@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 24f7dd26a625b3ef8acf5566567dc1cc7d76848c1c176a59c35db76a626fae51 # shrinks to (a, _) = (Singleton(Null), [Null]), (b, _) = (Union { arms: [(Int, Some(Int(IntRange { lo: -1, hi: 6 }))), (Float, None)], nullable: false }, [Int(0), Int(1), Int(2), Int(3), Int(4), Int(-1), Int(5), Int(6), Float(0.0)])
+cc d6a3fbfd3452cdce30302ecbb64ac4e98348b50c957608900f580a834e45ef8d # shrinks to (a, wa) = (Union { arms: [(Int, Some(Int(IntRange { lo: -3, hi: 4 }))), (Float, None)], nullable: false }, [Int(0), Int(1), Int(2), Int(-1), Int(-2), Int(-3), Int(3), Int(4), Float(0.0)]), (b, wb) = (Singleton(Null), [Null])

@@ -350,9 +350,27 @@ fn unrepresentable_element_collapses_to_other() {
 }
 
 #[test]
-fn non_literal_key_collapses_to_other() {
+fn a_non_literal_key_is_carried_rather_than_collapsing() {
+    // This pinned `ArgValue::Other` — one unspellable key dropped the WHOLE
+    // literal, so `array_key_first([$string => null])` and every
+    // `foreach ([$k => $v] as …)` had nothing to work from (issue #336).
+    // The key expression is carried instead: the walk can ask what the key IS
+    // even though it cannot say which key it lands on.
     let v = first_arg("<?php f([$k => 1]);");
-    assert_eq!(v, ArgValue::Other);
+    let it = items(&v);
+    assert_eq!(it.len(), 1);
+    assert_eq!(it[0].0, ArrayKey::Expr(Box::new(ArgValue::Var("k".into()))));
+    assert_eq!(it[0].1, ArgValue::Int(1));
+    // It is still not a normalizable key set: an unknown key may be an integer,
+    // so it moves the next-auto-index for every following `Auto` position.
+    assert_eq!(normalize_array(it, Some((8, 5))), None);
+}
+
+#[test]
+fn an_unrepresentable_key_expression_still_collapses() {
+    // Carrying the key needs a key to carry; an expression that lowers to
+    // `Other` leaves nothing, so the literal collapses as it always did.
+    assert_eq!(first_arg("<?php f([$obj->m() => 1]);"), ArgValue::Other);
 }
 
 #[test]

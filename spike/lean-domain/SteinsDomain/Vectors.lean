@@ -203,6 +203,13 @@ def renderFact : Fact → String
   | .refined b r n =>
     "R(" ++ renderBase b ++ "," ++ renderRef r ++ "," ++ renderNullable n ++ ")"
   | .general b n => "G(" ++ renderBase b ++ "," ++ renderNullable n ++ ")"
+  -- The abstract union (issue #339): its arms in the canonical base order the
+  -- constructor established, so the two sides compare textually.
+  | .union arms n =>
+    "U(" ++ String.intercalate "|" (arms.map (fun a =>
+      match a.2 with
+      | some r => renderBase a.1 ++ ":" ++ renderRef r
+      | none => renderBase a.1)) ++ "," ++ renderNullable n ++ ")"
   | .shape s n => "A(" ++ renderShape s ++ "," ++ renderNullable n ++ ")"
 termination_by f => sizeOf f
 

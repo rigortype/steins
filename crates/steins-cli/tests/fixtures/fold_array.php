@@ -17,6 +17,14 @@ $nested = count([[1, 2], [3]]);
 $dup = count([1 => 'a', 1 => 'b']);
 $mixed = implode(",", ['x' => 'a', 5 => 'b', 'c']);
 
-// An element that is not a proven value widens the WHOLE array: $x may hold
-// anything, so the literal's length is not the array's length.
-$widened = count([1, $x]);
+// An element that is not a proven value keeps the FOLD from running — the
+// seam sends the real engine a real array or nothing (ADR-0028 §2) — but the
+// entry count never depended on the element: `[1, $x]` has two entries
+// whatever $x holds (probed: count([1, $x]) === 2 for every $x). So the fold
+// declines and the shape rung answers, which is issue #327's whole point.
+$unfolded = count([1, $x]);
+
+// A SPREAD is the case that really is unknowable: `...$x` contributes as many
+// entries as $x has, so the literal's length is not the array's length and the
+// whole literal drops to no fact at all.
+$widened = count([1, ...$x]);

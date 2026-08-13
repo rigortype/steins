@@ -187,10 +187,13 @@ fn next_and_prev_add_false_even_to_a_non_empty_shape() {
             "{f} steps past the end of a non-empty array"
         );
     }
-    // …and where `∪ false` is not spellable (`int|false` is two bases), the rule
-    // declines rather than guessing half of it — while `current` on the same shape
-    // still answers.
-    assert_eq!(dump("array{a: int, b: int}", "next($v)"), "dumped type: unknown");
+    // …and where the values are abstract, `∪ false` used to be unspellable
+    // (`int|false` is two bases) and the rule declined. `Fact::Union` (issue
+    // #339) is the form, so it answers — as `int|bool` and not `int|false`,
+    // because `Bool` carries no refinement and the finite `false` widens to its
+    // base on the way into an arm. Sound, coarser than the reference
+    // implementation, and recorded in ADR-0085 §5 rather than papered over.
+    assert_eq!(dump("array{a: int, b: int}", "next($v)"), "dumped type: int|bool (asserted)");
     assert_eq!(dump("array{a: int, b: int}", "current($v)"), "dumped type: int (asserted)");
 }
 
@@ -218,9 +221,11 @@ fn a_possibly_empty_shape_adds_false_to_the_pointer_half() {
             "{f} of a possibly-empty shape admits false"
         );
     }
-    // `int|false` has no single-fact spelling, so the same shape with abstract
-    // values declines — a lost refinement, not a wrong one.
-    assert_eq!(dump("array<string, int>", "current($v)"), "dumped type: unknown");
+    // `int|false` had no single-fact spelling, so the same shape with abstract
+    // values used to decline. It answers now (issue #339), as `int|bool` — the
+    // `false` widens to its base on the way into a union arm, which is a lost
+    // refinement rather than a wrong one (ADR-0085 §5).
+    assert_eq!(dump("array<string, int>", "current($v)"), "dumped type: int|bool (asserted)");
 }
 
 #[test]

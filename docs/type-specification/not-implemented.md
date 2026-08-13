@@ -120,6 +120,14 @@ the refuting direction only.
   bound, and it never projects *positionally* from a declared shape — a key set
   has no runtime order (§2). An order-witnessed array is where the exact slice
   comes from, and only there.
+- An array literal with an unproven element seeds a `Fact::Shape` rather than
+  dropping the fact (ADR-0062 Amendment C), so its keys, entry count and sealing
+  survive what its values do not. The *order-dependent projections* do not
+  consume the order witness that seeding records yet: `array_keys` of a
+  literal-seeded shape is still the key union (`non-empty-list<'a'|'b'>`), not
+  the sequence (issue #328). `array_key_exists` and `isset` in **value**
+  position are `bool`/unknown against any array fact, declared or witnessed —
+  they are implemented as guards, and the value transfer is unwritten.
 
 **Objects** ([object-model.md](object-model.md)):
 

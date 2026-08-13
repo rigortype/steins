@@ -228,6 +228,18 @@ fn render_fact(f: &Fact) -> String {
         Fact::General { base, nullable } => {
             format!("G({},{})", render_base(*base), render_nullable(*nullable))
         }
+        // The abstract union (issue #339): its arms, in the canonical base order
+        // the constructor established, so the Lean side can compare textually.
+        Fact::Union { arms, nullable } => {
+            let rendered: Vec<String> = arms
+                .iter()
+                .map(|(b, r)| match r {
+                    Some(r) => format!("{}:{}", render_base(*b), render_refinement(r)),
+                    None => render_base(*b).to_owned(),
+                })
+                .collect();
+            format!("U({},{})", rendered.join("|"), render_nullable(*nullable))
+        }
         Fact::Shape { shape, nullable } => {
             format!("A({},{})", render_shape(shape), render_nullable(*nullable))
         }

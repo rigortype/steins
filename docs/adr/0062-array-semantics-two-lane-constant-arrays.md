@@ -452,3 +452,428 @@ its own slice.
 *import*; it was an unimplemented transfer, and the one entry the family
 still has — the value side of `in_array`/`array_search` — declines for the
 domain reason, not the seam one.
+
+## Amendment C (2026-08-13): a literal keeps its fact when its elements do not — PENDING ratification
+
+Issue [#327](https://github.com/rigortype/steins/issues/327). §3 built the
+abstract array stratum and §8's slice table fed it from exactly one place:
+a docblock. The other place an array's structure is known — the source
+writing one down — was never wired to it, and the effect was a cliff rather
+than a gap. `val_of` needs a proven `Val` per element and answers `None` on
+the first one it cannot build, so **one** unproven element dropped the fact
+for the **whole** array: its keys, its entry count, its sealing and every
+proven sibling. `['p' => 1, 'q' => $s]` knew nothing where the reference
+implementation knows `array{p: 1, q: string}`, and `count()` of it was
+`int<0, max>` where the count is two whatever `$s` turns out to be.
+
+Nothing about the keys was ever in doubt. `normalize_array` resolves auto
+indices, last-wins duplicates and A12's version-dependent next-int rule
+without inspecting a single value, so the key sequence is computable
+whatever the elements are — and a literal, by being a literal, seals its own
+key universe.
+
+### C1. The seeding ladder
+
+An array literal in rvalue position seeds by two rungs, most precise first:
+
+1. **Every element proven** → `Fact::Singleton(Val::Array)`, `Verified`.
+   Unchanged, and pinned as unchanged: the abstract rung may not be paid for
+   with the concrete one.
+2. **Otherwise** → `Fact::Shape` (`ShapeFact::from_witnessed_entries`): each
+   normalized key a field at `Presence::Required { witnessed: true }`, its
+   value slot that element's own fact and `None` where nothing proved one;
+   `Tail::Sealed`; `is_list` denotational over the **witnessed key
+   sequence**; `non_empty` from the entry count. Over `SHAPE_WIDTH_LIMIT`
+   it degrades to the tail summary exactly as `lift` does, and one unknown
+   slot makes that summary's value bound unknown.
+
+`normalize_array` declining (A12: a literal straddling the 8.3 next-int
+change on an unpinned minor) declines the **whole** literal at both rungs. A
+guessed key set is wrong rather than wide, which is not a trade this domain
+makes.
+
+**Stratum** is ADR-0061 §3's derivation clause: `min` over the element facts
+that contributed one. An unknown slot contributes nothing — it makes no
+claim to be trusted at any stratum. A literal over native elements is
+therefore `Verified`, and rightly: the keys were observed in the source, the
+sealing is what a literal *means*, and the slots are what the walk proved.
+A-G9's corollary keeps its `Asserted` cousins out of the proof layer as
+before.
+
+### C2. The order witness
+
+§2 splits the lanes by provenance and §7 declines declaration-order trust in
+positional projections, which is phpstan/phpstan#14940's false-positive
+class. `ShapeFact` could not *hold* the other side of that split:
+`normalize_counted` sorts fields into canonical key order, so a shape seeded
+from `['b' => 1, 'a' => $x]` was indistinguishable from one declared
+`array{a: …, b: …}` — and the sequence really was known.
+
+`ShapeFact` therefore gains **`order`**, the key sequence as observed, set at
+exactly two construction sites (this seeding, and `lift`) and dropped by
+every other operation: `normalize_counted` — which every derived shape goes
+through — always sets it to `None`, and the single struct-update that
+bypasses it (`relax_count_ceiling`) drops it by hand, because the write it
+models can append a key the sequence does not mention. Losing it costs
+precision and never soundness, which is the direction to fail in.
+
+It is **provenance, not extension**, exactly as `Presence::Required {
+witnessed }` already is: `admits` never reads it, two shapes differing only
+here admit the same values, and `with_order` refuses a claim inconsistent
+with the shape it is attached to rather than storing it. That inertness is
+also why it carries no ADR-0059 obligation — the Lean spec models the
+extension, and the extension did not move. It is pinned in the domain's own
+tests instead (`the_witness_is_extensionally_inert`), and `lean-check`
+agrees at 12208 lines.
+
+Two consumers, both of which are the split doing its job:
+
+- **`is_list` is decided by the sequence, not the key set.** `[1 => $x,
+  0 => $x]` has the key set of a two-element list and is not one. The
+  canonically sorted fields cannot tell it from `[0 => …, 1 => …]`.
+- **Spelling follows provenance.** A witnessed shape prints the order it
+  saw — the order its `Singleton` sibling has always printed, and the
+  reference implementation's — while a declared shape keeps the canonical
+  order, which is §6 saying out loud that `array{b: int, a: string}` is an
+  order-agnostic key set. The two must not look alike.
+
+The order-dependent *projections* do not read it yet; that is issue #328.
+
+### C3. §4's write row, on a witnessed base
+
+The write row was implemented for a declared base only, so `$a = [];
+$a['k'] = $x;` dropped the binding — the same cliff reached from the other
+direction. A base holding an order-witnessed value now lifts and takes the
+same path, and the witness changes one rule:
+
+**Writing an undeclared key under a sealed tail unseals it only when the
+sealing was declared.** A witnessed base has no docblock to have diverged
+from — its sealing is a fact about the array the code built, and adding a
+key yields another array the code built, still exactly known. There the
+write *extends* the sealed shape (the field is added by hand;
+`promote_present` can only promote a key a sealed shape already declares),
+the witness grows by the new key at the end where PHP puts it, an
+overwrite moves nothing, `unset` takes the key out of the sequence, and
+`is_list` is recomputed from the new sequence. The declared case is
+untouched: its sealing is a claim the write just falsified, so the tail
+opens.
+
+The written value's own fact now comes through the same argument-fact
+ladder an ordinary assignment uses, so `$a['k'] = $x` with a native
+`int $x` lands as `int` rather than unknown — and brings its stratum with
+it, because the binding must not come out more trusted than what was
+written into it.
+
+### C4. Measurement
+
+nsrt, same input both sides: headline 2414 → **2430**, admissible 2820 →
+**2852**, differ 11071 → 11039. The full transition matrix is
+one-directional — 16 `differ → match`, 14 `differ → subsumed`, 2
+`differ → equal`, and **zero** rows moved the other way.
+
+fp-gate GREEN: proof layer 0 across 6670 files, unchanged. One
+contract-layer movement, triaged verbatim rather than reseeded:
+`composer/composer` 19 → 21 `phpdoc.*`, both new findings the *same* true
+positive the same file already carried — an undeclared `type` key passed to
+a sealed `@param array{url: string}`, silent before only because the
+`__DIR__ . '…'` element used to drop the whole argument's fact along with
+its keys. Measured on a fixture that the unknown slot is not what fires: an
+unknown value against a declared `string` slot stays silent, because Maybe
+is silence.
+
+## Amendment D (2026-08-13): the positional projections execute on the witnessed lane — PENDING ratification
+
+Issue [#328](https://github.com/rigortype/steins/issues/328). Amendment C gave
+`ShapeFact` an order witness and left it unread. This is the consumer. §4's
+transfer table said "Concrete: execute on the witnessed order (sound)" for
+`array_values` / `array_keys` / `array_slice` / `array_reverse`, and only
+`array_slice` ever did (Amendment B); every other name fell through to the
+`lift` and took the key-set widening — the answer a *declared* shape deserves,
+handed to a subject whose construction had been observed.
+
+**The rule.** A subject that is a sealed, all-required shape carrying an order
+witness — a literal the walk saw built, or the `lift` of a proven `Val::Array` —
+has its projection *executed* over that sequence rather than widened. The four
+names, each from a probe at 8.5.9:
+
+| name | rule | probe |
+| --- | --- | --- |
+| `array_keys` | keys become values, reindexed `0..` | `array_keys(['b' => 1, 'a' => 2]) === ['b', 'a']` |
+| `array_values` | values reindexed `0..`, slots unread | `array_values(['b' => 1, 'a' => 2]) === [1, 2]` |
+| `array_reverse` | reversed; string keys survive in place, integer keys renumbered `0..` in the new order | `array_reverse(['a' => 1, 5 => 2, 'b' => 3, 9 => 4]) === [0 => 4, 'b' => 3, 1 => 2, 'a' => 1]` |
+| `array_flip` | keys and values swap, values normalized as keys, last wins, a non-`int\|string` value skipped | `array_flip(['x' => '1']) === [1 => 'x']`; `array_flip(['a', 'a']) === ['a' => 1]`; `array_flip(['a', 1.5, 'b']) === ['a' => 0, 'b' => 2]` |
+
+Three of the four never read a value, which is what makes them answer where a
+fold cannot: `array_keys(['a' => $x, 'b' => $y])` is `list{'a', 'b'}` because the
+result's *values* are the subject's *keys*. `array_flip` is the exception and
+**declines** on an unproven slot — its result's *keys* come from the subject's
+*values*, so an unknown value is an unknown key and there is no honest partial
+answer; it falls to the widening rather than to silence. The output is a
+`Singleton` where every slot it needed was proven and a witnessed `Fact::Shape`
+otherwise, so an unknown element costs one slot rather than the sequence.
+
+**§7's declined import is untouched, and that is the point.** A shape with no
+witness is a key set: `array_keys(array{a: int, b: int})` stays
+`non-empty-list<'a'|'b'>` and may never become `list{'a', 'b'}`, because the
+declaration admits `['b' => …, 'a' => …]` just as well. An *optional* field
+declines too, witness or not — `list{int, 1?: string}` realizes as one entry or
+two, so no single sequence describes every admitted value
+(`ShapeFact::witnessed_order` carries that precondition). The admission gate is
+`transfer_declaration_admits` over the engine's own `array` declaration, so a
+silent engine withholds the family and ADR-0069's floor answers instead.
+
+**Not folded, and why.** Handing these four to the sidecar would be the ADR-0004
+answer; the reason it is not taken is coverage, not doctrine. A fold fires only
+when *every* argument is a literal, so it cannot reach the partially-known
+subject at all — and that subject is what real code is made of. These four
+restructure the argument and read no value semantics beyond key normalization,
+which this codebase already owns version-aware and which `array_slice` already
+re-derives under the same justification. The names that genuinely need PHP's own
+semantics — `explode`, `array_unique`, `array_merge`, `range` — are held back for
+the fold-result slice (issue #330), where the engine answers for them.
+
+**Measurement.** nsrt headline 2430 → **2433**, admissible 2852 → **2858**,
+transition one-directional (3 `differ → match`, 2 `differ → subsumed`, 1
+`differ → equal`, zero the other way). The gain is small *here* by design: nsrt's
+array fixtures are overwhelmingly declared shapes, which correctly keep their
+widening — the slice pays out on literal-heavy code, which the harness does not
+sample. fp-gate GREEN with **no baseline movement at all**: proof layer 0,
+`phpdoc.*` and `throw.*` unmoved.
+
+## Amendment E (2026-08-13): an exact array is a value, not only a fact — PENDING ratification
+
+Issue [#329](https://github.com/rigortype/steins/issues/329). Amendments C and D
+made the value lane answer exactly; this is what makes the answers *compose*.
+`resolve_literal`'s call arm consulted two sources — the zero-argument constant
+function and the allowlist fold — and the transfer rung was not one of them. So a
+call whose *fact* was a proven `Singleton` resolved to no *value*, and everything
+reading values rather than facts went blind to it: value-position `===`, fold
+arguments, nested folds, `concat_cast`. One hop through a binding worked and the
+inline spelling did not, which is not a distinction PHP makes.
+
+The rung's answer now resolves as a value when it is a `Singleton`, carrying the
+rung's own stratum (ADR-0061 §3) so a projection over an `Asserted` subject
+cannot launder into a `Verified` premise by taking the value road instead of the
+fact road. Anything else — a `Shape`, a `OneOf`, a decline — resolves to nothing,
+as before. The rung's *subject* accepts a call for the same reason, which is what
+makes a projection of a projection compose; it terminates because each level
+strips one call from a finite expression, and its fixture pins that it answers
+what the two-statement spelling answers.
+
+`array_keys(['a' => 1, 'b' => 2]) === ['a', 'b']` is `true`, and
+`implode(',', array_keys(['a' => 1, 'b' => 2]))` is `'a,b'`.
+
+**The guard position is deliberately not included, and the reason is worth
+recording.** A call in comparison-guard position lowers to `CondOperand::Other`
+and `operand_values` answers `None` for it — but measurement shows that gap is
+not array-shaped at all: `if (strtoupper('a') === 'A')` does not decide either,
+and neither does any other folded call. It is a general call-operand gap whose
+fix moves branch decisions, dead-code marking and every finding downstream of
+them, so it wants its own slice and its own measurement rather than a ride on
+this one.
+
+### E1. The latent defect this exposed
+
+`resolve_cval`'s call arm wrapped whatever the value seam returned in
+`CVal::Scalar`. That was correct for exactly as long as a call could only resolve
+to a scalar — the fold's own results. The moment a projection's array became
+visible there, an array travelled in the scalar carrier, and the acceptance
+relation, asked whether a "scalar" inhabits `non-empty-list<string>`, correctly
+said no.
+
+The fp-gate caught it: six false positives in `guzzle/guzzle`, all one call site,
+all `getLastHeaderBlock(array_values($headers))` under
+`@param non-empty-list<string>` — a contract the argument plainly satisfies. The
+same value written literally, and the same value through a binding, were both
+silent; only the inline spelling was convicted. The fix routes the resolved value
+back through `resolve_cval`, exactly as the variable arm already sent its
+singleton back, so one value gets one verdict however it was produced. Pinned
+both ways: five spellings of a satisfied contract stay silent, and a genuine
+violation reaching the seam inline still fires.
+
+### E2. Measurement
+
+nsrt unmoved (headline 2433, admissible 2858, an empty transition matrix) — the
+harness asserts *types*, and this slice moves what a value can be *used for*, not
+what it is. fp-gate GREEN with no baseline movement: proof layer 0, and guzzle
+back to its expected zero after E1.
+
+## Amendment F (2026-08-14): the witnessed family, wave 2 — PENDING ratification
+
+Issue [#328](https://github.com/rigortype/steins/issues/328), second wave.
+Amendment D took the four restructuring projections. The same admission test —
+*restructures the argument, reads no value semantics beyond key normalization* —
+admits more names than that, and they were still answering the key-set widening.
+
+### F1. The position readers
+
+`array_key_first` / `array_key_last` / `array_first` / `array_last` are exact on
+a witnessed order. §4 answers them from the key set — "SOME key of the set,
+never the declared-first one", which is §2's rule at its sharpest and correct
+for a declaration that admits every permutation. A witnessed order is the other
+provenance: the sequence was observed, so first really is first. Probed at
+8.5.9: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`, `array_last(…) === 2`,
+and all four answer `null` on `[]`.
+
+The key readers answer whatever the values are — the result's *value* is the
+subject's *key* — while the value readers hand back the slot's own fact and
+decline on an unknown slot.
+
+**The pointer family is deliberately excluded.** `key` / `current` / `reset` /
+`end` read the internal array pointer, which Steins does not model. The existing
+arm tolerates that only because a shape-derived fact can never premise a
+proof-layer finding (A-G9's corollary); a witnessed literal is `Verified`, so an
+exact answer here *would* be admissible as a premise and the pointer assumption
+would ride into a proof with it. They keep the widening.
+
+### F2. `array_slice` on a witnessed shape
+
+The exact slice existed for a fully-proven `Val::Array` (Amendment B). It reads
+offsets and keys and never a value, so nothing about it needed the values known:
+`array_slice(['x', $s, 'z'], 1)` is `list{string, 'z'}`.
+
+### F3. Values as keys: `array_fill_keys` and `array_combine`
+
+Both take their result's keys from a value, through a cast that had to be
+measured. Three neighbouring builtins turn out to have three different rules for
+the value `1.5`:
+
+| seam | answer |
+| --- | --- |
+| `$a[1.5] = v` | int `1` — truncation, with a deprecation |
+| `array_fill_keys([1.5], v)` / `array_combine([1.5], [v])` | string `'1.5'` |
+| `array_flip([1.5])` | the entry is **skipped** |
+
+No amount of reasoning about "PHP's array key cast" produces that table; only
+running the engine does, which is ADR-0004's whole point. The float **declines**
+even so: PHP renders a float to string under the `precision` ini directive, so
+the *key* of `array_fill_keys([0.1 + 0.2], v)` depends on the runtime's
+configuration — the same reason `concat_cast` excludes floats.
+
+`array_combine` additionally declines a length mismatch, because PHP raises a
+`ValueError` there (probed): a call that does not return has no return value to
+state.
+
+### F4. Key-set work: `array_diff_key` and `array_intersect_key`
+
+Pure key operations, and the order comes from the *first* array (probed:
+`array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
+=== ['b' => 2, 'a' => 1]`). Key identity is the domain's own normalized `VKey`,
+which is what makes `array_diff_key([5 => 1, '5x' => 2], ['5' => 9])
+=== ['5x' => 2]` fall out — `'5'` and `5` are one key.
+
+**Their second argument may be a declared shape**, and this is not a crack in
+§7. What §7 declines is reading a declaration's key *order*; these two read its
+key *set*, and a set has no order. What the set must be is **certain**, so the
+reader refuses an optional field (a key that may or may not be there decides
+neither the difference nor the intersection) and an unsealed tail (the set would
+be a lower bound). `array_combine`, which zips *positionally*, still requires a
+witnessed order on both sides — the same argument, the other way round.
+
+### F5. Measurement, including two rows that left `match`
+
+nsrt headline 2433 → **2444**, admissible 2858 → **2872**. The transition matrix
+is 13 `differ → match`, 1 `differ → subsumed`, and — for the first time in this
+line of work — **2 `match → subsumed`**. Those two are worth naming rather than
+netting out.
+
+Both are `tests/PHPStan/Analyser/nsrt/array_first_last.php`, which asserts
+
+```php
+assertType("'a'|'b'|'c'", array_first([1 => 'a', 0 => 'b', 2 => 'c']));
+assertType("'a'|'b'|'c'", array_last([1 => 'a', 0 => 'b', 2 => 'c']));
+```
+
+Steins now answers `'a'` and `'c'`. The engine agrees: probed at 8.5.9, that
+literal's entries are in insertion order `1 => 'a'`, `0 => 'b'`, `2 => 'c'`, so
+first is `'a'` and last is `'c'`. The upstream expectation is an upper bound —
+`subsumed` is the harness saying our answer lies inside it — and the reference
+implementation does not consume constant-array order for this family. So the
+headline dropping two while the truth improved is the harness measuring
+*agreement*, not correctness, and this is a case where the two part company.
+
+fp-gate GREEN with **no baseline movement**: proof layer 0, `phpdoc.*` and
+`throw.*` unmoved.
+
+## Amendment G (2026-08-14): the array-key cast at the type level, and the wall it hits — PENDING ratification
+
+Owner request: support `array_flip` / `array_fill_keys` / `array_key_first` and
+the `foreach` key position when what is known about the value is a *refined
+string class* rather than a literal — the cases the reference implementation
+does not cover either.
+
+### G1. The cast is expressible, and the vocabulary was already there
+
+PHP casts an array key eagerly, and the interesting half is the string one: a
+string that spells an integer *the way PHP writes one back* becomes that
+integer, and every other string keeps its identity. Those two classes are
+exactly `StrPreds::DECIMAL_INT` and `StrPreds::NON_DECIMAL_INT`, which the
+conformance work landed for precisely this reason — the `DECIMAL_INT` doc
+already said "an array key made of it is cast to `int`".
+
+`Fact::array_key_cast` is that grid, every row probed at 8.5.9:
+
+| input | key |
+| --- | --- |
+| `int` (with its refinement) | itself |
+| `bool` | `int` |
+| `decimal-int-string` | `int` |
+| `non-decimal-int-string` | itself, predicates and all |
+| `numeric-string` | `int \| numeric-string&non-decimal-int-string` |
+| `string` | `int \| non-decimal-int-string` |
+| `float` | declines — the key is a `precision` ini setting away, and the seams disagree (`$a[1.5]` is `1`, `array_fill_keys([1.5], v)` is `'1.5'`) |
+
+The last two rows are **sharper than `array-key`**: a string that survives the
+cast is by definition one PHP does not rewrite, and that is a predicate this
+domain carries.
+
+### G2. The wall: a `Fact` carries one `Base`
+
+Both sharp rows are **two-base unions**, and the four-layer domain (ADR-0035)
+has no such form — the same wall `int|false` returns and `json_decode`'s
+envelope already hit. So `array_key_cast` *declines* them rather than widening,
+so that a caller can tell "no answer" from "the answer is `array-key`", and the
+sharp forms are written down at the decline site for whichever lane grows to
+hold them.
+
+The unsealed tail's key slot is a second, smaller wall: `KeyClass` has three
+values (`int`, `string`, `array-key`), so even `non-decimal-int-string` — which
+*is* a single-base fact — lowers to `string` there.
+
+### G3. What lands under those walls
+
+`array_flip`'s key class is now read off the cast rather than off the values'
+base, which is what lets a *string*-based value produce an *integer* key:
+
+| subject | before | after | the sharp answer the walls hide |
+| --- | --- | --- | --- |
+| `list<decimal-int-string>` | `array<int>` | **`array<int, int>`** | `array<int, int<0, max>>` |
+| `list<non-decimal-int-string>` | `array<int>` | **`array<string, int>`** | `array<non-decimal-int-string, int<0, max>>` |
+| `list<string>` / `list<numeric-string>` / `list<array-key>` | `array<int>` | unchanged | `array<int\|non-decimal-int-string, …>` &c. |
+| `[$decimalIntString, …]` (witnessed) | `array<0\|1>` | **`array<int, 0\|1>`** | `non-empty-array<int, 0\|1>` |
+
+A finite value set still casts key by key, which is exact where the abstract
+rung declines.
+
+### G4. What is still out of reach, and why — the three open pieces
+
+1. **The two-base union**, above. Every remaining row of the owner's spec needs
+   it. Reachable either by giving `Fact` a union layer (ADR-0035 is explicitly
+   single-base, so this is a domain-shape decision) or by moving the key slot to
+   the **arm lane**, which already carries `string|false`. Not decided here.
+2. **`array_fill_keys` has no shape-level arm at all**, so it declines on a
+   declared subject rather than answering the key class. Additive once the key
+   slot's expressiveness is settled.
+3. **A non-literal array key is unrepresentable in the IR.** `[$k => $v]` lowers
+   the *whole* literal to `Other`, so `array_key_first([$string => null])` and
+   every `foreach ([$k => $v] as …)` row of the spec has no fact to work from.
+   `ArrayKey` would need a non-literal form, and `normalize_array`'s next-int
+   would have to go unknown behind it (an unknown key may be an integer, which
+   moves the auto-index). Self-contained, and the largest of the three.
+
+### G5. Measurement
+
+nsrt unmoved (headline 2444, admissible 2872, empty transition matrix) — the
+harness's array fixtures do not exercise the refined-string key classes, which
+is itself a finding about coverage rather than about this change. fp-gate GREEN
+with no baseline movement; proof layer 0. Tests 4471 → 4477.

@@ -1929,14 +1929,21 @@ mod shape_fact_lowering_tests {
 
     #[test]
     fn unrepresentable_slots_floor_to_unknown() {
-        // Classes, callables, `mixed`, unmergeable unions, and the
-        // int-accepting `float` all floor — the honest `None` (A-G1a).
+        // Classes, callables, `mixed` and the int-accepting `float` floor —
+        // the honest `None` (A-G1a).
         let s = shape_of(
             "array{a: Foo, b: callable, c: mixed, d: int|string, e: float, f: literal-string}",
         );
-        for key in ["a", "b", "c", "d", "e", "f"] {
+        for key in ["a", "b", "c", "e", "f"] {
             assert_eq!(slot(&s, key), None, "slot {key} should floor to unknown");
         }
+        // …but a scalar UNION no longer floors (issue #339). `int|string` was
+        // in this list only because the value domain had no two-base form; it
+        // has one now, so the slot carries the union instead of nothing.
+        assert_eq!(
+            slot(&s, "d"),
+            Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+        );
         // …but `class-string` no longer does (issue #236): it is a string
         // refinement now, so the slot carries the predicate instead of nothing.
         let cs = shape_of("array{f: class-string}");
@@ -1955,7 +1962,13 @@ mod shape_fact_lowering_tests {
         assert_eq!(fact_of("int"), Some(Fact::General { base: Base::Int, nullable: false }));
         assert_eq!(fact_of("?string"), Some(Fact::General { base: Base::String, nullable: true }));
         assert_eq!(fact_of("5"), Some(Fact::Singleton(Val::Int(5))));
-        assert_eq!(fact_of("int|string"), None);
+        // A scalar union lowers into the value lane as of issue #339; `float`
+        // still floors, for its own reason (it accepts an int at the native
+        // seam, so the base alone is not the acceptance).
+        assert_eq!(
+            fact_of("int|string"),
+            Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+        );
         assert_eq!(fact_of("float"), None);
     }
 

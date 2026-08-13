@@ -414,7 +414,22 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// `phpstan/phpstan-src` remains absent (measured 0 under the 2026-08-08 corpus
 /// scoping recorded on its `THROW_EXPECTED` row).
 const PHPDOC_EXPECTED: &[(&str, usize)] = &[
-    ("composer/composer", 19),
+    // 19 → 21 (+2) with issue #327 (an array literal keeps its fact when its
+    // elements do not). `ArtifactRepositoryTest` lines 45 and 68 build
+    // `['type' => 'artifact', 'url' => __DIR__ . '/Fixtures/artifacts']` and pass
+    // it to `ArtifactRepository::__construct(@param array{url: string})`. The
+    // undeclared key `type` under that sealed shape is a TRUE contract violation
+    // — the docblock omits it — and it is the SAME finding the same file's line
+    // 79 already carried on the baseline, where the array is written with a
+    // literal url. Those two sites were silent only because `__DIR__ . '…'` is
+    // an unproven element, which used to drop the whole argument's fact along
+    // with the keys; now the keys survive it and the judgment happens.
+    //
+    // Triaged verbatim, not reseeded blind: the unknown `url` slot is NOT what
+    // fires. Measured on a fixture — `['url' => <unknown>]` against the same
+    // `array{url: string}` stays SILENT (an unknown slot is `Maybe`, and Maybe
+    // is silence), while the extra key fires with the slot proven or not.
+    ("composer/composer", 21),
     ("sebastianbergmann/phpunit", 8),
     ("Seldaek/monolog", 4),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new

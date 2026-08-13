@@ -185,9 +185,11 @@ fn a_provable_element_is_resolved_before_the_gate_judges_the_array() {
 
 #[test]
 fn a_non_literal_key_never_reaches_the_folder() {
-    // A key the analyzer cannot spell collapses the whole literal to `Other` at
-    // lowering, so the gate never even sees an array: `count([$k => 1])` is not
-    // 1 (the key might collide with another entry's).
+    // A key the analyzer cannot spell is CARRIED at lowering now (issue #336) —
+    // the walk can ask what the key expression is — but it is still not a fold
+    // argument: the seam sends the engine the array that was written or nothing
+    // at all, and `count([$k => 1, 'a' => 2])` is not 2 (the key might collide
+    // with the written one).
     assert!(asked(&format!("{COERCIVE_INT}width(count([$k => 1, 'a' => 2]));")).is_empty());
     assert!(asked(&format!("{COERCIVE_INT}width(count([[$k => 1]]));")).is_empty());
 }

@@ -2865,11 +2865,19 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
             if depth == 0 {
                 return false;
             }
-            for (_, el) in items {
+            for (key, el) in items {
                 if *budget == 0 {
                     return false;
                 }
                 *budget -= 1;
+                // A key the source did not spell as a literal (issue #336) is not
+                // sendable, and this gate must agree with `arg_to_fold_within`'s
+                // encoder to the letter — the two compute one verdict twice, and
+                // a gate that admits what the encoder refuses would ask the
+                // engine a question it cannot be given.
+                if matches!(key, ArrayKey::Expr(_)) {
+                    return false;
+                }
                 if !fits_fold_budget(el, depth - 1, budget) {
                     return false;
                 }
@@ -2963,6 +2971,10 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
                     // `?` widens the WHOLE array, exactly like an unrepresentable
                     // element: `None` here would mean "auto key", a different claim.
                     ArrayKey::Str(s) => Some(FoldKey::Str(s.as_str()?.to_owned())),
+                    // A key the source did not spell as a literal (issue #336)
+                    // is not a fold argument: the seam sends the engine the
+                    // array that was written or nothing at all.
+                    ArrayKey::Expr(_) => return None,
                 };
                 entries.push((key, arg_to_fold_within(v, depth - 1, budget)?));
             }
@@ -9570,6 +9582,29 @@ impl<'a> Cx<'a> {
                 // / `project_call_summary`) so findings still emit on the live `out`.
                 self.try_fold_under(name, args, env, poisoned, folder, descent, out)
                     .map(|(lit, _prov, strat)| (lit, strat))
+                    // **The transfer rung's answers are values too** (issue #329).
+                    // A rung that proved a `Singleton` — `array_slice($a, 1)`,
+                    // `array_keys(['a' => $x])` — had no way to say so *here*, so
+                    // everything that reads values rather than facts was blind to
+                    // it: value-position `===`, fold arguments, nested folds,
+                    // `concat_cast`. One hop through a binding worked and the
+                    // inline spelling did not, which is not a distinction PHP
+                    // makes.
+                    //
+                    // Below the fold, which is more precise and cheaper. The
+                    // rung's OWN stratum comes back with the value (ADR-0061 §3),
+                    // so a projection over an `Asserted` subject stays `Asserted`
+                    // and cannot launder into a proof-layer premise by taking the
+                    // value road instead of the fact road.
+                    .or_else(|| {
+                        let (fact, strat) = shape_builtin_return_fact(
+                            self, folder, name, args, env, None, poisoned,
+                        )?;
+                        match fact {
+                            Fact::Singleton(v) => Some((arg_of_val(&v), strat)),
+                            _ => None,
+                        }
+                    })
             }
             // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
             // string cast is total and environment-independent (`concat_cast`). One
@@ -10291,6 +10326,224 @@ fn render_val(v: &Val) -> String {
 /// the value is not representable (a non-literal) — the fact is then dropped.
 fn singleton_fact(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Fact> {
     val_of(arg, php_minor).map(Fact::Singleton)
+}
+
+/// The deepest nesting [`array_literal_fact`] descends into before it stops
+/// resolving element facts and leaves the slot unknown (issue #327).
+///
+/// It exists for the same reason the fold seam's depth bound does — to keep a
+/// recursive walk over a source-controlled structure off an unbounded stack —
+/// and takes the same value, so the two seams refuse the same literals.
+const SHAPE_SEED_MAX_DEPTH: u8 = FOLD_ARRAY_MAX_DEPTH;
+
+/// **The fact an array literal denotes when its elements are not all proven**
+/// (issue #327) — the abstract half of the seeding ladder whose concrete half
+/// is [`singleton_fact`].
+///
+/// # Why this exists
+///
+/// [`val_of`] needs a [`Val`] per element and answers `None` on the first one it
+/// cannot build, so a single unproven element drops the fact for the **whole
+/// array**: its key set, its entry count, its sealing, and every sibling
+/// element that *was* proven, all at once. That is sound and it is most of the
+/// array line's precision ceiling — `['p' => 1, 'q' => $s]` knows nothing where
+/// the reference implementation knows `array{p: 1, q: string}`.
+///
+/// Nothing about the keys was ever in doubt: [`normalize_array`] resolves auto
+/// indices, last-wins duplicates and the version-dependent next-int rule
+/// without inspecting a single value. So the keys, the count, and the sealing
+/// survive an unknown element; only that element's own slot does not.
+///
+/// # The ladder, and where this sits on it
+///
+/// Callers try the concrete path first — a fully-proven literal stays a
+/// `Singleton`, `Verified`, spelled exactly as it always was. This is the rung
+/// below: reached only when that failed, so at least one slot here is unknown
+/// or abstract and the result is always a [`Fact::Shape`].
+///
+/// # What it refuses
+///
+/// * **A poisoned scope** — the env cannot be read, and an element resolved
+///   against a poisoned env is not evidence. Today's silence, unchanged.
+/// * **An unresolvable key set** — [`normalize_array`] declining means the
+///   literal straddles the 8.3 next-int change on an unpinned minor (ADR-0049
+///   A12). A guessed key is a *wrong* key set rather than a wider one, so the
+///   whole literal declines exactly as `val_of` already makes it.
+///
+/// # Stratum
+///
+/// `min` over the element facts that contributed one (ADR-0061 §3's derivation
+/// clause). An unknown slot contributes nothing — it makes no claim to be
+/// trusted at any stratum. A literal whose elements are all `Verified` yields a
+/// `Verified` shape, and rightly: the keys were observed in the source, the
+/// sealing is what a literal *means*, and the slots are what the walk proved.
+fn array_literal_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+) -> Option<(Fact, Stratum)> {
+    array_literal_fact_within(cx, folder, items, env, poisoned, store, SHAPE_SEED_MAX_DEPTH)
+}
+
+/// The depth-carrying body of [`array_literal_fact`]. At depth zero a nested
+/// literal stops being descended into and its slot is left unknown, which
+/// widens the shape and never misstates it.
+fn array_literal_fact_within(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+    depth: u8,
+) -> Option<(Fact, Stratum)> {
+    if poisoned || depth == 0 {
+        return None;
+    }
+    // **A key the source did not spell as a literal** (issue #336, piece 3).
+    // `normalize_array` declines the whole literal — an unknown key may be an
+    // integer, so it moves every following `Auto` position and no key set is
+    // resolvable. What IS knowable is what the key *is*, and that is worth
+    // stating: the literal seeds an **unsealed** shape whose tail key is the
+    // array-key cast of the key expressions and whose tail value is the join of
+    // the element values.
+    if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
+        return open_keyed_literal_fact(cx, folder, items, env, poisoned, store, depth);
+    }
+    let normalized = normalize_array(items, cx.php_minor)?;
+    let mut entries: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(normalized.len());
+    let mut stratum = Stratum::Verified;
+    for (key, value) in &normalized {
+        let key = match key {
+            NormKey::Int(i) => VKey::Int(*i),
+            NormKey::Str(s) => VKey::Str(s.clone()),
+        };
+        // The element's own fact, by the same ladder any other argument-position
+        // value takes: a bound variable's fact (including its declared arm lane),
+        // a resolved literal, a fold. A nested literal that is itself only partly
+        // proven recurses here rather than dropping to unknown — the cliff this
+        // function exists to remove is the same one level down.
+        let slot = transfer_arg_known(cx, folder, value, env, store).or_else(|| match value {
+            ArgValue::Array(inner) => array_literal_fact_within(
+                cx, folder, inner, env, poisoned, store, depth - 1,
+            ),
+            _ => None,
+        });
+        match slot {
+            Some((fact, s)) => {
+                stratum = stratum.min(s);
+                entries.push((key, Some(fact)));
+            }
+            None => entries.push((key, None)),
+        }
+    }
+    Some((shape_fact(ShapeFact::from_witnessed_entries(&entries)), stratum))
+}
+
+/// The fact an array literal denotes when one of its **keys** is not a literal
+/// (issue #336, piece 3) — `[$k => $v]`, `['a' => 1, f() => 2]`.
+///
+/// # What is lost, and what is not
+///
+/// The key *set* is gone: an unknown key may be an integer, which moves the
+/// next-auto-index for every following `Auto` position, so no entry after it has
+/// a knowable key and even the entry count is uncertain (the unknown key may
+/// collide with a written one). That is why [`normalize_array`] declines, and
+/// declining is right.
+///
+/// What survives is what the keys and values *are*. The result is an unsealed
+/// shape: no declared fields, a tail whose key class is the **array-key cast**
+/// ([`steins_domain::Fact::array_key_cast`]) of the key expressions joined, and
+/// whose value is the join of the element values. `non_empty` holds — a literal
+/// with entries has at least one, whatever they collide into.
+///
+/// So `array_key_first([$decimalIntString => null])` answers `int`, because a
+/// string that spells an integer the way PHP writes one back keys an integer
+/// however little else is known.
+fn open_keyed_literal_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    items: &[(ArrayKey, ArgValue)],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+    store: Option<&Store>,
+    depth: u8,
+) -> Option<(Fact, Stratum)> {
+    use steins_domain::{KeyClass, Tail};
+    let mut stratum = Stratum::Verified;
+    let mut keys: Option<Fact> = None;
+    let mut values: Option<Fact> = None;
+    let join_into = |acc: &mut Option<Fact>, f: Fact| {
+        *acc = match acc.take() {
+            None => Some(f),
+            Some(prev) => prev.join(&f),
+        };
+    };
+    for (k, v) in items {
+        // The key's own fact, cast to what it becomes as a key. A written
+        // literal key contributes itself; an unknown one contributes its
+        // expression's fact through the cast.
+        let key_fact = match k {
+            ArrayKey::Int(i) => Some(Fact::Singleton(Val::Int(*i))),
+            ArrayKey::Str(s) => Some(Fact::Singleton(Val::Str(s.clone()))),
+            // An `Auto` key is an integer at an unknowable position.
+            ArrayKey::Auto => Some(Fact::General { base: Base::Int, nullable: false }),
+            ArrayKey::Expr(e) => {
+                let (f, s) = transfer_arg_known(cx, folder, e, env, store)?;
+                stratum = stratum.min(s);
+                f.array_key_cast()
+            }
+        };
+        join_into(&mut keys, key_fact?);
+        let value_fact = transfer_arg_known(cx, folder, v, env, store)
+            .map(|(f, s)| {
+                stratum = stratum.min(s);
+                f
+            })
+            .or_else(|| match v {
+                ArgValue::Array(inner) => array_literal_fact_within(
+                    cx, folder, inner, env, poisoned, store, depth - 1,
+                )
+                .map(|(f, s)| {
+                    stratum = stratum.min(s);
+                    f
+                }),
+                _ => None,
+            });
+        match value_fact {
+            Some(f) => join_into(&mut values, f),
+            // One unknown value makes the tail's value bound unknown, and the
+            // tail says what EVERY undeclared entry satisfies.
+            None => values = None,
+        }
+    }
+    // The key class the tail can hold. A two-base union has none, so it takes
+    // `array-key` — the second wall #336 records.
+    let key = match &keys {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        Some(f) => match f.finite_members() {
+            Some(vals) if vals.iter().all(|v| matches!(v, Val::Int(_))) => KeyClass::Int,
+            Some(vals) if vals.iter().all(|v| matches!(v, Val::Str(_))) => KeyClass::Str,
+            _ => KeyClass::ArrayKey,
+        },
+        None => KeyClass::ArrayKey,
+    };
+    let shape = ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key, value: values.map(Box::new) },
+        Certainty::Maybe,
+        !items.is_empty(),
+        Vec::new(),
+    );
+    Some((shape_fact(shape), stratum))
 }
 
 /// The value fact a `::class` magic constant produces — one seam for both of its
@@ -12246,6 +12499,23 @@ fn render_dump_fact(fact: &Fact) -> String {
         }
         Fact::Refined { base, nullable, .. } => with_null(base_keyword(*base).to_owned(), *nullable),
         Fact::General { base, nullable } => with_null(base_keyword(*base).to_owned(), *nullable),
+        // A union spells arm by arm through this same speller, joined by `|`
+        // (issue #339) — `int|non-decimal-int-string` is the abstract form of
+        // what the finite layers have always printed as `1|'x'`. The arms carry
+        // no `null`; the union's own flag adds it once, at the end.
+        Fact::Union { arms, nullable } => {
+            let spelled: Vec<String> = arms
+                .iter()
+                .map(|(base, refinement)| {
+                    let arm = match refinement {
+                        Some(r) => Fact::refined(*base, *r, false),
+                        None => Fact::General { base: *base, nullable: false },
+                    };
+                    render_dump_fact(&arm)
+                })
+                .collect();
+            with_null(spelled.join("|"), *nullable)
+        }
         // The abstract array stratum (ADR-0062 `Fact::Shape`, S2): routed through
         // the same ONE speller as the contract-arm and concrete-value paths.
         Fact::Shape { shape, nullable } => render_shape_fact(shape, *nullable),
@@ -12300,9 +12570,23 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
         );
         return with_null(body, nullable);
     }
-    let fields: Vec<(VKey, bool, String)> = shape
-        .fields
-        .iter()
+    // Field order on the page follows PROVENANCE (issue #327). A shape that
+    // witnessed its construction prints the order it saw, which is the order the
+    // `Singleton` it generalizes has always printed and the order the reference
+    // implementation prints: `['b' => 1, 'a' => $x]` is `array{b: 1, a: int}`.
+    // A shape that merely had an order *declared* at it keeps the canonical key
+    // order, which is Steins saying out loud that `array{b: int, a: string}` is
+    // an order-agnostic key set (ADR-0062 §2, RFC #14939) — the registered
+    // divergence, and the one place the two provenances must not look alike.
+    let ordered: Vec<&(VKey, Presence, Option<Box<Fact>>)> = match &shape.order {
+        Some(order) => order
+            .iter()
+            .filter_map(|k| shape.fields.iter().find(|(fk, _, _)| fk == k))
+            .collect(),
+        None => shape.fields.iter().collect(),
+    };
+    let fields: Vec<(VKey, bool, String)> = ordered
+        .into_iter()
         .filter(|(_, p, _)| !matches!(p, Presence::Absent))
         .map(|(k, p, slot)| {
             let value = slot.as_ref().map_or_else(|| "mixed".to_owned(), |f| render_dump_fact(f));
@@ -12607,6 +12891,19 @@ fn best_dump_type(
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: strat == Stratum::Asserted,
+        };
+    }
+    // An array literal the rung above could not prove whole (issue #327): the
+    // shape its observed keys denote, with an unknown slot for each element the
+    // walk could not resolve. Below the proven-`Singleton` path, which already
+    // returned for a fully-literal array.
+    if let ArgValue::Array(items) = value
+        && let Some((fact, stratum)) =
+            array_literal_fact(cx, folder, items, env, poisoned, Some(store))
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
         };
     }
     // The `::class` magic constant (issue #236): its FQN literal when written,
@@ -13300,6 +13597,25 @@ fn apply_assign(
             // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
             // (§2). A more-precise fold above already returned; this is the floor.
             None => match value {
+                // An array literal the rung above could not prove whole (issue
+                // #327): its keys, its count and its sealing are known even when
+                // an element's value is not, so it seeds a `Fact::Shape` rather
+                // than dropping the binding. Above every call rung — a literal
+                // is not a call — and below the proven-`Singleton` path, which
+                // already returned for a fully-literal array.
+                ArgValue::Array(items)
+                    if let Some((fact, strat)) = array_literal_fact(
+                        cx,
+                        folder,
+                        items,
+                        env,
+                        w.scope.poisoned,
+                        Some(&*store),
+                    ) =>
+                {
+                    env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+                    store.unbind(var);
+                }
                 // The `::class` magic constant (issue #236): `$c = Foo::class`
                 // binds its FQN literal, `$c = static::class` the refinement.
                 // Above every call rung, since none of them can see a class
@@ -13852,6 +14168,8 @@ fn fact_is_nullish(f: &Fact) -> bool {
     match f {
         Fact::Singleton(v) => matches!(v, Val::Null),
         Fact::OneOf(vs) => vs.iter().any(|v| matches!(v, Val::Null)),
+        // A union carries `null` beside its arms, never inside one.
+        Fact::Union { nullable, .. } => *nullable,
         Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => *nullable,
         // The array stratum (ADR-0062 `Fact::Shape`) has no property-seeding
         // consumer. Answering `true` keeps it out of the heap entirely, which is
@@ -14619,6 +14937,8 @@ fn call_receiver_fact<'a>(
 /// side filters it out because [`CALL_ON_NULL_ID`] already does.
 fn definite_non_object_type(fact: &Fact) -> Option<&'static str> {
     match fact {
+        // A union is several type words at once, and this surface names one.
+        Fact::Union { .. } => None,
         Fact::Singleton(v) => Some(val_type_name(v)),
         Fact::OneOf(vals) => {
             let first = val_type_name(vals.first()?);
@@ -15640,15 +15960,29 @@ fn eval_ternary_fact(
                 .and_then(|a| singleton_fact(&a, w.cx.php_minor))
         }
         Certainty::Maybe => {
-            // Undecided guard: the value is one of the two arms. `Fact::from_vals`
-            // gives the canonical finite form (a `Singleton` when the arms are
-            // equal, else a `OneOf`), or `None` (dropped) when an arm is not
-            // representable.
-            let t =
-                val_of(&w.cx.resolve_literal(then_val, &tenv, poisoned, folder)?, w.cx.php_minor)?;
-            let e =
-                val_of(&w.cx.resolve_literal(else_val, &eenv, poisoned, folder)?, w.cx.php_minor)?;
-            Fact::from_vals(vec![t, e])
+            // Undecided guard: the value is one of the two arms, so the fact is
+            // their **join**.
+            //
+            // Both arms proven is the finite case and answers exactly as it
+            // always did — `Fact::from_vals` gives a `Singleton` when the arms
+            // are equal and a `OneOf` otherwise.
+            //
+            // An arm that proves no *value* is not the end of it (issue #339):
+            // `$c ? $i : $s` used to be dropped whole because `val_of` needs a
+            // `Val` per arm, and the answer `int|string` had no form to live in.
+            // It does now, so each arm falls back to whatever fact it carries
+            // and the two are joined by the domain — which is the same operator
+            // the finite case is using, one layer up. An arm that carries no
+            // fact at all still drops the binding, as before.
+            let arm = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
+                w.cx
+                    .resolve_literal(value, aenv, poisoned, folder)
+                    .and_then(|lit| singleton_fact(&lit, w.cx.php_minor))
+                    .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(store)))
+            };
+            let t = arm(then_val, &tenv, folder)?;
+            let e = arm(else_val, &eenv, folder)?;
+            t.join(&e)
         }
     }
 }
@@ -15830,6 +16164,8 @@ fn fact_is_non_object(f: &Fact) -> bool {
     match f {
         Fact::Singleton(v) => val_is_non_object(v),
         Fact::OneOf(vs) => vs.iter().all(val_is_non_object),
+        // Every arm is a scalar base, and no scalar base is an object.
+        Fact::Union { .. } => true,
         Fact::Refined { .. } | Fact::General { .. } => true,
         // A shape fact does denote arrays, which are non-objects — but the
         // value-side `instanceof` rule gains no proof from it, so
@@ -16957,6 +17293,10 @@ fn pred_holds_on_fact(pred: TypePred, f: &Fact) -> Certainty {
             (k, *nullable)
         }
         Fact::Shape { nullable, .. } => (RtKind::Array, *nullable),
+        // A union spans several runtime kinds at once, so no single-kind
+        // predicate is decided by it — the honest floor, and the same one a
+        // mixed `OneOf` takes.
+        Fact::Union { .. } => return Maybe,
         // Finite layers are handled above.
         Fact::Singleton(_) | Fact::OneOf(_) => return Maybe,
     };
@@ -18057,7 +18397,8 @@ fn preg_pattern_keys(
         .iter()
         .filter_map(|(k, _)| match k {
             ArrayKey::Str(s) => s.as_str().map(ToOwned::to_owned),
-            ArrayKey::Int(_) | ArrayKey::Auto => None,
+            // An unknown key names nothing this reader can quote (issue #336).
+            ArrayKey::Int(_) | ArrayKey::Auto | ArrayKey::Expr(_) => None,
         })
         .collect()
 }
@@ -18249,6 +18590,9 @@ fn check_foreach_subject(
                 render_val(v),
             )
         }
+        // A union has no single type word for the engine's message, and this
+        // finding quotes that word verbatim.
+        Fact::Union { .. } => return,
         Fact::Refined { .. } | Fact::General { .. } => {
             let desc = describe_fact(fact);
             match foreach_subject_abstract_word(fact) {
@@ -18609,6 +18953,9 @@ fn fact_operand_kind(fact: &Fact) -> Option<OperandKind> {
             let first = val_operand_kind(vals.first()?);
             vals.iter().all(|v| val_operand_kind(v) == first).then_some(first)
         }
+        // Several operand kinds at once — no single row of the operator table
+        // applies, so the fatal is not proven.
+        Fact::Union { .. } => None,
         Fact::Shape { nullable: false, .. } => Some(OperandKind::Array),
         Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
             Some(match base {
@@ -27216,16 +27563,67 @@ fn apply_offset_write(
     // The written value's fact, resolved in the PRE-write env through the same
     // ladder an ordinary assignment uses; `None` (an unresolvable rvalue, or the
     // `unset` case) leaves the slot unknown, which is the honest floor.
-    let slot = value.and_then(|v| {
-        w.cx.resolve_literal(v, env, w.scope.poisoned, folder).and_then(|lit| singleton_fact(&lit, php_minor))
-    });
+    //
+    // The ladder is [`transfer_arg_known`]'s (issue #327), so a written value
+    // that is *abstract but known* — `$a['k'] = $x` with a natively-typed
+    // `int $x` — lands as `int` rather than as unknown, and brings its own
+    // stratum with it (ADR-0061 §3's derivation clause: the binding cannot come
+    // out more trusted than what was written into it). A poisoned scope keeps
+    // the literal-only path, because an env read there is not evidence.
+    let (slot, slot_stratum) = match value {
+        None => (None, Stratum::Verified),
+        Some(v) if w.scope.poisoned => (
+            w.cx
+                .resolve_literal(v, env, true, folder)
+                .and_then(|lit| singleton_fact(&lit, php_minor)),
+            Stratum::Verified,
+        ),
+        Some(v) => match transfer_arg_known(w.cx, folder, v, env, Some(&*store)) {
+            Some((fact, s)) => (Some(fact), s),
+            None => (None, Stratum::Verified),
+        },
+    };
 
     env.clear();
     store.clear();
 
     let Some(known) = before else { return };
-    let Some(Fact::Shape { shape, nullable }) = &known.fact else { return };
+    // A base holding an order-witnessed VALUE takes the same path, by lifting
+    // (issue #327). Before this, `$b = ['p' => 1]; $b['q'] = 2;` dropped `$b`
+    // entirely — the one write undid everything the literal had proven, which is
+    // the [`array_literal_fact`] cliff reached from the other direction. The lift
+    // is where the exact value honestly becomes a shape; the update rules below
+    // are then the ones ADR-0062 §4 already specifies, unchanged.
+    let lifted;
+    let (shape, nullable): (&ShapeFact, &bool) = match &known.fact {
+        Some(Fact::Shape { shape, nullable }) => (shape.as_ref(), nullable),
+        Some(Fact::Singleton(Val::Array(entries))) => {
+            lifted = ShapeFact::lift(entries);
+            (&lifted, &false)
+        }
+        _ => return,
+    };
     let Some(first) = keys.first().and_then(|k| guard_key(k, php_minor)) else { return };
+
+    // The order witness this write hands on, when the base had one (issue #327).
+    // A witnessed base stays witnessed through a write, because a write to an
+    // array whose construction was observed produces another array whose
+    // construction was observed: PHP appends a new key at the end, leaves an
+    // existing key where it is, and `unset` takes one out of the sequence. Every
+    // rebuild below drops the witness on the way, so it is re-attached once, at
+    // the end, from the sequence computed here.
+    let witnessed_order: Option<Vec<VKey>> = shape.order.as_ref().map(|order| {
+        let mut order: Vec<VKey> = order.clone();
+        match value {
+            None => order.retain(|k| *k != first),
+            Some(_) => {
+                if !order.contains(&first) {
+                    order.push(first.clone());
+                }
+            }
+        }
+        order
+    });
 
     let next = match value {
         None => {
@@ -27256,7 +27654,40 @@ fn apply_offset_write(
             // Keeping `Sealed` would leave a fact that rejects the very array the
             // code just built; unsealing is sound and loses only the declared
             // sealing, on this binding, from this point on.
-            if next.field(&first).is_none() {
+            //
+            // **Unless the sealing was witnessed too** (issue #327). A base whose
+            // construction this walk observed — `$a = []; $a['k'] = $x;` — has no
+            // docblock to have diverged from: its sealing is a fact about the
+            // array the code built, and adding a key to it yields another array
+            // the code built, still exactly known. There the write EXTENDS the
+            // sealed shape by the new key instead of opening the tail. It has to
+            // be added by hand: `promote_present` can only promote a key a sealed
+            // shape already declares, and the whole point here is that this one
+            // does not.
+            if let Some(order) = witnessed_order.as_ref()
+                && next.field(&first).is_none()
+            {
+                let mut fields = next.fields.clone();
+                fields.push((
+                    first.clone(),
+                    steins_domain::Presence::Required { witnessed: true },
+                    None,
+                ));
+                next = ShapeFact::normalize_counted(
+                    fields,
+                    Tail::Sealed,
+                    // Recomputed denotationally from the NEW key sequence: an
+                    // append can make a list (`[]` then key `0`) or break one
+                    // (a string key), and the old flag survives neither. The
+                    // sequence is what decides it, which is what the witness is
+                    // for — the canonically sorted fields cannot tell
+                    // `[1 => …, 0 => …]` from a list.
+                    Certainty::from_bool(steins_domain::keys_are_a_list(order.iter())),
+                    true,
+                    next.covers.clone(),
+                    next.count_bound,
+                );
+            } else if witnessed_order.is_none() && next.field(&first).is_none() {
                 next = ShapeFact::normalize_counted(
                     next.fields.clone(),
                     Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
@@ -27270,13 +27701,21 @@ fn apply_offset_write(
             if nested { set_slot_fact(&next, &first, None) } else { set_slot_fact(&next, &first, slot) }
         }
     };
+    // Re-attach the witness the rebuilds dropped. `with_order` re-checks it
+    // against the shape it lands on, so a sequence the update invalidated
+    // (a tail that ended up unsealed, a key count that no longer matches) is
+    // refused here rather than believed.
+    let next = match witnessed_order {
+        Some(order) => next.with_order(order),
+        None => next,
+    };
     env.insert(
         base.to_owned(),
         Known::value_strat(
             Fact::Shape { shape: Box::new(next), nullable: *nullable },
             known.line,
             Some(SHAPE_REFINED.to_owned()),
-            known.stratum,
+            known.stratum.min(slot_stratum),
         ),
     );
     if let Some(arms) = arms {
@@ -27867,6 +28306,14 @@ fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact> {
                 vs.into_iter().map(|v| coerce_val_to_native(ty, float_slot, v)).collect();
             // int→float can merge previously-distinct members; `from_vals` re-dedupes.
             coerced.and_then(Fact::from_vals)
+        }
+        // A union keeps the arms the native type actually has: the parameter
+        // is the gate, so an arm it does not admit cannot arrive. Losing every
+        // arm is no fact rather than an empty one.
+        Fact::Union { arms, nullable } => {
+            let kept: Vec<(Base, Option<Refinement>)> =
+                arms.into_iter().filter(|(b, _)| native_has_base(ty, *b)).collect();
+            Fact::union(kept, nullable)
         }
         Fact::Refined { base, refinement, nullable } => {
             if native_has_base(ty, base) {
@@ -28495,8 +28942,21 @@ impl<'a> Cx<'a> {
                     None
                 }
             }
+            // The resolved value goes back through this function rather than
+            // straight into `CVal::Scalar`, exactly as the `Var` arm above sends
+            // its singleton back (issue #329).
+            //
+            // It read `.map(CVal::Scalar)` while a call could only ever resolve
+            // to a *scalar* — the fold's own results. Once the transfer rung's
+            // arrays became visible here, that wrapped a `Val::Array` in the
+            // scalar carrier and the acceptance relation, asked whether a
+            // "scalar" inhabits `non-empty-list<string>`, correctly said no:
+            // `take(array_values(['x']))` was convicted where the identical
+            // `take(['x'])` and `$b = array_values(['x']); take($b)` were both
+            // silent. Same value, three provenances, one verdict now.
             ArgValue::Call(..) => {
-                self.resolve_literal(value, env, poisoned, folder).map(CVal::Scalar)
+                let lit = self.resolve_literal(value, env, poisoned, folder)?;
+                self.resolve_cval(&lit, env, store, poisoned, folder)
             }
             _ => None,
         }
@@ -30095,6 +30555,8 @@ fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin
 fn fact_base(f: &Fact) -> Option<Base> {
     match f {
         Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
+        // A union has no single base — that is what it is for.
+        Fact::Union { .. } => None,
         // The array stratum has no scalar base.
         Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
@@ -30108,6 +30570,20 @@ fn fact_base(f: &Fact) -> Option<Base> {
 fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
+        // **Still the nullable pair only, and now that is a decision** (issue
+        // #339). `Fact::Union` could hold any scalar union here, and generalising
+        // this arm was tried and reverted: the reflected declaration is the
+        // ENGINE's, which is coarse by construction (`abs` declares `int|float`),
+        // while ADR-0069's curated floor carries the sharp row for the same name
+        // (`int<1, max>|0|float`). The envelope rung sits ABOVE the floor, so an
+        // envelope that answers in more cases *shadows* the sharper row — 13 nsrt
+        // rows went from `int<0, max>|float` to `int|float` on exactly that path.
+        //
+        // A wider envelope is not wrong, but it is not an improvement either, and
+        // buying it at the cost of the curated rows is a bad trade. Widening this
+        // arm therefore waits on the ladder question — whether the floor may
+        // refine *within* a union envelope the way ADR-0061 §2 has the type rung
+        // refine within a scalar one — which is its own decision.
         ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
             let base = members.iter().find_map(|m| match m {
                 ContractTy::Base(b) => Some(*b),
@@ -30117,6 +30593,32 @@ fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
         }
         _ => None,
     }
+}
+
+/// Fold a declared union's members into one [`Fact`] through the domain's join
+/// (issue #339), or `None` if any member does not lift.
+///
+/// `null` is not a member here but a flag: it lowers to `Fact::Singleton(Null)`
+/// and the join folds it into `nullable` on the way, which is the same thing the
+/// old two-member special case did by hand.
+fn union_envelope(members: &[ContractTy]) -> Option<Fact> {
+    let mut acc: Option<Fact> = None;
+    for m in members {
+        let f = match m {
+            ContractTy::Null => Fact::Singleton(Val::Null),
+            ContractTy::Base(b) => Fact::General { base: *b, nullable: false },
+            ContractTy::IntIn(r) => Fact::refined(Base::Int, Refinement::Int(*r), false),
+            ContractTy::StrWith(p) => Fact::refined(Base::String, Refinement::Str(*p), false),
+            // Anything else — a class, a shape, a callable, a nested union —
+            // is not a scalar arm, so the union has no fact form.
+            _ => return None,
+        };
+        acc = Some(match acc {
+            None => f,
+            Some(prev) => prev.join(&f)?,
+        });
+    }
+    acc
 }
 
 /// Lower a curated refinement [`ContractTy`] to a value-domain [`Fact`] (ADR-0056
@@ -30137,10 +30639,9 @@ fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
         // here. Every other `Inter` still returns `None`: the honest floor.
         ContractTy::Inter(members) => steins_contract::inter_str_preds(members)
             .map(|p| Fact::refined(Base::String, Refinement::Str(p), false)),
-        ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
-            let inner = members.iter().find(|m| !matches!(m, ContractTy::Null))?;
-            fact_with_null(&contractty_to_fact(inner)?)
-        }
+        // Any scalar union (issue #339), by the same fold the envelope path uses
+        // — the nullable pair is now just its two-member case.
+        ContractTy::Union(members) => union_envelope(members),
         _ => None,
     }
 }
@@ -30151,6 +30652,7 @@ fn fact_with_null(f: &Fact) -> Option<Fact> {
     match f {
         Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: true }),
         Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, true)),
+        Fact::Union { arms, .. } => Fact::union(arms.clone(), true),
         // The curated `?T` wrapper is a scalar path; a shape fact refuses
         // rather than acquiring nullability here.
         Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
@@ -30355,9 +30857,44 @@ fn shape_builtin_return_fact(
     if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env, store) {
         return Some(out);
     }
-    let [ArgValue::Var(var), rest @ ..] = args else { return None };
-    let known = env.get(var)?;
-    let subject_stratum = known.stratum;
+    // **The subject binds by what it resolves to, not by how it was spelled**
+    // (issue #328 L1). A bare variable reads the env, as it always did; an array
+    // written *at the call site* resolves through the seeding ladder — the same
+    // one an assignment takes — so `count(['a' => $x, 'b' => $x])` is no longer
+    // strictly worse than `$a = ['a' => $x, 'b' => $x]; count($a)`, which is
+    // what it was for as long as this pattern said `Var` and nothing else.
+    //
+    // Deliberately only these three forms. Every other spelling would have to be
+    // resolved to find out it is not an array, and resolution can dispatch to
+    // the engine — most calls reaching this rung are not in the family at all,
+    // so the cheap syntactic gate stays nearly as cheap as it was.
+    //
+    // The `Call` form is what makes a projection *of* a projection compose
+    // (`array_values(array_keys([…]))`, issue #329). It terminates because each
+    // level strips one call from a finite expression, and it answers what the
+    // two-statement spelling answers — which is the property its fixture pins.
+    let seeded;
+    let (subject_fact, subject_stratum) = match args {
+        [ArgValue::Var(var), ..] => {
+            let known = env.get(var)?;
+            (known.fact.as_ref()?, known.stratum)
+        }
+        [ArgValue::Array(items), ..] => {
+            seeded = cx
+                .resolve_literal(&args[0], env, poisoned, folder)
+                .and_then(|lit| singleton_fact(&lit, cx.php_minor))
+                .map(|f| (f, value_stratum(&args[0], env, store)))
+                .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
+            (&seeded.0, seeded.1)
+        }
+        [call @ ArgValue::Call(..), ..] => {
+            let (lit, strat) = cx.resolve_literal_strat(call, env, poisoned, folder)?;
+            seeded = (singleton_fact(&lit, cx.php_minor)?, strat);
+            (&seeded.0, seeded.1)
+        }
+        _ => return None,
+    };
+    let [_, rest @ ..] = args else { return None };
 
     // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
     // witnessed `Val::Array` carries true insertion order, so the order-dependent
@@ -30372,17 +30909,37 @@ fn shape_builtin_return_fact(
     // `count($x)` over `[1, 2, 3]` reaches the same `count_range()` a sealed
     // `array{int, int, int}` would.
     let lifted;
-    let shape: &ShapeFact = match &known.fact {
-        Some(Fact::Singleton(Val::Array(entries))) => {
+    let shape: &ShapeFact = match subject_fact {
+        Fact::Singleton(Val::Array(entries)) => {
             if let Some(out) = witnessed_projection_fact(cx, folder, name, entries, args, env, store) {
                 return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
             }
             lifted = ShapeFact::lift(entries);
             &lifted
         }
-        Some(Fact::Shape { shape, nullable: false }) => shape.as_ref(),
+        Fact::Shape { shape, nullable: false } => shape.as_ref(),
         _ => return None,
     };
+
+    // **The positional projections, executed** (issue #328). A shape that
+    // witnessed its own construction — a literal the walk saw built, or the
+    // `lift` just above — carries a realizable key sequence, so the family may
+    // run over it instead of taking the key-set widening below. A shape that
+    // witnessed nothing has no sequence, falls straight through, and keeps
+    // exactly the answer it has today: that is ADR-0062 §7's declined import,
+    // and it stays declined.
+    if let Some(order) = shape.witnessed_order() {
+        let entries: Vec<(VKey, Option<Fact>)> = order
+            .iter()
+            .filter_map(|k| shape.field(k).map(|(_, _, slot)| (k.clone(), slot.clone().map(|f| *f))))
+            .collect();
+        if entries.len() == order.len()
+            && let Some(out) =
+                witnessed_family_fact(cx, folder, name, &entries, args, env, store)
+        {
+            return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
+        }
+    }
 
     let out = if rest.is_empty()
         && (name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof"))
@@ -30529,10 +31086,12 @@ fn transfer_declaration_admits(
 /// * `array_pop`/`array_shift`/`array_first`/`array_last` never touch the pointer;
 ///   they add `null` on a possibly-empty shape (`array_pop($e = []) === null`).
 ///
-/// A `∪ false` that the four-layer domain cannot spell — `int|false` is a
-/// two-base union with no single [`Fact`] — **declines**, exactly as `json_decode`
-/// does in the sibling dispatch rung. A rule that cannot state its own answer says
-/// nothing.
+/// A `∪ false` is now sayable (issue #339): `Fact::Union` holds a two-base union,
+/// so `next($x)` over an `int`-valued shape answers rather than declining. The
+/// answer is `int|bool` and not `int|false` — the `Bool` base carries no
+/// refinement, so the finite `false` widens to its base when it becomes an arm.
+/// Sound, coarser than the reference implementation, and recorded in ADR-0085 §5
+/// as the finite-member-beside-an-abstract-arm limit.
 ///
 /// **Mutation is not this function's business, and must not be.** Six of the ten
 /// (`array_pop array_shift next prev reset end`) take argument 0 by reference and
@@ -30599,6 +31158,34 @@ fn shape_projection_fact(
         let out = slice_widening(cx, folder, shape, args, env, store)?;
         return transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE).then_some(out);
     }
+    // `array_fill_keys($keys, $value)` over a DECLARED `$keys` (issue #336 piece
+    // 2). Placed with `array_slice` above the single-argument gate for the same
+    // reason: it reads a sibling argument.
+    //
+    // The witnessed lane computes this entry by entry; here only the key CLASS
+    // is knowable, and it comes from the array-key cast of the subject's value
+    // union — which is what lets `list<decimal-int-string>` key an `int` array
+    // even though its values' base is `string`.
+    //
+    // Unlike `array_flip`, `non_empty` **carries**: every value becomes a key,
+    // none is skipped. Probed at 8.5.9 — even an array value survives, as the
+    // string key `'Array'` with a warning, and a float as its string rendering.
+    // (Those two are exactly what `array_key_cast` declines to name, which costs
+    // the key class and never the entry count.)
+    if lower == "array_fill_keys" && args.len() == 2 {
+        let out = ShapeFact::normalize(
+            Vec::new(),
+            steins_domain::Tail::Unsealed {
+                key: filled_key_class(shape),
+                value: transfer_arg_fact(cx, folder, &args[1], env, store).map(Box::new),
+            },
+            Certainty::Maybe,
+            shape.non_empty,
+            Vec::new(),
+        );
+        return transfer_declaration_admits(cx, folder, name, ARRAY, None)
+            .then_some(shape_fact(out));
+    }
     // The rest of the family reads exactly ONE argument, and a call passing more is
     // a different function than the rule describes: `array_reverse($x, true)`
     // preserves keys, `current($x, 1)` is an `ArgumentCountError`.
@@ -30661,10 +31248,15 @@ fn shape_projection_fact(
             };
             (out, MIXED, ARITY_1)
         }
-        // Still declined, and now for the only reason left: the value side of
-        // `in_array`/`array_search` is a multi-base union (`int|string|false`) the
-        // four-layer domain has no single `Fact` for, so the rule cannot state its
-        // own answer (ADR-0061 §1). `array_slice`'s v1 decline — "the seam is
+        // Still declined, and the reason has CHANGED (issue #339). It used to be
+        // that the value side of `in_array`/`array_search` is a multi-base union
+        // (`int|string|false`) the four-layer domain had no single `Fact` for, so
+        // the rule could not state its own answer. `Fact::Union` is that form now,
+        // and what is missing is the rule itself — `array_search` over a witnessed
+        // array with a proven needle is exactly computable, and over a shape it is
+        // the key union ∪ false. Unwritten, not unsayable.
+        //
+        // The pattern is the one `array_slice` set: its v1 decline — "the seam is
         // single-argument by construction" — was answered by growing the seam, not
         // by weakening the rule (ADR-0062 Amendment B).
         _ => return None,
@@ -30745,6 +31337,451 @@ fn witnessed_projection_fact(
     }
 }
 
+/// **The positional projections on the order-witnessed lane** (issue #328) —
+/// `array_keys`, `array_values`, `array_reverse`, `array_flip` executed over a
+/// subject whose construction order was observed, rather than widened to the
+/// order-blind answer a key set deserves.
+///
+/// # What "order-witnessed" buys, and why it is not the declined import
+///
+/// ADR-0062 §7 declines *declaration*-order trust in positional projections —
+/// phpstan/phpstan#14940's false-positive class, where `array{b: …, a: …}`'s
+/// field order is read as runtime order even though the shape admits both
+/// insertion orders. Nothing here reads a declaration. The entries arrive in
+/// the order the walk *saw the array built*, carried by
+/// [`ShapeFact::witnessed_order`] (issue #327), and every admitted value of a
+/// sealed all-required witnessed shape has exactly that key sequence. Consuming
+/// it is the same move issue #165 made for `isList == Yes`: an order that is a
+/// semantic guarantee, never an artifact.
+///
+/// # The entries, and why the values may be unknown
+///
+/// `entries` is the witnessed sequence with each slot's fact, `None` where
+/// nothing proved one. Three of the four names do not care: they restructure
+/// the array, and a slot travels through them unread. That is what lets
+/// `array_keys(['a' => $x, 'b' => $y])` answer the exact key sequence — the
+/// result's *values* are the subject's *keys*, which are known by construction
+/// however little is known about `$x`.
+///
+/// `array_flip` is the exception and declines instead: the result's *keys* come
+/// from the subject's *values*, so an unproven value is an unproven key and
+/// there is no honest partial answer. It falls to the widening the shape rung
+/// already computes.
+///
+/// # Probes (PHP 8.5.9), which is where each rule comes from
+///
+/// * `array_keys(['b' => 1, 'a' => 2]) === [0 => 'b', 1 => 'a']` — the key
+///   sequence, reindexed. `array_keys([-5 => 1, 3 => 2]) === [-5, 3]`.
+/// * `array_values(['b' => 1, 'a' => 2]) === [0 => 1, 1 => 2]`.
+/// * `array_reverse(['a' => 1, 5 => 2, 'b' => 3, 9 => 4]) === [0 => 4,
+///   'b' => 3, 1 => 2, 'a' => 1]` — reversed, string keys surviving, integer
+///   keys renumbered `0..` **in the new order**. The same rule
+///   [`slice_entries`] already implements and probes.
+/// * `array_flip(['a', 'b']) === ['a' => 0, 'b' => 1]`;
+///   `array_flip(['x' => '1']) === [1 => 'x']` (the value goes through PHP's
+///   own key normalization); `array_flip(['a', 'a']) === ['a' => 1]`
+///   (last wins); `array_flip(['a', 1.5, 'b']) === ['a' => 0, 'b' => 2]` — a
+///   value that is not `int|string` is **skipped**, with a warning, and the
+///   survivors keep their original positions as values.
+///
+/// # The admission gate, and the result's own layer
+///
+/// The gate is [`transfer_declaration_admits`] over the engine's own `array`
+/// declaration, exactly as the shape rung's arm of this family uses. The result
+/// is a `Singleton` when every slot it needed was proven — for `array_keys`
+/// that is always — and a witnessed `Fact::Shape` otherwise, so an unknown
+/// element costs one slot rather than the sequence.
+fn witnessed_family_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    entries: &[(VKey, Option<Fact>)],
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    const ARRAY: &[&str] = &["array"];
+    /// `array_key_first`/`array_key_last`'s declared return. PHP 8 renders the
+    /// union in its own order; both spellings are accepted so the gate tests the
+    /// *declaration* rather than the engine's spelling of it.
+    const KEY_OR_NULL: &[&str] = &["string|int|null", "int|string|null"];
+    /// `array_first`/`array_last` declare a bare `mixed`, which pins nothing on
+    /// its own, so they carry the arity second leg (ADR-0064 Amendment B).
+    const MIXED: &[&str] = &["mixed"];
+    const ARITY_1: Option<(u32, u32)> = Some((1, 1));
+    const ARITY_SLICE: Option<(u32, u32)> = Some((4, 2));
+
+    let lower = name.to_ascii_lowercase();
+
+    // ---- The POSITION READERS (issue #328 wave 2) ---------------------------
+    //
+    // ADR-0062 §4 answers these from the key *set* — "SOME key of the set, never
+    // the declared-first one", §2's rule at its sharpest, and correct for a
+    // declaration that admits every permutation. A witnessed order is the other
+    // provenance: the sequence was observed, so first really is first.
+    //
+    // Probed at 8.5.9: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`,
+    // `array_key_last(…) === 'a'`, `array_first(…) === 1`, `array_last(…) === 2`,
+    // and all four answer `null` on `[]`.
+    //
+    // **The pointer family is deliberately excluded.** `key`/`current`/`reset`/
+    // `end` read the internal array pointer, which Steins does not model; the
+    // existing arm tolerates that only because a shape-derived fact can never
+    // premise a proof-layer finding (A-G9's corollary). A witnessed literal is
+    // `Verified`, so an exact answer here WOULD be admissible as a premise, and
+    // the pointer assumption would ride into a proof with it. They keep the
+    // widening.
+    let position: Option<GatedFact<'_>> = match lower.as_str() {
+        "array_key_first" | "array_key_last" | "array_first" | "array_last"
+            if args.len() == 1 =>
+        {
+            let last = lower.ends_with("last");
+            let entry = if last { entries.last() } else { entries.first() };
+            let fact = match entry {
+                // PHP answers `null` for the empty array, and the empty array is
+                // exactly what an empty witnessed sequence proves.
+                None => Fact::Singleton(Val::Null),
+                Some((k, slot)) => {
+                    if lower.starts_with("array_key") {
+                        Fact::Singleton(val_of_key(k))
+                    } else {
+                        // The value's own fact at whatever layer it was proven —
+                        // an unknown slot has no answer, so the arm declines to
+                        // the widening rather than claiming `mixed`.
+                        slot.clone()?
+                    }
+                }
+            };
+            let (declared, arity): (&[&str], Option<(u32, u32)>) =
+                if lower.starts_with("array_key") { (KEY_OR_NULL, None) } else { (MIXED, ARITY_1) };
+            Some((fact, declared, arity))
+        }
+        _ => None,
+    };
+    if let Some((fact, declared, arity)) = position {
+        return transfer_declaration_admits(cx, folder, name, declared, arity).then_some(fact);
+    }
+
+    // ---- `array_slice` on the witnessed lane, with unknown slots -------------
+    //
+    // The exact slice already existed for a fully-proven `Val::Array`
+    // (Amendment B). It reads offsets and keys and never a value, so nothing
+    // about it needed the values to be known — `array_slice(['x', $s, 'z'], 1)`
+    // is `list{string, 'z'}`, which the value-only rung could not say.
+    if lower == "array_slice" && (2..=4).contains(&args.len()) {
+        let (offset, length, preserve) = slice_window(cx, folder, args, env, store)?;
+        let out = slice_witnessed_entries(entries, offset, length, preserve);
+        return transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE)
+            .then(|| witnessed_entries_fact(&out));
+    }
+
+    // ---- The TWO-ARRAY names (issue #328 wave 2) ----------------------------
+    //
+    // Each reads a second witnessed sequence through the same seam the subject
+    // came through. All four are pure key work — none inspects a value except to
+    // *cast it to a key*, and that cast is measured below rather than recalled.
+    if matches!(
+        lower.as_str(),
+        "array_fill_keys" | "array_combine" | "array_diff_key" | "array_intersect_key"
+    ) {
+        let [_, second] = args else { return None };
+        let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
+            // `array_fill_keys($keys, $value)`: every value of `$keys` becomes a
+            // key, all mapped to the same `$value`. Probed:
+            // `array_fill_keys(['1', 2], 'v') === [1 => 'v', 2 => 'v']` (the
+            // key cast normalizes), `array_fill_keys(['a', 'a'], 1) === ['a' => 1]`
+            // (one entry). Its second argument is a plain VALUE, not a sequence —
+            // which is why the sibling is read per-arm rather than once up front.
+            "array_fill_keys" => {
+                let fill = transfer_arg_fact(cx, folder, second, env, store);
+                let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+                for (_, slot) in entries {
+                    let Some(Fact::Singleton(v)) = slot else { return None };
+                    let key = array_key_cast(v)?;
+                    match out.iter_mut().find(|(ek, _)| *ek == key) {
+                        Some(e) => e.1 = fill.clone(),
+                        None => out.push((key, fill.clone())),
+                    }
+                }
+                out
+            }
+            // `array_combine($keys, $values)`: positional zip. PHP raises a
+            // `ValueError` on a length mismatch (probed), so a mismatch is a call
+            // that does not return at all — no fact, rather than a guessed one.
+            // Probed: `array_combine(['1', 'b'], [1, 2]) === [1 => 1, 'b' => 2]`,
+            // `array_combine(['a', 'a'], [1, 2]) === ['a' => 2]` (last wins).
+            "array_combine" => {
+                let other = witnessed_entries_of(cx, folder, second, env, store)?;
+                if entries.len() != other.len() {
+                    return None;
+                }
+                let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+                for ((_, kslot), (_, vslot)) in entries.iter().zip(other.iter()) {
+                    let Some(Fact::Singleton(v)) = kslot else { return None };
+                    let key = array_key_cast(v)?;
+                    match out.iter_mut().find(|(ek, _)| *ek == key) {
+                        Some(e) => e.1 = vslot.clone(),
+                        None => out.push((key, vslot.clone())),
+                    }
+                }
+                out
+            }
+            // `array_diff_key` / `array_intersect_key`: pure key set difference and
+            // intersection, and **the order comes from the first array** (probed:
+            // `array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
+            //    === ['b' => 2, 'a' => 1]`). Key identity is the domain's own
+            // normalized `VKey`, which is what makes `array_diff_key([5 => 1,
+            // '5x' => 2], ['5' => 9]) === ['5x' => 2]` fall out — `'5'` and `5`
+            // are one key.
+            //
+            // Values are never read, so unknown slots cost nothing at all here.
+            // The second argument contributes its **key set** and nothing else —
+            // not its order, not its values — so unlike `array_combine` it may be
+            // a *declared* shape. Reading a declaration's key set is not the §7
+            // declined import: the import that is declined is reading its key
+            // *order*, and a set has none. What the set does need is to be
+            // certain, which is why [`key_set_of`] insists on a sealed tail and
+            // no optional field: a key that may or may not be there decides
+            // neither the difference nor the intersection.
+            other_name => {
+                let other = key_set_of(cx, folder, second, env, store)?;
+                let want = other_name == "array_intersect_key";
+                entries
+                    .iter()
+                    .filter(|(k, _)| other.contains(k) == want)
+                    .cloned()
+                    .collect()
+            }
+        };
+        return transfer_declaration_admits(cx, folder, name, ARRAY, None)
+            .then(|| witnessed_entries_fact(&out));
+    }
+
+    // Every name below reads exactly one argument, and a call passing more is a
+    // different function than the rule describes (`array_reverse($x, true)`
+    // preserves keys; `array_keys($x, $search)` filters by value).
+    let [_] = args else { return None };
+    let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
+        // The keys, as values, reindexed `0..`. Always fully proven: the result's
+        // values are the subject's keys.
+        "array_keys" => entries
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| {
+                (VKey::Int(i64::try_from(i).unwrap_or(i64::MAX)), Some(Fact::Singleton(val_of_key(k))))
+            })
+            .collect(),
+        // The values, reindexed `0..`. The slots travel unread, unknowns included.
+        "array_values" => entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, slot))| {
+                (VKey::Int(i64::try_from(i).unwrap_or(i64::MAX)), slot.clone())
+            })
+            .collect(),
+        // Reversed: string keys survive where they are, integer keys are
+        // renumbered `0..` in the NEW order.
+        "array_reverse" => {
+            let mut next = 0i64;
+            entries
+                .iter()
+                .rev()
+                .map(|(k, slot)| {
+                    let key = match k {
+                        VKey::Str(s) => VKey::Str(s.clone()),
+                        VKey::Int(_) => {
+                            let at = next;
+                            next = next.saturating_add(1);
+                            VKey::Int(at)
+                        }
+                    };
+                    (key, slot.clone())
+                })
+                .collect()
+        }
+        // Keys and values swap, so every value has to be proven — and to be an
+        // `int|string`, or PHP skips that entry entirely.
+        "array_flip" => {
+            let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+            for (k, slot) in entries {
+                let Some(Fact::Singleton(v)) = slot else { return None };
+                let Some(key) = flip_key_of(v) else { continue };
+                let value = Some(Fact::Singleton(val_of_key(k)));
+                // Last wins, in place — PHP overwrites the entry without moving it.
+                match out.iter_mut().find(|(ek, _)| *ek == key) {
+                    Some(slot) => slot.1 = value,
+                    None => out.push((key, value)),
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    if !transfer_declaration_admits(cx, folder, name, ARRAY, None) {
+        return None;
+    }
+    Some(witnessed_entries_fact(&out))
+}
+
+/// The array key PHP casts a value to for `array_fill_keys` / `array_combine`
+/// (issue #328 wave 2), or `None` where this crate declines to say.
+///
+/// # Three sibling functions, three different casts — measured, not recalled
+///
+/// The whole reason this is its own function is that the obvious assumption is
+/// wrong three ways. At 8.5.9, for the value `1.5`:
+///
+/// | seam | answer |
+/// | --- | --- |
+/// | `$a[1.5] = v` ([`offset_key_of`]) | int `1` — truncation, with a deprecation |
+/// | `array_fill_keys([1.5], v)` / `array_combine([1.5], [v])` | string `'1.5'` |
+/// | `array_flip([1.5])` ([`flip_key_of`]) | the entry is **skipped** |
+///
+/// Three neighbouring builtins, three rules, and no amount of reasoning about
+/// "PHP's array key cast" produces them — only running the engine does
+/// (ADR-0004). So this cast serves exactly the pair it was probed for.
+///
+/// **The float declines** rather than taking the measured `'1.5'`. PHP renders a
+/// float to string under the `precision` ini directive, so the *key* of
+/// `array_fill_keys([0.1 + 0.2], v)` depends on the runtime's configuration —
+/// the same reason [`concat_cast`] excludes floats. A key this crate cannot
+/// state without knowing an ini setting is a key it does not state.
+///
+/// The rest are measured and fixed: `array_fill_keys(['1', 2], 'v')
+/// === [1 => 'v', 2 => 'v']` (a numeric string normalizes, `'01'` does not),
+/// `array_fill_keys([true, null], 'v') === [1 => 'v', '' => 'v']`.
+fn array_key_cast(v: &Val) -> Option<VKey> {
+    match v {
+        Val::Int(i) => Some(VKey::Int(*i)),
+        Val::Bool(b) => Some(VKey::Int(i64::from(*b))),
+        Val::Null => Some(VKey::Str(PhpStr::new())),
+        Val::Str(s) => Some(match php_canonical_int_string(s) {
+            Some(i) => VKey::Int(i),
+            None => VKey::Str(s.clone()),
+        }),
+        // The float's ini-dependent rendering, and the array (a `TypeError`).
+        Val::Float(_) | Val::Array(_) => None,
+    }
+}
+
+/// The witnessed entry sequence an argument denotes (issue #328 wave 2) — the
+/// one seam the two-array names read their sibling through.
+///
+/// It answers for the same two provenances the subject binding accepts, and for
+/// the same reason: a `Singleton` array is an observed value, and a sealed,
+/// all-required shape carrying an order witness is an observed construction. A
+/// declared shape has no sequence and answers `None`, which is what keeps the
+/// §7 declined import declined on the *second* argument too — a rule that reads
+/// `array_intersect_key($x, array{a: int, b: int})` must not read that
+/// declaration's field order any more than it may read the subject's.
+fn witnessed_entries_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Vec<(VKey, Option<Fact>)>> {
+    match transfer_arg_fact(cx, folder, arg, env, store)? {
+        Fact::Singleton(Val::Array(entries)) => Some(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), Some(Fact::Singleton(v.clone()))))
+                .collect(),
+        ),
+        Fact::Shape { shape, nullable: false } => {
+            let order = shape.witnessed_order()?;
+            let out: Vec<(VKey, Option<Fact>)> = order
+                .iter()
+                .filter_map(|k| {
+                    shape.field(k).map(|(_, _, slot)| (k.clone(), slot.clone().map(|f| *f)))
+                })
+                .collect();
+            (out.len() == order.len()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+/// A rule's answer together with the admission gate it must pass: the reflected
+/// return declarations that count as the signature it was written against, and
+/// the arity pin where the declaration alone pins too little (ADR-0064
+/// Amendment B).
+type GatedFact<'a> = (Fact, &'a [&'a str], Option<(u32, u32)>);
+
+/// The **certain key set** of an argument (issue #328 wave 2) — every key it
+/// has, and no key it might not have.
+///
+/// Weaker than [`witnessed_entries_of`] in what it demands and in what it
+/// yields: no order witness is required, because a set has no order, and none is
+/// returned. That is the whole reason it exists — `array_diff_key` and
+/// `array_intersect_key` read their second argument's key set only, so a
+/// *declared* `array{a: int, b: int}` is a perfectly good second argument even
+/// though its field order means nothing (ADR-0062 §7's declined import is about
+/// reading declaration *order*, and there is no order here to read).
+///
+/// The set has to be certain, which is what the two refusals enforce:
+///
+/// * an **optional** field — a key that may or may not be present decides
+///   neither the difference nor the intersection;
+/// * an **unsealed** tail — an undeclared key could be anything, so the set is
+///   a lower bound rather than the set.
+fn key_set_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Vec<VKey>> {
+    use steins_domain::Tail;
+    match transfer_arg_fact(cx, folder, arg, env, store)? {
+        Fact::Singleton(Val::Array(entries)) => {
+            Some(entries.iter().map(|(k, _)| k.clone()).collect())
+        }
+        Fact::Shape { shape, nullable: false } => {
+            let certain = matches!(shape.tail, Tail::Sealed)
+                && shape.fields.iter().all(|(_, p, _)| p.is_required());
+            certain.then(|| shape.fields.iter().map(|(k, _, _)| k.clone()).collect())
+        }
+        _ => None,
+    }
+}
+
+/// The array key PHP casts a **flipped value** to, or `None` for a value
+/// `array_flip` skips (probed: `array_flip(['a', 1.5, 'b'])` drops the float,
+/// with a warning, and keeps the survivors' positions).
+///
+/// Only `int` and `string` flip. The string goes through the same canonical
+/// int-string normalization every other key seam uses, so `'1'` becomes the
+/// integer key `1` (probed: `array_flip(['x' => '1']) === [1 => 'x']`) while
+/// `'01'` stays a string.
+fn flip_key_of(v: &Val) -> Option<VKey> {
+    match v {
+        Val::Int(i) => Some(VKey::Int(*i)),
+        Val::Str(s) => Some(match php_canonical_int_string(s) {
+            Some(i) => VKey::Int(i),
+            None => VKey::Str(s.clone()),
+        }),
+        Val::Bool(_) | Val::Null | Val::Float(_) | Val::Array(_) => None,
+    }
+}
+
+/// The fact a witnessed entry sequence denotes: a `Singleton` when every slot is
+/// a proven value — the most precise thing the domain has, and what the value
+/// lane exists to produce — and a witnessed `Fact::Shape` otherwise.
+fn witnessed_entries_fact(entries: &[(VKey, Option<Fact>)]) -> Fact {
+    let proven: Option<Vec<(VKey, Val)>> = entries
+        .iter()
+        .map(|(k, slot)| match slot {
+            Some(Fact::Singleton(v)) => Some((k.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
+    match proven {
+        Some(vals) => Fact::Singleton(Val::Array(vals)),
+        None => shape_fact(ShapeFact::from_witnessed_entries(entries)),
+    }
+}
+
 /// The exact rung's three premises, read together: a `Singleton` offset, a
 /// `Singleton`-or-absent length, and a literal `$preserve_keys`. `None` — the
 /// caller takes the widening — as soon as one of them is not proven.
@@ -30779,6 +31816,44 @@ fn slice_window(
 
 /// The witnessed window of `entries`, keyed as PHP keys it (see
 /// [`witnessed_projection_fact`] for the probes both halves are written from).
+/// [`slice_entries`] over a witnessed sequence whose values may be unknown
+/// (issue #328 wave 2).
+///
+/// The window arithmetic and the key rule are the same computation on the same
+/// probes — `array_slice` reads offsets and keys and never a value, which is
+/// precisely why the slots can travel through it unread. The two functions are
+/// kept separate rather than generified because one carries `Val` and the other
+/// `Option<Fact>`; `slice_agrees_with_its_value_only_twin` pins that they answer
+/// alike wherever both apply.
+fn slice_witnessed_entries(
+    entries: &[(VKey, Option<Fact>)],
+    offset: i64,
+    length: Option<i64>,
+    preserve: bool,
+) -> Vec<(VKey, Option<Fact>)> {
+    let n = i64::try_from(entries.len()).unwrap_or(i64::MAX);
+    let start = if offset < 0 { (n.saturating_add(offset)).max(0) } else { offset.min(n) };
+    let end = match length {
+        None => n,
+        Some(l) if l < 0 => n.saturating_add(l).max(start),
+        Some(l) => start.saturating_add(l).min(n),
+    };
+    let (lo, hi) = (usize::try_from(start).unwrap_or(0), usize::try_from(end).unwrap_or(0));
+    let mut next = 0i64;
+    entries[lo.min(entries.len())..hi.min(entries.len())]
+        .iter()
+        .map(|(k, slot)| match k {
+            VKey::Str(_) => (k.clone(), slot.clone()),
+            VKey::Int(_) if preserve => (k.clone(), slot.clone()),
+            VKey::Int(_) => {
+                let key = VKey::Int(next);
+                next += 1;
+                (key, slot.clone())
+            }
+        })
+        .collect()
+}
+
 fn slice_entries(
     entries: &[(VKey, Val)],
     offset: i64,
@@ -31009,9 +32084,10 @@ fn read_position_value(shape: &ShapeFact, empty: Val) -> Option<Fact> {
 
 /// Add `false` to a fact's denotation. Unlike `null` there is no side-flag for it,
 /// so this is the plain domain join: finite layers absorb it as another member, and
-/// an abstract non-`bool` base yields `None` — `int|false` is a two-base union the
-/// four-layer domain does not name, and a rule that cannot state its answer
-/// declines (ADR-0061 §1).
+/// an abstract non-`bool` base joins into a [`Fact::Union`] (issue #339), where it
+/// used to yield `None` for want of a two-base form. The result is `int|bool`
+/// rather than `int|false`: `Bool` carries no refinement, so the finite `false`
+/// widens to its base on the way into an arm (ADR-0085 §5).
 fn fact_admitting_false(f: &Fact) -> Option<Fact> {
     f.join(&Fact::Singleton(Val::Bool(false)))
 }
@@ -31175,6 +32251,19 @@ fn transfer_arg_known(
             return Some((fact, stratum));
         }
         return env_fact.map(|f| (f, env_stratum));
+    }
+    // An array literal the value path cannot prove whole still denotes a fact
+    // (issue #327), and a rule reading it as an ARGUMENT should see the same one
+    // an assignment would bind. Without this a sibling argument like
+    // `array_combine(['a', 'b'], [1, $x])` reads nothing at all, which is the
+    // seeding cliff surviving one seam further out.
+    if let ArgValue::Array(items) = value
+        && let Some((lit, strat)) = cx
+            .resolve_literal_strat(value, env, false, folder)
+            .and_then(|(l, s)| Some((singleton_fact(&l, cx.php_minor)?, s)))
+            .or_else(|| array_literal_fact(cx, folder, items, env, false, store))
+    {
+        return Some((lit, strat.min(value_stratum(value, env, store))));
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
     Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))
@@ -32324,7 +33413,13 @@ fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
             let class = match key {
                 KeyClass::Int => Fact::General { base: Base::Int, nullable: false },
                 KeyClass::Str => Fact::General { base: Base::String, nullable: false },
-                KeyClass::ArrayKey => return None,
+                // `array-key` is PHP's `int|string`, and that is a fact now
+                // (issue #339) where it used to be a two-base union with no
+                // form — which is why this arm read `return None`.
+                KeyClass::ArrayKey => Fact::union(
+                    vec![(Base::Int, None), (Base::String, None)],
+                    false,
+                )?,
             };
             declared
                 .iter()
@@ -32459,18 +33554,80 @@ fn project_keys(shape: &ShapeFact) -> ShapeFact {
 /// `is_list` is left to `normalize` (`Maybe`): whether the values happen to be
 /// `0..n-1` is not something the shape knows.
 fn project_flip(shape: &ShapeFact) -> ShapeFact {
-    use steins_domain::{KeyClass, Tail};
-    let all_int = shape_value_union(shape).is_some_and(|f| fact_is_int(&f));
+    use steins_domain::Tail;
     ShapeFact::normalize(
         Vec::new(),
         Tail::Unsealed {
-            key: if all_int { KeyClass::Int } else { KeyClass::ArrayKey },
+            key: flipped_key_class(shape),
             value: shape_key_union(shape).map(Box::new),
         },
         Certainty::Maybe,
         false,
         Vec::new(),
     )
+}
+
+/// The key class `array_flip`'s result has, read off the **array-key cast** of
+/// the subject's value union (issue #336).
+///
+/// The cast is what decides this, not the base: a `decimal-int-string` value
+/// produces an **integer** key, because PHP rewrites a string that spells an
+/// integer the way it writes one back. So `array_flip(list<decimal-int-string>)`
+/// is keyed by `int`, which the previous all-int test could not see — it read
+/// the values' base and a string base is not an int.
+///
+/// Where the cast declines the answer is a two-base union
+/// (`int | non-decimal-int-string` for a plain string, and its numeric
+/// refinement for a numeric string), which is exactly `array-key`'s territory
+/// and no sharper thing this slot can hold: [`KeyClass`] has three values, and
+/// the union is not one of them. The floor is taken knowingly rather than by
+/// omission — see [`steins_domain::Fact::array_key_cast`] for the sharp forms.
+/// The key class `array_fill_keys`'s result has (issue #336 piece 2): the
+/// array-key cast of the subject's value union, since every value becomes a key.
+///
+/// Shares [`flipped_key_class`]'s reading of the cast and differs from it in
+/// what it does with a value the cast declines — `array_flip` *skips* such an
+/// entry while `array_fill_keys` *keeps* it under a cast this crate will not
+/// name (a float's ini-dependent rendering, an array's `'Array'`), so the class
+/// falls to `array-key` rather than the entry being lost.
+fn filled_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
+    use steins_domain::KeyClass;
+    let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
+    match values.array_key_cast() {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        _ => KeyClass::ArrayKey,
+    }
+}
+
+fn flipped_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
+    use steins_domain::KeyClass;
+    let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
+    // A finite value set casts key by key, which is exact where the abstract
+    // rung declines: `array_flip(['a', '1'])` is keyed by `'a'` and `1`.
+    if let Some(members) = values.finite_members() {
+        let classes: Vec<KeyClass> = members
+            .iter()
+            .filter_map(|v| flip_key_of(v).as_ref().map(KeyClass::of_key))
+            .collect();
+        return match classes.split_first() {
+            Some((first, rest)) if rest.iter().all(|c| c == first) => *first,
+            _ => KeyClass::ArrayKey,
+        };
+    }
+    match values.array_key_cast() {
+        Some(Fact::General { base: Base::Int, .. } | Fact::Refined { base: Base::Int, .. }) => {
+            KeyClass::Int
+        }
+        Some(Fact::General { base: Base::String, .. } | Fact::Refined { base: Base::String, .. }) => {
+            KeyClass::Str
+        }
+        _ => KeyClass::ArrayKey,
+    }
 }
 
 /// `array_reverse($x)` with the default `$preserve_keys = false`: **string keys
@@ -32729,6 +33886,25 @@ fn describe_fact(f: &Fact) -> String {
             (n, *nullable)
         }
         Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
+        // A union spells arm by arm through this same speller, joined by `|`
+        // (issue #339). The arms carry no `null` of their own — the union's
+        // flag does — so each is rendered non-nullable and the null half is
+        // added once, below, exactly as it is for a single base.
+        Fact::Union { arms, nullable } => {
+            let spelled: Vec<String> = arms
+                .iter()
+                .map(|(base, refinement)| {
+                    let arm = match refinement {
+                        Some(r) => Fact::refined(*base, *r, false),
+                        None => Fact::General { base: *base, nullable: false },
+                    };
+                    describe_fact(&arm)
+                        .trim_start_matches("a value of type ")
+                        .to_owned()
+                })
+                .collect();
+            (spelled.join("|"), *nullable)
+        }
         // The array stratum reaches this surface as of ADR-0072 (a shape fact is
         // now judged against a contract, so it can be the thing a
         // `phpdoc.*-mismatch` names). It spells through the ONE speller the dump
@@ -33938,13 +35114,20 @@ mod shape_projection_tests {
 
     #[test]
     fn array_values_is_a_list_of_the_value_union() {
-        // int ⊔ string is not representable as one scalar fact, so the value slot
-        // widens to the unknown floor — a list of anything, still non-empty.
+        // `int ⊔ string` IS one fact now (issue #339), so the value slot carries
+        // the union where it used to widen to the unknown floor.
         let p = project_values(&declared_shape());
         assert_eq!(p.is_list, Certainty::Yes);
         assert!(p.non_empty);
         assert!(p.fields.is_empty());
-        assert_eq!(p.tail, Tail::Unsealed { key: KeyClass::Int, value: None });
+        assert_eq!(
+            p.tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            }
+        );
 
         // A homogeneous shape keeps its value bound.
         let same = ShapeFact::normalize(
@@ -33975,11 +35158,16 @@ mod shape_projection_tests {
                 ])),
             }
         );
-        // An `array-key`-classed tail is `int|string` — not one fact, so the
-        // element slot is the unknown floor rather than a wrong guess.
+        // An `array-key`-classed tail is `int|string`, which IS one fact now
+        // (issue #339) — the element slot carries it instead of widening to the
+        // unknown floor.
         assert_eq!(
             project_keys(&ShapeFact::plain_array()).tail,
-            Tail::Unsealed { key: KeyClass::Int, value: None }
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            }
         );
         // An unsealed Yes-list's keys are `0..n-1` — never negative, so the
         // element bound sharpens past the bare `int` class (issue #165).
@@ -34120,10 +35308,16 @@ mod shape_projection_tests {
         // index 1 in `array_reverse(["a", "b"])` — a variable-length reversal
         // smears every position, so an optional key keeps today's widening
         // exactly (the value union under an int-classed list tail, `non_empty`
-        // carried).
+        // carried). The union that value slot carries is `int|string`, which
+        // issue #339 made expressible — the widening is the same one, said
+        // more precisely.
         let expected = ShapeFact::normalize(
             Vec::new(),
-            Tail::Unsealed { key: KeyClass::Int, value: None },
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                    .map(Box::new),
+            },
             Certainty::Yes,
             true,
             Vec::new(),

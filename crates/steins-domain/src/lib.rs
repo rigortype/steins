@@ -47,7 +47,7 @@ mod shape;
 mod value;
 
 pub use certainty::Certainty;
-pub use fact::{Fact, Refinement, CAP};
+pub use fact::{CAP, Fact, Refinement, UnionArm};
 pub use php::{
     php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,
@@ -57,5 +57,6 @@ pub use preds::StrPreds;
 pub use range::IntRange;
 pub use shape::{
     Cover, CoverFlavor, KeyClass, Presence, SHAPE_WIDTH_LIMIT, ShapeFact, Tail, array_is_list,
+    keys_are_a_list,
 };
 pub use value::{Base, Key, Val};

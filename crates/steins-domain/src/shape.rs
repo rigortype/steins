@@ -208,7 +208,10 @@ type Field = (Key, Presence, Option<Box<Fact>>);
 ///   whose floor is at least 1;
 /// * `count_bound` clamped to the non-negative ints, and — under a `Sealed`
 ///   tail whose declared key set the floor already exhausts — discharged into
-///   `Required` presence (the exact-count pin, issue #272).
+///   `Required` presence (the exact-count pin, issue #272);
+/// * `order` absent — [`ShapeFact::normalize_counted`] never mints an order
+///   witness, so every derived shape loses it and only the two construction
+///   sites that actually observed an insertion order set it (issue #327).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShapeFact {
     /// Declared keys, sorted, one entry per key.
@@ -227,6 +230,44 @@ pub struct ShapeFact {
     /// [`ShapeFact::count_range`] reports this interval met with the
     /// structural one, so the two can never disagree.
     pub count_bound: IntRange,
+    /// **The order witness** (issue #327): the key sequence in the order the
+    /// array was *observed* to be built, when this shape came from a place
+    /// that saw the construction — an array literal in the source, or the
+    /// [`ShapeFact::lift`] of an order-witnessed value.
+    ///
+    /// # Provenance, not extension
+    ///
+    /// Nothing about *which arrays this shape admits* depends on it:
+    /// [`ShapeFact::admits`] never reads it, the acceptance relation never
+    /// reads it, and two shapes that differ only here admit exactly the same
+    /// values. What it records is how the shape was learned, so that an
+    /// order-dependent projection may consume a *realizable* order instead of
+    /// the canonical key order `fields` is sorted into (ADR-0062 §2). The
+    /// existing `Presence::Required { witnessed }` bit is the same kind of
+    /// component and is documented the same way.
+    ///
+    /// # Why declaration order may never appear here
+    ///
+    /// A `@param array{b: int, a: int}` shape gets `None`. Trusting the
+    /// declaration's field order in a positional projection is exactly
+    /// phpstan/phpstan#14940's false-positive class, which ADR-0062 §7
+    /// declines by name. The witness exists to keep the two provenances apart,
+    /// not to blur them.
+    ///
+    /// # The drop discipline
+    ///
+    /// [`ShapeFact::normalize_counted`] — the canonical constructor every
+    /// derived shape goes through — always sets this to `None`. So a join, a
+    /// widening, a projection, a guard narrowing, a `mark_absent`, anything at
+    /// all that rebuilds the struct **loses** the witness, and the only way to
+    /// have one is to have just observed the order. Losing it costs precision
+    /// and can never cost soundness, which is the direction this domain takes
+    /// whenever the two trade off.
+    ///
+    /// When present, it is a permutation of the shape's own field keys and the
+    /// tail is `Sealed`; [`ShapeFact::with_order`] enforces both and refuses
+    /// the witness rather than storing an inconsistent one.
+    pub order: Option<Vec<Key>>,
 }
 
 /// PHP's `array_is_list`: the keys are exactly `0..n-1`, in that order.
@@ -235,7 +276,18 @@ pub struct ShapeFact {
 /// this is the one place the domain reads insertion order.
 #[must_use]
 pub fn array_is_list(entries: &[(Key, Val)]) -> bool {
-    entries.iter().enumerate().all(|(i, (k, _))| match k {
+    keys_are_a_list(entries.iter().map(|(k, _)| k))
+}
+
+/// [`array_is_list`] over the keys alone — the same predicate for a caller that
+/// witnessed the key order but not every value (issue #327).
+///
+/// It reads the sequence, not the set: `[1 => 'a', 0 => 'b']` has the key set of
+/// a two-element list and is not one, which is exactly why an order witness
+/// cannot be reconstructed from the canonically sorted `fields`.
+#[must_use]
+pub fn keys_are_a_list<'a, I: Iterator<Item = &'a Key>>(keys: I) -> bool {
+    keys.enumerate().all(|(i, k)| match k {
         Key::Int(n) => i64::try_from(i).is_ok_and(|want| *n == want),
         Key::Str(_) => false,
     })
@@ -374,7 +426,44 @@ impl ShapeFact {
         let computed = compute_is_list(&fields, &tail, non_empty);
         let is_list = sharpen_is_list(computed, is_list);
 
-        ShapeFact { fields, tail, is_list, non_empty, covers, count_bound }
+        // `order: None` unconditionally — see the field's drop discipline. This
+        // is the whole enforcement: every derived shape in the crate is built
+        // here, so none of them can carry a witness it did not earn.
+        ShapeFact { fields, tail, is_list, non_empty, covers, count_bound, order: None }
+    }
+
+    /// Attach an **order witness** (issue #327) — the key sequence in the order
+    /// the array was observed to be built.
+    ///
+    /// Refuses, returning the shape unwitnessed, unless the claim is consistent
+    /// with the shape it is attached to: the tail must be `Sealed` (an unsealed
+    /// tail admits keys the sequence does not mention, so there is no sequence
+    /// to state), and `order` must be a permutation of the field keys — same
+    /// length, every key present, no duplicates. A caller that computed the
+    /// order from the same entries it built the fields from satisfies both by
+    /// construction; the check is here so that a caller that did not cannot
+    /// install a witness the rest of the domain would then believe.
+    #[must_use]
+    pub fn with_order(mut self, order: Vec<Key>) -> ShapeFact {
+        let consistent = matches!(self.tail, Tail::Sealed)
+            && order.len() == self.fields.len()
+            && self.fields.iter().all(|(k, _, _)| order.contains(k))
+            && !order.iter().enumerate().any(|(i, k)| order[..i].contains(k));
+        if consistent {
+            self.order = Some(order);
+        }
+        self
+    }
+
+    /// The observed key sequence, when this shape witnessed one and every field
+    /// is `Required` — the precondition an order-dependent projection needs
+    /// (issue #328). An optional field makes the sequence variable-length, so
+    /// no single sequence describes every admitted value and the witness alone
+    /// is not enough.
+    #[must_use]
+    pub fn witnessed_order(&self) -> Option<&[Key]> {
+        let order = self.order.as_deref()?;
+        self.fields.iter().all(|(_, p, _)| p.is_required()).then_some(order)
     }
 
     /// The degenerate shape: plain `array` (A-G1). No fields, an untyped
@@ -497,14 +586,17 @@ impl ShapeFact {
     /// **Lift** an order-witnessed array value into the abstract stratum
     /// (A-G5): every entry becomes `Required { witnessed: true }` with a
     /// `Singleton` value slot, the tail seals, and `is_list` is the real
-    /// [`array_is_list`] verdict. This is where order-witnessed-ness is
-    /// honestly lost.
+    /// [`array_is_list`] verdict.
     ///
     /// A nested array lifts to a `Singleton` slot rather than a nested shape:
     /// the singleton is strictly more precise.
     ///
     /// Beyond [`SHAPE_WIDTH_LIMIT`] fields the lift degrades to the tail-only
-    /// summary (A-G6).
+    /// summary (A-G6) — and *that* is where order-witnessed-ness is honestly
+    /// lost, because the summary keeps no keys to sequence. Below the limit the
+    /// entries' own order rides along as the [`ShapeFact::order`] witness
+    /// (issue #327): the caller handed over a value it had observed, so the
+    /// sequence is realizable, not declared.
     #[must_use]
     pub fn lift(entries: &[(Key, Val)]) -> ShapeFact {
         let is_list = Certainty::from_bool(array_is_list(entries));
@@ -529,6 +621,49 @@ impl ShapeFact {
             })
             .collect();
         ShapeFact::normalize(fields, Tail::Sealed, is_list, non_empty, Vec::new())
+            .with_order(entries.iter().map(|(k, _)| k.clone()).collect())
+    }
+
+    /// **The partially-known literal** (issue #327): the shape an array whose
+    /// construction was observed denotes, when some of its *values* were not.
+    ///
+    /// [`ShapeFact::lift`]'s sibling, and the difference is the whole point —
+    /// `lift` needs a proven value per entry, this one takes `None` for an
+    /// entry whose value nothing proved. Everything else is identical, because
+    /// everything else was never about the values: the keys were observed, so
+    /// each is `Required { witnessed: true }`; no other key can appear, so the
+    /// tail is `Sealed`; the key *sequence* was observed, so `is_list` is
+    /// denotational rather than guessed and the order rides along as the
+    /// witness.
+    ///
+    /// This is what keeps `['p' => 1, 'q' => $s]` from collapsing to nothing:
+    /// one unknown value costs exactly that value, not the key set, not the
+    /// entry count, and not the sibling entries that *were* proven.
+    ///
+    /// Beyond [`SHAPE_WIDTH_LIMIT`] entries it degrades to the tail-only
+    /// summary (A-G6) exactly as `lift` does, and an unknown slot anywhere
+    /// makes that summary's value bound unknown too.
+    #[must_use]
+    pub fn from_witnessed_entries(entries: &[(Key, Option<Fact>)]) -> ShapeFact {
+        let is_list = Certainty::from_bool(keys_are_a_list(entries.iter().map(|(k, _)| k)));
+        let non_empty = !entries.is_empty();
+        if entries.len() > SHAPE_WIDTH_LIMIT {
+            return ShapeFact::normalize(
+                Vec::new(),
+                slot_tail_summary(entries),
+                is_list,
+                non_empty,
+                Vec::new(),
+            );
+        }
+        let fields = entries
+            .iter()
+            .map(|(k, f)| {
+                (k.clone(), Presence::Required { witnessed: true }, f.clone().map(Box::new))
+            })
+            .collect();
+        ShapeFact::normalize(fields, Tail::Sealed, is_list, non_empty, Vec::new())
+            .with_order(entries.iter().map(|(k, _)| k.clone()).collect())
     }
 
     /// Extensional membership: does this shape admit the array `entries`?
@@ -779,11 +914,18 @@ impl ShapeFact {
     /// that invalidates a ceiling while leaving a floor sound: an offset write.
     /// `$x[k] = v` can only add an entry or overwrite one, so "at least n"
     /// survives it and "at most n" does not.
+    ///
+    /// The order witness does not survive it either, and this is the one place
+    /// that has to say so by hand: the struct-update below is the sole
+    /// construction that does not run through
+    /// [`ShapeFact::normalize_counted`], and the very event it models — a write
+    /// that may append a key the sequence does not mention — is what makes the
+    /// witness stale (issue #327).
     #[must_use]
     pub fn relax_count_ceiling(&self) -> ShapeFact {
         let relaxed = IntRange::new(self.count_bound.lo(), i64::MAX)
             .unwrap_or(IntRange::NON_NEGATIVE);
-        ShapeFact { count_bound: relaxed, ..self.clone() }
+        ShapeFact { count_bound: relaxed, order: None, ..self.clone() }
     }
 
     /// **The count narrowing** (issue #272): meet the learned entry-count
@@ -915,6 +1057,8 @@ fn strip_null_fact(f: &Fact) -> Option<Fact> {
         }
         Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, false)),
         Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: false }),
+        // The arms are untouched: `null` sits beside them, not inside one.
+        Fact::Union { arms, .. } => Fact::union(arms.clone(), false),
         Fact::Shape { shape, .. } => {
             Some(Fact::Shape { shape: shape.clone(), nullable: false })
         }
@@ -933,6 +1077,34 @@ fn tail_summary<'a, I: Iterator<Item = (&'a Key, &'a Val)>>(entries: I) -> Tail 
     Tail::Unsealed {
         key: key.unwrap_or(KeyClass::ArrayKey),
         value: Fact::from_vals(vals).map(Box::new),
+    }
+}
+
+/// [`tail_summary`] for entries whose values are facts rather than values, and
+/// may be unknown (issue #327). One unknown slot makes the whole value bound
+/// unknown — the tail says what *every* undeclared entry satisfies, and nothing
+/// is known about the one that was never proven.
+fn slot_tail_summary(entries: &[(Key, Option<Fact>)]) -> Tail {
+    let mut key: Option<KeyClass> = None;
+    let mut value: Option<Fact> = None;
+    let mut all_known = true;
+    for (k, slot) in entries {
+        let c = KeyClass::of_key(k);
+        key = Some(key.map_or(c, |acc| acc.join(c)));
+        match (slot, all_known) {
+            (Some(f), true) => {
+                value = match value {
+                    None => Some(f.clone()),
+                    Some(acc) => acc.join(f),
+                };
+                all_known = value.is_some();
+            }
+            _ => all_known = false,
+        }
+    }
+    Tail::Unsealed {
+        key: key.unwrap_or(KeyClass::ArrayKey),
+        value: all_known.then_some(value).flatten().map(Box::new),
     }
 }
 
@@ -1681,6 +1853,192 @@ mod tests {
             (0..(SHAPE_WIDTH_LIMIT as i64)).map(|i| (Key::Int(i), Val::Int(i))).collect();
         let s = ShapeFact::lift(&entries);
         assert_eq!(s.fields.len(), SHAPE_WIDTH_LIMIT);
+    }
+
+    // ------------------------------------------------------------------
+    // from_witnessed_entries (issue #327)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn an_unknown_value_costs_that_value_and_nothing_else() {
+        // `['p' => 1, 'q' => $s]` where `$s` is a plain `string` parameter.
+        let s = ShapeFact::from_witnessed_entries(&[
+            (ks("p"), Some(Fact::Singleton(Val::Int(1)))),
+            (ks("q"), Some(Fact::General { base: Base::String, nullable: false })),
+        ]);
+        assert_eq!(s.tail, Tail::Sealed);
+        assert!(s.non_empty);
+        assert_eq!(s.count_range(), IntRange::point(2));
+        assert_eq!(s.is_list, Certainty::No);
+        assert!(s.fields.iter().all(|(_, p, _)| *p == Presence::Required { witnessed: true }));
+        assert!(s.admits(&arr(vec![(ks("p"), Val::Int(1)), (ks("q"), Val::Str("x".into()))])));
+        // The proven sibling keeps its exact value; a different one is refused.
+        assert!(!s.admits(&arr(vec![(ks("p"), Val::Int(2)), (ks("q"), Val::Str("x".into()))])));
+    }
+
+    #[test]
+    fn a_slot_nothing_proved_is_unknown_not_absent() {
+        let s = ShapeFact::from_witnessed_entries(&[(ks("k"), None)]);
+        assert_eq!(s.field(&ks("k")).map(|(_, p, _)| *p), Some(Presence::Required { witnessed: true }));
+        assert_eq!(s.field(&ks("k")).and_then(|(_, _, v)| v.clone()), None);
+        // Unknown admits anything at that key — but the key itself is proven
+        // present, which is what `array_key_exists` and `count` read.
+        assert!(s.admits(&arr(vec![(ks("k"), Val::Int(1))])));
+        assert!(s.admits(&arr(vec![(ks("k"), Val::Null)])));
+        assert!(!s.admits(&[]));
+        assert_eq!(s.count_range(), IntRange::point(1));
+    }
+
+    #[test]
+    fn is_list_reads_the_witnessed_sequence_not_the_key_set() {
+        let listy = ShapeFact::from_witnessed_entries(&[(k(0), None), (k(1), None)]);
+        assert_eq!(listy.is_list, Certainty::Yes);
+        assert_eq!(listy.witnessed_order(), Some([k(0), k(1)].as_slice()));
+        // The same key SET, built in the other order, is not a list — and the
+        // canonically sorted fields cannot tell the two apart, so this is the
+        // case that would go wrong without the witness.
+        let backwards = ShapeFact::from_witnessed_entries(&[(k(1), None), (k(0), None)]);
+        assert_eq!(backwards.is_list, Certainty::No);
+        assert_eq!(backwards.witnessed_order(), Some([k(1), k(0)].as_slice()));
+    }
+
+    #[test]
+    fn an_over_wide_literal_degrades_to_the_tail_summary() {
+        let entries: Vec<(Key, Option<Fact>)> = (0..=(SHAPE_WIDTH_LIMIT as i64))
+            .map(|i| (Key::Int(i), Some(Fact::Singleton(Val::Int(i)))))
+            .collect();
+        let s = ShapeFact::from_witnessed_entries(&entries);
+        assert!(s.fields.is_empty());
+        assert!(matches!(s.tail, Tail::Unsealed { key: KeyClass::Int, .. }));
+        assert_eq!(s.is_list, Certainty::Yes);
+        assert!(s.non_empty);
+        // No fields to sequence, so no witness either.
+        assert_eq!(s.order, None);
+    }
+
+    #[test]
+    fn one_unknown_slot_makes_the_over_wide_tail_value_unknown() {
+        let mut entries: Vec<(Key, Option<Fact>)> = (0..=(SHAPE_WIDTH_LIMIT as i64))
+            .map(|i| (Key::Int(i), Some(Fact::Singleton(Val::Int(i)))))
+            .collect();
+        entries[3].1 = None;
+        let s = ShapeFact::from_witnessed_entries(&entries);
+        assert!(matches!(s.tail, Tail::Unsealed { value: None, .. }));
+    }
+
+    #[test]
+    fn the_empty_literal_is_the_empty_shape() {
+        let s = ShapeFact::from_witnessed_entries(&[]);
+        assert!(s.fields.is_empty());
+        assert_eq!(s.tail, Tail::Sealed);
+        assert_eq!(s.is_list, Certainty::Yes);
+        assert!(!s.non_empty);
+        assert!(s.admits(&[]));
+    }
+
+    #[test]
+    fn a_fully_proven_literal_agrees_with_lift() {
+        let entries = arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Str("x".into()))]);
+        let slots: Vec<(Key, Option<Fact>)> =
+            entries.iter().map(|(k, v)| (k.clone(), Some(Fact::Singleton(v.clone())))).collect();
+        assert_eq!(ShapeFact::from_witnessed_entries(&slots), ShapeFact::lift(&entries));
+    }
+
+    // ------------------------------------------------------------------
+    // the order witness (issue #327)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn lift_records_the_order_it_saw_not_the_canonical_one() {
+        // `['b' => 1, 'a' => 2]`: the witnessed order is the REVERSE of the
+        // canonical key order the fields are sorted into, which is the whole
+        // reason the witness has to exist separately from `fields`.
+        let s = ShapeFact::lift(&arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]));
+        assert_eq!(s.fields.iter().map(|(k, _, _)| k.clone()).collect::<Vec<_>>(), vec![ks("a"), ks("b")]);
+        assert_eq!(s.witnessed_order(), Some([ks("b"), ks("a")].as_slice()));
+    }
+
+    #[test]
+    fn a_shape_that_witnessed_nothing_has_no_order() {
+        // The declared lane: `array{b: int, a: int}` carries field order that
+        // means nothing about runtime order (phpstan/phpstan#14940).
+        let s = sealed(vec![
+            (ks("b"), Presence::Required { witnessed: false }, int_slot(1)),
+            (ks("a"), Presence::Required { witnessed: false }, int_slot(2)),
+        ]);
+        assert_eq!(s.order, None);
+        assert_eq!(s.witnessed_order(), None);
+    }
+
+    #[test]
+    fn every_derived_shape_loses_the_witness() {
+        let a = ShapeFact::lift(&arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]));
+        let b = ShapeFact::lift(&arr(vec![(ks("a"), Val::Int(2)), (ks("b"), Val::Int(1))]));
+        // Two witnesses that disagree cannot both survive, so neither does.
+        assert_eq!(a.join(&b).order, None);
+        // …and it is not the disagreement that drops it: every rebuild does.
+        assert_eq!(a.join(&a).order, None);
+        assert_eq!(a.set_non_empty().order, None);
+        assert_eq!(a.mark_absent(&ks("a")).order, None);
+        assert_eq!(a.promote_present(&ks("a"), false, true).order, None);
+        assert_eq!(a.set_is_list(Certainty::No).order, None);
+        // The one construction that bypasses `normalize_counted` drops it by
+        // hand, because the write it models can append an unmentioned key.
+        assert_eq!(a.relax_count_ceiling().order, None);
+    }
+
+    #[test]
+    fn an_inconsistent_witness_is_refused_rather_than_stored() {
+        let s = sealed(vec![(ks("a"), Presence::Required { witnessed: true }, int_slot(1))]);
+        // A key the shape does not have.
+        assert_eq!(s.clone().with_order(vec![ks("zzz")]).order, None);
+        // The right keys, the wrong count.
+        assert_eq!(s.clone().with_order(vec![ks("a"), ks("a")]).order, None);
+        assert_eq!(s.clone().with_order(Vec::new()).order, None);
+        // An unsealed tail has keys outside any sequence, so there is none.
+        let open = ShapeFact::normalize(
+            vec![(ks("a"), Presence::Required { witnessed: true }, int_slot(1))],
+            Tail::Unsealed { key: KeyClass::ArrayKey, value: None },
+            Certainty::No,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(open.with_order(vec![ks("a")]).order, None);
+        // The consistent claim is stored.
+        assert_eq!(s.with_order(vec![ks("a")]).order, Some(vec![ks("a")]));
+    }
+
+    #[test]
+    fn an_optional_field_has_no_single_sequence() {
+        // `list{int, 1?: string}` realizes as one entry or two, so the witness
+        // is kept but `witnessed_order` declines to hand out a sequence.
+        let s = ShapeFact::normalize(
+            vec![
+                (k(0), Presence::Required { witnessed: true }, int_slot(1)),
+                (k(1), Presence::Optional, int_slot(2)),
+            ],
+            Tail::Sealed,
+            Certainty::Yes,
+            true,
+            Vec::new(),
+        )
+        .with_order(vec![k(0), k(1)]);
+        assert!(s.order.is_some());
+        assert_eq!(s.witnessed_order(), None);
+    }
+
+    #[test]
+    fn the_witness_is_extensionally_inert() {
+        // Two shapes differing only in the witness admit exactly the same
+        // values — the property that lets `admits` ignore it entirely.
+        let entries = arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]);
+        let witnessed = ShapeFact::lift(&entries);
+        let mut bare = witnessed.clone();
+        bare.order = None;
+        assert!(witnessed.admits(&entries));
+        assert!(bare.admits(&entries));
+        assert_eq!(witnessed.count_range(), bare.count_range());
+        assert_eq!(witnessed.is_list, bare.is_list);
     }
 
     // ------------------------------------------------------------------

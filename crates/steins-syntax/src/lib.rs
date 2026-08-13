@@ -1292,6 +1292,20 @@ pub enum ArrayKey {
     Int(i64),
     /// A string key that is not integer-like. A byte string (ADR-0080).
     Str(PhpStr),
+    /// **A key the source does not spell as a literal** (issue #336): `[$k => $v]`,
+    /// `[f() => $v]`, `[FOO => $v]`.
+    ///
+    /// Before this existed, one such key lowered the **whole** literal to
+    /// [`ArgValue::Other`], so `array_key_first([$string => null])` and every
+    /// `foreach ([$k => $v] as …)` had no fact to work from at all. The key
+    /// expression is carried instead, so the walk can ask what it *is* even
+    /// though it cannot say which key it lands on.
+    ///
+    /// It is **not** a normalized key and never becomes one: [`normalize_array`]
+    /// declines a literal containing it, because the next-auto-index chain runs
+    /// through it (an unknown key may be an integer, which moves every following
+    /// `Auto` position) and a guessed key set is wrong rather than wide.
+    Expr(Box<ArgValue>),
 }
 
 /// A fully PHP-normalized array key (no `Auto`): the runtime key an entry occupies.
@@ -1366,6 +1380,12 @@ pub fn next_int_is_version_dependent(items: &[(ArrayKey, ArgValue)]) -> bool {
             }
             ArrayKey::Int(i) => max_seen = Some(max_seen.map_or(*i, |m| m.max(*i))),
             ArrayKey::Str(_) => {}
+            // An unknown key may be an integer, so it may move the running max
+            // — which makes every following `Auto` position unresolvable under
+            // *either* rule, not merely different between them. Answering
+            // `true` routes the literal to `normalize_array`'s decline, which
+            // is where an unresolvable key set belongs (issue #336).
+            ArrayKey::Expr(_) => return true,
         }
     }
     false
@@ -1415,6 +1435,12 @@ pub fn normalize_array_with(
                 max_seen = Some(max_seen.map_or(i, |m| m.max(i)));
                 NormKey::Int(i)
             }
+            // Unreachable through `normalize_array`, which declines a literal
+            // holding one (issue #336); the raw `_with` form is only called
+            // with a resolvable key set. Stopping is the honest total answer —
+            // the entries after an unknown key have unknown positions, so
+            // continuing would invent them.
+            ArrayKey::Expr(_) => return out,
             ArrayKey::Int(i) => {
                 max_seen = Some(max_seen.map_or(*i, |m| m.max(*i)));
                 NormKey::Int(*i)
@@ -1448,6 +1474,14 @@ pub fn normalize_array(
     items: &[(ArrayKey, ArgValue)],
     php_minor: Option<(u16, u16)>,
 ) -> Option<Vec<(NormKey, ArgValue)>> {
+    // A key the source did not spell as a literal is unresolvable under EVERY
+    // rule (issue #336): it may be an integer, so it moves the next-auto-index
+    // for each following `Auto` position, and it may collide with a written key,
+    // so even the entry count is uncertain. This is checked before the minor is
+    // consulted, because no PHP version resolves it.
+    if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
+        return None;
+    }
     match php_minor {
         Some(m) => Some(normalize_array_with(items, NextIntRule::for_minor(m))),
         None if next_int_is_version_dependent(items) => None,
@@ -1556,7 +1590,10 @@ pub fn duplicate_array_keys(
 
     for el in &site.elements {
         let resolved = match &el.key {
-            None => {
+            // A missing key (a `list()` hole) and an UNKNOWN key (issue #336)
+            // poison the auto chain the same way: neither resolves a position,
+            // so no later key can be compared against an earlier one.
+            None | Some(ArrayKey::Expr(_)) => {
                 poisoned = true;
                 None
             }
@@ -7236,8 +7273,17 @@ fn lower_array_elements<'a>(elements: impl Iterator<Item = &'a ArrayElement<'a>>
                 items.push((ArrayKey::Auto, value));
             }
             ArrayElement::KeyValue(kv) => {
-                let Some(key) = lower_array_key(kv.key) else {
-                    return ArgValue::Other;
+                // A key the source does not spell as a literal is CARRIED now
+                // (issue #336) rather than collapsing the whole literal: the
+                // walk can ask what the key expression is even though it cannot
+                // say which key it lands on. An unrepresentable key expression
+                // still collapses — there is nothing to carry.
+                let key = match lower_array_key(kv.key) {
+                    Some(k) => k,
+                    None => match lower_arg_value(kv.key) {
+                        ArgValue::Other | ArgValue::OffsetRead { .. } => return ArgValue::Other,
+                        e => ArrayKey::Expr(Box::new(e)),
+                    },
                 };
                 let value = lower_arg_value(kv.value);
                 if matches!(value, ArgValue::Other | ArgValue::OffsetRead { .. }) {
