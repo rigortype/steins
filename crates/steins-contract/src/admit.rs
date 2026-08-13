@@ -145,6 +145,19 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
                 array_part
             };
         }
+        // A union is a for-all over its arms (issue #339): every arm is an
+        // alternative the value may take, so the contract must admit all of
+        // them. The `null` half is checked once, here, exactly as the
+        // single-base arms do it — the arms themselves carry no null.
+        Fact::Union { arms, nullable } => {
+            let arm_parts = arms.iter().map(|(b, r)| base_only(ty, *b, *r));
+            let all_arms = Certainty::all_of(arm_parts);
+            return if *nullable {
+                Certainty::all_of([all_arms, admits_val(ty, &Val::Null)])
+            } else {
+                all_arms
+            };
+        }
         Fact::Singleton(_) | Fact::OneOf(_) => unreachable!("finite handled above"),
     };
     let base_part = base_only(ty, base, refinement);

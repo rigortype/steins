@@ -41,6 +41,53 @@ def mkRefined (b : Base) (r : Refinement) (nullable : Bool) : Fact :=
   | .str p => if p.isEmpty then .general b nullable else .refined b r nullable
   | .int q => if q.isFull then .general b nullable else .refined b r nullable
 
+/-- Join two refinements of the same base — the widening join the single-base
+layers already use, lifted out so `mkUnion` and `joinAbstract` share it. -/
+def joinRefinements : Option Refinement → Option Refinement → Option Refinement
+  | some (.str p), some (.str q) => some (.str (p.inter q))
+  | some (.int r), some (.int s) => some (.int (r.hull s))
+  | _, _ => none
+
+/-- Base order, matching Rust's derived `Ord` (declaration order). -/
+def baseRank : Base → Nat
+  | .int => 0
+  | .float => 1
+  | .str => 2
+  | .bool => 3
+
+/-- Merge an arm into a sorted-by-base arm list, joining refinements when the
+base is already present. -/
+def insertArm (arms : List (Base × Option Refinement)) (arm : Base × Option Refinement) :
+    List (Base × Option Refinement) :=
+  match arms with
+  | [] => [arm]
+  | a :: rest =>
+    if a.1 = arm.1 then (a.1, joinRefinements a.2 arm.2) :: rest
+    else if baseRank arm.1 < baseRank a.1 then arm :: a :: rest
+    else a :: insertArm rest arm
+
+/-- **The normalising union constructor** (issue #339): one arm per base,
+sorted; one arm collapses to the single-base layers, none to `none`. -/
+def mkUnion (arms : List (Base × Option Refinement)) (nullable : Bool) : Option Fact :=
+  let merged := arms.foldl insertArm []
+  match merged with
+  | [] => none
+  | [(b, r)] =>
+    some (match r with
+      | some r => mkRefined b r nullable
+      | none => .general b nullable)
+  | _ => some (.union merged nullable)
+
+/-- This fact's abstract arms — one for a single-base layer, several for a
+union — or `none` for a finite or array fact. -/
+def abstractArms : Fact → Option (List (Base × Option Refinement) × Bool)
+  | .refined b r n => some ([(b, some r)], n)
+  | .general b n => some ([(b, none)], n)
+  | .union arms n => some (arms, n)
+  | .singleton _ => none
+  | .oneOf _ => none
+  | .shape _ _ => none
+
 /-- Does the refinement admit this value? Split out because the soundness proofs
 need it independently of the null/base dispatch. -/
 def refAdmits (M : Model) (r : Refinement) (v : Val) : Bool :=
@@ -83,6 +130,14 @@ def admits (M : Model) : Fact → Val → Bool
     match v with
     | .null => nullable
     | _ => decide (v.base = some b)
+  | .union arms nullable, v =>
+    match v with
+    | .null => nullable
+    | _ => arms.any (fun a =>
+        decide (v.base = some a.1) &&
+          match a.2 with
+          | some r => refAdmits M r v
+          | none => true)
   | .shape s nullable, v =>
     match v with
     | .null => nullable
@@ -141,6 +196,7 @@ def finiteMembers : Fact → Option (List Val)
   | .oneOf vs => some vs
   | .refined .. => none
   | .general .. => none
+  | .union .. => none
   | .shape .. => none
 
 /-! ## The computed widening -/
@@ -178,7 +234,18 @@ def summarizeScalar (M : Model) (vals : List Val) : Option Fact :=
     match first.base with
     | none => none
     | some b =>
-      if scalars.any (fun v => decide (v.base ≠ some b)) then none
+      if scalars.any (fun v => decide (v.base ≠ some b)) then
+        -- A mixed-base overflow becomes a union (issue #339), where it used to
+        -- become nothing. Each base is summarized on its own members.
+        mkUnion ([Base.int, .float, .str, .bool].filterMap (fun bb =>
+          let members := scalars.filter (fun v => decide (v.base = some bb))
+          match members with
+          | [] => none
+          | _ =>
+            match bb with
+            | .int => some (bb, (intHullOf members).map (Refinement.int))
+            | .str => some (bb, (strPredsOf M members).map (Refinement.str))
+            | _ => some (bb, none))) nullable
       else
         match b with
         | .int =>
@@ -207,21 +274,17 @@ def abstractParts : Fact → Option (Base × Option Refinement × Bool)
   | .general b n => some (b, none, n)
   | .singleton _ => none
   | .oneOf _ => none
+  -- A union has no ONE base; `joinAbstract` reads it through `abstractArms`.
+  | .union _ _ => none
   -- The array stratum has no scalar base, so the scalar join drops it.
   | .shape _ _ => none
 
+/-- The join of two abstract facts (issue #339). It used to answer `none` the
+moment the bases differed; with the union layer it concatenates the arms and
+lets `mkUnion` merge them per base, so it is total over the abstract layers. -/
 def joinAbstract (a b : Fact) : Option Fact :=
-  match abstractParts a, abstractParts b with
-  | some (ab, ar, an), some (bb, br, bn) =>
-    if ab ≠ bb then none
-    else
-      let nullable := an || bn
-      match ar, br with
-      | some (.str p), some (.str q) => some (mkRefined ab (.str (p.inter q)) nullable)
-      | some (.int r), some (.int s) => some (mkRefined ab (.int (r.hull s)) nullable)
-      -- A refinement joined with no-knowledge (or mismatched kinds, which cannot
-      -- occur for one base) widens to General.
-      | _, _ => some (.general ab nullable)
+  match abstractArms a, abstractArms b with
+  | some (aa, an), some (ba, bn) => mkUnion (aa ++ ba) (an || bn)
   | _, _ => none
 
 def joinFiniteAbstract (M : Model) (finite : List Val) (abs : Fact) : Option Fact :=
@@ -234,6 +297,7 @@ def joinFiniteAbstract (M : Model) (finite : List Val) (abs : Fact) : Option Fac
       match abs with
       | .refined b r _ => some (mkRefined b r true)
       | .general b _ => some (.general b true)
+      | .union arms _ => mkUnion arms true
       | .singleton _ => none
       | .oneOf _ => none
       -- The array stratum is not a scalar abstract layer; the scalar join
@@ -459,6 +523,7 @@ def stripNullFact (M : Model) : Fact → Option Fact
   | .oneOf vs => fromVals M (vs.filter (fun v => decide (v ≠ Val.null)))
   | .refined b r _ => some (mkRefined b r false)
   | .general b _ => some (.general b false)
+  | .union arms _ => mkUnion arms false
   | .shape s _ => some (.shape s false)
 
 def stripNullSlot (M : Model) : Slot → Slot
@@ -587,11 +652,24 @@ def eraseKey (entries : List (Key × Val)) (k : Key) : List (Key × Val) :=
 
 /-! ## Trinary queries -/
 
+/-- `(canBeFalsy, canBeTruthy)` for one union arm — the same table the
+single-base layer uses just below, factored out because Lean cannot recurse
+into a `Fact` this function would have to build. -/
+def armFalsyTruthy : Base → Option Refinement → Bool × Bool
+  | .str, some (.str p) => (!p.containsAll StrPreds.NON_FALSY, true)
+  | .int, some (.int q) => (q.contains 0, decide (q ≠ IntRange.point 0))
+  | _, _ => (true, true)
+
 /-- `(canBeFalsy, canBeTruthy)` for the abstract layers. The finite layers are
 `(true, true)` — i.e. `maybe` — where Rust `unreachable!`s. -/
 def abstractFalsyTruthy : Fact → Bool × Bool
   | .singleton _ => (true, true)
   | .oneOf _ => (true, true)
+  | .union arms nullable =>
+    -- The arms are alternatives, so each side is a disjunction over them.
+    arms.foldl (fun acc a =>
+      let ft := armFalsyTruthy a.1 a.2
+      (acc.1 || ft.1, acc.2 || ft.2)) (nullable, false)
   | .refined b r nullable =>
     let ft := match b, r with
       | .str, .str p =>
@@ -633,6 +711,15 @@ def satisfiesStr (M : Model) (f : Fact) (pred : StrPreds) : Certainty :=
       | .str p => if p.containsAll pred && !nullable then .yes else .maybe
       | .int _ => .maybe
   | .general b _ => if b = .str then .maybe else .no
+  -- A union answers for every arm at once: `yes` only where each arm is, `no`
+  -- only where none can be. A non-string arm is a definite `no` on its own.
+  | .union arms nullable =>
+    Certainty.allOf (arms.map (fun a =>
+      if a.1 ≠ .str then .no
+      else
+        match a.2 with
+        | some (.str p) => if p.containsAll pred && !nullable then .yes else .maybe
+        | _ => .maybe))
   -- An array is never a string, and neither is null.
   | .shape _ _ => .no
 
@@ -655,6 +742,17 @@ def intIn (f : Fact) (range : IntRange) : Certainty :=
         else .maybe
       | .str _ => .maybe
   | .general b _ => if b = .int then .maybe else .no
+  -- As `satisfiesStr`: the verdict is every arm's at once.
+  | .union arms nullable =>
+    Certainty.allOf (arms.map (fun a =>
+      if a.1 ≠ .int then .no
+      else
+        match a.2 with
+        | some (.int q) =>
+          if range.containsRange q && !nullable then .yes
+          else if q.inter range = none then .no
+          else .maybe
+        | _ => .maybe))
   -- An array is never an int, and neither is null.
   | .shape _ _ => .no
 

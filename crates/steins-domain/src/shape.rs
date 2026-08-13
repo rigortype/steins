@@ -1057,6 +1057,8 @@ fn strip_null_fact(f: &Fact) -> Option<Fact> {
         }
         Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, false)),
         Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: false }),
+        // The arms are untouched: `null` sits beside them, not inside one.
+        Fact::Union { arms, .. } => Fact::union(arms.clone(), false),
         Fact::Shape { shape, .. } => {
             Some(Fact::Shape { shape: shape.clone(), nullable: false })
         }

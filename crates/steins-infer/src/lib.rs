@@ -12374,6 +12374,23 @@ fn render_dump_fact(fact: &Fact) -> String {
         }
         Fact::Refined { base, nullable, .. } => with_null(base_keyword(*base).to_owned(), *nullable),
         Fact::General { base, nullable } => with_null(base_keyword(*base).to_owned(), *nullable),
+        // A union spells arm by arm through this same speller, joined by `|`
+        // (issue #339) — `int|non-decimal-int-string` is the abstract form of
+        // what the finite layers have always printed as `1|'x'`. The arms carry
+        // no `null`; the union's own flag adds it once, at the end.
+        Fact::Union { arms, nullable } => {
+            let spelled: Vec<String> = arms
+                .iter()
+                .map(|(base, refinement)| {
+                    let arm = match refinement {
+                        Some(r) => Fact::refined(*base, *r, false),
+                        None => Fact::General { base: *base, nullable: false },
+                    };
+                    render_dump_fact(&arm)
+                })
+                .collect();
+            with_null(spelled.join("|"), *nullable)
+        }
         // The abstract array stratum (ADR-0062 `Fact::Shape`, S2): routed through
         // the same ONE speller as the contract-arm and concrete-value paths.
         Fact::Shape { shape, nullable } => render_shape_fact(shape, *nullable),
@@ -14026,6 +14043,8 @@ fn fact_is_nullish(f: &Fact) -> bool {
     match f {
         Fact::Singleton(v) => matches!(v, Val::Null),
         Fact::OneOf(vs) => vs.iter().any(|v| matches!(v, Val::Null)),
+        // A union carries `null` beside its arms, never inside one.
+        Fact::Union { nullable, .. } => *nullable,
         Fact::Refined { nullable, .. } | Fact::General { nullable, .. } => *nullable,
         // The array stratum (ADR-0062 `Fact::Shape`) has no property-seeding
         // consumer. Answering `true` keeps it out of the heap entirely, which is
@@ -14793,6 +14812,8 @@ fn call_receiver_fact<'a>(
 /// side filters it out because [`CALL_ON_NULL_ID`] already does.
 fn definite_non_object_type(fact: &Fact) -> Option<&'static str> {
     match fact {
+        // A union is several type words at once, and this surface names one.
+        Fact::Union { .. } => None,
         Fact::Singleton(v) => Some(val_type_name(v)),
         Fact::OneOf(vals) => {
             let first = val_type_name(vals.first()?);
@@ -15814,15 +15835,29 @@ fn eval_ternary_fact(
                 .and_then(|a| singleton_fact(&a, w.cx.php_minor))
         }
         Certainty::Maybe => {
-            // Undecided guard: the value is one of the two arms. `Fact::from_vals`
-            // gives the canonical finite form (a `Singleton` when the arms are
-            // equal, else a `OneOf`), or `None` (dropped) when an arm is not
-            // representable.
-            let t =
-                val_of(&w.cx.resolve_literal(then_val, &tenv, poisoned, folder)?, w.cx.php_minor)?;
-            let e =
-                val_of(&w.cx.resolve_literal(else_val, &eenv, poisoned, folder)?, w.cx.php_minor)?;
-            Fact::from_vals(vec![t, e])
+            // Undecided guard: the value is one of the two arms, so the fact is
+            // their **join**.
+            //
+            // Both arms proven is the finite case and answers exactly as it
+            // always did — `Fact::from_vals` gives a `Singleton` when the arms
+            // are equal and a `OneOf` otherwise.
+            //
+            // An arm that proves no *value* is not the end of it (issue #339):
+            // `$c ? $i : $s` used to be dropped whole because `val_of` needs a
+            // `Val` per arm, and the answer `int|string` had no form to live in.
+            // It does now, so each arm falls back to whatever fact it carries
+            // and the two are joined by the domain — which is the same operator
+            // the finite case is using, one layer up. An arm that carries no
+            // fact at all still drops the binding, as before.
+            let arm = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
+                w.cx
+                    .resolve_literal(value, aenv, poisoned, folder)
+                    .and_then(|lit| singleton_fact(&lit, w.cx.php_minor))
+                    .or_else(|| transfer_arg_fact(w.cx, folder, value, aenv, Some(store)))
+            };
+            let t = arm(then_val, &tenv, folder)?;
+            let e = arm(else_val, &eenv, folder)?;
+            t.join(&e)
         }
     }
 }
@@ -16004,6 +16039,8 @@ fn fact_is_non_object(f: &Fact) -> bool {
     match f {
         Fact::Singleton(v) => val_is_non_object(v),
         Fact::OneOf(vs) => vs.iter().all(val_is_non_object),
+        // Every arm is a scalar base, and no scalar base is an object.
+        Fact::Union { .. } => true,
         Fact::Refined { .. } | Fact::General { .. } => true,
         // A shape fact does denote arrays, which are non-objects — but the
         // value-side `instanceof` rule gains no proof from it, so
@@ -17131,6 +17168,10 @@ fn pred_holds_on_fact(pred: TypePred, f: &Fact) -> Certainty {
             (k, *nullable)
         }
         Fact::Shape { nullable, .. } => (RtKind::Array, *nullable),
+        // A union spans several runtime kinds at once, so no single-kind
+        // predicate is decided by it — the honest floor, and the same one a
+        // mixed `OneOf` takes.
+        Fact::Union { .. } => return Maybe,
         // Finite layers are handled above.
         Fact::Singleton(_) | Fact::OneOf(_) => return Maybe,
     };
@@ -18423,6 +18464,9 @@ fn check_foreach_subject(
                 render_val(v),
             )
         }
+        // A union has no single type word for the engine's message, and this
+        // finding quotes that word verbatim.
+        Fact::Union { .. } => return,
         Fact::Refined { .. } | Fact::General { .. } => {
             let desc = describe_fact(fact);
             match foreach_subject_abstract_word(fact) {
@@ -18783,6 +18827,9 @@ fn fact_operand_kind(fact: &Fact) -> Option<OperandKind> {
             let first = val_operand_kind(vals.first()?);
             vals.iter().all(|v| val_operand_kind(v) == first).then_some(first)
         }
+        // Several operand kinds at once — no single row of the operator table
+        // applies, so the fatal is not proven.
+        Fact::Union { .. } => None,
         Fact::Shape { nullable: false, .. } => Some(OperandKind::Array),
         Fact::Refined { base, nullable: false, .. } | Fact::General { base, nullable: false } => {
             Some(match base {
@@ -28134,6 +28181,14 @@ fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact> {
             // int→float can merge previously-distinct members; `from_vals` re-dedupes.
             coerced.and_then(Fact::from_vals)
         }
+        // A union keeps the arms the native type actually has: the parameter
+        // is the gate, so an arm it does not admit cannot arrive. Losing every
+        // arm is no fact rather than an empty one.
+        Fact::Union { arms, nullable } => {
+            let kept: Vec<(Base, Option<Refinement>)> =
+                arms.into_iter().filter(|(b, _)| native_has_base(ty, *b)).collect();
+            Fact::union(kept, nullable)
+        }
         Fact::Refined { base, refinement, nullable } => {
             if native_has_base(ty, base) {
                 Some(Fact::Refined { base, refinement, nullable })
@@ -30374,6 +30429,8 @@ fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin
 fn fact_base(f: &Fact) -> Option<Base> {
     match f {
         Fact::General { base, .. } | Fact::Refined { base, .. } => Some(*base),
+        // A union has no single base — that is what it is for.
+        Fact::Union { .. } => None,
         // The array stratum has no scalar base.
         Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
@@ -30430,6 +30487,7 @@ fn fact_with_null(f: &Fact) -> Option<Fact> {
     match f {
         Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: true }),
         Fact::Refined { base, refinement, .. } => Some(Fact::refined(*base, *refinement, true)),
+        Fact::Union { arms, .. } => Fact::union(arms.clone(), true),
         // The curated `?T` wrapper is a scalar path; a shape fact refuses
         // rather than acquiring nullability here.
         Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
@@ -33599,6 +33657,25 @@ fn describe_fact(f: &Fact) -> String {
             (n, *nullable)
         }
         Fact::Refined { base, nullable, .. } => (base_kw(*base).to_owned(), *nullable),
+        // A union spells arm by arm through this same speller, joined by `|`
+        // (issue #339). The arms carry no `null` of their own — the union's
+        // flag does — so each is rendered non-nullable and the null half is
+        // added once, below, exactly as it is for a single base.
+        Fact::Union { arms, nullable } => {
+            let spelled: Vec<String> = arms
+                .iter()
+                .map(|(base, refinement)| {
+                    let arm = match refinement {
+                        Some(r) => Fact::refined(*base, *r, false),
+                        None => Fact::General { base: *base, nullable: false },
+                    };
+                    describe_fact(&arm)
+                        .trim_start_matches("a value of type ")
+                        .to_owned()
+                })
+                .collect();
+            (spelled.join("|"), *nullable)
+        }
         // The array stratum reaches this surface as of ADR-0072 (a shape fact is
         // now judged against a contract, so it can be the thing a
         // `phpdoc.*-mismatch` names). It spells through the ONE speller the dump

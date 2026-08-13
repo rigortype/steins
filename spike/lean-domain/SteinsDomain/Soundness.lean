@@ -78,6 +78,7 @@ theorem mem_of_admits_finite {a : Fact} {xs : List Val} {v : Val}
     simpa [admits] using hv
   | refined _ _ _ => simp [finiteMembers] at hxs
   | general _ _ => simp [finiteMembers] at hxs
+  | union _ _ => simp [finiteMembers] at hxs
   | shape _ _ => simp [finiteMembers] at hxs
 
 /-! ## Widening steps

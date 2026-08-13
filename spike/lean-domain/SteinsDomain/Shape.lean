@@ -178,6 +178,10 @@ inductive Fact where
   | refined (base : Base) (r : Refinement) (nullable : Bool)
   /-- Layer 4: just a scalar base (plus optionally `null`). -/
   | general (base : Base) (nullable : Bool)
+  /-- Layer 3½: an abstract union across bases (issue #339). One arm per
+  `Base`, sorted, at least two of them; `nullable` carries `null` for the whole
+  union. The array stratum is not an arm. -/
+  | union (arms : List (Base × Option Refinement)) (nullable : Bool)
   /-- The abstract array stratum (A-G2). There is no array-`general`: the
   degenerate shape *is* plain `array`. -/
   | shape (s : GShape Fact) (nullable : Bool)
@@ -206,6 +210,7 @@ def Fact.beq (a b : Fact) : Bool :=
   | .refined b₁ r₁ n₁, .refined b₂ r₂ n₂ =>
     decide (b₁ = b₂) && decide (r₁ = r₂) && decide (n₁ = n₂)
   | .general b₁ n₁, .general b₂ n₂ => decide (b₁ = b₂) && decide (n₁ = n₂)
+  | .union a₁ n₁, .union a₂ n₂ => decide (a₁ = a₂) && decide (n₁ = n₂)
   | .shape s₁ n₁, .shape s₂ n₂ => Fact.shapeBeq s₁ s₂ && decide (n₁ = n₂)
   | _, _ => false
 termination_by sizeOf a
@@ -253,6 +258,7 @@ def Fact.isNull : Fact → Certainty
   | .oneOf vs => Certainty.allOf (vs.map (fun v => Certainty.ofBool (decide (v = Val.null))))
   | .refined _ _ nullable => if nullable then .maybe else .no
   | .general _ nullable => if nullable then .maybe else .no
+  | .union _ nullable => if nullable then .maybe else .no
   | .shape _ nullable => if nullable then .maybe else .no
 
 /-! ## `array_is_list`
