@@ -639,3 +639,61 @@ array fixtures are overwhelmingly declared shapes, which correctly keep their
 widening — the slice pays out on literal-heavy code, which the harness does not
 sample. fp-gate GREEN with **no baseline movement at all**: proof layer 0,
 `phpdoc.*` and `throw.*` unmoved.
+
+## Amendment E (2026-08-13): an exact array is a value, not only a fact — PENDING ratification
+
+Issue [#329](https://github.com/rigortype/steins/issues/329). Amendments C and D
+made the value lane answer exactly; this is what makes the answers *compose*.
+`resolve_literal`'s call arm consulted two sources — the zero-argument constant
+function and the allowlist fold — and the transfer rung was not one of them. So a
+call whose *fact* was a proven `Singleton` resolved to no *value*, and everything
+reading values rather than facts went blind to it: value-position `===`, fold
+arguments, nested folds, `concat_cast`. One hop through a binding worked and the
+inline spelling did not, which is not a distinction PHP makes.
+
+The rung's answer now resolves as a value when it is a `Singleton`, carrying the
+rung's own stratum (ADR-0061 §3) so a projection over an `Asserted` subject
+cannot launder into a `Verified` premise by taking the value road instead of the
+fact road. Anything else — a `Shape`, a `OneOf`, a decline — resolves to nothing,
+as before. The rung's *subject* accepts a call for the same reason, which is what
+makes a projection of a projection compose; it terminates because each level
+strips one call from a finite expression, and its fixture pins that it answers
+what the two-statement spelling answers.
+
+`array_keys(['a' => 1, 'b' => 2]) === ['a', 'b']` is `true`, and
+`implode(',', array_keys(['a' => 1, 'b' => 2]))` is `'a,b'`.
+
+**The guard position is deliberately not included, and the reason is worth
+recording.** A call in comparison-guard position lowers to `CondOperand::Other`
+and `operand_values` answers `None` for it — but measurement shows that gap is
+not array-shaped at all: `if (strtoupper('a') === 'A')` does not decide either,
+and neither does any other folded call. It is a general call-operand gap whose
+fix moves branch decisions, dead-code marking and every finding downstream of
+them, so it wants its own slice and its own measurement rather than a ride on
+this one.
+
+### E1. The latent defect this exposed
+
+`resolve_cval`'s call arm wrapped whatever the value seam returned in
+`CVal::Scalar`. That was correct for exactly as long as a call could only resolve
+to a scalar — the fold's own results. The moment a projection's array became
+visible there, an array travelled in the scalar carrier, and the acceptance
+relation, asked whether a "scalar" inhabits `non-empty-list<string>`, correctly
+said no.
+
+The fp-gate caught it: six false positives in `guzzle/guzzle`, all one call site,
+all `getLastHeaderBlock(array_values($headers))` under
+`@param non-empty-list<string>` — a contract the argument plainly satisfies. The
+same value written literally, and the same value through a binding, were both
+silent; only the inline spelling was convicted. The fix routes the resolved value
+back through `resolve_cval`, exactly as the variable arm already sent its
+singleton back, so one value gets one verdict however it was produced. Pinned
+both ways: five spellings of a satisfied contract stay silent, and a genuine
+violation reaching the seam inline still fires.
+
+### E2. Measurement
+
+nsrt unmoved (headline 2433, admissible 2858, an empty transition matrix) — the
+harness asserts *types*, and this slice moves what a value can be *used for*, not
+what it is. fp-gate GREEN with no baseline movement: proof layer 0, and guzzle
+back to its expected zero after E1.

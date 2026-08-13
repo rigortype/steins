@@ -207,10 +207,18 @@ fn array_literals_fold_through_the_untouched_allowlist() {
     // PHP's own key semantics, because PHP is what builds the array.
     assert!(out.contains("//=> $dup = 1"), "duplicate key is one entry, got:\n{out}");
     assert!(out.contains(r#"//=> $mixed = "a,b,c""#), "mixed keys, got:\n{out}");
-    // The widening pin: one non-literal element and the whole array is unproven.
-    // (the source line is reprinted verbatim; what must be absent is the margin)
-    assert!(out.contains("$widened = count([1, $x]);"), "source reprinted, got:\n{out}");
-    assert!(!out.contains("//=> $widened"), "count([1, $x]) must widen, got:\n{out}");
+    // An unproven element stops the FOLD and not the count (issue #327). The
+    // pin here used to be `count([1, $x])` widening, on the stated ground that
+    // "$x may hold anything, so the literal's length is not the array's
+    // length" — which is false: a non-spread element is exactly one entry
+    // whatever it holds, and `count([1, $x]) === 2` is probed for every $x. The
+    // fold still declines (its argument gate is untouched, and `--no-php`
+    // below is what pins that); the shape rung answers what was always known.
+    assert!(out.contains("//=> $unfolded = 2"), "the count is known, got:\n{out}");
+    // The widening pin, moved to the case that really is unknowable: a spread
+    // contributes as many entries as its subject has.
+    assert!(out.contains("$widened = count([1, ...$x]);"), "source reprinted, got:\n{out}");
+    assert!(!out.contains("//=> $widened"), "a spread must widen, got:\n{out}");
     // The `$dup` literal's own duplicate key is ALSO a genuine `array.duplicate-key`
     // finding (ADR-0078, issue #187), joined onto the same line's margin as the
     // fold fact above — annotate carries both kinds of fact on one line.
@@ -229,6 +237,9 @@ fn array_literals_fold_through_the_untouched_allowlist() {
         "//=> $nested = 2",
         "//=> $dup = 1",
         r#"//=> $mixed = "a,b,c""#,
+        // The shape rung goes with them: its answer is admitted only inside the
+        // engine's own reflected envelope (ADR-0061 §2), and there is no engine.
+        "//=> $unfolded = 2",
     ] {
         assert!(!sound.stdout.contains(needle), "no folded facts without PHP ({needle}), got:\n{}", sound.stdout);
     }

@@ -9570,6 +9570,29 @@ impl<'a> Cx<'a> {
                 // / `project_call_summary`) so findings still emit on the live `out`.
                 self.try_fold_under(name, args, env, poisoned, folder, descent, out)
                     .map(|(lit, _prov, strat)| (lit, strat))
+                    // **The transfer rung's answers are values too** (issue #329).
+                    // A rung that proved a `Singleton` — `array_slice($a, 1)`,
+                    // `array_keys(['a' => $x])` — had no way to say so *here*, so
+                    // everything that reads values rather than facts was blind to
+                    // it: value-position `===`, fold arguments, nested folds,
+                    // `concat_cast`. One hop through a binding worked and the
+                    // inline spelling did not, which is not a distinction PHP
+                    // makes.
+                    //
+                    // Below the fold, which is more precise and cheaper. The
+                    // rung's OWN stratum comes back with the value (ADR-0061 §3),
+                    // so a projection over an `Asserted` subject stays `Asserted`
+                    // and cannot launder into a proof-layer premise by taking the
+                    // value road instead of the fact road.
+                    .or_else(|| {
+                        let (fact, strat) = shape_builtin_return_fact(
+                            self, folder, name, args, env, None, poisoned,
+                        )?;
+                        match fact {
+                            Fact::Singleton(v) => Some((arg_of_val(&v), strat)),
+                            _ => None,
+                        }
+                    })
             }
             // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
             // string cast is total and environment-independent (`concat_cast`). One
@@ -28738,8 +28761,21 @@ impl<'a> Cx<'a> {
                     None
                 }
             }
+            // The resolved value goes back through this function rather than
+            // straight into `CVal::Scalar`, exactly as the `Var` arm above sends
+            // its singleton back (issue #329).
+            //
+            // It read `.map(CVal::Scalar)` while a call could only ever resolve
+            // to a *scalar* — the fold's own results. Once the transfer rung's
+            // arrays became visible here, that wrapped a `Val::Array` in the
+            // scalar carrier and the acceptance relation, asked whether a
+            // "scalar" inhabits `non-empty-list<string>`, correctly said no:
+            // `take(array_values(['x']))` was convicted where the identical
+            // `take(['x'])` and `$b = array_values(['x']); take($b)` were both
+            // silent. Same value, three provenances, one verdict now.
             ArgValue::Call(..) => {
-                self.resolve_literal(value, env, poisoned, folder).map(CVal::Scalar)
+                let lit = self.resolve_literal(value, env, poisoned, folder)?;
+                self.resolve_cval(&lit, env, store, poisoned, folder)
             }
             _ => None,
         }
@@ -30605,10 +30641,15 @@ fn shape_builtin_return_fact(
     // strictly worse than `$a = ['a' => $x, 'b' => $x]; count($a)`, which is
     // what it was for as long as this pattern said `Var` and nothing else.
     //
-    // Deliberately only these two forms. Every other spelling would have to be
+    // Deliberately only these three forms. Every other spelling would have to be
     // resolved to find out it is not an array, and resolution can dispatch to
     // the engine — most calls reaching this rung are not in the family at all,
-    // so the cheap syntactic gate stays exactly as cheap as it was.
+    // so the cheap syntactic gate stays nearly as cheap as it was.
+    //
+    // The `Call` form is what makes a projection *of* a projection compose
+    // (`array_values(array_keys([…]))`, issue #329). It terminates because each
+    // level strips one call from a finite expression, and it answers what the
+    // two-statement spelling answers — which is the property its fixture pins.
     let seeded;
     let (subject_fact, subject_stratum) = match args {
         [ArgValue::Var(var), ..] => {
@@ -30621,6 +30662,11 @@ fn shape_builtin_return_fact(
                 .and_then(|lit| singleton_fact(&lit, cx.php_minor))
                 .map(|f| (f, value_stratum(&args[0], env, store)))
                 .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
+            (&seeded.0, seeded.1)
+        }
+        [call @ ArgValue::Call(..), ..] => {
+            let (lit, strat) = cx.resolve_literal_strat(call, env, poisoned, folder)?;
+            seeded = (singleton_fact(&lit, cx.php_minor)?, strat);
             (&seeded.0, seeded.1)
         }
         _ => return None,
