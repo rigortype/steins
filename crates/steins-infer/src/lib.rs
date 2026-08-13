@@ -30652,6 +30652,25 @@ fn shape_builtin_return_fact(
         _ => return None,
     };
 
+    // **The positional projections, executed** (issue #328). A shape that
+    // witnessed its own construction — a literal the walk saw built, or the
+    // `lift` just above — carries a realizable key sequence, so the family may
+    // run over it instead of taking the key-set widening below. A shape that
+    // witnessed nothing has no sequence, falls straight through, and keeps
+    // exactly the answer it has today: that is ADR-0062 §7's declined import,
+    // and it stays declined.
+    if let Some(order) = shape.witnessed_order() {
+        let entries: Vec<(VKey, Option<Fact>)> = order
+            .iter()
+            .filter_map(|k| shape.field(k).map(|(_, _, slot)| (k.clone(), slot.clone().map(|f| *f))))
+            .collect();
+        if entries.len() == order.len()
+            && let Some(out) = witnessed_family_fact(cx, folder, name, &entries, args)
+        {
+            return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
+        }
+    }
+
     let out = if rest.is_empty()
         && (name.eq_ignore_ascii_case("count") || name.eq_ignore_ascii_case("sizeof"))
     {
@@ -31010,6 +31029,171 @@ fn witnessed_projection_fact(
         // order-witnessed-ness is honestly lost — so a value-lane subject is never
         // worse off than a declared one.
         None => slice_widening(cx, folder, &ShapeFact::lift(entries), args, env, store),
+    }
+}
+
+/// **The positional projections on the order-witnessed lane** (issue #328) —
+/// `array_keys`, `array_values`, `array_reverse`, `array_flip` executed over a
+/// subject whose construction order was observed, rather than widened to the
+/// order-blind answer a key set deserves.
+///
+/// # What "order-witnessed" buys, and why it is not the declined import
+///
+/// ADR-0062 §7 declines *declaration*-order trust in positional projections —
+/// phpstan/phpstan#14940's false-positive class, where `array{b: …, a: …}`'s
+/// field order is read as runtime order even though the shape admits both
+/// insertion orders. Nothing here reads a declaration. The entries arrive in
+/// the order the walk *saw the array built*, carried by
+/// [`ShapeFact::witnessed_order`] (issue #327), and every admitted value of a
+/// sealed all-required witnessed shape has exactly that key sequence. Consuming
+/// it is the same move issue #165 made for `isList == Yes`: an order that is a
+/// semantic guarantee, never an artifact.
+///
+/// # The entries, and why the values may be unknown
+///
+/// `entries` is the witnessed sequence with each slot's fact, `None` where
+/// nothing proved one. Three of the four names do not care: they restructure
+/// the array, and a slot travels through them unread. That is what lets
+/// `array_keys(['a' => $x, 'b' => $y])` answer the exact key sequence — the
+/// result's *values* are the subject's *keys*, which are known by construction
+/// however little is known about `$x`.
+///
+/// `array_flip` is the exception and declines instead: the result's *keys* come
+/// from the subject's *values*, so an unproven value is an unproven key and
+/// there is no honest partial answer. It falls to the widening the shape rung
+/// already computes.
+///
+/// # Probes (PHP 8.5.9), which is where each rule comes from
+///
+/// * `array_keys(['b' => 1, 'a' => 2]) === [0 => 'b', 1 => 'a']` — the key
+///   sequence, reindexed. `array_keys([-5 => 1, 3 => 2]) === [-5, 3]`.
+/// * `array_values(['b' => 1, 'a' => 2]) === [0 => 1, 1 => 2]`.
+/// * `array_reverse(['a' => 1, 5 => 2, 'b' => 3, 9 => 4]) === [0 => 4,
+///   'b' => 3, 1 => 2, 'a' => 1]` — reversed, string keys surviving, integer
+///   keys renumbered `0..` **in the new order**. The same rule
+///   [`slice_entries`] already implements and probes.
+/// * `array_flip(['a', 'b']) === ['a' => 0, 'b' => 1]`;
+///   `array_flip(['x' => '1']) === [1 => 'x']` (the value goes through PHP's
+///   own key normalization); `array_flip(['a', 'a']) === ['a' => 1]`
+///   (last wins); `array_flip(['a', 1.5, 'b']) === ['a' => 0, 'b' => 2]` — a
+///   value that is not `int|string` is **skipped**, with a warning, and the
+///   survivors keep their original positions as values.
+///
+/// # The admission gate, and the result's own layer
+///
+/// The gate is [`transfer_declaration_admits`] over the engine's own `array`
+/// declaration, exactly as the shape rung's arm of this family uses. The result
+/// is a `Singleton` when every slot it needed was proven — for `array_keys`
+/// that is always — and a witnessed `Fact::Shape` otherwise, so an unknown
+/// element costs one slot rather than the sequence.
+fn witnessed_family_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    entries: &[(VKey, Option<Fact>)],
+    args: &[ArgValue],
+) -> Option<Fact> {
+    const ARRAY: &[&str] = &["array"];
+    // Every name here reads exactly one argument, and a call passing more is a
+    // different function than the rule describes (`array_reverse($x, true)`
+    // preserves keys; `array_keys($x, $search)` filters by value).
+    let [_] = args else { return None };
+    let lower = name.to_ascii_lowercase();
+    let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
+        // The keys, as values, reindexed `0..`. Always fully proven: the result's
+        // values are the subject's keys.
+        "array_keys" => entries
+            .iter()
+            .enumerate()
+            .map(|(i, (k, _))| {
+                (VKey::Int(i64::try_from(i).unwrap_or(i64::MAX)), Some(Fact::Singleton(val_of_key(k))))
+            })
+            .collect(),
+        // The values, reindexed `0..`. The slots travel unread, unknowns included.
+        "array_values" => entries
+            .iter()
+            .enumerate()
+            .map(|(i, (_, slot))| {
+                (VKey::Int(i64::try_from(i).unwrap_or(i64::MAX)), slot.clone())
+            })
+            .collect(),
+        // Reversed: string keys survive where they are, integer keys are
+        // renumbered `0..` in the NEW order.
+        "array_reverse" => {
+            let mut next = 0i64;
+            entries
+                .iter()
+                .rev()
+                .map(|(k, slot)| {
+                    let key = match k {
+                        VKey::Str(s) => VKey::Str(s.clone()),
+                        VKey::Int(_) => {
+                            let at = next;
+                            next = next.saturating_add(1);
+                            VKey::Int(at)
+                        }
+                    };
+                    (key, slot.clone())
+                })
+                .collect()
+        }
+        // Keys and values swap, so every value has to be proven — and to be an
+        // `int|string`, or PHP skips that entry entirely.
+        "array_flip" => {
+            let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+            for (k, slot) in entries {
+                let Some(Fact::Singleton(v)) = slot else { return None };
+                let Some(key) = flip_key_of(v) else { continue };
+                let value = Some(Fact::Singleton(val_of_key(k)));
+                // Last wins, in place — PHP overwrites the entry without moving it.
+                match out.iter_mut().find(|(ek, _)| *ek == key) {
+                    Some(slot) => slot.1 = value,
+                    None => out.push((key, value)),
+                }
+            }
+            out
+        }
+        _ => return None,
+    };
+    if !transfer_declaration_admits(cx, folder, name, ARRAY, None) {
+        return None;
+    }
+    Some(witnessed_entries_fact(&out))
+}
+
+/// The array key PHP casts a **flipped value** to, or `None` for a value
+/// `array_flip` skips (probed: `array_flip(['a', 1.5, 'b'])` drops the float,
+/// with a warning, and keeps the survivors' positions).
+///
+/// Only `int` and `string` flip. The string goes through the same canonical
+/// int-string normalization every other key seam uses, so `'1'` becomes the
+/// integer key `1` (probed: `array_flip(['x' => '1']) === [1 => 'x']`) while
+/// `'01'` stays a string.
+fn flip_key_of(v: &Val) -> Option<VKey> {
+    match v {
+        Val::Int(i) => Some(VKey::Int(*i)),
+        Val::Str(s) => Some(match php_canonical_int_string(s) {
+            Some(i) => VKey::Int(i),
+            None => VKey::Str(s.clone()),
+        }),
+        Val::Bool(_) | Val::Null | Val::Float(_) | Val::Array(_) => None,
+    }
+}
+
+/// The fact a witnessed entry sequence denotes: a `Singleton` when every slot is
+/// a proven value — the most precise thing the domain has, and what the value
+/// lane exists to produce — and a witnessed `Fact::Shape` otherwise.
+fn witnessed_entries_fact(entries: &[(VKey, Option<Fact>)]) -> Fact {
+    let proven: Option<Vec<(VKey, Val)>> = entries
+        .iter()
+        .map(|(k, slot)| match slot {
+            Some(Fact::Singleton(v)) => Some((k.clone(), v.clone())),
+            _ => None,
+        })
+        .collect();
+    match proven {
+        Some(vals) => Fact::Singleton(Val::Array(vals)),
+        None => shape_fact(ShapeFact::from_witnessed_entries(entries)),
     }
 }
 

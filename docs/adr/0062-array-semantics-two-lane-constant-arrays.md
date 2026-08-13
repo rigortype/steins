@@ -580,3 +580,62 @@ a sealed `@param array{url: string}`, silent before only because the
 its keys. Measured on a fixture that the unknown slot is not what fires: an
 unknown value against a declared `string` slot stays silent, because Maybe
 is silence.
+
+## Amendment D (2026-08-13): the positional projections execute on the witnessed lane — PENDING ratification
+
+Issue [#328](https://github.com/rigortype/steins/issues/328). Amendment C gave
+`ShapeFact` an order witness and left it unread. This is the consumer. §4's
+transfer table said "Concrete: execute on the witnessed order (sound)" for
+`array_values` / `array_keys` / `array_slice` / `array_reverse`, and only
+`array_slice` ever did (Amendment B); every other name fell through to the
+`lift` and took the key-set widening — the answer a *declared* shape deserves,
+handed to a subject whose construction had been observed.
+
+**The rule.** A subject that is a sealed, all-required shape carrying an order
+witness — a literal the walk saw built, or the `lift` of a proven `Val::Array` —
+has its projection *executed* over that sequence rather than widened. The four
+names, each from a probe at 8.5.9:
+
+| name | rule | probe |
+| --- | --- | --- |
+| `array_keys` | keys become values, reindexed `0..` | `array_keys(['b' => 1, 'a' => 2]) === ['b', 'a']` |
+| `array_values` | values reindexed `0..`, slots unread | `array_values(['b' => 1, 'a' => 2]) === [1, 2]` |
+| `array_reverse` | reversed; string keys survive in place, integer keys renumbered `0..` in the new order | `array_reverse(['a' => 1, 5 => 2, 'b' => 3, 9 => 4]) === [0 => 4, 'b' => 3, 1 => 2, 'a' => 1]` |
+| `array_flip` | keys and values swap, values normalized as keys, last wins, a non-`int\|string` value skipped | `array_flip(['x' => '1']) === [1 => 'x']`; `array_flip(['a', 'a']) === ['a' => 1]`; `array_flip(['a', 1.5, 'b']) === ['a' => 0, 'b' => 2]` |
+
+Three of the four never read a value, which is what makes them answer where a
+fold cannot: `array_keys(['a' => $x, 'b' => $y])` is `list{'a', 'b'}` because the
+result's *values* are the subject's *keys*. `array_flip` is the exception and
+**declines** on an unproven slot — its result's *keys* come from the subject's
+*values*, so an unknown value is an unknown key and there is no honest partial
+answer; it falls to the widening rather than to silence. The output is a
+`Singleton` where every slot it needed was proven and a witnessed `Fact::Shape`
+otherwise, so an unknown element costs one slot rather than the sequence.
+
+**§7's declined import is untouched, and that is the point.** A shape with no
+witness is a key set: `array_keys(array{a: int, b: int})` stays
+`non-empty-list<'a'|'b'>` and may never become `list{'a', 'b'}`, because the
+declaration admits `['b' => …, 'a' => …]` just as well. An *optional* field
+declines too, witness or not — `list{int, 1?: string}` realizes as one entry or
+two, so no single sequence describes every admitted value
+(`ShapeFact::witnessed_order` carries that precondition). The admission gate is
+`transfer_declaration_admits` over the engine's own `array` declaration, so a
+silent engine withholds the family and ADR-0069's floor answers instead.
+
+**Not folded, and why.** Handing these four to the sidecar would be the ADR-0004
+answer; the reason it is not taken is coverage, not doctrine. A fold fires only
+when *every* argument is a literal, so it cannot reach the partially-known
+subject at all — and that subject is what real code is made of. These four
+restructure the argument and read no value semantics beyond key normalization,
+which this codebase already owns version-aware and which `array_slice` already
+re-derives under the same justification. The names that genuinely need PHP's own
+semantics — `explode`, `array_unique`, `array_merge`, `range` — are held back for
+the fold-result slice (issue #330), where the engine answers for them.
+
+**Measurement.** nsrt headline 2430 → **2433**, admissible 2852 → **2858**,
+transition one-directional (3 `differ → match`, 2 `differ → subsumed`, 1
+`differ → equal`, zero the other way). The gain is small *here* by design: nsrt's
+array fixtures are overwhelmingly declared shapes, which correctly keep their
+widening — the slice pays out on literal-heavy code, which the harness does not
+sample. fp-gate GREEN with **no baseline movement at all**: proof layer 0,
+`phpdoc.*` and `throw.*` unmoved.
