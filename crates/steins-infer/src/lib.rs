@@ -30711,7 +30711,8 @@ fn shape_builtin_return_fact(
             .filter_map(|k| shape.field(k).map(|(_, _, slot)| (k.clone(), slot.clone().map(|f| *f))))
             .collect();
         if entries.len() == order.len()
-            && let Some(out) = witnessed_family_fact(cx, folder, name, &entries, args)
+            && let Some(out) =
+                witnessed_family_fact(cx, folder, name, &entries, args, env, store)
         {
             return Some((out, derivation_stratum(cx, folder, args, env, store, subject_stratum)));
         }
@@ -31138,13 +31139,170 @@ fn witnessed_family_fact(
     name: &str,
     entries: &[(VKey, Option<Fact>)],
     args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
 ) -> Option<Fact> {
     const ARRAY: &[&str] = &["array"];
-    // Every name here reads exactly one argument, and a call passing more is a
+    /// `array_key_first`/`array_key_last`'s declared return. PHP 8 renders the
+    /// union in its own order; both spellings are accepted so the gate tests the
+    /// *declaration* rather than the engine's spelling of it.
+    const KEY_OR_NULL: &[&str] = &["string|int|null", "int|string|null"];
+    /// `array_first`/`array_last` declare a bare `mixed`, which pins nothing on
+    /// its own, so they carry the arity second leg (ADR-0064 Amendment B).
+    const MIXED: &[&str] = &["mixed"];
+    const ARITY_1: Option<(u32, u32)> = Some((1, 1));
+    const ARITY_SLICE: Option<(u32, u32)> = Some((4, 2));
+
+    let lower = name.to_ascii_lowercase();
+
+    // ---- The POSITION READERS (issue #328 wave 2) ---------------------------
+    //
+    // ADR-0062 §4 answers these from the key *set* — "SOME key of the set, never
+    // the declared-first one", §2's rule at its sharpest, and correct for a
+    // declaration that admits every permutation. A witnessed order is the other
+    // provenance: the sequence was observed, so first really is first.
+    //
+    // Probed at 8.5.9: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`,
+    // `array_key_last(…) === 'a'`, `array_first(…) === 1`, `array_last(…) === 2`,
+    // and all four answer `null` on `[]`.
+    //
+    // **The pointer family is deliberately excluded.** `key`/`current`/`reset`/
+    // `end` read the internal array pointer, which Steins does not model; the
+    // existing arm tolerates that only because a shape-derived fact can never
+    // premise a proof-layer finding (A-G9's corollary). A witnessed literal is
+    // `Verified`, so an exact answer here WOULD be admissible as a premise, and
+    // the pointer assumption would ride into a proof with it. They keep the
+    // widening.
+    let position: Option<GatedFact<'_>> = match lower.as_str() {
+        "array_key_first" | "array_key_last" | "array_first" | "array_last"
+            if args.len() == 1 =>
+        {
+            let last = lower.ends_with("last");
+            let entry = if last { entries.last() } else { entries.first() };
+            let fact = match entry {
+                // PHP answers `null` for the empty array, and the empty array is
+                // exactly what an empty witnessed sequence proves.
+                None => Fact::Singleton(Val::Null),
+                Some((k, slot)) => {
+                    if lower.starts_with("array_key") {
+                        Fact::Singleton(val_of_key(k))
+                    } else {
+                        // The value's own fact at whatever layer it was proven —
+                        // an unknown slot has no answer, so the arm declines to
+                        // the widening rather than claiming `mixed`.
+                        slot.clone()?
+                    }
+                }
+            };
+            let (declared, arity): (&[&str], Option<(u32, u32)>) =
+                if lower.starts_with("array_key") { (KEY_OR_NULL, None) } else { (MIXED, ARITY_1) };
+            Some((fact, declared, arity))
+        }
+        _ => None,
+    };
+    if let Some((fact, declared, arity)) = position {
+        return transfer_declaration_admits(cx, folder, name, declared, arity).then_some(fact);
+    }
+
+    // ---- `array_slice` on the witnessed lane, with unknown slots -------------
+    //
+    // The exact slice already existed for a fully-proven `Val::Array`
+    // (Amendment B). It reads offsets and keys and never a value, so nothing
+    // about it needed the values to be known — `array_slice(['x', $s, 'z'], 1)`
+    // is `list{string, 'z'}`, which the value-only rung could not say.
+    if lower == "array_slice" && (2..=4).contains(&args.len()) {
+        let (offset, length, preserve) = slice_window(cx, folder, args, env, store)?;
+        let out = slice_witnessed_entries(entries, offset, length, preserve);
+        return transfer_declaration_admits(cx, folder, name, ARRAY, ARITY_SLICE)
+            .then(|| witnessed_entries_fact(&out));
+    }
+
+    // ---- The TWO-ARRAY names (issue #328 wave 2) ----------------------------
+    //
+    // Each reads a second witnessed sequence through the same seam the subject
+    // came through. All four are pure key work — none inspects a value except to
+    // *cast it to a key*, and that cast is measured below rather than recalled.
+    if matches!(
+        lower.as_str(),
+        "array_fill_keys" | "array_combine" | "array_diff_key" | "array_intersect_key"
+    ) {
+        let [_, second] = args else { return None };
+        let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
+            // `array_fill_keys($keys, $value)`: every value of `$keys` becomes a
+            // key, all mapped to the same `$value`. Probed:
+            // `array_fill_keys(['1', 2], 'v') === [1 => 'v', 2 => 'v']` (the
+            // key cast normalizes), `array_fill_keys(['a', 'a'], 1) === ['a' => 1]`
+            // (one entry). Its second argument is a plain VALUE, not a sequence —
+            // which is why the sibling is read per-arm rather than once up front.
+            "array_fill_keys" => {
+                let fill = transfer_arg_fact(cx, folder, second, env, store);
+                let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+                for (_, slot) in entries {
+                    let Some(Fact::Singleton(v)) = slot else { return None };
+                    let key = array_key_cast(v)?;
+                    match out.iter_mut().find(|(ek, _)| *ek == key) {
+                        Some(e) => e.1 = fill.clone(),
+                        None => out.push((key, fill.clone())),
+                    }
+                }
+                out
+            }
+            // `array_combine($keys, $values)`: positional zip. PHP raises a
+            // `ValueError` on a length mismatch (probed), so a mismatch is a call
+            // that does not return at all — no fact, rather than a guessed one.
+            // Probed: `array_combine(['1', 'b'], [1, 2]) === [1 => 1, 'b' => 2]`,
+            // `array_combine(['a', 'a'], [1, 2]) === ['a' => 2]` (last wins).
+            "array_combine" => {
+                let other = witnessed_entries_of(cx, folder, second, env, store)?;
+                if entries.len() != other.len() {
+                    return None;
+                }
+                let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
+                for ((_, kslot), (_, vslot)) in entries.iter().zip(other.iter()) {
+                    let Some(Fact::Singleton(v)) = kslot else { return None };
+                    let key = array_key_cast(v)?;
+                    match out.iter_mut().find(|(ek, _)| *ek == key) {
+                        Some(e) => e.1 = vslot.clone(),
+                        None => out.push((key, vslot.clone())),
+                    }
+                }
+                out
+            }
+            // `array_diff_key` / `array_intersect_key`: pure key set difference and
+            // intersection, and **the order comes from the first array** (probed:
+            // `array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
+            //    === ['b' => 2, 'a' => 1]`). Key identity is the domain's own
+            // normalized `VKey`, which is what makes `array_diff_key([5 => 1,
+            // '5x' => 2], ['5' => 9]) === ['5x' => 2]` fall out — `'5'` and `5`
+            // are one key.
+            //
+            // Values are never read, so unknown slots cost nothing at all here.
+            // The second argument contributes its **key set** and nothing else —
+            // not its order, not its values — so unlike `array_combine` it may be
+            // a *declared* shape. Reading a declaration's key set is not the §7
+            // declined import: the import that is declined is reading its key
+            // *order*, and a set has none. What the set does need is to be
+            // certain, which is why [`key_set_of`] insists on a sealed tail and
+            // no optional field: a key that may or may not be there decides
+            // neither the difference nor the intersection.
+            other_name => {
+                let other = key_set_of(cx, folder, second, env, store)?;
+                let want = other_name == "array_intersect_key";
+                entries
+                    .iter()
+                    .filter(|(k, _)| other.contains(k) == want)
+                    .cloned()
+                    .collect()
+            }
+        };
+        return transfer_declaration_admits(cx, folder, name, ARRAY, None)
+            .then(|| witnessed_entries_fact(&out));
+    }
+
+    // Every name below reads exactly one argument, and a call passing more is a
     // different function than the rule describes (`array_reverse($x, true)`
     // preserves keys; `array_keys($x, $search)` filters by value).
     let [_] = args else { return None };
-    let lower = name.to_ascii_lowercase();
     let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
         // The keys, as values, reindexed `0..`. Always fully proven: the result's
         // values are the subject's keys.
@@ -31205,6 +31363,129 @@ fn witnessed_family_fact(
         return None;
     }
     Some(witnessed_entries_fact(&out))
+}
+
+/// The array key PHP casts a value to for `array_fill_keys` / `array_combine`
+/// (issue #328 wave 2), or `None` where this crate declines to say.
+///
+/// # Three sibling functions, three different casts — measured, not recalled
+///
+/// The whole reason this is its own function is that the obvious assumption is
+/// wrong three ways. At 8.5.9, for the value `1.5`:
+///
+/// | seam | answer |
+/// | --- | --- |
+/// | `$a[1.5] = v` ([`offset_key_of`]) | int `1` — truncation, with a deprecation |
+/// | `array_fill_keys([1.5], v)` / `array_combine([1.5], [v])` | string `'1.5'` |
+/// | `array_flip([1.5])` ([`flip_key_of`]) | the entry is **skipped** |
+///
+/// Three neighbouring builtins, three rules, and no amount of reasoning about
+/// "PHP's array key cast" produces them — only running the engine does
+/// (ADR-0004). So this cast serves exactly the pair it was probed for.
+///
+/// **The float declines** rather than taking the measured `'1.5'`. PHP renders a
+/// float to string under the `precision` ini directive, so the *key* of
+/// `array_fill_keys([0.1 + 0.2], v)` depends on the runtime's configuration —
+/// the same reason [`concat_cast`] excludes floats. A key this crate cannot
+/// state without knowing an ini setting is a key it does not state.
+///
+/// The rest are measured and fixed: `array_fill_keys(['1', 2], 'v')
+/// === [1 => 'v', 2 => 'v']` (a numeric string normalizes, `'01'` does not),
+/// `array_fill_keys([true, null], 'v') === [1 => 'v', '' => 'v']`.
+fn array_key_cast(v: &Val) -> Option<VKey> {
+    match v {
+        Val::Int(i) => Some(VKey::Int(*i)),
+        Val::Bool(b) => Some(VKey::Int(i64::from(*b))),
+        Val::Null => Some(VKey::Str(PhpStr::new())),
+        Val::Str(s) => Some(match php_canonical_int_string(s) {
+            Some(i) => VKey::Int(i),
+            None => VKey::Str(s.clone()),
+        }),
+        // The float's ini-dependent rendering, and the array (a `TypeError`).
+        Val::Float(_) | Val::Array(_) => None,
+    }
+}
+
+/// The witnessed entry sequence an argument denotes (issue #328 wave 2) — the
+/// one seam the two-array names read their sibling through.
+///
+/// It answers for the same two provenances the subject binding accepts, and for
+/// the same reason: a `Singleton` array is an observed value, and a sealed,
+/// all-required shape carrying an order witness is an observed construction. A
+/// declared shape has no sequence and answers `None`, which is what keeps the
+/// §7 declined import declined on the *second* argument too — a rule that reads
+/// `array_intersect_key($x, array{a: int, b: int})` must not read that
+/// declaration's field order any more than it may read the subject's.
+fn witnessed_entries_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Vec<(VKey, Option<Fact>)>> {
+    match transfer_arg_fact(cx, folder, arg, env, store)? {
+        Fact::Singleton(Val::Array(entries)) => Some(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), Some(Fact::Singleton(v.clone()))))
+                .collect(),
+        ),
+        Fact::Shape { shape, nullable: false } => {
+            let order = shape.witnessed_order()?;
+            let out: Vec<(VKey, Option<Fact>)> = order
+                .iter()
+                .filter_map(|k| {
+                    shape.field(k).map(|(_, _, slot)| (k.clone(), slot.clone().map(|f| *f)))
+                })
+                .collect();
+            (out.len() == order.len()).then_some(out)
+        }
+        _ => None,
+    }
+}
+
+/// A rule's answer together with the admission gate it must pass: the reflected
+/// return declarations that count as the signature it was written against, and
+/// the arity pin where the declaration alone pins too little (ADR-0064
+/// Amendment B).
+type GatedFact<'a> = (Fact, &'a [&'a str], Option<(u32, u32)>);
+
+/// The **certain key set** of an argument (issue #328 wave 2) — every key it
+/// has, and no key it might not have.
+///
+/// Weaker than [`witnessed_entries_of`] in what it demands and in what it
+/// yields: no order witness is required, because a set has no order, and none is
+/// returned. That is the whole reason it exists — `array_diff_key` and
+/// `array_intersect_key` read their second argument's key set only, so a
+/// *declared* `array{a: int, b: int}` is a perfectly good second argument even
+/// though its field order means nothing (ADR-0062 §7's declined import is about
+/// reading declaration *order*, and there is no order here to read).
+///
+/// The set has to be certain, which is what the two refusals enforce:
+///
+/// * an **optional** field — a key that may or may not be present decides
+///   neither the difference nor the intersection;
+/// * an **unsealed** tail — an undeclared key could be anything, so the set is
+///   a lower bound rather than the set.
+fn key_set_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Vec<VKey>> {
+    use steins_domain::Tail;
+    match transfer_arg_fact(cx, folder, arg, env, store)? {
+        Fact::Singleton(Val::Array(entries)) => {
+            Some(entries.iter().map(|(k, _)| k.clone()).collect())
+        }
+        Fact::Shape { shape, nullable: false } => {
+            let certain = matches!(shape.tail, Tail::Sealed)
+                && shape.fields.iter().all(|(_, p, _)| p.is_required());
+            certain.then(|| shape.fields.iter().map(|(k, _, _)| k.clone()).collect())
+        }
+        _ => None,
+    }
 }
 
 /// The array key PHP casts a **flipped value** to, or `None` for a value
@@ -31277,6 +31558,44 @@ fn slice_window(
 
 /// The witnessed window of `entries`, keyed as PHP keys it (see
 /// [`witnessed_projection_fact`] for the probes both halves are written from).
+/// [`slice_entries`] over a witnessed sequence whose values may be unknown
+/// (issue #328 wave 2).
+///
+/// The window arithmetic and the key rule are the same computation on the same
+/// probes — `array_slice` reads offsets and keys and never a value, which is
+/// precisely why the slots can travel through it unread. The two functions are
+/// kept separate rather than generified because one carries `Val` and the other
+/// `Option<Fact>`; `slice_agrees_with_its_value_only_twin` pins that they answer
+/// alike wherever both apply.
+fn slice_witnessed_entries(
+    entries: &[(VKey, Option<Fact>)],
+    offset: i64,
+    length: Option<i64>,
+    preserve: bool,
+) -> Vec<(VKey, Option<Fact>)> {
+    let n = i64::try_from(entries.len()).unwrap_or(i64::MAX);
+    let start = if offset < 0 { (n.saturating_add(offset)).max(0) } else { offset.min(n) };
+    let end = match length {
+        None => n,
+        Some(l) if l < 0 => n.saturating_add(l).max(start),
+        Some(l) => start.saturating_add(l).min(n),
+    };
+    let (lo, hi) = (usize::try_from(start).unwrap_or(0), usize::try_from(end).unwrap_or(0));
+    let mut next = 0i64;
+    entries[lo.min(entries.len())..hi.min(entries.len())]
+        .iter()
+        .map(|(k, slot)| match k {
+            VKey::Str(_) => (k.clone(), slot.clone()),
+            VKey::Int(_) if preserve => (k.clone(), slot.clone()),
+            VKey::Int(_) => {
+                let key = VKey::Int(next);
+                next += 1;
+                (key, slot.clone())
+            }
+        })
+        .collect()
+}
+
 fn slice_entries(
     entries: &[(VKey, Val)],
     offset: i64,
@@ -31673,6 +31992,19 @@ fn transfer_arg_known(
             return Some((fact, stratum));
         }
         return env_fact.map(|f| (f, env_stratum));
+    }
+    // An array literal the value path cannot prove whole still denotes a fact
+    // (issue #327), and a rule reading it as an ARGUMENT should see the same one
+    // an assignment would bind. Without this a sibling argument like
+    // `array_combine(['a', 'b'], [1, $x])` reads nothing at all, which is the
+    // seeding cliff surviving one seam further out.
+    if let ArgValue::Array(items) = value
+        && let Some((lit, strat)) = cx
+            .resolve_literal_strat(value, env, false, folder)
+            .and_then(|(l, s)| Some((singleton_fact(&l, cx.php_minor)?, s)))
+            .or_else(|| array_literal_fact(cx, folder, items, env, false, store))
+    {
+        return Some((lit, strat.min(value_stratum(value, env, store))));
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
     Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))

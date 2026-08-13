@@ -697,3 +697,100 @@ nsrt unmoved (headline 2433, admissible 2858, an empty transition matrix) — th
 harness asserts *types*, and this slice moves what a value can be *used for*, not
 what it is. fp-gate GREEN with no baseline movement: proof layer 0, and guzzle
 back to its expected zero after E1.
+
+## Amendment F (2026-08-14): the witnessed family, wave 2 — PENDING ratification
+
+Issue [#328](https://github.com/rigortype/steins/issues/328), second wave.
+Amendment D took the four restructuring projections. The same admission test —
+*restructures the argument, reads no value semantics beyond key normalization* —
+admits more names than that, and they were still answering the key-set widening.
+
+### F1. The position readers
+
+`array_key_first` / `array_key_last` / `array_first` / `array_last` are exact on
+a witnessed order. §4 answers them from the key set — "SOME key of the set,
+never the declared-first one", which is §2's rule at its sharpest and correct
+for a declaration that admits every permutation. A witnessed order is the other
+provenance: the sequence was observed, so first really is first. Probed at
+8.5.9: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`, `array_last(…) === 2`,
+and all four answer `null` on `[]`.
+
+The key readers answer whatever the values are — the result's *value* is the
+subject's *key* — while the value readers hand back the slot's own fact and
+decline on an unknown slot.
+
+**The pointer family is deliberately excluded.** `key` / `current` / `reset` /
+`end` read the internal array pointer, which Steins does not model. The existing
+arm tolerates that only because a shape-derived fact can never premise a
+proof-layer finding (A-G9's corollary); a witnessed literal is `Verified`, so an
+exact answer here *would* be admissible as a premise and the pointer assumption
+would ride into a proof with it. They keep the widening.
+
+### F2. `array_slice` on a witnessed shape
+
+The exact slice existed for a fully-proven `Val::Array` (Amendment B). It reads
+offsets and keys and never a value, so nothing about it needed the values known:
+`array_slice(['x', $s, 'z'], 1)` is `list{string, 'z'}`.
+
+### F3. Values as keys: `array_fill_keys` and `array_combine`
+
+Both take their result's keys from a value, through a cast that had to be
+measured. Three neighbouring builtins turn out to have three different rules for
+the value `1.5`:
+
+| seam | answer |
+| --- | --- |
+| `$a[1.5] = v` | int `1` — truncation, with a deprecation |
+| `array_fill_keys([1.5], v)` / `array_combine([1.5], [v])` | string `'1.5'` |
+| `array_flip([1.5])` | the entry is **skipped** |
+
+No amount of reasoning about "PHP's array key cast" produces that table; only
+running the engine does, which is ADR-0004's whole point. The float **declines**
+even so: PHP renders a float to string under the `precision` ini directive, so
+the *key* of `array_fill_keys([0.1 + 0.2], v)` depends on the runtime's
+configuration — the same reason `concat_cast` excludes floats.
+
+`array_combine` additionally declines a length mismatch, because PHP raises a
+`ValueError` there (probed): a call that does not return has no return value to
+state.
+
+### F4. Key-set work: `array_diff_key` and `array_intersect_key`
+
+Pure key operations, and the order comes from the *first* array (probed:
+`array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
+=== ['b' => 2, 'a' => 1]`). Key identity is the domain's own normalized `VKey`,
+which is what makes `array_diff_key([5 => 1, '5x' => 2], ['5' => 9])
+=== ['5x' => 2]` fall out — `'5'` and `5` are one key.
+
+**Their second argument may be a declared shape**, and this is not a crack in
+§7. What §7 declines is reading a declaration's key *order*; these two read its
+key *set*, and a set has no order. What the set must be is **certain**, so the
+reader refuses an optional field (a key that may or may not be there decides
+neither the difference nor the intersection) and an unsealed tail (the set would
+be a lower bound). `array_combine`, which zips *positionally*, still requires a
+witnessed order on both sides — the same argument, the other way round.
+
+### F5. Measurement, including two rows that left `match`
+
+nsrt headline 2433 → **2444**, admissible 2858 → **2872**. The transition matrix
+is 13 `differ → match`, 1 `differ → subsumed`, and — for the first time in this
+line of work — **2 `match → subsumed`**. Those two are worth naming rather than
+netting out.
+
+Both are `tests/PHPStan/Analyser/nsrt/array_first_last.php`, which asserts
+
+```php
+assertType("'a'|'b'|'c'", array_first([1 => 'a', 0 => 'b', 2 => 'c']));
+assertType("'a'|'b'|'c'", array_last([1 => 'a', 0 => 'b', 2 => 'c']));
+```
+
+Steins now answers `'a'` and `'c'`. The engine agrees: probed at 8.5.9, that
+literal's entries are in insertion order `1 => 'a'`, `0 => 'b'`, `2 => 'c'`, so
+first is `'a'` and last is `'c'`. The upstream expectation is an upper bound —
+`subsumed` is the harness saying our answer lies inside it — and the reference
+implementation does not consume constant-array order for this family. So the
+headline dropping two while the truth improved is the harness measuring
+*agreement*, not correctness, and this is a case where the two part company.
+
+fp-gate GREEN with **no baseline movement**: proof layer 0, `phpdoc.*` and
+`throw.*` unmoved.
