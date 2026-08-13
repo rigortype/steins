@@ -69,7 +69,20 @@ whole, exactly as before.
   member facts, so a declared `int|string` now lowers into the *value* lane as
   well as the arm lane. Both carriers now describe it; ADR-0062 §5's
   one-relation discipline is what keeps them honest, and the acceptance path
-  reads the union as a for-all over its arms.
+  reads the union as a for-all over its arms. The curated-row lowering
+  (`contractty_to_fact`) folds any scalar union the same way.
+- **The reflected ENVELOPE is deliberately not generalised**, and this is the
+  one place the union was tried and backed out. The reflected declaration is
+  the *engine's*, which is coarse by construction — `abs` declares `int|float`
+  — while ADR-0069's curated floor carries the sharp row for the same name
+  (`int<1, max>|0|float`). The envelope rung sits **above** the floor, so an
+  envelope that answers in more cases *shadows* the sharper row: 13 nsrt rows
+  went from `int<0, max>|float` to `int|float` on exactly that path. A wider
+  envelope is not wrong and is not an improvement either, and buying it at the
+  cost of the curated rows is a bad trade. Widening it waits on the ladder
+  question — whether the floor may refine *within* a union envelope the way
+  ADR-0061 §2 has the type rung refine within a scalar one — which is its own
+  decision.
 - The ternary joins **facts** rather than values when an arm proves none, so
   `$c ? $i : $s` is `int|string` where it was `unknown`.
 - `Fact::array_key_cast` answers the rows it had to decline (ADR-0062

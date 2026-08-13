@@ -47,7 +47,7 @@ mod shape;
 mod value;
 
 pub use certainty::Certainty;
-pub use fact::{Fact, Refinement, CAP};
+pub use fact::{CAP, Fact, Refinement, UnionArm};
 pub use php::{
     php_is_falsy, php_is_numeric, php_str_is_decimal_int, php_str_is_lowercase,
     php_str_is_uppercase,

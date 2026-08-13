@@ -33,6 +33,10 @@ pub enum Refinement {
     Int(IntRange),
 }
 
+/// One arm of a [`Fact::Union`]: a scalar base and what is known about the
+/// values of that base, `None` being that base's `General` (issue #339).
+pub type UnionArm = (Base, Option<Refinement>);
+
 /// What is known about a single value, in one of the four layers.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Fact {
@@ -88,8 +92,8 @@ pub enum Fact {
     /// union would make the layer mutually recursive with the shape algebra for
     /// one spelling. A union with an array in it declines, as it does today.
     Union {
-        /// One `(base, refinement)` arm per base, sorted, `2..=4` of them.
-        arms: Vec<(Base, Option<Refinement>)>,
+        /// One [`UnionArm`] per base, sorted, `2..=4` of them.
+        arms: Vec<UnionArm>,
         /// Whether `null` is also admitted.
         nullable: bool,
     },
@@ -244,8 +248,8 @@ impl Fact {
     /// `Refined`/`General`, and one with none is `None` — a fact must say
     /// something.
     #[must_use]
-    pub fn union(arms: Vec<(Base, Option<Refinement>)>, nullable: bool) -> Option<Fact> {
-        let mut merged: Vec<(Base, Option<Refinement>)> = Vec::with_capacity(arms.len());
+    pub fn union(arms: Vec<UnionArm>, nullable: bool) -> Option<Fact> {
+        let mut merged: Vec<UnionArm> = Vec::with_capacity(arms.len());
         for (base, refinement) in arms {
             // A contentless refinement IS that base's General, and storing it
             // as `Some` would be a second spelling of one fact. `Fact::refined`
@@ -282,7 +286,7 @@ impl Fact {
 
     /// This fact's abstract arms — one entry for a single-base layer, several
     /// for a union — or `None` for a finite or array fact.
-    fn abstract_arms(&self) -> Option<(Vec<(Base, Option<Refinement>)>, bool)> {
+    fn abstract_arms(&self) -> Option<(Vec<UnionArm>, bool)> {
         match self {
             Fact::Refined { base, refinement, nullable } => {
                 Some((vec![(*base, Some(*refinement))], *nullable))

@@ -30444,6 +30444,20 @@ fn fact_base(f: &Fact) -> Option<Base> {
 fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
+        // **Still the nullable pair only, and now that is a decision** (issue
+        // #339). `Fact::Union` could hold any scalar union here, and generalising
+        // this arm was tried and reverted: the reflected declaration is the
+        // ENGINE's, which is coarse by construction (`abs` declares `int|float`),
+        // while ADR-0069's curated floor carries the sharp row for the same name
+        // (`int<1, max>|0|float`). The envelope rung sits ABOVE the floor, so an
+        // envelope that answers in more cases *shadows* the sharper row — 13 nsrt
+        // rows went from `int<0, max>|float` to `int|float` on exactly that path.
+        //
+        // A wider envelope is not wrong, but it is not an improvement either, and
+        // buying it at the cost of the curated rows is a bad trade. Widening this
+        // arm therefore waits on the ladder question — whether the floor may
+        // refine *within* a union envelope the way ADR-0061 §2 has the type rung
+        // refine within a scalar one — which is its own decision.
         ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
             let base = members.iter().find_map(|m| match m {
                 ContractTy::Base(b) => Some(*b),
@@ -30453,6 +30467,32 @@ fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
         }
         _ => None,
     }
+}
+
+/// Fold a declared union's members into one [`Fact`] through the domain's join
+/// (issue #339), or `None` if any member does not lift.
+///
+/// `null` is not a member here but a flag: it lowers to `Fact::Singleton(Null)`
+/// and the join folds it into `nullable` on the way, which is the same thing the
+/// old two-member special case did by hand.
+fn union_envelope(members: &[ContractTy]) -> Option<Fact> {
+    let mut acc: Option<Fact> = None;
+    for m in members {
+        let f = match m {
+            ContractTy::Null => Fact::Singleton(Val::Null),
+            ContractTy::Base(b) => Fact::General { base: *b, nullable: false },
+            ContractTy::IntIn(r) => Fact::refined(Base::Int, Refinement::Int(*r), false),
+            ContractTy::StrWith(p) => Fact::refined(Base::String, Refinement::Str(*p), false),
+            // Anything else — a class, a shape, a callable, a nested union —
+            // is not a scalar arm, so the union has no fact form.
+            _ => return None,
+        };
+        acc = Some(match acc {
+            None => f,
+            Some(prev) => prev.join(&f)?,
+        });
+    }
+    acc
 }
 
 /// Lower a curated refinement [`ContractTy`] to a value-domain [`Fact`] (ADR-0056
@@ -30473,10 +30513,9 @@ fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
         // here. Every other `Inter` still returns `None`: the honest floor.
         ContractTy::Inter(members) => steins_contract::inter_str_preds(members)
             .map(|p| Fact::refined(Base::String, Refinement::Str(p), false)),
-        ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
-            let inner = members.iter().find(|m| !matches!(m, ContractTy::Null))?;
-            fact_with_null(&contractty_to_fact(inner)?)
-        }
+        // Any scalar union (issue #339), by the same fold the envelope path uses
+        // — the nullable pair is now just its two-member case.
+        ContractTy::Union(members) => union_envelope(members),
         _ => None,
     }
 }
@@ -30921,10 +30960,12 @@ fn transfer_declaration_admits(
 /// * `array_pop`/`array_shift`/`array_first`/`array_last` never touch the pointer;
 ///   they add `null` on a possibly-empty shape (`array_pop($e = []) === null`).
 ///
-/// A `∪ false` that the four-layer domain cannot spell — `int|false` is a
-/// two-base union with no single [`Fact`] — **declines**, exactly as `json_decode`
-/// does in the sibling dispatch rung. A rule that cannot state its own answer says
-/// nothing.
+/// A `∪ false` is now sayable (issue #339): `Fact::Union` holds a two-base union,
+/// so `next($x)` over an `int`-valued shape answers rather than declining. The
+/// answer is `int|bool` and not `int|false` — the `Bool` base carries no
+/// refinement, so the finite `false` widens to its base when it becomes an arm.
+/// Sound, coarser than the reference implementation, and recorded in ADR-0085 §5
+/// as the finite-member-beside-an-abstract-arm limit.
 ///
 /// **Mutation is not this function's business, and must not be.** Six of the ten
 /// (`array_pop array_shift next prev reset end`) take argument 0 by reference and
@@ -31053,10 +31094,15 @@ fn shape_projection_fact(
             };
             (out, MIXED, ARITY_1)
         }
-        // Still declined, and now for the only reason left: the value side of
-        // `in_array`/`array_search` is a multi-base union (`int|string|false`) the
-        // four-layer domain has no single `Fact` for, so the rule cannot state its
-        // own answer (ADR-0061 §1). `array_slice`'s v1 decline — "the seam is
+        // Still declined, and the reason has CHANGED (issue #339). It used to be
+        // that the value side of `in_array`/`array_search` is a multi-base union
+        // (`int|string|false`) the four-layer domain had no single `Fact` for, so
+        // the rule could not state its own answer. `Fact::Union` is that form now,
+        // and what is missing is the rule itself — `array_search` over a witnessed
+        // array with a proven needle is exactly computable, and over a shape it is
+        // the key union ∪ false. Unwritten, not unsayable.
+        //
+        // The pattern is the one `array_slice` set: its v1 decline — "the seam is
         // single-argument by construction" — was answered by growing the seam, not
         // by weakening the rule (ADR-0062 Amendment B).
         _ => return None,
@@ -31884,9 +31930,10 @@ fn read_position_value(shape: &ShapeFact, empty: Val) -> Option<Fact> {
 
 /// Add `false` to a fact's denotation. Unlike `null` there is no side-flag for it,
 /// so this is the plain domain join: finite layers absorb it as another member, and
-/// an abstract non-`bool` base yields `None` — `int|false` is a two-base union the
-/// four-layer domain does not name, and a rule that cannot state its answer
-/// declines (ADR-0061 §1).
+/// an abstract non-`bool` base joins into a [`Fact::Union`] (issue #339), where it
+/// used to yield `None` for want of a two-base form. The result is `int|bool`
+/// rather than `int|false`: `Bool` carries no refinement, so the finite `false`
+/// widens to its base on the way into an arm (ADR-0085 §5).
 fn fact_admitting_false(f: &Fact) -> Option<Fact> {
     f.join(&Fact::Singleton(Val::Bool(false)))
 }
