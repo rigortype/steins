@@ -338,6 +338,10 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         // Object arms: no scalar-fact denotation; reflexive is-a floor.
         ContractTy::Class(name) => subsumes_class(a, name),
         ContractTy::ObjectAny => subsumes_object(a),
+        // The resource leaf: no scalar-fact denotation either, but — unlike a
+        // class — it has no hierarchy to be unsure about, so the answer is exact
+        // in both directions (ADR-0056 §8).
+        ContractTy::Resource => subsumes_resource(a),
 
         // `a` covers everything only if `a` is itself `mixed` (or the unknown
         // `Opaque`, honestly `Maybe`).
@@ -399,6 +403,31 @@ fn subsumes_class(a: &ContractTy, name: &str) -> Certainty {
             members.iter().fold(Yes, |acc, m| acc.and(subsumes_class(m, name)))
         }
         // Scalars / arrays / null / literals never cover object instances.
+        _ => No,
+    }
+}
+
+/// Whether `a` subsumes every resource. Exact, because a resource is a **leaf**:
+/// there is no resource hierarchy for an oracle to be unsure about, so the only
+/// `Maybe` is the honest one an [`ContractTy::Opaque`] arm forces.
+///
+/// Both cuts of `mixed` keep every resource: no resource is null, and every
+/// resource is truthy — a *closed* one included, which is the case worth stating
+/// (`$h = fopen(…); fclose($h); (bool) $h === true` at 8.5.9). So
+/// `non-empty-mixed` covers the leaf exactly as `non-null-mixed` does.
+fn subsumes_resource(a: &ContractTy) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+    match a {
+        ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::Resource => Yes,
+        ContractTy::Opaque => Maybe,
+        ContractTy::Union(members) => {
+            members.iter().fold(No, |acc, m| acc.or(subsumes_resource(m)))
+        }
+        ContractTy::Inter(members) => {
+            members.iter().fold(Yes, |acc, m| acc.and(subsumes_resource(m)))
+        }
+        // Scalars, arrays, null, literals, classes and `object` all denote
+        // worlds a resource is not in.
         _ => No,
     }
 }
@@ -529,7 +558,8 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
-        | ContractTy::ObjectAny => No,
+        | ContractTy::ObjectAny
+        | ContractTy::Resource => No,
     }
 }
 
@@ -556,7 +586,8 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
-        | ContractTy::ObjectAny => true,
+        | ContractTy::ObjectAny
+        | ContractTy::Resource => true,
         // Only the `*-closure` spellings refuse an array outright.
         ContractTy::CallableTy { obl, .. } => obl.closure_only,
         ContractTy::Union(m) => m.iter().all(array_incapable),

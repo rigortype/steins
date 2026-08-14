@@ -256,6 +256,28 @@ pub enum ContractTy {
     Class(String),
     /// The `object` keyword and object shapes.
     ObjectAny,
+    /// `resource` — a legacy PHP resource handle, and the one type PHP itself
+    /// **cannot spell** in a declaration (ADR-0056 §8).
+    ///
+    /// It is a leaf, deliberately: `open-resource` and `closed-resource` lower
+    /// here too. Steins models a resource's *kind*, never its open/closed state
+    /// nor its stream flavour, so a third variant would be a distinction with no
+    /// relation behind it.
+    ///
+    /// # Why it is a definite `No` for values and a `Maybe` for objects
+    ///
+    /// No [`steins_domain::Val`] is a resource — the value lattice is scalars,
+    /// null and arrays — so [`admits_val`] answers a definite `No` for every one
+    /// of them, and it is a *true* No: PHP rejects a string, an int, an array or
+    /// null at a resource-consuming boundary in weak mode exactly as in strict
+    /// (probed at 8.5.9). What is deliberately NOT decided here is the object
+    /// case, which this crate cannot see anyway (no object inhabitant): PHP 8
+    /// migrated most resources to objects while docblocks kept saying
+    /// `@param resource $ch`, so an object judged against this leaf must stay
+    /// `Maybe` in the lane that owns objects (`steins-infer`'s
+    /// `unrepresentable_verdict`) — a stale docblock is rot to route around, not
+    /// a programmer to convict.
+    Resource,
     /// `callable` and callable signatures: strings and arrays are `Maybe`
     /// (a string may name a function, a pair-array a method), other
     /// scalars `No`.
@@ -363,7 +385,7 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 }
 
 /// Type-operator/pseudo-type spellings this crate **recognizes as vocabulary**
-/// but does not (yet) model any relation for — `int-mask<...>`, `resource`,
+/// but does not (yet) model any relation for — `int-mask<...>`,
 /// Psalm's `properties-of<T>`, … — checked by both catch-alls below (the
 /// identifier table and the generic table share one normalized-name space, so
 /// one list serves both).
@@ -371,14 +393,23 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// Without this list, each of these names would fall through the catch-all to
 /// [`ContractTy::Class`] — a **nonexistent-class reference**, which is a hazard,
 /// not mere silence: the class leg of acceptance answers a definite `No` for any
-/// non-object value (`admits_val`/`accepts_class_name`), so `@param resource $h`
-/// would report a false positive on every scalar/array argument the checker
+/// non-object value (`admits_val`/`accepts_class_name`), so `@param hasOffset(1) $a`
+/// would report a false positive on every array argument the checker
 /// could resolve. This is the same wrong-No hazard handled for
 /// `key-of`/`value-of` (ADR-0062), applied to the names PHPStan's own
 /// curation corpus already documents as "falls back to a nonexistent-class
 /// reference" (`php-typing-conformance/conformance/results/steins/*.toml`,
 /// `status` field) — Steins does not model these constructs, so the honest
 /// floor is [`ContractTy::Opaque`] (always `Maybe`), never a manufactured `No`.
+///
+/// `resource` and its two state spellings **left this list** with ADR-0056 §8.
+/// They were here for the wrong-No hazard above, and the hazard turned out to be
+/// mis-read: a scalar handed to `@param resource $h` is a *real* TypeError at
+/// every boundary PHP has (probed at 8.5.9, weak mode included), so the `No` the
+/// class leg would have manufactured was the right answer reached by the wrong
+/// route. [`ContractTy::Resource`] now states it directly — and, unlike a `Class`
+/// arm, it also answers `Maybe` rather than `No` for the object case that PHP 8's
+/// resource-to-object migration left behind in stale docblocks.
 ///
 /// This is deliberately **not** the same thing as "any unrecognized name" — an
 /// unknown identifier must still fall through to `Class` (see the catch-alls'
@@ -400,9 +431,6 @@ const KNOWN_UNENFORCED: &[&str] = &[
     "hasoffsetvalue",
     "int-mask",
     "int-mask-of",
-    "resource",
-    "open-resource",
-    "closed-resource",
     "non-empty-literal-string",
     "arraylike-object",
     "properties-of",
@@ -442,6 +470,11 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "mixed" => ContractTy::Mixed,
         "never" | "never-return" | "never-returns" | "no-return" | "noreturn" => ContractTy::Never,
         "void" => ContractTy::Opaque,
+        // The three resource spellings collapse to one leaf (ADR-0056 §8): the
+        // open/closed distinction is a runtime state Steins never tracks, so
+        // `open-resource` and `closed-resource` would be arms with no relation of
+        // their own — and both of them ARE resources, which is the whole claim.
+        "resource" | "open-resource" | "closed-resource" => ContractTy::Resource,
         "scalar" => scalar(),
         "array-key" => array_key(),
         // The three subtraction spellings (census bucket x). `non-null-mixed`
@@ -1330,15 +1363,120 @@ mod known_unenforced_tests {
     #[test]
     fn known_unenforced_identifiers_lower_to_opaque() {
         for name in [
-            "resource",
-            "open-resource",
-            "closed-resource",
             "non-empty-literal-string",
             "arraylike-object",
             "stringable-object",
         ] {
             assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name} should lower to Opaque");
         }
+    }
+
+    /// The three spellings that LEFT this list with ADR-0056 §8. They were here
+    /// for the wrong-No hazard, and the hazard was mis-read: a scalar handed to
+    /// `@param resource` is a real TypeError, so the `No` the class catch-all
+    /// would have manufactured happened to be the right answer reached by the
+    /// wrong route. The leaf reaches it by the right one — and, unlike a `Class`
+    /// arm, keeps the object case undecided (that half lives in `steins-infer`,
+    /// which is where objects exist at all).
+    #[test]
+    fn the_three_resource_spellings_lower_to_one_leaf() {
+        for name in ["resource", "open-resource", "closed-resource", "RESOURCE", "\\resource"] {
+            assert_eq!(
+                lower_identifier(name),
+                ContractTy::Resource,
+                "{name} should lower to the resource leaf",
+            );
+        }
+        // Modeling the kind and not the state is a decision, so the round trip
+        // states it: all three spell back as the one thing that was modeled.
+        for spelling in ["resource", "open-resource", "closed-resource"] {
+            assert_eq!(
+                spell::spell_arms(std::slice::from_ref(&lower_str(spelling).unwrap())).as_deref(),
+                Some("resource"),
+            );
+        }
+    }
+
+    /// No value in the domain is a resource — and every one of them is a definite
+    /// `No`, not the `Maybe` the opaque floor used to give. There is no coercion
+    /// path in either mode (probed at 8.5.9), so this is set membership with no
+    /// asterisk.
+    #[test]
+    fn no_domain_value_inhabits_the_resource_leaf() {
+        let vals = [
+            Val::Int(0),
+            Val::Int(7),
+            Val::Float(1.5),
+            Val::Str("stream".into()),
+            Val::Str(String::new().into()),
+            Val::Bool(true),
+            Val::Bool(false),
+            Val::Null,
+            Val::Array(vec![]),
+        ];
+        for v in &vals {
+            assert_eq!(
+                admits_val(&ContractTy::Resource, v),
+                Certainty::No,
+                "{v:?} is not a resource",
+            );
+        }
+    }
+
+    /// The containment direction, which is what `dedup_arms`/`subtract` read. A
+    /// resource has no hierarchy, so both cuts of `mixed` are exact rather than
+    /// hedged: no resource is null, and every resource is truthy — the closed
+    /// ones too (`fclose($h); (bool) $h === true`).
+    #[test]
+    fn only_mixed_its_cuts_and_the_leaf_itself_cover_a_resource() {
+        for covering in ["mixed", "non-null-mixed", "non-empty-mixed", "resource"] {
+            assert_eq!(
+                normalize::subsumes(&lower_str(covering).unwrap(), &ContractTy::Resource),
+                Certainty::Yes,
+                "{covering} covers every resource",
+            );
+        }
+        for refusing in ["int", "string", "bool", "float", "null", "array", "object", "callable"] {
+            assert_eq!(
+                normalize::subsumes(&lower_str(refusing).unwrap(), &ContractTy::Resource),
+                Certainty::No,
+                "{refusing} covers no resource",
+            );
+        }
+        // A union covers it iff some arm does; `Opaque` says nothing.
+        assert_eq!(
+            normalize::subsumes(&lower_str("int|resource").unwrap(), &ContractTy::Resource),
+            Certainty::Yes,
+        );
+        assert_eq!(
+            normalize::subsumes(&ContractTy::Opaque, &ContractTy::Resource),
+            Certainty::Maybe,
+        );
+    }
+
+    /// The `false` subtraction the whole narrowing story rests on (ADR-0056 §8.4):
+    /// `resource|false` minus `false` must leave the resource arm standing, with
+    /// no resource-specific code involved.
+    #[test]
+    fn subtracting_false_leaves_the_resource_arm() {
+        struct NoHierarchy;
+        impl normalize::IsaOracle for NoHierarchy {
+            fn is_a(&self, _sub: &str, _sup: &str) -> Certainty {
+                Certainty::Maybe
+            }
+            fn is_final(&self, _class: &str) -> bool {
+                false
+            }
+        }
+        let sub = normalize::Subtrahend::Value(Val::Bool(false));
+        assert!(matches!(
+            normalize::subtract_arm(&sub, &ContractTy::Resource, &NoHierarchy),
+            normalize::ArmFate::Survives,
+        ));
+        assert!(matches!(
+            normalize::subtract_arm(&sub, &ContractTy::LitBool(false), &NoHierarchy),
+            normalize::ArmFate::Dies,
+        ));
     }
 
     #[test]

@@ -68,6 +68,14 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     // catch-all refusal below, which is reserved for arms with no faithful
     // spelling at all (`object`, a class, `callable`, …).
     let mut array_members: Vec<String> = Vec::new();
+    // The resource leaf (ADR-0056 §8.4). It reaches this speller only from the
+    // CONTRACT-ARM surface — `summarize_vals` produces arms from `Val`s, and no
+    // `Val` is a resource — so the docblock-writing callers
+    // (`render_value_domain`) can never route a resource here. What this arm does
+    // buy is the dump: a variable the argument families are about to convict for
+    // holding a resource must not dump as `unknown` (one relation, one speller —
+    // a second renderer beside this one is exactly what ADR-0030 refuses).
+    let mut has_resource = false;
     for arm in arms {
         match arm {
             ContractTy::Base(Base::Int) => has_int = true,
@@ -89,6 +97,7 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::IntIn(r) => int_ranges.push(int_range_keyword(*r)),
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
+            ContractTy::Resource => has_resource = true,
             ContractTy::ArrayAny { .. }
             | ContractTy::ListOf { .. }
             | ContractTy::MapOf { .. }
@@ -121,6 +130,11 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
         members.push("null".to_owned());
     }
     members.extend(array_members);
+    // Last, beside the array members and for the same reason: the scalar ladder
+    // above is ordered by PHP's own type list, and a resource sits outside it.
+    if has_resource {
+        members.push("resource".to_owned());
+    }
 
     if members.is_empty() { None } else { Some(members.join("|")) }
 }
@@ -330,6 +344,10 @@ fn spell_nested(ty: &ContractTy) -> String {
         ContractTy::MixedMinus(MixedCut::Falsy) => "non-empty-mixed".to_owned(),
         ContractTy::Class(name) => name.clone(),
         ContractTy::ObjectAny => "object".to_owned(),
+        // One spelling back for all three that lower here: the open/closed
+        // distinction is not modeled, so writing `open-resource` back would claim
+        // a state the leaf never carried.
+        ContractTy::Resource => "resource".to_owned(),
         ContractTy::CallableTy { obl, .. } => spell_callable(*obl).to_owned(),
         ContractTy::ArrayAny { .. }
         | ContractTy::ListOf { .. }
