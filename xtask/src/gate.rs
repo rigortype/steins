@@ -713,7 +713,50 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // entry back its meaning, which is the whole argument of the 2026-08-09
     // reseed two entries up: a baseline above the truth swallows exactly
     // that many real regressions in silence.
-    ("pxxxx-monorepo", 526),
+    //
+    // **526 -> 536 (+10), 2026-08-15, and it is two mechanisms, not one.**
+    // Measured as a finding-level diff rather than a count: the 2026-08-09 seed
+    // commit (86df4c6) re-run today still reports exactly 526 on the same corpus
+    // checkout, so the delta below is the analyzer's and nothing else's. Twelve
+    // rows are new, two are the *same two sites* with a refined rendering
+    // (`mixed` -> `int|string` inside a shape, two sites in one helper, counted
+    // before and after alike) — twelve minus those two is the +10. Every one of
+    // the twelve was read at its source:
+    //
+    // - **6 sites: an undeclared key under a sealed shape**, the exact class the
+    //   `composer/composer` entry at the top of this table records, arriving here
+    //   from the same array-literal work (issue #327: a literal keeps its fact when
+    //   its elements do not). Two hand a two-key literal to a `@phpstan-param`
+    //   sealing one optional key, the second key nowhere in the declaration; one
+    //   hands an extra key to a helper whose `@param` seals six other names; three
+    //   hand a **list of records to a `@param string[]`**, at three more sites of a
+    //   call whose fourth site was already counted in the 526. TRUE, and PHPStan
+    //   reports the identical class for sealed shapes.
+    // - **4 sites: a union the value domain could not hold until ADR-0085.**
+    //   Two request handlers (three sites in one, one in the other) read a request
+    //   parameter through a `trim()` over a parameter-helper chain and hand the
+    //   result to `@param int` / `@param float`. The value is a `string` at runtime
+    //   — `trim` returns one whatever it is given — so this is the numeric-string
+    //   case this table's own doc comment names as the archetypal TRUE
+    //   declared-contract violation. It was silent because a `string|bool` had no
+    //   carrier: the single-base wall meant the argument fell back to an
+    //   unjudgeable `mixed`, and Maybe is silence. `Fact::Union` gave it one, which
+    //   is also why the two re-rendered rows above move their spelling and not
+    //   their count.
+    //
+    // The corpus is byte-identical across the move (`corpus.local.toml`'s pin plus
+    // an overlay whose mtimes all predate the 2026-08-09 seed), `throw.*` unmoved
+    // at 43886 = baseline, possibly-grade unmoved at its own row, every OSS package
+    // at its own expectation.
+    //
+    // Read the attribution beside [`EFFECT_EXPECTED`]'s row before reading a delay
+    // into this one. Both families' fallout landed days before this reseed and
+    // waited for a gate run with the private corpus mounted: `corpus.local.toml` is
+    // gitignored, so the agent worktrees that landed #303, #327 and #341 all
+    // measured the public packages only. That is a hole in the workflow, not in the
+    // analyzer, and it is why this entry can cite mechanisms from three separate
+    // merges at once.
+    ("pxxxx-monorepo", 536),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
