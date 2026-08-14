@@ -1,10 +1,9 @@
 //! Grouped `use A\{B, C}` lowering (ADR-0049 §6 follow-up: a resolution bug fix).
 //!
-//! Grouped-use imports were previously skipped, so a class named by a grouped
-//! import fell back through namespace resolution and could **mis-resolve** to an
-//! unrelated class of the fallback name (a false-positive source the arity check
-//! surfaced). These tests lock the lowering: the grouped forms populate the same
-//! `class_imports` / `fn_imports` maps the plain sequence forms do.
+//! Grouped-use imports were previously skipped, so a grouped-imported class could
+//! **mis-resolve** to an unrelated class of the fallback name (a false-positive
+//! source the arity check surfaced). These tests lock the grouped forms into the
+//! same `class_imports` / `fn_imports` maps the plain sequence forms use.
 
 use steins_syntax::SourceTree;
 

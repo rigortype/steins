@@ -6,9 +6,9 @@ use crate::PhpStr;
 
 /// A scalar base type (the Refined/General layers' carrier).
 ///
-/// `Null` is deliberately absent: nullability is a *flag* on the abstract
-/// layers (a union with the one-inhabitant null type), and the null value
-/// itself lives in the finite layers as [`Val::Null`].
+/// `Null` is deliberately absent: nullability is a flag on the abstract layers (a union with
+/// the one-inhabitant null type); the null value lives in the finite layers as
+/// [`Val::Null`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Base {
     /// PHP `int` (64-bit).
@@ -21,23 +21,21 @@ pub enum Base {
     Bool,
 }
 
-/// An array key after PHP normalization (the trace IR performs the
-/// normalization; the domain only stores the result).
+/// An array key after PHP normalization (performed by the trace IR, not here).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Key {
     /// Integer key.
     Int(i64),
-    /// String key. A PHP array key is a byte string (ADR-0080), so two keys
-    /// spelled with different invalid-UTF-8 bytes stay distinct.
+    /// String key. A PHP array key is a byte string (ADR-0080), so two keys spelled with
+    /// different invalid-UTF-8 bytes stay distinct.
     Str(PhpStr),
 }
 
 /// A concrete PHP value.
 ///
-/// Equality and ordering are *representational*: floats compare by
-/// [`f64::total_cmp`] (so `NAN == NAN` here, and `-0.0 != 0.0` — the domain
-/// needs set semantics, not IEEE comparison; PHP-level `==`/`===` live in
-/// the condition evaluator, not on this type).
+/// Equality and ordering are *representational* (set semantics, not IEEE): floats compare by
+/// [`f64::total_cmp`], so `NAN == NAN` and `-0.0 != 0.0`. PHP-level `==`/`===` live in the
+/// condition evaluator, not on this type.
 #[derive(Debug, Clone)]
 pub enum Val {
     /// Integer value.

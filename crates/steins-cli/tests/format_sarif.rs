@@ -1,18 +1,15 @@
 //! `--format sarif` (ADR-0054 Part I §2, slice C2).
 //!
-//! The committed schema shape is pinned as a **snapshot fixture**
-//! (`tests/fixtures/sarif/basic.sarif.json`) rather than as a pile of field
-//! assertions: SARIF's value to a user is that an ingestion service reads it, and
-//! what breaks such a consumer is a field that quietly changed shape, not one a
-//! test forgot to look at. The snapshot sees everything. Structural properties
-//! that a snapshot cannot state — the rule table is deduped and sorted, every
-//! `ruleIndex` points at its own rule, the ADR's refusals hold — are asserted
-//! beside it.
+//! The committed schema shape is pinned as a snapshot fixture
+//! (`tests/fixtures/sarif/basic.sarif.json`), not field assertions: what breaks
+//! an ingestion consumer is a field that quietly changed shape, and the
+//! snapshot sees everything. Structural properties a snapshot can't state —
+//! rule table deduped and sorted, every `ruleIndex` points at its own rule,
+//! the ADR's refusals hold — are asserted beside it.
 //!
-//! `semanticVersion` is the one field that legitimately changes without anyone
-//! deciding anything, so the fixture carries `{{VERSION}}` and the test
-//! substitutes the crate version. Everything else is verbatim: if it moves,
-//! somebody moved it.
+//! `semanticVersion` legitimately changes without anyone deciding anything, so
+//! the fixture carries `{{VERSION}}` and the test substitutes the crate
+//! version. Everything else is verbatim: if it moves, somebody moved it.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -74,7 +71,7 @@ fn sarif_of(dir: &Path, args: &[&str]) -> serde_json::Value {
     serde_json::from_str(&r.stdout).unwrap_or_else(|e| panic!("valid SARIF json: {e}\n{}", r.stdout))
 }
 
-// ------------------------------------------------------------ the snapshot ---
+// The snapshot
 
 #[test]
 fn the_committed_schema_shape() {
@@ -83,19 +80,17 @@ fn the_committed_schema_shape() {
     let r = run_in(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
     let expected = fixture("basic.sarif.json").replace("{{VERSION}}", env!("CARGO_PKG_VERSION"));
     assert_eq!(r.stdout, expected, "the committed SARIF shape drifted");
-    // ADR-0050 §7 is identity, not a per-format decision: one fail-level finding
-    // displays, so `sarif` exits 1 exactly as `text` does. ADR-0054 §13 refuses
-    // `--exit-zero` — "upload anyway" is the workflow's `continue-on-error`.
+    // ADR-0050 §7 is identity, not per-format: `sarif` exits 1 like `text` does.
+    // ADR-0054 §13 refuses `--exit-zero` — "upload anyway" is `continue-on-error`'s job.
     assert_eq!(r.code, 1, "surfaced means fail, in every format");
 }
 
-// ------------------------------------------------------------ the rule table ---
+// The rule table
 
 #[test]
 fn rules_are_the_displayed_ids_deduped_and_sorted() {
-    // ADR-0054 §2: one `reportingDescriptor` per id present in the displayed
-    // results — not the full registry, not the surface's capture set (which has
-    // exactly one carrier already, the baseline capture header).
+    // ADR-0054 §2: one `reportingDescriptor` per id in the displayed results —
+    // not the full registry, not the surface's capture set.
     let dir = workdir("rules");
     write(&dir, "a.php", "<?php\nfunction width(int $w): int { return $w; }\nwidth(\"abc\");\nwidth(\"def\");\nvar_dump(1);\n");
     let v = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
@@ -112,8 +107,7 @@ fn rules_are_the_displayed_ids_deduped_and_sorted() {
         let idx = res["ruleIndex"].as_u64().expect("ruleIndex") as usize;
         assert_eq!(rules[idx]["id"], res["ruleId"], "ruleIndex agrees with ruleId");
     }
-    // The registry is much larger than two ids; the log carries only what it
-    // referenced.
+    // The registry is much larger than two ids; the log carries only what it referenced.
     assert!(rules.len() < 5, "not the whole registry: {ids:?}");
 }
 
@@ -125,36 +119,31 @@ fn the_run_carries_its_profile_and_the_accounting_envelope() {
     assert_eq!(set.code, 0, "baseline written");
     let v = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
     let run = &v["runs"][0];
-    // Parallel uploads under different profiles must not clobber each other's
-    // alert categories (§2).
+    // Parallel uploads under different profiles must not clobber alert categories (§2).
     assert_eq!(run["automationDetails"]["id"], "steins/default");
     assert_eq!(run["properties"]["profile"], "default");
     assert_eq!(run["properties"]["baselined"], 1, "counts, from the same envelope json carries");
     assert_eq!(run["properties"]["vendorSuppressed"], 0);
     assert_eq!(run["properties"]["suppressed"], 0);
-    // §7/§13: the suppression machinery stays unused. A baselined finding is a
-    // count, never a `suppressions` entry — a format that re-surfaced suppressed
-    // findings would be a fourth suppression channel, and would leak the
-    // baseline's contents into every upload.
+    // §7/§13: suppression machinery stays unused. A baselined finding is a count,
+    // never a `suppressions` entry — re-surfacing it would leak the baseline.
     assert!(run.get("suppressions").is_none(), "no run-level suppressions");
     for res in run["results"].as_array().expect("results") {
         assert!(res.get("suppressions").is_none(), "no per-result suppressions");
     }
-    // The `var_dump` is exempt from the baseline (ADR-0053 §8), so it still
-    // reports — and the run is exit-neutral because it is warn-fixed.
+    // `var_dump` is exempt from the baseline (ADR-0053 §8), so it still reports;
+    // exit-neutral because it's warn-fixed.
     let ids: Vec<&str> =
         run["results"].as_array().unwrap().iter().map(|r| r["ruleId"].as_str().unwrap()).collect();
     assert_eq!(ids, ["debug.var-dump"], "the baselined proof finding is gone, the dump is not");
 }
 
-// ------------------------------------------------------------- the mapping ---
+// The mapping
 
 #[test]
 fn the_debug_lane_is_carried_at_its_own_level() {
-    // ADR-0054 §3 and §13: `debug.var-dump` is `note` — not `warning`, which
-    // would misstate an answered question as a softly-surfaced claim, and not
-    // absent, which would hide the cause of a red run. The fail-fixed pair is
-    // `error`.
+    // ADR-0054 §3+§13: `debug.var-dump` is `note` — not `warning` (would misstate
+    // an answered question) and not absent (would hide a red run). Fail-fixed → `error`.
     let dir = workdir("debug");
     write(&dir, "a.php", "<?php\n$x = 5;\nvar_dump($x);\n\\PHPStan\\dumpType($x);\n");
     let v = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
@@ -192,8 +181,8 @@ fn a_warn_demoted_id_is_a_warning() {
 
 #[test]
 fn a_registry_declared_facet_rides_properties() {
-    // ADR-0050 §4, mirroring `json`: `"origin": "direct"` on the ids that
-    // declare a facet, absent on the ids that do not.
+    // ADR-0050 §4, mirroring `json`: `"origin": "direct"` on ids that declare a
+    // facet, absent otherwise.
     let dir = workdir("facet");
     write(&dir, "a.php", THROW_ONLY);
     let v = sarif_of(&dir, &["check", "--no-php", "--profile", "contracts", "--format", "sarif", "a.php"]);
@@ -202,14 +191,13 @@ fn a_registry_declared_facet_rides_properties() {
     assert_eq!(res["properties"]["origin"], "direct");
 }
 
-// -------------------------------------------------------- fingerprints ---
+// Fingerprints
 
 #[test]
 fn fingerprints_survive_an_unrelated_edit() {
-    // ADR-0054 §2: `partialFingerprints` reuses the ADR-0022 baseline hash. The
-    // hash exists precisely so identity survives unrelated edits — which is what
-    // alert tracking across runs needs, so the two consumers share one identity
-    // function. Adding a line far from the finding must not move it.
+    // ADR-0054 §2: `partialFingerprints` reuses the ADR-0022 baseline hash —
+    // identity surviving unrelated edits is what alert tracking needs too, so
+    // the two consumers share one identity function.
     let dir = workdir("fingerprint");
     write(&dir, "a.php", MIXED);
     let before = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
@@ -226,19 +214,18 @@ fn fingerprints_survive_an_unrelated_edit() {
     let after = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
     assert_eq!(fp(&after), original, "an unrelated edit does not move the fingerprint");
 
-    // And it *does* move when the flagged line's own neighborhood changes — that
-    // is the same intentional break the baseline has.
+    // Does move when the flagged line's neighborhood changes — the baseline's own break.
     write(&dir, "a.php", &MIXED.replace("width(\"abc\");", "width(\"abcd\");"));
     let changed = sarif_of(&dir, &["check", "--no-php", "--format", "sarif", "a.php"]);
     assert_ne!(fp(&changed), original, "the flagged line changed");
 }
 
-// ------------------------------------------------------------------ usage ---
+// Usage
 
 #[test]
 fn sarif_is_never_auto_selected() {
-    // ADR-0054 §6: `sarif` is a file artifact chosen deliberately for an upload
-    // step, not a log rendering — detection never picks it.
+    // ADR-0054 §6: `sarif` is a deliberate upload artifact, not a log —
+    // detection never picks it.
     let dir = workdir("no-autodetect");
     write(&dir, "a.php", MIXED);
     let out = Command::new(bin())

@@ -1,15 +1,11 @@
 //! End-to-end CLI tests for `steins transform loop-to-array-map` (ADR-0076).
 //!
-//! The differential fixture is the point of this file. ADR-0076 §5 asks for
-//! behaviour identity to be **measured, not argued**: the flagship rewrite is
-//! applied by the real binary and then *both* spellings are executed under the
-//! real `php`, with their outputs compared. An equivalence claim that is only
-//! reasoned about in a doc comment is a claim; an equivalence claim that runs is
-//! evidence.
-//!
-//! `php` is present in this environment and in CI (the sidecar needs it anyway);
-//! if it were missing these tests would fail loudly, which is the correct signal
-//! for a fixture whose whole job is to execute PHP.
+//! The differential fixture is the point: ADR-0076 §5 measures behaviour
+//! identity rather than arguing it — the rewrite runs through the real
+//! binary, then both spellings execute under the real `php` and their outputs
+//! are compared. `php` must be present here and in CI (the sidecar needs it
+//! too); if missing, these tests fail loudly, which is correct for a fixture
+//! whose job is to execute PHP.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -18,12 +14,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection
+/// (ADR-0054 §6) reads it and would else emit workflow commands instead of text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -83,9 +75,8 @@ impl Drop for TempProject {
     }
 }
 
-/// Execute a PHP file under the project's own `php` and return its stdout. A
-/// non-zero exit (a fatal, a TypeError) fails the test with the interpreter's own
-/// message — a rewrite that does not even run is the loudest possible failure.
+/// Executes a PHP file under the project's `php`, returning stdout. A non-zero
+/// exit fails the test with the interpreter's own message.
 fn php_output(path: &std::path::Path) -> String {
     let out = Command::new("php").arg(path).output().expect("run php");
     assert!(
@@ -99,9 +90,8 @@ fn php_output(path: &std::path::Path) -> String {
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
-/// The flagship fixture: an eligible loop plus a `var_export` of the result, so
-/// the program's observable output *is* the accumulated array — keys included,
-/// which is what the list-ness precondition exists to protect.
+/// The flagship fixture: a loop plus `var_export` of the result, so the
+/// output IS the accumulated array — keys included, list-ness protected.
 const FIXTURE: &str = "\
 <?php
 
@@ -133,7 +123,7 @@ var_export(run());
 echo \"\\n\";
 ";
 
-// ---- The differential fixture (ADR-0076 §5) --------------------------------
+// The differential fixture (ADR-0076 §5)
 
 #[test]
 fn both_spellings_produce_identical_output_under_the_real_php() {
@@ -145,8 +135,7 @@ fn both_spellings_produce_identical_output_under_the_real_php() {
     assert_eq!(r.code, 0, "stderr:\n{}", r.stderr);
 
     let after_src = proj.read("fixture.php");
-    // Both loops — the top-level one and the one inside a function — are
-    // rewritten, so the comparison below covers both scopes.
+    // Both loops — top-level and the one inside a function — are rewritten.
     assert_eq!(
         after_src.matches("array_map(fn ($row) => label($row), $rows);").count(),
         2,
@@ -160,15 +149,13 @@ fn both_spellings_produce_identical_output_under_the_real_php() {
         before_out, after_out,
         "the two spellings disagree under php:\nbefore:\n{before_out}\nafter:\n{after_out}"
     );
-    // Not vacuous: the fixture really printed the accumulated arrays.
     assert!(before_out.contains("'n=6'"), "fixture produced nothing to compare:\n{before_out}");
 }
 
 #[test]
 fn a_non_list_subject_would_have_changed_the_keys_and_is_refused() {
-    // The measurement behind the `subject-not-proven-list` gate: with a
-    // string-keyed subject the two spellings genuinely differ, so the refusal is
-    // not conservatism for its own sake.
+    // Measured behind `subject-not-proven-list`: a string-keyed subject makes
+    // the spellings differ.
     let proj = TempProject::new("keys");
     let loop_form = "<?php\n$xs = ['a' => 1, 'b' => 2];\n$out = [];\nforeach ($xs as $x) {\n    $out[] = $x * 2;\n}\nvar_export($out);\n";
     let map_form = "<?php\n$xs = ['a' => 1, 'b' => 2];\n$out = array_map(fn ($x) => $x * 2, $xs);\nvar_export($out);\n";
@@ -188,7 +175,7 @@ fn a_non_list_subject_would_have_changed_the_keys_and_is_refused() {
     assert!(r.stdout.contains("subject-not-proven-list"), "stdout:\n{}", r.stdout);
 }
 
-// ---- CLI surface -----------------------------------------------------------
+// CLI surface
 
 #[test]
 fn dry_run_prints_a_diff_and_writes_nothing() {
@@ -241,17 +228,10 @@ fn json_format_carries_the_plan_the_oracle_and_the_postcheck() {
 
 #[test]
 fn apply_writes_only_after_the_post_check_reports_ok() {
-    // ADR-0034 point 3a on this transform's own surface: the post-check runs in
-    // BOTH dry-run and `--apply`, and the write happens only behind it.
-    //
-    // The failing branch is deliberately not fixture-driven here, because no
-    // regression is constructible for this rewrite: everything the checker can
-    // see in the loop — literal arguments, arity, class references, effect
-    // origins — it still sees in the `array_map` form (the arrow function is a
-    // recognized invocation shape, so its origins edge straight back), while the
-    // arrow function's own scope is analyzed with an empty environment and can
-    // therefore prove strictly less, never more. A synthetic failure would be a
-    // test of the shared `post_check`, which is not this transform's contract.
+    // ADR-0034 point 3a: post-check runs in both dry-run and `--apply`, gating
+    // the write. No synthetic failing branch here — the arrow's own
+    // empty-environment scope can only prove less, never more; a synthetic
+    // failure would test the shared `post_check`, not this transform.
     let proj = TempProject::new("postcheck");
     let before = "<?php\nfunction w(int $n): int { return $n; }\n$xs = [1, 2];\n$out = [];\nforeach ($xs as $x) {\n    $out[] = w($x);\n}\nvar_export($out);\n";
     proj.write("lib.php", before);
@@ -270,7 +250,7 @@ fn apply_writes_only_after_the_post_check_reports_ok() {
 
 #[test]
 fn a_run_with_nothing_to_do_claims_no_post_check() {
-    // An empty plan short-circuits the post-check, so a refusal-only run must not
+    // An empty plan short-circuits the post-check: a refusal-only run must not
     // print a verification claim it never made.
     let proj = TempProject::new("nothing");
     proj.write("lib.php", "<?php\nfunction f(array $xs): void {\n    foreach ($xs as $x) {\n        echo $x;\n    }\n}\n");
@@ -280,11 +260,10 @@ fn a_run_with_nothing_to_do_claims_no_post_check() {
     assert!(r.stdout.contains("0 rewritten, 1 refused"), "oracle:\n{}", r.stdout);
 }
 
-// ---- The Asserted-subject opt-in (ADR-0076 amendment, issue #175) ----------
+// The Asserted-subject opt-in (ADR-0076 amendment, issue #175)
 
-/// A loop whose subject qualifies only at the Asserted stratum (a docblock
-/// `list<int>` over a native `array` hint), invoked with a *true* claim so the
-/// differential run below has behavior to compare.
+/// A loop whose subject qualifies only at the Asserted stratum (docblock
+/// `list<int>` over a native `array` hint), given a true claim to compare against.
 const ASSERTED_FIXTURE: &str = "\
 <?php
 
@@ -325,8 +304,6 @@ fn the_opt_in_flips_a_declared_list_from_refusal_to_labeled_rewrite() {
         "diff:\n{}",
         on.stdout
     );
-    // The label rides in the site's own entry, and the oracle line splits the
-    // lanes.
     assert!(on.stdout.contains("Asserted-subject admissions (1):"), "label:\n{}", on.stdout);
     assert!(on.stdout.contains("declared evidence"), "label:\n{}", on.stdout);
     assert!(on.stdout.contains("post-check cannot catch"), "label:\n{}", on.stdout);
@@ -340,8 +317,8 @@ fn the_opt_in_flips_a_declared_list_from_refusal_to_labeled_rewrite() {
 
 #[test]
 fn the_flag_alone_changes_no_output_without_asserted_evidence() {
-    // The binding byte-identity pin, measured in one run: over a proven-only
-    // project the two invocations print the same bytes and exit the same way.
+    // Binding byte-identity, measured in one run: over a proven-only project
+    // the two invocations print the same bytes and exit the same way.
     let proj = TempProject::new("optin-inert");
     proj.write(
         "lib.php",
@@ -356,9 +333,9 @@ fn the_flag_alone_changes_no_output_without_asserted_evidence() {
 
 #[test]
 fn an_admitted_true_claim_preserves_behavior_under_the_real_php() {
-    // The differential fixture, opt-in edition: with a *correct* `list<int>`
-    // claim the two spellings must agree under the real interpreter — which is
-    // exactly the conditional equivalence the trust label describes.
+    // Differential fixture, opt-in edition: with a correct `list<int>` claim,
+    // the spellings must agree under the real interpreter (the conditional
+    // equivalence the trust label describes).
     let proj = TempProject::new("optin-differential");
     let file = proj.write("fixture.php", ASSERTED_FIXTURE);
     let before_out = php_output(&file);

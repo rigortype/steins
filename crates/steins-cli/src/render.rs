@@ -1,42 +1,34 @@
 //! The `check` render seam (ADR-0054 Part I, slice C1).
 //!
-//! # Why a seam
-//!
-//! ADR-0054's first identity is that **a format is a serialization of the
-//! displayed surface, never a second surface**: the pipeline (vendor → profile →
-//! policy → inline ignores → baseline, ADR-0050 §6) decides what exists, and a
-//! format decides only how it is spelled. That identity is only as strong as the
-//! code shape behind it. While `run_check` ended in a `match format { Text =>
-//! print_text(…), Json => print_json(…) }` with nine positional arguments, each
-//! new format was a new branch of the command — free to consult one more fact,
-//! drop one finding, or compute its own exit contribution, with nothing in the
-//! type system objecting.
+//! ADR-0054's first identity: **a format is a serialization of the displayed
+//! surface, never a second surface** — the pipeline (vendor → profile → policy
+//! → inline ignores → baseline, ADR-0050 §6) decides what exists, a format only
+//! how it's spelled. A prior `match format { Text => print_text(…), Json =>
+//! print_json(…) }` with nine positional arguments left each format free to
+//! consult one more fact, drop a finding, or compute its own exit contribution,
+//! with nothing in the type system objecting.
 //!
 //! So the boundary is a value, not a call: `run_check` builds ONE
-//! [`CheckReport`] — the displayed findings, the active surface, the fix run, the
-//! accounting counters — and hands it to [`render`], which returns the bytes.
-//! Every format sees exactly the same report and nothing else; a format that
-//! wanted to hide a finding would have to be written to ignore a slice it was
-//! handed, which is visible in review rather than hidden in an argument list.
-//! The exit code is computed by `run_check` from that same report *after*
-//! rendering and is not a function of the format (ADR-0050 §7's "surfaced means
-//! fail" is identity — ADR-0054 §13 refuses `--exit-zero` and every other
+//! [`CheckReport`] — displayed findings, active surface, fix run, accounting
+//! counters — and hands it to [`render`], which returns the bytes. Every format
+//! sees exactly the same report; hiding a finding would require ignoring a
+//! slice it was handed, visible in review rather than hidden in an argument
+//! list. The exit code is computed by `run_check` from that same report *after*
+//! rendering and is never a function of the format (ADR-0050 §7's "surfaced
+//! means fail" is identity — ADR-0054 §13 refuses `--exit-zero` and every other
 //! format-dependent exit).
 //!
 //! # The formats
 //!
 //! * `text` — the human rendering, unchanged byte for byte.
 //! * `json` — the machine document, unchanged byte for byte.
-//! * `github` — GitHub Actions workflow commands (ADR-0054 §4), so a run
-//!   annotates a pull request's diff inline.
+//! * `github` — GitHub Actions workflow commands (ADR-0054 §4), annotating a
+//!   pull request's diff inline.
 //! * `sarif` — SARIF 2.1.0 for code-scanning upload (ADR-0054 §2), in
 //!   [`crate::sarif`].
 //!
-//! `text` and `json` moved here verbatim from `main.rs`; the extraction is
-//! byte-identical by construction (a `String` accumulated with `\n` per line and
-//! written with one `out!`, where the old code wrote one `outln!` per line) and
-//! `tests/format_recorded.rs` pins that against recorded output rather than
-//! trusting the argument.
+//! `text` and `json` moved here verbatim from `main.rs`, byte-identical by
+//! construction; `tests/format_recorded.rs` pins that against recorded output.
 
 use std::collections::HashMap;
 
@@ -47,14 +39,11 @@ use crate::{FixRun, sarif};
 
 /// Which spelling of the displayed surface `check` emits.
 ///
-/// Deliberately NOT the crate-root `Format` (which `annotate`, `transform` and
-/// `effect-diff` share): those commands render a *different* object — an
-/// annotated file, a diff plan, an effect delta — and `sarif`/`github` are
-/// mappings of *findings*. ADR-0054's deferred list keeps "SARIF for
-/// `transform`" explicitly outside this ADR ("transform's report is a diff/plan,
-/// not findings"), so a separate enum is what makes `steins transform --format
-/// sarif` a usage error at the parse site instead of an unreachable match arm
-/// somebody later fills in.
+/// Deliberately NOT the crate-root `Format` (shared by `annotate`, `transform`,
+/// `effect-diff`): those commands render a *different* object, and ADR-0054
+/// explicitly excludes "SARIF for `transform`" ("transform's report is a
+/// diff/plan, not findings"). A separate enum makes `steins transform --format
+/// sarif` a usage error at the parse site, not an unreachable match arm.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CheckFormat {
     Text,
@@ -78,9 +67,8 @@ impl CheckFormat {
 }
 
 /// The suppression accounting a run reports alongside its findings — counts
-/// only, never entries (ADR-0054 §7: a format that re-surfaced suppressed
-/// findings would be a fourth suppression channel beside the three ADR-0023
-/// fixes as the whole surface).
+/// only, never entries (ADR-0054 §7: re-surfacing findings here would open a
+/// fourth suppression channel beside the three ADR-0023 already fixes).
 pub struct Accounting<'a> {
     pub vendor_suppressed: usize,
     pub suppressed: usize,
@@ -119,9 +107,7 @@ pub fn render(report: &CheckReport<'_>, format: CheckFormat) -> String {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Format auto-detection (ADR-0054 §6)
-// ---------------------------------------------------------------------------
 
 /// The environment variable GitHub Actions sets on every step it runs.
 const GITHUB_ACTIONS_ENV: &str = "GITHUB_ACTIONS";
@@ -132,34 +118,27 @@ pub fn detect_from_env() -> CheckFormat {
     detect(std::env::var(GITHUB_ACTIONS_ENV).ok().as_deref())
 }
 
-/// Detection **detects the consumer, never the context** (ADR-0054 §6), and it
-/// only ever changes the spelling: the surface, the profile, the pipeline and
-/// the exit code are untouched by it (format invariance, §1, makes that
-/// checkable — `tests/format_github.rs` checks it).
+/// Detection **detects the consumer, never the context** (ADR-0054 §6): it only
+/// changes the spelling, never the surface, profile, pipeline or exit code
+/// (format invariance, §1, checked by `tests/format_github.rs`).
 ///
-/// Only `GITHUB_ACTIONS` detects. A generic `CI=true` is refused by §13: a
-/// detection exists to pick a rendering the environment can *consume*, and "some
-/// CI" names no rendering — `text` is already the right answer there. `sarif` is
-/// never auto-selected either; it is a file artifact chosen deliberately for an
-/// upload step, not a log rendering.
+/// Only `GITHUB_ACTIONS` detects. A generic `CI=true` is refused by §13 — "some
+/// CI" names no rendering, so `text` stays the answer there. `sarif` is never
+/// auto-selected either; it's a file artifact for a deliberate upload step, not
+/// a log rendering.
 ///
-/// Taken as a pure function of the variable's value so the rule is unit-testable
+/// A pure function of the variable's value, so the rule is unit-testable
 /// without mutating the test process's environment.
 pub fn detect(github_actions: Option<&str>) -> CheckFormat {
-    // GitHub Actions sets the literal `true`. The comparison is
-    // case-insensitive rather than exact so a hand-rolled runner that spells it
-    // `TRUE` gets the annotations it plainly wants; anything else (including the
-    // `false` GitHub itself never writes) stays `text`, because a variable that
-    // does not say yes is not a consumer.
+    // Case-insensitive so a runner spelling it `TRUE` still gets annotations;
+    // anything else (including GitHub's own never-written `false`) stays `text`.
     match github_actions {
         Some(v) if v.eq_ignore_ascii_case("true") => CheckFormat::Github,
         _ => CheckFormat::Text,
     }
 }
 
-// ---------------------------------------------------------------------------
 // The level mapping (ADR-0054 §3)
-// ---------------------------------------------------------------------------
 
 /// How a finding is spelled to a CI ingestion surface: SARIF's `level` and the
 /// GitHub workflow command are the same decision under two names.
@@ -193,25 +172,19 @@ impl CiLevel {
 /// The ADR-0054 §3 mapping: **the level keys on ADR-0050 §7's level, with one
 /// debug-layer carve-out.**
 ///
-/// Layer is semantic identity, not severity (ADR-0050 §1), so layer never
-/// carries the level; the exit level does, because the CI level and the exit
-/// code answer the same question ("does CI act on this?") and must not disagree.
-/// The debug lane is the carve-out, and it is carried rather than omitted —
-/// ADR-0054 §13 refuses omission outright: a fail-level dump reds CI in every
-/// format, and a serializer that dropped the annotation would show a red run
-/// with nothing explaining it, the format hiding the cause of its own failure.
-/// A warn-level dump is an *answer to a question the code asked* (ADR-0053 §1)
-/// rather than a softly-surfaced claim, so it takes SARIF's third level, which
-/// exists for exactly that register.
+/// Layer is semantic identity, not severity (ADR-0050 §1), so the exit level
+/// decides, not the layer — CI level and exit code answer the same question
+/// ("does CI act on this?") and must not disagree. The debug lane is carried
+/// rather than omitted: ADR-0054 §13 refuses omission because a serializer that
+/// dropped the annotation would show a red run with nothing explaining it. A
+/// warn-level dump is an *answer to a question the code asked* (ADR-0053 §1),
+/// so it takes SARIF's third level (`note`), not `warning`.
 ///
-/// The `Layer` match is exhaustive on purpose (ADR-0053 §1's compiler-forced
-/// posture): a future layer cannot silently fall into a level.
-///
-/// The ADR's table names the debug ids of its day (`debug.type` /
-/// `debug.phpdoc-type` fail; `debug.var-dump` warns). It is written here as the
-/// general rule behind that table — debug + fail → `error`, debug + warn →
-/// `note` — which is what makes `debug.trace` (ADR-0074 §8, warn-fixed, landed
-/// after ADR-0054 was written) map to `note` without an amendment.
+/// The `Layer` match is exhaustive on purpose: a future layer cannot silently
+/// fall into a level. Written as the general rule behind the ADR's table
+/// (debug + fail → `error`, debug + warn → `note`) rather than an id list, so
+/// `debug.trace` (ADR-0074 §8, added after ADR-0054) maps correctly without an
+/// amendment.
 pub fn ci_level(id: &str, surface: &profile::Surface) -> CiLevel {
     let level = surface.level(id);
     match steins_infer::layer(id) {
@@ -226,15 +199,10 @@ pub fn ci_level(id: &str, surface: &profile::Surface) -> CiLevel {
     }
 }
 
-// ---------------------------------------------------------------------------
-// text
-// ---------------------------------------------------------------------------
-
 fn text(report: &CheckReport<'_>) -> String {
     let mut out = String::new();
     for d in report.displayed {
-        // The level distinction (ADR-0050 §7): fail-level prints `error[…]`,
-        // warn-level (a profile `warn = [...]` demotion) prints `warning[…]`.
+        // ADR-0050 §7: fail-level prints `error[…]`, warn-level `warning[…]`.
         let kind = match report.surface.level(d.id) {
             profile::Level::Fail => "error",
             profile::Level::Warn => "warning",
@@ -248,16 +216,13 @@ fn text(report: &CheckReport<'_>) -> String {
     out
 }
 
-/// Everything `text` prints after the findings: the `--fix` run's report and the
-/// suppression accounting. Shared with `github`, whose §4 rendering is "one
-/// workflow command per displayed finding, then the same plain accounting lines
-/// `text` prints" — plain lines are inert in a workflow log, and the accounting
-/// must not become format-dependent.
+/// Everything `text` prints after the findings: the `--fix` run's report and
+/// the suppression accounting. Shared with `github` (§4: plain lines are inert
+/// in a workflow log, and accounting must not become format-dependent).
 fn plain_tail(out: &mut String, report: &CheckReport<'_>) {
-    // What `--fix` fixed (ADR-0010): each applied finding on its own line, in
-    // the same position spelling as a finding, marked `fixed[…]`. A refusal
-    // prints its named reason and the diagnostics the edits would have
-    // surfaced (ADR-0034's Refusal discipline). Both empty on a plain run.
+    // ADR-0010: each applied finding marked `fixed[…]`; a refusal prints its
+    // named reason and the diagnostics the edits would have surfaced. Both
+    // empty on a plain run.
     for d in report.fixed {
         out.push_str(&format!(
             "{}:{}:{}: fixed[{}]: {}\n",
@@ -273,8 +238,8 @@ fn plain_tail(out: &mut String, report: &CheckReport<'_>) {
             ));
         }
     }
-    // Suppression accounting (ADR-0022/0023/0015), each line printed only when
-    // nonzero. Vendor is the first channel (ADR-0015), so it prints first.
+    // Suppression accounting (ADR-0022/0023/0015): each line prints only when
+    // nonzero; vendor (ADR-0015) prints first.
     let a = &report.accounting;
     if a.vendor_suppressed > 0 {
         out.push_str(&format!(
@@ -294,15 +259,13 @@ fn plain_tail(out: &mut String, report: &CheckReport<'_>) {
             a.stale
         ));
     }
-    // The drowns-loudly notice (ADR-0050 §8), printed after the accounting.
+    // Drowns-loudly notice (ADR-0050 §8), after the accounting.
     if let Some(notice) = a.surface_notice {
         out.push_str(&format!("{notice}\n"));
     }
 }
 
-// ---------------------------------------------------------------------------
 // json
-// ---------------------------------------------------------------------------
 
 /// One finding as a `--format json` object. Shared by the `findings` array,
 /// the `--fix` run's `fixed` array, a refusal's `new_diagnostics`, and the MCP
@@ -310,8 +273,7 @@ fn plain_tail(out: &mut String, report: &CheckReport<'_>) {
 pub fn finding_json(d: &Diagnostic, surface: &profile::Surface) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "id": d.id,
-        // ADR-0050 §2: the diagnostic layer, additive. Every emitted id is
-        // registered (totality test), so this is always present.
+        // ADR-0050 §2: additive; always present (every emitted id is registered).
         "layer": steins_infer::layer(d.id).map(steins_infer::Layer::as_str),
         // ADR-0050 §7: the exit level (`fail|warn`), additive.
         "level": surface.level(d.id).as_str(),
@@ -320,15 +282,14 @@ pub fn finding_json(d: &Diagnostic, surface: &profile::Surface) -> serde_json::V
         "column": d.column,
         "message": d.message,
     });
-    // ADR-0050 §4: the registry-declared facet, additive — present as its own
-    // key (`"origin": "direct"|"propagated"`) only on ids that declare one.
+    // ADR-0050 §4: registry-declared facet, additive — own key
+    // (`"origin": "direct"|"propagated"`) only on ids that declare one.
     if let Some(facet) = d.facet {
         obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
     }
-    // ADR-0010: the fix payload, additive — present only on findings that carry
-    // one (v1: the explicit dump pair). The edit objects mirror steins-edit's
-    // `Edit` serialization (`path` + `span {start, end}` + `replacement`), so a
-    // consumer applies them with the same splice the transform surface speaks.
+    // ADR-0010: fix payload, additive. Edit objects mirror steins-edit's `Edit`
+    // serialization (`path` + `span {start, end}` + `replacement`) so a consumer
+    // applies them with the same splice the transform surface speaks.
     if let Some(fix) = &d.fix {
         let edits: Vec<serde_json::Value> = fix
             .edits
@@ -357,10 +318,8 @@ fn json(report: &CheckReport<'_>) -> String {
         "suppressed": report.accounting.suppressed,
         "baselined": report.accounting.baselined,
     });
-    // The `--fix` run report, present only when the flag was passed (a plain
-    // run's document is byte-identical to before): whether the edits were
-    // written, the findings they resolved, and — on refusal — the named reason
-    // with the diagnostics the edits would have surfaced.
+    // `--fix` report, present only when the flag was passed (a plain run's
+    // document is byte-identical to before).
     if let Some(run) = report.fix_run {
         let fixed_arr: Vec<serde_json::Value> =
             report.fixed.iter().map(|d| finding_json(d, surface)).collect();
@@ -382,21 +341,18 @@ fn json(report: &CheckReport<'_>) -> String {
     match serde_json::to_string_pretty(&doc) {
         Ok(s) => format!("{s}\n"),
         Err(e) => {
-            // Unreachable for a `serde_json::Value` tree, and kept as the
-            // pre-seam code had it: report on stderr, put nothing on stdout.
+            // Unreachable for a `serde_json::Value` tree; kept for parity with
+            // the pre-seam code.
             errln!("steins: failed to serialize json: {e}");
             String::new()
         }
     }
 }
 
-// ---------------------------------------------------------------------------
 // github (ADR-0054 §4)
-// ---------------------------------------------------------------------------
 
-/// GitHub's documented escaping has **two registers** (ADR-0054 §4, committed
-/// verbatim as fixtures in `tests/format_github.rs`): the message is *data*, and
-/// `%`, `\r`, `\n` are what a workflow command's data may not carry literally.
+/// GitHub's documented escaping has **two registers** (ADR-0054 §4, fixtures in
+/// `tests/format_github.rs`): the message is *data*, escaping `%`, `\r`, `\n`.
 /// `%` goes first or it would re-encode the escapes it just wrote.
 fn escape_data(s: &str) -> String {
     s.replace('%', "%25").replace('\r', "%0D").replace('\n', "%0A")
@@ -410,11 +366,8 @@ fn escape_property(s: &str) -> String {
 
 fn github(report: &CheckReport<'_>) -> String {
     let mut out = String::new();
-    // One command per displayed finding, in the standard sorted order. No cap:
-    // ADR-0054 §5/§13 refuse steins-side truncation — GitHub's own per-type
-    // annotation limit is GitHub's, and a steins-side cap would be a silent,
-    // format-keyed suppression channel. `title` carries the id so an annotation
-    // is triageable without opening the log.
+    // One command per finding, no cap (ADR-0054 §5/§13 refuse a steins-side
+    // truncation, which would be a silent format-keyed suppression channel).
     for d in report.displayed {
         out.push_str(&format!(
             "::{} file={},line={},col={},title={}::{}\n",
@@ -426,12 +379,10 @@ fn github(report: &CheckReport<'_>) -> String {
             escape_data(&d.message),
         ));
     }
-    // Then the same plain accounting `text` prints. The `--fix` lines ride along
-    // for the same reason (ADR-0054 §4's "the accounting must not become
-    // format-dependent"): a fixed finding is *not* a finding of the code on disk
-    // any more, so annotating it would be a lie, but dropping the line would
-    // make `--format github` the one spelling that says nothing about what it
-    // just rewrote.
+    // Then the same plain accounting `text` prints (ADR-0054 §4). A fixed
+    // finding is not annotated (it's no longer true of the code on disk), but
+    // dropping the `--fix` line would leave this the one format saying nothing
+    // about what it just rewrote.
     plain_tail(&mut out, report);
     out
 }
@@ -446,8 +397,7 @@ mod tests {
         assert_eq!(detect(Some("TRUE")), CheckFormat::Github);
         assert_eq!(detect(Some("false")), CheckFormat::Text);
         assert_eq!(detect(None), CheckFormat::Text);
-        // A generic CI signal names no rendering (ADR-0054 §13) — detection sees
-        // only `GITHUB_ACTIONS`, so nothing else can reach this function.
+        // A generic CI signal names no rendering (ADR-0054 §13).
         assert_eq!(detect(Some("1")), CheckFormat::Text);
     }
 
@@ -456,8 +406,7 @@ mod tests {
         // Data: `%`, CR, LF.
         assert_eq!(escape_data("100% done"), "100%25 done");
         assert_eq!(escape_data("a\r\nb"), "a%0D%0Ab");
-        // `%` is escaped first, so an escape sequence in the input survives as
-        // literal text rather than being read back as an escape.
+        // `%` escaped first, so input escape sequences survive as literal text.
         assert_eq!(escape_data("%0A"), "%250A");
         // Data leaves the property delimiters alone.
         assert_eq!(escape_data("a:b,c"), "a:b,c");

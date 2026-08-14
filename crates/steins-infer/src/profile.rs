@@ -2,66 +2,57 @@
 //! config, selecting which post-inference findings a `check` run prints.
 //!
 //! A **profile** is config-resolved *data* — a selection over diagnostic layers
-//! (ADR-0050 §1, read from the registry) and ids — never a change to inference
-//! behavior (the trust-toggle refusal, ADR-0050 §10, holds). The default surface
-//! is proof + mechanics (§3): a bare `steins check` prints exactly the
-//! proven-runtime-break set plus anti-rot, and the contract layer (`phpdoc.*`,
-//! `throw.*`) is reached only through a named opt-up stage.
+//! (ADR-0050 §1) and ids — never a change to inference behavior (trust-toggle
+//! refusal, ADR-0050 §10). The default surface is proof + mechanics (§3): a bare
+//! `steins check` prints the proven-runtime-break set plus anti-rot; the contract
+//! layer (`phpdoc.*`, `throw.*`) needs a named opt-up.
 //!
 //! # Built-ins (data, §5 / G1 amendment)
 //!
 //! * `default` — proof + mechanics.
 //! * `throws-direct` — default **plus** `throw.undeclared` WHERE `origin = direct`
-//!   (the §4 facet selector, the only facet v1 defines). Measurement-justified by
+//!   (the only facet v1 defines, §4), justified by
 //!   `docs/notes/20260724-g1-throw-origin-measurement.md` (158 direct vs 43,805
 //!   propagated on the legacy monorepo).
 //! * `contracts` — default plus the whole contract layer.
 //! * `strict` — contracts plus the strict-floor ids (ADR-0062 A-G10): the offset
 //!   family's `offset.undeclared` / `offset.maybe-missing` leg (issue #51).
-//! * `pedantic` — contracts plus the house-style asks, a **branch off
-//!   `contracts`** rather than a rung above `strict` (see below).
+//! * `pedantic` — contracts plus the house-style asks; a **branch off
+//!   `contracts`**, not a rung above `strict` (see below).
+//! * `boundary` is still **reserved** (ADR-0042): selecting or defining it is a
+//!   config error until its ADR lands.
 //!
 //! # The rung ladder (ADR-0062 A-G10)
 //!
-//! Profiles select by **rung**, not by layer set: the registry gives every id a
-//! `surface_floor`, and a surface admits an id when `floor(id) <= rung`. The rung
-//! order is the cumulative chain `default ⊂ contracts ⊂ strict`. Selecting
-//! by rung (rather than by layer set) is what lets ONE layer hold ids at two rungs
-//! — the contract layer does, spanning `Floor::Contracts` and `Floor::Strict`.
+//! Profiles select by **rung**, not layer set: the registry gives every id a
+//! `surface_floor`, and a surface admits an id when `floor(id) <= rung`, over the
+//! cumulative chain `default ⊂ contracts ⊂ strict`. Rung selection (vs. layer set)
+//! is what lets ONE layer hold ids at two rungs (contract spans `Contracts` and
+//! `Strict`).
 //!
-//! **The built-ins are not one chain, and never were.** `throws-direct` branches
-//! off `default`, and `pedantic` branches off `contracts`. Both reach an id above
-//! their own rung through `enable`, which is orthogonal to the ladder — the rung
-//! answers "how far up the cumulative order", `enable` answers "and also this".
-//!
-//! `pedantic` is a branch on purpose. "Demand an explicit type declaration" and
-//! "show me the weaker some-paths-only claims" are independent axes: a team that
-//! wants its constants annotated has not thereby asked to see
-//! `variable.maybe-undefined`. Making `pedantic` a rung above `strict` would force
-//! exactly that bundling, and it is the same objection that kept its ids off
-//! `strict` in the first place. The cost is real and accepted: there is no built-in
-//! that means "everything on", and a project wanting one writes
-//! `extends = "strict"` with the pedantic ids in its own `enable`.
-//!
-//! `boundary` is still a **reserved** name (ADR-0042): selecting *or* defining it
-//! is a config error until its ADR lands.
+//! The built-ins are not one chain: `throws-direct` branches off `default`,
+//! `pedantic` off `contracts`, each reaching one id above its own rung via
+//! `enable` — orthogonal to the ladder (rung = how far up the chain, `enable` =
+//! "and also this"). `pedantic` branches on purpose: "demand explicit types" and
+//! "show weaker some-paths claims" are independent axes, so a rung above `strict`
+//! would force strict users to inherit pedantic asks too (why those ids stay off
+//! `strict`). No built-in means "everything on"; write `extends = "strict"` with
+//! the pedantic ids in your own `enable` for that.
 //!
 //! # User profiles (§5)
 //!
-//! `[profile.<name>]` in `steins.toml` with `extends` (a built-in or user
-//! profile), and `enable` / `disable` / `warn` as ADR-0022 prefix id-arrays.
-//! Cycles, unknown names, and unknown id patterns are config errors. Mechanics ids
-//! ignore `disable` (§1). **Facet selectors in user profiles are deferred with
-//! design** (§4/§11): v1 reaches the `origin` facet only through the built-in
-//! `throws-direct` profile, so a user `enable`/`disable`/`warn` entry accepts only
-//! a plain id pattern — a facet-shaped token (`throw.undeclared@direct`) is an
-//! unknown id pattern and rejected clearly. This is the lenient path the ADR names.
+//! `[profile.<name>]` in `steins.toml`, with `extends` (built-in or user profile)
+//! and `enable`/`disable`/`warn` as ADR-0022 prefix id-arrays. Cycles, unknown
+//! names, and unknown id patterns are config errors; mechanics ids ignore
+//! `disable` (§1). Facet selectors are **deferred** (§4/§11): v1 reaches `origin`
+//! only via the built-in `throws-direct`, so a facet-shaped token
+//! (`throw.undeclared@direct`) is rejected as an unknown id pattern.
 //!
 //! # Composition (§6)
 //!
 //! vendor filter → **profile surface** → `[[policy]]` scoped enable/disable →
-//! inline ignores → baseline. The `[[policy]]` stage (issue #15) is currently a
-//! no-op with a clear seam for scoped enable/disable (see the CLI).
+//! inline ignores → baseline. `[[policy]]` (issue #15) is currently a no-op with a
+//! seam for scoped enable/disable (see the CLI).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -78,8 +69,8 @@ use crate::{
 pub const DEFAULT: &str = "default";
 
 /// The reserved profile names (ADR-0042): selecting or defining one errors until
-/// its ADR lands. `strict` left this list at ADR-0062 S6 — A-G10 is its ADR — and
-/// is now a built-in; `boundary` is still deferred.
+/// its ADR lands. `strict` left this list at ADR-0062 S6 (now a built-in);
+/// `boundary` remains deferred.
 const RESERVED: &[&str] = &["boundary"];
 
 /// The built-in profile names (ADR-0050 §5 / G1 amendment, extended by ADR-0062
@@ -109,8 +100,7 @@ impl Level {
 /// A user-defined `[profile.<name>]` entry (ADR-0050 §5), config-shape only.
 #[derive(Debug, Clone, Default)]
 pub struct UserProfile {
-    /// The base profile this one extends (a built-in or user profile). `None`
-    /// extends `default`.
+    /// The base profile extended (built-in or user); `None` extends `default`.
     pub extends: Option<String>,
     /// ADR-0022 prefix id-arrays forced onto the surface.
     pub enable: Vec<String>,
@@ -135,8 +125,7 @@ pub enum ConfigError {
     ReservedDefinition(String),
     /// A built-in name was redefined as `[profile.<name>]`.
     BuiltinRedefinition(String),
-    /// A selected/extended profile name is neither a built-in nor a defined user
-    /// profile.
+    /// A selected/extended profile name is neither built-in nor user-defined.
     Unknown(String),
     /// An `extends` chain cycles. The vector is the chain up to the repeat.
     Cycle(Vec<String>),
@@ -160,10 +149,8 @@ impl fmt::Display for ConfigError {
                 f,
                 "[profile.{n}] redefines the built-in profile `{n}`; pick another name"
             ),
-            // Derived from `BUILTINS`, not spelled out: the hand-written list had
-            // already drifted once (it still read four names after `pedantic`
-            // landed), and a wrong hint here sends the reader looking for a profile
-            // that exists.
+            // Derived from `BUILTINS`, not hand-spelled: a hard-coded list already
+            // drifted once (missed `pedantic`), misdirecting readers.
             ConfigError::Unknown(n) => write!(
                 f,
                 "unknown profile `{n}` (built-ins: {}; or define [profile.{n}])",
@@ -189,8 +176,8 @@ pub struct Surface {
     pub name: String,
     /// The **rung** on the cumulative ladder `default ⊂ contracts ⊂ strict`
     /// (ADR-0062 A-G10): an id is admitted when its registry [`Floor`] is at or
-    /// below this. Replaces the pre-S6 layer *set* — see [`Surface::layers_on`] for
-    /// why that replacement is behavior-preserving.
+    /// below this. Replaces the pre-S6 layer *set* ([`Surface::layers_on`] covers
+    /// why that's behavior-preserving).
     rung: Floor,
     /// Id patterns forced on beyond the layer set (`throws-direct` uses this for
     /// `throw.undeclared`; user profiles for `enable`).
@@ -199,28 +186,22 @@ pub struct Surface {
     disable: Vec<String>,
     /// Id patterns demoted to `warn`.
     warn: Vec<String>,
-    /// The `origin = direct` facet selector (§4): when set, a surfaced
+    /// The `origin = direct` facet selector (§4), the only facet v1 defines,
+    /// reached only through the `throws-direct` built-in: when set, a surfaced
     /// `throw.undeclared` finding is kept only if its origin facet is `direct`.
-    /// The only facet v1 defines, reached only through the `throws-direct` built-in.
     origin_direct_only: bool,
 }
 
 /// Whether a layer prints on **every** surface (ADR-0050 §1: mechanics is anti-rot,
 /// not a strictness preference). Exhaustive on [`Layer`] on purpose: a new variant
-/// (a future `boundary` layer) becomes a *compile error* here — forcing a
-/// deliberate always-on/opt-in decision rather than a silent fall-through to off.
+/// becomes a *compile error* here, forcing a deliberate always-on/opt-in decision.
 fn layer_always_on(l: Layer) -> bool {
     match l {
         Layer::Mechanics => true,
         Layer::Proof | Layer::Contract => false,
-        // The debug lane (ADR-0053 §4/§8) is **never** captured in a baseline and
-        // never enters `surface_ids()`, so it stays off *this* predicate — which
-        // governs `surface_ids()` (the baseline capture set) and the surface-aware
-        // staleness partition. Its DISPLAY is handled separately in
-        // [`Surface::is_surfaced`] (default-ON on every profile, the explicit pair
-        // profile-inert, `debug.var-dump` disableable — §4). Keeping capture and
-        // display split is exactly the §4/§8 exemption: a dump is displayed but never
-        // baselined. The exhaustive match still forces this variant to be stated.
+        // Debug (ADR-0053 §4/§8) never enters capture (`surface_ids()`/staleness);
+        // its DISPLAY is decided separately, unconditionally, in
+        // [`Surface::is_surfaced`] — capture/display stay split.
         Layer::Debug => false,
     }
 }
@@ -238,11 +219,10 @@ impl Surface {
         match name {
             // proof + mechanics (§3 / G1 amendment: unconditional).
             "default" => Some(base(Floor::Default)),
-            // default + the whole contract layer, as it stood before S6 — which is
-            // exactly "every id whose floor is at or below `contracts`".
+            // default + the whole contract layer, as it stood before S6.
             "contracts" => Some(base(Floor::Contracts)),
-            // contracts + the strict-floor ids (ADR-0062 A-G10). Strictly cumulative:
-            // it adds ids, never removes or re-levels one.
+            // contracts + the strict-floor ids (ADR-0062 A-G10): cumulative, adds
+            // ids only.
             "strict" => Some(base(Floor::Strict)),
             // default + throw.undeclared WHERE origin = direct (the §4 facet).
             "throws-direct" => {
@@ -251,13 +231,9 @@ impl Surface {
                 s.origin_direct_only = true;
                 Some(s)
             }
-            // contracts + the house-style asks. A BRANCH off `contracts`, not a rung
-            // above `strict`: "demand an explicit type declaration" and "show me the
-            // weaker some-paths claims" are independent axes, and a rung would force
-            // whoever wants the first to take the second. So the rung stays
-            // `Contracts` and the pedantic-floor ids are named — the `throws-direct`
-            // shape, one `enable` line per id, `Floor::Pedantic` keeping every one of
-            // them off the other three built-ins.
+            // contracts + the house-style asks by name, one `enable` line per id
+            // (the `throws-direct` shape) — a branch, not a rung above `strict`
+            // (module doc: "pedantic branches on purpose").
             "pedantic" => {
                 let mut s = base(Floor::Contracts);
                 s.enable.push(UNTYPED_CLASS_CONSTANT_ID.to_owned());
@@ -267,31 +243,21 @@ impl Surface {
         }
     }
 
-    /// Whether id `id` is on this surface, **facet-agnostic** (§8): the id-level
-    /// question, used to compute the baseline capture id-set and the dormant/stale
-    /// partition. Mechanics is unconditionally on (disable-exempt, §1/§5).
+    /// Whether id `id` is on this surface, **facet-agnostic** (§8): drives the
+    /// baseline capture id-set and the dormant/stale partition. Mechanics is
+    /// unconditionally on (disable-exempt, §1/§5).
     ///
-    /// The layer-set membership test this used to run became the ladder test
-    /// `floor(id) <= rung` at ADR-0062 S6. That substitution is behavior-preserving
-    /// for every pre-S6 id — proof/mechanics ids carry `Floor::Default` and were in
-    /// every built-in's layer set; contract ids carry `Floor::Contracts` and were in
-    /// `contracts`'s alone — and `tests/profile.rs` pins it id-by-id against the
-    /// registry rather than trusting the argument.
+    /// The pre-S6 layer-set test became the ladder test `floor(id) <= rung` at
+    /// ADR-0062 S6 — behavior-preserving for every pre-S6 id, pinned id-by-id
+    /// against the registry by `tests/profile.rs`.
     #[must_use]
     pub fn surfaces_id(&self, id: &str) -> bool {
         let Some(l) = layer(id) else { return false };
-        // The debug lane's capture exemption (§4/§8) is a LAYER property, decided
-        // BEFORE `enable`/`disable` are even consulted — unlike the ladder below, it
-        // is not something a profile can vote on. A prior revision let an explicit
-        // `enable = ["debug.type"]` pattern force `on` back to `true` past this
-        // point (issue #108 review): `pattern_is_known` accepts any registered id,
-        // debug ids included, so that pattern validates in a real `steins.toml` and
-        // reached `layers_on()` / `surface_ids()` — the debug lane's own doc
-        // comments on those two functions claim it never does. Returning here,
-        // before `layer_always_on` and the ladder, closes the corner instead of
-        // documenting it: no pattern in any channel can pull a debug id into the
-        // capture surface. Its DISPLAY is unaffected — that is decided separately
-        // and unconditionally in [`Surface::is_surfaced`].
+        // Debug's capture exemption is a LAYER property decided before `enable`/
+        // `disable` are consulted (issue #108 regression: `enable = ["debug.type"]`
+        // used to leak a debug id past this point into `layers_on()`/
+        // `surface_ids()`). DISPLAY is unaffected — decided separately in
+        // [`Surface::is_surfaced`].
         if l == Layer::Debug {
             return false;
         }
@@ -320,13 +286,11 @@ impl Surface {
     /// `throw.undeclared` finding is kept only when its origin facet is `direct`.
     #[must_use]
     pub fn is_surfaced(&self, d: &Diagnostic) -> bool {
-        // The debug lane (ADR-0053 §4) is default-ON on every profile but never in
-        // `surfaces_id` (baseline-exempt, §8). The explicit pair is profile-inert (no
-        // profile disables or demotes it, like mechanics); `debug.var-dump` is the one
-        // profile-disableable dump (`disable = ["debug.var-dump"]`), ON by default in
-        // every built-in. It stays the ONE (ADR-0074 §8): `debug.trace` has no
-        // disable escape hatch — an annotation is always an authored question,
-        // with no incidental case to decline; the remedy is deleting the comment.
+        // Debug (ADR-0053 §4) is default-ON on every profile, never in
+        // `surfaces_id` (baseline-exempt, §8). The explicit pair is profile-inert;
+        // `debug.var-dump` is the ONE profile-disableable dump (ADR-0074 §8:
+        // `debug.trace` has no escape hatch — an annotation is always an authored
+        // question; the remedy is deleting the comment).
         if let Some(Layer::Debug) = layer(d.id) {
             if d.id == DEBUG_VAR_DUMP_ID {
                 return !self.disable.iter().any(|p| pattern_matches(p, d.id));
@@ -346,28 +310,23 @@ impl Surface {
     /// `warn = [...]` pattern matches. A pure function of the id (warn matches ids).
     #[must_use]
     pub fn level(&self, id: &str) -> Level {
-        // The debug lane's levels are FIXED (ADR-0053 §3), never touched by a profile
-        // `warn`/`enable` channel: the explicit pair fails (a committed call names a
-        // function that does not exist at runtime — a guaranteed fatal), `var_dump`
-        // warns (exit-neutral forever — a leftover `var_dump` is working PHP; a lint
-        // rule is refused, ADR-0017). No channel promotes `debug.var-dump` to fail.
-        // `debug.trace` warns too, fixed (ADR-0074 §8): its trigger is a
-        // runtime-inert docblock, legal to commit — the pair's fail-forcing
-        // argument (a guaranteed runtime fatal) simply does not apply, and warn
-        // answers the asked question visibly without holding CI hostage.
+        // Debug levels are FIXED (ADR-0053 §3), untouched by any profile channel:
+        // the explicit pair fails (a named-but-nonexistent function is a guaranteed
+        // fatal); `var_dump` warns forever (a leftover call is working PHP — a lint
+        // rule is refused, ADR-0017); `debug.trace` warns too (ADR-0074 §8: its
+        // trigger is a runtime-inert docblock, so the fail-forcing argument doesn't
+        // apply).
         if id == DEBUG_VAR_DUMP_ID || id == DEBUG_TRACE_ID {
             return Level::Warn;
         }
         if id == DEBUG_TYPE_ID || id == DEBUG_PHPDOC_TYPE_ID {
             return Level::Fail;
         }
-        // Mechanics ids are profile-inert (ADR-0050 §1, diagnostic-policy.md "no
-        // profile disables OR DEMOTES mechanics ids"): `surfaces_id` already makes
-        // `disable` powerless via `layer_always_on`, and `warn` must be equally
-        // powerless, or a profile's `warn = ["suppress.*"]` demotes
-        // `suppress.unmatched` to a report-without-fail and a stale `@steins-ignore`
-        // stops failing CI — exactly the rot the mechanics layer exists to prevent
-        // (issue #108).
+        // Mechanics ids are profile-inert (ADR-0050 §1): `disable` is already
+        // powerless via `layer_always_on`, and `warn` must be too, or
+        // `warn = ["suppress.*"]` would demote `suppress.unmatched` and let a
+        // stale `@steins-ignore` stop failing CI (issue #108) — the rot mechanics
+        // exists to prevent.
         if layer(id) == Some(Layer::Mechanics) {
             return Level::Fail;
         }
@@ -379,24 +338,15 @@ impl Surface {
     }
 
     /// The named layers on this surface, sorted (ADR-0054 §9: the doctor's
-    /// "surface described" line). Mechanics is always-on regardless of membership
-    /// (§1); every rung carries it, so it always appears. The debug lane is
-    /// display-only and never a surface layer (§8 capture/display split), so it does
-    /// not appear here even though it always displays.
+    /// "surface described" line). Mechanics is always-on (§1); debug is
+    /// display-only and never a surface layer (§8), so it never appears here even
+    /// though it always displays.
     ///
-    /// Derived from the ids actually admitted by [`Surface::surfaces_id`] — every
-    /// registered id's layer, deduped — rather than a static rung-to-layer table.
-    /// The prior table read the rung alone, which was byte-identical for every
-    /// built-in EXCEPT `throws-direct`: that profile reaches `throw.undeclared` (a
-    /// contract-layer id) through its `enable` list rather than through its rung
-    /// (`rung = Floor::Default`, same as `default`), so the rung-only table reported
-    /// `[mechanics, proof]` and hid the contract layer the surface actually checks
-    /// (issue #108). Reading the real admitted ids fixes `throws-direct` and stays
-    /// byte-identical for `default` / `contracts` / `strict`, none of which uses
-    /// `enable` to reach outside its rung: `default` admits only `Floor::Default`
-    /// ids (proof + mechanics; debug is capture-excluded per `surfaces_id`),
-    /// `contracts` and `strict` additionally admit `Floor::Contracts`/`Floor::Strict`
-    /// contract-layer ids — the same two/three layers the old table named.
+    /// Derived from the ids [`Surface::surfaces_id`] actually admits, not a static
+    /// rung-to-layer table: a prior table read the rung alone and reported
+    /// `[mechanics, proof]` for `throws-direct` (rung `Floor::Default`, same as
+    /// `default`) even though it reaches `throw.undeclared` — a contract-layer id —
+    /// through `enable`, hiding the layer it actually checks (issue #108).
     #[must_use]
     pub fn layers_on(&self) -> Vec<&'static str> {
         let mut v: Vec<&'static str> = DIAGNOSTIC_REGISTRY
@@ -426,13 +376,10 @@ impl Surface {
 
 impl ProfileConfigs {
     /// Resolve the *selected* profile into its surface, after validating every
-    /// defined profile (ADR-0050 §5). Validation is whole-table so a broken but
-    /// unused `[profile.*]` is caught in CI review, not silently deferred until
-    /// selected.
-    ///
-    /// `selected` is the effective name (the `--profile` flag or `[check] profile`;
-    /// the caller resolves the flag-beats-config precedence). `None` selects
-    /// `default`.
+    /// defined profile (ADR-0050 §5) — whole-table, so a broken but unused
+    /// `[profile.*]` is caught in CI review, not deferred until selected.
+    /// `selected` is the effective name (`--profile` or `[check] profile`, caller
+    /// resolves precedence); `None` selects `default`.
     pub fn resolve(&self, selected: Option<&str>) -> Result<Surface, ConfigError> {
         // Whole-table validation: no defined profile may shadow a reserved or
         // built-in name, and every defined profile must resolve (patterns, extends
@@ -569,11 +516,7 @@ mod tests {
 
     #[test]
     fn mechanics_ignore_warn_too() {
-        // issue #108, defect 1: `disable` was already powerless against mechanics
-        // ids (the test above); `warn` was NOT — a profile's `warn = ["suppress.*"]`
-        // demoted `suppress.unmatched` to report-without-fail, so a stale
-        // `@steins-ignore` stopped failing CI. diagnostic-policy.md is explicit: "no
-        // profile disables OR DEMOTES mechanics ids." Both channels must be inert.
+        // issue #108: `warn` must be as powerless as `disable` against mechanics.
         let mut m = BTreeMap::new();
         m.insert(
             "quiet".to_owned(),
@@ -588,12 +531,8 @@ mod tests {
         );
     }
 
-    /// ADR-0078 §1.5, mechanized: a family prefix may span layers. `phpdoc.*` now
-    /// carries contract ids (`phpdoc.param-mismatch`) **and** mechanics ids (the
-    /// issue #186 hygiene family), and a profile pattern matches across both — but
-    /// the mechanics side stays `disable`-proof and undemotable. Without this the
-    /// new ids would have shipped with a one-line escape hatch the older mechanics
-    /// ids never had.
+    /// ADR-0078 §1.5: `phpdoc.*` spans contract and mechanics ids (issue #186);
+    /// mechanics stays disable/warn-proof even under a family pattern.
     #[test]
     fn a_phpdoc_family_disable_cannot_reach_the_mechanics_ids() {
         let mut m = BTreeMap::new();
@@ -644,10 +583,7 @@ mod tests {
 
     #[test]
     fn array_duplicate_key_ignores_disable_and_warn_too() {
-        // Issue #187: `array.duplicate-key` is a mechanics id (ADR-0078), so it
-        // inherits the same disable/warn-proof behavior as the rest of the
-        // layer for free — pinned here the same way `suppress.unmatched` is
-        // above, rather than trusted from the layer classification alone.
+        // Issue #187: pins the mechanics disable/warn-proof behavior for this id too.
         let mut m = BTreeMap::new();
         m.insert(
             "quiet".to_owned(),
@@ -681,8 +617,7 @@ mod tests {
 
     #[test]
     fn flag_selection_of_reserved_name_errors() {
-        // `boundary` is the one still-deferred reserved name (ADR-0042); `strict`
-        // left the list at ADR-0062 S6 and is exercised as a built-in below.
+        // `boundary` is the one still-deferred reserved name (ADR-0042).
         assert_eq!(
             empty().resolve(Some("boundary")),
             Err(ConfigError::ReservedName("boundary".to_owned()))
@@ -738,8 +673,7 @@ mod tests {
 
     #[test]
     fn facet_shaped_token_is_rejected_as_unknown_id() {
-        // The deferred-with-design decision (§4/§11): user profiles do not accept
-        // facet selectors; a facet-shaped token is an unknown id pattern.
+        // Deferred-with-design (§4/§11): user profiles reject facet selectors.
         let mut m = BTreeMap::new();
         m.insert(
             "p".to_owned(),
@@ -770,10 +704,7 @@ mod tests {
 
     #[test]
     fn debug_lane_displays_default_on_every_profile_but_is_baseline_exempt() {
-        // ADR-0053 §4/§8: the debug lane is default-ON on every built-in profile
-        // (display), yet NEVER captured in a baseline (`surfaces_id` / `surface_ids`
-        // stay false — the capture/display split). The explicit pair is profile-inert;
-        // `var_dump` is disableable but ON by default here (no built-in disables it).
+        // ADR-0053 §4/§8: default-ON display everywhere, never baseline-captured.
         for profile in [None, Some("contracts"), Some("throws-direct")] {
             let s = empty().resolve(profile).unwrap();
             for id in [DEBUG_TYPE_ID, DEBUG_PHPDOC_TYPE_ID, DEBUG_VAR_DUMP_ID, DEBUG_TRACE_ID] {
@@ -795,14 +726,8 @@ mod tests {
 
     #[test]
     fn an_enable_pattern_cannot_pull_a_debug_id_into_the_capture_surface() {
-        // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
-        // pattern `pattern_is_known` accepts (debug ids are registered, so the
-        // config layer never rejects it) and used to reach past `surfaces_id`'s
-        // debug carve-out — the `on = true` write happened unconditionally,
-        // regardless of layer. That leaked a debug id into `layers_on()` (doctor's
-        // surface line) and `surface_ids()` (the baseline capture header),
-        // contradicting both functions' own doc comments. `surfaces_id` now
-        // returns for the debug lane before `enable`/`disable` are even read.
+        // issue #108 (PR #133): `enable = ["debug.type"]` used to leak a debug id
+        // into `layers_on()`/`surface_ids()`; `surfaces_id` now excludes debug first.
         let mut m = BTreeMap::new();
         m.insert(
             "debug-enabled".to_owned(),
@@ -824,17 +749,12 @@ mod tests {
 
     #[test]
     fn debug_levels_are_fixed_pair_fails_var_dump_warns() {
-        // ADR-0053 §3: fixed levels, untouched by any profile channel. The explicit
-        // pair fails (a committed call is a runtime fatal); `var_dump` warns
-        // (exit-neutral forever). Even a `warn = ["debug.*"]` cannot demote the pair,
-        // and no channel promotes `var_dump` to fail.
+        // ADR-0053 §3: fixed levels, untouched by any profile channel.
         let s = empty().resolve(None).unwrap();
         assert_eq!(s.level(DEBUG_TYPE_ID), Level::Fail);
         assert_eq!(s.level(DEBUG_PHPDOC_TYPE_ID), Level::Fail);
         assert_eq!(s.level(DEBUG_VAR_DUMP_ID), Level::Warn);
-        // `debug.trace` is born at warn and fixed there (ADR-0074 §8): the
-        // trigger is a runtime-inert docblock, so the pair's fail-forcing
-        // argument does not apply.
+        // `debug.trace` warns too, fixed (ADR-0074 §8): a runtime-inert docblock.
         assert_eq!(s.level(DEBUG_TRACE_ID), Level::Warn);
 
         let mut m = BTreeMap::new();
@@ -850,8 +770,7 @@ mod tests {
 
     #[test]
     fn var_dump_is_profile_disableable_but_the_pair_is_inert() {
-        // ADR-0053 §4: `disable = ["debug.var-dump"]` turns the incidental dump off;
-        // the explicit pair is profile-inert (disable is ignored, like mechanics).
+        // ADR-0053 §4: `var_dump` is disableable; the explicit pair ignores disable.
         let mut m = BTreeMap::new();
         m.insert(
             "quiet".to_owned(),
@@ -874,11 +793,8 @@ mod tests {
 
     #[test]
     fn trace_annotation_has_no_profile_disable_escape_hatch() {
-        // ADR-0074 §8: unlike `debug.var-dump` (an incidental trigger whose
-        // authors never asked Steins anything), `@psalm-trace` is always an
-        // authored question — there is no incidental case to decline, so
-        // `disable = ["debug.trace"]` is a no-op like the explicit pair's. The
-        // remedy for an unwanted trace is deleting the comment.
+        // ADR-0074 §8: unlike `var-dump`, `@psalm-trace` is always an authored
+        // question, so `disable = ["debug.trace"]` is a no-op.
         let mut m = BTreeMap::new();
         m.insert(
             "mute".to_owned(),
@@ -908,12 +824,8 @@ mod tests {
 
     #[test]
     fn the_strict_floor_ids_are_invisible_below_strict() {
-        // Post-triage floors (the 2026-07-29 sweep ruling): `offset.undeclared`
-        // took its A-G10 END-state promotion to the contracts rung after
-        // measuring zero corpus findings; `offset.maybe-missing` stays at
-        // strict until the assertion-helper discharge lands. Below each id's
-        // floor, nothing displays or captures — default stays byte-identical
-        // to its pre-S6 output.
+        // 2026-07-29 ruling: `offset.undeclared` promoted to contracts (zero corpus
+        // findings); `offset.maybe-missing` stays strict until discharge lands.
         for profile in [None, Some("throws-direct")] {
             let s = empty().resolve(profile).unwrap();
             for id in [OFFSET_UNDECLARED_ID, OFFSET_MAYBE_MISSING_ID] {
@@ -930,8 +842,7 @@ mod tests {
 
     #[test]
     fn the_ladder_is_cumulative_across_the_whole_registry() {
-        // `default ⊂ contracts ⊂ strict` as SETS, checked over every registered id
-        // rather than asserted: a rung may only add ids, never drop or re-level one.
+        // `default ⊂ contracts ⊂ strict` as SETS, checked over every registered id.
         let d = empty().resolve(None).unwrap();
         let c = empty().resolve(Some("contracts")).unwrap();
         let s = empty().resolve(Some("strict")).unwrap();
@@ -945,8 +856,7 @@ mod tests {
 
     #[test]
     fn strict_names_the_same_three_layers_as_contracts() {
-        // `strict` is a FLOOR within the contract layer, not a fourth layer (A-G10),
-        // so the doctor's "surface described" line reads identically.
+        // `strict` is a FLOOR within the contract layer, not a fourth layer.
         let c = empty().resolve(Some("contracts")).unwrap();
         let s = empty().resolve(Some("strict")).unwrap();
         assert_eq!(c.layers_on(), s.layers_on());
@@ -956,8 +866,7 @@ mod tests {
 
     #[test]
     fn pedantic_branches_off_contracts_and_takes_nothing_from_strict() {
-        // The whole shape of the branch, in one test. `pedantic` is `contracts` plus
-        // the pedantic-floor ids by name — NOT a rung above `strict`.
+        // `pedantic` = `contracts` + pedantic-floor ids by name, not a strict+ rung.
         let c = empty().resolve(Some("contracts")).unwrap();
         let s = empty().resolve(Some("strict")).unwrap();
         let p = empty().resolve(Some("pedantic")).unwrap();
@@ -972,20 +881,15 @@ mod tests {
         for &(id, ..) in DIAGNOSTIC_REGISTRY {
             assert!(!c.surfaces_id(id) || p.surfaces_id(id), "`{id}`: contracts ⊄ pedantic");
         }
-        // But pedantic and strict are INCOMPARABLE — each holds what the other lacks.
-        // This is the property that would be lost by making `pedantic` a rung.
+        // pedantic and strict are INCOMPARABLE — a `pedantic`-as-rung would lose this.
         assert!(s.surfaces_id(OFFSET_MAYBE_MISSING_ID) && !p.surfaces_id(OFFSET_MAYBE_MISSING_ID));
         assert!(p.surfaces_id(UNTYPED_CLASS_CONSTANT_ID) && !s.surfaces_id(UNTYPED_CLASS_CONSTANT_ID));
-        // Still a contract-layer id reached by `enable`, so the layer list is the
-        // contracts one — the `throws-direct` lesson from issue #108.
         assert_eq!(p.layers_on(), vec!["contract", "mechanics", "proof"]);
     }
 
     #[test]
     fn no_builtin_carries_the_pedantic_rung() {
-        // The invariant that makes `Floor::Pedantic` mean "off unless named": if any
-        // built-in ever took it AS A RUNG, every pedantic-floor id would ride along
-        // and the branch would silently become a ladder top.
+        // Makes `Floor::Pedantic` mean "off unless named" (else every id rides along).
         for name in BUILTINS {
             let s = empty().resolve(Some(name)).unwrap();
             assert_ne!(s.rung(), Floor::Pedantic, "`{name}` must not rung at pedantic");
@@ -994,13 +898,8 @@ mod tests {
 
     #[test]
     fn throws_direct_names_the_contract_layer_it_actually_checks() {
-        // issue #108, defect 3: `throws-direct` sits at `Floor::Default` (same rung
-        // as `default`) and reaches `throw.undeclared` — a CONTRACT-layer id —
-        // through its `enable` list, not through its rung. The old rung-only table
-        // read only the rung and reported `[mechanics, proof]`, hiding the contract
-        // layer `doctor` (and this surface) actually checks. `layers_on` must derive
-        // from the ids really admitted by `surfaces_id`, which already accounts for
-        // `enable`.
+        // issue #108: `throws-direct` reaches `throw.undeclared` via `enable`, not
+        // its rung — `layers_on` must derive from `surfaces_id`, not a rung table.
         let td = empty().resolve(Some("throws-direct")).unwrap();
         assert_eq!(td.layers_on(), vec!["contract", "mechanics", "proof"]);
     }
@@ -1019,8 +918,7 @@ mod tests {
 
     #[test]
     fn a_default_profile_can_still_enable_one_strict_id_explicitly() {
-        // The `enable` channel is orthogonal to the ladder (it always was): a project
-        // that wants ONE strict id without the rest keeps that path.
+        // `enable` is orthogonal to the ladder — one strict id without the rest.
         let mut m = BTreeMap::new();
         m.insert(
             "just-undeclared".to_owned(),

@@ -1,16 +1,14 @@
 //! ADR-0062 S7 — the two lanes of the positional projections, at fixture level.
 //!
-//! * **The order-witnessed lane** (§2): an env-resolved `Singleton(Val::Array)`
-//!   argument reaches the sidecar fold exactly like a written literal, so the
-//!   order-dependent builtins the allowlist already admits answer over the real,
-//!   observed insertion order — `$a = ['x', 'y']; count($a)` is `2`, closing the
-//!   gap §1 measured.
-//! * **The order-declared lane** (§2/§4): a `Fact::Shape` base takes the sound
-//!   widening, and NEVER reads field declaration order — `array_key_first` of
+//! * **Order-witnessed lane** (§2): an env-resolved array argument reaches the
+//!   sidecar fold like a written literal, so order-dependent builtins see the
+//!   real insertion order — `$a = ['x', 'y']; count($a)` is `2`, closing §1's gap.
+//! * **Order-declared lane** (§2/§4): a `Fact::Shape` base takes the sound
+//!   widening and NEVER reads field declaration order — `array_key_first` of
 //!   `array{a: int, b: int}` is `'a'|'b'`, the declined import of §7.
 //!
-//! Zero emission (A-G9's corollary) is asserted on every fixture here, exactly as
-//! in `shape_reads.rs`: a shape-derived fact never premises a finding.
+//! Zero emission (A-G9) holds on every fixture here: a shape-derived fact never
+//! premises a finding.
 
 use std::collections::HashMap;
 
@@ -18,10 +16,9 @@ use steins_domain::{Base, Fact, IntRange, Refinement};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, ArrayKey, SourceTree};
 
-/// A mock PHP: it answers the reflected declarations the admission gates consult
-/// and *executes* the handful of allowlisted builtins the fold-seam tests use.
-/// The fold implementation is the point of those tests — it is what proves the
-/// argument arrived as a concrete, order-carrying array rather than as `$a`.
+/// A mock PHP: answers reflected declarations and *executes* the allowlisted
+/// builtins the fold-seam tests use, proving arguments arrive as a concrete,
+/// order-carrying array rather than as `$a`.
 #[derive(Default)]
 struct Mock {
     facts: HashMap<String, Fact>,
@@ -54,11 +51,9 @@ impl Mock {
             types.insert(f.to_owned(), "string|int|null".to_owned());
         }
         types.insert("count".to_owned(), "int".to_owned());
-        // `array_slice` is the one member of the family reading its siblings
-        // POSITIONALLY, so it carries the ADR-0064 Amendment B second leg as well
-        // as its `array` declaration: `array_slice(array $array, int $offset,
-        // ?int $length = null, bool $preserve_keys = false)` — four parameters, two
-        // required, measured at 8.5.8.
+        // `array_slice` reads its siblings POSITIONALLY (ADR-0064 Amendment B):
+        // `array_slice(array $array, int $offset, ?int $length = null, bool
+        // $preserve_keys = false)` — four parameters, two required, at PHP 8.5.8.
         let arities = HashMap::from([("array_slice".to_owned(), (4, 2))]);
         Mock { facts, types, arities, absence: true }
     }
@@ -82,9 +77,8 @@ fn scalar_text(v: &ArgValue) -> Option<String> {
 }
 
 impl Folder for Mock {
-    /// A miniature PHP for the three array-taking allowlist entries. Every one of
-    /// them reads the argument's **witnessed order**, which is exactly what the
-    /// fold seam has to deliver.
+    /// A miniature PHP for the three array-taking allowlist entries: each reads
+    /// the argument's **witnessed order**, what the fold seam must deliver.
     fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
         match (name.to_ascii_lowercase().as_str(), args) {
             ("count", [a]) => Some(ArgValue::Int(i64::try_from(entries(a)?.len()).ok()?)),
@@ -119,9 +113,8 @@ impl Folder for Mock {
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every assertion below keeps meaning what it meant before it landed.
+    // Drop `untyped.*` (ADR-0078, #200): it flags the fixtures' own deliberately
+    // untyped signatures, not the behavior under test.
     check_with(&tree, &[], "t.php", &mut Mock::sidecar())
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -210,8 +203,7 @@ fn a_folded_binding_keeps_flowing() {
 #[test]
 fn a_declared_shape_argument_is_not_a_fold_argument() {
     // The fold seam is the VALUE lane only: a declared shape has no witnessed
-    // order, so `count` takes the §4 shape transfer (an interval, `(asserted)`),
-    // never a fold.
+    // order, so `count` takes the §4 shape transfer (an interval), never a fold.
     assert_eq!(
         dump("array{a: int, b?: string}", "count($v)"),
         "dumped type: int<1, 2> (asserted)"
@@ -244,16 +236,14 @@ fn array_keys_of_a_sealed_shape_enumerates_the_key_set() {
         "dumped type: non-empty-list<'a'|'b'> (asserted)"
     );
     assert_eq!(dump("array<string, int>", "array_keys($v)"), "dumped type: list<string> (asserted)");
-    // `array-key` is `int|string`, which IS one fact as of issue #339 — the
-    // element bound carries it instead of widening to the unknown floor.
+    // `array-key` is one fact too (issue #339) — same widening escape as above.
     assert_eq!(dump("array", "array_keys($v)"), "dumped type: list<int|string> (asserted)");
 }
 
 #[test]
 fn array_key_first_is_some_key_of_the_set_never_the_declared_first() {
-    // **Negative test** (§2, §7 declined import 1): PHPStan
-    // answers `'a'` here and is wrong on `['b' => 2, 'a' => 1]`, which the shape
-    // admits just as well.
+    // **Negative test** (§2, §7 declined import 1): PHPStan answers `'a'` here
+    // and is wrong on `['b' => 2, 'a' => 1]`, which the shape admits just as well.
     assert_eq!(dump("array{a: int, b: int}", "array_key_first($v)"), "dumped type: 'a'|'b' (asserted)");
     assert_eq!(dump("array{a: int, b: int}", "array_key_last($v)"), "dumped type: 'a'|'b' (asserted)");
     // A possibly-empty shape adds `null` — PHP's own answer for `[]`.
@@ -285,10 +275,9 @@ fn array_reverse_and_array_flip_take_their_stated_widenings() {
     );
 }
 
-// The SEQUENCE lane (issue #165): isList == Yes is realizable order, so the
-// order-dependent projections consume it — a semantic guarantee every admitted
-// value satisfies, never the declaration artifact the divergence doc records
-// as PHPStan's real-FP class.
+// The SEQUENCE lane (issue #165): isList == Yes is realizable order, so
+// order-dependent projections consume it as a semantic guarantee, not the
+// declaration artifact PHPStan's divergence doc flags as its real-FP class.
 
 #[test]
 fn a_proven_sequence_projects_exactly() {
@@ -372,11 +361,9 @@ fn a_set_subject_keeps_todays_widenings() {
 
 #[test]
 fn the_declined_projections_say_nothing() {
-    // The value side of `array_search` is the family's ONE remaining v1 decline —
-    // honest silence, not a wrong widening. It shows the rung BELOW instead of
-    // `unknown`: ADR-0069's Asserted floor, and the `(asserted)` marker is the
-    // difference. That row is a multi-base union #73 counted and dropped and #79
-    // admitted; it did not move with anything in this family.
+    // `array_search`'s value side is the family's one remaining v1 decline: honest
+    // silence via ADR-0069's Asserted floor (the `(asserted)` marker), not a wrong
+    // widening. Multi-base union #73 dropped, #79 admitted — untouched here.
     assert_eq!(
         dump("array{a: int, b?: int}", "array_search(1, $v)"),
         "dumped type: int|string|false (asserted)"
@@ -410,9 +397,8 @@ fn array_slice_keeps_the_element_type_and_the_list_ness() {
 
 #[test]
 fn array_slice_never_keeps_non_emptiness() {
-    // `array_slice([1,2,3], 10) === []` and `array_slice([1,2,3], 1, 0) === []`: a
-    // non-empty subject slices to nothing, so the flag is dropped unconditionally —
-    // note the `non-empty-list<int>` subject and the plain `list<int>` result.
+    // A non-empty subject can slice to nothing (`array_slice([1,2,3],10)===[]`,
+    // `array_slice([1,2,3],1,0)===[]`), so non-emptiness drops unconditionally.
     assert_eq!(
         dump("non-empty-list<int>", "array_slice($v, 1)"),
         "dumped type: list<int> (asserted)"
@@ -449,9 +435,8 @@ fn preserve_keys_degrades_list_ness_honestly() {
 
 #[test]
 fn a_proven_list_sliced_from_offset_zero_keeps_list_ness_under_preserve_keys() {
-    // Claim 1: when the subject's shape PROVES `is_list`, the offset is a proven
-    // int `0`, and the flag is a literal `true`, the surviving keys are `0..k-1`
-    // unchanged — still a list, for any length sign
+    // Claim 1: a proven `is_list` subject, offset `0`, flag `true` keep `0..k-1`
+    // unchanged for any length sign — still a list
     // (`array_slice([1,2,3], 0, null, true) === [1,2,3]`,
     // `array_slice([1,2,3], 0, -1, true) === [0 => 1, 1 => 2]`).
     assert_eq!(
@@ -475,9 +460,8 @@ fn a_proven_list_sliced_from_offset_zero_keeps_list_ness_under_preserve_keys() {
 
 #[test]
 fn all_int_keys_alone_do_not_earn_the_preserved_prefix_claim() {
-    // **Negative test** (issue #137, claim 1's counterexample):
-    // `array_slice([5 => 2], 0, null, true) === [5 => 2]` — not a list. The claim
-    // needs the SUBJECT's proven `is_list`, and all-int keys do not prove it.
+    // **Negative test** (issue #137, claim 1's counterexample): all-int keys don't
+    // prove `is_list` (`array_slice([5 => 2], 0, null, true) === [5 => 2]`, not a list).
     assert_eq!(
         dump("array{5: int}", "array_slice($v, 0, null, true)"),
         "dumped type: array<int, int> (asserted)"
@@ -513,9 +497,8 @@ fn the_preserved_prefix_claim_declines_without_its_premises() {
 fn a_proven_zero_length_slice_is_the_empty_array() {
     // Claim 2: a proven `$length = 0` empties the window for ANY subject, offset,
     // and flag (`array_slice(['a' => 1], 0, 0) === []`,
-    // `array_slice([1,2,3], -2, 0, true) === []`), so the answer is the SEALED
-    // empty shape — which spells `array{}`: no keys at all, sealed —
-    // rather than the unsealed floor.
+    // `array_slice([1,2,3], -2, 0, true) === []`), so the answer is the sealed
+    // empty `array{}`, not the unsealed floor.
     assert_eq!(dump("array{a: int}", "array_slice($v, 0, 0)"), "dumped type: array{} (asserted)");
     assert_eq!(
         dump("list<int>", "array_slice($v, -2, 0, true)"),
@@ -550,10 +533,8 @@ fn the_zero_length_claim_declines_without_a_proven_zero() {
 
 #[test]
 fn array_slice_of_a_witnessed_array_projects_exactly() {
-    // **The §2 boundary at its sharpest**: the value lane is order-witnessed, so the
-    // projection is EXECUTED rather than widened. The offset and length are
-    // Singletons and the subject is a sealed all-required shape (the lift of a real
-    // array), which is the exact rung's whole premise.
+    // **The §2 boundary at its sharpest**: an order-witnessed subject with Singleton
+    // offset/length EXECUTES the projection rather than widening it.
     assert_eq!(
         dump_body("$a = ['x', 'y', 'z']; \\PHPStan\\dumpType(array_slice($a, 1));"),
         "dumped type: list{'y', 'z'}"
@@ -596,12 +577,9 @@ fn a_witnessed_subject_with_an_unproven_offset_falls_to_the_widening() {
 
 #[test]
 fn the_contract_lane_never_projects_positionally() {
-    // **Negative test** (§2, §7 declined import 1). A declared
-    // `array{a: int, b: string}` is a key SET: `['b' => 's', 'a' => 1]` is admitted
-    // just as well, so `array_slice($v, 1)` cannot be `array{b: string}` — the
-    // widening is the only sound answer, whatever the offset and length say. That is
-    // the boundary the grown seam did NOT move: what it reads is a flag and an
-    // offset, never field declaration order.
+    // **Negative test** (§2, §7 declined import 1): a declared `array{a: int, b:
+    // string}` is a key SET (`['b' => 's', 'a' => 1]` admitted too), so the grown
+    // seam still cannot spell field order — only a flag and an offset.
     assert_eq!(
         dump("array{a: int, b: string}", "array_slice($v, 1, 1)"),
         "dumped type: array<string, int|string> (asserted)"
@@ -614,9 +592,8 @@ fn the_contract_lane_never_projects_positionally() {
 
 #[test]
 fn array_slice_declines_outside_its_measured_signature() {
-    // An arity PHP itself rejects (`array_slice($v)` is an `ArgumentCountError`) has
-    // no return value for the rule to describe, and a fifth argument is a different
-    // function than the pinned `(4, 2)` signature.
+    // PHP itself rejects a missing-argument call (`ArgumentCountError`), and a 5th
+    // argument is outside the pinned `(4, 2)` signature — both decline.
     assert_eq!(dump("list<string>", "array_slice($v)"), "dumped type: array (asserted)");
     assert_eq!(
         dump("list<string>", "array_slice($v, 1, 2, true, 5)"),
@@ -626,10 +603,8 @@ fn array_slice_declines_outside_its_measured_signature() {
 
 #[test]
 fn an_engine_that_answers_no_arity_withholds_the_slice() {
-    // ADR-0064 Amendment B's second leg, on the one arm that reads its siblings
-    // positionally: a runner that cannot state `array_slice`'s signature withholds
-    // the rule exactly as one silent on the declaration does, and the ADR-0069 floor
-    // stands in its place.
+    // ADR-0064 Amendment B's second leg: a runner that cannot state `array_slice`'s
+    // signature withholds the rule, same as one silent on the declaration.
     let mut mock = Mock::sidecar();
     mock.arities.clear();
     let src = "<?php\n/** @param list<string> $v */\n\
@@ -643,10 +618,8 @@ fn an_engine_that_answers_no_arity_withholds_the_slice() {
 
 #[test]
 fn a_second_argument_or_a_nullable_base_declines() {
-    // The seam is single-argument by construction, and a nullable base may be
-    // `null` (a TypeError, not a projection). What is withheld is the PROJECTION —
-    // the key structure this family computes from the argument's own shape — and the
-    // floor's argument-blind row stands in its place, marked.
+    // The seam is single-argument; a nullable base may be `null` (a TypeError, not
+    // a projection) — both withhold the PROJECTION, leaving the argument-blind floor.
     assert_eq!(dump("array{a: int}", "array_reverse($v, true)"), "dumped type: array (asserted)");
     let src = "<?php\n/** @param array{a: int}|null $v */\n\
                function f(?array $v): void { \\PHPStan\\dumpType(array_values($v)); }\n";
@@ -668,12 +641,9 @@ fn a_project_function_shadowing_the_name_declines() {
 
 #[test]
 fn without_the_reflected_declaration_the_rule_is_withheld() {
-    // The ADR-0061 §2 admission gate: no live PHP (or a monkey-patch extension
-    // loaded) means the engine's own declaration is unavailable, and the transfer
-    // is withheld rather than trusted. `--no-php` is exactly where ADR-0069's floor
-    // is loudest, so the gate's observable is the marker rather than `unknown`: the
-    // catalog's `list<mixed>` says the result is a list and nothing more, while the
-    // withheld transfer would have carried `$v`'s own element type across.
+    // ADR-0061 §2 admission gate: no live PHP (or a monkey-patched extension) means
+    // the declaration is unavailable, so the transfer is withheld — the catalog's
+    // `list<mixed>` floor stands in for the withheld element-type transfer.
     struct NoPhp;
     impl Folder for NoPhp {
         fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {

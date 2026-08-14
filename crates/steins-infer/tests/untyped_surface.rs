@@ -51,17 +51,14 @@ fn surfaced(name: &str, d: &Diagnostic) -> bool {
     ProfileConfigs(BTreeMap::new()).resolve(Some(name)).unwrap().is_surfaced(d)
 }
 
-// ---------------------------------------------------------------------------
 // The registry contract: six contract-layer ids, five at the `Contracts` floor
 // and one at `Pedantic`.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn every_id_is_a_contract_layer_id_at_the_contracts_floor() {
     // `untyped.iterable-value` and `untyped.generics` are the ADR's remaining
-    // `Contracts→Strict by measurement` rows. They ship at the family's floor;
-    // moving either is a one-line registry edit, and this test is where the move
-    // must be recorded.
+    // `Contracts→Strict by measurement` rows; they ship at the family's floor.
+    // Moving either is a one-line registry edit, recorded by this test.
     for id in [
         UNTYPED_PARAMETER_ID,
         UNTYPED_RETURN_ID,
@@ -73,17 +70,14 @@ fn every_id_is_a_contract_layer_id_at_the_contracts_floor() {
         assert_eq!(surface_floor(id), Some(Floor::Contracts), "{id}");
     }
     // The arm that left the family floor entirely (2026-08-09): a class constant's
-    // initializer is a constant expression, so the type is pinned with or without a
-    // written one. The layer is unchanged — declared debt is still declared debt —
-    // and only the rung that asks for it moved. `Pedantic`, not `Strict`: a house
-    // -style ask does not belong on the rung that asks about weaker claims.
+    // initializer is a constant expression, so the type is pinned with or without
+    // a written one. The layer is unchanged — only the rung that asks for it moved.
+    // `Pedantic`, not `Strict`: a house-style ask doesn't belong on the weaker-claims rung.
     assert_eq!(layer(UNTYPED_CLASS_CONSTANT_ID), Some(Layer::Contract));
     assert_eq!(surface_floor(UNTYPED_CLASS_CONSTANT_ID), Some(Floor::Pedantic));
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.parameter`
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_parameter_with_no_native_type_and_no_param_tag_reports() {
@@ -101,8 +95,7 @@ fn a_native_typed_parameter_is_silent() {
 fn a_native_type_the_engine_does_not_model_still_counts_as_typed() {
     // The whole reason the check reads a hint SPAN rather than the lowered
     // `Param::ty`: `mixed`, `callable`, `object`, `self` and `void` all lower to
-    // `None` there for modeling reasons that have nothing to do with the source
-    // having written a type.
+    // `None` there for modeling reasons unrelated to whether the source wrote a type.
     silent("<?php\nfunction f(mixed $a, callable $b, object $c): void {}\n");
     silent("<?php\nclass C { public function f(self $s): static { return $this; } }\n");
     silent("<?php\nfunction f(int $x): never { throw new \\Exception(); }\n");
@@ -163,9 +156,8 @@ fn variadic_and_by_ref_spellings_still_name_the_parameter() {
 
 #[test]
 fn a_param_tag_naming_nobody_makes_the_unclaimed_parameters_decline() {
-    // A `@param int` with no `$name` could be about any parameter, so guessing that
-    // it is about none would convict annotated code. Every parameter the docblock
-    // does not visibly claim declines.
+    // A `@param int` with no `$name` could be about any parameter, so guessing it's
+    // about none would convict annotated code — every unclaimed parameter declines.
     let src = "<?php\n/** @param int */\nfunction f($x): int { return 1; }\n";
     assert_eq!(n(src, UNTYPED_PARAMETER_ID), 0, "{:?}", untyped(src));
     // A parameter with its OWN readable `@param` is unaffected either way, and its
@@ -185,9 +177,7 @@ fn a_method_parameter_reports_like_a_function_one() {
     assert!(ds[0].message.contains("C::m()"), "{}", ds[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.return`
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_function_with_no_native_return_and_no_return_tag_reports() {
@@ -218,9 +208,8 @@ fn construct_and_destruct_are_excluded_by_construction() {
 #[test]
 fn a_generator_body_with_no_declared_return_still_reports() {
     // The DECISION (issue #200): a `yield` body is not an implicit claim. `Generator`
-    // is a type the code could have written and did not, and inferring it here would
-    // be inference — which this family does not do. So the ordinary rule applies,
-    // and this test is what pins it against a later "generators are obvious" drift.
+    // is a type the code could have written and didn't — inferring it here would be
+    // inference, which this family doesn't do (pinned against later "obvious" drift).
     let ds = of("<?php\nfunction gen() { yield 1; }\n", UNTYPED_RETURN_ID);
     assert_eq!(ds.len(), 1, "{ds:?}");
     // And writing the claim silences it, by either spelling.
@@ -228,9 +217,7 @@ fn a_generator_body_with_no_declared_return_still_reports() {
     silent("<?php\n/** @return \\Generator<int, int, mixed, void> */\nfunction gen() { yield 1; }\n");
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.property`
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_property_with_no_native_type_and_no_var_tag_reports() {
@@ -260,8 +247,7 @@ fn every_item_of_a_multi_item_declaration_is_its_own_subject() {
 fn a_promoted_constructor_property_is_reported_once_on_the_parameter_arm() {
     // One declaration, one finding. The parameter arm owns promoted properties, so
     // the property arm must stay out of the way entirely — otherwise a single
-    // `public function __construct(public $x)` would earn two findings for one
-    // missing type.
+    // `__construct(public $x)` would earn two findings for one missing type.
     let src = "<?php\nclass C { public function __construct(public $x) {} }\n";
     assert_eq!(n(src, UNTYPED_PARAMETER_ID), 1, "{:?}", untyped(src));
     assert_eq!(n(src, UNTYPED_PROPERTY_ID), 0, "{:?}", untyped(src));
@@ -271,9 +257,7 @@ fn a_promoted_constructor_property_is_reported_once_on_the_parameter_arm() {
     silent("<?php\nclass C {\n  /** @param int $x */\n  public function __construct(public $x) {}\n}\n");
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.class-constant`
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_class_constant_with_no_native_type_and_no_var_tag_reports() {
@@ -311,9 +295,7 @@ fn an_enum_case_is_never_a_class_constant_finding() {
     assert!(ds[0].message.contains("Suit::K"), "{}", ds[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.iterable-value` — the noisy one, kept mechanically exact.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_bare_native_array_parameter_reports_the_value_type() {
@@ -390,9 +372,7 @@ fn the_return_and_property_positions_carry_the_iterable_arm_too() {
     silent("<?php\nclass C {\n  /** @var array<string, int> */\n  public array $p = [];\n}\n");
 }
 
-// ---------------------------------------------------------------------------
 // `untyped.generics`
-// ---------------------------------------------------------------------------
 
 /// A same-file `@template`-carrying class, plus a consumer to annotate.
 fn generic_fixture(param: &str) -> String {
@@ -450,10 +430,9 @@ fn a_class_level_template_shadows_the_name_in_every_member_docblock() {
 #[test]
 fn the_template_lookup_reaches_across_files() {
     // The boundary worth pinning: the lookup runs off the resident whole-project
-    // class index (`Cx::find_class`), which is the same read the class-level
-    // `@template` shadow already uses — so a generic class declared in ANOTHER file
-    // is found, with no new index and no new pass. Nothing here is narrowed to the
-    // current file.
+    // class index (`Cx::find_class`), the same read the class-level `@template`
+    // shadow already uses — so a class declared in ANOTHER file is found, with
+    // no new index and no new pass.
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> = [
         ("lib.php", "<?php\n/** @template T */\nclass Collection {}\n"),
@@ -483,9 +462,7 @@ fn the_return_and_property_positions_carry_the_generics_arm_too() {
     assert_eq!(n(prop, UNTYPED_GENERICS_ID), 1, "{:?}", untyped(prop));
 }
 
-// ---------------------------------------------------------------------------
 // Profile surfacing (ADR-0050 §5 / ADR-0062 A-G10).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_family_is_absent_from_the_default_surface_and_present_from_contracts() {
@@ -499,9 +476,8 @@ fn the_family_is_absent_from_the_default_surface_and_present_from_contracts() {
         assert!(surfaced("pedantic", d), "`{}` must reach --profile pedantic", d.id);
         if d.id == UNTYPED_CLASS_CONSTANT_ID {
             // The one arm that left the family floor: a constant's initializer already
-            // pins its type, so demanding the declaration is a house-style ask. It
-            // reaches `pedantic` (above, by name) and NOTHING else — `strict` asks a
-            // different question and does not get to carry a style opinion.
+            // pins its type, so demanding the declaration is a house-style ask — it
+            // reaches `pedantic` and NOTHING else; `strict` asks a different question.
             assert!(!surfaced("contracts", d), "`{}` is the pedantic-floor arm", d.id);
             assert!(!surfaced("strict", d), "`{}` must not ride the strict rung", d.id);
         } else {

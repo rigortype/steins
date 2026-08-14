@@ -3,134 +3,98 @@
 //!
 //! [`capture_groups`] turns a PHP pattern string — delimiters, expression, and
 //! trailing modifiers — into an ordered description of the groups it captures,
-//! each carrying a [`MatchedText`] summary of what its entry can hold. It is
-//! deliberately **not** a PCRE implementation. It answers only for patterns
-//! whose group structure it can establish with certainty, and for everything
-//! else it answers `None`.
+//! each carrying a [`MatchedText`] summary of what its entry can hold. Not a
+//! PCRE implementation: it answers only where it can establish the group
+//! structure with certainty, `None` otherwise. A peer of the crate's other
+//! extension-argument tables (e.g. `out_params`).
 //!
-//! This is knowledge about a PHP extension's *argument* rather than its
-//! signature, and so a peer of the crate's other tables: `out_params` already
-//! says position 2 of `preg_match` is written, and this says what the written
-//! array can hold. It stands alone — nothing else in the crate consults it yet,
-//! and it consults nothing.
+//! # `None` is a silent decline
 //!
-//! # A decline is the normal answer, and it is silent
+//! `None` means "no knowledge", never "the pattern is wrong" — it covers both
+//! an unmodelled construct and a pattern PCRE itself would refuse to compile.
+//! Reason: the group **count** — a wrong verdict about whether `(?i)` or
+//! `(*SKIP)` opens a group would mistype every later `$matches` entry, and
+//! there is no safe partial answer.
 //!
-//! `None` carries no diagnostic and no finding. Callers must treat it as "no
-//! knowledge", never as "the pattern is wrong": a decline covers both a
-//! construct this reader does not model and a pattern PCRE itself would refuse
-//! to compile.
+//! Conversely, an answer is not a certificate that PCRE would compile the
+//! pattern: unbalanced delimiters/parens and an unterminated class are caught,
+//! but a well-nested pattern can still be PCRE-rejected for reasons that don't
+//! touch group structure.
 //!
-//! The asymmetry that forces this discipline is the group **count**. Every
-//! index after a miscounted construct shifts, so a single wrong verdict about
-//! whether `(?i)` or `(*SKIP)` opens a group would silently mistype every later
-//! entry of `$matches`. There is no safe partial answer, so anything unmodelled
-//! declines outright.
+//! # Measured against PHP 8.5.9
 //!
-//! The converse does **not** hold: an answer is not a certificate that PCRE
-//! would compile the pattern. Structural breakage this reader can see —
-//! unbalanced delimiters or parentheses, an unterminated class — declines, but
-//! a pattern can be well-nested and still be rejected by PCRE for reasons that
-//! do not touch group structure. Callers that need "this pattern compiles" must
-//! establish it some other way.
+//! Every numbering and absence claim here was produced by running PHP 8.5.9.
+//! Counter-intuitive results:
 //!
-//! # Measured, not recalled
-//!
-//! Every numbering and absence claim in this module was produced by running PHP
-//! 8.5.9, and several are counter-intuitive:
-//!
-//! * A named group occupies a numeric index **as well as** its string key —
-//!   the name is additional, never a replacement.
-//! * The `x` (extended) and `n` (no-auto-capture) modifiers both change the
-//!   count: under `x` a `#` comment can swallow a `(`, and under `n` a plain
-//!   `(…)` stops capturing altogether. Both decline, in every spelling —
-//!   trailing modifier, `(?x)`, `(?n:…)`.
-//! * `\Q…\E` makes an enclosed `(` literal, **including inside a character
-//!   class**, where it can also hide the class terminator.
+//! * A named group occupies a numeric index **as well as** its string key.
+//! * `x` (extended) and `n` (no-auto-capture) both change the count — a `#`
+//!   comment can swallow a `(` under `x`, a plain `(…)` stops capturing under
+//!   `n` — so both decline in every spelling: trailing modifier, `(?x)`, `(?n:…)`.
+//! * `\Q…\E` makes an enclosed `(` literal, including inside a character
+//!   class, where it can also hide the class terminator.
 //! * A POSIX class inside a bracket class (`[[:alpha:](]`) hides both a `]`
 //!   and a `(` from a naive scan.
-//! * `(*MARK:x)` adds a `'MARK'` key to `$matches` that is not a capture group
-//!   at all, which is why the whole `(*…)` verb family declines.
-//! * A group inside a **negative** lookaround is never populated on a
-//!   successful match, so it can go unmatched wherever it sits — while a group
-//!   inside a *positive* lookaround always participates, and therefore still
-//!   closes the trailing-absence window for the groups before it.
-//! * `\d` matches **Unicode** digits under the `u` modifier — PHP turns on
-//!   PCRE2's Unicode properties with it, so `preg_match('/(\d+)/u', '١٢٣', $m)`
-//!   succeeds while `is_numeric('١٢٣')` is `false`. `[0-9]` is unaffected. This
-//!   is why the digit rule reads the modifier list before it answers.
-//! * `\K` moves where the **overall match** starts, so `preg_match('/a\K0/',
-//!   'a0', $m)` gives `$m[0] === '0'` — a two-character expression whose whole
-//!   match is one falsy character. Group entries are untouched by it.
+//! * `(*MARK:x)` adds a `'MARK'` key to `$matches` that is not a capture
+//!   group, so the whole `(*…)` verb family declines.
+//! * A group inside a **negative** lookaround is never populated on success;
+//!   one inside a *positive* lookaround always participates, closing the
+//!   trailing-absence window for groups before it.
+//! * `\d` matches **Unicode** digits under the `u` modifier (PCRE2 Unicode
+//!   properties); `[0-9]` is unaffected.
+//! * `\K` moves where the **overall match** starts, leaving group entries
+//!   untouched.
 //!
-//! # Why a mis-read of an uncompilable pattern is not a lie
-//!
-//! The length summary rests on an ordinary reading of quantifiers and
-//! concatenation, and a pattern PCRE would *reject* can defeat it (`/0**/` is
-//! not two characters). That costs nothing: a pattern PCRE refuses to compile
-//! makes `preg_match` return `false`, so no caller ever reaches a branch where
-//! this summary is asserted about anything. The claims here are conditional on
-//! a match having happened, and an uncompilable pattern never matches.
+//! An uncompilable pattern can't falsify the length summary: a pattern PCRE
+//! would *reject* can defeat the ordinary quantifier/concatenation reading
+//! (`/0**/` is not two characters), but that costs nothing — `preg_match`
+//! returns `false` for it, so no caller ever asserts the summary about it.
 //!
 //! # Not in this module
 //!
 //! The trust gate (is the pattern a proven literal?), the out-parameter seed,
 //! and the flag-dependent entry shapes (`PREG_OFFSET_CAPTURE`,
-//! `PREG_UNMATCHED_AS_NULL`, `PREG_SET_ORDER` — issue #168) all live with the
-//! seed's consumer in `steins-infer`. This module knows only about the pattern
-//! string.
+//! `PREG_UNMATCHED_AS_NULL`, `PREG_SET_ORDER` — issue #168) live with the
+//! seed's consumer in `steins-infer`.
 //!
 //! # The literal enumeration (issue #177, slice F)
 //!
-//! Alongside the one-sided [`MatchedText`] floors, each group carries
-//! [`literals`](CaptureGroup::literals): the sub-pattern's whole **language**,
-//! when it is provably finite and small — `(a)` is `'a'`, `(£|€)` is
-//! `'£'|'€'`, `(a(b))` is `'ab'` (a nested group is transparent: its own
-//! entry keeps its own language). The enumeration rides this parser's own
-//! walk — the same atoms, the same alternation and concatenation — and it
-//! declines to `None`, silently and per group, far more often than it answers:
+//! Each group also carries [`literals`](CaptureGroup::literals): the
+//! sub-pattern's whole **language**, when provably finite and small — `(a)` is
+//! `'a'`, `(£|€)` is `'£'|'€'`, `(a(b))` is `'ab'` (nested groups are
+//! transparent, keeping their own language). Declines to `None`, silently and
+//! per group, far more often than it answers:
 //!
-//! * any quantifier other than exactly-one (`{1}` included) on an atom inside
-//!   the body — `?`, `*`, `+`, `{n}`, `{n,m}` all decline the enclosing
-//!   enumeration, and a quantifier admitting more than one iteration declines
-//!   the enumeration of every group inside its atom too (measured:
-//!   `preg_match('/(baz){2}/', 'bazbaz', $m)` gives `$m[1] === 'baz'`, the
-//!   last iteration, so enumerating it would be sound — but the oracle this
-//!   slice is calibrated against declines there, and agreement beats
-//!   sharpness, the same trade slice E already made);
-//! * a group's **own** quantifier is the one exception the calibration
-//!   demands: `(b)?` still enumerates `'b'`, because the quantifier belongs
-//!   to the surrounding text and the entry holds the body's single iteration
-//!   whenever the group participates (measured, and the projection layers
-//!   supply the `''`/`null`/absence story for the other paths);
-//! * every character class, even `[ab]` — the enumeration-vs-class boundary
-//!   is where miscounting starts;
-//! * every escape that is not punctuation-for-itself: `\d` and friends denote
-//!   sets, `\x{30}` is a second spelling of `'0'`, and one spelling per atom
-//!   is the rule;
+//! * any quantifier other than exactly-one (`{1}` included) declines the
+//!   enclosing enumeration; one admitting more than one iteration declines
+//!   every group inside its atom too — sound in principle (a repeated capture
+//!   keeps its last iteration), but the calibration oracle declines there too
+//!   and agreement beats sharpness (slice E);
+//! * a group's **own** quantifier is the exception: `(b)?` still enumerates
+//!   `'b'`, since the quantifier belongs to the surrounding text and the entry
+//!   holds the body's single iteration whenever the group participates (the
+//!   projection layers supply the `''`/`null`/absence story otherwise);
+//! * every character class, even `[ab]`;
+//! * every escape that is not punctuation-for-itself — `\d` and friends
+//!   denote sets, `\x{30}` is a second spelling of `'0'`, one spelling per
+//!   atom is the rule;
 //! * `.`, backreferences, subroutine calls, `\K`;
-//! * the `i` modifier, trailing or inline: measured,
-//!   `preg_match('/(a)/i', 'A', $m)` captures `'A'`, so the pattern's own
-//!   spelling is NOT the language — and the oracle declines case-insensitive
-//!   patterns wholesale (`([xXa])/i` is `non-empty-string` there while the
-//!   case-sensitive twin enumerates), so the case product is not attempted
-//!   either;
+//! * the `i` modifier, trailing or inline — the spelling is NOT the language
+//!   under `i`, and the oracle declines case-insensitive patterns wholesale,
+//!   so the case product isn't attempted either;
 //! * more than [`LITERAL_UNION_CAP`] members at any intermediate step.
 //!
-//! Zero-width constructs contribute the empty string (`(^a$)` is `'a'`,
-//! measured), an empty alternation branch contributes `''` as a genuine
-//! member (`(|a)` is `''|'a'`, measured), and `\Q…\E` contributes its bytes
-//! verbatim. A decline never disturbs the [`MatchedText`] summary next to it.
+//! Zero-width constructs contribute `''` (`(^a$)` is `'a'`), an empty
+//! alternation branch contributes `''` as a genuine member (`(|a)` is
+//! `''|'a'`), and `\Q…\E` contributes its bytes verbatim. A decline never
+//! disturbs the [`MatchedText`] summary next to it.
 
 /// The most members a [`literals`](CaptureGroup::literals) union may carry.
 ///
-/// Chosen from two measurements (issue #177): the consumer domain's own
-/// finite-value layer holds at most eight members before it widens, and the
-/// largest literal union the calibration oracle expects on a row this
-/// enumeration can reach has three (`''|'a'|'b'`) — so eight never truncates
-/// an expectation while keeping every product this parser can build trivially
-/// small. Past the cap the enumeration declines, at whatever intermediate
-/// step the excess appears.
+/// Eight (issue #177): the consumer domain's finite-value layer widens past
+/// eight members, and the largest union the calibration oracle expects here
+/// has three (`''|'a'|'b'`) — so eight never truncates an expectation while
+/// keeping every reachable product small. Past the cap the enumeration
+/// declines, at whatever intermediate step the excess appears.
 pub const LITERAL_UNION_CAP: usize = 8;
 
 /// The capture groups of a pattern, in numeric order.
@@ -148,28 +112,24 @@ pub struct CaptureGroups {
 
 /// What the text a sub-pattern matched is guaranteed to look like.
 ///
-/// Both fields are **one-sided**: each states a floor the matched text cannot
-/// go below, and each degrades to "no knowledge" (`0` / `false`) rather than
-/// guessing. A construct this reader does not model contributes nothing here
-/// instead of declining the pattern, because a weaker summary only weakens the
-/// fact a caller may state, while a wrong one manufactures one.
+/// Both fields are **one-sided floors**: they degrade to "no knowledge" (`0` /
+/// `false`) rather than guess, because a weaker summary only weakens a claim
+/// while a wrong one manufactures one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchedText {
     /// A lower bound on the number of **characters** the sub-pattern consumes.
     ///
-    /// Characters, not bytes, and deliberately so: `£` is one character and two
-    /// bytes, so counting characters is the weaker — and therefore always
-    /// sound — bound on `strlen()`. It is what separates `''` (bound ≥ 1) and
-    /// `'0'` (bound ≥ 2) from the strings a sub-pattern can actually produce.
+    /// Characters, not bytes: `£` is one character and two bytes, so counting
+    /// characters is the weaker — and therefore always sound — bound on
+    /// `strlen()`.
     pub min_chars: u32,
     /// Whether **every** string the sub-pattern can produce is made only of
     /// ASCII digits `0`–`9`.
     ///
-    /// A claim about the whole language, not the common case, and false
-    /// wherever this reader cannot establish it for every alternative. Combined
-    /// with `min_chars >= 1` it is exactly `is_numeric()`: measured, PHP calls
-    /// every non-empty ASCII digit run numeric, leading zeros and 400 digits
-    /// included.
+    /// A claim about the whole language; false wherever not established for
+    /// every alternative. Combined with `min_chars >= 1` it is exactly
+    /// `is_numeric()` (measured: PHP calls every non-empty ASCII digit run
+    /// numeric, leading zeros and 400 digits included).
     pub digits_only: bool,
 }
 
@@ -193,86 +153,54 @@ pub struct CaptureGroup {
     /// `(?<name>…)` / `(?'name'…)` / `(?P<name>…)`; `None` for a plain `(…)`.
     pub name: Option<String>,
     /// Whether an unmatched instance of this group could be the LAST populated
-    /// entry — see the trailing-absence rule below.
+    /// entry.
     ///
     /// PHP drops a trailing unmatched group from `$matches` entirely, while an
-    /// unmatched group with a populated entry after it appears as `''`
-    /// (measured: `preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]`,
-    /// whereas `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives
-    /// `[0, 1, 2 => '', 3]`). So this flag is `true` exactly when the group can
-    /// go unmatched at all **and** no later group is guaranteed to participate.
+    /// unmatched group with a populated entry after it appears as `''` — see
+    /// the trailing-absence tests. `true` exactly when the group can go
+    /// unmatched at all **and** no later group is guaranteed to participate.
     ///
-    /// The field is biased towards `true` on purpose. A spuriously optional key
-    /// only weakens the fact a caller may state; a spuriously required one is
-    /// unsound. Where this reader cannot prove a group always participates, it
-    /// assumes it may not.
+    /// Biased towards `true`: a spuriously optional key only weakens a claim,
+    /// a spuriously required one is unsound.
     pub can_be_trailing_absent: bool,
     /// Whether a successful match can leave this group's entry **present and
-    /// equal to `''`** — the other half of the trailing-absence rule, and the
-    /// one that governs the entry's *type* rather than its presence.
+    /// equal to `''`** — the other half of the trailing-absence rule, governing
+    /// the entry's *type* rather than its presence.
     ///
-    /// The two halves are easy to conflate and PHPStan's own expectation for
-    /// `/(a)(b)*(c)(d)*/` shows them apart:
-    /// `array{0: …, 1: 'a', 2: string, 3: 'c', 4?: non-empty-string}`. The
-    /// middle `(b)*` and the trailing `(d)*` are the same sub-pattern and get
-    /// different element types, because an unmatched middle group is *present*
-    /// as `''` while an unmatched trailing group is *absent*. So a middle
-    /// optional group admits the empty string however its own
-    /// [`MatchedText::min_chars`] reads, and only the last group keeps the
-    /// non-empty claim.
-    ///
-    /// Measured, and the reason "trailing" is not the same as
-    /// `can_be_trailing_absent`: `preg_match('/(a)(b)?(c)?/', 'ac', $m)` gives
-    /// `$m[2] === ''` even though group 2 *can* be the last populated entry on
-    /// another path. Any group with a group after it can be present-and-empty,
-    /// so only the final group is exempt.
+    /// `(b)*` and `(d)*` in `/(a)(b)*(c)(d)*/` are the same sub-pattern but get
+    /// different element types (see the present-as-empty tests): an unmatched
+    /// middle group is *present* as `''`, an unmatched trailing group is
+    /// *absent*. Not the same as `can_be_trailing_absent` — a group can be
+    /// flagged trailing-absent and still be present-as-empty on another path.
+    /// Any group with a group after it can be present-and-empty; only the
+    /// final group is exempt.
     pub can_be_present_empty: bool,
     /// Whether **some successful match can leave this group unmatched at all** —
-    /// the raw, position-independent bit the two positional projections above are
-    /// computed from (issue #168).
-    ///
-    /// This is the `preg_match_all` PATTERN_ORDER padding predicate: in that mode
-    /// every column has exactly `ret` entries and an unmatched group contributes
-    /// `''` (or `null` under `PREG_UNMATCHED_AS_NULL`) to its column **wherever it
-    /// sits** (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)` gives
-    /// `$m[2] === ['a', '', 'a']`). The middle-vs-trailing machinery of the two
-    /// fields above is a `preg_match` phenomenon and must not be consulted for a
-    /// column element — which is why the raw bit is carried rather than
-    /// reconstructed from the projections.
-    ///
-    /// Same bias as its projections: `true` wherever participation cannot be
-    /// proven, because a spurious `''`/`null` union member only weakens the fact
-    /// while a missing one manufactures it.
+    /// the raw, position-independent bit the two projections above are computed
+    /// from (issue #168): the `preg_match_all` PATTERN_ORDER padding predicate,
+    /// where an unmatched group contributes `''`/`null` to its column
+    /// **wherever it sits**, unlike the `preg_match`-only middle-vs-trailing
+    /// machinery above. Carried raw rather than reconstructed; same
+    /// `true`-biased discipline as its projections.
     pub can_go_unmatched: bool,
     /// What this group's entry holds when the group participates — its body,
-    /// with the group's own quantifier excluded.
-    ///
-    /// The quantifier belongs to the surrounding text, not to the capture: a
-    /// repeated group captures its **last** iteration, so `preg_match('/(0){2}/',
-    /// '00', $m)` gives `$m[1] === '0'` while `$m[0] === '00'` (measured).
+    /// with the group's own quantifier excluded (the quantifier belongs to the
+    /// surrounding text: a repeated group captures its **last** iteration).
     pub body: MatchedText,
     /// The body's whole language, when provably finite and small (issue #177):
     /// **every** string this group's entry can hold when the group
     /// participates, sorted and deduped, `1..=`[`LITERAL_UNION_CAP`] members.
-    ///
-    /// `None` is the normal answer and is silent — the decline discipline is
-    /// the module-level story. `Some` is a claim about the whole language, so
-    /// a consumer may state the union as the entry's exact type wherever the
-    /// group participates; the unmatched paths (`''` padding, `null`, an
-    /// absent key) stay the projection fields' business, exactly as they are
-    /// for the [`MatchedText`] refinements.
+    /// `None` is the normal, silent decline; the unmatched paths (`''`
+    /// padding, `null`, an absent key) stay the projection fields' business.
     pub literals: Option<Vec<String>>,
 }
 
 /// Read the capture-group structure of a PHP PCRE pattern, or decline.
 ///
 /// `pattern` is the full PHP form — leading whitespace, delimiter, expression,
-/// closing delimiter, modifiers — exactly as it would be passed to
-/// `preg_match`.
-///
-/// Returns `None` for every pattern whose group structure cannot be
-/// established. This is a silent decline, not an error report; see the module
-/// documentation.
+/// closing delimiter, modifiers — exactly as passed to `preg_match`. Returns
+/// `None`, a silent decline (see the module docs), for every pattern whose
+/// group structure cannot be established.
 pub fn capture_groups(pattern: &str) -> Option<CaptureGroups> {
     let Delimited { body, ucp_digits, case_insensitive } = split_delimited(pattern)?;
     let mut parser = Parser {
@@ -288,15 +216,12 @@ pub fn capture_groups(pattern: &str) -> Option<CaptureGroups> {
         // The scan stopped on a `)` with no group open: unbalanced.
         return None;
     }
-    // `\K` discards everything matched before it from the overall match, so the
-    // expression's own length says nothing about `$matches[0]` — measured,
-    // `preg_match('/a\K0/', 'a0', $m)` gives the falsy `'0'` for a two-character
-    // expression. Group entries keep their text, so only entry 0 gives up.
+    // `\K` discards everything matched before it from the overall match, so
+    // only entry 0 gives up its length.
     let whole = if parser.match_start_reset { MatchedText::OPAQUE } else { whole.text };
-    // Case-insensitivity multiplies every letter's spellings, and the pattern's
-    // own spelling is not the language (measured: `/(a)/i` captures `'A'`) — so
-    // an `i` anywhere, trailing or inline, declines every enumeration while
-    // leaving the one-sided floors untouched.
+    // `i` anywhere (trailing or inline) declines every enumeration — the
+    // pattern's own spelling is not the language — while leaving the floors
+    // untouched.
     let case_blind = case_insensitive || parser.case_flagged;
     let raw = parser.take_groups()?;
     Some(CaptureGroups {
@@ -445,12 +370,10 @@ fn lang_into_literals(lang: Lang) -> Option<Vec<String>> {
 ///
 /// Walking backwards: a group is trailing-absent when it can go unmatched and
 /// nothing after it is guaranteed to participate. The first group that cannot
-/// go unmatched shuts the window for everything before it, because its own
-/// entry is always populated.
-/// The companion rule for `can_be_present_empty` is coarser and cheaper: a group
-/// with **any** group after it can be present-and-empty, because that later
-/// group may participate on a path where this one does not. Only the final group
-/// is exempt, since nothing can be populated after it to keep its entry alive.
+/// go unmatched shuts the window for everything before it.
+/// The `can_be_present_empty` companion is coarser: any group with a group
+/// after it can be present-and-empty, since that later group may participate
+/// on a path where this one doesn't. Only the final group is exempt.
 fn apply_trailing_absence(raw: Vec<RawGroup>, case_blind: bool) -> Vec<CaptureGroup> {
     let last = raw.len().saturating_sub(1);
     let mut out: Vec<CaptureGroup> = Vec::with_capacity(raw.len());
@@ -472,9 +395,7 @@ fn apply_trailing_absence(raw: Vec<RawGroup>, case_blind: bool) -> Vec<CaptureGr
     out
 }
 
-// ---------------------------------------------------------------------------
 // Delimiters and modifiers
-// ---------------------------------------------------------------------------
 
 /// Modifiers that provably leave the capture numbering alone.
 ///
@@ -490,21 +411,16 @@ struct Delimited<'a> {
     /// Whether the `u` modifier is set, which switches PCRE2's Unicode
     /// properties on and so widens `\d` past ASCII (see the module docs).
     ucp_digits: bool,
-    /// Whether the `i` modifier is set, which multiplies every letter's
-    /// spellings and so declines the literal enumeration (issue #177) while
-    /// leaving the numbering and the floors alone.
+    /// Whether the `i` modifier is set (see the module docs — declines the
+    /// literal enumeration, issue #177, leaving numbering and floors alone).
     case_insensitive: bool,
 }
 
 /// Strip the delimiters and modifiers, yielding the bare expression.
 ///
-/// Mirrors what PHP itself does before handing the pattern to PCRE: skip
-/// leading whitespace, take the first character as the delimiter, and — for the
-/// four bracket pairs — track nesting to find its partner. Everything after the
-/// closing delimiter is modifiers.
-///
-/// Measured: `'{a{b}'` fails to compile because the nesting scan never returns
-/// to depth zero, while `'(((a)))'` yields the two-group expression `((a))`.
+/// Mirrors PHP: skip leading whitespace, take the first character as the
+/// delimiter, and — for the four bracket pairs — track nesting to find its
+/// partner. Everything after the closing delimiter is modifiers.
 fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
     let bytes = pattern.as_bytes();
     let mut start = 0;
@@ -572,9 +488,7 @@ fn split_delimited(pattern: &str) -> Option<Delimited<'_>> {
     Some(Delimited { body, ucp_digits, case_insensitive })
 }
 
-// ---------------------------------------------------------------------------
 // The expression parser
-// ---------------------------------------------------------------------------
 
 /// A group as the parser collects it, before the trailing-absence rule runs.
 struct RawGroup {
@@ -685,9 +599,7 @@ impl<'a> Parser<'a> {
 
     /// One alternation branch: atoms until `|`, `)`, or end of input.
     ///
-    /// The empty branch is a genuine sub-pattern whose language is `{''}` —
-    /// measured, `preg_match('/(|a)/', 'a', $m)` succeeds with `$m[1] === ''`,
-    /// so `(|a)` enumerates to `''|'a'`.
+    /// The empty branch is a genuine sub-pattern whose language is `{''}`.
     fn branch(&mut self) -> Option<SubPattern> {
         let mut sum = SubPattern::zero_width();
         while let Some(c) = self.peek() {
@@ -713,21 +625,17 @@ impl<'a> Parser<'a> {
             self.mark_optional_from(start);
         }
         if !quant.at_most_one {
-            // More than one iteration reachable: the capture of any group
-            // inside comes from an iteration. Measured, `/(baz){2}/` on
-            // 'bazbaz' still captures `'baz'` — the last iteration — so the
-            // body language would be sound; but the calibration oracle
-            // declines every multi-iteration quantifier (`(baz){2}` expects
-            // only `non-falsy-string` there), and agreement beats sharpness.
+            // More than one iteration reachable: the capture would come from an
+            // iteration, and the calibration oracle declines every
+            // multi-iteration quantifier (issue #177).
             for g in &mut self.groups[start..] {
                 g.lang = None;
             }
         }
         // The atom's contribution to the surrounding language survives only an
-        // exactly-once quantifier (none, `{1}`, `{1,1}`): `?` and `{0,1}` make
-        // it variable and the rest make it repeated, and both decline (issue
-        // #177 — the group's own entry above keeps its body language, because
-        // the quantifier belongs to the surrounding text, not the capture).
+        // exactly-once quantifier (none, `{1}`, `{1,1}`) — the group's own
+        // entry above keeps its body language regardless, since the quantifier
+        // belongs to the surrounding text, not the capture.
         let exactly_once = quant.min_reps == 1 && quant.at_most_one;
         let lang = if exactly_once { sub.lang } else { None };
         Some(SubPattern { text: sub.text.repeat(quant.min_reps), lang })
@@ -742,17 +650,13 @@ impl<'a> Parser<'a> {
         let Some(c) = self.peek() else { return SubPattern::undescribed(MatchedText::EMPTY) };
         self.pos += 1;
         match c {
-            // Zero-width, and zero contribution to the language: measured,
-            // `preg_match('/(^a$)/', 'a', $m)` gives `$m[1] === 'a'`.
+            // Zero-width, zero contribution to the language.
             b'^' | b'$' => SubPattern::zero_width(),
             // The dot names a set, not a literal; the stray quantifier bytes
-            // sit in a pattern PCRE rejects ("nothing to repeat"), where a
-            // language claim would be about matches that never happen.
+            // sit in a pattern PCRE rejects ("nothing to repeat").
             b'.' | b'*' | b'+' | b'?' => SubPattern::undescribed(MatchedText::ONE_CHAR),
-            // Counted with the character its lead byte opened, so `£` is one.
-            // The byte still joins the language: concatenation stitches a
-            // multi-byte character back together from its byte atoms, and
-            // every construct that could isolate one byte of it declines.
+            // Counted with the character its lead byte opened, so `£` is one;
+            // the byte still joins the language via concatenation.
             c if is_utf8_continuation(c) => {
                 SubPattern { text: MatchedText::EMPTY, lang: Some(vec![vec![c]]) }
             }
@@ -767,10 +671,8 @@ impl<'a> Parser<'a> {
     fn open_paren(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'('));
 
-        // Backtracking control verbs. `(*MARK:x)` puts a `'MARK'` key into
-        // `$matches` that is not a group, and `(*ACCEPT)` truncates the match,
-        // so the whole family declines rather than being waved through as
-        // non-capturing.
+        // Backtracking control verbs (`(*MARK:x)`, `(*ACCEPT)`, ...) decline —
+        // see the module docs.
         if self.rest().starts_with(b"(*") {
             return None;
         }
@@ -783,28 +685,23 @@ impl<'a> Parser<'a> {
         // Order matters: `(?<=` and `(?<!` must be tested before `(?<name>`,
         // and `(?P<name>` before the inline-flag fallthrough.
         if self.eat(b"(?:") || self.eat(b"(?>") {
-            // Non-capturing, and its body is matched in place — language
-            // included. An atomic group only prunes backtracking, so every
-            // string it can consume is still in its body's language and the
-            // over-approximation stays sound.
+            // Non-capturing; body matched in place, language included. An
+            // atomic group only prunes backtracking, so its consumable
+            // strings are still in the body's language.
             let sub = self.alternation()?;
             self.close_group()?;
             return Some(sub);
         }
         if self.eat(b"(?=") || self.eat(b"(?<=") {
-            // Everything inside a *positive* lookaround participates whenever
-            // the match succeeds — but it is an assertion, so it consumes no
-            // characters and contributes none. Measured:
-            // `preg_match('/(0(?=x))/', '0x', $m)` gives `$m[1] === '0'`, and
-            // `preg_match('/(a(?=x))/', 'ax', $m)` gives `$m[1] === 'a'`.
+            // A *positive* lookaround always participates on match but
+            // consumes no characters and contributes none.
             self.alternation()?;
             self.close_group()?;
             return Some(SubPattern::zero_width());
         }
         if self.eat(b"(?!") || self.eat(b"(?<!") {
             // A negative lookaround succeeds only when its body did NOT match,
-            // so a group inside it is never populated. Measured:
-            // `preg_match('/(a)(?!(b))/', 'a', $m)` leaves group 2 absent.
+            // so a group inside it is never populated.
             let start = self.groups.len();
             self.alternation()?;
             self.close_group()?;
@@ -812,16 +709,14 @@ impl<'a> Parser<'a> {
             return Some(SubPattern::zero_width());
         }
         if self.eat(b"(?#") {
-            // A comment runs to the first `)`. A backslash does not escape
-            // inside it: `'/(?#a\)b)/'` fails to compile. Measured:
-            // `preg_match('/(a(?#hi)b)/', 'ab', $m)` gives `$m[1] === 'ab'`.
+            // A comment runs to the first `)`; a backslash does not escape
+            // inside it (`'/(?#a\)b)/'` fails to compile).
             self.skip_to_close_paren()?;
             return Some(SubPattern::zero_width());
         }
         if self.rest().starts_with(b"(?P=") {
-            // A named backreference, not a group. What it matches is whatever
-            // the referenced group did, which may be nothing at all: measured,
-            // `preg_match('/(a?)b\1/', 'b', $m)` matches.
+            // A named backreference, not a group: matches whatever the
+            // referenced group did, possibly nothing.
             self.pos += 4;
             self.skip_to_close_paren()?;
             return Some(SubPattern::undescribed(MatchedText::OPAQUE));
@@ -849,8 +744,8 @@ impl<'a> Parser<'a> {
     /// `(?<name>…)`, `(?'name'…)`, `(?P<name>…)` — the cursor sits on the first
     /// character of the name, and `terminator` closes it.
     ///
-    /// Measured: a named group takes a numeric index too, so this pushes one
-    /// group exactly like a plain `(…)` and merely records the name alongside.
+    /// A named group takes a numeric index too, so this pushes one group
+    /// exactly like a plain `(…)` and merely records the name alongside.
     fn named_group(&mut self, terminator: u8) -> Option<SubPattern> {
         let name_start = self.pos;
         while let Some(c) = self.peek() {
@@ -858,8 +753,6 @@ impl<'a> Parser<'a> {
                 break;
             }
             // PCRE names are `[A-Za-z_][A-Za-z0-9_]*`; anything else declines.
-            // Measured: `(?<1n>a)`, `(?<n->a)`, and `(?<>a)` all fail to
-            // compile.
             let ok = c == b'_'
                 || c.is_ascii_alphabetic()
                 || (c.is_ascii_digit() && self.pos > name_start);
@@ -878,11 +771,9 @@ impl<'a> Parser<'a> {
     }
 
     /// Record a capture group, parse its body, and hand the body back — both to
-    /// the group's own entry and to the surrounding text, which is where its
-    /// quantifier will be applied. The language rides along on both sides,
-    /// which is what makes a nested group transparent to an enclosing one:
-    /// measured, `preg_match('/(a(b))/', 'ab', $m)` gives `$m[1] === 'ab'`
-    /// while `$m[2] === 'b'`.
+    /// the group's own entry and to the surrounding text (where its quantifier
+    /// applies). The language rides along on both sides, which makes a nested
+    /// group transparent to its encloser.
     fn capturing_group(&mut self, name: Option<String>) -> Option<SubPattern> {
         let index = self.groups.len();
         self.groups.push(RawGroup {
@@ -914,14 +805,12 @@ impl<'a> Parser<'a> {
         if !condition_is_modelled(cond) {
             return None;
         }
-        // Whichever arm runs, the other one's groups stay unset — and with a
-        // single arm the whole body may be skipped — so the entire subtree can
-        // go unmatched. `alternation` reads the two arms as branches of one
-        // alternation, which is wrong for the length (the condition is not an
-        // arm), so the whole construct contributes nothing. The groups inside
-        // keep their own body languages: a language is a claim about the entry
-        // *when the group participates*, and which arm ran does not change
-        // what the arm's own body can capture.
+        // Whichever arm runs, the other's groups stay unset, and with a single
+        // arm the whole body may be skipped — so the subtree can go unmatched.
+        // `alternation` treats the two arms as one alternation's branches,
+        // which is wrong for length (the condition isn't an arm), so the
+        // whole construct contributes nothing to it. Groups inside keep their
+        // own body languages: which arm ran doesn't change what it captures.
         let start = self.groups.len();
         self.alternation()?;
         self.close_group()?;
@@ -945,14 +834,12 @@ impl<'a> Parser<'a> {
             return None;
         }
         if flags.iter().any(|c| NUMBERING_HOSTILE_FLAGS.contains(c)) {
-            // Measured: `/(?x) a#(z)\n(b)/` and `/(?n)(a)(?<x>b)/` both report
-            // one group where a flag-blind reader would say two.
             return None;
         }
         if flags.contains(&b'i') {
             // Setting or clearing — either way some region's case behavior is
-            // not the default, and the literal enumeration declines pattern-wide
-            // (issue #177; measured, `/(?i)(a)/` on 'A' captures 'A').
+            // not the default, and the literal enumeration declines
+            // pattern-wide (issue #177).
             self.case_flagged = true;
         }
         match self.src.get(i)? {
@@ -996,18 +883,14 @@ impl<'a> Parser<'a> {
 
     /// An escape sequence outside a character class.
     ///
-    /// For **group counting** a backslash and one following byte would do — no
-    /// PCRE escape can introduce an unescaped `(`, `)`, or `[`, and `\Q…\E` is
-    /// the only one that changes what a later `(` means. The length summary is
-    /// what forces the rest of this arm list: an escape whose argument is left
-    /// behind gets counted as extra literal characters, and every one of the
-    /// forms below can spell the character `0`. Measured, all of `\x{30}`,
-    /// `\x30`, `\060`, `\o{60}`, `\p{Nd}`, `\N` and `\C` match `'0'`, so
-    /// reading `\x{30}` as `\x` plus a `{30}` quantifier would claim a
-    /// thirty-character floor for a string that is exactly `'0'`.
-    ///
-    /// Every arm consumes exactly what the old backslash-plus-quantifier
-    /// reading consumed, so the group numbering is untouched.
+    /// For **group counting** alone a backslash plus one byte would suffice —
+    /// no PCRE escape can introduce an unescaped `(`, `)`, or `[`, and `\Q…\E`
+    /// is the only one that changes what a later `(` means. The length summary
+    /// forces the rest of this arm list: an unconsumed argument gets counted
+    /// as extra literal characters, and every form below can spell `'0'`
+    /// (`\x{30}`, `\x30`, `\060`, `\o{60}`, `\p{Nd}`, `\N`, `\C` all match it —
+    /// reading `\x{30}` as `\x` plus a `{30}` quantifier would wrongly claim a
+    /// thirty-character floor).
     fn escape(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'\\'));
         let next = *self.src.get(self.pos + 1)?;
@@ -1019,9 +902,8 @@ impl<'a> Parser<'a> {
             b'E' => SubPattern::zero_width(),
             // Zero-width assertions.
             b'A' | b'b' | b'B' | b'G' | b'z' | b'Z' => SubPattern::zero_width(),
-            // `\K` discards what was matched before it from `$matches[0]`.
-            // What it leaves a surrounding *group's* entry holding is a claim
-            // this reader has not measured, so the language declines.
+            // `\K` discards what was matched before it from `$matches[0]`; its
+            // effect on a surrounding group's entry is unmeasured, so declines.
             b'K' => {
                 self.match_start_reset = true;
                 SubPattern::undescribed(MatchedText::EMPTY)
@@ -1045,10 +927,8 @@ impl<'a> Parser<'a> {
                 self.pos += 1;
                 SubPattern::undescribed(MatchedText::ONE_CHAR)
             }
-            // One character named by a code point or a property. `\x{30}` is a
-            // second spelling of `'0'`, and one spelling per atom is the
-            // enumeration's rule, so the language declines with the set-like
-            // properties rather than modelling code-point arithmetic.
+            // One character named by a code point or a property; the language
+            // declines rather than modelling code-point arithmetic.
             b'x' | b'o' | b'p' | b'P' | b'N' => {
                 self.skip_escape_argument();
                 SubPattern::undescribed(MatchedText::ONE_CHAR)
@@ -1071,9 +951,7 @@ impl<'a> Parser<'a> {
             // An escaped letter this reader does not know is one PCRE rejects,
             // so the floor it gives up costs nothing.
             c if c.is_ascii_alphabetic() => SubPattern::undescribed(MatchedText::OPAQUE),
-            // An escaped punctuation character stands for itself — measured,
-            // `preg_match('/(a\.b)/', 'a.b', $m)` gives `$m[1] === 'a.b'` and
-            // `'axb'` does not match.
+            // An escaped punctuation character stands for itself.
             c => SubPattern { text: MatchedText::literal_run(&[c]), lang: Some(vec![vec![c]]) },
         })
     }
@@ -1111,9 +989,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Read a `\Q` literal run, which ends at `\E` or at the end of input.
-    ///
-    /// The run is one literal, bytes verbatim — measured,
-    /// `preg_match('/(\Qa|b\E)/', 'a|b', $m)` gives `$m[1] === 'a|b'`.
+    /// The run is one literal, bytes verbatim.
     fn take_quoted(&mut self) -> SubPattern {
         let src = self.src;
         let start = self.pos;
@@ -1134,14 +1010,12 @@ impl<'a> Parser<'a> {
 
     /// A bracketed character class. Nothing inside one is a group.
     ///
-    /// Finding the real terminator is the whole job, and three rules do it, all
-    /// measured: a `]` in first position (after an optional `^`) is a literal,
-    /// `\Q…\E` hides a `]`, and a POSIX class `[:alpha:]` carries a `]` of its
-    /// own — `'/[[:alpha:](]+(b)/'` has one group, not two.
+    /// Finding the real terminator is the whole job: a `]` in first position
+    /// (after an optional `^`) is a literal, `\Q…\E` hides a `]`, and a POSIX
+    /// class `[:alpha:]` carries a `]` of its own.
     ///
     /// A class never enumerates, `[ab]` included (issue #177): the
-    /// enumeration-vs-class boundary is where miscounting starts, so v1 keeps
-    /// the whole family on the decline side.
+    /// enumeration-vs-class boundary is where miscounting starts.
     fn char_class(&mut self) -> Option<SubPattern> {
         debug_assert_eq!(self.peek(), Some(b'['));
         let src = self.src;
@@ -1314,16 +1188,13 @@ fn is_escape_argument_byte(b: u8) -> bool {
 /// Whether a character class admits **only** ASCII digits, reading its body —
 /// everything between the `[` and its terminator.
 ///
-/// Only four members are modelled: a digit, a range whose both ends are digits,
-/// and `\d` or `[:digit:]` where the `u` modifier has not widened them.
-/// Everything else answers `false`, which is the only claim a caller may not act
-/// on. A negated class answers `false` outright — measured,
-/// `preg_match('/([^a])/', '0', $m)` captures a digit, and any other complement
-/// can too.
+/// Only four members are modelled: a digit, a digit-to-digit range, and
+/// `\d`/`[:digit:]` where `u` has not widened them. Everything else answers
+/// `false` — a negated class included, since its complement can reach a digit
+/// too.
 fn class_is_digits_only(body: &[u8], ucp_digits: bool) -> bool {
-    /// The one POSIX class whose members are all digits — measured ASCII-only
-    /// without `u` (`'/([[:digit:]]+)/'` refuses Arabic-Indic digits) and
-    /// Unicode-wide with it, exactly like `\d`.
+    /// The one POSIX class whose members are all digits — ASCII-only without
+    /// `u`, Unicode-wide with it, exactly like `\d`.
     const POSIX_DIGIT: &[u8] = b"[:digit:]";
 
     if body.first() == Some(&b'^') {
@@ -1362,16 +1233,13 @@ fn class_is_digits_only(body: &[u8], ucp_digits: bool) -> bool {
 
 /// Whether a conditional's condition is one this reader models.
 ///
-/// Accepts a group number (`1`, `+1`, `-1`) and a group name — bare, or in
-/// angle brackets. The quoted spelling `(?('n')…)` is deliberately absent:
-/// measured, PCRE2 rejects it even though `(?'n'…)` is a valid *group*
-/// spelling, so it is not a construct to model.
+/// Accepts a group number (`1`, `+1`, `-1`) and a group name, bare or in angle
+/// brackets. The quoted spelling `(?('n')…)` is deliberately absent: PCRE2
+/// rejects it even though `(?'n'…)` is a valid *group* spelling.
 ///
-/// Everything else declines — notably `VERSION>=…`, any name starting with `R`
-/// (which may be the recursion test rather than a name), and `DEFINE`, whose
-/// body holds groups that occupy numeric indices yet are *never* populated.
-/// Measured: `preg_match('/(?(DEFINE)(?<w>a))(?&w)(b)/', 'ab', $m)` reports
-/// group 1 as `''` on every successful match.
+/// Everything else declines — notably `VERSION>=…`, any bare name starting
+/// with `R` (may be the recursion test), and `DEFINE`, whose body holds
+/// groups that occupy numeric indices yet are *never* populated.
 fn condition_is_modelled(cond: &str) -> bool {
     let number = cond.strip_prefix(['+', '-']).unwrap_or(cond);
     if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
@@ -1402,10 +1270,7 @@ fn is_group_name(name: &str) -> bool {
 mod tests {
     use super::*;
 
-    /// The names of a pattern's groups, in numeric order.
-    ///
-    /// Panics on a decline, so every use of it is also an assertion that the
-    /// reader answered.
+    /// The names of a pattern's groups, in numeric order. Panics on a decline.
     fn names(pattern: &str) -> Vec<Option<String>> {
         capture_groups(pattern)
             .unwrap_or_else(|| panic!("expected an answer for {pattern}"))
@@ -1474,7 +1339,7 @@ mod tests {
         bodies(pattern).iter().map(|t| t.digits_only).collect()
     }
 
-    /// Assert a decline, which is the reader's whole safety story.
+    /// Assert a decline.
     fn declines(pattern: &str) {
         assert_eq!(
             capture_groups(pattern),
@@ -1483,13 +1348,10 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
     // Plain captures
-    // -----------------------------------------------------------------------
 
     #[test]
     fn plain_groups_are_counted_in_source_order() {
-        // Measured: `preg_match('/(\d+)-(\w+)/', '12-ab', $m)` fills keys 1, 2.
         assert_eq!(names(r"/(\d+)-(\w+)/"), expect(&[None, None]));
     }
 
@@ -1506,9 +1368,7 @@ mod tests {
         assert_eq!(count("/((a)(b))(c)/"), 4);
     }
 
-    // -----------------------------------------------------------------------
     // Non-capturing constructs — each one shifts every later index if miscounted
-    // -----------------------------------------------------------------------
 
     #[test]
     fn a_non_capturing_group_is_not_a_group() {
@@ -1525,7 +1385,6 @@ mod tests {
 
     #[test]
     fn a_group_inside_a_lookaround_still_counts() {
-        // Measured: `preg_match('/(a)(?=(b))/', 'ab', $m)` fills keys 1 and 2.
         assert_eq!(count("/(a)(?=(b))/"), 2);
     }
 
@@ -1552,7 +1411,6 @@ mod tests {
 
     #[test]
     fn a_named_backreference_is_not_a_group() {
-        // Measured: `preg_match('/(?P<z>a)(?P=z)(b)/', 'aab', $m)` fills 1, 2.
         assert_eq!(names("/(?P<z>a)(?P=z)(b)/"), expect(&[Some("z"), None]));
     }
 
@@ -1565,26 +1423,22 @@ mod tests {
 
     #[test]
     fn a_simple_conditional_is_not_a_group() {
-        // Measured: `preg_match('/(a)?(?(1)b|c)(d)/', 'cd', $m)` fills 1, 2 —
-        // the conditional itself takes no index.
+        // The conditional itself takes no index.
         assert_eq!(count("/(a)?(?(1)b|c)(d)/"), 2);
         assert_eq!(count("/(?<n>a)?(?(<n>)b|c)(d)/"), 2);
         assert_eq!(count("/(?<n>a)?(?(n)b|c)(d)/"), 2);
         assert_eq!(count("/(a)?(?(+1)b|c)(d)/"), 2);
         assert_eq!(count("/(a)?(?(-1)b|c)(d)/"), 2);
-        // Measured: PCRE2 rejects the quoted condition spelling outright.
+        // PCRE2 rejects the quoted condition spelling outright.
         declines("/(a)?(?('1')b|c)(d)/");
     }
 
-    // -----------------------------------------------------------------------
     // Named groups
-    // -----------------------------------------------------------------------
 
     #[test]
     fn a_named_group_occupies_a_numeric_index_too() {
-        // Measured: `preg_match('/(?<year>\d{4})-(?<mon>\d{2})/', '2026-08', $m)`
-        // gives keys `[0, 'year', 1, 'mon', 2]` — the name is additional, never
-        // a replacement.
+        // `preg_match('/(?<year>\d{4})-(?<mon>\d{2})/', '2026-08', $m)` gives
+        // keys `[0, 'year', 1, 'mon', 2]` — the name is additional.
         assert_eq!(
             names(r"/(?<year>\d{4})-(?<mon>\d{2})/"),
             expect(&[Some("year"), Some("mon")])
@@ -1606,16 +1460,13 @@ mod tests {
 
     #[test]
     fn a_malformed_name_declines() {
-        // Measured: `(?<1n>a)`, `(?<n->a)`, and `(?<>a)` all fail to compile.
         declines("/(?<1n>a)/");
         declines("/(?<n->a)/");
         declines("/(?<>a)/");
         declines("/(?<n>a/");
     }
 
-    // -----------------------------------------------------------------------
     // Escape and character-class traps
-    // -----------------------------------------------------------------------
 
     #[test]
     fn an_escaped_paren_is_not_a_group() {
@@ -1633,10 +1484,7 @@ mod tests {
 
     #[test]
     fn a_leading_close_bracket_in_a_class_is_a_literal() {
-        // The classic traps: in `[]]` and `[^]]` the first `]` is a member, not
-        // the terminator. Reading it as the terminator would leave `](a)` at
-        // top level and still find one group here — so the assertion that bites
-        // is the one where the class body holds a paren.
+        // In `[]]` / `[^]]` the first `]` is a class member, not the terminator.
         assert_eq!(count(r"/[\]](a)/"), 1);
         assert_eq!(count("/[]](a)/"), 1);
         assert_eq!(count("/[^]](a)/"), 1);
@@ -1646,8 +1494,7 @@ mod tests {
 
     #[test]
     fn a_posix_class_hides_a_bracket_and_a_paren() {
-        // Measured: `preg_match('/[[:alpha:](]+(b)/', 'x(b', $m)` fills key 1
-        // only. A scan that stopped at the `:]` would see two groups.
+        // A scan that stopped at the `:]` would see two groups here.
         assert_eq!(count("/[[:alpha:](]+(b)/"), 1);
         assert_eq!(count("/[^[:alpha:](]+(b)/"), 1);
         assert_eq!(count("/[[:^alpha:](]+(b)/"), 1);
@@ -1655,7 +1502,6 @@ mod tests {
 
     #[test]
     fn a_bare_bracket_inside_a_class_is_a_literal() {
-        // Measured: `preg_match('/[a[b](c)/', 'ac', $m)` fills key 1.
         assert_eq!(count("/[a[b](c)/"), 1);
     }
 
@@ -1667,7 +1513,6 @@ mod tests {
 
     #[test]
     fn quoted_runs_make_parens_literal() {
-        // Measured: `preg_match('/\Q(a)\E(b)/', '(a)b', $m)` fills key 1.
         assert_eq!(count(r"/\Q(a)\E(b)/"), 1);
         assert_eq!(count(r"/\Qx\E(a)/"), 1);
         // An unterminated `\Q` runs to the end of the expression.
@@ -1676,7 +1521,6 @@ mod tests {
 
     #[test]
     fn a_quoted_run_inside_a_class_hides_the_terminator() {
-        // Measured: `preg_match('/[\Qa]\E](b)/', 'ab', $m)` fills key 1.
         assert_eq!(count(r"/[\Qa]\E](b)/"), 1);
         assert_eq!(count(r"/[\Q]\E](b)/"), 1);
     }
@@ -1689,9 +1533,7 @@ mod tests {
         assert_eq!(count(r"/\p{L}(a)/"), 1);
     }
 
-    // -----------------------------------------------------------------------
     // Delimiters
-    // -----------------------------------------------------------------------
 
     #[test]
     fn every_delimiter_style_reads_alike() {
@@ -1702,8 +1544,6 @@ mod tests {
 
     #[test]
     fn bracket_delimiters_nest() {
-        // Measured: `'((a))'` is the one-group expression `(a)`, while
-        // `'(((a)))'` is the two-group expression `((a))`.
         assert_eq!(count("((a))"), 1);
         assert_eq!(count("(((a)))"), 2);
         assert_eq!(count("{(a)}"), 1);
@@ -1719,7 +1559,6 @@ mod tests {
 
     #[test]
     fn leading_whitespace_before_the_delimiter_is_skipped() {
-        // Measured: `preg_match(' /(a)/', 'a', $m)` matches.
         assert_eq!(count(" /(a)/"), 1);
         assert_eq!(count("\n/(a)/"), 1);
     }
@@ -1730,8 +1569,6 @@ mod tests {
         declines("/");
         declines("/(a");
         declines("abc");
-        // Measured: `'{a{b}'` fails to compile — the nesting scan never gets
-        // back to depth zero.
         declines("{a{b}");
         // An alphanumeric or backslash delimiter is rejected by PHP itself.
         declines("a(b)a");
@@ -1758,24 +1595,19 @@ mod tests {
 
     #[test]
     fn an_unknown_modifier_declines() {
-        // Measured: `'/(a)/z'` and `'/(a)/g'` fail to compile, and a tab is not
-        // one of the modifier separators PHP skips.
         declines("/(a)/z");
         declines("/(a)/g");
+        // A tab is not one of the modifier separators PHP skips.
         declines("/(a)/\t");
-        // Measured: `'/a/b/'` closes at the FIRST unescaped delimiter, leaving
-        // `b/` as the modifier text.
+        // `'/a/b/'` closes at the FIRST unescaped delimiter, leaving `b/` as
+        // the modifier text.
         declines("/a/b/");
     }
 
-    // -----------------------------------------------------------------------
     // Modifiers and flags that change what counts as a group
-    // -----------------------------------------------------------------------
 
     #[test]
     fn the_extended_modifier_declines() {
-        // Measured: under `x` a `#` comment swallows a `(`, so
-        // `'/ a # comment ( here\n(b)/x'` has ONE group.
         declines("/ a # comment ( here\n(b)/x");
         declines("/(a) (b)/x");
         declines("/(?x) a#(z)\n(b)/");
@@ -1785,8 +1617,6 @@ mod tests {
 
     #[test]
     fn the_no_auto_capture_modifier_declines() {
-        // Measured: `preg_match('/(a)(b)/n', 'ab', $m)` fills NO numeric key —
-        // a plain group stops capturing entirely.
         declines("/(a)(b)/n");
         declines("/(?n)(a)(?<x>b)/");
         declines("/(?n:(a))(b)/");
@@ -1794,9 +1624,8 @@ mod tests {
 
     #[test]
     fn duplicate_name_flags_decline() {
-        // Measured: under `J` both `(?<n>a)` and `(?<n>b)` exist and the string
-        // key resolves to the last one — a numbering rule this reader does not
-        // model.
+        // Under `J` both `(?<n>a)` and `(?<n>b)` exist and the string key
+        // resolves to the last one — a numbering rule this reader doesn't model.
         declines("/(?J)(?<n>a)(?<n>b)/");
         declines("/(?J:(?<n>a)(?<n>b))/");
         declines("/(?<n>a)(?<n>b)/J");
@@ -1804,14 +1633,11 @@ mod tests {
         declines("/(?<n>a)(?<n>b)/");
     }
 
-    // -----------------------------------------------------------------------
     // Declines
-    // -----------------------------------------------------------------------
 
     #[test]
     fn branch_reset_declines() {
-        // Measured: `preg_match('/(?|(a)|(b))(c)/', 'bc', $m)` has TWO groups,
-        // because both branches share index 1.
+        // Both branches would share index 1.
         declines("/(?|(a)|(b))(c)/");
     }
 
@@ -1827,8 +1653,6 @@ mod tests {
 
     #[test]
     fn backtracking_verbs_decline() {
-        // `(*MARK:x)` adds a `'MARK'` key to `$matches` that is not a capture
-        // group at all, and `(*ACCEPT)` truncates the match.
         declines("/(*SKIP)(a)/");
         declines("/(*MARK:x)(a)/");
         declines("/(*ACCEPT)(a)/");
@@ -1844,11 +1668,8 @@ mod tests {
 
     #[test]
     fn unmodelled_conditionals_decline() {
-        // A DEFINE body holds groups that occupy indices yet never participate.
         declines("/(?(DEFINE)(?<w>a))(?&w)(b)/");
-        // An assertion condition hides a whole sub-pattern.
         declines("/(?(?=a)a|b)(c)/");
-        // A recursion test is not a group name.
         declines("/(a)?(?(R)b|c)(d)/");
         declines("/(a)?(?(R1)b|c)(d)/");
         declines("/(?(VERSION>=10.0)(a)|(b))(c)/");
@@ -1856,7 +1677,6 @@ mod tests {
 
     #[test]
     fn structural_breakage_declines() {
-        // Measured: both fail to compile.
         declines("/(a))/");
         declines("/[a(b)/");
         declines("/(a/");
@@ -1872,18 +1692,15 @@ mod tests {
         declines("/(?~a)(b)/");
     }
 
-    // -----------------------------------------------------------------------
     // The trailing-absence rule
-    // -----------------------------------------------------------------------
 
     #[test]
     fn the_probe_cases_from_the_parent_issue() {
-        // Measured: `preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]` —
-        // group 2 is ABSENT, not `''`.
+        // `preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]` — group 2 is
+        // ABSENT, not `''`.
         assert_eq!(absent("/(a)(b)?/"), [false, true]);
-        // Measured: `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives
-        // `[0, 1, 2 => '', 3]` — group 2 is present-but-empty, because group 3
-        // always participates.
+        // `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `[0, 1, 2 => '', 3]` —
+        // group 2 is present-but-empty, because group 3 always participates.
         assert_eq!(absent("/(a)(b)?(c)/"), [false, false, false]);
     }
 
@@ -1913,48 +1730,37 @@ mod tests {
 
     #[test]
     fn a_literal_brace_is_not_a_quantifier() {
-        // Measured: `preg_match('/(a)b{x}(c)/', 'ab{x}c', $m)` matches, so
-        // `{x}` is literal text and leaves group 1 non-optional.
         assert_eq!(absent("/(a)b{x}(c)/"), [false, false]);
         assert_eq!(absent("/(a){}(b)/"), [false, false]);
     }
 
     #[test]
     fn alternation_makes_every_branch_group_skippable() {
-        // Measured: `preg_match('/(a)|(b)/', 'a', $m)` leaves group 2 absent.
         assert_eq!(absent("/(a)|(b)/"), [true, true]);
-        // Measured: `preg_match('/(?:(a)|(b))(c)/', 'bc', $m)` gives
-        // `[0, 1 => '', 2, 3]` — group 3 always participates, so neither
-        // branch group can be the last populated entry.
+        // `preg_match('/(?:(a)|(b))(c)/', 'bc', $m)` gives `[0, 1 => '', 2, 3]`
+        // — group 3 always participates, so neither branch group can be the
+        // last populated entry.
         assert_eq!(absent("/(?:(a)|(b))(c)/"), [false, false, false]);
     }
 
     #[test]
     fn optionality_reaches_nested_groups() {
-        // Measured: `preg_match('/((a)(b))?(c)/', 'c', $m)` gives all of 1, 2,
-        // 3 as `''` with 4 populated.
         assert_eq!(absent("/((a)(b))?(c)/"), [false, false, false, false]);
-        // Measured: `preg_match('/((a)?)/', '', $m)` gives keys `[0, 1]` —
-        // group 2 is absent.
         assert_eq!(absent("/((a)?)/"), [false, true]);
-        // Measured: `preg_match('/(x(a)?)(c)/', 'xc', $m)` gives group 2 as
-        // `''`.
         assert_eq!(absent("/(x(a)?)(c)/"), [false, false, false]);
     }
 
     #[test]
     fn a_group_inside_a_negative_lookaround_can_always_go_unmatched() {
-        // Measured: `preg_match('/(a)(?!(b))/', 'ac', $m)` gives keys `[0, 1]`
-        // — group 2 is absent even though nothing quantifies it.
+        // Group 2 is absent even though nothing quantifies it.
         assert_eq!(absent("/(a)(?!(b))/"), [false, true]);
         assert_eq!(absent("/(a)(?<!(b))/"), [false, true]);
     }
 
     #[test]
     fn a_group_inside_a_positive_lookaround_still_closes_the_window() {
-        // Measured: `preg_match('/(a)?(?=(b))/', 'b', $m)` gives
-        // `[0, 1 => '', 2 => 'b']` — group 2 participates, so group 1 is
-        // present-but-empty rather than absent.
+        // `preg_match('/(a)?(?=(b))/', 'b', $m)` gives `[0, 1 => '', 2 => 'b']`
+        // — group 2 participates, so group 1 is present-but-empty, not absent.
         assert_eq!(absent("/(a)?(?=(b))/"), [false, false]);
         assert_eq!(absent("/(a)?(?<=(b))/"), [false, false]);
     }
@@ -1971,9 +1777,8 @@ mod tests {
 
     #[test]
     fn named_groups_follow_the_same_absence_rule() {
-        // Measured: `preg_match('/(?<x>a)(?<y>b)?/', 'a', $m)` drops BOTH the
-        // `'y'` key and the numeric `2`; with a trailing `(?<z>c)` neither
-        // vanishes.
+        // `preg_match('/(?<x>a)(?<y>b)?/', 'a', $m)` drops BOTH the `'y'` key
+        // and the numeric `2`; with a trailing `(?<z>c)` neither vanishes.
         assert_eq!(absent("/(?<x>a)(?<y>b)?/"), [false, true]);
         assert_eq!(absent("/(?<x>a)(?<y>b)?(?<z>c)/"), [false, false, false]);
     }
@@ -1984,36 +1789,28 @@ mod tests {
         assert_eq!(absent("/(a)?(b)/"), [false, false]);
     }
 
-    // -----------------------------------------------------------------------
     // The present-as-empty rule — the other half of trailing absence
-    // -----------------------------------------------------------------------
 
     #[test]
     fn the_middle_and_trailing_halves_of_the_same_sub_pattern_part_ways() {
-        // The case the whole coupling turns on. PHPStan's expectation is
-        // `array{0: non-falsy-string, 1: 'a', 2: string, 3: 'c', 4?:
-        // non-empty-string}`: `(b)*` and `(d)*` are the same sub-pattern and
-        // get different element types.
-        //
-        // Measured: `preg_match('/(a)(b)*(c)(d)*/', 'ac', $m)` gives
-        // `['ac', 'a', '', 'c']` — the middle group is PRESENT as `''` while
-        // the trailing one is gone. So group 2 must admit the empty string
-        // however its own floor reads, and group 4 must not.
+        // PHPStan's expectation is `array{0: non-falsy-string, 1: 'a', 2:
+        // string, 3: 'c', 4?: non-empty-string}`: `(b)*` and `(d)*` are the
+        // same sub-pattern but get different element types — the middle group
+        // is PRESENT as `''`, the trailing one is gone.
         assert_eq!(present_empty("/(a)(b)*(c)(d)*/"), [false, true, false, false]);
         assert_eq!(absent("/(a)(b)*(c)(d)*/"), [false, false, false, true]);
-        // ...and both bodies read identically, which is exactly why the flag
-        // and not the body has to carry the difference.
+        // Both bodies read identically, which is why the flag and not the
+        // body carries the difference.
         assert_eq!(bodies("/(a)(b)*(c)(d)*/")[1], bodies("/(a)(b)*(c)(d)*/")[3]);
         assert_eq!(floors("/(a)(b)*(c)(d)*/"), [1, 1, 1, 1]);
     }
 
     #[test]
     fn a_trailing_absent_group_can_still_be_present_as_empty() {
-        // The trap inside the trap: `can_be_trailing_absent` is not enough on
-        // its own. Measured, `preg_match('/(a)(b)?(c)?/', 'ac', $m)` gives
-        // `['ac', 'a', '', 'c']` — group 2 is flagged trailing-absent (group 3
-        // may not participate) and is STILL present as `''` on the path where
-        // group 3 does. Only the last group is exempt.
+        // `can_be_trailing_absent` alone isn't enough: `preg_match(
+        // '/(a)(b)?(c)?/', 'ac', $m)` gives `['ac', 'a', '', 'c']` — group 2 is
+        // flagged trailing-absent (group 3 may not participate) and is STILL
+        // present as `''` where group 3 does. Only the last group is exempt.
         assert_eq!(absent("/(a)(b)?(c)?/"), [false, true, true]);
         assert_eq!(present_empty("/(a)(b)?(c)?/"), [false, true, false]);
     }
@@ -2024,23 +1821,18 @@ mod tests {
         assert_eq!(present_empty("/(a)(b)+/"), [false, false]);
         // A middle optional group with a mandatory group after it.
         assert_eq!(present_empty("/(a)(b)?(c)/"), [false, true, false]);
-        // Measured: `preg_match('/(a)?(?=(b))/', 'b', $m)` gives
-        // `['b', '', 'b']` — group 1 is present as `''`.
         assert_eq!(present_empty("/(a)?(?=(b))/"), [true, false]);
     }
 
     #[test]
     fn the_last_group_of_a_pattern_is_never_present_as_empty() {
         // Nothing can be populated after it to keep its entry alive, so an
-        // unmatched last group is absent rather than empty. Measured:
-        // `preg_match('/((a)?)/', '', $m)` gives keys `[0, 1]` only.
+        // unmatched last group is absent rather than empty.
         assert_eq!(present_empty("/(a)?/"), [false]);
         assert_eq!(present_empty("/((a)?)/"), [false, false]);
     }
 
-    // -----------------------------------------------------------------------
     // The character floor
-    // -----------------------------------------------------------------------
 
     #[test]
     fn a_floor_counts_the_characters_a_sub_pattern_must_consume() {
@@ -2053,9 +1845,9 @@ mod tests {
 
     #[test]
     fn a_quantifier_multiplies_the_floor_but_not_the_capture() {
-        // Measured: `preg_match('/(0){2}/', '00', $m)` gives `['00', '0']` —
-        // the group captures its LAST iteration, so its own quantifier belongs
-        // to the surrounding text and not to its entry.
+        // `preg_match('/(0){2}/', '00', $m)` gives `['00', '0']` — the group
+        // captures its LAST iteration, so its own quantifier belongs to the
+        // surrounding text, not to its entry.
         assert_eq!(floors("/(0){2}/"), [1]);
         assert_eq!(whole("/(0){2}/").min_chars, 2);
         assert_eq!(floors("/((?:ab){2})/"), [4]);
@@ -2067,8 +1859,8 @@ mod tests {
 
     #[test]
     fn a_zero_width_construct_adds_nothing_to_the_floor() {
-        // Measured: all of these capture the single character `'0'`, so a
-        // floor of two would call a falsy string non-falsy.
+        // All of these capture the single character `'0'`; a floor of two
+        // would call a falsy string non-falsy.
         assert_eq!(floors("/(^0$)/"), [1]);
         assert_eq!(floors(r"/(\b0\b)/"), [1]);
         assert_eq!(floors(r"/(\A0\z)/"), [1]);
@@ -2081,18 +1873,15 @@ mod tests {
 
     #[test]
     fn a_multi_byte_literal_counts_as_one_character() {
-        // `£` is two bytes and one character, and PHPStan reads `(£|€)` as
-        // `non-empty-string` rather than `non-falsy-string`. Characters are the
-        // weaker — hence always sound — bound on `strlen()`.
+        // `£` is two bytes, one character; PHPStan reads `(£|€)` as
+        // `non-empty-string`, not `non-falsy-string`.
         assert_eq!(floors("/(£|€)/u"), [1]);
         assert_eq!(floors("/(£€)/u"), [2]);
     }
 
     #[test]
     fn an_escape_that_names_one_character_contributes_one() {
-        // Measured: every one of these matches the single character `'0'`. A
-        // reader that let `{30}` fall through to the quantifier would claim a
-        // thirty-character floor for a string that is exactly `'0'`.
+        // Every one of these matches the single character `'0'`.
         assert_eq!(floors(r"/(\x{30})/"), [1]);
         assert_eq!(floors(r"/(\x30)/"), [1]);
         assert_eq!(floors(r"/(\o{60})/"), [1]);
@@ -2106,9 +1895,9 @@ mod tests {
 
     #[test]
     fn a_backreference_or_an_octal_escape_gives_up_its_floor() {
-        // Measured: `preg_match('/((a?)b\2)/', 'b', $m)` matches, so a
-        // backreference can consume nothing. `\060` is the character `'0'` and
-        // telling the two spellings apart needs the group count.
+        // `preg_match('/((a?)b\2)/', 'b', $m)` matches, so a backreference can
+        // consume nothing. `\060` is the character `'0'`, and telling it apart
+        // from a backreference needs the group count.
         assert_eq!(floors(r"/((a?)b\2)/"), [1, 0]);
         assert_eq!(floors(r"/(\060)/"), [0]);
         assert_eq!(floors(r"/(a)(b\1)/"), [1, 1]);
@@ -2118,8 +1907,6 @@ mod tests {
 
     #[test]
     fn the_match_start_reset_costs_entry_zero_its_floor() {
-        // Measured: `preg_match('/a\K0/', 'a0', $m)` gives `['0']` — a
-        // two-character expression whose whole match is one falsy character.
         // Group entries are untouched: `preg_match('/(a\Kb)/', 'ab', $m)`
         // gives `['b', 'ab']`.
         assert_eq!(whole(r"/a\K0/").min_chars, 0);
@@ -2128,9 +1915,8 @@ mod tests {
 
     #[test]
     fn an_alternation_floor_is_the_weakest_branch() {
-        // Measured: `preg_match('/(a|b)|(?:c)/', 'c', $m)` gives `['c']`, one
-        // character — which is why PHPStan calls entry 0 `non-empty-string`
-        // and not `non-falsy-string`.
+        // `preg_match('/(a|b)|(?:c)/', 'c', $m)` gives `['c']`, one character —
+        // why PHPStan calls entry 0 `non-empty-string`, not `non-falsy-string`.
         assert_eq!(whole("/(a|b)|(?:c)/").min_chars, 1);
         assert_eq!(whole("/(ab)|(?:cd)/").min_chars, 2);
         assert_eq!(whole("/(ab)|c/").min_chars, 1);
@@ -2138,16 +1924,13 @@ mod tests {
 
     #[test]
     fn a_conditional_gives_up_its_floor() {
-        // The arms are not branches of one alternation — the condition sits in
-        // front of them — so nothing here is worth a length claim. A reader
-        // that took the two arms for an alternation would add two characters
-        // that no match need contain.
+        // The arms aren't branches of one alternation — the condition sits in
+        // front of them — so a reader treating them as one would add two
+        // characters that no match need contain.
         assert_eq!(whole("/x(a)?(?(1)bb|cc)/").min_chars, 1);
     }
 
-    // -----------------------------------------------------------------------
     // The digit rule
-    // -----------------------------------------------------------------------
 
     #[test]
     fn a_sub_pattern_that_can_only_produce_digits_says_so() {
@@ -2158,22 +1941,18 @@ mod tests {
         assert_eq!(digits("/(0|12)/"), [true]);
         assert_eq!(digits(r"/(\d+(?=x))/"), [true]);
         assert_eq!(digits("/([0-46-9])/"), [true]);
-        // Measured: `preg_match('/([[:digit:]]+)/', '١٢٣', $m)` fails without
-        // the `u` modifier, so the POSIX class is ASCII there.
+        // `preg_match('/([[:digit:]]+)/', '١٢٣', $m)` fails without `u`, so
+        // the POSIX class is ASCII there.
         assert_eq!(digits("/([[:digit:]])/"), [true]);
         assert_eq!(digits("/([[:digit:]0-9])/"), [true]);
     }
 
     #[test]
     fn the_unicode_modifier_takes_the_digit_claim_off_backslash_d() {
-        // Measured, and it overturns the obvious reading: PHP's `u` modifier
-        // turns on PCRE2's Unicode properties, so `preg_match('/(\d+)/u',
-        // '١٢٣', $m)` succeeds — while `is_numeric('١٢٣')` is `false`. An
-        // explicit `[0-9]` is unaffected.
+        // See the module docs: `u` widens `\d` to Unicode digits.
         assert_eq!(digits(r"/(\d+)/u"), [false]);
         assert_eq!(digits(r"/([\d])/u"), [false]);
-        // Measured the same way: `preg_match('/([[:digit:]]+)/u', '١٢٣', $m)`
-        // succeeds, so the POSIX class loses the claim under `u` too.
+        // The POSIX class loses the claim under `u` too.
         assert_eq!(digits("/([[:digit:]])/u"), [false]);
         assert_eq!(digits("/([0-9]+)/u"), [true]);
         assert_eq!(digits("/(42)/u"), [true]);
@@ -2181,16 +1960,13 @@ mod tests {
 
     #[test]
     fn a_sub_pattern_that_can_produce_anything_else_declines_the_digit_claim() {
-        // Measured: `preg_match('/([\d.]+)/', '...', $m)` captures `'...'`,
-        // and `preg_match('/([^a])/', '0', $m)` shows a negated class reaching
-        // digits from the other side.
         assert_eq!(digits(r"/([\d.]{10})/"), [false]);
         assert_eq!(digits(r"/(\w+)/"), [false]);
         assert_eq!(digits("/([^a])/"), [false]);
         assert_eq!(digits("/([^0-9])/"), [false]);
         assert_eq!(digits("/(.)/"), [false]);
         assert_eq!(digits("/([0-9a])/"), [false]);
-        // Measured: both spellings of a negated POSIX class reach `'a'`.
+        // Both spellings of a negated POSIX class reach `'a'`.
         assert_eq!(digits("/([[:^digit:]])/"), [false]);
         assert_eq!(digits("/([^[:digit:]])/"), [false]);
         assert_eq!(digits("/([[:alpha:]])/"), [false]);
@@ -2206,18 +1982,12 @@ mod tests {
         // numeric-string, 1: numeric-string, 2: non-empty-string}`.
         assert_eq!(floors(r"/\w-(?P<num>\d+)-(\w)/"), [1, 1]);
         assert_eq!(digits(r"/\w-(?P<num>\d+)-(\w)/"), [true, false]);
-        // Measured: `preg_match('/\w-(?P<num>\d+)-(\w)/', 'a-12-b', $m)`
-        // matches, and no subject shorter than five characters can.
         assert_eq!(whole(r"/\w-(?P<num>\d+)-(\w)/").min_chars, 5);
     }
 
-    // -----------------------------------------------------------------------
     // The literal enumeration (issue #177, slice F)
-    // -----------------------------------------------------------------------
 
-    /// Each group's enumerated language, in numeric order — `None` per group
-    /// is the decline, and every `Some` below was observed by running the
-    /// pattern through PHP 8.5.9 in the same work session.
+    /// Each group's enumerated language, in numeric order (`None` is decline).
     fn literals(pattern: &str) -> Vec<Option<Vec<String>>> {
         capture_groups(pattern)
             .unwrap_or_else(|| panic!("expected an answer for {pattern}"))
@@ -2235,24 +2005,19 @@ mod tests {
 
     #[test]
     fn a_single_literal_enumerates_to_its_one_spelling() {
-        // Measured: `preg_match('/(a)/', 'xay', $m)` gives `$m[1] === 'a'`.
         assert_eq!(literals("/(a)/"), [union(&["a"])]);
-        // Measured: `'a.b'` matches and `'axb'` does not — the escaped dot is
-        // itself, not a set.
+        // The escaped dot is itself, not a set: `'a.b'` matches, `'axb'` doesn't.
         assert_eq!(literals(r"/(a\.b)/"), [union(&["a.b"])]);
-        // Measured: `preg_match('~(\{2})~', 'x{2}y', $m)` gives `'{2}'` — a
-        // brace with nothing to quantify is a literal.
+        // A brace with nothing to quantify is a literal.
         assert_eq!(literals(r"~(\{2})~"), [union(&["{2}"])]);
-        // Measured: `preg_match('/(\Qa|b\E)/', 'a|b', $m)` gives `'a|b'`.
         assert_eq!(literals(r"/(\Qa|b\E)/"), [union(&["a|b"])]);
     }
 
     #[test]
     fn an_alternation_of_literals_enumerates_every_branch() {
-        // Measured: `'xbary'` captures `'bar'` and `'xfooy'` captures `'foo'`.
         assert_eq!(literals("/(foo|bar)/"), [union(&["bar", "foo"])]);
-        // Measured: both currencies captured, one character each, two bytes —
-        // the byte atoms of a multi-byte character stitch back together.
+        // Both currencies captured, one character each, two bytes — the byte
+        // atoms of a multi-byte character stitch back together.
         assert_eq!(literals("/Price: (£|€)/"), [union(&["£", "€"])]);
         // Duplicate branches are one member.
         assert_eq!(literals("/(a|a)/"), [union(&["a"])]);
@@ -2260,20 +2025,15 @@ mod tests {
 
     #[test]
     fn an_empty_branch_contributes_the_empty_string_as_a_member() {
-        // Measured: `preg_match('/(|a)/', 'a', $m)` succeeds with `$m[1] ===
-        // ''`, and `preg_match('/(|a)a$/', 'aa', $m)` reaches `'a'`.
         assert_eq!(literals("/(|a)/"), [union(&["", "a"])]);
         assert_eq!(literals("/(a|)/"), [union(&["", "a"])]);
     }
 
     #[test]
     fn a_nested_group_is_transparent_to_its_encloser() {
-        // Measured: `preg_match('/(a(b))/', 'ab', $m)` gives `$m[1] === 'ab'`
-        // and `$m[2] === 'b'` — the oracle's own `~^(a(b))$~` expectation.
         assert_eq!(literals("/(a(b))/"), [union(&["ab"]), union(&["b"])]);
         // A non-capturing wrapper is transparent the same way, and the product
-        // of small alternations enumerates up to the cap: measured, `'ace'`
-        // and `'bdf'` both capture themselves.
+        // of small alternations enumerates up to the cap.
         assert_eq!(
             literals("/((?:a|b)(?:c|d)(?:e|f))/"),
             [union(&["ace", "acf", "ade", "adf", "bce", "bcf", "bde", "bdf"])]
@@ -2288,32 +2048,22 @@ mod tests {
 
     #[test]
     fn zero_width_constructs_contribute_the_empty_string() {
-        // Measured: `preg_match('/(^a$)/', 'a', $m)` gives `$m[1] === 'a'`.
         assert_eq!(literals("/(^a$)/"), [union(&["a"])]);
-        // Measured: `preg_match('/(a(?=x))/', 'ax', $m)` gives `$m[1] === 'a'`.
         assert_eq!(literals("/(a(?=x))/"), [union(&["a"])]);
-        // Measured: `preg_match('/(a(?#hi)b)/', 'ab', $m)` gives `'ab'`.
         assert_eq!(literals("/(a(?#hi)b)/"), [union(&["ab"])]);
     }
 
     #[test]
     fn a_groups_own_single_iteration_quantifier_keeps_its_body_language() {
-        // The quantifier belongs to the surrounding text, not the capture:
-        // measured, `preg_match('/x(b)?/', 'xb', $m)` gives `$m[1] === 'b'`,
-        // and the oracle's `~^a\.(b)?(c)?d~` expectation is `1?: ''|'b'` — the
-        // `''` member is the present-empty projection's business, joined on by
-        // the consumer, not a language member here.
+        // The quantifier belongs to the surrounding text, not the capture; the
+        // `''` member on an optional group is the present-empty projection's
+        // business, joined on by the consumer, not a language member here.
         assert_eq!(literals("/x(b)?/"), [union(&["b"])]);
         assert_eq!(literals(r"/a\.(b)?(c)?d/"), [union(&["b"]), union(&["c"])]);
     }
 
     #[test]
     fn a_multi_iteration_quantifier_declines_the_groups_inside_it() {
-        // Measured: `preg_match('/(baz){2}/', 'bazbaz', $m)` gives `$m[1] ===
-        // 'baz'` — the last iteration, so enumerating WOULD be sound. The
-        // calibration oracle declines there (`(baz){2}` expects only
-        // `non-falsy-string`), and agreement beats sharpness, so this declines
-        // too — the measured decision of issue #177.
         assert_eq!(literals("/(baz){2}/"), [None]);
         assert_eq!(literals("/(d)*/"), [None]);
         assert_eq!(literals("/(b)+/"), [None]);
@@ -2322,22 +2072,17 @@ mod tests {
 
     #[test]
     fn any_quantifier_inside_the_body_declines_the_enumeration() {
-        // The oracle enumerates `(a|bc?)` to `'a'|'b'|'bc'`; v1 stays on the
-        // decline side of every body-level quantifier, `{1}` excepted — the
-        // floors still answer, so the entry keeps its slice-E refinement.
+        // Declines every body-level quantifier except `{1}`; the floors still
+        // answer, so the entry keeps its slice-E refinement.
         assert_eq!(literals("/(a|bc?)/"), [None]);
         assert_eq!(literals("/(ab*)/"), [None]);
         assert_eq!(literals("/(ab+)/"), [None]);
-        // Measured: `preg_match('/(a{2})/', 'aa', $m)` gives `'aa'` — sound to
-        // enumerate, declined for the same agreement reason as `(baz){2}`.
         assert_eq!(literals("/(a{2})/"), [None]);
         assert_eq!(literals("/(a{2,3})/"), [None]);
-        // `{1}` is the identity: measured, `preg_match('/(a{1})/', 'a', $m)`
-        // gives `'a'`.
+        // `{1}` is the identity.
         assert_eq!(literals("/(a{1})/"), [union(&["a"])]);
         // The inner `?` declines the encloser, never the inner group's own
-        // entry: the oracle's `~^(a(b)?)$~` row expects `1: 'a'|'ab', 2?: 'b'`
-        // and v1 answers `non-empty-string` for group 1, `'b'` for group 2.
+        // entry.
         assert_eq!(literals("/(a(b)?)/"), [None, union(&["b"])]);
     }
 
@@ -2359,17 +2104,9 @@ mod tests {
 
     #[test]
     fn case_insensitivity_declines_every_enumeration() {
-        // Measured: `preg_match('/(a)/i', 'A', $m)` gives `$m[1] === 'A'` —
-        // the pattern's own spelling is not the language. The oracle declines
-        // case-insensitive rows wholesale (its `([xXa])/i` expectation is
-        // `non-empty-string` where the case-sensitive twin enumerates), so the
-        // case product is not attempted either — the other measured decision
-        // of issue #177.
         assert_eq!(literals("/(a)/i"), [None]);
-        // Even caseless atoms decline under `i`, matching the oracle's
-        // `(£|€)(\d+)/i` row.
         assert_eq!(literals("/(£|€)/i"), [None]);
-        // Inline spellings, bare and scoped: measured, both capture `'A'`.
+        // Inline spellings, bare and scoped.
         assert_eq!(literals("/(?i)(a)/"), [None]);
         assert_eq!(literals("/(?i:(a))/"), [None]);
         // The floors survive the decline untouched.

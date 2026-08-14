@@ -2,27 +2,21 @@
 //! argument is a bounded union of constants is folded once per member
 //! combination, and the answers are composed into one value fact.
 //!
-//! ADR-0069's amendment tabulates Steins' return ladder against PHPStan's
-//! extension stack and names the one condition the fold lane could not meet: an
-//! extension takes a constant *or a union of constants*, calls the real function
-//! per member, and composes. `$x = $c ? 'a' : 'b'; strtoupper($x)` widened here
-//! where PHPStan answers `'A'|'B'`. This file is that gap, closed and pinned.
+//! ADR-0069's amendment names the gap this closes: PHPStan's extension stack can
+//! fold a union of constants member-wise and compose; Steins' fold lane could
+//! not (`$x = $c ? 'a' : 'b'; strtoupper($x)` widened here where PHPStan answers
+//! `'A'|'B'`).
 //!
-//! Four disciplines are pinned, not just the spellings:
-//!
-//! * **No partial unions.** Busting the per-argument member cap (4) or the
-//!   combination cap (16) DECLINES; it never truncates. A union missing a member
-//!   is a wrong value domain, not a wider one.
-//! * **The gates are the fold lane's own gates.** Every combination goes back
-//!   through `try_fold`, so the allowlist, the shadowing check, the per-argument
-//!   budget, the memo and the issue-#64 integer-width gate apply once, in one
-//!   place. A member the width gate refuses declines the WHOLE fold.
-//! * **Stratum (ADR-0048 N2).** Each member answer is engine-`Verified`, but the
-//!   input union carries its own trust: an `Asserted` union in, an `Asserted`
-//!   fact out.
-//! * **Zero emission from the mechanism.** A union fold is a *type*. The one
-//!   finding pinned below is the ordinary proof-layer consequence of a product
-//!   whose members all agreed, which is a genuine proven value.
+//! Four disciplines pinned here, not just the spellings:
+//! * **No partial unions.** Busting the per-argument cap (4) or combination cap
+//!   (16) DECLINES; it never truncates.
+//! * **Shared gates.** Every combination re-enters `try_fold` (allowlist,
+//!   shadowing, budget, memo, issue-#64 width gate); a refused member declines
+//!   the WHOLE fold.
+//! * **Stratum (ADR-0048 N2).** Member answers are engine-`Verified`, but the
+//!   composed fact takes the input union's own trust.
+//! * **Zero emission.** A union fold is a *type*; the one finding pinned below
+//!   is the ordinary proof-layer consequence of members that all agreed.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -35,17 +29,15 @@ use steins_syntax::{ArgValue, SourceTree};
 
 // Foldable-union source shapes
 
-/// `$x = $c ? <a> : <b>` under an undecided guard — a two-member `OneOf` at the
-/// `Verified` stratum (ADR-0031's conditional value).
+/// `$x = $c ? <a> : <b>`: a two-member `OneOf` at `Verified` (ADR-0031).
 fn ternary(then_val: &str, else_val: &str, expr: &str) -> String {
     format!(
         "<?php\nfunction f(bool $c): void {{ $x = $c ? {then_val} : {else_val}; \\PHPStan\\dumpType({expr}); }}\n"
     )
 }
 
-/// A branch merge: `$v` starts at `members[0]` and each `if` re-assigns it, so the
-/// join at the end is an `n`-member `OneOf`, `Verified`. This is how a union wider
-/// than two arms is reachable from a plain function body.
+/// A branch merge: `$v` starts at `members[0]`, each `if` re-assigns it, and the
+/// join is an `n`-member `Verified` `OneOf`.
 fn merged(var: &str, members: &[&str]) -> String {
     let mut out = format!("${var} = {}; ", members[0]);
     for (i, m) in members.iter().enumerate().skip(1) {
@@ -64,8 +56,8 @@ fn merge_src(lanes: &[(&str, &[&str])], expr: &str) -> String {
     )
 }
 
-/// A declared array shape read: `$s = $v['k']` takes the slot's declared fact,
-/// which is where an `Asserted` union comes from (ADR-0052 §9 / ADR-0062 §4).
+/// `$s = $v['k']`: the slot's declared fact, source of an `Asserted` union
+/// (ADR-0052 §9 / ADR-0062 §4).
 fn shape_read(slot: &str, expr: &str) -> String {
     format!(
         "<?php\n/** @param array{{k: {slot}}} $v */\nfunction f(array $v): void {{ $s = $v['k']; \\PHPStan\\dumpType({expr}); }}\n"
@@ -77,10 +69,8 @@ fn shape_read(slot: &str, expr: &str) -> String {
 /// One call the gate forwarded to the folder.
 type Ask = (String, Vec<ArgValue>);
 
-/// A deterministic stand-in for the engine over the handful of names these
-/// fixtures use, recording every `(name, args)` the gate handed it. The counts are
-/// the instrument: a decline that never dispatched and a fold that dispatched every
-/// combination are different events, and only the record tells them apart.
+/// A deterministic stand-in for the engine, recording every `(name, args)` the
+/// gate handed it, so a decline is distinguishable from a full dispatch by count.
 #[derive(Clone, Default)]
 struct Mock(Rc<RefCell<Vec<Ask>>>);
 
@@ -110,10 +100,8 @@ impl Folder for Mock {
     }
 }
 
-/// A [`FoldEngine`] that answers over the arguments it is actually given — which
-/// is what a union needs, since its members must get DIFFERENT answers — with the
-/// integer width the test chooses. Drives the SHARED policy in `EngineFolder`, so
-/// the width gate under test is the real one.
+/// A [`FoldEngine`] at the integer width the test chooses, driving the SHARED
+/// policy in `EngineFolder` so the width gate under test is the real one.
 struct Fake {
     int_size: Option<u32>,
     dispatched: Vec<(String, Vec<FoldArg>)>,
@@ -147,8 +135,7 @@ impl FoldEngine for Fake {
         }
     }
 
-    /// The fake has no PCRE (ADR-0078): declining is what a transport that cannot
-    /// answer must do, and it keeps this file's subject the fold-width lane.
+    /// No PCRE (ADR-0078): keeps this file's subject the fold-width lane.
     fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
         None
     }
@@ -162,8 +149,7 @@ impl FoldEngine for Fake {
     }
 }
 
-/// A live sidecar folder, or `None` when `php` cannot be reached — in which case
-/// the caller skips loudly rather than asserting something vacuous.
+/// A live sidecar folder, or `None` when `php` is unreachable (caller skips loudly).
 fn live(test: &str) -> Option<SidecarFolder> {
     let mut folder = SidecarFolder::enabled();
     if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
@@ -181,8 +167,7 @@ fn diagnostics(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     check_with(&tree, &functions, "test.php", folder)
 }
 
-/// The `dumpType` bodies for `src`, in source order — asserting on the way that a
-/// union fold emitted no finding of its own (a transfer is a type, never a report).
+/// The `dumpType` bodies for `src`; asserts the fold emitted no finding of its own.
 fn dumps(src: &str, folder: &mut dyn Folder) -> Vec<String> {
     let ds = diagnostics(src, folder);
     let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
@@ -202,52 +187,44 @@ fn dump(src: &str, folder: &mut dyn Folder) -> String {
 
 // (1) The flagship, through the real engine
 
-/// ADR-0069's named gap, closed: the union of constants reaches the engine member
-/// by member and comes back as a union. `strtoupper` is on the allowlist and its
-/// answers are the engine's own — nothing here models PHP's casing.
+/// ADR-0069's named gap, closed: a union of constants reaches the real engine
+/// member by member and comes back composed, across assignment, all-agree
+/// (Singleton), and a plain literal composed alongside it — `strtoupper`'s
+/// answers are the engine's own.
 #[test]
 fn the_flagship_union_folds_through_the_real_engine() {
     let Some(mut folder) = live("the_flagship_union_folds_through_the_real_engine") else {
         return;
     };
     assert_eq!(dump(&ternary("'a'", "'b'", "strtoupper($x)"), &mut folder), "'A'|'B'");
-    // The assignment form binds the same fact, so the value survives a hop.
+    // Assignment form: the value survives a hop.
     let assigned = "<?php\nfunction f(bool $c): void { $x = $c ? 'a' : 'b'; $y = strtoupper($x); \\PHPStan\\dumpType($y); }\n";
     assert_eq!(dump(assigned, &mut folder), "'A'|'B'");
-    // A union whose members all fold to the SAME value composes to a Singleton —
-    // a genuinely proven value, not a union of one.
+    // All members fold to the SAME value: composes to a Singleton, not a union of one.
     assert_eq!(dump(&ternary("'a'", "'A'", "strtoupper($x)"), &mut folder), "'A'");
-    // The literal lane and the union lane compose in the product: a written
-    // constant is the one-member case of the same ladder.
+    // Literal and union lanes compose in the product.
     assert_eq!(dump(&ternary("'a'", "'b'", "str_repeat($x, 2)"), &mut folder), "'aa'|'bb'");
 }
 
-/// The rung ORDER, against the neighbour that would otherwise answer. Issue #77's
-/// string-predicate transfer knows `strtoupper` forces uppercase for any subject
-/// at all; the union fold knows *which* uppercase strings. The value wins, and
-/// where the union is too wide to enumerate the predicate still answers — so the
-/// ladder degrades rather than falling to the floor.
+/// The rung ORDER: the union fold outranks issue #77's string-predicate
+/// transfer, and past the fold's cap the ladder DEGRADES to that transfer
+/// rather than falling to the floor.
 #[test]
 fn the_union_fold_outranks_the_predicate_transfer() {
     let Some(mut folder) = live("the_union_fold_outranks_the_predicate_transfer") else { return };
     assert_eq!(dump(&ternary("'a'", "'b'", "strtoupper($x)"), &mut folder), "'A'|'B'");
     let five = merge_src(&[("x", &["'a'", "'b'", "'c'", "'d'", "'e'"])], "strtoupper($x)");
-    // Over the cap the ladder DEGRADES to the rung below rather than dropping to
-    // the reflected envelope: issue #77 reads the same union member-wise for its
-    // predicates, so `string` is still not the answer — and since issue #240 the
-    // casing the transfer establishes is spelled beside the length rung.
+    // Over the cap: #77's transfer still reads member-wise (casing since #240).
     assert_eq!(dump(&five, &mut folder), "non-falsy-uppercase-string");
 }
 
-/// A member that THROWS declines the whole fold. `intdiv($n, 0)` raises
-/// `DivisionByZeroError`, which the wire reports as a throw and the fold lane has
-/// always widened on; a union that quietly dropped it would claim a value domain
-/// the program does not have.
+/// A member that THROWS (`intdiv($n, 0)` raises `DivisionByZeroError`) declines
+/// the whole fold rather than quietly dropping it, which would claim a value
+/// domain the program does not have.
 #[test]
 fn a_throwing_member_declines_the_whole_fold() {
     let Some(mut folder) = live("a_throwing_member_declines_the_whole_fold") else { return };
-    // The control: two ordinary divisors compose, so the decline below is the
-    // throw and not the shape of the fixture.
+    // Control: two ordinary divisors compose, so the decline below is the throw.
     let ok = "<?php\nfunction f(bool $c): void { $d = $c ? 2 : 5; \\PHPStan\\dumpType(intdiv(10, $d)); }\n";
     assert_eq!(dump(ok, &mut folder), "2|5");
     let throws = "<?php\nfunction f(bool $c): void { $d = $c ? 2 : 0; \\PHPStan\\dumpType(intdiv(10, $d)); }\n";
@@ -259,9 +236,8 @@ fn a_throwing_member_declines_the_whole_fold() {
 
 // (2) The caps decline; they never truncate
 
-/// The per-argument member cap is 4. At five members the fold declines outright —
-/// and, crucially, dispatches NOTHING: the cap is charged before any combination
-/// is built, so an over-wide union costs no engine traffic either.
+/// The per-argument member cap is 4: at five members the fold declines and
+/// dispatches NOTHING, since the cap is charged before any combination is built.
 #[test]
 fn the_member_cap_declines_rather_than_truncating() {
     let mock = Mock::default();
@@ -270,18 +246,14 @@ fn the_member_cap_declines_rather_than_truncating() {
 
     let mock = Mock::default();
     let five = merge_src(&[("x", &["'a'", "'b'", "'c'", "'d'", "'e'"])], "strtoupper($x)");
-    // The FOLD declines — that is what `mock.count() == 0` measures, and it is the
-    // property this test owns. The rendered type is then whatever the rungs below
-    // supply, and since issue #79 that is ADR-0069's Asserted floor stating
-    // functionMap's `uppercase-string`. The `(asserted)` marker is how a reader
-    // tells a declared claim from a folded one.
+    // `mock.count() == 0` is the property owned here; the rendered type is the
+    // rung below (ADR-0069's Asserted floor, issue #79).
     assert_eq!(dump(&five, &mut mock.clone()), "uppercase-string (asserted)", "five members: no fold");
     assert_eq!(mock.count(), 0, "the cap is charged before any combination: {:?}", mock.asks());
 }
 
-/// The combination cap is 16, and it is a cap on the PRODUCT: three arguments of
-/// three members each is 27, with every individual lane comfortably inside the
-/// member cap. Two-by-two-by-four is 16 and folds.
+/// The combination cap is 16 and caps the PRODUCT, not any single argument:
+/// 3×3×3=27 (over, though each lane is inside the member cap); 2×2×4=16 folds.
 #[test]
 fn the_combination_cap_is_charged_on_the_product() {
     let mock = Mock::default();
@@ -289,10 +261,8 @@ fn the_combination_cap_is_charged_on_the_product() {
         &[("a", &["'a'", "'b'", "'c'"]), ("b", &["'x'", "'y'", "'z'"]), ("c", &["'aa'", "'ab'", "'ac'"])],
         "str_replace($a, $b, $c)",
     );
-    // The FOLD declines — `mock.count() == 0` is the property this test owns. What
-    // renders is the rung below: `str_replace` is `string|array` in functionMap, a
-    // row ADR-0071 admitted because one of its two arms is an array, and the
-    // `(asserted)` marker separates that declaration from a folded answer.
+    // `mock.count() == 0`: the rung below renders instead (`str_replace` is
+    // `string|array` in functionMap, ADR-0071).
     assert_eq!(dump(&twenty_seven, &mut mock.clone()), "string|array (asserted)", "27 > 16 declines");
     assert_eq!(mock.count(), 0, "…and dispatches nothing: {:?}", mock.asks());
 
@@ -301,12 +271,8 @@ fn the_combination_cap_is_charged_on_the_product() {
         &[("a", &["'a'", "'b'"]), ("b", &["'x'", "'y'"]), ("c", &["'aa'", "'ab'", "'ac'", "'ad'"])],
         "str_replace($a, $b, $c)",
     );
-    // Sixteen distinct answers overflow the value domain's own `OneOf` CAP, so
-    // `Fact::from_vals` hands back its **computed** widening — the summary derived
-    // by evaluating predicates on every member (ADR-0035). That is the fold
-    // succeeding, and it is a strictly better answer than the declared envelope.
-    // (Every one of the sixteen answers is lowercase, so the computed summary says
-    // so — the grid of issue #240 spells both axes.)
+    // Sixteen answers overflow the `OneOf` CAP, so `Fact::from_vals` hands back
+    // its **computed** widening (ADR-0035) — the fold still succeeding.
     assert_eq!(dump(&sixteen, &mut mock.clone()), "non-falsy-lowercase-string");
     assert_eq!(mock.count(), 16, "every combination was folded: {:?}", mock.asks());
 }
@@ -331,10 +297,8 @@ fn a_two_argument_product_folds_at_sixteen_and_declines_at_twenty() {
     assert_eq!(mock.count(), 0, "…and dispatches nothing: {:?}", mock.asks());
 }
 
-/// Determinism (ADR-0028 / ADR-0048): the product is enumerated in one fixed
-/// order — arguments in source order, members in the fact's own canonical order,
-/// last argument varying fastest — so the walk stays a pure function of (CST,
-/// entry state, fold memo) with no map iteration anywhere in it.
+/// Determinism (ADR-0028 / ADR-0048): the product is enumerated arguments in
+/// source order, members canonically ordered, last argument varying fastest.
 #[test]
 fn the_product_is_enumerated_in_a_canonical_order() {
     let mock = Mock::default();
@@ -358,13 +322,9 @@ fn the_product_is_enumerated_in_a_canonical_order() {
 
 // (3) The width gate, on both engines
 
-/// Issue #64's integer-width gate, reached member by member. `strval` is on the
-/// verified width-safe subset, so on a 64-bit engine both members fold and compose.
-/// On a 32-bit one the argument range guard refuses the oversized member — and the
-/// WHOLE fold declines with it, rather than answering the union of what survived.
-///
-/// The dispatch record is the proof that this is the gate and not a missing answer:
-/// the in-range member IS dispatched on both engines.
+/// Issue #64's width gate, reached member by member: on 64-bit both members of
+/// `$c ? 1 : 3000000000` fold; on 32-bit the range guard refuses the oversized
+/// one and the WHOLE fold declines (dispatch record: in-range member still asked).
 #[test]
 fn a_member_the_width_gate_refuses_declines_the_whole_fold() {
     const SRC: &str = "<?php\nfunction f(bool $c): void { $x = $c ? 1 : 3000000000; \\PHPStan\\dumpType(strval($x)); }\n";
@@ -384,10 +344,8 @@ fn a_member_the_width_gate_refuses_declines_the_whole_fold() {
 
 // (4) Stratum discipline (ADR-0048 N2)
 
-/// Each member answer is the engine's, and so `Verified` — but the composed fact
-/// consumed the INPUT union, and takes its stratum by the ordinary `min` clause.
-/// A declared array shape provides a reachable `Asserted` union, and the
-/// `(asserted)` marker is how the dump surface says which trust the fact carries.
+/// Member answers are engine-`Verified`, but the composed fact takes its
+/// stratum from the INPUT union (`min` clause); `(asserted)` marks that trust.
 #[test]
 fn the_composed_fact_takes_the_input_unions_stratum() {
     // Asserted in, asserted out: the slot fact is a docblock claim.
@@ -397,20 +355,16 @@ fn the_composed_fact_takes_the_input_unions_stratum() {
     );
     // Verified in, verified out: the ternary's arms are written literals.
     assert_eq!(dump(&ternary("'a'", "'b'", "strtoupper($x)"), &mut Mock::default()), "'A'|'B'");
-    // …and the caps are stratum-blind: an over-wide asserted union declines the fold
-    // too, leaving ADR-0069's Asserted floor to state functionMap's declaration
-    // (issue #79 — the row is a refinement #73 counted and dropped). What proves the
-    // fold declined is the absence of any `'A'|…` composition, not the word unknown.
+    // The caps are stratum-blind too: an over-wide asserted union declines the
+    // fold, leaving ADR-0069's Asserted floor (issue #79) to answer instead.
     assert_eq!(
         dump(&shape_read("'a'|'b'|'c'|'d'|'e'", "strtoupper($s)"), &mut Mock::default()),
         "uppercase-string (asserted)"
     );
 }
 
-/// The proof-layer consequence, and the ADR-0052 §5 gate on it. A `Verified`
-/// product whose members all agreed is a proven value and premises
-/// `type.argument-mismatch`; the same shape over an `Asserted` union stays silent.
-/// The provenance says what actually happened.
+/// ADR-0052 §5: a `Verified` product whose members all agreed premises
+/// `type.argument-mismatch`; the same shape over `Asserted` stays silent.
 #[test]
 fn a_collapsed_verified_product_premises_the_proof_layer_and_an_asserted_one_does_not() {
     const VERIFIED: &str = "<?php\nfunction takesInt(int $n): void {}\nfunction f(bool $c): void { $x = $c ? 'a' : 'A'; $y = strtoupper($x); takesInt($y); }\n";
@@ -448,17 +402,16 @@ fn the_standing_declines_are_unmoved() {
     assert_eq!(mock.count(), 0);
 
     let mock = Mock::default();
-    // An argument that is neither a proven literal nor a finite union: an
-    // abstract `string` envelope offers no members to enumerate, so the fold asks
-    // nothing (`count() == 0`) and the ADR-0069 floor answers below it with
-    // functionMap's `uppercase-string` (issue #79's widened lowering).
+    // Neither a proven literal nor a finite union: an abstract `string` offers
+    // no members to enumerate, so the fold asks nothing and the ADR-0069 floor
+    // answers below it (issue #79).
     let abstract_arg = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(strtoupper($s)); }\n";
     assert_eq!(dump(abstract_arg, &mut mock.clone()), "uppercase-string (asserted)");
     assert_eq!(mock.count(), 0);
 }
 
-/// The union fold is a fold, so a poisoned scope buys it nothing: the env facts it
-/// would read are exactly the ones a poisoned scope may not be trusted with.
+/// A poisoned scope buys the union fold nothing: it needs env facts a poisoned
+/// scope may not be trusted with.
 #[test]
 fn a_poisoned_scope_folds_no_union() {
     let mock = Mock::default();
@@ -469,9 +422,8 @@ fn a_poisoned_scope_folds_no_union() {
 
 // (6) Zero emission, swept
 
-/// Every fixture shape in this file, asserted to emit no non-debug finding. The
-/// `dumps` helper already asserts it per call; this sweeps the matrix so a future
-/// row cannot quietly skip the check.
+/// Every fixture shape in this file, swept to confirm none emits a non-debug
+/// finding — so a future row cannot quietly skip the check.
 #[test]
 fn no_findings_from_union_folds() {
     let mut mock = Mock::default();

@@ -32,8 +32,8 @@ const INT_TO_STRING: &str =
 
 #[test]
 fn param_narrower_than_contract_is_violation() {
-    // The `callables_docblock_signature` fixture: closure param `string` cannot
-    // accept the `int` the contract supplies. Contravariance broken.
+    // `callables_docblock_signature` fixture: closure param `string` cannot accept
+    // the contract's `int` — contravariance broken.
     let src = format!("{INT_TO_STRING}takes(static fn (string $v): string => $v);");
     assert_eq!(param_count(&src), 1, "string param cannot accept supplied int");
 }
@@ -56,8 +56,8 @@ fn param_wider_than_contract_is_ok() {
 
 #[test]
 fn return_disjoint_from_contract_is_violation() {
-    // The `callables_return_type_mismatch` fixture: closure returns `int` where
-    // the contract promises `string`. Covariance broken.
+    // `callables_return_type_mismatch` fixture: closure returns `int` where the
+    // contract promises `string` — covariance broken.
     let src = format!("{INT_TO_STRING}takes(static fn (int $v): int => $v);");
     assert_eq!(param_count(&src), 1, "int return incompatible with string contract");
 }
@@ -107,7 +107,6 @@ fn closure_extra_optional_param_is_ok() {
 
 #[test]
 fn bare_callable_contract_never_fires() {
-    // No signature on the contract → any callable is accepted.
     let callee = "<?php /** @param callable $cb */ function takes(callable $cb): void {}\n";
     let src = format!("{callee}takes(static fn (string $v): float => 1.0);");
     assert_eq!(param_count(&src), 0, "bare callable accepts any signature");
@@ -115,14 +114,12 @@ fn bare_callable_contract_never_fires() {
 
 #[test]
 fn undeclared_closure_param_is_silent() {
-    // No native type on the closure param → Maybe → silent.
     let src = format!("{INT_TO_STRING}takes(static fn ($v): string => (string) $v);");
     assert_eq!(param_count(&src), 0, "undeclared closure param is not judged");
 }
 
 #[test]
 fn undeclared_closure_return_is_silent() {
-    // No native return hint on the closure → return covariance is Maybe → silent.
     let src = format!("{INT_TO_STRING}takes(static fn (int $v) => $v);");
     assert_eq!(param_count(&src), 0, "undeclared closure return is not judged");
 }

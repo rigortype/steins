@@ -1,24 +1,18 @@
 //! Inline `@steins-ignore` suppression (ADR-0023), following `@phpstan-ignore`'s
 //! spec verbatim.
 //!
-//! A comment `@steins-ignore <id-list> (optional reason)` suppresses matching
-//! object-level diagnostics. Placement copies `@phpstan-ignore`: a comment that
-//! **trails code on a line** suppresses matching findings reported on *that* line;
-//! a comment **alone on its own line** suppresses findings on the *next* line
-//! ([`SourceTree::is_line_leading`] draws the distinction).
+//! `@steins-ignore <id-list> (optional reason)` suppresses matching object-level
+//! diagnostics. Placement copies `@phpstan-ignore`: a comment **trailing code on
+//! a line** suppresses findings on *that* line; a comment **alone on its own
+//! line** suppresses findings on the *next* line ([`SourceTree::is_line_leading`]
+//! draws the distinction).
 //!
-//! IDs are registry-governed ([`DIAGNOSTIC_IDS`]) with ADR-0022 prefix semantics:
-//! `type.*` (and bare `type`) matches `type.argument-mismatch`. Two always-on
-//! meta-diagnostics keep the channel from rotting:
-//!
-//! * [`SUPPRESS_UNMATCHED_ID`] — an ignore id that matches nothing on its target
-//!   line (the anti-rot mechanism), reported at the comment.
-//! * [`SUPPRESS_UNKNOWN_ID`] — an unknown/malformed id in an ignore, reported at
-//!   the comment.
-//!
-//! Meta-diagnostics are themselves **exempt** from both suppression channels
-//! (suppressing the suppressor is a loop — ADR-0023's channels govern only
-//! object-level findings), so this module never re-feeds them through matching.
+//! IDs are registry-governed ([`DIAGNOSTIC_IDS`]) under ADR-0022 prefix semantics
+//! (`type.*`/bare `type` matches `type.argument-mismatch`). Two always-on
+//! meta-diagnostics guard the channel, both reported at the comment and both
+//! **exempt** from suppression (suppressing the suppressor would loop):
+//! [`SUPPRESS_UNMATCHED_ID`] (an ignore id matching nothing on its target line)
+//! and [`SUPPRESS_UNKNOWN_ID`] (an unknown/malformed id).
 
 use std::collections::HashSet;
 
@@ -42,7 +36,6 @@ use crate::{
 };
 // string context (ADR-0078, issue #193)
 use crate::{STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID};
-// end string context (ADR-0078, issue #193)
 // docblock hygiene (ADR-0078, issue #186)
 use crate::{
     CLOSURE_UNUSED_USE_ID, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID, PHPDOC_STALE_VAR_ID,
@@ -52,21 +45,17 @@ use crate::{
 use crate::{CALL_ON_NON_OBJECT_ID, PROPERTY_ON_NON_OBJECT_ID};
 // parse failure (ADR-0079, issue #180)
 use crate::SYNTAX_UNPARSABLE_ID;
-// end parse failure (ADR-0079, issue #180)
 // inaccessible members (ADR-0078, issue #185)
 use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_INACCESSIBLE_ID};
 // member absence (ADR-0078, issue #197)
 use crate::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
-// end member absence (ADR-0078, issue #197)
 // untyped surface (ADR-0078, issue #200)
 use crate::{
     UNTYPED_CLASS_CONSTANT_ID, UNTYPED_GENERICS_ID, UNTYPED_ITERABLE_VALUE_ID,
     UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
 };
-// end untyped surface (ADR-0078, issue #200)
 // return missing (ADR-0078, issue #199)
 use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
-// end return missing (ADR-0078, issue #199)
 // overriding family (ADR-0078, issue #184)
 use crate::{
     OVERRIDE_FINAL_ID, OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID,
@@ -74,7 +63,6 @@ use crate::{
 };
 // global constants (ADR-0078, issue #198)
 use crate::CONSTANT_UNDEFINED_ID;
-// end global constants (ADR-0078, issue #198)
 // undefined variables (ADR-0078, issue #194)
 use crate::{VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID};
 
@@ -86,31 +74,25 @@ pub const SUPPRESS_UNMATCHED_ID: &str = "suppress.unmatched";
 /// (ADR-0022 registry-governed). Exempt from suppression.
 pub const SUPPRESS_UNKNOWN_ID: &str = "suppress.unknown-id";
 
-/// The **diagnostic layer** an id carries (ADR-0050 §1): its semantic identity —
-/// *what kind of claim it makes* — not a severity grade. The layer, not a string
-/// prefix, is the carrier both the fp-gate (ADR-0050 §9) and the user-facing
-/// surfaces key on; prefix spellings (`throw.*`) stay a config convenience only.
+/// The **diagnostic layer** an id carries (ADR-0050 §1): semantic identity, not a
+/// severity grade. The fp-gate (ADR-0050 §9) and user surfaces key on the layer,
+/// not on a string prefix (`throw.*` is a config convenience only).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Layer {
-    /// Runtime survivability: the program provably breaks on a live path. Held to
-    /// the zero-FP bar; gates red on sight (ADR-0013).
+    /// Runtime survivability: provably breaks on a live path. Zero-FP bar; red on
+    /// sight (ADR-0013).
     Proof,
-    /// Declared-contract acceptance: a proven behavior violates something the code
-    /// *declares* about itself; the program still works. TRUE findings legitimately
-    /// abound in released code, so these gate as increase tripwires, never on sight.
+    /// Declared-contract acceptance: a proven behavior violates a self-declared
+    /// contract; the program still works. TRUE findings legitimately abound in
+    /// released code, so this gates as an increase tripwire, never on sight.
     Contract,
-    /// The apparatus's own hygiene: a finding whose absence would silently rot
-    /// another channel. Gates red on sight (apparatus rot on corpus code).
+    /// The apparatus's own hygiene: absence would silently rot another channel.
+    /// Red on sight.
     Mechanics,
-    /// Requested introspection — an **answered question** (ADR-0053 §1): the
-    /// finding-shaped report exists *because a call site asked for it*
-    /// (`PHPStan\dumpType()`, `var_dump()`), and its content is a fact rendering,
-    /// not a claim about the program. Neither a proof (nothing breaks) nor a
-    /// contract claim (nothing is declared) nor mechanics (nothing rots if absent).
-    /// A layer, not a boolean, precisely so every exhaustive `Layer` match is forced
-    /// to state its debug posture at compile time (the point-1 discipline). fp-gate:
-    /// excluded from every counter (§8). Emitted from D3/D4; registered but unemitted
-    /// in the D1 groundwork.
+    /// Requested introspection — an **answered question** (ADR-0053 §1): exists
+    /// because a call site asked (`PHPStan\dumpType()`, `var_dump()`); a fact
+    /// rendering, not a claim about the program. Excluded from every fp-gate
+    /// counter (§8); emitted from D3/D4, registered-but-unemitted before that.
     Debug,
 }
 
@@ -128,13 +110,11 @@ impl Layer {
     }
 }
 
-/// The value of the `origin` facet (ADR-0050 §4): whether a `throw.undeclared`
-/// finding's escaping-throw origin site lies in the annotated declaration's **own
-/// body** ([`Origin::Direct`]) or arrived up one or more call edges
-/// ([`Origin::Propagated`]). This productionizes the direct-vs-propagated
-/// measurement (`docs/notes/20260724-g1-throw-origin-measurement.md`): 158 direct
-/// vs 43,805 propagated on the legacy monorepo, the split the `throws-direct`
-/// built-in profile selects on.
+/// The `origin` facet value (ADR-0050 §4): whether a `throw.undeclared` finding's
+/// escaping-throw origin is the declaration's **own body** ([`Origin::Direct`]) or
+/// arrived via a call edge ([`Origin::Propagated`]) — the split `throws-direct`
+/// selects on, per `docs/notes/20260724-g1-throw-origin-measurement.md` (158 direct
+/// vs 43,805 propagated on the legacy monorepo).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Origin {
     /// The origin lies in the annotated declaration's own body.
@@ -160,14 +140,10 @@ impl Origin {
 pub const FACET_ORIGIN: &str = "origin";
 
 /// A registry-declared **facet** value a finding carries (ADR-0050 §4): an
-/// additional classification axis, recorded by the emitter at emit time from
-/// walk-local data, that profile entries may select on. v1 declares exactly one
-/// facet — `origin`, carried only by `throw.undeclared`. The `default`/`contracts`
-/// built-ins ignore it; the `throws-direct` built-in selects `origin = direct`.
-///
-/// Kept a small enum (not an open string) so a second facet is an ADR-forced
-/// variant, never an ad-hoc key. The `--format json` output shows it additively as
-/// `"<key>": "<value>"` only on ids that declare a facet.
+/// extra classification axis profile entries may select on. v1 declares exactly
+/// one — `origin`, carried only by `throw.undeclared`. A small enum, not an open
+/// string, so a second facet forces an ADR-driven variant, not an ad-hoc key.
+/// `--format json` shows it additively as `"<key>": "<value>"` where declared.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Facet {
     /// The `origin` facet value (`direct|propagated`).
@@ -192,52 +168,38 @@ impl Facet {
     }
 }
 
-/// The facet an emitted `id` **declares**, if any (ADR-0050 §4). v1: only
-/// `throw.undeclared` declares the `origin` facet; every other id declares none,
-/// so its findings never carry — nor show — a facet key. Returns the facet *name*
-/// (a profile-selectable axis's identity), not a value. Registering that an id
-/// carries a facet is what lets the emitter attach one and profiles select on it.
+/// The facet an emitted `id` **declares**, if any (ADR-0050 §4): only
+/// `throw.undeclared` declares `origin` in v1. Returns the facet *name*, not a
+/// value — what lets the emitter attach one and profiles select on it.
 #[must_use]
 pub fn declared_facet(id: &str) -> Option<&'static str> {
     if id == THROW_UNDECLARED_ID { Some(FACET_ORIGIN) } else { None }
 }
 
 /// The **lowest profile rung** on which a registered id may reach the surface
-/// (ADR-0062 A-G10). The rung ladder is cumulative — `default ⊂ contracts ⊂
-/// strict` — so an id is admitted by a profile exactly when its floor is at or
-/// below that profile's rung. Ordered smallest-first: `Default < Contracts <
-/// Strict < Pedantic`, and the `Ord` derive is what the admission test uses.
+/// (ADR-0062 A-G10). Cumulative — `default ⊂ contracts ⊂ strict` — a profile
+/// admits an id exactly when its floor is at or below the profile's rung.
+/// Smallest-first order (`Default < Contracts < Strict < Pedantic`) drives
+/// admission via the `Ord` derive.
 ///
-/// A floor is finer than a layer *set*: a built-in profile admits an id when the
-/// id's floor is at or below the profile's rung. This lets a *single* layer
-/// straddle two rungs — the contract layer holds both floor-`Contracts` ids and
-/// floor-`Strict` ids (the offset family's strict leg), which naming layer sets
-/// could not express.
+/// Finer than a layer *set*: lets one layer straddle two rungs (contract holds
+/// both floor-`Contracts` and floor-`Strict` ids — the offset family's strict leg).
 ///
-/// # The one rung no built-in's *rung* reaches
-///
-/// [`Floor::Pedantic`] is the top of the order and **no built-in profile carries it
-/// as a rung**. That is deliberate, and it is what makes the order still a total
-/// order while the profiles stop being one chain: an id parked there is off every
-/// built-in surface until something names it in an `enable` list — the built-in
-/// `pedantic` profile, or a user profile. The `throws-direct` precedent is the same
-/// shape read the other way (a rung *below* the id it reaches).
+/// [`Floor::Pedantic`] tops the order and **no built-in carries it as a rung** —
+/// an id there is off every built-in until named in an `enable` list. (The same
+/// shape as `throws-direct`, read the other way: a rung *below* the id it reaches.)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Floor {
-    /// On the bare `steins check` surface (and therefore every surface above it).
+    /// On the bare `steins check` surface (and every surface above it).
     Default,
     /// Reached first by the `contracts` opt-up stage.
     Contracts,
     /// Reached only by the `strict` opt-up stage (ADR-0062 A-G10).
     Strict,
-    /// Reached by **no built-in rung at all** — only by an explicit `enable`,
-    /// whether the built-in `pedantic` profile's or a user profile's.
-    ///
-    /// The home for a house-style ask: a rule about how code should be *written*
-    /// where Steins itself has no finding to make. Those cannot ride `Strict`,
-    /// which asks a different question (is a weaker, some-paths-only claim worth
-    /// seeing?), and putting them there would make every `strict` user inherit a
-    /// style opinion the analyzer does not hold.
+    /// Reached by **no built-in rung** — only an explicit `enable`. Home for
+    /// house-style asks (how code is *written*, not a finding Steins makes): those
+    /// can't ride `Strict`, which asks a different question (a weaker some-paths
+    /// claim worth seeing?), and bundling them would force it on every `strict` user.
     Pedantic,
 }
 
@@ -254,10 +216,9 @@ impl Floor {
         }
     }
 
-    /// Parse a rung spelling back (the baseline round-trip). Deliberately an inherent
-    /// method, not `FromStr`: there is no error type worth naming and the tolerant
-    /// `None` reading is the whole contract. Unknown spellings
-    /// yield `None`; the caller decides the tolerant reading.
+    /// Parse a rung spelling back (the baseline round-trip). An inherent method,
+    /// not `FromStr` — no error type is worth naming; unknown spellings yield
+    /// `None` and the caller decides how to handle it.
     #[must_use]
     pub fn parse(s: &str) -> Option<Floor> {
         match s {
@@ -271,21 +232,17 @@ impl Floor {
 }
 
 /// The diagnostic-id registry (ADR-0022/0050/0062): the closed set of ids Steins
-/// emits, each paired with its [`Layer`] (ADR-0050 §2 makes the layer a first-class
-/// registry attribute) and its [`Floor`] (ADR-0062 A-G10's one added attribute).
-/// This is the **single source of truth** — `DIAGNOSTIC_IDS` is derived from it,
-/// `layer()` and `surface_floor()` read it, and registering an id here without both
-/// attributes does not compile (every entry is an `(id, Layer, Floor)` triple). A
-/// workspace totality test asserts every *emittable* id constant appears here.
+/// emits, each paired with its [`Layer`] (ADR-0050 §2) and [`Floor`] (ADR-0062
+/// A-G10). Single source of truth — `DIAGNOSTIC_IDS`, `layer()`, and
+/// `surface_floor()` derive from it; an entry lacking either attribute does not
+/// compile. A workspace totality test asserts every emittable id appears here.
 ///
-/// **The floor column reproduces the pre-S6 profile behavior exactly** and is
-/// pinned by `tests/registry.rs`: proof, mechanics and debug ids carry
-/// `Floor::Default` (the `default` built-in's layer set), every contract id that
-/// existed before S6 carries `Floor::Contracts` (reached first by the `contracts`
-/// built-in), and only the two S6 ids carry `Floor::Strict`.
+/// The floor column reproduces pre-S6 behavior exactly (pinned by
+/// `tests/registry.rs`): proof/mechanics/debug and pre-S6 contract ids carry
+/// `Floor::Default`/`Floor::Contracts`; only the two S6 ids carry `Floor::Strict`.
 ///
-/// `@steins-ignore` ids are validated against it (prefix-aware), and the baseline
-/// records these ids verbatim.
+/// `@steins-ignore` ids are validated against it (prefix-aware); the baseline
+/// records ids verbatim.
 pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // proof — runtime survivability (zero-FP, red on sight).
     (ID, Layer::Proof, Floor::Default),
@@ -304,119 +261,67 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (OFFSET_ON_UNSUPPORTED_ID, Layer::Proof, Floor::Default),
     // printf arity (ADR-0078, issue #188)
     (CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, Layer::Proof, Floor::Default),
-    // end printf arity (ADR-0078, issue #188)
     // declaration-incompatibility fatals (ADR-0078, issue #183): load-time fatals
-    // read off the declaration graph alone — proof layer at the `default` floor,
-    // per the ADR's floor table.
+    // read off the declaration graph alone.
     (CLASS_ABSTRACT_UNIMPLEMENTED_ID, Layer::Proof, Floor::Default),
     (CLASS_EXTENDS_FINAL_ID, Layer::Proof, Floor::Default),
-    // overriding family (ADR-0078, issue #184): the same load-time fatal
-    // `class.extends-final` claims, read off the same declaration graph — so the same
-    // layer and floor. The layer question the issue raises is settled by the
-    // consequence, not by the premise's stratum: PHP itself refuses the declaration,
-    // and every premise is a NATIVE declaration, which is Verified. That is where
-    // these diverge from `throw.liskov-widened` / `effect.liskov-widened`, whose
-    // premise is a docblock `@throws` / an inferred envelope PHP never enforces, and
-    // which therefore sit on the contract layer.
+    // overriding family (ADR-0078, issue #184): same declaration-graph fatal as
+    // `class.extends-final`. Differs from `throw.liskov-widened`/
+    // `effect.liskov-widened` (contract layer) because every premise here is a
+    // NATIVE, PHP-enforced declaration, not an unenforced docblock/envelope.
     (OVERRIDE_FINAL_ID, Layer::Proof, Floor::Default),
     (OVERRIDE_STATIC_MISMATCH_ID, Layer::Proof, Floor::Default),
     (OVERRIDE_VISIBILITY_WEAKENED_ID, Layer::Proof, Floor::Default),
     (OVERRIDE_PARAMETER_VARIANCE_ID, Layer::Proof, Floor::Default),
     (OVERRIDE_RETURN_VARIANCE_ID, Layer::Proof, Floor::Default),
-    // end overriding family (ADR-0078, issue #184)
-    // preg pattern refusal (ADR-0078, issue #189)
-    // proof — the project's own PCRE refuses a proven literal pattern, so the call
-    // warns and returns a value it cannot have been written for. Warning-grade, so
-    // it demotes under a declared `warning-handler = "null"` posture exactly as
-    // `offset.missing` does (ADR-0049 §7).
+    // "(demotes)" below = degrades under a declared `warning-handler = "null"`
+    // posture like `offset.missing` (ADR-0049 §7); unmarked = fatal, never demotes.
+    // preg pattern refusal (ADR-0078, #189): PCRE refuses a proven pattern (demotes).
     (PREG_INVALID_PATTERN_ID, Layer::Proof, Floor::Default),
-    // non-object receivers (ADR-0078, issue #190)
-    // proof — the same fatal `call.on-null` names, with the receiver's runtime type
-    // in place of null; a sibling id rather than a widening, so the null case's
-    // baseline entries keep their meaning (ADR-0022).
+    // non-object receivers (ADR-0078, #190): `call.on-non-object` siblings the
+    // fatal `call.on-null` rather than widening it, so the null case's baseline
+    // entries keep their meaning (ADR-0022). `property.on-non-object` (demotes).
     (CALL_ON_NON_OBJECT_ID, Layer::Proof, Floor::Default),
-    // proof — a property fetch on a non-object is an `E_WARNING` yielding null, so
-    // it demotes under a declared `warning-handler = "null"` posture exactly as
-    // `offset.missing` does (ADR-0049 §7).
     (PROPERTY_ON_NON_OBJECT_ID, Layer::Proof, Floor::Default),
-    // end non-object receivers (ADR-0078, issue #190)
-    // foreach subject (ADR-0078, issue #192)
-    // proof — a `foreach` subject proven a non-array scalar/null: PHP warns and
-    // skips the loop body entirely. Warning-grade, so it demotes under a declared
-    // `warning-handler = "null"` posture exactly as `offset.missing` does
-    // (ADR-0049 §7).
+    // foreach subject (ADR-0078, #192): non-array/null subject skips the loop
+    // body (demotes).
     (FOREACH_NON_ITERABLE_ID, Layer::Proof, Floor::Default),
-    // end foreach subject (ADR-0078, issue #192)
-    // string context (ADR-0078, issue #193)
-    // proof — a value PHP cannot convert to a string. The two consequences are two
-    // ids because the ADR-0049 §7 gate cuts between them (ADR-0078 §1.4): the
-    // object case is a fatal `Error` and never demotes, while the array case is a
-    // warning plus the literal string "Array" and demotes under a declared
-    // `warning-handler = "null"` exactly as `offset.missing` does.
+    // string context (ADR-0078, #193): two ids because the ADR-0049 §7 gate cuts
+    // between them (ADR-0078 §1.4) — object case is fatal (never demotes); array
+    // case warns with literal "Array" (demotes).
     (STRING_NON_STRINGABLE_ID, Layer::Proof, Floor::Default),
     (STRING_ARRAY_CONVERSION_ID, Layer::Proof, Floor::Default),
-    // end string context (ADR-0078, issue #193)
-    // inaccessible members (ADR-0078, issue #185)
-    // proof — a visibility violation is a fatal `Error` raised before the member is
-    // reached, so all three sit at the `default` floor per the ADR's floor table.
-    // None is warning-grade, so none is behind the ADR-0049 §7 warning-handler gate:
-    // no posture makes a `Cannot access private property` survivable.
+    // inaccessible members (ADR-0078, #185): visibility violation is fatal before
+    // the member is reached — none demotes.
     (CALL_INACCESSIBLE_METHOD_ID, Layer::Proof, Floor::Default),
     (PROPERTY_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
     (CLASS_CONST_INACCESSIBLE_ID, Layer::Proof, Floor::Default),
-    // end inaccessible members (ADR-0078, issue #185)
-    // member absence (ADR-0078, issue #197)
-    // proof — reading a property no declaration provides is an `E_WARNING`
-    // yielding null (witnessed), so it demotes under a declared
-    // `warning-handler = "null"` posture exactly as `offset.missing` does
-    // (ADR-0049 §7). Fetching an undefined class constant is a fatal `Error`
-    // (witnessed) and never demotes — the gate boundary that ADR-0078 §1.4 makes
-    // an id boundary, which is why these are two ids and not one member-absence id
-    // with a precise message.
+    // member absence (ADR-0078, #197): undeclared property read (demotes); undefined
+    // class constant is fatal (never demotes) — the ADR-0078 §1.4 gate boundary is
+    // why these are two ids, not one.
     (PROPERTY_UNDEFINED_ID, Layer::Proof, Floor::Default),
     (CLASS_CONST_UNDEFINED_ID, Layer::Proof, Floor::Default),
-    // proof at the STRICT floor — the `maybe-` sibling registered ahead of
-    // emission (ADR-0078 §1.3). The first proof-layer id to sit above `default`:
-    // the possibly-grade twin of a proven warning is still proof-grade evidence
-    // about the runtime, but a possibly-claim belongs on the strict surface, the
-    // `offset.maybe-missing` shape one layer up.
+    // `maybe-` sibling, registered ahead of emission (ADR-0078 §1.3): a
+    // possibly-claim belongs on the strict surface.
     (PROPERTY_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
-    // end member absence (ADR-0078, issue #197)
-    // return missing (ADR-0078, issue #199)
-    // proof — falling off the end of a function-like that declares a non-void
-    // native return type is a fatal `TypeError` on the live path. Not behind the
-    // ADR-0049 §7 warning-handler gate: nothing about a declared posture makes a
-    // `TypeError` survivable, so there is nothing to demote.
+    // return missing (ADR-0078, #199): falling off a non-void-typed function-like
+    // is a fatal `TypeError` — never demotes.
     (TYPE_RETURN_MISSING_ID, Layer::Proof, Floor::Default),
-    // proof — the SAME fatal, reached only along the paths the body's own returns
-    // do not cover (ADR-0078 §1.3's `maybe-` sibling). The first proof-layer id at
-    // the `strict` rung: the consequence is identical, so the layer cannot differ;
-    // the corpus measurement is what puts the floor there (phpstan-src's own `src/`
-    // carries two of these and passes its own missing-return rule).
+    // Same fatal, only on paths the body's own returns don't cover (`maybe-`
+    // sibling, ADR-0078 §1.3). Floor set by corpus measurement (phpstan-src's own
+    // `src/` carries two and passes its own missing-return rule).
     (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
-    // end return missing (ADR-0078, issue #199)
-    // invalid operands (ADR-0078, issue #191)
-    // proof — an operator whose proven operand kinds PHP's own table refuses with
-    // a `TypeError`. Fatal rows only (a warning/deprecation row is not this id at
-    // any posture), so no `warning-handler` gate: it never demotes.
+    // invalid operands (ADR-0078, #191): operand kinds PHP's table refuses with a
+    // `TypeError`. Fatal rows only — never demotes.
     (INVALID_OPERAND_ID, Layer::Proof, Floor::Default),
-    // end invalid operands (ADR-0078, issue #191)
-    // global constants (ADR-0078, issue #198)
-    // proof — fetching a constant nothing defines is a fatal `Error` since PHP 8.0,
-    // so it sits at the `default` floor with the rest of the absence family. Not
-    // warning-grade, so it is not behind the ADR-0049 §7 warning-handler gate.
+    // global constants (ADR-0078, #198): undefined constant is fatal since PHP
+    // 8.0 — never demotes.
     (CONSTANT_UNDEFINED_ID, Layer::Proof, Floor::Default),
-    // end global constants (ADR-0078, issue #198)
-    // undefined variables (ADR-0078, issue #194)
-    // proof — a read of a name the scope never binds is an `E_WARNING` yielding
-    // null, so it demotes under a declared `warning-handler = "null"` posture
-    // exactly as `offset.missing` does (ADR-0049 §7).
+    // undefined variables (ADR-0078, #194): unbound-name read (demotes).
     (VARIABLE_UNDEFINED_ID, Layer::Proof, Floor::Default),
-    // proof, `strict` floor — the some-paths-only sibling, registered ahead of its
-    // emitter (issue #199). A weaker claim than its `default`-floor sibling's, and
-    // one defensive house styles produce deliberately, so it is opt-in.
+    // `strict`-floor some-paths-only sibling, registered ahead of its emitter
+    // (#199): a weaker, deliberately-defensive claim, so opt-in.
     (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
-    // end undefined variables (ADR-0078, issue #194)
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
@@ -425,92 +330,64 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_ID, Layer::Contract, Floor::Contracts),
     (EFFECT_LISKOV_ID, Layer::Contract, Floor::Contracts),
-    // contract — interop-label hygiene (ADR-0082 amendment, issue #311). NOT the
-    // mechanics layer its attribute-side twin `effect.unknown-label` carries: a
-    // mechanics id is unsuppressable and prints on every profile, which is the
-    // fail-closed posture the owner ruling refused for docblocks. The floor rides
-    // with the rest of the envelope family, so opting into envelope enforcement is
-    // what turns on the diagnostic that keeps enforcement honest — a bare `check`
-    // stays silent, and a project mid-migration can baseline the pile.
+    // interop-label hygiene (ADR-0082 amendment, issue #311): NOT the mechanics
+    // layer its twin `effect.unknown-label` carries — mechanics is unsuppressable
+    // and always-on, the fail-closed posture the owner ruling refused for
+    // docblocks. Floor rides with the envelope family, so a bare `check` stays
+    // silent and a mid-migration project can baseline the pile.
     (INTEROP_UNKNOWN_LABEL_ID, Layer::Contract, Floor::Contracts),
     // contract — finding-breadth declared-receiver lane (ADR-0049 §8).
     (PHPDOC_UNDEFINED_METHOD_ID, Layer::Contract, Floor::Contracts),
-    // contract — the offset family's STRICT leg (ADR-0062 A-G10, issue #51):
-    // Asserted declared-envelope evidence. `offset.undeclared` sits at `Contracts`
-    // (a corpus sweep measured zero findings); `offset.maybe-missing` stays at
-    // `Strict` until the `isset`→`@phpstan-assert` discharge-ladder gap is closed.
+    // offset family's STRICT leg (ADR-0062 A-G10, #51): `offset.undeclared` sits
+    // at `Contracts` (a corpus sweep measured zero findings); `offset.maybe-missing`
+    // stays `Strict` until the `isset`→`@phpstan-assert` discharge gap closes.
     (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),
-    // untyped surface (ADR-0078, issue #200)
-    // contract — declared debt: a claim the code does not make (ADR-0078 §2's
-    // lint boundary). Declaration reading only, so nothing here is a proof and
-    // nothing here rots another channel; the contract layer's increase-tripwire
-    // posture is exactly right for "how much untyped surface is left".
+    // untyped surface (ADR-0078, #200): declared debt, not a proof (ADR-0078 §2's
+    // lint boundary). FIVE land at `Contracts`; the ADR marks
+    // `untyped.iterable-value`/`untyped.generics` `Contracts→Strict by
+    // measurement` (noisiest, most-content arms) — one-line moves once measured.
     //
-    // FIVE land at `Contracts`. The ADR's floor table marks the last two
-    // `Contracts→Strict by measurement`: `untyped.iterable-value` and
-    // `untyped.generics` carry the real content and are the two most likely to be
-    // noisy, so they ship at the family's floor and MOVE here — one-line edits to
-    // `Floor::Strict` — once the corpus measurement says they should. Nothing else
-    // in the tree keys on their rung.
-    //
-    // `untyped.class-constant` is the one that LEFT the family floor (2026-08-09
-    // owner ruling), and for a reason no other arm shares: a constant is inherently
-    // static. Its initializer is a constant expression, so the declaration pins the
-    // type whether or not one is written. Every other arm's silence yields `mixed`
-    // — real withheld information — while this arm's yields the exact same type
-    // either way. Inheritance can still overwrite a constant with a differently
-    // shaped value, and that risk is accepted knowingly: unlike a property, Steins
-    // does not ask for the declaration.
-    //
-    // So it does not sit at `Strict` either. `Strict` asks a different question —
-    // is a weaker, some-paths-only claim worth seeing? — and a team opting into
-    // that has not thereby asked to be told how to write its constants. The id goes
-    // to `Pedantic`, which no built-in rung reaches, and the built-in `pedantic`
-    // profile picks it up by name. Measured on the php-typing-conformance suite,
-    // where the arm fired on `key-of<C::MAP>` / `value-of<C::MAP>` /
-    // `int-mask-of<…>` fixtures whose constants are exhaustively typed BY their
-    // values.
+    // `untyped.class-constant` LEFT the family floor (2026-08-09 owner ruling): a
+    // constant's initializer is a constant expression, so the type is pinned
+    // whether written or not — unlike every other arm, whose silence yields real
+    // withheld `mixed`. Not `Strict` either (that rung asks an unrelated
+    // some-paths question). Goes to `Pedantic` (no built-in rung reaches it; the
+    // `pedantic` profile names it), measured on the php-typing-conformance suite
+    // firing on `key-of<C::MAP>`/`value-of<C::MAP>`/`int-mask-of<…>` fixtures
+    // typed exhaustively BY their values.
     (UNTYPED_PARAMETER_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_RETURN_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_PROPERTY_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Pedantic),
     (UNTYPED_ITERABLE_VALUE_ID, Layer::Contract, Floor::Contracts),
     (UNTYPED_GENERICS_ID, Layer::Contract, Floor::Contracts),
-    // end untyped surface (ADR-0078, issue #200)
     // mechanics — apparatus hygiene (red on sight, suppression-exempt).
     (SUPPRESS_UNMATCHED_ID, Layer::Mechanics, Floor::Default),
     (SUPPRESS_UNKNOWN_ID, Layer::Mechanics, Floor::Default),
     (UNKNOWN_LABEL_ID, Layer::Mechanics, Floor::Default),
-    // mechanics — the member-kind port wave's first id (ADR-0078, issue #187):
-    // works-but-drops-a-value intent/behaviour drift, not a runtime break.
+    // member-kind port wave's first id (ADR-0078, issue #187): works-but-drops-a-
+    // value drift, not a runtime break.
     (ARRAY_DUPLICATE_KEY_ID, Layer::Mechanics, Floor::Default),
-    // docblock hygiene (ADR-0078, issue #186)
-    // Anti-rot ids about annotations that drifted from the code. The `phpdoc.*`
-    // prefix now spans two layers (ADR-0078 §1.5): these five are mechanics —
-    // `disable`-proof and undemotable — while `phpdoc.param-mismatch` and its
-    // siblings above stay contract. The layer, never the prefix, decides.
+    // docblock hygiene (ADR-0078, issue #186): annotations drifted from code.
+    // `phpdoc.*` spans two layers (ADR-0078 §1.5) — the layer, never the prefix,
+    // decides.
     (PHPDOC_UNPARSABLE_ID, Layer::Mechanics, Floor::Default),
     (PHPDOC_STALE_PARAM_ID, Layer::Mechanics, Floor::Default),
     (PHPDOC_STALE_VAR_ID, Layer::Mechanics, Floor::Default),
     (PHPDOC_MISPLACED_VAR_ID, Layer::Mechanics, Floor::Default),
     (PHPDOC_THROWS_NOT_THROWABLE_ID, Layer::Mechanics, Floor::Default),
     (CLOSURE_UNUSED_USE_ID, Layer::Mechanics, Floor::Default),
-    // parse failure (ADR-0079, issue #180)
-    // mechanics — a file `php -l` rejects is apparatus rot, not a style opinion:
-    // red on sight, `disable`-proof, undemotable, suppression-exempt. The remedy
-    // is fixing the file, and the exit code says so.
+    // parse failure (ADR-0079, issue #180): a `php -l`-rejected file is apparatus
+    // rot — undemotable, suppression-exempt; the remedy is fixing the file.
     (SYNTAX_UNPARSABLE_ID, Layer::Mechanics, Floor::Default),
-    // end parse failure (ADR-0079, issue #180)
     // debug — the dump surface (ADR-0053): requested introspection, not a finding.
-    // Suppression-, baseline-, and fp-gate-exempt (§4/§8). The `Default` floor is
-    // inert for capture: the debug lane's exclusion from `surfaces_id` is a *layer*
-    // property, decided before the ladder is consulted.
+    // Suppression-, baseline-, and fp-gate-exempt (§4/§8), decided as a layer
+    // property before the ladder is consulted.
     (DEBUG_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_PHPDOC_TYPE_ID, Layer::Debug, Floor::Default),
     (DEBUG_VAR_DUMP_ID, Layer::Debug, Floor::Default),
-    // The trace annotation (ADR-0074 §4): the docblock spelling of the dump
-    // surface's question.
+    // The trace annotation (ADR-0074 §4): docblock spelling of the same question.
     (DEBUG_TRACE_ID, Layer::Debug, Floor::Default),
 ];
 
@@ -531,17 +408,15 @@ const fn derive_ids() -> [&'static str; DIAGNOSTIC_REGISTRY.len()] {
     arr
 }
 
-/// The [`Layer`] a diagnostic `id` carries, or `None` if `id` is not a registered
-/// diagnostic id (ADR-0050 §2). An exact-id lookup — prefix/family subsumption is
-/// [`pattern_is_known`]'s concern, not the layer attribute's.
+/// The [`Layer`] a diagnostic `id` carries, or `None` if unregistered (ADR-0050
+/// §2). Exact-id lookup — prefix subsumption is [`pattern_is_known`]'s concern.
 #[must_use]
 pub fn layer(id: &str) -> Option<Layer> {
     DIAGNOSTIC_REGISTRY.iter().find(|(i, ..)| *i == id).map(|(_, l, _)| *l)
 }
 
-/// The [`Floor`] a diagnostic `id` carries — the lowest profile rung that admits
-/// it (ADR-0062 A-G10) — or `None` if `id` is not registered. Exact-id lookup, the
-/// sibling of [`layer`].
+/// The [`Floor`] a diagnostic `id` carries (ADR-0062 A-G10), or `None` if
+/// unregistered. Exact-id lookup, the sibling of [`layer`].
 #[must_use]
 pub fn surface_floor(id: &str) -> Option<Floor> {
     DIAGNOSTIC_REGISTRY.iter().find(|(i, ..)| *i == id).map(|(.., f)| *f)
@@ -549,23 +424,22 @@ pub fn surface_floor(id: &str) -> Option<Floor> {
 
 /// The result of applying inline ignores to a batch of object-level findings.
 pub struct InlineOutcome {
-    /// Object-level findings that were **not** suppressed (fed onward to the
-    /// baseline channel and, ultimately, printed).
+    /// Findings **not** suppressed (fed onward to baseline, then printed).
     pub kept: Vec<Diagnostic>,
-    /// How many object-level findings inline ignores suppressed.
+    /// How many findings inline ignores suppressed.
     pub suppressed: usize,
-    /// The meta-diagnostics produced (`suppress.unmatched` / `suppress.unknown-id`).
-    /// Never suppressed or baselined themselves.
+    /// The meta-diagnostics produced (`suppress.unmatched` / `suppress.unknown-id`),
+    /// never themselves suppressed or baselined.
     pub meta: Vec<Diagnostic>,
 }
 
 /// A parsed `@steins-ignore` directive from one comment.
 struct Directive {
-    /// The raw id tokens (comma-separated list; may include unknown/malformed).
+    /// The raw id tokens (comma-separated; may include unknown/malformed).
     patterns: Vec<String>,
-    /// The line the directive suppresses on (its own line if trailing, else next).
+    /// The line this directive suppresses on.
     target_line: u32,
-    /// The comment's own 1-based line/column (where meta-diagnostics are reported).
+    /// The comment's own 1-based line/column (meta-diagnostics report here).
     line: u32,
     column: u32,
 }
@@ -574,8 +448,7 @@ struct Directive {
 /// **matches** a concrete diagnostic `id` under ADR-0022 prefix subsumption: a
 /// bare/`.*` family matches every id beneath it; an exact id matches itself.
 /// Segment-aware, so `type` does not match `typex.*`. Shared by the inline-ignore
-/// channel and the profile engine's `enable`/`disable`/`warn` id-arrays (ADR-0050
-/// §5), so both read the ADR-0022 prefix semantics from one place.
+/// channel and the profile engine's `enable`/`disable`/`warn` arrays (ADR-0050 §5).
 #[must_use]
 pub fn pattern_matches(pattern: &str, id: &str) -> bool {
     let norm = pattern.strip_suffix(".*").unwrap_or(pattern);
@@ -596,8 +469,8 @@ pub fn pattern_is_known(pattern: &str) -> bool {
         .any(|&r| r == norm || r.strip_prefix(norm).is_some_and(|rest| rest.starts_with('.')))
 }
 
-/// Extract the text following `@steins-ignore` in a comment, trimming the comment
-/// terminator (`*/`) and surrounding whitespace. `None` if the marker is absent.
+/// Extract the text following `@steins-ignore`, trimmed of `*/` and whitespace.
+/// `None` if the marker is absent.
 fn extract_directive(text: &str) -> Option<&str> {
     let idx = text.find("@steins-ignore")?;
     let mut rest = &text[idx + "@steins-ignore".len()..];
@@ -607,8 +480,8 @@ fn extract_directive(text: &str) -> Option<&str> {
     Some(rest.trim())
 }
 
-/// Parse the id list from a directive body: everything before an optional
-/// parenthesized reason, comma-separated, trimmed, non-empty tokens.
+/// Parse the id list from a directive body: comma-separated, trimmed, non-empty
+/// tokens before an optional parenthesized reason.
 fn parse_id_list(rest: &str) -> Vec<String> {
     let id_part = rest.find('(').map_or(rest, |p| &rest[..p]);
     id_part
@@ -655,10 +528,9 @@ pub fn apply_inline_ignores(
 
         for f in findings.iter().filter(|f| &f.path == path) {
             // ADR-0053 §4: the debug lane is exempt from inline ignores — a dump is an
-            // answered question, not a finding; the remedy is deleting the call, one
-            // keystroke away. A debug finding is never suppressed and never marks a
-            // directive pattern used, so an `@steins-ignore debug.type` naming it stays
-            // unmatched and earns `suppress.unmatched` (the anti-rot channel's normal job).
+            // answered question, not a finding (remedy: delete the call). It's never
+            // suppressed and never marks a pattern used, so `@steins-ignore debug.type`
+            // stays unmatched and earns `suppress.unmatched` (anti-rot doing its job).
             if matches!(layer(f.id), Some(Layer::Debug)) {
                 kept.push(f.clone());
                 continue;
@@ -760,10 +632,9 @@ mod tests {
         assert!(pattern_is_known("type"));
         assert!(pattern_is_known("effect.envelope-exceeded"));
         assert!(pattern_is_known("suppress.unmatched"));
-        // The ADR-0053 debug ids are registry-governed, so an `@steins-ignore`
-        // naming one is a *known* pattern (never `suppress.unknown-id`). It matches
-        // no dump finding (a dump is suppression-exempt, §4), so it reports
-        // `suppress.unmatched` — the anti-rot channel doing its normal job.
+        // Debug ids are registry-governed, so naming one is *known* (never
+        // suppress.unknown-id); it matches no dump finding (exempt, §4), so it
+        // reports suppress.unmatched instead — anti-rot doing its normal job.
         assert!(pattern_is_known("debug.type"));
         assert!(pattern_is_known("debug.phpdoc-type"));
         assert!(pattern_is_known("debug.var-dump"));

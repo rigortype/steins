@@ -1,6 +1,5 @@
 //! Acceptance tests for array-literal lowering into the trace IR (ADR-0001):
-//! key normalization, auto (next-int) keys, nested arrays, and the spread /
-//! unrepresentable-element → `Other` fallback.
+//! key normalization, next-int auto keys, nested arrays, spread/unrepresentable → `Other`.
 
 use steins_domain::PhpStr;
 use steins_syntax::{
@@ -21,8 +20,7 @@ fn items(v: &ArgValue) -> &[(ArrayKey, ArgValue)] {
     }
 }
 
-/// Normalize with an unknown PHP minor, asserting the literal is version-
-/// independent (the two next-int rules agree, so no minor is needed).
+/// Normalize with an unknown minor: asserts the literal is version-independent (rules agree).
 fn norm_unknown(it: &[(ArrayKey, ArgValue)]) -> Vec<(NormKey, ArgValue)> {
     assert!(!next_int_is_version_dependent(it), "fixture is version-dependent");
     normalize_array(it, None).expect("version-independent literal resolves without a minor")
@@ -78,11 +76,10 @@ fn next_int_follows_largest_explicit_int_key() {
     assert_eq!(norm[1].0, NormKey::Int(6));
 }
 
-// ---- Negative keys: the PHP 8.3 next-auto-index change (ADR-0049 A12) -------
-//
-// Every expectation below is a `php -r 'var_export(...)'` witness on PHP 8.5.8,
-// never recall. The pre-8.3 column is the rule PHP < 8.3 documents (the floor at
-// 0), which Steins must still serve because ADR-0011's floor is 8.1.
+// Negative keys: the PHP 8.3 next-auto-index change (ADR-0049 A12). Every
+// expectation below is a `php -r 'var_export(...)'` witness on PHP 8.5.8,
+// never recall; pre-8.3 column is what PHP < 8.3 documents (floor at 0;
+// Steins's floor is 8.1, ADR-0011).
 
 #[test]
 fn negative_key_next_int_splits_on_the_83_rule() {
@@ -112,15 +109,13 @@ fn reported_minor_picks_the_rule_and_unknown_declines() {
         assert_eq!(norm[1].0, NormKey::Int(want), "PHP {minor:?}");
     }
 
-    // Unknown minor + version-dependent literal → unproven, so the caller drops
-    // the fact rather than guessing a key.
+    // Unknown minor + version-dependent literal → unproven; drop the fact, don't guess.
     assert_eq!(normalize_array(it, None), None);
 }
 
 #[test]
 fn version_independent_literals_resolve_without_a_minor() {
-    // No negative key anywhere → the two rules agree, so an unknown minor is
-    // still answerable. This is what keeps the widening narrow.
+    // No negative key anywhere → the two rules agree, so an unknown minor still answers.
     for src in ["<?php f(['a', 'b']);", "<?php f([5 => 'a', 'b']);", "<?php f(['k' => 1, 'b']);"] {
         let v = first_arg(src);
         let it = items(&v);
@@ -175,9 +170,8 @@ fn auto_keys_climb_out_of_the_negatives() {
     );
 }
 
-/// The adversarial counterexamples #46 names by hand, each a `php -r` witness on
-/// PHP 8.5.8. The point of each is that the running **max** — not the last key,
-/// not the sign of the last key — drives the next index.
+/// Adversarial counterexamples #46 names by hand, each a `php -r` witness on
+/// PHP 8.5.8: the running **max** (not last key, not its sign) drives the next index.
 #[test]
 fn adversarial_negative_key_shapes() {
     // Mixed negative and positive explicit keys. `array_keys([-5=>a,3=>b,c])`
@@ -187,9 +181,8 @@ fn adversarial_negative_key_shapes() {
     assert!(!next_int_is_version_dependent(it));
     assert_eq!(norm_unknown(it)[2].0, NormKey::Int(4));
 
-    // A negative key *after* a larger auto key. `array_keys(['a',-5=>b,c])`
-    // → [0, -5, 1]: the auto key already pushed the max to 0, so the later
-    // negative key cannot pull the index back down.
+    // A negative key *after* a larger auto key: `array_keys(['a',-5=>b,c])` →
+    // [0, -5, 1] — the auto key already pushed max to 0; negatives can't pull it back.
     let v = first_arg("<?php f(['a', -5 => 'b', 'c']);");
     let it = items(&v);
     assert!(!next_int_is_version_dependent(it));
@@ -246,15 +239,13 @@ fn minus_one_is_the_boundary_where_the_rules_reconverge() {
     assert!(next_int_is_version_dependent(items(&v)));
 }
 
-/// `render_array` is the one consumer A12 exempts: a diagnostic message is not a
-/// proof-layer premise, so it takes the pinned rule unconditionally rather than
-/// threading the minor through `ArgValue::render()`. This pins that exemption so
-/// a future decision to thread it shows up as a test change (#46 criterion 3).
+/// `render_array` is the one consumer A12 exempts: not a proof-layer premise,
+/// so it takes the pinned rule unconditionally instead of threading the minor
+/// (issue #46 criterion 3) — a future change to thread it shows as a test diff.
 #[test]
 fn rendering_takes_the_pinned_rule_and_never_declines() {
     let v = first_arg("<?php f([-5 => 'a', 'b']);");
-    // The pinned rule (8.3+) puts `'b'` at -4; the literal is version-dependent,
-    // yet rendering still produces a message rather than refusing.
+    // Pinned rule (8.3+) puts 'b' at -4; version-dependent, yet rendering produces a message.
     assert!(next_int_is_version_dependent(items(&v)));
     assert_eq!(v.render(), "[-5 => 'a', -4 => 'b']");
 
@@ -262,10 +253,8 @@ fn rendering_takes_the_pinned_rule_and_never_declines() {
 }
 
 /// The load-bearing invariant behind A12's narrow widening: whenever
-/// `next_int_is_version_dependent` says "no", the two rules really do agree, so
-/// answering under an unknown minor is sound. Exhaustive over every key sequence
-/// of length ≤ 4 drawn from an alphabet that brackets the interesting cases
-/// (omitted, negative, zero, positive, string).
+/// `next_int_is_version_dependent` says "no", the two rules agree, so an unknown
+/// minor is sound. Exhaustive over key sequences ≤ length 4 (omitted/neg/zero/pos/string).
 #[test]
 fn version_independence_implies_the_two_rules_agree() {
     let alphabet = [
@@ -352,24 +341,20 @@ fn unrepresentable_element_collapses_to_other() {
 #[test]
 fn a_non_literal_key_is_carried_rather_than_collapsing() {
     // This pinned `ArgValue::Other` — one unspellable key dropped the WHOLE
-    // literal, so `array_key_first([$string => null])` and every
-    // `foreach ([$k => $v] as …)` had nothing to work from (issue #336).
-    // The key expression is carried instead: the walk can ask what the key IS
-    // even though it cannot say which key it lands on.
+    // literal, breaking `array_key_first`/`foreach` (issue #336). The key
+    // expression is carried instead, even though which key it lands on is unknown.
     let v = first_arg("<?php f([$k => 1]);");
     let it = items(&v);
     assert_eq!(it.len(), 1);
     assert_eq!(it[0].0, ArrayKey::Expr(Box::new(ArgValue::Var("k".into()))));
     assert_eq!(it[0].1, ArgValue::Int(1));
-    // It is still not a normalizable key set: an unknown key may be an integer,
-    // so it moves the next-auto-index for every following `Auto` position.
+    // Not a normalizable key set: an unknown key may be an integer, moving the auto-index.
     assert_eq!(normalize_array(it, Some((8, 5))), None);
 }
 
 #[test]
 fn an_unrepresentable_key_expression_still_collapses() {
-    // Carrying the key needs a key to carry; an expression that lowers to
-    // `Other` leaves nothing, so the literal collapses as it always did.
+    // Carrying needs a key to carry; an `Other`-lowering expression leaves nothing to carry.
     assert_eq!(first_arg("<?php f([$obj->m() => 1]);"), ArgValue::Other);
 }
 
@@ -381,7 +366,7 @@ fn variable_element_stays_representable() {
     assert_eq!(it[0].1, ArgValue::Var("x".into()));
 }
 
-// ---- `is_concrete_value`: the self-evident-value predicate (issue #39) -------
+// `is_concrete_value`: the self-evident-value predicate (issue #39)
 
 #[test]
 fn concrete_value_covers_scalars_and_literal_arrays() {
@@ -400,8 +385,7 @@ fn concrete_value_covers_scalars_and_literal_arrays() {
 
 #[test]
 fn one_unresolved_element_makes_the_whole_array_non_concrete() {
-    // A carrier element (`$x`, a call) is representable in the IR but is NOT a
-    // proven value, so the array containing it is not one either — at any depth.
+    // A carrier element (`$x`, a call) is representable but not a proven value, at any depth.
     for src in [
         "<?php f([$x]);",
         "<?php f([1, $x, 3]);",

@@ -1,14 +1,12 @@
-//! Regression tests for issue #179: `collect_php_files` used to sort-and-dedup
-//! the collected file list by path STRING, so a tree reachable through a
-//! directory symlink under two different spellings (`mirror/src -> ../src`)
-//! was ingested twice. Every class-like was declared twice, the absence-family
-//! existence guard (ADR-0049) read the duplicated hierarchy as non-enumerable,
-//! and every declaration-dependent finding vanished with no diagnostic; a
-//! flow-derived finding survived but was reported twice, once per spelling.
+//! Regression tests for issue #179: `collect_php_files` deduped the file list by
+//! path STRING, so a tree reachable via a directory symlink under two spellings
+//! (`mirror/src -> ../src`) was ingested twice. Declaration-dependent findings
+//! vanished (the absence-family existence guard, ADR-0049, read the duplicated
+//! hierarchy as non-enumerable); flow-derived findings survived but doubled.
 //!
-//! The fix (`crates/steins-cli/src/main.rs`, `dedup_canonical`) dedups by
-//! [`std::path::Path::canonicalize`] instead, keeping whichever spelling was
-//! encountered first (argument order, then walk order).
+//! Fix: `dedup_canonical` in `crates/steins-cli/src/main.rs` dedups by
+//! [`std::path::Path::canonicalize`], keeping whichever spelling came first
+//! (argument order, then walk order).
 
 use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
@@ -19,12 +17,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -64,10 +58,8 @@ fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
     p
 }
 
-/// `src/a.php`: a constructor requiring three arguments, called with one — the
-/// issue's repro. Provable ArgumentCountError, so this is a
-/// DECLARATION-dependent finding (needs the class-like enumerated exactly
-/// once): exactly the family #179 silently dropped.
+/// `src/a.php`: ArgumentCountError (ctor wants 3 args, called with 1) — the issue's
+/// repro. DECLARATION-dependent: needs the class-like enumerated once; #179 dropped it.
 const ARITY_SRC: &str = "<?php
 class Mapper {
     public function __construct(private int $a, private int $b, private int $c) {}
@@ -75,9 +67,8 @@ class Mapper {
 new Mapper(1);
 ";
 
-/// `src/a.php`: a proven-null receiver inside a `=== null` guard — `call.on-null`
-/// (ADR-0031). This finding is FLOW-derived, not declaration-dependent: #179's
-/// bug let it survive the duplication, but reported it twice, once per spelling.
+/// `src/a.php`: proven-null receiver in `=== null` guard — `call.on-null` (ADR-0031).
+/// FLOW-derived not declaration-dependent: #179 let it survive but reported it twice.
 const FLOW_SRC: &str = "<?php
 class U { public function name(): string { return \"x\"; } }
 function f($u): void {
@@ -85,17 +76,14 @@ function f($u): void {
 }
 ";
 
-/// Set up `<dir>/src/a.php` with `contents`, plus a directory symlink
-/// `<dir>/mirror/src -> ../src`, so `src` and `mirror/src` name the same tree
-/// under two spellings.
+/// `<dir>/mirror/src -> ../src`: `src` and `mirror/src` name the same tree.
 fn setup_mirrored_tree(dir: &Path, contents: &str) {
     write(dir, "src/a.php", contents);
     std::fs::create_dir_all(dir.join("mirror")).expect("create mirror dir");
     symlink("../src", dir.join("mirror/src")).expect("create mirror/src symlink");
 }
 
-// ---- (1) declaration-dependent finding: same single finding with/without ---
-// ---- the mirror argument ---------------------------------------------------
+// (1) declaration-dependent finding: same single finding with/without the mirror argument
 
 #[test]
 fn arity_finding_survives_and_stays_singular_through_a_symlinked_mirror() {
@@ -112,10 +100,7 @@ fn arity_finding_survives_and_stays_singular_through_a_symlinked_mirror() {
     assert_eq!(direct_lines.len(), 1, "exactly one finding, got:\n{}", direct.stdout);
     assert!(direct.stdout.contains("call.too-few-arguments"), "got:\n{}", direct.stdout);
 
-    // Pre-#179: `src` ingested under two spellings (`src/a.php`,
-    // `mirror/src/a.php`) made `Mapper` a duplicate declaration, the existence
-    // guard read the hierarchy as non-enumerable, and this arity finding —
-    // declaration-dependent — vanished with exit 0 and empty stdout.
+    // Pre-#179: vanished silently — exit 0, empty stdout.
     let mirrored = run_in(&dir, &["check", "src", "mirror"]);
     assert_eq!(
         mirrored.code, 1,
@@ -132,7 +117,7 @@ fn arity_finding_survives_and_stays_singular_through_a_symlinked_mirror() {
     assert!(mirrored.stdout.contains("call.too-few-arguments"), "got:\n{}", mirrored.stdout);
 }
 
-// ---- (2) flow-derived finding: reported once, not twice --------------------
+// (2) flow-derived finding: reported once, not twice
 
 #[test]
 fn flow_derived_finding_reachable_through_two_paths_reports_once() {
@@ -143,8 +128,7 @@ fn flow_derived_finding_reachable_through_two_paths_reports_once() {
     assert_eq!(direct.code, 1, "direct: call.on-null present, got:\n{}", direct.stdout);
     assert_eq!(direct.stdout.lines().count(), 1, "one finding, got:\n{}", direct.stdout);
 
-    // Pre-#179: this finding is flow-derived, not declaration-dependent, so it
-    // survived the duplicate ingestion — but once per spelling, i.e. TWICE.
+    // Pre-#179: survived (flow-derived) but reported TWICE, once per spelling.
     let mirrored = run_in(&dir, &["check", "src", "mirror"]);
     assert_eq!(mirrored.code, 1, "mirrored: call.on-null present, got:\n{}", mirrored.stdout);
     let lines: Vec<&str> = mirrored.stdout.lines().collect();
@@ -157,15 +141,13 @@ fn flow_derived_finding_reachable_through_two_paths_reports_once() {
     assert!(mirrored.stdout.contains("call.on-null"), "got:\n{}", mirrored.stdout);
 }
 
-// ---- (3) the reported path is stable: first argument order wins ------------
+// (3) the reported path is stable: first argument order wins
 
 #[test]
 fn reported_path_is_the_first_spelling_in_argument_order() {
     let dir = workdir("stable");
     setup_mirrored_tree(&dir, ARITY_SRC);
 
-    // `src` named first → the survivor is spelled `src/a.php`, not the
-    // canonical form and not `mirror/src/a.php`.
     let src_first = run_in(&dir, &["check", "src", "mirror"]);
     assert_eq!(src_first.code, 1, "got:\n{}", src_first.stdout);
     assert!(
@@ -175,10 +157,7 @@ fn reported_path_is_the_first_spelling_in_argument_order() {
     );
     assert!(!src_first.stdout.contains("mirror/src/a.php"), "got:\n{}", src_first.stdout);
 
-    // Swap the argument order → the survivor is spelled `mirror/src/a.php`:
-    // the choice tracks argument order, not alphabetical or canonical order
-    // (`mirror/src/a.php` sorts and canonicalizes the same regardless of which
-    // way round the arguments were given).
+    // Argument order decides, not sort/canonical order — same either way given.
     let mirror_first = run_in(&dir, &["check", "mirror", "src"]);
     assert_eq!(mirror_first.code, 1, "got:\n{}", mirror_first.stdout);
     assert!(
@@ -189,14 +168,13 @@ fn reported_path_is_the_first_spelling_in_argument_order() {
     assert!(!mirror_first.stdout.contains("\nsrc/a.php"), "got:\n{}", mirror_first.stdout);
 }
 
-// ---- directory symlink cycle: the walker must terminate --------------------
+// Directory symlink cycle: the walker must terminate
 
 #[test]
 fn directory_symlink_cycle_does_not_hang_or_crash() {
     let dir = workdir("cycle");
     write(&dir, "src/a.php", ARITY_SRC);
-    // `src/self -> .`: an infinite directory symlink cycle if the walker has
-    // no cycle guard (issue #179's third requirement).
+    // `src/self -> .`: infinite symlink cycle without a walker cycle guard (#179).
     symlink(".", dir.join("src/self")).expect("create self-referential symlink");
 
     let r = run_in(&dir, &["check", "src"]);

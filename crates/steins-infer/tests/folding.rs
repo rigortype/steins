@@ -1,6 +1,5 @@
-//! Folding integration at the inference layer, driven by a deterministic mock
-//! [`Folder`] (no PHP needed). Real end-to-end folding through a live sidecar is
-//! covered by the CLI tests; here we prove the engine's gate and provenance.
+//! Folding integration at the inference layer, via a deterministic mock [`Folder`]
+//! (no PHP) — proves the gate and provenance. Live-sidecar folding is CLI-tested.
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -17,9 +16,7 @@ impl Folder for Mock {
             ("strtolower", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_lowercase().into())),
             ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_uppercase().into())),
             ("strval", [ArgValue::Int(i)]) => Some(ArgValue::Str(i.to_string().into())),
-            // `count` over a literal array (issue #39). The real fold runs on the
-            // project's PHP; the mock only has to prove the GATE let the array
-            // through — the sidecar tests cover the semantics.
+            // `count` over a literal array (issue #39) — proves the GATE, not the fold.
             ("count", [ArgValue::Array(items)]) => {
                 Some(ArgValue::Str(format!("n{}", items.len()).into()))
             }
@@ -31,8 +28,7 @@ impl Folder for Mock {
 /// One call the gate forwarded to the folder.
 type Ask = (String, Vec<ArgValue>);
 
-/// A folder that records every `(name, args)` the gate hands it and never folds,
-/// so a test can assert on what the gate *asked* rather than on a diagnostic.
+/// Records every `(name, args)` the gate hands it and never folds (asserts on *asked*).
 #[derive(Clone, Default)]
 struct Spy(Rc<RefCell<Vec<Ask>>>);
 
@@ -69,8 +65,6 @@ const STRICT_INT: &str =
 
 #[test]
 fn folds_builtin_in_argument_position() {
-    // width(strtolower("ABC")) → "abc", a non-numeric string into int (coercive
-    // TypeError).
     let f = find(&format!("{COERCIVE_INT}width(strtolower(\"ABC\"));"), &mut Mock);
     assert_eq!(f.len(), 1);
     assert_eq!(
@@ -81,26 +75,23 @@ fn folds_builtin_in_argument_position() {
 
 #[test]
 fn folds_builtin_on_assignment_rhs() {
-    // $w = strtoupper("xy"); width($w);  → "XY" into int.
     let f = find(&format!("{COERCIVE_INT}$w = strtoupper(\"xy\");\nwidth($w);"), &mut Mock);
     assert_eq!(f.len(), 1, "got {f:#?}");
-    // Chained through a variable → provenance is the immediate $w hop.
+    // Chained through a variable: provenance is the immediate $w hop.
     assert!(f[0].message.contains("from $w, assigned at line"), "{}", f[0].message);
     assert!(f[0].message.contains("argument \"XY\""));
 }
 
 #[test]
 fn non_literal_inner_arg_is_silent() {
-    // width(strtolower($x)) — inner arg is a variable, not a literal, so the gate
-    // never asks the folder.
+    // A variable inner arg (not a literal) means the gate never asks the folder.
     let src = format!("{COERCIVE_INT}$x = $_GET['x'];\nwidth(strtolower($x));");
     assert_eq!(find(&src, &mut Mock).len(), 0);
 }
 
 #[test]
 fn strval_folds_strict_flagged_coercive_silent() {
-    // strval(5) → "5". In strict, string→int is a TypeError; in coercive, "5" is
-    // numeric and coerces silently.
+    // strval(5) → "5": strict flags string→int; coercive accepts a numeric string.
     let strict = find(&format!("{STRICT_INT}width(strval(5));"), &mut Mock);
     assert_eq!(strict.len(), 1, "strict flags string→int: {strict:#?}");
     assert!(strict[0].message.contains("(folded from strval(5))"));
@@ -122,11 +113,8 @@ fn nofold_is_silent_for_folded_findings() {
     assert_eq!(check(&tree, &funcs, "d.php").len(), 1);
 }
 
-// array-literal fold arguments (issue #39)
-
-// These assert the GATE — which arguments reach the folder at all. `count`,
-// `in_array` and `implode` were parked on the `foldable` allowlist behind exactly
-// this gate; nothing about the allowlist changes here.
+// Array-literal fold arguments (issue #39): assert the GATE for `count`, `in_array`,
+// `implode` on the `foldable` allowlist.
 
 #[test]
 fn a_literal_array_argument_reaches_the_folder() {
@@ -138,7 +126,6 @@ fn a_literal_array_argument_reaches_the_folder() {
         "got {calls:#?}"
     );
 
-    // …and the folded value premises the ordinary native check: "n3" into int.
     let f = find(&format!("{COERCIVE_INT}width(count([1, 2, 3]));"), &mut Mock);
     assert_eq!(f.len(), 1, "folded array arg produces a finding, got {f:#?}");
     assert!(f[0].message.contains("folded from count([1, 2, 3])"), "{}", f[0].message);
@@ -146,7 +133,7 @@ fn a_literal_array_argument_reaches_the_folder() {
 
 #[test]
 fn a_nested_literal_array_reaches_the_folder() {
-    // Nesting is REPRESENTED, not widened: the whole tree crosses the seam.
+    // Nesting is REPRESENTED, not widened — the whole tree crosses the seam.
     let calls = asked(&format!("{COERCIVE_INT}width(count([[1, 2], ['k' => 3]]));"));
     assert!(!calls.is_empty(), "nested array arg passed the gate");
     let [ArgValue::Array(outer)] = &calls[0].1[..] else { panic!("expected one array arg") };
@@ -155,29 +142,21 @@ fn a_nested_literal_array_reaches_the_folder() {
 
 #[test]
 fn an_array_with_a_non_literal_element_never_reaches_the_folder() {
-    // The acceptance pin: `count([1, $x])` widens. `$x` may hold anything —
-    // including an array — so the literal's length is not the array's length.
+    // `$x` may hold anything (even an array), so the literal's length is not the
+    // array's length — at top level, at depth, and a spread (never lowered to `Array`).
     assert!(asked(&format!("{COERCIVE_INT}width(count([1, $x]));")).is_empty());
-    // Also at depth.
     assert!(asked(&format!("{COERCIVE_INT}width(count([[1, [$x]]]));")).is_empty());
-    // And a spread, which never lowered to an `Array` in the first place.
     assert!(asked(&format!("{COERCIVE_INT}width(count([1, ...$rest]));")).is_empty());
 }
 
 #[test]
 fn a_provable_element_is_resolved_before_the_gate_judges_the_array() {
-    // ADR-0062 S7: the gate judges each argument as the value it PROVABLY is, so
-    // an element that is itself a foldable call (or a bound variable) is resolved
-    // first and the whole array crosses the seam. `strtolower('A')` runs on the
-    // project's own PHP, so `['a']` is what `count` is actually handed — one
-    // entry, and the length claim is honest.
+    // ADR-0062 S7: the gate judges each argument as the value it PROVABLY is, so a
+    // foldable-call element is resolved first (`['a']`, one entry — an honest length).
     let calls = asked(&format!("{COERCIVE_INT}width(count([strtolower('A')]));"));
     assert!(!calls.is_empty(), "the resolved element let the array through");
-    // The `strtolower` fold is asked for first, then `count` over the resolved
-    // array — the Spy never folds, so `count`'s argument stays unresolved here.
+    // strtolower is asked first; the Spy never folds, so count's arg stays unresolved.
     assert_eq!(calls[0].0, "strtolower");
-    // With a folder that actually folds, the array is concrete by the time the
-    // gate judges it.
     let f = find(&format!("{COERCIVE_INT}width(count([strtolower('A')]));"), &mut Mock);
     assert_eq!(f.len(), 1, "the resolved array folds, got {f:#?}");
     assert!(f[0].message.contains("folded from count(['a'])"), "{}", f[0].message);
@@ -185,21 +164,15 @@ fn a_provable_element_is_resolved_before_the_gate_judges_the_array() {
 
 #[test]
 fn a_non_literal_key_never_reaches_the_folder() {
-    // A key the analyzer cannot spell is CARRIED at lowering now (issue #336) —
-    // the walk can ask what the key expression is — but it is still not a fold
-    // argument: the seam sends the engine the array that was written or nothing
-    // at all, and `count([$k => 1, 'a' => 2])` is not 2 (the key might collide
-    // with the written one).
+    // A key the analyzer cannot spell is CARRIED at lowering (issue #336), but still
+    // not a fold argument — the key might collide with the written one.
     assert!(asked(&format!("{COERCIVE_INT}width(count([$k => 1, 'a' => 2]));")).is_empty());
     assert!(asked(&format!("{COERCIVE_INT}width(count([[$k => 1]]));")).is_empty());
 }
 
 #[test]
 fn a_literal_array_folds_in_a_poisoned_scope_too() {
-    // Poisoning (ADR-0027: `extract`, references, …) makes every *variable*
-    // unknown, but a literal array reads no variable — `count([1, 2, 3])` is 3
-    // whatever aliasing machinery the scope contains. The fold is asked, and it
-    // is asked with the same argument as in a clean scope.
+    // Poisoning (ADR-0027) makes every *variable* unknown, but a literal reads none.
     let src = format!(
         "{COERCIVE_INT}function poisoned() {{ extract($GLOBALS); width(count([1, 2, 3])); }}"
     );
@@ -222,17 +195,14 @@ fn the_empty_array_is_a_value_and_folds() {
 
 #[test]
 fn an_oversized_literal_array_widens_instead_of_folding() {
-    // The fold budget (256 entries, counted recursively) keeps a generated lookup
-    // table off the IPC seam and out of the memo. At the cap it still folds;
-    // one past it, the gate never asks.
+    // The fold budget (256 entries, counted recursively) keeps big lookups off the IPC seam.
     assert!(!asked(&count_of_n(256)).is_empty(), "256 entries is inside the budget");
     assert!(asked(&count_of_n(257)).is_empty(), "257 entries widens");
 }
 
 #[test]
 fn an_overdeep_literal_array_widens_instead_of_folding() {
-    // The depth bound (8) is what keeps the recursive encoders — Rust's and the
-    // runner's — off an unbounded stack.
+    // The depth bound (8) keeps the recursive encoders off an unbounded stack.
     let nest = |d: usize| format!("{COERCIVE_INT}width(count({}1{}));", "[".repeat(d), "]".repeat(d));
     assert!(!asked(&nest(8)).is_empty(), "depth 8 is inside the budget");
     assert!(asked(&nest(9)).is_empty(), "depth 9 widens");
@@ -240,9 +210,7 @@ fn an_overdeep_literal_array_widens_instead_of_folding() {
 
 #[test]
 fn user_function_named_like_builtin_is_not_folded() {
-    // A same-file user function shadowing an allowlisted name must not be sent to
-    // the sidecar. Here `strtolower` is user-defined and non-constant, so silent.
+    // A same-file user function shadowing an allowlisted name must not reach the sidecar.
     let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction strtolower(string $s): string { $x = 1; return $s; }\nwidth(strtolower(\"ABC\"));";
-    // Mock would fold it to "abc" if asked — assert the gate prevents that.
     assert_eq!(find(src, &mut Mock).len(), 0, "user fn is not folded");
 }

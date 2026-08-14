@@ -1,14 +1,13 @@
-//! `property.maybe-undefined` (ADR-0078's floor table, ADR-0081 §7): the
-//! declared-shape possibly leg of the property family.
+//! `property.maybe-undefined` (ADR-0078's floor table, ADR-0081 §7): the declared-shape
+//! possibly leg of the property family.
 //!
-//! The receiver is narrowed to a **union** of declared types; the §8 ladder proves
-//! the property absent on some arms and finds it declared on the rest. That is the
-//! whole claim — the arms are declared types, not control-flow paths, so nothing
-//! here consults the reachability foundation the `variable.*` pair rests on.
+//! The receiver is narrowed to a **union** of declared types; the §8 ladder proves the
+//! property absent on some arms and declared on the rest — the arms are declared types, not
+//! control-flow paths, so nothing here consults `variable.*`'s reachability foundation.
 //!
-//! The routing is a partition, and this file's job is to pin all three cells: every
-//! arm absent is `property.undefined` at the `default` floor, some arms absent is
-//! this id at `strict`, and one arm the ladder cannot close is silence on both.
+//! The routing is a partition, and this file pins all three cells: every arm absent is
+//! `property.undefined` at the `default` floor, some arms absent is this id at `strict`, and
+//! one arm the ladder cannot close is silence on both.
 
 use std::collections::BTreeMap;
 
@@ -19,9 +18,8 @@ use steins_infer::{
 };
 use steins_syntax::SourceTree;
 
-/// The same boot-surface mock the definite leg's suite uses: the A9 gate is open,
-/// no project class is a homonym, no PHP-minor skew. What these fixtures measure is
-/// the ladder, never the gate.
+/// The same boot-surface mock the definite leg's suite uses: A9 gate open, no homonym,
+/// no PHP-minor skew — these fixtures measure the ladder, never the gate.
 struct Boot {
     available: bool,
 }
@@ -61,9 +59,8 @@ fn definite(src: &str) -> Vec<Diagnostic> {
     findings(src, PROPERTY_UNDEFINED_ID)
 }
 
-/// One arm declares `$nope`, the other provably lacks it — the id's whole reason to
-/// exist. Both arms are `final`, so descendant closure is immune and the ladder
-/// turns on the declaration alone.
+/// One arm declares `$nope`, the other provably lacks it — the id's whole reason to exist.
+/// Both arms are `final`, so descendant closure is immune.
 const MIXED_UNION: &str = "<?php
 final class Has { public int $nope = 1; }
 final class Lacks { public int $other = 2; }
@@ -77,9 +74,7 @@ final class B { public int $other = 2; }
 function f(A|B $o): void { $x = $o->nope; }
 ";
 
-// ---------------------------------------------------------------------------
 // The registry contract.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_id_sits_in_the_proof_layer_at_the_strict_floor() {
@@ -99,9 +94,7 @@ fn only_the_strict_profile_surfaces_it() {
     assert!(strict.is_surfaced(&d), "`strict` is where the possibly leg lives");
 }
 
-// ---------------------------------------------------------------------------
 // The three cells of the partition.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_where_some_arms_declare_the_property_and_some_do_not() {
@@ -138,9 +131,8 @@ function f(A|B $o): void { $x = $o->nope; }
 
 #[test]
 fn an_unclosable_arm_silences_both_legs() {
-    // The leg that makes the possibly claim honest: a `__get` on one arm means the
-    // ladder proved nothing there, and "some arms lack it" is still a claim about
-    // ALL of them.
+    // The leg that makes the possibly claim honest: a `__get` on one arm means the ladder
+    // proved nothing there, and "some arms lack it" is still a claim about ALL of them.
     let src = "<?php
 final class Has { public int $nope = 1; }
 final class Magic { public function __get($n) { return 1; } }
@@ -149,15 +141,13 @@ function f(Has|Magic $o): void { $x = $o->nope; }
     assert!(maybe(src).is_empty(), "{:#?}", maybe(src));
     assert!(definite(src).is_empty(), "{:#?}", definite(src));
 
-    // The negative control: the same shape with the magic method removed fires, so
-    // the silence above is the leg and not a broken fixture.
+    // Control: the same shape without the magic method fires, so silence above is the leg.
     assert_eq!(maybe(MIXED_UNION).len(), 1, "{:#?}", maybe(MIXED_UNION));
 }
 
 #[test]
 fn a_descendant_declaring_the_property_silences_the_possibly_leg_too() {
-    // A descendant that declares it is an UNKNOWN arm, not a clean one: the runtime
-    // receiver may or may not be that subclass.
+    // A descendant that declares it is an UNKNOWN arm, not a clean one — the runtime receiver may or may not be that subclass.
     let src = "<?php
 final class Has { public int $nope = 1; }
 class Lacks { public int $other = 2; }
@@ -168,9 +158,7 @@ function f(Has|Lacks $o): void { $x = $o->nope; }
     assert!(definite(src).is_empty(), "{:#?}", definite(src));
 }
 
-// ---------------------------------------------------------------------------
 // The definite leg's premises, inherited.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_a9_sidecar_gate_silences_it() {
@@ -184,8 +172,7 @@ fn the_a9_sidecar_gate_silences_it() {
 
 #[test]
 fn an_asserted_arm_is_the_same_calibration_boundary() {
-    // A13's Verified-stratum floor is computed over the participating arms before
-    // the ladder runs, so a docblock-premised union gets no id on either leg.
+    // A13's Verified-stratum floor is computed before the ladder runs, so a docblock-premised union gets no id on either leg.
     let src = "<?php
 final class Has { public int $nope = 1; }
 final class Lacks { public int $other = 2; }
@@ -197,8 +184,7 @@ function f($o): void { $x = $o->nope; }
 
 #[test]
 fn a_project_wide_dynamic_write_silences_it() {
-    // The obstacle is asked before any class work and covers both legs: a name
-    // written dynamically anywhere could have been created on the object first.
+    // The obstacle is asked before any class work, covering both legs: a name written dynamically anywhere could have created it on the object first.
     let src = "<?php
 final class Has { public int $nope = 1; }
 final class Lacks { public int $other = 2; }
@@ -210,8 +196,7 @@ function w(object $q): void { $q->nope = 5; }
 
 #[test]
 fn a_declared_null_warning_posture_takes_it_off_the_proof_surface() {
-    // ADR-0049 §7: the consequence is warning-plus-`null`, exactly the definite
-    // leg's, so the same gate applies whole.
+    // ADR-0049 §7: the consequence is warning-plus-`null`, exactly the definite leg's, so the same gate applies.
     let tree = SourceTree::parse(MIXED_UNION);
     let tolerant: Vec<Diagnostic> = steins_infer::check_full(
         &tree,

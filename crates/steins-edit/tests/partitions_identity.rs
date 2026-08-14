@@ -1,7 +1,6 @@
-//! ADR-0047 identity gate: threading a [`PartitionMap`] into the planners must not
-//! change any decision. Whether `partitions` is `None`, the single-region identity,
-//! or a fully-declared multi-partition map, the [`TransformReport`] is byte-identical
-//! (ADR-0047 §6: "with one region the planner degenerates to today's behavior").
+//! ADR-0047 identity gate: threading a [`PartitionMap`] into the planners must
+//! not change any decision — [`TransformReport`] is byte-identical whether
+//! `partitions` is `None`, single-region identity, or a fully-declared map (ADR-0047 §6).
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::{
@@ -75,7 +74,6 @@ fn honesty_is_byte_identical_across_partition_inputs() {
 
 #[test]
 fn no_config_is_the_single_region_identity() {
-    // The CLI's "no [transform.partitions] section" path yields `None`; assert that
-    // `None` and the constructed identity are interchangeable at the planner seam.
+    // The CLI's "no [transform.partitions] section" path yields `None`.
     assert_eq!(promote_with(None), promote_with(Some(&PartitionMap::single_region())));
 }

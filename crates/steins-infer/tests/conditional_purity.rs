@@ -50,7 +50,7 @@ const APPLY: &str = "<?php\n\
         return $out;\n\
     }\n";
 
-// ---- The callable condition -------------------------------------------------
+// The callable condition
 
 #[test]
 fn a_pure_callback_at_the_flagged_position_stays_clean() {
@@ -84,8 +84,7 @@ fn a_named_function_callback_joins_too() {
 #[test]
 fn an_opaque_callable_at_the_flagged_position_keeps_the_taint() {
     // The contract cannot resolve what the analyzer cannot see either: an opaque
-    // `callable` in the flagged slot leaves the call non-exhaustive (`…?`), and
-    // emits nothing. Silence plus an honest maybe, never an invented finding.
+    // `callable` in the flagged slot leaves the call non-exhaustive (`…?`) and silent.
     let src = format!(
         "{APPLY}#[\\Steins\\Pure]\nfunction f(array $xs, callable $g): array {{ return applyAll($xs, $g); }}\n"
     );
@@ -95,9 +94,8 @@ fn an_opaque_callable_at_the_flagged_position_keeps_the_taint() {
 
 #[test]
 fn a_resolved_callback_discharges_the_callees_opaque_taint() {
-    // The substantive gain. `applyAll`'s own body is permanently tainted by its
-    // `$cb($x)` dynamic call; with the callable decided here, the declaration
-    // discharges that unknown and the caller gets a definite answer.
+    // The substantive gain: `applyAll`'s body is permanently tainted by its
+    // `$cb($x)` dynamic call, but a decided callable discharges that unknown.
     let src = format!(
         "{APPLY}function f(array $xs): array {{ return applyAll($xs, function ($x) {{ return $x + 1; }}); }}\n"
     );
@@ -129,7 +127,7 @@ fn an_absent_flagged_argument_makes_the_condition_vacuous() {
     assert!(summary(src, "f").exhaustive, "no callable passed → the contract is satisfied");
 }
 
-// ---- The by-ref sister ------------------------------------------------------
+// The by-ref sister
 
 /// A userland out-parameter writer whose write the effect scan cannot see: the
 /// assignment to `&$out` is not an effect origin, so the *only* thing that can
@@ -177,11 +175,9 @@ fn the_sister_tag_respects_the_target_leg_too() {
 
 #[test]
 fn a_visible_by_ref_write_inside_the_helper_is_proven_and_wins() {
-    // The counterpart, and the ADR-0037 boundary. When the helper's *body* passes
-    // its own by-ref parameter to a catalog out-param builtin, P2 proves the write
-    // escapes the helper's frame — `mutate`, not `mutate.local` — and that proven
-    // finding propagates however the caller's argument is spelled. The
-    // declaration refines the unknown; it cannot soften the known.
+    // ADR-0037 boundary: when the helper's body passes its own by-ref parameter to
+    // a catalog out-param builtin, P2 proves the write escapes the frame (`mutate`,
+    // not `mutate.local`) — the declaration refines the unknown, not the known.
     let src = "<?php\n\
         /** @pure-unless-parameter-passed $out */\n\
         function matches(string $re, string $s, &$out = null): bool { return (bool) preg_match($re, $s, $out); }\n\
@@ -192,7 +188,7 @@ fn a_visible_by_ref_write_inside_the_helper_is_proven_and_wins() {
     assert!(!d.message.contains("mutate.local"), "the escape is proven, not local: {}", d.message);
 }
 
-// ---- Spelling fidelity ------------------------------------------------------
+// Spelling fidelity
 
 #[test]
 fn the_phpstan_prefixed_spelling_is_honored() {

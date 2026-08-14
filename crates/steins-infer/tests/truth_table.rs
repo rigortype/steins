@@ -8,9 +8,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // `untyped.*` (ADR-0078, issue #200) fires on the fixtures' own untyped
+    // declarations, not the tested behaviour — dropped so counts keep meaning.
     check(&tree, &functions, "test.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -32,7 +31,7 @@ const STRICT_STRING: &str =
 const STRICT_BOOL: &str =
     "<?php\ndeclare(strict_types=1);\nfunction flag(bool $b): bool { return $b; }\n";
 
-// ---- Acceptance 1: coercive file, int parameter --------------------------
+// Acceptance 1: coercive file, int parameter
 
 #[test]
 fn coercive_int_param() {
@@ -46,7 +45,7 @@ fn coercive_int_param() {
     assert_eq!(n(&format!("{COERCIVE_INT}width(true);")), 0, "bool->int coerces");
 }
 
-// ---- Acceptance 2: strict file -------------------------------------------
+// Acceptance 2: strict file
 
 #[test]
 fn strict_int_param() {
@@ -73,7 +72,7 @@ fn strict_string_and_bool_params() {
     assert_eq!(n(&format!("{STRICT_BOOL}flag(1);")), 1, "int to bool flagged in strict");
 }
 
-// ---- Acceptance 3: nullable accepts null in both modes -------------------
+// Acceptance 3: nullable accepts null in both modes
 
 #[test]
 fn nullable_accepts_null_both_modes() {
@@ -88,12 +87,11 @@ fn nullable_accepts_null_both_modes() {
     assert_eq!(n(strict_bad), 1);
 }
 
-// ---- Acceptance 4: non-literal args and unknown callees are silent -------
+// Acceptance 4: non-literal args and unknown callees are silent
 
 #[test]
 fn non_literal_and_unknown_are_silent() {
-    // A value from an unknown source (a function not defined in this file) is
-    // not provable, so it stays silent even under strict mode.
+    // A value from an unknown source is unprovable, so it stays silent even under strict.
     assert_eq!(n(&format!("{STRICT_INT}$x = getInput();\nwidth($x);")), 0, "unknown source silent");
     assert_eq!(n(&format!("{STRICT_INT}unknownFunc(\"abc\");")), 0, "unknown fn silent");
     assert_eq!(n("<?php strlen(\"abc\");"), 0, "builtin not in file silent");
@@ -101,20 +99,19 @@ fn non_literal_and_unknown_are_silent() {
     assert_eq!(n(&format!("{STRICT_INT}$a=[1];\nwidth(...$a);")), 0, "spread silent");
 }
 
-// ---- Acceptance 5: parse error does not panic, no false diagnostic -------
+// Acceptance 5: parse error does not panic, no false diagnostic
 
 #[test]
 fn parse_error_is_safe() {
     let broken = "<?php\nfunction width(int $w): int { return $w;\nfunction broken( int $x {\nwidth(123);";
     let f = findings(broken);
-    // ADR-0079 / issue #180: the file now names its own breakage, and that is the
-    // ONLY thing it says. `width(123)` is a valid int->int call and would be silent
-    // anyway; what this pins is that no *inference* finding escapes a broken file.
+    // ADR-0079/issue #180: the file names its own breakage and nothing else —
+    // `width(123)` would be silent anyway; no *inference* finding escapes a broken file.
     assert!(f.iter().all(|d| d.id == "syntax.unparsable"), "{f:?}");
     assert_eq!(f.len(), 1, "one parse finding per broken file, and nothing else: {f:?}");
 }
 
-// ---- Message shape (matches the ADR-0022 spirit) -------------------------
+// Message shape (matches the ADR-0022 spirit)
 
 #[test]
 fn message_is_value_precise() {
@@ -141,11 +138,8 @@ fn only(src: &str) -> Diagnostic {
 
 #[test]
 fn var_flow_flagged_coercive_and_strict() {
-    // Coercive: non-numeric string into int is a proven TypeError.
     assert_eq!(n(&format!("{COERCIVE_INT}$w = \"abc\";\nwidth($w);")), 1, "coercive abc via $w");
-    // Strict: even a numeric string is rejected.
     assert_eq!(n(&format!("{STRICT_INT}$w = \"5\";\nwidth($w);")), 1, "strict 5 via $w");
-    // Coercive numeric string still coerces silently through a variable.
     assert_eq!(n(&format!("{COERCIVE_INT}$w = \"5\";\nwidth($w);")), 0, "coercive 5 via $w silent");
 }
 
@@ -176,27 +170,19 @@ fn reassignment_uses_last_literal() {
     );
 }
 
-// ADR-0027 Feature A: write-set `Opaque` refinement of control-flow barriers.
-//
-// A control-flow construct no longer erases the *whole* env — it forgets only
-// the variables it might write. So a value survives an intervening construct
-// that does not touch it, and is forgotten by one that does.
+// ADR-0027 Feature A: write-set `Opaque` refinement — a control-flow construct
+// forgets only the variables it might write, not the whole env.
 
 #[test]
 fn construct_writing_var_forgets_it() {
-    // (Refinement of the former "intervening if → silent" test.) An `if` that
-    // *writes* `$w` makes it unknown at the later use → silent. This preserves
-    // the original intent: a construct that could have changed `$w` is not
-    // second-guessed.
+    // An `if` that writes `$w` makes it unknown at the later use → silent.
     let src = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ $w = 5; }}\nwidth($w);");
     assert_eq!(n(&src), 0, "if writes $w → forgotten → silent");
 }
 
 #[test]
 fn irrelevant_construct_preserves_var() {
-    // The surviving case: an `if` that does not write `$w` (only calls a
-    // side-effecting helper and writes an unrelated `$y`) leaves `$w` known, so
-    // the proven TypeError at `width($w)` must remain visible.
+    // An `if` that never writes `$w` (only an unrelated `$y`) leaves `$w` known → flagged.
     let src = format!(
         "{COERCIVE_INT}function log_it(): void {{}}\n$w = \"abc\";\nif ($cond) {{ log_it(); $y = 1; }}\nwidth($w);"
     );
@@ -227,9 +213,8 @@ fn loop_writing_var_becomes_unknown() {
 
 #[test]
 fn try_catch_forgets_only_catch_param() {
-    // A `try`/`catch` whose body touches neither `$w` nor the catch var leaves
-    // `$w` known → flagged; the catch parameter `$e` is in the write set but is
-    // irrelevant to `$w`.
+    // A try/catch touching neither `$w` nor the catch var leaves `$w` known →
+    // flagged; the catch param `$e` is in the write set but irrelevant to `$w`.
     let src = format!(
         "{COERCIVE_INT}$w = \"abc\";\ntry {{ echo 1; }} catch (\\Throwable $e) {{ echo 2; }}\nwidth($w);"
     );
@@ -243,8 +228,8 @@ fn try_catch_forgets_only_catch_param() {
 
 #[test]
 fn variable_written_via_call_in_construct_becomes_unknown() {
-    // `$w` handed to a call *inside* the construct is forgotten when that call
-    // could write it by reference, following ADR-0070 declaration-aware conservatism.
+    // `$w` passed into a call inside the construct is forgotten if that call
+    // could write it by reference (ADR-0070 declaration-aware conservatism).
     let by_ref = format!(
         "{COERCIVE_INT}function sink(&$x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
     );
@@ -254,9 +239,8 @@ fn variable_written_via_call_in_construct_becomes_unknown() {
         "{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
     );
     assert_eq!(n(&unknown), 0, "$w passed to an unresolvable callee inside the if → forgotten");
-    // A BY-VALUE parameter cannot reach the caller's binding, in a branch as
-    // anywhere else, so the literal survives the construct and the later
-    // `width("abc")` is a proven TypeError on every path.
+    // A BY-VALUE parameter cannot reach the caller's binding, so the literal
+    // survives the construct and `width("abc")` is a proven TypeError.
     let by_value = format!(
         "{COERCIVE_INT}function sink($x): void {{}}\n$w = \"abc\";\nif ($cond) {{ sink($w); }}\nwidth($w);"
     );
@@ -265,8 +249,8 @@ fn variable_written_via_call_in_construct_becomes_unknown() {
 
 #[test]
 fn poison_inside_construct_still_poisons() {
-    // A poison marker anywhere in a construct's subtree poisons the whole scope;
-    // write-set refinement must not weaken poisoning.
+    // A poison marker anywhere in the subtree poisons the whole scope — write-set
+    // refinement must not weaken that.
     let global = format!("{COERCIVE_INT}$w = \"abc\";\nif ($cond) {{ global $g; }}\nwidth($w);");
     assert_eq!(n(&global), 0, "global inside if → scope poisoned → silent");
     let byref = format!(
@@ -283,12 +267,10 @@ fn variable_passed_to_another_call_becomes_unknown() {
     // value is no longer trusted at the later `width($w)`.
     let by_ref = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink(&$x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(by_ref), 0, "$w passed BY REF → unknown afterwards");
-    // The same for a callee the index and the catalog both fail to describe: an
-    // unresolvable name is not a by-value promise.
+    // Same for an unresolvable callee — an unknown name is not a by-value promise.
     let unknown = "<?php\nfunction width(int $w): int { return $w; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(unknown), 0, "$w passed to an unresolvable callee → unknown afterwards");
-    // ADR-0070: a by-value parameter receives a copy, so `$w` remains `"abc"`
-    // and `width("abc")` is a proven TypeError.
+    // ADR-0070: a by-value param receives a copy, so `$w` stays `"abc"` — proven TypeError.
     let by_value = "<?php\nfunction width(int $w): int { return $w; }\nfunction sink($x) { return $x; }\n$w = \"abc\";\nsink($w);\nwidth($w);";
     assert_eq!(n(by_value), 1, "$w passed BY VALUE → the literal survives the call");
 }
@@ -313,8 +295,7 @@ const CONST_PRICE: &str =
 
 #[test]
 fn constant_function_flow_flagged() {
-    // `width(price())` where price() is a constant function returning a bad
-    // literal is a proven TypeError.
+    // price() is a constant function (single return literal) — proven TypeError.
     let d = only(&format!("{CONST_PRICE}width(price());"));
     assert!(
         d.message.contains("from price(), defined at line 3"),
@@ -326,8 +307,8 @@ fn constant_function_flow_flagged() {
 
 #[test]
 fn non_constant_functions_are_silent() {
-    // Two statements in the body → not constant, and ZERO-ARG calls do not
-    // descend (ADR-0057 §3 / A5) — the summary lane adds nothing here.
+    // Two-statement body isn't constant; zero-arg calls don't descend
+    // (ADR-0057 §3/A5) — the summary lane adds nothing here.
     let two = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { $x = 1; return \"abc\"; }\nwidth(price());";
     assert_eq!(n(two), 0, "two-statement body is not constant");
     // Has a branch → body is a Barrier, not `[Return(literal)]`; zero-arg again.
@@ -337,9 +318,8 @@ fn non_constant_functions_are_silent() {
 
 #[test]
 fn parametrized_call_crosses_via_the_summary_lane() {
-    // The parametrized call resolves through the T0 binding
-    // descent in argument position: `"x"` binds `$s`, `price` provably returns
-    // `"abc"`, and the boundary TypeError fires.
+    // Resolves through the T0 binding descent in argument position: `"x"`
+    // binds `$s`, price() provably returns `"abc"`, and the boundary TypeError fires.
     let params = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(string $s): string { return \"abc\"; }\nwidth(price(\"x\"));";
     let d = only(params);
     assert!(
@@ -371,7 +351,7 @@ fn constant_function_composes_in_strict_mode() {
     assert_eq!(n(src), 1, "strict: numeric-string const return into int flagged");
 }
 
-// ---- Salsa pipeline routing ----------------------------------------------
+// Salsa pipeline routing
 
 #[test]
 fn routes_through_salsa_and_memoizes() {

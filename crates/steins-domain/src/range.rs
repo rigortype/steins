@@ -1,10 +1,9 @@
 //! Integer intervals — the canonical int refinement (ADR-0035).
 //!
-//! `positive-int`, `non-negative-int`, and phpdoc `int<lo, hi>` are all
-//! spellings of an inclusive [`IntRange`] over PHP's 64-bit ints; `min`/`max`
-//! are the domain bounds. Interval algebra (hull/intersection) is total and
-//! canonical — no normalization pass exists because no non-canonical form
-//! can be constructed.
+//! `positive-int`, `non-negative-int`, and phpdoc `int<lo, hi>` are all spellings of an
+//! inclusive [`IntRange`] over PHP's 64-bit ints. Interval algebra (hull/intersection) is
+//! total and canonical: no non-canonical form is constructible, so no normalization pass
+//! exists.
 
 /// An inclusive integer interval. Invariant: `lo <= hi`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -23,8 +22,7 @@ impl IntRange {
     /// `non-negative-int` (`int<0, max>`).
     pub const NON_NEGATIVE: IntRange = IntRange { lo: 0, hi: i64::MAX };
 
-    /// Construct an interval; returns `None` when `lo > hi` (empty — the
-    /// domain has no empty fact; callers treat it as contradiction).
+    /// Construct an interval; `None` when `lo > hi` (empty; treated as contradiction).
     #[must_use]
     pub const fn new(lo: i64, hi: i64) -> Option<Self> {
         if lo <= hi { Some(IntRange { lo, hi }) } else { None }
@@ -66,9 +64,8 @@ impl IntRange {
         self.lo <= other.lo && other.hi <= self.hi
     }
 
-    /// Convex hull — the join for value-set union (may over-approximate a
-    /// union with gaps; that is the measured widening, sound by
-    /// construction).
+    /// Convex hull — the join for value-set union. May over-approximate a union with gaps
+    /// (measured widening, sound by construction).
     #[must_use]
     pub const fn hull(self, other: Self) -> Self {
         IntRange {

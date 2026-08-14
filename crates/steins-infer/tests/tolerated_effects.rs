@@ -1,12 +1,10 @@
 //! Tolerated effects (ADR-0084): policy-declared discharge at judgment time.
 //!
-//! The three invariants under test are the ADR's own. **The catalog never lies**:
-//! every fixture asserts that the proven labels a summary shows are exactly what
-//! they were before any policy existed. **The concealment is auditable**: a policy
-//! with no tolerance discharges nothing, and emptying the tolerance
-//! (`--no-tolerated-effects`) brings every finding back. **Reversible per
-//! question**: only the envelope judgment and the purity oracle consult the
-//! policy; the labels are all still there to answer "what touches the clock".
+//! Three invariants under test, all the ADR's own: **the catalog never lies** (the
+//! proven labels a summary shows never move, policy or no policy); **the
+//! concealment is auditable** (an empty tolerance discharges nothing, and
+//! `--no-tolerated-effects` restores every finding); **reversible per question**
+//! (only the envelope judgment and the purity oracle consult the policy).
 //!
 //! Leg 2 — attribution — is must-semantics over paths, so the fixtures that
 //! matter most are the ones where an effect reaches a declaration *twice*.
@@ -33,8 +31,7 @@ fn effects(src: &str, policy: EffectsPolicy) -> Vec<Diagnostic> {
     check(src, policy).into_iter().filter(|d| d.id == EFFECT_ID).collect()
 }
 
-/// The proven-label summary of one declaration — the `annotate` margin, which no
-/// policy is allowed to move.
+/// The proven-label summary of one declaration — the `annotate` margin, no policy may move.
 fn summary(src: &str, symbol: &str) -> EffectSummary {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
@@ -45,9 +42,8 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-/// One declaration's summary and its rendered `annotate` effect margin under
-/// `policy` — the two ADR-0084 §4 surfaces, read off one project so a drift
-/// between them fails here.
+/// A declaration's summary and its rendered `annotate` margin under `policy` — the
+/// two ADR-0084 §4 surfaces, read off one project so a drift between them fails here.
 fn rendered(src: &str, symbol: &str, policy: EffectsPolicy) -> (EffectSummary, String) {
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, "test.php".to_owned(), src.to_owned());
@@ -81,12 +77,9 @@ fn attribution(keys: &[&str]) -> Vec<(String, Vec<String>)> {
     keys.iter().map(|k| ((*k).to_owned(), vec!["telemetry".to_owned()])).collect()
 }
 
-// ---------------------------------------------------------------------------
 // Leg 1: the label itself is tolerated.
-// ---------------------------------------------------------------------------
 
-/// The whole `mutate.local` mechanism, generalized: a project may name the labels
-/// its envelopes tolerate.
+/// A project may name the labels its envelopes tolerate.
 const ECHOES: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): void { echo $s; }\n";
 
 #[test]
@@ -97,8 +90,8 @@ fn tolerating_a_label_discharges_the_finding_that_carries_it() {
 
 #[test]
 fn tolerance_follows_the_taxonomy_downward_not_upward() {
-    // `io.output` subsumes the proven `io.output.buffer` (ADR-0018), so tolerating
-    // the parent covers the child. Tolerating a sibling covers nothing.
+    // `io.output` subsumes the proven `io.output.buffer` (ADR-0018): parent covers
+    // child, sibling covers nothing.
     assert_eq!(effects(ECHOES, tolerate(&["io.output.buffer"])).len(), 0, "exact");
     assert_eq!(effects(ECHOES, tolerate(&["io"])).len(), 0, "an ancestor covers it");
     assert_eq!(effects(ECHOES, tolerate(&["io.fs"])).len(), 1, "a sibling does not");
@@ -106,8 +99,8 @@ fn tolerance_follows_the_taxonomy_downward_not_upward() {
 
 #[test]
 fn a_proven_child_discharges_under_a_tolerated_parent() {
-    // The proven label is `io.fs.write` (the path argument is a literal, so the
-    // stream row narrows), and the policy names only `io.fs`.
+    // Proven label is `io.fs.write` (literal path argument narrows the stream row);
+    // policy names only the ancestor `io.fs`.
     const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): void { file_put_contents('/tmp/x', $s); }\n";
     assert_eq!(summary(SRC, "f").labels, vec!["io.fs.write".to_owned()]);
     assert_eq!(effects(SRC, EffectsPolicy::none()).len(), 1);
@@ -116,9 +109,8 @@ fn a_proven_child_discharges_under_a_tolerated_parent() {
 
 #[test]
 fn the_proven_lane_is_untouched_by_the_tolerance() {
-    // The catalog never lies (ADR-0084 invariant 1): the label is still there, and
-    // `annotate` still shows it. Only the judgment tolerated it — and §4 says so
-    // in the margin, with the label present and prefixed rather than removed.
+    // Invariant 1, "the catalog never lies": `annotate` still shows the label — only
+    // the judgment tolerated it, marked with a §4 prefix rather than removed.
     assert_eq!(summary(ECHOES, "f").labels, vec!["io.output.buffer".to_owned()]);
     let (s, margin) = rendered(ECHOES, "f", tolerate(&["io.output"]));
     assert_eq!(s.labels, vec!["io.output.buffer".to_owned()], "the proven lane did not move");
@@ -126,9 +118,7 @@ fn the_proven_lane_is_untouched_by_the_tolerance() {
     assert_eq!(margin, "effects: {~io.output.buffer}");
 }
 
-// ---------------------------------------------------------------------------
 // Leg 2: every path the effect arrived by is attributed.
-// ---------------------------------------------------------------------------
 
 /// The logger-pollution shape the ADR was written for: a pure-declared function
 /// reaches the clock and a stream through a logging facade and nothing else.
@@ -136,23 +126,20 @@ const FACADE: &str = "<?php\nclass Logger {\n    public static function debug(st
 
 #[test]
 fn an_attributed_facade_discharges_the_effects_that_flow_through_it() {
-    // Two findings today: the stream write and the clock read, both honest, both
-    // arriving only through the logger.
+    // Stream write and clock read both arrive only through the logger.
     assert_eq!(effects(FACADE, EffectsPolicy::none()).len(), 2, "the pollution");
     assert_eq!(effects(FACADE, telemetry(&["Logger"])).len(), 0, "discharged as telemetry");
 }
 
 #[test]
 fn the_attributed_labels_stay_visible_in_the_margin() {
-    // The audit question "what touches the clock" is still answerable: the proven
-    // set is what it was, tolerance or no tolerance.
+    // "What touches the clock" stays answerable: the proven set is unchanged by policy.
     let mut labels = summary(FACADE, "f").labels;
     labels.sort();
     let both = vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()];
     assert_eq!(labels, both);
-    // Under the policy the same two labels are still listed, still in the raw
-    // `labels` vec, and each wears the §4 marker: both reached `f` only through
-    // the attributed facade, so both are wholly discharged here.
+    // Both labels reached `f` only through the attributed facade, so both wear the
+    // §4 marker and both are wholly discharged.
     let (s, margin) = rendered(FACADE, "f", telemetry(&["Logger"]));
     assert_eq!(s.labels, both, "the proven lane did not move");
     assert_eq!(s.tolerated, both);
@@ -161,10 +148,9 @@ fn the_attributed_labels_stay_visible_in_the_margin() {
 
 #[test]
 fn a_partially_discharged_label_stays_unmarked() {
-    // The marker is a claim about the whole unit: `nondet.time` reaches `f` both
-    // through the facade and by a bare `time()`, so one of its groups survives and
-    // the label is judged here — no tilde. The stream write arrives only through
-    // the facade and is marked. Same fixture, two verdicts, one line.
+    // The marker is a claim about the whole unit: `nondet.time` reaches `f` both via
+    // the facade and via a bare `time()`, so one group survives and it is judged —
+    // no tilde. The stream write arrives only via the facade and is marked.
     const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
     let (s, margin) = rendered(BOTH, "f", telemetry(&["Logger"]));
     assert_eq!(s.labels, vec!["io.output.stderr".to_owned(), "nondet.time".to_owned()]);
@@ -174,15 +160,13 @@ fn a_partially_discharged_label_stays_unmarked() {
 
 #[test]
 fn no_policy_marks_nothing_and_mutate_local_is_never_marked() {
-    // The empty policy is the pre-ADR world exactly: no `~` anywhere, and an empty
-    // `tolerated`.
+    // The empty policy is the pre-ADR world exactly: no `~` anywhere, empty `tolerated`.
     let (bare, margin) = rendered(FACADE, "f", EffectsPolicy::none());
     assert!(bare.tolerated.is_empty(), "{:?}", bare.tolerated);
     assert_eq!(margin, "effects: {io.output.stderr, nondet.time}");
-    // `mutate.local` is discharged by every envelope and always has been, but it
-    // is the built-in case rather than a configured one, so it renders plain —
-    // under a policy as much as without one (§4: the marker shows the *policy* at
-    // work, and the docblock transforms read this same summary).
+    // `mutate.local` is discharged by every envelope but is the built-in case, not a
+    // configured one, so it renders plain under a policy as much as without one
+    // (§4: the marker shows the *policy* at work).
     const BYREF: &str = "<?php\nfunction f(string $s): int { $n = 0; preg_match('/x/', $s, $m); return $n; }\n";
     let (plain, unmarked) = rendered(BYREF, "f", EffectsPolicy::none());
     assert_eq!(plain.labels, vec!["mutate.local".to_owned()]);
@@ -198,8 +182,8 @@ fn a_class_key_covers_every_method_and_a_method_key_covers_one() {
     const TWO: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m); }\n    public static function today(): int { return time(); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return Logger::today(); }\n";
     assert_eq!(effects(TWO, EffectsPolicy::none()).len(), 2);
     assert_eq!(effects(TWO, telemetry(&["Logger"])).len(), 0, "the class covers both methods");
-    // The method key is the precision half: the log line is telemetry, and the
-    // business-logic clock read in the same class is not.
+    // Method key is the precision half: the log line is telemetry, the business-logic
+    // clock read in the same class is not.
     let one = effects(TWO, telemetry(&["Logger::debug"]));
     assert_eq!(one.len(), 1, "{one:#?}");
     assert!(one[0].message.contains("nondet.time"), "{}", one[0].message);
@@ -214,34 +198,30 @@ fn a_global_function_is_attributable_by_name() {
 
 #[test]
 fn a_direct_arrival_keeps_its_report_while_the_facade_path_discharges() {
-    // Must-semantics over paths (ADR-0084 §2): the same declaration reads the clock
-    // through the logger AND in its own body. The second arrival is not telemetry,
-    // was never attributed, and is exactly the finding the author needs to see.
+    // Must-semantics over paths (ADR-0084 §2): `f` reads the clock through the
+    // logger AND in its own body; the second arrival was never attributed and is
+    // exactly the finding the author needs to see.
     const BOTH: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n#[\\Steins\\Pure]\nfunction f(string $s): int { Logger::debug($s); return time(); }\n";
     let kept = effects(BOTH, telemetry(&["Logger"]));
     assert_eq!(kept.len(), 1, "exactly the direct read survives: {kept:#?}");
     assert!(kept[0].message.contains("time() has effect nondet.time"), "{}", kept[0].message);
-    // And with no policy at all, all three arrivals report.
     assert_eq!(effects(BOTH, EffectsPolicy::none()).len(), 3);
 }
 
 #[test]
 fn one_undischarged_group_emits_exactly_one_diagnostic() {
-    // Attribution variants of one finding are copies, not findings: a declaration
-    // the logger reaches down two paths — one attributed, one not — must not be
-    // told about it twice.
+    // Attribution variants of one finding are copies: a declaration the logger
+    // reaches down two paths — one attributed, one not — must not be told about it twice.
     const TWO_PATHS: &str = "<?php\nfunction clock(): int { return time(); }\nclass Logger {\n    public static function debug(): int { return clock(); }\n}\n#[\\Steins\\Pure]\nfunction f(): int { return Logger::debug() + clock(); }\n";
     let bare = effects(TWO_PATHS, EffectsPolicy::none());
     assert_eq!(bare.len(), 2, "one per call site, as before: {bare:#?}");
-    // Attributing the logger splits the callee's own finding into two copies; the
-    // bare `clock()` call site is the one that still reports, once.
+    // Attributing the logger splits the callee's finding into two copies; the bare
+    // `clock()` call site is the one that still reports, once.
     let tolerated = effects(TWO_PATHS, telemetry(&["Logger"]));
     assert_eq!(tolerated.len(), 1, "no duplicate from the attribution copy: {tolerated:#?}");
 }
 
-// ---------------------------------------------------------------------------
 // Builtin production sites: the boundary is the call, not an edge.
-// ---------------------------------------------------------------------------
 
 /// The telemetry shape a codebase reaches for before anyone writes a facade:
 /// PHP's own logging builtin, called straight from the body.
@@ -249,17 +229,16 @@ const ERROR_LOG: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { 
 
 #[test]
 fn an_attributed_builtin_discharges_at_its_caller() {
-    // A builtin draws no edge in the effect graph — its findings go straight into
-    // the caller's direct set — so the attribution is stamped where the effect is
-    // produced. Every path to it passes through this call by construction.
+    // A builtin draws no edge in the effect graph — findings go straight into the
+    // caller's direct set — so attribution is stamped where the effect is produced.
     assert_eq!(effects(ERROR_LOG, EffectsPolicy::none()).len(), 1);
     assert_eq!(effects(ERROR_LOG, telemetry(&["error_log"])).len(), 0);
 }
 
 #[test]
 fn an_attributed_builtin_discharges_transitively() {
-    // Born attributed at the production site, the copy carries its attribution up
-    // every edge above it without any of those callees being attributed.
+    // Born attributed at the production site, the copy carries attribution up every
+    // edge above it without any of those callees being attributed themselves.
     const VIA: &str = "<?php\nfunction helper(string $s): void { error_log($s); }\n#[\\Steins\\Pure]\nfunction f(string $s): int { helper($s); return 1; }\n";
     assert_eq!(effects(VIA, EffectsPolicy::none()).len(), 1);
     assert_eq!(effects(VIA, telemetry(&["error_log"])).len(), 0);
@@ -267,15 +246,15 @@ fn an_attributed_builtin_discharges_transitively() {
 
 #[test]
 fn an_attributed_builtin_without_tolerance_stays_reported() {
-    // Attribution is fact; only the tolerance is policy, for a builtin exactly as
-    // for a project symbol.
+    // Attribution is fact; tolerance is policy — for a builtin exactly as for a
+    // project symbol.
     let inert = EffectsPolicy::new(Vec::new(), attribution(&["error_log"]));
     assert_eq!(effects(ERROR_LOG, inert).len(), 1);
 }
 
 #[test]
 fn a_clock_read_beside_an_attributed_builtin_still_reports() {
-    // Must-semantics are untouched by where the attribution was stamped.
+    // Must-semantics untouched by where the attribution was stamped.
     const BOTH: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { error_log($s); return time(); }\n";
     let kept = effects(BOTH, telemetry(&["error_log"]));
     assert_eq!(kept.len(), 1, "{kept:#?}");
@@ -285,15 +264,14 @@ fn a_clock_read_beside_an_attributed_builtin_still_reports() {
 
 #[test]
 fn an_attributed_builtin_keeps_its_transport_label_in_the_margin() {
-    // The catalog never lies: `error_log` is still `io`, whoever tolerates it.
+    // Invariant 1 again: `error_log` is still `io`, whoever tolerates it.
     assert_eq!(summary(ERROR_LOG, "f").labels, vec!["io".to_owned()]);
 }
 
 #[test]
 fn a_second_attribution_label_carries_its_own_tolerance() {
-    // The ADR's survey guidance, mechanized: "safe to stop watching" and "must
-    // always fire" are different risk profiles, so `audit` is its own label with
-    // its own tolerance rather than riding `telemetry`.
+    // ADR survey guidance, mechanized: "safe to stop watching" and "must always
+    // fire" are different risk profiles, so `audit` is its own label, not `telemetry`'s.
     const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): int { error_log($s); syslog(LOG_INFO, $s); return 1; }\n";
     let split = EffectsPolicy::new(
         vec!["telemetry".to_owned()],
@@ -309,8 +287,8 @@ fn a_second_attribution_label_carries_its_own_tolerance() {
 
 #[test]
 fn a_catalogued_builtin_class_method_is_attributable() {
-    // The same production-site argument for `builtin_method_findings`: a
-    // catalogued external class colors the call, so the call is the boundary.
+    // Same production-site argument as above: a catalogued external class colors
+    // the call, so the call is the boundary.
     const SRC: &str = "<?php\n#[\\Steins\\Pure]\nfunction f(PDO $db): int { (new PDO('sqlite::memory:'))->exec('x'); return 1; }\n";
     assert_eq!(effects(SRC, EffectsPolicy::none()).len(), 1);
     let policy = EffectsPolicy::new(
@@ -320,24 +298,20 @@ fn a_catalogued_builtin_class_method_is_attributable() {
     assert_eq!(effects(SRC, policy).len(), 0);
 }
 
-// ---------------------------------------------------------------------------
 // Attribution is inert on its own; tolerance is inert without a match.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn attribution_without_tolerance_discharges_nothing() {
-    // Attribution is fact, not policy. A plugin (or a person) may state what a
-    // symbol's effects are for without thereby silencing anything (ADR-0084's
-    // "not a plugin power").
+    // Attribution is fact, not policy: stating what a symbol's effects are for
+    // silences nothing by itself (ADR-0084's "not a plugin power").
     let inert = EffectsPolicy::new(Vec::new(), attribution(&["Logger"]));
     assert_eq!(effects(FACADE, inert).len(), 2, "the facts changed no verdict");
 }
 
 #[test]
 fn tolerating_a_label_nothing_carries_discharges_nothing() {
-    // `telemetry` is not a transport label and never appears in the proven lane —
-    // no plugin puts a semantic label there today — so tolerating it without an
-    // attribution table is a policy about nothing.
+    // `telemetry` never appears in the proven lane (no plugin puts a semantic label
+    // there today), so tolerating it without an attribution table is a no-op.
     assert_eq!(effects(FACADE, tolerate(&["telemetry"])).len(), 2);
 }
 
@@ -348,14 +322,12 @@ fn emptying_the_tolerance_restores_every_finding() {
     assert_eq!(effects(FACADE, audited).len(), 2);
 }
 
-// ---------------------------------------------------------------------------
 // Both envelope strata (ADR-0082), and the Liskov conjunction beside them.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_interop_envelope_discharges_the_same_way_the_attribute_does() {
     // Discharge is a property of the judgment, not of the spelling: upstream's
-    // `@phpstan-pure` is held to the same bound by the same rule.
+    // `@phpstan-pure` is held to the same bound.
     const INTEROP: &str = "<?php\nclass Logger {\n    public static function debug(string $m): void { fwrite(STDERR, $m . time()); }\n}\n/** @phpstan-pure */\nfunction f(string $s): int { Logger::debug($s); return 1; }\n";
     let bare = effects(INTEROP, EffectsPolicy::none());
     assert_eq!(bare.len(), 2, "{bare:#?}");
@@ -365,9 +337,8 @@ fn an_interop_envelope_discharges_the_same_way_the_attribute_does() {
 
 #[test]
 fn a_tolerated_label_does_not_widen_an_abstraction() {
-    // `effect.liskov-widened` judges the same proven set against the abstraction's
-    // bound; the subtraction is on the proven side and the conjunction on the
-    // declared side, so a discharged effect cannot widen anything.
+    // `effect.liskov-widened` judges the proven set against the abstraction's bound;
+    // the subtraction is on the proven side, so a discharged effect can't widen anything.
     const IMPL: &str = "<?php\ninterface Reader {\n    #[\\Steins\\Pure]\n    public function read(): string;\n}\nclass FileReader implements Reader {\n    public function read(): string { echo 'x'; return 'y'; }\n}\n";
     let bare: Vec<Diagnostic> =
         check(IMPL, EffectsPolicy::none()).into_iter().filter(|d| d.id == EFFECT_LISKOV_ID).collect();
@@ -379,10 +350,9 @@ fn a_tolerated_label_does_not_widen_an_abstraction() {
     assert!(tolerated.is_empty(), "{tolerated:#?}");
 }
 
-/// One effect origin, reached by an implementation both through an attributed
-/// facade and by a bare call — the residue leg 2's `every` is written for. The
-/// two arrivals share label, origin, line and path, so they are one finding
-/// group whose members differ only in attribution.
+/// One effect origin, reached through an attributed facade and by a bare call — the
+/// residue leg 2's `every` is written for; both arrivals share label, origin, line
+/// and path, so they are one finding group whose members differ only in attribution.
 fn shared_origin(also_direct: bool) -> String {
     let body = if also_direct { "Logger::debug() + clock()" } else { "Logger::debug()" };
     format!(
@@ -398,17 +368,14 @@ fn a_group_reached_by_an_unattributed_path_too_is_discharged_for_neither() {
     // Only the facade reaches the clock: one group, one member, attributed.
     assert_eq!(liskov(&shared_origin(false), EffectsPolicy::none()).len(), 1, "the fixture bites");
     assert!(liskov(&shared_origin(false), telemetry(&["Logger"])).is_empty());
-    // The same clock read now also arrives bare. Both copies sit in the
-    // implementation's own set under one key, and one of them carries no
-    // attribution — so the group survives and the widening is reported.
+    // The clock read now also arrives bare: one copy carries no attribution, so the
+    // group survives and the widening is reported.
     let kept = liskov(&shared_origin(true), telemetry(&["Logger"]));
     assert_eq!(kept.len(), 1, "{kept:#?}");
     assert!(kept[0].message.contains("nondet.time"), "{}", kept[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // The purity oracle reads the same rule.
-// ---------------------------------------------------------------------------
 
 /// A `pure-callable` obligation and a closure that routes its one effect through
 /// an attributed facade.
@@ -416,8 +383,8 @@ const CALLBACK: &str = "<?php\nclass Logger {\n    public static function debug(
 
 #[test]
 fn a_callback_whose_only_effect_is_discharged_satisfies_pure_callable() {
-    // Otherwise a purity query and an envelope judgment would disagree about one
-    // function (ADR-0084 §3).
+    // Otherwise a purity query and an envelope judgment disagree about one function
+    // (ADR-0084 §3).
     let mismatches = |policy: EffectsPolicy| -> Vec<Diagnostic> {
         check(CALLBACK, policy).into_iter().filter(|d| d.id == PARAM_MISMATCH_ID).collect()
     };
@@ -425,9 +392,7 @@ fn a_callback_whose_only_effect_is_discharged_satisfies_pure_callable() {
     assert!(mismatches(telemetry(&["Logger"])).is_empty(), "accepted under the policy");
 }
 
-// ---------------------------------------------------------------------------
 // Config validation (ADR-0084 §5).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_unknown_tolerated_label_is_named_with_the_nearest_suggestion() {
@@ -440,12 +405,11 @@ fn an_unknown_tolerated_label_is_named_with_the_nearest_suggestion() {
 
 #[test]
 fn a_label_the_attribution_table_introduces_validates_clean() {
-    // `telemetry` is in no builtin taxonomy and no plugin registered it. It is
-    // known because the project declared it — by writing it in the attribution
-    // table, which is what makes that table a vocabulary as well as a fact.
+    // `telemetry` is in no builtin taxonomy and no plugin registered it — it is
+    // known only because the project declared it in the attribution table, which
+    // makes that table a vocabulary as well as a fact.
     let policy = telemetry(&["Logger"]);
     assert!(policy.label_notices(PluginFacts::none().registry()).is_empty());
-    // Without the attribution row there is nothing declaring it, and the same
-    // spelling is unknown.
+    // Without the attribution row the same spelling is unknown.
     assert_eq!(tolerate(&["telemetry"]).label_notices(PluginFacts::none().registry()).len(), 1);
 }

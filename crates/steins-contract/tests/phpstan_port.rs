@@ -80,10 +80,9 @@ enum Probe {
     Fact(Fact),
 }
 
-/// Convert a lowered right-hand contract into probe(s), or `None` when the
-/// type is out of Steins' value/fact surface (object world, `mixed`,
-/// `never`, non-extensional string provenance, arrays, …). A union yields the
-/// concatenation of its arms' probes; any inexpressible arm poisons the whole.
+/// Converts a lowered rhs contract into probe(s), or `None` when out of
+/// Steins' value/fact surface (object world, `mixed`, `never`, non-extensional
+/// strings, arrays, …). A union concatenates its arms' probes; one poisons all.
 fn probes_of(ty: &ContractTy) -> Option<Vec<Probe>> {
     let one = |p| Some(vec![p]);
     match ty {

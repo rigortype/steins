@@ -3,10 +3,10 @@
 //! certainty, subject refinement, arm joins, and `\UnhandledMatchError` when
 //! `match` has no default.
 //!
-//! The env-free direct pass flags literal call arguments regardless of
-//! reachability. Deadness is therefore tested with a literal-bad call; the
-//! reachability-sensitive propagation pass is tested through a variable or
-//! subject refinement (see `branch_analysis.rs`).
+//! The env-free direct pass flags literal call arguments regardless of reachability,
+//! so deadness is tested with a literal-bad call; the reachability-sensitive
+//! propagation pass is tested through a variable or subject refinement instead
+//! (see `branch_analysis.rs`).
 
 use steins_infer::{Diagnostic, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
@@ -39,8 +39,8 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
 
 #[test]
 fn match_decided_first_arm_prunes_later_arms() {
-    // `$x = 5`; arm `5` is a decided match (first), so arm `6` is unreachable —
-    // its literal-bad `width("abc")` must be pruned (direct pass silent).
+    // Arm `5` is a decided match (first), so arm `6` is unreachable — its
+    // literal-bad `width("abc")` must be pruned (direct pass silent).
     let src = format!(
         "{HDR}$x = 5;\nmatch ($x) {{ 5 => helper(), 6 => width(\"abc\") }};\n"
     );
@@ -120,8 +120,7 @@ match ($s) { \"abc\", \"xyz\" => width($s), default => 0 };
 #[test]
 fn match_no_default_all_no_terminates_tail_dead() {
     // `$x = 9`; both arms decided No, no default → the match provably throws
-    // `\UnhandledMatchError`, so the tail is unreachable and its bad literal is
-    // pruned.
+    // `\UnhandledMatchError`, so the tail is unreachable and its bad literal pruned.
     let src = "<?php
 function width(int $w): int { return $w; }
 function f(): void {
@@ -172,8 +171,8 @@ fn match_with_default_has_no_unhandled_match_error_throw() {
 
 #[test]
 fn throw_inside_match_arm_surfaces_and_is_dammed_by_enclosing_try() {
-    // The structural throw scan walks the CST, not the trace, so a `throw` inside
-    // a match arm is collected with its enclosing try/catch guards intact.
+    // The structural throw scan walks the CST, not the trace: a `throw` inside a
+    // match arm is collected with its enclosing try/catch guards intact.
     let raises = "<?php
 function f(int $x): void { match ($x) { 1 => throw new \\RuntimeException(), default => 0 }; }
 ";
@@ -255,10 +254,8 @@ match ($s) { \"abc\" => width($s), default => 0 };
 #[test]
 fn fallthrough_switch_stays_opaque_no_misbinding() {
     // `case 1` has no `break` and falls through into `case 2`, so `width("abc")`
-    // in `case 2` DOES run when `$x == 1`. Structuring would (wrongly) prune it as
-    // a decided-No case; staying Opaque keeps it reachable → the direct pass
-    // flags it. This is the load-bearing adversarial: a fall-through that would
-    // misbind if structured.
+    // DOES run when `$x == 1`. Structuring would wrongly prune it as decided-No;
+    // staying Opaque keeps it reachable — the load-bearing adversarial.
     let fallthrough = format!(
         "{HDR}$x = 1;\nswitch ($x) {{ case 1: helper(); case 2: width(\"abc\"); break; }}\n"
     );
@@ -275,9 +272,8 @@ fn fallthrough_switch_stays_opaque_no_misbinding() {
 
 #[test]
 fn non_lowerable_arm_condition_forces_whole_opaque() {
-    // One arm's condition is a call (`helper()`), which does not lower to a
-    // variable/literal → the WHOLE match stays Opaque, so the decided `5` arm does
-    // NOT prune the sibling arm's bad literal.
+    // One arm's condition is a call (`helper()`), not lowerable to a variable/
+    // literal → the WHOLE match stays Opaque, so decided `5` doesn't prune the sibling.
     let src = format!(
         "{HDR}$x = 5;\nmatch ($x) {{ helper() => width(\"abc\"), 5 => 0 }};\n"
     );
@@ -294,9 +290,8 @@ fn non_lowerable_arm_condition_forces_whole_opaque() {
 
 #[test]
 fn assignment_rhs_match_is_not_structured() {
-    // `$w = match (...) { ... }` keeps today's behavior: the RHS is not flow-
-    // structured, so a decided arm does NOT prune a sibling arm's bad literal —
-    // the direct pass still flags it.
+    // `$w = match (...) { ... }` keeps today's behavior: the RHS isn't flow-
+    // structured, so a decided arm does NOT prune a sibling's bad literal.
     let src = format!(
         "{HDR}$x = 5;\n$w = match ($x) {{ 5 => 1, 6 => width(\"abc\") }};\n"
     );
@@ -312,10 +307,8 @@ fn assignment_rhs_match_is_not_structured() {
 
 #[test]
 fn ordering_rule_prevents_later_arm_sole_live_when_earlier_maybe() {
-    // `match (true)` with variable conditions. `$a` is unknown → arm 1 is Maybe;
-    // `$b = true` → arm 2 WOULD be a decided match in isolation, but because an
-    // earlier arm is Maybe (not provably No), arm 2 is NOT decided-Yes, so the
-    // `default` is NOT pruned and its bad literal is flagged.
+    // `$a` unknown → arm 1 is Maybe; `$b = true` → arm 2 WOULD decide in isolation,
+    // but an earlier Maybe blocks it from being decided-Yes, so `default` stays live.
     let src = "<?php
 function width(int $w): int { return $w; }
 $b = true;

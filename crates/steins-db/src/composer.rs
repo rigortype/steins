@@ -1,35 +1,24 @@
 //! Reading the project's own `composer.json` — the IO boundary that produces a
 //! [`ProjectLayout`] (ADR-0015).
 //!
-//! Everything here runs once, before any salsa input is set. The value it
-//! produces is pure and is carried as a [`crate::Project`] input, so a replay
-//! with the same inputs gives the same answer without re-reading the filesystem
-//! (ADR-0048's canonical entry state).
+//! Runs once, before any salsa input is set. The value produced is pure and
+//! carried as a [`crate::Project`] input, so a replay with the same inputs
+//! gives the same answer without re-reading the filesystem (ADR-0048).
 //!
-//! # What is read
+//! **What is read:** `config.vendor-dir` (default `vendor`, the field that
+//! makes a tree vendoring into `3rdparty/` legible), and `autoload`/
+//! `autoload-dev`'s `psr-4`/`psr-0`/`classmap` directories (first-party code,
+//! what stops `src/vendor/` from being disowned by the directory-name floor).
+//! `autoload.files` is not read: it names individual files, and promoting
+//! their parent directory to a first-party root would claim more than the
+//! manifest says.
 //!
-//! - `config.vendor-dir` — where Composer installs dependencies. Default
-//!   `vendor`. This is the field that makes a tree vendoring into `3rdparty/`
-//!   legible.
-//! - `autoload` and `autoload-dev` — the `psr-4`, `psr-0` and `classmap`
-//!   directories. These are the project's own code, and they are what stops a
-//!   first-party `src/vendor/` from being disowned by the directory-name floor.
-//!
-//! `autoload.files` is deliberately not read: it names individual files, and
-//! promoting their parent directory to a first-party root would claim more than
-//! the manifest says.
-//!
-//! # What is walked
-//!
-//! Upward from each analyzed path to its nearest ancestor manifest — that is the
-//! project root when someone runs `steins check src/`. Then downward through the
-//! analyzed paths, so a monorepo's subproject manifests each govern their own
-//! subtree.
-//!
-//! The downward walk does **not** descend into a directory named `vendor`, into a
-//! vendor root already declared by an enclosing manifest, or into `.git` /
-//! `node_modules`. A dependency's own `composer.json` is not a governing root,
-//! and there are thousands of them.
+//! **What is walked:** upward from each analyzed path to its nearest ancestor
+//! manifest (finds the project root for `steins check src/`), then downward
+//! through the analyzed paths, so a monorepo's subproject manifests each govern
+//! their own subtree. The downward walk does **not** descend into a directory
+//! named `vendor`, an enclosing manifest's declared vendor root, or `.git` /
+//! `node_modules` — a dependency's own `composer.json` is not a governing root.
 //!
 //! A manifest that cannot be read or parsed is skipped, not fatal: the paths it
 //! would have governed fall through to the floor.
@@ -54,8 +43,7 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
     let seeds = seed_dirs(paths, cwd);
     let mut roots: Vec<GoverningRoot> = Vec::new();
 
-    // Upward: the nearest ancestor manifest of each analyzed path. This is what
-    // finds the project root when only a subdirectory was named.
+    // Upward: the nearest ancestor manifest of each analyzed path.
     for seed in &seeds {
         for ancestor in seed.ancestors() {
             let manifest = ancestor.join("composer.json");
@@ -69,8 +57,7 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
     // Downward: subproject manifests, parents before children so an enclosing
     // root's vendor declaration can prune the walk beneath it.
     let mut queue: VecDeque<PathBuf> = seeds.iter().cloned().collect();
-    // A set, not a list: the walk visits every directory in the analyzed tree, and
-    // a linear membership test makes that quadratic on a monorepo.
+    // A set, not a list: a linear membership test would be quadratic here.
     let mut seen: HashSet<PathBuf> = HashSet::new();
     while let Some(dir) = queue.pop_front() {
         if !seen.insert(dir.clone()) {
@@ -99,14 +86,12 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
 /// The directories the walk starts from: each analyzed path, absolutized and
 /// normalized, with a file path standing in for its parent directory.
 ///
-/// A path that names *nothing* seeds nothing. The parent substitution exists so
-/// that `steins check src/Foo.php` discovers the manifest governing `src/`, but it
-/// applies only when the path exists: a nonexistent `/typo` must not substitute
-/// `/` and walk the whole filesystem downward (an unbounded walk that would make
-/// `doctor /typo` look like a hang rather than an error). Dropping the seed bounds
-/// `discover` on a nonexistent root regardless of which caller passes one; callers
-/// that want a *diagnosis* of the bad argument must reject it themselves (ADR-0050
-/// §7 amendment for the path-walking commands, ADR-0054 §10 for doctor).
+/// A path that names *nothing* seeds nothing. The parent substitution lets
+/// `steins check src/Foo.php` discover the manifest governing `src/`, but only
+/// when the path exists: a nonexistent `/typo` must not substitute `/` and walk
+/// the whole filesystem (which would make `doctor /typo` hang rather than
+/// error). Callers wanting a *diagnosis* of the bad argument reject it
+/// themselves (ADR-0050 §7 amendment, ADR-0054 §10 for doctor).
 fn seed_dirs(paths: &[PathBuf], cwd: &Path) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
@@ -174,8 +159,8 @@ fn read_root(manifest: &Path, dir: &Path) -> Option<GoverningRoot> {
     first_party.sort();
     first_party.dedup();
 
-    // The target PHP range (issue #28): `config.platform.php` — Composer's own
-    // "resolve as if on this PHP" pin — beats the `require.php` constraint.
+    // Issue #28: `config.platform.php` (Composer's "resolve as if on this PHP"
+    // pin) beats the `require.php` constraint.
     let php_target = json
         .get("config")
         .and_then(|c| c.get("platform"))
@@ -215,9 +200,9 @@ fn php_target_from(raw: &str, source: PhpTargetSource) -> Option<PhpTarget> {
 type MinorRange = ((u16, u16), Option<(u16, u16)>);
 
 /// Parse a Composer `require.php` constraint into a `(floor, ceiling)` minor
-/// range. Handles the forms real manifests use — `^8.1`, `~8.1.0`, `>=8.1`,
-/// `8.1.*`, exact versions, hyphen ranges, `||` unions and space/comma
-/// conjunctions. Anything else is `None`: no target beats a wrong target.
+/// range. Handles `^8.1`, `~8.1.0`, `>=8.1`, `8.1.*`, exact versions, hyphen
+/// ranges, `||` unions and space/comma conjunctions; anything else is `None` —
+/// no target beats a wrong target.
 fn parse_php_constraint(raw: &str) -> Option<MinorRange> {
     let mut floor: Option<(u16, u16)> = None;
     let mut ceiling: Option<Option<(u16, u16)>> = None; // None = no group yet
@@ -454,9 +439,7 @@ mod tests {
 
     #[test]
     fn two_sibling_analyzed_roots_each_resolve_their_own_declared_vendor_dir() {
-        // Issue #181: `steins check projA projB` where the two are unrelated
-        // Composer projects (not one nested inside the other) — each of their
-        // own declared `vendor-dir`s must answer independently.
+        // Issue #181: two unrelated Composer projects, not nested.
         let t = Tree::new("sibling-roots");
         t.write("projA/composer.json", r#"{"config":{"vendor-dir":"3rdparty"},"autoload":{"psr-4":{"A\\":"src/"}}}"#);
         t.dir("projA/3rdparty/pkg");
@@ -514,9 +497,7 @@ mod tests {
         assert!(t.layout().is_fallback());
     }
 
-    /// A file path still stands in for its directory — the substitution
-    /// [`seed_dirs`] exists for. Pinned next to the nonexistent-root case below
-    /// because that case is fixed by narrowing this one.
+    /// The [`seed_dirs`] parent substitution.
     #[test]
     fn a_file_path_seeds_its_own_directory() {
         let t = Tree::new("file-seed");
@@ -526,11 +507,9 @@ mod tests {
         assert!(!l.is_fallback(), "the manifest above the named file governs it");
     }
 
-    /// A root that names nothing seeds nothing, so `discover` terminates instead
-    /// of substituting the parent and walking it. A top-level `/typo` must not
-    /// seed `/` and descend the entire filesystem (which would make `doctor /typo`
-    /// hang). The assertion that matters is that this test *returns at all*; the
-    /// fallback layout is the honest answer for a tree that was never there.
+    /// A root naming nothing seeds nothing, so `discover` terminates instead of
+    /// walking the whole filesystem. The assertion that matters is that this
+    /// test *returns at all*.
     #[test]
     fn a_nonexistent_root_terminates_and_falls_back() {
         let cwd = std::env::temp_dir();
@@ -539,8 +518,7 @@ mod tests {
         assert!(discover(&[PathBuf::from("definitely-not-a-real-path-9x8")], &cwd).is_fallback());
     }
 
-    /// One good path among bad ones still governs: a missing seed is dropped,
-    /// not fatal, so `discover` stays the total function its callers assume.
+    /// A missing seed is dropped, not fatal.
     #[test]
     fn a_missing_seed_does_not_disown_a_real_one() {
         let t = Tree::new("mixed-seeds");

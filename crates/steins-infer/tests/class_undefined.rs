@@ -243,8 +243,8 @@ fn fires_on_dnf_type_declaration_arms() {
 
 #[test]
 fn silent_on_instanceof() {
-    // `instanceof` an undefined class evaluates false — never a hard error.
-    // (An ADR-0078 contract twin, deferred by name; never a proof-layer finding.)
+    // `instanceof` an undefined class evaluates false, never a hard error (an
+    // ADR-0078 contract twin, deferred by name; never a proof-layer finding).
     let d = fires("<?php\nfunction f($x) { return $x instanceof Widget; }\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -326,8 +326,7 @@ fn silent_on_self_static_parent() {
 
 #[test]
 fn silent_on_trait_name_static_call() {
-    // PHP permits a static call through a trait name (with a deprecation), so the
-    // trait resolves through the class-like index rather than raising a hard error.
+    // A (deprecated) static call through a trait name resolves via the class-like index.
     let d = fires("<?php\ntrait T { public static function m() {} }\nT::m();\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -402,8 +401,8 @@ fn silent_under_standing_dam_bare_relative_include() {
 
 #[test]
 fn silent_when_class_exists_guard_folds_branch_dead() {
-    // The guard leg via dead-region pruning: `class_exists('Widget')` folds to No
-    // (Widget absent + boot not-found), so the then-branch is dead and skipped.
+    // Dead-region pruning: `class_exists('Widget')` folds to No (absent + boot
+    // not-found), so the then-branch is dead.
     let d = fires("<?php\nif (class_exists('Widget')) {\n  new Widget();\n}\n");
     assert!(d.is_empty(), "{d:?}");
 }

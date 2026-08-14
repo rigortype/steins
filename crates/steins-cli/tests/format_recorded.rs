@@ -1,16 +1,11 @@
-//! Recorded-output regression for the render seam (ADR-0054 slice C1).
+//! Recorded-output regression for the render seam (ADR-0054 slice C1): a
+//! format is a serialization of the displayed surface, so moving where that
+//! lives (into [`render`](../src/render.rs)) must not move a byte — recorded
+//! here since drift (a stray newline, a lost separator) is easy to miss.
 //!
-//! Extracting `text` and `json` out of `run_check`'s two `print_*` calls into
-//! [`render`](../src/render.rs) is meant to be a pure refactor: the ADR's whole
-//! premise is that a format is a *serialization of the displayed surface*, so
-//! moving where the serialization lives must not move a byte of it. That claim is
-//! cheap to make and easy to break silently — a stray trailing newline, a lost
-//! separator — so it is recorded here rather than argued.
-//!
-//! The fixture is deliberately mixed: a fail-level proof finding and a warn-level
-//! debug dump, so both level spellings, both `layer`/`level` JSON fields and the
-//! exit code are covered by one recording. `github` is recorded alongside them
-//! because a new format's committed shape deserves the same treatment.
+//! The fixture mixes a fail-level proof finding and a warn-level debug dump, so
+//! both level spellings, `layer`/`level` JSON fields, and the exit code are
+//! covered in one recording; `github` is recorded alongside for the same reason.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -29,8 +24,7 @@ fn workdir(tag: &str) -> PathBuf {
     dir
 }
 
-/// `(exit code, stdout)` for a run in `dir` with the CI environment scrubbed —
-/// the recording must not change because the test happens to run on Actions.
+/// `(exit code, stdout)` for a run in `dir`, CI scrubbed so recordings don't drift on Actions.
 fn run_in(dir: &Path, args: &[&str]) -> (i32, String) {
     let out = Command::new(bin())
         .args(args)
@@ -89,9 +83,8 @@ fn recorded(tag: &str, format: &str, expected: &str) {
     std::fs::write(dir.join("a.php"), FIXTURE).expect("write fixture");
     let (code, stdout) = run_in(&dir, &["check", "--no-php", "--format", format, "a.php"]);
     assert_eq!(stdout, expected, "`--format {format}` output drifted");
-    // ADR-0050 §7 is identity, not a per-format decision (ADR-0054 §13 refuses
-    // `--exit-zero` and every other format-dependent exit): one fail-level
-    // finding displays, so every format exits 1.
+    // ADR-0050 §7 identity, not per-format (ADR-0054 §13 refuses `--exit-zero`):
+    // one fail-level finding → every format exits 1.
     assert_eq!(code, 1, "`--format {format}` exit code");
 }
 

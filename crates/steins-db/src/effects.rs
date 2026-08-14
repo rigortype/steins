@@ -1,30 +1,21 @@
 //! The tolerated-effects policy (ADR-0084): `steins.toml`'s `[effects]` table,
 //! resolved once at the IO boundary and carried as project input state.
 //!
-//! Two halves that do very different jobs:
+//! Two halves with different jobs: `tolerated` is **policy** — the labels the
+//! envelope judgment discharges, the only half that can change a verdict.
+//! `[effects.attribution]` is **fact** — what a symbol's effects are *for*,
+//! changing no judgment on its own but giving policy something precise to grip
+//! (so the same `time()` call is distinguishable by logging facade vs. business
+//! logic). Neither half touches the proven lane: `time()` stays `nondet.time`,
+//! `annotate` shows every label — tolerance lives at the judgment, which is
+//! what makes it reversible per question (ADR-0084's three invariants).
 //!
-//! * `tolerated` is **policy** — the labels the envelope judgment discharges. It
-//!   is the only half that can change a verdict.
-//! * `[effects.attribution]` is **fact** — what a symbol's effects are *for*. It
-//!   changes no judgment on its own; it gives the policy something precise to
-//!   grip, so that the same `time()` call is distinguishable by whether it
-//!   arrived through a logging facade or through business logic.
-//!
-//! Neither half ever touches the proven lane. `time()` stays `nondet.time`, the
-//! fixpoint is unchanged, and `annotate` shows every label — the tolerance lives
-//! at the judgment, which is what makes it reversible per question (ADR-0084's
-//! three invariants).
-//!
-//! # Key normalization
-//!
-//! Attribution keys name PHP symbols, and PHP folds the case of class, method and
-//! function names, so every key is stored `trim_start_matches('\\')`-ed and
-//! ASCII-lowercased — the same normalization [`crate::ProjectIndex`] uses for its
-//! own FQN keys and [`crate::PluginFacts::effect_labels`] uses for global function
-//! names. A key with `::` is one method; a key without is *either* a class (every
-//! method of it) or a global function, and both lookups are tried, because the
-//! two spellings are indistinguishable in the config and PHP lets a class and a
-//! function share a name.
+//! **Key normalization:** PHP folds the case of class/method/function names, so
+//! every attribution key is stored `trim_start_matches('\\')`-ed and
+//! ASCII-lowercased (same normalization as [`crate::ProjectIndex`] and
+//! [`crate::PluginFacts::effect_labels`]). A key with `::` is one method; a key
+//! without is *either* a class (every method) or a global function — both
+//! lookups are tried, since PHP lets a class and function share a name.
 
 use std::collections::BTreeMap;
 
@@ -34,20 +25,19 @@ use steins_catalog::LabelRegistry;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct AttributionEntry {
     /// The key exactly as the config wrote it (`Monolog\Logger`), kept for
-    /// messages: a notice that named the normalized `monolog\logger` would point
-    /// at a line the reader never wrote.
+    /// messages: pointing at the normalized `monolog\logger` would name a line
+    /// the reader never wrote.
     spelling: String,
     /// The semantic labels, sorted and deduplicated.
     labels: Vec<String>,
 }
 
-/// The `[effects]` policy of one project — carried as a [`crate::Project`] input
-/// beside the layout and the plugin channel, for the same reason they are: it is
-/// resolved once at the IO boundary, and a replay from the same inputs must reach
-/// the same verdict (ADR-0048).
+/// The `[effects]` policy of one project — a [`crate::Project`] input for the
+/// same reason as the layout/plugin channel: resolved once at the IO boundary,
+/// and a replay from the same inputs must reach the same verdict (ADR-0048).
 ///
-/// [`EffectsPolicy::none`] is the empty policy, and it is the default: a project
-/// with no `[effects]` table judges exactly as it did before ADR-0084.
+/// [`EffectsPolicy::none`] is the empty policy and the default: a project with
+/// no `[effects]` table judges exactly as it did before ADR-0084.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct EffectsPolicy {
     /// The tolerated labels, sorted and deduplicated. Any label is admissible —
@@ -66,12 +56,11 @@ impl EffectsPolicy {
         Self::default()
     }
 
-    /// Build the policy from an already-parsed `[effects]` table: the `tolerated`
-    /// list and the `attribution` key→labels rows, as written.
+    /// Build the policy from an already-parsed `[effects]` table.
     ///
     /// Two rows whose keys normalize to the same symbol (`App\Log` and `app\log`)
-    /// join rather than one winning — attribution is a set of claims about a
-    /// symbol, and there is no reason to prefer either spelling.
+    /// join rather than one winning: attribution is a set of claims, and there
+    /// is no reason to prefer either spelling.
     #[must_use]
     pub fn new<A>(tolerated: Vec<String>, attribution: A) -> Self
     where
@@ -100,12 +89,10 @@ impl EffectsPolicy {
         Self { tolerated, attribution: rows }
     }
 
-    /// This policy with the tolerance emptied — `steins check --no-tolerated-effects`
-    /// (ADR-0084 §1's audit switch).
-    ///
-    /// The attribution survives, and deliberately: it is fact rather than policy,
-    /// so dropping it would change what the findings *say* about themselves and
-    /// not merely which of them are discharged.
+    /// This policy with the tolerance emptied — `steins check
+    /// --no-tolerated-effects` (ADR-0084 §1's audit switch). Attribution
+    /// survives deliberately: it is fact, not policy, so dropping it would
+    /// change what findings *say* about themselves, not just what's discharged.
     #[must_use]
     pub fn without_tolerance(&self) -> Self {
         Self { tolerated: Vec::new(), attribution: self.attribution.clone() }
@@ -126,10 +113,9 @@ impl EffectsPolicy {
     /// Whether `label` is covered by the tolerance under ADR-0018 prefix
     /// subsumption — tolerating `io.fs` covers a proven `io.fs.write`.
     ///
-    /// This is the policy half only. The built-in, unconditional `mutate.local`
-    /// tolerance is not spelled here (ADR-0084 §2): it is a property of the
-    /// language, not of any project's judgment call, and it lives with the
-    /// envelope check that has always owned it.
+    /// Policy half only: the built-in, unconditional `mutate.local` tolerance
+    /// is not spelled here (ADR-0084 §2) — it's a property of the language, not
+    /// a project's judgment call, and lives with the envelope check.
     #[must_use]
     pub fn tolerates(&self, label: &str) -> bool {
         self.tolerated.iter().any(|t| steins_catalog::subsumes(t, label))
@@ -157,9 +143,8 @@ impl EffectsPolicy {
         out
     }
 
-    /// Every label the attribution table introduces — the labels that are
-    /// *project-declared* by virtue of appearing here (ADR-0084 §1), sorted and
-    /// deduplicated.
+    /// Every label the attribution table introduces — *project-declared* by
+    /// virtue of appearing here (ADR-0084 §1), sorted and deduplicated.
     #[must_use]
     pub fn declared_labels(&self) -> Vec<String> {
         let mut out: Vec<String> =
@@ -176,13 +161,13 @@ impl EffectsPolicy {
     }
 
     /// The label registry this policy's own labels are judged against (ADR-0084
-    /// §5): `base` — builtin plus whatever the plugin channel registered —
-    /// extended with every label the attribution table introduces.
+    /// §5): `base` (builtin plus whatever the plugin channel registered)
+    /// extended with every attribution-table label.
     ///
-    /// The view is for **validating the policy**, and stops there. It is
-    /// deliberately not the registry inference asks: a label a project attributes
-    /// is not thereby a label its docblocks may declare, and letting `[effects]`
-    /// register vocabulary would open a second door past ADR-0068 §2's root rule.
+    /// For **validating the policy** only — not the registry inference asks: a
+    /// label a project attributes is not thereby a label its docblocks may
+    /// declare, and letting `[effects]` register vocabulary would open a second
+    /// door past ADR-0068 §2's root rule.
     #[must_use]
     pub fn registry_view(&self, base: &LabelRegistry) -> LabelRegistry {
         LabelRegistry::with_extensions(
@@ -192,17 +177,12 @@ impl EffectsPolicy {
 
     /// Load-time complaints about the policy's own vocabulary (ADR-0084 §5), in
     /// deterministic order: one line per `tolerated` entry or attribution value
-    /// the [`Self::registry_view`] does not know, carrying the same
-    /// nearest-suggestion the declared-label check gives a typo'd envelope.
+    /// [`Self::registry_view`] doesn't know, with the same nearest-suggestion
+    /// the declared-label check gives a typo'd envelope.
     ///
-    /// Empty for a well-spelled policy — including one whose only labels are its
-    /// own attribution values, which the view knows precisely because they are
-    /// written there.
-    ///
-    /// An unknown label is reported and **kept**. It subsumes nothing in the
-    /// taxonomy, so it discharges nothing, and the error is therefore in the
-    /// direction that reports more findings rather than fewer: worth a word on
-    /// stderr, never worth refusing to run.
+    /// An unknown label is reported and **kept**: it subsumes nothing in the
+    /// taxonomy and discharges nothing, so the error direction is more findings
+    /// rather than fewer — worth a word on stderr, never worth refusing to run.
     #[must_use]
     pub fn label_notices(&self, base: &LabelRegistry) -> Vec<String> {
         let view = self.registry_view(base);

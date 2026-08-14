@@ -1,13 +1,11 @@
-//! The reachability foundation itself (ADR-0078 §5, issue #199): `Stmt::end` and
-//! the [`body_end`] fold, pinned as the **three-valued** judgment they are.
+//! The reachability foundation itself (ADR-0078 §5, issue #199): `Stmt::end`
+//! and the [`body_end`] fold, pinned as the **three-valued** judgment they are.
 //!
 //! `crates/steins-infer/tests/return_missing.rs` exercises the same foundation
-//! through `type.return-missing`, but that consumer collapses `Terminates` and
-//! `Unknown` into one observable outcome — silence. This file is where the two
-//! are told apart, because the deferred dead-code consumer reads them the
-//! opposite way round: it may report only on `Terminates`, so a construct that
-//! answers `Terminates` when it should answer `Unknown` is a false "this code is
-//! unreachable" waiting to happen, and no test on the tracer would ever see it.
+//! but collapses `Terminates` and `Unknown` into one outcome (silence). This
+//! file tells the two apart: a future dead-code consumer may report only on
+//! `Terminates`, so `Terminates` where the truth is `Unknown` is a false
+//! "unreachable" that no test on that consumer would catch.
 
 use steins_syntax::{BodyEnd, Scope, ScopeOwner, SourceTree, body_end, body_has_terminator};
 
@@ -33,9 +31,7 @@ fn exits_of(body: &str) -> bool {
     body_has_terminator(&scope_of(body).stmts)
 }
 
-// ---------------------------------------------------------------------------
 // Terminates — proven to have no edge to the successor.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn terminators_terminate() {
@@ -60,9 +56,8 @@ fn an_if_terminates_only_when_every_arm_does() {
 
 #[test]
 fn a_literal_condition_is_not_a_branch() {
-    // `if (true)` has no no-branch path to add, so the arm alone decides — this is
-    // the one place a condition is read, and it exists to keep the tracer off a
-    // function that demonstrably returns.
+    // `if (true)` has no no-branch path, so the arm alone decides — the one
+    // place a condition is read, to keep the tracer off a demonstrably-returning function.
     assert_eq!(end_of("if (true) { return 1; }"), BodyEnd::Terminates);
     assert_eq!(end_of("if (1) { return 1; }"), BodyEnd::Terminates);
     // A literal-false arm contributes no path at all.
@@ -102,9 +97,7 @@ fn the_first_terminator_wins_over_a_later_tail() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // FallsThrough — a terminator-free syntactic path to the end exists.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn straight_line_code_falls_through() {
@@ -134,11 +127,8 @@ fn a_switch_with_no_default_falls_through() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Unknown — the exit edges are not bounded. THIS is the class the tracer cannot
-// tell apart from `Terminates`, and the one a dead-code consumer must not
-// mistake for it.
-// ---------------------------------------------------------------------------
+// Unknown — exit edges not bounded; the class the tracer cannot tell apart
+// from `Terminates`, and the one a dead-code consumer must not mistake for it.
 
 #[test]
 fn a_try_is_undecided_whole() {
@@ -164,11 +154,9 @@ fn an_unconditional_loop_containing_a_break_is_undecided() {
 
 #[test]
 fn a_switch_containing_a_break_is_undecided_not_terminal() {
-    // The regression this test exists for: every case ends in `break`, and a
-    // `break` in isolation terminates the list it sits in — so a naive join would
-    // call the whole switch terminal and a dead-code consumer would report
-    // everything after it unreachable. It is FallsThrough in truth and `Unknown`
-    // here, which is the safe answer for both consumers.
+    // Regression: `break` in isolation terminates the list it sits in, so a naive
+    // join would call the switch terminal and a dead-code consumer would report
+    // everything after unreachable. Truth is FallsThrough; `Unknown` is safe for both.
     assert_eq!(
         end_of("switch ($x) { case 1: $y = 1; break; default: $y = 2; break; }"),
         BodyEnd::Unknown
@@ -189,16 +177,13 @@ fn an_undecided_statement_with_no_later_terminator_leaves_the_list_undecided() {
     assert_eq!(end_of("try { $x = 1; } finally { $y = 2; }\n$z = 3;"), BodyEnd::Unknown);
 }
 
-// ---------------------------------------------------------------------------
 // The two predicates, and why both exist.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_two_predicates_are_not_negations_of_each_other() {
     for end in [BodyEnd::Terminates, BodyEnd::FallsThrough, BodyEnd::Unknown] {
-        // `Unknown` answers `false` to BOTH — which is the whole point: each
-        // consumer's accusation needs a positive proof, and neither may reach for
-        // the other's negation.
+        // `Unknown` answers `false` to BOTH: each consumer needs positive proof,
+        // neither may reach for the other's negation.
         assert!(!(end.provably_terminates() && end.provably_falls_through()));
     }
     assert!(!BodyEnd::Unknown.provably_terminates());
@@ -218,11 +203,9 @@ fn the_arm_join_is_the_documented_lattice() {
     assert_eq!(BodyEnd::join_arms([Unknown, FallsThrough]), FallsThrough);
 }
 
-// ---------------------------------------------------------------------------
 // The second question: does the body exit ANYWHERE (`body_has_terminator`)?
-// Orthogonal to `body_end`, and the discriminator that splits `type.return-missing`
+// Orthogonal to `body_end`; the discriminator splitting `type.return-missing`
 // from its `maybe-` sibling (ADR-0078 §1.3, issue #199).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_body_with_no_exit_anywhere_reports_none() {

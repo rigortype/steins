@@ -1,36 +1,24 @@
 //! Issue #158 — a write inside a **comparison operand** is still a write.
 //!
 //! The lowering represents a condition's shape (`Cmp`, `Instanceof`, `Truthy`,
-//! `Call`, `Opaque`) and, until this slice, an operand it could not model became
-//! a bare `CondOperand::Other` that mentioned nothing: not the call it was, not
-//! the variables that call may have written by reference. So a guard call in
-//! *guard* position invalidated its by-ref arguments and the same call one
-//! character away — inside a comparison — invalidated nothing.
+//! `Call`, `Opaque`); before this slice an unmodelled operand became a bare
+//! `CondOperand::Other` that forgot everything — so a guard call in *guard*
+//! position invalidated its by-ref arguments, but the same call one character
+//! away, inside a comparison, invalidated nothing.
 //!
-//! The field shape is phpstan-src's `nsrt/preg_match_shapes.php::bug11622`:
-//!
-//! ```text
-//! $matches = [];
-//! if (preg_match('/^abc(def|$)/', $expression, $matches) === 1) {
-//!     // reported `list{}` — an EMPTY array, on the one branch where PHP has
-//!     // provably written ['abc…', …] into it
-//! }
-//! ```
-//!
-//! `list{}` there is a false fact on a reachable path, which is the zero-FP
-//! bar's foundational rule, and it needed a prior binding to show: with no
-//! `$matches = []` ahead of the guard nothing was bound, so nothing wrong
-//! survived and the same bug answered a harmless `unknown`. Every test below
-//! therefore **binds first** — that is what makes the assertion able to fail.
+//! Field shape: phpstan-src's `nsrt/preg_match_shapes.php::bug11622` reports
+//! `list{}` (an EMPTY array) on the one branch where PHP has provably written
+//! into it — a false fact on a reachable path, the zero-FP bar's foundational
+//! rule. It needed a prior `$matches = []` binding to show at all, so every
+//! test below **binds first**, which is what makes the assertion able to fail.
 //!
 //! Three things are pinned here:
 //!
 //! 1. every operand shape that can write forgets what it may have written;
-//! 2. an operand that cannot write forgets **nothing** — the fix is not "forget
-//!    more", and a property read or arithmetic in a comparison must keep the
-//!    facts it never touched;
-//! 3. what ADR-0070's by-value gate proves the callee could not reach survives
-//!    the comparison, exactly as it survives a statement-position call.
+//! 2. an operand that cannot write forgets **nothing** — reads/arithmetic in a
+//!    comparison must keep facts they never touched;
+//! 3. what ADR-0070's by-value gate proves unreachable survives the
+//!    comparison, exactly as it survives a statement-position call.
 
 use steins_infer::{DEBUG_TYPE_ID, check};
 use steins_syntax::SourceTree;
@@ -61,24 +49,20 @@ fn bound(body: &str) -> String {
 }
 
 /// However the engine currently spells the empty-array shape — **measured, not
-/// written down**. The bug is "the pre-guard binding survived", and a literal
-/// expectation makes that assertion silently vacuous the day the rendering
-/// changes: `list{}` became `array{}` in #159 while this file was in flight, and
-/// every `assert_ne!(…, "list{}")` in it would have gone on passing with the bug
-/// fully intact.
+/// written down**: `list{}` became `array{}` in #159 while this file was in
+/// flight, and a literal `assert_ne!(…, "list{}")` would have kept passing with
+/// the bug fully intact.
 fn empty_array() -> String {
     let rendered = one_dump("<?php\nfunction e(): void { $m = []; \\PHPStan\\dumpType($m); }\n");
-    // A reference fixture that degenerates takes every test resting on it down
-    // with it, silently and in the passing direction. Pin that it did not.
+    // A degenerating reference fixture takes every dependent test down with it,
+    // silently; pin that it did not.
     assert_ne!(rendered, "unknown", "the empty-array reference stopped binding");
     rendered
 }
 
-/// What the bare truthy guard — the spelling ADR-0077 already supported —
-/// answers for the same call. The seed tests below compare against THIS, because
-/// that IS their claim: "the compared spelling witnesses exactly what the tested
-/// spelling does". A written-down rendering would state something weaker and
-/// would have to be chased every time the shape is re-spelled.
+/// What the bare truthy guard (ADR-0077's spelling) answers for the same call.
+/// Seed tests compare against THIS — a written-down rendering would state a
+/// weaker claim and need re-chasing every time the shape is re-spelled.
 fn truthy_guard_shape() -> String {
     let rendered = one_dump(
         "<?php\nfunction t(string $s): void { \
@@ -89,10 +73,8 @@ fn truthy_guard_shape() -> String {
 }
 
 /// The same body with the guard removed — what the binding reads as when nothing
-/// tests it. A test whose claim is "this guard changed nothing" should compare
-/// against *that*, measured, rather than against a written-down rendering: the
-/// sealed-shape spelling moved twice (#159, #163) while this branch was open,
-/// and each time a literal expectation would have had to be chased.
+/// tests it. A "this guard changed nothing" claim should compare against *that*,
+/// measured: the spelling moved twice (#159, #163) while this branch was open.
 fn with_and_without_guard(decl: &str, guard: &str, dumped: &str) -> (String, String) {
     let guarded = one_dump(&format!(
         "<?php\nfunction f(): void {{ {decl} if ({guard}) {{ \\PHPStan\\dumpType({dumped}); }} }}\n"
@@ -107,21 +89,19 @@ fn with_and_without_guard(decl: &str, guard: &str, dumped: &str) -> (String, Str
 
 #[test]
 fn a_by_ref_write_in_a_comparison_operand_is_not_forgotten_as_empty() {
-    // bug11622 itself. The seed (ADR-0077, extended below) answers the success
+    // bug11622 itself: the seed (ADR-0077, extended below) answers the success
     // shape; what must never come back is the pre-guard empty array.
     let got = bound("if (preg_match('/^abc(def|$)/', $s, $m) === 1) { \\PHPStan\\dumpType($m); }");
     assert_ne!(got, empty_array(), "the pre-guard `$m = []` survived the write");
-    // And the branch is not merely honest, it is as sharp as the spelling
-    // ADR-0077 already supported.
+    // And the branch is as sharp as the spelling ADR-0077 already supported.
     assert_eq!(got, truthy_guard_shape());
 }
 
 #[test]
 fn every_equality_operator_carries_the_write() {
-    // The four equality operators reach `CondExpr::Cmp` (the orderings lower to
-    // `Opaque`, which always collected its reads). None may keep the binding —
-    // whether or not the comparison also proves the write happened, which is a
-    // separate question answered by the seed tests below.
+    // The four equality operators reach `CondExpr::Cmp` (orderings lower to
+    // `Opaque`, which always collected reads); none may keep the binding.
+    // Whether the comparison also proves the write is answered by the seed tests below.
     for guard in [
         "preg_match('/a(b)/', $s, $m) === 0",
         "preg_match('/a(b)/', $s, $m) !== 0",
@@ -136,11 +116,9 @@ fn every_equality_operator_carries_the_write() {
 
 #[test]
 fn an_ordering_comparison_carries_the_write() {
-    // `<`/`<=`/`>`/`>=` with an unrepresentable operand lower to `Opaque`, which
-    // has always collected its whole read set — so these were sound before this
-    // slice and are pinned here so a future lift of that fallback (which would
-    // route them through `Cmp` like the rest, and let `> 0` reach the seed)
-    // cannot quietly take the soundness with it.
+    // `<`/`<=`/`>`/`>=` lower to `Opaque` (unrepresentable operand), always sound
+    // via its whole read set — pinned so a future lift of that fallback (routing
+    // through `Cmp`, letting `> 0` reach the seed) can't quietly lose the soundness.
     for guard in [
         "preg_match('/a(b)/', $s, $m) > 0",
         "preg_match('/a(b)/', $s, $m) >= 1",
@@ -201,9 +179,8 @@ fn an_assignment_or_increment_in_a_comparison_operand_carries_its_write() {
 
 #[test]
 fn an_operand_that_cannot_write_keeps_every_fact() {
-    // The fix is not "an unmodelled operand is dangerous". A property fetch, an
-    // offset read and arithmetic read and return; forgetting there would be a
-    // precision loss with no soundness content.
+    // The fix is not "an unmodelled operand is dangerous": a property fetch,
+    // offset read, or arithmetic read forgetting there is precision loss, not soundness.
     for guard in ["$o->p === $t", "$o->p[0] === $t", "$o->p . 'x' === $t", "-$n === 3"] {
         let got = one_dump(&format!(
             "<?php\nfunction f(object $o, int $n): void {{ $t = 'abc'; if ({guard}) {{ \\PHPStan\\dumpType($t); }} }}\n"
@@ -226,12 +203,10 @@ fn a_method_receiver_survives_its_own_call_in_a_comparison() {
 
 #[test]
 fn a_by_value_argument_survives_the_comparison_it_is_compared_in() {
-    // `count($a)` hands `$a` to a by-value parameter, so the callee cannot reach
-    // the caller's binding — the same reason `count($a);` as a statement leaves
-    // it alone. Without this the soundness fix above would have cost 191 nsrt
-    // observations that are true. The claim is "the guard changed nothing", so
-    // it is asked as exactly that: the guarded reading must equal the unguarded
-    // one, whatever either currently renders as.
+    // `count($a)` hands `$a` to a by-value parameter, so the callee can't reach
+    // the caller's binding (same reason `count($a);` alone leaves it). Without
+    // this, the soundness fix above would cost 191 true nsrt observations. Claim
+    // is "the guard changed nothing": guarded reading must equal unguarded.
     let (guarded, plain) = with_and_without_guard("$a = [1, 2];", "count($a) === 2", "$a");
     assert_eq!(guarded, plain, "the comparison forgot a by-value argument");
     assert_ne!(guarded, "unknown", "the fixture proves nothing if nothing was bound");
@@ -244,8 +219,7 @@ fn a_by_value_argument_survives_the_comparison_it_is_compared_in() {
 #[test]
 fn the_by_ref_position_of_a_partly_by_value_call_still_condemns_its_argument() {
     // The gate is per name, not per call: `preg_match` takes `$s` by value and
-    // `$m` by reference, and the comparison must keep the first while forgetting
-    // the second. (`$s` here is the seed's own witness that the split is real.)
+    // `$m` by reference — keep the first, forget the second (`$s` is the witness).
     let dumped = dumps(
         "<?php\nfunction f(): void { $s = 'abc'; $m = [];\n\
          if (preg_match('/x/', $s, $m) === 0) { \\PHPStan\\dumpType($s); \\PHPStan\\dumpType($m); } }\n",
@@ -255,9 +229,8 @@ fn the_by_ref_position_of_a_partly_by_value_call_still_condemns_its_argument() {
 
 #[test]
 fn a_by_value_call_beside_a_non_call_writer_keeps_the_blanket_drop() {
-    // The by-value evidence describes what a *callee* does to its arguments and
-    // says nothing about an assignment sitting beside it, so an operand carrying
-    // both refuses the exemption outright.
+    // By-value evidence describes what a *callee* does to its arguments, not an
+    // assignment beside it — an operand carrying both refuses the exemption.
     let got = one_dump(
         "<?php\nfunction f(): void { $t = 'abc'; if (strlen($t) + ($t = 'z') === 4) { \\PHPStan\\dumpType($t); } }\n",
     );
@@ -268,9 +241,8 @@ fn a_by_value_call_beside_a_non_call_writer_keeps_the_blanket_drop() {
 
 #[test]
 fn identity_against_one_witnesses_the_write() {
-    // PHPStan types all of these, and the witness is satisfied by `=== 1` just as
-    // it is by bare truthiness: every value satisfying the comparison is truthy,
-    // so the branch proves the callee performed its by-ref write.
+    // PHPStan types all of these; `=== 1` satisfies the witness just as bare
+    // truthiness does — every value satisfying the comparison is truthy.
     let expected = truthy_guard_shape();
     for guard in [
         "if (preg_match('/^abc(def|$)/', $s, $m) === 1) { \\PHPStan\\dumpType($m); }",
@@ -289,10 +261,9 @@ fn identity_against_one_witnesses_the_write() {
 
 #[test]
 fn a_comparison_that_admits_a_falsy_result_witnesses_nothing() {
-    // The refusals are the load-bearing half. `preg_match` returns `false` on a
-    // pattern PCRE will not compile and writes **nothing at all**, so a guard
-    // that admits `false` proves no write — and one that proves the result is
-    // `0` proves the failure branch, not the success shape.
+    // The refusals are the load-bearing half: `preg_match` returns `false` on an
+    // uncompilable pattern and writes **nothing**, so a guard admitting `false`
+    // proves no write; one proving `0` proves the failure branch, not success.
     for guard in [
         // `0` is falsy: no write is witnessed.
         "if (preg_match('/^abc(def|$)/', $s, $m) === 0) { \\PHPStan\\dumpType($m); }",
@@ -311,18 +282,16 @@ fn a_comparison_that_admits_a_falsy_result_witnesses_nothing() {
 
 #[test]
 fn a_compared_call_does_not_widen_the_assert_if_true_envelope() {
-    // The seed's witness is truthiness; `@phpstan-assert-if-true` is stated about
-    // the callee returning `true`, and `f() === 1` does not witness that — `1` is
-    // truthy but is not `true`. The two collectors stay separate so a comparison
-    // cannot silently widen every envelope in the project.
+    // The seed's witness is truthiness; `@phpstan-assert-if-true` is about the
+    // callee returning `true`, and `f() === 1` doesn't witness that (`1` is
+    // truthy, not `true`) — the two collectors stay separate.
     let src = "<?php
 /** @phpstan-assert-if-true non-empty-string $v */
 function isFilled(?string $v): bool { return $v !== null && $v !== ''; }
 function f(?string $v): void { %s \\PHPStan\\dumpType($v); }
 ";
-    // `$v` reads exactly as it does with no guard at all: not narrowed by the
-    // envelope, and not merely forgotten either — it keeps its declared arm,
-    // because `?string $v` is a by-value parameter (the gate above).
+    // `$v` reads exactly as with no guard: not narrowed by the envelope, not
+    // forgotten either — `?string $v` is a by-value parameter (the gate above).
     let compared = one_dump(&src.replace("%s", "if (isFilled($v) === 1)"));
     let plain = one_dump(&src.replace("%s", ""));
     assert_eq!(compared, plain);

@@ -2,18 +2,16 @@
 //! only *some* of the paths that reach it.
 //!
 //! PHP's own consequence on the unbound paths (`php -r`-witnessed, 8.5.9):
-//! `Warning: Undefined variable $x`, and the read evaluates to `null` — the same
-//! consequence as the definite leg, which is why the two share a layer and differ
-//! only in floor. The claim is weaker (a path, not the whole scope), so the id sits
-//! at `strict` and the default profile never shows it.
+//! `Warning: Undefined variable $x`, evaluating to `null` — the same consequence
+//! as the definite leg, so the two share a layer and differ only in floor. The
+//! claim is weaker (a path, not the whole scope), so the id sits at `strict` and
+//! the default profile never shows it.
 //!
-//! The firing set itself is pinned in
-//! `crates/steins-syntax/tests/binding_presence.rs`, where the lattice, the
-//! termination subtraction, the loop fixpoint and the guard polarities each get a
-//! firing/silent pair. This file pins the **checker's** half: the warning-handler
-//! gate, the out-parameter subtraction with its call-site-forward refinement, the
-//! floor, and the disjointness from `variable.undefined` as observed through
-//! `check_full`.
+//! The firing set is pinned in `crates/steins-syntax/tests/binding_presence.rs`
+//! (lattice, termination subtraction, loop fixpoint, guard polarities). This
+//! file pins the **checker's** half: the warning-handler gate, the out-parameter
+//! subtraction with its call-site-forward refinement, the floor, and the
+//! disjointness from `variable.undefined` observed through `check_full`.
 
 use steins_infer::profile::ProfileConfigs;
 use steins_infer::{
@@ -42,9 +40,7 @@ fn fires(src: &str, name: &str) -> Diagnostic {
     d[0].clone()
 }
 
-// ---------------------------------------------------------------------------
 // The registry contract.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_id_sits_in_the_proof_layer_at_the_strict_floor() {
@@ -67,9 +63,7 @@ fn only_the_strict_profile_surfaces_it() {
     assert!(strict.is_surfaced(&finding), "`strict` is where the some-paths leg lives");
 }
 
-// ---------------------------------------------------------------------------
 // Firing, and the sentence it carries.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_the_some_paths_shape() {
@@ -111,9 +105,7 @@ fn a_terminating_arm_is_silence() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Disjointness from the definite leg, observed end to end.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_two_legs_never_both_fire_on_one_read() {
@@ -142,9 +134,7 @@ fn a_name_bound_nowhere_stays_on_the_definite_leg() {
     silent("<?php\nfunction f(bool $c): int {\n    if ($c) {\n        echo 1;\n    }\n    return $nope;\n}\n");
 }
 
-// ---------------------------------------------------------------------------
 // The warning-handler gate (ADR-0049 §7) — inherited verbatim.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_declared_null_warning_posture_takes_the_id_off_the_proof_surface() {
@@ -162,9 +152,7 @@ fn a_declared_null_warning_posture_takes_the_id_off_the_proof_surface() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The out-parameter subtraction (ADR-0077), with the call-site-forward refinement.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_out_parameter_binds_from_its_call_site_forward() {
@@ -177,9 +165,9 @@ fn an_out_parameter_binds_from_its_call_site_forward() {
 
 #[test]
 fn a_read_before_the_out_parameter_call_is_not_subtracted() {
-    // The binding is at the call site, so a read that precedes it reaches unbound.
-    // Subtracting scope-wide — the definite leg's rule, right there because that
-    // leg's premise is ordering-blind — would silence this.
+    // The binding is at the call site, so a preceding read reaches unbound;
+    // subtracting scope-wide (the definite leg's ordering-blind rule) would
+    // wrongly silence this.
     let d = fires(
         "<?php\nfunction f(bool $c): mixed {\n    $first = $m;\n    preg_match('/a/', 'b', $m);\n    if ($c) {\n        $m = [];\n    }\n    return $first;\n}\n",
         "m",
@@ -201,22 +189,18 @@ fn a_by_value_argument_binds_nothing() {
 
 #[test]
 fn a_read_reached_only_through_an_out_parameter_call_stays_on_the_definite_leg() {
-    // Recorded obstacle. A name whose ONLY binding form is an out-parameter
-    // position is bound nowhere in the scope's *text*, so lowering routes its reads
-    // to `variable.undefined`, whose checker subtracts an oracle-confirmed
-    // candidate scope-wide. The read before the call is therefore silent on both
-    // legs rather than reported on this one. Moving it here would mean routing
-    // between the legs in the checker, which is exactly the coupling the
-    // disjoint-by-construction split exists to avoid; the cost is recall, in the
-    // direction the proof layer always errs.
+    // Recorded obstacle: a name whose ONLY binding form is an out-parameter is
+    // bound nowhere in the scope's *text*, so lowering routes reads to
+    // `variable.undefined` instead — silent on both legs rather than reported
+    // here. Fixing it would mean routing between legs in the checker, the exact
+    // coupling the disjoint-by-construction split avoids; the cost is recall,
+    // the direction the proof layer always errs.
     silent(
         "<?php\nfunction f(): mixed {\n    $first = $m;\n    preg_match('/a/', 'b', $m);\n    return $first;\n}\n",
     );
 }
 
-// ---------------------------------------------------------------------------
 // Scopes that report nothing at all — the definite leg's universe, verbatim.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_top_level_script_scope_never_reports() {

@@ -52,16 +52,12 @@ fn of_id(src: &str, id: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// The false positive. `$s` is one of two DISTINCT byte strings, so the two
-/// guards below are mutually exclusive and no path dereferences null. While
-/// both literals decoded to U+FFFD the ternary join collapsed `OneOf` to a
-/// `Singleton`, `php_identical` decided **both** guards `Yes`, and the walk
-/// took the null assignment and the dereference as one proven path — a
-/// proof-layer `call.on-null` on a state the program cannot reach, which is
-/// exactly what ADR-0002 forbids.
-///
-/// Verified on PHP 8.5: `$c = true` prints the year, `$c = false` enters
-/// neither branch body that would break.
+/// The false positive: `$s` is one of two DISTINCT byte strings, so the two
+/// guards below are mutually exclusive and no path dereferences null. Both
+/// literals decoded to U+FFFD, so the ternary join collapsed `OneOf` to a
+/// `Singleton`; `php_identical` decided **both** guards `Yes`, proving a
+/// path ADR-0002 forbids. Verified on PHP 8.5: `$c = true` prints the year,
+/// `$c = false` enters neither branch body that would break.
 #[test]
 fn distinct_byte_strings_do_not_forge_a_proven_null_path() {
     let src = "<?php\n\
@@ -97,9 +93,8 @@ fn one_byte_string_still_proves_the_null_path() {
     assert_eq!(d.len(), 1, "{d:#?}");
 }
 
-/// The false negative. PHP warns `Undefined array key` here; while the keys
-/// collapsed, `array_has_key` found the read key "present" and the finding was
-/// suppressed.
+/// The false negative: PHP warns `Undefined array key` here. While the keys
+/// collapsed, `array_has_key` found the read key "present" and suppressed the finding.
 #[test]
 fn a_byte_string_key_that_is_absent_is_proven_absent() {
     let src = "<?php\n$a = [\"\\xC0\" => 1];\n$b = $a[\"\\xD0\"];\n";
@@ -116,9 +111,8 @@ fn a_byte_string_key_that_is_present_stays_silent() {
     assert!(d.is_empty(), "{d:#?}");
 }
 
-/// A diagnostic naming a byte string spells it the way PHP source does. The
-/// old rendering printed the lossy replacement character, which named nothing
-/// the reader could search for.
+/// A diagnostic naming a byte string spells it the way PHP source does — the
+/// old rendering printed the lossy replacement character, unsearchable by the reader.
 #[test]
 fn a_diagnostic_spells_byte_strings_as_php_escapes() {
     let src = "<?php\n$a = [\"\\xC0\" => 1];\n$b = $a[\"\\xD0\"];\n";
@@ -129,10 +123,9 @@ fn a_diagnostic_spells_byte_strings_as_php_escapes() {
     assert!(!d[0].message.contains('\u{FFFD}'), "{}", d[0].message);
 }
 
-/// PHP's `.` joins **bytes**, so two halves that are each invalid UTF-8 can
-/// concatenate to a perfectly valid string: `"\xC3" . "\xA9"` is `"é"`. While
-/// the halves decoded lossily this folded to two replacement characters — a
-/// third string, equal to neither the source nor the truth.
+/// PHP's `.` joins **bytes**, so two invalid-UTF-8 halves can concatenate to a
+/// valid string: `"\xC3" . "\xA9"` is `"é"`. Lossy decoding used to fold this to
+/// two replacement characters — a third string, equal to neither source nor truth.
 #[test]
 fn concatenation_joins_bytes_not_decoded_text() {
     assert_eq!(dumped(r#""\xC3" . "\xA9""#), "'é'");
@@ -147,10 +140,9 @@ fn a_byte_string_survives_concatenation() {
 }
 
 /// The fold wire is JSON and cannot carry arbitrary bytes, so a byte-string
-/// argument is not sent at all (ADR-0080 §2.6): `strlen` falls back to its
-/// declared return envelope instead of folding the **wrong** `3` that a lossy
-/// three-byte U+FFFD used to produce. PHP's answer is `1`; restoring that exact
-/// fold is ADR-0080 §3.1.
+/// argument isn't sent at all (ADR-0080 §2.6): `strlen` falls back to its
+/// declared return envelope instead of the **wrong** `3` a lossy three-byte
+/// U+FFFD used to produce. PHP's real answer is `1`; restoring that fold is ADR-0080 §3.1.
 #[test]
 fn a_byte_string_is_not_sent_to_the_fold_wire() {
     let got = dumped(r#"strlen("\xC0")"#);
@@ -164,10 +156,9 @@ fn a_byte_string_is_not_sent_to_the_fold_wire() {
 /// The `dumpType` body for `$x = <expr>;` against a **live** sidecar, or `None`
 /// when `php` cannot be reached.
 ///
-/// The two pins below need the real engine, not [`dumped`]'s `NoFold`: their
-/// subject is what the *runner* does when a call whose arguments are perfectly
-/// sendable returns bytes JSON cannot carry. Only a request that actually reaches
-/// PHP exercises that branch.
+/// The two pins below need the real engine, not [`dumped`]'s `NoFold`: they pin
+/// what the *runner* does when sendable arguments return bytes JSON can't carry
+/// — only a request that reaches PHP exercises that branch.
 fn live_dumped(test: &str, expr: &str) -> Option<String> {
     let mut folder = SidecarFolder::enabled();
     if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
@@ -186,12 +177,12 @@ fn live_dumped(test: &str, expr: &str) -> Option<String> {
 }
 
 /// The mirror of the test above, on the **result** side: the argument here is
-/// plain ASCII and is sent, and it is the *answer* that JSON cannot carry.
-/// `base64_decode('wA==')` is the single byte `\xC0`, so the runner widens rather
-/// than reporting a lossy U+FFFD, and the call falls back to its declared envelope.
+/// plain ASCII and sent; it's the *answer* JSON cannot carry. `base64_decode
+/// ('wA==')` is the single byte `\xC0`, so the runner widens rather than
+/// reporting a lossy U+FFFD, falling back to its declared envelope.
 ///
-/// This branch existed in the runner from the start and was pinned nowhere, in
-/// either result form. Restoring the exact fold is ADR-0080 §3.1's tagged bytes.
+/// This branch existed in the runner unpinned from the start, in either result
+/// form; restoring the exact fold is ADR-0080 §3.1's tagged bytes.
 #[test]
 fn a_scalar_byte_string_result_widens_rather_than_folding_lossily() {
     let Some(got) = live_dumped(
@@ -213,12 +204,11 @@ fn a_scalar_byte_string_result_widens_rather_than_folding_lossily() {
 
 /// And the array form, now that array results cross the seam (ADR-0028's
 /// 2026-08-14 amendment, issue #330): one byte string **anywhere** inside widens
-/// the whole result, because a partial array would be a wrong value rather than a
-/// wider one.
+/// the whole result — a partial array would be a wrong value, not a wider one.
 ///
 /// `substr_replace` slices **bytes**, so cutting one byte off `"À"` (`C3 80`)
-/// leaves a lone `\x80` — an array result that no argument had to be binary to
-/// produce. The wave-0 name reaching its own new result path is the point.
+/// leaves a lone `\x80` — an array result no argument had to be binary to
+/// produce; the wave-0 name reaching its own new result path is the point.
 #[test]
 fn a_byte_string_inside_an_array_result_widens_the_whole_array() {
     let Some(got) = live_dumped(

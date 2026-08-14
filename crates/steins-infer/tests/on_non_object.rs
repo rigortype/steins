@@ -8,26 +8,10 @@
 //! that absence is where every `Maybe`, object-arm union and unknown-class receiver
 //! lands. The silence fixtures below pin that.
 //!
-//! Every runtime claim is `php -r`-witnessed on PHP 8.5.9 (the sandbox's `php`) and
-//! quoted verbatim in the test that consumes it:
-//!
-//! ```text
-//! $ php -r '$x = 1;    $x->m();'   PHP Fatal error: Uncaught Error: Call to a member function m() on int
-//! $ php -r '$x = "s";  $x->m();'   … on string
-//! $ php -r '$x = 1.5;  $x->m();'   … on float
-//! $ php -r '$x = true; $x->m();'   … on true
-//! $ php -r '$x = false;$x->m();'   … on false
-//! $ php -r '$x = [];   $x->m();'   … on array
-//! $ php -r '$x = null; $x->m();'   … on null          (call.on-null's, unchanged)
-//! $ php -r '$x = 1;    $x?->m();'  … on int           (?-> does NOT excuse it)
-//! $ php -r '$x = null; $x?->m(); echo "ok\n";'        ok  (nullsafe is the legal form)
-//! $ php -r '$x = 1;    $y = $x->p; var_dump($y);'
-//!       PHP Warning: Attempt to read property "p" on int in Command line code on line 1
-//!       NULL
-//! ```
-//!
-//! (the property warning reads identically with `string` / `float` / `true` /
-//! `false` / `array` / `null` in place of `int`, and yields `NULL` in every case).
+//! Every runtime claim is `php -r`-witnessed on PHP 8.5.9, one scalar kind per test
+//! below: a call fatals with `Call to a member function m() on <type>`; a property
+//! read warns `Attempt to read property "p" on <type>` and yields `NULL` — the same
+//! shape for `int`/`string`/`float`/`true`/`false`/`array`/`null` in place of `int`.
 
 use steins_infer::{
     CALL_ON_NON_OBJECT_ID, CALL_ON_NULL_ID, Diagnostic, Folder, PROPERTY_ON_NON_OBJECT_ID, check,
@@ -83,7 +67,6 @@ fn scope(value: &str, usage: &str) -> String {
 
 #[test]
 fn call_on_proven_int_fires() {
-    // `php -r '$x = 1; $x->m();'` → Call to a member function m() on int.
     let d = on_non_object(&scope("1", "$x->m();"));
     assert_eq!(d.len(), 1, "a proven int receiver is a fatal method call: {d:#?}");
     assert!(d[0].message.contains("int"), "the message names the receiver's type: {d:#?}");
@@ -91,36 +74,31 @@ fn call_on_proven_int_fires() {
 
 #[test]
 fn call_on_proven_string_fires() {
-    // `php -r '$x = "s"; $x->m();'` → Call to a member function m() on string.
     assert_eq!(on_non_object(&scope("'s'", "$x->m();")).len(), 1);
 }
 
 #[test]
 fn call_on_proven_float_fires() {
-    // `php -r '$x = 1.5; $x->m();'` → Call to a member function m() on float.
     assert_eq!(on_non_object(&scope("1.5", "$x->m();")).len(), 1);
 }
 
 #[test]
 fn call_on_proven_bool_fires() {
-    // `php -r '$x = true; $x->m();'` → … on true; `false` → … on false. Both are the
-    // same id here; the finding names the *type*, `bool`.
+    // `true` and `false` are the same id here; the finding names the *type*, `bool`.
     assert_eq!(on_non_object(&scope("true", "$x->m();")).len(), 1);
     assert_eq!(on_non_object(&scope("false", "$x->m();")).len(), 1);
 }
 
 #[test]
 fn call_on_proven_array_fires() {
-    // `php -r '$x = []; $x->m();'` → Call to a member function m() on array.
     assert_eq!(on_non_object(&scope("[]", "$x->m();")).len(), 1);
     assert_eq!(on_non_object(&scope("[1, 2]", "$x->m();")).len(), 1);
 }
 
 #[test]
 fn call_on_native_seeded_scalar_param_fires() {
-    // The receiver need not be a literal assignment: a native `string` parameter is a
-    // runtime-enforced entry fact (`Fact::General`), and it proves non-objecthood
-    // exactly as a literal does.
+    // The receiver need not be a literal: a native `string` parameter is a
+    // runtime-enforced entry fact (`Fact::General`), proving non-objecthood too.
     let src = "<?php\nfunction f(string $s): void { $s->m(); }\n";
     assert_eq!(on_non_object(src).len(), 1, "a native scalar seed is a Verified fact");
 }
@@ -128,8 +106,7 @@ fn call_on_native_seeded_scalar_param_fires() {
 #[test]
 fn call_on_proven_prop_receiver_fires() {
     // The depth-1 `$v->prop->m()` receiver lane `call.on-null` already reads
-    // (ADR-0052 §7): the heap property fact proves the same thing about the object
-    // the property holds.
+    // (ADR-0052 §7): the heap property fact proves the same about what it holds.
     let src = "<?php
 class C { public int $n = 1; }
 function f(): void { $o = new C(); $o->n->m(); }
@@ -158,8 +135,7 @@ fn null_receiver_stays_call_on_null_with_its_own_message() {
 
 #[test]
 fn nullsafe_on_null_stays_silent() {
-    // `php -r '$x = null; $x?->m(); echo "ok\n";'` → ok. Nullsafe is the legal form
-    // for a null receiver; neither id may fire.
+    // Nullsafe is the legal form for a null receiver; neither id may fire.
     let src = scope("null", "$x?->m();");
     assert!(on_null(&src).is_empty(), "?-> on null is legal PHP");
     assert!(on_non_object(&src).is_empty(), "?-> on null is legal PHP");
@@ -167,8 +143,7 @@ fn nullsafe_on_null_stays_silent() {
 
 #[test]
 fn nullsafe_on_proven_non_object_still_fires() {
-    // `php -r '$x = 1; $x?->m();'` → Call to a member function m() on int. `?->`
-    // short-circuits on null ALONE, so a proven non-null non-object still fatals.
+    // `?->` short-circuits on null ALONE, so a proven non-null non-object still fatals.
     assert_eq!(
         on_non_object(&scope("1", "$x?->m();")).len(),
         1,
@@ -180,9 +155,8 @@ fn nullsafe_on_proven_non_object_still_fires() {
 
 #[test]
 fn maybe_object_receiver_is_silent() {
-    // A parameter that may be an object carries no value-domain fact at all — the
-    // domain cannot spell an object — so the receiver is unknown and both ids are
-    // silent. This is the `Maybe` pin.
+    // A parameter that may be an object carries no value-domain fact (the domain
+    // can't spell an object), so the receiver is unknown and both ids are silent.
     let src = "<?php
 class C { public function m(): void {} }
 function f(?C $c): void { $c->m(); }
@@ -216,9 +190,8 @@ function f(\\Some\\Absent\\Thing $t): void { $t->m(); }
 #[test]
 fn nullable_scalar_receiver_is_silent() {
     // `?int` is a non-object under BOTH arms, so PHP fatals either way — but the
-    // fact is `General { base: Int, nullable: true }` and there is no single type to
-    // name (nor a settled owner between the two ids). The recorded reach boundary of
-    // this slice: silence, not a wrong sentence.
+    // fact is `General { base: Int, nullable: true }`, with no single type to name
+    // (nor a settled owner between the two ids): silence, not a wrong sentence.
     let src = "<?php\nfunction f(?int $n): void { $n->m(); }\n";
     assert!(on_non_object(src).is_empty(), "a nullable scalar receiver is this slice's boundary");
     assert!(on_null(src).is_empty(), "…and it is not proven null either");
@@ -250,8 +223,6 @@ function f(mixed $x): void { claimInt($x); $x->m(); }
 
 #[test]
 fn property_on_proven_int_fires() {
-    // `php -r '$x = 1; $y = $x->p; var_dump($y);'`
-    //   → Warning: Attempt to read property "p" on int … NULL
     let d = prop_on_non_object(&scope("1", "$y = $x->p;"));
     assert_eq!(d.len(), 1, "a proven int receiver warns on a property read: {d:#?}");
     assert!(d[0].message.contains("int"), "the message names the receiver's type: {d:#?}");
@@ -317,9 +288,9 @@ function f(): void { $o = new C(); $y = $o->p; }
 
 #[test]
 fn property_nullsafe_fetch_is_the_recorded_silence() {
-    // `php -r '$x = 1; $y = $x?->p;'` DOES warn at runtime, but `?->p` lowers to an
-    // opaque value rather than a property fetch, so it never reaches this check.
-    // Pinned as a recorded reach boundary, not as correct behaviour.
+    // `$x?->p` DOES warn at runtime, but lowers to an opaque value rather than a
+    // property fetch, so it never reaches this check — a recorded reach boundary,
+    // not correct behaviour.
     assert!(
         prop_on_non_object(&scope("1", "$y = $x?->p;")).is_empty(),
         "the nullsafe property form is outside the lowered read lane"

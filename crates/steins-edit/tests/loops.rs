@@ -1,14 +1,9 @@
 //! Integration tests for Transform #3 — loop→`array_map` (ADR-0076, issue #116).
 //!
-//! Two things are pinned here. First the **rewrite**: the flagship shape, and
-//! that an applied file re-enumerates zero candidates. Second the **refusal
-//! taxonomy**: every reason in ADR-0076 §4 is exercised at least once, because a
-//! transform whose whole contract is "transformed or refused, by name" is only
-//! as good as the names it can actually produce.
-//!
-//! Behaviour identity between the two spellings is measured, not argued, by the
-//! differential fixture in `crates/steins-cli/tests/transform_loops.rs`, which
-//! runs both under the real `php`.
+//! Pins the flagship **rewrite** shape (applied file re-enumerates zero
+//! candidates) and the **refusal taxonomy** (every ADR-0076 §4 reason
+//! exercised). Behaviour identity measured by the differential fixture in
+//! `crates/steins-cli/tests/transform_loops.rs`, under real `php`.
 
 use steins_edit::TransformReport;
 use steins_edit::VouchSet;
@@ -46,8 +41,7 @@ fn assert_oracle_complete(report: &TransformReport) {
     assert!(report.oracle.is_complete(), "oracle incomplete: {:?}", report.oracle);
 }
 
-/// Wrap a loop body in a function whose subject is a proven list literal, so the
-/// parity gates pass and the test is about whatever `body` does.
+/// Wraps `body` in a fn with a proven list-literal subject; test is about `body` alone.
 fn with_proven_subject(body: &str) -> String {
     format!("<?php\nfunction run(): array {{\n    $xs = [1, 2, 3];\n    $out = [];\n{body}\n    return $out;\n}}\n")
 }
@@ -66,7 +60,7 @@ fn refusal_for(source: &str) -> String {
     only_reason(&report).to_owned()
 }
 
-// ---- 1. The rewrite --------------------------------------------------------
+// 1. The rewrite
 
 const FLAGSHIP: &str = "\
 <?php
@@ -100,18 +94,16 @@ fn flagship_shape_is_rewritten_consuming_both_statements() {
         out.contains("    $out = array_map(fn ($x) => double($x), $xs);\n"),
         "rewrite missing:\n{out}"
     );
-    // Both statements are consumed — no stranded initializer, no leftover loop.
     assert!(!out.contains("foreach"), "loop survived:\n{out}");
     assert!(!out.contains("$out = [];"), "initializer stranded:\n{out}");
-    // Everything outside the two statements is byte-identical (ADR-0003).
+    // Byte-identical elsewhere (ADR-0003).
     assert!(out.contains("function double(int $n): int\n{\n    return $n * 2;\n}"), "got:\n{out}");
     assert!(out.contains("\n\n    return $out;\n}\n"), "tail perturbed:\n{out}");
 }
 
 #[test]
 fn an_applied_file_enumerates_no_candidate() {
-    // Idempotence: the rewritten statement is no longer a `foreach`, so it is no
-    // longer even a candidate — the oracle counts zero, not "one, refused".
+    // Idempotence: no longer a `foreach`, so oracle counts zero, not "one, refused".
     let applied = plan(&[("lib.php", FLAGSHIP)]).plan.apply_file("lib.php", FLAGSHIP);
     let again = plan(&[("lib.php", &applied)]);
     assert_oracle_complete(&again);
@@ -133,8 +125,7 @@ fn a_pure_builtin_body_is_rewritten() {
 
 #[test]
 fn every_foreach_is_enumerated_even_the_ineligible_ones() {
-    // The candidate domain is the whole construct family (ADR-0076 §4): the
-    // narrowness is counted, not hidden.
+    // Candidate domain is the whole construct family (ADR-0076 §4): narrowness not hidden.
     let src = "<?php\nfunction f(array $a, array $b): void {\n    foreach ($a as $x) { echo $x; }\n    foreach ($b as $k => $v) { echo $k; }\n}\n";
     let report = plan(&[("lib.php", src)]);
     assert_oracle_complete(&report);
@@ -142,7 +133,7 @@ fn every_foreach_is_enumerated_even_the_ineligible_ones() {
     assert_eq!(report.oracle.refused, 2);
 }
 
-// ---- 2. The purity bar (ADR-0076 §2) ---------------------------------------
+// 2. The purity bar (ADR-0076 §2)
 
 #[test]
 fn a_proven_effect_label_refuses_and_is_named() {
@@ -152,7 +143,6 @@ fn a_proven_effect_label_refuses_and_is_named() {
     let report = plan(&[("lib.php", &src)]);
     assert_oracle_complete(&report);
     assert_eq!(only_reason(&report), REASON_BODY_EFFECTS);
-    // The detail names the proven label, so an agent can act on it.
     assert!(
         report.refusals[0].detail.contains("io.output.buffer"),
         "detail: {}",
@@ -177,13 +167,7 @@ fn a_proven_throw_refuses_even_though_pure_admits_throw() {
 
 #[test]
 fn a_loop_inside_a_try_refuses_before_the_throw_gate_is_reached() {
-    // The guards an enclosing `catch` contributes are deliberately stripped by
-    // the purity probe (see `steins-infer/tests/region_purity.rs`, which pins
-    // that asymmetry directly). End to end it cannot change a verdict today: a
-    // `try` is an opaque construct for the trace, so the walk never reaches the
-    // loop head and the subject is unproven — the earlier gate answers first.
-    // Recorded as a test rather than left implicit, so the day `try` becomes
-    // structured the change of reason is visible.
+    // `catch` guards stripped (region_purity.rs); `try` opaque, earlier gate answers first.
     let src = "<?php\nfunction boom(int $n): int { throw new RuntimeException('no'); }\nfunction run(): array {\n    $out = [];\n    try {\n        $xs = [1, 2];\n        $out = [];\n        foreach ($xs as $x) {\n            $out[] = boom($x);\n        }\n    } catch (RuntimeException $e) {\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_SUBJECT_NOT_PROVEN_ARRAY);
 }
@@ -196,8 +180,7 @@ fn an_unresolvable_callee_refuses_rather_than_being_assumed_harmless() {
 
 #[test]
 fn an_unmodelled_construct_refuses_as_an_unresolved_call() {
-    // `new` is not on the effect fixpoint (constructor effects and throws are not
-    // tracked), so it is read as an unanalyzable target rather than as pure.
+    // `new` is off the effect fixpoint, so it reads as unanalyzable, not pure.
     let src = with_proven_subject(
         "    foreach ($xs as $x) {\n        $out[] = new RuntimeException((string) $x);\n    }",
     );
@@ -206,9 +189,7 @@ fn an_unmodelled_construct_refuses_as_an_unresolved_call() {
 
 #[test]
 fn a_declared_only_call_refuses_because_a_cap_is_not_a_proof() {
-    // ADR-0067's lane wall at its first transform consumer. The interface
-    // envelope caps what `load()` can do; it does not witness that the call does
-    // nothing, and a cap cannot witness the equivalence of two evaluation orders.
+    // ADR-0067: an envelope caps `load()`, doesn't witness it does nothing.
     let src = "<?php\ninterface Repo {\n    #[\\Steins\\Effect('io')]\n    public function load(int $id): int;\n}\nfunction run(Repo $r): array {\n    $xs = [1, 2, 3];\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $r->load($x);\n    }\n    return $out;\n}\n";
     let report = plan(&[("lib.php", src)]);
     assert_oracle_complete(&report);
@@ -222,15 +203,14 @@ fn a_declared_only_call_refuses_because_a_cap_is_not_a_proof() {
 
 #[test]
 fn a_frame_sensitive_builtin_refuses() {
-    // `func_get_args()` answers about the *frame* it is written in; moving it
-    // into an arrow function changes what it means.
+    // `func_get_args()` answers about the *frame* it's written in; an arrow fn changes that.
     let src = with_proven_subject(
         "    foreach ($xs as $x) {\n        $out[] = count(func_get_args());\n    }",
     );
     assert_eq!(refusal_for(&src), REASON_BODY_CALL_UNRESOLVED);
 }
 
-// ---- 3. Semantic parity gates (ADR-0076 §3) --------------------------------
+// 3. Semantic parity gates (ADR-0076 §3)
 
 #[test]
 fn a_non_list_subject_refuses() {
@@ -246,23 +226,21 @@ fn a_traversable_subject_refuses() {
 
 #[test]
 fn a_docblock_asserted_list_is_a_claim_not_a_proof() {
-    // ADR-0037's iron rule at the transform's own boundary: an `@param list<int>`
-    // is `Asserted`, and an asserted fact never premises a rewrite.
+    // ADR-0037: `@param list<int>` is `Asserted`; an asserted fact never premises a rewrite.
     let src = "<?php\n/** @param list<int> $xs */\nfunction run(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_SUBJECT_NOT_PROVEN_ARRAY);
 }
 
 #[test]
 fn an_iteration_variable_used_after_the_loop_refuses() {
-    // `foreach` leaves `$x` bound to the last element; the arrow function's
-    // parameter does not escape.
+    // `foreach` leaves `$x` bound to the last element; the arrow param doesn't escape.
     let src = "<?php\nfunction run(): array {\n    $xs = [1, 2, 3];\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return [$out, $x];\n}\n";
     assert_eq!(refusal_for(src), REASON_ITERATION_VAR_LIVE_AFTER);
 }
 
 #[test]
 fn a_similarly_named_variable_after_the_loop_does_not_refuse() {
-    // The liveness scan matches whole names: `$xs` is not an occurrence of `$x`.
+    // Liveness scan matches whole names: `$xs` is not an occurrence of `$x`.
     let src = "<?php\nfunction run(): array {\n    $xs = [1, 2, 3];\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return [$out, $xs];\n}\n";
     let report = plan(&[("lib.php", src)]);
     assert_oracle_complete(&report);
@@ -279,14 +257,12 @@ fn the_accumulator_read_in_the_body_refuses() {
 
 #[test]
 fn the_accumulator_bound_as_the_iteration_variable_refuses() {
-    // `$out = []; foreach ($xs as $out) { $out[] = 1; }` would make every element
-    // clobber the accumulator — the loop observes its own state through the
-    // binding, which is still "occurs other than as the append target".
+    // Binding `$out` as iteration var clobbers it — "occurs other than as append target".
     let src = "<?php\nfunction run(): array {\n    $xs = [1, 2];\n    $out = [];\n    foreach ($xs as $out) {\n        $out[] = 1;\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_ACCUMULATOR_READ_IN_BODY);
 }
 
-// ---- 4. Shape gates (ADR-0076 §1) ------------------------------------------
+// 4. Shape gates (ADR-0076 §1)
 
 #[test]
 fn a_key_binding_refuses() {
@@ -302,8 +278,7 @@ fn a_reference_binding_refuses() {
 
 #[test]
 fn a_destructuring_binding_refuses_with_its_own_reason() {
-    // The ADR-0076 §4 taxonomy addition: arrow functions cannot spell a
-    // destructuring parameter, and no listed reason describes this shape.
+    // ADR-0076 §4 taxonomy addition: arrow fns can't spell a destructuring param.
     let src = "<?php\nfunction run(): array {\n    $xs = [[1, 2]];\n    $out = [];\n    foreach ($xs as [$a, $b]) {\n        $out[] = $a;\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_VALUE_BINDING_NOT_VARIABLE);
 }
@@ -324,7 +299,7 @@ fn a_multi_statement_body_refuses() {
 
 #[test]
 fn an_append_expression_that_writes_a_variable_refuses() {
-    // `fn` captures by value, so `$i++` inside the expression would not carry.
+    // `fn` captures by value; `$i++` inside the expression wouldn't carry.
     let src = "<?php\nfunction run(): array {\n    $xs = [1, 2];\n    $i = 0;\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $i++ + $x;\n    }\n    return $out;\n}\n";
     let reason = refusal_for(src);
     assert_eq!(reason, REASON_BODY_NOT_SINGLE_APPEND);
@@ -338,7 +313,7 @@ fn an_early_exit_refuses() {
     assert_eq!(refusal_for(&src), REASON_EARLY_EXIT);
 }
 
-// ---- 5. The accumulator's initializer (ADR-0076 §3) ------------------------
+// 5. The accumulator's initializer (ADR-0076 §3)
 
 #[test]
 fn a_non_adjacent_initializer_refuses() {
@@ -348,7 +323,7 @@ fn a_non_adjacent_initializer_refuses() {
 
 #[test]
 fn a_comment_in_the_gap_refuses_rather_than_being_eaten() {
-    // The rewrite consumes both spans, so anything between them would vanish.
+    // The rewrite consumes both spans; anything between them would vanish.
     let src = "<?php\nfunction run(): array {\n    $xs = [1, 2, 3];\n    $out = [];\n    // keep me\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     assert_eq!(refusal_for(src), REASON_ACCUMULATOR_INIT_NOT_ADJACENT);
 }
@@ -365,14 +340,13 @@ fn a_loop_that_opens_its_block_refuses_for_want_of_an_initializer() {
     assert_eq!(refusal_for(src), REASON_ACCUMULATOR_INIT_NOT_ADJACENT);
 }
 
-// ---- 6. The Asserted-subject opt-in (ADR-0076 amendment, issue #175) -------
+// 6. The Asserted-subject opt-in (ADR-0076 amendment, issue #175)
 
 fn opted_in() -> LoopToArrayMapOptions {
     LoopToArrayMapOptions { asserted_subjects: true }
 }
 
-/// A loop whose subject qualifies only at the Asserted stratum: a docblock
-/// `list<int>` claim over a native `array` hint the engine cannot represent.
+/// Asserted-stratum only: native `array` hint, docblock `list<int>` claim.
 const ASSERTED_LIST: &str = "<?php\n/** @param list<int> $xs */\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x * 3;\n    }\n    return $out;\n}\n";
 
 #[test]
@@ -384,9 +358,7 @@ fn the_opt_in_admits_a_docblock_list_counted_and_labeled() {
     let out = report.plan.apply_file("lib.php", ASSERTED_LIST);
     assert!(out.contains("$out = array_map(fn ($x) => $x * 3, $xs);"), "got:\n{out}");
 
-    // The label at the site (amendment condition 3): it must name the subject,
-    // say declared-not-proven, state the key-numbering risk, and not pretend
-    // the post-check could catch a wrong claim.
+    // Condition 3: label names subject, declared-not-proven, key risk, no post-check oversell.
     assert_eq!(report.asserted_admissions.len(), 1, "{:#?}", report.asserted_admissions);
     let admission = &report.asserted_admissions[0];
     assert_eq!(admission.site.label, "foreach");
@@ -407,8 +379,7 @@ fn the_opt_in_admits_a_docblock_list_counted_and_labeled() {
 
 #[test]
 fn without_the_opt_in_the_same_fixture_still_refuses_at_the_array_gate() {
-    // The pre-amendment behavior, pinned: a declared list is a claim, and the
-    // proven-only gate refuses it at the array check (the #145 order artifact).
+    // Pre-amendment: declared list is a claim, refused at array check (#145 order artifact).
     let report = plan(&[("lib.php", ASSERTED_LIST)]);
     assert_oracle_complete(&report);
     assert!(report.plan.is_empty(), "no edit without the opt-in");
@@ -419,9 +390,7 @@ fn without_the_opt_in_the_same_fixture_still_refuses_at_the_array_gate() {
 
 #[test]
 fn the_flag_alone_changes_nothing_where_no_asserted_evidence_exists() {
-    // Byte-identity measured in one run: over a proven rewrite plus a proven
-    // non-list refusal, the whole report — plan, refusals, oracle — is equal
-    // with and without the opt-in.
+    // Byte-identity: report equal with/without opt-in, proven rewrite + non-list refusal.
     let non_list = "<?php\nfunction keys(): array {\n    $xs = ['a' => 1, 'b' => 2];\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let files = [("a.php", FLAGSHIP), ("b.php", non_list)];
     let off = plan_with(&files, LoopToArrayMapOptions::default());
@@ -433,7 +402,7 @@ fn the_flag_alone_changes_nothing_where_no_asserted_evidence_exists() {
 
 #[test]
 fn a_proven_subject_under_the_opt_in_stays_a_proven_rewrite() {
-    // The proven lane is untouched: the opt-in never relabels a proven site.
+    // The proven lane is untouched; the opt-in never relabels a proven site.
     let report = plan_with(&[("lib.php", FLAGSHIP)], opted_in());
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
@@ -443,9 +412,7 @@ fn a_proven_subject_under_the_opt_in_stays_a_proven_rewrite() {
 
 #[test]
 fn a_bare_native_array_hint_is_no_evidence_at_either_stratum() {
-    // Amendment condition 2: `function scale(array $xs)` with no docblock. The
-    // native lowering represents no `array` member, so the subject has no
-    // evidence at all and still refuses at the array gate even opted in.
+    // Condition 2: no docblock, no `array` evidence at all; refuses even opted in.
     let src = "<?php\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let off = plan(&[("lib.php", src)]);
     assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY);
@@ -463,9 +430,7 @@ fn a_bare_native_array_hint_is_no_evidence_at_either_stratum() {
 
 #[test]
 fn a_declared_bare_array_satisfies_the_array_half_only() {
-    // `@param array $xs`: Asserted evidence for array-ness, none for list-ness.
-    // Off, it refuses at the array gate (nothing Verified); on, the array half
-    // is Asserted-satisfied and the honest refusal moves to the list gate.
+    // Asserted array-ness only; off refuses at array gate, on moves to list gate.
     let src = "<?php\n/** @param array $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let off = plan(&[("lib.php", src)]);
     assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY);
@@ -483,8 +448,7 @@ fn a_declared_bare_array_satisfies_the_array_half_only() {
 
 #[test]
 fn a_declared_map_shape_refuses_at_the_list_gate_under_the_opt_in() {
-    // `array<string, int>` declares the array half and denies nothing about
-    // keys the list gate could accept — same cell as the bare `array` claim.
+    // Same cell as the bare `array` claim: declares the array half only.
     let src = "<?php\n/** @param array<string, int> $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let on = plan_with(&[("lib.php", src)], opted_in());
     assert_oracle_complete(&on);
@@ -494,8 +458,7 @@ fn a_declared_map_shape_refuses_at_the_list_gate_under_the_opt_in() {
 
 #[test]
 fn a_nullable_declared_list_is_not_array_evidence() {
-    // `list<int>|null` admits null, which `foreach` warns through and
-    // `array_map` TypeErrors on — the array half fails at both strata.
+    // `list<int>|null` admits null, which `array_map` TypeErrors on; fails at both strata.
     let src = "<?php\n/** @param list<int>|null $xs */\nfunction scale($xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let on = plan_with(&[("lib.php", src)], opted_in());
     assert_oracle_complete(&on);
@@ -505,8 +468,7 @@ fn a_nullable_declared_list_is_not_array_evidence() {
 
 #[test]
 fn an_inline_var_cast_admits_under_the_opt_in() {
-    // ADR-0073's inline `@var` is the same Asserted seeding as a `@param`, so
-    // the opt-in reads it the same way.
+    // ADR-0073's inline `@var` is the same Asserted seeding as a `@param`.
     let src = "<?php\nfunction scale($xs): array {\n    /** @var list<int> $xs */\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = $x;\n    }\n    return $out;\n}\n";
     let report = plan_with(&[("lib.php", src)], opted_in());
     assert_oracle_complete(&report);
@@ -517,9 +479,7 @@ fn an_inline_var_cast_admits_under_the_opt_in() {
 
 #[test]
 fn an_opted_in_effectful_body_finally_fires_the_purity_cell() {
-    // The #145 measurement found the purity cells starved by the subject gate;
-    // under the opt-in they become load-bearing: an admitted-quality subject
-    // with an effectful body refuses on the effect, not on the subject.
+    // #145: purity cells starved by the subject gate; opted in, refuse on effect not subject.
     let src = "<?php\n/** @param list<int> $xs */\nfunction scale(array $xs): array {\n    $out = [];\n    foreach ($xs as $x) {\n        $out[] = shout($x);\n    }\n    return $out;\n}\nfunction shout(int $n): int { echo $n; return $n; }\n";
     let off = plan(&[("lib.php", src)]);
     assert_eq!(only_reason(&off), REASON_SUBJECT_NOT_PROVEN_ARRAY, "the starvation, pinned");

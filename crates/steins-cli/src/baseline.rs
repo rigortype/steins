@@ -1,44 +1,32 @@
 //! The `.steins-baseline.jsonl` channel (ADR-0022): the accumulated past at
 //! adoption, machine-managed, line-shift-immune.
 //!
-//! # Format
-//!
-//! JSONL. A header line `{"steins-baseline":1,"note":"…"}`, then one
+//! **Format:** JSONL. A header line `{"steins-baseline":1,"note":"…"}`, then one
 //! `{"id","path","hash"[,"surface"]}` entry per line, sorted by `(path, id, hash)`
-//! for diff stability. `path` is relative to the baseline file's directory, forward
-//! slashes.
+//! for diff stability. `path` is relative to the baseline file's directory,
+//! forward slashes.
 //!
-//! # Stable hash (no line numbers)
+//! **Stable hash (no line numbers):** [`entry_hash`] is the first 16 hex of
+//! SHA-256 over `id + relative-path + the flagged line's trimmed text + the
+//! trimmed nearest non-empty line above + below`. Survives unrelated edits
+//! elsewhere in the file (line-shift immunity, the ADR's whole point) and breaks
+//! when the flagged line or its neighborhood changes (finding resurfaces).
 //!
-//! [`entry_hash`] is the first 16 hex of SHA-256 over
-//! `id + relative-path + the flagged line's trimmed text + the trimmed nearest
-//! non-empty line above + below`. This survives unrelated edits elsewhere in the
-//! file (line-shift immunity — the ADR's whole point) and intentionally breaks
-//! when the flagged line or its immediate neighborhood changes (the finding then
-//! correctly resurfaces).
+//! **Capture surface (ADR-0050 §8, ADR-0062 A-G10):** the header records the
+//! `profile` name and resolved id-set the baseline was written under. Staleness
+//! is computed only over ids *inside the current run's surface* (an unconsumed
+//! entry outside it is *dormant*: kept, not stale, not pruned), and a run whose
+//! active surface exceeds the captured one prints a one-line notice rather than
+//! failing silently. A-G10 pushes the surface down to the **entry**: each entry
+//! may carry the profile *rung* (`"default"|"contracts"|"strict"`) it was
+//! captured at, judged unmatched only on a run whose rung is at or above it —
+//! needed because entries from different surfaces can end up mixed in one file.
 //!
-//! # Capture surface (ADR-0050 §8, ADR-0062 A-G10)
-//!
-//! The header records the **capture surface**: the `profile` name and the resolved
-//! id-set the baseline was written under. Two consequences: (a) staleness is
-//! computed only over ids *inside the current run's surface* — an unconsumed entry
-//! whose id is outside it is *dormant* (kept, not stale, not pruned); (b) a run
-//! whose active surface exceeds the captured one prints a one-line notice so it
-//! "drowns loudly", never silently.
-//!
-//! ADR-0062 A-G10 pushes the capture surface down to the **entry**: each entry may
-//! carry the profile *rung* (`"default"|"contracts"|"strict"`) it was captured at,
-//! and an entry is judged unmatched only on a run whose rung is at or above it. The
-//! header is one string for a whole file; the per-entry tag is what keeps a file
-//! honest when entries from different surfaces end up in it.
-//!
-//! **Round-trip and the untagged reading.** The field is omitted entirely when the
-//! rung is `default`, so a `default`-captured baseline is byte-identical to one this
-//! crate wrote before S6, and an untagged legacy entry reads as **captured at
-//! `default`**. That reading is chosen because it is the *behavior-preserving* one:
-//! `Default <= every rung`, so the rung clause is vacuously true for every legacy
-//! entry and staleness for legacy files is decided exactly as before, by the id
-//! alone. An unrecognized spelling (a hand-edit) reads the same way.
+//! **Round-trip:** the rung field is omitted at `default`, so a
+//! `default`-captured baseline is byte-identical to a pre-S6 one, and an
+//! untagged (or unrecognized-spelling) entry reads as captured at `default` —
+//! behavior-preserving, since `Default <= every rung` makes the clause vacuous
+//! and legacy staleness is decided by id alone, as before.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -51,10 +39,9 @@ use crate::sha256;
 /// One baseline entry. Field order is the on-disk key order (serde preserves
 /// struct field order): `{"id":…,"path":…,"hash":…[,"surface":…]}`.
 ///
-/// `surface` is the capture **rung** (ADR-0062 A-G10), omitted when `default` — see
-/// the module docs for the round-trip rule. It is deliberately NOT part of the
-/// match key: a finding matches its entry by `(id, path, hash)` regardless of the
-/// surface either was seen on.
+/// `surface` is the capture **rung** (ADR-0062 A-G10), omitted when `default` —
+/// see the module docs for the round-trip rule. It is deliberately NOT part of
+/// the match key: a finding matches its entry by `(id, path, hash)` alone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
     pub id: String,
@@ -84,9 +71,9 @@ impl Entry {
 pub const DEFAULT_FILE: &str = ".steins-baseline.jsonl";
 
 /// The capture surface recorded in a baseline header (ADR-0050 §8): the profile
-/// name the baseline was written under and its resolved id-set. Present in headers
-/// written by this version; absent (`None` from [`parse_header`]) in pre-ADR-0050
-/// baselines, which then simply skip the surface-exceeds notice.
+/// name and resolved id-set the baseline was written under. Absent (`None` from
+/// [`parse_header`]) in pre-ADR-0050 baselines, which then skip the
+/// surface-exceeds notice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureSurface {
     pub profile: String,
@@ -198,10 +185,9 @@ pub fn parse(text: &str) -> Vec<Entry> {
 /// one as findings match (duplicate findings against one entry: one suppressed,
 /// one reported — ADR-0022's implicit count).
 pub struct Matcher {
-    /// `key -> (unconsumed count, lowest capture rung seen for that key)`. The rung
-    /// is the *minimum* over entries sharing a key: the lowest rung is the one that
-    /// makes the entry judgeable on the widest range of runs, so taking it never
-    /// hides a stale entry from a surface that could have matched it.
+    /// `key -> (unconsumed count, lowest capture rung seen for that key)`. The
+    /// minimum, not any other rung, is kept: it's judgeable on the widest range
+    /// of runs, so a stale entry is never hidden from a surface that could match it.
     counts: HashMap<(String, String, String), (usize, Floor)>,
 }
 
@@ -232,27 +218,19 @@ impl Matcher {
         }
     }
 
-    /// Surface-aware staleness (ADR-0050 §8, ADR-0062 A-G10): the number of
-    /// unconsumed entries `admits` accepts, given each entry's id and the rung it
-    /// was captured at. The ordinary reading bundles two independent conditions:
-    ///
-    /// * the entry's id is inside the current run's surface — an id this profile
-    ///   never looked for is **dormant**, kept and not counted; and
-    /// * the entry's capture rung is at or below the run's rung — an entry
-    ///   captured at `strict` never cries unmatched on a `default` run, even for
-    ///   an id whose floor would admit it, because that run did not analyze the
-    ///   same surface.
+    /// Surface-aware staleness (ADR-0050 §8, ADR-0062 A-G10): unconsumed entries
+    /// `admits` accepts, given each entry's id and its capture rung. Bundles two
+    /// independent conditions: the id is inside the current run's surface (else
+    /// **dormant**, kept and not counted), and the capture rung is at or below
+    /// the run's rung (an entry captured at `strict` never cries unmatched on a
+    /// `default` run).
     ///
     /// `|_, captured| captured <= Floor::Strict` recovers the pre-ADR-0050
-    /// unconditional stale count (legacy untagged entries read as `Floor::Default`,
-    /// so the clause is vacuous for them and behavior is unchanged). The rung
-    /// argument only makes sense for ids the rung ladder actually governs — the
-    /// debug lane (ADR-0053 §4/§8, issue #108) is judged on **every** rung, since
-    /// a debug finding is checked on every profile and a debug baseline entry can
-    /// never be matched again regardless of rung (the caller bypasses the matcher
-    /// for it unconditionally); a caller carving that out ignores `captured`
-    /// entirely for those ids rather than this method special-casing a layer it
-    /// has no way to name.
+    /// unconditional stale count (legacy entries read as `Floor::Default`, so the
+    /// clause is vacuous and behavior is unchanged). The debug lane (ADR-0053
+    /// §4/§8, issue #108) is judged on **every** rung regardless of its own
+    /// capture rung — a caller carving out that id must ignore `captured`
+    /// entirely rather than have this method special-case a layer it can't name.
     #[must_use]
     pub fn stale_count_within(&self, admits: impl Fn(&str, Floor) -> bool) -> usize {
         self.counts
@@ -278,7 +256,7 @@ mod tests {
         let hb = entry_hash("type.argument-mismatch", "a.php", b, 5);
         assert_eq!(ha, hb, "line-shift immunity");
 
-        // Editing the flagged line changes the hash.
+        // Editing the flagged line does change the hash.
         let c = "<?php\nfunction w(int $x): int { return $x; }\nw(\"xyz\");\n";
         assert_ne!(ha, entry_hash("type.argument-mismatch", "a.php", c, 3));
         assert_eq!(ha.len(), 16, "16 hex chars");
@@ -333,7 +311,7 @@ mod tests {
 
     #[test]
     fn pre_adr_0050_header_has_no_capture_surface() {
-        // A legacy header with no profile/surface keys parses to None (skip notice).
+        // No profile/surface keys: parses to None, skipping the notice.
         let legacy = "{\"steins-baseline\":1,\"note\":\"machine-managed; do not hand-edit\"}\n";
         assert_eq!(parse_header(legacy), None);
     }
@@ -345,7 +323,6 @@ mod tests {
             Entry { id: "call.on-null".into(), path: "b".into(), hash: "h2".into(), surface: None },
         ];
         let m = Matcher::new(&entries);
-        // Neither consumed. Under a proof-only surface, throw.undeclared is dormant.
         assert_eq!(m.stale_count_within(|_, _| true), 2, "raw stale counts both");
         assert_eq!(
             m.stale_count_within(|id, _| id == "call.on-null"),
@@ -356,12 +333,10 @@ mod tests {
 
     #[test]
     fn an_untagged_legacy_entry_reads_as_captured_at_default() {
-        // The round-trip choice (ADR-0062 A-G10): absent tag = `default`, which makes
-        // the rung clause vacuous and leaves legacy staleness decided by id alone.
         let e: Entry = serde_json::from_str(r#"{"id":"x","path":"a","hash":"h"}"#).unwrap();
         assert_eq!(e.surface, None);
         assert_eq!(e.captured_at(), Floor::Default);
-        // An unrecognized spelling (a hand-edit) reads the same way.
+        // Unrecognized spelling (a hand-edit) reads the same way.
         let odd: Entry =
             serde_json::from_str(r#"{"id":"x","path":"a","hash":"h","surface":"nope"}"#).unwrap();
         assert_eq!(odd.captured_at(), Floor::Default);
@@ -369,8 +344,6 @@ mod tests {
 
     #[test]
     fn a_default_capture_writes_the_pre_s6_bytes() {
-        // Byte-identity for the common case: no `surface` key is written at the
-        // `default` rung, so a default baseline diffs clean against an older one.
         let surface = CaptureSurface { profile: "default".into(), ids: vec!["a".into()] };
         let out = render(
             vec![Entry {
@@ -406,8 +379,6 @@ mod tests {
 
     #[test]
     fn a_strict_captured_entry_is_dormant_on_a_default_run() {
-        // A-G10's rule, stated on the entry rather than only on the id: the run that
-        // never analyzed the strict surface must not call the entry unmatched.
         let entries = vec![Entry {
             id: "call.on-null".into(),
             path: "a".into(),
@@ -415,8 +386,6 @@ mod tests {
             surface: Some("strict".into()),
         }];
         let m = Matcher::new(&entries);
-        // The id itself IS fireable at default — so only the capture rung can make
-        // this dormant, which is exactly what the per-entry tag buys.
         assert_eq!(
             m.stale_count_within(|_, captured| captured <= Floor::Default),
             0,
@@ -450,14 +419,10 @@ mod tests {
 
     #[test]
     fn a_debug_entry_is_stale_at_every_rung_regardless_of_its_own_capture_rung() {
-        // Review finding on issue #108 (PR #133): a debug entry captured under
-        // `strict` and consulted on a `default` run kept `*captured <= rung` in
-        // the predicate, so it read as `Strict <= Default` = false — silently
-        // dormant forever, contradicting the PR's own stated ruling that a
-        // leftover debug entry is dead weight at every rung and must surface as
-        // stale. The rung comparison only makes sense for ids the ladder governs;
-        // a caller carving out the debug lane must ignore `captured` for it
-        // entirely, which is what `main.rs`'s `match_baseline` now does.
+        // Regression for issue #108 (PR #133): `*captured <= rung` alone let a
+        // strict-captured debug entry read Strict <= Default = false and stay
+        // dormant forever on a default run. `main.rs`'s `match_baseline` now
+        // ignores `captured` entirely for debug-lane ids.
         let entries = vec![Entry {
             id: "debug.type".into(),
             path: "a".into(),
@@ -477,8 +442,6 @@ mod tests {
 
     #[test]
     fn the_surface_tag_is_not_part_of_the_match_key() {
-        // A finding matches its entry by `(id, path, hash)`; which surface either was
-        // seen on is bookkeeping, never identity.
         let e = Entry {
             id: "x".into(),
             path: "a".into(),

@@ -64,8 +64,7 @@ fn computing_closure_literal_satisfies_pure_callable() {
 
 #[test]
 fn echoing_closure_through_a_variable_violates_pure_callable() {
-    // The propagation-pass lane: the variable carries a PROVEN closure value and no
-    // scalar fact at all, so neither value lane can see it.
+    // Propagation-pass lane: a PROVEN closure has no scalar fact for either value lane.
     let src = format!(
         "{PURE_CALLABLE}$cb = static function (): void {{ echo 'x'; }};\ntakes($cb);"
     );
@@ -96,8 +95,7 @@ fn builtin_first_class_callable_stays_silent() {
 
 #[test]
 fn opaque_callable_parameter_stays_silent() {
-    // A `callable` value forwarded from an enclosing parameter is opaque: no
-    // definition in scope, so the obligation cannot be decided.
+    // A forwarded `callable` parameter is opaque: no definition in scope to decide.
     let src = format!(
         "{PURE_CALLABLE}function fwd(callable $x): void {{ takes($x); }}\n"
     );
@@ -106,8 +104,7 @@ fn opaque_callable_parameter_stays_silent() {
 
 #[test]
 fn plain_callable_spelling_imposes_no_purity() {
-    // The obligation must come from the *refined* spelling: a bare `callable`
-    // accepts an echoing closure exactly as it always did.
+    // The obligation must come from the *refined* spelling, not a bare `callable`.
     let src = "<?php /** @param callable $cb */ function takes($cb): void {}\n\
                takes(static function (): void { echo 'x'; });";
     assert_eq!(count(src), 0, "bare callable carries no purity obligation");
@@ -143,8 +140,7 @@ fn non_static_full_closure_violates_static_closure() {
 
 #[test]
 fn first_class_callable_satisfies_static_closure() {
-    // `f(...)` has no bound `$this`, so it satisfies the binding obligation the way
-    // `static function () {}` does.
+    // `f(...)` has no bound `$this`, satisfying the obligation like `static function () {}`.
     let src = format!("{STATIC_CLOSURE}function calc(): int {{ return 1; }}\ntakes(calc(...));");
     assert_eq!(count(&src), 0, "a free-function first-class callable is unbound");
 }
@@ -165,8 +161,8 @@ fn callable_string_is_not_a_static_closure_either() {
 
 #[test]
 fn callable_string_still_satisfies_pure_callable() {
-    // `pure-callable` is not closure-only: a string may name a pure function, and
-    // its purity is not decidable from the value, so this stays `Maybe`.
+    // `pure-callable` is not closure-only: a string may name a pure function, but its
+    // purity is undecidable from the value, so this stays `Maybe`.
     let src = format!("{PURE_CALLABLE}takes('strlen');");
     assert_eq!(count(&src), 0, "pure-callable admits a callable-string as Maybe");
 }
@@ -224,8 +220,7 @@ fn signature_bearing_pure_callable_also_judges_purity() {
 
 #[test]
 fn return_position_carries_no_obligation() {
-    // An analyzer that cannot *construct* a `pure-closure` would report the valid
-    // probe and the `@return` body. Steins judges the argument lane only.
+    // Steins judges the argument lane only, never a `@return`-side construction.
     let src = "<?php /** @return pure-closure */ function mk() { return static fn (int $v): int => $v + 1; }\n";
     assert_eq!(count(src), 0, "no obligation is imposed on a returned callable");
 }

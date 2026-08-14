@@ -2,10 +2,9 @@
 //! and ADR-0064 Amendment B's **arity second leg**.
 //!
 //! Ten names read a position rather than restructuring the array: `current reset
-//! end next prev key array_pop array_shift array_first array_last`. Nine of them
-//! declare a bare `mixed`, which countersigns nothing, so their rules additionally
-//! pin the live signature's arity — the leg this file exercises from all three
-//! sides (right arity fires, wrong arity withholds, absent arity withholds).
+//! end next prev key array_pop array_shift array_first array_last`. Nine declare
+//! a bare `mixed`, so their rules additionally pin the live signature's arity —
+//! exercised here from all three sides (right/wrong/absent arity).
 //!
 //! # Behavioral witnesses at `PINNED_PHP` (8.5.8, `php -r`)
 //!
@@ -29,12 +28,11 @@
 //! $z = [1, 2, 3]; array_pop($z); count($z) === 2  → true   (the mutation)
 //! ```
 //!
-//! Reflection at the same engine, which is what the pins are:
-//! `current/reset/end/next/prev/key/array_pop/array_shift/array_first/array_last`
-//! are each `params_total = 1`, `params_required = 1`; `key` declares
-//! `string|int|null` and the other nine declare `mixed`. (`array_first`/
-//! `array_last` are PHP 8.5 additions and are resident on the pinned engine —
-//! asserted live in `steins-sidecar`'s `reflect_reports_the_parameter_counts`.)
+//! Reflection at the same engine: `current/reset/end/next/prev/key/array_pop/
+//! array_shift/array_first/array_last` are each `params_total = 1`,
+//! `params_required = 1`; `key` declares `string|int|null`, the other nine
+//! `mixed`. (`array_first`/`array_last` are PHP 8.5 additions, resident on the
+//! pinned engine — asserted in `steins-sidecar`'s `reflect_reports_the_parameter_counts`.)
 //!
 //! Zero emission (ADR-0062 A-G9's corollary) is asserted on every fixture, exactly
 //! as in `shape_projections.rs`: a shape-derived fact never premises a finding.
@@ -125,10 +123,9 @@ impl Folder for Mock {
 fn one_type_with(src: &str, folder: &mut dyn Folder) -> String {
     let tree = SourceTree::parse(src);
     let ds = check_with(&tree, &[], "t.php", folder);
-    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps. These
-    // fixtures declare a bare `array` on purpose — that is the shape under test —
-    // and a contract-layer id observing the missing value type is not the
-    // read-position transfer speaking.
+    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps: these
+    // fixtures declare a bare `array` on purpose (the shape under test), and a
+    // contract-layer id on the missing value type isn't the transfer speaking.
     let other: Vec<&Diagnostic> = ds
         .iter()
         .filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped."))
@@ -177,9 +174,8 @@ fn a_non_empty_shape_answers_the_value_union_alone() {
 
 #[test]
 fn next_and_prev_add_false_even_to_a_non_empty_shape() {
-    // THE arm this family gets wrong if it is copied from `current`: `$n = [1];
-    // next($n) === false`, and `$p = [1, 2]; prev($p) === false` — a step off
-    // either end of a perfectly non-empty array.
+    // THE arm this family gets wrong if copied from `current`: `$n = [1];
+    // next($n) === false`, `$p = [1, 2]; prev($p) === false` — a step off either end.
     for f in ["next", "prev"] {
         assert_eq!(
             dump("array{a: 1, b: 2}", &format!("{f}($v)")),
@@ -187,12 +183,10 @@ fn next_and_prev_add_false_even_to_a_non_empty_shape() {
             "{f} steps past the end of a non-empty array"
         );
     }
-    // …and where the values are abstract, `∪ false` used to be unspellable
-    // (`int|false` is two bases) and the rule declined. `Fact::Union` (issue
-    // #339) is the form, so it answers — as `int|bool` and not `int|false`,
-    // because `Bool` carries no refinement and the finite `false` widens to its
-    // base on the way into an arm. Sound, coarser than the reference
-    // implementation, and recorded in ADR-0085 §5 rather than papered over.
+    // Where values are abstract, `∪ false` was unspellable (`int|false` is two
+    // bases) and the rule declined. `Fact::Union` (issue #339) answers instead,
+    // as `int|bool` not `int|false` — `false` widens to its base entering a
+    // union arm: sound but coarser, recorded in ADR-0085 §5.
     assert_eq!(dump("array{a: int, b: int}", "next($v)"), "dumped type: int|bool (asserted)");
     assert_eq!(dump("array{a: int, b: int}", "current($v)"), "dumped type: int (asserted)");
 }
@@ -221,10 +215,8 @@ fn a_possibly_empty_shape_adds_false_to_the_pointer_half() {
             "{f} of a possibly-empty shape admits false"
         );
     }
-    // `int|false` had no single-fact spelling, so the same shape with abstract
-    // values used to decline. It answers now (issue #339), as `int|bool` — the
-    // `false` widens to its base on the way into a union arm, which is a lost
-    // refinement rather than a wrong one (ADR-0085 §5).
+    // Same `int|bool` widening as above, for `current`'s pointer form
+    // (issue #339, ADR-0085 §5) — a lost refinement, not a wrong one.
     assert_eq!(dump("array<string, int>", "current($v)"), "dumped type: int|bool (asserted)");
 }
 
@@ -273,10 +265,9 @@ fn a_mixed_declaration_alone_does_not_admit_a_rule() {
     // (a) The right arity fires — the baseline the other two are measured against.
     assert_eq!(dump("array{a: int}", "current($v)"), "dumped type: int (asserted)");
 
-    // (b) A WRONG total: this engine's `current` is not the one-parameter function
-    // the rule was written against, so the rule is stale and says nothing. The
-    // declaration (`mixed`) is identical in both worlds — which is the whole point
-    // of the ruling.
+    // (b) A WRONG total: this engine's `current` isn't the one-parameter function
+    // the rule was written against, so the stale rule says nothing — the
+    // declaration (`mixed`) is identical in both worlds, which is the whole point.
     for wrong in [(2, 1), (1, 0), (0, 0), (3, 2)] {
         let mut folder = Mock::with_arity("current", wrong.0, wrong.1);
         assert_eq!(
@@ -286,9 +277,8 @@ fn a_mixed_declaration_alone_does_not_admit_a_rule() {
         );
     }
 
-    // (c) An ABSENT arity withholds, exactly as an absent declaration does — a
-    // runner with no arity replay table degrades to silence rather than to the
-    // un-countersigned rule.
+    // (c) An ABSENT arity withholds like an absent declaration — a runner with
+    // no arity replay table degrades to silence, not the un-countersigned rule.
     let mut old = Mock::without_arity();
     for f in ["current", "reset", "end", "next", "prev", "array_pop", "array_shift",
               "array_first", "array_last"] {
@@ -305,9 +295,8 @@ fn a_mixed_declaration_alone_does_not_admit_a_rule() {
 #[test]
 fn a_mutating_read_position_call_invalidates_the_argument_fact() {
     // `$z = [1, 2, 3]; array_pop($z); count($z) === 2` — the pre-call count must
-    // not survive the call. Six of the ten take argument 0 by reference
-    // (`steins_catalog::out_params` carries all six), and the walk's
-    // call-argument invalidation drops the binding's fact at the statement end.
+    // not survive. Six of the ten take argument 0 by reference
+    // (`steins_catalog::out_params`), so the walk drops the binding's fact at statement end.
     for f in ["array_pop", "array_shift", "next", "prev", "reset", "end"] {
         let src = format!(
             "<?php\nfunction f(): void {{ $z = [1, 2, 3]; {f}($z); \\PHPStan\\dumpType(count($z)); }}\n"
@@ -346,9 +335,8 @@ fn a_call_that_is_not_one_argument_declines() {
 
 #[test]
 fn a_project_function_shadowing_the_name_declines() {
-    // The shape docblock belongs to `f` — the fixture's `$v` — not to the
-    // shadowing declaration, whose parameter is `$x` (issue #186: a `@param`
-    // naming a parameter its own signature lacks is now `phpdoc.stale-param`).
+    // The shape docblock belongs to `f` (`$v`), not the shadowing declaration
+    // (`$x`) — issue #186: naming a param the signature lacks is now `phpdoc.stale-param`.
     let src = "<?php\n\
                function current(array $x): int { return 1; }\n\
                /** @param array{a: int} $v */\n\
@@ -376,12 +364,10 @@ fn an_engine_silent_on_the_declaration_declines() {
     for f in ["current", "array_pop", "next"] {
         assert_eq!(dumped(f), "dumped type: unknown", "{f} withholds");
     }
-    // `key` withholds here too — what answers instead is the rung BELOW, ADR-0069's
-    // Asserted declared-return floor, whose row functionMap states as
-    // `int|string|null`. The distinction is the `(asserted)` marker: this rule would
-    // have said `'a'`, and does not. The row was counted-and-dropped at issue #73
-    // (a multi-base union no envelope could hold) and admitted by #79, so this pin
-    // changed with the widened lowering rather than with anything in this family.
+    // `key` withholds too — the rung BELOW, ADR-0069's Asserted declared-return
+    // floor (functionMap: `int|string|null`), answers instead. The `(asserted)`
+    // marker shows this rule would have said `'a'` and didn't; the row was
+    // dropped at issue #73 (multi-base union, no envelope) and admitted by #79.
     assert_eq!(dumped("key"), "dumped type: int|string|null (asserted)");
 }
 

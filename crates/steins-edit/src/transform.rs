@@ -2,24 +2,21 @@
 //! and a [`CompletenessOracle`] that accounts every enumerated site as
 //! transformed-or-refused so nothing is silently dropped.
 //!
-//! A transform's real currency is per-site, not whole-plan: a run over a project
-//! promotes some sites and refuses others, each refusal carrying a *named*
-//! reason an agent can read and act on (ADR-0034 point 2). [`TransformReport`]
+//! A transform's real currency is per-site, not whole-plan: each refusal
+//! carries a *named* reason an agent can read and act on. [`TransformReport`]
 //! bundles the [`EditPlan`], the refusals, and the oracle.
 
 use serde::{Deserialize, Serialize};
 
 use crate::EditPlan;
 
-/// Where a transform decision landed: a file position plus a human label of the
-/// site (`function f() param $x`, `call to f() at …`). Used by both refusals and
-/// the audit trail of what was transformed.
+/// Where a transform decision landed: a file position plus a human label of
+/// the site (`function f() param $x`, `call to f() at …`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SiteRef {
     pub path: String,
     pub line: u32,
     pub column: u32,
-    /// A short human label identifying the site.
     pub label: String,
 }
 
@@ -37,9 +34,8 @@ impl SiteRef {
 pub struct Refusal {
     /// The candidate site the refusal is *about* (the promotion target).
     pub site: SiteRef,
-    /// A stable, named reason. See the phpdoc-promotion module for the catalog.
+    /// See the phpdoc-promotion module for the reason-name catalog.
     pub reason: String,
-    /// Human-readable detail — enough for an agent to continue the conversation.
     pub detail: String,
 }
 
@@ -50,18 +46,15 @@ impl Refusal {
     }
 }
 
-/// An admitted-under-opt-in site (the ADR-0076 issue-#175 amendment): a
-/// transform edit whose subject qualified on **Asserted** (declared) evidence
-/// rather than proven facts. The `detail` is the trust label the site's own
-/// report entry carries — that the subject's list-ness is declared, not
-/// proven, and that a wrong claim changes behavior in a way the post-check
-/// cannot catch. Kept distinct from [`Refusal`]: the site *was* transformed;
-/// what this records is the conditional trust its equivalence rests on.
+/// An admitted-under-opt-in site (ADR-0076 issue #175): a transform edit whose
+/// subject qualified on **Asserted** (declared) evidence rather than proven
+/// facts. `detail` is the trust label the reviewer must read — a wrong claim
+/// changes behavior in a way the post-check cannot catch. Distinct from
+/// [`Refusal`]: the site *was* transformed; this records the conditional
+/// trust its equivalence rests on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssertedAdmission {
-    /// The transformed site the label is about.
     pub site: SiteRef,
-    /// The trust label — the human sentence the reviewer must read.
     pub detail: String,
 }
 
@@ -72,30 +65,24 @@ impl AssertedAdmission {
     }
 }
 
-/// The completeness oracle (ADR-0034 point 3b): every enumerated candidate site
-/// is accounted for as transformed or refused — a mismatch is a bug in the
-/// transform, surfaced by [`Self::is_complete`].
+/// The completeness oracle (ADR-0034 point 3b): accounts every candidate site
+/// as transformed or refused. See [`Self::is_complete`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompletenessOracle {
-    /// Candidate sites the enumerator produced.
     pub enumerated: usize,
-    /// Sites that produced an edit.
     pub transformed: usize,
-    /// The subset of `transformed` admitted on **Asserted** (declared) rather
-    /// than proven evidence (the ADR-0076 issue-#175 opt-in). Always `0` with
-    /// the opt-in off, and for every transform that has no such opt-in — so
-    /// proven yield and opted-in yield stay separately reportable numbers.
-    /// Not a fourth accounting column: these sites are already counted in
-    /// `transformed`, and [`Self::is_complete`] is unchanged.
+    /// Subset of `transformed` admitted on **Asserted** rather than proven
+    /// evidence (ADR-0076 issue #175 opt-in; `0` when unused). Not a fourth
+    /// accounting column: already counted in `transformed`, so
+    /// [`Self::is_complete`] is unchanged.
     #[serde(default)]
     pub transformed_asserted: usize,
-    /// Sites that produced a refusal.
     pub refused: usize,
 }
 
 impl CompletenessOracle {
-    /// Whether every enumerated site was accounted for (transformed + refused ==
-    /// enumerated). A `false` here means the transform dropped a site silently —
+    /// Whether every enumerated site was accounted for (transformed + refused
+    /// == enumerated). `false` means the transform dropped a site silently —
     /// an internal invariant violation, not a user-facing state.
     #[must_use]
     pub const fn is_complete(&self) -> bool {
@@ -103,16 +90,14 @@ impl CompletenessOracle {
     }
 }
 
-/// A project-global caller-enumeration obstacle (ADR-0046 §2): a dynamic-code
-/// construct — `eval`, or a dynamic/out-of-universe `include`/`require` — that
-/// makes "all callers proven" unknowable for *every* candidate. Recorded ONCE per
-/// run with the full offending-site list (text output caps the display; JSON
-/// carries them all). While an unvouched obstacle stands, every candidate refuses.
+/// A project-global caller-enumeration obstacle (ADR-0046 §2 — see the
+/// `obstacles` module for the full mechanism). Recorded ONCE per run with the
+/// full offending-site list (text output caps the display; JSON carries them
+/// all). While an unvouched obstacle stands, every candidate refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Obstacle {
     /// The stable reason name (`eval-present` / `dynamic-include-present`).
     pub reason: String,
-    /// A human sentence naming the obstacle family (agent-readable).
     pub detail: String,
     /// Every *unvouched* site that raises this obstacle, in source order.
     pub sites: Vec<SiteRef>,
@@ -126,10 +111,10 @@ impl Obstacle {
 }
 
 /// The full result of running a transform over a project: the atomic
-/// [`EditPlan`], the per-site refusals, the completeness oracle, and — ADR-0046
-/// §2 — any project-global dynamic-code obstacles plus the sites the user vouched
-/// away. A non-empty `vouched_exemptions` is the honesty downgrade: the run's
-/// completeness claim is conditional on those user assertions (ADR-0037).
+/// [`EditPlan`], the per-site refusals, the completeness oracle, and any
+/// [`Obstacle`]s plus the sites the user vouched away. A non-empty
+/// `vouched_exemptions` downgrades the completeness claim to conditional on
+/// those user assertions (ADR-0037).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TransformReport {
     pub plan: EditPlan,
@@ -141,18 +126,16 @@ pub struct TransformReport {
     /// Sites the user vouched in `steins.toml` (the completeness-claim downgrade).
     #[serde(default)]
     pub vouched_exemptions: Vec<SiteRef>,
-    /// Sites admitted on Asserted evidence under an explicit opt-in (the
-    /// ADR-0076 issue-#175 amendment), each carrying its trust label. Empty
-    /// for every run without the opt-in, and for every transform that has no
-    /// such opt-in.
+    /// Sites admitted on Asserted evidence under an explicit opt-in (ADR-0076
+    /// issue #175), each carrying its trust label. Empty when the opt-in is
+    /// unused or unavailable.
     #[serde(default)]
     pub asserted_admissions: Vec<AssertedAdmission>,
 }
 
-/// The transform contract (ADR-0034 point 2). Concrete transforms (e.g.
-/// phpdoc→native promotion) carry their own project context and produce a
-/// [`TransformReport`]; this trait names the transform and its stable id so the
-/// CLI/MCP surface can dispatch generically.
+/// The transform contract (ADR-0034 point 2). Concrete transforms carry their
+/// own project context and produce a [`TransformReport`]; this trait names
+/// the transform's stable id so the CLI/MCP surface can dispatch generically.
 pub trait Transform {
     /// The stable command id, e.g. `"phpdoc-to-native"`.
     fn id(&self) -> &'static str;

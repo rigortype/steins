@@ -37,23 +37,20 @@ fn parse_error_no_panic() {
 fn whole_line_span_widens_only_lone_statements() {
     use steins_syntax::Span;
 
-    // Line 2 ("  foo();") holds nothing but the statement: the span widens to
-    // the line start and swallows the trailing newline. Line 3 shares its line
-    // with a trailing comment: unchanged. Line 4 ends the file without a
-    // newline: widened to the file end.
+    // A lone statement's span widens to the line start, swallowing the newline.
+    // A line sharing code with a trailing comment is unchanged; a line ending
+    // the file with no newline widens to file end.
     let src = "<?php\n  foo();\nbar(); // t\n  baz();";
     let tree = SourceTree::parse(src);
     assert_eq!(tree.whole_line_span(Span { start: 8, end: 14 }), Span { start: 6, end: 15 });
     assert_eq!(tree.whole_line_span(Span { start: 15, end: 21 }), Span { start: 15, end: 21 });
     assert_eq!(tree.whole_line_span(Span { start: 29, end: 35 }), Span { start: 27, end: 35 });
 
-    // CRLF line endings: the CR is part of the line break and is swallowed
-    // with the LF.
+    // CRLF: the CR is part of the line break and is swallowed with the LF.
     let crlf = SourceTree::parse("<?php\r\nfoo();\r\n");
     assert_eq!(crlf.whole_line_span(Span { start: 7, end: 13 }), Span { start: 7, end: 15 });
 
-    // Code BEFORE the statement on its line: unchanged (deleting the line
-    // would delete the sibling statement too).
+    // Code BEFORE the statement on its line is unchanged (would delete the sibling too).
     let two = SourceTree::parse("<?php\nfoo(); bar();\n");
     assert_eq!(two.whole_line_span(Span { start: 13, end: 19 }), Span { start: 13, end: 19 });
 }
@@ -68,7 +65,6 @@ fn lowers_scopes_trace_and_poison() {
 
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     assert!(!top.poisoned);
-    // The function *declaration* is a Barrier at top level; then the assign and call.
     let kinds: Vec<&StmtKind> = top.stmts.iter().map(|s| &s.kind).collect();
     assert!(matches!(kinds[0], StmtKind::Barrier), "nested fn decl → Barrier");
     assert!(matches!(kinds[1], StmtKind::Assign { var, .. } if var == "w"));
@@ -90,9 +86,8 @@ type EntryView<'a> = (&'a str, bool, Vec<(&'a str, u32)>);
 
 #[test]
 fn each_invalidated_name_carries_its_call_sites() {
-    // ADR-0070 (issue #135): the syntax layer records WHERE each handed-over
-    // variable went ON the name's own entry, and decides nothing. The entry
-    // list stays the complete sound floor.
+    // ADR-0070 (issue #135): syntax layer records WHERE each handed-over
+    // variable went, on the name's own entry; decides nothing else.
     let tree = SourceTree::parse("<?php $s = 'a'; trim($s);");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = &top.stmts[1];
@@ -104,8 +99,7 @@ fn each_invalidated_name_carries_its_call_sites() {
     assert_eq!(v.sites[0].0.raw, "trim");
     assert_eq!(v.sites[0].1, 0);
 
-    // Positions are the argument indices, and a nested call is descended into
-    // exactly as the name collection descends — they are one walk.
+    // Positions are argument indices; a nested call is descended into as one walk.
     let tree = SourceTree::parse("<?php $a = 1; $b = 2; f($a, g($b));");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = &top.stmts[2];
@@ -128,11 +122,9 @@ fn each_invalidated_name_carries_its_call_sites() {
 
 #[test]
 fn invalidated_names_are_the_bare_call_arguments_in_source_order() {
-    // The name-set invariant: one entry per name, in first-occurrence source
-    // order, and the names are exactly the statement's bare call arguments —
-    // describable or not. `$b` occurs twice and keeps one entry with both
-    // sites; `$d` goes to a method call and keeps an opaque entry; the method
-    // receiver `$o` is not an argument and gets no entry at all.
+    // One entry per name, first-occurrence order, exactly the statement's bare
+    // call arguments. `$b` occurs twice, keeps one entry with both sites; `$d`
+    // (method-call arg) is opaque; receiver `$o` gets no entry.
     let tree = SourceTree::parse("<?php $x = f($b, $a, g($c), $b) . $o->m($d);");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = top.stmts.last().unwrap();
@@ -151,10 +143,8 @@ fn invalidated_names_are_the_bare_call_arguments_in_source_order() {
 
 #[test]
 fn an_unprovable_occurrence_marks_the_entry_opaque_with_no_sites() {
-    // The explicit spelling of the old absence rule: ONE unprovable occurrence
-    // anywhere in the statement makes the name's entry opaque, and an opaque
-    // entry carries no sites — the provable `f($s)` site is discarded, not
-    // kept beside the verdict.
+    // ONE unprovable occurrence anywhere makes the entry opaque with no sites —
+    // the provable `f($s)` site is discarded, not kept beside the verdict.
     for (src, why) in [
         ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o->m($s);", "method call"),
         ("<?php $s = 'a'; $o = new C(); $x = f($s) . $o?->m($s);", "nullsafe method call"),
@@ -180,8 +170,7 @@ fn an_unprovable_occurrence_marks_the_entry_opaque_with_no_sites() {
         assert!(v.opaque, "{why}: one unprovable occurrence marks the entry opaque");
         assert!(v.sites.is_empty(), "{why}: an opaque entry carries no sites");
     }
-    // The echo write is statement-scoped in the other direction too: the write
-    // in the FIRST operand disqualifies a provable site in the second.
+    // Statement-scoped: a write in the FIRST operand disqualifies a site in the second.
     let tree = SourceTree::parse("<?php $s = 'a'; echo $s = 'x', trim($s);");
     let top = tree.scopes().iter().find(|s| s.function_name.is_none()).unwrap();
     let st = top.stmts.last().unwrap();
@@ -206,12 +195,11 @@ fn poison_markers_are_detected() {
     }
 }
 
-// ---- ADR-0005/0006: `#[\Steins\Pure]` envelope attribute recognition -------
+// ADR-0005/0006: `#[\Steins\Pure]` envelope recognition
 
 use steins_syntax::EffectOrigin;
 
-/// Whether the single function `f` carries a recognized `Pure` envelope (an
-/// effect envelope with the empty label set).
+/// Whether function `f` carries a recognized `Pure` envelope (empty label set).
 fn is_pure(src: &str) -> bool {
     let tree = SourceTree::parse(src);
     tree.functions()
@@ -225,7 +213,6 @@ fn is_pure(src: &str) -> bool {
 fn recognizes_fully_and_semi_qualified_pure() {
     assert!(is_pure("<?php #[\\Steins\\Pure] function f(): void {}"), "fully-qualified");
     assert!(is_pure("<?php #[Steins\\Pure] function f(): void {}"), "qualified");
-    // Case-insensitive (PHP class names).
     assert!(is_pure("<?php #[\\steins\\pure] function f(): void {}"), "case-insensitive");
 }
 
@@ -241,7 +228,6 @@ fn bare_pure_recognized_only_with_use() {
     );
     // The JetBrains collision guard: bare #[Pure] WITHOUT the use does not match.
     assert!(!is_pure("<?php #[Pure] function f(): void {}"), "bare #[Pure] without use");
-    // An alias binds only its own name, not the class's bare last segment.
     assert!(
         !is_pure("<?php\nuse Steins\\Pure as P;\n#[Pure] function f(): void {}"),
         "aliasing to P does not also bind Pure"
@@ -255,7 +241,7 @@ fn foreign_pure_attributes_do_not_match() {
     assert!(!is_pure("<?php function f(): void {}"), "no attribute at all");
 }
 
-// ---- ADR-0018: `#[\Steins\Effect(...)]` recognition + lowering ------------
+// ADR-0018: `#[\Steins\Effect(...)]` recognition + lowering
 
 use steins_syntax::EffectEnvelope;
 
@@ -288,7 +274,6 @@ fn recognizes_effect_via_use_alias() {
         .expect("aliased");
     assert_eq!(e.labels, vec!["nondet".to_owned()]);
 
-    // Bare #[Effect(...)] without the use is not the Steins envelope.
     assert!(envelope("<?php #[Effect('io')] function f(): void {}").is_none());
 }
 
@@ -317,7 +302,6 @@ fn pure_wins_over_effect_when_both_present() {
 
 #[test]
 fn scans_effect_origins_across_control_flow() {
-    // echo nested in an if, a builtin call, and a same-file user call.
     let src = "<?php #[\\Steins\\Pure] function f(): void { if (true) { echo 1; } rand(); g(); }\nfunction g(): void {}";
     let tree = SourceTree::parse(src);
     let f = tree.functions().iter().find(|f| f.name == "f").unwrap();
@@ -352,10 +336,9 @@ fn scans_exit_and_die() {
     assert!(matches!(g.effect_origins.first(), Some(EffectOrigin::Exit { keyword: "die", .. })));
 }
 
-/// Issue #318: the proven-constant leading arguments an effect origin carries.
-/// A string-literal argument is also a resolvable callback reference, so most of
-/// these calls arrive as `HigherOrder` rather than `Call` — the pair is read off
-/// both arms, and this test is where that is pinned.
+/// Issue #318: the proven-constant leading args an effect origin carries. A
+/// literal arg is also a resolvable callback ref, so most calls arrive as
+/// `HigherOrder`, not `Call` — pinned on both arms here.
 #[test]
 fn scans_the_constant_leading_arguments_of_a_named_call() {
     use steins_syntax::{CallTarget, ConstArgs};
@@ -373,24 +356,20 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     }
     let lit = |s: &str| Some(CallTarget::Literal(s.to_owned()));
 
-    // Both quotings, and the second position as well as the first.
     assert_eq!(const_args("fopen('/tmp/x', \"r\");"), ConstArgs { first: lit("/tmp/x"), second: lit("r") });
-    // A leading `\` is stripped from a constant fetch; a namespaced one is not a
-    // global constant and is declined.
+    // A leading `\` is stripped from a constant fetch; a namespaced one is declined.
     assert_eq!(
         const_args("fwrite(\\STDOUT, 'x');"),
         ConstArgs { first: Some(CallTarget::ConstFetch("STDOUT".to_owned())), second: lit("x") }
     );
     assert_eq!(const_args("fwrite(App\\STDOUT, 'x');").first, None);
-    // Everything a structural scan cannot read is absent: a variable, an
-    // interpolated string, a concatenation, a class constant.
+    // Unreadable structurally: a variable, interpolated string, concatenation, class constant.
     assert_eq!(const_args("file_get_contents($p);"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents(\"pre{$p}post\");"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents('/tmp/' . $p);"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents(C::PATH);"), ConstArgs::default());
     assert_eq!(const_args("fread($h, 8);"), ConstArgs::default());
-    // A named or spread argument defeats positional mapping wholesale, exactly as
-    // it defeats `arg_targets`.
+    // A named or spread argument defeats positional mapping wholesale (like `arg_targets`).
     assert_eq!(const_args("file_get_contents(filename: '/tmp/x');"), ConstArgs::default());
     assert_eq!(const_args("file_get_contents(...$p);"), ConstArgs::default());
     assert_eq!(const_args("file_put_contents('/tmp/x', 'y', flags: 8);"), ConstArgs::default());
@@ -398,7 +377,7 @@ fn scans_the_constant_leading_arguments_of_a_named_call() {
     assert_eq!(const_args("file_put_contents('/a', 'b', 'c');").second, lit("b"));
 }
 
-// ---- Class / method lowering (class-world extension) ----------------------
+// Class / method lowering (class-world extension)
 
 use steins_syntax::{Callee, ClassDecl, Receiver, ScopeOwner, StaticClass, StmtKind, Visibility};
 
@@ -434,9 +413,8 @@ fn lowers_class_and_method_shape() {
 
 #[test]
 fn class_likes_are_all_lowered_as_names() {
-    // Interfaces (ADR-0033 Liskov), enums (ADR-0043), and — since ADR-0049 §5 —
-    // traits all enter the class-like index, each marked by its kind flag. A trait
-    // is name-only (no members) but present, so it occupies its FQN in the table.
+    // Interfaces (ADR-0033), enums (ADR-0043), and traits (ADR-0049 §5) all enter
+    // the class-like index; a trait is name-only but occupies its FQN.
     let src = "<?php\ninterface I {}\ntrait T {}\nenum E { case A; }\nclass C {}\n";
     let tree = SourceTree::parse(src);
     assert_eq!(tree.classes().len(), 4, "class, interface, enum, and trait are lowered");
@@ -512,8 +490,7 @@ fn lowers_method_and_static_call_receivers() {
 
 #[test]
 fn nested_closure_bodies_are_not_scanned() {
-    // The echo is inside a closure — a separate scope — so it is NOT an origin
-    // of the outer function (closure bodies are not scanned).
+    // The echo is inside a closure (separate scope) — not the outer function's origin.
     let src = "<?php function f(): void { $g = function () { echo 1; }; }";
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
@@ -547,13 +524,12 @@ fn is_line_leading_distinguishes_trailing_from_own_line() {
     assert!(!tree.is_line_leading(trailing.span.start), "trailing comment does not lead");
 }
 
-// --- ADR-0043 stage 1: object types, enums, class-const/enum-case values ------
+// ADR-0043 stage 1: object types, enums, class-const/enum-case values
 
 #[test]
 fn object_param_lowers_to_instance_member() {
-    // A class type hint lowers to a namespace-resolved `Instance` member
-    // (ADR-0043) — lowercase `fqn` for matching, source-cased `display` for
-    // diagnostics — no longer collapsing the whole type to `None`.
+    // A class hint lowers to a namespace-resolved `Instance` member (ADR-0043):
+    // lowercase `fqn` for matching, source-cased `display` for diagnostics.
     let src = "<?php\nnamespace App;\nuse Other\\Bar;\nfunction f(Foo $a, Bar $b, \\Ns\\Baz $c): void {}\n";
     let tree = SourceTree::parse(src);
     let f = &tree.functions()[0];
@@ -564,12 +540,9 @@ fn object_param_lowers_to_instance_member() {
         },
         other => panic!("expected single Instance member, got {other:?}"),
     };
-    // Unqualified `Foo` resolves against the current namespace `App`.
     assert_eq!(member(0), ("app\\foo".into(), "App\\Foo".into()));
-    // `Bar` resolves through the `use Other\Bar` import.
     assert_eq!(member(1), ("other\\bar".into(), "Other\\Bar".into()));
-    // A fully-qualified `\Ns\Baz` passes through (leading `\` trimmed; `fqn`
-    // lowercased, `display` source-cased).
+    // Fully-qualified `\Ns\Baz` passes through: leading `\` trimmed, fqn lowercased.
     assert_eq!(member(2), ("ns\\baz".into(), "Ns\\Baz".into()));
     assert!(f.ret.is_none(), "a `void` return stays unlowered");
 }
@@ -601,10 +574,8 @@ fn object_scalar_union_is_one_shape() {
 #[test]
 fn self_static_return_lower_parent_param_unlowered_intersection_lowers() {
     // Return-position `self`/`static` lower to a synthesized single-member
-    // `Instance` of the enclosing class bound (ADR-0043 amendment — the LSB
-    // minimum-bound check); `parent`/`self`/`static` in *parameter* position
-    // stay unlowered (out of the amendment's return-only scope). An object
-    // intersection (`A&B`) lowers to a single conjunctive `InstanceInter` member.
+    // `Instance` of the enclosing class bound (ADR-0043 amendment, LSB minimum-bound);
+    // in *parameter* position they stay unlowered. `A&B` lowers to one `InstanceInter`.
     let src = "<?php\nnamespace App;\nclass C {\n  function a(): self { return $this; }\n  function b(): static { return $this; }\n  function c(parent $p): void {}\n  function d(A&B $x): void {}\n}\n";
     let tree = SourceTree::parse(src);
     let c = tree.classes().iter().find(|d| d.name == "C").unwrap();
@@ -633,8 +604,7 @@ fn self_static_return_lower_parent_param_unlowered_intersection_lowers() {
 
 #[test]
 fn enum_lowered_with_backing_and_cases() {
-    // A backed enum records its backing scalar, cases (with literal backed values),
-    // and implemented interfaces; it is final and marked is_enum.
+    // A backed enum records backing scalar, cases, and interfaces; final, is_enum.
     let src = "<?php\nnamespace App;\nenum Suit: string implements HasLabel {\n  case Hearts = 'H';\n  case Spades = 'S';\n}\n";
     let tree = SourceTree::parse(src);
     let e = tree.classes().iter().find(|d| d.name == "Suit").unwrap();
@@ -646,7 +616,6 @@ fn enum_lowered_with_backing_and_cases() {
     assert_eq!(e.enum_cases[0].value, Some(ArgValue::Str("H".into())));
     assert_eq!(e.implements.len(), 1, "the implemented interface is recorded");
     assert!(e.methods.is_empty(), "enum method bodies are not lowered in v1");
-    // A pure (unit) enum records no backing.
     let src2 = "<?php\nenum Dir { case Up; case Down; }\n";
     let tree2 = SourceTree::parse(src2);
     let d = tree2.classes().iter().find(|d| d.name == "Dir").unwrap();
@@ -657,8 +626,7 @@ fn enum_lowered_with_backing_and_cases() {
 
 #[test]
 fn class_const_access_lowers_to_class_const_value() {
-    // `Class::CONST` / `Enum::Case` lower to the uniform ClassConst value (an
-    // unproven object-world value), no longer erased to Other.
+    // `Class::CONST`/`Enum::Case` lower to the uniform ClassConst value, not erased to Other.
     let src = "<?php\nf(Foo::BAR, self::BAZ, $x::DYN, Suit::Hearts);\n";
     let tree = SourceTree::parse(src);
     let args = &tree.calls()[0].args;
@@ -678,7 +646,7 @@ fn class_const_access_lowers_to_class_const_value() {
     }
 }
 
-// ---- ADR-0046 §2: dynamism sites (eval / include / require) ----------------
+// ADR-0046 §2: dynamism sites (eval / include / require)
 
 use steins_syntax::{DynamismKind, IncludePath};
 
@@ -738,7 +706,7 @@ fn a_clean_file_has_no_dynamism_sites() {
     assert!(!tree.contains_eval());
 }
 
-// ---- ADR-0049 §5: trait names into the class-like index --------------------
+// ADR-0049 §5: trait names into the class-like index
 
 #[test]
 fn trait_enters_the_class_like_index_as_a_name() {
@@ -751,7 +719,7 @@ fn trait_enters_the_class_like_index_as_a_name() {
     assert!(!t.conditional, "a top-level namespaced trait is unconditional");
 }
 
-// ---- ADR-0049 A2i: the conditional flag ------------------------------------
+// ADR-0049 A2i: the conditional flag
 
 #[test]
 fn top_level_and_namespaced_declarations_are_unconditional() {
@@ -778,7 +746,7 @@ fn declarations_inside_a_function_body_are_conditional() {
     }
 }
 
-// ---- ADR-0049 §2: class_alias edges + non-literal dam sites -----------------
+// ADR-0049 §2: class_alias edges + non-literal dam sites
 
 use steins_syntax::ClassAliasEdge;
 
@@ -812,7 +780,7 @@ fn non_literal_class_alias_is_a_dynamism_site() {
     assert!(matches!(sites[0].kind, DynamismKind::ClassAlias));
 }
 
-// ---- issue #36: `X::class` is compile-time, so it mints an edge, not a dam ----
+// Issue #36: `X::class` is compile-time — mints an edge, not a dam
 
 /// The single edge a source lowers to, as `(target_fqn, alias_fqn)`, asserting the
 /// call left no dam site behind. Panics unless there is exactly one edge.
@@ -832,8 +800,7 @@ fn alias_dams(src: &str) -> bool {
 
 #[test]
 fn class_const_target_lowers_to_an_edge() {
-    // The issue's minimal repro: `X::class` is resolved by the compiler, so this is
-    // an alias edge — not "a runtime class-name mint".
+    // Minimal repro: `X::class` is compiler-resolved — an alias edge, not a runtime mint.
     let tree = SourceTree::parse("<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n");
     assert_eq!(only_edge(&tree), ("thing".to_owned(), "legacy_thing".to_owned()));
 }
@@ -849,8 +816,7 @@ fn class_const_in_either_or_both_positions_lowers_to_an_edge() {
 
 #[test]
 fn class_const_target_resolves_through_the_namespace_context() {
-    // `X::class` is subject to ordinary class-name resolution, unlike a literal
-    // (which is a runtime FQN taken as written). The enclosing namespace applies…
+    // `X::class` follows class-name resolution, unlike a literal (runtime FQN as-written).
     let tree = SourceTree::parse("<?php\nnamespace App;\nclass Thing {}\nclass_alias(Thing::class, 'Legacy');\n");
     assert_eq!(only_edge(&tree), ("app\\thing".to_owned(), "legacy".to_owned()));
     // …a fully-qualified spelling escapes it…
@@ -863,8 +829,7 @@ fn class_const_target_resolves_through_the_namespace_context() {
 
 #[test]
 fn class_const_target_resolves_through_use_imports() {
-    // Plain, aliased, and GROUPED `use` — the grouped form is the shape that
-    // previously mis-resolved to a same-named class in the fallback namespace.
+    // Plain, aliased, GROUPED `use` — grouped previously mis-resolved to the fallback ns.
     let tree = SourceTree::parse("<?php\nuse Vendor\\Pkg\\Thing;\nclass_alias(Thing::class, 'Legacy');\n");
     assert_eq!(only_edge(&tree), ("vendor\\pkg\\thing".to_owned(), "legacy".to_owned()));
     let tree = SourceTree::parse("<?php\nuse Vendor\\Pkg\\Thing as T;\nclass_alias(T::class, 'Legacy');\n");
@@ -878,19 +843,16 @@ fn class_const_target_resolves_through_use_imports() {
 
 #[test]
 fn class_const_on_an_unresolvable_name_still_lowers_to_an_edge() {
-    // `X::class` neither autoloads nor requires `X` to exist (PHP 8.0+), so the
-    // lowering is unconditional. Whether the alias *backs an existence claim* is the
-    // index fold's call — an edge to an absent target mints nothing there — so a
-    // name the index cannot resolve costs nothing and must not dam.
+    // `X::class` neither autoloads nor requires `X` to exist (PHP 8.0+), so lowering
+    // is unconditional; an edge to an absent target costs nothing and must not dam.
     let tree = SourceTree::parse("<?php\nclass_alias(NeverDeclared::class, 'Legacy');\n");
     assert_eq!(only_edge(&tree), ("neverdeclared".to_owned(), "legacy".to_owned()));
 }
 
 #[test]
 fn self_static_and_parent_class_still_dam() {
-    // `static::class` is late-static-bound — unknowable at the site. `self::class` /
-    // `parent::class` need a lexical-class context this file-wide walk does not
-    // carry. All three keep damming, the sound direction.
+    // `static::class` is late-static-bound (unknowable here); `self`/`parent::class`
+    // need lexical-class context this walk lacks. All three keep damming (sound).
     for kw in ["self", "static", "parent"] {
         let src = format!(
             "<?php\nclass C extends P {{ public function f(): void {{ class_alias({kw}::class, 'Legacy'); }} }}\n"
@@ -901,9 +863,8 @@ fn self_static_and_parent_class_still_dam() {
 
 #[test]
 fn genuinely_runtime_alias_names_still_dam() {
-    // The widening stops at `::class`. Everything whose name is minted at run time —
-    // a variable, a concatenation (even one touching `::class`), a call, a constant,
-    // a dynamic class expression, a dynamic constant name — keeps damming.
+    // Widening stops at `::class`; anything run-time-minted — variable, concat,
+    // call, constant, dynamic expression/name — keeps damming.
     for src in [
         "<?php\nclass_alias($src, 'B');\n",
         "<?php\nclass_alias('A', $dst);\n",
@@ -921,7 +882,7 @@ fn genuinely_runtime_alias_names_still_dam() {
     }
 }
 
-// ---- issue #30: the opaque-construct inventory behind the poison flag -------
+// Issue #30: the opaque-construct inventory behind the poison flag
 
 use steins_syntax::{OpaqueConstruct, ReflectionKind};
 
@@ -934,8 +895,7 @@ fn top_opaque(src: &str) -> Vec<OpaqueConstruct> {
 
 #[test]
 fn every_poison_marker_names_itself_in_the_inventory() {
-    // The same sources as `poison_markers_are_detected`, now asserting WHICH
-    // construct was recognized — the inventory is the predicate's own vocabulary.
+    // Same sources as `poison_markers_are_detected`, asserting WHICH construct is recognized.
     for (src, want) in [
         ("<?php $r = &$w; width($w);", OpaqueConstruct::ReferenceAssign),
         ("<?php extract($d); width($w);", OpaqueConstruct::Extract),
@@ -956,8 +916,7 @@ fn every_poison_marker_names_itself_in_the_inventory() {
 
 #[test]
 fn the_poison_flag_is_the_inventory_being_non_empty() {
-    // The anti-drift invariant, asserted over every scope of a mixed file: the flag
-    // and the inventory come from one walk, so they cannot disagree.
+    // Anti-drift invariant: flag and inventory come from one walk, so they cannot disagree.
     let tree = SourceTree::parse(
         "<?php\n\
          function clean(int $a): int { return $a; }\n\
@@ -971,8 +930,7 @@ fn the_poison_flag_is_the_inventory_being_non_empty() {
         assert_eq!(scope.poisoned, !scope.opaque.is_empty(), "{:?}", scope.owner);
     }
     let poisoned = tree.scopes().iter().filter(|s| s.poisoned).count();
-    // The top level is poisoned too: the by-ref `use (&$t)` capture aliases one of
-    // ITS locals (ADR-0033), so the fact lands on both sides of the capture.
+    // Top level is poisoned too: by-ref `use (&$t)` aliases one of ITS locals (ADR-0033).
     assert_eq!(poisoned, 5, "top level + dirty + the closure + the arrow fn + C::m");
 }
 
@@ -984,8 +942,7 @@ fn a_clean_scope_carries_no_sites() {
 
 #[test]
 fn a_byref_capture_is_a_site_on_both_scopes() {
-    // One aliasing fact, two scopes (ADR-0033): the enclosing scope and the
-    // closure's own. Both must name it, or the inventory under-reports the closure.
+    // One aliasing fact, two scopes (ADR-0033): both enclosing and closure must name it.
     let tree = SourceTree::parse("<?php\n$t = 0;\n$f = function () use (&$t) { $t++; };\n");
     let sites: Vec<OpaqueConstruct> =
         tree.scopes().iter().flat_map(|s| s.opaque.iter().map(|o| o.construct)).collect();
@@ -1003,8 +960,7 @@ fn a_nested_scopes_construct_belongs_to_that_scope_only() {
 
 #[test]
 fn every_construct_kind_has_a_label() {
-    // `ALL` is hand-maintained beside an exhaustive `label` match; this pins the
-    // pair together so a new variant cannot silently vanish from the report.
+    // `ALL` sits beside an exhaustive `label` match; pins the pair so a variant can't vanish.
     assert_eq!(OpaqueConstruct::ALL.len(), 9);
     let mut labels: Vec<&str> = OpaqueConstruct::ALL.iter().map(|c| c.label()).collect();
     labels.sort_unstable();
@@ -1012,7 +968,7 @@ fn every_construct_kind_has_a_label() {
     assert_eq!(labels.len(), OpaqueConstruct::ALL.len(), "labels must be distinct");
 }
 
-// ---- issue #30: reflection-driven invocation (report-only, an admitted guess) ---
+// Issue #30: reflection-driven invocation (report-only, admitted guess)
 
 fn reflection_kinds(src: &str) -> Vec<ReflectionKind> {
     SourceTree::parse(src).reflection_sites().iter().map(|s| s.kind).collect()
@@ -1072,8 +1028,7 @@ fn func_get_args_counts_only_under_a_typed_signature() {
     for src in [
         "<?php function f($a) { return func_get_args(); }",
         "<?php func_get_args();",
-        // The nearest enclosing function-like decides: an untyped closure inside a
-        // typed method is untyped.
+        // Nearest function-like decides: an untyped closure in a typed method is untyped.
         "<?php class C { public function m(int $a): array { $f = function () { return func_get_args(); }; return []; } }",
     ] {
         assert!(reflection_kinds(src).is_empty(), "`{src}`");
@@ -1082,18 +1037,16 @@ fn func_get_args_counts_only_under_a_typed_signature() {
 
 #[test]
 fn reflection_sites_poison_nothing() {
-    // The inventory is report-only: recognizing a reflective call must not change a
-    // single analysis decision.
+    // Report-only: recognizing a reflective call must not change a single analysis decision.
     let tree = SourceTree::parse("<?php\nfunction f(\\ReflectionMethod $m, object $o): mixed {\n  return $m->invoke($o);\n}\n");
     assert_eq!(tree.reflection_sites().len(), 1);
     assert!(tree.scopes().iter().all(|s| !s.poisoned));
     assert!(tree.dynamism_sites().is_empty());
 }
 
-/// A method name in a multibyte script must not panic the reflection-site
-/// lowering (issue #30's inventory): `name[..11]` on a Japanese method name is
-/// not a char boundary. Found by running the analyzer over ec-cube, whose
-/// domain methods are named in Japanese — real code, not a fuzzer artifact.
+/// A multibyte method name must not panic reflection-site lowering (issue #30):
+/// `name[..11]` isn't a char boundary. Found running the analyzer over ec-cube's
+/// Japanese-named domain methods — real code, not a fuzzer artifact.
 #[test]
 fn multibyte_method_names_do_not_panic_reflection_lowering() {
     let src = "<?php\n\
@@ -1102,7 +1055,6 @@ fn multibyte_method_names_do_not_panic_reflection_lowering() {
         $q->newInstance生成();\n\
         $q->invokeHandler();\n";
     let tree = steins_syntax::SourceTree::parse(src);
-    // The ASCII-prefixed calls still classify; the multibyte-led one is simply
-    // not a reflection site.
+    // ASCII-prefixed calls still classify; the multibyte-led one is not a reflection site.
     assert!(tree.parse_errors().is_empty());
 }

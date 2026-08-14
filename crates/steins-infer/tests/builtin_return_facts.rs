@@ -63,7 +63,7 @@ fn return_mismatches(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
         .collect()
 }
 
-// ── seeding: the reflected bool envelope enters the value domain ─────────────
+// seeding: the reflected bool envelope enters the value domain
 
 #[test]
 fn assigned_builtin_bool_flows_to_a_lying_return_docblock() {
@@ -78,7 +78,6 @@ function f($x) { $b = is_int($x); return $b; }";
 
 #[test]
 fn assigned_builtin_bool_satisfies_a_true_return_docblock() {
-    // The same seed against a truthful `@return bool` stays silent.
     let src = "<?php
 /** @return bool */
 function f($x) { $b = is_int($x); return $b; }";
@@ -86,7 +85,7 @@ function f($x) { $b = is_int($x); return $b; }";
     assert!(return_mismatches(src, &mut m).is_empty(), "bool return vs @return bool is fine");
 }
 
-// ── no sidecar: the declared floor, then silence ────────────────────────────
+// no sidecar: the declared floor, then silence
 
 #[test]
 fn no_sidecar_falls_through_to_the_declared_floor() {
@@ -97,7 +96,7 @@ fn no_sidecar_falls_through_to_the_declared_floor() {
     let src = "<?php
 /** @return string */
 function f($x) { $b = is_int($x); return $b; }";
-    let mut m = Mock::default(); // no facts registered
+    let mut m = Mock::default();
     assert_eq!(
         return_mismatches(src, &mut m).len(),
         1,
@@ -107,10 +106,9 @@ function f($x) { $b = is_int($x); return $b; }";
 
 #[test]
 fn no_sidecar_and_no_floor_row_seeds_nothing() {
-    // A name the floor does NOT cover: `preg_replace` declares
-    // `array|string|null`, a multi-base union that
-    // is not envelope-representable and was dropped at generation. No engine fact
-    // and no floor row ⇒ no return premise ⇒ silence, even against a lying docblock.
+    // A name the floor does NOT cover: `preg_replace` declares `array|string|null`
+    // (multi-base, not envelope-representable, dropped at generation) ⇒ silence,
+    // even against a lying docblock.
     let src = "<?php
 /** @return int */
 function f($x) { $b = preg_replace(\"/a/\", \"b\", $x); return $b; }";
@@ -118,7 +116,7 @@ function f($x) { $b = preg_replace(\"/a/\", \"b\", $x); return $b; }";
     assert!(return_mismatches(src, &mut m).is_empty(), "with neither rung, nothing fires");
 }
 
-// ── precedence: folding is the floor below the return fact ───────────────────
+// precedence: folding is the floor below the return fact
 
 #[test]
 fn folding_beats_the_return_fact() {
@@ -137,13 +135,12 @@ function f() { $b = strlen(\"abc\"); return $b; }";
     );
 }
 
-// ── unique resolution: a user function of the same name shadows the builtin ──
+// unique resolution: a user function of the same name shadows the builtin
 
 #[test]
 fn user_function_shadow_blocks_seeding() {
-    // A project `function is_int(...)` shadows the builtin, so the builtin envelope
-    // must NOT be seeded (conservative, never an FP). The user function's own return
-    // is unknown here, so the lying `@return string` stays silent.
+    // A project `function is_int(...)` shadows the builtin — must NOT seed
+    // (conservative): the user's own return is unknown, so the lying tag stays silent.
     let src = "<?php
 function is_int($x) { return $x; }
 /** @return string */
@@ -155,13 +152,12 @@ function f($x) { $b = is_int($x); return $b; }";
     );
 }
 
-// ── value position vs guard position ────────────────────────────────────────
+// value position vs guard position
 
 #[test]
 fn guard_position_is_untouched() {
-    // A bare guard `if (is_int($x))` is NOT a returned value — the return-fact
-    // seeding never applies to it (guard-position folding is a separate, untouched
-    // path). The returned `"s"` is a genuine string, matching `@return string`.
+    // A bare guard `if (is_int($x))` is NOT a returned value — return-fact seeding
+    // never applies (guard-position folding is a separate, untouched path).
     let src = "<?php
 /** @return string */
 function f($x) { if (is_int($x)) { return \"s\"; } return \"t\"; }";

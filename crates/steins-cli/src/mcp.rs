@@ -3,51 +3,41 @@
 //!
 //! ADR-0010 names the interaction model this serves: an agent refactors
 //! conversationally through **dry-run → diff → approve → apply**, with a
-//! completeness oracle in every response. The command line already speaks that
-//! loop (`transform` dry-runs, `--apply` writes); this module gives an agent
-//! the same loop as structured tool calls, over the same code. Nothing here
-//! re-derives a fact: the plan, the refusals, the oracle counts and the
-//! post-check all come from [`crate::plan_transform_run`], the function
-//! `steins transform` itself calls, and a finding is spelled by
-//! [`crate::render::finding_json`], the same one `check --format json` prints.
+//! completeness oracle in every response — the same loop `transform`/`--apply`
+//! speak on the command line, over the same code. Nothing here re-derives a
+//! fact: plan, refusals, oracle counts and post-check all come from
+//! [`crate::plan_transform_run`] (what `steins transform` itself calls), and a
+//! finding is spelled by [`crate::render::finding_json`] (what
+//! `check --format json` prints).
 //!
-//! # Approve is a step, not a flag
+//! **Approve is a step, not a flag.** `plan_transform` and `apply_plan` are two
+//! tool calls; there is no third that does both. The agent must show a diff and
+//! be told to go ahead before anything is written — that pause *is* the model,
+//! spelled in the tool surface rather than left to a client's good manners.
 //!
-//! `plan_transform` and `apply_plan` are two tool calls, and there is no third
-//! that does both. The agent must show a diff and be told to go ahead before
-//! anything is written — that pause *is* the model, so it is spelled in the
-//! tool surface rather than left to a client's good manners.
+//! **A plan handle lives in one process.** `plan_transform` returns a
+//! `plan_handle`; `apply_plan` takes one. The handle is minted with this
+//! process's identity ([`Session::stamp`]) and the plan is held only in this
+//! process's memory — no daemon, no on-disk plan store. A handle from another
+//! process, a restarted server, or an already-applied plan is a **named
+//! error**, never a write, since applying spans computed against a tree nobody
+//! re-verified is exactly the stale write this design refuses. `apply_plan`
+//! also re-reads every target (refusing if bytes moved since planning) and
+//! re-runs the ADR-0034 post-check before writing.
 //!
-//! # A plan handle lives in one process
+//! **Read-only by construction.** Tool handlers come in exactly two shapes
+//! ([`Handler`]): `Read` is handed `&Session` and answers, `Write` is handed
+//! `&mut Session`. Exactly one `Write` exists in [`TOOLS`] (a test pins that),
+//! and the module's only `std::fs::write` calls are inside it — "this tool does
+//! not touch the tree" is enforced by the compiler and the table, not a comment.
 //!
-//! `plan_transform` returns a `plan_handle`; `apply_plan` takes one. The handle
-//! is minted with this process's identity ([`Session::stamp`]) and the plan
-//! itself is held in this process's memory — there is no daemon, no on-disk
-//! plan store, and no way to hand a handle to a later run. A handle from
-//! another process, from a restarted server, or from a plan already applied is
-//! a **named error**, never a write: applying spans that were computed against
-//! a tree nobody re-verified is precisely the stale write this design refuses.
-//! On top of that, `apply_plan` re-reads every target and refuses if the bytes
-//! moved since planning, then re-runs the ADR-0034 post-check before writing.
-//!
-//! # Read-only by construction
-//!
-//! Tool handlers come in exactly two shapes ([`Handler`]), and the shape is the
-//! guarantee. A `Read` handler is handed `&Session` and answers; a `Write`
-//! handler is handed `&mut Session`. There is exactly one `Write` in [`TOOLS`]
-//! (a test pins that), and the module's only `std::fs::write` calls are inside
-//! it. A `Read` handler cannot even record its own plan handle — it returns the
-//! plan in a [`Reply`] and the dispatcher stores it — so "this tool does not
-//! touch the tree" is something the compiler and the table say, not a comment.
-//!
-//! # Transport, and why no MCP SDK
-//!
-//! MCP's stdio transport is JSON-RPC 2.0 messages delimited by newlines — the
-//! same wire family the PHP sidecar already speaks (ADR-0024), and the reason
-//! that ADR chose it. `serde_json` plus the loop below covers `initialize`,
-//! `tools/list` and `tools/call` in a few dozen lines with no new dependency,
-//! no async runtime, and nothing new for the licenses gate (ADR-0025) to weigh.
-//! An SDK would buy transports and protocol surface this server does not use.
+//! **Transport, and why no MCP SDK.** MCP's stdio transport is JSON-RPC 2.0
+//! messages delimited by newlines — the same wire family the PHP sidecar
+//! speaks (ADR-0024), and the reason that ADR chose it. `serde_json` plus the
+//! loop below covers `initialize`/`tools/list`/`tools/call` in a few dozen
+//! lines with no new dependency, no async runtime, and nothing new for the
+//! licenses gate (ADR-0025) to weigh — an SDK would buy transports this server
+//! does not use.
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -68,9 +58,9 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// server answers identically.
 const SPOKEN_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 
-// JSON-RPC 2.0 error codes. Protocol-level failures use these; a *tool* failure
-// is never one of them — it comes back as a result with `isError` set and a
-// named reason in `structuredContent`, so an agent can read and act on it.
+// JSON-RPC 2.0 error codes, for protocol-level failures only. A *tool* failure
+// is never one of these — it's a result with `isError` and a named reason in
+// `structuredContent`.
 const PARSE_ERROR: i64 = -32700;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
@@ -118,10 +108,9 @@ pub(crate) fn run_mcp(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Answer one JSON-RPC message, or `None` when there is nothing to answer — a
-/// notification (`notifications/initialized` and friends) carries no id, and a
-/// message with an id but no method is a response to a request this server
-/// never sends.
+/// Answer one JSON-RPC message, or `None` when there is nothing to answer: a
+/// notification carries no id, and an id with no method is a response to a
+/// request this server never sends.
 fn handle_message(session: &mut Session, line: &str) -> Option<Value> {
     let message: Value = match serde_json::from_str(line) {
         Ok(v) => v,
@@ -146,10 +135,9 @@ fn handle_message(session: &mut Session, line: &str) -> Option<Value> {
     })
 }
 
-/// The `initialize` result: what this server is and what it offers. The
-/// instructions field is the one place an agent is told the two rules it cannot
-/// infer from the schemas — approve is a separate call, and a handle dies with
-/// the process.
+/// The `initialize` result. `instructions` is the one place an agent is told
+/// the two rules it can't infer from the schemas: approve is a separate call,
+/// and a handle dies with the process.
 fn initialize_result(message: &Value) -> Value {
     let requested = message
         .get("params")
@@ -170,8 +158,7 @@ fn initialize_result(message: &Value) -> Value {
 }
 
 /// Route a `tools/call`. An unknown tool name is a protocol-level invalid-params
-/// error (the client asked for something that is not on the menu); everything a
-/// *tool* refuses comes back as a result with `isError` and a named reason.
+/// error; a *tool* refusal comes back as a result with `isError` instead.
 fn tools_call(session: &mut Session, id: Value, message: &Value) -> Value {
     let params = message.get("params").cloned().unwrap_or_else(|| json!({}));
     let Some(name) = params.get("name").and_then(Value::as_str) else {
@@ -190,9 +177,8 @@ fn tools_call(session: &mut Session, id: Value, message: &Value) -> Value {
     }
 }
 
-/// A tool result. The document is carried twice on purpose: `structuredContent`
-/// for a client that reads JSON, and the same document pretty-printed as text
-/// content for one that does not.
+/// A tool result. The document is carried twice: `structuredContent` for a
+/// client that reads JSON, pretty-printed text for one that doesn't.
 fn tool_result(value: Value, is_error: bool) -> Value {
     let text = serde_json::to_string_pretty(&value).unwrap_or_else(|e| format!("{{\"error\":{{\"reason\":\"serialize-failed\",\"detail\":\"{e}\"}}}}"));
     json!({
@@ -214,9 +200,7 @@ fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option
     json!({ "jsonrpc": "2.0", "id": id, "error": error })
 }
 
-// ---------------------------------------------------------------------------
 // The session: plan handles, and the one place a plan is remembered.
-// ---------------------------------------------------------------------------
 
 /// A plan waiting for approval: everything `apply_plan` needs to re-verify and
 /// write, and nothing that outlives the process holding it.
@@ -224,9 +208,8 @@ fn error_response(id: Value, code: i64, message: impl Into<String>, data: Option
 struct StoredPlan {
     kind: TransformKind,
     plan: EditPlan,
-    /// The exact bytes each analyzed file had when the plan was computed. Apply
-    /// compares the edited files against these before splicing: a byte span is
-    /// only meaningful against the text it was measured in.
+    /// Each analyzed file's exact bytes when the plan was computed — a byte
+    /// span is only meaningful against the text it was measured in.
     texts: HashMap<String, String>,
     /// The paths the plan was made over — re-analyzed at apply time so the
     /// post-check measures the project, not a snapshot.
@@ -234,12 +217,11 @@ struct StoredPlan {
     oracle: CompletenessOracle,
 }
 
-/// One connection's state. A [`Session`] is created by [`run_mcp`] and dropped
-/// when the client disconnects, which is the whole lifetime of every plan
-/// handle it ever mints.
+/// One connection's state, created by [`run_mcp`] and dropped when the client
+/// disconnects — the whole lifetime of every plan handle it ever mints.
 struct Session {
-    /// This process's identity, stamped into every handle: pid plus a start
-    /// nonce, so a handle cannot survive a restart even onto a recycled pid.
+    /// This process's identity: pid plus a start nonce, so a handle cannot
+    /// survive a restart even onto a recycled pid.
     stamp: String,
     /// The next handle's sequence number.
     next: u64,
@@ -255,12 +237,9 @@ impl Session {
         Self { stamp: format!("{}-{nonce}", std::process::id()), next: 1, plans: HashMap::new() }
     }
 
-    /// Dispatch a tool call, returning `None` when no tool has that name.
-    ///
-    /// The two handler shapes meet here and nowhere else: a `Read` handler gets
-    /// `&Session` — it cannot store anything, so it cannot be the tool that
-    /// mutates — and the plan it produces is remembered by [`Self::remember`]
-    /// on the way out.
+    /// Dispatch a tool call, returning `None` when no tool has that name. The
+    /// two handler shapes meet here and nowhere else; whatever plan a handler
+    /// produces is remembered by [`Self::remember`] on the way out.
     fn call_tool(&mut self, name: &str, args: &Value) -> Option<Result<Value, ToolError>> {
         let tool = TOOLS.iter().find(|t| t.name == name)?;
         let reply = match tool.handler {
@@ -284,8 +263,7 @@ impl Session {
     }
 
     /// Resolve a handle, distinguishing the three ways one can fail to name a
-    /// plan this process is holding. Each is a named refusal an agent can act
-    /// on; none of them can become a write.
+    /// plan this process holds. Each is a named refusal, never a write.
     fn plan_for(&self, handle: &str) -> Result<&StoredPlan, ToolError> {
         let stamp = handle
             .strip_prefix("steins-plan-")
@@ -320,13 +298,11 @@ impl Session {
     }
 }
 
-// ---------------------------------------------------------------------------
 // The tool table.
-// ---------------------------------------------------------------------------
 
 /// What a tool handler returns: the response document, plus — for
-/// `plan_transform` — the plan the dispatcher should remember. A handler never
-/// stores anything itself; see [`Session::call_tool`].
+/// `plan_transform` — the plan the dispatcher should remember. See
+/// [`Session::call_tool`].
 struct Reply {
     value: Value,
     plan: Option<StoredPlan>,
@@ -342,9 +318,8 @@ impl Reply {
     }
 }
 
-/// A tool failure the agent is meant to read: a stable machine-readable
-/// `reason` and a human `detail` — ADR-0034's Refusal discipline, applied to
-/// the tool surface.
+/// A tool failure the agent is meant to read: a stable machine `reason` and a
+/// human `detail` — ADR-0034's Refusal discipline, applied to the tool surface.
 struct ToolError {
     reason: &'static str,
     detail: String,
@@ -356,8 +331,7 @@ impl ToolError {
         Self { reason, detail: detail.into(), extra: Value::Null }
     }
 
-    /// Attach further named facts (the diagnostics a post-check would surface,
-    /// the tools that do exist, …).
+    /// Attach further named facts (post-check diagnostics, existing tools, …).
     fn with(mut self, extra: Value) -> Self {
         self.extra = extra;
         self
@@ -376,8 +350,7 @@ impl ToolError {
 
 /// The two handler shapes — and the read-only guarantee (see the module docs).
 enum Handler {
-    /// Reads the project and answers. Handed `&Session`, so it can neither
-    /// remember a plan nor consume one.
+    /// Reads the project and answers. Handed `&Session`, so it can't mutate.
     Read(fn(&Session, &Value) -> Result<Reply, ToolError>),
     /// The one tool that writes to the tree.
     Write(fn(&mut Session, &Value) -> Result<Reply, ToolError>),
@@ -493,7 +466,6 @@ fn tool_descriptors() -> Vec<Value> {
                 "description": t.description,
                 "inputSchema": (t.schema)(),
                 // The MCP hint an agent uses to decide what needs confirming.
-                // Exactly one tool in this surface is not read-only.
                 "annotations": {
                     "title": t.title,
                     "readOnlyHint": matches!(t.handler, Handler::Read(_)),
@@ -503,9 +475,7 @@ fn tool_descriptors() -> Vec<Value> {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
 // The tools.
-// ---------------------------------------------------------------------------
 
 fn tool_list_transforms(_session: &Session, _args: &Value) -> Result<Reply, ToolError> {
     let transforms: Vec<Value> = TransformKind::ALL
@@ -534,10 +504,8 @@ fn tool_plan_transform(_session: &Session, args: &Value) -> Result<Reply, ToolEr
     let paths = paths_arg(args)?;
     let config = optional_string_arg(args, "config")?;
     let asserted_subjects = bool_arg(args, "asserted_subjects")?;
-    // The same one-transform rule the command line enforces, read from the same
-    // table ([`TransformKind::supports_asserted_subjects`]): on any other
-    // transform the opt-in has no defined meaning, so it is a named error, not
-    // a silent no-op.
+    // Same one-transform rule the command line enforces: on any other
+    // transform the opt-in is a named error, not a silent no-op.
     if asserted_subjects && !kind.supports_asserted_subjects() {
         return Err(ToolError::new(
             "invalid-argument",
@@ -548,8 +516,7 @@ fn tool_plan_transform(_session: &Session, args: &Value) -> Result<Reply, ToolEr
     let run = crate::plan_transform_run(kind, &paths, config.as_deref(), asserted_subjects)
         .map_err(|e| ToolError::new("config-error", e))?;
 
-    // The `--format json` document, plus what the command line prints as a
-    // diff and what only an agent surface can carry: a handle.
+    // The `--format json` document, plus the diff and a plan handle.
     let mut value = crate::transform_json(&run.report, &run.postcheck, false);
     let diffs: Vec<Value> = run
         .report
@@ -566,8 +533,7 @@ fn tool_plan_transform(_session: &Session, args: &Value) -> Result<Reply, ToolEr
     value["diffs"] = json!(diffs);
     value["notices"] = json!(run.notices);
     value["post_check_surface"] = json!(kind.post_check_surface().name());
-    // An empty plan has nothing to approve, so it mints no handle: the oracle
-    // still reports every enumerated site and why each was refused.
+    // An empty plan mints no handle; the oracle still reports every site.
     if run.report.plan.is_empty() {
         value["plan_handle"] = Value::Null;
         return Ok(Reply::plain(value));
@@ -585,17 +551,16 @@ fn tool_plan_transform(_session: &Session, args: &Value) -> Result<Reply, ToolEr
 /// The approve half of the loop, and the only tool that writes.
 ///
 /// Three gates stand between a handle and a byte on disk: the handle must name
-/// a plan *this* process is holding, every target must still hold the bytes the
-/// plan was computed against, and the ADR-0034 post-check must pass again on
-/// the surface this transform names. Each failure is a named refusal that
-/// leaves the tree exactly as it was, and the handle stays open for a retry.
+/// a plan *this* process holds, every target must still hold the bytes the plan
+/// was computed against, and the ADR-0034 post-check must pass again. Each
+/// failure is a named refusal that leaves the tree untouched and the handle
+/// open for retry.
 fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolError> {
     let handle = string_arg(args, "plan_handle")?;
     let stored = session.plan_for(&handle)?.clone();
 
-    // Gate 1: the tree must still be the tree that was planned against. A span
-    // is only meaningful in the text it was measured in, so an edited file that
-    // moved under us is refused rather than spliced.
+    // Gate 1: an edited file that moved under us is refused rather than
+    // spliced — a span is only meaningful in the text it was measured in.
     for path in stored.plan.edited_paths() {
         let planned = stored.texts.get(path).ok_or_else(|| {
             ToolError::new(
@@ -617,8 +582,7 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
             ));
         }
     }
-    // A plan that creates a file must not silently replace one. No transform
-    // emits new files today; if one does, clobbering is a decision for a human.
+    // A plan creating a file must not silently replace an existing one.
     for new_file in &stored.plan.new_files {
         if std::path::Path::new(&new_file.path).exists() {
             return Err(ToolError::new(
@@ -629,8 +593,7 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
     }
 
     // Gate 2: the dual-verification post-check (ADR-0034 point 3a), re-run
-    // against the project as it stands now, on the surface this transform
-    // names — not a cached verdict from planning time.
+    // against the project as it stands now — not a cached planning-time verdict.
     let files = crate::collect_files(&stored.paths);
     let allow = crate::allow_list_from_disk();
     let loaded = crate::load_project(
@@ -659,8 +622,7 @@ fn tool_apply_plan(session: &mut Session, args: &Value) -> Result<Reply, ToolErr
         .with(json!({ "new_diagnostics": new_diagnostics })));
     }
 
-    // The write. These are the only `std::fs::write` calls in this module, and
-    // they are reachable only from the surface's one `Handler::Write`.
+    // The write — see the module docs for why this is the only place it happens.
     let mut written: Vec<String> = Vec::new();
     for path in stored.plan.edited_paths() {
         let original = stored.texts.get(path).expect("gate 1 read every edited path");
@@ -714,8 +676,7 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
     let vendor_diagnostics = bool_arg(args, "vendor_diagnostics")?;
     let requested_profile = optional_string_arg(args, "profile")?;
 
-    // The same config read `check` performs, with the same hard-error posture:
-    // a malformed steins.toml is a refusal, never a warn-and-proceed.
+    // Same config read as `check`: a malformed steins.toml is a refusal.
     let config = crate::read_steins_config().map_err(|e| ToolError::new("config-error", e))?;
     let (check_cfg, profile_tbl, runtime_cfg, plugin_allow, effects_cfg) = match config {
         Some(c) => (c.check, c.profile, c.runtime, crate::allow_list(c.plugins), c.effects),
@@ -769,9 +730,7 @@ fn diagnostic_json(d: &Diagnostic) -> Value {
     json!({ "id": d.id, "path": d.path, "line": d.line, "column": d.column, "message": d.message })
 }
 
-// ---------------------------------------------------------------------------
 // Argument reading. Every failure is a named refusal, not a panic.
-// ---------------------------------------------------------------------------
 
 fn string_arg(args: &Value, key: &str) -> Result<String, ToolError> {
     match args.get(key) {
@@ -800,8 +759,7 @@ fn bool_arg(args: &Value, key: &str) -> Result<bool, ToolError> {
 }
 
 /// The `paths` argument, held to the command line's rule (ADR-0050 §7): a path
-/// that names nothing is refused up front, so a renamed directory can never
-/// come back as a clean empty report.
+/// naming nothing is refused up front, never a clean empty report.
 fn paths_arg(args: &Value) -> Result<Vec<String>, ToolError> {
     let Some(Value::Array(items)) = args.get("paths") else {
         return Err(match args.get("paths") {
@@ -840,8 +798,6 @@ fn paths_arg(args: &Value) -> Result<Vec<String>, ToolError> {
 mod tests {
     use super::*;
 
-    /// The read-only claim, as a fact about the table rather than a comment:
-    /// exactly one tool is a [`Handler::Write`], and it is `apply_plan`.
     #[test]
     fn exactly_one_tool_can_write_to_the_tree() {
         let writers: Vec<&str> = TOOLS
@@ -850,7 +806,7 @@ mod tests {
             .map(|t| t.name)
             .collect();
         assert_eq!(writers, vec!["apply_plan"]);
-        // And the descriptors say so, so a client can see it before calling.
+        // The descriptors say so too, visible to a client before calling.
         for descriptor in tool_descriptors() {
             let name = descriptor["name"].as_str().unwrap().to_owned();
             let read_only = descriptor["annotations"]["readOnlyHint"].as_bool().unwrap();
@@ -858,9 +814,8 @@ mod tests {
         }
     }
 
-    /// A handle carries this process's identity, so one minted anywhere else is
-    /// refused by name — the property that makes apply-after-restart an error
-    /// rather than a stale write.
+    /// A handle minted elsewhere is refused by name — apply-after-restart is
+    /// an error, never a stale write.
     #[test]
     fn a_handle_from_another_process_is_refused_by_name() {
         let mut session = Session::new();
@@ -892,9 +847,8 @@ mod tests {
         assert_eq!(err.reason, "plan-handle-unknown");
     }
 
-    /// Two sessions in the same process still cannot share a handle: the nonce
-    /// separates them, so "valid only in the process that produced it" is not
-    /// weakened by pid reuse.
+    /// Two sessions in the same process still can't share a handle — the nonce
+    /// separates them even under pid reuse.
     #[test]
     fn sessions_do_not_share_handles() {
         let a = Session::new();

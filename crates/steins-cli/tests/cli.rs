@@ -7,12 +7,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s format
+/// auto-detection (ADR-0054 §6) reads it, so a run on CI would otherwise emit workflow
+/// commands instead of the asserted text (detection is tested in `tests/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -73,36 +70,31 @@ fn clean_fixtures_exit_zero() {
 // parse failure (ADR-0079, issue #180)
 #[test]
 fn a_file_that_does_not_parse_reports_and_exits_non_zero() {
-    // `broken.php` used to be a *clean* fixture: error-tolerant parsing recovered,
-    // and `steins check` printed nothing and exited 0 on a file `php -l` rejects.
-    // ADR-0079 §2.1 ends that — the silence was the finding.
+    // ADR-0079 §2.1 (issue #180): a file `php -l` rejects must fail the run, not
+    // silently recover into a clean exit 0 as it used to.
     let r = run(&["check", fixture("broken.php").to_str().unwrap()]);
     assert_eq!(r.code, 1, "a file that does not parse must fail the run:\n{}", r.stdout);
     let lines: Vec<&str> = r.stdout.lines().collect();
     assert_eq!(lines.len(), 1, "exactly one finding per broken file, got:\n{}", r.stdout);
     assert!(lines[0].contains("error[syntax.unparsable]"), "{}", lines[0]);
-    // Positioned at the FIRST parse error — the missing `)` in `function broken(
-    // int $x {` on line 7 is diagnosed where the parser gives up, at `$x` on line 8 —
-    // and the message carries the count of the further ones.
+    // Positioned at the FIRST parse error: the missing `)` on line 7 is diagnosed
+    // where the parser gives up (line 8), and the message counts the further ones.
     assert!(lines[0].contains("broken.php:8:12:"), "positioned at the first error: {}", lines[0]);
     assert!(lines[0].contains("further parse error"), "{}", lines[0]);
 }
-// end parse failure (ADR-0079, issue #180)
 
 #[test]
 fn json_format_smoke() {
     let r = run(&["check", "--format", "json", fixture("demo.php").to_str().unwrap()]);
     assert_eq!(r.code, 1);
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json object");
-    // The document is an object: findings array plus suppression counts.
     assert_eq!(v["suppressed"], 0);
     assert_eq!(v["baselined"], 0);
     let arr = v["findings"].as_array().expect("findings array");
     assert_eq!(arr.len(), 1);
     let d = &arr[0];
     assert_eq!(d["id"], "type.argument-mismatch");
-    // ADR-0050 §2: additive per-finding layer field. `type.argument-mismatch` is
-    // a proof-layer id.
+    // ADR-0050 §2: additive per-finding `layer` field; this id is proof-layer.
     assert_eq!(d["layer"], "proof");
     assert_eq!(d["line"], 7);
     assert_eq!(d["column"], 7);
@@ -115,10 +107,9 @@ fn json_format_smoke() {
 
 #[test]
 fn directory_walk_and_unknown_command() {
-    // Walking a directory recurses into subdirectories and collects every `.php`
-    // file into ONE project (ADR-0009/0015): `render()` is defined in
-    // `walk/lib.php` and called (badly) from `walk/sub/main.php`, so the finding
-    // only exists because the two files are analyzed together. Exit 1.
+    // Walking a directory recurses into subdirectories, collecting every `.php` file
+    // into ONE project (ADR-0009/0015): the finding only exists because `walk/lib.php`
+    // and `walk/sub/main.php` are analyzed together.
     let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/walk");
     let r = run(&["check", dir.to_str().unwrap()]);
     assert_eq!(r.code, 1, "cross-file finding present, got:\n{}", r.stdout);
@@ -132,11 +123,8 @@ fn directory_walk_and_unknown_command() {
     assert_eq!(bad.code, 2, "unknown command → exit 2");
 }
 
-// ---- PHP-sidecar folding (end-to-end, real `php`) -------------------------
-//
-// These execute the actual sidecar. `php` is present in this environment; if it
-// were not, the folded findings would simply be omitted (sound subset) and the
-// asserted-flagged tests would fail loudly — which is the correct signal.
+// PHP-sidecar folding (real `php`, end to end): if `php` were absent, folded
+// findings would simply be omitted (sound subset) and these tests would fail loudly.
 
 #[test]
 fn fold_argument_position_flagged_with_provenance() {
@@ -168,15 +156,11 @@ fn fold_nonliteral_inner_arg_is_silent() {
 #[test]
 fn no_php_omits_folded_but_keeps_direct_and_notes_posture() {
     let path = fixture("fold_mixed.php");
-    // Default posture: both the direct `width("abc")` and the folded
-    // `width(strtolower("XYZ"))` fire.
     let full = run(&["check", path.to_str().unwrap()]);
     assert_eq!(full.code, 1);
     assert_eq!(full.stdout.lines().count(), 2, "both findings, got:\n{}", full.stdout);
     assert!(full.stdout.contains("folded from strtolower(\"XYZ\")"));
 
-    // `--no-php`: the folded finding is omitted, the direct literal stays, and
-    // the sound-subset notice is printed to stderr.
     let sound = run(&["check", "--no-php", path.to_str().unwrap()]);
     assert_eq!(sound.code, 1, "direct finding still fires");
     assert_eq!(sound.stdout.lines().count(), 1, "only the direct finding, got:\n{}", sound.stdout);
@@ -207,27 +191,20 @@ fn array_literals_fold_through_the_untouched_allowlist() {
     // PHP's own key semantics, because PHP is what builds the array.
     assert!(out.contains("//=> $dup = 1"), "duplicate key is one entry, got:\n{out}");
     assert!(out.contains(r#"//=> $mixed = "a,b,c""#), "mixed keys, got:\n{out}");
-    // An unproven element stops the FOLD and not the count (issue #327). The
-    // pin here used to be `count([1, $x])` widening, on the stated ground that
-    // "$x may hold anything, so the literal's length is not the array's
-    // length" — which is false: a non-spread element is exactly one entry
-    // whatever it holds, and `count([1, $x]) === 2` is probed for every $x. The
-    // fold still declines (its argument gate is untouched, and `--no-php`
-    // below is what pins that); the shape rung answers what was always known.
+    // A non-spread element is always exactly one entry regardless of its value, so
+    // `count([1, $x])` is known statically even though $x is unproven (issue #327);
+    // the FOLD still declines since its own argument gate is untouched.
     assert!(out.contains("//=> $unfolded = 2"), "the count is known, got:\n{out}");
-    // The widening pin, moved to the case that really is unknowable: a spread
-    // contributes as many entries as its subject has.
+    // The widening pin lives where it's truly unknowable: a spread contributes as
+    // many entries as its subject has.
     assert!(out.contains("$widened = count([1, ...$x]);"), "source reprinted, got:\n{out}");
     assert!(!out.contains("//=> $widened"), "a spread must widen, got:\n{out}");
-    // The `$dup` literal's own duplicate key is ALSO a genuine `array.duplicate-key`
-    // finding (ADR-0078, issue #187), joined onto the same line's margin as the
-    // fold fact above — annotate carries both kinds of fact on one line.
+    // The `$dup` literal's duplicate key is ALSO a genuine `array.duplicate-key`
+    // finding (ADR-0078, issue #187), on the same margin line as the fold fact.
     assert!(out.contains("✗ array.duplicate-key"), "the finding margin, got:\n{out}");
 
-    // Under `--no-php` every FOLDED fact goes — the sound subset (ADR-0004) never
-    // invents a value it did not execute — but `array.duplicate-key` is a purely
-    // syntactic mechanics finding (issue #187) that needs no PHP at all, so it
-    // stays.
+    // Under `--no-php` every FOLDED fact goes (ADR-0004: sound subset never invents
+    // an unexecuted value) but `array.duplicate-key` needs no PHP (issue #187) and stays.
     let sound = run(&["annotate", "--no-php", path.to_str().unwrap()]);
     assert_eq!(sound.code, 0);
     for needle in [
@@ -237,8 +214,8 @@ fn array_literals_fold_through_the_untouched_allowlist() {
         "//=> $nested = 2",
         "//=> $dup = 1",
         r#"//=> $mixed = "a,b,c""#,
-        // The shape rung goes with them: its answer is admitted only inside the
-        // engine's own reflected envelope (ADR-0061 §2), and there is no engine.
+        // The shape rung goes too: its answer needs the engine's reflected envelope
+        // (ADR-0061 §2), and there is no engine here.
         "//=> $unfolded = 2",
     ] {
         assert!(!sound.stdout.contains(needle), "no folded facts without PHP ({needle}), got:\n{}", sound.stdout);
@@ -258,8 +235,7 @@ fn annotate_prints_all_fact_kinds_and_exhaustiveness_marker() {
     assert_eq!(r.code, 0, "annotate never fails on a readable file, got:\n{}", r.stderr);
     let out = r.stdout;
 
-    // 1. Effects on declaration lines: proven-empty, a proven io write, and the
-    //    non-exhaustive `…?` marker for an uncatalogued call.
+    // 1. Effects: proven-empty, a proven io write, non-exhaustive `…?` marker.
     assert!(out.contains("function price(): string"), "source reprinted");
     assert!(out.contains("//=> effects: {}"), "proven effect-free body, got:\n{out}");
     assert!(out.contains("//=> effects: {io.fs.write}"), "proven io.fs.write, got:\n{out}");
@@ -289,15 +265,12 @@ fn annotate_no_php_drops_folded_value_keeps_the_rest() {
 
     let sound = run(&["annotate", "--no-php", path.to_str().unwrap()]);
     assert_eq!(sound.code, 0);
-    // The folded fact needs the sidecar — gone under --no-php.
     assert!(!sound.stdout.contains(r#"$upper = "XY""#), "folded fact dropped, got:\n{}", sound.stdout);
-    // Everything not requiring folding survives.
     assert!(sound.stdout.contains(r#"//=> $named = "abc""#), "const-fn value stays");
     assert!(sound.stdout.contains("//=> $count = 42"), "literal stays");
     assert!(sound.stdout.contains("//=> $box: Box (exact)"), "exact class stays");
     assert!(sound.stdout.contains("//=> effects: {io.fs.write}"), "effects stay");
     assert!(sound.stdout.contains("//=> ✗ type.argument-mismatch"), "finding stays");
-    // The sound-subset posture is surfaced up front.
     assert!(
         sound.stderr.contains("running as sound subset (no PHP sidecar)"),
         "posture notice on stderr, got:\n{}",
@@ -326,25 +299,22 @@ fn annotate_json_shape_pins_colored_pure_and_tainted_functions() {
     assert_eq!(price["exhaustive"], serde_json::json!(true));
     assert_eq!(price["line"], serde_json::json!(8), "declaration line, got:\n{doc}");
 
-    // A colored function (calls file_put_contents): one proven label, exhaustive
-    // — the catalog fully accounts for the body.
+    // A colored function (calls file_put_contents): one proven label, exhaustive.
     let writer = by_name("writer");
     assert_eq!(writer["effects"], serde_json::json!(["io.fs.write"]));
     assert_eq!(writer["declared"], serde_json::json!([]));
     assert_eq!(writer["exhaustive"], serde_json::json!(true));
 
-    // An exhaustiveness-tainted function: the uncatalogued/dynamic call widens
-    // to no proven label but flips the exhaustiveness bit — distinguishable
-    // from the catalogued-pure `price` above, which is the acceptance bar.
+    // An exhaustiveness-tainted function: the uncatalogued/dynamic call widens to no
+    // proven label but flips the exhaustiveness bit (contrast with `price` above).
     let mystery = by_name("mystery");
     assert_eq!(mystery["effects"], serde_json::json!([]));
     assert_eq!(mystery["declared"], serde_json::json!([]));
     assert_eq!(mystery["exhaustive"], serde_json::json!(false));
 
-    // The declared lane (ADR-0067): a call through an interface-typed parameter
-    // proves nothing and bounds everything. `declared` is its own array — the
-    // label never leaks into `effects` — and the bound discharges the taint the
-    // same call would otherwise carry, so `exhaustive` stays true.
+    // The declared lane (ADR-0067): a call through an interface-typed parameter proves
+    // nothing but bounds it in its own `declared` array (never leaking into `effects`),
+    // discharging the taint so `exhaustive` stays true.
     let stamp = by_name("stamp");
     assert_eq!(stamp["effects"], serde_json::json!([]));
     assert_eq!(stamp["declared"], serde_json::json!(["nondet.time"]));
@@ -386,9 +356,8 @@ fn vendor_findings_suppressed_by_default_shown_with_flag() {
     let dir = fixture("vendor_proj");
     let vendor_lib = dir.join("vendor/acme/lib.php").to_string_lossy().into_owned();
 
-    // Default: only the first-party width("abc") finding is reported; the
-    // vendor height("xyz") finding is suppressed and summarized. Exit reflects
-    // the first-party finding only.
+    // Default: only the first-party finding is reported; the vendor finding is
+    // suppressed and summarized, and exit reflects the first-party finding only.
     let def = run(&["check", dir.to_str().unwrap()]);
     assert_eq!(def.code, 1, "first-party finding → exit 1, got:\n{}", def.stdout);
     assert!(def.stdout.contains("to width() cannot become int $w"), "first-party shown, got:\n{}", def.stdout);
@@ -428,9 +397,8 @@ fn vendor_suppressed_field_present_in_json() {
 
 #[test]
 fn a_composer_declared_vendor_dir_is_suppressed_by_default_shown_with_flag() {
-    // `composer_vendor_dir_proj/composer.json` declares `config.vendor-dir:
-    // "3rdparty"` — not the literal `vendor` — so this proves the suppression
-    // reads Composer's own configuration rather than guessing a directory name.
+    // `composer.json` declares `config.vendor-dir: "3rdparty"` (not literal `vendor`),
+    // proving suppression reads Composer's config rather than guessing a dir name.
     let dir = fixture("composer_vendor_dir_proj");
     let vendor_lib = dir.join("3rdparty/acme/lib.php").to_string_lossy().into_owned();
 
@@ -454,11 +422,10 @@ fn a_composer_declared_vendor_dir_is_suppressed_by_default_shown_with_flag() {
 
 #[test]
 fn a_broken_file_under_a_composer_declared_vendor_dir_does_not_dam_the_project() {
-    // `composer_vendor_dir_dam_proj/3rdparty/pkg/broken.php` fails to parse. If the
-    // ADR-0079 dam read a literal `vendor` component instead of the SAME resolved
-    // answer `check` uses, it would treat this as a first-party break and silence
-    // `src/main.php`'s undefined-function fatal project-wide (§2.2). It must not:
-    // the declared `3rdparty` vendor-dir carries the ADR-0046 §2 presumption too.
+    // `3rdparty/pkg/broken.php` fails to parse. If the ADR-0079 dam read a literal
+    // `vendor` instead of the same resolved path `check` uses, it would mistreat this as
+    // first-party and silence `src/main.php`'s fatal project-wide (§2.2) — the declared
+    // `3rdparty` dir carries the ADR-0046 §2 presumption too.
     let dir = fixture("composer_vendor_dir_dam_proj");
 
     let def = run(&["check", dir.to_str().unwrap()]);
@@ -504,9 +471,9 @@ fn fold_strval_flagged_in_strict_silent_in_coercive() {
     assert!(coercive.stdout.is_empty());
 }
 
-/// ADR-0050 §7 amendment: an explicitly-passed path naming nothing is a usage
-/// error (exit 2), not an empty clean report. The regression it closes is a CI
-/// job staying green after a directory rename.
+/// ADR-0050 §7 amendment: an explicitly-passed path naming nothing is a usage error
+/// (exit 2), not an empty clean report — closing a regression where CI stayed green
+/// after a directory rename.
 #[test]
 fn nonexistent_path_is_a_usage_error() {
     let r = run(&["check", "/definitely-not-a-real-path-9x8"]);
@@ -534,9 +501,9 @@ fn nonexistent_path_is_a_usage_error() {
     assert!(e.stderr.contains("path does not exist"), "got:\n{}", e.stderr);
 }
 
-/// Every missing path is named in one message, so a multi-path invocation
-/// reports all of its typos at once rather than one per re-run. A real path
-/// alongside them does not rescue the run.
+/// Every missing path is named in one message, so a multi-path invocation reports all
+/// of its typos at once rather than one per re-run; a real path alongside them does
+/// not rescue the run.
 #[test]
 fn all_missing_paths_are_named_at_once() {
     let real = fixture("silent.php");
@@ -546,9 +513,9 @@ fn all_missing_paths_are_named_at_once() {
     assert!(r.stderr.contains("/no-such-b-2"), "second typo also named, got:\n{}", r.stderr);
 }
 
-/// §7 amendment point 3: existence is the discriminator, emptiness is not. A
-/// directory that exists and holds no `.php` files is a real location the run
-/// genuinely had nothing to say about — still exit 0, still an empty report.
+/// §7 amendment point 3: existence is the discriminator, emptiness is not. A directory
+/// that exists and holds no `.php` files is a real location the run had nothing to say
+/// about — still exit 0, still an empty report.
 #[test]
 fn existing_but_empty_dir_stays_clean() {
     let dir = std::env::temp_dir().join("steins-empty-dir-test");

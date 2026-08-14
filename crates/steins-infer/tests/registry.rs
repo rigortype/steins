@@ -27,13 +27,10 @@ use steins_infer::{
 };
 // member absence (ADR-0078, issue #197)
 use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
-// end member absence (ADR-0078, issue #197)
 // global constants (ADR-0078, issue #198)
 use steins_infer::CONSTANT_UNDEFINED_ID;
-// end global constants (ADR-0078, issue #198)
 // untyped surface (ADR-0078, issue #200)
 use steins_infer::UNTYPED_CLASS_CONSTANT_ID;
-// end untyped surface (ADR-0078, issue #200)
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -48,10 +45,9 @@ fn every_emittable_id_is_registered_with_a_layer() {
 }
 
 /// Totality, backward: the registry has no phantom ids — every registered id is
-/// either one an emitter actually produces (`ALL_EMITTABLE_IDS`) or one registered
-/// **ahead of emission** (`REGISTERED_NOT_YET_EMITTED`, ADR-0049 S1). The two
-/// carve-outs are disjoint, so an id emitted for the first time must leave the
-/// not-yet-emitted list — the reconciliation cannot rot silently.
+/// either one an emitter actually produces (`ALL_EMITTABLE_IDS`) or registered
+/// **ahead of emission** (`REGISTERED_NOT_YET_EMITTED`, ADR-0049 S1), the two
+/// carve-outs disjoint, so a newly-emitted id must leave the not-yet-emitted list.
 #[test]
 fn registry_has_no_unemittable_ids() {
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
@@ -118,9 +114,8 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(EFFECT_ID), Some(Layer::Contract));
     assert_eq!(layer(EFFECT_LISKOV_ID), Some(Layer::Contract));
     // The interop stratum's vocabulary check (issue #311) is contract, not the
-    // mechanics its attribute-side twin two lines down carries: it is suppressable
-    // and off the default surface by design, which is the whole reason it is a
-    // separate id at all.
+    // mechanics its attribute-side twin below carries: suppressable and off the
+    // default surface by design — the whole reason it's a separate id.
     assert_eq!(layer(INTEROP_UNKNOWN_LABEL_ID), Some(Layer::Contract));
     // mechanics
     assert_eq!(layer(SUPPRESS_UNMATCHED_ID), Some(Layer::Mechanics));
@@ -129,9 +124,9 @@ fn classification_matches_adr_0050_section_1() {
     // the member-kind port wave's first id (ADR-0078, issue #187).
     assert_eq!(layer(ARRAY_DUPLICATE_KEY_ID), Some(Layer::Mechanics));
     // finding-breadth family (ADR-0049): proof layer, except the declared-receiver
-    // lane's Asserted half, which is contract (the paired-id precedent, ADR-0049 §8;
-    // the lane's all-Verified half rides `call.undefined-method` under A13, so the
-    // two rows below cover both halves without a third id).
+    // lane's Asserted half (contract, paired-id precedent ADR-0049 §8) — its
+    // all-Verified half rides `call.undefined-method` under A13, so two rows cover
+    // both halves without a third id.
     assert_eq!(layer(CALL_UNDEFINED_FUNCTION_ID), Some(Layer::Proof));
     assert_eq!(layer(CALL_UNDEFINED_METHOD_ID), Some(Layer::Proof));
     assert_eq!(layer(CLASS_UNDEFINED_ID), Some(Layer::Proof));
@@ -154,16 +149,12 @@ fn classification_matches_adr_0050_section_1() {
     assert_eq!(layer(DEBUG_TRACE_ID), Some(Layer::Debug));
 }
 
-/// The two unknown-label ids are one defect on two strata, and the registry is
-/// where that distinction is enforced (issue #311).
-///
-/// Same question — "this label is not in the vocabulary" — asked of a Steins
-/// attribute and of one of upstream's docblock tags. The attribute's is apparatus
-/// rot: Steins' own syntax, unsuppressable, red on every profile. The docblock's is
-/// declared debt on a claim upstream itself does not check, so it is suppressable
-/// and opt-in — reusing the mechanics id would have made every project with a
-/// pre-existing `@phpstan-impure` note fail a bare `steins check`, which is exactly
-/// what the ADR-0082 amendment refused.
+/// The two unknown-label ids are one defect on two strata, enforced by the registry
+/// (issue #311): same question — "this label is not in the vocabulary" — asked of a
+/// Steins attribute (apparatus rot: unsuppressable, red on every profile) and of an
+/// upstream docblock tag (declared debt on an unchecked claim: suppressable, opt-in).
+/// Reusing the mechanics id would fail every project with a pre-existing
+/// `@phpstan-impure` note on a bare `steins check` — exactly what ADR-0082 refused.
 #[test]
 fn the_two_unknown_label_ids_sit_on_different_strata() {
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
@@ -195,38 +186,31 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // S4: the two existence ids are emittable proof-layer ids following a
-    // zero-FP measurement run and field survey.
+    // S4: emittable proof-layer ids following a zero-FP measurement run and field survey.
     for id in [CALL_UNDEFINED_FUNCTION_ID, CLASS_UNDEFINED_ID] {
         assert!(emittable.contains(id), "`{id}` must be emittable from S4");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // S5: the userland arity arms (too-few / unknown-named) are emittable proof-layer
-    // ids and left the pending list.
+    // S5: the userland arity arms (too-few / unknown-named), emittable and off the pending list.
     for id in [CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID] {
         assert!(emittable.contains(id), "`{id}` must be emittable from S5");
         assert!(!pending.contains(id), "`{id}` must have left REGISTERED_NOT_YET_EMITTED");
         assert_eq!(layer(id), Some(Layer::Proof));
     }
 
-    // S6: the declared-receiver lane is emittable and left the pending list. Under
-    // ADR-0049 A13 the lane routes by minimum stratum across TWO already-registered
-    // ids — `phpdoc.undefined-method` for an Asserted premise, `call.undefined-method`
-    // (S2's, asserted above) for an all-Verified one. The registry sees no change at
-    // all from that: no id was added, renamed or relayered, which is the invariant
-    // this block pins.
+    // S6: the declared-receiver lane, emittable and off the pending list. Under
+    // ADR-0049 A13 it routes by minimum stratum across TWO already-registered ids —
+    // `phpdoc.undefined-method` (Asserted premise), `call.undefined-method` (S2's,
+    // all-Verified) — so the registry sees no change: nothing added, renamed or relayered.
     assert!(emittable.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must be emittable");
     assert!(!pending.contains(PHPDOC_UNDEFINED_METHOD_ID), "S6 must have left REGISTERED_NOT_YET_EMITTED");
     assert_eq!(layer(PHPDOC_UNDEFINED_METHOD_ID), Some(Layer::Contract));
-    // The A13 restatement of §8's disjointness invariant: it is over SITES, not ids.
-    // One id may carry two emitters (ADR-0022 decouples the two) — what may never
-    // happen is one call site judged by both, and that is pinned where the emitters
-    // live (`tests/s6_routing.rs::one_call_site_is_judged_by_exactly_one_emitter`,
-    // `tests/phpdoc_undefined_method.rs::exact_receiver_is_s2s_emitter_never_both`).
-    // Here the registry-side consequence: both ids stay emittable, and neither is a
-    // duplicate of the other.
+    // A13's disjointness invariant (§8) is over SITES, not ids: one id may carry two
+    // emitters, but one site is never judged by both — pinned in
+    // `tests/s6_routing.rs` and `tests/phpdoc_undefined_method.rs`. Registry-side:
+    // both ids stay emittable and neither duplicates the other.
     assert!(emittable.contains(CALL_UNDEFINED_METHOD_ID), "the promoted half's id must be emittable");
     assert_ne!(PHPDOC_UNDEFINED_METHOD_ID, CALL_UNDEFINED_METHOD_ID);
 
@@ -257,21 +241,16 @@ fn finding_breadth_ids_light_up_stage_by_stage() {
     );
     assert_eq!(layer(PROPERTY_MAYBE_UNDEFINED_ID), Some(Layer::Proof));
     assert_eq!(surface_floor(PROPERTY_MAYBE_UNDEFINED_ID), Some(Floor::Strict));
-    // end member absence (ADR-0078, issue #197)
 
     assert_eq!(REGISTERED_NOT_YET_EMITTED.len(), 1);
 }
 
 // undefined variables (ADR-0078, issue #194)
 
-/// The `variable.*` pair: one id emitting, one registered ahead of emission.
-///
-/// `variable.undefined` proves the binding absent from the whole scope and emits at
-/// the `default` floor. `variable.maybe-undefined` claims only that *a* path reaches
-/// the read unbound — the reachability foundation's question (issue #199), answered
-/// by the binding-presence pass (ADR-0081, issue #267) — and emits at the `strict`
-/// floor. The split that matters is no longer emitting/pending but the two floors:
-/// the weaker claim never reaches the default profile.
+/// The `variable.*` pair: `variable.undefined` proves the binding absent from the
+/// whole scope and emits at `default`; `variable.maybe-undefined` claims only that
+/// *a* path reaches the read unbound (issue #199, answered by the binding-presence
+/// pass ADR-0081/#267) and emits at `strict` — the weaker claim never reaches default.
 #[test]
 fn the_variable_pair_splits_across_the_two_floors() {
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
@@ -300,9 +279,8 @@ fn the_variable_pair_splits_across_the_two_floors() {
         "the weaker claim is opt-in"
     );
 
-    // Disjointness, stated for this pair specifically — the two ids describe the
-    // same defect at different strengths, which is exactly the shape where a
-    // double-registration would go unnoticed.
+    // Disjointness for this pair specifically: same defect, different strengths —
+    // exactly the shape where a double-registration would go unnoticed.
     assert!(emittable.is_disjoint(&pending));
     assert_ne!(VARIABLE_UNDEFINED_ID, VARIABLE_MAYBE_UNDEFINED_ID);
 
@@ -322,8 +300,6 @@ fn exactly_one_id_is_registered_ahead_of_emission() {
         "REGISTERED_NOT_YET_EMITTED drifted — every entry needs an argued reason"
     );
 }
-
-// end undefined variables (ADR-0078, issue #194)
 
 /// All four debug ids emit at `Layer::Debug`, appear in `ALL_EMITTABLE_IDS`, and
 /// retain their ADR-0053/ADR-0074 kebab-case spellings.
@@ -406,50 +382,30 @@ fn every_registered_id_has_a_surface_floor() {
 
 /// **The byte-identity argument, mechanized.** ADR-0062 A-G10 replaced the profile
 /// engine's layer-*set* selection with the floor ladder, on the claim that the floor
-/// is a faithful unification of what the built-ins already selected. That claim is
-/// exactly this rule — proof/mechanics/debug at `default`, contract at `contracts` —
-/// and it is checked here for EVERY id rather than argued once in a comment.
+/// is a faithful unification of what the built-ins already selected: proof/mechanics/
+/// debug at `default`, contract at `contracts` — checked here for EVERY id rather
+/// than argued once in a comment.
 ///
-/// The admitted exceptions are named one by one, with the layer each is allowed to
-/// carry. Two of them are the pair ADR-0062 S6 itself introduced (the offset
-/// family's strict leg, in the contract layer at the `strict` floor — the whole
-/// reason a floor attribute was needed); the third is ADR-0078 §1.3's `maybe-`
-/// sibling convention, which puts a **proof**-layer id above `default` for the
-/// first time: a possibly-grade twin is still proof-grade evidence about the
-/// runtime, and a possibly-claim belongs on the strict surface.
-/// The admitted exceptions are the ids whose floor was set by a **measurement**
-/// rather than by their layer: the pair ADR-0062 S6 itself introduces (the offset
-/// family's strict leg, contract layer at the `strict` floor — the whole reason a
-/// floor attribute was needed, since a layer can now straddle rungs), and
-/// `type.return-maybe-missing` (ADR-0078 §1.3, issue #199), the first **proof**
-/// layer id to do the same.
-/// Two exceptions are admitted, each argued at its registry row. The first is the
-/// pair ADR-0062 S6 itself introduces: the offset family's strict leg sits in the
-/// contract layer at the `strict` floor, which is the whole reason a floor attribute
-/// was needed (a layer can now straddle rungs). The second is `variable.maybe-undefined`
-/// (ADR-0078, issue #194), which straddles in the other direction — a *proof*-layer
-/// id at the `strict` floor, because its claim is weaker than its sibling's and the
-/// shape it names is one defensive house styles produce on purpose.
+/// The admitted exceptions are ids whose floor was set by a **measurement** rather
+/// than by their layer (the `promoted` table below); each is argued at its own row
+/// in the test body, including the two straddling directions: a `maybe-` sibling
+/// that stays proof-layer but opts UP to `strict` (ADR-0078 §1.3), and the offset
+/// family's strict leg, which sits in the contract layer instead of `default`.
 #[test]
 fn floors_reproduce_the_pre_s6_layer_selection() {
-    // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured
-    // ZERO corpus findings and took A-G10's END-state promotion to `Contracts`;
-    // `offset.maybe-missing` stays `Strict` until the assertion-helper
-    // discharge lands (its 3 sweep findings were all that one gap). Plus the
-    // member-absence `maybe-` sibling (ADR-0078, issue #197).
-    // `type.return-maybe-missing` (2026-08-08 gate triage): the SAME fatal as its
-    // definite sibling, so the layer cannot differ — a `TypeError` is a `TypeError`.
-    // What the corpus measured is that the conditional class (a body that returns
-    // on every taken arm and leaves an uncovered escape edge) is dominated by code
-    // that is correct by construction and unprovable by analysis: phpstan-src's own
-    // `src/` carries two and passes its own missing-return rule. Hence `Strict`.
-    // `untyped.class-constant` (2026-08-09 owner ruling): the one arm of the untyped
-    // family whose missing declaration withholds NO information — a constant is
-    // inherently static, its initializer is a constant expression, so the type is
-    // pinned either way. Not `Strict`, which asks whether a weaker some-paths-only
-    // claim is worth seeing: a team opting into that has not asked to be told how to
-    // write its constants. `Pedantic`, the rung no built-in reaches by rung, and the
-    // `pedantic` branch names it in `enable`.
+    // The S6 pair, post-triage (2026-07-29 sweep): `offset.undeclared` measured ZERO
+    // corpus findings and took A-G10's promotion to `Contracts`; `offset.maybe-missing`
+    // stays `Strict` until the assertion-helper discharge lands (3 sweep findings were
+    // the whole gap). Plus the member-absence `maybe-` sibling (ADR-0078, issue #197).
+    // `type.return-maybe-missing` (2026-08-08 triage): the SAME fatal as its definite
+    // sibling, so the layer can't differ. The corpus shows the conditional class (a
+    // body returning on every taken arm, leaving an uncovered escape edge) dominated
+    // by code correct by construction and unprovable — phpstan-src's own `src/` has
+    // two such cases and passes its own missing-return rule. Hence `Strict`.
+    // `untyped.class-constant` (2026-08-09 ruling): the one untyped-family arm whose
+    // missing declaration withholds NO information (a constant's type is pinned either
+    // way), so not `Strict` (which asks about a weaker some-paths claim) but
+    // `Pedantic` — the rung no built-in reaches, named in `enable`.
     let promoted = [
         (OFFSET_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
         (OFFSET_MAYBE_MISSING_ID, Layer::Contract, Floor::Strict),

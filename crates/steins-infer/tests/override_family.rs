@@ -2,14 +2,12 @@
 //! `override.static-mismatch`, `override.visibility-weakened`,
 //! `override.parameter-variance` and `override.return-variance`. Each claims a
 //! fatal PHP raises **at class load**, read off the declaration graph alone (no
-//! flow analysis, no value domain, no receiver, no sidecar), on the closure
-//! discipline issue #183's tracer establishes and this slice reuses verbatim.
+//! flow analysis, value domain, receiver, or sidecar) — reusing issue #183's
+//! closure-discipline tracer verbatim.
 //!
-//! Every runtime claim below is `php -r`-witnessed on PHP 8.5.9 and the witness is
-//! quoted at the fixture that rests on it — the firing row AND its legal
-//! counterpart, since a silence leg is only worth as much as the witness that it is
-//! really legal. The harness runs on `NoFold` (no boot surface), which is itself the
-//! no-sidecar-leg evidence.
+//! Every claim is `php -r`-witnessed on PHP 8.5.9, quoted at the test that
+//! consumes it — firing row AND its legal counterpart. The harness runs on
+//! `NoFold` (no boot surface), itself the no-sidecar-leg evidence.
 
 use steins_infer::{
     Diagnostic, OVERRIDE_FINAL_ID, OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID,
@@ -47,14 +45,11 @@ fn silent(src: &str) {
     assert!(all.is_empty(), "{all:?}");
 }
 
-// ---------------------------------------------------------------------------
 // `override.final`.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_overriding_a_final_method() {
-    // php -r 'class P { final public function m() {} } class C extends P { public function m() {} }'
-    // → Fatal error: Cannot override final method P::m()
+    // php -r → Fatal: Cannot override final method P::m()
     let d = only(
         "<?php\nclass P { final public function m() {} }\nclass C extends P { public function m() {} }\n",
         OVERRIDE_FINAL_ID,
@@ -66,8 +61,7 @@ fn fires_on_overriding_a_final_method() {
 
 #[test]
 fn fires_without_a_sidecar() {
-    // The whole harness runs on `NoFold` (no boot surface), so every firing fixture
-    // is also this leg's evidence: no id here has an `absence_family_available` gate.
+    // NoFold (no boot surface): no id here gates on `absence_family_available`.
     assert_eq!(
         run(
             "<?php\nclass P { final public function m() {} }\nclass C extends P { public function m() {} }\n",
@@ -80,8 +74,7 @@ fn fires_without_a_sidecar() {
 
 #[test]
 fn fires_on_a_grandparents_final_method() {
-    // php -r 'class A { final public function m() {} } class B extends A {} class C extends B { public function m() {} }'
-    // → Fatal error: Cannot override final method A::m()
+    // php -r → Fatal: Cannot override final method A::m()
     let d = only(
         "<?php\nclass A { final public function m() {} }\nclass B extends A {}\nclass C extends B { public function m() {} }\n",
         OVERRIDE_FINAL_ID,
@@ -91,9 +84,7 @@ fn fires_on_a_grandparents_final_method() {
 
 #[test]
 fn fires_on_an_abstract_child_over_a_final_parent() {
-    // php -r 'class P { final public function m() {} } abstract class C extends P { abstract public function m(); }'
-    // → Fatal error: Cannot override final method P::m() — finality outranks the
-    // "cannot make non abstract method abstract" shape.
+    // php -r → Fatal: finality outranks "cannot make non abstract method abstract".
     only(
         "<?php\nclass P { final public function m() {} }\nabstract class C extends P { abstract public function m(); }\n",
         OVERRIDE_FINAL_ID,
@@ -102,19 +93,15 @@ fn fires_on_an_abstract_child_over_a_final_parent() {
 
 #[test]
 fn silent_when_the_child_is_the_final_one() {
-    // php -r 'class P { public function m() {} } class C extends P { final public function m() {} }'
-    // → runs clean: sealing an override is legal.
+    // php -r → runs clean: sealing an override is legal.
     silent("<?php\nclass P { public function m() {} }\nclass C extends P { final public function m() {} }\n");
 }
 
-// ---------------------------------------------------------------------------
 // `override.static-mismatch`.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_a_static_override_of_an_instance_method() {
-    // php -r 'class P { public function m() {} } class C extends P { public static function m() {} }'
-    // → Fatal error: Cannot make non static method P::m() static in class C
+    // php -r → Fatal: Cannot make non static method P::m() static in class C
     let d = only(
         "<?php\nclass P { public function m() {} }\nclass C extends P { public static function m() {} }\n",
         OVERRIDE_STATIC_MISMATCH_ID,
@@ -125,8 +112,7 @@ fn fires_on_a_static_override_of_an_instance_method() {
 
 #[test]
 fn fires_on_an_instance_override_of_a_static_method() {
-    // php -r 'class P { public static function m() {} } class C extends P { public function m() {} }'
-    // → Fatal error: Cannot make static method P::m() non static in class C
+    // php -r → Fatal: Cannot make static method P::m() non static in class C
     let d = only(
         "<?php\nclass P { public static function m() {} }\nclass C extends P { public function m() {} }\n",
         OVERRIDE_STATIC_MISMATCH_ID,
@@ -136,19 +122,14 @@ fn fires_on_an_instance_override_of_a_static_method() {
 
 #[test]
 fn silent_when_both_sides_agree_on_staticness() {
-    // php -r 'class P { public static function m() {} } class C extends P { public static function m() {} }'
-    // → runs clean.
     silent("<?php\nclass P { public static function m() {} }\nclass C extends P { public static function m() {} }\n");
 }
 
-// ---------------------------------------------------------------------------
 // `override.visibility-weakened`.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_public_weakened_to_protected() {
-    // php -r 'class P { public function m() {} } class C extends P { protected function m() {} }'
-    // → Fatal error: Access level to C::m() must be public (as in class P)
+    // php -r → Fatal: Access level to C::m() must be public (as in class P)
     let d = only(
         "<?php\nclass P { public function m() {} }\nclass C extends P { protected function m() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -159,8 +140,7 @@ fn fires_on_public_weakened_to_protected() {
 
 #[test]
 fn fires_on_public_weakened_to_private() {
-    // php -r 'class P { public function m() {} } class C extends P { private function m() {} }'
-    // → Fatal error: Access level to C::m() must be public (as in class P)
+    // php -r → Fatal: Access level to C::m() must be public (as in class P)
     let d = only(
         "<?php\nclass P { public function m() {} }\nclass C extends P { private function m() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -170,8 +150,7 @@ fn fires_on_public_weakened_to_private() {
 
 #[test]
 fn fires_on_protected_weakened_to_private() {
-    // php -r 'class P { protected function m() {} } class C extends P { private function m() {} }'
-    // → Fatal error: Access level to C::m() must be protected (as in class P) or weaker
+    // php -r → Fatal: Access level to C::m() must be protected (as in class P) or weaker
     let d = only(
         "<?php\nclass P { protected function m() {} }\nclass C extends P { private function m() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -181,19 +160,15 @@ fn fires_on_protected_weakened_to_private() {
 
 #[test]
 fn silent_on_widened_visibility() {
-    // php -r 'class P { protected function m() {} } class C extends P { public function m() {} }'
-    // → runs clean; widening is exactly what LSP permits.
+    // php -r → runs clean; widening is exactly what LSP permits.
     silent("<?php\nclass P { protected function m() {} }\nclass C extends P { public function m() {} }\n");
 }
 
-// ---------------------------------------------------------------------------
 // `override.parameter-variance` (contravariance).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_a_narrowed_parameter_type() {
-    // php -r 'class P { public function m(int|string $x) {} } class C extends P { public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string|int $x)
+    // php -r → Fatal: Declaration of C::m(int $x) incompatible with P::m(string|int $x)
     let d = only(
         "<?php\nclass P { public function m(int|string $x) {} }\nclass C extends P { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -205,8 +180,7 @@ fn fires_on_a_narrowed_parameter_type() {
 
 #[test]
 fn fires_on_a_parameter_narrowed_out_of_nullability() {
-    // php -r 'class P { public function m(?int $x) {} } class C extends P { public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(?int $x)
+    // php -r → Fatal: Declaration of C::m(int $x) incompatible with P::m(?int $x)
     only(
         "<?php\nclass P { public function m(?int $x) {} }\nclass C extends P { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -215,8 +189,7 @@ fn fires_on_a_parameter_narrowed_out_of_nullability() {
 
 #[test]
 fn fires_on_a_disjoint_parameter_type() {
-    // php -r 'class P { public function m(string $x) {} } class C extends P { public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string $x)
+    // php -r → Fatal: Declaration of C::m(int $x) incompatible with P::m(string $x)
     only(
         "<?php\nclass P { public function m(string $x) {} }\nclass C extends P { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -225,8 +198,7 @@ fn fires_on_a_disjoint_parameter_type() {
 
 #[test]
 fn silent_on_a_widened_parameter_type() {
-    // php -r 'class P { public function m(int $x) {} } class C extends P { public function m(int|string $x) {} }'
-    // → runs clean; contravariance is what PHP asks for.
+    // php -r → runs clean; contravariance is what PHP asks for.
     silent(
         "<?php\nclass P { public function m(int $x) {} }\nclass C extends P { public function m(int|string $x) {} }\n",
     );
@@ -234,8 +206,7 @@ fn silent_on_a_widened_parameter_type() {
 
 #[test]
 fn silent_on_a_renamed_parameter_and_an_added_optional_one() {
-    // php -r 'class P { public function m(int $x) {} } class C extends P { public function m(int $z, int $y = 0) {} }'
-    // → runs clean: names do not participate, and an extra OPTIONAL parameter is legal.
+    // php -r → runs clean: names don't participate; an extra OPTIONAL parameter is legal.
     silent(
         "<?php\nclass P { public function m(int $x) {} }\nclass C extends P { public function m(int $z, int $y = 0) {} }\n",
     );
@@ -243,18 +214,13 @@ fn silent_on_a_renamed_parameter_and_an_added_optional_one() {
 
 #[test]
 fn silent_when_a_parameter_type_is_dropped() {
-    // php -r 'class P { public function m(int $x) {} } class C extends P { public function m($x) {} }'
-    // → runs clean: an untyped parameter accepts everything.
+    // php -r → runs clean: an untyped parameter accepts everything.
     silent("<?php\nclass P { public function m(int $x) {} }\nclass C extends P { public function m($x) {} }\n");
 }
 
 #[test]
 fn silent_on_an_arity_change_alone() {
-    // Both directions ARE fatals PHP raises —
-    // php -r 'class P { public function m(int $x, int $y) {} } class C extends P { public function m(int $x) {} }'
-    // → Declaration of C::m(int $x) must be compatible with P::m(int $x, int $y) —
-    // but the shape is an arity change, not a variance one, and this id's name would
-    // misname it. A deliberate v1 silence with its own deferred id.
+    // Both directions fatal in PHP, but arity change isn't variance — v1 silence.
     silent(
         "<?php\nclass P { public function m(int $x, int $y) {} }\nclass C extends P { public function m(int $x) {} }\n",
     );
@@ -263,14 +229,11 @@ fn silent_on_an_arity_change_alone() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // `override.return-variance` (covariance).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_a_widened_return_type() {
-    // php -r 'class P { public function m(): int {} } class C extends P { public function m(): int|string {} }'
-    // → Fatal error: Declaration of C::m(): string|int must be compatible with P::m(): int
+    // php -r → Fatal: Declaration of C::m(): string|int incompatible with P::m(): int
     let d = only(
         "<?php\nclass P { public function m(): int {} }\nclass C extends P { public function m(): int|string {} }\n",
         OVERRIDE_RETURN_VARIANCE_ID,
@@ -282,8 +245,7 @@ fn fires_on_a_widened_return_type() {
 
 #[test]
 fn fires_on_a_return_made_nullable() {
-    // php -r 'class P { public function m(): int {} } class C extends P { public function m(): ?int {} }'
-    // → Fatal error: Declaration of C::m(): ?int must be compatible with P::m(): int
+    // php -r → Fatal: Declaration of C::m(): ?int incompatible with P::m(): int
     only(
         "<?php\nclass P { public function m(): int {} }\nclass C extends P { public function m(): ?int {} }\n",
         OVERRIDE_RETURN_VARIANCE_ID,
@@ -292,8 +254,7 @@ fn fires_on_a_return_made_nullable() {
 
 #[test]
 fn silent_on_a_narrowed_return_type() {
-    // php -r 'class P { public function m(): int|string {} } class C extends P { public function m(): int {} }'
-    // → runs clean; covariance is what PHP asks for.
+    // php -r → runs clean; covariance is what PHP asks for.
     silent(
         "<?php\nclass P { public function m(): int|string {} }\nclass C extends P { public function m(): int {} }\n",
     );
@@ -301,44 +262,28 @@ fn silent_on_a_narrowed_return_type() {
 
 #[test]
 fn silent_when_the_parent_declares_no_return_type() {
-    // php -r 'class P { public function m() {} } class C extends P { public function m(): int {} }'
-    // → runs clean: adding a return type narrows, which is legal.
+    // php -r → runs clean: adding a return type narrows, which is legal.
     silent("<?php\nclass P { public function m() {} }\nclass C extends P { public function m(): int {} }\n");
 }
 
 #[test]
 fn silent_when_the_child_drops_the_return_type() {
-    // php -r 'class P { public function m(): int {} } class C extends P { public function m() {} }'
-    // → Fatal error: Declaration of C::m() must be compatible with P::m(): int — real,
-    // but the syntax layer lowers an unrepresentable hint (`void`, `mixed`, a DNF
-    // form) to the same `None` an ABSENT hint lowers to, so "declares nothing" is not
-    // distinguishable from "declares something Steins does not carry". A yield loss,
-    // never a false positive.
+    // Real fatal (php -r); `void`/`mixed`/DNF lower to the same `None` as ABSENT (yield loss).
     silent("<?php\nclass P { public function m(): int {} }\nclass C extends P { public function m() {} }\n");
 }
 
 #[test]
 fn silent_on_a_self_returning_pair() {
-    // php -r 'class P { public function m(): self {} } class C extends P { public function m(): self {} }'
-    // → runs clean, and PHP re-binds `self` per declarer. Steins synthesizes the
-    // keyword to an `Instance` of the DECLARING class (ADR-0043 amendment), so
-    // comparing the two sides would compare `P` against `C` — the pair is skipped.
+    // Runs clean; `self` synthesizes per DECLARING class (ADR-0043) — comparing is wrong.
     silent("<?php\nclass P { public function m(): self {} }\nclass C extends P { public function m(): self {} }\n");
 }
 
-// ---------------------------------------------------------------------------
 // The acceptance relation: `Maybe` is silence, and only that relation judges.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_when_the_acceptance_answer_is_maybe() {
-    // The variance verdict is `steins_contract::normalize::subsumes`, whose class
-    // arms judge through the reflexive is-a floor: `Class(A)` vs `Class(B)` is
-    // `Maybe`, never `No`, so an unrelated-class narrowing does not convict —
-    // php -r 'class A {} class B {} class P { public function m(A $x) {} } class C extends P { public function m(B $x) {} }'
-    // → Fatal error: Declaration of C::m(B $x) must be compatible with P::m(A $x).
-    // A real fatal, deliberately unreported: `Maybe` is silence (the standing
-    // zero-FP rule), and this is the leg that pins it.
+    // `Class(A)` vs `Class(B)` judges `Maybe`, never `No` (reflexive is-a floor)
+    // — a real fatal (php -r witnessed), deliberately unreported: zero-FP rule.
     silent(
         "<?php\nclass A {}\nclass B {}\nclass P { public function m(A $x) {} }\nclass C extends P { public function m(B $x) {} }\n",
     );
@@ -346,9 +291,7 @@ fn silent_when_the_acceptance_answer_is_maybe() {
 
 #[test]
 fn silent_when_a_covariant_class_pair_is_only_maybe() {
-    // The mirror, where PHP runs clean and `Maybe` costs nothing:
-    // php -r 'class S {} class T extends S {} class P { public function m(): S {} } class C extends P { public function m(): T {} }'
-    // → runs clean (return covariance).
+    // The mirror: PHP runs clean here, so `Maybe` costs nothing (return covariance).
     silent(
         "<?php\nclass S {}\nclass T extends S {}\nclass P { public function m(): S {} }\nclass C extends P { public function m(): T {} }\n",
     );
@@ -356,32 +299,20 @@ fn silent_when_a_covariant_class_pair_is_only_maybe() {
 
 #[test]
 fn silent_when_a_bool_arm_is_only_partly_covered() {
-    // php -r 'class P { public function m(bool $x) {} } class C extends P { public function m(true $x) {} }'
-    // → Fatal error: Declaration of C::m(true $x) must be compatible with P::m(bool $x).
-    // Real, and deliberately unreported: the parent's `bool` is ONE arm, and the
-    // acceptance relation folds its two finite members to `Maybe` (`true` is
-    // admitted, `false` is not). Proven-partial reads as `Maybe` there, and `Maybe`
-    // is silence.
+    // Real fatal; `bool`'s two members fold to `Maybe` (proven-partial reads as `Maybe`).
     silent("<?php\nclass P { public function m(bool $x) {} }\nclass C extends P { public function m(true $x) {} }\n");
 }
 
 #[test]
 fn silent_when_the_pair_differs_only_by_the_int_float_allowance() {
-    // php -r 'class P { public function m(int $x) {} } class C extends P { public function m(float $x) {} }'
-    // → Fatal error: Declaration of C::m(float $x) must be compatible with P::m(int $x).
-    // PHP's inheritance check is a pure subtype test with no coercion, while the
-    // acceptance relation carries PHP's weak-mode int→float widening (`float` admits
-    // an `int` fact) — so it answers `Yes` and the check stays silent. A yield loss
-    // by construction, in the direction that can only lose findings.
+    // Real fatal; PHP's check has no coercion, but int->float widens weakly (yield loss).
     silent("<?php\nclass P { public function m(int $x) {} }\nclass C extends P { public function m(float $x) {} }\n");
 }
 
 #[test]
 fn silent_on_an_asserted_only_premise() {
-    // v1 judges NATIVE signatures only. A `@param` claim is Asserted (ADR-0037/0052
-    // N2) and PHP does not read it when it decides this fatal —
-    // php -r 'class P { /** @param int|string $x */ public function m($x) {} } class C extends P { /** @param int $x */ public function m($x) {} }'
-    // → runs clean. A docblock cannot forge a proof-layer finding.
+    // v1 judges NATIVE signatures only (PHP ignores `@param`, Asserted, ADR-0037/0052
+    // N2) — a docblock cannot forge a proof-layer finding.
     silent(
         "<?php\nclass P {\n  /** @param int|string $x */\n  public function m($x) {}\n}\nclass C extends P {\n  /** @param int $x */\n  public function m($x) {}\n}\n",
     );
@@ -389,21 +320,17 @@ fn silent_on_an_asserted_only_premise() {
 
 #[test]
 fn silent_when_a_docblock_contradicts_a_compatible_native_pair() {
-    // The sharper face: the native pair is legal (widening), and only the docblock
-    // narrows. Still silence — the Asserted stratum does not participate at all.
+    // Sharper: the native pair is legal (widening); only the docblock narrows — silence.
     silent(
         "<?php\nclass P { public function m(int $x) {} }\nclass C extends P {\n  /** @param int $x */\n  public function m(int|string $x) {}\n}\n",
     );
 }
 
-// ---------------------------------------------------------------------------
 // Interface implementation — the same path as class inheritance.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_an_interface_method_narrowed_by_its_implementation() {
-    // php -r 'interface I { public function m(int|string $x); } class C implements I { public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with I::m(string|int $x)
+    // php -r → Fatal: Declaration of C::m(int $x) incompatible with I::m(string|int $x)
     let d = only(
         "<?php\ninterface I { public function m(int|string $x); }\nclass C implements I { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -413,8 +340,7 @@ fn fires_on_an_interface_method_narrowed_by_its_implementation() {
 
 #[test]
 fn fires_on_an_interface_implementation_that_weakens_visibility() {
-    // php -r 'interface I { public function m(); } class C implements I { protected function m() {} }'
-    // → Fatal error: Access level to C::m() must be public (as in class I)
+    // php -r → Fatal: Access level to C::m() must be public (as in class I)
     only(
         "<?php\ninterface I { public function m(); }\nclass C implements I { protected function m() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -423,8 +349,7 @@ fn fires_on_an_interface_implementation_that_weakens_visibility() {
 
 #[test]
 fn fires_on_an_interface_implementation_that_widens_the_return() {
-    // php -r 'interface I { public function m(): int; } class C implements I { public function m(): int|string {} }'
-    // → Fatal error: Declaration of C::m(): string|int must be compatible with I::m(): int
+    // php -r → Fatal: Declaration of C::m(): string|int incompatible with I::m(): int
     only(
         "<?php\ninterface I { public function m(): int; }\nclass C implements I { public function m(): int|string {} }\n",
         OVERRIDE_RETURN_VARIANCE_ID,
@@ -433,10 +358,7 @@ fn fires_on_an_interface_implementation_that_widens_the_return() {
 
 #[test]
 fn fires_on_an_interface_method_narrowed_by_an_abstract_ancestor() {
-    // The transitive collection: the interface is implemented by the PARENT, and the
-    // subject still owes it —
-    // php -r 'interface I { public function m(int|string $x); } abstract class P implements I {} class C extends P { public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with I::m(string|int $x)
+    // Transitive: the interface is implemented by the PARENT, and C still owes it.
     only(
         "<?php\ninterface I { public function m(int|string $x); }\nabstract class P implements I {}\nclass C extends P { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -445,8 +367,6 @@ fn fires_on_an_interface_method_narrowed_by_an_abstract_ancestor() {
 
 #[test]
 fn silent_on_a_legal_interface_implementation() {
-    // php -r 'interface I { public function m(int $x); } class C implements I { public function m(int|string $x) {} }'
-    // → runs clean.
     silent(
         "<?php\ninterface I { public function m(int $x); }\nclass C implements I { public function m(int|string $x) {} }\n",
     );
@@ -454,23 +374,17 @@ fn silent_on_a_legal_interface_implementation() {
 
 #[test]
 fn silent_on_an_interface_subject() {
-    // php -r 'interface J { public function m(int|string $x); } interface I extends J { public function m(int $x); }'
-    // → Fatal error: Declaration of I::m(int $x) must be compatible with J::m(string|int $x).
-    // Real, but the ancestry walk is class-shaped (it refuses an interface node
-    // outright) — a recorded v1 silence, never a false positive.
+    // Real fatal (php -r); the walk is class-shaped (refuses interface nodes) — v1 silence.
     silent(
         "<?php\ninterface J { public function m(int|string $x); }\ninterface I extends J { public function m(int $x); }\n",
     );
 }
 
-// ---------------------------------------------------------------------------
 // `__construct` — the exemption, pinned in both directions.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_on_a_constructor_narrowing_against_a_concrete_parent() {
-    // php -r 'class P { public function __construct(int|string $x) {} } class C extends P { public function __construct(int $x) {} }'
-    // → runs clean: `__construct` is excluded from PHP's LSP signature check.
+    // php -r → runs clean: __construct is excluded from PHP's LSP signature check.
     silent(
         "<?php\nclass P { public function __construct(int|string $x) {} }\nclass C extends P { public function __construct(int $x) {} }\n",
     );
@@ -478,8 +392,7 @@ fn silent_on_a_constructor_narrowing_against_a_concrete_parent() {
 
 #[test]
 fn silent_on_a_constructor_weakening_visibility_against_a_concrete_parent() {
-    // php -r 'class P { public function __construct() {} } class C extends P { private function __construct() {} }'
-    // → runs clean; a private constructor beneath a public one is the singleton idiom.
+    // php -r → runs clean; a private ctor beneath a public one is the singleton idiom.
     silent(
         "<?php\nclass P { public function __construct() {} }\nclass C extends P { private function __construct() {} }\n",
     );
@@ -487,9 +400,7 @@ fn silent_on_a_constructor_weakening_visibility_against_a_concrete_parent() {
 
 #[test]
 fn silent_on_a_static_constructor() {
-    // php -r 'class P { public function __construct() {} } class C extends P { public static function __construct() {} }'
-    // → Fatal error: Method C::__construct() cannot be static — a standalone fatal
-    // that needs no parent at all, so `override.static-mismatch` would misname it.
+    // Fatal (php -r witnessed) but standalone; `override.static-mismatch` would misname it.
     silent(
         "<?php\nclass P { public function __construct() {} }\nclass C extends P { public static function __construct() {} }\n",
     );
@@ -497,9 +408,7 @@ fn silent_on_a_static_constructor() {
 
 #[test]
 fn fires_on_overriding_a_final_constructor() {
-    // php -r 'class P { final public function __construct() {} } class C extends P { public function __construct() {} }'
-    // → Fatal error: Cannot override final method P::__construct() — the ONE member
-    // of this family a constructor does not escape.
+    // php -r → Fatal: Cannot override final method P::__construct() (the one exception).
     only(
         "<?php\nclass P { final public function __construct() {} }\nclass C extends P { public function __construct() {} }\n",
         OVERRIDE_FINAL_ID,
@@ -508,9 +417,7 @@ fn fires_on_overriding_a_final_constructor() {
 
 #[test]
 fn fires_on_a_constructor_narrowing_against_an_interface() {
-    // The exemption ends at an ABSTRACT parent constructor —
-    // php -r 'interface I { public function __construct(int|string $x); } class C implements I { public function __construct(int $x) {} }'
-    // → Fatal error: Declaration of C::__construct(int $x) must be compatible with I::__construct(string|int $x)
+    // The exemption ends at an ABSTRACT parent constructor (php -r witnessed fatal).
     only(
         "<?php\ninterface I { public function __construct(int|string $x); }\nclass C implements I { public function __construct(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -519,8 +426,7 @@ fn fires_on_a_constructor_narrowing_against_an_interface() {
 
 #[test]
 fn fires_on_a_constructor_weakening_visibility_against_an_abstract_parent() {
-    // php -r 'abstract class P { abstract public function __construct(); } class C extends P { protected function __construct() {} }'
-    // → Fatal error: Access level to C::__construct() must be public (as in class P)
+    // php -r → Fatal: Access level to C::__construct() must be public (as in class P)
     only(
         "<?php\nabstract class P { abstract public function __construct(); }\nclass C extends P { protected function __construct() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -529,24 +435,18 @@ fn fires_on_a_constructor_weakening_visibility_against_an_abstract_parent() {
 
 #[test]
 fn fires_on_a_destructor_weakening_visibility() {
-    // Only `__construct` is special —
-    // php -r 'class P { public function __destruct() {} } class C extends P { private function __destruct() {} }'
-    // → Fatal error: Access level to C::__destruct() must be public (as in class P)
+    // Only __construct is special; __destruct gets the ordinary fatal (php -r witnessed).
     only(
         "<?php\nclass P { public function __destruct() {} }\nclass C extends P { private function __destruct() {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
     );
 }
 
-// ---------------------------------------------------------------------------
 // A private parent method is not inherited — silence for every member.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_on_a_private_parent_method() {
-    // php -r 'class P { private function m(int $x) {} } class C extends P { public static function m(string $y, array $z): void {} }'
-    // → runs clean: a private method is not inherited, so nothing is overridden —
-    // not the signature, not the staticness, not the visibility.
+    // php -r → runs clean: a private method isn't inherited, so nothing is overridden.
     silent(
         "<?php\nclass P { private function m(int $x) {} }\nclass C extends P { public static function m(string $y) {} }\n",
     );
@@ -554,12 +454,7 @@ fn silent_on_a_private_parent_method() {
 
 #[test]
 fn a_private_declaration_shadowing_an_ancestor_is_reported_at_the_shadower() {
-    // php -r 'class A { public function m(int|string $x) {} } class B extends A { private function m() {} } class C extends B { public function m(int $x) {} }'
-    // → Fatal error: Access level to B::m() must be public (as in class A). The fatal
-    // is at **B**, and exactly one finding is emitted, naming B: C's own override
-    // question is silenced by B's private declaration (a private method is not
-    // inherited, so C overrides nothing through the chain), which is what keeps this
-    // from double-reporting one runtime fatal.
+    // The fatal is at **B** (php -r); C's question is silenced by B's private declaration.
     let d = only(
         "<?php\nclass A { public function m(int|string $x) {} }\nclass B extends A { private function m() {} }\nclass C extends B { public function m(int $x) {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -568,23 +463,17 @@ fn a_private_declaration_shadowing_an_ancestor_is_reported_at_the_shadower() {
     assert_eq!(d.line, 3, "positioned at B's declaration, not C's: {d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // The closure conditions inherited from issue #183's tracer, one leg each.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_on_an_unresolvable_parent() {
-    // The signature could be anything (or the method absent) in a class Steins cannot
-    // enumerate — the chain must be enumerable end to end.
+    // The signature could be anything in a class Steins can't enumerate end to end.
     silent("<?php\nclass C extends \\Vendor\\Base { public function m(int $x) {} }\n");
 }
 
 #[test]
 fn silent_on_a_trait_using_class() {
-    // php -r 'class P { public function m(int|string $x) {} } trait T {} class C extends P { use T; public function m(int $x) {} }'
-    // → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string|int $x).
-    // Real, but trait members are not flattened, so a trait could be the member
-    // source — the tracer's obstacle (ADR-0049 leg (e)), inherited verbatim.
+    // Real fatal (php -r witnessed); trait members aren't flattened (ADR-0049 leg (e)).
     silent(
         "<?php\nclass P { public function m(int|string $x) {} }\ntrait T {}\nclass C extends P { use T; public function m(int $x) {} }\n",
     );
@@ -615,8 +504,7 @@ fn silent_on_an_ambiguous_parent_name() {
 
 #[test]
 fn silent_in_a_dead_branch() {
-    // Live-path discipline (ADR-0002/0031): a declaration inside a proven-dead region
-    // never loads, so it never fatals.
+    // Live-path discipline (ADR-0002/0031): a proven-dead declaration never loads or fatals.
     silent(
         "<?php\nclass P { final public function m() {} }\nif (false) {\n  class C extends P { public function m() {} }\n}\n",
     );
@@ -632,8 +520,7 @@ fn silent_on_a_conditional_ancestor_under_a_standing_dam() {
 
 #[test]
 fn fires_on_a_conditional_ancestor_with_the_dam_clear() {
-    // The same fixture without the dynamism site: A2i is about the dam, not about
-    // conditionality by itself.
+    // Same fixture without the dynamism site — A2i is about the dam, not conditionality.
     only(
         "<?php\nif (defined('X')) {\n  class P { final public function m() {} }\n}\nclass C extends P { public function m() {} }\n",
         OVERRIDE_FINAL_ID,
@@ -642,10 +529,7 @@ fn fires_on_a_conditional_ancestor_with_the_dam_clear() {
 
 #[test]
 fn silent_on_an_anonymous_class() {
-    // php -r 'class P { final public function m() {} } $x = new class extends P { public function m() {} };'
-    // → Fatal error: Cannot override final method P::m(). Real, but `new class`
-    // lowers EDGE-ONLY (ADR-0049 A4: parent + implements refs, no members), so the
-    // subject's own methods are invisible and the claim would be unfounded.
+    // Real fatal (php -r witnessed); `new class` lowers EDGE-ONLY (ADR-0049 A4, no members).
     silent(
         "<?php\nclass P { final public function m() {} }\n$x = new class extends P { public function m() {} };\n",
     );
@@ -653,9 +537,7 @@ fn silent_on_an_anonymous_class() {
 
 #[test]
 fn silent_on_an_enum_subject() {
-    // php -r 'interface I { public function m(int|string $x); } enum E implements I { case A; public function m(int $x) {} }'
-    // → Fatal error: Declaration of E::m(int $x) must be compatible with I::m(string|int $x).
-    // Real, but enum members are not lowered at all (ADR-0043).
+    // Real fatal (php -r witnessed), but enum members aren't lowered at all (ADR-0043).
     silent(
         "<?php\ninterface I { public function m(int|string $x); }\nenum E implements I { case A; public function m(int $x) {} }\n",
     );
@@ -663,23 +545,18 @@ fn silent_on_an_enum_subject() {
 
 #[test]
 fn silent_on_an_abstract_child_over_a_concrete_parent() {
-    // php -r 'class P { public function m(int|string $x) {} } abstract class C extends P { abstract public function m(int $x); }'
-    // → Fatal error: Cannot make non abstract method P::m() abstract in class C — a
-    // DIFFERENT fatal, which none of these ids may claim.
+    // A DIFFERENT fatal ("non abstract method abstract", php -r witnessed) — not these ids.
     silent(
         "<?php\nclass P { public function m(int|string $x) {} }\nabstract class C extends P { abstract public function m(int $x); }\n",
     );
 }
 
-// ---------------------------------------------------------------------------
 // Precedence — one runtime fatal, one finding, in PHP's own witnessed order
 // (final ≻ static ≻ visibility ≻ parameter ≻ return).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn final_outranks_every_other_member() {
-    // php -r 'class P { final public function m(int|string $x) {} } class C extends P { protected static function m(int $x) {} }'
-    // → Fatal error: Cannot override final method P::m()
+    // php -r → Fatal: Cannot override final method P::m()
     only(
         "<?php\nclass P { final public function m(int|string $x) {} }\nclass C extends P { protected static function m(int $x) {} }\n",
         OVERRIDE_FINAL_ID,
@@ -688,8 +565,7 @@ fn final_outranks_every_other_member() {
 
 #[test]
 fn static_outranks_visibility_and_variance() {
-    // php -r 'class P { public function m(int|string $x) {} } class C extends P { protected static function m(int $x) {} }'
-    // → Fatal error: Cannot make non static method P::m() static in class C
+    // php -r → Fatal: Cannot make non static method P::m() static in class C
     only(
         "<?php\nclass P { public function m(int|string $x) {} }\nclass C extends P { protected static function m(int $x) {} }\n",
         OVERRIDE_STATIC_MISMATCH_ID,
@@ -698,8 +574,7 @@ fn static_outranks_visibility_and_variance() {
 
 #[test]
 fn visibility_outranks_variance() {
-    // php -r 'class P { public function m(int|string $x): int {} } class C extends P { protected function m(int $x): int|string {} }'
-    // → Fatal error: Access level to C::m() must be public (as in class P)
+    // php -r → Fatal: Access level to C::m() must be public (as in class P)
     only(
         "<?php\nclass P { public function m(int|string $x): int {} }\nclass C extends P { protected function m(int $x): int|string {} }\n",
         OVERRIDE_VISIBILITY_WEAKENED_ID,
@@ -708,9 +583,7 @@ fn visibility_outranks_variance() {
 
 #[test]
 fn a_parameter_violation_outranks_a_return_one() {
-    // php -r 'class P { public function m(int|string $x): int {} } class C extends P { public function m(int $x): int|string {} }'
-    // → ONE fatal: Declaration of C::m(int $x): string|int must be compatible with
-    // P::m(string|int $x): int. One fatal, one finding.
+    // php -r → ONE fatal, one finding (parameter beats return in PHP's own check order).
     only(
         "<?php\nclass P { public function m(int|string $x): int {} }\nclass C extends P { public function m(int $x): int|string {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -719,8 +592,7 @@ fn a_parameter_violation_outranks_a_return_one() {
 
 #[test]
 fn a_parent_and_an_interface_declaring_the_same_method_report_once() {
-    // php -r 'interface I { public function m(int|string $x); } class P implements I { public function m(int|string $x) {} } class C extends P { public function m(int $x) {} }'
-    // → ONE fatal, named against P (the nearest declaration).
+    // php -r → ONE fatal, named against P (the nearest declaration).
     let d = only(
         "<?php\ninterface I { public function m(int|string $x); }\nclass P implements I { public function m(int|string $x) {} }\nclass C extends P { public function m(int $x) {} }\n",
         OVERRIDE_PARAMETER_VARIANCE_ID,
@@ -728,14 +600,11 @@ fn a_parent_and_an_interface_declaring_the_same_method_report_once() {
     assert!(d.message.contains("P::m()"), "{}", d.message);
 }
 
-// ---------------------------------------------------------------------------
 // Namespaced rendering.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn renders_namespaced_declarations_with_qualified_names() {
-    // php -r 'namespace App; class P { final public function m() {} } class C extends P { public function m() {} }'
-    // → Fatal error: Cannot override final method App\P::m()
+    // php -r → Fatal: Cannot override final method App\P::m()
     let d = only(
         "<?php\nnamespace App;\nclass P { final public function m() {} }\nclass C extends P { public function m() {} }\n",
         OVERRIDE_FINAL_ID,

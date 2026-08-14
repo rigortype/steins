@@ -3,9 +3,8 @@
 //! `origin` facet selector, exit levels (`fail`/`warn`), config errors, and
 //! baseline capture-surface awareness.
 //!
-//! Each test runs the real `steins` binary in a private temp dir (its own CWD) so
-//! the auto-loaded `steins.toml` and `.steins-baseline.jsonl` are isolated. Runs
-//! use `--no-php` for determinism (the fixtures need no runtime folding).
+//! Each test runs in a private temp dir (its own CWD) so the auto-loaded
+//! `steins.toml`/`.steins-baseline.jsonl` are isolated; `--no-php` for determinism.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,12 +14,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection
+/// (ADR-0054 §6) reads it and would else emit workflow commands instead of text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -69,7 +64,7 @@ const MIXED: &str = "<?php\n\
 const THROW_ONLY: &str =
     "<?php\n/** @throws \\JsonException */\nfunction f(): void { throw new \\RuntimeException(); }\n";
 
-// ------------------------------------------------------- default = proof only ---
+// Default = proof only
 
 #[test]
 fn default_surface_is_proof_plus_mechanics_only() {
@@ -111,7 +106,7 @@ fn throws_direct_profile_selects_the_origin_facet() {
     assert!(!r.stdout.contains("RuntimeException can escape"), "propagated throw hidden");
 }
 
-// ---------------------------------------------------------- config selection ---
+// Config selection
 
 #[test]
 fn config_selects_profile_and_flag_beats_config() {
@@ -139,8 +134,6 @@ fn unknown_profile_is_a_config_error() {
 fn reserved_profile_name_is_a_config_error() {
     let dir = workdir("reserved");
     write(&dir, "a.php", THROW_ONLY);
-    // `boundary` is the last deferred name; `strict` became a built-in at ADR-0062
-    // S6 (A-G10 is its ADR) and is exercised by the strict-profile tests instead.
     let name = "boundary";
     let r = run_in(&dir, &["check", "--no-php", "--profile", name, "a.php"]);
     assert_eq!(r.code, 2, "reserved `{name}` → exit 2");
@@ -149,8 +142,7 @@ fn reserved_profile_name_is_a_config_error() {
 
 #[test]
 fn user_profile_facet_token_is_rejected() {
-    // The deferred-with-design decision (§4/§11): user profiles do not accept facet
-    // selectors; a facet-shaped token is an unknown id pattern.
+    // Deferred-with-design (§4/§11): user profiles reject facet selectors.
     let dir = workdir("facet-token");
     write(&dir, "a.php", THROW_ONLY);
     write(
@@ -163,13 +155,12 @@ fn user_profile_facet_token_is_rejected() {
     assert!(r.stderr.contains("throw.undeclared@direct"), "got:\n{}", r.stderr);
 }
 
-// --------------------------------------------------- [runtime] config errors ---
+// [runtime] config errors
 
 #[test]
 fn unknown_runtime_key_is_a_hard_config_error() {
-    // ADR-0050 §7 / ADR-0052 §5 N2: `[runtime]` uses `deny_unknown_fields`, so a
-    // misspelled key fails the parse — a HARD config error (exit 2), not a
-    // warn-and-proceed. The typo can never silently leave the safe default in force.
+    // ADR-0050 §7 / ADR-0052 §5 N2: `deny_unknown_fields` makes a misspelled key
+    // a HARD error (exit 2), never a silent warn-and-proceed.
     let dir = workdir("runtime-typo");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nwarning-hadler = \"abort\"\n");
@@ -180,11 +171,8 @@ fn unknown_runtime_key_is_a_hard_config_error() {
 
 #[test]
 fn abolished_zend_assertions_key_is_a_hard_config_error() {
-    // ADR-0052 amendment: `zend-assertions` is abolished from the `[runtime]`
-    // vocabulary — `assert($expr)` reads as a throw-guard (Verified
-    // unconditionally), so it is not a runtime pseudo-constant Steins models. A
-    // steins.toml carrying it hits the `deny_unknown_fields` exit-2 path like any
-    // other unknown key — a hard config error, not warn-and-proceed.
+    // ADR-0052 amendment: `zend-assertions` abolished from `[runtime]` (assert()
+    // is now an unconditional throw-guard) — same exit-2 path.
     let dir = workdir("runtime-zend-abolished");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
@@ -195,7 +183,6 @@ fn abolished_zend_assertions_key_is_a_hard_config_error() {
 
 #[test]
 fn valid_runtime_section_proceeds() {
-    // The control: a well-formed `[runtime]` parses and the run proceeds normally.
     let dir = workdir("runtime-ok");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nwarning-handler = \"abort\"\n");
@@ -205,7 +192,6 @@ fn valid_runtime_section_proceeds() {
 
 #[test]
 fn malformed_toml_is_a_hard_config_error() {
-    // Any unparseable steins.toml the CLI reads is exit 2 (not silently ignored).
     let dir = workdir("toml-garbage");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "this is not = valid = toml [[[\n");
@@ -213,7 +199,7 @@ fn malformed_toml_is_a_hard_config_error() {
     assert_eq!(r.code, 2, "malformed steins.toml → exit 2; stderr:\n{}", r.stderr);
 }
 
-// -------------------------------------------------------------- exit levels ---
+// Exit levels
 
 #[test]
 fn warn_demotion_reports_without_failing() {
@@ -230,7 +216,7 @@ fn warn_demotion_reports_without_failing() {
     assert!(!r.stdout.contains("error[throw.undeclared]"), "not error-level");
 }
 
-// -------------------------------------------------------------- json output ---
+// JSON output
 
 #[test]
 fn json_carries_level_and_origin_facet() {
@@ -240,11 +226,10 @@ fn json_carries_level_and_origin_facet() {
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
     assert_eq!(v["profile"], "contracts");
     let arr = v["findings"].as_array().expect("findings array");
-    // Every finding carries an additive level; proof findings carry no facet key.
+    // Every finding carries an additive `level`; only throws carry `origin`.
     for d in arr {
         assert_eq!(d["level"], "fail", "fail by default (§7)");
     }
-    // The throw findings carry the additive `origin` facet; the proof one does not.
     let throws: Vec<&serde_json::Value> =
         arr.iter().filter(|d| d["id"] == "throw.undeclared").collect();
     assert_eq!(throws.len(), 2);
@@ -256,7 +241,7 @@ fn json_carries_level_and_origin_facet() {
     assert!(proof.get("origin").is_none(), "proof finding has no facet key");
 }
 
-// ------------------------------------------------- baseline capture surface ---
+// Baseline capture surface
 
 #[test]
 fn baseline_captured_under_default_drowns_loudly_under_contracts() {
@@ -292,24 +277,21 @@ fn out_of_surface_baseline_entries_are_dormant_not_stale() {
     assert_eq!(r.code, 0, "proof finding is baselined; exit 0");
 }
 
-// -------------------------------------------------- ADR-0053 D4: var_dump lane ---
+// ADR-0053 D4: var_dump lane
 
 /// A fixture whose ONLY finding is a default-on `var_dump` dump.
 const VAR_DUMP_ONLY: &str = "<?php\n$x = 5;\nvar_dump($x);\n";
 
 #[test]
 fn var_dump_dumps_by_default_and_is_exit_neutral() {
-    // ADR-0053 §3/§4: `var_dump` reports on a bare `check` (default-ON, every
-    // profile), at warn level — so a run whose only findings are var_dump dumps
-    // exits 0 (exit-neutral forever). The dump is warn, never a lint red.
+    // ADR-0053 §3/§4: `var_dump` is default-ON at warn in every profile, so this
+    // run stays exit-neutral forever — warn, never a lint red.
     let dir = workdir("vardump");
     write(&dir, "a.php", VAR_DUMP_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert!(r.stdout.contains("warning[debug.var-dump]"), "var_dump dumps by default:\n{}", r.stdout);
-    // The dump surface renders the value-domain fact value-precisely: `$x = 5` is
-    // the constant `5`, not the collapsed base `int` (the ADR-0053 §9 collapse is
-    // reversed for the dump path — value-precision is what the surface exists to
-    // show, matching PHPStan's constant types).
+    // Value-precise, not collapsed: `$x = 5` renders as the constant `5`, not
+    // base `int` (ADR-0053 §9's collapse reversed, matching PHPStan's constant types).
     assert!(r.stdout.contains("dumped type: 5"), "renders the fact value-precisely:\n{}", r.stdout);
     assert_eq!(r.code, 0, "a var_dump-only run is exit-neutral; stdout:\n{}", r.stdout);
 }
@@ -325,20 +307,16 @@ fn var_dump_json_carries_debug_layer_and_warn_level() {
     assert_eq!(r.code, 0);
 }
 
-// ------------------------------------------- ADR-0074: trace-annotation lane ---
+// ADR-0074: trace-annotation lane
 
 /// A fixture whose ONLY finding is a `@psalm-trace` annotation report (#94) —
-/// the canonical Psalm placement: the annotation above the assignment reports
-/// the type that statement leaves behind (ADR-0074 §5 exit facts).
+/// the annotation above the assignment reports the type it leaves behind (ADR-0074 §5).
 const TRACE_ANNOTATION_ONLY: &str = "<?php\n/** @psalm-trace $x */\n$x = 5;\n";
 
 #[test]
 fn trace_annotation_warns_by_default_and_is_exit_neutral() {
-    // ADR-0074 §8: `debug.trace` is born at warn and fixed there — the trigger
-    // is a runtime-inert, committable docblock, so the explicit pair's
-    // fail-forcing argument does not apply and a trace-only run exits 0. No
-    // CLI-side plumbing is trace-specific (layer and level flow from the
-    // registry); this test pins that the text surface indeed says so.
+    // ADR-0074 §8: `debug.trace` is born and fixed at warn — a runtime-inert,
+    // committable docblock, so the fail-forcing "explicit pair" argument doesn't apply.
     let dir = workdir("trace-annotation");
     write(&dir, "a.php", TRACE_ANNOTATION_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -349,8 +327,7 @@ fn trace_annotation_warns_by_default_and_is_exit_neutral() {
 
 #[test]
 fn var_dump_is_profile_disableable() {
-    // ADR-0053 §4: a named profile `disable = ["debug.var-dump"]` turns the incidental
-    // dump off — the relief valve for a team drowning in legacy sites.
+    // ADR-0053 §4: a profile can `disable = ["debug.var-dump"]` for legacy sites.
     let dir = workdir("vardump-off");
     write(&dir, "a.php", VAR_DUMP_ONLY);
     write(
@@ -365,9 +342,8 @@ fn var_dump_is_profile_disableable() {
 
 #[test]
 fn an_inline_ignore_never_suppresses_a_dump() {
-    // ADR-0053 §4: the debug lane is exempt from all three suppression channels. An
-    // `@steins-ignore debug.var-dump` does NOT mute the dump (it still displays) and,
-    // matching nothing suppressible, earns `suppress.unmatched`.
+    // ADR-0053 §4: the debug lane is exempt from all three suppression channels;
+    // `@steins-ignore debug.var-dump` does NOT mute it but earns `suppress.unmatched`.
     let dir = workdir("vardump-ignore");
     write(&dir, "a.php", "<?php\n$x = 5;\nvar_dump($x); // @steins-ignore debug.var-dump\n");
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -377,17 +353,15 @@ fn an_inline_ignore_never_suppresses_a_dump() {
         "an ignore naming a dump earns suppress.unmatched:\n{}",
         r.stdout
     );
-    // suppress.unmatched is mechanics (fail-level), so this run exits 1 — on the
-    // meta-diagnostic, not the dump.
+    // suppress.unmatched is fail-level mechanics; exit 1 is on it, not the dump.
     assert_eq!(r.code, 1, "the unmatched-ignore mechanics finding fails; stdout:\n{}", r.stdout);
 }
 
-// ---------------------------------------------- strict (ADR-0062 A-G10 / #51) ---
+// strict (ADR-0062 A-G10 / #51)
 
-/// The strict leg's own fixture: an unguarded read of a declared-optional key (one
-/// `offset.maybe-missing`) and a read of a key the sealed shape excludes (one
-/// `offset.undeclared`). No proof-layer or other contract-layer finding, so each
-/// profile's output is exactly its own rung's contribution.
+/// An unguarded read of a declared-optional key (`offset.maybe-missing`) and
+/// one the sealed shape excludes (`offset.undeclared`); no proof/contract
+/// finding, so each profile's output is its own rung's contribution.
 const STRICT_ONLY: &str = "<?php\n\
     /** @param array{a?: string, b: string} $d */\n\
     function f(array $d): void { $x = $d['a']; $y = $d['zzz']; }\n";
@@ -395,9 +369,8 @@ const STRICT_ONLY: &str = "<?php\n\
 #[test]
 fn strict_leg_ids_respect_their_post_triage_floors() {
     // Post-triage floors (2026-07-29 sweep ruling): default shows neither id;
-    // contracts shows `offset.undeclared` (promoted after measuring zero corpus
-    // findings) but never `offset.maybe-missing` (held at strict pending the
-    // assertion-helper discharge). Default stays clean for this file.
+    // contracts shows `offset.undeclared` (promoted, zero corpus findings) but
+    // never `offset.maybe-missing` (held at strict, pending assertion-helper discharge).
     let dir = workdir("strict-hidden");
     write(&dir, "a.php", STRICT_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -433,8 +406,8 @@ fn strict_profile_keeps_everything_contracts_shows() {
 
 #[test]
 fn a_guarded_read_is_clean_at_strict() {
-    // The discharge ladder, through the real binary: guarded code must be clean by
-    // PROOF at the strictest surface, or the leg is unusable (issue #51 §3).
+    // The discharge ladder through the real binary: guarded code must be clean
+    // by PROOF at the strictest surface, or the leg is unusable (issue #51 §3).
     let dir = workdir("strict-guarded");
     write(
         &dir,
@@ -454,9 +427,8 @@ fn a_guarded_read_is_clean_at_strict() {
 
 #[test]
 fn a_strict_baseline_entry_is_dormant_on_a_default_run() {
-    // The per-entry capture surface (A-G10). Capture at strict, then run at default:
-    // the entries are dormant, so no `suppress.unmatched` fires — and the default
-    // run stays clean rather than complaining about a surface it never analyzed.
+    // Per-entry capture surface (A-G10): captured-at-strict entries go dormant on
+    // a default run (no `suppress.unmatched`), not stale-complained-about.
     let dir = workdir("strict-baseline");
     write(&dir, "a.php", STRICT_ONLY);
     let set = run_in(&dir, &["check", "--no-php", "--profile", "strict", "--set-baseline", "a.php"]);

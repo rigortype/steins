@@ -1,12 +1,10 @@
 //! The `steins` binary (ADR-0020). `check` walks `.php` files, runs the salsa
-//! pipeline, prints proof-layer diagnostics, and exits 1 if any finding was
-//! reported. `annotate` reprints a single file with a right-margin column of
-//! *proven* inferred facts (the Rigor-style display). `transform`, `effect-diff`,
-//! `doctor`, `version`, and `license` complete the command surface.
+//! pipeline, prints proof-layer diagnostics, exits 1 if any finding was
+//! reported. `annotate` reprints a file with a right-margin *proven*-fact
+//! column. `transform`, `effect-diff`, `doctor`, `version`, `license` complete it.
 
-// The output seam (issue #44) is declared FIRST and `#[macro_use]`d: `outln!` /
-// `out!` / `errln!` are `macro_rules!` macros, which are textually scoped, so
-// every module that writes a byte has to come after this line.
+// Output seam (issue #44), declared first: `outln!`/`out!`/`errln!` are
+// textually-scoped macros, so every module using them must come after this.
 #[macro_use]
 mod out;
 
@@ -18,8 +16,7 @@ mod render;
 mod sarif;
 mod sha256;
 
-// The CLI and wasm playground share `steins_infer::profile`, preserving the
-// no-second-relation discipline for surface selection.
+// Shared with the wasm playground (no-second-relation discipline for surface selection).
 pub(crate) use steins_infer::profile;
 
 use std::collections::{HashMap, HashSet};
@@ -43,10 +40,8 @@ use steins_infer::{
 };
 use steins_syntax::SourceTree;
 
-/// The `text|json` pair `annotate`, `transform` and `effect-diff` share. `check`
-/// has its own [`render::CheckFormat`], which adds the CI renderings (ADR-0054):
-/// those are mappings of *findings*, and the other three commands render
-/// something else entirely (an annotated file, a diff plan, an effect delta).
+/// The `text|json` pair `annotate`, `transform` and `effect-diff` share.
+/// `check` uses its own [`render::CheckFormat`] instead (CI renderings, ADR-0054).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
     Text,
@@ -54,43 +49,19 @@ enum Format {
 }
 
 /// Headroom for the worker thread every subcommand runs on (issue #246).
-///
-/// `SourceTree::parse`'s lowering walkers — `scan_effect_origins` and some thirty
-/// siblings — recurse one frame per CST node, so a deeply nested expression costs
-/// stack in proportion to its nesting depth. Nothing about that recursion is
-/// unbounded: a `$n->next->next…` chain is a finite tree, and the walk terminates.
-/// It just does not fit the OS default stack. Measured on this workspace with such
-/// a chain, the ~8 MiB main thread runs out around 520 levels in a debug build and
-/// around 2,700 in a release one; phpstan-src ships
-/// `tests/bench/data/nullsafe-chain-walk.php` with chains 1,000 levels deep, so a
-/// real file in a real repository sits past the debug ceiling and at roughly 40%
-/// of the release one. `steins check` over it aborted with `fatal runtime error:
-/// stack overflow`.
-///
-/// An abort is the one outcome the Certainty discipline (ADR-0009) leaves no room
-/// for. It is not a finding and not a named silence — it is the loss of the entire
-/// run, including every other file in the project, reported as a bare process
-/// death. Issue #246 ruled that a depth cutoff over a finite input manufactures a
-/// silence nothing calls for, and that ruling is why this is headroom rather than
-/// a budget: the engine still answers the whole question. 256 MiB matches the nsrt
-/// harness's constant (`WORKER_STACK_SIZE` in `xtask/src/nsrt.rs`) and is virtual
-/// address space the OS commits page by page as frames are touched, so a run that
-/// never nests deeply pays nothing for it.
-///
-/// This sizes the *binary*, not the library: steins-syntax still promises no
-/// particular depth to an embedder, and the wasm playground — whose shadow stack
-/// is fixed at link time and cannot be grown from inside — is not covered here.
+/// CST-walking recursion costs one stack frame per nesting level; this
+/// workspace overflowed the ~8 MiB OS default around 520 levels in debug,
+/// ~2,700 in release — under phpstan-src's 1,000-level chain-walk fixture. A
+/// stack-overflow abort loses the whole run (ADR-0009), so #246 chose
+/// headroom over a depth cutoff. 256 MiB matches the nsrt harness's
+/// `WORKER_STACK_SIZE` (`xtask/src/nsrt.rs`), costing nothing when unused.
+/// Sizes the binary only — steins-syntax and the wasm playground aren't covered.
 const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    // Every command's verdict passes through the output seam on its way out
-    // (issue #44): `out::finish` flushes stdout and decides what a failed write
-    // does to the exit code. A closed reader leaves `code` alone — see `out`.
-    //
-    // `dispatch` runs on a worker thread sized per `WORKER_STACK_SIZE` rather than
-    // on `main`'s default-sized OS stack — see that constant's doc. Every
-    // subcommand parses, so the sizing belongs here rather than in `run_check`.
+    // Output seam (issue #44): `out::finish` flushes stdout, maps write failure
+    // to exit code. Worker thread sized per `WORKER_STACK_SIZE` (see its doc).
     let code = std::thread::Builder::new()
         .stack_size(WORKER_STACK_SIZE)
         .spawn(move || dispatch(&args))
@@ -138,38 +109,25 @@ fn dispatch(args: &[String]) -> ExitCode {
     }
 }
 
-/// Steins' own terms, embedded (#43). The release archive ships `LICENSE`
-/// beside the binary, but nothing downstream guarantees the two stay together:
-/// the Homebrew formula installs the executable and the third-party notices and
-/// **not** this file, and `cargo install --git` produces a bare binary. Apache-2.0
-/// §4(a) requires a recipient to get a copy of the License, so the binary carries
-/// one rather than depending on a packager to.
+/// Steins' own terms, embedded (#43): Homebrew and `cargo install --git` both
+/// produce a binary with no `LICENSE` file, and Apache-2.0 §4(a) requires one.
 const LICENSE_APACHE: &str = include_str!("../../../LICENSE");
 
-/// The bundled dependencies' notices, embedded for the same reason — their
-/// MIT/BSD/ISC terms require the notice to accompany a binary distribution.
-/// Generated by `cargo xtask licenses`; the CI drift guard keeps it current.
+/// Bundled dependencies' notices (their MIT/BSD/ISC terms require it).
+/// Generated by `cargo xtask licenses`; a CI drift guard keeps it current.
 const THIRD_PARTY_LICENSES: &str = include_str!("../../../THIRD-PARTY-LICENSES.md");
 
-/// PHPStan's own MIT notice. PHPStan is not a Rust dependency compiled into
-/// this binary — `cargo xtask licenses` has nothing to discover — so unlike
-/// [`THIRD_PARTY_LICENSES`] the generator can never carry it, and it would
-/// otherwise be missing from `steins license` even though Steins takes it as
-/// its direct model and borrows many rules straight from it (README
-/// "Acknowledgments"). Embedded the same way as [`LICENSE_APACHE`] so the
-/// guarantee holds for a bare binary with no accompanying files.
+/// PHPStan's own MIT notice — not a Rust dependency, so the generator can't
+/// discover it; embedded by hand to credit Steins' direct model (README).
 const LICENSE_PHPSTAN: &str = include_str!("../../../LICENSE-PHPSTAN");
 
-/// The `version` banner: what this binary is, which tree it was built from, and
-/// where to read the licenses. Build date and revision come from `build.rs` and
-/// degrade to `unknown` outside a git working tree.
+/// The `version` banner. Build date/revision come from `build.rs`, degrading
+/// to `unknown` outside a git working tree.
 fn version_text() -> String {
     format!(
         concat!(
             "steins {} ({} revision {}) - {}\n",
-            // The holder is the one README's copyright notice states; the crate's
-            // `authors` field carries only the individual, so `TypedDuck` is named
-            // here rather than silently narrowing the notice.
+            // `authors` carries only the individual; README names `TypedDuck`.
             "Copyright (c) TypedDuck, {}\n",
             "    Built with the help of many third-party libraries.\n",
             "    Run `steins license` to see all dependencies and their licenses.",
@@ -182,17 +140,9 @@ fn version_text() -> String {
     )
 }
 
-/// The `license` output: Steins' own Apache-2.0 terms, PHPStan's MIT notice,
-/// then every bundled dependency's notice. All three are embedded, so this
-/// works for a binary with no accompanying files at all.
-///
-/// Apache-2.0's text appears twice across the two documents — once as Steins'
-/// own terms and once among the dependencies that use it. That is deliberate:
-/// `THIRD-PARTY-LICENSES.md` also ships as a standalone file, and a downstream
-/// packager may install it *without* `LICENSE` (the Homebrew formula does
-/// exactly that), so its Apache-2.0 section has to stand on its own rather than
-/// point at a copy that may not be there. Self-sufficiency is a compliance
-/// property; non-duplication is only tidiness.
+/// The `license` output: Steins' Apache-2.0 terms, PHPStan's MIT notice, then
+/// every dependency notice. Apache-2.0 appears twice deliberately (standalone
+/// `THIRD-PARTY-LICENSES.md` ships without `LICENSE`, Homebrew).
 fn license_text() -> String {
     format!(
         "steins {} — open source licenses\n{}\n\n\
@@ -215,37 +165,30 @@ fn print_version() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `license` / `licenses`. The text runs into the thousands of lines (three
-/// embedded license bodies plus every dependency notice — see [`mod@out`]'s
-/// module docs), so on an interactive terminal it is worth paging rather than
-/// scrolling past. Piped or redirected output (`| head`, `> file`, CI logs)
-/// keeps going straight to stdout unchanged, through the same EPIPE-safe seam
-/// every other command uses.
+/// `license` / `licenses`. Thousands of lines, so an interactive terminal
+/// pages it; piped/redirected output goes straight to stdout (EPIPE-safe
+/// seam, see [`mod@out`]).
 fn print_license() -> ExitCode {
     let text = license_text();
     let pager = std::env::var("PAGER").ok();
     if should_page(out::stdout_is_terminal(), pager.as_deref()) {
-        // `should_page` only returns true when `pager` is `Some` and non-blank.
+        // `should_page` confirmed `pager` is non-blank.
         return page_through(pager.as_deref().expect("should_page confirmed a pager"), &text);
     }
     out!("{text}");
     ExitCode::SUCCESS
 }
 
-/// Whether `print_license` should route through a pager: only when stdout is
-/// an interactive terminal *and* `$PAGER` names a non-blank command. Split out
-/// as a pure function (rather than inlined behind `is_terminal()`) so the
-/// decision itself — as opposed to the terminal and the pager process, which
-/// no unit test can fake — is covered by `tests::pager_policy` below.
+/// Whether to page: an interactive terminal AND a non-blank `$PAGER`. A pure
+/// function so the decision (not the untestable terminal/process) is covered
+/// by `tests::pager_policy`.
 fn should_page(stdout_is_terminal: bool, pager: Option<&str>) -> bool {
     stdout_is_terminal && pager.is_some_and(|p| !p.trim().is_empty())
 }
 
-/// Spawn `pager` (a shell command line, e.g. `less` or `less -R`) through `sh
-/// -c` and write `text` to its stdin, letting it draw directly to the
-/// terminal it inherits from us. If it cannot even be spawned (a typo'd
-/// `$PAGER`), fall back to printing `text` directly rather than losing the
-/// output entirely.
+/// Spawn `pager` (e.g. `less -R`) via `sh -c` and write `text` to its stdin.
+/// If it cannot even be spawned (a typo'd `$PAGER`), print `text` directly
+/// instead of losing the output.
 fn page_through(pager: &str, text: &str) -> ExitCode {
     let mut child = match std::process::Command::new("sh")
         .arg("-c")
@@ -261,10 +204,7 @@ fn page_through(pager: &str, text: &str) -> ExitCode {
         }
     };
     if let Some(mut stdin) = child.stdin.take() {
-        // A pager that quits before reading everything (`q` in `less`) closes
-        // its stdin first — that is a reader finishing early, not a failure
-        // (the same EPIPE policy the direct-stdout seam in `out` documents),
-        // so the write error is swallowed rather than reported.
+        // A pager quitting early (`q`) closes stdin first, same EPIPE policy as `out`.
         let _ = stdin.write_all(text.as_bytes());
     }
     match child.wait() {
@@ -281,10 +221,8 @@ fn page_through(pager: &str, text: &str) -> ExitCode {
 }
 
 fn run_check(args: &[String]) -> ExitCode {
-    // `None` until `--format` names one: the flag's *absence* is what
-    // auto-detection reads (ADR-0054 §6), so it cannot be pre-filled with a
-    // default here or an explicit `--format text` would be indistinguishable
-    // from no flag at all inside GitHub Actions.
+    // `None` until `--format` names one: absence is what auto-detection reads
+    // (ADR-0054 §6), so a default here would defeat GitHub Actions detection.
     let mut format: Option<render::CheckFormat> = None;
     let mut no_php = false;
     let mut no_tolerated_effects = false;
@@ -302,9 +240,7 @@ fn run_check(args: &[String]) -> ExitCode {
                 no_php = true;
                 i += 1;
             }
-            // The ADR-0084 §1 audit switch: judge with an empty tolerance and every
-            // discharged finding comes back. The attribution table is still parsed —
-            // it is fact, not policy, and nothing about it depends on this flag.
+            // ADR-0084 §1 audit switch: empties tolerance; attribution table unaffected.
             "--no-tolerated-effects" => {
                 no_tolerated_effects = true;
                 i += 1;
@@ -360,19 +296,16 @@ fn run_check(args: &[String]) -> ExitCode {
         }
     }
 
-    // Auto-detection (ADR-0054 §6): an explicit `--format` always wins; with no
-    // flag the environment may name a *consumer* (GitHub Actions), and then only
-    // the spelling changes — surface, profile, pipeline and exit code are
-    // untouched by detection.
+    // Auto-detection (ADR-0054 §6): explicit `--format` wins, else env may
+    // name a consumer (GitHub Actions) — only the spelling changes.
     let format = format.unwrap_or_else(render::detect_from_env);
 
     if paths.is_empty() {
         errln!("steins: no paths given");
         return ExitCode::from(2);
     }
-    // `--set-baseline` writes a suppression file instead of reporting; `--fix`
-    // rewrites the analyzed sources. Combining the two has no coherent meaning
-    // (which state would the baseline capture?), so it is a usage error.
+    // `--set-baseline` and `--fix` cannot combine (ambiguous which state the
+    // baseline would capture) — usage error.
     if fix_requested && set_baseline {
         errln!("steins: --fix cannot be combined with --set-baseline");
         return ExitCode::from(2);
@@ -383,20 +316,14 @@ fn run_check(args: &[String]) -> ExitCode {
 
     let files = collect_files(&paths);
 
-    // Coverage posture (ADR-0004): with `--no-php` the run is the sound subset,
-    // surfaced up front as a startup notice. Without the flag we fold via a
-    // lazily-spawned sidecar (spawned only on the first foldable call); if `php`
-    // turns out to be unavailable, the folder emits the same notice itself.
+    // Coverage posture (ADR-0004): `--no-php` runs the sound subset (notice up
+    // front); otherwise folds via a lazily-spawned sidecar.
     if no_php {
         errln!("{SOUND_SUBSET_NOTICE}");
     }
 
-    // Parse `./steins.toml` ONCE, up front, before any analysis (ADR-0050 §7 /
-    // ADR-0052 §5 N2): a malformed file — including an unknown key in `[runtime]`,
-    // which `deny_unknown_fields` rejects — is a HARD config error (exit 2), never
-    // a warn-and-proceed. Silently proceeding on defaults would let a `warning-hadler`
-    // typo leave the safe default in force while the user believed they had overridden
-    // it. A missing file is `None` (the built-in defaults govern).
+    // Parse `./steins.toml` once, up front (ADR-0050 §7/ADR-0052 §5 N2): a
+    // malformed file (incl. an unknown `[runtime]` key) is exit 2, never warn-and-proceed.
     let config = match read_steins_config() {
         Ok(c) => c,
         Err(e) => {
@@ -410,9 +337,8 @@ fn run_check(args: &[String]) -> ExitCode {
     };
     let effects_policy = effects_from_config(effects_cfg, no_tolerated_effects);
 
-    // The active display surface (ADR-0050 §5): resolve the selected profile before
-    // any analysis so a config error fails fast (exit 2). Precedence: the
-    // `--profile` flag beats `[check] profile` beats the built-in `default`.
+    // Active display surface (ADR-0050 §5), resolved before analysis (config
+    // error fails fast, exit 2). Precedence: `--profile` > `[check] profile` > `default`.
     let (config_profile, profile_configs) = profiles_from_config(check_cfg, profile_tbl);
     let selected = profile_flag.as_deref().or(config_profile.as_deref());
     let surface = match profile_configs.resolve(selected) {
@@ -423,23 +349,18 @@ fn run_check(args: &[String]) -> ExitCode {
         }
     };
 
-    // One folder for the whole run: it owns the resident sidecar and the fold
-    // memo, so a repeated call across files never re-spawns or re-folds.
+    // One folder for the whole run: owns the sidecar + fold memo, so repeated
+    // calls across files never re-spawn or re-fold.
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
 
-    // Project mode (ADR-0009/0015): all `.php` files across the given paths form
-    // ONE project (one salsa DB), so cross-file calls, class chains, and effects
-    // resolve. `texts` keeps each file's contents by diagnostic path so the
-    // baseline hash can read the flagged line's neighborhood (ADR-0022).
+    // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
+    // DB) so cross-file calls, class chains, effects resolve.
     let loaded = load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
-    // The declared target PHP range (issue #28) gates the folder's absence
-    // family and curated-fact admission; the checker reads it from the layout.
+    // Target PHP range (issue #28) gates the folder's absence family and curated facts.
     folder.set_php_target(loaded.layout.php_target().cloned());
-    // `[runtime]` pseudo-constants (ADR-0037 §2): the boot truth the checker cannot
-    // observe from source (e.g. `warning-handler = "null"`). Parsed above with the
-    // rest of the config; an unknown *value* on a known key still warns and keeps the
-    // safe default (a parse error already exited 2).
+    // `[runtime]` pseudo-constants (ADR-0037 §2): an unknown value on a known
+    // key warns and keeps the safe default (a parse error already exited 2).
     let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
     for w in &runtime_warnings {
         errln!("steins: {w}");
@@ -452,15 +373,13 @@ fn run_check(args: &[String]) -> ExitCode {
         postures.final_keyword,
     );
 
-    // The suppression channels, in ADR-0050 §6 order (vendor → surface → policy →
-    // inline). The baseline is the one channel that stays here in `check`: it is
-    // the CI ratchet, and which file to consult is this command's own argument.
+    // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
+    // inline). Baseline stays here: it's the CI ratchet, this command's own argument.
     let (inline, vendor_suppressed) =
         suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
 
-    // Which baseline file to consult (ADR-0022): `--set-baseline` and an explicit
-    // `--baseline` both name a file; otherwise the default is auto-loaded when it
-    // exists, unless `--ignore-baseline` bypasses it.
+    // Baseline file (ADR-0022): `--set-baseline`/`--baseline` name one
+    // explicitly, else the default auto-loads unless `--ignore-baseline`.
     let baseline_file: Option<PathBuf> = if set_baseline {
         Some(PathBuf::from(baseline_path.as_deref().unwrap_or(baseline::DEFAULT_FILE)))
     } else if ignore_baseline {
@@ -478,11 +397,8 @@ fn run_check(args: &[String]) -> ExitCode {
         return write_baseline(&file, &inline.kept, texts, &surface);
     }
 
-    // Baseline channel: partition the inline survivors into baselined (suppressed,
-    // excluded from exit) and reported. `--ignore-baseline` / no file → all report.
-    // Staleness is surface-aware (ADR-0050 §8): an unconsumed entry outside the
-    // current surface is dormant, not stale. `surface_notice` fires when the active
-    // surface exceeds the captured one (the drowns-loudly rule).
+    // Baseline channel: partitions survivors into baselined (excluded) and
+    // reported; no file → all report. Staleness is surface-aware (ADR-0050 §8).
     let (reported, baselined, stale, surface_notice) = match &baseline_file {
         Some(file) => match std::fs::read_to_string(file) {
             Ok(text) => match_baseline(file, &text, inline.kept, texts, &surface),
@@ -491,34 +407,26 @@ fn run_check(args: &[String]) -> ExitCode {
         None => (inline.kept, 0, 0, None),
     };
 
-    // Displayed = object-level survivors + meta-diagnostics (which are exempt from
-    // both channels). Sorted for deterministic output.
+    // Displayed = survivors + meta-diagnostics (exempt from both channels), sorted.
     let mut displayed = reported;
     displayed.extend(inline.meta);
     displayed.sort_by(|a, b| {
         (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
     });
 
-    // `check --fix` (ADR-0010, the exit ADR-0020 reserves): apply the fix
-    // payloads the displayed findings carry, under the transform engine's
-    // transformed-or-refused discipline (ADR-0034). Without the flag this is
-    // `None` and the run takes no new code path — byte-identical to before.
+    // `check --fix` (ADR-0010): applies fix payloads under ADR-0034's
+    // transformed-or-refused discipline. Without the flag, `None` — unchanged.
     let fix_run = fix_requested.then(|| apply_fixes(db, project, &displayed, texts));
 
-    // A finding whose fix was applied is no longer a finding of the code on
-    // disk: it leaves both the display and the exit computation. Everything
-    // with a payload was applied (the plan is atomic), so the partition key is
-    // simply the payload's presence. A refused or empty fix run keeps every
-    // finding in place.
+    // A fixed finding leaves both display and exit; the plan is atomic, so
+    // payload presence is the partition key.
     let (displayed, fixed): (Vec<Diagnostic>, Vec<Diagnostic>) = match &fix_run {
         Some(run) if run.applied => displayed.into_iter().partition(|d| d.fix.is_none()),
         _ => (displayed, Vec::new()),
     };
 
-    // The render seam (ADR-0054 C1): ONE report, handed to whichever spelling was
-    // selected. Every format sees the same displayed multiset and the same
-    // accounting — format invariance (§1) is a property of this shape, not of
-    // four call sites agreeing.
+    // Render seam (ADR-0054 C1): ONE report handed to whichever format was
+    // selected — format invariance (§1) is a property of this shape.
     let report = render::CheckReport {
         displayed: &displayed,
         fixed: &fixed,
@@ -535,8 +443,7 @@ fn run_check(args: &[String]) -> ExitCode {
     };
     out!("{}", render::render(&report, format));
 
-    // The fix run's stderr accounting, after the report like every maintenance
-    // confirmation (`--set-baseline`, `--apply`).
+    // Fix-run accounting, after the report like other maintenance confirmations.
     if let Some(run) = &fix_run {
         if run.applied {
             errln!(
@@ -551,41 +458,30 @@ fn run_check(args: &[String]) -> ExitCode {
         }
     }
 
-    // Exit level (ADR-0050 §7): 1 iff any *fail*-level finding is displayed; a
-    // warn-only run exits 0 (that is what `warn` means). Config/usage errors already
-    // exited 2 above. Fixed findings are gone from `displayed` (they no longer
-    // exist on disk), so they cannot double as surviving findings here.
+    // Exit level (ADR-0050 §7): 1 iff any fail-level finding is displayed, else
+    // 0 (warn-only); fixed findings are already gone from `displayed`.
     let any_fail = displayed.iter().any(|d| surface.level(d.id) == profile::Level::Fail);
     if any_fail { ExitCode::FAILURE } else { ExitCode::SUCCESS }
 }
 
-/// The outcome of a `check --fix` run. `applied` is true iff the plan's edits
-/// were written to disk; a refusal (post-check regression, an unplannable edit
-/// set, an unreadable target, a failed write) leaves the findings exactly as a
-/// plain run reports them. Nothing is ever dropped silently: every way this can
-/// fail to write is one of the four named reasons.
+/// Outcome of a `check --fix` run. `applied` is true iff edits were written; a
+/// refusal (four named reasons) leaves findings as a plain run reports them.
 struct FixRun {
     applied: bool,
     files_written: usize,
     refusal: Option<FixRefusal>,
 }
 
-/// A named fix refusal (ADR-0034's Refusal discipline, applied to `check
-/// --fix`): a stable machine-readable `reason`, a human `detail`, and — for
-/// the post-check gate — the diagnostics the edits would have surfaced.
+/// A named fix refusal (ADR-0034 Refusal discipline): machine `reason`, human
+/// `detail`, and the diagnostics the edits would have surfaced.
 struct FixRefusal {
     reason: &'static str,
     detail: String,
     new_diagnostics: Vec<Diagnostic>,
 }
 
-/// Apply the fix payloads carried by the displayed findings (ADR-0010):
-/// pour every edit into ONE atomic [`EditPlan`], run the transform engine's
-/// dual-verification post-check (ADR-0034 point 3a — zero new diagnostics or
-/// nothing happens), and only then write. Two findings may carry the SAME
-/// edit — a multi-argument dump emits one finding per argument, all remedied
-/// by the one statement deletion — so identical edits dedupe rather than
-/// colliding as overlaps.
+/// Apply fix payloads (ADR-0010): pour every edit into ONE atomic
+/// [`EditPlan`], run the post-check (ADR-0034 point 3a), then write.
 fn apply_fixes(
     db: &SteinsDatabase,
     project: Project,
@@ -605,13 +501,12 @@ fn apply_fixes(
                 span: ByteSpan::new(e.start, e.end),
                 replacement: e.replacement.clone(),
             };
+            // Findings may share an edit; dedupe rather than collide as overlaps.
             if plan.edits.contains(&edit) {
                 continue;
             }
             if let Err(err) = plan.add_edit(edit) {
-                // Distinct fixes whose edits overlap cannot form one atomic
-                // transaction. No fix family produces this today (statements
-                // do not overlap); refusing beats guessing which one to drop.
+                // Overlapping edits can't be one atomic transaction; refuse rather than guess.
                 return FixRun {
                     applied: false,
                     files_written: 0,
@@ -625,16 +520,8 @@ fn apply_fixes(
         }
     }
 
-    // The post-check gate (ADR-0034 point 3a), verbatim from `transform`: the
-    // edited project is re-analyzed and any diagnostic id whose count rises
-    // refuses the whole write, by name, with the would-be findings attached.
-    //
-    // Measured against the broad surface, as it has been since `check --fix`
-    // landed: a fix-it deletes debug scaffolding and is never *meant* to move
-    // the contract layer, so a new `phpdoc.*` or `throw.*` finding after the
-    // edit is a regression and must veto. Only the envelope-seeding transforms,
-    // whose product *is* a contract, earn the narrow surface — see
-    // [`PostCheckSurface`].
+    // Post-check gate (ADR-0034 point 3a): refuses the write if any id's count
+    // rises. Broad surface — a fix-it must not move the contract layer.
     let postcheck = post_check(db, project, &plan, texts, PostCheckSurface::Everything);
     if !postcheck.ok {
         let n = postcheck.new_diagnostics.len();
@@ -651,13 +538,8 @@ fn apply_fixes(
 
     let mut written = 0usize;
     for path in plan.edited_paths() {
-        // A guard, not a path this run can take: `texts` holds every analyzed
-        // file, and a fix's path is the path of a diagnostic of one of them.
-        // Should that invariant ever break, the splice has no base text — and
-        // skipping the file would be the one silent drop in a surface whose
-        // every other failure is a named refusal: the run would still report
-        // `applied`, and the CLI would partition the finding into `fixed` while
-        // its statement sat untouched on disk. Refuse by name instead.
+        // Guard, not a reachable path: `texts` holds every analyzed file. If
+        // this invariant broke, skipping would silently report `applied`.
         let Some(original) = texts.get(path) else {
             return FixRun {
                 applied: false,
@@ -689,17 +571,13 @@ fn apply_fixes(
 }
 
 /// The `[[policy]]` scoped enable/disable stage (ADR-0050 §6): currently an
-/// identity that keeps the composition order (vendor → surface → policy → inline →
-/// baseline) real.
+/// identity, keeping the vendor→surface→policy→inline→baseline order real.
 fn apply_policy_stage(findings: Vec<Diagnostic>) -> Vec<Diagnostic> {
     findings
 }
 
-/// Write a baseline file from the inline-surviving findings (ADR-0022
-/// `--set-baseline`). Never affects exit code: writing is a maintenance action.
-/// The header records the capture surface (ADR-0050 §8): the active `surface`'s
-/// profile name and resolved id-set, so a later run can tell dormant from stale and
-/// notice when its surface exceeds this one.
+/// Write a baseline file from inline-surviving findings (ADR-0022
+/// `--set-baseline`); never affects exit code. Header records capture surface (ADR-0050 §8).
 fn write_baseline(
     file: &Path,
     findings: &[Diagnostic],
@@ -709,23 +587,15 @@ fn write_baseline(
     let dir = baseline::base_dir(file);
     let entries: Vec<baseline::Entry> = findings
         .iter()
-        // The debug lane (ADR-0053 §4/§8) displays on every profile — `is_surfaced`
-        // says so on purpose (a dump is an answered question, always shown) — but
-        // must NEVER be captured: `surfaces_id`/`surface_ids` already exclude it
-        // from the capture predicate everywhere else, and this filter is what makes
-        // that exclusion hold here too. Without it, a committed `\PHPStan\dumpType()`
-        // (which reaches `inline.kept` because both the surface stage and the inline
-        // channel exempt the debug lane) gets baselined, and a later run reports it
-        // as "1 findings in baseline" at exit 0 — a guaranteed runtime fatal frozen
-        // green (issue #108).
+        // Debug lane (ADR-0053 §4/§8) must NEVER be captured — else a committed
+        // dump baselines and later reports suppressed at exit 0 (issue #108).
         .filter(|d| !matches!(steins_infer::layer(d.id), Some(steins_infer::Layer::Debug)))
         .map(|d| {
             let rel = baseline::relativize(&dir, &d.path);
             let hash = texts
                 .get(&d.path)
                 .map_or_else(String::new, |t| baseline::entry_hash(d.id, &rel, t, d.line));
-            // The per-entry capture rung (ADR-0062 A-G10). `None` at the `default`
-            // rung, so a default capture writes the pre-S6 bytes exactly.
+            // Capture rung (ADR-0062 A-G10): `None` at `default` writes pre-S6 bytes.
             baseline::Entry {
                 id: d.id.to_owned(),
                 path: rel,
@@ -752,14 +622,8 @@ fn write_baseline(
     }
 }
 
-/// Match inline-surviving `findings` against a baseline file's entries. Returns
-/// `(reported, baselined_count, stale_count, surface_notice)`.
-///
-/// Surface-aware (ADR-0050 §8): staleness counts only unconsumed entries whose id
-/// is inside the current `surface` (others are dormant — kept silently). The
-/// `surface_notice` is `Some` when the active surface admits an id the captured
-/// surface (from the header) did not — the "drowns loudly" rule so a
-/// `--profile contracts` run over a default-captured baseline says so.
+/// Match inline-surviving `findings` against a baseline's entries. Returns
+/// `(reported, baselined, stale, surface_notice)`; surface-aware (ADR-0050 §8).
 fn match_baseline(
     file: &Path,
     text: &str,
@@ -773,12 +637,7 @@ fn match_baseline(
     let mut reported = Vec::new();
     let mut baselined = 0usize;
     for d in findings {
-        // The debug lane is exempt from the baseline on the MATCH side too (ADR-0053
-        // §4/§8): "never matched by a baseline entry" is symmetric with "never
-        // captured" (write_baseline, above). A debug finding must always report even
-        // if a stale entry happens to share its `(id, path, hash)` — e.g. a
-        // hand-edited entry — so it bypasses the matcher entirely rather than
-        // consuming (and hiding behind) such an entry.
+        // Debug lane exempt on MATCH too (ADR-0053 §4/§8), symmetric with write_baseline.
         if matches!(steins_infer::layer(d.id), Some(steins_infer::Layer::Debug)) {
             reported.push(d);
             continue;
@@ -793,22 +652,8 @@ fn match_baseline(
             reported.push(d);
         }
     }
-    // Staleness (§8) folds in the debug-layer carve-out. `surface.surfaces_id`
-    // always excludes debug ids (the capture predicate never admits the lane), so
-    // reading it alone would call every leftover debug entry *dormant* — kept,
-    // never reported, forever. That reading fits an id the active surface simply
-    // never looked for; it does not fit a debug entry, which is not "outside this
-    // surface" but a mistake that can never become valid again (the matcher above
-    // bypasses debug findings, so such an entry can never be consumed either).
-    //
-    // A debug entry must surface as stale on EVERY run, not only once the run's
-    // rung reaches its own capture rung — the ADR-0062 A-G10 "not yet analyzed
-    // that surface" reading behind `captured <= rung` does not apply here: a debug
-    // finding is checked unconditionally on every profile (`is_surfaced`), so an
-    // entry captured at `strict` and consulted on a `default` run is just as dead
-    // as one captured at `default` (issue #108). Debug ids therefore ignore
-    // `captured` entirely here, the same way `match_baseline`'s per-finding loop
-    // above ignores it when deciding whether to bypass the matcher.
+    // Debug carve-out (§8): a leftover debug entry surfaces stale on EVERY run,
+    // ignoring `captured` (#108), since `surfaces_id` excludes debug ids.
     let stale = matcher.stale_count_within(|id, captured| {
         if matches!(steins_infer::layer(id), Some(steins_infer::Layer::Debug)) {
             true
@@ -817,9 +662,7 @@ fn match_baseline(
         }
     });
 
-    // The drowns-loudly notice (ADR-0050 §8): ids the current surface admits that
-    // the captured surface did not. A pre-ADR-0050 header (no capture surface) can
-    // not be compared, so no notice fires.
+    // Drowns-loudly notice (ADR-0050 §8): ids the surface admits the header didn't.
     let surface_notice = baseline::parse_header(text).and_then(|captured| {
         let captured_ids: std::collections::HashSet<&str> =
             captured.ids.iter().map(String::as_str).collect();
@@ -841,14 +684,10 @@ fn match_baseline(
 }
 
 /// `steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map>
-/// [--apply] [--asserted-subjects] [--format text|json] <paths...>`
-/// (ADR-0020/0034). Dry-run by default:
-/// prints a unified diff and a refusal report, and runs the dual-verification
-/// post-check (ADR-0034 point 3a — the edited project must produce *zero new
-/// diagnostics*, on the surface that transform names; see [`PostCheckSurface`]).
-/// `--apply`
-/// writes the edited files only after the post-check passes. Exits 2 on usage
-/// error, 1 when the post-check fails, 0 otherwise.
+/// [--apply] [--asserted-subjects] [--format text|json] <paths...>` (ADR-0020/0034).
+/// Dry-run by default: diff + refusal report + post-check (ADR-0034 point 3a,
+/// zero new diagnostics; see [`PostCheckSurface`]). `--apply` writes only
+/// after post-check passes. Exit 2 usage error, 1 post-check fail, 0 else.
 fn run_transform(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut apply = false;
@@ -901,9 +740,8 @@ fn run_transform(args: &[String]) -> ExitCode {
         }
     }
 
-    // Select the transform by subcommand. Everything the name decides — the
-    // planner, the oracle's verb, the post-check surface — lives on
-    // [`TransformKind`], the one table the CLI and the MCP surface share.
+    // Select the transform by subcommand; planner/verb/surface all live on
+    // [`TransformKind`], shared by the CLI and MCP surface.
     let kind = match subcommand.as_deref() {
         Some(name) => match TransformKind::from_id(name) {
             Some(k) => k,
@@ -921,9 +759,8 @@ fn run_transform(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // The opt-in belongs to exactly one transform (the ADR-0076 issue-#175
-    // amendment); on any other it has no defined meaning, so it is a usage
-    // error rather than a silent no-op.
+    // Opt-in belongs to exactly one transform (ADR-0076 issue-#175); on any
+    // other it's a usage error, not a silent no-op.
     if asserted_subjects && !kind.supports_asserted_subjects() {
         errln!("steins: --asserted-subjects applies only to loop-to-array-map");
         return ExitCode::from(2);
@@ -987,10 +824,8 @@ fn run_transform(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Which transform a run drives (ADR-0034). Hoisted out of [`run_transform`] so
-/// the command line and the MCP surface (issue #117) select a transform, name
-/// its oracle verb, and choose its post-check surface from ONE table — the two
-/// entry points cannot disagree about what `throws-envelope` means.
+/// Which transform a run drives (ADR-0034). Shared by the command line and MCP
+/// surface (issue #117) so both agree on what `throws-envelope` means.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum TransformKind {
     Promote,
@@ -1010,8 +845,7 @@ impl TransformKind {
         TransformKind::LoopToArrayMap,
     ];
 
-    /// The stable command id — the `transform` subcommand word, and the
-    /// `transform` argument of the MCP `plan_transform` tool.
+    /// The stable command id: the subcommand word and MCP `plan_transform` argument.
     fn id(self) -> &'static str {
         match self {
             TransformKind::Promote => "phpdoc-to-native",
@@ -1035,8 +869,7 @@ impl TransformKind {
         }
     }
 
-    /// One sentence describing what the transform rewrites — what an agent
-    /// enumerating the surface reads before choosing one.
+    /// One sentence describing what the transform rewrites, for an agent choosing one.
     fn summary(self) -> &'static str {
         match self {
             TransformKind::Promote => {
@@ -1057,38 +890,23 @@ impl TransformKind {
         }
     }
 
-    /// Whether this transform consumes the `--asserted-subjects` opt-in (the
-    /// ADR-0076 issue-#175 amendment). Exactly one does; on every other the
-    /// flag is a usage error, and both entry points (command line and MCP)
-    /// read the answer from here so they cannot disagree.
+    /// Whether this transform consumes `--asserted-subjects` (ADR-0076
+    /// issue-#175). Exactly one does; both entry points read it from here.
     fn supports_asserted_subjects(self) -> bool {
         matches!(self, TransformKind::LoopToArrayMap)
     }
 
-    /// The surface this transform's dual-verification post-check is measured
-    /// against (ADR-0034 point 3a, issue #115). The answer is a property of what
-    /// the transform *does*, so it is named here, once, beside the transform it
-    /// belongs to — and both the command line and the MCP surface route through
-    /// it rather than picking their own.
+    /// The surface this transform's post-check is measured against (ADR-0034
+    /// point 3a, issue #115), named once so the CLI and MCP agree.
     fn post_check_surface(self) -> PostCheckSurface {
         match self {
-            // Rewriting a type in a docblock is not supposed to change what the
-            // docblock promises, so a new contract-layer finding after the edit is a
-            // regression and must veto. Unchanged from before `throws-envelope`.
-            // A loop→`array_map` rewrite is likewise not supposed to move the
-            // contract: it edits statements under a proven-purity precondition and
-            // leaves every docblock alone, so a new contract-layer finding after it
-            // is a regression like any other. It takes the broad net.
+            // Docblock/loop rewrites aren't meant to change the contract — a new
+            // contract-layer finding is a regression, so both take the broad net.
             TransformKind::Promote | TransformKind::Honesty | TransformKind::LoopToArrayMap => {
                 PostCheckSurface::Everything
             }
-            // Seeding an envelope IS a contract change: measuring it against the
-            // contract layer would let the transform veto its own success. Both
-            // envelope-seeding transforms are on this side for the one reason —
-            // an emitted interop envelope (ADR-0082) is precisely what gives
-            // `effect.envelope-exceeded` and `effect.liskov-widened` something to
-            // check, so a new contract-layer finding after it is the product, not
-            // a regression.
+            // Seeding an envelope IS a contract change (ADR-0082): measuring
+            // against the contract layer would let it veto its own success.
             TransformKind::ThrowsEnvelope | TransformKind::EffectsEnvelope => {
                 PostCheckSurface::DefaultOnly
             }
@@ -1096,15 +914,9 @@ impl TransformKind {
     }
 }
 
-/// One planned transform run: the [`TransformReport`] (plan + refusals +
-/// completeness oracle), the dual-verification post-check measured on the
-/// surface the transform names, and the file texts the plan was computed
-/// against.
-///
-/// Producing one writes nothing. Applying it is a separate, later step — that
-/// separation is the interaction model (ADR-0010), not an implementation
-/// detail: `transform --apply` and the MCP `apply_plan` tool both take a run
-/// like this as input and are the only code that reaches the filesystem.
+/// One planned transform run: [`TransformReport`], post-check, file texts.
+/// Producing writes nothing; applying is a separate step (ADR-0010) —
+/// `transform --apply`/MCP `apply_plan` are the only code reaching disk.
 struct TransformRun {
     report: TransformReport,
     postcheck: PostCheck,
@@ -1114,29 +926,20 @@ struct TransformRun {
     notices: Vec<String>,
 }
 
-/// Plan `kind` over `paths` and run its post-check — the dry-run half of the
-/// dry-run → diff → approve → apply loop (ADR-0010), shared by `steins
-/// transform` and the MCP `plan_transform` tool.
-///
-/// `Err` is a config error the caller reports as such (exit 2 on the command
-/// line): overlapping partition path-sets, the one `steins.toml` mistake that
-/// has no defined meaning. A vouch typo is a notice, never an error.
+/// Plan `kind` over `paths` and run its post-check (ADR-0010's dry-run half),
+/// shared by `steins transform` and MCP `plan_transform`. `Err` is a config
+/// error (exit 2): overlapping partition path-sets. A vouch typo is a notice.
 fn plan_transform_run(
     kind: TransformKind,
     paths: &[String],
     config_path: Option<&str>,
     asserted_subjects: bool,
 ) -> Result<TransformRun, String> {
-    // Load the vouching valve (ADR-0046 §2): `steins.toml [transform.vouch]` from
-    // `--config`, else `./steins.toml` if present. A malformed entry is a warning,
-    // never a hard error (the run proceeds with the well-formed entries).
+    // Vouching valve (ADR-0046 §2): `[transform.vouch]`. A malformed entry warns.
     let (vouches, mut notices) = load_vouches(config_path);
 
-    // Load the region map (ADR-0047 §7): `steins.toml [transform.partitions]`. With
-    // no such section this is `None` — the single-region identity, so the transform
-    // is byte-identical to a run with no partition config. An *overlap* in the
-    // declared partition path-sets is a hard config error (unlike a vouch typo),
-    // because a non-disjoint partition claim has no defined region assignment.
+    // Region map (ADR-0047 §7). No section → `None` (single-region identity);
+    // an *overlap* in partition path-sets is a hard error (unlike a vouch typo).
     let partitions = load_partitions(config_path)?;
 
     let files = collect_files(paths);
@@ -1144,18 +947,12 @@ fn plan_transform_run(
         load_project(&files, paths, allow_list_from_disk().as_deref(), effects_policy_from_disk());
     let (db, project) = (&loaded.db, loaded.project);
 
-    // Plan the transform (pure — no writes, no re-check). The region map (ADR-0047)
-    // is threaded into the planners but not yet consumed by any decision, so the
-    // plan is identical with or without it.
+    // Plan the transform (pure — no writes, no re-check).
     let report = match kind {
         TransformKind::Promote => plan_phpdoc_to_native(db, project, &vouches, partitions.as_ref()),
         TransformKind::Honesty => plan_phpdoc_honesty(db, project, &vouches, partitions.as_ref()),
-        // Envelope seeding takes no vouch set: proven escapes are forward facts
-        // of the declaration's own body/callees, so the ADR-0046 §2 caller-
-        // enumerability obstacles (and their vouching valve) have no bearing.
+        // No vouch set: proven escapes are forward facts (ADR-0046 §2 doesn't apply).
         TransformKind::ThrowsEnvelope => plan_throws_envelope(db, project, partitions.as_ref()),
-        // Interop-envelope emission (ADR-0082 §7) takes no vouch set either, and
-        // for the same reason: an effect bound is a forward fact of the body.
         TransformKind::EffectsEnvelope => plan_effects_envelope(db, project, partitions.as_ref()),
         TransformKind::LoopToArrayMap => plan_loop_to_array_map(
             db,
@@ -1166,28 +963,22 @@ fn plan_transform_run(
         ),
     };
 
-    // Vouching an already-benign (or nonexistent) site is a no-op the user should
-    // know about (ADR-0046 §2). Skipped for a transform that consults no vouches
-    // at all — there, silence about an inert section beats a misleading "no-op"
-    // line per entry.
+    // A benign/nonexistent vouched site is a no-op worth reporting (ADR-0046 §2).
     if !matches!(kind, TransformKind::ThrowsEnvelope | TransformKind::EffectsEnvelope) {
         for entry in vouches.unused() {
             notices.push(format!("vouched site `{entry}` matched no dynamic-code obstacle (no-op)"));
         }
     }
 
-    // Dual verification (ADR-0034 point 3a): re-analyze the edited project and
-    // require zero NEW diagnostics vs. the pre-edit baseline. Run in both dry-run
-    // and `--apply`, so a violation is visible before anything is written.
+    // Dual verification (ADR-0034 point 3a): zero NEW diagnostics, both dry-run and `--apply`.
     let postcheck =
         post_check(db, project, &report.plan, &loaded.texts, kind.post_check_surface());
 
     Ok(TransformRun { report, postcheck, texts: loaded.texts, notices })
 }
 
-/// `steins.toml` — the `[transform.vouch]` (ADR-0046 §2) and
-/// `[transform.partitions]` (ADR-0047 §7) sections. Unknown keys are ignored so
-/// the file can carry additional config.
+/// `steins.toml` — `[transform.vouch]` (ADR-0046 §2) and
+/// `[transform.partitions]` (ADR-0047 §7). Unknown keys ignored.
 #[derive(serde::Deserialize, Default)]
 struct SteinsConfig {
     transform: Option<TransformConfig>,
@@ -1209,39 +1000,23 @@ struct SteinsConfig {
     effects: Option<EffectsConfig>,
 }
 
-/// The `[effects]` section (ADR-0084 §1) — the project's tolerated-effects
-/// policy, and deliberately NOT a `[profile.*]` field: ADR-0050 §10's refusal
-/// stands unamended, because a profile selects a display surface while this
-/// changes which findings exist at all.
-///
-/// `deny_unknown_fields`, like `[runtime]` and `[plugins]`: a misspelled key here
-/// (`tolerate` for `tolerated`) would leave the project believing it had declared
-/// a tolerance it has not, and silently reporting thousands of findings it thought
-/// it had discharged is exactly the pollution this section exists to end.
+/// The `[effects]` section (ADR-0084 §1) — tolerated-effects policy. NOT a
+/// `[profile.*]` field (ADR-0050 §10): this changes which findings exist.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct EffectsConfig {
-    /// The labels the envelope judgment discharges. Policy — the only half that
-    /// can change a verdict.
+    /// The labels the envelope judgment discharges — policy.
     #[serde(default)]
     tolerated: Vec<String>,
-    /// `[effects.attribution]`: symbol → the labels its effects are *for*. Fact,
-    /// not policy; inert until `tolerated` names one of its labels. A key is a
-    /// class (every method), a `Class::method`, or a global function. A
-    /// `BTreeMap` so notice order is deterministic.
+    /// `[effects.attribution]`: symbol → labels its effects are *for*. Fact,
+    /// not policy — inert until `tolerated` names its label.
     #[serde(default)]
     attribution: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-/// The `[doctor]` section (ADR-0054 §14, issue #268): `require = [...]` names
-/// posture facts doctor otherwise only *reports* (exit 0) and turns a violation
-/// into doctor's exit 1 — the lenient-default escape hatch point 10 promised
-/// ("teams that want environment facts to fail... get it the lenient-default way").
-/// `deny_unknown_fields` so a misspelled key under `[doctor]` (e.g. `requries`) is
-/// a hard parse error, the same posture `[runtime]`/`[plugins]` already take;
-/// an unknown *name inside* `require` is validated separately by
-/// `doctor::known_assertions` (ADR-0054 §10's config-contradiction lane, since the
-/// string is data, not a struct field serde can gate).
+/// The `[doctor]` section (ADR-0054 §14, issue #268): `require = [...]` turns
+/// posture facts doctor otherwise only reports into its exit 1. An unknown
+/// name inside `require` is validated by `doctor::known_assertions`.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct DoctorConfig {
@@ -1249,27 +1024,19 @@ struct DoctorConfig {
     require: Vec<String>,
 }
 
-/// The `[paths]` section (issue #181) — `steins.toml`'s config channel for a
-/// project with no `composer.json` at all. Consulted only at the vendor floor
-/// (see `layout::ProjectLayout::with_extra_vendor_dirs`), so a project a
-/// governing manifest already answers for needs none of this: zero-config for
-/// Composer projects is unaffected either way.
+/// The `[paths]` section (issue #181): config channel for a project with no
+/// `composer.json`, consulted only at the vendor floor.
 #[derive(serde::Deserialize, Default)]
 struct PathsConfig {
-    /// Extra vendor directory-name sequences, `/`-separated
-    /// (`"3rdparty"`, `"lib/vendor"`), matched whole-component like the `vendor`
-    /// literal — `vendor_proj/` and `vendor.php` never match.
+    /// Extra vendor directory-name sequences, `/`-separated, matched
+    /// whole-component like `vendor` (`vendor_proj/` never matches).
     #[serde(rename = "vendor-dirs", default)]
     vendor_dirs: Vec<String>,
 }
 
-/// The `[plugins]` section (ADR-0039 discovery, ADR-0068 §2 ownership).
-///
-/// `allow = ["acme/steins-plugin"]` **replaces** `installed.json` discovery with
-/// exactly these Composer package names — the explicit listing wins, which is why
-/// `allow = []` is a meaningful value (load nothing) rather than a missing one.
-/// Listing a plugin also vouches for its identity, lifting the vendor-root rule on
-/// the labels it may register.
+/// The `[plugins]` section (ADR-0039/ADR-0068 §2). `allow = [...]`
+/// **replaces** `installed.json` discovery, so `allow = []` loads nothing.
+/// Listing a plugin also vouches for it, lifting the vendor-root label rule.
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct PluginsConfig {
@@ -1277,17 +1044,14 @@ struct PluginsConfig {
     allow: Vec<String>,
 }
 
-/// The `[check]` section (ADR-0050 §5): repo defaults for `steins check`. It
-/// carries the default profile name; the `--profile` flag beats it (§5).
+/// The `[check]` section (ADR-0050 §5): default profile name; `--profile` beats it.
 #[derive(serde::Deserialize, Default)]
 struct CheckConfig {
     profile: Option<String>,
 }
 
-/// A `[profile.<name>]` entry (ADR-0050 §5): `extends` a base and refines it with
-/// ADR-0022 prefix id-arrays. Facet selection is not accepted here in v1 (the
-/// deferred-with-design lenient path, §4/§11): a facet-shaped token in any array is
-/// an unknown id pattern and errors clearly.
+/// A `[profile.<name>]` entry (ADR-0050 §5): `extends` a base, refines with
+/// ADR-0022 prefix id-arrays. Facet tokens error as unknown id patterns (v1).
 #[derive(serde::Deserialize, Default)]
 struct ProfileEntryConfig {
     extends: Option<String>,
@@ -1299,35 +1063,22 @@ struct ProfileEntryConfig {
     warn: Vec<String>,
 }
 
-/// The `[runtime]` section (ADR-0037 §2): boot-truth pseudo-constants the checker
-/// cannot observe from source. `deny_unknown_fields` makes a misspelled key a hard
-/// parse error — a security-relevant knob (a silently-ignored `warning-handler` typo
-/// would leave the safe default in force while the user believed otherwise). This is
-/// also where the abolished `zend-assertions` key now lands: the 2026-07-25 owner
-/// ruling reads `assert($expr)` as a throw-guard (Verified unconditionally), so a
-/// `steins.toml` still carrying `zend-assertions` is an unknown-key config error
-/// (exit 2) — the correct hard-config-error outcome. Reserved keys for future runtime
-/// pseudo-constants (ADR-0049's `include-path`, `sapi`) join here as they land.
+/// The `[runtime]` section (ADR-0037 §2): boot-truth pseudo-constants the
+/// checker can't observe from source. `deny_unknown_fields` so a typo can't
+/// silently keep the safe default. Abolished `zend-assertions` also lands
+/// here as an unknown-key error (2026-07-25: `assert()` is a throw-guard).
 #[derive(serde::Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 struct RuntimeConfig {
-    /// `warning-handler = "abort" | "null"` (ADR-0049 §7 amendment): what a proven
-    /// `E_WARNING` *does* at runtime. Default (or absence) is `"abort"` — the
-    /// owner-confirmed realistic-app assumption that a handler converts the warning to
-    /// an exception / halts, so proven warning-grade offset findings emit. `"null"`
-    /// declares the app tolerates the warning: those findings leave the proof surface
-    /// and stay silent.
+    /// `warning-handler = "abort" | "null"` (ADR-0049 §7): what a proven
+    /// `E_WARNING` does at runtime. Default `"abort"` emits proven
+    /// warning-grade findings; `"null"` silences them (app tolerates it).
     #[serde(rename = "warning-handler", default)]
     warning_handler: Option<String>,
-    /// `final-keyword = "enforced" | "stripped"` (issue #234): what the runtime this
-    /// project is analyzed for *does* with the `final` keyword. Default (or absence)
-    /// is `"enforced"` — the language's own rule, so a `final` class admits no
-    /// subtype and an intersection carrying a final arm is uninhabited. `"stripped"`
-    /// declares a loader that removes the keyword before the engine compiles the
-    /// class (`dg/bypass-finals` rewrites the source in a stream wrapper), which is
-    /// what makes `FinalClass&MockObject` a real type under a test harness. See
-    /// [`steins_infer::FinalKeyword`] for what the posture deliberately does not
-    /// license — `readonly`, and the `final` diagnostics, are untouched.
+    /// `final-keyword = "enforced" | "stripped"` (issue #234): default
+    /// `"enforced"` is PHP's own rule; `"stripped"` declares a loader that
+    /// strips it (e.g. `dg/bypass-finals`), making `FinalClass&MockObject`
+    /// real under test. See [`steins_infer::FinalKeyword`].
     #[serde(rename = "final-keyword", default)]
     final_keyword: Option<String>,
 }
@@ -1345,24 +1096,22 @@ struct VouchConfig {
     sites: Vec<String>,
 }
 
-/// The `[transform.partitions]` section (ADR-0047 §7): declared observer globs and
-/// the `[transform.partitions.sets]` name→glob-list table. Region assignment is a
-/// pure function of these plus the file path ([`PartitionMap`]).
+/// The `[transform.partitions]` section (ADR-0047 §7): observer globs and the
+/// name→glob-list `sets` table. Region assignment is a pure function of these
+/// plus the file path ([`PartitionMap`]).
 #[derive(serde::Deserialize, Default)]
 struct PartitionsConfig {
     /// Observer path-sets (tests, dev-scripts; ADR-0047 §1).
     #[serde(default)]
     observers: Vec<String>,
-    /// Partition name → glob list. A `BTreeMap` gives deterministic iteration;
-    /// partitions are disjoint (validated), so order never affects assignment.
+    /// Partition name → glob list; `BTreeMap` for deterministic iteration.
     #[serde(default)]
     sets: std::collections::BTreeMap<String, Vec<String>>,
 }
 
-/// Load the vouching valve from `steins.toml` (ADR-0046 §2). Reads `--config` when
-/// given, else `./steins.toml` if it exists (a missing default file is silently
-/// no vouches). Returns the [`VouchSet`] plus human warnings for a missing
-/// explicit `--config`, a parse error, or a malformed `file:line` entry.
+/// Load the vouching valve from `steins.toml` (ADR-0046 §2): `--config` else
+/// `./steins.toml`. Returns [`VouchSet`] plus warnings for a missing explicit
+/// `--config`, parse error, or malformed `file:line` entry.
 fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
     let mut warnings = Vec::new();
     let (path, explicit) = match config_path {
@@ -1403,56 +1152,41 @@ fn load_vouches(config_path: Option<&str>) -> (VouchSet, Vec<String>) {
 }
 
 /// The tolerated-effects policy from an already-parsed config (ADR-0084 §1).
-/// `no_tolerated` is `steins check --no-tolerated-effects`, the audit switch: it
-/// empties the tolerance for the run while leaving the attribution table in place,
-/// because attribution is fact and only the tolerance is policy.
+/// `no_tolerated` (`--no-tolerated-effects`) empties tolerance while leaving
+/// attribution in place — attribution is fact, tolerance is policy.
 fn effects_from_config(effects: Option<EffectsConfig>, no_tolerated: bool) -> EffectsPolicy {
     let effects = effects.unwrap_or_default();
     let policy = EffectsPolicy::new(effects.tolerated, effects.attribution);
     if no_tolerated { policy.without_tolerance() } else { policy }
 }
 
-/// [`effects_from_config`] for the surfaces that do not already hold a parsed
-/// config, read the same lenient way [`allow_list_from_disk`] reads the plugin
-/// allow-list: `check`/`doctor` are the surfaces that turn a malformed
-/// `steins.toml` into exit 2, and they run first.
+/// [`effects_from_config`] for surfaces without an already-parsed config, as
+/// leniently as [`allow_list_from_disk`] reads the plugin allow-list.
 fn effects_policy_from_disk() -> EffectsPolicy {
     effects_from_config(read_steins_config().ok().flatten().and_then(|c| c.effects), false)
 }
 
-/// The `[plugins] allow` list from an already-parsed config: `Some(names)` when
-/// the section is present (an empty list is a deliberate "load nothing"), `None`
-/// when it is absent, which leaves `installed.json` discovery in charge.
+/// The `[plugins] allow` list: `Some(names)` when present (`[]` deliberately
+/// loads nothing), `None` when absent (`installed.json` discovery in charge).
 fn allow_list(plugins: Option<PluginsConfig>) -> Option<Vec<String>> {
     plugins.map(|p| p.allow)
 }
 
-/// [`allow_list`] for the surfaces that do not already hold a parsed config
-/// (`annotate`, `effect-diff`, `transform`). Leniently: a `steins.toml` that does
-/// not parse leaves discovery in charge here, because `check`/`doctor` are the
-/// surfaces that turn a malformed config into exit 2, and they run first.
+/// [`allow_list`] for surfaces without an already-parsed config. Lenient: an
+/// unparseable `steins.toml` leaves discovery in charge.
 fn allow_list_from_disk() -> Option<Vec<String>> {
     allow_list(read_steins_config().ok().flatten().and_then(|c| c.plugins))
 }
 
-/// The `[paths] vendor-dirs` list from `./steins.toml` (issue #181), read the
-/// same lenient way [`allow_list_from_disk`] reads `[plugins] allow`: a missing
-/// or unparseable file yields no extra dirs rather than blocking the run.
-/// `check`/`doctor` already turn a malformed `steins.toml` into exit 2 before
-/// this is ever consulted; the other surfaces (`annotate`, `effect-diff`,
-/// `transform`) treat this config exactly as permissively as they already treat
-/// the plugin allow-list.
+/// `[paths] vendor-dirs` (issue #181), read as leniently as
+/// [`allow_list_from_disk`]: missing/unparseable → no extra dirs.
 fn vendor_dirs_from_disk() -> Vec<String> {
     read_steins_config().ok().flatten().and_then(|c| c.paths).map(|p| p.vendor_dirs).unwrap_or_default()
 }
 
 /// Load the plugin channel (ADR-0068) for `layout`, reporting every load-time
-/// refusal on stderr.
-///
-/// A rejected label, an unsupported `steins-plugin-api`, a package with no
-/// manifest: each is one line, naming the plugin. Never a diagnostic — the zero-FP
-/// banner covers what Steins proves about the user's code, and a third party's
-/// packaging mistake is not that. Silence names itself instead.
+/// refusal on stderr. Never a diagnostic — the zero-FP banner covers the
+/// user's code, not a third party's packaging mistake.
 fn load_plugins(layout: &ProjectLayout, allow: Option<&[String]>) -> PluginFacts {
     let facts = PluginFacts::discover(layout, allow);
     for notice in facts.notices() {
@@ -1462,20 +1196,9 @@ fn load_plugins(layout: &ProjectLayout, allow: Option<&[String]>) -> PluginFacts
 }
 
 /// Read and parse `./steins.toml` once for `check`/`doctor` (ADR-0050 §7 /
-/// ADR-0052 §5 N2). Returns:
-///
-/// * `Ok(None)` — no `steins.toml` (the built-in defaults govern);
-/// * `Ok(Some(config))` — the parsed config;
-/// * `Err(message)` — the file exists but does not parse. A malformed file,
-///   INCLUDING an unknown key in `[runtime]` (`RuntimeConfig` uses
-///   `deny_unknown_fields`), is a hard config error the caller maps to exit 2 —
-///   never a warn-and-proceed. This is the one place `steins.toml` leniency is the
-///   wrong default: a silently-ignored `warning-hadler` typo would leave the safe
-///   runtime default in force while the user believed they had overridden it. (The
-///   abolished `zend-assertions` key reaches the same exit-2 path, as intended.)
-///
-/// Transform's `--config` path keeps its own lenient loaders (`load_vouches` /
-/// `load_partitions`, ADR-0046 §2): a vouch typo must not stop a transform run.
+/// ADR-0052 §5 N2). `Ok(None)`: no file. `Err`: doesn't parse, INCLUDING an
+/// unknown `[runtime]` key — a hard error (exit 2), never warn-and-proceed.
+/// Transform's `--config` keeps its own lenient loaders (ADR-0046 §2).
 fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
     let path = PathBuf::from("steins.toml");
     let text = match std::fs::read_to_string(&path) {
@@ -1487,30 +1210,23 @@ fn read_steins_config() -> Result<Option<SteinsConfig>, String> {
         .map_err(|e| format!("{}: parse error ({e})", path.display()))
 }
 
-/// The `[runtime]` pseudo-constants a run analyses under (ADR-0037 §2), resolved
-/// from `steins.toml` by [`runtime_from_config`]. One value per declared boot
-/// truth; every slot has a safe default, so a project with no `[runtime]` section
-/// and a project that spells every key at its default resolve to the same value.
+/// The `[runtime]` pseudo-constants a run analyzes under (ADR-0037 §2). Every
+/// slot has a safe default, resolved by [`runtime_from_config`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RuntimePostures {
     /// `warning-handler` (ADR-0049 §7 amendment): `true` for `"abort"`.
     warning_handler_abort: bool,
-    /// `final-keyword` (issue #234). Consumed by the inhabitance judgment in
-    /// steins-contract; `doctor` reports it, and the checker picks it up when
-    /// intersection consumption lands (issue #238).
+    /// `final-keyword` (issue #234), consumed by steins-contract's inhabitance judgment.
     final_keyword: FinalKeyword,
 }
 
-/// Derive the `[runtime]` pseudo-constants (ADR-0037 §2 family) from the
-/// already-parsed config. Returns the [`RuntimePostures`] plus human warnings for
-/// an unrecognized *value* on a known key (a parse error / unknown key already
-/// exited 2 in [`read_steins_config`]). Absence is the safe default in every slot:
-/// `warning-handler = "abort"` (ADR-0049 §7) and `final-keyword = "enforced"`
-/// (issue #234), which together are byte-identical to declaring no section at all.
+/// Derive the `[runtime]` pseudo-constants from the already-parsed config.
+/// Returns [`RuntimePostures`] plus warnings for an unrecognized value on a
+/// known key. Absence defaults to `"abort"`/`"enforced"`.
 fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePostures, Vec<String>) {
     let mut warnings = Vec::new();
     let runtime = runtime.unwrap_or_default();
-    // Default "abort": a proven E_WARNING is a proven runtime break (ADR-0049 §7).
+    // Default "abort" (ADR-0049 §7): a proven E_WARNING is a runtime break.
     let warning_handler_abort = match runtime.warning_handler.as_deref() {
         None | Some("abort") => true,
         Some("null") => false,
@@ -1521,8 +1237,7 @@ fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePostures, Vec<
             true
         }
     };
-    // Default "enforced": PHP's own rule. Only an explicit declaration says the
-    // analyzed runtime rewrites the keyword away (issue #234).
+    // Default "enforced" is PHP's own rule (issue #234).
     let final_keyword = match runtime.final_keyword.as_deref() {
         None | Some("enforced") => FinalKeyword::Enforced,
         Some("stripped") => FinalKeyword::Stripped,
@@ -1537,10 +1252,8 @@ fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePostures, Vec<
 }
 
 /// Derive the profile selection and user-profile table from the already-parsed
-/// config (ADR-0050 §5). Returns the `[check] profile` selection (the repo default;
-/// the `--profile` flag beats it) and the resolved [`profile::ProfileConfigs`] table.
-/// The parse itself already happened in [`read_steins_config`] (a parse error exited
-/// 2 there), so this is a pure decomposition.
+/// config (ADR-0050 §5). Pure decomposition — parsing already happened in
+/// [`read_steins_config`].
 fn profiles_from_config(
     check: Option<CheckConfig>,
     profile: Option<std::collections::BTreeMap<String, ProfileEntryConfig>>,
@@ -1564,14 +1277,9 @@ fn profiles_from_config(
     (selected, profile::ProfileConfigs(map))
 }
 
-/// Load the region map from `steins.toml [transform.partitions]` (ADR-0047 §7).
-/// Reads `--config` when given, else `./steins.toml` if present.
-///
-/// Returns `Ok(None)` — the single-region identity — when the file is missing,
-/// unparseable (the vouch loader already surfaces the parse warning), or carries
-/// no `[transform.partitions]` section; a run with no partition config is then
-/// byte-identical to today's behavior. Returns `Err` only for a genuine config
-/// error: overlapping partition path-sets (which have no defined assignment).
+/// Load the region map from `[transform.partitions]` (ADR-0047 §7). `Ok(None)`
+/// (single-region identity) when missing/unparseable/no section. `Err` only
+/// for overlapping partition path-sets (no defined assignment).
 fn load_partitions(config_path: Option<&str>) -> Result<Option<PartitionMap>, String> {
     let path = match config_path {
         Some(p) => PathBuf::from(p),
@@ -1580,15 +1288,14 @@ fn load_partitions(config_path: Option<&str>) -> Result<Option<PartitionMap>, St
     let Ok(text) = std::fs::read_to_string(&path) else {
         return Ok(None);
     };
-    // A parse error is already reported by `load_vouches`; proceed as identity here
-    // rather than double-warning.
+    // Parse error already reported by `load_vouches`; proceed as identity.
     let Ok(config) = toml::from_str::<SteinsConfig>(&text) else {
         return Ok(None);
     };
     let Some(partitions) = config.transform.and_then(|t| t.partitions) else {
         return Ok(None);
     };
-    // An empty section (no sets, no observers) is still the identity.
+    // Empty section is still the identity.
     if partitions.sets.is_empty() && partitions.observers.is_empty() {
         return Ok(None);
     }
@@ -1597,54 +1304,29 @@ fn load_partitions(config_path: Option<&str>) -> Result<Option<PartitionMap>, St
         .map_err(|e| format!("steins.toml [transform.partitions]: {e}"))
 }
 
-/// The outcome of the dual-verification post-check: whether the edited project is
-/// clean, plus any diagnostics whose per-id count *increased* after the edits.
+/// Outcome of the dual-verification post-check: whether the edit is clean,
+/// plus diagnostics whose per-id count increased.
 struct PostCheck {
     ok: bool,
     new_diagnostics: Vec<Diagnostic>,
 }
 
-/// Which diagnostics a transform's post-check counts as "new" (ADR-0034 point
-/// 3a). Deliberately **not** a global default: the right answer is a property of
-/// what the transform *does*, so every call site names its own and a reader sees
-/// the choice next to the transform it belongs to (issue #115).
+/// Which diagnostics a post-check counts as "new" (ADR-0034 point 3a). Not a
+/// global default — each call site names its own (issue #115).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum PostCheckSurface {
-    /// Every diagnostic the engine produces, vendor-filtered only (ADR-0015) —
-    /// the proof and mechanics layers **and** the opt-up contract layer.
-    ///
-    /// This is the right net for a transform that rewrites documentation without
-    /// meaning to change what the documentation promises. `phpdoc-honesty`'s most
-    /// plausible regression is precisely a new `phpdoc.*` finding, and the
-    /// contract layer is the only thing that would catch it — so it is measured
-    /// against everything, as both phpdoc transforms always have been.
+    /// Every diagnostic, vendor-filtered only (ADR-0015): proof + mechanics +
+    /// contract layer, for transforms not meant to change what docs promise.
     Everything,
-    /// The default display surface alone (proof + mechanics) — what a bare
-    /// `steins check` enforces.
-    ///
-    /// Reserved for a transform whose *product is a contract*, where a new
-    /// contract-layer finding is the intended effect rather than a regression.
-    /// The two envelope-seeding transforms are the ones: seeding an `@throws`
-    /// envelope onto an override gives its ancestor's narrower envelope something
-    /// to be widened against, and seeding a parent gives an existing child
-    /// envelope an abstraction carrier it did not have — both surface
-    /// `throw.liskov-widened` under an opt-up profile. `effects-envelope` is the
-    /// same shape in the effect world (ADR-0082 §7): an emitted interop envelope
-    /// is exactly what gives `effect.envelope-exceeded` / `effect.liskov-widened`
-    /// something to check. Measuring a seed against the contract layer would let
-    /// the transform veto its own success; the safety net that remains is the
-    /// proof layer, the fp-gate discipline transposed to rewriting.
-    ///
-    /// The asymmetry with [`PostCheckSurface::Everything`] is deliberate. It is
-    /// not an inconsistency to smooth away — see the transform-engine spec, and
-    /// the test that pins it by showing the broad surface vetoing a legitimate
-    /// seed.
+    /// The default display surface alone (proof + mechanics). Reserved for
+    /// transforms whose *product is a contract* (seeding `@throws`/effects
+    /// envelopes, ADR-0082 §7): the contract layer would let them veto their
+    /// own success — deliberate asymmetry with [`PostCheckSurface::Everything`].
     DefaultOnly,
 }
 
 impl PostCheckSurface {
-    /// The stable name an agent reads (the MCP `list_transforms` tool reports
-    /// which net each transform is measured against).
+    /// The stable name an agent reads (MCP `list_transforms`).
     fn name(self) -> &'static str {
         match self {
             PostCheckSurface::Everything => "everything",
@@ -1665,15 +1347,9 @@ impl PostCheckSurface {
     }
 }
 
-/// Re-analyze the project with the plan's edits applied and report any diagnostic
-/// id whose count increased (ADR-0034 point 3a). Comparison is by per-id count so
-/// it is robust to the line-number shifts a tag deletion causes; vendor findings
-/// are filtered from both sides, matching `check`'s default (ADR-0015). Shared by
-/// `transform` (both dry-run and `--apply`) and `check --fix`: one gate, one
-/// discipline.
-///
-/// `surface` is the transform's own answer to "new diagnostics on *what*" — see
-/// [`PostCheckSurface`], which carries the reasoning for each choice.
+/// Re-analyze the edited project, report any diagnostic id whose count
+/// increased (ADR-0034 point 3a); vendor-filtered (ADR-0015). Shared by
+/// `transform` and `check --fix`. `surface` — see [`PostCheckSurface`].
 fn post_check(
     db: &SteinsDatabase,
     project: Project,
@@ -1691,16 +1367,14 @@ fn post_check(
         check_project(db, project, &mut NoFold),
     );
 
-    // Build the edited project in a fresh database (avoids salsa mutation subtlety
-    // and keeps the pre-edit query results intact for `before`).
+    // Fresh database avoids salsa mutation subtlety and keeps `before` intact.
     let edb = SteinsDatabase::default();
     let mut einputs: Vec<SourceFile> = Vec::new();
     for (path, original) in texts {
         let updated = plan.apply_file(path, original);
         einputs.push(SourceFile::new(&edb, path.clone(), updated));
     }
-    // The edited project is the same project: it must classify vendor the same way
-    // or the before/after comparison is measuring the layout, not the edit.
+    // Must classify vendor the same way, or before/after measures layout, not the edit.
     let eproject =
         Project::new(&edb, einputs, project.layout(db).clone(), project.plugins(db).clone());
     let after = filtered_diagnostics(
@@ -1729,8 +1403,7 @@ fn post_check(
 }
 
 /// The post-check's view of a diagnostic run: always vendor-filtered (ADR-0015),
-/// and additionally restricted to `surface` when the transform asked for one.
-/// `None` keeps every layer, contract included.
+/// plus restricted to `surface` when the transform asked. `None` keeps everything.
 fn filtered_diagnostics(
     layout: &ProjectLayout,
     surface: Option<&profile::Surface>,
@@ -1740,9 +1413,8 @@ fn filtered_diagnostics(
     ds
 }
 
-/// Render the transform dry-run/apply report as text: a unified diff per edited
-/// file, then the refusals, the completeness-oracle summary, and the post-check
-/// verdict.
+/// Render the transform dry-run/apply report as text: diff, refusals, oracle
+/// summary, post-check verdict.
 fn print_transform_text(
     report: &TransformReport,
     postcheck: &PostCheck,
@@ -1756,10 +1428,7 @@ fn print_transform_text(
         }
     }
 
-    // Asserted-subject admissions (the ADR-0076 issue-#175 amendment): each
-    // opted-in site's trust label, printed beside the diff it qualifies. Absent
-    // whenever the run had none, so a run without the opt-in prints exactly as
-    // before.
+    // Asserted-subject admissions (ADR-0076 issue-#175): absent when none opted in.
     if !report.asserted_admissions.is_empty() {
         outln!("\nAsserted-subject admissions ({}):", report.asserted_admissions.len());
         for a in &report.asserted_admissions {
@@ -1767,8 +1436,7 @@ fn print_transform_text(
         }
     }
 
-    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, with the
-    // site list capped in text output (the JSON carries every site).
+    // Dynamic-code obstacles (ADR-0046 §2): site list capped in text (JSON has all).
     const OBSTACLE_SITE_CAP: usize = 5;
     if !report.obstacles.is_empty() {
         outln!("\nDynamic-code obstacles ({}):", report.obstacles.len());
@@ -1795,8 +1463,7 @@ fn print_transform_text(
 
     let o = &report.oracle;
     if o.transformed_asserted > 0 {
-        // The lane split, visible in the summary line (the amendment's oracle
-        // clause): proven yield and opted-in yield are different numbers.
+        // Lane split (ADR-0076): proven and opted-in yield are different numbers.
         outln!(
             "\n{} enumerated: {} {action} ({} on asserted evidence), {} refused",
             o.enumerated, o.transformed, o.transformed_asserted, o.refused
@@ -1805,9 +1472,7 @@ fn print_transform_text(
         outln!("\n{} enumerated: {} {action}, {} refused", o.enumerated, o.transformed, o.refused);
     }
 
-    // The vouching downgrade (ADR-0046 §2 / ADR-0037): a run that vouched sites
-    // does not silently pass — its completeness claim is conditional on those
-    // user assertions, and the report says so prominently.
+    // Vouching downgrade (ADR-0046 §2/ADR-0037): completeness claim is conditional.
     if !report.vouched_exemptions.is_empty() {
         outln!(
             "\nDOWNGRADE: completeness claim is conditional on {} user-vouched dynamic-code exemption(s):",
@@ -1828,11 +1493,8 @@ fn print_transform_text(
     }
 }
 
-/// Render the transform report as JSON: the serializable [`TransformReport`]
-/// (plan + refusals + oracle) plus the post-check verdict and whether the edits
-/// were written. Shared with the MCP surface (issue #117), which returns this
-/// document with the per-site diffs and a plan handle added — an agent and a
-/// `--format json` consumer read the same facts, spelled the same way.
+/// Render the transform report as JSON: [`TransformReport`] plus post-check
+/// verdict and write status. Shared with MCP (issue #117, plan handle added).
 fn transform_json(
     report: &TransformReport,
     postcheck: &PostCheck,
@@ -1848,9 +1510,8 @@ fn transform_json(
             })
         })
         .collect();
-    // The vouching downgrade (ADR-0046 §2): the `report` already serializes the
-    // `obstacles` and `vouched_exemptions` arrays; surface the claim downgrade as a
-    // prominent top-level note whenever any site was vouched.
+    // Vouching downgrade (ADR-0046 §2): surfaced as a top-level note whenever
+    // any site was vouched.
     let downgrade_note = (!report.vouched_exemptions.is_empty()).then(|| {
         format!(
             "completeness claim is conditional on {} user-vouched dynamic-code exemption(s)",
@@ -1874,10 +1535,8 @@ fn print_transform_json(report: &TransformReport, postcheck: &PostCheck, applied
 }
 
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
-/// file with a right-margin column of proven inferred facts (ADR-0020), or (with
-/// `--format json`) emit the same effect summaries as a machine-readable
-/// document (issue #65). Never modifies the file; output goes to stdout. Exits
-/// 2 on a usage error (directory, missing/extra args).
+/// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
+/// same effect summaries (issue #65). Never modifies the file; exit 2 on usage error.
 fn run_annotate(args: &[String]) -> ExitCode {
     let mut no_php = false;
     let mut format = Format::Text;
@@ -1950,13 +1609,8 @@ fn run_annotate(args: &[String]) -> ExitCode {
     let db = SteinsDatabase::default();
     let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
 
-    // The project context for cross-file facts (ADR-0015): the `--project`
-    // directory, else the file's own directory. Every `.php` file under it is
-    // parsed into one project so `annotate` sees cross-file resolution.
-    //
-    // A bare relative filename has an *empty* parent, which is not a directory
-    // any walk can open: `steins annotate app.php` would otherwise find no
-    // project at all and silently fall back to the one-file, policy-free path.
+    // Project context (ADR-0015): `--project` dir, else the file's dir. A bare
+    // relative filename has an empty (unopenable) parent — else falls back silently.
     let root = project_dir.map(PathBuf::from).unwrap_or_else(|| {
         path.parent()
             .filter(|p| !p.as_os_str().is_empty())
@@ -1986,10 +1640,8 @@ fn run_annotate(args: &[String]) -> ExitCode {
         inputs.push(input);
     }
 
-    // If the target file was not found under the root (e.g. an explicit path
-    // outside the project dir), fall back to a one-file project. `--format
-    // json` (issue #65) reads the same [`EffectSummary`]s the text margin's
-    // effect facts are rendered from, so the two surfaces cannot disagree.
+    // Fall back to a one-file project if the target isn't under root. `--format
+    // json` reads the same [`EffectSummary`]s as the text margin (issue #65).
     match format {
         Format::Text => {
             let facts = match target {
@@ -2032,19 +1684,9 @@ fn run_annotate(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// `annotate --format json`'s document (issue #65): a top-level `functions`
-/// array, one entry per analyzed function/method, each carrying the same
-/// dimensions the text margin's `effects: {…}` / `≤` / `…?` spells — the sorted
-/// proven labels, the sorted **declared** bounds (ADR-0067), and the
-/// exhaustiveness bit — as distinct fields rather than one flattened string.
-/// Only proven labels go in `effects`; the two lanes are never merged here, and
-/// `declared` arrives already normalized against `effects` (a bound the proven
-/// lane subsumes is dropped, exactly as the margin drops it).
-///
-/// `tolerated` (ADR-0084 §4) joins them only where the policy discharges
-/// something, so a project with no `[effects]` table emits the document it always
-/// did. Its labels stay listed in `effects` too — it names a subset, never a
-/// removal.
+/// `annotate --format json`'s document (issue #65): sorted proven labels,
+/// sorted declared bounds (ADR-0067), exhaustiveness. `tolerated` (ADR-0084 §4)
+/// joins only where discharged, as a subset of `effects`, never a removal.
 fn print_annotate_json(summaries: &[EffectSummary]) {
     let functions: Vec<serde_json::Value> = summaries
         .iter()
@@ -2069,16 +1711,9 @@ fn print_annotate_json(summaries: &[EffectSummary]) {
 }
 
 /// `steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json]
-/// <paths...>` (issue #69) — capture the project's per-function effect summaries,
-/// or report how today's differ from a captured past.
-///
-/// The review story for an effect-neutral refactor: capture before, refactor,
-/// run again, and read one line per changed function. It touches neither `check`
-/// nor the diagnostic baseline — its own sidecar file, its own format, no
-/// suppression, and no verdict. The diff is informational, so a run that finds
-/// changes still exits 0; only a usage or file error exits 2. Gating a build on
-/// an effect delta is a policy decision (ADR-0023's territory), not this
-/// surface's.
+/// <paths...>` (issue #69) — capture per-function effect summaries, or diff
+/// against a captured past. Own sidecar file, untouched by `check`.
+/// Informational: exits 0 even with changes; only usage/file errors exit 2.
 fn run_effect_diff(args: &[String]) -> ExitCode {
     let mut format = Format::Text;
     let mut set_baseline = false;
@@ -2157,9 +1792,8 @@ fn run_effect_diff(args: &[String]) -> ExitCode {
     let plugins = load_plugins(&layout, allow_list_from_disk().as_deref());
     let project = Project::new(&db, inputs.clone(), layout.clone(), plugins);
 
-    // The sidecar file, resolved exactly like the diagnostic baseline's: the
-    // `--baseline` path, else the default name in the working directory. Entry
-    // paths are relative to its directory (ADR-0022's relativization, reused).
+    // Sidecar file, resolved like the diagnostic baseline's: `--baseline` path
+    // else the default name. Entry paths relative to its directory (ADR-0022).
     let file = PathBuf::from(baseline_path.as_deref().unwrap_or(effect_baseline::DEFAULT_FILE));
     let dir = baseline::base_dir(&file);
     let current = capture_effect_entries(&db, project, &inputs, &layout, &dir);
@@ -2211,13 +1845,8 @@ fn run_effect_diff(args: &[String]) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// The current run's effect summaries as baseline entries, one per analyzed
-/// non-vendor function/method.
-///
-/// Vendor files are excluded exactly as `check` excludes vendor findings
-/// (ADR-0015): they are still indexed and still contribute to every summary
-/// through the call graph, but someone else's function is not this project's
-/// effect surface to review.
+/// The current run's effect summaries as baseline entries, one per non-vendor
+/// function/method (vendor excluded, ADR-0015).
 fn capture_effect_entries(
     db: &SteinsDatabase,
     project: Project,
@@ -2232,10 +1861,7 @@ fn capture_effect_entries(
             continue;
         }
         let rel = baseline::relativize(dir, &path);
-        // One whole-project effect fixpoint per target file — the same cost
-        // `annotate` pays per invocation, paid once per file here. Acceptable for a
-        // capture-and-compare surface; if it ever bites, the fixpoint (not this
-        // loop) is what should learn to answer for every file at once.
+        // One whole-project fixpoint per file (same cost `annotate` pays per call).
         for s in effect_summaries_project(db, project, input) {
             entries.push(effect_baseline::Entry {
                 file: rel.clone(),
@@ -2249,8 +1875,7 @@ fn capture_effect_entries(
     entries
 }
 
-/// `effect-diff --format json`: the itemized `events` array plus the footer
-/// counts, so a CI job can read the same delta the text lines spell.
+/// `effect-diff --format json`: `events` array plus footer counts, for CI.
 fn print_effect_diff_json(report: &effect_baseline::Diff) {
     let events: Vec<serde_json::Value> = report
         .events
@@ -2276,18 +1901,16 @@ fn print_effect_diff_json(report: &effect_baseline::Diff) {
     }
 }
 
-/// Render the annotated file: each source line reprinted verbatim, and lines
-/// with a proven fact padded (to the longest line, capped at column 88) and
-/// given a `//=>` margin. Multiple facts on one line join with `; `.
+/// Render the annotated file: lines with a proven fact padded (longest line,
+/// capped at column 88) and given a `//=>` margin; facts join with `; `.
 fn render_annotation(text: &str, facts: &[LineFact]) -> String {
-    /// The column source lines are padded to before the margin (cap: longer
-    /// lines simply get a single separating space).
+    /// The column source lines are padded to before the margin.
     const CAP: usize = 88;
     const PREFIX: &str = "//=> ";
 
     let lines: Vec<&str> = text.lines().collect();
 
-    // Group fact bodies by line, de-duplicating identical bodies, order-stable.
+    // Group fact bodies by line, de-duplicating, order-stable.
     let mut by_line: std::collections::BTreeMap<u32, Vec<String>> = std::collections::BTreeMap::new();
     for f in facts {
         let bodies = by_line.entry(f.line).or_default();
@@ -2305,9 +1928,7 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
         out.push_str(line);
         if let Some(bodies) = by_line.get(&line_no) {
             let width = line.chars().count();
-            // Pad up to `target`, then always exactly one separating space — so
-            // margins align at column `target + 1`, and an over-long line (width
-            // >= target) simply gets that single space.
+            // Pad to `target` plus one space, so margins align at `target + 1`.
             let pad = target.saturating_sub(width) + 1;
             for _ in 0..pad {
                 out.push(' ');
@@ -2320,18 +1941,10 @@ fn render_annotation(text: &str, facts: &[LineFact]) -> String {
     out
 }
 
-/// Reject explicitly-passed paths that name nothing (ADR-0050 §7 amendment).
-///
-/// A nonexistent path argument is argv, not analysis: it fell through
-/// `collect_php_files` silently, so `steins check /typo` reported an empty
-/// findings set and exit 0 — a false all-clear indistinguishable from a clean
-/// run, which is how a renamed directory keeps a CI job green. Every missing
-/// path is named in one message so a multi-path invocation reports all of its
-/// typos at once. Callers must run this BEFORE emitting anything, so a
-/// `--format json` run produces no document rather than a well-formed empty one.
-///
-/// Existence is the whole discriminator: a path that exists and yields zero
-/// `.php` files is a real location with nothing to say, and stays exit 0.
+/// Reject explicitly-passed paths that name nothing (ADR-0050 §7 amendment):
+/// previously `steins check /typo` reported an empty findings set at exit 0,
+/// a false all-clear (a renamed directory kept CI green). A path that exists
+/// but yields zero `.php` files still stays exit 0.
 fn reject_missing_paths(paths: &[String]) -> Result<(), ExitCode> {
     let missing = missing_paths(paths);
     if missing.is_empty() {
@@ -2343,35 +1956,23 @@ fn reject_missing_paths(paths: &[String]) -> Result<(), ExitCode> {
     Err(ExitCode::from(2))
 }
 
-/// Recursively collect `.php` files under `path` (or `path` itself if it is a
-/// `.php` file).
-/// Resolve the run's [`ProjectLayout`] from the analyzed paths (ADR-0015): read
-/// each governing `composer.json` for its vendor directory and its own autoload
-/// roots, so "is this someone else's code" is answered from what the project
-/// declares rather than from a directory name. A tree with no manifest — or an
-/// unreadable working directory — resolves to [`ProjectLayout::fallback`], which
-/// is the directory-name floor.
-///
-/// `steins.toml [paths] vendor-dirs` (issue #181) is layered on top either way:
-/// it only ever supplies the floor a governing root's own declaration already
-/// beats, so a project with a `composer.json` and no `[paths]` section resolves
-/// byte-identically to before.
+/// Resolve the run's [`ProjectLayout`] (ADR-0015): each governing
+/// `composer.json` names its vendor dir; no manifest → [`ProjectLayout::fallback`].
+/// `[paths] vendor-dirs` (issue #181) only supplies a floor a manifest beats.
 fn resolve_layout(paths: &[String]) -> ProjectLayout {
     let Ok(cwd) = std::env::current_dir() else { return ProjectLayout::fallback() };
     let roots: Vec<PathBuf> = paths.iter().map(PathBuf::from).collect();
     composer::discover(&roots, &cwd).with_extra_vendor_dirs(vendor_dirs_from_disk())
 }
 
-/// The path arguments that name nothing on disk. The command line turns these
-/// into exit 2 ([`reject_missing_paths`]); the MCP surface turns them into a
-/// named tool error — the same rule, refusing to report a false all-clear.
+/// The path arguments that name nothing on disk: exit 2 on the command line
+/// ([`reject_missing_paths`]), a named tool error over MCP — same rule.
 fn missing_paths(paths: &[String]) -> Vec<&String> {
     paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect()
 }
 
-/// The `.php` files `paths` names, deduplicated to their real identity (issue
-/// #179) — the analyzed set. See [`dedup_canonical`] for the dedup key and
-/// why the surviving spelling is NOT the sorted/canonical one.
+/// The `.php` files `paths` names, deduplicated to real identity (issue #179)
+/// — see [`dedup_canonical`] for the dedup key and surviving spelling.
 fn collect_files(paths: &[String]) -> Vec<PathBuf> {
     let mut files = Vec::new();
     for p in paths {
@@ -2380,37 +1981,10 @@ fn collect_files(paths: &[String]) -> Vec<PathBuf> {
     dedup_canonical(files)
 }
 
-/// Deduplicate `files` by real filesystem identity, keeping the first
-/// spelling encountered (push order — argument order, then this crate's walk
-/// order) rather than sorting first.
-///
-/// Issue #179: a directory symlink (`mirror/src -> ../src`) makes the same
-/// tree reachable through two different path spellings. The pre-#179 code
-/// sorted the aggregate file list and deduped by path STRING, so `src/a.php`
-/// and `mirror/src/a.php` survived as two distinct entries naming one file.
-/// Every class-like in that file was then declared twice, and the
-/// absence-family existence guard (ADR-0049) read the duplicated hierarchy as
-/// non-enumerable, silently dropping every declaration-dependent finding
-/// (arity, undefined-method, `class.undefined`); flow-derived findings
-/// (`call.on-null`) survived but were reported twice, once per spelling.
-///
-/// The fix separates the dedup KEY from the surviving SPELLING:
-///   - key: [`Path::canonicalize`] — the file's real, symlink-resolved
-///     identity, so both spellings above collapse to one entry.
-///   - spelling: whichever of the duplicates was pushed first. Diagnostics,
-///     `--fix` edits, and the baseline hash (ADR-0022) all key off the path
-///     the user gets back, so silently normalizing it to the canonical form
-///     would change output for every user who never named a symlink — the
-///     common case — while the symlink case (this fix's actual target) is
-///     rare. First-in-argument-order is also the more PREDICTABLE half of the
-///     "decide and document" acceptance criterion: `steins check a b` always
-///     prefers whatever `a` contributed, independent of the two directories'
-///     alphabetical relationship.
-///
-/// A path whose `canonicalize()` fails (dangling symlink, permission denied,
-/// a TOCTOU race with a delete) falls back to its own literal path as the key
-/// — it dedups against nothing and is never dropped, degrading to the
-/// pre-#179 behavior for exactly that one file rather than losing it.
+/// Deduplicate `files` by real identity, first spelling wins (push order).
+/// Issue #179: a symlinked dir made one tree reachable two ways; deduping by
+/// path STRING double-declared classes (ADR-0049 existence guard). Dedup KEY
+/// is [`Path::canonicalize`]; uncanonicalizable paths key on themselves.
 fn dedup_canonical(files: Vec<PathBuf>) -> Vec<PathBuf> {
     let mut seen: HashSet<PathBuf> = HashSet::with_capacity(files.len());
     let mut out = Vec::with_capacity(files.len());
@@ -2420,42 +1994,26 @@ fn dedup_canonical(files: Vec<PathBuf>) -> Vec<PathBuf> {
             out.push(file);
         }
     }
-    // The pre-#179 pipeline handed every consumer a SORTED list, and read_dir's
-    // order is filesystem-dependent — so re-sort the survivors to keep the
-    // analyzed set deterministic across runs and machines. Survivor SELECTION
-    // (which spelling of a duplicate lives) happened above, in push order;
-    // this sort only fixes where each survivor sits in the list.
+    // Re-sort for determinism (read_dir order is fs-dependent); selection already done.
     out.sort();
     out
 }
 
-/// One analyzed project: the salsa database, the [`Project`] input, the parsed
-/// file handles, and each file's text keyed by the path diagnostics use.
-///
-/// `db` owns everything the salsa ids point into, so this struct is the unit
-/// that must stay alive for a run — hand out `&loaded.db` and the `Copy`
-/// `loaded.project` rather than moving either out.
+/// One analyzed project: salsa database, [`Project`] input, parsed file
+/// handles, each file's text keyed by diagnostic path. `db` owns everything
+/// salsa ids point into — hand out `&loaded.db`, not moved out.
 struct LoadedProject {
     db: SteinsDatabase,
     project: Project,
     inputs: Vec<SourceFile>,
-    /// Each analyzed file's contents, by diagnostic path. The baseline hash
-    /// (ADR-0022) reads a flagged line's neighborhood from here, and every
-    /// splice — `transform --apply`, `check --fix`, the MCP `apply_plan` tool —
-    /// uses it as the base text the plan was computed against.
+    /// Each file's contents by diagnostic path (ADR-0022 baseline hash, splices).
     texts: HashMap<String, String>,
     layout: ProjectLayout,
 }
 
 /// Load `files` as ONE project (ADR-0009/0015): one salsa DB, so cross-file
-/// calls, class chains, and effects resolve. `paths` is the argv the layout is
-/// discovered from (ADR-0015), `allow` the `[plugins] allow` list, and `effects`
-/// the `[effects]` tolerated-effects policy (ADR-0084 §1).
-///
-/// The single door into a project: `check`, `transform`, and the MCP surface
-/// (issue #117) all come through here, so what "the project" means cannot
-/// differ between the command line and an agent's tool call. An unreadable file
-/// is reported on stderr and left out of the project, as it always has been.
+/// calls resolve. Single door: `check`, `transform`, MCP (issue #117) all come
+/// through here. An unreadable file is reported on stderr and left out.
 fn load_project(
     files: &[PathBuf],
     paths: &[String],
@@ -2480,39 +2038,22 @@ fn load_project(
     let layout = resolve_layout(paths);
     // The plugin channel (ADR-0068), read once at the boundary like the layout.
     let plugins = load_plugins(&layout, allow);
-    // The tolerated-effects policy's own vocabulary is judged against the registry
-    // this run actually has — builtin plus whatever the plugin channel registered
-    // — so a project tolerating an ecosystem label its plugin declares is clean
-    // (ADR-0084 §5).
+    // Tolerated-effects vocabulary judged against this run's registry (ADR-0084 §5).
     for notice in effects.label_notices(plugins.registry()) {
         errln!("steins: {notice}");
     }
     let project =
         Project::builder(inputs.clone(), layout.clone(), plugins).effects(effects).new(&db);
-    // Attribution keys are checked against the symbol table, which only exists
-    // once the project is built. Never a diagnostic and never fatal: vendor code
-    // comes and goes, and a key naming a class this checkout does not vendor is a
-    // stale line in a config file, not a claim about the user's own code.
+    // Attribution keys checked against the symbol table. Never a diagnostic:
+    // a key naming an unvendored class is a stale config line.
     for notice in attribution_notices(&db, project) {
         errln!("steins: {notice}");
     }
     LoadedProject { db, project, inputs, texts, layout }
 }
 
-/// `[effects.attribution]` keys that name no symbol at all (ADR-0084 §5), in
-/// config order.
-///
-/// Four ways to be named, because four kinds of symbol produce effect findings:
-/// a project function, a project class, a **catalogued builtin function**
-/// (`error_log`, `trigger_error` — the telemetry shapes a real codebase reaches
-/// for before it writes a facade), and a **catalogued builtin class** (`PDO`).
-/// A bare key is tried as every one of them: the spellings are indistinguishable
-/// in the config, and PHP lets a class and a function share a name.
-///
-/// For a `Class::method` key only the class is resolved. A method can arrive from
-/// a trait (which this tree lowers as a name, with no members) or from `__call`,
-/// so a missing method is not evidence of a typo and a notice about one would be
-/// noise.
+/// `[effects.attribution]` keys naming no symbol (ADR-0084 §5). Tried against
+/// all four symbol kinds; for `Class::method` only the class resolves.
 fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
     let policy = project.effects(db);
     if policy.is_empty() {
@@ -2522,8 +2063,7 @@ fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
     let known = |name: &str| {
         !matches!(index.resolve_class(name), Resolve::Absent)
             || !matches!(index.resolve_function(name), Resolve::Absent)
-            // The same test the checker itself uses to decide a name is a builtin
-            // rather than an unresolved userland call: the catalog colors it.
+            // Same test the checker uses to decide builtin vs. unresolved userland call.
             || steins_catalog::effect_labels(name).is_some()
             || steins_catalog::out_params(name).is_some()
             || steins_catalog::builtin_class_display(name).is_some()
@@ -2541,27 +2081,16 @@ fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
         .collect()
 }
 
-/// The suppression channels a check run applies to raw findings, in the
-/// ADR-0050 §6 order: **vendor → surface → policy → inline**. Returns the
-/// inline outcome (survivors, meta-diagnostics, suppressed count) and how many
-/// findings vendor filtering removed.
-///
-/// Shared by `check` and the MCP `check` tool so an agent is told exactly what
-/// the command line would print. The baseline channel is deliberately *not*
-/// here: it is a per-invocation argument (`--baseline`, `--ignore-baseline`,
-/// `--set-baseline`), so each caller decides whether and which file to consult.
+/// Suppression channels, ADR-0050 §6 order: vendor → surface → policy →
+/// inline. Baseline deliberately NOT here — a per-invocation argument.
 fn suppression_pipeline(
     loaded: &LoadedProject,
     mut findings: Vec<Diagnostic>,
     surface: &profile::Surface,
     vendor_diagnostics: bool,
 ) -> (steins_infer::InlineOutcome, usize) {
-    // Vendor filtering applies FIRST (ADR-0015), before inline ignores and the
-    // baseline: vendor code is fully indexed and inferred, but a finding whose
-    // path is inside a `vendor/` directory is suppressed by default and never
-    // reaches — nor consumes — a later channel (a vendor finding must not eat a
-    // baseline entry). `--vendor-diagnostics` opts back in, sending vendor
-    // findings through the normal channels like any first-party finding.
+    // Vendor filtering FIRST (ADR-0015): suppressed by default, must not eat a
+    // baseline entry. `--vendor-diagnostics` opts back in.
     let mut vendor_suppressed = 0usize;
     if !vendor_diagnostics {
         let before = findings.len();
@@ -2569,19 +2098,14 @@ fn suppression_pipeline(
         vendor_suppressed = before - findings.len();
     }
 
-    // Profile surface (ADR-0050 §6, second in the pipeline): a finding off the
-    // active surface does not exist — it never reaches, nor consumes, a later
-    // channel (inline ignore, baseline). A bare `check` shows proof + mechanics;
-    // named profiles opt into contracts. Mechanics ids stay on in every profile
-    // (anti-rot, §1).
+    // Profile surface (ADR-0050 §6): bare `check` shows proof + mechanics;
+    // named profiles opt into contracts. Mechanics ids stay on always (§1).
     findings.retain(|d| surface.is_surfaced(d));
 
-    // Scoped policy is reserved as the third stage (ADR-0050 §6). It is currently
-    // an identity, preserving vendor → surface → policy → inline → baseline order.
+    // Scoped policy, third stage (ADR-0050 §6); currently an identity.
     let findings = apply_policy_stage(findings);
 
-    // Inline `@steins-ignore` applies next (ADR-0023): a finding suppressed
-    // inline never reaches — nor consumes — the baseline channel.
+    // Inline `@steins-ignore` next (ADR-0023): suppressed findings skip the baseline.
     let db = &loaded.db;
     let trees: Vec<&SourceTree> = loaded.inputs.iter().map(|&sf| parse_tree(db, sf)).collect();
     let file_pairs: Vec<(String, &SourceTree)> = loaded
@@ -2597,26 +2121,13 @@ fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {
     collect_php_files_inner(path, out, &mut HashSet::new());
 }
 
-/// The walk `collect_php_files` fronts, plus a directory symlink cycle guard
-/// (issue #179): `visited_dirs` holds the canonical form of every directory
-/// already entered on THIS top-level call, so a self-referential symlink
-/// (`a/self -> .`, or a deeper loop through several directories) terminates
-/// instead of recursing forever — the walker had no such guard before #179.
-///
-/// This is deliberately NOT the file-level dedup: `visited_dirs` starts fresh
-/// per top-level [`collect_php_files`] call, so two independent arguments that
-/// both reach the same tree (`check src mirror` where `mirror/src -> ../src`)
-/// still each walk it fully, pushing both spellings into `out`. Collapsing
-/// that duplication is [`dedup_canonical`]'s job, run once over the aggregate
-/// list — see its doc comment for why the dedup key and the surviving
-/// spelling are decided at that later, whole-list layer rather than here.
+/// The walk `collect_php_files` fronts, plus a symlink cycle guard (issue
+/// #179): `visited_dirs` resets per top-level call, so it stops loops but is
+/// NOT the file-level dedup — [`dedup_canonical`] collapses cross-argument duplicates.
 fn collect_php_files_inner(path: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<PathBuf>) {
     if path.is_dir() {
-        // A directory whose canonical form was already entered on this walk is
-        // a symlink cycle: stop rather than recurse forever. A directory whose
-        // canonicalize() fails (permissions, a TOCTOU race) is walked
-        // uncached — read_dir below fails harmlessly if it truly is not
-        // readable, exactly like before this guard existed.
+        // Already-entered directory is a symlink cycle: stop. canonicalize()
+        // failure is walked uncached; read_dir fails harmlessly if unreadable.
         if let Ok(canon) = path.canonicalize()
             && !visited_dirs.insert(canon)
         {
@@ -2635,18 +2146,9 @@ fn collect_php_files_inner(path: &Path, out: &mut Vec<PathBuf>, visited_dirs: &m
 mod tests {
     use super::*;
 
-    /// The `check --fix` post-check gate refuses a fix whose edits would
-    /// surface a new diagnostic, by name, writing nothing (ADR-0034 point 3a).
-    ///
-    /// Exercised with a SYNTHETIC payload, deliberately: the shipped dump
-    /// family cannot trip the gate through the real engine — a recognized dump
-    /// is transparent (ADR-0053 §10: it reads facts and binds nothing), so
-    /// deleting its statement never changes a downstream fact, which is
-    /// exactly why the issue #114 slice chose it as the riskless tracer. The
-    /// gate is belt-and-braces for the families that come later, and this test
-    /// pins the refusal plumbing they will rely on: an edit that rewrites a
-    /// proven-int argument into a non-numeric string is a guaranteed new
-    /// `type.argument-mismatch` in the edited project.
+    /// The `check --fix` post-check gate refuses a regressing fix by name,
+    /// writing nothing (ADR-0034 point 3a); SYNTHETIC since a real dump is
+    /// transparent (ADR-0053 §10) and can't trip it.
     #[test]
     fn post_check_gate_refuses_a_regressing_fix() {
         let db = SteinsDatabase::default();
@@ -2662,7 +2164,7 @@ mod tests {
         let mut texts: HashMap<String, String> = HashMap::new();
         texts.insert(path.clone(), src.to_owned());
 
-        // `width(5);` → `width("abc");` — byte 55..56 holds the `5`.
+        // `width(5);` → `width("abc");`: byte 55..56 holds the `5`.
         let displayed = vec![Diagnostic {
             id: steins_infer::DEBUG_TYPE_ID,
             path: path.clone(),
@@ -2691,18 +2193,12 @@ mod tests {
             "the would-be diagnostics are attached, got {:?}",
             refusal.new_diagnostics
         );
-        // The refusal path returns before any write: the fake path was never
-        // created on disk.
+        // Refusal returns before any write.
         assert!(!Path::new(&path).exists(), "nothing written on refusal");
     }
 
-    /// A fix whose target has no analyzed source text is refused by name, not
-    /// skipped — the guard the write loop carries. A real run cannot reach it
-    /// (`texts` holds every analyzed file and a fix's path is a diagnostic's
-    /// path), so it is reached here the same way: a SYNTHETIC payload whose
-    /// edit names a file the project never read. The alternative — skipping —
-    /// would leave `applied` true, and the caller would then report the finding
-    /// as fixed with its statement still on disk.
+    /// A fix targeting no analyzed source text is refused by name, not
+    /// skipped — skipping would leave `applied` true with the edit undone.
     #[test]
     fn a_fix_whose_target_was_never_read_is_refused_by_name() {
         let db = SteinsDatabase::default();
@@ -2718,8 +2214,7 @@ mod tests {
         let mut texts: HashMap<String, String> = HashMap::new();
         texts.insert(read, src.to_owned());
 
-        // The edit targets a path the project never read, so the post-check
-        // sees an unchanged project and passes — the guard is what stops it.
+        // Targets a path the project never read; the guard, not the post-check, stops it.
         let unread = "steins-checkfix-unread-unit-missing.php".to_owned();
         let displayed = vec![Diagnostic {
             id: steins_infer::DEBUG_TYPE_ID,
@@ -2748,18 +2243,9 @@ mod tests {
         assert!(!Path::new(&unread).exists(), "nothing written on refusal");
     }
 
-    /// The case that **forced** the post-check surface asymmetry (issue #115).
-    ///
-    /// One plan, both surfaces. Measured against everything, a correct
-    /// `throws-envelope` seed vetoes its own success: the envelope it writes onto
-    /// the override is exactly what gives the ancestor's narrower envelope
-    /// something to be widened against, so `throw.liskov-widened` appears where
-    /// there was none and the transform refuses to write. Measured on the surface
-    /// a bare `steins check` enforces, the same seed is clean.
-    ///
-    /// This is why `throws-envelope` is measured on [`PostCheckSurface::DefaultOnly`]
-    /// while the two phpdoc transforms keep [`PostCheckSurface::Everything`] — an
-    /// asymmetry with a reason, pinned by the case rather than argued for.
+    /// The case that forced the post-check surface asymmetry (issue #115): a
+    /// correct seed vetoes itself against [`PostCheckSurface::Everything`] but
+    /// passes [`PostCheckSurface::DefaultOnly`].
     #[test]
     fn the_broad_surface_would_veto_a_legitimate_throws_seed() {
         const LIB: &str = "<?php\nclass P {\n    /**\n     * @throws \\JsonException\n     */\n    public function m(): void {}\n}\nclass C extends P {\n    public function m(): void { throw new \\RuntimeException(\"x\"); }\n}\n";
@@ -2796,11 +2282,8 @@ mod tests {
         );
     }
 
-    /// The other half of the asymmetry: the phpdoc transforms are still measured
-    /// against **everything**, contract layer included. A `phpdoc-honesty` run
-    /// whose rewrite introduced a new `phpdoc.*` finding must still veto, and
-    /// such a finding is invisible on the default surface — so this is the arm
-    /// that would silently stop working if the two were ever unified.
+    /// The other half: phpdoc transforms measure against everything, contract
+    /// included — a `phpdoc.*` finding is invisible on the default surface.
     #[test]
     fn the_phpdoc_transforms_are_measured_against_the_contract_layer_too() {
         assert!(
@@ -2833,11 +2316,8 @@ mod tests {
 
     // ---- dedup_canonical (issue #179) --------------------------------------
 
-    /// Two spellings of one real file — the direct path and one through a
-    /// symlinked directory — collapse to a single entry, and the survivor is
-    /// the FIRST spelling pushed, not a re-sort. The end-to-end repro through
-    /// `steins check` lives in `tests/symlink_dedup.rs`; this is the unit-level
-    /// pin on `dedup_canonical` itself.
+    /// Two spellings of one file collapse to one entry, first-pushed surviving.
+    /// E2e repro: `tests/symlink_dedup.rs`.
     #[test]
     fn dedup_canonical_collapses_two_spellings_keeping_the_first() {
         let dir = std::env::temp_dir()
@@ -2856,28 +2336,21 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// A path whose `canonicalize()` fails (nothing on disk at that spelling)
-    /// is never dropped: it dedups against nothing, keyed on its own literal
-    /// path, and degrades to the pre-#179 behavior for that one entry instead
-    /// of silently disappearing.
+    /// A path whose `canonicalize()` fails is never dropped: keyed on its own
+    /// literal path (pre-#179 behavior).
     #[test]
     fn dedup_canonical_keeps_uncanonicalizable_paths() {
         let a = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-a.php");
         let b = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-b.php");
         let out = dedup_canonical(vec![a.clone(), b.clone(), a.clone()]);
-        // `a` still dedups against its own exact repeat (both fall back to the
-        // same literal-path key), but never against the unrelated `b`.
+        // `a` dedups against its own repeat but not against unrelated `b`.
         assert_eq!(out, vec![a, b]);
     }
 
     // ---- should_page --------------------------------------------------------
 
-    /// Paging is opt-in on two independent axes — an interactive terminal AND
-    /// a non-blank `$PAGER` — and both must hold. Piped/redirected output
-    /// (`stdout_is_terminal == false`, the case `tests/license.rs`'s
-    /// `Stdio::piped()` runs always hit) must never page even with `$PAGER`
-    /// set, and an interactive terminal with no usable `$PAGER` must fall back
-    /// to the direct seam rather than erroring.
+    /// Paging requires both an interactive terminal AND a non-blank `$PAGER`;
+    /// piped output (`tests/license.rs`) must never page even with `$PAGER` set.
     #[test]
     fn pager_policy() {
         assert!(should_page(true, Some("less")));

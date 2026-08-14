@@ -1,17 +1,17 @@
 //! ADR-0049 §3 / S4: `call.undefined-function` — a DAMMED absence proof.
 //!
-//! Fires only under complete closure with a CLEAR dam: every candidate FQN (under
-//! PHP resolution order) index-Absent, not a catalog builtin, the boot surface
-//! reports not-found, no dominating `function_exists` vouch, no dump/SAPI carve-out.
-//! A [`Boot`] mock stands in for the runtime boot surface (there is no live sidecar
-//! in tests). Every ladder leg ships with a silence fixture (the §10 discipline).
+//! Fires only under complete closure with a CLEAR dam: every candidate FQN (PHP
+//! resolution order) index-Absent, not a catalog builtin, boot surface not-found,
+//! no dominating `function_exists` vouch, no dump/SAPI carve-out. [`Boot`] mocks
+//! the boot surface (no live sidecar in tests); every ladder leg has a silence
+//! fixture (§10 discipline).
 
 use steins_infer::{CALL_UNDEFINED_FUNCTION_ID, Diagnostic, Folder, check_with};
 use steins_syntax::SourceTree;
 
-/// A boot-surface mock: `available` is the A9/no-sidecar gate; `fns` are the
-/// lowercased names the boot surface reports as resident functions (A2ii homonyms);
-/// `reflect_fails` simulates a mid-run sidecar failure (Unknown for every query).
+/// A boot-surface mock: `available` is the A9/no-sidecar gate, `fns` are resident
+/// function names (A2ii homonyms), `reflect_fails` simulates a mid-run sidecar
+/// failure (Unknown for every query).
 struct Boot {
     available: bool,
     fns: Vec<String>,
@@ -160,8 +160,7 @@ fn silent_under_a_standing_dam_bare_relative_include() {
 
 #[test]
 fn silent_when_function_exists_vouches_on_this_branch() {
-    // FP-15 guard leg: a positive `function_exists('tyop')` guard vouches the name on
-    // the branch it dominates (a Maybe verdict walks both branches live).
+    // FP-15 guard leg: a positive `function_exists` guard vouches the name on its branch.
     let d = fires("<?php\nif (function_exists('tyop')) {\n  tyop();\n}\n");
     assert!(d.is_empty(), "{d:?}");
 }

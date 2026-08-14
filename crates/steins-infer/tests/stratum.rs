@@ -1,14 +1,12 @@
 //! Stratum-discipline tests (ADR-0052 §5 N2): the checked trust bit that
 //! stops a docblock claim from forging a proof-layer finding.
 //!
-//! The through-line: an `Asserted` fact (an `@phpstan-assert` family docblock claim)
-//! buys **silence** — narrowing away a would-be proof report is always safe — but
-//! never *premises* a proof-layer id (`type.*`, `call.on-null`). A `Verified` fact (a
-//! native runtime test, a native seed, or an `assert($expr)` construct — see the
-//! 2026-07-25 owner ruling folded into the ADR-0052 amendment) does. Every "SILENT"
-//! test below is paired, where practical, with a `Verified` control that fires, so
-//! the test proves the narrowing happened *and* was gated — not that nothing narrowed
-//! at all.
+//! The through-line: an `Asserted` fact (an `@phpstan-assert` family docblock
+//! claim) buys **silence** — narrowing away a would-be proof report is always
+//! safe — but never *premises* a proof-layer id (`type.*`, `call.on-null`). A
+//! `Verified` fact (native runtime test, native seed, or `assert($expr)` —
+//! 2026-07-25 owner ruling, ADR-0052 amendment) does. Every "SILENT" test
+//! below is paired, where practical, with a `Verified` control that fires.
 
 use steins_infer::{CALL_ON_NULL_ID, Diagnostic, ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -44,9 +42,8 @@ function f(): void { $x = null; takesInt($x); }
 
 #[test]
 fn asserted_null_cannot_premise_argument_mismatch() {
-    // A lying `@phpstan-assert null $x` narrows `$x` to null at the Asserted
-    // stratum; the downstream `takesInt($x)` would be a proof-layer
-    // `type.argument-mismatch` — but a claim cannot forge a proof, so SILENT.
+    // A lying `@phpstan-assert null $x` narrows `$x` at the Asserted stratum;
+    // downstream `takesInt($x)` would be proof-layer — a claim can't forge it.
     let src = "<?php
 /** @phpstan-assert null $x */
 function claimNull($x): void {}
@@ -70,9 +67,8 @@ function f(mixed $x): void { claimNull($x); $x->method(); }
 
 #[test]
 fn asserted_int_may_fire_contract_but_not_proof() {
-    // Item 7(b): `@phpstan-assert int $x` on a value flowing into a `@param string`
-    // contract fires the *contract* layer (phpdoc.param-mismatch accepts Asserted),
-    // while no *proof* id fires. The claim is coherent end-to-end at its own layer.
+    // Item 7(b): `@phpstan-assert int $x` into a `@param string` contract fires
+    // the *contract* layer (accepts Asserted) but no *proof* id — coherent at its layer.
     let src = "<?php
 /** @phpstan-assert int $x */
 function claimInt($x): void {}
@@ -106,9 +102,8 @@ function f(mixed $x): void { claimNull($x); $y = $x; takesInt($y); }
 
 #[test]
 fn derivation_array_composition_stays_silent() {
-    // The audit's laundering shape: `$pair = [$x, 99]` composed from an Asserted
-    // `$x` must not let a proof-layer finding fire on the composed value. (Offset
-    // consumption is S3; this pins the composition-stratum invariant meanwhile.)
+    // The audit's laundering shape: composing `$pair = [$x, 99]` from Asserted
+    // `$x` must not let a proof finding fire on it (offset consumption is S3).
     let src = "<?php
 /** @phpstan-assert null $x */
 function claimNull($x): void {}
@@ -189,9 +184,8 @@ function f(mixed $x): void { if (notNull($x)) {} else { takesInt($x); } }
 
 #[test]
 fn guard_negated_if_true_flips_polarity() {
-    // `if (!isNull($x))` — the `@phpstan-assert-if-true null` spec applies on the
-    // ELSE branch (the call was true there). The guarded else `takesInt($x)` stays
-    // silent; the then branch is unnarrowed.
+    // `if (!isNull($x))` — `@phpstan-assert-if-true null` applies on the ELSE
+    // branch (call was true there), so the guarded else `takesInt($x)` stays silent.
     let src = "<?php
 /** @phpstan-assert-if-true null $x */
 function isNull($x): bool { return true; }
@@ -204,8 +198,7 @@ function f(mixed $x): void { if (!isNull($x)) {} else { takesInt($x); } }
 #[test]
 fn bare_assert_if_true_is_not_recognized() {
     // Regression pin (conformance `regressions_string_narrowing_assert_if_true`):
-    // the BARE `@assert-if-true` (no vendor prefix, ADR-0029) is NOT a recognized
-    // tag, so it narrows nothing and the guard-call carrier consumes no envelope.
+    // bare `@assert-if-true` (no vendor prefix, ADR-0029) is unrecognized, narrows nothing.
     let src = "<?php
 /** @assert-if-true null $x */
 function isNull($x): bool { return true; }
@@ -217,17 +210,14 @@ function f(mixed $x): void { if (isNull($x)) { takesInt($x); } }
     assert_eq!(arg_mismatch(src), 0, "a bare @assert-if-true narrows nothing (unchanged behavior)");
 }
 
-// assert($expr) statement narrowing — Verified UNCONDITIONALLY.
-//
-// Per the 2026-07-25 owner ruling (ADR-0052 amendment I0), `assert($expr)` is
-// equivalent to `if (!$expr) throw`: always Verified, independent of
-// `zend.assertions`.
+// assert($expr) statement narrowing — Verified UNCONDITIONALLY. Per the
+// 2026-07-25 owner ruling (ADR-0052 amendment I0), `assert($expr)` is
+// equivalent to `if (!$expr) throw`, independent of `zend.assertions`.
 
 #[test]
 fn assert_stmt_narrows_at_verified_and_premises_proof() {
-    // `assert($x === null)` narrows `$x` to null and — per the ruling — does so at the
-    // Verified stratum unconditionally, so the downstream `takesInt($x)` premises the
-    // proof-layer `type.argument-mismatch`.
+    // `assert($x === null)` narrows `$x` to null at the Verified stratum
+    // unconditionally (per the ruling), so `takesInt($x)` premises the proof layer.
     let src = "<?php
 function takesInt(int $n): void {}
 function f(mixed $x): void { assert($x === null); takesInt($x); }
@@ -241,10 +231,9 @@ function f(mixed $x): void { assert($x === null); takesInt($x); }
 
 #[test]
 fn asserted_tag_still_cannot_premise_where_assert_construct_can() {
-    // Boundary guard (ruling item 4): the `@phpstan-assert` TAG family stays Asserted
-    // — a lying tag claiming the same `=== null` narrowing must still NOT premise the
-    // proof layer, even though the `assert()` CONSTRUCT now does. The ruling covers
-    // the construct only; the tag remains a docblock claim (ADR-0037).
+    // Boundary guard (ruling item 4): the `@phpstan-assert` TAG stays Asserted
+    // — a lying tag must still NOT premise the proof layer, even though the
+    // `assert()` CONSTRUCT now does; the ruling covers the construct only (ADR-0037).
     let src = "<?php
 /** @phpstan-assert null $x */
 function claimNull($x): void {}

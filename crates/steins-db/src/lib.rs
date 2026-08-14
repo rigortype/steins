@@ -52,38 +52,25 @@ pub fn function_index(db: &dyn Db, file: SourceFile) -> Vec<FunctionDecl> {
     parse(db, file).functions().to_vec()
 }
 
-// ---------------------------------------------------------------------------
 // The project: a set of source files analyzed together as one salsa DB.
-// ---------------------------------------------------------------------------
 
 /// A whole-project input: the set of `.php` [`SourceFile`]s analyzed together
 /// (ADR-0009/0015). Cross-file resolution ([`project_index`]) and the
-/// project-wide inference in `steins-infer` are computed against this.
+/// project-wide inference in `steins-infer` are computed against this. Setting
+/// the file list creates a new revision; the monolithic [`project_index`] then
+/// re-runs (see its granularity note).
 ///
-/// Setting the file list creates a new revision; the monolithic
-/// [`project_index`] then re-runs (see its granularity note).
-///
-/// The [`ProjectLayout`] rides along as a second input because vendor
-/// classification is *project* state, not ambient state: it decides which
-/// findings are reported and which declarations are transform candidates
-/// (ADR-0015), and a replay must reach the same verdict from the same inputs
-/// (ADR-0048). Resolved once at the boundary by [`composer::discover`];
-/// [`ProjectLayout::fallback`] is the honest answer for a tree with no manifest.
-///
-/// [`PluginFacts`] rides along as a third input for the same reason (ADR-0068):
-/// the labels a Composer plugin registered and the functions it colors are project
-/// input state, read once from the vendor tree by [`plugins::PluginFacts::discover`],
-/// and a replay must reach the same verdict from the same inputs.
-/// [`PluginFacts::none`] is the empty channel — a project with no plugin carries
-/// no registered labels or colorings.
-///
-/// [`EffectsPolicy`] rides along as a fourth input, and for the third time for the
-/// same reason (ADR-0084 §1): the `[effects]` table decides which envelope
-/// findings exist and what the purity oracle answers, so it is project input
-/// state, read once from `steins.toml` at the boundary. It carries `#[default]`
-/// because the empty policy is the pre-ADR-0084 world exactly — every caller that
-/// declares no tolerance judges as it always has — so a project is built with
-/// [`Project::builder`] only where a policy is actually in hand.
+/// [`ProjectLayout`], [`PluginFacts`] and [`EffectsPolicy`] all ride along as
+/// further inputs for the same reason: each decides part of what is reported
+/// (vendor classification/ADR-0015, plugin-registered labels/ADR-0068, the
+/// purity oracle/ADR-0084 §1), so each is *project* state, not ambient state,
+/// and a replay must reach the same verdict from the same inputs (ADR-0048).
+/// Each is resolved once at the boundary: layout by [`composer::discover`]
+/// (falling back to [`ProjectLayout::fallback`] with no manifest), plugins by
+/// [`plugins::PluginFacts::discover`] (empty via [`PluginFacts::none`] with no
+/// plugin), effects from `steins.toml`'s `[effects]` table (`#[default]` empty,
+/// the pre-ADR-0084 world, so [`Project::builder`] is only needed where a
+/// policy is actually in hand).
 #[salsa::input]
 pub struct Project {
     #[returns(deref)]
@@ -114,18 +101,17 @@ pub enum Resolve {
     /// Exactly one definition — the resolvable case.
     Unique(DeclSite),
     /// Two or more files define this FQN (polyfills / conditional decls). PHP
-    /// would fatal on a real double-definition, and we cannot know which body
-    /// runs, so an ambiguous FQN is **never** resolved (silent).
+    /// would fatal on a real double-definition and we can't know which body
+    /// runs, so an ambiguous FQN is **never** resolved.
     Ambiguous,
 }
 
 /// The whole-project symbol index (ADR-0009). FQN keys are lowercase-normalized
 /// (PHP function/class/namespace names are case-insensitive).
 ///
-/// **Granularity (ADR-0009):** this is one monolithic tracked query, so *any*
-/// file edit invalidates it and every analysis downstream of it. That is
-/// acceptable for the batch CLI; per-symbol salsa interning (so an edit to one
-/// file re-indexes only its symbols) is the recorded plan for the LSP.
+/// **Granularity (ADR-0009):** one monolithic tracked query, so *any* file edit
+/// invalidates it and everything downstream — acceptable for the batch CLI;
+/// per-symbol salsa interning is the recorded plan for the LSP.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndex {
     /// Unambiguous function FQN → definition site.
@@ -136,9 +122,9 @@ pub struct ProjectIndex {
     ambiguous_functions: HashSet<String>,
     /// Class FQNs defined in more than one file (ambiguous → never resolved).
     ambiguous_classes: HashSet<String>,
-    /// Lowercased simple function name → every definition site. Used for the
-    /// simple-name checks (constant-function resolution and fold shadowing) where
-    /// only the last segment is available at the use site.
+    /// Lowercased simple function name → every definition site. Used where only
+    /// the last segment is available at the use site (constant-function
+    /// resolution, fold shadowing).
     fn_by_simple: HashMap<String, Vec<DeclSite>>,
 }
 
@@ -183,8 +169,7 @@ impl ProjectIndex {
         self.fn_by_simple.contains_key(&simple.to_ascii_lowercase())
     }
 
-    /// Read access to the unambiguous function map (fqn → site), for consumers
-    /// that rebuild their own view keyed on file position.
+    /// Read access to the unambiguous function map (fqn → site).
     #[must_use]
     pub fn functions(&self) -> &HashMap<String, DeclSite> {
         &self.functions
@@ -233,23 +218,18 @@ pub fn project_index(db: &dyn Db, project: Project) -> ProjectIndex {
             insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
         }
     }
-    // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in **after** every
-    // textual declaration: an alias name resolves — for existence — to its target's
-    // site, sharing the duplicate-decl ambiguity discipline. An alias colliding with
-    // a textual decl of the same FQN, or two alias edges for one name, is
-    // `Ambiguous`. An alias whose target does not resolve uniquely mints no edge
-    // (its existence cannot be backed).
+    // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in after every
+    // textual declaration; see `fold_class_alias_edges`.
     fold_class_alias_edges(db, project, &mut idx);
     idx
 }
 
-/// Fold every file's literal `class_alias` edges into the class map (ADR-0049 §2).
-/// Targets are resolved against the **textual** index snapshot (no alias-to-alias
-/// chaining), so the result is order-independent (ADR-0048); the resolved edges are
-/// then folded in with the same duplicate-decl discipline, so an alias colliding
-/// with a textual decl of the same FQN — or two alias edges for one name — demotes
-/// to `Ambiguous`. An alias whose target is absent or itself ambiguous mints no
-/// edge (its existence cannot be backed).
+/// Fold every file's literal `class_alias` edges into the class map (ADR-0049
+/// §2). Targets are resolved against the **textual** index snapshot (no
+/// alias-to-alias chaining, so the result is order-independent, ADR-0048); an
+/// alias colliding with a textual decl of the same FQN, or two alias edges for
+/// one name, demotes to `Ambiguous`. An alias whose target is absent or itself
+/// ambiguous mints no edge.
 fn fold_class_alias_edges(db: &dyn Db, project: Project, idx: &mut ProjectIndex) {
     let mut resolved: Vec<(String, DeclSite)> = Vec::new();
     for &file in project.files(db) {

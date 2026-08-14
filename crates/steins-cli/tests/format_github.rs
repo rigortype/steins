@@ -1,23 +1,16 @@
 //! `--format github` and CI auto-detection (ADR-0054 Part I, slice C1).
 //!
-//! Three things are pinned here, and they are the three the ADR argues for:
+//! Pins three things: the workflow command (§4) — one `::error|::warning|::notice`
+//! line per displayed finding, `title` carrying the id, plus the same plain
+//! accounting `text` prints; the level mapping (§3) — exit level decides, with
+//! the debug-lane carve-out (`var_dump` → `::notice`, neither dump omitted, per
+//! §13's refusal of an invisible CI-red); and detection (§6) — `GITHUB_ACTIONS`
+//! selects `github`, an explicit `--format` always wins, generic `CI=true`
+//! selects nothing, and detection changes only the spelling. Plus §1's format
+//! invariance: the four spellings render one multiset and one exit code.
 //!
-//! 1. **The workflow command** (§4) — one `::error|::warning|::notice` line per
-//!    displayed finding, `title` carrying the id, plus the same plain accounting
-//!    `text` prints.
-//! 2. **The level mapping** (§3) — the exit level decides, with the debug lane's
-//!    carve-out: a warn-fixed dump is `::notice`, and neither dump is *omitted*
-//!    (§13 refuses that outright — an invisible CI-red is a serializer lying
-//!    about its own exit).
-//! 3. **Detection** (§6) — `GITHUB_ACTIONS` selects `github`, an explicit
-//!    `--format` always wins, a generic `CI=true` selects nothing, and detection
-//!    changes *only the spelling*: same findings, same exit code.
-//!
-//! Plus §1's format invariance: the four spellings render one multiset and one
-//! exit code.
-//!
-//! Each test runs the real binary in a private temp dir (its own CWD) so an
-//! auto-loaded `steins.toml` / `.steins-baseline.jsonl` is isolated, and with
+//! Each test runs the real binary in a private temp dir (isolated CWD, so an
+//! auto-loaded `steins.toml`/`.steins-baseline.jsonl` can't leak in) with
 //! `--no-php` for determinism.
 
 use std::collections::BTreeSet;
@@ -79,7 +72,7 @@ const THROW_ONLY: &str =
 const DUMPS: &str =
     "<?php\n$x = 5;\nvar_dump($x);\n\\PHPStan\\dumpType($x);\n";
 
-// ------------------------------------------------------- the workflow command ---
+// The workflow command
 
 #[test]
 fn one_command_per_displayed_finding() {
@@ -100,14 +93,13 @@ fn one_command_per_displayed_finding() {
         "the id rides in `title`, got:\n{}",
         lines[0]
     );
-    // The message rides after the `::`, verbatim (wording is not a contract,
-    // ADR-0023 — the id is).
+    // The message rides after the `::` (wording is not a contract, ADR-0023 — the id is).
     assert!(lines[0].contains("cannot become int $w"), "message carried, got:\n{}", lines[0]);
 }
 
 #[test]
 fn warn_level_is_a_warning_command() {
-    // ADR-0054 §3: the level keys on ADR-0050 §7's level. A profile `warn = [...]`
+    // ADR-0054 §3: level keys on ADR-0050 §7's level; a `warn = [...]` profile
     // demotion prints `warning[…]` in text and must print `::warning` here.
     let dir = workdir("warn");
     write(&dir, "a.php", THROW_ONLY);
@@ -124,11 +116,9 @@ fn warn_level_is_a_warning_command() {
 
 #[test]
 fn the_debug_lane_is_carried_never_omitted() {
-    // ADR-0054 §3 and §13's refusal, together: the explicit dump pair is
-    // fail-fixed and reds CI, so it is annotated as `::error` — omitting it would
-    // leave a red run with nothing explaining it. `var_dump` is warn-fixed and an
-    // *answer to a question the code asked*, so it takes `::notice`, not
-    // `::warning` and not silence.
+    // ADR-0054 §3+§13: the explicit dump is fail-fixed (reds CI) → `::error`,
+    // never omitted. `var_dump` is warn-fixed, an answer to a question the code
+    // asked, so it takes `::notice`, not `::warning` and not silence.
     let dir = workdir("debug");
     write(&dir, "a.php", DUMPS);
     let r = run_in(&dir, &["check", "--no-php", "--format", "github", "a.php"]);
@@ -147,9 +137,8 @@ fn the_debug_lane_is_carried_never_omitted() {
 
 #[test]
 fn the_plain_accounting_follows_the_commands() {
-    // ADR-0054 §4: after the commands, the same plain accounting lines `text`
-    // prints — inert in a workflow log, and the accounting must not become
-    // format-dependent.
+    // ADR-0054 §4: the same plain accounting `text` prints follows the commands,
+    // inert in a workflow log; accounting must not become format-dependent.
     let dir = workdir("accounting");
     write(&dir, "a.php", PROOF);
     let set = run_in(&dir, &["check", "--no-php", "--set-baseline", "a.php"]);
@@ -159,7 +148,7 @@ fn the_plain_accounting_follows_the_commands() {
     assert_eq!(r.stdout, "1 findings in baseline\n", "plain accounting, got:\n{}", r.stdout);
 }
 
-// ------------------------------------------------------------------ detection ---
+// Detection
 
 #[test]
 fn github_actions_selects_the_github_spelling() {
@@ -183,17 +172,15 @@ fn an_explicit_format_always_wins() {
         assert!(r.stdout.starts_with(expect), "--format {flag} wins, got:\n{}", r.stdout);
         assert!(!r.stdout.contains("::error"), "no workflow command, got:\n{}", r.stdout);
     }
-    // Including the explicit `--format github` outside Actions, the other side of
-    // the same rule.
+    // Same rule, other side: explicit `--format github` outside Actions.
     let r = run_in(&dir, &["check", "--no-php", "--format", "github", "a.php"]);
     assert!(r.stdout.starts_with("::error"), "explicit github off-CI, got:\n{}", r.stdout);
 }
 
 #[test]
 fn a_generic_ci_signal_detects_nothing() {
-    // ADR-0054 §13: no generic `CI=true` detection and no per-CI format zoo —
-    // detection selects a rendering the environment can *consume*, and "some CI"
-    // names none. `text` is already correct there.
+    // ADR-0054 §13: no generic `CI=true` detection, no per-CI format zoo — "some
+    // CI" names no consumable rendering, and `text` is already correct there.
     let dir = workdir("ci");
     write(&dir, "a.php", PROOF);
     for env in [
@@ -208,9 +195,8 @@ fn a_generic_ci_signal_detects_nothing() {
 
 #[test]
 fn detection_changes_only_the_spelling() {
-    // ADR-0054 §6: everything else about the run — surface, profile, pipeline,
-    // exit code — is untouched by detection. Format invariance (§1) is what makes
-    // that checkable, so it is checked rather than asserted.
+    // ADR-0054 §6: everything else about the run is untouched by detection;
+    // format invariance (§1) is what makes that checkable, not just assertable.
     let dir = workdir("invariant-detect");
     write(&dir, "a.php", DUMPS);
     let plain = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -219,7 +205,7 @@ fn detection_changes_only_the_spelling() {
     assert_eq!(positions_text(&plain.stdout), positions_github(&detected.stdout));
 }
 
-// --------------------------------------------------------- format invariance ---
+// Format invariance
 
 /// `(id, path, line, column)` for every `text` finding line.
 fn positions_text(stdout: &str) -> BTreeSet<String> {
@@ -309,11 +295,9 @@ fn positions_json(stdout: &str) -> BTreeSet<String> {
 
 #[test]
 fn every_format_renders_one_multiset_and_one_exit_code() {
-    // ADR-0054 §1, the binding invariant: for a fixed invocation every format
-    // renders the same displayed finding multiset and produces the same exit
-    // code. The fixture deliberately spans three levels — a fail-level proof
-    // finding, a fail-fixed dump and a warn-fixed dump — so a format that dropped
-    // the "merely informational" one would be caught.
+    // ADR-0054 §1: every format renders the same displayed finding multiset and
+    // exit code. The fixture spans three levels — fail-level proof, fail-fixed
+    // dump, warn-fixed dump — so a format dropping the "informational" one is caught.
     let dir = workdir("invariance");
     write(&dir, "a.php", &format!("{PROOF}{}", &DUMPS[6..]));
     let text = run_in(&dir, &["check", "--no-php", "--format", "text", "a.php"]);
@@ -331,7 +315,7 @@ fn every_format_renders_one_multiset_and_one_exit_code() {
     assert_eq!(expected, positions_sarif(&sarif.stdout), "sarif multiset");
 }
 
-// ----------------------------------------------------------------- usage ---
+// Usage
 
 #[test]
 fn an_unknown_format_is_a_usage_error() {

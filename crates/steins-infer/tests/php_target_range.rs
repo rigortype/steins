@@ -1,10 +1,9 @@
-//! Issue #28 — the declared **target PHP range** drives version-sensitive
-//! decisions through the layout: a `composer.json` target reaches ADR-0049
-//! A12's next-int rule via `check_project_with_runtime` ("the range must
-//! agree, else decline").
+//! Issue #28 — the declared **target PHP range** drives version-sensitive decisions through
+//! the layout: a `composer.json` target reaches ADR-0049 A12's next-int rule via
+//! `check_project_with_runtime` ("the range must agree, else decline").
 //!
-//! The absence-family and curated-admission legs live behind a live sidecar;
-//! this file pins the layout→Cx seam, which needs no PHP at all.
+//! The absence-family and curated-admission legs live behind a live sidecar; this file pins
+//! the layout→Cx seam, which needs no PHP at all.
 
 use std::path::PathBuf;
 
@@ -41,9 +40,8 @@ fn dump_under(layout: ProjectLayout) -> String {
 
 #[test]
 fn a_straddling_target_declines_the_boundary_sensitive_literal() {
-    // `^8.1` spans both sides of the 8.3 next-int change: no single key
-    // assignment is true for the whole declared range, so the literal's value
-    // is honestly unknown (A12's unknown leg, generalized).
+    // `^8.1` spans both sides of the 8.3 next-int change: no single key assignment holds for
+    // the whole declared range, so the value is honestly unknown (A12's unknown leg).
     let layout = layout_with(Some(require_target("^8.1", (8, 1), Some((8, u16::MAX)))));
     assert_eq!(dump_under(layout), "dumped type: unknown");
 }
@@ -67,8 +65,7 @@ fn a_target_above_the_boundary_resolves_with_the_new_rule() {
 
 #[test]
 fn no_target_and_no_runtime_still_declines() {
-    // No declaration and no sidecar answer: the straddling literal declines
-    // rather than guessing a rule.
+    // No declaration and no sidecar answer: the straddling literal declines rather than guessing.
     assert_eq!(dump_under(layout_with(None)), "dumped type: unknown");
     // And a version-independent literal still resolves under the same view.
     let db = SteinsDatabase::default();

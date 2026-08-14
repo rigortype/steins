@@ -1,10 +1,9 @@
 //! The operator-value node's LOWERING (issue #260).
 //!
-//! `ArgValue::Binary` is structural, exactly like `Concat` and `Coalesce`: the
-//! operands stay unevaluated in the tree because their values are env facts the
-//! walk owns. What this file pins is the boundary — which operators the node
-//! carries, and that everything else still widens to `Other`, so an operator with
-//! no value-position evaluator can never be mistaken for one that has an answer.
+//! `ArgValue::Binary` is structural, like `Concat`/`Coalesce`: operands stay
+//! unevaluated since their values are env facts the walk owns. This file pins
+//! the boundary — which operators the node carries, and that everything else
+//! still widens to `Other`.
 
 use steins_syntax::{ArgValue, CmpOp, SourceTree, StmtKind, ValueOp};
 
@@ -50,8 +49,8 @@ fn every_comparison_operator_lowers_to_the_node() {
 
 #[test]
 fn operands_keep_their_own_lowering() {
-    // The operands are whatever the value IR spells them as — a `Var` here, whose
-    // value only the walk knows. That is the whole reason the node is structural.
+    // Operands are whatever the value IR spells them as — a `Var` here, whose
+    // value only the walk knows; that is the whole reason the node is structural.
     match lowered("$a === 'x'") {
         ArgValue::Binary { lhs, rhs, .. } => {
             assert_eq!(*lhs, ArgValue::Var("a".to_owned()));
@@ -63,9 +62,8 @@ fn operands_keep_their_own_lowering() {
 
 #[test]
 fn an_unrepresentable_operand_stays_in_the_tree() {
-    // Unlike an array literal, an operand the domain cannot spell does NOT collapse
-    // the node: the operator still guarantees a `bool`, so the node is kept and the
-    // walk declines on the value alone.
+    // Unlike an array literal, an unspellable operand does NOT collapse the node:
+    // the operator still guarantees a `bool`, so the walk declines on the value alone.
     match lowered("$a->b->c === 1") {
         ArgValue::Binary { lhs, .. } => assert_eq!(*lhs, ArgValue::Other),
         other => panic!("lowered to {other:?}"),
@@ -86,8 +84,8 @@ fn non_comparison_operators_still_widen() {
 
 #[test]
 fn the_node_is_not_a_proven_value() {
-    // `is_literal`/`is_concrete_value` gate every proof-layer consumer; a comparison
-    // becomes a value only by being decided, never by being written.
+    // `is_literal`/`is_concrete_value` gate every proof-layer consumer; a
+    // comparison becomes a value only by being decided, never by being written.
     let v = lowered("1 === 1");
     assert!(!v.is_literal());
     assert!(!v.is_concrete_value());

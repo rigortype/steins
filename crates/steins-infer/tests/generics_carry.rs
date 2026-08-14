@@ -1,9 +1,8 @@
 //! Class-level generic carry (ADR-0032, issue #10).
 //!
 //! Generic arguments are **state, not solving**: `new Class(args)` carries values
-//! flowing through direct `@param T` constructor parameters, and
-//! `@param Class<A>` judges the carried arguments against `A`. There is no
-//! call-site template solver (ADR-0030); absent knowledge stays `Maybe`.
+//! through direct `@param T` ctor params, judged against `@param Class<A>` at call
+//! sites. No call-site template solver (ADR-0030); unknown stays `Maybe`.
 
 use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -20,8 +19,7 @@ fn param_count(src: &str) -> usize {
 
 // 1. The conformance fixtures, in-crate.
 
-/// `generics_template_box`: `new Box('x')` is a `Box<string>` — rejected where a
-/// `Box<int>` is required; `new Box(1)` is accepted.
+/// Conformance case `generics_template_box`.
 #[test]
 fn box_int_rejects_string_element() {
     let base = "<?php\n\
@@ -40,9 +38,7 @@ fn box_int_rejects_string_element() {
     );
 }
 
-/// `generics_template_bound`: `new NamedBox(new AnonymousUser())` carries an
-/// `AnonymousUser` element — rejected where `NamedBox<User>` is required; a `User`
-/// element is accepted.
+/// Conformance case `generics_template_bound`: a bound template (`T of HasName`) gates it.
 #[test]
 fn named_box_user_rejects_unrelated_element() {
     let base = "<?php\n\
@@ -68,11 +64,9 @@ fn named_box_user_rejects_unrelated_element() {
     );
 }
 
-// 2. Element-add envelope over a project collection shape (issue #10 criterion).
+// 2. Element-add envelope over a project collection shape (issue #10 criterion): a
+// class-level type argument reads as an envelope on the element added at construction.
 
-/// A declared class-level type argument (`TypedList<User>`) is read as an envelope
-/// on the element added at construction: a matching element is accepted, a
-/// non-matching one rejected.
 #[test]
 fn collection_shape_element_add_envelope() {
     let base = "<?php\n\
@@ -86,13 +80,11 @@ fn collection_shape_element_add_envelope() {
         }\n\
         /** @param TypedList<Animal> $list */\n\
         function needsAnimals(TypedList $list): void {}\n";
-    // Element-add of a subtype element is within the envelope (is-a Yes).
     assert_eq!(
         param_count(&format!("{base}needsAnimals(new TypedList(new Dog()));")),
         0,
         "Dog element inhabits TypedList<Animal>",
     );
-    // Element-add of an unrelated element violates the envelope.
     assert_eq!(
         param_count(&format!("{base}needsAnimals(new TypedList(new Cat()));")),
         1,
@@ -122,8 +114,7 @@ fn nested_generic_fires_on_inner_mismatch() {
     );
 }
 
-/// An unresolvable / unknown argument class stays `Maybe` (never a manufactured
-/// `No`): the declared generic argument may be a `@template` param or type alias.
+/// An unresolvable argument class stays `Maybe` — it may be a `@template` param or alias.
 #[test]
 fn unknown_arg_class_stays_silent() {
     let src = "<?php\n\
@@ -136,8 +127,7 @@ fn unknown_arg_class_stays_silent() {
     assert_eq!(param_count(src), 0, "unresolved arg class → Maybe → silent");
 }
 
-/// A template/argument count mismatch is a thin library-author concern, silent
-/// here: two templates declared, one argument written.
+/// A template/argument arity mismatch is a thin library-author concern — silent.
 #[test]
 fn arity_mismatch_stays_silent() {
     let src = "<?php\n\
@@ -152,9 +142,8 @@ fn arity_mismatch_stays_silent() {
     assert_eq!(param_count(src), 0, "declared-arg arity ≠ carried arity → silent");
 }
 
-/// The class half only gates: an object that is NOT the required class stays
-/// silent under a generic spelling (generic-class class-mismatch reporting is
-/// deferred; the sole `No` comes from the argument half).
+/// The class half only gates: a wrong-class object stays silent (class-mismatch
+/// reporting is deferred).
 #[test]
 fn class_half_mismatch_is_deferred_silent() {
     let src = "<?php\n\
@@ -167,8 +156,7 @@ fn class_half_mismatch_is_deferred_silent() {
     assert_eq!(param_count(src), 0, "wrong-class object vs generic spelling → Maybe (deferred)");
 }
 
-/// A template with no direct `@param T` constructor parameter yields no carry, so
-/// the argument half stays silent even when a mismatching element exists elsewhere.
+/// No direct `@param T` ctor param ⇒ no carry — silent even with a mismatch elsewhere.
 #[test]
 fn no_direct_template_param_no_carry() {
     let src = "<?php\n\
@@ -183,8 +171,7 @@ fn no_direct_template_param_no_carry() {
     assert_eq!(param_count(src), 0, "nested @param array<T> does not bind T (no solver) → silent");
 }
 
-/// A non-generic class used with a generic spelling still accepts a right-class
-/// object (no false positive from an empty carry).
+/// A non-generic class under a generic spelling accepts a right-class object (empty carry).
 #[test]
 fn non_generic_class_object_accepted() {
     let src = "<?php\n\
@@ -196,15 +183,9 @@ fn non_generic_class_object_accepted() {
 }
 
 // 4. Template BOUNDS as upper-bound contracts (ADR-0032 tier 1, issue #293).
-//
-// A declared bound is a promise about every value that ever binds to the template,
-// so a bound parameter can be judged without solving anything: whatever reaches
-// `@param T $x` inhabits `T`, and `T` is at most its bound. Only **vocabulary**
-// bounds participate in this slice — a class bound declines (see below).
 
-/// `generics_template_bound_array`: `@template T of array` makes `@param T $items`
-/// an `array` contract at the call site. A literal `1` violates it; an array does
-/// not, and an abstract array fact is accepted rather than doubted into a finding.
+/// `generics_template_bound_array`: an abstract array fact is accepted, not doubted
+/// into a finding.
 #[test]
 fn vocabulary_bound_array_gates_the_constructor_argument() {
     let base = "<?php\n\
@@ -223,8 +204,6 @@ fn vocabulary_bound_array_gates_the_constructor_argument() {
         0,
         "an array satisfies the `of array` bound",
     );
-    // The abstract-fact path: `$row` is a declared parameter carrying no proven
-    // value, so the bound answers Maybe — the silence conformance line 51 pins.
     let abstract_arg = format!(
         "{base}/** @param array{{id: int}} $row */\n\
          function fill(array $row): void {{ new Collection($row); }}"
@@ -236,8 +215,7 @@ fn vocabulary_bound_array_gates_the_constructor_argument() {
     );
 }
 
-/// Bounds other than `array` read the same way, including a union bound and a
-/// bound reached through a *function*'s own `@template` rather than a class's.
+/// Bounds beyond `array` read the same way: a union bound, and a function's own `@template`.
 #[test]
 fn vocabulary_bounds_beyond_array() {
     let int_bound = "<?php\n\
@@ -260,7 +238,7 @@ fn vocabulary_bounds_beyond_array() {
         "int inhabits the union bound",
     );
 
-    // A free function's own `@template` declaration, not a class-level one.
+    // A free function's own `@template`, not a class-level one.
     let fn_bound = "<?php\n\
         /** @template T of string\n * @param T $s */\n\
         function takesStringy($s): void {}\n";
@@ -272,10 +250,8 @@ fn vocabulary_bounds_beyond_array() {
     );
 }
 
-/// **The class-bound decline.** `@template T of HasName` is a class bound, and this
-/// slice does not read it: `T` stays opaque and `new Named(1)` is silent, exactly as
-/// before. Declining is the deliberate scope line (issue #293) — class bounds are
-/// the common corpus shape and reading them is a follow-up, not a half-check here.
+/// **The class-bound decline.** `T of HasName` is a class bound; `T` stays opaque
+/// here (deliberate scope line, issue #293).
 #[test]
 fn class_bound_declines() {
     let src = "<?php\n\
@@ -284,8 +260,7 @@ fn class_bound_declines() {
         final class Named { /** @param T $v */ public function __construct(public $v) {} }\n\
         new Named(1);";
     assert_eq!(param_count(src), 0, "a class bound is not read — T stays opaque → Maybe");
-    // `of object` and `of mixed` decline too: neither is information a check can
-    // act on, and the first is the class direction in disguise.
+    // `of object`/`of mixed` decline too — neither constrains anything actionable.
     let obj = "<?php\n\
         /** @template T of object */\n\
         final class Holder { /** @param T $v */ public function __construct(public $v) {} }\n\
@@ -298,19 +273,16 @@ fn class_bound_declines() {
     assert_eq!(param_count(mixed), 0, "`of mixed` constrains nothing");
 }
 
-/// A bound never resurrects a template *name* as a class: an unbounded template
-/// whose name collides with a real class stays opaque (issue #5's shadow), and a
-/// template redeclared on a method without a bound loses the class-level bound.
+/// A bound never resurrects a template *name* as a class (issue #5's shadow); a
+/// method redeclaring the name unbounded loses the class-level bound.
 #[test]
 fn bound_does_not_leak_past_its_declaration() {
-    // Unbounded template named like a real class — the #5 shadow, unchanged.
     let shadowed = "<?php\n\
         final class Model {}\n\
         /** @template Model */\n\
         final class Repo { /** @param Model $m */ public function __construct($m) {} }\n\
         new Repo(1);";
     assert_eq!(param_count(shadowed), 0, "an unbounded template stays opaque");
-    // A method redeclaring the class-level name without a bound shadows the bound.
     let redeclared = "<?php\n\
         /** @template T of int */\n\
         final class Outer {\n\
@@ -321,16 +293,12 @@ fn bound_does_not_leak_past_its_declaration() {
     assert_eq!(param_count(redeclared), 0, "the member's own unbounded T wins");
 }
 
-// 5. Type arguments on INHERITANCE EDGES (ADR-0032 amendment, issue #294).
-//
-// `@extends Box<int>` parameterizes an ancestor, so the carry names the class that
-// *declares* the templates rather than the object's own class. Variance gates every
-// verdict: a covariant/contravariant position answers `Maybe`, because Steins models
-// neither direction and an invariant reading there convicts correct code.
+// 5. Type arguments on INHERITANCE EDGES (ADR-0032 amendment, issue #294):
+// `@extends Box<int>` names the declaring class. Variance is unmodeled, so
+// covariant/contravariant positions always answer `Maybe`.
 
-/// `generics_extends_implements`: a template-free subclass documenting
-/// `@extends Box<int>` behaves as `Box<int>` at call sites — accepted where
-/// `Box<int>` is required, rejected where `Box<string>` is.
+/// Conformance case `generics_extends_implements`: a template-free `@extends Box<int>`
+/// subclass behaves as `Box<int>`.
 #[test]
 fn extends_edge_parameterizes_the_ancestor() {
     let base = "<?php\n\
@@ -359,8 +327,7 @@ fn extends_edge_parameterizes_the_ancestor() {
     );
 }
 
-/// `@implements Producer<int>` reads the same way as `@extends`, through an
-/// interface edge — and an *invariant* interface template does reach a verdict.
+/// `@implements` reads like `@extends`; an *invariant* interface template reaches a verdict.
 #[test]
 fn implements_edge_parameterizes_the_interface() {
     let base = "<?php\n\
@@ -379,13 +346,11 @@ fn implements_edge_parameterizes_the_interface() {
     );
 }
 
-/// **The variance regression pins** — the two conformance cases that pass today
-/// *because* the carry was absent, and would become false positives under an
-/// invariant reading of the edge.
+/// **The variance regression pins** — correct today only because the carry is absent;
+/// an invariant reading of the edge would false-positive here.
 #[test]
 fn covariant_and_contravariant_positions_stay_silent() {
-    // `generics_template_covariant`: Dog producer where an Animal producer is
-    // required. Correct code under `@template-covariant`.
+    // Dog producer standing in for an Animal producer — correct under `@template-covariant`.
     let covariant = "<?php\n\
         class Animal {}\n\
         class Dog extends Animal {}\n\
@@ -399,8 +364,6 @@ fn covariant_and_contravariant_positions_stay_silent() {
         function takesAnimalProducer(Producer $producer): void {}\n\
         takesAnimalProducer(new DogProducer());";
     assert_eq!(param_count(covariant), 0, "a covariant position never reaches a verdict");
-    // The same edge against a *disjoint* argument is still silent: the gate is the
-    // variance marker, not the arguments' relationship.
     let covariant_disjoint = "<?php\n\
         class Animal {}\n\
         class Dog extends Animal {}\n\
@@ -414,8 +377,7 @@ fn covariant_and_contravariant_positions_stay_silent() {
         function takesIntProducer(Producer $producer): void {}\n\
         takesIntProducer(new DogProducer());";
     assert_eq!(param_count(covariant_disjoint), 0, "variance gates before the comparison");
-    // `generics_template_contravariant`: a consumer of Animal standing in for a
-    // consumer of Dog.
+    // A consumer of Animal standing in for a consumer of Dog.
     let contravariant = "<?php\n\
         class Animal {}\n\
         class Dog extends Animal {}\n\
@@ -431,8 +393,8 @@ fn covariant_and_contravariant_positions_stay_silent() {
     assert_eq!(param_count(contravariant), 0, "a contravariant position never reaches a verdict");
 }
 
-/// A subclass that declares its **own** `@template` is unaffected: the value carry
-/// wins and the edge is never read (it may mention that very template).
+/// A subclass declaring its **own** `@template` is unaffected: the value carry wins
+/// and the edge is never read.
 #[test]
 fn own_templates_win_over_the_edge() {
     let src = "<?php\n\
@@ -450,8 +412,7 @@ fn own_templates_win_over_the_edge() {
         1,
         "the subclass's own value carry judges its own templates",
     );
-    // And the edge's `T` is never lowered as a class named `T`: a `Box<int>`
-    // spelling over the same object stays silent rather than manufacturing a `No`.
+    // The edge's `T` is never lowered as a class named `T` either.
     assert_eq!(
         param_count(&format!(
             "{src}/** @param Box<int> $b */\nfunction g(Box $b): void {{}}\ng(new SubBox('x'));"
@@ -461,16 +422,13 @@ fn own_templates_win_over_the_edge() {
     );
 }
 
-/// Adversarial edges, all silent: an edge naming a class the object is not, an
-/// arity disagreement between the edge and the ancestor's templates, an
-/// unparameterized `@extends`, and an argument naming an unresolvable identifier
-/// (which may be a `@phpstan-type` alias denoting a scalar).
+/// Adversarial edges, all silent: wrong owner, arity disagreement, unparameterized
+/// `@extends`, and an unresolvable identifier (may be a `@phpstan-type` alias).
 #[test]
 fn adversarial_edges_stay_silent() {
     let ancestor = "<?php\n\
         /** @template T */\n\
         class Box { public function __construct() {} }\n";
-    // The edge names a class this object does not extend.
     let wrong_owner = format!(
         "{ancestor}/** @extends Box<int> */\n\
          final class NotABox {{ public function __construct() {{}} }}\n\
@@ -479,7 +437,6 @@ fn adversarial_edges_stay_silent() {
          f(new NotABox());"
     );
     assert_eq!(param_count(&wrong_owner), 0, "an edge to a non-ancestor says nothing");
-    // Edge writes two arguments, the ancestor declares one.
     let arity = format!(
         "{ancestor}/** @extends Box<int, string> */\n\
          final class Weird extends Box {{ public function __construct() {{}} }}\n\
@@ -488,7 +445,6 @@ fn adversarial_edges_stay_silent() {
          f(new Weird());"
     );
     assert_eq!(param_count(&arity), 0, "edge/template arity disagreement stays a thin lint");
-    // A bare `@extends Box` carries no arguments.
     let bare = format!(
         "{ancestor}/** @extends Box */\n\
          final class Plain extends Box {{ public function __construct() {{}} }}\n\
@@ -497,7 +453,6 @@ fn adversarial_edges_stay_silent() {
          f(new Plain());"
     );
     assert_eq!(param_count(&bare), 0, "an unparameterized edge carries nothing");
-    // An unresolvable argument identifier may be a type alias denoting a scalar.
     let alias = format!(
         "{ancestor}/** @extends Box<SomeAlias> */\n\
          final class AliasBox extends Box {{ public function __construct() {{}} }}\n\
@@ -509,16 +464,10 @@ fn adversarial_edges_stay_silent() {
 }
 
 // 6. The carry through a VARIABLE BINDING, and the sweep that keeps it sound
-// (ADR-0032 binding amendment, issue #295).
-//
-// The carry lives on the allocation (`HeapObj::targs`), so it survives `$box = new
-// Box(1);`. A receiver method call sweeps the **value** half: a method may rewrite
-// the very values the carry recorded (`@phpstan-self-out self<U>` says so out loud),
-// and a stale carry is a false positive at the next declared `Box<T>` parameter.
+// (ADR-0032 binding amendment, issue #295). The carry lives on the allocation
+// (`HeapObj::targs`); a receiver call must sweep it or a stale carry false-positives.
 
-/// The shape `assertions_this_out_self_out` fails on: the carry reaches the call
-/// through the binding, so `takesStringBox($box)` on an int box reports — and
-/// `takesIntBox($box)` on the same box does not.
+/// The carry reaches a call through a `$box = new Box(1)` binding, not just a direct `new`.
 #[test]
 fn carry_survives_a_variable_binding() {
     let base = "<?php\n\
@@ -544,9 +493,8 @@ fn carry_survives_a_variable_binding() {
     );
 }
 
-/// **Argument passing keeps the carry only for a callee that provably cannot reach
-/// the object** — the conformance case's line 52/53 pair. `takesIntBox` ignores its
-/// parameter entirely, so nothing it does can invalidate what the carry states.
+/// Argument passing keeps the carry when the callee provably cannot reach the object:
+/// `takesIntBox` never touches its parameter.
 #[test]
 fn passing_the_object_as_an_argument_keeps_the_carry() {
     let src = "<?php\n\
@@ -565,13 +513,9 @@ fn passing_the_object_as_an_argument_keeps_the_carry() {
     assert_eq!(param_count(src), 1, "the carry survives an intervening call that only reads it");
 }
 
-/// **The line-57 pin.** After `$box->replace($next)` the carried `int` is stale:
-/// `@phpstan-self-out self<U>` re-parameterizes the receiver and Steins models no
-/// such update. Both spellings must therefore stay silent — the string one because
-/// the box may now hold a string, the int one because it may no longer.
-///
-/// Without the sweep this test fails on `takesStringBox` with a **false positive**,
-/// which is exactly the regression it exists to pin.
+/// **The line-57 pin.** `@phpstan-self-out self<U>` on `replace()` re-parameterizes
+/// the receiver, so the carried `int` is stale after the call — both spellings must
+/// stay silent. Without the sweep, `takesStringBox` here is a **false positive**.
 #[test]
 fn receiver_method_call_sweeps_the_stale_value_carry() {
     let base = "<?php\n\
@@ -605,8 +549,7 @@ fn receiver_method_call_sweeps_the_stale_value_carry() {
     );
 }
 
-/// A receiver call sweeps only **its own** receiver: an unrelated object's carry is
-/// untouched, the same precision payoff `sweep_nonreadonly` gives props.
+/// A receiver call sweeps only its own receiver — an unrelated object's carry is untouched.
 #[test]
 fn the_sweep_is_receiver_local() {
     let src = "<?php\n\
@@ -625,10 +568,8 @@ fn the_sweep_is_receiver_local() {
     assert_eq!(param_count(src), 1, "sweeping $a leaves $b's carry intact");
 }
 
-/// **The sweep-immune path.** An inheritance-edge carry states what the author
-/// *declared* about the class (`@extends Box<int>`), not what flowed into one
-/// object, so no method call can invalidate it — it survives a receiver call
-/// exactly as a `readonly` prop survives a sweep.
+/// **The sweep-immune path.** A *declared* edge carry (`@extends Box<int>`) survives
+/// a receiver call, like a `readonly` prop survives a sweep.
 #[test]
 fn inheritance_edge_carry_survives_a_receiver_call() {
     let src = "<?php\n\
@@ -650,8 +591,7 @@ fn inheritance_edge_carry_survives_a_receiver_call() {
     assert_eq!(param_count(src), 1, "a declared edge is not a mutable fact — it survives the sweep");
 }
 
-/// Aliasing and cloning both preserve the carry: an alias shares the allocation, a
-/// clone copies it (and a `Box<int>` clone is still a `Box<int>`).
+/// Aliasing and cloning both preserve the carry (a `Box<int>` clone is still a `Box<int>`).
 #[test]
 fn alias_and_clone_carry_the_arguments() {
     let base = "<?php\n\
@@ -672,8 +612,7 @@ fn alias_and_clone_carry_the_arguments() {
     );
 }
 
-/// A branch join **intersects**: a carry swept inside one arm is gone for the
-/// successor, even though the other arm still had it.
+/// A branch join **intersects**: a carry swept in one arm is gone for the successor.
 #[test]
 fn a_branch_that_sweeps_erases_the_carry_after_the_join() {
     let base = "<?php\n\
@@ -701,18 +640,12 @@ fn a_branch_that_sweeps_erases_the_carry_after_the_join() {
     );
 }
 
-// 7. The ARGUMENT-PASS gate (ADR-0032 binding amendment, argument-pass ruling).
-//
-// A callee that mutates the object it was handed makes the carry stale exactly as
-// the receiver's own method does — and there the failure direction is a *report* on
-// correct code. So the carry survives an argument pass only where the callee
-// provably cannot reach the object at all: PHP locals are lexical, so a parameter
-// the body never spells cannot be touched by it. Every uncertainty sweeps.
+// 7. The ARGUMENT-PASS gate (ADR-0032 binding amendment, argument-pass ruling): the
+// carry survives a pass only where the callee provably cannot reach the object — PHP
+// locals are lexical, so an unspelled parameter is untouchable. Every uncertainty sweeps.
 
-/// **The false positive this gate exists to prevent.** `mutate()` calls
-/// `$b->replace('s')` internally, so the carried `int` is stale afterwards — and
-/// `takesStringBox($box)` on the following line is *correct code*. It must be
-/// silent, not reported.
+/// **The false positive this gate prevents.** `mutate()` calls `$b->replace('s')`
+/// internally, so `takesStringBox($box)` next is *correct code* — must stay silent.
 #[test]
 fn a_callee_that_mutates_its_parameter_sweeps_the_carry() {
     let base = "<?php\n\
@@ -746,10 +679,8 @@ fn a_callee_that_mutates_its_parameter_sweeps_the_carry() {
     );
 }
 
-/// The gate is **reachability, not mutation**: a callee that only *reads* the
-/// parameter sweeps too. Narrow by construction — proving "reads but never writes"
-/// is the per-parameter non-mutation judgment ADR-0055 Part II's inference unlocks,
-/// and it is not built.
+/// The gate is **reachability, not mutation**: a callee that only *reads* sweeps too
+/// (the ADR-0055 Part II non-mutation judgment this would need is not built).
 #[test]
 fn a_callee_that_merely_mentions_its_parameter_sweeps() {
     let src = "<?php\n\
@@ -764,8 +695,8 @@ fn a_callee_that_merely_mentions_its_parameter_sweeps() {
     assert_eq!(param_count(src), 0, "a mentioned parameter is not a proven-unreachable one");
 }
 
-/// **Unknown is not proof of non-mutation.** An unresolvable callee, a builtin, a
-/// method call, and a by-ref parameter all sweep.
+/// **Unknown is not proof of non-mutation:** unresolvable, by-ref, variadic, and
+/// poisoned-body callees all sweep.
 #[test]
 fn an_unprovable_callee_sweeps() {
     let base = "<?php\n\
@@ -774,13 +705,12 @@ fn an_unprovable_callee_sweeps() {
         /** @param Box<string> $box */\n\
         function takesStringBox(Box $box): void {}\n\
         $box = new Box(1);\n";
-    // A function the project does not declare.
     assert_eq!(
         param_count(&format!("{base}undeclared_helper($box);\ntakesStringBox($box);")),
         0,
         "an unresolvable callee sweeps",
     );
-    // A by-ref parameter — the callee can rebind the caller's variable outright.
+    // By-ref: the callee can rebind the caller's variable outright.
     assert_eq!(
         param_count(&format!(
             "{base}function byRef(Box &$b): void {{}}\nbyRef($box);\ntakesStringBox($box);"
@@ -788,7 +718,7 @@ fn an_unprovable_callee_sweeps() {
         0,
         "a by-ref position sweeps",
     );
-    // A variadic position: no parameter to index.
+    // Variadic: no parameter to index.
     assert_eq!(
         param_count(&format!(
             "{base}function variadic(Box ...$bs): void {{}}\nvariadic($box);\ntakesStringBox($box);"
@@ -796,7 +726,7 @@ fn an_unprovable_callee_sweeps() {
         0,
         "a variadic position sweeps",
     );
-    // A poisoned callee body can reach a binding without spelling it.
+    // Poisoned body: `extract()` can reach a binding without spelling it.
     assert_eq!(
         param_count(&format!(
             "{base}function poisoned(Box $b): void {{ extract(['b' => 1]); }}\n\
@@ -807,10 +737,7 @@ fn an_unprovable_callee_sweeps() {
     );
 }
 
-/// The mention test is **token-exact**: a callee spelling `$boxes` does not count
-/// as spelling `$box`, so a genuinely unreachable parameter is not swept by a
-/// near-name. (The other direction — a mention inside a string or comment — sweeps,
-/// which errs toward silence.)
+/// The mention test is **token-exact** (`$boxes` ≠ `$box`); a comment mention still sweeps.
 #[test]
 fn the_mention_test_respects_token_boundaries() {
     let src = "<?php\n\
@@ -825,9 +752,7 @@ fn the_mention_test_respects_token_boundaries() {
     assert_eq!(param_count(src), 1, "$boxes is not $box — the carry survives");
 }
 
-/// An inheritance-edge carry is **declared**, so an argument pass does not sweep it
-/// any more than a receiver call does: no callee can change what `@extends Box<int>`
-/// says about the class.
+/// A **declared** edge carry is no more swept by an argument pass than a receiver call.
 #[test]
 fn inheritance_edge_carry_survives_an_argument_pass() {
     let src = "<?php\n\

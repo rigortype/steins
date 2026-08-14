@@ -229,9 +229,8 @@ fn asserted_capture_summary_stays_asserted() {
 #[test]
 fn memo_does_not_launder_asserted_after_verified_same_value() {
     // Issue #128 review: BindingKey without stratum collides Verified `$f('hi')`
-    // with Asserted `$f($u)` (same Singleton value) inside one outer descent —
-    // memo replay would hand a Verified summary to the Asserted call and premise
-    // a proof finding. Stratum is part of the key so the second call re-walks.
+    // with Asserted `$f($u)` (same Singleton value) inside one descent — memo
+    // replay would premise a finding, so stratum is part of the key.
     let src = "<?php\n\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\
@@ -256,10 +255,9 @@ fn memo_does_not_launder_asserted_after_verified_same_value() {
 
 #[test]
 fn memo_does_not_launder_asserted_capture_after_verified_same_value() {
-    // The parameter-stratum fixture above does not by itself prove that
-    // `use:{name}` entries carry stratum too. Two walks of `wrap` share one memo
-    // and instantiate the same closure definition with equal capture values but
-    // different trust; omitting capture stratum would replay the first summary.
+    // The fixture above doesn't prove `use:{name}` entries carry stratum too.
+    // Two walks of `wrap` share one memo, same capture value but different
+    // trust — omitting capture stratum would replay the first summary.
     let src = "<?php\n\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\
@@ -285,10 +283,9 @@ fn memo_does_not_launder_asserted_capture_after_verified_same_value() {
     );
 }
 
-// (c) Phpdoc `@return` — docblock adoption (issue #128, second leg). Two
-// spellings share one grammar (ADR-0029 whitespace gap): inline before the
-// closure expression's first token wins; the enclosing statement's docblock is
-// adopted only when the statement is a simple `$f = <closure>;` assignment.
+// (c) Phpdoc `@return` — docblock adoption (issue #128, second leg; ADR-0029
+// whitespace gap): inline before the closure's first token wins; statement
+// docblock adopts only for a simple `$f = <closure>;` assignment.
 
 #[test]
 fn inline_phpdoc_return_mismatch_fires() {
@@ -340,9 +337,8 @@ fn static_closure_inline_phpdoc_adjacency_is_to_the_static_keyword() {
 
 #[test]
 fn generator_closure_phpdoc_return_is_not_checked() {
-    // The native leg's generator skip holds for the phpdoc lane identically: a
-    // `yield` body's in-body `return` is `Generator::getReturn()`'s value, so
-    // even a blatant `@return int` mismatch stays silent.
+    // The native leg's generator skip holds for the phpdoc lane too: in-body
+    // `return` is `getReturn()`'s value, so even a blatant mismatch stays silent.
     let src = "<?php\n\
         /** @return int */\n\
         $f = function () {\n\
@@ -354,10 +350,9 @@ fn generator_closure_phpdoc_return_is_not_checked() {
 
 #[test]
 fn generator_function_phpdoc_return_is_not_checked() {
-    // Issue #142's live repro: the docblock is TRUTHFUL (calling `g()` yields a
-    // `Generator`; `42` is `Generator::getReturn()`'s value), the native leg is
-    // silent, and the phpdoc leg fires exactly where the native one did not — so
-    // before the scope-wide guard this reported against a correct annotation.
+    // Issue #142's live repro: the docblock is TRUTHFUL (`g()` yields a
+    // `Generator`; `42` is `getReturn()`'s value) — before the scope-wide guard
+    // this reported against a correct annotation.
     let src = "<?php\n\
         /** @return \\Generator */\n\
         function g() {\n\
@@ -406,9 +401,8 @@ fn non_generator_method_phpdoc_return_still_fires() {
 
 #[test]
 fn embedded_closure_does_not_adopt_the_statement_docblock() {
-    // A closure in a call-argument position is not the statement's whole RHS —
-    // the statement docblock stays with the statement, in both the bare-call
-    // and assigned-call spellings.
+    // A closure in call-argument position is not the statement's whole RHS —
+    // the docblock stays with the statement, bare-call or assigned-call.
     let bare = "<?php\n\
         /** @return string */\n\
         array_map(function () {\n\
@@ -425,10 +419,9 @@ fn embedded_closure_does_not_adopt_the_statement_docblock() {
 
 #[test]
 fn inline_docblock_beats_the_statement_docblock() {
-    // Both positions present: inline wins. `@return string` (inline) is violated
-    // by `return 42` even though the statement-level `@return int` would accept
-    // it — and the mirror image stays silent where the statement-level claim
-    // would have fired.
+    // Both positions present: inline wins. `@return string` (inline) is
+    // violated by `return 42` though statement-level `@return int` would
+    // accept it — the mirror stays silent where statement-level would fire.
     let inline_fires = "<?php\n\
         /** @return int */\n\
         $f = /** @return string */ function () {\n\
@@ -446,8 +439,7 @@ fn inline_docblock_beats_the_statement_docblock() {
 #[test]
 fn var_only_statement_docblock_leaves_the_closure_unchecked() {
     // ADR-0073's `@var` cast lane and this `@return` lane read different tags
-    // from the same statement docblock; a `@var`-only docblock carries no
-    // `@return` and so checks nothing on the closure body.
+    // from the same docblock; `@var`-only carries no `@return`, so nothing checks.
     let src = "<?php\n\
         /** @var \\Closure $f */\n\
         $f = function () {\n\
@@ -479,10 +471,8 @@ fn non_doc_comment_breaks_the_adoption_adjacency() {
 #[test]
 fn phpdoc_refines_the_declared_floor_at_a_refused_call() {
     // The value-lane seam (issue #128 second leg): a named-arg call refuses
-    // binding descent, and the floor it keeps composes native `: int` with the
-    // adopted `@return positive-int` through the same `refine_contract_arms`
-    // precedence free functions use — an Asserted refinement within the
-    // Verified native envelope.
+    // binding descent, and the kept floor composes native `: int` with the
+    // adopted `@return positive-int` — an Asserted refinement within Verified.
     let src = "<?php\n\
         /** @return positive-int */\n\
         $f = function (int $x): int {\n\

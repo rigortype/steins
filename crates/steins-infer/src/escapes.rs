@@ -1,30 +1,26 @@
-//! The proven-escape sweep for `@throws` envelope seeding (issue #115): the
-//! narrow seam the transform engine (`steins-edit`) reaches into for the throw
-//! system's per-declaration verdicts, the same way [`crate::promote`] exposes
-//! the reverse call-site sweep for promotion/honesty.
-//!
-//! The sweep reuses the checker's own machinery — the throw fixpoint behind
-//! `throw.undeclared` (ADR-0040), the checked accounting (ADR-0007), and the
-//! declared-`@throws` resolution — rather than forking it, and returns plain
-//! data. The transform crate owns candidate enumeration, refusal assembly, and
-//! the edit mechanics.
+//! The proven-escape sweep for `@throws` envelope seeding (issue #115): the seam
+//! `steins-edit` reaches into for the throw system's per-declaration verdicts,
+//! as [`crate::promote`] exposes the reverse call-site sweep for
+//! promotion/honesty. Reuses the checker's own machinery — the throw fixpoint
+//! behind `throw.undeclared` (ADR-0040), checked accounting (ADR-0007), and
+//! declared-`@throws` resolution — and returns plain data; the transform crate
+//! owns candidate enumeration, refusal assembly, and edit mechanics.
 //!
 //! ## What a declaration's entry means
 //!
 //! A declaration appears in the sweep iff it has at least one **envelope-
-//! relevant** escaping throw class: a class that is not provably unchecked (the
-//! `Error`/`LogicException` families never count against envelopes, ADR-0007).
-//! Each class carries two verdicts:
+//! relevant** escaping throw class: not provably unchecked (`Error`/
+//! `LogicException` families never count against envelopes, ADR-0007). Each
+//! class carries two verdicts:
 //!
-//! * `proven` — the escape is `Yes` **and** the class is provably checked: the
-//!   exact conjunction under which `throw.undeclared` would fire for it. Only
-//!   these may become a written envelope entry (ADR-0037: only proven facts are
-//!   written; a `Maybe` never becomes a declared contract).
+//! * `proven` — escape is `Yes` **and** the class is provably checked: the exact
+//!   conjunction under which `throw.undeclared` would fire. Only these may
+//!   become a written envelope entry (ADR-0037: only proven facts are written).
 //! * `covered` — a declared `@throws` already admits it (subtype not-`No`,
 //!   mirroring the checker's own silence rule).
 //!
 //! Order is deterministic: classes appear in the source order of their first
-//! escaping origin (`(origin_file, offset, class)` — the same sort
+//! escaping origin (`(origin_file, offset, class)`, the same sort
 //! `throw.undeclared` emission uses), deduplicated case-insensitively.
 
 use std::collections::HashMap;
@@ -37,14 +33,13 @@ use crate::{Cx, FileUnit, Index, Sym, compute_throws, declared_throws, throw_che
 /// One envelope-relevant escaping throw class of a declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EscapeClass {
-    /// The class FQN exactly as the proven-escape machinery reports it (resolved
-    /// in the origin file's context, no leading `\`) — the spelling discipline
-    /// `throw.undeclared` uses; the transform writes this, never a respelling.
+    /// The class FQN as the proven-escape machinery reports it (origin file's
+    /// context, no leading `\`) — `throw.undeclared`'s spelling discipline; the
+    /// transform writes this, never a respelling.
     pub class: String,
     /// `true` iff the escape is proven (`Yes`) **and** the class is provably
     /// checked — the conjunction under which `throw.undeclared` would fire.
-    /// `false` is the Maybe side (a `Maybe` escape, or a class whose hierarchy
-    /// leaves known territory): never written (ADR-0037/0040).
+    /// `false` (Maybe escape or unknown hierarchy) is never written (ADR-0037/0040).
     pub proven: bool,
     /// `true` iff a declared `@throws` on the declaration already admits this
     /// class (subtype resolution not-`No` — the checker's own silence rule).

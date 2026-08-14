@@ -28,13 +28,8 @@ pub mod suppress;
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 /// The `[runtime] final-keyword` posture (issue #234), re-exported so the CLI can
 /// resolve `steins.toml` into it without depending on steins-contract directly —
-/// the same shape as [`check_project_with_runtime`]'s `warning_handler_abort`
-/// parameter, which is the CLI's other `[runtime]` pseudo-constant. Nothing in the
-/// checker reads it yet: intersections are consumed nowhere, so the judgment it
-/// governs ([`steins_contract::normalize::provably_uninhabited`]) has no caller in
-/// the binary, and planting an unread field on the analysis context would claim a
-/// run reads something it does not. Intersection consumption (issue #238) is where
-/// it joins `warning_handler_abort` on `Cx`.
+/// mirrors [`check_project_with_runtime`]'s `warning_handler_abort` parameter.
+/// Unused until intersection consumption (issue #238) joins it on `Cx`.
 pub use steins_contract::normalize::FinalKeyword;
 pub use suppress::{
     DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, InlineOutcome, Layer, Origin,
@@ -141,19 +136,16 @@ pub use steins_domain::Certainty;
 pub const UNKNOWN_LABEL_ID: &str = "effect.unknown-label";
 
 /// The registry id for the **interop** vocabulary check (issue #311): a label in
-/// one of upstream's purity tags that the registry does not know, *and* that
-/// carries evidence of label intent ([`steins_catalog::LabelRegistry::label_intent`]
-/// — a near miss, a recognized sibling in the same list, a dot-path shape, or a
-/// spelling Steins retired). The tag has already gone ⊤ by then (the ADR-0082
-/// amendment); this id is what keeps that degradation from being invisible.
+/// an upstream purity tag that the registry does not know but that carries
+/// evidence of label intent ([`steins_catalog::LabelRegistry::label_intent`] — a
+/// near miss, a sibling in the same list, a dot-path shape, or a retired
+/// spelling). The tag has already gone ⊤ (ADR-0082 amendment); this id keeps that
+/// degradation visible.
 ///
-/// **Not [`UNKNOWN_LABEL_ID`]**, deliberately. That id is mechanics: unsuppressable
-/// and on every profile, which is the fail-closed posture the owner ruling refused
-/// for docblocks — firing it from an interop tag is exactly what the ADR-0082
-/// amendment declined. This one is *contract* layer at the `contracts` floor: its
-/// content is "the bound you declared is not the bound being checked", a statement
-/// about a declaration's debt, and a codebase mid-migration must be able to absorb
-/// a pile of them through a baseline or `@steins-ignore`.
+/// Deliberately not [`UNKNOWN_LABEL_ID`] (mechanics: unsuppressable, fail-closed —
+/// refused for docblocks by the same amendment). This is *contract* layer at the
+/// `contracts` floor, so a mid-migration codebase can absorb it via baseline or
+/// `@steins-ignore`.
 pub const INTEROP_UNKNOWN_LABEL_ID: &str = "effect.interop-unknown-label";
 
 /// The registry id for the `@throws` envelope check (ADR-0040/0007): a **checked**
@@ -240,10 +232,9 @@ pub const OFFSET_ON_UNSUPPORTED_ID: &str = "offset.on-unsupported";
 /// excludes — a field declared `Absent`, a key outside a `Sealed` shape's fields, or
 /// a key the unsealed tail's own key class rejects (`ShapeRead::DeclaredAbsent`).
 ///
-/// The absence is definite **conditional on the docblock**, so the evidence is the
-/// Asserted world and the finding is contract-grade — never a proof-layer claim
-/// (A-G9's corollary). v1 scope: shape-declared bases with
-/// constant/env-resolved keys only.
+/// Absence is definite only conditional on the docblock (Asserted world), so this
+/// is contract-grade, never a proof-layer claim (A-G9's corollary). v1 scope:
+/// shape-declared bases with constant/env-resolved keys only.
 pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
 
 /// The registry id for the undischarged optional-offset read (ADR-0062 A-G10 /
@@ -252,10 +243,10 @@ pub const OFFSET_UNDECLARED_ID: &str = "offset.undeclared";
 /// proof on this path discharges — no `isset`/`array_key_exists` guard promoted it
 /// (S4), and no KeyCover + `¬isset` premise ladder proved it (S5).
 ///
-/// At runtime such a read warns `Undefined array key` and yields `null`, which then
-/// propagates — a real soundness hazard, reported only on the strict surface because
-/// its evidence is the declaration, not a proven value. The `??`
-/// chain's non-final arms NEVER fire: the operator itself protects them.
+/// Runtime: warns `Undefined array key`, yields `null`, which then propagates — a
+/// real soundness hazard, reported only on the strict surface because the evidence
+/// is the declaration, not a proven value. `??` chain non-final arms never fire —
+/// the operator itself protects them.
 pub const OFFSET_MAYBE_MISSING_ID: &str = "offset.maybe-missing";
 
 /// The registry id for the declared-receiver undefined-method check (ADR-0049 §8,
@@ -268,11 +259,10 @@ pub const PHPDOC_UNDEFINED_METHOD_ID: &str = "phpdoc.undefined-method";
 /// proof layer): a `printf`/`sprintf`/`fprintf`/`vprintf`/`vsprintf` call whose
 /// folded literal format string demands more placeholders than the call proves
 /// it supplies (a `printf`/`sprintf`/`fprintf` fatal `ArgumentCountError`; a
-/// `vprintf`/`vsprintf` fatal `ValueError` on a proven-size array). Distinct
-/// from [`CALL_TOO_FEW_ARGUMENTS_ID`]: the evidence here is a folded format
-/// string, not a resolved callee signature, so this id keeps the M2
-/// internal-arity slice (`CALL_TOO_MANY_ARGUMENTS_ID`) clean of format-derived
-/// claims (ADR-0078 §"The naming decision").
+/// `vprintf`/`vsprintf` fatal `ValueError` on a proven-size array). Distinct from
+/// [`CALL_TOO_FEW_ARGUMENTS_ID`]: the evidence is a folded format string, not a
+/// resolved callee signature, keeping the M2 internal-arity slice
+/// (`CALL_TOO_MANY_ARGUMENTS_ID`) clean of format-derived claims.
 pub const CALL_PRINTF_TOO_FEW_ARGUMENTS_ID: &str = "call.printf-too-few-arguments";
 // end printf arity (ADR-0078, issue #188)
 
@@ -285,12 +275,11 @@ pub const CALL_PRINTF_TOO_FEW_ARGUMENTS_ID: &str = "call.printf-too-few-argument
 /// The registry id for the duplicate-array-key check (ADR-0078, **mechanics**
 /// layer, issue #187): a literal array expression declares the same
 /// PHP-normalized key twice, so the earlier value is silently overwritten —
-/// works-but-drops-a-value intent/behaviour drift, not a runtime break, hence
-/// mechanics rather than proof. Purely syntactic (the evidence is the literal
-/// itself); the key comparison reuses `steins_syntax`'s A12 coercion and
-/// next-auto-index resolution (`duplicate_array_keys`) rather than a second
-/// coercion table, and a key the fold gate cannot pin — a variable, a call, a
-/// spread, and every `Auto` position after one of those — is silently skipped.
+/// works-but-drops-a-value drift, not a runtime break, hence mechanics rather
+/// than proof. Purely syntactic; key comparison reuses `steins_syntax`'s A12
+/// coercion and next-auto-index resolution (`duplicate_array_keys`) rather than
+/// a second coercion table. A key the fold gate cannot pin — a variable, a call,
+/// a spread, and every `Auto` position after one of those — is silently skipped.
 pub const ARRAY_DUPLICATE_KEY_ID: &str = "array.duplicate-key";
 
 // ---------------------------------------------------------------------------
@@ -530,69 +519,53 @@ pub fn is_dump_family_fqn(fqn: &str) -> bool {
 /// `Default`): a `preg_*` call whose pattern argument is a proven literal that the
 /// project's OWN PCRE refuses to compile.
 ///
-/// # Why proof, and why the warning-handler gate
+/// Consequence, measured at PHP 8.5.9: an `E_WARNING` carrying PCRE's own
+/// complaint, plus a useless return (`false` for `preg_match`/`preg_match_all`/
+/// `preg_split`/`preg_grep`, `null` for the `preg_replace*`/`preg_filter` family).
+/// A live-path break, hence **proof** — the same warning-plus-degraded-value shape
+/// `offset.missing` carries, riding the same ADR-0049 §7 warning-handler lever:
+/// silent under a declared `warning-handler = "null"` posture.
 ///
-/// The consequence is warning-plus-a-useless-return, measured at PHP 8.5.9: the
-/// call emits an `E_WARNING` carrying PCRE's own complaint and returns `false`
-/// (`preg_match`, `preg_match_all`, `preg_split`, `preg_grep`) or `null`
-/// (`preg_replace`, `preg_replace_callback`, `preg_replace_callback_array`,
-/// `preg_filter`). The call never does what it was written to do — a live-path
-/// break, so **proof**, the same answer `offset.missing` carries for the same
-/// warning-plus-degraded-value shape. And for the same reason it rides the same
-/// ADR-0049 §7 lever: under a declared `warning-handler = "null"` posture the
-/// application tolerates the warning, so the warning-grade finding leaves the proof
-/// surface exactly as `offset.missing` does.
-///
-/// # Where the refusal comes from
-///
-/// From the project's own PCRE, through the sidecar (ADR-0004), never from Steins'
-/// own pattern reader. The reader's job stays what it was built for (#148/#149/
-/// #156/#168/#177): deciding that the pattern IS a proven literal worth asking
-/// about. A reader-derived refusal would report patterns PCRE compiles happily,
-/// which the zero-FP bar forbids. No sidecar ⇒ no refusal ⇒ silence.
+/// The refusal comes from the project's own PCRE, through the sidecar (ADR-0004),
+/// never from Steins' own pattern reader — whose job stays deciding that the
+/// pattern IS a proven literal worth asking about (#148/#149/#156/#168/#177). A
+/// reader-derived refusal would report patterns PCRE compiles happily, which the
+/// zero-FP bar forbids. No sidecar ⇒ no refusal ⇒ silence.
 pub const PREG_INVALID_PATTERN_ID: &str = "preg.invalid-pattern";
 
 // non-object receivers (ADR-0078, issue #190)
 
 /// The registry id for a method call on a receiver proven to be a **non-object,
-/// non-null** value (ADR-0078, issue #190): `$x = 1; $x->m();` is the very same
-/// fatal `Error` [`CALL_ON_NULL_ID`] already names for `null`, only with the runtime
-/// type in its place — `Call to a member function m() on int` (witnessed at PHP
-/// 8.5.9 for `int`, `string`, `float`, `true`, `false` and `array`).
+/// non-null** value (ADR-0078, issue #190): `$x = 1; $x->m();` is the same fatal
+/// `Error` [`CALL_ON_NULL_ID`] names for `null`, with the runtime type in its
+/// place — `Call to a member function m() on int` (witnessed at PHP 8.5.9 for
+/// `int`, `string`, `float`, `true`, `false`, `array`).
 ///
-/// **A sibling id, not a widening of `call.on-null`.** ADR-0022 makes an id's
-/// meaning a contract: `call.on-null` is already in users' baselines and
-/// `@steins-ignore` comments, and widening it in place would silently change what
-/// those suppress. The null case keeps its own, sharper sentence; this id takes the
-/// scalar and array receivers. The two are disjoint by construction — the null
-/// receiver is `Fact::Singleton(Val::Null)`, which this id's emitter refuses — so no
-/// site can ever report both.
+/// A sibling id, not a widening of `call.on-null`: ADR-0022 makes an id's meaning
+/// a contract, and `call.on-null` is already in baselines/`@steins-ignore`
+/// comments. The two are disjoint by construction (null is
+/// `Fact::Singleton(Val::Null)`, which this id's emitter refuses), so no site
+/// reports both.
 ///
-/// The receiver premise is the four-layer value domain's own: a `Fact` has no object
-/// denotation at all (`Val` cannot spell one), so a receiver that carries a fact is
-/// already proven not to be an object. A receiver with no fact is silence, which is
-/// where every `Maybe`-object, object-arm union and unknown-class receiver lands.
-///
-/// `?->` does **not** excuse it: nullsafe short-circuits on `null` alone, so a
-/// proven non-null non-object still fatals (witnessed: `$x = 1; $x?->m();`).
+/// Premise: the four-layer value domain has no object denotation at all (`Val`
+/// cannot spell one), so a receiver carrying a `Fact` is already proven not an
+/// object; a receiver with no fact is silence (every `Maybe`-object, object-arm
+/// union, unknown-class receiver). `?->` does not excuse it — nullsafe
+/// short-circuits on `null` alone, so a proven non-null non-object still fatals
+/// (witnessed: `$x = 1; $x?->m();`).
 pub const CALL_ON_NON_OBJECT_ID: &str = "call.on-non-object";
 
 /// The registry id for a property fetch on a receiver proven to be a **non-object,
 /// non-null** value (ADR-0078, issue #190): `$x = 1; $y = $x->p;` raises
 /// `Warning: Attempt to read property "p" on int` and evaluates to `null`
-/// (witnessed at PHP 8.5.9 for `int`, `string`, `float`, `true`, `false` and
-/// `array`).
+/// (witnessed at PHP 8.5.9 for `int`, `string`, `float`, `true`, `false`, `array`).
+/// Warning-grade, riding the ADR-0049 §7 lever like `offset.missing`.
 ///
-/// Warning-grade, so it rides the ADR-0049 §7 lever exactly as `offset.missing`
-/// does: under a declared `warning-handler = "null"` posture the application
-/// tolerates the warning and the finding leaves the proof surface.
-///
-/// Unlike its `call.` sibling this id **does** own the proven-`null` receiver:
-/// there is no `property.on-null` in the ADR-0078 table to defer to, PHP raises the
-/// very same warning for it (`Attempt to read property "p" on null`), and null is a
-/// non-object — carving it out would leave the commonest receiver of all
-/// unreported. `call.on-non-object` carves null out only because
-/// [`CALL_ON_NULL_ID`] already owns it.
+/// Unlike its `call.` sibling this id owns the proven-`null` receiver too: PHP
+/// raises the same warning for it (`Attempt to read property "p" on null`), and
+/// there is no `property.on-null` to defer to — carving null out would leave the
+/// commonest receiver unreported. `call.on-non-object` carves null out only
+/// because [`CALL_ON_NULL_ID`] already owns it.
 pub const PROPERTY_ON_NON_OBJECT_ID: &str = "property.on-non-object";
 
 // end non-object receivers (ADR-0078, issue #190)
@@ -600,14 +573,13 @@ pub const PROPERTY_ON_NON_OBJECT_ID: &str = "property.on-non-object";
 /// `foreach.non-iterable` (ADR-0078, issue #192): a `foreach` subject proven — in
 /// the same value-domain lane `offset.missing` reads — to be a non-array
 /// scalar/`null`. PHP's own consequence (`php -r`-witnessed, 8.5.9):
-/// `foreach() argument must be of type array|object, {type} given`, and the loop
-/// body is skipped entirely, not merely warned about. Single-id family, like
-/// `readonly.reassigned` — there is no companion "unsupported" arm, because every
-/// leg this proves already IS the one runtime consequence (unlike the offset
-/// family's missing-key/unsupported-base split).
+/// `foreach() argument must be of type array|object, {type} given`; the loop body
+/// is skipped entirely, not merely warned about. Single-id family like
+/// `readonly.reassigned` — no companion "unsupported" arm, since every leg this
+/// proves already IS the one runtime consequence.
 ///
-/// Warning-grade, so it rides the same `warning-handler` gate `offset.missing`
-/// does (ADR-0049 §7): silent under a declared `warning-handler = "null"` posture.
+/// Warning-grade, riding the same `warning-handler` gate as `offset.missing`
+/// (ADR-0049 §7): silent under a declared `warning-handler = "null"` posture.
 pub const FOREACH_NON_ITERABLE_ID: &str = "foreach.non-iterable";
 
 // string context (ADR-0078, issue #193)
@@ -622,29 +594,24 @@ pub const FOREACH_NON_ITERABLE_ID: &str = "foreach.non-iterable";
 /// Error: Object of class A could not be converted to string
 /// ```
 ///
-/// An `Error` is a fatal on the live path — proof layer, and **not** behind the
-/// ADR-0049 §7 warning-handler gate, which demotes warning-grade findings only.
-/// That gate boundary is exactly why this is a separate id from
-/// [`STRING_ARRAY_CONVERSION_ID`] (ADR-0078 §1.4: an id demotes whole or not at
-/// all), rather than one id with a precise message.
+/// A fatal, so proof layer, and **not** behind the ADR-0049 §7 warning-handler
+/// gate (which demotes warning-grade findings only) — exactly why this is a
+/// separate id from [`STRING_ARRAY_CONVERSION_ID`] rather than one id with a
+/// precise message (ADR-0078 §1.4: an id demotes whole or not at all).
 ///
 /// # What has to be proven
 ///
 /// The receiver's class must be **exactly** known and its `__toString` provably
 /// absent under complete enumeration — the same ladder `call.undefined-method`
-/// walks, asked for one particular method name. So a `Stringable` implementor is
-/// silence (the is-a oracle answers `Yes` for any class with a `__toString`
-/// anywhere), a `__toString` inherited from a parent Steins cannot resolve is
-/// silence (the chain never closes), a trait anywhere in the chain is silence (the
-/// object model does not flatten trait members), and an A14 magic-tag obstacle
-/// anywhere in the class-like's resolved reach is silence.
+/// walks. Silence cases: a `Stringable` implementor, a `__toString` inherited
+/// from an unresolvable parent, a trait anywhere in the chain (traits are not
+/// flattened), or an A14 magic-tag obstacle in the class-like's resolved reach.
 ///
-/// The magic-tag leg is deliberate over-silence, and it is worth naming why:
-/// measured on 8.5.9, a `__call` does **not** rescue a string conversion
-/// (`WithCall` with `__call` still raises the `Error`), so no docblock claim about
-/// magic members can make the conversion legal. Reusing the obstacle records
-/// anyway keeps ONE enumerability rule in the codebase instead of a second one
-/// that happens to be laxer.
+/// The magic-tag leg is deliberate over-silence: measured on 8.5.9, `__call` does
+/// **not** rescue a string conversion (`WithCall` still raises the `Error`), so no
+/// docblock claim about magic members makes the conversion legal — reusing the
+/// obstacle records instead keeps one enumerability rule rather than a laxer
+/// second one.
 pub const STRING_NON_STRINGABLE_ID: &str = "string.non-stringable";
 
 /// The registry id for an **array** put into string context (ADR-0078, **proof**
@@ -656,16 +623,14 @@ pub const STRING_NON_STRINGABLE_ID: &str = "string.non-stringable";
 /// Warning: Array to string conversion
 /// ```
 ///
-/// and the value produced is the literal string `"Array"` — `(string) [1,2,3]` is
-/// `"Array"`, `'x' . [1,2,3]` is `"xArray"`. The program keeps running with a
-/// value it cannot have been written for, which is the same warning-plus-degraded-
-/// value shape `offset.missing` and `preg.invalid-pattern` carry: **proof** layer,
-/// and demoted off the proof surface under a declared `warning-handler = "null"`
-/// posture (ADR-0049 §7), where the application has said it tolerates the warning.
+/// producing the literal string `"Array"` (`(string) [1,2,3]` is `"Array"`,
+/// `'x' . [1,2,3]` is `"xArray"`) — the same warning-plus-degraded-value shape
+/// `offset.missing` and `preg.invalid-pattern` carry, demoted off the proof
+/// surface under a declared `warning-handler = "null"` posture (ADR-0049 §7).
 ///
-/// The evidence is a value-domain fact alone — no class world, no sidecar. A
-/// `Maybe` (`array|string`) proves nothing and is silence, and an `Asserted` fact
-/// (a docblock `@var array`) is not proof-layer evidence (ADR-0052 §5).
+/// Evidence is a value-domain fact alone — no class world, no sidecar. A `Maybe`
+/// (`array|string`) proves nothing and is silence; an `Asserted` fact (a docblock
+/// `@var array`) is not proof-layer evidence (ADR-0052 §5).
 pub const STRING_ARRAY_CONVERSION_ID: &str = "string.array-conversion";
 
 // end string context (ADR-0078, issue #193)
@@ -676,20 +641,18 @@ pub const STRING_ARRAY_CONVERSION_ID: &str = "string.array-conversion";
 /// **mechanics** layer, floor `Default`): `SourceTree::parse` recovered from at
 /// least one error, so `php -l` would reject the file outright.
 ///
-/// Emitted **once per file**, positioned at the FIRST error and naming the count of
-/// further errors. One per file rather than one per error because recovery cascades
-/// make every position after the first unreliable — a second "error" is as likely to
-/// be the recovery's own confusion as a second mistake.
+/// Emitted **once per file**, positioned at the first error, naming the count of
+/// further errors — one per file because recovery cascades make every later
+/// position unreliable (a second "error" is as likely the recovery's own
+/// confusion as a second mistake).
 ///
-/// Mechanics semantics apply in full: fail level, red on sight, profile-`disable`-
-/// proof and undemotable, suppression-exempt. A file that does not parse is
-/// apparatus rot, not a style opinion, and the remedy is fixing the file. The
-/// finding is the only thing the broken file emits (§2.4) — a finding built on a
-/// misparse is precisely the manufactured-FP shape ADR-0002 forbids — and a
-/// **non-vendor** broken file additionally joins the whole-universe dam as
-/// [`DamKind::Unparsable`] (§2.2). In `vendor/` the ADR-0046 §2 presumption carries
-/// over verbatim (§2.3): not a dam site, and the finding rides the ordinary vendor
-/// filter like every other vendor finding.
+/// Full mechanics semantics: fail level, red on sight, profile-`disable`-proof
+/// and undemotable, suppression-exempt. The finding is the only thing the broken
+/// file emits (§2.4) — a finding built on a misparse would be the manufactured-FP
+/// shape ADR-0002 forbids. A **non-vendor** broken file also joins the
+/// whole-universe dam as [`DamKind::Unparsable`] (§2.2); in `vendor/` the
+/// ADR-0046 §2 presumption carries over (§2.3): not a dam site, ordinary vendor
+/// filter applies.
 pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
 
 // end parse failure (ADR-0079, issue #180)
@@ -697,10 +660,9 @@ pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
 // inaccessible members (ADR-0078, issue #185)
 
 /// The registry id for a call to a method the call site's scope **cannot see**
-/// (ADR-0078, issue #185): a `private` method called from anywhere but its own
-/// declaring class, or a `protected` one called from a scope outside its
-/// hierarchy. PHP raises a fatal `Error` before the body runs — `php -r`-witnessed
-/// at 8.5.9:
+/// (ADR-0078, issue #185): a `private` method called from outside its own
+/// declaring class, or a `protected` one called from outside its hierarchy. PHP
+/// raises a fatal `Error` before the body runs — `php -r`-witnessed at 8.5.9:
 ///
 /// ```text
 /// Call to private method C::m() from global scope
@@ -709,21 +671,19 @@ pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
 /// Call to private C::__construct() from global scope
 /// ```
 ///
-/// This is the consumer of a predicate the resolver already computed and threw
-/// away (the resolver's `private_blocked`): a blocked method resolves to `None`, so the
-/// call goes unchecked and unreported. Resolution keeps that suppression — a
-/// blocked method is not a callable target, so arity, effects and every other
-/// downstream consumer must still see `None` — and this id is emitted by a
-/// **separate** check that asks the same question for the opposite purpose.
+/// Consumes a predicate the resolver already computes and discards
+/// (`private_blocked`): a blocked method resolves to `None`, so the call goes
+/// unchecked by resolution (which must keep suppressing it — arity, effects and
+/// every downstream consumer need `None` too) and is instead flagged by this
+/// separate check.
 ///
-/// The `__call` / `__callStatic` leg is what makes this non-trivial rather than a
-/// formality: PHP routes an *inaccessible* member call through the magic fallback
-/// exactly as it routes an undefined one (`php -r` witness: a class with a private
-/// `m()` and a `__call` prints `__call:m`, no error). So a magic method anywhere in
-/// the receiver's chain — or an ADR-0049 A14 `@method`/`@mixin` tag in its reach —
-/// is silence, on the same terms as `call.undefined-method`'s leg (d). The
-/// constructor is the one exception, and it is witnessed too: `__call` does **not**
-/// rescue `new C()` on a private `__construct`.
+/// The `__call`/`__callStatic` leg makes this non-trivial: PHP routes an
+/// *inaccessible* call through the magic fallback exactly as an undefined one
+/// (witnessed: a private `m()` plus `__call` prints `__call:m`, no error). So a
+/// magic method anywhere in the receiver's chain, or an A14 `@method`/`@mixin`
+/// tag in its reach, is silence — same terms as `call.undefined-method` leg (d).
+/// The constructor is the one exception: `__call` does **not** rescue `new C()`
+/// on a private `__construct`.
 pub const CALL_INACCESSIBLE_METHOD_ID: &str = "call.inaccessible-method";
 
 /// The registry id for a property read or write the site's scope **cannot see**
@@ -737,18 +697,17 @@ pub const CALL_INACCESSIBLE_METHOD_ID: &str = "call.inaccessible-method";
 /// $c = new C; echo $c->p;   Cannot access protected property C::$p
 /// ```
 ///
-/// **A private property declared by an ancestor is not this id.** PHP mangles a
-/// private property into its declaring class's own slot, so a subclass instance
-/// simply has no such name: `class A { private $p; } class B extends A {}` with
-/// `(new B)->p` is `Warning: Undefined property: B::$p`, a different consequence
-/// and (once it exists) a different id. The claim therefore requires the
-/// declaration to sit on the receiver's **own exact class** for `private`, while
+/// A private property declared by an ancestor is NOT this id: PHP mangles a
+/// private property into its declaring class's own slot, so a subclass simply
+/// has no such name (`class A { private $p; } class B extends A {}`, `(new
+/// B)->p` is `Warning: Undefined property: B::$p` — a different id). So the
+/// declaration must sit on the receiver's own exact class for `private`, while
 /// `protected` is inherited and fires from anywhere in the chain (witnessed:
 /// `Cannot access protected property B::$p`).
 ///
-/// `__get` / `__set` anywhere in the chain is silence, witnessed the same way as
-/// the method id's `__call`: an inaccessible read prints `__get:p` and an
-/// inaccessible write prints `__set:p=5`, neither erroring.
+/// `__get`/`__set` anywhere in the chain is silence, witnessed like the method
+/// id's `__call`: an inaccessible read prints `__get:p`, a write `__set:p=5`,
+/// neither erroring.
 pub const PROPERTY_INACCESSIBLE_ID: &str = "property.inaccessible";
 
 /// The registry id for a class-constant fetch the site's scope **cannot see**
@@ -756,17 +715,15 @@ pub const PROPERTY_INACCESSIBLE_ID: &str = "property.inaccessible";
 /// `Cannot access protected constant B::K`, both fatal `Error`s witnessed at PHP
 /// 8.5.9.
 ///
-/// Constants have **no magic fallback at all** — `__get` and `__callStatic` are
-/// both witnessed *not* to intercept `C::K` — so the obstacle leg that shapes the
-/// other two ids is simply absent here; what remains is the hierarchy-enumeration
-/// closure they share.
+/// Constants have no magic fallback at all (`__get`/`__callStatic` witnessed not
+/// to intercept `C::K`), so the obstacle leg that shapes the other two ids is
+/// absent here; only the shared hierarchy-enumeration closure remains.
 ///
-/// The private/protected asymmetry is the property id's, for the same engine
-/// reason: `class A { private const K = 1; } class B extends A {}` with `B::K` is
-/// `Error: Undefined constant B::K` (absence, not inaccessibility), while the same
-/// shape with `protected` is `Cannot access protected constant B::K`. Naming the
-/// declaring class directly (`A::K` from a subclass's scope) is inaccessibility in
-/// both cases, and fires.
+/// Same private/protected asymmetry as the property id: `class A { private
+/// const K = 1; } class B extends A {}` with `B::K` is `Error: Undefined
+/// constant B::K` (absence, not inaccessibility), while `protected` gives
+/// `Cannot access protected constant B::K`. Naming the declaring class directly
+/// (`A::K` from a subclass's scope) is inaccessibility either way, and fires.
 pub const CLASS_CONST_INACCESSIBLE_ID: &str = "class-const.inaccessible";
 
 // end inaccessible members (ADR-0078, issue #185)
@@ -785,74 +742,57 @@ pub const CLASS_CONST_INACCESSIBLE_ID: &str = "class-const.inaccessible";
 ///   NULL
 /// ```
 ///
-/// So the consequence is **warning-grade**: the read yields `null` and the program
-/// keeps running with a value it cannot have been written for — the
-/// `offset.missing` shape exactly. Proof layer at the `Default` floor, **behind
-/// the ADR-0049 §7 warning-handler gate**: under a declared
-/// `[runtime] warning-handler = "null"` the application has said it tolerates the
-/// warning, and the finding leaves the proof surface. ADR-0049 §7's 2026-08-08
-/// amendment settles that layer question once for `variable.undefined`,
-/// `foreach.non-iterable` and this id alike; it is not re-argued here.
+/// Warning-grade (the `offset.missing` shape): read yields `null`, program keeps
+/// running. Proof layer at the `Default` floor, behind the ADR-0049 §7
+/// warning-handler gate (settled once, 2026-08-08 amendment, for
+/// `variable.undefined`, `foreach.non-iterable` and this id alike).
 ///
 /// # The ladder (ADR-0049 §4, per member kind)
 ///
-/// Absence over a property is the method ladder with the property's own obstacles
-/// substituted for `__call`, and the additions are what PHP 8.2 made of dynamic
-/// properties:
+/// The method ladder with the property's own obstacles substituted for
+/// `__call`, plus what PHP 8.2 made of dynamic properties:
 ///
-/// * **`__get` / `__set` / `__isset` anywhere in the chain.** Only `__get` truly
-///   rescues a read (witnessed: `__get` prints `__get:nope`, while `__isset` and
-///   `__set` alone still warn), but all three are taken as obstacles — a class
-///   declaring any of them is running the magic-property protocol, and the
-///   over-silence keeps ONE enumerability rule rather than a laxer second one
-///   (the [`STRING_NON_STRINGABLE_ID`] precedent).
-/// * **`#[AllowDynamicProperties]` anywhere in the chain**, which re-licenses the
-///   write PHP 8.2 deprecated and so leaves the property set open.
-/// * **`stdClass` and its descent**, silence for the id entirely — reads
-///   included. A never-written read on a `stdClass` really does warn (witnessed),
-///   so this is deliberate v1 conservatism: `stdClass` is the language's own
-///   property bag and a dynamic property may have been written anywhere. Its
-///   descent needs no leg of its own — `stdClass` is not a project declaration, so
-///   the chain never closes through it.
-/// * **A project-wide dynamic-write obstacle** (`SourceTree::property_write_names`):
-///   a name written *anywhere* could have been created dynamically on this object
-///   before the read, and a plain-class dynamic write is deprecated, not an error
-///   (witnessed). A computed-name write (`$o->$n = …`) anywhere takes the id off
-///   the surface altogether.
-/// * Everything the method ladder already had: the A14 magic-tag obstacle in the
-///   class-like's reach, a trait name or a trait-using node, an enum node
-///   (`name`/`value` are engine-provided), an unresolvable/`Ambiguous`/builtin
+/// * `__get`/`__set`/`__isset` anywhere in the chain — only `__get` truly
+///   rescues a read (witnessed: prints `__get:nope`; `__isset`/`__set` alone
+///   still warn), but all three are taken as obstacles (over-silence, one
+///   enumerability rule — the [`STRING_NON_STRINGABLE_ID`] precedent).
+/// * `#[AllowDynamicProperties]` anywhere in the chain, re-licensing the write
+///   PHP 8.2 deprecated.
+/// * `stdClass` and its descent: silence entirely, reads included. A
+///   never-written read on `stdClass` really does warn (witnessed), but its
+///   property bag may have been written anywhere (deliberate v1
+///   conservatism; needs no separate leg since `stdClass` is not a project
+///   declaration).
+/// * A project-wide dynamic-write obstacle (`SourceTree::property_write_names`):
+///   any name written anywhere could have been created dynamically here (a
+///   plain-class dynamic write is deprecated, not an error). A computed-name
+///   write (`$o->$n = …`) anywhere takes the id off the surface.
+/// * Everything the method ladder already had: the A14 magic-tag obstacle, a
+///   trait name/using node, an enum node, an unresolvable/`Ambiguous`/builtin
 ///   ancestor, a member-incomplete file (ADR-0079 §2.5), a cycle, the A2i
-///   conditional-declaration re-dam, and the A2ii boot-surface homonym leg under
-///   `absence_family_available`.
+///   conditional-declaration re-dam, and the A2ii boot-surface homonym leg.
 ///
-/// A **declared** property is silence however it is spelled — plain, `static`
-/// (`$obj->staticName` warns, but a same-named declaration is treated as present:
-/// safe under-firing), promoted, `readonly`, inherited, or hooked (the #185
-/// lowering keeps a hooked property's name in `ClassDecl::hooked_properties`
-/// precisely so an absence claim cannot miss it). A `private` property declared by
-/// an *ancestor* is genuinely absent on the child (witnessed:
-/// `Warning: Undefined property: B1::$p`), and is nonetheless treated as present
-/// here — v1 under-fires rather than reason about name mangling, and the choice
-/// keeps this id and [`PROPERTY_INACCESSIBLE_ID`] disjoint by construction.
+/// A **declared** property is silence however spelled — plain, `static` (safe
+/// under-firing), promoted, `readonly`, inherited, or hooked (kept in
+/// `ClassDecl::hooked_properties` so an absence claim cannot miss it). A
+/// `private` property declared by an *ancestor* is genuinely absent on the
+/// child (witnessed: `Warning: Undefined property: B1::$p`) but treated as
+/// present here — v1 under-fires rather than reason about name mangling,
+/// keeping this id disjoint from [`PROPERTY_INACCESSIBLE_ID`].
 pub const PROPERTY_UNDEFINED_ID: &str = "property.undefined";
 
 /// The `maybe-` sibling of [`PROPERTY_UNDEFINED_ID`] (ADR-0078 §1.3): the
 /// declared-shape possibly-grade leg — a read whose receiver was narrowed to a
-/// **union** of declared types, where the §8 ladder proves the property absent on
-/// some arms and finds it declared on the rest. Proof layer at the `Strict` floor,
-/// the `offset.maybe-missing` precedent.
+/// **union** of declared types, where the §8 ladder proves the property absent
+/// on some arms and finds it declared on the rest. Proof layer at the `Strict`
+/// floor, the `offset.maybe-missing` precedent. Registered ahead of emission in
+/// v0.1.4, emitting since ADR-0081 §7 (issue #267) — shares that ADR only
+/// because the pair was registered together, carrying no reachability premise
+/// of its own (the arms are a union of declared types, not control-flow paths).
 ///
-/// Registered ahead of emission in v0.1.4 and **emitting since ADR-0081 §7**
-/// (issue #267). It carries no reachability premise of its own: the arms are a
-/// union of declared types, not control-flow paths, so the binding-presence pass
-/// the `variable.*` pair rests on plays no part here. It shares that ADR only
-/// because the pair was registered together and ships together.
-///
-/// Disjoint from [`PROPERTY_UNDEFINED_ID`] by a partition, not a filter: every arm
-/// absent is the definite id, some arms absent is this one, and a single arm the
-/// ladder cannot close silences both — a possibly-grade claim about "some arms" is
-/// still a claim about all of them.
+/// Disjoint from [`PROPERTY_UNDEFINED_ID`] by a partition, not a filter: every
+/// arm absent is the definite id, some arms absent is this one, and a single
+/// arm the ladder cannot close silences both.
 pub const PROPERTY_MAYBE_UNDEFINED_ID: &str = "property.maybe-undefined";
 
 /// The registry id for a class-constant fetch no declaration in the receiver's
@@ -867,16 +807,15 @@ pub const PROPERTY_MAYBE_UNDEFINED_ID: &str = "property.maybe-undefined";
 /// interface I { const IK = 1; } I::NOPE    Error: Undefined constant I::NOPE
 /// ```
 ///
-/// This is the cleanest member in the family because PHP gives it **no magic
-/// channel at all** — witnessed at 8.5.9 and already recorded by #185: a class
-/// carrying both `__get` and `__callStatic` still raises
-/// `Error: Undefined constant Magic::NOPE`. What remains is enumeration, and the
-/// enumeration is wider than a method's: a constant may come from the parent
-/// chain, from **any interface in the reach** (`class C implements I` answers
-/// `C::IK`, and `interface IB extends IA` carries `IA`'s constants through to
-/// `CB::AK` — both witnessed), from a **trait** the class uses (`CT::TK`,
-/// witnessed, 8.2+ — so `uses_traits` is an obstacle), or from an enum's **cases**
-/// (`Suit::Hearts`), which are member sources exactly as constants are.
+/// The cleanest member in the family: PHP gives it **no magic channel at all**
+/// (witnessed at 8.5.9, per #185: a class carrying both `__get` and
+/// `__callStatic` still raises `Error: Undefined constant Magic::NOPE`). What
+/// remains is enumeration, wider than a method's: a constant may come from the
+/// parent chain, **any interface in the reach** (`class C implements I`
+/// answers `C::IK`; `interface IB extends IA` carries `IA`'s constants through
+/// to `CB::AK` — both witnessed), a **trait** the class uses (`CT::TK`,
+/// witnessed 8.2+, so `uses_traits` is an obstacle), or an enum's **cases**
+/// (`Suit::Hearts`).
 ///
 /// `X::class` is excluded at the site: it is a plain string since PHP 8.0 and
 /// errors on nothing (witnessed on an undefined class name).
@@ -889,86 +828,53 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 /// The registry id for a function-like that **runs off the end of its body** while
 /// declaring a native return type PHP demands a value for (ADR-0078, issue #199).
 ///
-/// Witnessed on PHP 8.5.9 — the consequence is a fatal `TypeError` at the moment
-/// control reaches the closing brace, not at declaration time:
+/// Witnessed on PHP 8.5.9: a fatal `TypeError` at the moment control reaches the
+/// closing brace (`f(): Return value must be of type int, none returned`), not at
+/// declaration time. A live-path break, so **proof** layer at the `Default` floor,
+/// and not behind the ADR-0049 §7 warning-handler gate — no declared posture makes
+/// a `TypeError` survivable.
 ///
-/// ```text
-/// TypeError: f(): Return value must be of type int, none returned
-/// TypeError: A::m(): Return value must be of type int, none returned
-/// TypeError: {closure:…}(): Return value must be of type int, none returned
-/// ```
+/// `type.*` rather than `return.*` because ADR-0078 §1 puts an id in the family
+/// its premise names — the written native return declaration, the same
+/// Verified evidence [`RETURN_MISMATCH_ID`] reads, asked one step earlier.
 ///
-/// A live-path break, so **proof** layer at the `Default` floor. It is *not*
-/// behind the ADR-0049 §7 warning-handler gate: a `TypeError` is fatal and no
-/// declared posture makes it survivable.
+/// # The definite/possibly split
 ///
-/// # Why `type.*` and not a `return.*` family
+/// A `FallsThrough` body comes in two populations (measured on the corpus, 26
+/// findings, 2026-08-08), floored differently (ADR-0078 §1.3):
 ///
-/// The premise is the **native return declaration** — the same Verified evidence
-/// [`RETURN_MISMATCH_ID`]'s native leg reads, asked one step earlier: that id says
-/// *the value you returned is the wrong type*, this one says *you returned no
-/// value at all*. ADR-0078 §1 puts an id in the family its premise names, and the
-/// premise here is a written type, so `type.*` it is (the ADR flags this row as
-/// added beyond its grilled table; landing the id discharges the flag).
+/// * **no function exit anywhere** — every execution reaches the brace, fatal
+///   unconditional. **This id**, `Default` floor.
+/// * **an exit somewhere, not covering every path** — a no-`default` `switch`
+///   whose cases all return, an `if` with no `else`: real edge, but may be
+///   taken only for inputs the program never produces (phpstan-src's `src/`
+///   carries two such shapes and passes its own missing-return rule).
+///   [`TYPE_RETURN_MAYBE_MISSING_ID`], `Strict` floor.
 ///
-/// # The definite/possibly split — why this id is not alone
+/// Discriminator: [`body_has_terminator`], a separate question from the fold.
 ///
-/// A body whose fold is `FallsThrough` comes in two populations, measured on the
-/// corpus (2026-08-08 gate triage, 26 findings), and the zero-FP policy floors
-/// them differently (ADR-0078 §1.3, the `maybe-` convention):
+/// # The two premises, both required
 ///
-/// * **no function exit anywhere in the body** — a stub, an empty body, a body of
-///   pure side effects (`function (): bool {}` in a test double). *Every*
-///   execution reaches the closing brace, so the fatal is unconditional. **This
-///   id**, `Default` floor.
-/// * **an exit somewhere, but not covering every path** — a `return` in every
-///   taken arm with an uncovered escape edge (a no-`default` `switch` over a
-///   string whose every case returns; an `if` with no `else`; a loop that returns
-///   on a match). The fall-through edge is real, but may be taken only for inputs
-///   the program never produces — phpstan-src's own `src/` carries two such shapes
-///   and passes its own missing-return rule. [`TYPE_RETURN_MAYBE_MISSING_ID`],
-///   `Strict` floor.
+/// 1. **The declaration demands a value** — a written, non-`void`, non-`never`
+///    hint from `Scope::ret_hint` (the *raw* hint: `: array`/`: mixed`/`: self`
+///    lower to no `NativeType` yet all three fatal identically). `?int` and
+///    `int|string` demand one too. A generator body is excluded (its declared
+///    type describes the `Generator` the *call* produces, ADR-0057 §5), and
+///    `never` is excluded (its fall-through is a different fatal).
+/// 2. **The body provably falls through** ([`BodyEnd::provably_falls_through`]):
+///    an undecided body (`try`/`catch`, `goto`, unstructurable `switch`) counts
+///    as terminating.
 ///
-/// The discriminator is [`body_has_terminator`], which is a *separate question*
-/// from the fold, not a refinement of it — see its own docs.
-///
-/// # What has to be proven, and what is deliberately not
-///
-/// Two independent premises, both required:
-///
-/// 1. **The declaration demands a value.** A written, non-`void`, non-`never`
-///    return hint — read from `Scope::ret_hint`, the *raw* hint, because
-///    `: array` / `: mixed` / `: self` lower to no `NativeType` yet all three
-///    fatal identically. `?int` and `int|string` demand one too: nullable is not
-///    optional. A generator body (`yield` anywhere) is excluded — its declared
-///    type describes the `Generator` the *call* produces, never a body exit
-///    (ADR-0057 §5). `never` is excluded because its fall-through is a different
-///    fatal with a different sentence (`never-returning function must not
-///    implicitly return`), and ADR-0022 makes one id one consequence.
-/// 2. **The body provably falls through** —
-///    [`BodyEnd::provably_falls_through`], the ADR-0078 reachability foundation.
-///    The asymmetry that type documents is this id's safe side: an undecided body
-///    (`try`/`catch`, a `goto`, an unstructurable `switch`) counts as
-///    **terminating**, i.e. silence. Never accuse a body of running off its end
-///    on evidence that only failed to prove it did not.
-///
-/// Abstract methods and interface methods are excluded **by construction**: the
-/// lowering builds a `Scope` only for a concrete body, so a body-less declaration
-/// is not a candidate at all. `__construct`/`__destruct` are excluded by
-/// construction too — PHP forbids a return type on either. An arrow function is
-/// excluded by construction a third way: its body lowers to a single `return`.
+/// Excluded by construction: abstract/interface methods (no concrete `Scope`),
+/// `__construct`/`__destruct` (PHP forbids a return type), and arrow functions.
 ///
 /// # The recorded obstacle: never-returning callees
 ///
 /// `function g(): never { exit(1); } function f(): int { g(); }` runs clean
-/// (witnessed 8.5.9) — `g()` never returns, so control never reaches `f`'s closing
-/// brace. The reachability judgment is index-free and reads a statement-position
-/// call as falling through, so this id applies the refinement itself: a scope
-/// containing a statement-position call to a resolvable callee declaring `: never`
-/// is silent, whole. A callee that never returns without *declaring* `never` —
-/// the legacy `function redirect($u) { header(…); exit; }` — is **not** modelled,
-/// and is this id's one named over-report risk; inferring `never` from a callee's
-/// own `BodyEnd` is exactly what a later consumer of this foundation can add.
+/// (witnessed 8.5.9): a scope containing such a call to a resolvable callee
+/// declaring `: never` is silent, whole. A callee that never returns without
+/// *declaring* it — the legacy `function redirect($u) { header(…); exit; }` —
+/// is not modelled, and is this id's one named over-report risk.
 pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 
 /// The registry id for the **possibly** leg of [`TYPE_RETURN_MISSING_ID`]
@@ -982,11 +888,9 @@ pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 /// TypeError: f(): Return value must be of type int, none returned
 /// ```
 ///
-/// so this is **proof** layer like its definite sibling. What differs is the
-/// *floor*: `Strict`, not `Default`. It is the first proof-layer id at that rung,
-/// and it is there for the reason ADR-0078 §1.3 names the convention for — the
-/// possibly-leg is registered and emitted rather than scoped out of existence, but
-/// it does not print on a bare `steins check`.
+/// so this is **proof** layer like its definite sibling, but at `Strict` floor —
+/// the first proof-layer id at that rung: registered and emitted rather than
+/// scoped out of existence (ADR-0078 §1.3), but silent on a bare `steins check`.
 ///
 /// # Why the floor, in one measurement
 ///
@@ -994,10 +898,8 @@ pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 /// this shape twice — `TypeNodeResolver.php:697` and `ClassNameUsageLocation.php:128`,
 /// each a no-`default` `switch` over a string whose every case returns. The escape
 /// edge exists in the CFG; the inputs that take it do not exist in the program.
-/// Reporting that at `Default` would put a whole class of "correct by construction,
-/// unprovable by analysis" code in front of every user on a bare check, which is
-/// the crying-wolf failure the floor ladder exists to prevent. Reporting it at
-/// `Strict` keeps it named, addressable and measurable.
+/// Reporting that at `Default` would be the crying-wolf failure the floor ladder
+/// exists to prevent; `Strict` keeps it named, addressable and measurable.
 ///
 /// Every premise, silence leg and recorded obstacle is [`TYPE_RETURN_MISSING_ID`]'s
 /// — the two ids differ in exactly one predicate, [`body_has_terminator`], and are
@@ -1010,10 +912,9 @@ pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 
 /// `type.invalid-operand` (ADR-0078, issue #191): an arithmetic, bitwise, shift
 /// or unary operator applied to operands PHP's own table refuses with a
-/// `TypeError`. One id for the whole operator family, per the ADR — binary,
-/// unary and comparison — and **fatal rows only**: a row that merely warns or
-/// deprecates is not this finding at any posture, which is why the id carries no
-/// `warning-handler` gate.
+/// `TypeError`. One id for the whole operator family (binary, unary,
+/// comparison), **fatal rows only** — a row that merely warns or deprecates is
+/// not this finding at any posture, so the id carries no `warning-handler` gate.
 ///
 /// # The table
 ///
@@ -1048,21 +949,18 @@ pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 /// # Version sensitivity
 ///
 /// None, deliberately: the two moving boundaries — non-numeric-string arithmetic
-/// and array arithmetic becoming `TypeError` — both moved in **PHP 8.0**, and the
-/// workspace floor is 8.1 (ADR-0011). Every row above holds unchanged across
-/// 8.1…8.5, so no row consults `Folder::php_minor()` and the check never asks
-/// the sidecar. A row that did move inside 8.1…8.5 would have to be gated the
-/// way the A12 next-int rule is; none is.
+/// and array arithmetic becoming `TypeError` — both moved in **PHP 8.0**, and
+/// the workspace floor is 8.1 (ADR-0011). Every row holds unchanged across
+/// 8.1…8.5, so no row consults `Folder::php_minor()`.
 ///
 /// # Objects
 ///
-/// Silence by construction, and that is the *correct* posture: PHP has no
-/// userland operator overloading, so any plain object in `+` is a `TypeError`
-/// (witnessed: `new stdClass() + 1`) — but internal classes DO overload
-/// (`GMP` arithmetic is the standard counterexample), and the four-layer value
-/// domain has no object denotation at all ([`Val`] cannot spell one). An object
-/// operand therefore carries no `Fact`, resolves to no operand kind, and is
-/// silent without a special case.
+/// Silence by construction, and correctly so: PHP has no userland operator
+/// overloading, so any plain object in `+` is a `TypeError` (witnessed: `new
+/// stdClass() + 1`) — but internal classes DO overload (`GMP` arithmetic is
+/// the standard counterexample), and the four-layer value domain has no object
+/// denotation at all ([`Val`] cannot spell one). An object operand carries no
+/// `Fact`, resolves to no operand kind, and is silent without a special case.
 pub const INVALID_OPERAND_ID: &str = "type.invalid-operand";
 
 // end invalid operands (ADR-0078, issue #191)
@@ -1074,56 +972,45 @@ pub const INVALID_OPERAND_ID: &str = "type.invalid-operand";
 /// scope. PHP's own consequence (`php -r`-witnessed, 8.5.9):
 /// `Warning: Undefined variable $x`, and the read evaluates to `null`.
 ///
-/// # Why proof
+/// Warning-plus-a-degraded-value is `offset.missing`'s shape, so it rides the
+/// same ADR-0049 §7 lever: silent under a declared `warning-handler = "null"`
+/// posture.
 ///
-/// Warning-plus-a-degraded-value is exactly `offset.missing`'s shape: the
-/// expression never yields what it was written to yield, and every consumer
-/// downstream sees a `null` the author did not intend. So it rides the same
-/// ADR-0049 §7 lever too — under a declared `warning-handler = "null"` posture the
-/// application tolerates the warning and the finding leaves the proof surface.
+/// The premise is deliberately weaker than PHP's own and reachability-blind: it
+/// fires only when the name has **no** binding form at all in the scope's text —
+/// not a parameter, assignment target (compound, destructuring, `list()`, offset
+/// or property write), `global`/`static` declaration, closure `use`, `catch`
+/// binding, `foreach` binding, or out-parameter position. Ordering/branching are
+/// ignored on purpose: a read that *precedes* its only assignment is
+/// [`VARIABLE_MAYBE_UNDEFINED_ID`]'s territory instead, and needs the
+/// reachability foundation (issue #199) — the two are disjoint by construction.
 ///
-/// # Why no reachability is needed
-///
-/// The premise is deliberately weaker than PHP's own: this id fires only when the
-/// name appears as **no** binding form at all in the scope's text — not a
-/// parameter, not an assignment target anywhere (compound, destructuring, `list()`,
-/// offset or property write), not a `global`/`static` declaration, not a closure
-/// `use`, not a `catch` binding, not a `foreach` binding, not an out-parameter
-/// position. Ordering and branching are ignored on purpose: a read that *precedes*
-/// its only assignment is a possibility claim, which is `variable.maybe-undefined`'s
-/// territory (see [`VARIABLE_MAYBE_UNDEFINED_ID`]) and needs the reachability
-/// foundation (issue #199). Under this premise the two are disjoint by
-/// construction — one binding form anywhere is enough to leave this id.
-///
-/// The firing set is computed at lowering (`Scope::undefined_reads`), where the
-/// binding forms, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
-/// superglobal/`$this` exclusions and the `extract`/`compact`/`$$x`/`eval`/`include`
-/// scope dam are all already accounted for. The checker adds the one premise
-/// lowering cannot reach: whether a bare `$x` argument at a statically-named call is
-/// an out-parameter (ADR-0077's by-value oracle, which needs the cross-file index).
+/// Computed at lowering (`Scope::undefined_reads`), which already accounts for
+/// binding forms, `isset`/`empty`/`??`/`unset`/`@` guards, superglobal/`$this`
+/// exclusions and the `extract`/`compact`/`$$x`/`eval`/`include` scope dam. The
+/// checker adds one premise lowering cannot reach: whether a bare `$x` argument
+/// at a statically-named call is an out-parameter (ADR-0077's by-value oracle,
+/// which needs the cross-file index).
 pub const VARIABLE_UNDEFINED_ID: &str = "variable.undefined";
 
 /// `variable.maybe-undefined` (ADR-0078, issue #194, **proof** layer, floor
 /// `Strict`): a read of a name bound on only *some* paths reaching it — PHPStan's
-/// `checkMaybeUndefinedVariables`. Registered ahead of emission in v0.1.4 and
-/// **emitting since the binding-presence pass landed** (ADR-0081, issue #267): the
+/// `checkMaybeUndefinedVariables`. Registered ahead of emission in v0.1.4,
+/// emitting since the binding-presence pass landed (ADR-0081, issue #267): the
 /// firing set is `Scope::maybe_undefined_reads`, computed at lowering by a
 /// statement-ordered walk over a three-valued presence lattice that subtracts a
-/// provably-terminating branch arm, iterates loop bodies to a fixpoint and consumes
-/// `isset`/`empty` guards with polarity.
+/// provably-terminating branch arm, iterates loop bodies to a fixpoint and
+/// consumes `isset`/`empty` guards with polarity.
 ///
-/// It sits at the `strict` floor, not `default`, because the claim is weaker than
-/// its sibling's: `variable.undefined` proves the binding is absent from the whole
-/// scope, whereas this one proves only that *a* path reaches the read unbound — a
-/// shape defensive house styles produce on purpose, and one a partial-path guess
-/// would turn into exactly the false positive the proof layer forbids.
+/// `strict` floor, not `default`, because the claim is weaker: `variable.undefined`
+/// proves the binding absent from the whole scope, this one only that *a* path
+/// reaches the read unbound — a shape defensive house styles produce on purpose.
 ///
-/// The two are disjoint by construction, not by a filter: this id fires only where
-/// the scope binds the name **somewhere**, which is exactly the condition that
-/// takes a read out of [`VARIABLE_UNDEFINED_ID`]'s ordering-blind premise. The
-/// use-before-assign shape (`$y = $x; $x = 1;`) therefore stays here even though no
-/// path reaches the read bound — promoting it would break the definite id's
-/// documented ordering-blindness (ADR-0081, non-goal 1).
+/// Disjoint from [`VARIABLE_UNDEFINED_ID`] by construction, not a filter: this id
+/// fires only where the scope binds the name **somewhere**. The use-before-assign
+/// shape (`$y = $x; $x = 1;`) stays here even though no path reaches the read
+/// bound — promoting it would break the definite id's ordering-blindness
+/// (ADR-0081, non-goal 1).
 pub const VARIABLE_MAYBE_UNDEFINED_ID: &str = "variable.maybe-undefined";
 
 // end undefined variables (ADR-0078, issue #194)
@@ -1289,20 +1176,16 @@ pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering 
 
 /// What the fold surface actually delivered over one whole run (issue #245).
 ///
-/// The two notices above are *events*: they fire once, on stderr, at the moment
-/// the posture changes. That is enough for a person watching a `check`, and not
-/// enough for a harness that prints a number at the end — a count measured after
-/// the child died reads exactly like one measured before it, and the run that
-/// produced it is long gone by the time anyone compares. So the same posture is
-/// also carried as data, to be *reported beside the number it qualifies*
-/// (ADR-0004: incompleteness is never silent, and a posture that changes partway
-/// is still a posture).
+/// The two notices above are *events*, printed once at the moment the posture
+/// changes — not enough for a harness that reports a number at the end, since a
+/// count measured after the child died looks identical to one measured before.
+/// So the posture is also carried as data, reported beside the number it
+/// qualifies (ADR-0004: incompleteness is never silent).
 ///
-/// The counters are edges, not requests: `losses` counts the times a request
-/// ended with the child dead or silent — each one an answer that widened and,
-/// per ADR-0024, is never retried — and `restarts` counts the replacements that
-/// followed. `losses == 0` is the only shape that licenses reading a count as
-/// sidecar-backed throughout.
+/// Counters are edges, not requests: `losses` counts requests that ended with
+/// the child dead or silent (never retried, per ADR-0024); `restarts` counts the
+/// replacements that followed. `losses == 0` is the only shape that licenses
+/// reading a count as sidecar-backed throughout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct FoldPosture {
     /// Whether a live engine was ever reached at all. `false` covers both
@@ -1409,32 +1292,28 @@ pub trait Folder {
     /// installed extension provides (`Redis`, `Random\Randomizer`, `Dom\Element`).
     ///
     /// `Some(r)` with `r.declaration == Some(..)` is the runtime's own declaration:
-    /// members, signatures, constants, hierarchy edges, and the origin
-    /// (`internal` + `extension`) they came with. `Some(r)` with no declaration is
-    /// a definitive not-found on this boot surface. `None` is unanswerable — no
-    /// sidecar, `--no-php`, a timeout, a poisoned child, a runner too old to
-    /// implement the method — and the only sound reading of it is silence, exactly
-    /// as for every other engine question here. The default is `None`: the sound
-    /// subset (ADR-0004).
+    /// members, signatures, constants, hierarchy edges, origin (`internal` +
+    /// `extension`). `Some(r)` with no declaration is a definitive not-found.
+    /// `None` is unanswerable (no sidecar, `--no-php`, a timeout, a poisoned
+    /// child, a runner too old to implement the method) and reads as silence. The
+    /// default is `None`: the sound subset (ADR-0004).
     ///
     /// # This answer resolves; it does not convict (owner ruling, 2026-08-09)
     ///
-    /// A reflected declaration is an **envelope-grade** fact: the runtime's claim
-    /// about its own class, not a proof about the program. It may restore coverage
-    /// and buy correct silence, and a member check may consume it as an envelope —
-    /// but **no absence-family finding may be premised on its completeness**.
+    /// A reflected declaration is **envelope-grade**: the runtime's claim about its
+    /// own class, not a proof about the program. It may restore coverage and buy
+    /// correct silence, and a member check may consume it as an envelope — but
+    /// **no absence-family finding may be premised on its completeness**.
     /// `call.undefined-method`, `property.undefined`, `class-const.undefined`,
     /// `class.undefined` and the arity family all require a chain that is
-    /// source-declared and uniquely resolved (`Cx::find_class`), and this query is
-    /// deliberately *not* reachable from any of them: a reflected class never
-    /// enters the project index, so no enumeration those checks perform can be
-    /// completed by one. Convictions over reflected declarations are a separate
-    /// slice behind their own ADR, consistent with the standing pattern that the
-    /// runtime's answers refute rather than convict (`constant.undefined`'s
-    /// `defined()` precedent).
+    /// source-declared and uniquely resolved (`Cx::find_class`); this query is
+    /// deliberately unreachable from any of them, since a reflected class never
+    /// enters the project index. Convictions over reflected declarations are a
+    /// separate slice behind their own ADR (runtime answers refute, not convict —
+    /// `constant.undefined`'s `defined()` precedent).
     ///
     /// `fqn` is the resolved name; PHP class names are case-insensitive, so the
-    /// lowercased form is a faithful query and is what the memo keys on.
+    /// memo keys on the lowercased form.
     fn reflected_class(&mut self, fqn: &str) -> Option<ClassReflection> {
         let _ = fqn;
         None
@@ -1461,34 +1340,29 @@ pub trait Folder {
     }
 
     /// The value-domain **return fact** of a uniquely-resolved builtin `name`
-    /// (ADR-0056 R1): the reflected return envelope (the running engine's own
-    /// declaration), refined by an admitted curated row. `None` when nothing may
-    /// be seeded — no sidecar, a runtime-redefinition extension loaded (a
-    /// monkey-patched builtin disowns its declared type — the ADR-0049 A9 posture,
-    /// value-domain edition), a name the runtime does not know as a function, a
-    /// return type not representable as a single value-domain [`Fact`] (a
-    /// multi-base union such as `int|false` — deferred to the contract-lane arms),
-    /// or no return type at all. The default is `None` (the
-    /// sound subset — ADR-0004). Always seeded at the `Verified` stratum: it is a
-    /// native declaration read off the engine's own arginfo (§2), never demoted to
-    /// Asserted. `name` is the call's simple name (the fold path's key).
+    /// (ADR-0056 R1): the reflected return envelope, refined by an admitted
+    /// curated row. `None` when nothing may be seeded — no sidecar, a
+    /// runtime-redefinition extension loaded (ADR-0049 A9, value-domain edition:
+    /// a monkey-patched builtin disowns its declared type), a name the runtime
+    /// does not know as a function, a return type not representable as a single
+    /// value-domain [`Fact`] (a multi-base union such as `int|false` — deferred
+    /// to the contract-lane arms), or no return type at all. Default `None` (sound
+    /// subset, ADR-0004). Always seeded at the `Verified` stratum — native, off
+    /// the engine's own arginfo (§2), never demoted to Asserted. `name` is the
+    /// call's simple name (the fold path's key).
     fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> {
         let _ = name;
         None
     }
 
     /// The **reflected return-type declaration** of a uniquely-resolved builtin
-    /// `name` — the `(string)` rendering of the running engine's own
-    /// `ReflectionFunction::getReturnType()` (`"array"`, `"string|int|null"`).
-    ///
-    /// This is [`Self::builtin_return_fact`]'s raw sibling, for the transfers
-    /// whose result is not a scalar the value domain names in a single `Fact`
-    /// (ADR-0062 §4's positional projections return arrays; `array_key_first`
-    /// returns an `int|string|null` union). It carries the *same* gates —
-    /// a live sidecar and no runtime-redefinition extension loaded (ADR-0049 A9:
-    /// a monkey-patched builtin disowns its declared type) — so a rule admitted
-    /// through it is admitted on exactly the ADR-0061 §2 evidence, unweakened.
-    /// The default is `None`: the sound subset withholds the rule.
+    /// `name` — the `(string)` rendering of `ReflectionFunction::getReturnType()`
+    /// (`"array"`, `"string|int|null"`). [`Self::builtin_return_fact`]'s raw
+    /// sibling, for transfers whose result is not a scalar the value domain names
+    /// in a single `Fact` (ADR-0062 §4's positional projections return arrays;
+    /// `array_key_first` returns `int|string|null`). Same gates as above, so a
+    /// rule admitted through it rests on the same ADR-0061 §2 evidence,
+    /// unweakened. Default `None`: the sound subset withholds the rule.
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
         let _ = name;
         None
@@ -1498,36 +1372,29 @@ pub trait Folder {
     /// that return carries a `false` failure arm (ADR-0056 §8). `Some(true)` is
     /// `resource|false`, `Some(false)` a bare `resource`.
     ///
-    /// The one return fact that cannot ride the reflected envelope, because PHP
-    /// has no syntax to declare it: `fopen` reports no return type and never will.
-    /// §7's gate replaces the envelope's authority with three conditions, and this
-    /// method is where all three meet — the catalog row (the php-src stub reading
-    /// at the pin), the engine declaring NO return type for the name (the
-    /// resource-to-object migration tripwire: an engine that answers
-    /// `CurlHandle|false` has disowned the row), and the project minor equalling
-    /// the catalog pin. The default is `None`, the sound subset as everywhere else.
+    /// The one return fact that cannot ride the reflected envelope — PHP has no
+    /// syntax to declare it (`fopen` reports no return type and never will). §7's
+    /// gate replaces the envelope's authority with three conditions this method
+    /// checks together: the catalog row (php-src stub at the pin), the engine
+    /// declaring NO return type for the name (the resource-to-object migration
+    /// tripwire — an engine answering `CurlHandle|false` has disowned the row),
+    /// and the project minor equalling the catalog pin. Default `None`.
     fn builtin_resource_return(&mut self, name: &str) -> Option<bool> {
         let _ = name;
         None
     }
 
     /// The **reflected parameter counts** of a uniquely-resolved builtin `name` —
-    /// `(getNumberOfParameters(), getNumberOfRequiredParameters())` off the running
-    /// engine's own signature.
+    /// `(getNumberOfParameters(), getNumberOfRequiredParameters())`.
     ///
-    /// This is the **arity second leg** of ADR-0064's mixed-pin ruling. The
-    /// declaration pin ([`Self::builtin_return_type`]) is what countersigns a
-    /// structural transfer — but a name declaring a bare `mixed` (the whole array
-    /// read-position family: `current`, `array_pop`, `array_first`, …) pins
-    /// *nothing*: `mixed` is compatible with any rule output, so the check degenerates
-    /// to a presence test. The ruling is that such a rule is inadmissible on the
-    /// declaration alone and must additionally pin the live signature, which is a
-    /// real, movable fact about this engine's version of the function.
-    ///
-    /// It carries the same gates the declaration does — a live sidecar, no
-    /// runtime-redefinition extension loaded — so nothing is weakened by using it.
-    /// The default is `None`: no arity, no rule (the sound subset, ADR-0004), which
-    /// is also what an older runner's reply and every pre-arity replay table yield.
+    /// The **arity second leg** of ADR-0064's mixed-pin ruling: the declaration
+    /// pin ([`Self::builtin_return_type`]) countersigns a structural transfer, but
+    /// a name declaring bare `mixed` (the array read-position family: `current`,
+    /// `array_pop`, `array_first`, …) pins nothing — `mixed` is compatible with
+    /// any rule output, degenerating the check to a presence test. Such a rule is
+    /// inadmissible on the declaration alone and must additionally pin the live
+    /// signature. Same gates as the declaration; default `None` (no arity, no
+    /// rule — also what an older runner or a pre-arity replay table yields).
     fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
         let _ = name;
         None
@@ -1711,22 +1578,18 @@ pub struct EngineFolder<E: FoldEngine> {
     // end global constants (ADR-0078, issue #198)
     // reflected class world (issue #269)
     /// Per-**class** memo of the reflected declaration, keyed by the lowercased FQN
-    /// (PHP class names are case-insensitive). A declaration is by far the largest
-    /// reply on this wire — a fat extension class carries hundreds of methods — so
-    /// asking twice for the same name is the one thing this memo must prevent.
+    /// (PHP class names are case-insensitive). A declaration is the largest reply
+    /// on this wire (a fat extension class carries hundreds of methods), so
+    /// asking twice for the same name is what this memo must prevent.
     ///
-    /// Keyed by the `env()` identity, not merely by name: see
-    /// [`Self::env_identity`]. What a class *is* — which members it has, which
-    /// extension declares it — is a property of the interrogated engine, so an
-    /// engine that changes underneath the run invalidates every answer taken from
-    /// the previous one rather than silently mixing two runtimes' class worlds.
-    /// Per-run memoization is the whole of the caching discipline in this slice;
+    /// Also keyed by the `env()` identity ([`Self::env_identity`]): an engine that
+    /// changes underneath the run invalidates every prior answer rather than
+    /// silently mixing two runtimes' class worlds. Per-run memoization only;
     /// cross-run persistence is M5's problem (issue #269).
     ///
-    /// Engine-intrinsic, like `int_size` and `preg_refusal_memo`: what a resident
-    /// class *is* does not change with the project's declared target, so
-    /// [`Self::set_php_target`] does not drop it. The target gates absence claims,
-    /// and a declaration is not one.
+    /// Engine-intrinsic, like `int_size` and `preg_refusal_memo`: [`Self::set_php_target`]
+    /// does not drop it, since the target gates absence claims and a declaration
+    /// is not one.
     class_reflect_memo: HashMap<String, Option<ClassReflection>>,
     /// The `env()` identity the [`Self::class_reflect_memo`] entries were taken at:
     /// PHP version plus the loaded-extension set, the two facts that determine which
@@ -1806,28 +1669,24 @@ impl<E: FoldEngine> EngineFolder<E> {
     ///
     /// The four memos below (`absence_available`, `php_minor`, `int_size`,
     /// `boot_surface_label`) are *whole-run* answers taken from a single `env()`
-    /// reply, and each one gates a whole family: a declined `env` turns the entire
-    /// absence family off, for the rest of the run, from one badly-timed request.
-    /// That is how a transport failure the transport itself recovers from — one
-    /// lost fold, one respawn — became a run-long, silent narrowing of what the
-    /// checker would even ask. The lost *request* stays lost (ADR-0024: a reply
-    /// that never arrived is never retried); what must not stay lost is the
-    /// standing answer that happened to be taken in that window.
+    /// reply, and each gates a whole family: a declined `env` would otherwise turn
+    /// the entire absence family off for the rest of the run from one badly-timed
+    /// request. The lost *request* stays lost (ADR-0024: never retried); what must
+    /// not stay lost is the standing answer taken in that window.
     ///
-    /// The generation counter is what keeps this bounded. Re-asking on "the memo
-    /// holds a decline" would pay the ADR-0024 timeout at every call site against
-    /// a sidecar that is merely hung; re-asking on "the engine that declined has
-    /// been replaced" costs at most one `env` per respawn, and the respawn cap
-    /// bounds those. All four are dropped rather than only the declines: they come
-    /// from one reply, re-deriving an unchanged answer costs one request, and a
-    /// conditional would have to reason about which `false` was a decline and
-    /// which was a real verdict (a loaded monkey-patch extension is a legitimate
+    /// The generation counter bounds the re-asking: re-asking on "the memo holds a
+    /// decline" would pay the ADR-0024 timeout at every call site against a merely
+    /// hung sidecar; re-asking on "the engine that declined was replaced" costs at
+    /// most one `env` per respawn, bounded by the respawn cap. All four are
+    /// dropped together rather than only the declines, since they come from one
+    /// reply and a conditional would have to distinguish a decline from a real
+    /// verdict (a loaded monkey-patch extension is a legitimate
     /// `absence_available == Some(false)`).
     ///
-    /// The per-name memos are deliberately NOT dropped. A declined `reflect` costs
-    /// exactly the one name it was asked about — the same magnitude as the lost
-    /// request itself, which ADR-0024 already accepts — while dropping them would
-    /// re-issue thousands of requests per respawn.
+    /// The per-name memos are deliberately NOT dropped: a declined `reflect` costs
+    /// exactly the one name asked about (the same magnitude ADR-0024 already
+    /// accepts), while dropping them would re-issue thousands of requests per
+    /// respawn.
     fn refresh_env_memos(&mut self) {
         let generation = self.engine.restarts();
         if generation == self.env_generation {
@@ -1843,20 +1702,18 @@ impl<E: FoldEngine> EngineFolder<E> {
     // reflected class world (issue #269)
 
     /// The `env()` identity the reflected class world is keyed by — PHP version
-    /// plus the loaded-extension set — re-taken when the transport has been
-    /// replaced, and **clearing [`Self::class_reflect_memo`] when it has changed**.
-    ///
-    /// Those two facts are exactly the two that determine the class world: which
-    /// classes are resident, and what each one contains. Keying on them is what
-    /// makes a changed runtime invalidate the answers rather than silently mixing
+    /// plus the loaded-extension set, the two facts that determine which classes
+    /// are resident and what each contains. Re-taken when the transport has been
+    /// replaced, **clearing [`Self::class_reflect_memo`] when it has changed** —
+    /// so a changed runtime invalidates the answers rather than silently mixing
     /// two engines' class worlds inside one run.
     ///
     /// An unanswerable `env()` is a *distinct* identity from any answered one, so
     /// an answered memo is not carried across a window where the engine stopped
-    /// describing itself. This has its own generation stamp rather than riding
-    /// [`Self::refresh_env_memos`]: that helper drops its four memos on a bumped
-    /// generation, and here the point is precisely to *compare* the re-taken value
-    /// with the one the class memo holds.
+    /// describing itself. Own generation stamp rather than riding
+    /// [`Self::refresh_env_memos`]: that helper drops its memos on a bumped
+    /// generation, while here the point is to *compare* the re-taken value with
+    /// the one the class memo holds.
     fn class_world_identity(&mut self) -> Option<String> {
         let generation = self.engine.restarts();
         if let Some(cached) = &self.env_identity
@@ -1900,20 +1757,20 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// Whether the engine's integer machine is the one every value rule here
     /// assumes: 64-bit (issue #64).
     ///
-    /// A minor is not a machine. php-wasm 0.1.0 is PHP 8.5.2 — the pinned minor,
-    /// which every existing version gate admits — built 32-bit, and on it
-    /// `ip2long('255.255.255.255')` is `-1`, `crc32('x')` is negative, `1 << 40` is
-    /// `0`, `hexdec('FFFFFFFFF')` promotes to float and `strtotime('2040-01-01')` is
-    /// `false`. Those are silently wrong *values*, not failures: nothing widens,
-    /// nothing throws, and a fold would carry the wrong literal straight into a
-    /// proof. So the ADR-0056 curated admission requires a **provably** 64-bit
-    /// engine, and an unknown width declines.
+    /// A minor is not a machine. php-wasm 0.1.0 is PHP 8.5.2 (the pinned minor,
+    /// admitted by every existing version gate) built 32-bit, where
+    /// `ip2long('255.255.255.255')` is `-1`, `crc32('x')` is negative, `1 << 40`
+    /// is `0`, `hexdec('FFFFFFFFF')` promotes to float, and
+    /// `strtotime('2040-01-01')` is `false` — silently wrong *values*, not
+    /// failures: nothing widens, nothing throws, and a fold would carry the wrong
+    /// literal straight into a proof. So ADR-0056 curated admission requires a
+    /// **provably** 64-bit engine; an unknown width declines.
     ///
-    /// This is the CURATED-ROW leg, and it stays all-or-nothing on purpose. A
-    /// curated row is a claim about a builtin's whole return domain, verified
-    /// against the 64-bit engine at `PINNED_PHP`; there is no per-call argument
-    /// tuple to range-check it against, so there is nothing for the fold lane's
-    /// width-safe subset (below) to be the analogue of.
+    /// The CURATED-ROW leg, all-or-nothing on purpose: a curated row is a claim
+    /// about a builtin's whole return domain, verified against the 64-bit engine
+    /// at `PINNED_PHP`, with no per-call argument tuple to range-check it against
+    /// — so there is nothing for the fold lane's width-safe subset (below) to be
+    /// the analogue of.
     fn engine_is_64_bit(&mut self) -> bool {
         self.engine_int_size() == Some(8)
     }
@@ -1922,13 +1779,13 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// **curated** return-fact row may refine the reflected envelope.
     ///
     /// A curated row is verified against the 64-bit engine at
-    /// [`steins_catalog::PINNED_PHP`] and nowhere else, so the row is admitted only
+    /// [`steins_catalog::PINNED_PHP`] and nowhere else, so it is admitted only
     /// when the analysis is about exactly that version *and* that machine. With a
     /// declared target (issue #28) the WHOLE range must be the pin; with no target
-    /// the runtime-vs-pin comparison stands as it did before #28.
+    /// the runtime-vs-pin comparison stands as before #28.
     ///
     /// Extracted so [`Self::surface_summary`] reports the same verdict the gate
-    /// applies rather than a second copy of it.
+    /// applies, not a second copy of it.
     fn curated_rows_admitted(&mut self) -> bool {
         self.engine_is_64_bit()
             && match &self.php_target {
@@ -1942,17 +1799,15 @@ impl<E: FoldEngine> EngineFolder<E> {
     ///
     /// Every field is read off the same helpers that decide admission
     /// ([`Self::boot_surface_label`], `engine_int_size`, `fold_lane_at_width`,
-    /// `curated_rows_admitted`, [`Folder::absence_family_available`] — the last two
-    /// private, hence plain spans), so a description and the behaviour it
-    /// describes cannot drift: changing a gate changes what this reports, in the
-    /// same commit and by construction. Nothing here is prose — the wording of the
-    /// boundary belongs to whoever renders it.
+    /// `curated_rows_admitted`, [`Folder::absence_family_available`]), so a
+    /// description and the behaviour it describes cannot drift: changing a gate
+    /// changes what this reports, in the same commit.
     ///
-    /// Asking is not free of consequence on the replay transport: an unanswered
-    /// `env` is recorded as pending exactly as any other miss is, so a caller that
-    /// summarizes *before* collecting pending gets a run that asks for the boot
-    /// surface it could not describe, and converges one iteration later with it.
-    /// That is the intended shape: a converged run always has a complete summary.
+    /// Asking is not free on the replay transport: an unanswered `env` is
+    /// recorded as pending like any other miss, so a caller that summarizes
+    /// *before* collecting pending gets a run that asks for the boot surface it
+    /// could not describe, converging one iteration later. A converged run always
+    /// has a complete summary.
     pub fn surface_summary(&mut self) -> SurfaceSummary {
         let label = self.boot_surface_label();
         let php_version = self.engine.env().map(|e| e.php_version);
@@ -1975,29 +1830,25 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// admission gate of ADR-0056 §2 assembled from three whole-run engine
     /// answers. Called once per name; [`Folder::builtin_return_fact`] memoizes.
     fn compute_builtin_return_fact(&mut self, key: &str) -> Option<Fact> {
-        // Gate 1 — a live engine and no runtime-redefinition extension. A
-        // monkey-patched builtin (uopz/runkit7/Componere) can return a type its
-        // native declaration disowns, so the reflected envelope is not trustworthy;
-        // this is the ADR-0049 A9 posture applied to the value domain. Also covers
-        // the no-engine sound subset (returns `false`).
+        // Gate 1 — a live engine and no runtime-redefinition extension (ADR-0049
+        // A9 applied to the value domain): a monkey-patched builtin
+        // (uopz/runkit7/Componere) can return a type its native declaration
+        // disowns. Also covers the no-engine sound subset.
         if !self.absence_family_available() {
             return None;
         }
         // Gate 2 (minor pin, ADR-0052 A11 / ADR-0056 §2, target-aware per issue
-        // #28) — governs the CURATED refinement only; the reflected envelope is
+        // #28) governs the CURATED refinement only — the reflected envelope is
         // version-correct by construction and needs no pin. A curated row is
-        // verified at PINNED_PHP and nowhere else, so with a declared target the
-        // row is admitted only when the WHOLE range is the pin (`§2`'s hole is
-        // exactly cross-version drift); with no target, the runtime-vs-pin
-        // comparison stands as before.
+        // verified at PINNED_PHP and nowhere else: with a declared target the row
+        // is admitted only when the WHOLE range is the pin; with no target, the
+        // runtime-vs-pin comparison stands as before #28.
         //
-        // The pin is a version AND a machine (issue #64): a curated row is verified
-        // against the 64-bit engine at that minor, and a 32-bit engine at the SAME
-        // minor can violate it (`hexdec` returning float where the row says int).
-        // The reflected envelope is unaffected — a declared return type is a
-        // platform-independent claim, and the 32-bit build reports the same ones —
-        // so an unpinned or narrow-integer engine still SEEDS, it just does not
-        // get the curated refinement.
+        // The pin is a version AND a machine (issue #64): a 32-bit engine at the
+        // same minor can violate a curated row (`hexdec` returning float where
+        // the row says int). The reflected envelope is unaffected (a declared
+        // return type is platform-independent), so an unpinned or
+        // narrow-integer engine still SEEDS, just without curated refinement.
         let minor_matches_pin = self.curated_rows_admitted();
         // The reflected return envelope — the running engine's own declaration.
         let refl = self.engine.reflect(key)?;
@@ -2028,33 +1879,31 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// makes the reasoning readable. Called once per name; memoized by
     /// [`Folder::builtin_resource_return`].
     fn compute_builtin_resource_return(&mut self, key: &str) -> Option<bool> {
-        // Gate 1 — the same live-engine / no-monkey-patching posture every other
-        // return rung takes (ADR-0049 A9). Without an engine there is no tripwire
-        // to check, and a row admitted without its tripwire is the whole thing §7
-        // is designed to prevent.
+        // Gate 1 — same live-engine / no-monkey-patching posture as every other
+        // return rung (ADR-0049 A9): without an engine there is no tripwire to
+        // check, and a row admitted without its tripwire is what §7 prevents.
         if !self.absence_family_available() {
             return None;
         }
-        // Gate 2 — the minor pin. The stub was read at `PINNED_PHP` and says
+        // Gate 2 — the minor pin: the stub was read at `PINNED_PHP` and says
         // nothing about any other minor (ADR-0056 §2).
         if !self.curated_rows_admitted() {
             return None;
         }
         let refl = self.engine.reflect(key)?;
-        // A name this engine does not have is not this engine's resource producer,
-        // whatever the pinned stubs said — an unloaded extension, or a function
-        // removed since the pin.
+        // A name this engine does not have is not this engine's resource
+        // producer, whatever the pinned stubs said (an unloaded extension, or a
+        // function removed since the pin).
         if !refl.function_exists {
             return None;
         }
         // Gate 3 — THE TRIPWIRE. Silence is the evidence: PHP cannot spell a
         // `resource` return, so a genuine resource producer declares nothing. An
         // engine that DOES declare something has migrated the function to an
-        // object (`curl_init` → `CurlHandle|false`) — it has spoken, and §1's
-        // precedence rule says curation yields to the engine without exception.
-        // This is what refuses the 89 rotted `functionMap` names (ADR-0069 §5)
-        // with no denylist, and what will switch `fopen` off by itself on the day
-        // some future PHP migrates it.
+        // object (`curl_init` → `CurlHandle|false`), and §1's precedence rule
+        // says curation yields to the engine without exception. Refuses the 89
+        // rotted `functionMap` names (ADR-0069 §5) with no denylist, and will
+        // switch `fopen` off by itself the day some future PHP migrates it.
         if refl.return_type.is_some() {
             return None;
         }
@@ -2297,20 +2146,18 @@ impl<E: FoldEngine> EngineFolder<E> {
 /// * `Some(8)` — the machine every value rule here assumes. Admit everything, so
 ///   this is byte-identical to the pre-S1.5 behaviour on every native run.
 /// * `Some(4)` — the **width-safe subset**. Admit `name` only when the catalog
-///   certifies it ([`steins_catalog::width_safe`]) *and* every integer occurring
-///   anywhere in the arguments is inside [`I32_SAFE`]. Both legs are required:
-///   the catalog verdict is stated for exactly the tuples this range guard admits,
-///   so neither leg means anything alone. The catalog's classification became
-///   three-valued in ADR-0028's 2026-08-14 amendment §4 and this gate did not
-///   move: a `Refused` row and an `Unverified` one are both "not certified", and
-///   the single `width_safe` question is what makes them mechanically identical
-///   here while staying distinguishable where the *evidence* is reported.
-/// * anything else (`None`, or a width nobody has verified) — **default-deny**.
-///   An old or foreign runner is unknown, not assumed; and there is no verified
-///   subset for a 16-bit or 128-bit machine because nobody has probed one.
+///   certifies it ([`steins_catalog::width_safe`]) *and* every integer in the
+///   arguments is inside [`I32_SAFE`] — both legs required, since the catalog
+///   verdict is stated only for tuples the range guard admits. The catalog's
+///   classification went three-valued in ADR-0028's 2026-08-14 amendment §4 and
+///   this gate did not move: a `Refused` row and an `Unverified` one are both
+///   "not certified" here, staying distinguishable only where evidence is
+///   reported.
+/// * anything else (`None`, or an unverified width) — **default-deny**: an old
+///   or foreign runner is unknown, not assumed, and no 16-bit/128-bit subset is
+///   verified because nobody has probed one.
 ///
-/// Declining is spelled as it always was: the caller returns `None`, which widens.
-/// Nothing here fabricates, and nothing here narrows on a guess.
+/// Declining is spelled as always: the caller returns `None`, which widens.
 fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -> bool {
     match fold_lane_at_width(int_size) {
         FoldLane::Full => true,
@@ -2463,25 +2310,19 @@ pub struct ProcessEngine {
     notified: bool,
     /// Whether [`SIDECAR_HANDSHAKE_NOTICE`] has already been printed this run —
     /// the issue #110 latch, sibling to `notified` above but for "spawned, then
-    /// a request went unanswered" rather than "could not spawn at all". The two
-    /// notices are mutually exclusive per instance (a spawn failure never
-    /// reaches a live sidecar to poison), but are kept as separate flags since
-    /// they guard different text and, unlike `notified`, this one can still be
-    /// meaningfully false after `ensure` has long since stopped being consulted.
+    /// a request went unanswered" rather than "could not spawn at all". Kept as
+    /// a separate flag since it guards different text and can stay meaningfully
+    /// false after `ensure` has stopped being consulted.
     ///
-    /// A prior revision also tracked "has any request ever succeeded" and used
-    /// that to permanently suppress this notice after the first success — on
-    /// the theory that later poisoning is always the respawn-tolerant failure
-    /// mode `Sidecar`'s own doc comment describes, and therefore not silent
-    /// incompleteness. That theory does not hold: `Sidecar`'s own contract is
-    /// that "the request whose reply never arrived still fails... it is never
-    /// retried" — respawn makes the INSTANCE recover, it does not un-widen the
-    /// answer that request already lost. A mid-run timeout after a healthy
-    /// opening handshake is exactly as silent, to the caller, as one at the
-    /// very start, and the issue's own acceptance criterion says so ("fails or
-    /// times out mid-run"). So this is a plain once-per-run latch now, armed by
-    /// the first poisoning event at any point in the run — no permanent
-    /// suppression from an earlier success (review finding on PR #134).
+    /// A prior revision suppressed this notice permanently after any request
+    /// succeeded, on the theory that later poisoning is always the
+    /// respawn-tolerant failure mode. That does not hold: `Sidecar`'s contract
+    /// is that a lost reply is never retried, so respawn recovers the
+    /// INSTANCE but does not un-widen the answer already lost — a mid-run
+    /// timeout is exactly as silent as one at the start. So this is a plain
+    /// once-per-run latch, armed by the first poisoning event anywhere in the
+    /// run, with no permanent suppression from an earlier success (review
+    /// finding on PR #134).
     unresponsive_notified: bool,
     /// Requests that ended with the child dead or silent (issue #245) — the
     /// [`FoldPosture::losses`] counter. Counted on the EDGE into poison rather
@@ -2551,13 +2392,11 @@ impl ProcessEngine {
 
     /// Run one request against the live sidecar (spawning it first if needed),
     /// then check the issue #110 latch from the transport's OWN post-call state
-    /// (`Sidecar::is_poisoned`) rather than from `op`'s return value: a `fold`
-    /// that legitimately widens — an argument out of the width-safe range, a
-    /// callee not on the allowlist, an exception result — is not a transport
-    /// failure and must never arm the notice; only the child actually going
-    /// silent or dying does. `None` when no sidecar can be had at all (disabled,
-    /// or a prior spawn already failed — [`Self::ensure`] already speaks for
-    /// that case).
+    /// (`Sidecar::is_poisoned`) rather than `op`'s return value: a `fold` that
+    /// legitimately widens (an out-of-range argument, a non-allowlisted callee,
+    /// an exception result) is not a transport failure and must never arm the
+    /// notice — only the child actually going silent or dying does. `None` when
+    /// no sidecar can be had at all ([`Self::ensure`] already covers that case).
     fn call<T>(&mut self, op: impl FnOnce(&mut Sidecar) -> T) -> Option<T> {
         let sc = self.ensure()?;
         let result = op(sc);
@@ -2843,17 +2682,15 @@ const NEXT_INT_BOUNDARY: (u16, u16) = (8, 3);
 /// consumes.
 ///
 /// - The **effective minor** feeds `normalize_array` (ADR-0049 A12): with a
-///   declared target, the range must agree on the next-int boundary — a range
-///   entirely on one side answers with its floor (any minor on that side picks
-///   the same rule), a straddling range answers `None`, which is exactly A12's
-///   existing unknown leg (a boundary-sensitive literal declines; every other
-///   literal still resolves). With no target, the runtime minor answers, as it
-///   did before #28.
+///   declared target, the range must agree on the next-int boundary — one side
+///   entirely answers with its floor, a straddling range answers `None` (A12's
+///   existing unknown leg: a boundary-sensitive literal declines, every other
+///   literal still resolves). With no target, the runtime minor answers as
+///   before #28.
 /// - The **catalog skew** flag feeds ADR-0052 A11's arm-deletion demotion: the
-///   catalog is verified at [`steins_catalog::PINNED_PHP`], so the verdicts are
-///   trustworthy only when every version the analysis is about is the pin —
-///   a target range is skewed unless it is exactly the pin; no target falls
-///   back to the runtime-vs-pin comparison (A11 unchanged).
+///   catalog is verified only at [`steins_catalog::PINNED_PHP`], so a target
+///   range is skewed unless it is exactly the pin; no target falls back to the
+///   runtime-vs-pin comparison (A11 unchanged).
 /// - The **version-id interval** feeds the issue-#29 `PHP_VERSION_ID` guard
 ///   fold — see [`PhpView::version_id`].
 ///
@@ -2923,14 +2760,13 @@ fn parse_php_minor(v: &str) -> Option<(u16, u16)> {
 ///
 /// Both exist because a fold argument is serialized, sent over IPC, executed, and
 /// used as a memo key — all linear in the literal's size, all paid per call site.
-/// The values are chosen to cover every array literal a human writes as a `count`
-/// / `in_array` / `implode` argument while refusing the generated 10,000-entry
-/// lookup table, where a fold costs real time and buys nothing (its `count` is a
-/// number nobody is about to mistype into a `string` parameter). Exceeding either
-/// bound **widens** — a miss, never a false positive (ADR-0002).
-///
-/// The depth bound is also what keeps the recursive encoders here and in the
-/// runner off an unbounded stack.
+/// The values cover every array literal a human writes as a `count` /
+/// `in_array` / `implode` argument while refusing a generated 10,000-entry
+/// lookup table, where a fold costs real time and buys nothing (its `count` is
+/// a number nobody would mistype into a `string` parameter). Exceeding either
+/// bound **widens** — a miss, never a false positive (ADR-0002). The depth
+/// bound also keeps the recursive encoders here and in the runner off an
+/// unbounded stack.
 const FOLD_ARRAY_MAX_ENTRIES: usize = 256;
 const FOLD_ARRAY_MAX_DEPTH: u8 = 8;
 
@@ -2989,21 +2825,21 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
 /// The fold seam's standing rule is that PHP semantics are answered by running the
 /// project's own PHP (ADR-0004/0028), never re-derived in Rust. Concatenation earns
 /// an exception on a narrow, checkable ground: for the operand types admitted below
-/// the cast is *total and environment-independent*. Byte concatenation of two
-/// strings consults no locale, no encoding, and no ini setting; `int` has one
-/// decimal spelling; `bool` and `null` have fixed one-character-or-empty spellings.
-/// There is no configuration under which php-src answers differently, so there is
-/// nothing for the sidecar to arbitrate.
+/// the cast is *total and environment-independent* — byte concatenation of two
+/// strings consults no locale/encoding/ini setting, `int` has one decimal
+/// spelling, and `bool`/`null` have fixed one-character-or-empty spellings. No
+/// configuration makes php-src answer differently, so there is nothing for the
+/// sidecar to arbitrate.
 ///
-/// That is also why `float` is **excluded**. PHP's float-to-string conversion is
-/// governed by the `precision` ini directive (default 14), so `0.1 + 0.2` prints as
-/// `0.3` on a stock build and as `0.30000000000000004` under `precision=17`. A value
-/// that depends on the runtime's configuration is exactly what this crate must not
-/// invent: `strval(1.5)` stays on the `foldable` allowlist and is answered by the
-/// real engine, which knows the real setting. `Float` here therefore widens.
+/// `float` is **excluded** because PHP's float-to-string conversion is governed by
+/// the `precision` ini directive (default 14): `0.1 + 0.2` prints as `0.3` on a
+/// stock build and `0.30000000000000004` under `precision=17`. A value that
+/// depends on runtime configuration is exactly what this crate must not invent —
+/// `strval(1.5)` stays on the `foldable` allowlist, answered by the real engine.
 ///
-/// Arrays (`"Array"` plus a warning), objects (`__toString` or an `Error`) and every
-/// unresolved carrier widen for the ordinary reason — the result is not proven.
+/// Arrays (`"Array"` plus a warning), objects (`__toString` or an `Error`) and
+/// every unresolved carrier widen for the ordinary reason: the result is not
+/// proven.
 fn concat_cast(v: &ArgValue) -> Option<PhpStr> {
     match v {
         ArgValue::Str(s) => Some(s.clone()),
@@ -3748,13 +3584,13 @@ pub fn check_project_with_runtime(
 /// [`check_project_with_runtime`] plus the `[runtime] final-keyword` posture
 /// (issue #234, consumed by #238).
 ///
-/// Both `[runtime]` pseudo-constants in one entry point, because they are one
-/// family (ADR-0037 §2): a boot truth no amount of reading source settles, which
-/// the project declares and Steins reasons under. `final_keyword` reaches exactly
-/// one consumer — the declared-receiver lane's intersection leg — and
+/// Both `[runtime]` pseudo-constants in one entry point, since they are one
+/// family (ADR-0037 §2): a boot truth no amount of reading source settles,
+/// which the project declares and Steins reasons under. `final_keyword` reaches
+/// exactly one consumer — the declared-receiver lane's intersection leg — and
 /// [`FinalKeyword::Enforced`] is what declaring nothing means, so
-/// [`check_project_with_runtime`] delegating with it keeps every existing caller's
-/// semantics byte-identical.
+/// [`check_project_with_runtime`] delegating with it keeps every existing
+/// caller's semantics byte-identical.
 #[must_use]
 pub fn check_project_with_postures(
     db: &dyn Db,
@@ -3855,14 +3691,13 @@ pub fn collect_assert_types(
 /// (ADR-0076 §3, the loop-subject probe). Every field is `false` when the walk
 /// bound nothing there — a missing answer is "not proven", never a guess.
 ///
-/// The answer carries **both trust lanes in one struct**: `array` and `list`
-/// report what the bound fact *says*, and `verified` reports which stratum
-/// (ADR-0052 §5) says it. A consumer that requires `verified` reads the proven
-/// lane; a consumer that deliberately accepts `verified == false` (the
-/// ADR-0076 issue-#175 opt-in) is consuming the **Asserted** lane — a docblock
-/// claim, never a proof — and must keep the two apart in everything it derives
-/// (its own admission counts, its labels). Nothing here lets one lane launder
-/// into the other: the stratum bit is the wall.
+/// The answer carries **both trust lanes in one struct**: `array`/`list` report
+/// what the bound fact *says*, and `verified` reports which stratum (ADR-0052
+/// §5) says it. A consumer requiring `verified` reads the proven lane; one that
+/// deliberately accepts `verified == false` (the ADR-0076 issue-#175 opt-in) is
+/// consuming the **Asserted** lane — a docblock claim, never a proof — and must
+/// keep the two apart in everything it derives. The stratum bit is the wall
+/// that stops one lane laundering into the other.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct SubjectFact {
     /// `true` when the bound fact is an array value (an abstract shape or a
@@ -4298,16 +4133,15 @@ fn check_units(
 // ---------------------------------------------------------------------------
 
 /// Emit the one `syntax.unparsable` finding a broken file earns (ADR-0079 §2.1):
-/// positioned at the FIRST recovered parse error and naming the count of further
-/// ones. One per file, never one per error — recovery cascades make every position
-/// after the first unreliable, so the later errors are reported as a *count* (a
-/// magnitude the operator can use) rather than as positions (which would be
-/// guesses). A file that parses emits nothing.
+/// positioned at the FIRST recovered parse error, naming the count of further
+/// ones. One per file, never one per error — recovery cascades make every later
+/// position unreliable, so those are reported as a *count* rather than as
+/// positions (which would be guesses). A file that parses emits nothing.
 ///
 /// `dams` is the ADR-0046 §2 vendor answer, read off the site list rather than
-/// re-derived here so the finding's own words cannot drift from the dam's behavior:
-/// a non-vendor break silences the existence family project-wide and the message
-/// says so, a vendor break does not and the message does not claim it.
+/// re-derived here so the finding's own words cannot drift from the dam's
+/// behavior: a non-vendor break silences the existence family project-wide and
+/// the message says so; a vendor break does not.
 fn emit_parse_failure(unit: &FileUnit, dams: bool, out: &mut Vec<Diagnostic>) {
     let errors = unit.tree.parse_errors();
     let Some(first) = errors.first() else { return };
@@ -4606,11 +4440,9 @@ struct EffectFinding {
     /// `[effects.attribution]` table.
     ///
     /// Part of `Hash`/`Eq`, so two copies of one effect that reached this unit
-    /// along differently-attributed paths are distinct set elements. That is what
-    /// makes leg 2 of the discharge rule a *must* over paths rather than a may:
-    /// the copies are all present, and [`finding_groups`] quantifies over them.
-    /// Nothing else reads it — the label, origin, line and path of every finding
-    /// are what they were before this field existed.
+    /// along differently-attributed paths are distinct set elements — what makes
+    /// leg 2 of the discharge rule a *must* over paths rather than a may: the
+    /// copies are all present, and [`finding_groups`] quantifies over them.
     attributed: BTreeSet<String>,
 }
 
@@ -5490,16 +5322,15 @@ fn effect_summary_units(
 /// The two lanes stay apart, exactly as ADR-0067 built them. [`Self::labels`] is
 /// what inference **proved**; [`Self::declared`] is what a declaration merely
 /// **bounds** — an envelope imported at an interface-typed receiver, or a plugin
-/// coloring. A cap is not an occurrence proof, so a consumer that needs "provably
-/// no effects" must read a non-empty declared lane as *unproven*, never as a
-/// weaker kind of proof. The two are reported separately rather than merged so
-/// that reading is the consumer's explicit decision.
+/// coloring. A cap is not an occurrence proof, so a consumer needing "provably no
+/// effects" must read a non-empty declared lane as *unproven*. Reported separately
+/// rather than merged, so that reading is the consumer's explicit decision.
 ///
-/// Carrying the declared lane is load-bearing, not documentation: the effect pass
-/// deliberately **discharges** the exhaustiveness taint at a call whose declared
-/// receiver answered (ADR-0067 — the envelope is a checked contract, so the call
-/// site is no longer "unknown"), which would otherwise let a declared-only call
-/// through a proven-purity gate reading [`Self::exhaustive`] alone.
+/// Carrying the declared lane is load-bearing: the effect pass deliberately
+/// **discharges** the exhaustiveness taint at a call whose declared receiver
+/// answered (ADR-0067 — a checked contract, so the call site is no longer
+/// "unknown"), which would otherwise let a declared-only call through a
+/// proven-purity gate reading [`Self::exhaustive`] alone.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RegionPurity {
     /// The proven effect labels arising inside the region, sorted and deduped.
@@ -5717,10 +5548,10 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
 /// question of a bound callable — "is its inferred effect envelope pure?" — and the
 /// machinery that answers it ([`compute_effects`]) already exists, keyed by exactly
 /// the [`Sym`] a `ClosureRef`/`ClosureTarget` names. What did not exist was a way to
-/// ask it from a *call site*: [`compute_effects`] ran only inside
-/// [`effect_diagnostics`], a whole-project pass that runs strictly **after** the
-/// per-call-site loop. This type is the connection, and nothing more — it adds no
-/// effect semantics of its own.
+/// ask it from a *call site*, since [`compute_effects`] ran only inside
+/// [`effect_diagnostics`], a whole-project pass strictly **after** the
+/// per-call-site loop. This type is just that connection — no effect semantics of
+/// its own.
 ///
 /// Purity is read against the same relation the envelope check uses, so the two
 /// consumers cannot disagree: a label is disqualifying here exactly when
@@ -6106,13 +5937,12 @@ impl OperativeBound<'_> {
     /// Whether a **freshly produced** finding must be reported against this
     /// bound: it exceeds the envelope and nothing discharges it.
     ///
-    /// A production site is a one-member finding group by construction — a
+    /// A production site is a one-member finding group by construction (a
     /// builtin draws no edge, so this call is the only way this label reached
-    /// this origin at this line — and leg 2 therefore collapses from `every
-    /// member` to this copy's own attribution. That is [`finding_groups`]'s
-    /// answer for a singleton group with no edge, computed through the same
-    /// [`attribution_tolerated`] predicate so the transitive site and this one
-    /// cannot disagree about the same effect.
+    /// this origin at this line), so leg 2 collapses from `every member` to
+    /// this copy's own attribution — [`finding_groups`]'s answer for a
+    /// singleton group with no edge, computed through the same
+    /// [`attribution_tolerated`] predicate so the two sites cannot disagree.
     fn reports(self, f: &EffectFinding) -> bool {
         self.exceeds(&f.label) && !attribution_tolerated(f, self.policy)
     }
@@ -6452,14 +6282,13 @@ const MUTATE_LOCAL: &str = "mutate.local";
 /// `mutate.local` is the only member and, by construction, the only one there can
 /// be: it names a write whose target lives inside the calling frame, so no
 /// observer outside that frame can distinguish a run where it happened from one
-/// where it did not. An envelope constrains what a *caller* may observe; a label
-/// no caller can observe cannot exceed one.
+/// where it did not — an envelope constrains what a *caller* may observe, and a
+/// label no caller can observe cannot exceed one.
 ///
-/// The ADR states the tolerance for `Pure` specifically. It is implemented for
-/// every envelope because `Pure` is the *tightest* envelope in the lattice —
+/// The ADR states the tolerance for `Pure` specifically, but it is implemented
+/// for every envelope: `Pure` is the *tightest* envelope in the lattice, and
 /// tolerating a label there while rejecting it under a wider declaration would
-/// make the check non-monotone, and `#[\Steins\Effect('io.output')]` (strictly
-/// weaker than `Pure`) would flag a call `#[\Steins\Pure]` accepts.
+/// make the check non-monotone.
 fn tolerated_by_every_envelope(effect_label: &str) -> bool {
     effect_label == MUTATE_LOCAL
 }
@@ -6503,22 +6332,16 @@ struct FindingKey<'a> {
 /// One representative per finding group of `set`, paired with the group's
 /// ADR-0084 discharge verdict, in report order.
 ///
-/// `edge` is the attribution a caller accumulates as these findings cross out of
-/// the unit that owns them. A judgment site reads the *callee's* stored set, so
-/// the edge has not been folded in there yet — the fixpoint folds it when it
-/// copies, and this is the same fold at the reporting seam, so the two cannot
-/// disagree about what a caller sees. Pass an empty slice to judge a unit's own
-/// set as it stands (the purity oracle and the Liskov check both do: they ask
-/// about the symbol itself, not about a call into it).
+/// `edge` is the attribution a caller accumulates as these findings cross out
+/// of the unit that owns them: a judgment site reads the *callee's* stored
+/// set, so the edge is folded in here rather than already present, matching
+/// the fixpoint's own fold at copy time. Pass an empty slice to judge a unit's
+/// own set as it stands (the purity oracle and the Liskov check both do).
 ///
-/// A group is discharged iff its label is tolerated (leg 1), or **every** member
-/// carries at least one attribution the policy tolerates (leg 2). The `all` is
-/// what makes leg 2 must-semantics: an effect that reaches a declaration both
-/// through an attributed facade and through a bare call is discharged for
-/// neither.
-/// **Leg 2's per-member test**, over the attribution labels themselves. Written
-/// once and read by the group rule, the production sites and the userland
-/// conditional-purity rows alike, so none of them can drift apart.
+/// A group is discharged iff its label is tolerated (leg 1), or **every**
+/// member carries at least one attribution the policy tolerates (leg 2) — the
+/// `all` is must-semantics: an effect reaching a declaration both through an
+/// attributed facade and through a bare call is discharged for neither.
 fn any_tolerated<'a>(
     labels: impl IntoIterator<Item = &'a String>,
     policy: &EffectsPolicy,
@@ -6573,18 +6396,16 @@ fn exceeded_diag(
 /// The effect label a by-ref write through an argument with this lvalue root
 /// carries (ADR-0063 §2.3) — the **target leg** of the conditional out-param row.
 ///
-/// The three answers are three genuinely different contracts, which is exactly
-/// why the row cannot be a per-function flag: `preg_match($p, $s, $m)` writes
-/// only the frame, `preg_match($p, $s, $this->m)` mutates an object every caller
-/// shares, and `preg_match($p, $s, $_SESSION['m'])` writes interpreter-global
-/// state.
+/// Three genuinely different contracts, so not a per-function flag:
+/// `preg_match($p, $s, $m)` writes only the frame, `preg_match($p, $s,
+/// $this->m)` mutates an object every caller shares, and `preg_match($p, $s,
+/// $_SESSION['m'])` writes interpreter-global state.
 ///
-/// Non-local targets stop at the conservative parent `mutate` rather than pick an
-/// ADR-0055 child (`mutate.self` / `mutate.instance` / `mutate.static`): that
-/// taxonomy's *inference* (ADR-0055) is not built, and a coarse-but-true
-/// label is worth more than a precise guess. So Steins **does** distinguish the
-/// targets — property-rooted by-ref writes never claim `mutate.local` — while
-/// declining to name which flavor of escape it is.
+/// Non-local targets stop at the conservative parent `mutate` rather than pick
+/// an ADR-0055 child (`mutate.self`/`mutate.instance`/`mutate.static`): that
+/// taxonomy's *inference* is not built, and a coarse-but-true label beats a
+/// precise guess. Steins still distinguishes targets — property-rooted by-ref
+/// writes never claim `mutate.local` — while declining to name the flavor.
 fn by_ref_label(target: steins_syntax::RefTarget) -> &'static str {
     match target {
         steins_syntax::RefTarget::Local => MUTATE_LOCAL,
@@ -6640,10 +6461,9 @@ fn stream_target(
 /// `policy` supplies the ADR-0084 attribution of the builtin being called. A
 /// builtin draws no edge in the effect graph — its findings are inserted straight
 /// into the caller's direct set — so the *production site* is the boundary the
-/// attribution has to be stamped at. That is not a weaker form of the edge fold:
-/// every path to this effect passes through this call by construction, so a
-/// finding born attributed is attributed on all of them, which is exactly what
-/// leg 2's `every` asks.
+/// attribution has to be stamped at: every path to this effect passes through
+/// this call by construction, so a finding born attributed is attributed on all
+/// of them, exactly what leg 2's `every` asks.
 ///
 /// `const_args` is the third axis and the only one that can make a row *narrower*
 /// (issue #318): a wrapper-capable stream row is `io` until the call site proves
@@ -6960,12 +6780,11 @@ fn nearest_interop_envelope<'a>(
 /// The envelope a declaration is **actually held to** (ADR-0082 role B), or `None`
 /// when nothing constrains it.
 ///
-/// The checked stratum wins outright (ADR-0082 §1). The shadowing is total, and the
-/// caller enforces the other half of it by not even *reading* the docblock when an
-/// attribute is present: the interop bound is then neither checked nor
-/// label-validated. Checking both would let a docblock manufacture a finding
-/// against a declaration whose author already wrote the authoritative bound one
-/// line down.
+/// The checked stratum wins outright (ADR-0082 §1). The shadowing is total: the
+/// caller does not even *read* the docblock when an attribute is present, so the
+/// interop bound is then neither checked nor label-validated — checking both
+/// would let a docblock manufacture a finding against a declaration whose author
+/// already wrote the authoritative bound one line down.
 ///
 /// `anchor` is where a finding about the declaration itself lands when the interop
 /// envelope wins — the declaration's name, since the tag lives in trivia the
@@ -7032,15 +6851,15 @@ impl InteropTag {
 /// Current PHPStan discards everything after `@phpstan-impure`, so wild code
 /// legitimately carries one-word prose — `@phpstan-impure database` — that this
 /// grammar would otherwise read as a label. Treating an unrecognized label as
-/// *unspecified* is what keeps such a docblock from failing a run; a separate rule
-/// owns typo reporting, and it reports on the checked stratum.
+/// *unspecified* keeps such a docblock from failing a run; a separate rule owns
+/// typo reporting, on the checked stratum.
 ///
-/// The whole tag goes inert rather than the unknown labels being dropped from it.
-/// An unknown label is ⊤ — no information — and an upper bound that contains ⊤ is
-/// ⊤. Checking the body against the *known subset* of the author's claim would
-/// hold it to a narrower bound than the one written (`@phpstan-impure io.db,
-/// io.netw` is not a claim of `io.db`), which manufactures findings the zero-FP
-/// bar forbids. Widening to ⊤ can only lose findings, never invent them.
+/// The whole tag goes inert rather than dropping just the unknown labels: an
+/// unknown label is ⊤ (no information), and an upper bound containing ⊤ is ⊤.
+/// Checking the body against the *known subset* would hold it to a narrower
+/// bound than written (`@phpstan-impure io.db, io.netw` is not a claim of
+/// `io.db`), manufacturing findings the zero-FP bar forbids. Widening to ⊤ can
+/// only lose findings, never invent them.
 fn interop_tag(
     registry: &steins_catalog::LabelRegistry,
     docblock: Option<&String>,
@@ -7074,12 +6893,12 @@ const fn class_tag(env: EnvelopeTag) -> bool {
 /// carry evidence of label intent.
 ///
 /// This is the vocabulary-conformance diagnostic the interop spec's fail-open
-/// paragraph asks an enforcing checker for. The bound-reading rule stays exactly as
-/// it was: the tag is inert either way, and this function is told so by
-/// [`interop_tag`] rather than re-deriving it, so the ruling has one implementation
-/// and this has no vote in it. Firing on an inert tag is the entire point — a
-/// declaration that checks nothing while looking like it checks something is
-/// precisely the degradation the ruling accepted and asked to be made visible.
+/// paragraph asks an enforcing checker for. The bound-reading rule stays exactly
+/// as it was: the tag is inert either way, and this function is told so by
+/// [`interop_tag`] rather than re-deriving it, so the ruling has one
+/// implementation. Firing on an inert tag is the entire point — a declaration
+/// that checks nothing while looking like it checks something is the
+/// degradation the ruling asked to be made visible.
 ///
 /// What it must never do is read a human's prose as a bound the author fumbled.
 /// [`steins_catalog::LabelRegistry::label_intent`] owns that judgment and answers
@@ -7190,19 +7009,18 @@ fn spells_interop_envelope(docblock: Option<&String>) -> bool {
 /// and, failing that, from the declaring class-like's.
 ///
 /// [`InteropTag::Absent`] means *nothing was written* — the same answer an absent
-/// docblock gives, and the caller's cue to keep looking or to keep its taint. An
+/// docblock gives, and the caller's cue to keep looking or keep its taint. An
 /// empty label list on a [`InteropTag::Bound`] is the **empty** bound
 /// (`@phpstan-pure`): a real claim, not a missing one — except under
-/// `AllMethodsImpure`, whose bare form is ⊤. The tag family is returned alongside
-/// precisely so a consumer can tell those two apart, and so a diagnostic can quote
-/// the declaration back as its author spelled it.
+/// `AllMethodsImpure`, whose bare form is ⊤. The tag family is returned
+/// alongside so a consumer can tell those two apart and quote the declaration
+/// back as its author spelled it.
 ///
 /// Precedence is upstream's **nearest-wins**, not Steins' Liskov conjunction: a
-/// method-level tag replaces the class-level one outright rather than joining it.
-/// ADR-0082 §5 records why the two strata differ here — rewriting the semantics of
-/// someone else's implemented tag is not "interop". Within one docblock the first
-/// envelope tag wins; a docblock spelling two contradictory ones is a user error
-/// this reader does not diagnose.
+/// method-level tag replaces the class-level one outright rather than joining
+/// it (ADR-0082 §5 — rewriting the semantics of someone else's implemented tag
+/// is not "interop"). Within one docblock the first envelope tag wins; two
+/// contradictory ones is a user error this reader does not diagnose.
 fn interop_envelope(
     registry: &steins_catalog::LabelRegistry,
     tree: &SourceTree,
@@ -7913,10 +7731,10 @@ fn check_stale_params(cx: &Cx, out: &mut Vec<Diagnostic>) {
 /// docblock scanner records the first `$name` it sees, and in
 /// `@param callable(CallbackInput $input): bool $callback` that is `$input` — a
 /// parameter of the callable *type*, not of the annotated signature (measured on
-/// phpunit's `Framework/Constraint/Callback.php`). Parsing the payload and reading
-/// the first variable **past the parse's extent** puts the boundary where the type
-/// grammar puts it, so a `$name` inside `callable(…)` / `\Closure(…)` parens can
-/// never be the subject.
+/// phpunit's `Framework/Constraint/Callback.php`). Reading the first variable
+/// **past the parse's extent** puts the boundary where the type grammar puts
+/// it, so a `$name` inside `callable(…)` / `\Closure(…)` parens can never be
+/// the subject.
 ///
 /// Two guards keep a *multiline* type from ever convicting, because the
 /// line-based scanner hands this a truncated payload and `parse_type`'s
@@ -8023,16 +7841,15 @@ fn stale_params_of(
 /// The narrower claim is ADR-0073's, not PHPStan's. Under §2 the cast re-declares
 /// *the variable the tag names*, whatever the adopted statement binds — re-typing
 /// an already-bound variable is the feature's whole point — and §4 defers the
-/// assignment form as a **silence** (the rebind erases the cast), never as rot. So
-/// `/** @var Echo_ $echo */ $dnumber = $echo->exprs[0];` is legal under our own
-/// engine, and a docblock naming several in-scope variables is too. PHPStan's
+/// assignment form as a **silence** (the rebind erases the cast), never as rot.
+/// So `/** @var Echo_ $echo */ $dnumber = $echo->exprs[0];` is legal here, and a
+/// docblock naming several in-scope variables is too. PHPStan's
 /// `varTag.differentVariable` is a different tool's semantics and is not ported.
 ///
-/// Adoption is `SourceTree::stmt_docblock`, the ADR-0073/0074 rule verbatim: no
-/// second adoption is invented here. The firing shape is the plain assignment,
-/// the one statement whose bound name is a syntactic fact; every other statement
-/// kind binds nothing this check can name, and stays silent. A scope that can mint
-/// names (`extract` / `compact` / `$$x` / `eval` / `include`) is silent throughout
+/// Adoption is `SourceTree::stmt_docblock`, the ADR-0073/0074 rule verbatim. The
+/// firing shape is the plain assignment, the one statement whose bound name is a
+/// syntactic fact; every other statement kind stays silent. A scope that can
+/// mint names (`extract`/`compact`/`$$x`/`eval`/`include`) is silent throughout
 /// — the same dam `closure.unused-use` applies.
 fn check_stale_vars(cx: &Cx, out: &mut Vec<Diagnostic>) {
     for scope in cx.tree().scopes() {
@@ -8137,10 +7954,10 @@ fn check_unused_uses(cx: &Cx, out: &mut Vec<Diagnostic>) {
 // family, P9 of the rule-port map.
 //
 // **Declaration reading only.** Every premise below is a fact about what the
-// declaration and its own docblock spell — never about a value, a receiver, or
-// another file's behaviour. The one cross-file question the family asks is
-// "does this class declare `@template` parameters?", answered off the already-
-// resident class index (`Cx::find_class`), which is a declaration read too.
+// declaration and its own docblock spell — never a value, a receiver, or
+// another file's behaviour. The one cross-file question is "does this class
+// declare `@template` parameters?", answered off the resident class index
+// (`Cx::find_class`), itself a declaration read.
 //
 // The typed/untyped boundary is ADR-0078's, and it is *presence*, not agreement:
 // a native type, OR a docblock claim of any provenance (`@param`, `@phpstan-param`,
@@ -8148,18 +7965,17 @@ fn check_unused_uses(cx: &Cx, out: &mut Vec<Diagnostic>) {
 // typed. A claim that disagrees with the code is `phpdoc.*`'s finding; this
 // family's subject is the claim that was never made.
 //
-// What the lowering leaves invisible, stated so the silence is named:
+// What the lowering leaves invisible:
 //
-// * **Traits** lower to a NAME only (ADR-0049 §5) — no members reach here, so a
-//   trait's untyped surface is not measured.
-// * **Enum methods** are not lowered (`ClassDecl::methods` is empty for an enum),
-//   so enum method signatures are not measured; enum CONSTANTS are.
-// * **Class-body hooked properties** are dropped at lowering (only their names
-//   survive), so they never reach the property arm — "per their lowering". A
-//   PROMOTED hooked property does reach it, and is skipped there like every other
-//   promoted property, because the parameter arm already covers it.
-// * **Closures and arrow functions** are out of scope: PHPStan ports them as its
-//   own `MissingClosure*TypehintRule` pair, which issue #200 does not list.
+// * **Traits** lower to a NAME only (ADR-0049 §5) — no members reach here.
+// * **Enum methods** are not lowered (`ClassDecl::methods` is empty for an
+//   enum), so method signatures are not measured; enum CONSTANTS are.
+// * **Class-body hooked properties** are dropped at lowering (only names
+//   survive), so they never reach the property arm. A PROMOTED hooked property
+//   does reach it, and is skipped there like every other promoted property,
+//   since the parameter arm already covers it.
+// * **Closures and arrow functions** are out of scope: PHPStan ports them as
+//   its own `MissingClosure*TypehintRule` pair, which issue #200 does not list.
 // ---------------------------------------------------------------------------
 
 /// The file's untyped-surface findings, run once per file from `check_units`.
@@ -8562,34 +8378,34 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
 /// (ADR-0081, issue #267).
 ///
 /// **One predicate routes between them, and it lives at lowering**: a name the
-/// scope binds nowhere lands in `Scope::undefined_reads`, a name it binds somewhere
-/// lands in `Scope::maybe_undefined_reads`, and no read can be in both. This is
-/// `check_return_missing`'s shape — a Default-floor definite id and a Strict-floor
-/// possibly id, disjoint by construction rather than by a filter applied here.
+/// scope binds nowhere lands in `Scope::undefined_reads`, a name it binds
+/// somewhere lands in `Scope::maybe_undefined_reads`, and no read can be in
+/// both — `check_return_missing`'s shape, a Default-floor definite id and a
+/// Strict-floor possibly id, disjoint by construction.
 ///
-/// The firing set is `Scope::undefined_reads`, computed at lowering — every binding
-/// form, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
-/// superglobal/`$this` exclusions, the top-level and arrow-function silences and the
-/// `extract`/`compact`/`$$x`/`eval`/`include` scope dam are all settled there. This
-/// function adds the two premises lowering cannot reach:
+/// The firing set is `Scope::undefined_reads`, computed at lowering — every
+/// binding form, the `isset`/`empty`/`??`/`unset`/`@` guard exclusions, the
+/// superglobal/`$this` exclusions, the top-level and arrow-function silences and
+/// the `extract`/`compact`/`$$x`/`eval`/`include` scope dam are all settled
+/// there. This function adds the two premises lowering cannot reach:
 ///
-/// 1. **The warning-handler posture** (ADR-0049 §7). The consequence is
-///    warning-plus-`null`, so under a declared `warning-handler = "null"` the
-///    application tolerates it and the finding leaves the proof surface, exactly as
-///    `offset.missing` does.
-/// 2. **The out-parameter subtraction** (ADR-0077). `preg_match('/a/', $s, $m)`
-///    *binds* `$m`, and whether an argument position is by-reference is a property
-///    of the **callee's** declaration — the cross-file index for a user function,
-///    the catalog's `out_params` rows for a builtin. `arg_is_by_value` is that same
-///    oracle, and it refuses for every uncertainty (an unresolved name, an ambiguous
-///    one, an argument past the declared arity), which is the direction that keeps
-///    this id silent rather than wrong.
+/// 1. **The warning-handler posture** (ADR-0049 §7): warning-plus-`null`, so
+///    under a declared `warning-handler = "null"` the finding leaves the proof
+///    surface, exactly as `offset.missing` does.
+/// 2. **The out-parameter subtraction** (ADR-0077): `preg_match('/a/', $s, $m)`
+///    *binds* `$m`, and whether an argument position is by-reference is a
+///    property of the **callee's** declaration — the cross-file index for a
+///    user function, the catalog's `out_params` rows for a builtin.
+///    `arg_is_by_value` is that oracle, and it refuses for every uncertainty
+///    (an unresolved/ambiguous name, an argument past the declared arity),
+///    keeping this id silent rather than wrong.
 ///
-/// `Scope::poisoned` is deliberately **not** a gate here. Its members that matter to
-/// a binding question — `global $x`, `static $x`, `$a = &$b`, `use (&$x)` — are
-/// binding forms this id reads directly, and the rest (`extract`, `$$v`, `eval`,
-/// `include`) already dam the read list at lowering. Gating on the flag would
-/// silence every scope that merely declares a `global`.
+/// `Scope::poisoned` is deliberately **not** a gate here: its members that
+/// matter to a binding question (`global $x`, `static $x`, `$a = &$b`,
+/// `use (&$x)`) are binding forms this id reads directly, and the rest
+/// (`extract`, `$$v`, `eval`, `include`) already dam the read list at lowering.
+/// Gating on the flag would silence every scope that merely declares a
+/// `global`.
 fn check_undefined_variables(cx: &Cx, out: &mut Vec<Diagnostic>) {
     if !cx.warning_handler_abort {
         return;
@@ -8949,12 +8765,11 @@ struct Cx<'a> {
     dam: &'a DamFacts,
     /// The `[runtime] warning-handler` pseudo-constant (ADR-0049 §7 amendment,
     /// ADR-0037 §2 family). `true` = `"abort"` (the owner-confirmed realistic-app
-    /// default: a warning handler converts an `E_WARNING` to an exception / halts, so
+    /// default: a warning handler converts an `E_WARNING` to an exception/halts, so
     /// a *proven* warning is a proven runtime break — warning-grade offset findings
     /// emit). `false` = `"null"`: the application tolerates the warning and continues,
-    /// so warning-grade offset findings leave the proof surface and stay silent (v1
-    /// simplification: the ADR-0050 layer-demotion + value-side `null`/`""` adoption
-    /// is deferred; v1 either emits under "abort" or silences under "null"). The
+    /// so warning-grade offset findings stay silent (v1 simplification: the
+    /// ADR-0050 layer-demotion + value-side `null`/`""` adoption is deferred). The
     /// Error-grade `offset.on-unsupported` object case (not yet implemented) is
     /// posture-independent and would emit under both.
     warning_handler_abort: bool,
@@ -9078,20 +8893,15 @@ impl<'a> Cx<'a> {
         self.catalog_skew
     }
 
-    // parse failure (ADR-0079, issue #180)
     /// Whether the class-likes declared in `file` are **member-incomplete**
     /// (ADR-0079 §2.5): the file did not parse, so a recovery point may have
-    /// swallowed methods out of a class body the recovery otherwise kept. Asked by
-    /// the chain-closure legs exactly where the A14 magic-tag obstacle is asked —
-    /// both say "members live where the index cannot enumerate them".
-    ///
-    /// Read off the dam's site list, so the ADR-0046 §2 vendor presumption applies
-    /// here too, and so an auxiliary-pass context (pointing at [`EMPTY_DAM`]) answers
-    /// `false` — those passes emit no absence id and ask this of nothing.
+    /// swallowed methods out of a class body it otherwise kept. Asked by the
+    /// chain-closure legs where the A14 magic-tag obstacle is also asked. Read off
+    /// the dam's site list, so the ADR-0046 §2 vendor presumption applies here too,
+    /// and an auxiliary-pass context ([`EMPTY_DAM`]) answers `false`.
     fn member_incomplete(&self, file: usize) -> bool {
         self.dam.file_is_unparsable(self.units[file].path)
     }
-    // end parse failure (ADR-0079, issue #180)
 
     fn tree(&self) -> &'a SourceTree {
         self.units[self.cur].tree
@@ -9132,17 +8942,14 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The source-cased, namespace-qualified display form of a class FQN (the
-    /// spelling diagnostics use, matching PHPStan — no leading `\`). A project class
-    /// contributes its declared casing ([`ClassDecl::display`]); a name **no**
-    /// project file declares ([`Cx::class_absent`] — so an ambiguous project name
-    /// keeps issue #67 precedence and never reads the catalog) recovers the casing
-    /// php-src declares from the builtin display-name table
-    /// ([`steins_catalog::builtin_class_display`]): `dumpType(gmp_init($x))` reads
-    /// `GMP`, as PHPStan does. Anything still unresolved falls back to the given
-    /// key with any leading `\` stripped. Drives the dump surface's class rendering
-    /// (ADR-0053 §7 / the class rendering-fidelity fix; builtin casing closes the
-    /// ADR-0069 third-amendment residual).
+    /// The source-cased, namespace-qualified display form of a class FQN (matching
+    /// PHPStan, no leading `\`). A project class contributes its declared casing
+    /// ([`ClassDecl::display`]); a name no project file declares
+    /// ([`Cx::class_absent`], keeping issue #67 precedence) recovers the casing
+    /// php-src declares ([`steins_catalog::builtin_class_display`]):
+    /// `dumpType(gmp_init($x))` reads `GMP`, as PHPStan does. Unresolved falls back
+    /// to the given key with any leading `\` stripped (ADR-0053 §7; builtin casing
+    /// closes the ADR-0069 third-amendment residual).
     fn class_display_fqn(&self, fqn: &str) -> String {
         match self.find_class(fqn) {
             Some((_, cd)) if !cd.display.is_empty() => cd.display.clone(),
@@ -9227,19 +9034,15 @@ impl<'a> Cx<'a> {
     /// to a DIRECT top-level `@param T $p` constructor parameter, the matching
     /// positional argument's resolved value becomes that template's carried value.
     ///
-    /// Deliberately **not a solver** (ADR-0030/0032 "won't build"): a template is
-    /// bound only from a *bare* `@param T` occurrence at a constructor parameter; a
-    /// nested or compound occurrence (`@param array<T>`, `@param T|null`) does not
-    /// bind it. The result is **all-or-nothing**: one carried value per template
-    /// only when EVERY template resolved to a proven value at an aligned positional
-    /// argument; any gap (a template with no direct parameter, a missing/unprovable
-    /// argument, a variadic in the way) returns EMPTY. An empty carry is the honest
-    /// floor — downstream acceptance answers `Maybe` on the argument half, never a
-    /// manufactured `No`, and the positional args↔templates alignment stays sound.
+    /// Deliberately not a solver (ADR-0030/0032 "won't build"): only a *bare*
+    /// `@param T` occurrence binds a template; a nested/compound occurrence
+    /// (`@param array<T>`, `@param T|null`) does not. All-or-nothing: one carried
+    /// value per template only when EVERY template resolves at an aligned
+    /// positional argument; any gap returns EMPTY, so downstream acceptance answers
+    /// `Maybe` rather than a manufactured `No`.
     ///
-    /// ADR-0048: this is a pure function of the already-seeded `new` argument trace
-    /// (§2 replayable from the scope walk), touches no scope entry state (§3), and
-    /// carries no global-ordering dependence (§4).
+    /// ADR-0048: pure function of the already-seeded `new` argument trace, no scope
+    /// entry state, no global-ordering dependence.
     fn infer_generic_args(
         &self,
         class_fqn: &str,
@@ -9302,24 +9105,21 @@ impl<'a> Cx<'a> {
     /// The class-level generic parameterizations a `new Class(args)` expression
     /// carries (ADR-0032 tier 3 + its inheritance-edge amendment, issues #10/#294).
     ///
-    /// Two provenances, in a fixed precedence:
+    /// Two provenances, in fixed precedence:
     ///
     /// 1. **Own templates** — the class declares `@template`s and the `new` site
-    ///    proves values for them ([`Self::infer_generic_args`]). One edge owned by
-    ///    the class itself. A class that declares its own templates stops here even
-    ///    when the value carry comes back empty: its inheritance edges may mention
-    ///    those very templates, and a value is the stronger fact whenever there is
-    ///    one (amendment, "own templates win").
-    /// 2. **Inheritance edges** — the class declares no templates, so `@extends
-    ///    Box<int>` / `@implements Producer<Dog>` on its own docblock name an
-    ///    *ancestor's* parameterization. One edge per parameterized tag, owned by the
-    ///    ancestor. Read one level only: following the chain up through a generic
-    ///    intermediate is a substitution problem this slice does not build.
+    ///    proves values for them ([`Self::infer_generic_args`]). Stops here even when
+    ///    the value carry comes back empty: a value is the stronger fact whenever
+    ///    there is one ("own templates win").
+    /// 2. **Inheritance edges** — no own templates, so `@extends Box<int>` /
+    ///    `@implements Producer<Dog>` names an *ancestor's* parameterization, one
+    ///    edge per tag. Read one level only — following a generic intermediate up
+    ///    the chain is a substitution problem this slice does not build.
     ///
-    /// An edge is kept only when its base resolves to a class that (a) the object
-    /// provably is-a and (b) declares exactly as many `@template`s as the tag writes
-    /// arguments. Anything else is dropped silently — an arity disagreement is a
-    /// library-author lint, which ADR-0032 keeps thin.
+    /// An edge is kept only when its base resolves to a class the object provably
+    /// is-a, with exactly as many `@template`s as the tag writes arguments; an
+    /// arity disagreement is a library-author lint (ADR-0032 keeps this thin) and
+    /// is dropped silently.
     fn infer_generic_carry(
         &self,
         class_fqn: &str,
@@ -9390,58 +9190,41 @@ impl<'a> Cx<'a> {
         self.resolve_function_with(r, &|n| steins_catalog::effect_labels(n).is_some())
     }
 
-    /// [`Self::resolve_function`] with the **effects pass's** wider notion of a
-    /// known builtin: a name carrying a by-ref out-parameter row
-    /// ([`steins_catalog::out_params`]) is catalogued too, even when it has no
-    /// unconditional color and is not foldable — `preg_match` and `sort` are
-    /// exactly that, and P2 is what gives them something to say.
-    ///
-    /// Scoped to the effects pass on purpose. The same widening would also change
-    /// how the *throws* pass classifies these names (from an unresolved taint to
-    /// a `builtin_throws` consultation) — a real gap, but a different pass's
-    /// accounting, left untouched here.
+    /// [`Self::resolve_function`] with the effects pass's wider notion of a known
+    /// builtin: a name carrying a by-ref out-parameter row
+    /// ([`steins_catalog::out_params`]) counts too, even with no unconditional
+    /// color and not foldable — `preg_match`/`sort` are exactly that, and P2 is
+    /// what gives them something to say. Scoped to the effects pass on purpose: the
+    /// same widening would also change the *throws* pass's classification of these
+    /// names, left untouched here.
     fn resolve_effect_function(&self, r: &NameRef) -> FnResolution {
         self.resolve_function_with(r, &|n| {
             steins_catalog::effect_labels(n).is_some() || steins_catalog::out_params(n).is_some()
         })
     }
 
-    /// [`Self::resolve_function`] with the **ADR-0070** notion of a known
-    /// builtin: a name whose *argument semantics* the catalog can state
-    /// ([`steins_catalog::by_value_arg`], three-valued — a `None` there is
-    /// exactly "the catalog does not know this name"). That is a different
-    /// question from having an effect color or a by-ref row, and either alone
-    /// would be the wrong widening: `trim` has no out-param row and is still
-    /// fully described, `sscanf` has neither and must stay unknown.
-    ///
-    /// Scoped to the call-argument survival gate, in the same spirit as
-    /// [`Self::resolve_effect_function`]'s scoping: no other pass's baseline
-    /// moves behind its back.
+    /// [`Self::resolve_function`] with the ADR-0070 notion of a known builtin: a
+    /// name whose argument semantics the catalog can state
+    /// ([`steins_catalog::by_value_arg`], three-valued — `None` means "unknown to
+    /// the catalog"). Distinct from an effect color or a by-ref row: `trim` has no
+    /// out-param row and is still fully described; `sscanf` has neither and stays
+    /// unknown. Scoped to the call-argument survival gate only.
     fn resolve_arg_function(&self, r: &NameRef) -> FnResolution {
         self.resolve_function_with(r, &|n| steins_catalog::by_value_arg(n, 0).is_some())
     }
 
-    /// [`Self::resolve_function`] with the **higher-order invocation** notion
-    /// of a known builtin: a name the catalog states a callback-invoking shape
-    /// for ([`steins_catalog::invocation_shape`]) — `usort`, `array_map`,
-    /// `call_user_func`, and siblings. A distinct predicate from either of the
-    /// two above on purpose: `array_map` and `call_user_func` carry neither an
-    /// effect color nor an out-param row, so [`Self::resolve_effect_function`]
-    /// would answer `Unknown` for them and silently drop the higher-order
-    /// dispatch this resolver exists to feed.
+    /// [`Self::resolve_function`] with the higher-order invocation notion of a
+    /// known builtin: a name the catalog states a callback-invoking shape for
+    /// ([`steins_catalog::invocation_shape`]) — `usort`, `array_map`,
+    /// `call_user_func`, etc. Distinct on purpose: those carry neither an effect
+    /// color nor an out-param row, so [`Self::resolve_effect_function`] would miss
+    /// them.
     ///
-    /// Before issue #279's fix, the three call sites that need this asked
-    /// [`steins_catalog::invocation_shape`] directly with the call's own
-    /// spelling ([`steins_syntax::NameRef::simple`]) — sound for a bare
-    /// `usort(...)`, silently blind to `use function usort as u; u(...)`, and
-    /// (as a side effect neither issue nor fix intended to preserve) blind to
-    /// **shadowing** too: a project function literally named `usort` was
-    /// treated as the builtin invoker on spelling alone, resolution never
-    /// consulted. Routing through [`Self::resolve_function_with`] fixes both
-    /// in one motion — a project function's declaration site answers `User`
-    /// (or `Unknown`, ambiguous, exactly as every other shadowed builtin name
-    /// does under ADR-0001) whether or not the call spells it through an
-    /// alias.
+    /// Before issue #279's fix, call sites asked [`steins_catalog::invocation_shape`]
+    /// directly against the call's raw spelling — blind to a `use function usort as
+    /// u;` alias, and blind to shadowing by a project function of the same name.
+    /// Routing through [`Self::resolve_function_with`] fixes both: a project
+    /// declaration wins per ADR-0001 resolution regardless of alias.
     fn resolve_invoker_function(&self, r: &NameRef) -> FnResolution {
         self.resolve_function_with(r, &|n| steins_catalog::invocation_shape(n).is_some())
     }
@@ -9493,16 +9276,11 @@ impl<'a> Cx<'a> {
                     return match self.index.resolve_function(&target) {
                         Res::Unique(site) => FnResolution::User(site),
                         Res::Ambiguous => FnResolution::Unknown,
-                        // `use function strtolower;` imports the **global builtin**:
-                        // the target is a single-segment name no project function
-                        // defines, which is exactly the `\strtolower` case the
-                        // `FullyQualified` arm above already answers `Builtin`.
-                        // Without this leg an import silenced every catalog answer
-                        // about the name — measured (issue #41) as the second half
-                        // of the string family's precision loss: phpstan-src's
-                        // `non-empty-string.php` imports five string builtins, and
-                        // each imported call condemned its arguments' facts at the
-                        // ADR-0070 survival gate for want of a resolution.
+                        // `use function strtolower;` imports the global builtin — same
+                        // case the `FullyQualified` arm above answers `Builtin`. Without
+                        // this leg an import silenced every catalog answer about the name
+                        // (issue #41: phpstan-src's `non-empty-string.php` imports five
+                        // string builtins, each losing ADR-0070 argument survival).
                         Res::Absent => {
                             if !target.contains('\\') && catalog_knows(&target) {
                                 FnResolution::Builtin(target)
@@ -9534,10 +9312,9 @@ impl<'a> Cx<'a> {
                     }
                 }
             }
-            // ADR-0049 A8: `namespace\name` — resolves against the enclosing namespace
-            // ONLY, with no `use` imports and no global fallback (an undefined `Ns\name`
-            // is a fatal error, never a fall-through to a global builtin). In the global
-            // namespace the candidate is `name` itself, where a catalog builtin applies.
+            // ADR-0049 A8: `namespace\name` resolves against the enclosing namespace
+            // only — no `use` imports, no global fallback (undefined `Ns\name` is a
+            // fatal error). In the global namespace the candidate is `name` itself.
             RefKind::Relative => {
                 let ctx = self.tree().ctx_at(r.offset);
                 let name = r.raw.to_ascii_lowercase();
@@ -9571,11 +9348,11 @@ impl<'a> Cx<'a> {
         self.resolve_user_fn_any(call)
     }
 
-    /// Resolve the call's user-function target **without** the positional-only guard
-    /// (Gap A). The argument-contract lanes bind named arguments by name and check the
-    /// positional prefix of a mixed call, so they must resolve a non-positional call;
-    /// the binding descent still routes through [`Self::resolve_user_fn`], whose guard
-    /// keeps the positional-mapping descent off named/spread calls.
+    /// Resolve the call's user-function target without the positional-only guard
+    /// (Gap A): argument-contract lanes bind named arguments and check a mixed
+    /// call's positional prefix, so they need this for non-positional calls too.
+    /// The binding descent still routes through [`Self::resolve_user_fn`], whose
+    /// guard keeps positional-mapping descent off named/spread calls.
     fn resolve_user_fn_any(&self, call: &CallExpr) -> Option<Site> {
         let r = call.callee_ref.as_ref()?;
         match self.resolve_function(r) {
@@ -9633,15 +9410,14 @@ impl<'a> Cx<'a> {
 
     /// Resolve an [`ArgValue`] to a concrete literal, if provable.
     ///
-    /// Equivalent to [`Self::resolve_literal_under`] with no live descent — the
-    /// common call sites (assignment, dump, property checks) that are not mid-
-    /// binding. Project-call arguments of foldable builtins still resolve via a
-    /// fresh descent tree (issue #127); live-descent callers must use
-    /// [`Self::resolve_literal_under`] so the on-stack guard is threaded.
+    /// Equivalent to [`Self::resolve_literal_under`] with no live descent — for
+    /// call sites (assignment, dump, property checks) not mid-binding. Live-descent
+    /// callers must use [`Self::resolve_literal_under`] so the on-stack guard
+    /// threads through.
     ///
-    /// The second return is the trust stratum of the resolved value (ADR-0052 §5):
-    /// a fold that consumed an Asserted project-call summary stays Asserted, so
-    /// it cannot launder into a proof-layer premise.
+    /// The second return is the trust stratum (ADR-0052 §5): a fold that consumed
+    /// an Asserted project-call summary stays Asserted, never laundering into a
+    /// proof-layer premise.
     fn resolve_literal(
         &self,
         value: &ArgValue,
@@ -9715,20 +9491,14 @@ impl<'a> Cx<'a> {
                 // / `project_call_summary`) so findings still emit on the live `out`.
                 self.try_fold_under(name, args, env, poisoned, folder, descent, out)
                     .map(|(lit, _prov, strat)| (lit, strat))
-                    // **The transfer rung's answers are values too** (issue #329).
-                    // A rung that proved a `Singleton` — `array_slice($a, 1)`,
-                    // `array_keys(['a' => $x])` — had no way to say so *here*, so
-                    // everything that reads values rather than facts was blind to
-                    // it: value-position `===`, fold arguments, nested folds,
-                    // `concat_cast`. One hop through a binding worked and the
-                    // inline spelling did not, which is not a distinction PHP
-                    // makes.
-                    //
-                    // Below the fold, which is more precise and cheaper. The
-                    // rung's OWN stratum comes back with the value (ADR-0061 §3),
-                    // so a projection over an `Asserted` subject stays `Asserted`
-                    // and cannot launder into a proof-layer premise by taking the
-                    // value road instead of the fact road.
+                    // The transfer rung's answers are values too (issue #329): a rung
+                    // proving a `Singleton` (`array_slice($a, 1)`) previously had no way
+                    // to say so here, so value-position `===`, fold arguments, and
+                    // `concat_cast` were blind to it even though a binding hop would see
+                    // it — a distinction PHP itself doesn't make. Tried below the fold,
+                    // since it's more precise and cheaper. The rung's own stratum comes
+                    // back with the value (ADR-0061 §3), so an Asserted subject cannot
+                    // launder into Verified via the value road.
                     .or_else(|| {
                         let (fact, strat) = shape_builtin_return_fact(
                             self, folder, name, args, env, None, poisoned,
@@ -9740,9 +9510,8 @@ impl<'a> Cx<'a> {
                     })
             }
             // `$a . $b` (issue #59): proven iff BOTH operands resolve to values whose
-            // string cast is total and environment-independent (`concat_cast`). One
-            // unresolved operand yields `None` — the same silence as any other
-            // unprovable value, never a partial string.
+            // string cast is total and environment-independent (`concat_cast`); one
+            // unresolved operand yields `None`, never a partial string.
             ArgValue::Concat(a, b) => {
                 let (l, sl) = self.resolve_literal_under(
                     a, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
@@ -9750,21 +9519,18 @@ impl<'a> Cx<'a> {
                 let (r, sr) = self.resolve_literal_under(
                     b, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
-                // PHP's `.` joins **bytes** (ADR-0080), so two halves that are each
-                // invalid UTF-8 can still concatenate to a valid string;
-                // `PhpStr::from_vec` re-canonicalizes the join.
+                // `.` joins bytes (ADR-0080): two invalid-UTF-8 halves can still
+                // concatenate to a valid string; `from_vec` re-canonicalizes the join.
                 let (lb, rb) = (concat_cast(&l)?, concat_cast(&r)?);
                 let mut bytes = lb.as_bytes().to_vec();
                 bytes.extend_from_slice(rb.as_bytes());
                 Some((ArgValue::Str(PhpStr::from_vec(bytes)), sl.min(sr)))
             }
-            // A comparison in value position (issue #260): the SAME `eval_cmp` the
+            // A comparison in value position (issue #260): the same `eval_cmp` the
             // condition path runs, over the same candidate value sets — a decided
-            // verdict IS the expression's value (`1 === 1` is `true`), so it resolves
-            // like any other proven literal. An undecided one yields `None` here (the
-            // caller's honest silence); the `bool` floor every comparison still
-            // deserves is minted one level up, at the fact seam, because a literal
-            // cannot spell it.
+            // verdict IS the expression's value. Undecided yields `None`; the `bool`
+            // floor every comparison deserves is minted one level up at the fact seam,
+            // since a literal can't spell it.
             ArgValue::Binary { op: ValueOp::Cmp(cop), lhs, rhs } => {
                 let l = self.cmp_candidates_under(
                     lhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
@@ -9772,8 +9538,7 @@ impl<'a> Cx<'a> {
                 let r = self.cmp_candidates_under(
                     rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
-                // Same derivation clause as `.` above: the verdict consumes both
-                // operands' facts, so the result stratum is their `min`.
+                // Same derivation as `.` above: result stratum is the operands' min.
                 let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
                 match eval_cmp(*cop, &l, &r, self.php_minor) {
                     Certainty::Yes => Some((ArgValue::Bool(true), strat)),
@@ -9799,15 +9564,12 @@ impl<'a> Cx<'a> {
         }
     }
 
-    /// The candidate values of a **value-position** comparison operand (issue #260)
-    /// — the value-side twin of `operand_values`, which does the same job for a
-    /// guard's [`CondOperand`].
-    ///
-    /// A bare variable contributes its fact's finite members (a `Singleton` or a
-    /// `OneOf`, the layers ADR-0031's all-pairs rule can enumerate); anything else
-    /// contributes whatever the general value seam proves it to be — a literal, a
-    /// fold, a resolved `.`, a nested comparison — as one candidate. `None` means
-    /// the operand offers no candidates at all, and the caller declines.
+    /// The candidate values of a value-position comparison operand (issue #260) —
+    /// the value-side twin of `operand_values`, which does this for a guard's
+    /// [`CondOperand`]. A bare variable contributes its fact's finite members
+    /// (`Singleton`/`OneOf`, per ADR-0031's all-pairs rule); anything else
+    /// contributes one candidate from the general value seam. `None` means no
+    /// candidates at all.
     fn cmp_candidates_under(
         &self,
         value: &ArgValue,
@@ -9832,33 +9594,26 @@ impl<'a> Cx<'a> {
     /// # The env-resolved argument (ADR-0062 S7, the §1 fold gap)
     ///
     /// Each argument is first rendered as the value it provably *is*, through
-    /// [`Self::resolve_literal`]: a bare `$a` bound to a proven value becomes that
-    /// value, an array literal with a proven element becomes the concrete array,
-    /// a nested foldable call becomes its folded result. An argument that does not
-    /// resolve is left **exactly as written**, so the gate below judges it the way
-    /// it always did — resolution can only ever add arguments to the fold, never
-    /// remove one (a literal resolves to itself, and a poisoned scope resolves
-    /// nothing at all).
+    /// [`Self::resolve_literal`]: a bound `$a`, a proven array element, a nested
+    /// foldable call. An unresolved argument is left exactly as written, so
+    /// resolution can only ever add arguments to the fold, never remove one.
     ///
-    /// This is what closes ADR-0062 §1's measured gap: `$a = ['x', 'y'];
-    /// count($a)` now folds to `2` exactly as the written `count(['x', 'y'])`
-    /// does. **Nothing about the allowlist or the purity discipline changed** —
+    /// Closes ADR-0062 §1's gap: `$a = ['x', 'y']; count($a)` now folds like
+    /// `count(['x', 'y'])`. The allowlist and purity discipline are unchanged —
     /// the fold still runs on the project's own PHP (ADR-0004/0028), so every
-    /// order-dependent builtin the allowlist admits (`in_array`, `implode`,
-    /// `count`) is answered by the real engine over the real, order-witnessed
-    /// array (ADR-0062 §2's value lane), never by a re-derivation here.
+    /// order-dependent builtin (`in_array`, `implode`, `count`) is answered by the
+    /// real engine over the real array (ADR-0062 §2's value lane), never
+    /// re-derived here.
     ///
     /// # Project-call arguments (issue #127)
     ///
     /// A foldable arg that is itself a project call (`strtoupper(g(1))`) resolves
     /// through the T0 summary under the same descent guard as a nested binding —
-    /// see [`Self::resolve_literal_under`]. Budget exhaustion widens (the gate
-    /// declines); it never partially folds. The result stratum is `min` over the
-    /// resolved arguments (including a nested summary's Asserted stratum), so an
+    /// see [`Self::resolve_literal_under`]. Budget exhaustion widens rather than
+    /// partially folding. Result stratum is `min` over resolved arguments, so an
     /// Asserted project-call premise cannot launder into a Verified fold.
     ///
-    /// Provenance names the *resolved* call — the call that actually ran.
-    /// Returns `(folded, provenance, stratum)`.
+    /// Provenance names the resolved call. Returns `(folded, provenance, stratum)`.
     fn try_fold(
         &self,
         name: &str,
@@ -9906,16 +9661,14 @@ impl<'a> Cx<'a> {
         }
         let mut resolved = Vec::with_capacity(args.len());
         let mut arg_strat = Stratum::Verified;
-        // When no external sink is provided (dump surface, pure resolution), use a
-        // scratch so nested descents stay silent. Walk/check paths pass a real
-        // `out` so binding-specific findings under `g(1)` in `strtoupper(g(1))`
-        // are not discarded (issue #127 review).
+        // No external sink (dump surface, pure resolution) uses a scratch so nested
+        // descents stay silent; walk/check paths pass a real `out` so findings under
+        // `g(1)` in `strtoupper(g(1))` aren't discarded (issue #127).
         let mut scratch: Vec<Diagnostic> = Vec::new();
         for a in args {
-            // Resolve under the live descent so a project-call arg's summary
-            // reuses the on-stack guard (issue #127). `resolve_literal_under`
-            // covers literals / env / nested folds; a project call that is not
-            // itself foldable is answered by `nested_call_singleton`.
+            // Resolve under the live descent so a project-call arg's summary reuses
+            // the on-stack guard (issue #127); a non-foldable project call is
+            // answered by `nested_call_singleton`.
             let (r, s) = if let Some((v, s)) = self.resolve_literal_under(
                 a,
                 env,
@@ -9950,12 +9703,10 @@ impl<'a> Cx<'a> {
             arg_strat = arg_strat.min(s);
             resolved.push(r);
         }
-        // Every argument must be a self-evident value: a scalar literal, or an
-        // array literal that is concrete all the way down and inside the fold
-        // budget (issue #39). This is the gate the `count`/`in_array`/`implode`
-        // entries were parked behind — nothing about the allowlist changed, the
-        // arguments they take simply became representable. Checked BEFORE
-        // `folder.fold`, so an over-budget literal is never cloned into the memo.
+        // Every argument must be a self-evident value: a scalar literal, or an array
+        // literal concrete all the way down and inside the fold budget (issue #39).
+        // Checked before `folder.fold` so an over-budget literal is never cloned
+        // into the memo.
         if !resolved.iter().all(is_fold_arg) {
             return None;
         }
@@ -9966,53 +9717,34 @@ impl<'a> Cx<'a> {
     /// Fold an allowlisted builtin over a **bounded union of constant arguments**,
     /// composing the members' answers into one value fact (issue #74).
     ///
-    /// # Why this rung exists
+    /// PHPStan's dynamic return extensions accept a constant or a union of
+    /// constants, calling the real function once per member and composing results.
+    /// [`Self::try_fold`] only admits a single constant tuple, so `$x = $c ? 'a' :
+    /// 'b'; strtoupper($x)` widened where PHPStan answers `'A'|'B'` (ADR-0069
+    /// amendment). This closes that gap.
     ///
-    /// PHPStan's dynamic return extensions accept a constant *or a union of
-    /// constants*, call the real function once per member and compose the results.
-    /// ADR-0069's amendment tabulates Steins' return ladder against that stack and
-    /// names the union of constants as the one condition the fold lane could not
-    /// meet: [`Self::try_fold`] admits a single constant tuple, so `$x = $c ? 'a' :
-    /// 'b'; strtoupper($x)` widened where PHPStan answers `'A'|'B'`. This closes it.
+    /// Per-argument resolution ladder: (1) whatever [`Self::resolve_literal`]
+    /// proves; (2) failing that, a `Fact::OneOf` env fact every member of which
+    /// converts to a foldable argument. Neither resolving declines the whole fold.
+    /// A `Singleton` is the one-member case of the same ladder (`intdiv($u, 2)`
+    /// works because the literal and union lanes compose in the product).
     ///
-    /// # The resolution ladder, per argument
+    /// Bounds: at most [`UNION_FOLD_MEMBER_CAP`] members per argument,
+    /// [`UNION_FOLD_COMBINATION_CAP`] combinations total. Busting either declines
+    /// rather than truncates — a union missing a member is a *wrong* domain
+    /// (ADR-0002), not a wider one.
     ///
-    /// 1. whatever [`Self::resolve_literal`] proves — a written literal, a
-    ///    `Singleton` env fact, a nested fold, a proven concatenation or array;
-    /// 2. failing that, a `Fact::OneOf` env fact **every** member of which converts
-    ///    to a foldable argument.
+    /// Each member tuple goes back through [`Self::try_fold`], so name gates, the
+    /// fold budget, the memo, the issue-#64 integer-width gate, and (in the
+    /// browser) the ADR-0066 replay loop all apply unchanged. A widening or
+    /// throwing member declines the whole fold — a union that quietly drops its
+    /// throwing member is the same wrong domain the cap refuses to mint. Every
+    /// combination is still asked before declining, so a replay transport learns
+    /// the batch in one round trip.
     ///
-    /// An argument that resolves to neither declines the whole fold — the existing
-    /// silence, reached one rung later. A `Singleton` is simply the one-member case
-    /// of the same ladder, which is what makes `intdiv($u, 2)` work: the literal
-    /// lane and the union lane compose in the product.
-    ///
-    /// # The bounds, and why busting one declines
-    ///
-    /// At most [`UNION_FOLD_MEMBER_CAP`] members per argument and
-    /// [`UNION_FOLD_COMBINATION_CAP`] combinations in total. Over either bound the
-    /// fold **declines**; it never truncates. A union missing a member is a *wrong*
-    /// value domain, not a wider one — the analyzer would claim `'A'|'B'` for a
-    /// value that can also be `'C'`, which is the one thing ADR-0002 forbids.
-    ///
-    /// # Every combination is an ordinary fold
-    ///
-    /// Each member tuple goes back through [`Self::try_fold`] — the same seam a
-    /// literal call takes — so the name gates, the per-argument fold budget, the
-    /// `(name, args)` memo, the issue-#64 integer-width gate with its argument
-    /// range guard, and (in the browser) the ADR-0066 replay loop all apply
-    /// unchanged and un-duplicated. A member that widens or throws answers `None`,
-    /// and the whole fold declines with it: a union that quietly drops its throwing
-    /// member is the same wrong domain the cap refuses to mint. (Treating a
-    /// *uniform* throw as a proven throw is a separate inference question.) Every
-    /// combination is nonetheless *asked* before the decline is returned, so a
-    /// replay transport learns the whole batch in one round trip.
-    ///
-    /// # Replayability (ADR-0028 / ADR-0048)
-    ///
-    /// The enumeration is a pure function of (CST, entry state, fold memo): the
-    /// arguments are in source order and a `Fact::OneOf` is canonically sorted, so
-    /// the product is walked in one fixed order with no map iteration anywhere.
+    /// Replayability (ADR-0028/0048): pure function of (CST, entry state, fold
+    /// memo) — arguments in source order, `Fact::OneOf` canonically sorted, product
+    /// walked in one fixed order.
     ///
     /// Returns the composed fact, its stratum, and a provenance string.
     fn try_union_fold(
@@ -10026,8 +9758,8 @@ impl<'a> Cx<'a> {
         if poisoned || args.is_empty() {
             return None;
         }
-        // The two name gates `try_fold` opens with, asked before any enumeration so
-        // a shadowed or non-allowlisted name costs nothing at all.
+        // Same two name gates as `try_fold`, asked before enumeration so a shadowed
+        // or non-allowlisted name costs nothing.
         if self.index.has_simple_function(name) || !steins_catalog::foldable(name) {
             return None;
         }
@@ -10047,9 +9779,9 @@ impl<'a> Cx<'a> {
                     vals.iter().map(arg_of_val).collect()
                 }
             };
-            // The gate `try_fold` applies per call, applied here per member: a
-            // member that is not a self-evident value (or busts the array budget)
-            // takes the whole fold down rather than being quietly dropped.
+            // Same gate as `try_fold`, applied per member: a non-self-evident value
+            // (or a busted array budget) takes the whole fold down rather than being
+            // quietly dropped.
             if !members.iter().all(is_fold_arg) {
                 return None;
             }
@@ -10059,19 +9791,17 @@ impl<'a> Cx<'a> {
             }
             lanes.push(members);
         }
-        // One combination is the plain fold, and `resolve_literal` already owns it
-        // (this rung is only ever reached after that one declined).
+        // One combination is the plain fold, already owned by `resolve_literal`
+        // (this rung is only reached after that one declined).
         if combinations < 2 {
             return None;
         }
-        // The bounded cartesian product, last argument varying fastest.
-        //
-        // EVERY combination is asked, even once one has declined. The verdict is
-        // unaffected — one declining member declines the whole fold — but the
-        // browser's replay transport (ADR-0066) collects a *batch* of unanswered
-        // requests per iteration, so asking them all in one pass is the difference
-        // between one round trip and one per member. On the native transport the
-        // extra questions are bounded by the combination cap and memoized.
+        // Bounded cartesian product, last argument varying fastest. Every
+        // combination is asked even once one has declined — the verdict is
+        // unaffected, but the browser's replay transport (ADR-0066) batches
+        // unanswered requests per iteration, so this is one round trip instead of
+        // one per member; on the native transport the extra questions are bounded
+        // and memoized.
         let mut vals: Vec<Val> = Vec::with_capacity(combinations);
         let mut declined = false;
         let mut odometer = vec![0usize; lanes.len()];
@@ -10096,15 +9826,12 @@ impl<'a> Cx<'a> {
         if declined {
             return None;
         }
-        // `Fact::from_vals` is the narrowing lanes' own composition: deduped and
-        // sorted, a `Singleton` when every member agreed, a `OneOf` up to the
-        // domain's own CAP, and past that the *computed* widening — sound, and the
-        // same summary any other value set would get.
+        // `Fact::from_vals`: deduped and sorted, `Singleton` when every member
+        // agreed, `OneOf` up to the domain CAP, else the computed widening.
         let fact = Fact::from_vals(vals)?;
-        // Stratum (ADR-0048 N2 / ADR-0052 §5's derivation clause): each member
-        // answer is engine-`Verified`, but the INPUT union carries its own trust,
-        // and the composed fact consumed all of them — `min` over the arguments.
-        // An `Asserted` union in, an `Asserted` result out.
+        // Stratum (ADR-0048 N2 / ADR-0052 §5): each member answer is engine-Verified,
+        // but the input union carries its own trust — min over the arguments, so an
+        // Asserted union in gives an Asserted result out.
         let stratum =
             args.iter().fold(Stratum::Verified, |acc, a| acc.min(value_stratum(a, env, None)));
         Some((fact, stratum, format!("folded from {name}() over {combinations} argument combinations")))
@@ -10160,15 +9887,9 @@ impl<'a> Cx<'a> {
     }
 
     /// Build the resource flavour of a `type.argument-mismatch` diagnostic
-    /// (ADR-0056 §8) — same id, same shape, one deliberate difference in the tail.
-    ///
-    /// [`Self::diagnostic`] closes with the file's coercion mode because for every
-    /// other value it is load-bearing: a `__toString` object into a `string`
-    /// parameter is an error in strict mode and fine in coercive, so naming the
-    /// mode tells the reader which half of the world they are in. A resource has
-    /// no coercion path into anything, so naming the mode here would invite exactly
-    /// the wrong fix — dropping `declare(strict_types=1)` changes nothing, and the
-    /// tail says so instead of implying the opposite.
+    /// (ADR-0056 §8) — same id and shape as [`Self::diagnostic`], but the tail
+    /// omits the coercion mode: a resource has no coercion path into anything, so
+    /// naming the mode would wrongly suggest dropping `strict_types=1` helps.
     fn resource_diagnostic(
         &self,
         offset: u32,
@@ -10257,9 +9978,9 @@ impl<'a> Cx<'a> {
     /// (ADR-0052 §9) to refine the native member list with the declared `@param`.
     fn scope_envelopes(&self, scope: &Scope) -> Option<Envelopes> {
         match &scope.owner {
-            // Closures: deliberately `None` even though the scope may carry an
-            // adopted docblock (issue #128 lit up `@return` only, via
-            // `scope_return_phpdoc`) — `@param`/`@throws` on closures stays dark.
+            // Closures: `None` even though the scope may carry an adopted docblock
+            // (issue #128 lit up `@return` only, via `scope_return_phpdoc`) —
+            // `@param`/`@throws` on closures stays dark.
             ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => None,
             ScopeOwner::Function(name) => {
                 let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
@@ -10277,9 +9998,8 @@ impl<'a> Cx<'a> {
 
     /// The `@template` shadow set in force over a scope's *body* (issue #5 applied
     /// to statement-level docblocks): the owning declaration's own template names
-    /// plus, for a method, the enclosing class-level ones — the same two idempotent
-    /// stages [`Cx::scope_envelopes`] applies to the declaration's envelopes. Empty
-    /// for top-level and closure scopes (no owning docblock).
+    /// plus, for a method, the enclosing class-level ones — same two stages
+    /// [`Cx::scope_envelopes`] applies. Empty for top-level and closure scopes.
     fn scope_template_shadow(&self, scope: &Scope) -> TemplateShadow {
         match &scope.owner {
             ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => TemplateShadow::default(),
@@ -10342,13 +10062,10 @@ impl<'a> Cx<'a> {
     /// function, method, or closure (same file this `Cx` points at), or `None`
     /// when there is no docblock `@return` (or the scope is top-level).
     fn scope_return_phpdoc(&self, scope: &Scope) -> Option<(PType, String)> {
-        // Scope-wide, mirroring [`Cx::scope_return`]'s native guard (issue #142):
-        // a generator's declared return type names the `Generator` object the
-        // *call* yields, not the values of in-body `return` (those are
-        // `Generator::getReturn()`). Checking body returns against
-        // `@return Generator` is a false positive (issue #128 review) — and the
-        // phpdoc leg fires exactly where the native one stayed silent, so
-        // guarding only the native side left the FP alive on every owner arm.
+        // Mirrors [`Cx::scope_return`]'s native guard (issue #142): a generator's
+        // declared return type names the `Generator` object the call yields, not
+        // in-body `return` values — checking those against `@return Generator` is
+        // an FP (issue #128) that guarding only the native side left alive.
         if scope.is_generator {
             return None;
         }
@@ -10371,12 +10088,11 @@ impl<'a> Cx<'a> {
                 let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }
-            // Issue #128: closures carry their adopted docblock on the scope
-            // itself (`Scope::docblock`, two-position adoption in steins-syntax)
-            // — same `parse_envelopes` grammar as free functions. No
-            // enclosing-class `@template` shadowing here (known limitation — a
-            // closure inside a templated class could misread a template name as
-            // a class name).
+            // Issue #128: closures carry their adopted docblock on the scope itself
+            // (`Scope::docblock`) — same `parse_envelopes` grammar as free
+            // functions. No enclosing-class `@template` shadowing here (known
+            // limitation: a closure inside a templated class could misread a
+            // template name as a class name).
             ScopeOwner::Closure { .. } => {
                 let ret = parse_envelopes(scope.docblock.as_deref())?.ret?;
                 Some((ret, "closure".to_owned()))
@@ -10386,14 +10102,13 @@ impl<'a> Cx<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// The env now stores the full four-layer `steins_domain::Fact` (ADR-0035) — the
-// finished algebra lives in `steins-domain`; this crate only converts to/from
-// the trace IR's `ArgValue` at the two seams below and calls the domain's joins,
-// membership, and trinary queries. Stage-2 abstract facts (`Refined`/`General`)
-// now flow through the env exactly like the finite layers: they resolve no
-// *value* (only a `Singleton` does), but they carry knowledge for guard
-// refinements (ADR-0031 stage 2), native-type seeding, and contract-on-fact
-// acceptance (ADR-0030).
+// The env stores the full four-layer `steins_domain::Fact` (ADR-0035); the algebra
+// lives in `steins-domain`, this crate only converts to/from the trace IR's
+// `ArgValue` at the two seams below and calls the domain's joins, membership, and
+// trinary queries. Stage-2 abstract facts (`Refined`/`General`) flow through the
+// env like the finite layers: no *value* resolves (only `Singleton` does), but
+// they carry knowledge for guard refinements (ADR-0031 stage 2), native-type
+// seeding, and contract-on-fact acceptance (ADR-0030).
 // ---------------------------------------------------------------------------
 
 /// The domain value-fact (four layers), aliased as `Fact` throughout the walk.
@@ -10508,43 +10223,27 @@ const SHAPE_SEED_MAX_DEPTH: u8 = FOLD_ARRAY_MAX_DEPTH;
 /// (issue #327) — the abstract half of the seeding ladder whose concrete half
 /// is [`singleton_fact`].
 ///
-/// # Why this exists
-///
 /// [`val_of`] needs a [`Val`] per element and answers `None` on the first one it
-/// cannot build, so a single unproven element drops the fact for the **whole
-/// array**: its key set, its entry count, its sealing, and every sibling
-/// element that *was* proven, all at once. That is sound and it is most of the
-/// array line's precision ceiling — `['p' => 1, 'q' => $s]` knows nothing where
-/// the reference implementation knows `array{p: 1, q: string}`.
+/// cannot build, dropping the fact for the whole array — key set, entry count,
+/// sealing, and every proven sibling all at once. That is sound but is most of
+/// the array line's precision ceiling: `['p' => 1, 'q' => $s]` knew nothing
+/// where the reference implementation knows `array{p: 1, q: string}`. Nothing
+/// about the keys was ever in doubt — [`normalize_array`] resolves auto indices,
+/// last-wins duplicates, and the next-int rule without inspecting values — so
+/// keys, count, and sealing survive an unknown element; only that element's slot
+/// does not.
 ///
-/// Nothing about the keys was ever in doubt: [`normalize_array`] resolves auto
-/// indices, last-wins duplicates and the version-dependent next-int rule
-/// without inspecting a single value. So the keys, the count, and the sealing
-/// survive an unknown element; only that element's own slot does not.
+/// Callers try the concrete path first (a fully-proven literal stays a
+/// `Singleton`); this is the rung below, reached only when that failed, so the
+/// result is always a [`Fact::Shape`].
 ///
-/// # The ladder, and where this sits on it
+/// Refuses: a poisoned scope (today's silence, unchanged), and an unresolvable
+/// key set — [`normalize_array`] declining means the literal straddles the 8.3
+/// next-int change on an unpinned minor (ADR-0049 A12); a guessed key would be
+/// *wrong*, not wider, so the whole literal declines as `val_of` already does.
 ///
-/// Callers try the concrete path first — a fully-proven literal stays a
-/// `Singleton`, `Verified`, spelled exactly as it always was. This is the rung
-/// below: reached only when that failed, so at least one slot here is unknown
-/// or abstract and the result is always a [`Fact::Shape`].
-///
-/// # What it refuses
-///
-/// * **A poisoned scope** — the env cannot be read, and an element resolved
-///   against a poisoned env is not evidence. Today's silence, unchanged.
-/// * **An unresolvable key set** — [`normalize_array`] declining means the
-///   literal straddles the 8.3 next-int change on an unpinned minor (ADR-0049
-///   A12). A guessed key is a *wrong* key set rather than a wider one, so the
-///   whole literal declines exactly as `val_of` already makes it.
-///
-/// # Stratum
-///
-/// `min` over the element facts that contributed one (ADR-0061 §3's derivation
-/// clause). An unknown slot contributes nothing — it makes no claim to be
-/// trusted at any stratum. A literal whose elements are all `Verified` yields a
-/// `Verified` shape, and rightly: the keys were observed in the source, the
-/// sealing is what a literal *means*, and the slots are what the walk proved.
+/// Stratum: `min` over element facts that contributed one (ADR-0061 §3); an
+/// unknown slot contributes nothing.
 fn array_literal_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -10571,13 +10270,11 @@ fn array_literal_fact_within(
     if poisoned || depth == 0 {
         return None;
     }
-    // **A key the source did not spell as a literal** (issue #336, piece 3).
-    // `normalize_array` declines the whole literal — an unknown key may be an
-    // integer, so it moves every following `Auto` position and no key set is
-    // resolvable. What IS knowable is what the key *is*, and that is worth
-    // stating: the literal seeds an **unsealed** shape whose tail key is the
-    // array-key cast of the key expressions and whose tail value is the join of
-    // the element values.
+    // A key the source did not spell as a literal (issue #336, piece 3):
+    // `normalize_array` declines the whole literal since an unknown key may be an
+    // integer, moving every following `Auto` position. What survives is an
+    // unsealed shape whose tail key is the array-key cast of the key expressions
+    // and whose tail value is the join of the element values.
     if items.iter().any(|(k, _)| matches!(k, ArrayKey::Expr(_))) {
         return open_keyed_literal_fact(cx, folder, items, env, poisoned, store, depth);
     }
@@ -10590,10 +10287,8 @@ fn array_literal_fact_within(
             NormKey::Str(s) => VKey::Str(s.clone()),
         };
         // The element's own fact, by the same ladder any other argument-position
-        // value takes: a bound variable's fact (including its declared arm lane),
-        // a resolved literal, a fold. A nested literal that is itself only partly
-        // proven recurses here rather than dropping to unknown — the cliff this
-        // function exists to remove is the same one level down.
+        // value takes. A nested, only-partly-proven literal recurses here rather
+        // than dropping to unknown — the cliff this function removes, one level down.
         let slot = transfer_arg_known(cx, folder, value, env, store).or_else(|| match value {
             ArgValue::Array(inner) => array_literal_fact_within(
                 cx, folder, inner, env, poisoned, store, depth - 1,
@@ -10614,23 +10309,18 @@ fn array_literal_fact_within(
 /// The fact an array literal denotes when one of its **keys** is not a literal
 /// (issue #336, piece 3) — `[$k => $v]`, `['a' => 1, f() => 2]`.
 ///
-/// # What is lost, and what is not
+/// The key set is gone: an unknown key may be an integer, moving the
+/// next-auto-index for every following `Auto` position, so no later entry has a
+/// knowable key and even the entry count is uncertain — hence
+/// [`normalize_array`] declines.
 ///
-/// The key *set* is gone: an unknown key may be an integer, which moves the
-/// next-auto-index for every following `Auto` position, so no entry after it has
-/// a knowable key and even the entry count is uncertain (the unknown key may
-/// collide with a written one). That is why [`normalize_array`] declines, and
-/// declining is right.
-///
-/// What survives is what the keys and values *are*. The result is an unsealed
-/// shape: no declared fields, a tail whose key class is the **array-key cast**
-/// ([`steins_domain::Fact::array_key_cast`]) of the key expressions joined, and
-/// whose value is the join of the element values. `non_empty` holds — a literal
-/// with entries has at least one, whatever they collide into.
-///
-/// So `array_key_first([$decimalIntString => null])` answers `int`, because a
-/// string that spells an integer the way PHP writes one back keys an integer
-/// however little else is known.
+/// What survives is what the keys and values *are*: an unsealed shape, no
+/// declared fields, tail key class the **array-key cast**
+/// ([`steins_domain::Fact::array_key_cast`]) of the key expressions joined, tail
+/// value the join of the element values. `non_empty` holds since a literal with
+/// entries has at least one. So `array_key_first([$decimalIntString => null])`
+/// answers `int` — a string spelling an integer the way PHP writes one back
+/// still keys an integer.
 fn open_keyed_literal_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -10651,9 +10341,8 @@ fn open_keyed_literal_fact(
         };
     };
     for (k, v) in items {
-        // The key's own fact, cast to what it becomes as a key. A written
-        // literal key contributes itself; an unknown one contributes its
-        // expression's fact through the cast.
+        // The key's own fact, cast to what it becomes as a key: a written literal
+        // key contributes itself, an unknown one its expression's fact via the cast.
         let key_fact = match k {
             ArrayKey::Int(i) => Some(Fact::Singleton(Val::Int(*i))),
             ArrayKey::Str(s) => Some(Fact::Singleton(Val::Str(s.clone()))),
@@ -10718,23 +10407,19 @@ fn open_keyed_literal_fact(
 /// forms (issue #236, on ADR-0043's resolution and issue #36's settlement that
 /// the compiler resolves `::class` and it mints nothing at runtime).
 ///
-/// - **Written** (`Foo::class`): the FQN **string literal**, in the source's own
-///   declared casing, which [`Cx::class_fqn`] preserves. Strictly more precise
-///   than any refinement, and exactly what PHPStan asserts for the same
-///   expression — so the literal, never `class-string`.
+/// - **Written** (`Foo::class`): the FQN string literal in the source's own
+///   declared casing ([`Cx::class_fqn`] preserves it) — more precise than any
+///   refinement, and what PHPStan asserts for the same expression.
 /// - **Relative** (`self`/`parent`/`static::class`): the `class-string`
-///   refinement. [`Cx::resolve_class_const`] refuses these for a stated reason —
-///   the class-like is resolved, but only as the index's lowercase-normalized
-///   FQN, while `::class` yields the *declared* casing, so emitting a literal
-///   would risk a wrong-case string. That deferral left the value with no fact
-///   at all; the refinement is precisely what survives it. The class table is
-///   the evidence, which is why the predicate is the contextual one
-///   ([`StrPreds::CLASS_STRING`]) rather than anything `StrPreds::of` derives.
+///   refinement. [`Cx::resolve_class_const`] refuses these because the
+///   class-like resolves only to the index's lowercase-normalized FQN, while
+///   `::class` yields the declared casing — emitting a literal would risk a
+///   wrong-case string, so the refinement is what survives instead (predicate
+///   [`StrPreds::CLASS_STRING`], the contextual one).
 ///
 /// A closure scope refuses the relative forms: [`scope_class`] answers `None`
-/// there for a lexical reason rather than because no class is in scope
-/// ([`class_scope_known`]), and `parent::class` outside a class is a compile
-/// error, not a class-string.
+/// there for a lexical reason ([`class_scope_known`]), and `parent::class`
+/// outside a class is a compile error, not a class-string.
 fn class_const_class_fact(cx: &Cx, scope: &Scope, sc: &StaticClass, name: &str) -> Option<Fact> {
     if !name.eq_ignore_ascii_case("class") {
         return None;
@@ -10825,40 +10510,34 @@ struct PropFact {
 struct HeapObj {
     /// The class FQN (lowercase-normalized, as `classes_env` held). For an
     /// allocation-proven object (`new`, enum case, clone-of-exact) this is the exact
-    /// runtime class; for a `$this` seed it is only a **lower bound** — the runtime
-    /// object may be any descendant that inherited the method. `class_exact`
+    /// runtime class; for a `$this` seed it is only a lower bound — the runtime
+    /// object may be a descendant that inherited the method. `class_exact`
     /// distinguishes the two (audit G1, ADR-0036).
     class: String,
-    /// Whether `class` is the *exact* runtime class (`true`) or a lower bound
-    /// (`false`). A No-side conclusion — `is_a(class, T) = No` implies the object is
-    /// not a `T` — is only sound when this is `true`: with a lower bound the actual
-    /// instance may be a descendant of `class` that *is* a `T`. Yes-side conclusions
-    /// (`is_a(class, T) = Yes`) hold for a lower bound too (every descendant is a T).
+    /// Whether `class` is the exact runtime class (`true`) or a lower bound
+    /// (`false`). A No-side conclusion (`is_a(class, T) = No`) is only sound when
+    /// exact — with a lower bound the actual instance may be a `T` descendant.
+    /// Yes-side conclusions hold for a lower bound too.
     class_exact: bool,
-    /// Property facts keyed by property name (ADR-0035 Facts live in props), each
-    /// with its trust stratum (ADR-0052 §5).
+    /// Property facts keyed by property name (ADR-0035), each with its trust
+    /// stratum (ADR-0052 §5).
     props: HashMap<String, PropFact>,
     /// Properties declared `readonly` — sweep-immune once established (ADR-0036).
     readonly: HashSet<String>,
     /// readonly props provably written on THIS path (for `readonly.reassigned`).
     ro_written: HashSet<String>,
-    /// Whether this object has escaped (passed to a call, returned, stored into an
-    /// array/property, or captured by a closure). Escaped objects have their
-    /// non-readonly props swept by unknown calls; a purely-local object's props
-    /// survive — the ADR-0036 precision payoff.
+    /// Whether this object has escaped (call arg, return, stored, captured).
+    /// Escaped objects have non-readonly props swept by unknown calls; a
+    /// purely-local object's props survive (ADR-0036 precision payoff).
     escaped: bool,
     /// The class-level generic parameterizations this object carries (ADR-0032 tier
-    /// 3 + its binding amendment, issue #295): the same owner-keyed
-    /// [`GenericCarry`] edges a `new Class(args)` expression proves, kept on the
-    /// allocation so they survive a variable binding. Empty for every seeded object
-    /// — the ADR-0048 §3 entry-state contribution: a `$this` seed and any non-exact
-    /// object seed empty, and a parameter seeded from a declared
-    /// `@param Box<string> $p` would seed its *declared* arguments (declared-
-    /// authoritative, ADR-0037) if parameters were seeded onto the heap at all,
-    /// which today they are not.
+    /// 3 + binding amendment, issue #295) — the same owner-keyed [`GenericCarry`]
+    /// edges a `new Class(args)` expression proves, kept on the allocation so they
+    /// survive a variable binding. Empty for every seeded object (ADR-0048 §3):
+    /// parameters aren't seeded onto the heap today.
     ///
-    /// Swept by a receiver method call ([`Self::sweep_targs`]): a value carry states
-    /// what flowed into the constructor, and a method may have replaced it.
+    /// Swept by a receiver method call ([`Self::sweep_targs`]) since a method may
+    /// have replaced what a value carry states flowed into the constructor.
     targs: Vec<GenericCarry>,
 }
 
@@ -10885,16 +10564,14 @@ impl HeapObj {
     }
 
     /// Sweep the **value** generic carries (ADR-0032 binding amendment, issue #295):
-    /// a method call on this object as the receiver may have written the very values
-    /// a `new`-site carry recorded (`@phpstan-self-out self<U>` is the annotation
-    /// that says so), and a stale carry is a false positive at the next declared
-    /// `Box<T>` parameter, not a miss. Type carries — an inheritance edge's
-    /// `@extends Box<int>` — state what the author declared about the class, which
-    /// no call can change, so they survive exactly as a `readonly` prop does.
+    /// a method call on this object as receiver may have written the values a
+    /// `new`-site carry recorded (`@phpstan-self-out self<U>`), so a stale value
+    /// carry is a false positive, not a miss. Type carries (an inheritance edge's
+    /// `@extends Box<int>`) state what the author declared, which no call changes,
+    /// so they survive like a `readonly` prop.
     ///
-    /// A mixed carry cannot occur (a carry is all-`Val` from a `new` site or all-`Ty`
-    /// from an edge), but the predicate is written over the args so that it stays
-    /// correct if one ever does.
+    /// A mixed carry can't occur (all-`Val` from `new`, or all-`Ty` from an edge),
+    /// but the predicate is written over the args to stay correct if one ever does.
     fn sweep_targs(&mut self) {
         self.targs.retain(|c| c.args.iter().all(|a| matches!(a, CArg::Ty(_))));
     }
@@ -10909,35 +10586,30 @@ impl HeapObj {
 struct Store {
     refs: HashMap<String, AllocId>,
     heap: HashMap<AllocId, HeapObj>,
-    /// **Contract facts** (ADR-0052 §1, the NEW carrier): a variable's *declared*
-    /// type as a lowered, syntactic **arm list**, seeded at scope entry (§9 — THE
-    /// entry-state contribution) and narrowed by guards arm-wise (`instanceof`,
-    /// `!== null`). Each arm carries its own trust stratum: the native member list
-    /// seeds `Verified`, a `@param` phpdoc refinement seeds `Asserted` (ADR-0037
-    /// trust order). Subtraction preserves each surviving arm's stratum — an
-    /// `Asserted` arm can never launder to `Verified`. Consumed ONLY by the four
-    /// §3 consumers (arm filtering, `eval_instanceof` implication, catch matching,
-    /// and — reserved for S6 — the declared-receiver lane); NEVER by `call.on-null`
-    /// proofs, arity, `call.undefined-method`, or binding descent.
+    /// **Contract facts** (ADR-0052 §1): a variable's declared type as a lowered
+    /// syntactic arm list, seeded at scope entry (§9) and narrowed by guards
+    /// arm-wise (`instanceof`, `!== null`). Each arm carries its own trust stratum:
+    /// native member list seeds `Verified`, a `@param` phpdoc refinement seeds
+    /// `Asserted` (ADR-0037 trust order) — subtraction preserves it, so an
+    /// `Asserted` arm never launders to `Verified`. Consumed only by the four §3
+    /// consumers (arm filtering, `eval_instanceof` implication, catch matching,
+    /// reserved-for-S6 declared-receiver lane); never by `call.on-null` proofs,
+    /// arity, `call.undefined-method`, or binding descent.
     contract: HashMap<String, Vec<ContractArm>>,
-    /// **Class facts** (ADR-0052 §1, the NEW carrier): guard-derived is-a bounds on
-    /// an object-holding variable, beside the heap's *exact* class. A positive
-    /// `instanceof T` binds `T` into `yes`; a negative branch binds it into `no`.
-    /// `Member` is deliberately weaker than exactness (ADR-0043) — it is NOT fed to
-    /// the exactness-gated consumers (§3 NOT-fed list); a final-class `Member` is
-    /// deliberately not treated as exactness in v1.
+    /// **Class facts** (ADR-0052 §1): guard-derived is-a bounds on an
+    /// object-holding variable, beside the heap's exact class. A positive
+    /// `instanceof T` binds `T` into `yes`; negative binds into `no`. Deliberately
+    /// weaker than exactness (ADR-0043) — not fed to exactness-gated consumers; a
+    /// final-class `Member` is not treated as exactness in v1.
     members: HashMap<String, Member>,
-    /// **Existence vouches** (ADR-0049 §4 conservative guard-respect leg): the set of
-    /// symbols a positive `method_exists`/`function_exists`/`class_exists` … guard has
-    /// vouched for on THIS branch. An absence-family emitter (`call.undefined-method`
-    /// today, S4's ids tomorrow) that resolves to a vouched symbol stays silent even
-    /// when its own proof reached `Absent` — firing against programmer-supplied
-    /// existence evidence would call the programmer a liar. Purely additive and
-    /// walk-local (ADR-0048): bound on the guarded branch clone, INTERSECTED at a
-    /// join (a vouch survives past the `if` only if every fall-through path carried
-    /// it — so `if (method_exists(C,'m')) {} (new C)->m();` never silences the tail),
-    /// and deliberately untouched by [`Self::unbind`]/[`Self::clear`] (a symbol's
-    /// existence does not change when a variable is rebound or a barrier is crossed).
+    /// **Existence vouches** (ADR-0049 §4 guard-respect leg): symbols a positive
+    /// `method_exists`/`function_exists`/`class_exists`… guard has vouched for on
+    /// THIS branch. An absence-family emitter resolving to a vouched symbol stays
+    /// silent even on its own `Absent` proof — firing would call the programmer a
+    /// liar. Walk-local (ADR-0048): bound on the guarded branch clone, intersected
+    /// at a join (so `if (method_exists(C,'m')) {} (new C)->m();` never silences
+    /// the tail), and untouched by [`Self::unbind`]/[`Self::clear`] — a symbol's
+    /// existence doesn't change on rebind or barrier.
     vouched: HashSet<Vouch>,
 }
 
@@ -11114,20 +10786,17 @@ impl Store {
 
 /// The **trust stratum** of a bound fact (ADR-0052 §5): whether it is fit to
 /// premise a proof-layer finding. `Verified` facts come from a runtime-executed
-/// test on the live branch (`===`, `is_int`, `instanceof`, ordering, truthiness)
-/// or a native declaration seed — the branch runs only if the test passed, so the
-/// fact holds on the live path. The `assert($expr)` construct is `Verified` too:
-/// the 2026-07-25 owner ruling reads it as a throw-guard (`if (!$expr) throw`),
-/// unconditionally, without consulting `zend.assertions`. `Asserted` facts come from
-/// docblock claims (`@phpstan-assert` family) — a claim, not a proof. The bit is a *checked*
-/// attribute (the `"asserted"` provenance string is prose, only for display); the
-/// consumption rule (proof-layer ids require all-Verified premises) reads it.
+/// test on the live branch (`===`, `is_int`, `instanceof`, ordering, truthiness) or
+/// a native declaration seed. `assert($expr)` is `Verified` too: the 2026-07-25
+/// owner ruling reads it as an unconditional throw-guard (`if (!$expr) throw`),
+/// regardless of `zend.assertions`. `Asserted` facts come from docblock claims
+/// (`@phpstan-assert` family) — a claim, not a proof; the bit is checked, not just
+/// prose (the consumption rule requires all-Verified premises).
 ///
-/// A derived fact's stratum is the **minimum** over every fact consumed in its
-/// derivation (the amendment's derivation clause): folds, array composition, heap
-/// property writes, branch joins, and binding-descent seeding all propagate
-/// `min(inputs)`, so `Asserted` can never launder into `Verified` across a
-/// derivation step. `min` is `Asserted` whenever either operand is `Asserted`.
+/// A derived fact's stratum is the minimum over every fact consumed in its
+/// derivation (folds, array composition, heap writes, branch joins, descent
+/// seeding all propagate `min(inputs)`), so `Asserted` can never launder into
+/// `Verified` across a derivation step.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 enum Stratum {
     /// A runtime-executed test or a native declaration — fit for the proof layer.
@@ -11295,27 +10964,21 @@ fn analyze_scope(
 ) {
     let enclosing_class = scope_class(scope);
 
-    // The owning function/method's native return type, resolved once. Return-type
-    // checking runs only in the plain per-scope pass (`descent.is_none()`), never
-    // under an interprocedural binding descent: a descent rebinds the *callee's*
-    // parameters, not its return, so re-checking there would only duplicate the
-    // per-scope finding (and the file's own strict mode already governs it). The
-    // returned value is resolved against the *file's own* `strict` via `cx`.
+    // The owning function/method's native return type, resolved once. Checking runs
+    // only in the plain per-scope pass (`descent.is_none()`): a descent rebinds the
+    // callee's params, not its return, so re-checking there would only duplicate the
+    // per-scope finding.
     let ret_info: Option<(&NativeType, String)> =
         if descent.is_none() { cx.scope_return(scope) } else { None };
-    // The owning declaration's `@return` phpdoc envelope, resolved the same way
-    // (plain per-scope pass only). Checked under contract acceptance, skipped where
-    // the native return check already fired (no double-report).
+    // Same restriction for the `@return` phpdoc envelope; skipped where the native
+    // return check already fired (no double-report).
     let ret_phpdoc: Option<(PType, String)> =
         if descent.is_none() { cx.scope_return_phpdoc(scope) } else { None };
 
-    // Native-type parameter seeding (Feature B): seed each parameter with the fact
-    // its native type guarantees at runtime. This is sound in BOTH strict and
-    // coercive modes: the engine coerces or throws at entry, so inside the body an
-    // `int $x` param IS an int (post-coercion) — the seed is a *runtime-enforced*
-    // fact, not a guess. A descent already binds actual values for the params the
-    // caller supplied; we only seed params still absent from the env (unbound
-    // params may still carry their native-type fact — sound).
+    // Native-type parameter seeding (Feature B): sound in both strict and coercive
+    // modes since the engine coerces or throws at entry, so inside the body an
+    // `int $x` param IS an int post-coercion. A descent already binds params the
+    // caller supplied; only params still absent from the env get seeded here.
     if let Some(params) = cx.scope_params(scope) {
         for p in params {
             if env.contains_key(&p.name) || store.is_bound(&p.name) {
@@ -11327,15 +10990,12 @@ fn analyze_scope(
         }
     }
 
-    // Contract-fact seeding (ADR-0052 §9) — THE entry-state contribution of this
-    // ADR (ADR-0048 §3 canonical entry state, defined at landing, not retrofitted):
-    // per declared parameter, the native member list (`Verified`) refined by the
-    // declared `@param` phpdoc envelope (`Asserted`), the ADR-0037 trust order. The
-    // arm lane lives in the walk-local `Store` (cloned as `bclasses` at every
-    // branch); a descent that already bound a param's value gets no lane (its value
-    // is known, the declared possibilities are moot). Every other narrowing carrier
-    // (guard facts, members, static-prop channels) contributes nothing to entry
-    // state — the deliberately boring §9 answer.
+    // Contract-fact seeding (ADR-0052 §9), the canonical entry-state contribution
+    // (ADR-0048 §3): per declared parameter, the native member list (`Verified`)
+    // refined by the declared `@param` phpdoc envelope (`Asserted`, ADR-0037 trust
+    // order). The arm lane lives in the walk-local `Store`; a descent that already
+    // bound a param's value gets no lane. No other narrowing carrier (guard facts,
+    // members, static-prop channels) contributes to entry state.
     if descent.is_none()
         && let Some(params) = cx.scope_params(scope)
     {
@@ -11358,22 +11018,19 @@ fn analyze_scope(
             if let Some(arms) = seed_contract_arms(p, phpdoc, &resolve)
                 && !arms.is_empty()
             {
-                // The abstract array stratum's entry state (ADR-0062 S3): a lane
-                // whose array vocabulary has collapsed to ONE arm also seeds the
-                // value lane with that arm's canonical shape fact. Multi-array-arm
-                // lanes seed nothing — a shape∪shape union lives in the arm lane
-                // until a guard subtracts it down to one (A-G3; the subtraction is
-                // S4's), and the fact lane holds a single shape only then.
+                // Abstract array stratum's entry state (ADR-0062 S3): a lane whose
+                // array vocabulary collapsed to ONE arm also seeds the value lane
+                // with that arm's shape fact. Multi-arm lanes seed nothing — the
+                // shape∪shape union lives in the arm lane until a guard subtracts it
+                // to one (A-G3, S4's job).
                 if !env.contains_key(&p.name)
                     && let Some(fact) = seed_shape_fact(&arms)
                 {
                     env.insert(
                         p.name.clone(),
-                        // ALWAYS `Asserted`, even where the arm itself is
-                        // `Verified` (a native `array $x`): A-G9's corollary is
-                        // normative — shape-derived facts never feed proof-layer
-                        // findings — and the stratum is the mechanism that
-                        // enforces it structurally rather than by review.
+                        // ALWAYS `Asserted` even where the arm itself is `Verified`
+                        // (a native `array $x`): A-G9's corollary is normative —
+                        // shape-derived facts never feed proof-layer findings.
                         Known::value_strat(
                             fact,
                             0,
@@ -11382,15 +11039,11 @@ fn analyze_scope(
                         ),
                     );
                 }
-                // The scalar half of the same seeding (issue #242). Unlike the array
-                // half above, the value lane is NOT free here: the native pass just
-                // planted the coarse `Fact::General` of the parameter's own native
-                // type, and it outranks the arm lane at every fact read — so a
-                // declared refinement within that envelope has to REPLACE it, not
-                // yield to it. The `== native` test is the whole discipline: it
-                // overwrites only the seed this same entry pass planted from
-                // `seed_fact`, never a descent-bound value, a guard fact, or anything
-                // else a caller may have put in the lane.
+                // The scalar half (issue #242): the native pass already planted the
+                // coarse `Fact::General`, which outranks the arm lane, so a declared
+                // refinement must REPLACE it, not yield. The `== native` test
+                // overwrites only the seed this same entry pass planted, never a
+                // descent-bound value or guard fact.
                 else if let Some(native) = seed_fact(p)
                     && env.get(&p.name).is_some_and(|k| k.fact.as_ref() == Some(&native))
                     && let Some((fact, stratum)) = seed_refined_scalar_fact(p, &native, &arms)
@@ -11411,18 +11064,16 @@ fn analyze_scope(
     }
 
     // Seed the `$this` object in a method scope (ADR-0036): props/readonly from the
-    // class surface. Only when the class declares tracked properties (otherwise
-    // `$this` stays unbound — identical to pre-heap behavior). A descent that
-    // already bound `this` (impossible today — descents pass an empty store) is left
-    // untouched.
+    // class surface, only when the class declares tracked properties (otherwise
+    // `$this` stays unbound). A descent that already bound `this` is left untouched
+    // (impossible today — descents pass an empty store).
     if let Some(class) = enclosing_class
         && !store.is_bound("this")
     {
-        // G1 (audit): `$this`'s heap class is a LOWER BOUND — any subclass instance
-        // may be running this method — UNLESS exactness is locally provable. A
-        // binding descent that proved the exact receiver (`this_exact`) makes `$this`
-        // exactly that class; otherwise the enclosing class is the class, exact only
-        // when it is `final` or an enum (no subclass can exist).
+        // G1: `$this`'s heap class is a lower bound (any subclass instance may be
+        // running this method) unless exactness is locally provable — a descent
+        // that proved the exact receiver (`this_exact`), or the enclosing class
+        // itself when `final` or an enum.
         let (this_class, exact): (&str, bool) = match this_exact.as_deref() {
             Some(exact) => (exact, true),
             None => (class, cx.this_class_exact(class)),
@@ -11437,9 +11088,8 @@ fn analyze_scope(
     // The allocation counter starts past any id already in the store (the seeded
     // `$this`), so a fresh `new`/`clone` never collides with it.
     let alloc_start = store.heap.keys().copied().max().map_or(0, |m| m + 1);
-    // Return-fact summary collection (ADR-0057 amendment T0): active only when the
-    // caller requested exits (a descent building the callee's summary). The native
-    // return arms are resolved once, up front, as the A2 drop oracle.
+    // Return-fact summary collection (ADR-0057 T0): active only when the caller
+    // requested exits. Native return arms resolved once, as the A2 drop oracle.
     let summary = ret_exits.as_ref().map(|_| SummaryCtx {
         native: cx.scope_return(scope).map(|(ty, _)| native_arms(ty)).unwrap_or_default(),
         exits: std::cell::RefCell::new(Vec::new()),
@@ -11494,18 +11144,17 @@ struct WalkCx<'a, 'w> {
     this_exact: Option<&'w str>,
     ret_info: &'w Option<(&'a NativeType, String)>,
     ret_phpdoc: &'w Option<(PType, String)>,
-    /// Proven-dead statement spans discovered during this walk (skipped decided
-    /// branches, unreachable tails). Only the PLAIN per-scope walk's regions are
-    /// universal truths — a binding descent's dead branches are dead *for that
-    /// binding only*, so descents discard theirs (`dead_out: None`).
+    /// Proven-dead statement spans discovered during this walk. Only the plain
+    /// per-scope walk's regions are universal truths — a binding descent's dead
+    /// branches are dead only for that binding, so descents discard theirs.
     dead: std::cell::RefCell<Vec<Span>>,
     /// A monotone allocation-id counter for this scope walk (ADR-0036). Shared
     /// across branch clones (they clone the `Store`, not this cell), so a `new` in
-    /// one branch never collides with a `new` in another that later joins.
+    /// one branch never collides with one in another that later joins.
     alloc: std::cell::Cell<AllocId>,
-    /// Return-fact summary collection (ADR-0057 amendment T0): `Some` only while a
-    /// callee body is walked for its summary (a descent requested it). Each returning
-    /// exit pushes its contribution here; the join happens in [`descend`].
+    /// Return-fact summary collection (ADR-0057 T0): `Some` only while a callee
+    /// body is walked for its summary. Each returning exit pushes its contribution
+    /// here; the join happens in [`descend`].
     summary: Option<SummaryCtx>,
 }
 
@@ -11536,22 +11185,19 @@ fn mark_dead(w: &WalkCx, traces: &[&[Stmt]]) {
 /// short-circuits past, the untaken arm of a decided ternary, the right operand of
 /// a `??` whose left is proven set-and-non-null).
 ///
-/// The statement-level [`mark_dead`] and this share one consumer, [`in_dead`], and
-/// one discipline: a region is recorded only from a **decided** verdict, and only
-/// the plain per-scope walk's regions escape the walk (a binding descent discards
-/// its own — its verdicts hold for that caller's bindings, not universally).
+/// Shares one consumer with [`mark_dead`], [`in_dead`], and one discipline: only a
+/// decided verdict is recorded, and only the plain per-scope walk's regions escape
+/// (a binding descent discards its own — its verdicts hold for that caller only).
 fn mark_dead_span(w: &WalkCx, span: Span) {
     w.dead.borrow_mut().push(span);
 }
 
 /// Record every call this condition carries as dead. Used where a whole operand of
 /// `&&`/`||` is proven unevaluated: the operand itself has no span (a [`CondExpr`]
-/// is a lowered form, not a CST node), but its calls do, and a call is where the
-/// env-free direct pass positions the findings this closes.
+/// is a lowered form, not a CST node), but its calls do.
 ///
 /// A non-call site inside such an operand (a class reference, a constant fetch)
-/// keeps its own filter and is NOT covered — those families read `r.offset`, not a
-/// call span. Recorded as a known residue rather than papered over.
+/// keeps its own filter and is NOT covered — a known residue, not papered over.
 fn mark_dead_cond_calls(w: &WalkCx, cond: &CondExpr) {
     let calls = collect_guard_calls_any(cond);
     if calls.is_empty() {
@@ -11588,66 +11234,51 @@ fn walk_trace(
     let scope = w.scope;
     for (stmt_idx, stmt) in stmts.iter().enumerate() {
         // 0. Statement-level inline `@var` casts (ADR-0073), applied before the
-        // statement's own checks read the env — the docblock precedes the
-        // statement, so its cast is in force for everything the statement does.
-        // A tag above an `Assign` to the same variable is erased by step 2's own
-        // rebind: the assignment-form `@var` (PHPStan casts the RHS there) is a
-        // separate unsupported feature that stays silent, never a wrong claim.
-        // Plain per-scope pass only (see `apply_inline_var_casts`).
+        // statement's own checks read the env. A tag above an `Assign` to the same
+        // variable is erased by step 2's own rebind — the assignment-form `@var`
+        // is a separate unsupported feature that stays silent. Plain per-scope pass
+        // only (see `apply_inline_var_casts`).
         if descent.is_none() {
             apply_inline_var_casts(w, stmt, env, store);
-            // 0a. The ADR-0076 loop-subject probe, read from the ENTRY env (after
-            // the inline cast, which the statement's own checks also see). Gated on
-            // an installed probe, so a normal check pays one `is_some()` and sees
-            // no behaviour change; never under a binding descent, like every other
-            // observer.
+            // 0a. The ADR-0076 loop-subject probe, read from the entry env (after
+            // the inline cast). Gated on an installed probe, so a normal check pays
+            // one `is_some()` and sees no behaviour change.
             record_subject_probe(cx, stmt, env);
-            // 0a-bis. `foreach.non-iterable` (ADR-0078, issue #192): judged from the
-            // SAME entry env the probe above just read — the construct is still
-            // `StmtKind::Opaque` at this point (step 2 below is what clears/forgets
-            // its write/read set), so nothing has touched `env` for it yet. The
-            // trace carries no per-construct discriminant for `foreach` versus its
-            // `Opaque` siblings (`while`/`for`/`do-while`/`try`), so the match is by
-            // span against the ADR-0076 site enumeration (both computed from the
-            // same `Statement` node's span, so they agree exactly).
+            // 0a-bis. `foreach.non-iterable` (ADR-0078, issue #192), judged from the
+            // same entry env the probe above just read (nothing has touched `env`
+            // for this construct yet). The trace has no per-construct discriminant
+            // for `foreach` vs its `Opaque` siblings, so the match is by span
+            // against the ADR-0076 site enumeration.
             if let Some(site) = cx.tree().foreach_sites().iter().find(|s| s.span == stmt.span) {
                 check_foreach_subject(cx, site, env, scope.poisoned, out);
             }
-            // 0a-ter. `type.invalid-operand` (ADR-0078, issue #191): the operator
-            // applications this statement covers, judged from the SAME entry env —
-            // an assignment's operands are evaluated before its own binding lands,
-            // so the entry env is exactly what the expression sees. Leaf statements
-            // only (see `check_operand_sites`), so a branch's own sites are judged
-            // when the walk reaches that branch's statements, never twice.
+            // 0a-ter. `type.invalid-operand` (ADR-0078, issue #191), judged from the
+            // same entry env — an assignment's operands evaluate before its own
+            // binding lands. Leaf statements only, so a branch's sites are judged
+            // once, when the walk reaches them.
             check_operand_sites(cx, stmt, env, scope.poisoned, out);
         }
         // 0b. The trace annotation (ADR-0074, issue #94): a statement-adopted
-        // `@psalm-trace $x` docblock asks the dump surface's question against
-        // this statement's EXIT facts (§5, Psalm's semantics: the annotation is
-        // "applied to the next statement" and reports what it leaves behind).
-        // Adoption is resolved here — the same shared `stmt_docblock` query the
-        // step-0 cast reads (§6: one position, one adoption grammar) — and the
-        // answer is flushed via `.take()` on whichever exit this iteration
-        // takes: the divergent `return`s in step 2 or the common bottom, so
-        // every annotated site (diverging statements included) answers exactly
-        // once. Plain per-scope pass only (the `emit_dumps` gate): never
-        // per-caller under a binding descent.
+        // `@psalm-trace $x` docblock asks the dump surface's question against this
+        // statement's exit facts (§5, Psalm semantics: "applied to the next
+        // statement", reporting what it leaves behind). The answer is flushed via
+        // `.take()` on whichever exit this iteration takes — divergent `return`s in
+        // step 2, or the common bottom — so every annotated site answers exactly
+        // once. Plain per-scope pass only.
         let mut pending_trace = if descent.is_none() {
             adopted_trace_docblock(w, stmt)
         } else {
             None
         };
         // The return-fact summary of a `$x = f(...)` / `$x = $o->m(...)` RHS
-        // descent (ADR-0057 amendment T0; ADR-0075 for methods/statics), captured
-        // in step 1 and consumed by `apply_assign` in step 2. For an `Assign`
-        // statement `checkable_calls` yields exactly the RHS call, so the summary
-        // below is unambiguously this assignment's. Constructors keep descending
-        // for diagnostics but never fill this slot (ADR-0075 §3).
+        // descent (ADR-0057 T0; ADR-0075 for methods/statics), captured in step 1
+        // and consumed by `apply_assign` in step 2. For an `Assign` statement
+        // `checkable_calls` yields exactly the RHS call. Constructors keep
+        // descending for diagnostics but never fill this slot (ADR-0075 §3).
         //
-        // `stmt_return_arms` is the declared return floor resolved **before**
+        // `stmt_return_arms` is the declared return floor resolved before
         // `apply_assign` unbinds the assignment target (self-assign
-        // `$o = $o->m(1)` would otherwise drop the exact receiver before floor
-        // re-resolution).
+        // `$o = $o->m(1)` would otherwise drop the exact receiver first).
         let mut stmt_summary: Option<ReturnSummary> = None;
         let mut stmt_return_arms: Option<Vec<ContractArm>> = None;
         // 1. Check + descend every statically-named call this statement carries.
@@ -11658,41 +11289,31 @@ fn walk_trace(
                         cx, folder, scope.poisoned, descent.is_some(), call, env, store, out,
                     );
                     // Userland function arity (ADR-0049 §6 / S5): judged once in the
-                    // plain per-scope pass, like the absence flagship.
+                    // plain per-scope pass, like the checks below.
                     if descent.is_none() {
                         check_arity(cx, folder, call, store, scope.poisoned, out);
-                        // The printf-family arity check (ADR-0078, issue #188): a
-                        // folded literal format string demanding more placeholders
-                        // than the call proves it supplies. Judged once in the plain
-                        // per-scope pass, like the signature-derived arity checks
-                        // above.
+                        // Printf-family arity (ADR-0078, issue #188): a folded literal
+                        // format string demanding more placeholders than proven.
                         check_printf_arity(cx, folder, call, env, scope.poisoned, out);
-                        // The existence flagship (ADR-0049 §3 / S4): a call to a
-                        // provably-undefined function behind a clear dam. Judged once
-                        // in the plain per-scope pass; the walk has already pruned any
-                        // proven-dead region, and the branch store carries the FP-15
-                        // `function_exists` vouch.
+                        // Existence flagship (ADR-0049 §3 / S4): a call to a
+                        // provably-undefined function behind a clear dam. The branch
+                        // store carries the FP-15 `function_exists` vouch.
                         check_undefined_function(cx, folder, call, store, out);
-                        // The pattern-refusal check (ADR-0078 / issue #189): a
-                        // `preg_*` call whose proven-literal pattern the project's
-                        // own PCRE refuses to compile. Plain per-scope pass only,
-                        // like every other once-per-site judgement here.
+                        // Pattern-refusal check (ADR-0078 / issue #189): a `preg_*`
+                        // call whose proven-literal pattern the project's own PCRE
+                        // refuses to compile.
                         check_preg_pattern(w, folder, call, env, out);
-                        // The dump surface (ADR-0053 D3/D4): a recognized
+                        // Dump surface (ADR-0053 D3/D4): a recognized
                         // `PHPStan\dumpType`-family or `var_dump` call emits its fact
-                        // rendering at this position. Plain per-scope pass only, so a
-                        // site is dumped once (never re-emitted under a binding descent).
-                        // A statement-position call (`StmtKind::Call` — the dump IS the
-                        // whole expression-statement) also hands its statement span
-                        // down, so the explicit pair's findings can carry the
+                        // rendering here. A statement-position call also hands its
+                        // statement span down, so its finding can carry the
                         // statement-deletion fix payload (ADR-0010, issue #114).
                         let removal =
                             matches!(stmt.kind, StmtKind::Call(_)).then_some(stmt.span);
                         emit_dumps(w, folder, call, env, store, removal, out);
                         // Oracle idea B (harness-only): when the assertType sink is
-                        // installed, record this call's (expected, rendering) pair.
-                        // A no-op in every normal check (the sink is absent), so this
-                        // adds nothing to the check surface.
+                        // installed, record this call's (expected, rendering) pair —
+                        // a no-op in every normal check (sink absent).
                         emit_asserts(w, folder, call, env, store);
                     }
                     stmt_summary =
@@ -11703,33 +11324,25 @@ fn walk_trace(
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
                     // whose receiver is proven `Singleton(null)` on this path.
                     check_call_on_null(w, call, env, store, out);
-                    // non-object receivers (ADR-0078, issue #190)
-                    // Its sibling on the same receiver fact: a `$v->m()` whose
-                    // receiver is proven a non-null NON-object (`int`, `string`,
-                    // `float`, `bool`, `array`) — the same fatal, a different id, and
-                    // disjoint from the null case by construction.
+                    // Sibling on the same receiver fact (ADR-0078, issue #190): a
+                    // `$v->m()` whose receiver is proven a non-null non-object — same
+                    // fatal, different id, disjoint from the null case by construction.
                     check_call_on_non_object(w, call, env, store, out);
-                    // end non-object receivers (ADR-0078, issue #190)
-                    // The absence flagship (ADR-0049 §4 / S2): fire only in the plain
-                    // per-scope pass — every scope (method bodies included) is walked
-                    // once there, so a descent must not re-judge the same site.
+                    // Absence flagship (ADR-0049 §4 / S2): fire only in the plain
+                    // per-scope pass — a descent must not re-judge the same site.
                     if descent.is_none() {
-                        // inaccessible members (ADR-0078, issue #185)
-                        // The absence flagship's positive twin: the method IS there,
-                        // and its declared visibility hides it from this scope. Reads
-                        // the predicate the resolver computes and discards.
+                        // Absence flagship's positive twin (ADR-0078, issue #185): the
+                        // method IS there, hidden by declared visibility.
                         check_inaccessible_method(w, call, store, out);
-                        // end inaccessible members (ADR-0078, issue #185)
                         check_undefined_method(cx, folder, call, store, scope.poisoned, out);
-                        // The declared-receiver lane (ADR-0049 §8 / S6): a method
-                        // absent on a phpdoc-declared receiver narrowed by branch
-                        // analysis, under per-arm descendant closure. Disjoint from
-                        // S2 by construction — S2 fires on class_exact receivers, S6
-                        // only on non-exact receivers carrying a narrowed arm lane.
+                        // Declared-receiver lane (ADR-0049 §8 / S6): a method absent on
+                        // a phpdoc-declared receiver narrowed by branch analysis.
+                        // Disjoint from S2 by construction — S2 fires on class_exact
+                        // receivers, S6 only on non-exact ones with a narrowed arm lane.
                         check_phpdoc_undefined_method(cx, folder, call, store, scope.poisoned, out);
-                        // Method / constructor / static arity (ADR-0049 §6 / S5),
-                        // under a proven-exact receiver only (the declared-receiver
-                        // variant is unsound — see `resolve_arity_method`).
+                        // Method / constructor / static arity (ADR-0049 §6 / S5), under
+                        // a proven-exact receiver only (the declared-receiver variant
+                        // is unsound — see `resolve_arity_method`).
                         check_arity(cx, folder, call, store, scope.poisoned, out);
                     }
                     let outcome = handle_method_call(
@@ -11746,7 +11359,7 @@ fn walk_trace(
                     );
                     // ADR-0075: a resolved method/static summary rebinds on the same
                     // rungs as a function's. Constructors keep their exactness lane
-                    // (ADR-0036) and leave the summary/arms unread.
+                    // (ADR-0036) and skip this.
                     if !matches!(call.receiver, Callee::Construct { .. }) {
                         stmt_summary = outcome.summary;
                         stmt_return_arms = outcome.return_arms;
@@ -11792,8 +11405,7 @@ fn walk_trace(
         // 1z-bis-a. The destructure source (issue #288), the third whitelisted read
         // position: `[$a, $b] = $m;` / `list($a, $b) = $m;` reads `$m[0]`, `$m[1]`
         // exactly as the assignment-RHS position reads `$m[0]`, and PHP warns per
-        // absent key. The targets are writes and stay silent (the audit note's
-        // G7(e)). Same pass, same pre-statement env, same two legs.
+        // absent key. The targets are writes and stay silent (audit note G7(e)).
         if descent.is_none()
             && let StmtKind::Destructure { source, call, reads, span } = &stmt.kind
         {
@@ -11802,11 +11414,10 @@ fn walk_trace(
             );
         }
 
-        // 1z-bis. The `??` final arm (ADR-0062 S6, issue #51 §2). A coalesce operand
-        // is a silence carrier for every arm the operator protects, but the RIGHT-MOST
-        // arm is a plain read: it is the value whenever everything left of it fell
-        // through. Judged at the same two whitelisted positions, under the accumulated
-        // `¬isset` premise ladder S5 built.
+        // 1z-bis. The `??` final arm (ADR-0062 S6, issue #51 §2): a coalesce operand
+        // is a silence carrier for every arm it protects, but the right-most arm is a
+        // plain read — the value whenever everything left fell through. Judged under
+        // the accumulated `¬isset` premise ladder S5 built.
         if descent.is_none()
             && let StmtKind::Assign { value: value @ ArgValue::Coalesce(..), span, .. }
             | StmtKind::Return { value: value @ ArgValue::Coalesce(..), span, .. } = &stmt.kind
@@ -11814,51 +11425,40 @@ fn walk_trace(
             check_coalesce_final_arm(cx, value, env, scope.poisoned, *span, out);
         }
 
-        // non-object receivers (ADR-0078, issue #190)
-        // 1z-ter. `property.on-non-object` at the SAME whitelisted read positions the
-        // offset family uses (A7): a plain assignment-RHS and a return operand whose
-        // value is directly a property fetch. Judged once per site in the plain
-        // per-scope pass, against the pre-statement env — so a branch that narrowed
-        // the receiver is already in force. Argument, echo and condition positions
-        // are outside the whitelist, exactly as they are for `offset.missing`.
+        // 1z-ter. `property.on-non-object` (ADR-0078, issue #190) at the same
+        // whitelisted read positions the offset family uses (A7), against the
+        // pre-statement env — so a branch that narrowed the receiver is already in
+        // force. Argument/echo/condition positions are outside the whitelist,
+        // like `offset.missing`.
         if descent.is_none()
             && let StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
             | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } = &stmt.kind
         {
             check_property_on_non_object(cx, var, prop, env, scope.poisoned, *span, out);
         }
-        // end non-object receivers (ADR-0078, issue #190)
 
         // 1z-ter. String context (ADR-0078, issue #193): every value this statement
-        // hands to PHP's string conversion, judged against the PRE-statement env —
-        // which is the env PHP evaluates the operands in. The sites themselves come
-        // from the lowering, so this position list is the statement's own, not a
-        // second syntactic derivation. Plain per-scope pass only, like every other
-        // once-per-site judgement.
+        // hands to PHP's string conversion, judged against the pre-statement env,
+        // the env PHP evaluates the operands in.
         if descent.is_none() {
             check_string_contexts(w, folder, stmt, env, store, out);
         }
 
-        // inaccessible members (ADR-0078, issue #185)
-        // 1z-quater. `property.inaccessible` and `class-const.inaccessible` at the
-        // member-access positions this IR spells: the same two whitelisted READ
-        // positions the offset family uses, plus the property WRITE statement, which
-        // is a member access in its own right (`Cannot access private property C::$p`
-        // is witnessed for both directions). Once per site, plain per-scope pass.
+        // 1z-quater. `property.inaccessible` / `class-const.inaccessible` (ADR-0078,
+        // issue #185) at the member-access positions this IR spells: the same two
+        // whitelisted read positions the offset family uses, plus the property write
+        // statement, itself a member access (`Cannot access private property C::$p`
+        // is witnessed both directions).
         if descent.is_none() {
             match &stmt.kind {
                 StmtKind::Assign { value: ArgValue::PropFetch { var, prop }, span, .. }
                 | StmtKind::Return { value: ArgValue::PropFetch { var, prop }, span, .. } => {
                     check_inaccessible_property(w, var, prop, store, false, *span, out);
-                    // member absence (ADR-0078, issue #197)
-                    // The absence twin at the same READ position — and only the read
-                    // position: the write side is `property.dynamic-write`, deferred
-                    // with its design, and a write is a deprecation today rather than
-                    // the warning this id names. The two are disjoint by construction
-                    // (an inaccessible property is *declared*, which is this walk's
-                    // silence), so a site never carries both.
+                    // Absence twin (ADR-0078, issue #197), read position only — the
+                    // write side is `property.dynamic-write`, deferred with its own
+                    // design. Disjoint by construction from the inaccessible check
+                    // above (that requires a *declared* property).
                     check_undefined_property(w, folder, var, prop, store, *span, out);
-                    // end member absence (ADR-0078, issue #197)
                 }
                 StmtKind::PropAssign { target_var, prop, span, .. } => {
                     check_inaccessible_property(w, target_var, prop, store, true, *span, out);
@@ -11866,30 +11466,25 @@ fn walk_trace(
                 StmtKind::Assign { value: ArgValue::ClassConst(sc, name), span, .. }
                 | StmtKind::Return { value: ArgValue::ClassConst(sc, name), span, .. } => {
                     check_inaccessible_class_const(w, sc, name, *span, out);
-                    // member absence (ADR-0078, issue #197)
                     check_undefined_class_const(w, folder, sc, name, *span, out);
-                    // end member absence (ADR-0078, issue #197)
                 }
                 _ => {}
             }
         }
-        // end inaccessible members (ADR-0078, issue #185)
 
         // 1a. Escape + sweep (ADR-0036): passing an object into a call escapes it;
         // an unknown/overridable call — or any call an object was passed into —
         // sweeps every escaped object's non-readonly props. `$this` is pre-escaped,
-        // so an overridable call on it (unresolved via the guard) sweeps it, while a
-        // private/final call (resolved, no object args) leaves it intact.
+        // so an overridable call on it sweeps it, while a resolved private/final
+        // call with no object args leaves it intact.
         apply_call_escape_and_sweep(w, &stmt.kind, store);
 
-        // 1b. Return-type check (native + phpdoc contract); see the original notes.
+        // 1b. Return-type check (native + phpdoc contract).
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
             let mut native_fired = false;
             // A proven scalar (env/fold), or a proven object / class constant
-            // (ADR-0043 stage 3 return path); the object arm rides the is-a oracle.
-            // Stratum rides with the resolution (issue #127 review): an Asserted
-            // fold (`return strtoupper(g(...))`) must not launder to Verified via a
-            // syntactic re-read. Nested fold descents emit through `out`.
+            // (ADR-0043 stage 3). Stratum rides with the resolution (issue #127): an
+            // Asserted fold must not launder to Verified via a syntactic re-read.
             let ret_resolved: Option<(ArgValue, Stratum)> = cx
                 .resolve_literal_strat_ex(
                     value,
@@ -11918,12 +11513,11 @@ fn walk_trace(
             if !native_fired
                 && let Some((pret, display)) = w.ret_phpdoc
             {
-                // Proven-value path, then the abstract-fact path (Feature E) —
-                // same discipline as the `@param` check: only a definite `No`.
+                // Proven-value path, then the abstract-fact path (Feature E) — same
+                // discipline as `@param`: only a definite `No`.
                 let rendered = match cx.resolve_cval(value, env, store, scope.poisoned, folder) {
-                    // ADR-0043 stage 4: the class arm of `accepts` now yields definite
-                    // verdicts; a class-touching return verdict is guard-blind inside a
-                    // descent (mirror of the native `object_world_guard_blind`).
+                    // ADR-0043 stage 4: class-touching verdict is guard-blind inside a
+                    // descent, mirroring `object_world_guard_blind`.
                     Some(cv) => (accepts(cx, cx.cur, span.start, pret, &cv) == Certainty::No
                         && !phpdoc_object_guard_blind(descent.is_some(), pret, Some(&cv)))
                     .then(|| rendered_cval(&cv)),
@@ -11955,22 +11549,20 @@ fn walk_trace(
             }
         }
 
-        // 1c. Return-fact summary (ADR-0057 amendment T0): when a descent is building
-        // this callee's summary, snapshot each returning exit's value-domain fact.
-        // Read here — before the return's own escape/invalidation effect (step 2) —
-        // so the returned variable's env fact is still live. The join is deferred to
-        // `descend`; here we only classify the exit (A2 drop / cross, A3 floor).
+        // 1c. Return-fact summary (ADR-0057 T0): when a descent is building this
+        // callee's summary, snapshot each returning exit's value-domain fact. Read
+        // here — before the return's own escape/invalidation effect (step 2) — so
+        // the returned variable's env fact is still live. The join is deferred to
+        // `descend`; here we only classify the exit (A2 drop/cross, A3 floor).
         if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
             // Composition (A1): when the returned expression IS a call whose
-            // summary step 1 captured into `stmt_summary`, that summary is this
-            // exit's fact — `return g(...)` and `return $o->m(...)` / `return C::m(...)`
-            // (ADR-0075) cross the proven fact. A constructor `return new Foo(...)`
-            // is `ArgValue::New` and never composes a construct-body summary as a
-            // value (object return is T1). A recursive / unbindable inner call left
-            // `stmt_summary` empty, so this falls through to the direct value fact
-            // (and thence the A3 floor).
+            // summary step 1 captured, that summary is this exit's fact — `return
+            // g(...)`, `return $o->m(...)`/`C::m(...)` (ADR-0075) cross the proven
+            // fact. A constructor `return new Foo(...)` never composes (object
+            // return is T1). A recursive/unbindable inner call left `stmt_summary`
+            // empty, falling through to the direct value fact (thence A3 floor).
             let composed = if matches!(value, ArgValue::New(..)) {
                 None
             } else {
@@ -12004,9 +11596,9 @@ fn walk_trace(
                 Flow::FellThrough
             }
             // A destructuring assignment (issue #288) is a barrier that also names
-            // the reads its source undergoes. The reads were judged above (1z-bis-a,
-            // against the pre-statement env); the env effect is the barrier's, since
-            // the pattern's targets are writes this walk does not model.
+            // the reads its source undergoes (judged above against the pre-statement
+            // env); the env effect is the barrier's, since the pattern's targets are
+            // writes this walk does not model.
             StmtKind::Destructure { .. } => {
                 env.clear();
                 store.clear();
@@ -12026,13 +11618,12 @@ fn walk_trace(
             // assignment / by-ref call) is in `invalidated` (step 3). Reading a
             // variable in an echo no longer forgets it (ADR-0031 precision payoff).
             StmtKind::Echo(_) => Flow::FellThrough,
-            // A still-`Opaque` construct (loop / switch / try) forgets what it may
-            // write AND what it branches on (reads) (ADR-0027), because the trace
-            // does not model its control flow. When the subtree
-            // may `return` (`may_return`), a summary walk contributes the declared
-            // floor so those hidden exits join the visible ones (ADR-0057 A3;
-            // ADR-0075 / #126: without this, a sibling `return null` alone pins
-            // Singleton(null) and manufactures call.on-null FPs).
+            // A still-`Opaque` construct (loop/switch/try) forgets what it may write
+            // AND what it branches on (ADR-0027) since the trace does not model its
+            // control flow. When the subtree may `return`, a summary walk
+            // contributes the declared floor so hidden exits join the visible ones
+            // (ADR-0057 A3; ADR-0075/#126 — without this a sibling `return null`
+            // alone pins Singleton(null) and manufactures call.on-null FPs).
             StmtKind::Opaque { writes, reads, poisons, may_return } => {
                 if *poisons {
                     env.clear();
@@ -12053,23 +11644,16 @@ fn walk_trace(
             StmtKind::Call(_) => Flow::FellThrough,
             // `assert($expr)` narrows the fall-through env with the guard's
             // true-branch refinements (ADR-0052 §5, amended 2026-07-25 — owner
-            // ruling "assert() reads as a throw-guard"). Steins reads `assert($expr)`
-            // as statically equivalent to `if (!$expr) throw`: continuing past it
-            // means the condition held, at the `Verified` stratum unconditionally.
-            // `zend.assertions` is never consulted — the risk of running production
-            // with assertions compiled out is the operator's, not the analysis's.
+            // ruling: `assert($expr)` reads as `if (!$expr) throw`, unconditionally,
+            // at `Verified` stratum; `zend.assertions` is never consulted).
             StmtKind::Assert { cond } => {
                 apply_type_narrowing(w.cx, cond, true, env, store);
                 let refs = then_refinements(cond, w.cx.php_minor);
                 apply_refinements(&refs, env, store, Stratum::Verified);
-                // The assert lowering already models its argument as a `CondExpr`
-                // and applies the true-branch refinements, so `assert(isset(...))`
-                // routes into the S4 narrowing through exactly the `if`-guard
-                // path — no assert-specific plumbing.
-                // …and the same holds for the DR2 type-predicate vocabulary
-                // (applied above, in the branch walk's order): `assert(is_string($x))`
-                // narrows through the `if`-guard path with no assert-specific
-                // plumbing — ADR-0064 §5's "assert inherits every guard for free".
+                // The assert lowering models its argument as a `CondExpr`, so both
+                // `assert(isset(...))` and the DR2 type-predicate vocabulary
+                // (`assert(is_string($x))`) route through the same `if`-guard
+                // narrowing with no assert-specific plumbing (ADR-0064 §5).
                 apply_shape_narrowing(w.cx, cond, true, env, store, true);
                 Flow::FellThrough
             }
@@ -12185,94 +11769,55 @@ fn walk_trace(
 /// The variables `stmt` hands to a call whose facts nevertheless **survive** it
 /// (ADR-0070) — the precise reading of the blanket `Stmt::invalidated` drop.
 ///
-/// Takes the evidence rather than the statement, because two positions carry
-/// it: a statement's [`Stmt::invalidated`], and a comparison operand's
-/// [`CondOperand::Other`] `sites` (issue #158 — `count($a) === count($b)` hands
-/// `$a` to the same by-value parameter `count($a);` does, and the branch has the
-/// same right to keep its shape).
+/// Evidence comes from two positions: [`Stmt::invalidated`], and a comparison
+/// operand's [`CondOperand::Other`] `sites` (issue #158 — `count($a) === count($b)`
+/// hands `$a` to the same by-value parameter `count($a);` does).
 ///
-/// # Why anything may survive at all
-///
-/// PHP passes scalars, strings and arrays **by value** (copy-on-write): the
-/// callee's parameter is a separate zval, and writing it cannot reach the
-/// caller's binding. So `array_first($a)` — a by-value argument — leaves `$a`
-/// exactly as it was, and forgetting `$a`'s shape there is a precision loss with
-/// no soundness content. Only a `&$x` parameter (an alias of the caller's
-/// lvalue) and an object *handle* (whose referent the callee can mutate) pierce
-/// that, and the first is refused below. The second — an object handle — is
-/// admitted since the 2026-08-09 amendment (issue #295): a by-value callee can
-/// mutate the referent's state, but that state is swept by ADR-0036 earlier in
-/// the same statement, and nothing else about the handle is reachable from the
-/// callee. See [`is_value_semantic`].
+/// Survival is possible because PHP passes scalars, strings and arrays **by value**
+/// (copy-on-write): the callee's parameter is a separate zval, so forgetting the
+/// caller's shape is precision loss, not a soundness risk. A `&$x` parameter and an
+/// object *handle* pierce that — the first is refused below; the second is admitted
+/// since the 2026-08-09 amendment (issue #295) because ADR-0036 already sweeps the
+/// referent's state earlier in the statement. See [`is_value_semantic`].
 ///
 /// # The gate — all five must hold, per variable
 ///
-/// 1. **Every** occurrence of the name in this statement's call arguments is a
-///    recorded site on its [`steins_syntax::InvalidatedVar`] entry — an entry
-///    with an unprovable occurrence anywhere is `opaque` and carries no sites
-///    (the syntax layer's completeness invariant) — and each of
-///    those callees **resolves with a known signature**: a project function the
-///    index knows (its declared [`Param::by_ref`] answers directly), or a
-///    builtin whose argument semantics the catalog states
-///    ([`steins_catalog::by_value_arg`]). A name nobody knows refuses.
-/// 2. The argument is **by value** at that position. Call-time pass-by-reference
-///    was removed in PHP 8, so this is a property of the declaration alone; a
-///    `&$x` parameter, an argument past the declared arity, and a variadic
-///    position all refuse.
-/// 3. The variable denotes a **value-semantic** thing, or a **heap object
-///    handle** (the 2026-08-09 amendment). A closure value and a bare
-///    guard-derived class bound still drop.
-/// 4. The scope is **not poisoned**. Every aliasing / scope-injection construct
-///    (`$x = &$y`, `global`, `static $x`, `$$v`, `extract`/`compact`, `eval`,
-///    `include`, a by-ref `use (&$x)`) poisons the whole scope, so a live
-///    reference into a local can never coexist with a surviving fact here. The
-///    same veto is applied to the *callee's* body for a project function, which
-///    is what closes the one route a by-value argument does not describe — a
-///    callee reaching a caller local through `global` at top-level scope.
-/// 5. Language constructs never reach this path: `isset`/`empty`/`unset`/`list`
-///    are not call nodes, so the lowering records no site for them.
+/// 1. Every occurrence of the name in this statement's call arguments is a recorded
+///    site on its [`steins_syntax::InvalidatedVar`] entry (an unprovable occurrence
+///    makes the entry `opaque`, with no sites), and each callee resolves with a known
+///    signature — project ([`Param::by_ref`]) or catalog builtin
+///    ([`steins_catalog::by_value_arg`]). An unknown callee refuses.
+/// 2. The argument is by value at that position (call-time pass-by-reference was
+///    removed in PHP 8, so this is fixed by the declaration): a `&$x` parameter, an
+///    argument past declared arity, or a variadic position refuses.
+/// 3. The variable is value-semantic or a heap object handle — a closure value or a
+///    bare guard-derived class bound still drops.
+/// 4. The scope is not poisoned. Every aliasing/scope-injection construct (`$x = &$y`,
+///    `global`, `static $x`, `$$v`, `extract`/`compact`, `eval`, `include`, a by-ref
+///    `use (&$x)`) poisons the whole scope — including inside a project callee's own
+///    body, closing the route by-value alone can't: reaching a caller local via
+///    `global`.
+/// 5. Language constructs (`isset`/`empty`/`unset`/`list`) never reach this path —
+///    they aren't call nodes, so the lowering records no site.
 ///
-/// # The dump-surface exception (ADR-0053)
+/// # Read-site exceptions
 ///
-/// A recognized dump callee — the reserved `PHPStan\dumpType` pair (D3) or the
-/// global `var_dump` (D4) — is a **read**: it observes the walk's facts at the
-/// call position and binds nothing (§10 §3). Such a site keeps the argument's
-/// every binding (object holders included — nothing is handed anywhere that
-/// could mutate the referent's state) and is exempt from conditions 1–3, so the
-/// dump surface stays idempotent: the second dump of a variable answers exactly
-/// what the first one did. Recognition is the emitters' own — resolved-FQN,
-/// definition-insensitive for the reserved pair ([`dump_family`]'s rule) — so
-/// the gate and the emitter can never disagree about what a dump is.
+/// A recognized dump callee — `PHPStan\dumpType` (D3) or global `var_dump` (D4) — is a
+/// read that binds nothing (ADR-0053 §10 §3), exempt from conditions 1–3, keeping the
+/// dump surface idempotent. Recognition is the emitters' own resolved-FQN rule
+/// ([`dump_family`]), so gate and emitter can't disagree.
 ///
-/// # The harness assertType exception (oracle idea B)
-///
-/// In the **harness universe only** — the [`ASSERT_SINK`] installed by
-/// [`collect_assert_types`] — a `PHPStan\Testing\assertType('T', $e)` site is
-/// the same kind of read: the observer records facts at the call position and
-/// binds nothing, so its arguments survive exactly like a dump's. This is what
-/// keeps the measurement honest when a corpus file asserts one variable twice
-/// (phpstan-src's nsrt files do, routinely): the second assertion must observe
-/// the same env the first did, not one degraded by the first assertion's own
-/// scaffolding. The exception is deliberately **not** unconditional, unlike the
-/// dump pair's: the dumps earn theirs by being normal-check-surface features
-/// (D3/D4 emit diagnostics in every check), while `assertType` has no
-/// normal-check emitter — with the sink absent, [`is_assert_read_site`] is
-/// `false` everywhere and the check surface stays byte-identical (the
-/// [`emit_asserts`] pin), so a project that really calls
-/// `PHPStan\Testing\assertType` keeps the ordinary conservative treatment.
+/// In the harness universe only ([`ASSERT_SINK`], installed by
+/// [`collect_assert_types`]), a `PHPStan\Testing\assertType` site is the same kind of
+/// read, keeping repeated-assert nsrt files honest. Not unconditional like the dumps —
+/// with the sink absent, [`is_assert_read_site`] is `false` everywhere and the check
+/// surface stays byte-identical (the [`emit_asserts`] pin).
 ///
 /// # Replayability (ADR-0048)
 ///
-/// The verdict is a **pure function** of (the statement's recorded sites, the
-/// project index, the static catalog, the walk-local env/store at this point,
-/// and which universe is running — the harness sink is installed for a whole
-/// [`collect_assert_types`] run and absent for a whole check, never toggled
-/// mid-walk, so it selects a universe rather than injecting per-name state).
-/// It asks the engine nothing — no sidecar reflection, no boot surface, no fold
-/// — so there is no per-name engine state to memo (the issue #63 discipline
-/// applies vacuously here, and deliberately so), and no global ordering can
-/// enter a kept fact. Two runs of the same universe over the same sources
-/// decide identically, with or without PHP.
+/// The verdict is a pure function of the statement's recorded sites, the project
+/// index, the static catalog, and the walk-local env/store — no reflection, boot
+/// surface, or fold, so no per-name engine state needs memoizing.
 fn by_value_survivors<'s>(
     cx: &Cx<'_>,
     poisoned: bool,
@@ -12357,40 +11902,27 @@ fn is_assert_read_site(cx: &Cx<'_>, r: &NameRef) -> bool {
     ASSERT_SINK.with(|s| s.borrow().is_some()) && resolved_fn_fqn(cx, r) == ASSERT_TYPE_FQN
 }
 
-/// Whether `var` holds a **value-semantic** binding worth saving — a scalar, a
-/// string or an array — rather than an object handle or nothing at all
-/// (ADR-0070 condition 3).
+/// Whether `var` holds a **value-semantic** binding worth saving — a scalar,
+/// string, or array — rather than an object handle or nothing at all (ADR-0070
+/// condition 3).
 ///
-/// [`Fact`] has no object layer by construction (its `Val` is int/float/string/
-/// bool/null/array), so the object question is asked of the carriers that do
-/// hold one: the heap handle lane, the guard-derived class-bound lane, and the
-/// closure value on the binding itself.
+/// [`Fact`] has no object layer by construction, so the object question is asked
+/// of the carriers that hold one: the heap handle lane, the guard-derived
+/// class-bound lane, and the closure value on the binding itself.
 ///
-/// **The heap handle lane admits** (ADR-0070 amendment, issue #295). Class
-/// identity was never the reason it refused — a by-value call cannot change what
-/// class an object is, and it cannot rebind the caller's variable either — the
-/// object's own **mutable state** was. That state is already invalidated,
-/// earlier in this very statement, by the ADR-0036 escape-and-sweep
-/// ([`escape_and_sweep_calls`]): handing an object to a call marks it escaped and
-/// sweeps its non-readonly props. Dropping the var→id link on top of that erased
-/// the allocation identity as well — the exact class, the readonly facts, and
-/// (issue #295) the class-level generic carry — for no soundness gain. The one
-/// route that could rebind the variable, a `&$x` parameter, is refused by
-/// condition 2, and the routes that reach a caller local sideways (`global`,
-/// `extract`, `$$v`, `eval`) are refused by condition 4 on both sides. So a
-/// handle whose every occurrence is a proven by-value argument survives, holding
-/// exactly what a by-value callee cannot touch.
+/// The heap handle lane admits (ADR-0070 amendment, issue #295): a by-value call
+/// cannot change an object's class or rebind the caller's variable — only its
+/// mutable state, which is already invalidated earlier in the statement by the
+/// ADR-0036 escape-and-sweep. Dropping the var→id link on top of that would erase
+/// the allocation identity (exact class, readonly facts, generic carry) for no
+/// soundness gain. The route that could rebind (`&$x`) is refused by condition 2;
+/// sideways routes (`global`, `extract`, `$$v`, `eval`) by condition 4.
 ///
-/// A **guard-derived class bound alone** (a `Member` with no heap object)
-/// deliberately does not follow it here. The same argument would carry, but this
-/// slice needed the allocation lane and nothing else, and a narrowing carrier
-/// with no allocation behind it is a separate consumer set to measure.
+/// A guard-derived class bound alone (`Member` with no heap object) deliberately
+/// does not follow it here — a separate consumer set to measure later.
 ///
-/// A name none of the lanes mention answers `false` too, and that leg is purely
-/// a cost gate: invalidating an unbound name is already a no-op, so the callee
-/// resolution behind conditions 1 and 2 would be work spent on nothing. Most
-/// call arguments in real code are exactly that, which is what keeps the precise
-/// path off the hot path.
+/// A name none of the lanes mention answers `false` too, purely as a cost gate:
+/// invalidating an unbound name is already a no-op.
 fn is_value_semantic(var: &str, env: &HashMap<String, Known>, store: &Store) -> bool {
     if store.refs.contains_key(var) {
         return true;
@@ -12442,12 +11974,10 @@ fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> bool {
 }
 
 /// The trust stratum a resolved value carries (ADR-0052 §5 derivation clause): the
-/// minimum over every env/heap fact consumed while resolving `value`. A literal, a
-/// `new`/enum/const, or a fully-literal subtree is `Verified`; a bare `$var` takes
-/// its env stratum; a property fetch takes the prop's stratum; an array literal or
-/// a foldable call takes the min over its elements/arguments; a ternary the min of
-/// its arms. Consulted only where resolution succeeded (so consumed vars were
-/// proven), it stamps the derived binding with `min(inputs)`, closing the
+/// minimum over every env/heap fact consumed while resolving `value`. A literal or
+/// fully-literal subtree is `Verified`; a bare `$var` takes its env stratum; a
+/// property fetch takes the prop's stratum; an array/call/ternary takes the min
+/// over its parts. Stamps the derived binding with `min(inputs)`, closing the
 /// laundering hazard the audit's `$pair = [$x, 99]` snippet names.
 fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&Store>) -> Stratum {
     match value {
@@ -12515,11 +12045,10 @@ struct DumpRendering {
     asserted: bool,
 }
 
-/// The resolved function FQN a call names (ADR-0001 name resolution), lowercase-
-/// normalized and leading-`\`-stripped — **definition-insensitive** (no index lookup:
-/// the reserved dump pair is recognized regardless of whether a userland definition
-/// exists, ADR-0053 §5). Mirrors [`Cx::resolve_function`]'s name computation but
-/// yields the FQN string rather than a resolution verdict.
+/// The resolved function FQN a call names (ADR-0001), lowercase-normalized —
+/// definition-insensitive (no index lookup, ADR-0053 §5: the reserved dump pair
+/// is recognized regardless of whether a userland definition exists). Mirrors
+/// [`Cx::resolve_function`]'s name computation but yields the FQN string.
 fn resolved_fn_fqn(cx: &Cx, r: &NameRef) -> String {
     match r.kind {
         RefKind::FullyQualified => r.raw.to_ascii_lowercase(),
@@ -12583,19 +12112,14 @@ fn dump_family(cx: &Cx, call: &CallExpr) -> Option<DumpFamily> {
 /// resolution and fallback rule (ADR-0053 §5 / D4) — the `debug.var-dump` trigger.
 /// The six enumerated legs:
 ///
-/// - (a) `\var_dump($e)` — always (the fully-qualified global builtin);
-/// - (b) unqualified `var_dump($e)` in the root namespace — always;
-/// - (c) unqualified in `namespace Foo;` — only if `Foo\var_dump` is **provably
-///   undefined** (the runtime falls back to global); a same-namespace homonym, an
-///   ambiguous resolution, or a dam that leaves existence Unknown ⇒ **no dump** (a
-///   missed dump is never an FP — silence is the free safe side);
-/// - (d) `Foo\var_dump($e)` qualified, or `use function Foo\var_dump;` — never
-///   (resolves elsewhere); a `use function var_dump;` importing the global is still
-///   the global, so it dumps;
-/// - (e) a *method* `$o->var_dump()` / `static::var_dump()` — never (a different
-///   symbol space; `Callee::Method`/`Static`, not `Function`);
-/// - (f) first-class callables and string callables — never (no argument expression
-///   at the site to dump — handled by the arg-less guard in [`emit_dumps`]).
+/// - (a) `\var_dump($e)` — always;
+/// - (b) unqualified in the root namespace — always;
+/// - (c) unqualified in `namespace Foo;` — only if `Foo\var_dump` is provably
+///   undefined (ambiguous or Unknown ⇒ no dump — silence is the safe side);
+/// - (d) `Foo\var_dump($e)` qualified, or `use function Foo\var_dump;` — never;
+///   `use function var_dump;` importing the global still dumps;
+/// - (e) a method `$o->var_dump()` — never (different symbol space);
+/// - (f) first-class/string callables — never (no argument expression to dump).
 fn recognizes_var_dump(cx: &Cx, call: &CallExpr) -> bool {
     let Callee::Function(_) = &call.receiver else { return false };
     let Some(r) = call.callee_ref.as_ref() else { return false };
@@ -12645,15 +12169,12 @@ fn is_first_class_callable(call: &CallExpr) -> bool {
 }
 
 /// Render a value-domain [`Fact`] for the dump surface (ADR-0053 §7). Finite layers
-/// (`Singleton`/`OneOf`) render **value-precisely** — the literal itself, not its
-/// base type — because value-precision is exactly what the dump surface exists to
-/// show (and what PHPStan's own constant types render: `5`, `false`, `'a'`). This
-/// reverses ADR-0053 §9's earlier collapse-to-base pin for the dump path only (the
-/// annotate/docblock renderer keeps the base-collapsed spelling, unchanged — see
-/// [`render_finite_precise`]). The abstract layers (`Refined`/`General`) carry no
-/// enumerable value set; they render as the honest phpdoc keyword ladder, reusing
-/// the speller's own `preds_keyword` for refined strings so the two agree. A set with
-/// no faithful spelling (an array member) renders as honest [`DUMP_UNKNOWN`].
+/// (`Singleton`/`OneOf`) render value-precisely — the literal itself, not its base
+/// type (what PHPStan's constant types render too). This reverses ADR-0053 §9's
+/// collapse-to-base pin for the dump path only (the annotate/docblock renderer
+/// keeps base-collapsed spelling — see [`render_finite_precise`]). Abstract layers
+/// (`Refined`/`General`) render as the phpdoc keyword ladder, reusing the speller's
+/// `preds_keyword` for refined strings. No faithful spelling renders [`DUMP_UNKNOWN`].
 fn render_dump_fact(fact: &Fact) -> String {
     if let Some(members) = fact.finite_members() {
         return render_finite_precise(members).unwrap_or_else(|| DUMP_UNKNOWN.to_owned());
@@ -12695,39 +12216,30 @@ fn render_dump_fact(fact: &Fact) -> String {
 /// Spell an abstract [`ShapeFact`] for the dump surface (ADR-0062 §6, D4) — the
 /// same array-vocabulary decision [`render_contract_arms`]'s `Shape` arm and
 /// [`render_finite_precise`]'s concrete-array path make, run over the flow-side
-/// fact form instead of the declared or concrete one. Every field/tail value
-/// slot recurses through [`render_dump_fact`] itself (the domain's `Fact` is
-/// recursive, ADR-0062 §3). [`describe_fact`] inherits it for the
-/// `phpdoc.*-mismatch` messages ADR-0072 unlocked, so the diagnostic surface
-/// and the dump surface name a shape fact identically.
+/// fact form. Every field/tail slot recurses through [`render_dump_fact`] (the
+/// domain's `Fact` is recursive, ADR-0062 §3). [`describe_fact`] inherits it for
+/// `phpdoc.*-mismatch` messages, so the diagnostic and dump surfaces agree.
 fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
     use steins_domain::{KeyClass, Presence, Tail};
 
     let is_list = shape.is_list == Certainty::Yes;
-    // The degenerate forms (A-G1) spell as the GENERIC vocabulary, not as a
-    // brace shape with only a tail in it: `array`, `array<K, V>`, `list<T>` —
-    // which is both what they lowered from and what they round-trip back to.
-    // `array{...<int, string>}` would parse to the same fact, but nobody writes
-    // it and PHPStan does not print it. `covers` does not gate this: neither
-    // spelling prints a disjunctive-presence fact (A-G8 lives in the domain,
-    // not the surface), so a fieldless covers-bearing fact still spells the
-    // generic keyword — PHPStan's own `non-empty-array` for the
-    // `array_key_exists(A) || array_key_exists(B)` join.
+    // The degenerate forms (A-G1) spell as the generic vocabulary, not a brace
+    // shape with only a tail: `array`, `array<K, V>`, `list<T>` — both what they
+    // lowered from and what they round-trip back to. `covers` does not gate this:
+    // a fieldless covers-bearing fact still spells the generic keyword (PHPStan's
+    // own `non-empty-array` for an `array_key_exists` join).
     if shape.fields.is_empty()
         && let Tail::Unsealed { key, value } = &shape.tail
     {
         let val = value.as_ref().map(|f| render_dump_fact(f));
-        // A key class is printed only where it is narrower than `array-key`;
-        // `spell_generic_array` drops it entirely for a list.
+        // Printed only where narrower than `array-key`; dropped for a list.
         let key_text = match key {
             KeyClass::ArrayKey => None,
             KeyClass::Int => Some("int"),
             KeyClass::Str => Some("string"),
         };
-        // A key-agnostic, value-agnostic tail IS plain `array`, which the
-        // speller produces from the two `None`s. A denotational `No` (never
-        // `Yes`, handled above) is Phan's `associative-array` — the fact-lane
-        // mirror of `to_shape_fact`'s `MapOf.not_list` seed.
+        // A key-agnostic, value-agnostic tail IS plain `array`. A denotational
+        // `No` (never `Yes`, handled above) is Phan's `associative-array`.
         let not_list = shape.is_list == Certainty::No;
         let body = steins_contract::spell::spell_generic_array(
             is_list,
@@ -12738,14 +12250,12 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
         );
         return with_null(body, nullable);
     }
-    // Field order on the page follows PROVENANCE (issue #327). A shape that
-    // witnessed its construction prints the order it saw, which is the order the
-    // `Singleton` it generalizes has always printed and the order the reference
-    // implementation prints: `['b' => 1, 'a' => $x]` is `array{b: 1, a: int}`.
-    // A shape that merely had an order *declared* at it keeps the canonical key
-    // order, which is Steins saying out loud that `array{b: int, a: string}` is
-    // an order-agnostic key set (ADR-0062 §2, RFC #14939) — the registered
-    // divergence, and the one place the two provenances must not look alike.
+    // Field order follows PROVENANCE (issue #327): a shape that witnessed its
+    // construction prints the order it saw (`['b'=>1,'a'=>$x]` is
+    // `array{b: 1, a: int}`, matching the reference implementation). A shape with
+    // a merely *declared* order keeps canonical key order — Steins saying
+    // `array{b: int, a: string}` is an order-agnostic key set (ADR-0062 §2, RFC
+    // #14939), the registered divergence between the two provenances.
     let ordered: Vec<&(VKey, Presence, Option<Box<Fact>>)> = match &shape.order {
         Some(order) => order
             .iter()
@@ -12781,25 +12291,18 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
 }
 
 /// Value-precise spelling of a finite value set (`Singleton`/`OneOf` members) for
-/// the dump surface: int/float/bool literals verbatim (`123`, `-5`, `123.0`,
-/// `false`), string literals single-quoted through the shared speller's own literal
-/// escaping ([`steins_contract::spell::string_literal`] — ONE speller, no second
-/// string escaper), `null` as `null`, and — ADR-0062 §6 — an array member through
-/// the shared D4 spelling ([`steins_contract::spell::spell_val`], the `spell_arms`
-/// "value-side counterpart": a list value `list{…}`, everything else keyed
-/// `array{…}`, nested arrays recursing). Members are sorted+deduped and joined with
-/// `|` in the domain's canonical [`Val`] order (int, float, string, bool, null,
-/// array) — order is immaterial to the harness (it sorts union atoms) but kept
-/// stable for readable output. `None` only for an empty member slice (unreachable
-/// from `Fact::finite_members`, which is never empty by construction) — every
-/// `Val`, including an array, now has a faithful spelling here.
+/// the dump surface: int/float/bool literals verbatim, string literals through the
+/// shared speller's escaping ([`steins_contract::spell::string_literal`]), `null`
+/// as `null`, and (ADR-0062 §6) an array member through the shared D4 spelling
+/// ([`steins_contract::spell::spell_val`]: `list{…}` or `array{…}`, recursing).
+/// Members sorted+deduped, joined with `|`. `None` only for an empty slice
+/// (unreachable from `Fact::finite_members`).
 fn render_finite_precise(members: &[Val]) -> Option<String> {
     let mut vals = members.to_vec();
     vals.sort();
     vals.dedup();
     // Emit in the canonical spelling order `summarize_vals` fixes (int, float,
-    // string, bool, null) — value-precise per member. Order is immaterial to the
-    // harness (it sorts atoms) but kept stable and PHPStan-shaped for readable output.
+    // string, bool, null) — kept stable and PHPStan-shaped for readable output.
     let mut parts: Vec<String> = Vec::with_capacity(vals.len());
     parts.extend(vals.iter().filter_map(|v| match v {
         Val::Int(n) => Some(n.to_string()),
@@ -12817,8 +12320,8 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
         ),
         _ => None,
     }));
-    // Both bool literals present ⟺ the whole `bool` type — PHPStan renders `bool`
-    // there, not `false|true`. A single bool literal stays precise (`true`/`false`).
+    // Both bool literals present == the whole `bool` type — PHPStan renders `bool`,
+    // not `false|true`. A single bool literal stays precise.
     match (vals.contains(&Val::Bool(true)), vals.contains(&Val::Bool(false))) {
         (true, true) => parts.push("bool".to_owned()),
         (true, false) => parts.push("true".to_owned()),
@@ -12828,8 +12331,7 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
     if vals.contains(&Val::Null) {
         parts.push("null".to_owned());
     }
-    // Array members: the D4 spelling, appended last (mirroring spell_arms's own
-    // array-vocabulary placement — scalar members first, arrays after).
+    // Array members: D4 spelling, appended last (scalars first, arrays after).
     parts.extend(vals.iter().filter_map(|v| match v {
         Val::Array(_) => Some(steins_contract::spell::spell_val(v)),
         _ => None,
@@ -12859,21 +12361,19 @@ fn base_keyword(b: Base) -> &'static str {
     }
 }
 
-/// How an int interval spells on the dump surface — the shared
-/// [`steins_contract::spell::int_range_keyword`], not a second copy of the ladder,
-/// so the value-fact path and the contract-arm path cannot disagree about a range
-/// (issue #90). [`describe_fact`] keeps its own keyword prose: a finding message
-/// is not the dump surface and reads better with the phpdoc sugar.
+/// How an int interval spells on the dump surface — shares
+/// [`steins_contract::spell::int_range_keyword`] with the contract-arm path so
+/// the two can't disagree about a range (issue #90). [`describe_fact`] keeps its
+/// own keyword prose since a finding message reads better with phpdoc sugar.
 fn int_range_keyword(r: IntRange) -> String {
     steins_contract::spell::int_range_keyword(r)
 }
 
 /// Render a narrowed contract-fact arm list (ADR-0052 §1 carrier) for the dump
-/// surface. Scalar arms spell through the shared [`steins_contract::spell::spell_arms`];
-/// a pure class/`null` arm list renders each class's **source-cased,
-/// namespace-qualified** FQN (via [`Cx::class_display_fqn`], matching PHPStan and the
-/// casing diagnostics use); anything else has no faithful spelling (`None` → the
-/// caller falls to honest unknown).
+/// surface. Scalar arms spell through [`steins_contract::spell::spell_arms`]; a
+/// pure class/`null` arm list renders each class's source-cased FQN (via
+/// [`Cx::class_display_fqn`], matching PHPStan); anything else has no faithful
+/// spelling (`None` — caller falls to honest unknown).
 fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
     let tys: Vec<ContractTy> = arms.iter().map(|a| a.ty.clone()).collect();
     if let Some(scalar) = steins_contract::spell::spell_arms(&tys) {
@@ -12898,14 +12398,11 @@ fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
 /// literal at each site.
 const SHAPE_REFINED: &str = "narrowed array shape";
 
-/// Has this shape fact been refined by the flow, rather than merely seeded from
-/// a declaration?
-///
-/// Two independent signals, because the S4 operators leave different traces: a
-/// **witnessed** field is presence promotion's own record (the presence stratum,
-/// ADR-0062 §3), and the [`SHAPE_REFINED`] provenance covers the operators that
-/// leave no structural mark — `set_non_empty`, `set_is_list`, a `mark_absent`
-/// whose field a sealed tail then drops, and the collapse mint.
+/// Has this shape fact been refined by the flow, rather than merely seeded from a
+/// declaration? Two independent signals, since S4 operators leave different
+/// traces: a witnessed field is presence promotion's own record (ADR-0062 §3),
+/// and [`SHAPE_REFINED`] covers operators with no structural mark
+/// (`set_non_empty`, `set_is_list`, `mark_absent`, the collapse mint).
 fn shape_is_flow_refined(fact: &Fact, known: &Known) -> bool {
     if known.bound.as_deref() == Some(SHAPE_REFINED) {
         return true;
@@ -12971,14 +12468,10 @@ fn best_dump_type(
             return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
         }
         // 2b. The N4 `Member{yes:[…]}` carrier (ADR-0052 §1): a var an `instanceof`
-        //     guard bound to a class but that carries no heap object — e.g. a
-        //     `MethodCall`-typed var narrowed by `if ($x instanceof Foo)`, which
-        //     otherwise dumps as its coarse declared `CallLike` supertype. A
-        //     single-yes-member set renders that one class (tighter than the
-        //     contract arm); a multi-member yes-set has no single faithful class
-        //     spelling here, so it falls through to the contract carrier. The `no`
-        //     side never names a positive type. Bound at `Verified` (a runtime
-        //     `instanceof` on the live branch) ⇒ never `(asserted)`.
+        //     guard bound to a class but with no heap object — otherwise dumps as
+        //     its coarse declared supertype. A single-yes-member set renders that
+        //     class; a multi-member set falls through to the contract carrier.
+        //     Bound at `Verified` (a live-branch `instanceof`) => never `(asserted)`.
         if let Some(m) = store.member_of(name)
             && let [only] = m.yes.as_slice()
         {
@@ -12997,9 +12490,8 @@ fn best_dump_type(
         return DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false };
     }
     // A constant-key read against an abstract shape (ADR-0062 §4, S3): the declared
-    // field's value slot. Every no-fact outcome (an optional field, an unknown slot,
-    // a declared absence) falls through to honest unknown — the read surface says
-    // nothing it cannot spell, and emits nothing at all.
+    // field's value slot. Every no-fact outcome (optional field, unknown slot,
+    // declared absence) falls through to honest unknown.
     if let ArgValue::OffsetRead { base, key } = value
         && let Some((read, stratum)) = shape_read_at(base, key, env, poisoned, cx.php_minor)
         && let Some(fact) = read.into_fact()
@@ -13011,8 +12503,8 @@ fn best_dump_type(
     }
 
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
-    // left-to-right `¬isset` premise ladder, which is where a KeyCover discharges.
-    // Placed above the fold because a `??` is never a literal the folder can reach.
+    // left-to-right `¬isset` premise ladder, where a KeyCover discharges. Placed
+    // above the fold since a `??` is never a literal the folder can reach.
     if let ArgValue::Coalesce(a, b, _) = value
         && let Some((fact, stratum)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
     {
@@ -13022,11 +12514,9 @@ fn best_dump_type(
         };
     }
 
-    // A value-position binary operator (issue #260): the operator's own fact. Placed
-    // beside `??` and above the fold rung for the same reason — a comparison is never
-    // a literal the folder can reach — and it is total for a comparison, so the rungs
-    // below never see one. `true`/`false` when `eval_cmp` decides, `bool` when it does
-    // not: the floor is the operator's guarantee, not a guess about its operands.
+    // A value-position binary operator (issue #260): the operator's own fact, same
+    // placement reasoning as `??`. Total for a comparison, so lower rungs never see
+    // one — `true`/`false` when `eval_cmp` decides, `bool` when it doesn't.
     if let ArgValue::Binary { op, lhs, rhs } = value {
         let (fact, stratum) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
@@ -13037,9 +12527,9 @@ fn best_dump_type(
     }
 
     // A depth-1 property fetch `$var->prop` (ADR-0052 §7, Gap B): the allocation-keyed
-    // heap property fact (alias-correct by construction, ADR-0036). Escaped-then-swept
-    // props carry no fact and fall through to honest unknown; a readonly prop survives.
-    // Deeper chains (`$a->b->c`) lower to `Other`, never here — depth stays exactly 1.
+    // heap property fact (alias-correct, ADR-0036). Escaped-then-swept props carry no
+    // fact and fall through to unknown; a readonly prop survives. Deeper chains
+    // (`$a->b->c`) lower to `Other`, never here.
     if let ArgValue::PropFetch { var, prop } = value
         && !poisoned
         && let Some(fact) = store.prop_fact(var, prop)
@@ -13049,10 +12539,10 @@ fn best_dump_type(
             asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
         };
     }
-    // A non-variable argument: a resolved literal / foldable value fact wins first
-    // (folding is the floor below the return fact — a fully-literal call folds to a
-    // Singleton, ADR-0056 §4). Stratum comes from the resolution itself so a fold
-    // over an Asserted project-call summary stays Asserted (issue #127).
+    // A non-variable argument: a resolved literal/foldable value fact wins first (a
+    // fully-literal call folds to a Singleton, ADR-0056 §4). Stratum comes from the
+    // resolution itself so a fold over an Asserted project-call summary stays
+    // Asserted (issue #127).
     if let Some((lit, strat)) = cx.resolve_literal_strat(value, env, poisoned, folder)
         && let Some(fact) = singleton_fact(&lit, cx.php_minor)
     {
@@ -13062,9 +12552,7 @@ fn best_dump_type(
         };
     }
     // An array literal the rung above could not prove whole (issue #327): the
-    // shape its observed keys denote, with an unknown slot for each element the
-    // walk could not resolve. Below the proven-`Singleton` path, which already
-    // returned for a fully-literal array.
+    // shape its observed keys denote, with an unknown slot per unresolved element.
     if let ArgValue::Array(items) = value
         && let Some((fact, stratum)) =
             array_literal_fact(cx, folder, items, env, poisoned, Some(store))
@@ -13074,20 +12562,17 @@ fn best_dump_type(
             asserted: stratum == Stratum::Asserted,
         };
     }
-    // The `::class` magic constant (issue #236): its FQN literal when written,
-    // the `class-string` refinement when relative. Verified — the claim is PHP's
-    // own, not a declaration's. Below the fold rung above, which never reaches a
-    // class constant, so nothing more precise is displaced.
+    // The `::class` magic constant (issue #236): FQN literal when written, the
+    // `class-string` refinement when relative. Verified — PHP's own claim.
     if let ArgValue::ClassConst(sc, name) = value
         && let Some(fact) = class_const_class_fact(cx, w.scope, sc, name)
     {
         return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
-    // The MEMBER-WISE UNION FOLD (issue #74): the fold lane's own generalization —
-    // an argument that is a bounded union of constants is enumerated, each
-    // combination folded through the very seam a literal call takes, and the
-    // answers composed. It sits with the fold it generalizes, above every type rung
-    // below: this is a VALUE the real engine answered, member by member.
+    // The member-wise union fold (issue #74): a bounded union-of-constants argument
+    // is enumerated, each combination folded through the same seam a literal call
+    // takes, and the answers composed. Sits above every type rung below — this is a
+    // value the real engine answered, member by member.
     if let ArgValue::Call(name, cargs) = value
         && let Some((fact, stratum, _prov)) = cx.try_union_fold(name, cargs, env, poisoned, folder)
     {
@@ -13097,13 +12582,11 @@ fn best_dump_type(
         };
     }
     // A project-function call in argument position (issue #60): the T0 return-fact
-    // summary, sitting exactly where the assignment ladder puts it (fold > summary >
-    // builtin envelope > arms). `summary_binds` keeps the two forms observably
-    // identical: a summary the assignment would not bind falls through to the same
-    // arms floor here. The descent's findings go to a scratch — the dump surface
-    // reads facts, it never emits for the callee (emission stays the statement-level
-    // descent's job) — and `descent: None` is sound because `emit_dumps` runs only
-    // in the plain per-scope pass.
+    // summary, where the assignment ladder puts it (fold > summary > builtin
+    // envelope > arms). `summary_binds` keeps the two forms identical. Findings go
+    // to a scratch since the dump surface never emits for the callee, and
+    // `descent: None` is sound because `emit_dumps` runs only in the plain
+    // per-scope pass.
     if let ArgValue::Call(name, cargs) = value
         && !cargs.is_empty()
     {
@@ -13118,9 +12601,9 @@ fn best_dump_type(
             };
         }
     }
-    // The argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over
-    // an abstract shape (ADR-0062 §4) — sits above the envelope here exactly as it
-    // does at the assignment seam, and carries the argument's stratum.
+    // Argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over an
+    // abstract shape (ADR-0062 §4) — sits above the envelope, as at the assignment
+    // seam, carrying the argument's stratum.
     if let ArgValue::Call(name, args) = value
         && let Some((fact, stratum)) =
             shape_builtin_return_fact(cx, folder, name, args, env, Some(store), poisoned)
@@ -13132,19 +12615,17 @@ fn best_dump_type(
     }
 
     // A uniquely-resolved builtin call the fold could not reach: its reflected
-    // return envelope / admitted refinement (ADR-0056 R1). Always Verified — a
-    // native declaration read off the engine's own arginfo (§2).
+    // return envelope / admitted refinement (ADR-0056 R1). Always Verified — read
+    // off the engine's own arginfo.
     if let ArgValue::Call(name, _) = value
         && let Some(fact) = builtin_call_return_fact(cx, folder, name)
     {
         return DumpRendering { text: render_dump_fact(&fact), asserted: false };
     }
-    // The DECLARED-RETURN FLOOR (ADR-0069): the rung strictly below, reached only
-    // where the engine said nothing about this name. Always `(asserted)` — the row
-    // is a catalog declaration, not a runtime answer, and the marker is how the dump
-    // surface says which rung answered. Rendered through the arm speller, the same
-    // one the project-call floor below uses, so a `string|false` row spells the way
-    // the contract lane spells it rather than degrading to its base.
+    // The declared-return floor (ADR-0069): reached only where the engine said
+    // nothing about this name. Always `(asserted)` — the row is a catalog
+    // declaration, not a runtime answer. Rendered through the same arm speller the
+    // project-call floor below uses.
     if let ArgValue::Call(name, _) = value
         && let Some(arms) = builtin_return_floor(cx, name)
         && let Some(text) = render_contract_arms(cx, &arms)
@@ -13152,11 +12633,9 @@ fn best_dump_type(
         return DumpRendering { text, asserted: true };
     }
     // The declared-return floor of an unresolved project call (issue #60): the
-    // callee's `: string` is a fact the caller should see even when no summary
-    // crossed — `unknown` where the source declares a return type reads as a
-    // defect. Exactly the arm list the assignment form seeds into the contract
-    // store, rendered through the same speller; a call with no declared return
-    // type still falls through to honest unknown.
+    // callee's `: string` is a fact the caller should see even with no summary
+    // crossed. Exactly the arm list the assignment form seeds into the contract
+    // store; no declared return type still falls to honest unknown.
     if let ArgValue::Call(name, _) = value
         && let Some(arms) = call_return_arms_by_name(cx, folder, name)
         && let Some(text) = render_contract_arms(cx, &arms)
@@ -13188,7 +12667,7 @@ fn best_dump_phpdoc_type(
         };
     }
     // A project call in argument position (issue #60): its declared envelope is the
-    // same arm list the assignment form would seed into the contract store — parity
+    // same arm list the assignment form seeds into the contract store — parity
     // between `dumpPhpDocType(f(…))` and `$x = f(…); dumpPhpDocType($x)`.
     if let ArgValue::Call(name, _) = value
         && let Some(arms) = call_return_arms_by_name(cx, folder, name)
@@ -13199,9 +12678,8 @@ fn best_dump_phpdoc_type(
             asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
         };
     }
-    // A BUILTIN call, through the ADR-0069 floor (issue #79). Same parity claim, one
-    // rung lower: the row IS a declared contract, so the declared-side surface must
-    // show it wherever the assignment form would seed it into the contract store.
+    // A builtin call, through the ADR-0069 floor (issue #79). Same parity claim, one
+    // rung lower — the row IS a declared contract.
     if let ArgValue::Call(name, _) = value
         && let Some(arms) = builtin_return_floor(cx, name)
         && let Some(text) = render_contract_arms(cx, &arms)
@@ -13221,20 +12699,17 @@ fn dump_message(label: &str, r: &DumpRendering) -> String {
 
 /// Emit the dump reports a recognized call site produces (ADR-0053 §7): the explicit
 /// pair (D3) by resolved FQN, `var_dump` (D4) by the PHP fallback rule. One report
-/// per positional argument, in argument order; a zero-argument `dumpType()` still
-/// reports (fail-level, "nothing to dump" — the committed call is a runtime fatal
-/// either way). Reads the walk's facts at the call position; binds nothing (§10 §3).
+/// per positional argument; a zero-argument `dumpType()` still reports (fail-level,
+/// "nothing to dump" — the committed call is a runtime fatal either way). Reads the
+/// walk's facts at the call position; binds nothing (§10 §3).
 ///
 /// `removal` is the enclosing statement's span when the dump call IS the whole
-/// expression-statement (`StmtKind::Call` — the caller decides), and drives the
-/// fix payload (ADR-0010, issue #114): the explicit pair's remedy is deleting
-/// that statement, the one remedy ADR-0053 names, so each `debug.type` /
-/// `debug.phpdoc-type` finding at such a site carries the deletion as a
-/// first-class [`Fix`]. A dump embedded in a larger statement (`$y =
-/// dumpType($x);`, `return dumpType($x);`, `echo dumpType($x);`) gets `None` —
-/// deleting the whole statement there would delete the enclosing binding too,
-/// which is no longer mechanical — and `debug.var-dump` never carries a fix: a
-/// `var_dump()` is legal working PHP, so deleting it is a judgment call.
+/// expression-statement, driving the fix payload (ADR-0010, issue #114): the
+/// explicit pair's remedy is deleting that statement, so each finding there carries
+/// the deletion as a first-class [`Fix`]. A dump embedded in a larger statement
+/// (`$y = dumpType($x);`) gets `None` — deleting the statement would delete the
+/// enclosing binding too. `debug.var-dump` never carries a fix: `var_dump()` is
+/// legal working PHP, so deleting it is a judgment call.
 fn emit_dumps(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -13257,10 +12732,9 @@ fn emit_dumps(
             }
         };
         // The statement deletion, widened to swallow its whole line when the
-        // statement stands alone on it (no blank gutter line left behind). A
-        // multi-argument dump emits one finding per argument; each carries this
-        // SAME edit — one statement, one deletion — and the CLI's plan builder
-        // dedupes identical edits rather than treating them as an overlap.
+        // statement stands alone (no blank gutter line left behind). A
+        // multi-argument dump emits one finding per argument, each carrying this
+        // same edit — the CLI's plan builder dedupes identical edits.
         let fix = removal.map(|span| {
             let span = cx.tree().whole_line_span(span);
             Fix {
@@ -13308,9 +12782,8 @@ fn emit_dumps(
     }
 
     // var_dump (ADR-0053 D4): default-on, one `debug.type`-shaped report per argument,
-    // same rendering and same fact source as the explicit `debug.type`. A first-class
-    // callable and a zero-argument `var_dump()` dump nothing (§2/§5 leg f) — no
-    // argument expression exists at the site.
+    // same rendering and fact source as the explicit `debug.type`. A first-class
+    // callable and a zero-argument `var_dump()` dump nothing (§2/§5 leg f).
     if recognizes_var_dump(cx, call) {
         if is_first_class_callable(call) || call.args.is_empty() {
             return;
@@ -13332,22 +12805,15 @@ fn emit_dumps(
 }
 
 /// Whether the statement starting at `stmt_start` is itself a **declaration**
-/// (function / class / interface / enum / trait). Declarations lower to
-/// [`StmtKind::Barrier`] in the trace IR, so the kind alone cannot say; the
-/// tree's declaration indexes can — a named function's or class-like's name span
-/// falls inside the declaration statement's own span, and inside no other
-/// `Barrier`'s (a declaration nested in an `if`/loop sits under a `StmtKind::If`
-/// / `Opaque` statement, never a `Barrier`, so the containment test is exact for
-/// the caller's Barrier-gated use).
+/// (function/class/interface/enum/trait). Declarations lower to
+/// [`StmtKind::Barrier`], so the kind alone cannot say; the tree's declaration
+/// indexes can — a named function's or class-like's name span falls inside the
+/// declaration statement's own span and inside no other `Barrier`'s.
 ///
-/// Why it matters (ADR-0074 §6: "declaration statements are inert at the
-/// emitter"): a docblock a declaration owns is a contract surface, never a
-/// statement trigger. The shared adoption query (`stmt_docblock`, ADR-0073's
-/// tag-agnostic rule) does NOT exclude declaration-owned docblocks — a
-/// docblock before a `function`/`class`/`interface`/`enum`/`trait` declaration
-/// statement IS returned by it — so this guard is load-bearing for all five
-/// declaration kinds; the trace-specific exclusion lives here, with the trace
-/// emitter, keeping the query shared.
+/// Matters because (ADR-0074 §6) a docblock a declaration owns is a contract
+/// surface, never a statement trigger. The shared adoption query (`stmt_docblock`)
+/// does not exclude declaration-owned docblocks, so this guard is load-bearing;
+/// the trace-specific exclusion lives here, keeping the query itself shared.
 fn stmt_is_declaration(tree: &SourceTree, span: Span) -> bool {
     let within = |s: Span| span.start <= s.start && s.start < span.end;
     tree.functions().iter().any(|f| within(f.span))
@@ -13355,15 +12821,11 @@ fn stmt_is_declaration(tree: &SourceTree, span: Span) -> bool {
 }
 
 /// The docblock the statement adopts as a trace-annotation trigger (ADR-0074
-/// §6), or `None` for every deliberate silence: a docblock the statement did
-/// not adopt under the shared statement-adoption rule (`stmt_docblock`, the
-/// same query the inline-`@var` cast reads — nothing but whitespace between
-/// the nearest preceding comment trivium, which must be a docblock, and the
-/// statement), and a declaration statement's docblock (a contract surface,
-/// inert at the emitter for all five declaration kinds — see
-/// [`stmt_is_declaration`]). Resolved at the top of the walk's per-statement
-/// step; the answer is flushed by [`emit_trace_annotations`] at the step's
-/// exit.
+/// §6), or `None` for every deliberate silence: a docblock not adopted under the
+/// shared statement-adoption rule (`stmt_docblock`, same query the inline-`@var`
+/// cast reads), and a declaration statement's docblock (a contract surface,
+/// inert at the emitter — see [`stmt_is_declaration`]). Resolved at the top of
+/// the walk's per-statement step; flushed by [`emit_trace_annotations`] at exit.
 fn adopted_trace_docblock<'a>(w: &'a WalkCx, stmt: &Stmt) -> Option<&'a Comment> {
     let tree = w.cx.tree();
     let comment = tree.stmt_docblock(stmt.span.start)?;
@@ -13377,31 +12839,20 @@ fn adopted_trace_docblock<'a>(w: &'a WalkCx, stmt: &Stmt) -> Option<&'a Comment>
 
 /// Emit the trace-annotation reports a statement's adopted docblock asks for
 /// (ADR-0074 §5/§6): a `/** @psalm-trace $x */` directly above the statement is
-/// the docblock spelling of `PHPStan\dumpType($x)` — the SAME question, answered
-/// through the same machinery ([`best_dump_type`] → the one renderer, honoring
-/// the `(asserted)` stratum marker) against the statement's **EXIT facts** (§5,
-/// Psalm's semantics: the annotation is "applied to the next statement" and
-/// reports what that statement leaves behind — what `dumpType($x)` would report
-/// were it the following statement), and reported at the TAG's own position
-/// (the question's own text, like a dump call reports at the call). A comma
-/// list (`@psalm-trace $a, $b`, §7) arrives from the scanner as one tag per
-/// named variable in source order, so this loop emits one diagnostic per
-/// variable — each rendered independently (one variable's `unknown` never
-/// perturbs its neighbors), all at the tag's position. Reads facts, binds
-/// nothing (§9 transparency).
+/// the docblock spelling of `PHPStan\dumpType($x)` — the same question, answered
+/// through the same renderer ([`best_dump_type`]), against the statement's exit
+/// facts (§5, Psalm semantics: "applied to the next statement", reporting what
+/// it leaves behind), reported at the tag's own position. A comma list
+/// (`@psalm-trace $a, $b`, §7) arrives as one tag per variable, emitting one
+/// diagnostic each, independently rendered. Reads facts, binds nothing (§9).
 ///
 /// `pending` is the adoption [`adopted_trace_docblock`] resolved at the step's
-/// top — `None` (nothing adopted, or a descent pass) flushes nothing. The walk
-/// calls this exactly once per statement, on whichever exit the statement
-/// takes: the divergent `return`s (a `return`/`throw`/`exit` under the
-/// annotation still answers, §5) or the common bottom of the iteration. A
-/// named variable with no fact renders honest `unknown` — a missing answer is
-/// incompleteness, never silence.
+/// top — `None` flushes nothing. Called exactly once per statement, on
+/// whichever exit it takes (divergent `return`s answer too, §5, or the common
+/// bottom). A named variable with no fact renders honest `unknown`.
 ///
-/// Runs in the plain per-scope pass only (the capture site gates on
-/// `descent.is_none()` exactly like [`emit_dumps`]'s call site), so an
-/// annotated site emits once — never re-reported per caller under a binding
-/// descent.
+/// Plain per-scope pass only (gates on `descent.is_none()` like [`emit_dumps`]),
+/// so an annotated site emits once.
 fn emit_trace_annotations(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -13453,11 +12904,10 @@ const ASSERT_TYPE_FQN: &str = "phpstan\\testing\\asserttype";
 
 /// Harness-only (oracle idea B): when the assertType sink is installed
 /// ([`collect_assert_types`]), recognize a `PHPStan\Testing\assertType('T', $e)` call
-/// by resolved FQN and record (expected string, Steins rendering of `$e`) — the
-/// rendering shares the D3 dump path ([`best_dump_type`]) verbatim. A no-op when the
-/// sink is absent (every normal check), so the check surface is byte-identical.
-/// Runs in the plain per-scope pass only (like [`emit_dumps`]), so a site is recorded
-/// once — never re-observed under a binding descent.
+/// by resolved FQN and record (expected string, Steins rendering of `$e`) — sharing
+/// the D3 dump path ([`best_dump_type`]) verbatim. A no-op when the sink is absent,
+/// so the check surface is byte-identical. Plain per-scope pass only, like
+/// [`emit_dumps`].
 fn emit_asserts(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -13540,9 +12990,9 @@ fn apply_assign(
     let cx = w.cx;
     let line = cx.tree().position(span_start).line;
 
-    // A ternary rvalue `$x = $c ? A : B` is a conditional value (ADR-0031): the
-    // walk evaluates the guard and resolves to the chosen arm, or (undecided) a
-    // `OneOf` of the two arms when both are literal, else unknown.
+    // A ternary rvalue `$x = $c ? A : B` (ADR-0031): the walk evaluates the guard
+    // and resolves to the chosen arm, or (undecided) a `OneOf` of both when
+    // literal, else unknown.
     if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value {
         match eval_ternary_fact(
             w,
@@ -13561,9 +13011,8 @@ fn apply_assign(
                         kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
                     });
                 }
-                // Derivation clause: the arm chosen is one of the two operands, so
-                // the result stratum is `min` over the arms (either could be the
-                // taken one under a `Maybe` verdict).
+                // Derivation clause: result stratum is `min` over the arms (either
+                // could be the taken one under a `Maybe` verdict).
                 let strat = value_stratum(then_val, env, Some(&*store)).min(value_stratum(else_val, env, Some(&*store)));
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
@@ -13577,9 +13026,8 @@ fn apply_assign(
     }
 
     // A comparison rvalue `$b = $x > 3;` (issue #260): the operator's fact, by the
-    // same evaluator the dump surface reads, so the assignment and the dump of the
-    // same expression can never disagree. Total for a comparison — the binding is
-    // `bool` at worst, never dropped.
+    // same evaluator the dump surface reads, so the two can never disagree. Total
+    // for a comparison — the binding is `bool` at worst, never dropped.
     if let ArgValue::Binary { op, lhs, rhs } = value {
         let (fact, strat) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
@@ -13594,10 +13042,8 @@ fn apply_assign(
         return;
     }
 
-    // A closure value `$f = fn(...) => …;` / `$f = strtolower(...);` (ADR-0033):
-    // record a `ClosureVal` with its by-value capture snapshot taken from the
-    // CURRENT (definition-site) env — the semantically correct PHP by-value
-    // capture. A poisoned scope drops it (no reliable capture snapshot).
+    // A closure value (ADR-0033): record a `ClosureVal` with its by-value capture
+    // snapshot from the current (definition-site) env. A poisoned scope drops it.
     if let ArgValue::Closure(cref) = value {
         env.remove(var);
         store.unbind(var);
@@ -13618,13 +13064,11 @@ fn apply_assign(
     }
 
     // The declared-arm lane travels across a plain copy `$c = $o` (ADR-0052 §9,
-    // issue #196 piece 2). A copy binds the SAME value, so every declared
-    // possibility that held of the source holds of the destination, at the same
-    // stratum — this carries an existing fact one step, it does not infer a new one.
-    // Read BEFORE the match, because a self-assign `$a = $a` unbinds `var` — and so
-    // the source's own lane — inside it; written AFTER, because every arm the match
-    // can take for a `Var` rvalue drops `var`'s lane on its way (`unbind`) and none
-    // of them mints a replacement, so this is the one write that survives.
+    // issue #196 piece 2): a copy binds the same value, so declared possibilities
+    // carry over at the same stratum. Read before the match (a self-assign `$a =
+    // $a` would otherwise unbind `var` and lose the source's own lane); written
+    // after, since every match arm for a `Var` rvalue drops `var`'s lane without
+    // replacing it.
     let copied_arms: Option<Vec<ContractArm>> = match value {
         ArgValue::Var(src) if !w.scope.poisoned => store.contract.get(src).cloned(),
         _ => None,
@@ -13658,13 +13102,10 @@ fn apply_assign(
         // `clone $a` (ADR-0036 adversarial #1): a NEW id with a COPY of the source
         // object's props (PHP shallow clone) — post-clone writes stay isolated.
         ArgValue::Clone(src) if !w.scope.poisoned && store.is_bound(src) => {
-            // Read the source id BEFORE unbinding `var`. For a self-clone
-            // `$a = clone $a` we have `var == src`, so `store.unbind(var)` would
-            // also drop `src`'s binding and make `id_of(src)` return `None`. PHP
-            // evaluates the rvalue (`clone $a`) against the current value first
-            // and only then assigns, so the source id is the pre-assignment one;
-            // capturing it here keeps the guard's `is_bound(src)` invariant true
-            // at the `.expect` for every `var`/`src` pairing.
+            // Read the source id before unbinding `var`. For a self-clone
+            // `$a = clone $a`, `var == src`, so unbinding first would drop `src`'s
+            // binding too. PHP evaluates the rvalue before assigning, so the
+            // pre-assignment id is the correct one to capture.
             let src_id = store.id_of(src).expect("bound var has an id");
             env.remove(var);
             store.unbind(var);
@@ -13688,12 +13129,10 @@ fn apply_assign(
         }
         // `$x = $base[k]` where `$base` carries an abstract shape (ADR-0062 §4's
         // read row, S3): a constant-key read takes the declared field's value slot.
-        // A key with no fact behind it (an optional field, an unknown slot, a
-        // declared absence) binds NOTHING — never value∪null (A-G9: missing-ness is
-        // the strict leg's finding, never a type pollution). The concrete-base read
-        // is unchanged (it never bound a fact here either); this arm only adds the
-        // abstract stratum, and the whitelisted `offset.missing` judgment for this
-        // same statement has already run in the walk (1z) independently.
+        // A key with no fact behind it binds nothing — never value∪null (A-G9:
+        // missing-ness is the strict leg's finding, never type pollution). The
+        // whitelisted `offset.missing` judgment for this statement already ran
+        // independently (step 1z).
         ArgValue::OffsetRead { base, key } => {
             // Resolve against the PRE-assignment env: PHP evaluates the rvalue
             // first, so a self-read `$a = $a['k']` still reads the old `$a`.
@@ -13705,23 +13144,17 @@ fn apply_assign(
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
             }
         }
-        // `$x = $a ?? $b` (ADR-0052 §6): the value is the non-null part of `$a`
-        // unioned with `$b` — `clear_null(fact($a)) join fact($b)`. A fact only when
-        // BOTH operands are visible facts; an unseen operand (an array offset, an
-        // unknown call) yields no fact, so `??` never manufactures certainty for a
-        // value it cannot spell. The join widens, so it can only *lose* precision
-        // (never fire a proof the concrete arms would not) — the FP-safe side.
+        // `$x = $a ?? $b` (ADR-0052 §6): `clear_null(fact($a)) join fact($b)`. A
+        // fact only when BOTH operands are visible facts, so `??` never manufactures
+        // certainty for a value it cannot spell. The join widens, so it can only
+        // lose precision — the FP-safe side.
         ArgValue::Coalesce(a, b, rhs_span) => {
-            // `??` gates its right operand the way a ternary gates an arm: a left
-            // operand proven set-and-non-null means PHP never evaluates the right,
-            // so a finding positioned there is a false positive (ADR-0052 §6).
+            // `??` gates its right operand like a ternary gates an arm: a left
+            // operand proven set-and-non-null means PHP never evaluates the right.
             if coalesce_lhs_proven_present(w, folder, a, env, store) {
                 mark_dead_span(w, *rhs_span);
             }
-            // The stratum is the evaluator's own `min` over the spine's arms — the
-            // same derivation clause the two-operand form used, extended to a
-            // projection arm, whose stratum comes from the base's shape fact rather
-            // than from `value_stratum`'s syntactic reading.
+            // Stratum is the evaluator's own `min` over the spine's arms.
             match eval_coalesce_fact(w, folder, a, b, env, Some(&*store)) {
                 Some((fact, strat)) => {
                     env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
@@ -13753,24 +13186,19 @@ fn apply_assign(
                 }
                 // Derivation clause: folds and array composition resolve through
                 // `resolve_literal`, consuming env facts and nested project-call
-                // summary strata (issue #127) — stamp that min, not a re-read of
-                // the syntactic Call tree alone. Nested project-call descents for
-                // fold args emit through `out` so binding-specific findings under
-                // `strtoupper(g(1))` are not discarded (issue #127 review).
+                // summary strata (issue #127) — stamp that min. Nested descents for
+                // fold args emit through `out` so findings under `strtoupper(g(1))`
+                // aren't discarded.
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
             // `$x = is_int($y)` and kin: the fold could not reach it, so seed the
-            // uniquely-resolved builtin's reflected return envelope / admitted
-            // refinement (ADR-0056 R1). Enters at `Verified` — a native declaration
-            // (§2). A more-precise fold above already returned; this is the floor.
+            // uniquely-resolved builtin's reflected return envelope (ADR-0056 R1).
+            // Enters at `Verified` — a native declaration (§2).
             None => match value {
                 // An array literal the rung above could not prove whole (issue
-                // #327): its keys, its count and its sealing are known even when
-                // an element's value is not, so it seeds a `Fact::Shape` rather
-                // than dropping the binding. Above every call rung — a literal
-                // is not a call — and below the proven-`Singleton` path, which
-                // already returned for a fully-literal array.
+                // #327): keys, count, and sealing are known even when an element's
+                // value is not, so it seeds a `Fact::Shape` rather than dropping.
                 ArgValue::Array(items)
                     if let Some((fact, strat)) = array_literal_fact(
                         cx,
@@ -13786,27 +13214,22 @@ fn apply_assign(
                 }
                 // The `::class` magic constant (issue #236): `$c = Foo::class`
                 // binds its FQN literal, `$c = static::class` the refinement.
-                // Above every call rung, since none of them can see a class
-                // constant. Verified: PHP's own guarantee, not a declaration's.
+                // Verified: PHP's own guarantee, not a declaration's.
                 ArgValue::ClassConst(sc, name)
                     if let Some(fact) = class_const_class_fact(cx, w.scope, sc, name) =>
                 {
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
-                // The MEMBER-WISE UNION FOLD (issue #74): still the fold lane, one
-                // rung wider — an argument that is a bounded union of constants is
-                // enumerated and every combination answered by the real engine. It
-                // therefore binds where a folded literal binds, above every type
-                // rung below, and carries the input union's own stratum (N2's min),
-                // not the engine's `Verified`.
+                // The member-wise union fold (issue #74): a bounded union-of-constants
+                // argument is enumerated and every combination answered by the real
+                // engine. Binds where a folded literal binds, carrying the input
+                // union's own stratum (N2's min), not the engine's `Verified`.
                 ArgValue::Call(name, args)
                     if let Some((fact, strat, prov)) =
                         cx.try_union_fold(name, args, env, w.scope.poisoned, folder) =>
                 {
-                    // A product whose members all agreed composes to a `Singleton`
-                    // — a proven value, and the margin says so exactly as it does
-                    // for the single-tuple fold.
+                    // A product whose members all agreed composes to a `Singleton`.
                     if let (Fact::Singleton(v), Some(facts)) = (&fact, facts.as_deref_mut()) {
                         facts.push(LineFact {
                             line,
@@ -13819,10 +13242,9 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value_strat(fact, line, Some(prov), strat));
                     store.unbind(var);
                 }
-                // The type rung above the envelope (ADR-0061 §1): a rule that reads
-                // the call's ARGUMENT facts — here ADR-0062 §4's `count`/
-                // `array_is_list` shape transfers. Enters at the argument's own
-                // stratum (§3's derivation clause), not `Verified`.
+                // The type rung above the envelope (ADR-0061 §1): reads the call's
+                // argument facts — ADR-0062 §4's `count`/`array_is_list` shape
+                // transfers. Enters at the argument's own stratum, not `Verified`.
                 ArgValue::Call(name, args)
                     if let Some((fact, strat)) = shape_builtin_return_fact(
                         cx,
@@ -13844,22 +13266,15 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
-                // The RESOURCE rung (ADR-0056 §8). It sits here, below the
-                // reflected envelope and above the declared floor, and the position
-                // is the argument: the envelope always wins where it exists, and
-                // this rung fires only where it structurally cannot — PHP has no
-                // syntax for a `resource` return type, so `fopen` declares nothing
-                // and the rung above returned `None` for a reason that is not
-                // ignorance. The gate (`builtin_resource_return`) has already
-                // checked that this engine still declares nothing for the name,
-                // which is what separates "cannot say it" from "no longer true".
+                // The resource rung (ADR-0056 §8), below the reflected envelope and
+                // above the declared floor: fires only where the envelope
+                // structurally cannot (PHP has no `resource` return-type syntax, so
+                // `fopen` declares nothing). The gate confirms this engine still
+                // declares nothing for the name.
                 //
-                // ARM LANE ONLY, and `Verified`. There is no value-lane fact to
-                // seed: no `Val` is a resource and none is coming (ADR-0035/0038),
-                // so `env` is cleared rather than left holding a stale binding.
-                // The `false` arm is an ordinary literal arm, subtracted by the
-                // ordinary `=== false` guard machinery — which is the entire
-                // narrowing story, no resource-specific branch anywhere.
+                // Arm lane only, `Verified` — no `Val` is a resource (ADR-0035/0038),
+                // so `env` is cleared rather than left stale. The `false` arm is an
+                // ordinary literal arm, subtracted by ordinary guard machinery.
                 ArgValue::Call(name, _)
                     if !w.scope.poisoned
                         && let Some(arms) = builtin_resource_arms(cx, folder, name) =>
@@ -13868,19 +13283,15 @@ fn apply_assign(
                     env.remove(var);
                     store.contract.insert(var.to_owned(), arms);
                 }
-                // The DECLARED-RETURN FLOOR (ADR-0069): strictly below the rung
-                // above, reached only where the engine said nothing about this name.
-                // Enters `Asserted` — a catalog declaration, not a runtime answer —
-                // so the proof layer's all-Verified premise rule keeps every finding
-                // off it, and the derivation clause carries that down every step.
+                // The declared-return floor (ADR-0069): reached only where the
+                // engine said nothing about this name. Enters `Asserted` — a catalog
+                // declaration, not a runtime answer — carried down every derivation
+                // step.
                 //
-                // BOTH carriers are seeded, as the `@param` entry seeding does with
-                // `seed_contract_arms` + `seed_shape_fact`: the arm lane holds the
-                // declaration itself (so a `string|false` row survives to both dump
-                // surfaces and to whatever the arm lane learns to subtract), and the
-                // value lane holds the one fact the arms denote where they denote
-                // one. A multi-arm row has no single fact and lives in the arm lane
-                // alone — observably identical to a hand-written `@param string|false`.
+                // Both carriers are seeded, as `@param` entry seeding does: the arm
+                // lane holds the declaration itself, and the value lane holds the
+                // one fact the arms denote where they denote one. A multi-arm row
+                // lives in the arm lane alone.
                 ArgValue::Call(name, _)
                     if !w.scope.poisoned && let Some(arms) = builtin_return_floor(cx, name) =>
                 {
@@ -13903,16 +13314,12 @@ fn apply_assign(
                     }
                     store.contract.insert(var.to_owned(), arms);
                 }
-                // The return-fact SUMMARY, then the arm FLOOR (ADR-0057 amendment T0 /
-                // ADR-0052 §9). `unbind` first (it voids any stale arm lane on `var`).
-                // The summary is the value floor above the declared arms (A1): when it
-                // carries a bindable value fact (strictly more precise than a bare base,
-                // A3), it binds as `var`'s VALUE fact at its joined stratum — sitting
-                // exactly where a folded literal would (the `resolve_const_fn`
-                // degenerate case above is disjoint by arity: it is zero-arg only, the
-                // summary descends on positional args ≥ 1). Otherwise the summary
-                // degraded to the floor and the declared arms stand — observably
-                // identical to no summary.
+                // The return-fact summary, then the arm floor (ADR-0057 T0 /
+                // ADR-0052 §9). `unbind` first (voids any stale arm lane). The summary
+                // is the value floor above the declared arms (A1): a bindable value
+                // fact binds as `var`'s value fact at its joined stratum, sitting
+                // where a folded literal would. Otherwise the summary degraded to the
+                // floor and the declared arms stand.
                 _ => {
                     env.remove(var);
                     store.unbind(var);
@@ -13983,27 +13390,23 @@ fn seed_returned_shape(
 
 /// The fact of a `??` chain (ADR-0052 §6, extended by ADR-0062 A-G11 / S5).
 ///
-/// **The join law is unchanged**: `clear_null(fact($a)) join fact($b)`, folded
+/// The join law is unchanged: `clear_null(fact($a)) join fact($b)`, folded
 /// right-to-left over the whole spine (`??` is right-associative, so `$a ?? $b ??
-/// $c` is one chain of three arms, not two nested pairs). Every arm must produce a
-/// fact — an operand the domain cannot spell yields `None` for the whole
-/// expression, so `??` never manufactures certainty for a value it cannot see —
-/// and every arm but the last contributes only its non-null part, because that is
-/// the only case in which `??` takes it.
+/// $c` is one chain, not two nested pairs). An operand the domain cannot spell
+/// yields `None` for the whole expression; every arm but the last contributes only
+/// its non-null part.
 ///
-/// **What S5 adds is the premise ladder** (A-G11). A `??` arm is reached only when
+/// What S5 adds is the premise ladder (A-G11). A `??` arm is reached only when
 /// every arm to its left failed `isset`, so a pure depth-1 projection arm
 /// `$x['k']` contributes the premise `¬isset($x['k'])` to everything after it.
-/// Those premises are what [`ShapeFact::cover_proves`] consumes: a KeyCover
-/// recorded by `isset($x['a']) || isset($x['b'])` plus `¬isset($x['a'])` proves
-/// `$x['b']` present, so the last arm — otherwise an undischarged optional read
-/// with no fact — becomes a `Present` read and the chain gets a value.
+/// [`ShapeFact::cover_proves`] consumes those: a KeyCover from
+/// `isset($x['a']) || isset($x['b'])` plus `¬isset($x['a'])` proves `$x['b']`
+/// present, turning an otherwise undischarged optional read into a value.
 ///
-/// **Any other arm form invalidates the ladder.** A call may write through a
-/// reference or a global and make an earlier `¬isset` stale, so an arm that is not
-/// a pure projection contributes no premise *and drops every accumulated one*
-/// (A-G11's conservatism, and the reason `$x['a'] ?? f() ?? $x['b']` discharges
-/// nothing).
+/// Any other arm form invalidates the ladder (A-G11's conservatism): a call may
+/// write through a reference and make an earlier `¬isset` stale, so a non-projection
+/// arm contributes no premise and drops every accumulated one — why
+/// `$x['a'] ?? f() ?? $x['b']` discharges nothing.
 fn eval_coalesce_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -14033,10 +13436,8 @@ fn eval_coalesce_fact(
             ),
         };
         parts.push(part?);
-        // A projection arm the shape proves present AND non-null is the value: `??`
-        // never evaluates anything to its right, so the chain ends here and the
-        // arms after it contribute nothing. (Only the shape lane short-circuits;
-        // the other operand forms keep their join verbatim.)
+        // A projection arm the shape proves present and non-null is the value: `??`
+        // never evaluates anything to its right, so the chain ends here.
         if settled {
             break;
         }
@@ -14046,13 +13447,11 @@ fn eval_coalesce_fact(
         }
     }
 
-    // Derivation clause (ADR-0052 §5): the value is one of the arms, so the whole
-    // expression is no stronger than the weakest of them.
+    // Derivation clause (ADR-0052 §5): result is no stronger than the weakest arm.
     let (mut acc, mut stratum) = parts.pop()?;
     while let Some((fact, s)) = parts.pop() {
         stratum = stratum.min(s);
-        // A provably-null arm (nothing survives `clear_null`) can never be the
-        // value: it contributes nothing, exactly as the two-operand law had it.
+        // A provably-null arm (nothing survives `clear_null`) contributes nothing.
         if let Some(nonnull) = clear_null(&fact) {
             acc = nonnull.join(&acc)?;
         }
@@ -14073,14 +13472,14 @@ fn flatten_coalesce<'a>(v: &'a ArgValue, out: &mut Vec<&'a ArgValue>) {
     }
 }
 
-/// Is this `??` arm a **pure depth-1 projection** `$x[k]` with a resolvable
-/// constant key (A-G11's premise carrier)? The key resolution is the offset
-/// family's own ([`offset_operand_fact`] + [`offset_key_of`]), so a premise and a
-/// cover can never disagree about which key they mean.
+/// Is this `??` arm a pure depth-1 projection `$x[k]` with a resolvable constant
+/// key (A-G11's premise carrier)? Key resolution is the offset family's own
+/// ([`offset_operand_fact`] + [`offset_key_of`]), so a premise and a cover can
+/// never disagree.
 ///
 /// Depth is exactly one and the base is exactly a binding: `$x['a']['b']` and
-/// `$this->x['a']` are not premise carriers, and by falling through to the
-/// non-projection path they *invalidate* the ladder rather than extending it.
+/// `$this->x['a']` are not premise carriers and invalidate the ladder rather than
+/// extending it.
 fn coalesce_projection(
     arm: &ArgValue,
     env: &HashMap<String, Known>,
@@ -14096,20 +13495,16 @@ fn coalesce_projection(
 }
 
 /// The fact a projection arm `$var[key]` contributes to its `??` chain, the
-/// stratum it inherits from the base's shape fact (the derivation clause: the read
-/// consumes that fact, so it is never stronger than it — always `Asserted`), and
-/// whether the arm **settles** the chain (is proven to be the value, so `??` never
-/// evaluates anything to its right).
+/// stratum it inherits from the base's shape fact (derivation clause: never
+/// stronger than the base — always `Asserted`), and whether the arm settles the
+/// chain (proven to be the value, so `??` never evaluates further).
 ///
-/// The two positions are genuinely different questions:
-///
-/// * a **non-final** arm is used only when `isset` holds of it, so presence does
-///   not have to be proved — missing means fall-through — and the arm yields its
-///   declared slot ([`ShapeRead::taken_fact`]);
-/// * the **final** arm is the value whenever everything to its left fell through,
-///   so it must be *proved* present. A declared-`Required` field proves it
-///   outright; for an optional one, A-G11's cover discharge is the only thing that
-///   can, and `absent` is the accumulated `¬isset` ladder over this same base.
+/// A non-final arm is used only when `isset` holds of it, so presence needn't be
+/// proved — missing means fall-through, yielding its declared slot
+/// ([`ShapeRead::taken_fact`]). The final arm is the value whenever everything to
+/// its left fell through, so it must be *proved* present: a `Required` field
+/// proves it outright; an optional one needs A-G11's cover discharge, with
+/// `absent` the accumulated `¬isset` ladder over this base.
 fn coalesce_arm_fact(
     var: &str,
     key: &VKey,
@@ -14120,9 +13515,8 @@ fn coalesce_arm_fact(
     let known = env.get(var)?;
     let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
     let read = shape_read(shape, key);
-    // Present AND non-null is exactly PHP's `isset`, so this arm is taken for every
-    // value the shape admits — the same test in both positions, harmless on the
-    // last arm and a short-circuit before it.
+    // Present and non-null is exactly PHP's `isset` — same test in both positions,
+    // harmless on the last arm and a short-circuit before it.
     let settled = matches!(&read, ShapeRead::Present(Some(f)) if f.is_null().is_no());
     if !final_arm {
         return read.taken_fact().map(|f| (f, known.stratum, settled));
@@ -14135,31 +13529,27 @@ fn coalesce_arm_fact(
     let flavor = cover_discharges(shape, key, &absent)?;
     let slot = shape.field(key).and_then(|(_, _, s)| s.as_deref().cloned())?;
     match flavor {
-        // "at least one covered key is present AND non-null": every other member
-        // failed `isset`, so this one carries the claim — present, and not null.
+        // "at least one covered key is present AND non-null": this one carries it.
         CoverFlavor::Isset => clear_null(&slot).map(|f| (f, known.stratum, true)),
         // "at least one covered key EXISTS", value possibly null (A-G11's table).
         CoverFlavor::KeyExists => Some((slot, known.stratum, false)),
     }
 }
 
-/// **The S5 discharge, asked as a presence question** (A-G11's table): does a
+/// The S5 discharge, asked as a presence question (A-G11's table): does a
 /// recorded KeyCover plus the accumulated `¬isset(absent)` ladder prove `key`
-/// present? `Some(flavor)` when it does, `None` when nothing discharges it.
+/// present? `Some(flavor)` when it does, `None` otherwise.
 ///
-/// Split out of [`coalesce_arm_fact`] so the *value* lane and S6's *finding* lane
-/// consult one predicate. The distinction matters: a discharged key whose declared
-/// value slot is unrepresentable yields no fact (the value lane has nothing to
-/// bind) but is still proven present (the finding lane must stay silent). Folding
-/// the two together would have made an unspellable slot emit a false positive.
+/// Split out of [`coalesce_arm_fact`] so the value lane and S6's finding lane
+/// consult one predicate: a discharged key with an unrepresentable value slot
+/// yields no fact but is still proven present, so the finding lane must stay
+/// silent — folding the two would emit a false positive on an unspellable slot.
 fn cover_discharges(shape: &ShapeFact, key: &VKey, absent: &[VKey]) -> Option<CoverFlavor> {
     match shape.cover_proves(key, absent)? {
         CoverFlavor::Isset => Some(CoverFlavor::Isset),
         // A present-*null* earlier key satisfies a KeyExists claim while `??` still
-        // falls through it, so the cover would have been discharged by an arm that
-        // is not this one. The discharge is sound only when every premise key's
-        // declared value is provably non-nullable, which is what makes "fell
-        // through" and "absent" the same statement for them.
+        // falls through it, so the discharge is sound only when every premise key's
+        // declared value is provably non-nullable ("fell through" == "absent").
         CoverFlavor::KeyExists => absent
             .iter()
             .all(|k| {
@@ -14207,10 +13597,9 @@ fn build_new_object(
     let mut obj = HeapObj::new(class.to_owned());
     obj.class_exact = true; // `new Class(...)` allocates exactly `Class` (audit G1)
     // The class-level generic parameterizations this allocation proves (ADR-0032
-    // tier 3 + its binding amendment, issue #295). Recorded on the allocation, which
-    // is what makes them survive `$box = new MutableBox(1);` — the same computation
-    // `resolve_cval` runs for a bare `new` in argument position, read off the store
-    // BEFORE this object joins it (the carry is a function of the arguments only).
+    // tier 3 + binding amendment, issue #295), recorded on the allocation so they
+    // survive `$box = new MutableBox(1);` — read off the store before this object
+    // joins it (the carry is a function of the arguments only).
     obj.targs = cx.infer_generic_carry(class, args, env, store, w.scope.poisoned, folder);
     let props = cx.class_props(class);
 
@@ -14228,8 +13617,7 @@ fn build_new_object(
         if let Some(default) = &p.default
             && let Some(fact) = singleton_fact(default, cx.php_minor)
             // A typed slot stores the boundary-converted default (issue #48):
-            // `public float $d = 3;` holds `3.0`, not `3` — PHP converts the
-            // compile-time default exactly as it converts a write.
+            // `public float $d = 3;` holds `3.0`, not `3`.
             && let Some(fact) = match p.ty.as_ref() {
                 Some(ty) => coerce_fact_to_native(ty, fact),
                 None => Some(fact),
@@ -14258,16 +13646,14 @@ fn build_new_object(
                 break;
             }
             let Some(pd) = promoted.get(param.name.as_str()) else { continue };
-            // The bound argument: the positional at this index, else a named argument
-            // whose name matches this parameter (case-sensitive, PHP semantics — Gap A
-            // value-binding side). A positional-and-named collision is a PHP fatal, so
-            // the two are disjoint on valid input.
+            // The bound argument: the positional at this index, else a matching
+            // named argument (case-sensitive PHP semantics). Positional-and-named
+            // collision is a PHP fatal, so the two are disjoint on valid input.
             let bound = args
                 .get(i)
                 .or_else(|| named.iter().find(|n| n.name == param.name).map(|n| &n.value));
-            // The value: the resolved arg literal (carrying the arg's stratum —
-            // derivation clause, heap write), else the param's native-type seed
-            // (`Verified`).
+            // The value: the resolved arg literal (carrying its stratum), else the
+            // param's native-type seed (`Verified`).
             let (fact, stratum) = match bound {
                 Some(a) => match cx
                     .resolve_literal_strat(a, env, w.scope.poisoned, folder)
@@ -14275,11 +13661,8 @@ fn build_new_object(
                         singleton_fact(&lit, cx.php_minor).map(|f| (f, strat))
                     })
                     // The promoted slot stores the boundary-converted argument
-                    // (issue #48): `__construct(public float $g)` called with `2`
-                    // holds `2.0`. A mode-dependent conversion falls back to the
-                    // native seed — `General` of the declared scalar covers
-                    // whatever the runtime conversion produces (or the write
-                    // fatals), so the seed stays sound where the value is not.
+                    // (issue #48): a mode-dependent conversion falls back to the
+                    // native seed, which covers whatever the runtime produces.
                     .and_then(|(f, strat)| match param.ty.as_ref() {
                         Some(ty) => coerce_fact_to_native(ty, f).map(|f| (f, strat)),
                         None => Some((f, strat)),
@@ -14311,17 +13694,14 @@ fn build_new_object(
 /// exact receiver when a descent proved one, else the enclosing class as a lower
 /// bound), plus the readonly set and provably-written readonly props from the class
 /// surface. `class_exact` records whether that class is exact (audit G1). `$this` is
-/// **pre-escaped** (an overridable call on it sweeps its non-readonly props).
-/// Returns `None` when the class has no tracked properties (leaving `$this` unbound
-/// — identical to pre-heap behavior).
+/// pre-escaped (an overridable call on it sweeps its non-readonly props). Returns
+/// `None` when the class has no tracked properties.
 ///
-/// Crucially this seeds **no property value facts**. A property's value in an
-/// arbitrary method is whatever some *other* method last stored (or a `!== null`
-/// guard narrowed) — neither of which this per-scope walk models — so assuming the
-/// declared default here would be unsound (it produced null-property false
-/// positives past `if ($this->x !== null)` guards). Only facts written *in this
-/// method* (explicit `$this->p = …`) flow; readonly bookkeeping stays because a
-/// readonly value cannot change after construction.
+/// Seeds NO property value facts: a property's value in an arbitrary method is
+/// whatever some other method last stored, which this per-scope walk doesn't
+/// model, so assuming the declared default would produce null-property false
+/// positives past `!== null` guards. Only facts written *in this method* flow;
+/// readonly bookkeeping stays since a readonly value can't change post-construction.
 fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapObj> {
     let props = cx.class_props(class_fqn);
     if props.is_empty() {
@@ -14406,9 +13786,9 @@ fn apply_prop_assign(
 
     // Resolve the rvalue to a proven literal (for the native check) and a fact
     // (for storage + the abstract phpdoc check). The rvalue's trust stratum
-    // (ADR-0052 §5) gates the proof-layer native check and is recorded on the prop
-    // (derivation clause — heap write). Stratum rides with the resolution so an
-    // Asserted fold does not launder to Verified (issue #127 review).
+    // (ADR-0052 §5) gates the proof-layer native check and is recorded on the prop.
+    // Stratum rides with the resolution so an Asserted fold doesn't launder
+    // (issue #127).
     let proven = cx.resolve_literal_strat_ex(value, env, false, folder, None, Some(&mut *out));
     let (proven_lit, rvalue_strat) = match &proven {
         Some((lit, strat)) => (Some(lit.clone()), *strat),
@@ -14426,11 +13806,10 @@ fn apply_prop_assign(
     let pdecl = cx.class_props(&class).into_iter().find(|p| p.name == prop && !p.is_static);
 
     // A hooked property (PHP 8.4 `get`/`set`) routes this write through arbitrary
-    // user code: the value that lands in the object is whatever the `set` hook
-    // computes, not `value`. So neither property-mismatch id is sound against the
-    // assigned value, and no fact may be recorded (FP class 16). Class-body hooked
-    // props are dropped at lowering (pdecl is `None` — checks skip naturally); this
-    // guards the promoted-param case, whose declaration survives on the surface.
+    // user code: the stored value is whatever the `set` hook computes, not `value`,
+    // so neither property-mismatch id is sound and no fact may be recorded (FP
+    // class 16). Class-body hooked props are dropped at lowering (pdecl is `None`);
+    // this guards the promoted-param case, whose declaration survives.
     let hooked = pdecl.is_some_and(|pd| pd.hooked);
 
     // 1. Native `type.property-mismatch` — a proven literal against a native prop
@@ -14536,14 +13915,11 @@ fn apply_prop_assign(
     // / is an object handle). Mark the readonly write for the reassign check.
     match prop_fact_val {
         // A hooked property never records a fact — its stored value is the `set`
-        // hook's arbitrary-code result, not `value` (FP class 16). Keep the slot
-        // Unknown so reads (dumps, receivers, depth-1 prop-fetch) fall back to
-        // arbitrary code rather than the assigned value.
+        // hook's arbitrary-code result, not `value` (FP class 16).
         Some(fact) if !rval_is_object && !hooked => {
-            // A TYPED slot stores what PHP's boundary conversion makes of the
-            // rvalue, not the rvalue (issue #48): an int written to a `float`
-            // property IS a float. A fact the conversion cannot answer
-            // mode-independently drops to Unknown (sound both ways).
+            // A typed slot stores what PHP's boundary conversion makes of the
+            // rvalue, not the rvalue (issue #48). Mode-independently unanswerable
+            // facts drop to Unknown (sound both ways).
             let stored = match pdecl.and_then(|pd| pd.ty.as_ref()) {
                 Some(ty) => coerce_fact_to_native(ty, fact),
                 None => Some(fact),
@@ -14584,11 +13960,10 @@ fn parse_var_type(docblock: &str) -> Option<PType> {
 
 /// Build a [`ClosureVal`] from a lowered [`ClosureRef`] at its creation site,
 /// snapshotting the by-value captures from the definition-site `env` (ADR-0033).
-/// A capture whose variable has no proven scalar fact is simply omitted (the
-/// closure body sees it as unknown — sound); a captured closure is not re-snapshot
-/// (nested closure capture is not modeled — the body treats it as unknown).
-/// Each captured fact keeps its trust stratum so descent seeding cannot launder
-/// an `Asserted` claim into a `Verified` summary (issue #128 review).
+/// A capture with no proven scalar fact is omitted; a captured closure is not
+/// re-snapshot (nested capture is not modeled). Each captured fact keeps its
+/// trust stratum so descent seeding cannot launder Asserted into Verified
+/// (issue #128).
 fn build_closure_val(
     cx: &Cx,
     cref: &steins_syntax::ClosureRef,
@@ -14602,12 +13977,9 @@ fn build_closure_val(
             for name in captures {
                 if let Some(k) = env.get(name)
                     && let Some(f) = &k.fact
-                    // A `Fact::Shape` is deliberately NOT captured (ADR-0062 S3):
-                    // the descent key collapses every non-`Singleton` fact to
-                    // `Other` (`arg_of_fact_key`), so a captured shape carries no
-                    // binding information — it would only flip the "descend at
-                    // all" test. (Stratum is now snapshotted for scalars, but
-                    // shapes stay out until the key can spell them.)
+                    // A `Fact::Shape` is deliberately NOT captured (ADR-0062 S3): the
+                    // descent key collapses every non-`Singleton` fact to `Other`, so
+                    // a captured shape carries no binding information.
                     && !matches!(f, Fact::Shape { .. })
                 {
                     snapshot.push((name.clone(), f.clone(), k.stratum));
@@ -14662,40 +14034,31 @@ fn walk_if(
     }
 
     // 2. The guard's own effects on *every* resulting path, sequenced at the calls'
-    // positions (ADR-0052 §6): a
-    // retained guard call escapes its object arguments/receiver and sweeps the
-    // escaped objects' mutable props (the method receiver's binding survives — a
-    // method call does not rebind its receiver variable, the payoff (i) that lets
-    // `$x !== null && $x->m()` keep a proven-non-null receiver), then by-ref argument
-    // invalidation and opaque reads are forgotten. Both apply before the branch
-    // clones (a call in either operand may have executed on the excluded path too).
+    // positions (ADR-0052 §6): a retained guard call escapes its object
+    // arguments/receiver and sweeps the escaped objects' mutable props (the method
+    // receiver's binding survives, letting `$x !== null && $x->m()` keep a
+    // proven-non-null receiver), then by-ref argument invalidation and opaque reads
+    // are forgotten. Both apply before the branch clones.
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
     escape_and_sweep_calls(w, &guard_calls, store);
-    // The pattern-refusal check at guard position (ADR-0078 / issue #189).
-    // `if (preg_match('/…/', $s))` is THE idiom the id is about, and a guard
-    // condition is not a `checkable_calls` position, so the statement-position hook
-    // never sees it. An `elseif` chain arrives here too — `walk_else` recurses into
-    // `walk_if` per link — so each condition is judged exactly once. Plain
-    // per-scope pass only, like every other once-per-site judgement.
+    // The pattern-refusal check at guard position (ADR-0078 / issue #189):
+    // `if (preg_match('/…/', $s))` is the idiom the id is about, and a guard
+    // condition is not a `checkable_calls` position. An `elseif` chain recurses
+    // into `walk_if` per link, so each condition is judged exactly once.
     if descent.is_none() {
         for call in &guard_calls {
             check_preg_pattern(w, folder, call, env, out);
         }
     }
     // The declared-arm lanes a guard call's own `@phpstan-assert-*` tag names, taken
-    // BEFORE the conservative read-set drop below and put back after it. Rationale is
-    // the statement-position rule, verbatim (walk_trace step 3 before step 4): an
-    // assertion tag's contract is a *stronger* statement about the argument than "the
-    // call may have mutated this by reference", and the tag is worthless if the same
-    // call's blanket invalidation erases the lane the tag exists to narrow.
+    // before the conservative read-set drop below and put back after it — same
+    // rationale as the statement-position rule (walk_trace step 3 before step 4):
+    // the tag is worthless if the call's blanket invalidation erases the lane it
+    // narrows.
     //
-    // The lift is deliberately minimal, and each restriction is load-bearing:
-    // the **arm lane only** (the value lane and the `Member` sets still drop, so no
-    // fact survives a guard that did not survive one before — the precision change
-    // `collect_call_opaque_reads` refuses stays refused); only for a variable the
-    // callee takes **by value** at the asserted position (ADR-0070's gate: a by-value
-    // parameter is a separate zval, so that call cannot rebind the caller's binding);
-    // and only when no other call in the same condition takes the variable at all.
+    // The lift is minimal: arm lane only (value lane and `Member` sets still drop);
+    // only for a variable the callee takes by value at the asserted position
+    // (ADR-0070's gate); and only when no other call in the condition touches it.
     let kept_lanes = guard_assert_kept_lanes(w, cond, &guard_calls, env, store);
     for v in cond_invalidations(w.cx, cond, env, store, poisoned) {
         env.remove(&v);
@@ -14710,17 +14073,15 @@ fn walk_if(
 
     // Guard calls carrying `-if-true`/`-if-false` envelopes, collected per branch
     // polarity through the `&&`/`||` structure (ADR-0052 §6, extending N2's
-    // top-level-only consumption into nested positions: `if ($a && isNonEmpty($s))`
-    // now consumes `isNonEmpty`'s `-if-true` on the then-branch). Each carries whether
-    // the call returned `true` on that branch, selecting the spec polarity. The specs
-    // apply at the `Asserted` stratum (§5) — silence only, never a proof premise.
+    // top-level-only consumption into nested positions). Each carries whether the
+    // call returned `true` on that branch. Specs apply at `Asserted` stratum (§5).
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        // The DR2 type vocabulary runs FIRST of the four: it is the only one that
-        // can *mint* a fact over an unfacted binding, and the scalar refinements
-        // below must then see that fact — `if (is_string($v) && $v !== '')` on a
-        // `mixed` binding narrows to `non-empty-string` only in this order.
+        // The DR2 type vocabulary runs first of the four: it's the only one that
+        // can mint a fact over an unfacted binding, which the scalar refinements
+        // below must then see — `if (is_string($v) && $v !== '')` narrows to
+        // `non-empty-string` only in this order.
         apply_type_narrowing(w.cx, cond, true, &mut benv, &mut bclasses);
         let refs = then_refinements(cond, w.cx.php_minor);
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
@@ -14732,7 +14093,7 @@ fn walk_if(
             let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
             apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
             // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
-            // symbol on the branch where it holds true, silencing the absence family.
+            // symbol on the branch where it holds true.
             if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
                 bclasses.vouch(v);
             }
@@ -14764,11 +14125,9 @@ fn walk_if(
                 bclasses.vouch(v);
             }
         }
-        // The same seed on the other side of the branch, for the same reason and
-        // under the same condition: `if (!preg_match($re, $s, $m)) { return; }`
-        // reaches its else-branch — and everything after it — with the call
-        // proven truthy (ADR-0077 §3.1). The branch is not what decides; the
-        // polarity the witness survives under is.
+        // Same seed on the other side, for the same reason: `if (!preg_match($re,
+        // $s, $m)) { return; }` reaches its else-branch with the call proven
+        // truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
         seed_out_params(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
@@ -14816,21 +14175,18 @@ fn walk_else(
 /// Walk a structured statement-position `match`/`switch` (ADR-0031 Part B).
 ///
 /// Per arm, the "taken" certainty is computed left to right with first-match
-/// semantics: `taken(k) = Yes` iff arm `k` matches (`Yes`) **and** every earlier
-/// arm provably does not (`No`); `No` iff arm `k` provably does not match; `Maybe`
-/// otherwise. This ordering rule is what stops a later `Yes` arm from being walked
-/// as the sole-live branch while an earlier arm is only `Maybe`. Arms with
-/// `taken == No` are recorded dead (the env-free direct pass then stays silent
-/// inside them); every other arm is walked on a cloned env, with the subject
-/// var refined to the arm's literal set (a `match` binds `Singleton`/`OneOf`; a
-/// `switch` binds nothing — its loose `==` truth set is multi-valued).
+/// semantics: `taken(k) = Yes` iff arm `k` matches and every earlier arm provably
+/// does not; `No` iff arm `k` provably does not match; `Maybe` otherwise — this
+/// ordering rule stops a later `Yes` arm from being walked as sole-live while an
+/// earlier arm is only `Maybe`. `No` arms are recorded dead; every other arm is
+/// walked on a cloned env with the subject refined to the arm's literal set (a
+/// `match` binds `Singleton`/`OneOf`; a `switch` binds nothing since its loose
+/// `==` truth set is multi-valued).
 ///
-/// The "no arm matched" outcome depends on the construct: with a `default` arm it
-/// runs that body (unless a decided `Yes` arm makes it dead); without one, a
-/// `switch` falls through to after the construct (entry env preserved) while a
-/// `match` raises `\UnhandledMatchError` — a terminator contributing no
-/// fall-through. The successor env is the join of every branch that falls
-/// through; if none does, the whole construct terminates (tail unreachable).
+/// The "no arm matched" outcome: with a `default` arm it runs that body (unless
+/// dead); without one, a `switch` falls through unchanged while a `match` raises
+/// `\UnhandledMatchError` (a terminator). The successor env is the join of every
+/// branch that falls through; if none does, the construct terminates.
 #[allow(clippy::too_many_arguments)]
 fn walk_match(
     w: &WalkCx,
@@ -14850,10 +14206,8 @@ fn walk_match(
     let subj_vals = operand_values(subject, env, poisoned);
 
     // 1. Per-arm first-match "taken" certainty (left to right). `earlier_all_no`
-    // tracks whether every arm before the current one provably does NOT match;
-    // `decided_done` records that a *decided* match (`Yes` with all earlier `No`)
-    // has been found — every later arm and the default are then unreachable,
-    // because `match`/`switch` take the FIRST matching arm.
+    // tracks whether every earlier arm provably does NOT match; `decided_done`
+    // records a decided match — every later arm and the default become unreachable.
     let mut takens: Vec<Certainty> = Vec::with_capacity(arms.len());
     let mut earlier_all_no = true;
     let mut decided_done = false;
@@ -14899,9 +14253,8 @@ fn walk_match(
         refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
         // Tag-based discrimination (ADR-0062 A-G4): a `match`/`switch` on a
         // constant-key projection subtracts the base's array arms by the field's
-        // `admits` verdict, and mints the collapsed shape into the arm's env.
-        // The `default` arm below refines nothing — its truth is "no listed tag
-        // matched", a residue A-G4 does not model in v1.
+        // `admits` verdict, minting the collapsed shape into the arm's env. The
+        // `default` arm refines nothing (a residue A-G4 does not model in v1).
         if let CondOperand::Offset { var, key } = subject
             && let Some(k) = guard_key(key, w.cx.php_minor)
             && let Some(tags) = arm_tag_literals(&arm.conditions)
@@ -14985,12 +14338,9 @@ fn eval_arm_cond(
 
 /// Refine the subject variable inside a matched arm's cloned env. A `match`
 /// (strict `===`) whose subject is a bare variable and whose conditions are all
-/// literals binds the subject to that exact finite set (`Singleton` for one,
-/// `OneOf` for several) — the value is provably one of them on this path. A
-/// `switch` (loose `==`) binds NOTHING: a loose-equal truth set is multi-valued
-/// (`case 0` matches `0`, `"0"`, `false`, `0.0`, …), so no single `Fact` is sound.
-/// A match/switch arm's condition literals, or `None` when any condition is not
-/// one (a stacked arm lists several: `1, 2 => …` / `case 1: case 2:`).
+/// literals binds the subject to that exact finite set (`Singleton`/`OneOf`). A
+/// `switch` (loose `==`) binds nothing: its truth set is multi-valued (`case 0`
+/// matches `0`, `"0"`, `false`, `0.0`, …), so no single `Fact` is sound.
 fn arm_tag_literals(conditions: &[CondOperand]) -> Option<Vec<ArgValue>> {
     if conditions.is_empty() {
         return None;
@@ -15080,15 +14430,13 @@ fn check_call_on_null(
 /// method call's receiver, its trust stratum, and the receiver's rendering.
 ///
 /// A bare `$v` reads the env value fact; a depth-1 `$v->prop` receiver reads the
-/// allocation-keyed heap property fact (ADR-0052 §7, alias-correct by construction,
-/// ADR-0036) — escaped-then-swept props return `None` here (silence preserved), and a
-/// readonly prop survives the sweep. `$this` and `(new C)->…` are objects by
-/// construction and carry no fact lane at all.
+/// allocation-keyed heap property fact (ADR-0052 §7, ADR-0036) — escaped-then-swept
+/// props return `None`, a readonly prop survives the sweep. `$this` and
+/// `(new C)->…` are objects by construction with no fact lane at all.
 ///
 /// The env fact and the [`Store`] object binding are mutually exclusive by
 /// construction: every rvalue arm of `apply_assign` pairs `env.remove(var)` with
-/// `store.unbind(var)`, so a variable that currently holds an object never has a
-/// fact here, and a variable with a fact never holds one.
+/// `store.unbind(var)`.
 fn call_receiver_fact<'a>(
     receiver: &Receiver,
     env: &'a HashMap<String, Known>,
@@ -15109,24 +14457,18 @@ fn call_receiver_fact<'a>(
 }
 
 /// The PHP type name a fact's denotation is confined to, when that denotation
-/// contains **no object** — the "definitely not an object" premise both members of
+/// contains no object — the "definitely not an object" premise both members of
 /// the ADR-0078 non-object family consume (issue #190).
 ///
-/// The four-layer domain does the proving for free: [`Val`] has no object variant
-/// and [`Base`] no object base, so *no* fact can denote an object. What is left to
-/// decide is only whether the fact names ONE type, which the message must be able to
-/// say. Three shapes therefore decline:
-///
-/// * a `nullable: true` abstract layer (`?int` — non-object either way, but "int"
-///   would be a wrong sentence and `null` is a different id on the call side);
-/// * a `OneOf` mixing bases (`1|'a'` from a ternary — again fatal either way, but
-///   with no single name to print);
-/// * an absent fact, which is where every `Maybe`-object receiver, every union with
-///   an object arm, and every unknown-class receiver lands — the domain simply has
-///   no fact for a value that might be an object, so silence is automatic.
+/// The four-layer domain proves this for free: [`Val`] has no object variant and
+/// [`Base`] no object base, so no fact can denote an object. What's left is
+/// whether the fact names ONE type. Three shapes decline: a `nullable: true`
+/// abstract layer (non-object either way, but no single word to print); a `OneOf`
+/// mixing bases; and an absent fact, where every `Maybe`-object or unknown-class
+/// receiver lands.
 ///
 /// `null` IS named here: `property.on-non-object` owns that receiver, and the call
-/// side filters it out because [`CALL_ON_NULL_ID`] already does.
+/// side filters it out since [`CALL_ON_NULL_ID`] already does.
 fn definite_non_object_type(fact: &Fact) -> Option<&'static str> {
     match fact {
         // A union is several type words at once, and this surface names one.
@@ -15175,19 +14517,16 @@ fn base_type_name(base: Base) -> &'static str {
 /// The non-object receiver proof for a method call (`call.on-non-object`, ADR-0078,
 /// issue #190): `$x = 1; $x->m();` is the same guaranteed `Error` `call.on-null`
 /// reports, with the receiver's runtime type in place of null — witnessed at PHP
-/// 8.5.9 as `Call to a member function m() on int` for `int`, `string`, `float`,
-/// `true`, `false` and `array`.
+/// 8.5.9 as `Call to a member function m() on int` for `int`/`string`/`float`/
+/// `true`/`false`/`array`.
 ///
-/// Two boundaries, both deliberate:
+/// Two deliberate boundaries: `?->` is not an excuse — nullsafe short-circuits on
+/// `null` alone, so a proven non-null non-object receiver still fatals (witnessed),
+/// so unlike [`check_call_on_null`] the `nullsafe` flag isn't read; and `null`
+/// belongs to [`CALL_ON_NULL_ID`] (ADR-0022), disjoint by this one filter.
 ///
-/// * **`?->` is not an excuse.** Nullsafe short-circuits on `null` alone, so a proven
-///   non-null non-object receiver still fatals (`$x = 1; $x?->m();` — witnessed).
-///   This is why, unlike [`check_call_on_null`], the `nullsafe` flag is not read.
-/// * **null belongs to [`CALL_ON_NULL_ID`]**, whose meaning ADR-0022 keeps stable;
-///   the two ids are disjoint at every site by this one filter.
-///
-/// The receiver lane is exactly [`check_call_on_null`]'s — a bare variable or a
-/// depth-1 `$v->prop` — deliberately not widened here (issue #196 owns reach).
+/// The receiver lane is exactly [`check_call_on_null`]'s, deliberately not
+/// widened here (issue #196 owns reach).
 fn check_call_on_non_object(
     w: &WalkCx,
     call: &CallExpr,
@@ -15232,18 +14571,15 @@ fn check_call_on_non_object(
 /// The non-object receiver proof for a property fetch (`property.on-non-object`,
 /// ADR-0078, issue #190): `$x = 1; $y = $x->p;` raises
 /// `Warning: Attempt to read property "p" on int` and evaluates to `null`
-/// (witnessed at PHP 8.5.9 for `int`, `string`, `float`, `true`, `false`, `array`
-/// and `null`).
+/// (witnessed at PHP 8.5.9 for `int`/`string`/`float`/`true`/`false`/`array`/`null`).
 ///
 /// Warning-grade, so the ADR-0049 §7 posture gate comes first: under a declared
-/// `warning-handler = "null"` the application tolerates the warning and the finding
-/// leaves the proof surface, exactly as `offset.missing` does.
+/// `warning-handler = "null"` the finding leaves the proof surface, like
+/// `offset.missing`.
 ///
-/// The receiver here is only ever a bare variable — [`ArgValue::PropFetch`] is the
-/// only lowered shape of a property read, and it decomposes `$var->prop` alone
-/// (a chain, a dynamic name and the `?->` form all lower to `ArgValue::Other`, so
-/// `$x?->p` on a proven `int` is a recorded silence rather than a finding). `$this`
-/// carries no fact lane, so `$this->p` is silent by construction.
+/// The receiver is only ever a bare variable — [`ArgValue::PropFetch`] is the only
+/// lowered shape of a property read (a chain, dynamic name, or `?->` all lower to
+/// `ArgValue::Other`). `$this` carries no fact lane, so `$this->p` is silent.
 fn check_property_on_non_object(
     cx: &Cx,
     var: &str,
@@ -15292,16 +14628,11 @@ fn check_property_on_non_object(
 /// every other arm is env-only and ignores it.
 /// Whether `r` names the ENGINE's `PHP_VERSION_ID` in the current file (issue
 /// #29). Constants are case-sensitive, so the match is exact. A fully-qualified
-/// `\PHP_VERSION_ID` always does (the engine defines it first; a `define` of an
-/// already-defined constant is a no-op). An unqualified reference does unless
-/// this file `use const`-imports the alias — the namespace fallback otherwise
-/// lands on the global. Qualified/relative spellings never do. The remaining
-/// residue — a userland `const`/literal `define` twin anywhere in the project —
-/// zeroes [`Cx::version_id`] before this is ever consulted; a define with a
-/// *computed* name is not scanned, the one modeled-out corner (recorded here
-/// deliberately: the only consumer is branch pruning, and a computed define
-/// minting a namespaced `PHP_VERSION_ID` twin has no known occurrence in the
-/// wild).
+/// `\PHP_VERSION_ID` always does; an unqualified reference does unless the file
+/// `use const`-imports an alias; qualified/relative spellings never do. A userland
+/// `const`/`define` twin elsewhere in the project zeroes [`Cx::version_id`] before
+/// this is consulted; a define with a *computed* name is the one modeled-out
+/// corner (no known occurrence in the wild).
 fn is_engine_version_id(cx: &Cx, r: &NameRef) -> bool {
     if r.raw != "PHP_VERSION_ID" {
         return false;
@@ -15447,22 +14778,15 @@ fn eval_cond(
         }
         CondExpr::Not(c) => eval_cond(w, folder, c, env, store, poisoned).not(),
         // Short-circuit env threading (ADR-0052 §6 / N3): the RIGHT operand
-        // evaluates under the env the LEFT operand's outcome establishes, exactly as
-        // PHP's `&&`/`||` sequence it — `b` in `a && b` runs only when `a` was truthy
-        // (so it sees `then_refinements(a)`); `b` in `a || b` runs only when `a` was
-        // falsy (so it sees `else_refinements(a)`, De Morgan). The composed verdict
-        // stays the trinary `and`/`or`; only the operand env threads. This is
-        // walk-local left-to-right evaluation (ADR-0048 §2): the refinement clone is
-        // discarded, no entry state contributes, no ordering beyond the source's own.
+        // evaluates under the env the LEFT operand's outcome establishes, as PHP's
+        // `&&`/`||` sequence it — `b` in `a && b` sees `then_refinements(a)`; `b`
+        // in `a || b` sees `else_refinements(a)` (De Morgan). Only the operand env
+        // threads; the composed verdict stays the trinary `and`/`or`.
         CondExpr::And(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
-            // `a` false ⇒ `b` never runs; the verdict is already `No`, and the
-            // threaded env would be a contradiction — skip it. `b`'s span is
-            // *unevaluated code*, not merely unnarrowed: PHP short-circuits past it,
-            // so a finding positioned there would be a false positive on a path the
-            // engine never takes. Record it, exactly as a decided `if` records its
-            // skipped branch (ADR-0052 §6's "the direct env-free pass stands down on
-            // spans covered here").
+            // `a` false => `b` never runs. `b`'s span is unevaluated code, not
+            // merely unnarrowed, so a finding there would be a false positive —
+            // record it dead, as a decided `if` records its skipped branch.
             if va == Certainty::No {
                 mark_dead_cond_calls(w, b);
                 return Certainty::No;
@@ -15473,8 +14797,7 @@ fn eval_cond(
         }
         CondExpr::Or(a, b) => {
             let va = eval_cond(w, folder, a, env, store, poisoned);
-            // `a` true ⇒ `b` never runs; the verdict is already `Yes`. Same
-            // unevaluated-span reasoning as the `&&` side, De Morgan-mirrored.
+            // `a` true => `b` never runs. Same unevaluated-span reasoning, De Morgan-mirrored.
             if va == Certainty::Yes {
                 mark_dead_cond_calls(w, b);
                 return Certainty::Yes;
@@ -15488,11 +14811,9 @@ fn eval_cond(
         // any other guard call stays undecided.
         CondExpr::Call { call, .. } => eval_existence_call(w, folder, call),
         // `isset($x[k])` decides NOTHING (ADR-0062 S4). The only evidence that
-        // could decide it on a declared base is a shape fact, which is
-        // `Asserted` — and a verdict is what prunes branches and marks regions
-        // dead, so deciding here would let a docblock claim silence the env-free
-        // direct pass on a live path. Narrowing (silence) is the whole payoff;
-        // reachability stays proof-only.
+        // could decide it is a shape fact, which is `Asserted` — deciding here
+        // would let a docblock claim silence the env-free pass on a live path.
+        // Narrowing is the whole payoff; reachability stays proof-only.
         CondExpr::Isset { .. } | CondExpr::Opaque { .. } => Certainty::Maybe,
     }
 }
@@ -15500,53 +14821,34 @@ fn eval_cond(
 // ---------------------------------------------------------------------------
 // Foldable existence-guard verdicts (ADR-0049 §4 / N3).
 //
-// `method_exists(C, 'm')` / `function_exists('f')` / `class_exists('N')` (and the
-// `interface_`/`trait_`/`enum_exists` siblings) in guard position fold to a
-// three-valued `Certainty` against the closed world, so the ADR-0031 dead-region
-// discipline prunes the branch the runtime provably never takes. The verdict rests
-// on the SAME closure the absence family fires under (S1 existence + S2 chain
-// enumeration + the A2ii boot-surface homonym oracle + A2i conditional/dam leg):
-//   * `Yes`  — the symbol is provably PRESENT under complete closure;
-//   * `No`   — provably ABSENT under complete closure;
-//   * `Maybe`— anything short of closure (a trait-bearing chain, a conditional decl
-//              with the dam standing, an unresolvable ancestor, an unanswerable
-//              homonym query, a non-literal argument, or no live boot surface).
-// A `Maybe` verdict is always the FP-safe fallback: it walks both branches live and
-// leans on the conservative guard-respect leg (the per-symbol vouch) for silence.
+// `method_exists`/`function_exists`/`class_exists` (and `interface_`/`trait_`/
+// `enum_exists`) in guard position fold to a three-valued `Certainty` against the
+// closed world, so ADR-0031 dead-region pruning drops the branch the runtime
+// provably never takes. Rests on the same closure the absence family fires under
+// (S1 existence + S2 chain enumeration + A2ii boot-surface homonym oracle + A2i
+// conditional/dam leg): `Yes` — provably present; `No` — provably absent; `Maybe`
+// — anything short of closure. `Maybe` is always the FP-safe fallback, walking
+// both branches live and leaning on the guard-respect vouch for silence.
 // ---------------------------------------------------------------------------
 
 /// Whether a function reference **denotes the global function it spells** — the
 /// one question every builtin recognizer in this file asks before matching a name
-/// against its vocabulary. It lives here, once, so the next recognizer someone
-/// adds is correct by construction rather than by copying (issue #153).
+/// against its vocabulary. Lives here once so the next recognizer added is
+/// correct by construction rather than by copying (issue #153).
 ///
-/// The load-bearing distinction is that `\foo` denotes the global function while
-/// `Ns\foo` does not, and the rule is emphatically **not** "reject a backslash":
-/// [`NameRef::raw`] already has a leading `\` stripped and a `namespace\` prefix
-/// dropped, so a purely textual test silently reads the wrong thing on two
-/// spellings. Every leg below was measured against `php` 8.5.9:
+/// The load-bearing distinction: `\foo` denotes the global function, `Ns\foo`
+/// does not — not simply "reject a backslash", since [`NameRef::raw`] already has
+/// a leading `\` and `namespace\` prefix stripped. Legs, measured against php
+/// 8.5.9: `\is_string($x)` — always global; `is_string($x)` — PHP's function
+/// fallback reaches global from any namespace; `Foo\is_string($x)` — relative,
+/// never global; `namespace\is_string($x)` inside `namespace App;` — resolves to
+/// `App\is_string` only, no fallback (in the root namespace this IS global);
+/// `use function Other\thing as is_string;` — goes to `Other\thing`, never falls
+/// back, while a plain `use function is_string;` still is global.
 ///
-/// * `\is_string($x)` — the global builtin whatever the file's namespace, even
-///   where an `App\is_string` is declared alongside it. `\Foo\is_string` keeps a
-///   separator and is a different function.
-/// * `is_string($x)` — PHP's function fallback reaches the global name from any
-///   namespace, so the spelling denotes it (the shadowing leg below is what
-///   removes the cases where a project function wins).
-/// * `Foo\is_string($x)` — relative to the current namespace: never global.
-/// * `namespace\is_string($x)` inside `namespace App;` — resolves to
-///   `App\is_string` **only**, with no global fallback: PHP fatals with "Call to
-///   undefined function App\is_string()". In the root namespace the enclosing
-///   namespace *is* global, so there the same spelling does denote the builtin.
-/// * `use function Other\thing as is_string;` — the call goes to `Other\thing`
-///   and never falls back, so the spelling is not the builtin; a plain
-///   `use function is_string;` names the global one and still is.
-///
-/// The two rejected legs mirror [`name_reaches_global_var_dump`], which asks the
-/// same question of one hard-coded name and reached the same answers.
-///
-/// The **shadowing** leg is a separate guarantee, unchanged and deliberately
-/// kept: a project-defined function of the name is a different function whatever
-/// the spelling would otherwise denote.
+/// The rejected legs mirror [`name_reaches_global_var_dump`]. The shadowing leg
+/// is separate and unchanged: a project-defined function of the name is different
+/// whatever the spelling otherwise denotes.
 fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
     let spells_global = match r.kind {
         RefKind::FullyQualified => !r.raw.contains('\\'),
@@ -15678,11 +14980,10 @@ fn existence_class_literal(cx: &Cx, v: &ArgValue) -> Option<String> {
 /// The three-valued `method_exists(start_fqn, method)` verdict: walk `start_fqn`'s
 /// class chain under the S2 closure discipline (ADR-0049 §4). Unlike the absence
 /// flagship this ignores `__call`/`__callStatic` — `method_exists` reports only
-/// DECLARED methods, magic fallbacks do not make it true. An abstract or any-visibility
-/// declaration counts as present (`method_exists` is visibility-blind). Any obstacle
-/// to closure (a trait-bearing/enum node, an unresolvable ancestor, a cycle, a
-/// conditional node with the dam standing, or an unanswerable/positive boot-surface
-/// homonym on any traversed FQN) collapses to `Maybe`.
+/// declared methods. Abstract or any-visibility declarations count as present
+/// (visibility-blind). Any obstacle to closure (trait-bearing/enum node,
+/// unresolvable ancestor, cycle, conditional node with the dam standing, or an
+/// unanswerable/positive boot-surface homonym) collapses to `Maybe`.
 fn method_exists_verdict(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -15770,23 +15071,20 @@ fn function_exists_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Cert
 /// The three-valued `defined('NAME')` verdict — deliberately **two**-valued in
 /// practice: it answers `No` or `Maybe`, and never `Yes`.
 ///
-/// That asymmetry is the whole point. `defined()` asks a question about the state
-/// of the *running* process, not about the text: a `define('X', 1)` sitting in the
-/// universe has not necessarily executed by the time this call runs, and the single
-/// most common shape in real code is precisely the one where it has not —
+/// That asymmetry is the whole point. `defined()` asks about the state of the
+/// *running* process, not the text: a `define('X', 1)` in the universe hasn't
+/// necessarily executed yet, and the common shape is exactly
 /// `if (!defined('X')) { define('X', …); }`, whose body exists because `defined`
-/// is false there. Folding a declared constant to `Yes` would mark that body dead
-/// and delete findings inside it on a claim PHP does not make.
+/// is false there. Folding to `Yes` would mark that body dead on a claim PHP
+/// doesn't make.
 ///
-/// `No` is safe in the opposite direction and is what buys `constant.undefined` its
-/// guard leg for free: when nothing in the universe declares the name, the dam is
-/// clear for constants, and the project's own PHP reports it not defined, then the
-/// call provably returns `false` — so `if (defined('X')) { echo X; }` folds its body
-/// dead and the fetch inside is never judged. That is the same mechanism
-/// `class.undefined` uses, resting on the same closure the ladder itself needs.
+/// `No` is safe the other way and buys `constant.undefined` its guard leg for
+/// free: when nothing declares the name, the dam is clear, and PHP reports it not
+/// defined, the call provably returns `false` — so `if (defined('X')) { echo X; }`
+/// folds its body dead. Same mechanism `class.undefined` uses.
 ///
 /// `name` is case-sensitive on its final segment; [`steins_syntax::normalize_const_fqn`]
-/// is what decides which half of the name folds case.
+/// decides which half folds case.
 fn constant_defined_verdict(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Certainty {
     let key = steins_syntax::normalize_const_fqn(name);
     if cx.index.declares_constant(&key) {
@@ -15822,11 +15120,9 @@ fn classlike_exists_verdict(
             if cd.conditional && !cx.dam.is_clear() {
                 return Certainty::Maybe;
             }
-            // The predicate queries one specific kind; `enum` satisfies both
-            // `enum_exists` and `class_exists` (a PHP enum is a class), while a plain
+            // A PHP enum satisfies both `enum_exists` and `class_exists`; a plain
             // interface/trait never satisfies `class_exists`. A mismatch cannot be
-            // proven true here (the name may still resolve to a boot-surface homonym
-            // of the right kind), so it stays `Maybe`.
+            // proven true (a boot-surface homonym might still match), so `Maybe`.
             if classlike_kind_matches(pred, cd) {
                 Certainty::Yes
             } else {
@@ -15856,12 +15152,11 @@ fn classlike_kind_matches(pred: &str, cd: &ClassDecl) -> bool {
 }
 
 /// The symbol a positive existence guard call vouches for (ADR-0049 §4 guard-respect
-/// leg), resolved against the branch store. `None` when the call is not a recognized
-/// existence predicate or its subject cannot be pinned to a concrete symbol.
-/// `method_exists` additionally resolves a `$var` receiver to its store-known class
-/// (the literal `C::class`/string forms go through [`existence_class_literal`]), so
-/// the instance idiom `if (method_exists($o,'m')) { $o->m(); }` vouches `C::m` — the
-/// exact-textual-match discipline: the vouch key is the RESOLVED class + name.
+/// leg), resolved against the branch store. `None` when the call isn't a recognized
+/// existence predicate or its subject can't be pinned to a concrete symbol.
+/// `method_exists` additionally resolves a `$var` receiver to its store-known class,
+/// so the instance idiom `if (method_exists($o,'m')) { $o->m(); }` vouches `C::m` —
+/// the vouch key is the resolved class + name.
 fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
     let pred = existence_predicate(cx, call)?;
     if pred == "method_exists" {
@@ -15889,14 +15184,11 @@ fn existence_vouch(cx: &Cx, store: &Store, call: &CallExpr) -> Option<Vouch> {
         Some(Vouch::Function(name.as_str()?.trim_start_matches('\\').to_ascii_lowercase()))
     // global constants (ADR-0078, issue #198)
     } else if pred == "defined" {
-        // `defined('X')` vouches nothing, on purpose. The absence id it guards
-        // (`constant.undefined`) is judged by a file-wide pass with no branch store
-        // — exactly like `class.undefined` — and takes its guard leg from dead-region
-        // pruning instead: a `defined('X')` whose constant meets this id's firing
-        // conditions folds to `false` under the SAME closure the ladder rests on
-        // (see `constant_defined_verdict`), so the guarded branch is already dead
-        // before the pass looks at it. The arm exists so the class-predicate arm
-        // below cannot mistake a constant name for a class name.
+        // `defined('X')` vouches nothing, on purpose: `constant.undefined` is
+        // judged by a file-wide pass with no branch store, like `class.undefined`,
+        // and takes its guard leg from dead-region pruning instead (see
+        // `constant_defined_verdict`). The arm exists so the class-predicate arm
+        // below can't mistake a constant name for a class name.
         None
     // end global constants (ADR-0078, issue #198)
     } else {
@@ -15926,16 +15218,14 @@ fn threaded_operand_env(
     let mut benv = env.clone();
     let mut bstore = store.clone();
     let mut refs = Vec::new();
-    // The DR2 type vocabulary threads with the rest — and, as in the branch walk,
-    // runs before the scalar refinements so a minted fact is what they refine:
-    // `is_string($s) && strlen($s)` evaluates its right operand under a narrowed
-    // `$s` (ADR-0052 §6).
+    // The DR2 type vocabulary threads with the rest, running before the scalar
+    // refinements so a minted fact is what they refine: `is_string($s) &&
+    // strlen($s)` narrows `$s` in that order (ADR-0052 §6).
     apply_type_narrowing(cx, operand, then, &mut benv, &mut bstore);
     collect_refine(operand, then, &mut refs, php_minor);
     apply_refinements(&refs, &mut benv, &mut bstore, Stratum::Verified);
-    // The operand's own side effects land *after* its test narrowed (a by-ref call
-    // in the operand may rebind a variable the test just constrained): forget them
-    // so the right operand's verdict reads the post-`operand` env, not a stale one.
+    // The operand's own side effects land after its test narrowed (a by-ref call
+    // may rebind a variable the test just constrained): forget them.
     for v in cond_invalidations(cx, operand, env, store, poisoned) {
         benv.remove(&v);
         bstore.unbind(&v);
@@ -15969,13 +15259,11 @@ fn contract_literal_value(ty: &ContractTy) -> Option<ArgValue> {
 /// value lanes (issue #260).
 ///
 /// The proven lane first (`cmp_candidates_under`: a fact's finite members, a
-/// literal, a fold). Then the DECLARED arm lane (ADR-0052 §1) — which is where a
-/// `@param 1 $one` lives, and therefore where most of the corpus's finite operands
-/// actually are: a parameter declared as a literal type carries no *fact*, only an
-/// arm. Reading it here is the same read the dump surface already performs for
-/// `dumpType($one)`, at the same `Asserted` stratum, so the comparison inherits the
-/// declaration's trust rather than laundering it: nothing is promoted to the proven
-/// lane, and `resolve_literal` (the proof-layer seam) still refuses to see it.
+/// literal, a fold). Then the declared arm lane (ADR-0052 §1), where a `@param 1
+/// $one` lives — a parameter declared as a literal type carries no *fact*, only
+/// an arm. Read at the same `Asserted` stratum the dump surface uses for
+/// `dumpType($one)`, so the comparison inherits the declaration's trust without
+/// laundering it: `resolve_literal` (the proof-layer seam) still refuses to see it.
 ///
 /// `None` = no candidates ⇒ the caller's verdict is `Maybe`.
 fn cmp_operand_candidates(
@@ -16007,36 +15295,27 @@ fn cmp_operand_candidates(
 
 /// Evaluate a **value-position binary operator** (issue #260) to an env [`Fact`].
 ///
-/// For a comparison this is total, and that is the point: a PHP comparison
+/// For a comparison this is total, and that's the point: a PHP comparison
 /// operator evaluates to a `bool` whatever its operands are, so the honest floor
-/// for an undecided one is `bool` — not silence. `eval_cmp`'s three verdicts map
-/// straight onto the three renderings the fixtures ask for:
-/// `Yes → true`, `No → false`, `Maybe → bool`.
-///
-/// The decision procedure is the condition path's, unchanged and unforked: the
-/// only new thing here is *where* it is asked from.
+/// for an undecided one is `bool`, not silence. `eval_cmp`'s three verdicts map
+/// straight onto three renderings: `Yes -> true`, `No -> false`, `Maybe -> bool`.
+/// The decision procedure is the condition path's, unchanged — only *where* it's
+/// asked from is new.
 ///
 /// # Stratum: the undecided arm is Verified, the decided arms are derived
 ///
-/// Owner ruling (2026-08-09), and the one place this rung departs from a flat
-/// reading of the derivation clause (ADR-0052 §5). The three verdicts do not make
-/// the same *kind* of claim, so they do not carry the same trust:
+/// Owner ruling (2026-08-09), departing from a flat reading of the derivation
+/// clause (ADR-0052 §5): the three verdicts make different kinds of claims.
+/// `Maybe -> bool` is a claim about the operator, not either operand — PHP's
+/// guarantee, owed to nobody's docblock — so no operand refinement survives into
+/// it: Verified, always (as ADR-0061 §3 floors its envelope). `Yes -> true` /
+/// `No -> false` are claims about *which* bool, resting on the operands, so they
+/// keep the operands' `min` stratum — a lying `@param 1 $one` can never launder
+/// into the proof lane.
 ///
-/// * `Maybe → bool` is a claim about the **operator**, not about either operand.
-///   A PHP comparison evaluates to a `bool` whatever it is handed — that is the
-///   language's guarantee, owed to nobody's docblock — and in this arm no operand
-///   refinement survived into the fact at all, so an inherited `Asserted` marker
-///   would be vestigial: it would record a premise the conclusion never used.
-///   **Verified, always**, exactly as ADR-0061 §3 floors its envelope.
-/// * `Yes → true` / `No → false` are claims about **which** bool, and that claim
-///   does rest on the operands: it is `eval_cmp`'s verdict over candidate values
-///   the declared arm lane may have supplied. These keep the operands' `min`
-///   stratum, so a lying `@param 1 $one` can still never launder into the proof
-///   lane.
-///
-/// The recall this buys is the point: a Verified `bool` may premise a proof-layer
-/// finding, so `$x = ($a === $b); f($x);` against `function f(int $i)` is now the
-/// definite No it always was, instead of a silence.
+/// The recall this buys: a Verified `bool` may premise a proof-layer finding, so
+/// `$x = ($a === $b); f($x);` against `function f(int $i)` is now a definite No
+/// instead of silence.
 #[allow(clippy::too_many_arguments)]
 fn eval_binary_fact(
     cx: &Cx<'_>,
@@ -16077,18 +15356,12 @@ fn eval_binary_fact(
 /// Is a `??` left operand proven **set and non-null**, so PHP's own evaluation
 /// order proves the right operand unevaluated (ADR-0052 §6)?
 ///
-/// Three refusals keep this on the FP-safe side, and each is the same refusal the
-/// verdict machinery already makes elsewhere:
-///
-/// * an **offset read** never answers yes — presence is the very question `??`
-///   asks of it, and [`ArgValue::OffsetRead`] is a silence carrier in this
-///   position by construction (ADR-0049 A7);
-/// * an operand that does not resolve to a concrete value answers no (unknown is
-///   not "present");
-/// * an operand whose fact is **`Asserted`** answers no. Marking a span dead is a
-///   reachability claim, and reachability stays proof-only — the same line
-///   [`eval_cond`] draws at `Isset` (a docblock claim must never silence the
-///   env-free direct pass on a live path).
+/// Three refusals keep this on the FP-safe side: an offset read never answers
+/// yes (presence is the very question `??` asks of it, and
+/// [`ArgValue::OffsetRead`] is a silence carrier by construction, ADR-0049 A7);
+/// an operand that doesn't resolve to a concrete value answers no; and an
+/// operand whose fact is `Asserted` answers no — reachability stays proof-only,
+/// the same line [`eval_cond`] draws at `Isset`.
 fn coalesce_lhs_proven_present(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -16135,9 +15408,8 @@ fn eval_ternary_fact(
         Certainty::Maybe => {}
     }
     // The arms evaluate under the guard's respective refinements (ADR-0052 §6):
-    // `$c ? A : B` — `A` runs only when `$c` was truthy (so it sees
-    // `then_refinements($c)`), `B` only when `$c` was falsy (`else_refinements`).
-    // The arm-selection verdict logic is unchanged; only the arm *envs* thread.
+    // `$c ? A : B` — `A` sees `then_refinements($c)`, `B` sees `else_refinements`.
+    // Only the arm envs thread; the verdict logic is unchanged.
     let (tenv, _) = threaded_operand_env(w.cx, cond, true, env, store, w.cx.php_minor, poisoned);
     let (eenv, _) = threaded_operand_env(w.cx, cond, false, env, store, w.cx.php_minor, poisoned);
     match verdict {
@@ -16153,19 +15425,14 @@ fn eval_ternary_fact(
         }
         Certainty::Maybe => {
             // Undecided guard: the value is one of the two arms, so the fact is
-            // their **join**.
+            // their join. Both arms proven is the finite case, unchanged —
+            // `Fact::from_vals` gives a `Singleton` when equal, `OneOf` otherwise.
             //
-            // Both arms proven is the finite case and answers exactly as it
-            // always did — `Fact::from_vals` gives a `Singleton` when the arms
-            // are equal and a `OneOf` otherwise.
-            //
-            // An arm that proves no *value* is not the end of it (issue #339):
-            // `$c ? $i : $s` used to be dropped whole because `val_of` needs a
-            // `Val` per arm, and the answer `int|string` had no form to live in.
-            // It does now, so each arm falls back to whatever fact it carries
-            // and the two are joined by the domain — which is the same operator
-            // the finite case is using, one layer up. An arm that carries no
-            // fact at all still drops the binding, as before.
+            // An arm that proves no value isn't the end of it (issue #339): `$c ?
+            // $i : $s` used to drop whole since `val_of` needs a `Val` per arm and
+            // `int|string` had no form to live in. Now each arm falls back to
+            // whatever fact it carries and the two join. An arm with no fact at
+            // all still drops the binding.
             let arm = |value: &ArgValue, aenv: &HashMap<String, Known>, folder: &mut dyn Folder| {
                 w.cx
                     .resolve_literal(value, aenv, poisoned, folder)
@@ -16278,38 +15545,30 @@ fn eval_instanceof(
             match store.class_of(name) {
                 Some(obj_fqn) => {
                     // The trinary is-a oracle (ADR-0043): a proven supertype path is a
-                    // definite `Yes`; a completely-enumerated hierarchy that excludes
-                    // the target is a definite `No` (the branch is dead); an incomplete
-                    // hierarchy stays `Maybe` (the FP-safe side). Instanceof still binds
-                    // no exactness fact — membership is not exactness (see below).
+                    // definite `Yes`; a completely-enumerated hierarchy excluding the
+                    // target is `No` (branch dead); an incomplete hierarchy stays
+                    // `Maybe`. Instanceof still binds no exactness fact.
                     match w.cx.is_a(obj_fqn, &target) {
                         // Yes-side holds for a lower bound too (every descendant of the
-                        // proven class is still a `T`) — keep the branch-death precision.
+                        // proven class is still a `T`).
                         IsA::Yes => Certainty::Yes,
-                        // No-side needs exactness (audit G1): with a lower-bound `$this`,
-                        // the runtime object may be a descendant that IS a `T`, so a
-                        // `No` here is not decisive — the then-branch is not dead.
+                        // No-side needs exactness (audit G1): with a lower-bound
+                        // `$this`, the runtime object may be a descendant that IS a
+                        // `T`, so `No` here is not decisive.
                         IsA::No if store.is_exact(name) => Certainty::No,
                         IsA::No | IsA::Unknown => Certainty::Maybe,
                     }
                 }
-                // No heap object. First the VALUE side (survey FP class 14): if the
-                // variable's value-domain fact proves it holds a *non-object* value on
-                // this path (`null`/int/float/string/bool/array — e.g. a call-site
-                // `null` imported as `Singleton(null)` by a binding descent), then
-                // `instanceof T` is definitionally `false` for every `T` — `null` and
-                // every scalar are instances of nothing. This is a decisive `No` that
-                // needs NO class reasoning and NO exactness: the G1 exactness discipline
-                // (`store.is_exact`) is scoped to *object-class* No verdicts on the heap
-                // path above and is untouched here. Sound unconditionally (silence: the
-                // then-branch is dead — no PHP value that is not an object is an instance).
+                // No heap object. First the value side (survey FP class 14): if the
+                // fact proves a non-object value on this path, `instanceof T` is
+                // definitionally `false` for every `T`. Needs no class reasoning and
+                // no exactness (`store.is_exact` is scoped to the heap path above).
                 None if env.get(name).and_then(|k| k.fact.as_ref()).is_some_and(fact_is_non_object) => {
                     Certainty::No
                 }
                 // Otherwise a prior `instanceof` guard may have bound a `Member` fact
-                // whose is-a implication decides this test (ADR-0052 §3b, consumer (b)).
-                // A11 does NOT thread here: it is scoped to the arm-deletion consumers,
-                // and this implication is a separate one.
+                // whose is-a implication decides this test (ADR-0052 §3b). A11 does
+                // NOT thread here — scoped to the arm-deletion consumers.
                 None => member_instanceof(w.cx, store.member_of(name), &target),
             }
         }
@@ -16321,16 +15580,10 @@ fn eval_instanceof(
 }
 
 /// The `instanceof T2` verdict implied by a variable's guard-derived [`Member`]
-/// fact (ADR-0052 §3b), when no exact heap class is known:
-///
-/// - **`Yes`** — some proven `T1 ∈ yes` has `is_a(T1, T2) = Yes`: the value is
-///   already a `T1`, and every `T1` is a `T2`.
-/// - **`No`** — some excluded `T1' ∈ no` has `is_a(T2, T1') = Yes`: a `T2` instance
-///   would be a `T1'`, which the guard proved the value is not.
-/// - **`Maybe`** — otherwise (no fact, or the hierarchy does not decide).
-///
-/// Sound in both directions and monotone: it only turns `Maybe` into a decided
-/// verdict (branch-death → *silence*), never emits.
+/// fact (ADR-0052 §3b), when no exact heap class is known: `Yes` when some
+/// proven `T1 ∈ yes` has `is_a(T1, T2) = Yes`; `No` when some excluded
+/// `T1' ∈ no` has `is_a(T2, T1') = Yes`; `Maybe` otherwise. Monotone: only turns
+/// `Maybe` into a decided verdict, never emits.
 fn member_instanceof(cx: &Cx, member: Option<&Member>, target: &str) -> Certainty {
     let Some(m) = member else { return Certainty::Maybe };
     if m.yes.iter().any(|t1| cx.is_a(t1, target) == IsA::Yes) {
@@ -16342,16 +15595,12 @@ fn member_instanceof(cx: &Cx, member: Option<&Member>, target: &str) -> Certaint
     Certainty::Maybe
 }
 
-/// Whether a value-domain [`Fact`] proves the variable holds a **non-object**
-/// value on this path (survey FP class 14 — the value-side `instanceof` rule).
-/// Every inhabitant of the fact must be a non-object PHP value; then `instanceof
-/// T` is `false` for every `T` (`null`, ints, floats, strings, bools and arrays
-/// are instances of nothing). All four fact layers denote non-object values —
-/// objects live in the heap, never in the value domain — so this holds whenever
-/// a value fact is present. A `Singleton`/`OneOf` is checked inhabitant-wise so
-/// the rule stays correct (a *mixed* `OneOf` would be `Maybe`) if the value
-/// domain ever gains an object inhabitant; the scalar-base layers admit only a
-/// scalar base plus optionally `null`, both non-objects.
+/// Whether a value-domain [`Fact`] proves the variable holds a non-object value
+/// on this path (survey FP class 14). Every inhabitant must be a non-object PHP
+/// value; then `instanceof T` is `false` for every `T`. All four fact layers
+/// denote non-object values — objects live in the heap, never the value domain.
+/// A `Singleton`/`OneOf` is checked inhabitant-wise so the rule stays correct if
+/// the value domain ever gains an object inhabitant.
 fn fact_is_non_object(f: &Fact) -> bool {
     match f {
         Fact::Singleton(v) => val_is_non_object(v),
@@ -16377,27 +15626,24 @@ fn val_is_non_object(v: &Val) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Guard refinement (ADR-0031 stage 1 → stage 2 negative facts). A guard narrows
+// Guard refinement (ADR-0031 stage 1 -> stage 2 negative facts). A guard narrows
 // a variable's fact on the branch where it holds. Stage 1's positive `$x === v`
-// binds a Singleton; stage 2 adds the *negative* facts (ADR-0031): `!== null`
-// clears nullability, `!== v` removes a member (or, for `!== ''`, adds
-// NON_EMPTY), ordering guards intersect an int interval, and truthiness adds
-// NON_FALSY / clears null. Instanceof binds nothing — membership is not
-// exactness (a subclass instance would make an exact-class fact WRONG).
+// binds a Singleton; stage 2 adds the negative facts: `!== null` clears
+// nullability, `!== v` removes a member (or, for `!== ''`, adds NON_EMPTY),
+// ordering guards intersect an int interval, truthiness adds NON_FALSY/clears
+// null. Instanceof binds nothing — membership is not exactness.
 //
-// A refinement that would empty a fact (e.g. an int-range intersection with no
-// overlap, reachable only across an `&&` of contradictory guards) drops the
-// var's fact rather than signalling branch-death: the decided-guard verdict
-// already prunes truly-dead branches up front, so dropping-to-no-fact is the
-// sound, simpler fallback here (documented choice).
+// A refinement that would empty a fact (int-range intersection with no overlap,
+// reachable only across `&&` of contradictory guards) drops the var's fact
+// rather than signalling branch-death: the decided-guard verdict already prunes
+// truly-dead branches, so dropping-to-no-fact is the simpler fallback here.
 // ---------------------------------------------------------------------------
 
-/// The fact a parameter's **native** type guarantees at runtime (Feature B), or
-/// `None` when nothing representable can be seeded. Only a **single scalar**
-/// type (optionally nullable) seeds — a `General{base, nullable}` fact; unions and
+/// The fact a parameter's native type guarantees at runtime (Feature B), or
+/// `None` when nothing representable can be seeded. Only a single scalar type
+/// (optionally nullable) seeds a `General{base, nullable}` fact; unions and
 /// bool-literal members (`string|false`) have no clean single-`Fact` form and are
-/// skipped (documented). By-ref params are never seeded (the caller may hold
-/// anything and the var can be rebound); variadic params are skipped.
+/// skipped. By-ref params are never seeded; variadic params are skipped.
 fn seed_fact(p: &Param) -> Option<Fact> {
     if p.by_ref || p.variadic {
         return None;
@@ -16420,26 +15666,19 @@ fn seed_fact(p: &Param) -> Option<Fact> {
 /// [`Stratum::Asserted`] (ADR-0037 trust order). Returns the declaration-ordered
 /// arm list, or `None` when neither source yields a representable arm.
 ///
-/// - **native only** (`int|string $x`, no `@param`): the scalar/instance/null arms,
-///   each `Verified` — a runtime-enforced entry fact.
-/// - **phpdoc present** (`object $value` + `@param User|Guest`): the phpdoc's arms
-///   are the declared contract; an arm the native type *also* proves (`arm_eq` to a
-///   native arm) stays `Verified`, every other (refined/added) arm is `Asserted` —
-///   a claim, never a proof (so an `Asserted` arm can never premise the proof layer,
-///   and an S6 finding it premises inherits the min stratum).
+/// Native only (`int|string $x`, no `@param`): scalar/instance/null arms, each
+/// `Verified`. Phpdoc present (`object $value` + `@param User|Guest`): the
+/// phpdoc's arms are the declared contract; an arm the native type also proves
+/// stays `Verified`, every other (refined/added) arm is `Asserted`.
 ///
-/// By-ref / variadic params are skipped (the caller may rebind a by-ref; a variadic
-/// is an array), matching [`seed_fact`].
+/// By-ref/variadic params are skipped, matching [`seed_fact`].
 ///
-/// `resolve_class` namespace-resolves a phpdoc **class** arm's name to its normalized
-/// (lowercase, no leading `\`) project FQN, using the callee file's namespace/use
-/// context — the same resolution [`Cx::resolve_pclass`] performs for every other
-/// phpdoc class contract. Without it, a `@param User|Guest` under a `namespace`
-/// would seed the arm lane with the *unqualified* names while the `instanceof`
-/// subtrahend (and S6's `find_class`) carry the fully-qualified ones, so subtraction
-/// would silently keep both arms and the declared-receiver lane could never close
-/// (the latent N4 gap this consumer surfaces). Native `Instance` arms are already
-/// FQN-resolved at syntax lowering, so only the phpdoc arms are re-resolved.
+/// `resolve_class` namespace-resolves a phpdoc class arm's name to its normalized
+/// project FQN, the same resolution [`Cx::resolve_pclass`] performs elsewhere.
+/// Without it, a `@param User|Guest` under a `namespace` would seed unqualified
+/// names while the `instanceof` subtrahend carries fully-qualified ones, so
+/// subtraction would silently keep both arms. Native `Instance` arms are already
+/// FQN-resolved at lowering, so only phpdoc arms are re-resolved.
 fn seed_contract_arms(
     p: &Param,
     phpdoc: Option<&PType>,
@@ -16454,21 +15693,16 @@ fn seed_contract_arms(
 
 /// The value-lane seed a seeded contract-arm lane contributes (ADR-0062 S3): the
 /// canonical [`Fact::Shape`] of a lane whose array vocabulary is ONE arm, plus a
-/// `null` arm's nullability (A-G2 — `nullable` is the same side-flag the other
-/// abstract layers carry, never a field inside the shape).
+/// `null` arm's nullability (A-G2, a side-flag, never a field inside the shape).
 ///
-/// `None` — no value-lane seed — in every other case, each for its own ADR reason:
+/// `None` in every other case: two or more array arms (a shape∪shape union stays
+/// in the arm lane until a guard subtracts it to one, A-G3 — joining would lose
+/// the discrimination the arms carry); a mixed union (`array{…}|string`,
+/// un-facted like scalars, A-G2); no array arm at all.
 ///
-/// * **two or more array arms**: a shape∪shape union stays in the arm lane until a
-///   guard subtracts it to one (A-G3); the fact lane never joins them, because the
-///   join would lose exactly the discrimination the arms exist to carry;
-/// * **a mixed union** (`array{…}|string`): un-facted, exactly as for scalars
-///   (A-G2);
-/// * **no array arm at all**: the scalar lanes are untouched by this ADR.
-///
-/// The lowering itself is [`steins_contract::to_shape_fact`] — the ONE lowering,
-/// shared with the speller's `is_list` computation, so a seeded fact and its
-/// spelled arm can never disagree.
+/// The lowering is [`steins_contract::to_shape_fact`] — the one lowering, shared
+/// with the speller's `is_list` computation, so a seeded fact and its spelled arm
+/// can never disagree.
 fn seed_shape_fact(arms: &[ContractArm]) -> Option<Fact> {
     let mut shape: Option<steins_domain::ShapeFact> = None;
     let mut nullable = false;
@@ -16486,41 +15720,29 @@ fn seed_shape_fact(arms: &[ContractArm]) -> Option<Fact> {
     Some(Fact::Shape { shape: Box::new(shape?), nullable })
 }
 
-/// The **scalar** mirror of [`seed_shape_fact`] (issue #242): the value-lane fact a
+/// The scalar mirror of [`seed_shape_fact`] (issue #242): the value-lane fact a
 /// declared arm list contributes when it REFINES the native scalar envelope the
 /// entry pass already seeded.
 ///
-/// It exists because the two lanes seed in the wrong order for scalars. The native
-/// pass ([`seed_fact`]) plants `Fact::General { base }` for every single-scalar
-/// parameter *before* the ADR-0052 §9 arm lane is built, and the value lane outranks
-/// the arm lane everywhere a fact is read (the ADR-0037 trust order — a value beats
-/// a declared envelope). So a `@param non-empty-string $s` on a `string $s` reached
-/// its arm lane intact and was then shadowed by the coarser `string` the native pass
-/// had already put in front of it. The array vocabulary never hit this: [`seed_fact`]
-/// matches a lone native *scalar* member, so a native `array $a` leaves the value
-/// lane free for [`seed_shape_fact`] to fill from the arms — which is exactly the
-/// asymmetry issue #242 measured.
+/// Exists because the two lanes seed in the wrong order for scalars: the native
+/// pass ([`seed_fact`]) plants `Fact::General { base }` before the ADR-0052 §9
+/// arm lane is built, and the value lane outranks the arm lane wherever a fact is
+/// read (ADR-0037 trust order). So `@param non-empty-string $s` on a `string $s`
+/// reached its arm lane intact and was then shadowed by the coarser `string`
+/// already in front of it — exactly the asymmetry issue #242 measured (arrays
+/// never hit this, since [`seed_fact`] only matches a scalar member).
 ///
-/// The seed is admitted only under conditions that make it a strict narrowing of the
-/// native fact it replaces, so nothing here can ever widen what the runtime enforces:
+/// Admitted only under conditions that make it a strict narrowing of the native
+/// fact it replaces: the lane lowers ([`steins_contract::to_fact`]) to a
+/// `Fact::Refined` (a `@param int $x` on `float $x` lowers to `Fact::General`
+/// instead, refused, since PHP's coercion makes it hold a float regardless); the
+/// refined base equals the native seed's base; and nullability only ever
+/// shrinks — an implicitly-nullable parameter (`string $s = null`) keeps its
+/// `null` since [`native_arms`] reads `ty.nullable` alone.
 ///
-/// * the lane lowers ([`steins_contract::to_fact`], the ONE lowering — the same one
-///   the shape seed and the arm speller use) to a **`Fact::Refined`**. A refinement
-///   adds a predicate set or an interval and keeps the base; every other lowering is
-///   refused, which is what keeps the sound-looking-but-wrong cases out — a `@param
-///   int $x` on a `float $x` lowers to `Fact::General`, not `Refined`, and PHP's
-///   coercion makes that parameter hold a float at runtime whatever the docblock
-///   claims;
-/// * the refined **base equals** the native seed's base — belt to the brace above;
-/// * nullability only ever shrinks, and an implicitly-nullable parameter
-///   (`string $s = null`) keeps its `null`: [`native_arms`] reads `ty.nullable`
-///   alone, so the arm lane cannot see that default and its lowering would drop a
-///   `null` the runtime really admits.
-///
-/// The stratum comes from the arms. A refinement the native type does not itself
-/// prove is `Asserted` and stays `Asserted` here (ADR-0037; ADR-0052 N2) — it is a
-/// docblock claim, so it can narrow a report but can never premise a proof-layer
-/// finding, exactly as the shape seed's A-G9 corollary pins for arrays.
+/// Stratum comes from the arms: a refinement the native type doesn't itself
+/// prove is `Asserted` and stays `Asserted` (ADR-0037; ADR-0052 N2), exactly as
+/// the shape seed's A-G9 corollary pins for arrays.
 fn seed_refined_scalar_fact(
     p: &Param,
     native: &Fact,
@@ -16544,37 +15766,26 @@ fn seed_refined_scalar_fact(
 
 /// Statement-level inline `/** @var T $x */` casts (ADR-0073): the docblock
 /// immediately preceding a trace statement re-declares the named variable's type
-/// from that statement on — PHPStan's inline-`@var` reading. The lowering is the
-/// `@param` entry seeding's ([`seed_contract_arms`]) minus the native envelope:
-/// every arm seeds `Asserted` (ADR-0037 — a docblock the runtime never checks),
-/// and a lane whose array vocabulary collapsed to one arm seeds the value lane
-/// with its canonical shape fact exactly as ADR-0062 S3's entry seeding does.
+/// from that statement on — PHPStan's inline-`@var` reading. Lowering mirrors
+/// `@param` entry seeding ([`seed_contract_arms`]) minus the native envelope:
+/// every arm seeds `Asserted` (ADR-0037), and a lane collapsed to one array arm
+/// seeds the value lane with its canonical shape fact (ADR-0062 S3).
 ///
-/// It is a **cast, not a refinement**: every carrier of the old value dies first
-/// (`env.remove` + [`Store::unbind`] — the same forgetting a rebind performs),
-/// because the tag re-declares what the variable holds rather than narrowing the
-/// declared possibilities. Losing a proven value to an assertion only ever
-/// silences (the proof-layer consumers take `Verified` facts, which the cast
-/// never mints), so the trade is PHPStan parity at zero FP cost.
+/// A cast, not a refinement: every carrier of the old value dies first
+/// (`env.remove` + [`Store::unbind`]), since the tag re-declares rather than
+/// narrows. Losing a proven value to an assertion only ever silences (proof-layer
+/// consumers take `Verified` facts, which the cast never mints), so the trade is
+/// PHPStan parity at zero FP cost.
 ///
-/// The guards, each its own reason:
+/// Guards: property targets (`@var T $this->p`, bare `$this`) never cast, since
+/// casting the receiver could manufacture declared-receiver findings (S6);
+/// `@template` names shadow as in declaration envelopes (issue #5); an
+/// unparseable/unlowerable type casts nothing (ADR-0029: a missing envelope only
+/// silences); a prefixed `@phpstan-var`/`@psalm-var` displaces the plain `@var`
+/// for the same variable (ADR-0029 precedence).
 ///
-/// * **property targets** (`@var T $this->p`, `@var T $obj->p`, bare `$this`)
-///   never cast — the tag speaks about the property, and casting the *receiver*
-///   could manufacture declared-receiver findings (S6) out of a tag that says
-///   nothing about the receiver;
-/// * **`@template` names shadow** exactly as in the declaration envelopes (issue
-///   #5): the enclosing declaration's and, for a method, the class-level set;
-/// * **an unparseable or unlowerable type casts nothing** — the same status-quo
-///   silence a malformed `@param` gets (ADR-0029: a missing envelope only
-///   silences), never a `Barrier`-style erasure;
-/// * **a prefixed `@phpstan-var`/`@psalm-var` displaces the plain `@var`** for
-///   the same variable in the same docblock (the ADR-0029 precedence rule).
-///
-/// Applied in the plain per-scope pass only: a binding descent carries
-/// call-site-proven values, and propagated truth outranks a docblock assertion —
-/// the same reason the ADR-0052 §9 entry seeding skips a descent-bound param
-/// (a bound value moots the declared lane).
+/// Plain per-scope pass only: a binding descent carries call-site-proven values,
+/// which outrank a docblock assertion.
 fn apply_inline_var_casts(
     w: &WalkCx,
     stmt: &Stmt,
@@ -16640,22 +15851,19 @@ fn apply_inline_var_casts(
 /// list refined by a declared phpdoc envelope, under the trust order's subset
 /// discipline.
 ///
-/// With **no** phpdoc envelope, each native member is a `Verified` arm (PHP enforces
-/// native param/return types at runtime). With one, each lowered phpdoc arm refines
-/// *within* the native envelope: a phpdoc arm the native base **provably cannot
-/// cover** is a contradiction (`string` under `int`) and seeds NOTHING — the docblock
-/// never widens past the runtime-enforced native type. An arm covering a native
-/// member exactly is `Verified`; a strict refinement within it (`positive-int` under
-/// `int`) is `Asserted`. An undecidable is-a (two unrelated classes — no hierarchy in
-/// this crate) is NOT a contradiction; the arm stays (`Asserted`), the FP-safe side.
-/// Where NO native type exists, every phpdoc arm seeds `Asserted`.
+/// With no phpdoc envelope, each native member is a `Verified` arm. With one, each
+/// lowered phpdoc arm refines within the native envelope: a phpdoc arm the native
+/// base provably cannot cover is a contradiction (`string` under `int`) and seeds
+/// nothing. An arm covering a native member exactly is `Verified`; a strict
+/// refinement within it is `Asserted`. An undecidable is-a is NOT a contradiction —
+/// the arm stays `Asserted`, the FP-safe side. Where no native type exists, every
+/// phpdoc arm seeds `Asserted`.
 /// Resolve every class name in a contract arm against the declaring namespace.
 ///
 /// One level of intersection is walked and nothing else: `Foo&Bar` is the shape a
 /// declared conjunction has, and an arm list is already union-flattened
-/// ([`flatten_arms`]) by the time this runs, so there is no nested union to
-/// descend into. Non-class members of an intersection (an array arm, a scalar) are
-/// left exactly as they are — they name no class to resolve.
+/// ([`flatten_arms`]) by this point. Non-class intersection members (array, scalar)
+/// are left as-is.
 fn resolve_class_arms(ty: ContractTy, resolve_class: &dyn Fn(&str) -> String) -> ContractTy {
     match ty {
         ContractTy::Class(n) => ContractTy::Class(resolve_class(&n)),
@@ -16689,15 +15897,15 @@ fn refine_contract_arms(
     }
 }
 
-/// [`refine_contract_arms`]' declared-side body, over an **already-flattened** arm
+/// [`refine_contract_arms`]' declared-side body, over an already-flattened arm
 /// list rather than a parsed docblock.
 ///
 /// Split out for the ADR-0069 builtin floor (issue #79), which reaches the same law
-/// from a catalog type *string*: the row is lowered by `lower_str`, flattened by
-/// [`flatten_arms`], and refined here against an empty native list — so a builtin's
-/// declared return and a project function's declared return travel one lowering
-/// path, and the builtin's arms come out `Asserted` for the same structural reason
-/// a phpdoc arm over an untyped signature does (nothing runtime-enforced covers it).
+/// from a catalog type string: lowered by `lower_str`, flattened by
+/// [`flatten_arms`], refined against an empty native list — so a builtin's declared
+/// return and a project function's travel one lowering path, and the builtin's
+/// arms come out `Asserted` for the same structural reason a phpdoc arm over an
+/// untyped signature does.
 fn refine_declared_arms(
     native: &[ContractTy],
     declared: Vec<ContractTy>,
@@ -16706,12 +15914,9 @@ fn refine_declared_arms(
     let out: Vec<ContractArm> = declared
         .into_iter()
         .filter_map(|ty| {
-            // Resolve a class arm against the declaring namespace; the native member
-            // list already holds FQNs, so this aligns the two. An intersection's
-            // MEMBERS are class arms too (`@param Foo&Bar`, issue #238) and need the
-            // same resolution — without it the lane would carry a namespace-relative
-            // `Bar` that no hierarchy lookup can find, and every consumer would read
-            // it as an unknown class.
+            // Resolve a class arm against the declaring namespace to align with the
+            // native member list's FQNs. An intersection's members are class arms
+            // too (`@param Foo&Bar`, issue #238) and need the same resolution.
             let ty = resolve_class_arms(ty, resolve_class);
             if !native.is_empty() {
                 let covered = native
@@ -16729,10 +15934,9 @@ fn refine_declared_arms(
             Some(ContractArm { ty, stratum })
         })
         .collect();
-    // Canonicalize the minted list before it enters the lane: a mined row like
-    // `strpos`' `positive-int|0|false` carries the two-armed spelling of one
-    // interval, and every later reader (guard subtraction, join, dump) should see
-    // the denotation once (issue #90).
+    // Canonicalize before it enters the lane: a mined row like `strpos`'s
+    // `positive-int|0|false` carries the two-armed spelling of one interval, and
+    // every later reader should see the denotation once (issue #90).
     let mut out = out;
     absorb_contract_arms(&mut out);
     (!out.is_empty()).then_some(out)
@@ -16740,23 +15944,17 @@ fn refine_declared_arms(
 
 /// The declared-return arm list to seed the assigned variable of `$x = f(...)` /
 /// `$x = $o->m(...)` at a call site (ADR-0052 §9, the return direction; ADR-0075
-/// for methods). For a uniquely-resolved USER function target (the same
-/// `resolve_user_fn_any` the contract lane uses, so it fires on named-argument
-/// calls too), or a resolved method/static target via [`resolve_call_target`], the
-/// native return type seeds `Verified` arms and the `@return` phpdoc refines
-/// `Asserted` within it, through [`refine_contract_arms`].
+/// for methods). For a uniquely-resolved user function target, or a resolved
+/// method/static target via [`resolve_call_target`], the native return type seeds
+/// `Verified` arms and the `@return` phpdoc refines `Asserted` within it.
 ///
-/// **Verified membership is never exactness.** A `: Foo` native return seeds an
-/// Instance-*membership* arm (`ContractTy::Class`), NOT an exact-class object: PHP
-/// guarantees the value *is a* `Foo`, but the concrete runtime class may be any
-/// subclass. So this arm feeds the S6-style declared-receiver contract lane and the
-/// `eval_instanceof` Yes-side only; it must NEVER satisfy an exactness-requiring proof
-/// leg (the ADR-0052 §3 NOT-fed list: no S2/arity/descent consumption, the G1/A1
-/// membership-is-not-exactness discipline). The arms are the FLOOR below values: a
-/// caller seeds them only after every proven-value path (a folded literal, the R1
-/// builtin return envelope, a bindable summary) has declined. `None` for a
-/// builtin / unknown / dynamic target, a constructor, or a target with no declared
-/// return type at all.
+/// Verified membership is never exactness: a `: Foo` native return seeds an
+/// Instance-membership arm, not an exact-class object — the runtime class may be
+/// any subclass. This arm feeds the S6-style declared-receiver lane and the
+/// `eval_instanceof` Yes-side only; it must never satisfy an exactness-requiring
+/// proof leg (ADR-0052 §3 NOT-fed list). The arms are the floor below values,
+/// seeded only after every proven-value path has declined. `None` for a
+/// builtin/unknown/dynamic target, a constructor, or no declared return type.
 fn call_return_arms(
     cx: &Cx,
     call: &CallExpr,
@@ -16891,11 +16089,11 @@ fn else_refinements(cond: &CondExpr, php_minor: Option<(u16, u16)>) -> Vec<Refin
 }
 
 /// Guard calls whose `@phpstan-assert-if-true`/`-if-false` envelope applies on the
-/// given branch polarity, in source order — the same And-then / Or-else
-/// distribution as [`collect_refine`], so a call nested in a threaded `&&`/`||`
-/// (`if ($a && isNonEmpty($s))`) reaches its consumption point (ADR-0052 §6). The
-/// paired `bool` is whether the call returned `true` on this branch (it flips under
-/// `Not`), selecting the [`AssertKind`] polarity.
+/// given branch polarity, in source order — same And-then/Or-else distribution as
+/// [`collect_refine`], so a call nested in a threaded `&&`/`||` reaches its
+/// consumption point (ADR-0052 §6). The paired `bool` is whether the call
+/// returned `true` on this branch (flips under `Not`), selecting the
+/// [`AssertKind`] polarity.
 fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a CallExpr, bool)>) {
     match cond {
         CondExpr::Call { call, .. } => out.push((call, then)),
@@ -16912,21 +16110,17 @@ fn collect_guard_calls<'a>(cond: &'a CondExpr, then: bool, out: &mut Vec<(&'a Ca
     }
 }
 
-/// The calls this branch proves returned a **truthy** value — the witness the
+/// The calls this branch proves returned a truthy value — the witness the
 /// out-parameter seed (ADR-0077 §3.2) consumes, in source order.
 ///
-/// Its `&&`/`||`/`!` distribution is [`collect_guard_calls`]', and for a call in
-/// guard position it selects exactly the same calls that function's `returns_true`
-/// flag did. What it adds is the **compared** call: `preg_match($re, $s, $m) === 1`
-/// proves the result is `1`, which is as truthy as a bare `preg_match(…)` guard
-/// proves it, and PHPStan types both.
+/// Its `&&`/`||`/`!` distribution matches [`collect_guard_calls`]'; what it adds
+/// is the compared call: `preg_match($re, $s, $m) === 1` proves the result is
+/// `1`, as truthy as a bare `preg_match(…)` guard.
 ///
-/// Kept apart from [`collect_guard_calls`] deliberately, because the two ask
-/// different questions. `@phpstan-assert-if-true` is stated about the callee
-/// *returning `true`*, and `f($x) === 1` does not witness that — `1` is truthy
-/// but is not `true`. Feeding compared calls into the assert consumption would
-/// silently widen every envelope in the project; feeding them into the seed only
-/// asserts what the comparison itself proved.
+/// Kept apart from [`collect_guard_calls`] deliberately: `@phpstan-assert-if-true`
+/// is stated about the callee *returning `true`*, and `f($x) === 1` doesn't
+/// witness that (`1` is truthy but isn't `true`). Feeding compared calls into the
+/// assert consumption would silently widen every envelope in the project.
 fn collect_truthy_calls<'a>(
     cond: &'a CondExpr,
     then: bool,
@@ -16953,18 +16147,14 @@ fn collect_truthy_calls<'a>(
 
 /// The call a comparison proves truthy on this branch polarity, or `None`.
 ///
-/// The test is not a table of blessed shapes — it is the claim itself, checked:
-/// **every** value that satisfies the comparison must be truthy, i.e. no falsy
-/// value may satisfy it. PHP's falsy values are a finite, enumerable set
-/// ([`FALSY_LITERALS`]), and the comparison semantics are the ones the evaluator
-/// already implements, so the question is answered by running each falsy value
-/// through [`eval_cmp`] rather than by reasoning about operators in prose.
+/// Not a table of blessed shapes — the claim itself, checked: every value that
+/// satisfies the comparison must be truthy, i.e. no falsy value may satisfy it.
+/// PHP's falsy values are a finite set ([`FALSY_LITERALS`]), so the question is
+/// answered by running each through [`eval_cmp`] rather than reasoning in prose.
 ///
-/// It lands where it should: `f() === 1` and `f() == 1` prove truthy on the then
-/// branch (nothing falsy is identical or loosely equal to `1`); `f() !== 1` and
-/// `f() != 1` prove it on the *else* branch (every falsy value differs from `1`,
-/// so none of them survives the negation); `f() === 0`, `f() !== false` and
-/// `f() === ''` prove nothing, on either branch.
+/// `f() === 1` and `f() == 1` prove truthy on the then branch (nothing falsy is
+/// identical/loosely equal to `1`); `f() !== 1`/`f() != 1` prove it on the else
+/// branch; `f() === 0`, `f() !== false`, `f() === ''` prove nothing either way.
 fn cmp_truthy_witness<'a>(
     op: CmpOp,
     lhs: &'a CondOperand,
@@ -17111,12 +16301,10 @@ fn collect_cmp_refine(
 }
 
 /// Collect the `instanceof` guards a condition establishes on the given polarity
-/// (`then` = true-path, `!then` = false-path), with the **branch** polarity per
-/// guard (`positive` = the guard held). Negation flips polarity; `&&` distributes
-/// on the true-path, `||` on the false-path — the same De Morgan distribution as
-/// [`collect_refine`], so an `instanceof` nested in `$a && $v instanceof T` reaches
-/// its narrowing point. Only bare-variable operands are collected (a `$x->p
-/// instanceof T` is depth-1 property narrowing, N5's concern, not here).
+/// (`then` = true-path, `!then` = false-path), with the branch polarity per guard.
+/// Negation flips polarity; `&&` distributes on the true-path, `||` on the
+/// false-path — same De Morgan distribution as [`collect_refine`]. Only
+/// bare-variable operands are collected (`$x->p instanceof T` is N5's concern).
 fn collect_instanceof<'a>(
     cond: &'a CondExpr,
     then: bool,
@@ -17139,45 +16327,34 @@ fn collect_instanceof<'a>(
     }
 }
 
-/// Apply a branch's **class-fact** narrowing (ADR-0052 N4) to its cloned `Store`:
-/// the two NEW carriers, mutated arm-wise through the real is-a oracle. This runs
-/// beside [`apply_refinements`] (which owns the value-domain `Fact` carrier).
+/// Apply a branch's class-fact narrowing (ADR-0052 N4) to its cloned `Store`: the
+/// two NEW carriers, mutated arm-wise through the real is-a oracle. Runs beside
+/// [`apply_refinements`] (which owns the value-domain `Fact` carrier).
 ///
-/// 1. Each `instanceof T` guard on this branch subtracts from the variable's
-///    **contract lane** — the negative branch deletes arm `M` iff `is_a(M, T) = Yes`
-///    (is-a inherited), the positive branch deletes `M` only when `M` is final/enum
-///    and `is_a(M, T) = No` — through steins-contract's single per-arm judgment
-///    ([`normalize::subtract_arm`]), preserving each surviving arm's stratum.
-///    An emptied lane drops to no-fact (never a death signal, §2). The `oracle`
-///    threads the A11 demotion into exactly these arm-deletion queries.
-/// 2. The same guard binds the **`Member`** fact at `Verified` (the runtime test
-///    executed): the positive branch adds `T` to `yes`, the negative to `no`.
-/// 3. A `!== null` on this branch subtracts the `null` arm from the contract lane
-///    (the nullable-bit analogue for the arm carrier).
-/// 4. A `!== v` on this branch subtracts the **value** `v` from the contract lane
+/// 1. Each `instanceof T` guard subtracts from the variable's contract lane: the
+///    negative branch deletes arm `M` iff `is_a(M, T) = Yes`; the positive branch
+///    deletes `M` only when `M` is final/enum and `is_a(M, T) = No`
+///    ([`normalize::subtract_arm`]), preserving each surviving arm's stratum. An
+///    emptied lane drops to no-fact (never a death signal, §2). `oracle` threads
+///    the A11 demotion into these arm-deletion queries.
+/// 2. The same guard binds the `Member` fact at `Verified`: positive adds `T` to
+///    `yes`, negative to `no`.
+/// 3. `!== null` subtracts the `null` arm from the contract lane.
+/// 4. `!== v` subtracts value `v` from the contract lane
 ///    ([`normalize::Subtrahend::Value`], ADR-0052 §2): an arm dies iff the literal
-///    provably covers the whole arm (`Yes`), and `Maybe` keeps it. This is what
-///    strips the `false` arm of a `T|false` row under `if (strpos(…) !== false)`,
-///    and it is general over literals — an `!== 2` deletes a `2` arm, an `!== 'GET'`
-///    deletes a `'GET'` arm. The interior-point rule is exactly what keeps it
-///    sound: `false` does NOT cover a general `bool` arm (a `bool` may still be
-///    `true`), so a `bool` arm survives `!== false`. The one **partial** deletion
-///    is the interval endpoint: `!== 0` clips an `int<0, max>` arm to
-///    `int<1, max>` ([`normalize::ArmFate::Narrows`]), while an interior `!== 5`
-///    leaves it whole — the gap has no arm spelling.
+///    provably covers the whole arm. Strips the `false` arm of a `T|false` row
+///    under `if (strpos(…) !== false)`, general over any literal. The interior-point
+///    rule keeps it sound: `false` does NOT cover a general `bool` arm, so `bool`
+///    survives `!== false`. The one partial deletion is an interval endpoint:
+///    `!== 0` clips `int<0, max>` to `int<1, max>` ([`normalize::ArmFate::Narrows`]);
+///    an interior `!== 5` leaves it whole.
 ///
-/// Two neighbouring narrowings are deliberately NOT here:
-///
-/// * **`Refine::Truthy`** (`if ($pos)` over an `int|false` row). Truthiness kills
-///   `0` and `''` as well as `false`, so it is not a value subtraction at all;
-///   pretending it were would silently narrow `int|false` to `int` on a branch
-///   where `$pos` cannot be `0`. That is PHPStan's classic `strpos` footgun and it
-///   needs its own designed subtrahend, not a reuse of this seam.
-/// * **Keep-only narrowing on the positive branch** (`if ($x === false)` ⇒ the arm
-///   lane becomes `{false}`). The value lane's `Refine::Exact` already owns the
-///   positive branch, and an arm lane is a *subtraction* carrier by construction
-///   (§2): every mutation here removes arms it can prove dead. Intersecting to a
-///   singleton is a different judgment and is not implemented.
+/// Two neighbouring narrowings are deliberately NOT here: `Refine::Truthy` (`if
+/// ($pos)` over `int|false` — truthiness kills `0`/`''` too, not a value
+/// subtraction, PHPStan's classic `strpos` footgun needing its own subtrahend);
+/// and keep-only narrowing on the positive branch (`if ($x === false)` — the
+/// value lane's `Refine::Exact` already owns this, and the arm lane is a
+/// subtraction carrier by construction).
 fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut Store) {
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
 
@@ -17200,12 +16377,10 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
         }
     }
 
-    // (3)/(4) `!== null` and `!== v` on this branch → subtract from the contract
+    // (3)/(4) `!== null` and `!== v` on this branch subtract from the contract
     // lane. `collect_refine` already carries the branch polarity, so both spellings
-    // of the same guard arrive here: `!== v` on the then-branch and `=== v` on the
-    // else-branch both produce `Exclude` (and `var_literal` normalizes the Yoda
-    // order). `Refine::Exact`, `Truthy` and `IntRange` are the value lane's — see
-    // the refusals in this function's doc comment.
+    // arrive as `Exclude`. `Refine::Exact`, `Truthy`, `IntRange` are the value
+    // lane's — see the refusals above.
     let mut refs = Vec::new();
     collect_refine(cond, then, &mut refs, w.cx.php_minor);
     for r in &refs {
@@ -17227,10 +16402,9 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
 }
 
 /// Subtract `sub` from `var`'s contract lane in `store`, arm-wise, preserving each
-/// surviving arm's stratum (the single per-arm judgment [`normalize::subtract_arm`]
-/// applied to the stratified lane — a partial deletion, an interval arm clipped at
-/// its endpoint, keeps the stratum of the arm it shrinks); an emptied lane drops
-/// to no-fact.
+/// surviving arm's stratum ([`normalize::subtract_arm`] applied to the stratified
+/// lane — a partial deletion, an interval arm clipped at its endpoint, keeps the
+/// stratum of the arm it shrinks); an emptied lane drops to no-fact.
 fn subtract_contract_lane(
     store: &mut Store,
     var: &str,
@@ -17258,22 +16432,16 @@ fn subtract_contract_lane(
 // PHPStan ships this family as a `FunctionTypeSpecifyingExtension` set; Steins
 // imports it into the existing narrowing machinery (ADR-0052) rather than a new
 // extension mechanism — the arm lane subtracts, the value-fact lane refines, and
-// `assert(is_string($x))` inherits both for free because assert lowers its
-// argument to the same `CondExpr` and runs the same walk.
+// `assert(is_string($x))` inherits both for free.
 //
-// **Both polarities are pinned per predicate, and each is a different question.**
-// For an arm `M` and a predicate `P`, `pred_holds_on_arm` answers the trinary
-// "does *every* value `M` admits satisfy `P`?":
-//   * the TRUE branch deletes `M` iff that answer is `No`  — `P` refutes the arm;
-//   * the FALSE branch deletes `M` iff that answer is `Yes` — `P` proves the arm,
-//     so no value of `M` survives the negation.
-// `Maybe` keeps the arm on both branches: ADR-0052 §2's "an arm dies only on a
-// definite verdict", verbatim.
+// Both polarities are pinned per predicate, each a different question. For arm
+// `M` and predicate `P`, `pred_holds_on_arm` answers "does *every* value `M`
+// admits satisfy `P`?": the TRUE branch deletes `M` iff `No`; the FALSE branch
+// deletes `M` iff `Yes`. `Maybe` keeps the arm on both branches (ADR-0052 §2).
 //
-// **`ctype_*` is deliberately NOT here.** `ctype_digit` and kin are locale- and
-// byte-sensitive (and, before PHP 8.1, silently reinterpreted int arguments in
-// `-128..=255` as byte values), so the string-predicate mapping they *look* like
-// needs its own measured slice; DR2 declines them rather than guessing.
+// `ctype_*` is deliberately NOT here: locale- and byte-sensitive (and, before
+// PHP 8.1, silently reinterpreted int arguments as byte values), so it needs its
+// own measured slice; DR2 declines rather than guessing.
 // ---------------------------------------------------------------------------
 
 /// One recognized `is_*` type predicate.
@@ -17303,13 +16471,12 @@ enum TypePred {
     Iterable,
 }
 
-/// A value's PHP **runtime** type class — what `gettype()` reports, which is the
-/// only thing the `is_*` family actually tests. Deliberately distinct from the
-/// contract crate's *acceptance* relation: `admits_val(Base(Float), Int(5))` is
-/// `Yes` (PHPStan's "float accepts int" declaration rule), but `is_float(5)` is
-/// `false` — a `float`-declared slot holds a float at runtime, because PHP widens
-/// at the boundary. The judgment below reads declared arms as runtime types, the
-/// same reading PHPStan's own type specifier uses.
+/// A value's PHP runtime type class — what `gettype()` reports, the only thing
+/// the `is_*` family actually tests. Distinct from the contract crate's
+/// acceptance relation: `admits_val(Base(Float), Int(5))` is `Yes` (PHPStan's
+/// "float accepts int" rule), but `is_float(5)` is `false` since PHP widens at
+/// the boundary. Reads declared arms as runtime types, as PHPStan's own type
+/// specifier does.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RtKind {
     Null,
@@ -17319,17 +16486,16 @@ enum RtKind {
     String,
     Array,
     Object,
-    /// `gettype()` reports `resource` (or `resource (closed)` for a closed one —
-    /// one kind here, since no `is_*` predicate separates them and Steins does
-    /// not model the state). No [`Val`] maps here: the kind exists for the
-    /// [`ContractTy::Resource`] arm alone (ADR-0056 §8), which is exactly why
+    /// `gettype()` reports `resource` (or `resource (closed)` — one kind here,
+    /// since no `is_*` predicate separates them). No [`Val`] maps here: exists
+    /// for the [`ContractTy::Resource`] arm alone (ADR-0056 §8), which is why
     /// every predicate below rejects it.
     Resource,
 }
 
-/// The **exhaustive** set of runtime kinds an arm's values can have, or `None`
-/// when the arm spans an unknown set (`mixed`, its cuts, `Opaque`, `never`).
-/// Unknown keeps the arm on both polarities.
+/// The exhaustive set of runtime kinds an arm's values can have, or `None` when
+/// the arm spans an unknown set (`mixed`, its cuts, `Opaque`, `never`). Unknown
+/// keeps the arm on both polarities.
 fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
     use ContractTy as C;
     use RtKind::{Array, Bool, Float, Int, Null, Object, Resource, String as Str};
@@ -17356,16 +16522,14 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
 }
 
 /// `(kinds the predicate definitely accepts, kinds it definitely rejects)`. A kind
-/// in neither set is undecidable for that predicate (`is_callable` on a string, on
-/// an array, or on an object; `is_iterable` on an object).
+/// in neither set is undecidable for that predicate (`is_callable` on a string,
+/// array, or object; `is_iterable` on an object).
 ///
-/// Every predicate here **rejects** [`RtKind::Resource`], with no exception to
-/// write down: PHP's `is_*` family answers `false` for a resource across the
-/// board — `is_scalar`, `is_callable` and `is_iterable` included (probed at
-/// 8.5.9). `is_resource` itself is the one predicate that would answer `true`,
-/// and it is deliberately not a [`TypePred`] yet (ADR-0056 §8 deferral): it would
-/// need the *positive* branch to bind a resource fact, which is a producer
-/// question, not an arm-filtering one.
+/// Every predicate here rejects [`RtKind::Resource`]: PHP's `is_*` family answers
+/// `false` for a resource across the board, `is_scalar`/`is_callable`/
+/// `is_iterable` included (probed at 8.5.9). `is_resource` itself would answer
+/// `true` and is deliberately not a [`TypePred`] yet (ADR-0056 §8 deferral) —
+/// it needs the positive branch to bind a resource fact, a producer question.
 fn pred_kind_sets(pred: TypePred) -> (&'static [RtKind], &'static [RtKind]) {
     use RtKind::{Array, Bool, Float, Int, Null, Object, Resource, String as Str};
     match pred {
@@ -17582,14 +16746,12 @@ enum TypeGuard {
 /// The `(needle var, haystack literals)` of a **strict** `in_array` over a literal
 /// haystack, or `None`.
 ///
-/// **The non-strict form narrows NOTHING, deliberately.** `in_array($x, ['a'], false)`
-/// is PHP's loose `==`, whose equivalence classes are neither reflexive across types
-/// nor transitive: `in_array(0, ['a'])` is *true* on PHP 7 (`0 == 'a'`), `in_array('1e2',
-/// ['100'])` is true, `in_array(true, ['anything non-empty'])` is true, and the PHP 8
-/// string↔int comparison change moved the boundary again. There is no sound OneOf to
-/// mint from a loose membership test, so the whole guard is declined rather than
-/// approximated. A non-literal haystack (`in_array($x, $allowed, true)`) is declined for
-/// the plainer reason that its members are unknown.
+/// The non-strict form narrows NOTHING, deliberately: `in_array($x, ['a'], false)`
+/// is PHP's loose `==`, whose equivalence classes are neither reflexive across
+/// types nor transitive (`in_array(0, ['a'])` is true on PHP 7, `in_array('1e2',
+/// ['100'])` is true, and PHP 8's string<->int change moved the boundary again).
+/// No sound OneOf can be minted from a loose test, so the guard is declined. A
+/// non-literal haystack is declined since its members are unknown.
 fn in_array_literals(
     cx: &Cx,
     call: &CallExpr,
@@ -17665,14 +16827,12 @@ fn apply_type_narrowing(
         match g {
             TypeGuard::Pred { var, pred, positive } => {
                 subtract_pred_arms(store, var, *pred, *positive);
-                // An arm lane that collapsed to a single array arm mints its shape
-                // fact through the SAME gated helper `is_array`'s S4 siblings use —
-                // never a second minting path.
+                // An arm lane collapsed to a single array arm mints its shape fact
+                // through the same gated helper `is_array`'s S4 siblings use.
                 mint_collapsed_shape(var, env, store);
                 refine_fact_for_pred(env, var, *pred, *positive);
                 // A value the guard proved is not an object cannot still carry a
-                // heap binding or an is-a bound; the declared-arm lane (just
-                // narrowed) is deliberately kept.
+                // heap binding or is-a bound; the declared-arm lane stays.
                 if *positive && !pred_kind_sets(*pred).0.contains(&RtKind::Object) {
                     store.refs.remove(var);
                     store.members.remove(var);
@@ -17702,26 +16862,22 @@ fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bo
 
 /// Value-fact narrowing for one type predicate.
 ///
-/// **`None` means "leave the fact exactly as it was", and that is also the answer
-/// when the guard's polarity refutes the whole fact** — a binding proven `int` under
-/// an `is_string` true-branch says the branch is unreachable, and this helper does not
-/// own death (ADR-0052 §2: the verdict does). Rewriting the fact there would mint a
-/// claim about a path the runtime never takes; leaving the fact alone is the
-/// FP-safe answer on exactly that path.
+/// `None` means "leave the fact exactly as it was", also the answer when the
+/// guard's polarity refutes the whole fact — a binding proven `int` under an
+/// `is_string` true-branch means the branch is unreachable, and this helper does
+/// not own death (ADR-0052 §2: the verdict does). Rewriting there would mint a
+/// claim about a path the runtime never takes.
 fn refine_fact_for_pred(
     env: &mut HashMap<String, Known>,
     var: &str,
     pred: TypePred,
     positive: bool,
 ) {
-    // The one predicate that narrows a binding carrying NO fact: `is_string`/
-    // `is_int`/`is_float`/`is_bool` prove a single base, and `is_null` proves a
-    // single value, so the true branch can state it outright (a `mixed`/undeclared
-    // binding is the common real-world guard subject). Every other predicate names
-    // a union of bases (`is_scalar`, `is_numeric`), the array stratum (`is_array` —
-    // served by `mint_collapsed_shape` from the arm lane instead, so the Asserted
-    // shape lane keeps its A-G9 stratum discipline), or something the four-layer
-    // domain does not represent (`is_object`/`is_callable`/`is_iterable`).
+    // `is_string`/`is_int`/`is_float`/`is_bool` prove a single base, and `is_null`
+    // a single value, so the true branch can state it outright over a
+    // mixed/undeclared binding. Every other predicate names a union of bases
+    // (`is_scalar`, `is_numeric`), the array stratum (served by
+    // `mint_collapsed_shape` instead), or nothing the domain represents.
     if env.get(var).is_none_or(|k| k.fact.is_none()) {
         if !positive {
             return;
@@ -17745,22 +16901,18 @@ fn refine_fact_for_pred(
         return;
     }
     refine_fact(env, var, Stratum::Verified, |f| {
-        // **The guard's polarity refutes the binding's own fact ⇒ DROP it.** The
-        // branch is unreachable (`is_string($n)` with `$n` proven `1`), and this
-        // slice does not own death — the verdict does (ADR-0052 §2). Carrying the
-        // refuted fact into the branch is worse than either alternative: it would
-        // premise proof-layer findings about a path the runtime never takes (the
-        // measured FP class — `new Identifier($name)` inside `if (is_string($name))`
-        // under a call-site descent that bound `$name` to an int). Dropping to
-        // no-fact is the FP-safe fallback: the guard's base is forgotten wholesale
-        // here.
+        // The guard's polarity refutes the binding's own fact => DROP it. The
+        // branch is unreachable, and this slice does not own death (ADR-0052 §2).
+        // Carrying the refuted fact would premise proof-layer findings about a
+        // path the runtime never takes (measured FP class: `new Identifier($name)`
+        // inside `if (is_string($name))` under a descent that bound `$name` to an
+        // int). Dropping to no-fact is the FP-safe fallback.
         let holds = pred_holds_on_fact(pred, f);
         if (positive && holds == Certainty::No) || (!positive && holds.is_yes()) {
             return None;
         }
-        // The finite layers narrow by **exact member retention** on both
-        // polarities — the only lossless subtraction the domain has (ADR-0052 §2).
-        // The retention can no longer empty the set: the refutation test above
+        // The finite layers narrow by exact member retention on both polarities —
+        // the only lossless subtraction the domain has. The refutation test above
         // already caught the all-members-refuted case.
         if let Some(members) = f.finite_members() {
             let kept: Vec<Val> = members
@@ -17775,9 +16927,8 @@ fn refine_fact_for_pred(
         }
         if !positive {
             // The abstract layers carry no negative-predicate vocabulary (ADR-0052
-            // §2: "General has no point-complement representation, and gets none").
-            // The one exception is the nullable bit, which IS the complement of
-            // `is_null` — the same channel `!== null` already uses.
+            // §2). The exception is the nullable bit, the complement of `is_null`
+            // — the same channel `!== null` uses.
             return if pred == TypePred::Null { clear_null(f) } else { Some(f.clone()) };
         }
         Some(match (pred, f) {
@@ -17791,10 +16942,9 @@ fn refine_fact_for_pred(
             (_, Fact::General { base, .. }) if pred_base(pred) == Some(*base) => {
                 Fact::General { base: *base, nullable: false }
             }
-            // `is_numeric` is the first guard to WIRE the already-modeled
-            // `StrPreds::NUMERIC` (ADR-0064 §1 names it): on a string-based fact the
-            // true branch intersects the numeric-string class in. On an int/float
-            // fact it only drops nullability (every int and float is numeric).
+            // `is_numeric` wires the already-modeled `StrPreds::NUMERIC` (ADR-0064
+            // §1): on a string-based fact the true branch intersects the
+            // numeric-string class in. On int/float it only drops nullability.
             (
                 TypePred::Numeric,
                 Fact::Refined { base: Base::String, .. } | Fact::General { base: Base::String, .. },
@@ -17819,15 +16969,13 @@ fn refine_fact_for_pred(
 
 /// Value-fact narrowing for the strict literal-haystack `in_array` form.
 ///
-/// TRUE branch: the needle is **identical** to one of the haystack literals, so the
+/// TRUE branch: the needle is identical to one of the haystack literals, so the
 /// fact becomes the `OneOf` of those literals intersected with what was already
-/// known (`Fact::from_vals` re-canonicalizes — one survivor collapses to a
-/// `Singleton`, an over-`CAP` set widens through the computed summary).
-/// FALSE branch: subtraction is exact only on a **finite** fact (`OneOf` minus the
-/// literals, through `exclude_member`); an abstract fact has no
-/// point-complement, so it is left alone.
-/// Either polarity emptying the set means the branch is unreachable — the fact is
-/// left untouched, since the verdict owns death (ADR-0052 §2).
+/// known (`Fact::from_vals` re-canonicalizes). FALSE branch: subtraction is exact
+/// only on a finite fact (`OneOf` minus the literals via `exclude_member`); an
+/// abstract fact has no point-complement, so it's left alone. Either polarity
+/// emptying the set means the branch is unreachable — the fact is left
+/// untouched, since the verdict owns death (ADR-0052 §2).
 fn refine_fact_for_in_array(
     env: &mut HashMap<String, Known>,
     var: &str,
@@ -18057,13 +17205,12 @@ fn truthy_narrow(f: &Fact) -> Option<Fact> {
 /// Add string predicates to a String-based abstract fact (union-closed); a
 /// non-string or finite fact is returned unchanged.
 ///
-/// **Both arms close under implication.** [`StrPreds`] documents itself as
-/// "canonically closed", and the `Refined` arm gets that for free from
-/// [`StrPreds::union`] — the `General` arm, which starts from no predicates, has
-/// to ask for it. Storing a raw `NON_FALSY` bit produces a fact that renders as
-/// `non-falsy-string` but answers `false` to "is it non-empty?", which is the
-/// closure existing to prevent: a consumer testing the weaker predicate (DR3's
-/// `explode` separator gate is the first) would silently miss the stronger one.
+/// Both arms close under implication: the `Refined` arm gets it free from
+/// [`StrPreds::union`], and the `General` arm (starting from no predicates) must
+/// ask for it explicitly. Without this, a raw `NON_FALSY` bit would render as
+/// `non-falsy-string` but answer `false` to "is it non-empty?" — a consumer
+/// testing the weaker predicate (DR3's `explode` separator gate is the first)
+/// would silently miss the stronger one.
 fn add_str_preds(f: &Fact, preds: StrPreds) -> Fact {
     match f {
         Fact::Refined { base: Base::String, refinement: Refinement::Str(have), nullable } => {
@@ -18154,10 +17301,9 @@ fn guard_call_line(w: &WalkCx, call: &CallExpr) -> u32 {
 /// A truthy result is the callee's own witness that it performed its by-ref
 /// write, and the ONLY branch where the written fact is sound — `preg_match` on
 /// an uncompilable pattern returns `false` and writes nothing at all. Runs after
-/// the invalidation of `walk_if` step 2 and rebinds what it forgot (§3.4), and
-/// after the branch's assert narrowings, so an explicit `@phpstan-assert`
-/// envelope is not silently overwritten by a seed at a further call in the same
-/// condition.
+/// `walk_if` step 2's invalidation rebinds what it forgot (§3.4) and after the
+/// branch's assert narrowings, so an explicit `@phpstan-assert` envelope is not
+/// overwritten by a seed at a further call in the same condition.
 fn seed_out_params(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18184,19 +17330,17 @@ const OUT_PARAM_SEEDED: &str = "written by the guard call on this branch";
 /// **The out-parameter seed** (ADR-0077): the by-ref arguments a guard call
 /// proved it wrote, paired with the fact its contract determines for each.
 ///
-/// Called only from the branch where the call's result is proven truthy, and
-/// that is the whole ADR. `preg_match` returns `1` and assigns the success shape,
-/// returns `0` and assigns `[]` — and on a pattern PCRE refuses to compile it
-/// returns `false` and assigns **nothing at all**, leaving the caller's variable
-/// holding whatever it held (measured, PHP 8.5.9). The third outcome is not a
-/// value a fact could widen to include; it is the absence of an assignment. So
-/// truthiness is not merely where the sharper fact is, it is the only place any
-/// fact is sound at all — and a seed at the call statement would manufacture one
-/// on a reachable path.
+/// Called only from the branch where the call's result is proven truthy. `preg_match`
+/// returns `1` and assigns the success shape, `0` and assigns `[]` — and on a
+/// pattern PCRE refuses to compile it returns `false` and assigns **nothing at
+/// all**, leaving the caller's variable holding whatever it held (measured, PHP
+/// 8.5.9). That third outcome is the absence of an assignment, not a value a fact
+/// could widen to include — so truthiness is the only place any fact is sound,
+/// and a seed at the call statement would manufacture one on a reachable path.
 ///
-/// Every leg refuses **silently**, and a refusal is exactly today's behavior: the
-/// name stays forgotten, no diagnostic is produced, and nothing distinguishes a
-/// pattern this engine cannot read from one it never looked at.
+/// Every leg refuses **silently**: the name stays forgotten, no diagnostic is
+/// produced, and nothing distinguishes a pattern this engine cannot read from one
+/// it never looked at.
 fn out_param_seed(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18247,11 +17391,8 @@ fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
 }
 
 /// The fact the callee's contract determines for the out-parameter at
-/// `position`, computed from **proven arguments only** (ADR-0077 §3.3).
-///
-/// Two rows exist, and the dispatch is by (name, position) because that is what
-/// the witness is keyed by: another row would be another arm, not a widening of
-/// these.
+/// `position`, computed from **proven arguments only** (ADR-0077 §3.3). Two rows
+/// exist, dispatched by (name, position) — the key the witness is indexed by.
 fn out_param_written_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18304,10 +17445,10 @@ struct PregFlags {
 /// An absent argument is the measured default (PATTERN_ORDER, no pairs, no
 /// nulls). A present one must resolve to a proven int — a literal, a modeled
 /// engine constant ([`preg_flag_const_value`]), or a variable the walk proves —
-/// and any unknown bit, any bit outside `allowed`, and any unproven value
-/// decline the whole seed, silently. Both order bits together also decline:
-/// measured (PHP 8.5.9), `preg_match_all(…, 3)` throws a `ValueError` and
-/// writes nothing, so there is no written shape to state.
+/// and any unknown bit, any bit outside `allowed`, or any unproven value
+/// declines the whole seed, silently. Both order bits together also decline:
+/// measured (PHP 8.5.9), `preg_match_all(…, 3)` throws a `ValueError` and writes
+/// nothing, so there is no written shape to state.
 fn preg_resolved_flags(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18337,18 +17478,17 @@ fn preg_resolved_flags(
 }
 
 /// The engine **value** of a modeled `PREG_*` flag-constant reference, or
-/// `None` (issue #168 rule 6: constants resolve to values, never match by
-/// name — the name is only the route to the engine's constant).
+/// `None` (issue #168 rule 6: constants resolve to values, never match by name —
+/// the name is only the route to the engine's constant).
 ///
-/// The route is guarded by the same shadow discipline as the engine
-/// `PHP_VERSION_ID` ([`is_engine_version_id`], issue #29): a fully-qualified
-/// `\PREG_SET_ORDER` always denotes the engine constant (the engine defines it
-/// first, and a `define` of an already-defined constant is a no-op); an
-/// unqualified one does unless this file `use const`-imports one of the names
-/// or **any file in the project** declares a userland twin — PHP's namespace
-/// fallback would then resolve an unqualified reference to the twin, whose
-/// value nothing here knows. Qualified and `namespace\`-relative spellings
-/// never denote the engine constant.
+/// Guarded by the same shadow discipline as `PHP_VERSION_ID`
+/// ([`is_engine_version_id`], issue #29): a fully-qualified `\PREG_SET_ORDER`
+/// always denotes the engine constant (defined first; a `define` of an
+/// already-defined constant is a no-op). An unqualified one does too, unless
+/// this file `use const`-imports one of the names or any project file declares a
+/// userland twin — PHP's namespace fallback would then resolve to the twin,
+/// whose value is unknown. Qualified and `namespace\`-relative spellings never
+/// denote the engine constant.
 fn preg_flag_const_value(cx: &Cx, r: &NameRef) -> Option<i64> {
     let value = match r.raw.as_str() {
         "PREG_PATTERN_ORDER" => PREG_FLAG_PATTERN_ORDER,
@@ -18369,24 +17509,15 @@ fn preg_flag_const_value(cx: &Cx, r: &NameRef) -> Option<i64> {
 }
 
 /// What `preg_match` wrote into `$matches`, for a call whose every premise is
-/// proven — else `None`.
-///
-/// Three refusals live here, and each is a premise the fact would otherwise rest
-/// on without holding it:
-///
-/// * **the pattern** must resolve to a proven `Singleton` string (ADR-0037): a
-///   computed or widened pattern says nothing about the group structure;
-/// * **the group reader declines** (#149) for every pattern whose numbering it
-///   cannot establish, which is also what keeps this out of the business of
-///   deciding whether PCRE would compile the pattern at all;
-/// * **the flags argument**, when supplied, must be a proven int whose every set
-///   bit is modeled ([`preg_resolved_flags`]). For `preg_match` those are
-///   `PREG_OFFSET_CAPTURE` and `PREG_UNMATCHED_AS_NULL` (issue #168) — the
-///   order bits are `preg_match_all` vocabulary, and passing one here is a
-///   measured `ValueError`, so they stay outside `allowed`.
-///
-/// The `$offset` argument (position 4) is deliberately *not* consulted: it moves
-/// where matching starts, and measurement confirms it leaves the written key set
+/// proven — else `None`. Three refusals: the pattern must resolve to a proven
+/// `Singleton` string (ADR-0037; a computed/widened pattern says nothing about
+/// group structure); the group reader (#149) must establish the numbering; the
+/// flags argument, if supplied, must be a proven int whose every set bit is
+/// modeled ([`preg_resolved_flags`]) — for `preg_match` that's
+/// `PREG_OFFSET_CAPTURE` and `PREG_UNMATCHED_AS_NULL` (the order bits are
+/// `preg_match_all` vocabulary and measured `ValueError` here, so stay outside
+/// `allowed`). The `$offset` argument (position 4) is not consulted: it moves
+/// where matching starts but measurement confirms it leaves the written key set
 /// alone.
 fn preg_match_written_fact(
     w: &WalkCx,
@@ -18407,16 +17538,15 @@ fn preg_match_written_fact(
 
 /// What `preg_match_all` wrote into `$matches` (issue #168), for a call whose
 /// every premise is proven — else `None`. Same pattern and reader refusals as
-/// [`preg_match_written_fact`]; the flags gate additionally admits the two
-/// order bits, mutually exclusive (measured: both together is a `ValueError`).
+/// [`preg_match_written_fact`]; the flags gate additionally admits the two order
+/// bits, mutually exclusive (measured: both together is a `ValueError`).
 ///
 /// Called only on the proven-truthy branch (ADR-0077): the return is
-/// `int|false`, a truthy value is an int >= 1, and that proves both that the
-/// pattern compiled and that at least one match landed — so every column
-/// (PATTERN_ORDER) is a written, non-empty list, and the SET_ORDER outer list
-/// is non-empty. The zero-match write (`ret = 0`, empty columns — measured) is
-/// real but indistinguishable from `false` on the falsy branch, which therefore
-/// stays unseeded.
+/// `int|false`, and a truthy value (int >= 1) proves both that the pattern
+/// compiled and that at least one match landed — so every column
+/// (PATTERN_ORDER) is a written, non-empty list, and the SET_ORDER outer list is
+/// non-empty. The zero-match write (`ret = 0`, empty columns — measured) is real
+/// but indistinguishable from `false` on the falsy branch, so it stays unseeded.
 fn preg_match_all_written_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18464,11 +17594,11 @@ fn preg_proven_groups(
 /// The **one** fold-gate fact both preg consumers rest on: `value` resolves to a
 /// proven `Singleton` string (ADR-0037), i.e. a pattern the analysis can name.
 ///
-/// Extracted so the ADR-0078 refusal check asks the same question the capture-group
-/// reader asks, out of the same seam, rather than re-deriving "is this a literal
-/// pattern" a second time and drifting from it. Everything the reader's
-/// resolution admits — a written literal, a variable bound to one, a concatenation
-/// of proven halves, a folded builtin call — is admitted here, and nothing else is.
+/// Extracted so the ADR-0078 refusal check and the capture-group reader ask the
+/// same question out of the same seam rather than re-deriving "is this a literal
+/// pattern" and drifting apart. Everything the reader's resolution admits — a
+/// written literal, a variable bound to one, a concatenation of proven halves, a
+/// folded builtin call — is admitted here, and nothing else is.
 fn preg_proven_pattern(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18517,10 +17647,8 @@ struct PregEntryPoint {
 /// The `preg_*` surface is `preg_match`, `preg_match_all`, `preg_replace`,
 /// `preg_replace_callback`, `preg_replace_callback_array`, `preg_filter`,
 /// `preg_split`, `preg_grep`, `preg_quote`, `preg_last_error` and
-/// `preg_last_error_msg`. The last three are the complement and take no pattern:
-/// `preg_quote` takes the *text to escape* (a plain string, never compiled), and
-/// the two error readers take nothing. So this table is the whole entry-point set,
-/// with the omission recorded rather than left implicit.
+/// `preg_last_error_msg`. The last three take no pattern: `preg_quote` takes the
+/// text to escape (never compiled), and the two error readers take nothing.
 const PREG_PATTERN_ENTRY_POINTS: &[PregEntryPoint] = &[
     PregEntryPoint { name: "preg_match", form: PregPatternForm::Single, refusal_value: "false" },
     PregEntryPoint { name: "preg_match_all", form: PregPatternForm::Single, refusal_value: "false" },
@@ -18541,10 +17669,10 @@ const PREG_PATTERN_ENTRY_POINTS: &[PregEntryPoint] = &[
 ];
 
 /// The entry point `call` names, or `None` when it names none — or names one
-/// *textually* while denoting something else. [`global_function_callee`] owns that
-/// second rule: a `Foo\preg_match` or a project function of the same simple name is
-/// a DIFFERENT function, and asking PCRE about its first argument would be a claim
-/// about code we did not analyze.
+/// textually while denoting something else. [`global_function_callee`] owns that
+/// second rule: a `Foo\preg_match` or a project function of the same simple name
+/// is a DIFFERENT function, and asking PCRE about its first argument would be a
+/// claim about code we did not analyze.
 fn preg_entry_point(cx: &Cx, call: &CallExpr) -> Option<&'static PregEntryPoint> {
     let callee = global_function_callee(cx, call)?;
     PREG_PATTERN_ENTRY_POINTS.iter().find(|e| callee.eq_ignore_ascii_case(e.name))
@@ -18552,13 +17680,13 @@ fn preg_entry_point(cx: &Cx, call: &CallExpr) -> Option<&'static PregEntryPoint>
 
 /// The proven pattern strings in a `Single`/`SingleOrList` argument.
 ///
-/// The whole-value resolution comes first, which covers the written literal, a
-/// variable bound to one, and an array every element of which is proven. It is the
-/// **partial** array that needs the second leg: `resolve_literal` is all-or-nothing
-/// over an array, so `preg_replace(['/(unclosed/', $dynamic], …)` resolves to
-/// nothing at all — yet each element is still its own question, and the literal one
-/// is refused no matter what `$dynamic` turns out to hold. Elements that do not
-/// resolve simply contribute nothing (silence, never a guess).
+/// The whole-value resolution comes first (a written literal, a variable bound
+/// to one, or an array every element of which is proven). A **partial** array
+/// needs the second leg: `resolve_literal` is all-or-nothing over an array, so
+/// `preg_replace(['/(unclosed/', $dynamic], …)` resolves to nothing at all — yet
+/// each element is still its own question, and the literal one is refused no
+/// matter what `$dynamic` holds. Elements that do not resolve contribute nothing
+/// (silence, never a guess).
 fn preg_pattern_list(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18613,36 +17741,27 @@ fn preg_pattern_keys(
 /// Emit `preg.invalid-pattern` for every proven-literal pattern at this `preg_*`
 /// call that the project's own PCRE refuses (ADR-0078, issue #189).
 ///
-/// The ladder, in the order the legs are cheapest to fail:
+/// The ladder, cheapest legs first: (1) the warning-handler posture (ADR-0049
+/// §7) — under a declared `warning-handler = "null"` the finding leaves the
+/// proof surface, wired exactly as `offset.missing`; (2) a recognized entry
+/// point, denoting the real builtin; (3) positional arguments only — a named
+/// `pattern:` argument, a spread, or a first-class callable (`preg_match(...)`,
+/// which builds a Closure and compiles nothing) is skipped, the same
+/// conservatism `out_param_seed_callee` applies; (4) a live, legitimate boot
+/// surface (`absence_family_available`) — no runtime-redefinition extension has
+/// redefined `preg_match` (ADR-0049 A9), and the runtime is a version the
+/// project declares it ships on (issue #28); `--no-php` and a missing `php` both
+/// fail this leg, the sound subset (ADR-0004); (5) a proven literal pattern from
+/// the same fold gate the capture-group reader consumes
+/// ([`preg_proven_pattern`]); (6) PCRE's own refusal, asked of the project's own
+/// engine and deduped per distinct pattern for the whole run
+/// ([`Folder::preg_pattern_refusal`]).
 ///
-/// 1. **The warning-handler posture** (ADR-0049 §7). A refusal is warning-plus-a-
-///    useless-return, so under a declared `warning-handler = "null"` the finding
-///    leaves the proof surface — wired exactly as `offset.missing` is.
-/// 2. **A recognized entry point**, denoting the real builtin.
-/// 3. **Positional arguments only.** A named `pattern:` argument is not read: the
-///    positional mapping this check reasons with is what a named or spread argument
-///    defeats, and the same conservatism `out_param_seed_callee` applies. A
-///    first-class callable (`preg_match(...)`) lands here too and is likewise
-///    skipped — it builds a Closure and compiles nothing.
-/// 4. **A live, legitimate boot surface** (`absence_family_available`): a sidecar is
-///    answering, no runtime-redefinition extension has redefined `preg_match` out
-///    from under the probe (ADR-0049 A9), and the runtime is a version the project
-///    declares it ships on (issue #28) — a refusal on a version the project does not
-///    ship on proves nothing about the ones it does. `--no-php` and a missing `php`
-///    both fail this leg, which is the sound subset (ADR-0004).
-/// 5. **A proven literal pattern**, from the same fold gate the capture-group reader
-///    consumes ([`preg_proven_pattern`]).
-/// 6. **PCRE's own refusal**, asked of the project's own engine and deduped per
-///    distinct pattern for the whole run ([`Folder::preg_pattern_refusal`]).
-///
-/// # Positions covered, and the recorded boundary
-///
-/// Two hooks: the statement-position pass (a bare call, and the `return` / assign /
-/// echo positions [`checkable_calls`] yields) and `walk_if`'s guard, which is where
-/// `if (preg_match(…))` — the idiom the id exists for — actually lives. A call in a
-/// LOOP header, a ternary condition, or a `match` subject is not reached by either,
-/// and is silence: the same position boundary every other call-site check here
-/// carries, recorded rather than left implicit.
+/// Positions covered: the statement-position pass (a bare call, and the
+/// `return`/assign/echo positions [`checkable_calls`] yields) and `walk_if`'s
+/// guard, where `if (preg_match(…))` lives. A call in a loop header, ternary
+/// condition, or `match` subject is not reached by either — silence, the same
+/// position boundary every other call-site check here carries.
 fn check_preg_pattern(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -18746,25 +17865,23 @@ fn foreach_subject_abstract_word(fact: &Fact) -> Option<&'static str> {
 ///
 /// Reuses `SourceTree::foreach_sites()` (ADR-0076) rather than re-lowering the
 /// construct — the checker's own trace erases `foreach` into an undifferentiated
-/// `StmtKind::Opaque` (ADR-0027), so the site list is where "this IS a foreach,
-/// and here is its subject" survives.
+/// `StmtKind::Opaque` (ADR-0027), so the site list is where "this IS a foreach"
+/// survives.
 ///
 /// The subject's fact comes from the SAME lane `offset.missing` reads (a bare
 /// `Var` in `env`, required `Verified` — an `Asserted`/docblock claim never
 /// premises this proof, ADR-0052 §5). Only a `Singleton` over a non-array `Val`
-/// and a scalar-base `Refined`/`General` fact fire (ADR-0078 §"fires only on a
-/// proven non-iterable"); a `Fact::Shape` (an array, always iterable) and a
-/// `Fact::OneOf` (out of scope here — no single warning word to attribute) stay
-/// silent.
+/// and a scalar-base `Refined`/`General` fact fire; a `Fact::Shape` (an array,
+/// always iterable) and a `Fact::OneOf` (no single warning word to attribute)
+/// stay silent.
 ///
-/// Every other silence leg falls out of the SAME gate with no extra code: a
-/// plain object carries no `Fact` at all (the domain `Val` has no object
-/// variant — object state lives in the heap/store, ADR-0036), so `Traversable`/
-/// `Generator`/a plain object/an unenumerable class hierarchy are all simply
-/// unproven here. An `iterable`-declared native parameter contributes no `Fact`
-/// either (ADR-0002 silence — only a docblock shape or a walked value answers).
-/// A `None` fact, a poisoned scope, or an `Asserted`-stratum fact all stay
-/// silent by the same gates `offset.missing` uses.
+/// Every other silence leg falls out of the same gate: a plain object carries no
+/// `Fact` at all (the domain `Val` has no object variant — object state lives in
+/// the heap/store, ADR-0036), so `Traversable`/`Generator`/a plain object/an
+/// unenumerable hierarchy are simply unproven. An `iterable`-declared native
+/// parameter contributes no `Fact` either (ADR-0002 silence). A `None` fact, a
+/// poisoned scope, or an `Asserted`-stratum fact all stay silent by the same
+/// gates `offset.missing` uses.
 fn check_foreach_subject(
     cx: &Cx,
     site: &ForeachSite,
@@ -18834,13 +17951,13 @@ fn check_foreach_subject(
 /// [`TYPE_RETURN_MAYBE_MISSING_ID`]. Both premises are shared; one predicate,
 /// [`body_has_terminator`], routes the finding between them.
 ///
-/// Env-free and dead-region-free by design. The premise is a *declaration* plus
+/// Env-free and dead-region-free by design: the premise is a declaration plus
 /// the ADR-0078 reachability foundation's structural verdict, neither of which a
-/// walked value can change, so this pass borrows nothing from the propagation
-/// pass — the same posture `check_declaration_fatals` and `docblock_hygiene` take.
+/// walked value can change — the same posture `check_declaration_fatals` and
+/// `docblock_hygiene` take.
 ///
 /// `never_returning` is the set of callee names the run proved never return; see
-/// [`never_returning_names`] and the id's own "recorded obstacle" section.
+/// [`never_returning_names`].
 fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Vec<Diagnostic>) {
     for scope in cx.tree().scopes() {
         // Premise 1a: a written, non-void, non-never return hint. The RAW hint, not
@@ -18850,30 +17967,28 @@ fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Ve
         if hint.kind != RetHintKind::Other {
             continue;
         }
-        // Premise 1b: not a generator. A body containing `yield` returns a
-        // `Generator` object from the CALL; its declared type describes that object
-        // and never a body exit (ADR-0057 §5), so falling off the end is legal.
+        // Premise 1b: not a generator — a body with `yield` returns a `Generator`
+        // object from the call, describing that object rather than a body exit
+        // (ADR-0057 §5), so falling off the end is legal.
         if scope.is_generator {
             continue;
         }
-        // Premise 2: the body PROVABLY falls through. This is the asymmetry
-        // [`BodyEnd`] documents, applied: `Unknown` — a `try`/`catch`, a `goto`, an
-        // unstructurable `switch` — reads as terminating here, i.e. silence.
+        // Premise 2: the body PROVABLY falls through ([`BodyEnd`]'s asymmetry):
+        // `Unknown` (a `try`/`catch`, a `goto`, an unstructurable `switch`) reads as
+        // terminating, i.e. silence.
         if !body_end(&scope.stmts).provably_falls_through() {
             continue;
         }
-        // The never-returning-callee refinement the judgment leaves to this id:
-        // `function g(): never { exit(1); }` makes `function f(): int { g(); }` run
-        // clean (witnessed 8.5.9). Scope-wide rather than path-precise — a strictly
-        // larger silence, which is the safe direction.
+        // Never-returning-callee refinement: `function g(): never { exit(1); }`
+        // makes `function f(): int { g(); }` run clean (witnessed 8.5.9). Scope-wide
+        // rather than path-precise — the safe, larger-silence direction.
         if scope_calls_never_returning(scope, never_returning) {
             continue;
         }
         // `include`/`require`/`eval` bring in code that can `exit` the whole script,
-        // so a body whose fall-through path runs through one has an exit this
-        // judgment cannot see. Only these two give-up constructs are vetoed — the
-        // rest of the ADR-0001 list (`global`, `static $x`, `extract`, a by-ref
-        // capture) defeats *value* tracking, which this premise never consults.
+        // invisibly to this judgment. Only these two are vetoed — the rest of the
+        // ADR-0001 give-up list defeats *value* tracking, which this premise never
+        // consults.
         if scope
             .opaque
             .iter()
@@ -18882,11 +17997,10 @@ fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Ve
             continue;
         }
 
-        // The definite/possibly discriminator (ADR-0078 §1.3). A body that exits
-        // NOWHERE fatals on every execution — the stub/test-double class, and the
-        // definite id. A body that exits somewhere but not on every path fatals only
-        // along the uncovered edge, which is the `maybe-` sibling's whole subject.
-        // The two ids are disjoint by construction: one predicate decides.
+        // The definite/possibly discriminator (ADR-0078 §1.3): a body that exits
+        // nowhere fatals on every execution (the definite id); one that exits
+        // somewhere but not on every path fatals only along the uncovered edge (the
+        // `maybe-` sibling). Disjoint by construction: one predicate decides.
         let conditional = body_has_terminator(&scope.stmts);
 
         let declared = cx.tree().text_at(hint.span).unwrap_or("the declared type").trim();
@@ -18939,15 +18053,14 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
 }
 
 /// The simple names of every function and method in the run that declares
-/// `: never` — the veto set for the recorded never-returning-callee obstacle.
+/// `: never` — the veto set for the never-returning-callee obstacle.
 ///
-/// Read off `Scope::ret_hint`, so it covers exactly the bodies the analysis
-/// lowered. Names are lowercased because PHP function and method names are
-/// case-insensitive, and they are **simple** names, not resolved targets: a scope
-/// is vetoed when it calls *something spelled like* a never-returning callee. That
-/// is a deliberate over-silence — resolving each call's real target would need the
-/// receiver's exact class, which this declaration-only pass has no business
-/// computing, and the cost of guessing wrong is a false `TypeError` accusation.
+/// Read off `Scope::ret_hint`, covering exactly the bodies the analysis lowered.
+/// Names are lowercased (PHP names are case-insensitive) and are **simple**
+/// names, not resolved targets: a scope is vetoed when it calls something
+/// spelled like a never-returning callee. Deliberate over-silence — resolving
+/// each call's real target would need the receiver's exact class, and the cost
+/// of guessing wrong is a false `TypeError` accusation.
 fn never_returning_names(units: &[FileUnit]) -> HashSet<String> {
     let mut names = HashSet::new();
     for unit in units {
@@ -19080,25 +18193,23 @@ impl OperandKind {
 /// Whether a **known** string is one PHP refuses fatally as an arithmetic
 /// operand: a string with no *leading numeric prefix* at all.
 ///
-/// PHP 8 grades string operands in three bands, and only the third is this id's
-/// (all `php -r`-witnessed at 8.5.9 against `$s + 1`):
-///
+/// PHP 8 grades string operands in three bands (all `php -r`-witnessed at 8.5.9
+/// against `$s + 1`), and only the third is this id's:
 /// * **numeric** (`'5'`, `'5.5'`, `'.5'`, `'5.'`, `'1e3'`, `'017'`, `'+5'`,
 ///   `' 5'`, `'5 '`, `'000123'`) — legal, silently coerced;
 /// * **leading-numeric** (`'5abc'`, `'.5abc'`, `'1e'`, `'0x1A'`, `'0b11'`,
-///   `'1_000'`, `"5\0"`) — an `E_WARNING` "A non-numeric value encountered"
-///   and the operation still computes. Warning-grade, so **not** this id, at
-///   any posture;
+///   `'1_000'`, `"5\0"`) — an `E_WARNING` and the operation still computes.
+///   Warning-grade, not this id, at any posture;
 /// * **no numeric prefix** (`'abc'`, `''`, `' '`, `'abc5'`, `'.abc'`, `'e5'`,
 ///   `'-abc'`, `'--5'`, `'INF'`, `'NAN'`, `"\0 5"`, `'０'`) — `TypeError:
 ///   Unsupported operand types: string + int`. This function's `true`.
 ///
-/// The prefix grammar is PHP's own and is matched exactly: optional leading
-/// whitespace from the set `" \t\n\r\x0b\x0c"` (a NBSP is *not* whitespace —
-/// `"\u{a0}5" + 1` is a `TypeError`), then an optional single `+`/`-`, then
-/// either an ASCII digit or a `.` followed by an ASCII digit. Anything else has
-/// no prefix and is fatal. Witnessed on both sides of the boundary: `'- 5'`
-/// (sign, space, digit) is fatal, `'-.5x'` is the warning.
+/// The prefix grammar is PHP's own, matched exactly: optional leading
+/// whitespace from `" \t\n\r\x0b\x0c"` (a NBSP is *not* whitespace —
+/// `"\u{a0}5" + 1` is a `TypeError`), then an optional single `+`/`-`, then an
+/// ASCII digit or a `.` followed by one. Anything else has no prefix and is
+/// fatal. Witnessed on both sides: `'- 5'` (sign, space, digit) is fatal,
+/// `'-.5x'` is the warning.
 fn string_is_fatal_operand(s: impl AsRef<[u8]>) -> bool {
     // Byte-oriented, and byte-**exact** for a non-UTF-8 string: PHP's own
     // leading-numeric prefix rule reads bytes, so `"\xC0" * 2` is the TypeError
@@ -19139,20 +18250,16 @@ fn val_operand_kind(v: &Val) -> OperandKind {
 }
 
 /// The operand kind a whole [`Fact`] proves, or `None` when it proves no single
-/// one.
-///
-/// Two families decline, both because their denotation spans two *different*
-/// consequences:
-///
-/// * any `nullable: true` layer (`?string` is `string`-or-`null`, and for `~`
-///   those are opposite verdicts);
-/// * a heterogeneous `OneOf` (`1|'abc'` from a ternary) — a homogeneous one
-///   answers, so `'abc'|'def'` is still a proven `FatalString`.
+/// one. Two families decline, both because their denotation spans two
+/// *different* consequences: any `nullable: true` layer (`?string` is
+/// `string`-or-`null`, opposite verdicts for `~`), and a heterogeneous `OneOf`
+/// (`1|'abc'` from a ternary — a homogeneous one still answers, so `'abc'|'def'`
+/// is a proven `FatalString`).
 ///
 /// An abstract `string` base answers [`OperandKind::String`], never
 /// `FatalString`: `numeric-string` and `'abc'` share that layer, and only the
-/// *content* decides. That is the conservative direction — it suppresses a
-/// fatal claim, and it supplies the "is a string" premise the `& | ^` rows need.
+/// content decides. Conservative direction — suppresses a fatal claim, and
+/// supplies the "is a string" premise the `& | ^` rows need.
 fn fact_operand_kind(fact: &Fact) -> Option<OperandKind> {
     match fact {
         Fact::Singleton(v) => Some(val_operand_kind(v)),
@@ -19341,22 +18448,18 @@ fn judge_operand_site(
 /// Judge every [`OperandSite`] the statement covers, against the statement's
 /// ENTRY env (ADR-0078, issue #191).
 ///
-/// The reach is deliberately the narrowest one that is *always* reading the
-/// right env, and both halves of that are load-bearing:
-///
-/// * **Leaf statements only.** A structured `If`/`Match` and an `Opaque`
-///   construct both textually contain their body's sites, and the entry env is
-///   emphatically not the env those bodies run under (`$x = 1; while (…) { $x =
-///   []; $x + 1; }`). The `If`/`Match` branches are walked as their own inner
-///   statements, so their leaf statements are judged there with the branch env,
-///   and nothing is judged twice; a loop/`try` body is simply out of reach,
-///   like every other ADR-0027 unmodelled construct. `Barrier` is excluded for
-///   the same reason (`declare(ticks=1) { … }` carries a block).
-/// * **Same function body.** A closure's sites lie inside their creating
-///   statement's span, but `$s` inside `fn () => $s + 1` is the closure's
-///   binding, not the enclosing scope's — [`OperandSite::enclosing_body`] is
-///   what tells the two apart, and the closure's own scope walk judges those
-///   sites with its own env.
+/// The reach is the narrowest one that is *always* reading the right env:
+/// **leaf statements only** — a structured `If`/`Match` and an `Opaque`
+/// construct both textually contain their body's sites, and the entry env is
+/// not the env those bodies run under (`$x = 1; while (…) { $x = []; $x + 1;
+/// }`). The `If`/`Match` branches are walked as their own inner statements, so
+/// their leaf statements are judged there with the branch env and nothing is
+/// judged twice; a loop/`try` body is simply out of reach, like every other
+/// ADR-0027 unmodelled construct (`Barrier` excluded for the same reason). And
+/// **same function body**: a closure's sites lie inside their creating
+/// statement's span, but `$s` inside `fn () => $s + 1` is the closure's own
+/// binding — [`OperandSite::enclosing_body`] tells the two apart, and the
+/// closure's own scope walk judges those sites with its own env.
 ///
 /// The sites are span-sorted, so the covered range is found by binary search
 /// rather than a per-statement scan of the file.
@@ -19405,31 +18508,20 @@ fn check_operand_sites(
 // end invalid operands (ADR-0078, issue #191)
 
 /// The element type of one `$matches` entry, read off the sub-pattern that
-/// produced it (issue #156).
+/// produced it (issue #156). Three rules, each falling back to plain `string`
+/// when it cannot establish more: a floor of one character rules out `''`
+/// (`non-empty-string`); a floor of **two** rules out `'0'` too — the falsy
+/// strings — giving `non-falsy-string`; a sub-pattern producing only ASCII
+/// digits, at least one, is `numeric-string` (measured: PHP calls every
+/// non-empty ASCII digit run numeric, leading zeros and four hundred digits
+/// included). Floors are counted in **characters**, so a multi-byte literal
+/// like `(£|€)` (one-character floor, two-byte floor) stays `non-empty-string`,
+/// agreeing with PHPStan.
 ///
-/// Three rules, each a property of the sub-pattern's whole language and each
-/// answering plain `string` — today's behavior — for anything it cannot
-/// establish:
-///
-/// * a floor of one character rules out `''`, so the entry is
-///   `non-empty-string`;
-/// * a floor of **two** rules out `'0'` as well, and those are exactly the
-///   falsy strings, so the entry is `non-falsy-string`;
-/// * a sub-pattern that can produce nothing but ASCII digits, and must produce
-///   at least one, is `numeric-string` — measured, PHP calls every non-empty
-///   ASCII digit run numeric, leading zeros and four hundred digits included.
-///
-/// The floors are counted in **characters**, which is what keeps the second
-/// rule honest for a multi-byte literal: `(£|€)` has a one-character floor and
-/// a two-*byte* one, and PHPStan agrees it is only `non-empty-string`.
-///
-/// Deliberately not implemented: the issue also offers "a mandatory literal
-/// character other than `'0'`" as a second route to `non-falsy-string`. It is
-/// sound — a string containing `'x'` is neither `''` nor `'0'` — but it claims
-/// more than PHPStan does for the same pattern (`/(a|b)|(?:c)/` is
-/// `non-empty-string` there), so it would trade agreement for sharpness on
-/// rows that are otherwise exact. A decline costs nothing and is easy to add
-/// later.
+/// Not implemented: "a mandatory literal character other than `'0'`" as a
+/// second route to `non-falsy-string` (the issue's alternative). Sound but
+/// claims more than PHPStan does for `/(a|b)|(?:c)/` (`non-empty-string`
+/// there), trading agreement for sharpness — declined, cheap to add later.
 fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
     let mut preds = StrPreds::empty();
     if text.min_chars >= 1 {
@@ -19452,10 +18544,10 @@ fn preg_element_fact(text: &steins_catalog::preg::MatchedText) -> Fact {
 /// The union is the sharper answer to the same question the refinement
 /// answers, so it slots in above it and changes nothing about presence: the
 /// unmatched paths (`''` padding, `null`, an absent key) stay with the
-/// positional projections and the flag seams, which join their extra member
-/// onto whatever element this function produced. The reader caps the union at
-/// the domain's own finite layer ([`steins_catalog::preg::LITERAL_UNION_CAP`]
-/// = the `OneOf` cap), so `from_vals` never widens here; the fallthrough is
+/// positional projections and flag seams, which join their extra member onto
+/// whatever element this function produced. The reader caps the union at the
+/// domain's own finite layer ([`steins_catalog::preg::LITERAL_UNION_CAP`], the
+/// `OneOf` cap), so `from_vals` never widens here; the fallthrough is
 /// belt-and-suspenders for an empty or unrepresentable set.
 fn preg_group_element_fact(g: &steins_catalog::preg::CaptureGroup) -> Fact {
     if let Some(literals) = &g.literals {
@@ -19471,62 +18563,52 @@ fn preg_group_element_fact(g: &steins_catalog::preg::CaptureGroup) -> Fact {
 /// numeric order, each value a string refined from the sub-pattern that fills
 /// it, named groups additionally under their string key, sealed.
 ///
-/// Every claim below was produced by running PHP 8.5.9, and three are
-/// counter-intuitive enough to be worth the ink:
+/// Every claim below is `php -r`-measured (8.5.9), three counter-intuitively: a
+/// **trailing** unmatched group is dropped outright
+/// (`preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]`), so the slice-A
+/// reader's `can_be_trailing_absent` becomes an **optional** key; an
+/// **interior** unmatched group is present as `''`
+/// (`preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `[0, 1, 2 => '', 3]`), so it
+/// stays **required** — absence is trailing-only; a named group occupies both
+/// its string key and its numeric one, present together.
 ///
-/// * a **trailing** unmatched group is dropped from the array outright
-///   (`preg_match('/(a)(b)?/', 'a', $m)` gives keys `[0, 1]`), so the slice-A
-///   reader's `can_be_trailing_absent` becomes an **optional** key;
-/// * an **interior** unmatched group is present as `''`
-///   (`preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `[0, 1, 2 => '', 3]`), so it
-///   stays a **required** key — absence is a trailing-only phenomenon and the
-///   reader has already applied that rule;
-/// * a named group occupies its string key **and** a numeric one, both present
-///   exactly when the group's entry is, which is why one presence serves both.
-///
-/// **The element type is coupled to that same absence rule, and the coupling is
-/// the whole hazard.** PHPStan's expectation for `/(a)(b)*(c)(d)*/` is
+/// **The element type is coupled to that same absence rule.** PHPStan expects
 /// `array{0: non-falsy-string, 1: 'a', 2: string, 3: 'c', 4?: non-empty-string}`
-/// — the middle `(b)*` and the trailing `(d)*` are the same sub-pattern and get
-/// **different** element types. A group that can be *present* while unmatched
-/// holds `''` on that path, so no bare refinement of its body may be stated
-/// however its floor reads — a floor collapses to plain `string`, and a
-/// literal union (slice F, issue #177) must carry `''` as an explicit member
-/// (measured: `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `$m[2] === ''`, so
-/// the entry is `''|'b'`); only a group whose unmatched case is *absence*
-/// keeps the bare claim. The reader answers which is which
-/// ([`can_be_present_empty`](steins_catalog::preg::CaptureGroup::can_be_present_empty)),
-/// and getting it backwards would put a false fact on a reachable path.
+/// for `/(a)(b)*(c)(d)*/` — the middle `(b)*` and trailing `(d)*` are the same
+/// sub-pattern with **different** element types. A group that can be *present*
+/// while unmatched holds `''` on that path, so no bare body refinement may
+/// stand: a floor collapses to plain `string`, and a literal union (slice F,
+/// issue #177) must carry `''` as an explicit member (measured:
+/// `preg_match('/(a)(b)?(c)/', 'ac', $m)` gives `$m[2] === ''`, entry `''|'b'`);
+/// only a group whose unmatched case is *absence* keeps the bare claim. The
+/// reader distinguishes which
+/// ([`can_be_present_empty`](steins_catalog::preg::CaptureGroup::can_be_present_empty));
+/// getting it backwards puts a false fact on a reachable path.
 ///
-/// **List-ness.** The keys PHP writes are `0..n` in ascending order and the
-/// trailing drop removes a *suffix* of them, so every realizable key set is a
-/// prefix and `array_is_list($m)` measured `true` for every group-only pattern
-/// probed — including `/(a)(b)?(c)?/` matching only `a`. The shape alone cannot
-/// see this (`array{0: string, 1?: string, 2?: string}` also admits a
-/// hole-bearing `{0, 2}` that PCRE never produces), so the flag is asserted where
-/// the shape would only guess. A named group ends it: its string key makes
-/// `array_is_list` false whenever the group participates, and it may still not
-/// participate (`/(a)(?<b>x)?/` on `'a'` measured a list, on `'ax'` measured not
-/// one) — so a pattern with any name asserts nothing and lets the denotational
-/// computation answer, which is `No` for a name that always participates and
-/// `Maybe` for one that may not.
-/// **The per-match constructor is this one function**, for both consumers: a
+/// **List-ness.** PHP writes keys `0..n` ascending and the trailing drop
+/// removes a suffix, so every realizable key set is a prefix — `array_is_list`
+/// measured `true` for every group-only pattern probed, including
+/// `/(a)(b)?(c)?/` matching only `a`. The shape alone can't see this (it also
+/// admits a hole-bearing `{0, 2}` PCRE never produces), so the flag is asserted.
+/// A named group ends it: its string key makes `array_is_list` false whenever
+/// the group participates, which it may not (`/(a)(?<b>x)?/` on `'a'` measured
+/// a list, on `'ax'` not) — so a pattern with any name asserts nothing and lets
+/// denotational computation answer (`No` if the name always participates,
+/// `Maybe` otherwise).
+///
+/// **The per-match constructor is this one function** for both consumers: a
 /// `preg_match` seed and one `PREG_SET_ORDER` set of `preg_match_all` are the
-/// same measured shape (issue #168 rule 3), so a second derivation may not
-/// exist.
+/// same measured shape (issue #168 rule 3) — no second derivation.
 ///
-/// `flags` varies the entries, each variant measured (PHP 8.5.9):
-///
-/// * `PREG_UNMATCHED_AS_NULL` turns optionality into nullability: an unmatched
-///   group's entry is **present** with value `null` (`preg_match('/(a)(b)?/',
-///   'a', $m, PREG_UNMATCHED_AS_NULL)` gives `['a', 'a', null]`), so every key
-///   becomes required and a can-go-unmatched group's element gains `|null` —
-///   while the interior-`''` padding disappears (`/(a)(b)?(c)/` on `'ac'` gives
-///   `['ac', 'a', null, 'c']`), so the element keeps its body refinement.
-/// * `PREG_OFFSET_CAPTURE` turns every entry into a `[text, offset]` pair
-///   ([`preg_offset_pair`]). Presence is unchanged: a trailing unmatched group
-///   is still dropped (`/(a)(b)?/` on `'a'` gives two pairs), and an unmatched
-///   entry that IS present is `['', -1]` (`[null, -1]` with both flags).
+/// `flags`, each variant measured: `PREG_UNMATCHED_AS_NULL` turns optionality
+/// into nullability — an unmatched entry is **present** with value `null`
+/// (`preg_match('/(a)(b)?/', 'a', $m, PREG_UNMATCHED_AS_NULL)` gives `['a',
+/// 'a', null]`), every key required, a can-go-unmatched group's element gains
+/// `|null`, and the interior-`''` padding disappears (`/(a)(b)?(c)/` on `'ac'`
+/// gives `['ac', 'a', null, 'c']`). `PREG_OFFSET_CAPTURE` turns every entry
+/// into a `[text, offset]` pair ([`preg_offset_pair`]); presence is unchanged
+/// (a trailing unmatched group still drops), and a present-but-unmatched entry
+/// is `['', -1]` (`[null, -1]` with both flags).
 fn preg_success_shape(
     groups: &steins_catalog::preg::CaptureGroups,
     flags: PregFlags,
@@ -19621,17 +18703,16 @@ fn preg_success_shape(
 /// **Columns are PADDED — the trap this slice exists to avoid.** `preg_match`'s
 /// trailing-absence rule does not apply here: any can-go-unmatched group
 /// contributes `''` (or `null` under PREG_UNMATCHED_AS_NULL) to its column
-/// **wherever it sits** (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a',
-/// $m)` gives `$m[2] === ['a', '', 'a']`). So the element consults the reader's
-/// raw [`can_go_unmatched`](steins_catalog::preg::CaptureGroup::can_go_unmatched)
+/// wherever it sits (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)`
+/// gives `$m[2] === ['a', '', 'a']`). So the element consults the reader's raw
+/// [`can_go_unmatched`](steins_catalog::preg::CaptureGroup::can_go_unmatched)
 /// bit and NEVER the slice-E middle-vs-trailing projections — reusing the
-/// per-set element rule here would refine a column that holds `''` on a
-/// reachable path.
+/// per-set element rule would refine a column that holds `''` on a reachable
+/// path.
 ///
 /// Entry `0`'s element is the whole-expression refinement from slice E: the
 /// whole match always participates (a zero-width match contributes `''`, which
-/// the whole expression's own floor already accounts for — a floor of 0 is
-/// plain `string`).
+/// its own floor already accounts for — a floor of 0 is plain `string`).
 fn preg_pattern_order_shape(
     groups: &steins_catalog::preg::CaptureGroups,
     flags: PregFlags,
@@ -19746,12 +18827,11 @@ fn preg_offset_pair(elem: Fact, unmatched_written: bool) -> Option<Fact> {
 
 /// Bind an out-parameter seed on a branch env (ADR-0077 §3.4).
 ///
-/// **The order is fixed, and the seed is second.** [`walk_if`] has already run
+/// The order is fixed, seed second: [`walk_if`] has already run
 /// [`cond_invalidations`] over the pre-branch env, so the name reaches this
-/// function forgotten and this rebinds it; the two never race, and no reader has
-/// to work out which won. The binding is `Asserted` (§3.3): it rests on a
-/// declared contract plus proven inputs, never on observing a run, so it may
-/// silence but never premise a proof.
+/// forgotten and this rebinds it — no race. The binding is `Asserted` (§3.3): it
+/// rests on a declared contract plus proven inputs, never on observing a run, so
+/// it may silence but never premise a proof.
 fn seed_out_param(
     var: &str,
     fact: Fact,
@@ -19839,11 +18919,11 @@ fn apply_call_asserts(
 /// parameter list, its docblock, and its **own name-resolution context**
 /// `(file, offset)`.
 ///
-/// The last element is what makes a class-typed spec resolvable: an assert tag's
-/// class name is written in the *callee's* namespace, not the caller's —
+/// The last element makes a class-typed spec resolvable: an assert tag's class
+/// name is written in the *callee's* namespace, not the caller's —
 /// `@phpstan-assert Guest $v` declared in `App\Auth` means `App\Auth\Guest`
-/// wherever it is called from. Reading it there is a query answer, not cross-scope
-/// walk state, so ADR-0048 §2's replayability argument carries over unchanged.
+/// wherever called from. Reading it there is a query answer, not cross-scope
+/// walk state (ADR-0048 §2 replayability).
 struct AssertCallee<'a> {
     params: &'a [Param],
     docblock: Option<&'a str>,
@@ -19886,21 +18966,18 @@ fn assert_callee<'a>(
 }
 
 /// The declared-arm lanes that must survive a guard's conservative read-set drop:
-/// one entry per variable a **class-typed** assert spec of a guard call names, and
-/// only where the callee provably cannot have rebound it.
+/// one entry per variable a **class-typed** assert spec of a guard call names,
+/// and only where the callee provably cannot have rebound it.
 ///
-/// Three gates, each a refusal rather than a heuristic:
+/// Three gates, each a refusal rather than a heuristic: (1) the spec's type
+/// must lower to a `Class` — the arm-lane road, no other spec kind reaches it;
+/// (2) the callee's parameter at the asserted position must be **by value**
+/// (ADR-0070) — a separate zval the call cannot write the caller's binding
+/// through; (3) the variable must appear **nowhere else** in the condition's
+/// calls — one by-value occurrence proves nothing about a second occurrence
+/// that could take a reference.
 ///
-/// 1. the spec's type must lower to a `Class` — this is the arm-lane road, and no
-///    other spec kind reaches it;
-/// 2. the callee's parameter at the asserted position must be **by value**
-///    (ADR-0070): a by-value parameter is a separate zval, so the call cannot write
-///    the caller's binding through it;
-/// 3. the variable must appear **nowhere else** in the condition's calls — not as
-///    another argument, not as a receiver. One by-value occurrence proves nothing
-///    about a second occurrence somewhere that could take a reference.
-///
-/// Only the arm lane is carried across. The value lane and the `Member` sets still
+/// Only the arm lane is carried across; the value lane and `Member` sets still
 /// drop with everything else, so no *fact* survives a guard here that did not
 /// survive one before.
 fn guard_assert_kept_lanes(
@@ -19997,36 +19074,34 @@ fn asserted_boolean(spec: &AssertSpec) -> Option<bool> {
 /// discharge ladder): route a userland assertion helper's condition argument
 /// through the SAME guard walk `assert($cond)` uses.
 ///
-/// `Util_Assert::true(isset($options['user_id']));` is the corpus pattern this
-/// exists for. `assert(isset(…))` discharges the strict leg because its argument
-/// survives lowering as a condition; the helper form did not, because the value
-/// lowering of `isset(…)` is [`ArgValue::Other`] — nothing to consume. With the
-/// condition retained (`CallExpr::arg_conds`) the two forms differ in exactly one
-/// respect, and it is the one ADR-0058 legislates:
+/// A house helper asserting `isset($options['key'])` before the read is the
+/// corpus pattern this exists for. `assert(isset(…))` discharges the strict leg
+/// because its argument survives lowering as a condition; the helper form did
+/// not, since `isset(…)`'s value lowering is [`ArgValue::Other`] — nothing to
+/// consume. With the condition retained (`CallExpr::arg_conds`) the two forms
+/// differ in exactly the one respect ADR-0058 legislates: **stratum**.
+/// `assert()` is *Verified, unconditionally* (the 2026-07-25 ruling reads it as
+/// `if (!$cond) throw`); a helper carrying only a `@phpstan-assert` tag is
+/// **Asserted** (ADR-0058's table row "userland helper, tag-declared only" —
+/// its §8: the tag lane is a claim, a lying tag must not forge a proof), so the
+/// presence promotion here is `Required { witnessed: false }`. The discharge is
+/// unaffected — `offset.maybe-missing` is a contract-layer finding over an
+/// `Asserted` shape (A-G9's corollary), so an Asserted presence silences it just
+/// as a witnessed one does, and no proof-layer id can be premised on either.
+/// Raising this leg to Verified needs the descent proof of ADR-0058 §3 (slice
+/// I2), reading the helper's throw-guard out of its body rather than trusting
+/// the tag; outside this rule. Everything else — polarity, `&&`/`||`
+/// distribution, the S5 disjunctive cover, tag discrimination, arm subtraction —
+/// is the walk's, unmodified.
 ///
-/// * **Stratum.** `assert()` is *Verified, unconditionally* (the 2026-07-25
-///   ruling reads it as `if (!$cond) throw`). A helper carrying only a
-///   `@phpstan-assert` tag is **Asserted** — ADR-0058's table row "userland
-///   helper, tag-declared only", restated as a refusal in its §8: the tag lane is
-///   a claim and a lying tag must not forge a proof. So the presence promotion
-///   this applies is `Required { witnessed: false }`. The DISCHARGE is unaffected
-///   — `offset.maybe-missing` is a contract-layer finding over an `Asserted`
-///   shape (A-G9's corollary), so an Asserted presence silences it just as a
-///   witnessed one does, and no proof-layer id can be premised on either.
-///   Raising this leg to Verified needs the descent proof of ADR-0058 §3 (slice
-///   I2), which reads the helper's throw-guard out of its body rather than
-///   trusting the tag; that remains outside this rule.
-/// * **Nothing else.** Polarity, `&&`/`||` distribution, the S5 disjunctive
-///   cover, tag discrimination and arm subtraction are the walk's, unmodified.
-///
-/// The by-ref exemption is the second half. `assert()` never forgets its argument
-/// (its statement carries no invalidation); a helper call *does* — the lowering
-/// conservatively forgets every variable the call expression mentions, which
-/// includes the base inside `isset($d['a'])` and would erase the narrowing one
-/// statement later. A variable mentioned only inside a condition argument cannot
-/// be bound by reference (PHP binds a reference to a variable or lvalue, never to
-/// the value of `isset(…)` or `$a && $b`), so it is exempt — unless the SAME call
-/// also hands that variable over directly, which is the one case that can mutate.
+/// The by-ref exemption is the second half. `assert()` never forgets its
+/// argument; a helper call *does* — the lowering conservatively forgets every
+/// variable the call expression mentions, including the base inside
+/// `isset($d['a'])`, erasing the narrowing one statement later. A variable
+/// mentioned only inside a condition argument cannot be bound by reference (PHP
+/// binds a reference to a variable or lvalue, never to the value of `isset(…)`
+/// or `$a && $b`), so it is exempt — unless the SAME call also hands that
+/// variable over directly, the one case that can mutate.
 #[allow(clippy::too_many_arguments)]
 fn apply_helper_guard(
     cx: &Cx,
@@ -20056,38 +19131,34 @@ fn apply_helper_guard(
 }
 
 /// Apply one assertion spec to a caller variable at the **`Asserted`** stratum
-/// (ADR-0052 §5 — a docblock is a claim, never a proof). Replace-if-weaker, in two
-/// halves: (1) a stronger finite fact (`Singleton`/`OneOf`) is kept — an assert
-/// never coarsens known-exact knowledge; (2) **an `Asserted` fact never overwrites
-/// a `Verified` one of any layer**, so a lying
-/// `@phpstan-assert` cannot downgrade a proven fact into a forgeable one (nor
-/// launder its own claim past the stratum gate). A negated `!null` clears
-/// nullability (also `Asserted`); other negated forms are not representable as a
-/// positive fact and are skipped (documented).
+/// (ADR-0052 §5 — a docblock is a claim, never a proof). Replace-if-weaker: a
+/// stronger finite fact (`Singleton`/`OneOf`) is kept (an assert never coarsens
+/// known-exact knowledge), and **an `Asserted` fact never overwrites a
+/// `Verified` one of any layer** (a lying `@phpstan-assert` cannot downgrade a
+/// proven fact into a forgeable one, nor launder its claim past the stratum
+/// gate). A negated `!null` clears nullability (also `Asserted`); other negated
+/// forms are not representable as a positive fact and are skipped.
 ///
-/// A **class-typed** spec (`@phpstan-assert Guest $v`, and its negation) takes the
-/// other road, because the value lane cannot spell it: the four-layer domain is
-/// object-free by construction (ADR-0035/0043 §4), so `assert_fact_of` declines
-/// every `Class` arm and the whole tag family was — until this — a silent no-op on
-/// object subjects. Class claims belong to the **class carriers** of §1, and this
-/// routes them to the one of the two that is stratified: the **contract arm lane**,
-/// narrowed arm-wise through `normalize::subtract_arm`, the same single judgment an
-/// `instanceof` guard uses, with the same polarity asymmetry (§2's class-arm rule).
-/// That lane is what ADR-0052 §3(d) names as the consumer — the declared-receiver
-/// lane, `phpdoc.undefined-method`, contract-layer — and its routing already grades
-/// by the minimum arm stratum, so a lying tag can buy the contract-layer finding it
-/// is entitled to and no proof.
+/// A **class-typed** spec (`@phpstan-assert Guest $v`, and its negation) takes
+/// the other road: the four-layer value domain is object-free by construction
+/// (ADR-0035/0043 §4), so `assert_fact_of` declines every `Class` arm. Class
+/// claims belong to the **class carriers** of §1, routed to the one that is
+/// stratified: the **contract arm lane**, narrowed arm-wise through
+/// `normalize::subtract_arm` — the same judgment an `instanceof` guard uses,
+/// same polarity asymmetry (§2's class-arm rule). That lane is ADR-0052 §3(d)'s
+/// named consumer (the declared-receiver lane, `phpdoc.undefined-method`,
+/// contract-layer), and its routing already grades by minimum arm stratum, so a
+/// lying tag can buy the contract-layer finding it is entitled to and no proof.
 ///
-/// The **`Member` carrier is deliberately refused here.** It has no stratum slot —
-/// it is documented as bound at `Verified`, and its consumers include
-/// `eval_instanceof` implication (§3(b)), which decides verdicts, prunes branches
-/// and marks regions dead. Feeding a docblock claim into a *reachability* decision
-/// is precisely the laundering §5 exists to prevent, and the fix is a stratum on
-/// `Member`, not a quiet insertion. Recorded as the slice's one deferral.
+/// The **`Member` carrier is refused here**: it has no stratum slot (documented
+/// bound at `Verified`), and its consumers include `eval_instanceof` implication
+/// (§3(b)), which decides verdicts and prunes branches. Feeding a docblock claim
+/// into a *reachability* decision is the laundering §5 exists to prevent — the
+/// fix is a stratum on `Member`, not a quiet insertion. Recorded deferral.
 ///
-/// Returns whether the variable now carries an established fact (so the caller
-/// protects it from the by-ref invalidation) — `true` when a fact was set or a
-/// stronger/Verified fact was deliberately kept, `false` when nothing applied.
+/// Returns whether the variable now carries an established fact (protecting it
+/// from the by-ref invalidation) — `true` when a fact was set or a
+/// stronger/Verified fact was deliberately kept, `false` otherwise.
 fn apply_assert_to_var(
     cx: &Cx,
     decl_at: (usize, u32),
@@ -20176,16 +19247,15 @@ fn assert_class_to_lane(
 /// **The S4 exemption, and how narrow it is.** `isset($x['k'])`,
 /// `array_key_exists('k', $x)` and `array_is_list($x)` cannot mutate anything —
 /// the first is not even a function call, the other two are pure by-value
-/// builtins. Before S4 all three forgot their base (the first because it lowered
-/// to `Opaque`, the other two because a retained guard call forgets its reads),
-/// which was pure conservatism. Lifting it *wholesale* would let every lane see
-/// facts across such a guard for the first time, and a proven `Singleton` array
-/// surviving into the branch can premise a proof-layer `offset.missing` that did
-/// not fire before. So the exemption is granted only to a base that carries the
-/// **shape lane** — a `Fact::Shape`, or a contract lane with an array arm — which
-/// is exactly what this narrowing consumes and is `Asserted` end to end
-/// (A-G9). A base mentioned anywhere else in the same condition keeps the old
-/// forgetting, because that other mention is what might mutate it.
+/// builtins. Before S4 all three forgot their base regardless (pure
+/// conservatism). Lifting that wholesale would let every lane see facts across
+/// such a guard for the first time, and a proven `Singleton` array surviving
+/// into the branch can premise a proof-layer `offset.missing` that did not fire
+/// before. So the exemption is granted only to a base carrying the **shape
+/// lane** — a `Fact::Shape`, or a contract lane with an array arm — exactly what
+/// this narrowing consumes and `Asserted` end to end (A-G9). A base mentioned
+/// anywhere else in the same condition keeps the old forgetting, since that
+/// other mention is what might mutate it.
 fn cond_invalidations(
     cx: &Cx,
     cond: &CondExpr,
@@ -20289,22 +19359,18 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut V
         }
         CondExpr::Call { call, reads } => collect_call_opaque_reads(cx, call, reads, out),
         // **Operand position** (issue #158). A call does not become harmless by
-        // sitting inside a comparison: `preg_match($re, $s, $m) === 1` writes
-        // `$m` exactly as the bare `preg_match($re, $s, $m)` guard does, and
-        // before this arm existed the walk had nothing to forget — an earlier
-        // `$m = []` survived into the branch and was reported there as `list{}`,
-        // a false fact on a reachable path. The rule is the one-liner it should
-        // always have been: **an operand's writes are judged by the same policy
-        // as a guard call's, because position within the condition changes
-        // nothing about what a call can do.**
+        // sitting inside a comparison: `preg_match($re, $s, $m) === 1` writes `$m`
+        // exactly as the bare guard does. The rule: an operand's writes are judged
+        // by the same policy as a guard call's — position within the condition
+        // changes nothing about what a call can do.
         CondExpr::Cmp { lhs, rhs, .. } => {
             collect_operand_opaque_reads(cx, lhs, ce, out);
             collect_operand_opaque_reads(cx, rhs, ce, out);
         }
-        // `f($x, $m) instanceof Foo` — the same gap, reached through the other
+        // `f($x, $m) instanceof Foo` — the same gap, through the other
         // operand-carrying variant. (`Truthy`'s operand can only be an `Offset`
-        // here: `lower_cond` routes a call or any other unrepresentable
-        // condition to `Call`/`Opaque` before it can become a `Truthy(Other)`.)
+        // here: `lower_cond` routes a call or other unrepresentable condition to
+        // `Call`/`Opaque` before it can become a `Truthy(Other)`.)
         CondExpr::Instanceof { operand, .. } => {
             collect_operand_opaque_reads(cx, operand, ce, out);
         }
@@ -20323,14 +19389,13 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut V
 /// whatever its write set earns under the guard-call policy above, **minus what
 /// ADR-0070's by-value gate proves the callee could not reach**.
 ///
-/// The gate runs here and not on [`CondExpr::Call`] because this is where the
-/// floor is being chosen for the first time. The blanket read-set drop in guard
-/// position is pre-existing and measured, and lifting it would let facts survive
-/// guards that never let them through before — a precision change with its own
-/// FP exposure and its own measurement run. Choosing the *precise* sound rule
-/// for a path that had no rule at all costs nothing and keeps 191 nsrt
-/// observations (`count($listA) === count($listB)`, `strstr($s, 'a') === 'b'`)
-/// that the missing invalidation had been holding up.
+/// The gate runs here rather than on [`CondExpr::Call`] because this is where
+/// the floor is chosen for the first time — the blanket read-set drop in guard
+/// position is pre-existing and measured, and lifting it there would let facts
+/// survive guards that never let them through before. Choosing the *precise*
+/// sound rule for a path that had no rule at all costs nothing and keeps 191
+/// nsrt observations (`count($listA) === count($listB)`, `strstr($s, 'a') ===
+/// 'b'`) that the missing invalidation had been holding up.
 fn collect_operand_opaque_reads(
     cx: &Cx,
     operand: &CondOperand,
@@ -20364,30 +19429,26 @@ fn collect_operand_opaque_reads(
 ///
 /// The general rule is its `reads`, minus the pure method receiver (`$x` in
 /// `$x->m()` is not rebound by the call, only its object's props are swept;
-/// ADR-0052 §6 payoff (i)) — which survives only when it is not also handed in
-/// as an argument (`$x->m($x)` passes it by value/ref, so it is still
-/// forgotten). Two families are exempt outright:
+/// ADR-0052 §6 payoff (i)) — surviving only when not also handed in as an
+/// argument (`$x->m($x)` is still forgotten). Two families are exempt outright:
 ///
 /// **The S4 exemption.** A recognized pure array builtin mutates nothing; its
 /// bases are decided by [`collect_pure_guard_bases`] + the shape-lane test
 /// instead. `array_all`/`array_any` (A8) join this set: neither parameter is
-/// by-ref in PHP's own signature, so the base array is exactly as safe as
+/// by-ref in PHP's own signature, so the base array is as safe as
 /// `array_is_list`'s — any *other* alias risk (a callback closing over the base
-/// by reference) is still caught, because `collect_pure_guard_bases` only
-/// exempts a read that also carries the shape lane, and a by-ref-captured var
-/// generally won't.
+/// by reference) is still caught, since the shape-lane gate only exempts a read
+/// that carries it, and a by-ref-captured var generally won't.
 ///
-/// **The DR2 exemption, and why it is unconditional** (unlike S4's, which is
-/// gated on the shape lane). The `is_*` family and `in_array` declare every
-/// parameter BY VALUE in PHP's own signature and are side-effect free, so a
-/// guard call cannot have changed the base between the test and the branch.
-/// S4 kept its exemption shape-lane-gated because lifting it wholesale would
-/// let *any* proven fact survive a guard for the first time; here the base's
-/// scalar fact surviving is the entire point of the slice — and every finding
-/// it can premise is true by construction, because the value the branch sees
-/// is the value the predicate tested. A base mentioned by any OTHER call in
-/// the same condition is still forgotten: that mention is what might mutate
-/// it, and it is collected by that call's own visit.
+/// **The DR2 exemption, unconditional** (unlike S4's shape-lane gate). The
+/// `is_*` family and `in_array` declare every parameter BY VALUE in PHP's own
+/// signature and are side-effect free, so a guard call cannot have changed the
+/// base between the test and the branch — here the base's scalar fact surviving
+/// IS the point of the slice, and every finding it premises is true by
+/// construction, since the value the branch sees is the value the predicate
+/// tested. A base mentioned by any OTHER call in the same condition is still
+/// forgotten — that mention is what might mutate it, collected by that call's
+/// own visit.
 fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &mut Vec<String>) {
     if array_guard_predicate(cx, call).is_some()
         || array_all_any_predicate(cx, call).is_some()
@@ -20614,18 +19675,15 @@ fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
     let mut kept: Vec<ContractArm> = Vec::with_capacity(arms.len());
     for arm in arms.drain(..) {
         // Collapse a structurally-identical arm FIRST (`ty == ty`), keeping the min
-        // stratum. This is the reflexive tie `subsumes`/`arm_eq` deliberately cannot
-        // prove for the non-extensional arms (`StrOpaque`, `CallableTy`, `Opaque` —
-        // ADR-0038: membership is unmodeled, so `subsumes(x, x)` is `Maybe`, not
-        // `Yes`). The array vocabulary (`ArrayAny`/`ListOf`/`MapOf`/`IterableOf`/
-        // `Shape`) left that list with ADR-0071, which gave it a structural
-        // denotation and hence arm_eq-reflexivity; this fast path still collapses it
-        // first, and more cheaply. Exact structural equality is a strictly stronger
-        // witness of same-denotation than mutual subsumption, so keeping one is sound
-        // and loses no precision — and it is what stops a branch-union from *doubling*
-        // a pile of identical opaque arms at every join. Without it an `array`/`Closure`
-        // parameter threaded through a deeply nested `if` tree grew to 2^depth copies
-        // of one arm (survey non-termination on nextcloud `core/Migrations`).
+        // stratum. This is the reflexive tie `subsumes`/`arm_eq` cannot prove for the
+        // non-extensional arms (`StrOpaque`, `CallableTy`, `Opaque` — ADR-0038:
+        // membership unmodeled, so `subsumes(x, x)` is `Maybe`). Exact structural
+        // equality is a strictly stronger witness of same-denotation than mutual
+        // subsumption, so keeping one is sound and loses no precision — and it stops a
+        // branch-union from *doubling* a pile of identical opaque arms at every join.
+        // Without it an `array`/`Closure` parameter threaded through a deeply nested
+        // `if` tree grew to 2^depth copies of one arm (survey non-termination on
+        // nextcloud `core/Migrations`).
         if let Some(k) =
             kept.iter_mut().find(|k| k.ty == arm.ty || normalize::arm_eq(&k.ty, &arm.ty))
         {
@@ -20655,16 +19713,13 @@ fn dedup_contract_arms(arms: &mut Vec<ContractArm>) {
 /// Run a contract-arm list to the interval-absorption fixpoint (issue #90), the
 /// stratified analogue of the pass [`normalize::dedup_arms`] gained: `int<1, max>`
 /// beside `0` is one denotation spelled two ways, and subsumption cannot collapse
-/// it because neither arm covers the other.
-///
-/// The merged arm takes the **min** stratum of the pair, for the same reason the
-/// subsumption widening above does (ADR-0052 §5): the merged arm is only as
-/// strongly held as the weaker of the two claims it replaces, so a `Verified`
-/// twin can never lift an `Asserted` one.
+/// it because neither arm covers the other. The merged arm takes the **min**
+/// stratum of the pair (ADR-0052 §5): only as strongly held as the weaker of the
+/// two claims it replaces, so a `Verified` twin can never lift an `Asserted` one.
 ///
 /// Runs wherever an arm list is minted or joined, so the lane never *stores* the
-/// two-armed spelling — the collapse is semantic, not a rendering choice, and the
-/// dump surface inherits it rather than deciding it (the ADR-0052 §4 charter).
+/// two-armed spelling — the collapse is semantic, and the dump surface inherits
+/// it rather than deciding it (ADR-0052 §4).
 fn absorb_contract_arms(arms: &mut Vec<ContractArm>) {
     loop {
         let mut merged_at: Option<(usize, usize, ContractArm)> = None;
@@ -20768,13 +19823,13 @@ fn is_concrete(v: &ArgValue) -> bool {
 ///   []       T    T    F    F    F     F    F    F     F     T
 /// ```
 ///
-/// The rules reproduced (stable since PHP 8.0): a `bool` operand casts BOTH sides
-/// to bool; `null` compares to the other side's zero/empty (except bool, handled
-/// by the bool rule); `int`/`float` vs a numeric string compares numerically,
-/// vs a non-numeric string compares the number's string form; two strings compare
-/// numerically iff both are numeric strings, else byte-wise; an array is unequal
-/// to any scalar (non-null, non-bool). Cells not covered (a `float` vs a
-/// non-numeric string; non-trivial arrays) return `None` → `Maybe`.
+/// Rules reproduced (stable since PHP 8.0): a `bool` operand casts BOTH sides to
+/// bool; `null` compares to the other side's zero/empty (except bool); `int`/
+/// `float` vs a numeric string compares numerically, vs non-numeric compares
+/// string forms; two strings compare numerically iff both numeric, else
+/// byte-wise; an array is unequal to any non-null, non-bool scalar. Uncovered
+/// cells (a `float` vs non-numeric string; non-trivial arrays) return `None` →
+/// `Maybe`.
 fn php_loose_eq(a: &ArgValue, b: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<bool> {
     use ArgValue::{Array, Bool, Float, Int, Null, Str};
     // A `bool` on either side casts both operands to bool (subsumes null==bool).
@@ -20964,55 +20019,47 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
 /// — the gate that decides whether a generic value carry survives being handed to
 /// a call.
 ///
-/// # Why the effects machinery cannot answer this
+/// **Why the effects machinery cannot answer this.** The natural oracle would be
+/// "this callee does not mutate that argument", and it does not exist today:
+/// ADR-0055's mutation family (`mutate.arg`/`.self`/`.instance`/`.static`) is
+/// **taxonomy only** — its inference is unbuilt ([`by_ref_label`]), and no
+/// property write contributes any effect label ([`steins_syntax::EffectOrigin`]
+/// has arms for calls, output, exit, method calls and opaque constructs, none
+/// for a property assignment; the only `mutate*` carriers are `mutate.local` and
+/// a coarse `mutate`, both from builtin by-ref out-parameters, ADR-0063 §2.3).
+/// [`PurityOracle`] cannot stand in for it either — actively unsound here, not
+/// merely weak: its `provably_impure` returning `false` means "not proven
+/// impure", and since property writes color nothing, `function mutate(Box $b) {
+/// $b->value = 's'; }` has an **empty** proven finding set. Gating on purity
+/// would keep the carry across exactly the call that invalidates it (ADR-0055's
+/// own opening complaint: a `#[\Steins\Pure]` method writing `$this->p` passes
+/// silently) — a declared envelope is no better.
 ///
-/// The natural oracle would be "this callee does not mutate that argument", and it
-/// does not exist, in any form, today:
+/// **What is provable instead.** Not "does the callee mutate it" but "**can the
+/// callee refer to it at all**". PHP locals are lexical, so a parameter a body
+/// never spells cannot be read, written, captured, passed on, or used as a
+/// receiver. Every construct that reaches a binding non-lexically (`$$v`,
+/// `extract`/`compact`, `eval`, `include`, `global`, a by-ref `use`) is on the
+/// ADR-0001 give-up list, sets [`Scope::poisoned`], and is refused below. The
+/// scan runs over the body's **source text** ([`FunctionDecl::body_span`])
+/// rather than the linear trace — the trace drops nested sub-expressions to
+/// [`ArgValue::Other`] and unrecognized statements to [`StmtKind::Barrier`], so
+/// `helper($b)` inside `$x = strlen($b->p) + helper($b);` would be invisible to
+/// it, and a gate that misses one use keeps a stale carry — the failure
+/// direction this amendment exists to close.
 ///
-/// * ADR-0055's mutation family (`mutate.arg` / `.self` / `.instance` / `.static`)
-///   is **taxonomy only** — its inference is unbuilt, as [`by_ref_label`] states in
-///   the tree ("that taxonomy's *inference* (ADR-0055) is not built"). No property
-///   write contributes any effect label: [`steins_syntax::EffectOrigin`] has arms
-///   for calls, output, exit, method calls and opaque constructs, and none for a
-///   property assignment. The only `mutate*` carriers are `mutate.local` and a
-///   coarse `mutate`, both from **builtin by-ref out-parameters** (ADR-0063 §2.3).
-/// * [`PurityOracle`] therefore cannot stand in for it, and using it would be
-///   actively unsound here rather than merely weak. It answers `provably_impure`,
-///   whose `false` means "not proven impure"; and because property writes color
-///   nothing, `function mutate(Box $b) { $b->value = 's'; }` has an **empty** proven
-///   finding set. Gating on purity would keep the carry across exactly the call
-///   that invalidates it. This is ADR-0055's own opening complaint — "a
-///   `#[\Steins\Pure]` method that writes `$this->p` passes silently, and 'Pure'
-///   does not mean what it says" — so a declared envelope is no better.
+/// Every uncertainty answers `false` (sweep): an unresolved/dynamic callee, a
+/// builtin (an out-parameter row is a mutation contract; no builtin takes a
+/// project object it could not touch), a method/static call, a by-ref or
+/// variadic position, an argument past declared arity, a poisoned callee body,
+/// or unreadable body text. Unknown is never proof of non-mutation.
 ///
-/// # What is provable instead
-///
-/// A different question is decidable with what exists: not "does the callee mutate
-/// it" but "**can the callee refer to it at all**". PHP locals are lexical, so a
-/// parameter a body never spells cannot be read, written, captured, passed on, or
-/// used as a receiver by that body. Every construct that reaches a binding
-/// non-lexically (`$$v`, `extract`/`compact`, `eval`, `include`, `global`, a by-ref
-/// `use`) is on the ADR-0001 give-up list and sets [`Scope::poisoned`], which is
-/// refused below. The scan therefore runs over the body's **source text**
-/// ([`FunctionDecl::body_span`]) rather than the linear trace: the trace drops
-/// nested sub-expressions to [`ArgValue::Other`] and unrecognized statements to
-/// [`StmtKind::Barrier`], so `helper($b)` inside `$x = strlen($b->p) + helper($b);`
-/// is invisible to it — and a gate that misses one use is a gate that keeps a stale
-/// carry, which is the failure direction this whole amendment exists to close.
-///
-/// Every uncertainty answers `false` (sweep): an unresolved or dynamic callee, a
-/// builtin (an out-parameter row is a mutation contract, and no builtin takes a
-/// project object it could not touch), a method or static call, a by-ref or
-/// variadic position, an argument past the declared arity, a poisoned callee body,
-/// and a body whose text cannot be read. Unknown is never proof of non-mutation.
-///
-/// **Narrow by construction, and stated as such.** In practice this admits the
-/// callee that ignores the parameter — which is exactly the conformance fixture's
-/// `takesIntBox(MutableBox $box): void {}` — and little else. The wider gate is a
-/// real per-parameter non-mutation judgment, and its precondition is ADR-0055 Part
-/// II's inference: once a property write colors `mutate.self`/`mutate.instance`,
-/// "this callee mutates nothing an argument can reach" becomes a fixpoint question
-/// rather than a lexical one.
+/// **Narrow by construction.** In practice this admits the callee that ignores
+/// the parameter — the conformance fixture's `takesIntBox(MutableBox $box):
+/// void {}` — and little else. The wider gate needs a real per-parameter
+/// non-mutation judgment, whose precondition is ADR-0055 Part II's inference:
+/// once a property write colors `mutate.self`/`mutate.instance`, "this callee
+/// mutates nothing an argument can reach" becomes a fixpoint question.
 fn callee_cannot_reach_arg(cx: &Cx<'_>, call: &CallExpr, position: usize) -> bool {
     if !matches!(call.receiver, Callee::Function(_)) {
         return false;
@@ -21343,26 +20390,23 @@ fn try_descend_function(
 /// `$x = greet(2, "World")` always saw — the machinery is [`descend`] verbatim,
 /// only the entry point differs.
 ///
-/// # Name resolution is the `resolve_const_fn` precedent
+/// **Name resolution** is the `resolve_const_fn` precedent: an [`ArgValue::Call`]
+/// carries the call's **simple name only** (lowering takes the identifier's last
+/// segment; no [`NameRef`] survives into the value IR), so resolution here is
+/// `unique_fn_by_simple` — the same rule the zero-argument `resolve_const_fn`
+/// value lane has always used. A project with two same-named functions in
+/// different namespaces declines (the statement-level descent, with the full
+/// `NameRef`, still resolves those). Widening this means carrying the resolved
+/// FQN in the value IR — a deliberate non-goal.
 ///
-/// An [`ArgValue::Call`] carries the call's **simple name only** (lowering takes
-/// the identifier's last segment; no [`NameRef`] survives into the value IR), so
-/// resolution here is `unique_fn_by_simple` — exactly the rule the zero-argument
-/// `resolve_const_fn` value lane has always used. A project with two same-named
-/// functions in different namespaces declines (the statement-level descent, which
-/// has the full `NameRef`, still resolves those). Widening this would mean carrying
-/// the resolved FQN in the value IR — a deliberate non-goal.
-///
-/// # Recursion discipline
-///
-/// The caller's `descent` MUST be threaded whenever one is live: the on-stack
-/// binding-key guard is what turns mutual recursion (`f` calling `g` calling `f`)
-/// into a bounded decline instead of an unbounded tree of fresh stacks. A `None`
-/// here is only correct at a **plain-pass** entry (the dump surface and the
-/// propagated-argument check, both `descent.is_none()`-gated), where the fresh
-/// tree is the same shape `try_descend_function` has always created. Expression
-/// nesting across such trees is bounded by the source's own nesting depth — each
-/// level is one bounded tree, never a loop.
+/// **Recursion discipline**: the caller's `descent` MUST be threaded whenever
+/// one is live — the on-stack binding-key guard turns mutual recursion (`f`
+/// calling `g` calling `f`) into a bounded decline instead of an unbounded tree
+/// of fresh stacks. A `None` here is only correct at a **plain-pass** entry (the
+/// dump surface and the propagated-argument check, both `descent.is_none()`-
+/// gated), where the fresh tree is the same shape `try_descend_function` has
+/// always created. Expression nesting across such trees is bounded by the
+/// source's own nesting depth — each level is one bounded tree, never a loop.
 #[allow(clippy::too_many_arguments)]
 fn project_call_summary(
     cx: &Cx,
@@ -21399,29 +20443,23 @@ fn project_call_summary(
 }
 
 /// The project function a **value-position** simple name may be trusted to mean
-/// (issue #60) — `unique_fn_by_simple` hardened against the two ways a written
-/// simple name can target a *different* function at runtime:
+/// (issue #60) — `unique_fn_by_simple` hardened against two ways a written
+/// simple name can target a *different* function at runtime: a **conditional
+/// declaration** (the `function_exists`-guarded polyfill shape, ADR-0049 A2i,
+/// where which body binds is a load-order fact — declined, the same re-damming
+/// instinct the arity check applies), and a **homonym of a runtime function**
+/// (a namespaced project function's unqualified call outside its namespace
+/// falls back to the runtime function; a global homonym could not even have
+/// loaded — both decline, the ADR-0061 posture on a shadowed builtin, pinned by
+/// `a_project_function_shadowing_the_name_declines`). The runtime is asked
+/// three ways, any positive answer declining: the boot-surface reflect oracle, a
+/// reflected builtin return type, and (folderless — the playground) the static
+/// catalog standing in for common builtins.
 ///
-/// * **A conditional declaration** (the `function_exists`-guarded polyfill shape,
-///   ADR-0049 A2i): which body binds is a load-order fact, so a summary from this
-///   body could describe a function the runtime never defined. Declined — the same
-///   re-damming instinct the arity check applies to conditional targets.
-/// * **A homonym of a runtime function**: for a namespaced project function the
-///   unqualified call outside its namespace falls back to the RUNTIME function
-///   (and the value IR does not carry the caller's qualification); for a *global*
-///   one the program could not even have loaded (a fatal redeclaration), so there
-///   is no runtime behavior to speak for. Both decline — the same posture the
-///   ADR-0061 rule seam takes on a shadowed builtin, pinned by
-///   `a_project_function_shadowing_the_name_declines`. The runtime is asked three
-///   ways, any positive answer declining: the boot-surface reflect oracle, a
-///   reflected builtin return type, and (folderless — the playground) the static
-///   catalog standing in for the common builtins.
-///
-/// What this deliberately does NOT close: a `use function … as …` alias shadowing
-/// a same-named project function at one call site. The written simple name is all
-/// the value IR carries (the alias residue is shared verbatim with
-/// `resolve_const_fn`, which has always resolved this way); closing it means
-/// carrying the resolved FQN in [`ArgValue::Call`] — a follow-up.
+/// Not closed: a `use function … as …` alias shadowing a same-named project
+/// function at one call site — the written simple name is all the value IR
+/// carries (shared verbatim with `resolve_const_fn`); closing it means carrying
+/// the resolved FQN in [`ArgValue::Call`], a follow-up.
 fn value_lane_fn_site(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Site> {
     let site = cx.index.unique_fn_by_simple(name)?;
     let decl = cx.fn_decl(site);
@@ -21475,14 +20513,13 @@ struct VarCallOutcome {
 }
 
 /// Handle a `$fn(...)` variable call (ADR-0033): resolve the callee variable
-/// against the env. A proven closure value → argument check against the closure's
-/// params + binding descent into the closure scope (with the capture snapshot
+/// against the env. A proven closure value → argument check against the
+/// closure's params + binding descent into the closure scope (capture snapshot
 /// seeded); a proven `Singleton(Str)` → resolve as a function name through the
 /// normal function path. An unresolved `$fn` does nothing (opaque; the effects
-/// pass taints exhaustiveness separately).
-///
-/// Returns the callee's [`ReturnSummary`] when one was computed (issue #128), so
-/// `$x = $fn(...)` rebinds on the same rungs as free functions and methods.
+/// pass taints exhaustiveness separately). Returns the callee's
+/// [`ReturnSummary`] when computed (issue #128), so `$x = $fn(...)` rebinds on
+/// the same rungs as free functions and methods.
 #[allow(clippy::too_many_arguments)]
 fn handle_var_call(
     cx: &Cx,
@@ -21746,15 +20783,14 @@ fn descend(
         }
         // Direct resolution first; when it declines and the argument is itself a
         // project call, the T0 machinery answers for its own argument position
-        // (issue #60): `f(g(1))` binds `g(1)`'s Singleton summary. The CURRENT
-        // descent is threaded (reborrowed), so the on-stack recursion guard and
-        // `MAX_BINDING_DEPTH` bound the nested resolution exactly as they bound a
-        // statement-level chain; the nested walk emits through the same `out` a
-        // statement-level descent would.
-        // Thread the live descent into literal resolution so a foldable builtin
-        // whose arg is a project call (`strtoupper(g($x))` inside a callee)
-        // reuses the on-stack guard (issue #127). Project-call-only args still
-        // fall through to `nested_call_singleton` with the real `out`.
+        // (issue #60): `f(g(1))` binds `g(1)`'s Singleton summary. The current
+        // descent is threaded (reborrowed) so the on-stack recursion guard and
+        // `MAX_BINDING_DEPTH` bound the nested resolution as they bound a
+        // statement-level chain, and the nested walk emits through the same `out`.
+        // Threading it into literal resolution also lets a foldable builtin whose
+        // arg is a project call (`strtoupper(g($x))` inside a callee) reuse the
+        // on-stack guard (issue #127); project-call-only args fall through to
+        // `nested_call_singleton` with the real `out`.
         let (value, strat) = match cx.resolve_literal_under(
             arg_value,
             env,
@@ -21815,9 +20851,9 @@ fn descend(
     // declaring FQN (`Base::m`), but two exact receivers (`Sub1`, `Sub2`) can
     // inherit the same body while `$this->hook()` inside it dispatches differently.
     // When `body_this_exact` is `Some`, a `this:` pseudo-binding carries that
-    // receiver so the memo never replays one receiver's value (or emissions) for
-    // the other. Guarded resolutions pass `None` and key exactly as before — a
-    // final/private body's inner dispatch is a pure function of its declaring class.
+    // receiver so the memo never replays one receiver's result for the other.
+    // Guarded resolutions pass `None` — a final/private body's inner dispatch is a
+    // pure function of its declaring class.
     let mut key_binding: Vec<(String, ArgValue, Stratum)> = bound
         .iter()
         .map(|(n, v, s)| (n.clone(), v.clone(), *s))
@@ -21949,29 +20985,27 @@ fn join_summary(
     callee_scope: &Scope,
     exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
-    // Generators: the call result is a Generator, not the value of `return`
-    // after `yield` (ADR-0057 §5). Refuse the whole value summary.
+    // Generators: the call result is a Generator, not the value of `return` after
+    // `yield` (ADR-0057 §5) — refuse the whole value summary.
     if callee_scope.is_generator {
         return None;
     }
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
     // A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
     // `: never`, …) leaves `scope_return` as `None`, so the A2 native-oracle arms
-    // are empty and `native_violates` cannot drop boundary TypeErrors
-    // (`return null` under `: object`). Refuse the whole value summary rather than
-    // rebind an uncheckable exit as a Singleton premise (ADR-0075 review).
+    // are empty and `native_violates` cannot drop boundary TypeErrors (`return
+    // null` under `: object`). Refuse rather than rebind an uncheckable exit as a
+    // Singleton premise (ADR-0075 review).
     if ret.is_none() && callee_scope.ret_hint.is_some() {
         return None;
     }
     let floor = ret.and_then(native_value_floor);
     // The declared return type is a CONVERSION boundary, not just an envelope
     // (the #48 family, return edition): PHP hands the caller what the boundary
-    // converts, so `return 1` under `: float` crosses as `1.0`, never as the
-    // callee's raw int — an int-based summary there is a wrong value, the exact
-    // FP class #48 closed for property writes and promoted params. A2 already
-    // dropped the *violating* exits at collection; this converts the admitted
-    // ones, and an admitted-but-unconvertible fact degrades to the declared
-    // floor (the A3 side — wider, never wrong).
+    // converts, so `return 1` under `: float` crosses as `1.0`, never the callee's
+    // raw int. A2 already dropped the *violating* exits at collection; this
+    // converts the admitted ones, and an admitted-but-unconvertible fact degrades
+    // to the declared floor (A3 — wider, never wrong).
     let coerced: Vec<ExitContribution> = exits
         .iter()
         .map(|e| match (e, ret) {
@@ -22286,25 +21320,22 @@ fn private_blocked(r: &ResolvedMethod, enclosing_class: Option<&str>) -> bool {
 //
 // `call.inaccessible-method`, `property.inaccessible`, `class-const.inaccessible`.
 //
-// A **positive** claim over a resolved declaration, the #183 shape: the member is
-// found, its declared visibility is read off it, and the site's scope is compared
-// to the declaring class. Unlike the absence family there is no dam and no sidecar
+// A **positive** claim over a resolved declaration (the #183 shape): the member
+// is found, its declared visibility read off it, and the site's scope compared to
+// the declaring class. Unlike the absence family there is no dam and no sidecar
 // leg — `eval` can mint a name, but it cannot reopen a declared class to widen a
-// member's visibility, and the boot surface answers about *existence*, which is not
-// in question here.
+// member's visibility, and existence (the boot surface's question) is not at
+// issue here.
 //
 // What the absence family's closure conditions DO carry over, because a nearer
-// declaration or a fallback would change the verdict:
-//
-//   * the receiver's hierarchy must be enumerable end to end — an unresolvable,
-//     `Ambiguous`, trait-using or trait ancestor anywhere is silence;
-//   * `__call` / `__callStatic` / `__get` / `__set` anywhere in that chain is
-//     silence, because PHP routes an *inaccessible* member through the magic
-//     fallback exactly as it routes an undefined one (witnessed below) — this is
-//     the leg that makes the slice non-trivial;
-//   * an A14 `@method` / `@property` / `@mixin` tag in the class-like's reach is
-//     silence, one door earlier, on the same reasoning;
-//   * a conditionally declared node re-dams the claim (A2i).
+// declaration or a fallback would change the verdict: the receiver's hierarchy
+// must be enumerable end to end (an unresolvable, `Ambiguous`, trait-using or
+// trait ancestor anywhere is silence); `__call`/`__callStatic`/`__get`/`__set`
+// anywhere in that chain is silence (PHP routes an *inaccessible* member through
+// the magic fallback exactly as an undefined one, witnessed below — the leg that
+// makes this slice non-trivial); an A14 `@method`/`@property`/`@mixin` tag in the
+// class-like's reach is silence, one door earlier; a conditionally declared node
+// re-dams the claim (A2i).
 //
 // And one condition of its own: the **receiver's runtime class must be exact**.
 // `$this->m()` in `B` on a `private A::m()` is a fatal for a `B` instance but calls
@@ -22331,21 +21362,19 @@ fn private_blocked(r: &ResolvedMethod, enclosing_class: Option<&str>) -> bool {
 //   first-class callable `$c->m(...)` on a private method  the same fatal
 // ---------------------------------------------------------------------------
 
-/// Whether the walk's class scope is *known* at this site — the question every
-/// visibility verdict rests on, and the one place `None` must not be read as "global
-/// scope".
+/// Whether the walk's class scope is *known* at this site — the one place `None`
+/// must not be read as "global scope".
 ///
-/// A closure body lexically inside a class method **runs in that class's scope** in
-/// PHP (`php -r` witness: a closure declared in `C::go()` calls `C`'s own private
-/// `m()` and prints `ok`; a `static` closure and an arrow function do the same), but
-/// [`scope_class`] deliberately does not thread the enclosing class into a closure
-/// scope. Its `None` there means "unknown", not "no class" — so a visibility claim
-/// inside a closure would read a legal same-class access as a global-scope violation.
-/// Silence, until the closure scope carries its owner.
+/// A closure body lexically inside a class method **runs in that class's scope**
+/// in PHP (`php -r` witness: a closure declared in `C::go()` calls `C`'s own
+/// private `m()` and prints `ok`; `static` closures and arrow functions do the
+/// same), but [`scope_class`] deliberately does not thread the enclosing class
+/// into a closure scope — its `None` there means "unknown", not "no class", so a
+/// visibility claim inside a closure would read a legal same-class access as a
+/// global-scope violation. Silence, until the closure scope carries its owner.
 ///
-/// A plain `function` nested inside a method genuinely has no class scope (PHP does
-/// not give one), and a top-level statement is the global scope; both keep their
-/// `None`, and both are answerable.
+/// A plain `function` nested inside a method genuinely has no class scope, and a
+/// top-level statement is the global scope; both keep `None` and both answerable.
 fn class_scope_known(scope: &Scope) -> bool {
     !matches!(scope.owner, ScopeOwner::Closure { .. })
 }
@@ -22365,16 +21394,15 @@ fn private_invisible(declaring_fqn: &str, scope: Option<&str>) -> bool {
 /// The `protected` leg: visible from any scope in the declaring class's *hierarchy*,
 /// in either direction, and from nowhere else.
 ///
-/// Witnessed at 8.5.9: a subclass scope may call it (`ok`), a **superclass** scope
-/// may call it on a child-declared member (`ok`), a sibling subclass scope may call
-/// it on another descendant of the declaring class (`ok`), and an unrelated class or
-/// the global scope may not (`Call to protected method A::m() from scope U`).
+/// Witnessed at 8.5.9: a subclass scope may call it, a **superclass** scope may
+/// call it on a child-declared member, a sibling subclass scope may call it on
+/// another descendant, and an unrelated class or the global scope may not
+/// (`Call to protected method A::m() from scope U`).
 ///
-/// So this is the is-a oracle applied twice, and it inherits the oracle's discipline
-/// (ADR-0043 §3): only a **definite** `No` in both directions — which needs the
-/// hierarchy completely enumerated — blocks. `Unknown` either way is silence.
-/// A site with no class scope at all (global scope, a plain function) is blocked
-/// without asking, since there is nothing that could be related.
+/// So this is the is-a oracle applied twice, inheriting its discipline (ADR-0043
+/// §3): only a **definite** `No` in both directions — needing the hierarchy
+/// completely enumerated — blocks. `Unknown` either way is silence. A site with
+/// no class scope at all is blocked without asking.
 fn protected_invisible(cx: &Cx, declaring_fqn: &str, scope: Option<&str>) -> bool {
     match scope {
         None => true,
@@ -22514,30 +21542,25 @@ impl CallSiteKind {
 /// The call sites a `call.inaccessible-method` claim can rest on: the receiver's
 /// **exact** runtime class, the member name, and the site kind. `None` is silence.
 ///
-/// The reach is the existing member checks', not a new one — `new`-typed receivers,
-/// allocation-proven variables and explicit `C::m()`. Three deliberate exclusions:
+/// The reach is the existing member checks', not a new one — `new`-typed
+/// receivers, allocation-proven variables and explicit `C::m()`. Three deliberate
+/// exclusions: **`$this`/`self::`/`static::`/`parent::`** (the enclosing object's
+/// runtime class is a *lower bound*, and a descendant may both override the
+/// member publicly and carry a `__call`; both rescues are witnessed —
+/// `class C extends B { public function m(){} }` makes `$this->m()` in `B` print
+/// `C`); **a non-`static` method through `C::m()`** (with a `$this` in scope PHP
+/// treats it as an instance call, the lower-bound case again; without one it's a
+/// different fatal); **a depth-1 property receiver** (no exact-class proof,
+/// ADR-0052 §7).
 ///
-/// * **`$this` / `self::` / `static::` / `parent::`** — the enclosing object's
-///   runtime class is a *lower bound*, and a descendant may both override the member
-///   publicly and carry a `__call`; both rescues are witnessed
-///   (`class C extends B { public function m(){} }` makes `$this->m()` in `B` print
-///   `C`). The enclosing-class question these sites raise is answered — the walk's
-///   scope owner supplies it — but the receiver question is not.
-/// * **a non-`static` method through `C::m()`** — with a `$this` in scope PHP treats
-///   it as an instance call on that object, which is the lower-bound case again;
-///   without one it is a different fatal (`cannot be called statically`).
-/// * **a depth-1 property receiver** — carries no exact-class proof (ADR-0052 §7).
+/// `nullsafe` is not read: `?->` short-circuits on `null` alone, and every
+/// receiver this lane admits is allocation-proven, never null (`$c = new C;
+/// $c?->m();` on a private `m()` is the same fatal, witnessed).
 ///
-/// The `nullsafe` flag is deliberately not read: `?->` short-circuits on `null`
-/// alone, and every receiver this lane admits is an allocation-proven object, so it
-/// is never null — `$c = new C; $c?->m();` on a private `m()` is the same fatal
-/// (witnessed).
-///
-/// The first-class-callable form `$c->m(...)` is a **recorded boundary**, not a
-/// decision: PHP raises the very same fatal at closure-*creation* time for it
-/// (witnessed), and this check would report it, but the form does not lower to a
-/// method call in the trace IR at all — so no site reaches here. It joins the lane
-/// for free the day the lowering carries it.
+/// The first-class-callable form `$c->m(...)` is a **recorded boundary**: PHP
+/// raises the same fatal at closure-*creation* time for it (witnessed), but the
+/// form does not lower to a method call in the trace IR at all, so no site
+/// reaches here — it joins the lane for free the day the lowering carries it.
 fn inaccessible_call_subject(
     cx: &Cx,
     call: &CallExpr,
@@ -22667,15 +21690,15 @@ fn check_inaccessible_method(
 /// Find `member` in an enumerated chain, returning the node that declares it and
 /// whether that node is the receiver's own class.
 ///
-/// The second half is what separates inaccessibility from absence for the two
+/// The second half separates inaccessibility from absence for the two
 /// *unmangled* member kinds. PHP stores a private property under its declaring
-/// class's own key and does not inherit a private constant, so when the declaration
-/// sits on an ancestor rather than on the receiver's own class the name is simply
-/// **not there** for this site: `class A { private $p; } class B extends A {}` gives
-/// `Warning: Undefined property: B::$p`, and the constant form gives
-/// `Error: Undefined constant B::K` — different consequences, not this id. A
-/// `protected` member is inherited normally and fires from anywhere in the chain
-/// (`Cannot access protected property B::$p`, witnessed).
+/// class's own key and does not inherit a private constant, so when the
+/// declaration sits on an ancestor rather than the receiver's own class the name
+/// is simply **not there** for this site: `class A { private $p; } class B
+/// extends A {}` gives `Warning: Undefined property: B::$p`, and the constant
+/// form gives `Error: Undefined constant B::K` — different consequences, not
+/// this id. A `protected` member is inherited normally and fires from anywhere
+/// in the chain (`Cannot access protected property B::$p`, witnessed).
 fn declared_in_chain<'a, T>(
     chain: &MemberChain<'a>,
     mut find: impl FnMut(&'a ClassDecl) -> Option<T>,
@@ -22947,22 +21970,19 @@ enum ChainWalk {
 
 /// Collect every magic-member obstacle record in `start_fqn`'s **resolved reach**
 /// (ADR-0049 A14, issue #195): the class-like's own records, then those of its
-/// parent chain, its interfaces, and its `@mixin` targets — each of those
-/// followed transitively, so a mixin whose target is itself a mixin chains on.
+/// parent chain, its interfaces, and its `@mixin` targets — each followed
+/// transitively, so a mixin whose target is itself a mixin chains on.
 ///
 /// Non-empty ⇒ the class-like is not enumerable for an absence proof. Three
-/// deliberate asymmetries with the method-chain walk:
-///
-/// - **Interfaces are walked here** even though [`enumerate_method_chain`]
-///   ignores them: an interface cannot *define* a method, but a `@method` tag on
-///   one still says the implementors answer names the index cannot list.
-/// - **An unresolvable parent/interface is not an obstacle here** — that leg
-///   belongs to the chain walk, which already silences on it; treating every
-///   vendor-unresolved interface as a magic obstacle would silence the family
-///   through the wrong door.
-/// - **An unresolvable `@mixin` target needs no special case**: the `@mixin`
-///   record on the carrier is already in the result, so a target naming nothing
-///   is silence, never a finding.
+/// deliberate asymmetries with the method-chain walk: **interfaces are walked
+/// here** even though [`enumerate_method_chain`] ignores them (an interface
+/// cannot *define* a method, but a `@method` tag on one still says the
+/// implementors answer names the index cannot list); **an unresolvable
+/// parent/interface is not an obstacle here** (that leg belongs to the chain
+/// walk, which already silences on it; treating every vendor-unresolved
+/// interface as a magic obstacle would silence through the wrong door); **an
+/// unresolvable `@mixin` target needs no special case** (the `@mixin` record on
+/// the carrier is already in the result, so a target naming nothing is silence).
 ///
 /// The visited set is the cycle guard: `@mixin`-into-`@mixin` cycles (and the
 /// diamond an interface list makes) terminate after one visit per class-like.
@@ -23161,53 +22181,46 @@ fn check_undefined_method(
 // | property  | class chain (plain/promoted/static/hooked) | `__get`/`__set`/`__isset`, `#[AllowDynamicProperties]`, `stdClass` descent, a project-wide dynamic write |
 // | class-const | chain + **interfaces** + **enum cases**  | none — PHP gives constants no magic channel at all |
 //
-// Every `php -r` witness quoted here was taken at PHP 8.5.9 and is reproduced at
-// the leg that consumes it. The two consequences differ, and ADR-0078 §1.4 makes
-// that an id boundary rather than a message detail:
+// Every `php -r` witness quoted here is at PHP 8.5.9, reproduced at the leg that
+// consumes it. The two consequences differ, and ADR-0078 §1.4 makes that an id
+// boundary rather than a message detail:
 //
 //   $c = new C; echo $c->nope;   Warning: Undefined property: C::$nope   → null
 //   echo C::NOPE;                Error: Undefined constant C::NOPE       → fatal
 //   echo C::$nope;               Error: Access to undeclared static property C::$nope
 //
-// **The static-property row is recorded, not implemented.** `C::$prop` on an
-// undeclared static property is a fatal `Error` (witnessed above) — a different
-// consequence from the instance read, so under ADR-0078 §1.4 it could not ride
-// `property.undefined` in any case, and the trace IR has no static-property *read*
-// site at all (`Node::StaticPropertyAccess` is collected only as a class
-// reference, for `class.undefined`). Naming it here rather than minting an id the
-// ADR-0078 floor table does not carry: the collection is a lowering change, not a
-// cheap one, and the id would have to be its own row.
+// The static-property row is recorded, not implemented: `C::$prop` on an
+// undeclared static property is a fatal (a different consequence from the
+// instance read, so it could not ride `property.undefined` anyway), and the
+// trace IR has no static-property *read* site at all — a lowering change, not a
+// cheap one.
 //
-// **Discharge, and where it does not reach yet** (the owner's 2026-08-08 policy
-// restatement, ADR-0049 A14). The A14 magic-tag leg is a *dischargeable* obstacle:
-// its records are reified, and a plugin manifest / pack (ADR-0039/0044/0045) that
-// declares a magic property restores the absolute check for exactly what it
-// declared — the demand side of that channel is PHPStan's 15,554 Eloquent-shaped
-// `property.notFound` sites. The three legs this slice adds — `__get`/`__set`/
-// `__isset`, `#[AllowDynamicProperties]` and the project-wide dynamic-write set —
-// are read off the code rather than off a docblock, so they produce no record and
-// nothing can discharge them today. Recorded as the boundary it is: reifying them
-// is a `MagicObstacle`-vocabulary change, not a ladder change, and the ladder here
-// is already the consumer that would read them.
+// Discharge (owner's 2026-08-08 policy, ADR-0049 A14): the A14 magic-tag leg is
+// *dischargeable* — its records are reified, and a plugin manifest/pack
+// (ADR-0039/0044/0045) declaring a magic property restores the absolute check
+// for exactly what it declared (demand side: PHPStan's 15,554 Eloquent-shaped
+// `property.notFound` sites). The three legs this slice adds — `__get`/`__set`/
+// `__isset`, `#[AllowDynamicProperties]`, the project-wide dynamic-write set —
+// are read off the code rather than a docblock, so nothing can discharge them
+// today; reifying them is a `MagicObstacle`-vocabulary change, not a ladder one.
 //
-// **The write side is deferred with its design**, per ADR-0078 §3 and this issue.
-// `property.dynamic-write` — writing an undeclared property on a plain class — is
-// a **deprecation** today (witnessed:
-// `Deprecated: Creation of dynamic property Plain::$dyn is deprecated`) and a
-// fatal at PHP 9.0. Ask-the-real-thing forbids calling it proof while the
-// project's own PHP tolerates it, so the id ships when the sidecar reports
-// ≥ 9.0 and not before. Designed, named, not registered.
+// The write side is deferred with its design (ADR-0078 §3): `property.dynamic-
+// write` (writing an undeclared property on a plain class) is a deprecation
+// today (witnessed: `Deprecated: Creation of dynamic property Plain::$dyn is
+// deprecated`) and a fatal at PHP 9.0. Ask-the-real-thing forbids calling it
+// proof while the project's own PHP tolerates it, so the id ships when the
+// sidecar reports ≥ 9.0 and not before. Designed, named, not registered.
 // ---------------------------------------------------------------------------
 
 /// The magic methods that route an instance property access away from the
 /// declaration set (ADR-0078, issue #197).
 ///
-/// Only `__get` genuinely rescues a **read** — witnessed at 8.5.9: a class with a
-/// `__get` prints `__get:nope`, while `__isset` alone and `__set` alone both still
-/// raise `Warning: Undefined property`. All three are obstacles anyway: a class
-/// declaring any of them runs the magic-property protocol, and the deliberate
-/// over-silence keeps ONE enumerability rule in the codebase rather than a second,
-/// laxer one — the [`STRING_NON_STRINGABLE_ID`] precedent, argued there.
+/// Only `__get` genuinely rescues a **read** — witnessed at 8.5.9: a class with
+/// a `__get` prints `__get:nope`, while `__isset`/`__set` alone still raise
+/// `Warning: Undefined property`. All three are obstacles anyway: any of them
+/// runs the magic-property protocol, and the over-silence keeps ONE
+/// enumerability rule rather than a second, laxer one (the
+/// [`STRING_NON_STRINGABLE_ID`] precedent).
 const PROPERTY_MAGIC: &[&str] = &["__get", "__set", "__isset"];
 
 /// A receiver class's ancestor chain, enumerated end to end with no obstacle on it
@@ -23224,34 +22237,29 @@ struct PropertyChain {
 /// Whether a class-like declaration **provides** `prop` as a member — the
 /// declaration set an absence claim must find empty.
 ///
-/// Every spelling counts, and one of them only exists because #185 put it there: a
-/// class-body **hooked** property (`public int $p { get => 42; }`) binds no value
-/// and so is not lowered to a `PropertyDecl` at all, but it IS declared (witnessed:
-/// the read prints `42`), which is why `ClassDecl::hooked_properties` keeps the
-/// bare name. A `static` declaration counts too, though `$obj->staticName` really
-/// does warn (witnessed: `Accessing static property S1::$sp as non static` then
-/// `Undefined property: S1::$sp`) — treating the name as present costs one true
-/// positive and can never cost a false one.
+/// Every spelling counts. A class-body **hooked** property (`public int $p {
+/// get => 42; }`, added by #185) binds no value and is not lowered to a
+/// `PropertyDecl`, but it IS declared (witnessed: the read prints `42`) —
+/// `ClassDecl::hooked_properties` keeps the bare name. A `static` declaration
+/// counts too, though `$obj->staticName` really does warn (witnessed:
+/// `Accessing static property S1::$sp as non static` then `Undefined property:
+/// S1::$sp`) — treating the name as present costs one true positive, never a
+/// false one.
 fn declares_property(cd: &ClassDecl, prop: &str) -> bool {
     cd.properties.iter().any(|p| p.name == prop) || cd.hooked_properties.iter().any(|h| h == prop)
 }
 
 /// Whether this node hides members from the property walk however the walk asks
 /// (ADR-0078, issue #197) — the obstacle set shared by the chain walk and the
-/// descendant scan.
-///
-/// * a **trait** name or a trait-using node: trait members are not flattened (S1 /
-///   leg (e)), and a trait can declare properties (witnessed: `UT::$tp` reads `4`
-///   through `use TP`);
-/// * an **enum**: `name`/`value` are engine-provided rather than declared, and an
-///   enum node would otherwise read as property-empty;
-/// * an **interface**: it declares no properties at all, so its own emptiness
-///   proves nothing about the object behind it;
-/// * `__get`/`__set`/`__isset` — see [`PROPERTY_MAGIC`], and note the fallback is
-///   inherited (witnessed: a parent's `__get` rescues a read on the child, which
-///   is exactly why this is asked at every node rather than only at the receiver);
-/// * `#[AllowDynamicProperties]`, which re-licenses the write PHP 8.2 deprecated
-///   and so leaves the property set open for good.
+/// descendant scan: a **trait** name or trait-using node (members not
+/// flattened, S1/leg (e) — a trait can declare properties, witnessed `UT::$tp`
+/// reads `4` through `use TP`); an **enum** (`name`/`value` are engine-provided,
+/// not declared); an **interface** (declares no properties at all, so its own
+/// emptiness proves nothing about the object behind it); `__get`/`__set`/
+/// `__isset` (see [`PROPERTY_MAGIC`] — the fallback is inherited, witnessed a
+/// parent's `__get` rescues a read on the child, which is why this is asked at
+/// every node); `#[AllowDynamicProperties]` (re-licenses the write PHP 8.2
+/// deprecated, leaving the property set open for good).
 fn property_walk_obstacle(cd: &ClassDecl) -> bool {
     cd.is_trait
         || cd.uses_traits
@@ -23267,13 +22275,12 @@ fn property_walk_obstacle(cd: &ClassDecl) -> bool {
 ///
 /// Interfaces are not walked (a PHP interface cannot declare a property), and
 /// **`stdClass` needs no leg of its own**: it is not a project declaration, so
-/// `find_class` answers `None` at it and the chain simply never closes — which is
-/// the id-wide silence this issue asks for, covering `stdClass` itself and every
-/// descendant of it in one edge. The conservatism is deliberate and worth naming:
-/// a never-written read on a `stdClass` really does warn (witnessed:
-/// `Undefined property: stdClass::$nope`), so these are true positives Steins
-/// declines in v1 because `stdClass` is the language's own property bag and a
-/// dynamic property written anywhere would make the read clean.
+/// `find_class` answers `None` and the chain simply never closes — covering
+/// `stdClass` and every descendant in one edge. Deliberately conservative: a
+/// never-written read on `stdClass` really does warn (witnessed: `Undefined
+/// property: stdClass::$nope`), a true positive Steins declines in v1 because
+/// `stdClass` is the language's own property bag and a dynamic property written
+/// anywhere would make the read clean.
 fn enumerate_property_chain(cx: &Cx, start_fqn: &str, prop: &str) -> Option<PropertyChain> {
     match enumerate_property_chain_outcome(cx, start_fqn, prop) {
         PropertyChainOutcome::Absent(chain) => Some(chain),
@@ -23350,21 +22357,16 @@ fn enumerate_property_chain_outcome(
 /// The receiver a `property.undefined` claim can rest on (ADR-0078, issue #197),
 /// or `None` for silence.
 ///
-/// The reach is the two lanes the member family already has, and nothing new:
-///
-/// * **the exact lane (S2's).** An allocation-proven `$var` whose `class_exact`
-///   holds. `$this` never qualifies — it is a membership fact, not exactness
-///   (A1) — and a lower-bound variable is not this lane's.
-/// * **the declared lane (S6's, routed by A13).** A receiver carrying a narrowed
-///   contract-arm lane, admitted only when the minimum stratum over the
-///   *participating* arms is `Verified` — a native `C $o` declaration PHP enforces
-///   at the boundary. **Any `Asserted` arm is silence**, and that is this slice's
-///   calibration boundary rather than a ladder step: the A13 routing sends an
-///   Asserted method claim to `phpdoc.undefined-method`, and the property family
-///   has no phpdoc twin to send it to (ADR-0078's floor table registers none). A
-///   docblock-premised property absence therefore gets no id in v1 rather than
-///   being laundered onto the proof surface, which is the direction ADR-0052 §5
-///   requires. The twin, if measurement ever asks for one, is a registry addition.
+/// The reach is the two lanes the member family already has: **the exact lane
+/// (S2's)** — an allocation-proven `$var` whose `class_exact` holds (`$this`
+/// never qualifies, it's a membership fact not exactness, A1); **the declared
+/// lane (S6's, routed by A13)** — a receiver carrying a narrowed contract-arm
+/// lane, admitted only when the minimum stratum over the *participating* arms
+/// is `Verified`. **Any `Asserted` arm is silence**: the property family has no
+/// phpdoc twin to route an Asserted claim to (ADR-0078's floor table registers
+/// none), so a docblock-premised property absence gets no id in v1 rather than
+/// laundering onto the proof surface (ADR-0052 §5). The twin, if ever needed, is
+/// a registry addition.
 enum PropertyReceiver {
     Exact(String),
     /// A declared/narrowed arm lane, as **conjunct lists** — one inner list per
@@ -23613,20 +22615,20 @@ fn check_undefined_property(
 /// declared-shape possibly leg, where the declared-receiver ladder proves the
 /// property absent on **some** union arms and present on the rest.
 ///
-/// This is `offset.maybe-missing`'s emission pattern one member kind over: the
-/// definite leg claims absence over the whole receiver, this one claims it over a
-/// proper subset of the arms the receiver was narrowed to, and the two are disjoint
-/// because the routing in [`check_undefined_property`] is a partition — every arm
-/// absent, some arms absent, or an unclosable arm that silences both.
+/// `offset.maybe-missing`'s emission pattern one member kind over: the definite
+/// leg claims absence over the whole receiver, this one over a proper subset of
+/// the narrowed arms, disjoint because the routing in
+/// [`check_undefined_property`] is a partition — every arm absent, some arms
+/// absent, or an unclosable arm that silences both.
 ///
-/// It carries **no reachability premise**: the arms are a union of declared types,
-/// not a set of control-flow paths, so nothing here consults the binding-presence
-/// pass. It shares ADR-0081 only because the pair was registered together.
+/// Carries **no reachability premise** — the arms are a union of declared
+/// types, not control-flow paths, so nothing here consults the binding-presence
+/// pass; it shares ADR-0081 only because the pair was registered together.
 ///
-/// Every premise of the definite leg is already discharged by the caller — the
+/// Every premise of the definite leg is already discharged by the caller: the
 /// ADR-0049 §7 warning-handler gate, `Scope::poisoned`, the project-wide
-/// dynamic-write obstacle, the A9 sidecar availability, the A13 Verified-stratum
-/// floor on the participating arms, and the full §8 ladder per arm.
+/// dynamic-write obstacle, A9 sidecar availability, the A13 Verified-stratum
+/// floor, and the full §8 ladder per arm.
 fn check_maybe_undefined_property(
     cx: &Cx,
     var: &str,
@@ -23685,16 +22687,16 @@ fn provides_class_const(cd: &ClassDecl, name: &str) -> bool {
 /// transitively — proving `name`'s absence (ADR-0078, issue #197). `None` is
 /// silence.
 ///
-/// Where the method and property walks follow the `extends` chain alone, a constant
-/// can arrive from anywhere in the reach, and all three routes are witnessed at
-/// 8.5.9: `class CImpl implements I1 {}` answers `CImpl::IK`,
-/// `interface IB extends IA` carries `IA::AK` through to `CB::AK`, and a trait's
-/// constant answers through the using class (`CT::TK`) — which is why a
-/// trait-using node is an obstacle here rather than a node to skip.
+/// Where the method and property walks follow the `extends` chain alone, a
+/// constant can arrive from anywhere in the reach, all three routes witnessed at
+/// 8.5.9: `class CImpl implements I1 {}` answers `CImpl::IK`, `interface IB
+/// extends IA` carries `IA::AK` through to `CB::AK`, and a trait's constant
+/// answers through the using class (`CT::TK`) — so a trait-using node is an
+/// obstacle here rather than a node to skip.
 ///
-/// An enum node is **not** an obstacle: unlike enum methods (leg (j)/A3, unlowered)
-/// both an enum's constants and its cases are lowered, so an enum reach is
-/// enumerable for this member kind.
+/// An enum node is **not** an obstacle: unlike enum methods (leg (j)/A3,
+/// unlowered) both an enum's constants and cases are lowered, so an enum reach
+/// is enumerable for this member kind.
 fn enumerate_const_reach(cx: &Cx, start_fqn: &str, name: &str) -> Option<ConstReach> {
     // A14 (issue #195), one door earlier. Constants have no magic channel at all —
     // a `@property`/`@method` tag cannot make `C::K` resolve — so this leg is pure
@@ -23870,27 +22872,16 @@ fn check_string_context_site(
 }
 
 /// The fatal leg: an object whose class provably declares no `__toString` anywhere
-/// a runtime lookup could find one.
-///
-/// The ladder is `call.undefined-method`'s, asked for one particular method name,
-/// and every leg of it is a silence:
-///
-/// 1. **An exactly-known class.** A lower bound is not enough — a subclass may
-///    declare `__toString` — so the same exactness discipline
-///    [`undefined_method_receiver`] applies holds here (`$this` included: it is
-///    membership, not exactness, unless the class is `final`).
-/// 2. **A live, monkey-patch-free boot surface** (`absence_family_available`,
-///    ADR-0049 A9): a runtime-redefinition extension can add a method to a class
-///    out from under any textual proof.
-/// 3. **`Stringable` refuted** by the is-a oracle. That oracle already knows PHP
-///    8.0's implicit implementation — any class with a `__toString` anywhere in its
-///    hierarchy answers `Yes`, and a trait-using class answers `Unknown` — so a
-///    non-`No` answer is silence before the chain is walked at all.
-/// 4. **The chain fully enumerated** with `__toString` absent from every node
-///    ([`enumerate_method_chain`]): an unresolvable or ambiguous ancestor, a
-///    builtin ancestor, a trait, an enum, and an A14 magic-tag obstacle anywhere in
-///    the resolved reach each stop the walk.
-/// 5. **The dam and the A2ii homonym leg**, as the method id applies them.
+/// a runtime lookup could find one. Reuses `call.undefined-method`'s ladder for one
+/// method name: an exactly-known class ([`undefined_method_receiver`]'s discipline —
+/// a lower bound is not enough since a subclass may declare `__toString`; `$this` is
+/// membership, not exactness, unless `final`); a live monkey-patch-free boot surface
+/// (`absence_family_available`, ADR-0049 A9); `Stringable` refuted by the is-a oracle
+/// (which already knows PHP 8.0's implicit implementation — any `__toString` in the
+/// hierarchy answers `Yes`, a trait-using class `Unknown`); the chain fully enumerated
+/// with `__toString` absent from every node ([`enumerate_method_chain`] — unresolvable/
+/// ambiguous ancestor, builtin ancestor, trait, enum, or an A14 magic-tag stop the
+/// walk); and the dam plus the A2ii homonym leg, as the method id applies them.
 fn check_non_stringable(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -23947,24 +22938,17 @@ fn check_non_stringable(
 
 /// Whether a string-context operand is **provably an array** at the `Verified`
 /// stratum a proof-layer finding requires (ADR-0052 §5): a proven array value, in
-/// the env or resolved by the fold. `Certainty::Maybe` — an `array|string` — is
-/// silence by construction.
+/// the env or resolved by the fold. `Certainty::Maybe` (`array|string`) is silence
+/// by construction.
 ///
-/// # What is deliberately NOT evidence here, and why
-///
-/// The `Fact::Shape` a **declared** array seeds is always `Asserted`, by ADR-0062
-/// A-G9's corollary: a declared shape's contents are a claim the runtime never
-/// checks, and the stratum is what enforces "shape-derived facts never feed
-/// proof-layer findings" structurally rather than by review. That covers the
-/// docblock case (`@param array<int, string> $a`) exactly right.
-///
-/// It also means a bare native `array $x` parameter — which PHP *does* enforce with
-/// a `TypeError`, and which is the single commonest shape of this finding in other
-/// analyzers — reports nothing today. The reason is one level below this check:
-/// `TypeMember` has no array member, so an `array` hint lowers the whole native
-/// type to `None` and there is no `Verified` arm to read. Widening it is an IR
-/// change (the array vocabulary joining the native envelope), not a judgement
-/// change, and it is recorded silence until then.
+/// Deliberately not evidence: a **declared** array's `Fact::Shape` is always
+/// `Asserted` (ADR-0062 A-G9's corollary — a declared shape's contents are a claim
+/// the runtime never checks), so the docblock case (`@param array<int, string> $a`)
+/// is covered by the stratum check above. A bare native `array $x` parameter — which
+/// PHP *does* enforce with a `TypeError`, and is the commonest shape of this finding
+/// elsewhere — reports nothing today: `TypeMember` has no array member, so an
+/// `array` hint lowers to `None` with no `Verified` arm to read. Widening that is an
+/// IR change (array vocabulary joining the native envelope), recorded silence until then.
 fn string_context_is_array(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -24020,26 +23004,24 @@ fn string_context_object_class(
 
 // ---------------------------------------------------------------------------
 // The existence ids: `call.undefined-function` + `class.undefined`
-// (ADR-0049 §3/§5 / S4 — the FP-risk hotspot, opened in measurement mode first).
+// (ADR-0049 §3/§5 / S4 — the FP-risk hotspot).
 //
-// Both are DAMMED absence claims (unlike S2's method-absence, which is immune —
-// PHP cannot reopen a resolved class, but eval and out-of-universe includes DO mint
-// functions and classes at runtime). So a standing dam site ANYWHERE in the universe
-// silences the whole slice: the include-heavy legacy monorepo stays quiet while
-// dynamism-free OSS packages fire — the §10 falsifiable prediction. The shared
-// ladder (any leg failing ⇒ silence, the zero-FP identity ADR-0013):
-//   - a real direct call / a hard-error class position (first-class callables,
-//     `$fn()`, `::class`, instanceof, catch, type-decls are §5's verified NON-findings);
-//   - `absence_family_available` (A9 monkey-patch void + the no-sidecar sound subset);
-//   - not a reserved dump FQN (D3 carve-out) and not a curated SAPI-provided name (A6);
-//   - every candidate FQN index-Absent — not Unique, not Ambiguous, not a catalog builtin;
-//   - the whole-universe dam clear (A5-corrected; the vouch valve is NOT in scope —
-//     dammed ⇒ silent);
+// Both are DAMMED absence claims (unlike S2's method-absence, which is immune: PHP
+// cannot reopen a resolved class, but eval and out-of-universe includes DO mint
+// functions/classes at runtime) — a standing dam site ANYWHERE in the universe
+// silences the whole slice (§10's falsifiable prediction). Shared ladder, any leg
+// failing ⇒ silence (zero-FP identity ADR-0013):
+//   - a real direct call / hard-error class position (first-class callables, `$fn()`,
+//     `::class`, instanceof, catch, type-decls are §5's verified NON-findings);
+//   - `absence_family_available` (A9 monkey-patch void + no-sidecar sound subset);
+//   - not a reserved dump FQN (D3) and not a curated SAPI-provided name (A6);
+//   - every candidate FQN index-Absent (not Unique, not Ambiguous, not a catalog builtin);
+//   - the whole-universe dam clear (A5-corrected; the vouch valve is out of scope here);
 //   - the boot surface answers not-found for every candidate (A2ii / reflect);
-//   - not existence-vouched by a dominating `function_exists`/`class_exists` guard —
-//     for `call.undefined-function` via the branch store (FP-15); for `class.undefined`
-//     via dead-region pruning, since a decided guard whose class meets the firing
-//     conditions (Absent + boot not-found) folds its branch dead under the SAME closure;
+//   - not vouched by a dominating `function_exists`/`class_exists` guard — via the
+//     branch store for `call.undefined-function` (FP-15), via dead-region pruning for
+//     `class.undefined` (a decided guard meeting the firing conditions folds its
+//     branch dead under the SAME closure);
 //   - PHP function-/class-name case-insensitivity throughout.
 // ---------------------------------------------------------------------------
 
@@ -24157,8 +23139,8 @@ fn check_undefined_function(
     store: &Store,
     out: &mut Vec<Diagnostic>,
 ) {
-    // Leg (d): a real direct call. A first-class callable `f(...)` builds a Closure
-    // (never invokes); `$fn()` / `call_user_func` are other `Callee` variants.
+    // Leg (d): a real direct call — `f(...)` (first-class callable) and `$fn()` are
+    // other `Callee` variants.
     let Callee::Function(_) = &call.receiver else {
         return;
     };
@@ -24168,8 +23150,7 @@ fn check_undefined_function(
     let Some(r) = call.callee_ref.as_ref() else {
         return;
     };
-    // Index leg (cheap, first): every candidate provably Absent (not Unique/Ambiguous,
-    // not a catalog builtin). `None` ⇒ resolved/ambiguous ⇒ silence.
+    // Index leg (cheap, first, header above).
     let Some((display, candidates)) = undefined_function_target(cx, r) else {
         return;
     };
@@ -24178,7 +23159,7 @@ fn check_undefined_function(
     if is_dump_family_fqn(&resolved_fn_fqn(cx, r)) {
         return;
     }
-    // A6: a curated SAPI-provided name is never Absent under an undeclared SAPI.
+    // A6: curated SAPI-provided name.
     if candidates.iter().any(|c| is_sapi_provided_function(c)) {
         return;
     }
@@ -24186,17 +23167,15 @@ fn check_undefined_function(
     if candidates.iter().any(|c| store.vouches_function(c)) {
         return;
     }
-    // Dam leg (A5): function existence is dammed — a standing dynamism site could mint
-    // the name (the vouch valve is unavailable here, so dammed is silent).
+    // Dam leg (A5, header above).
     if !cx.dam.is_clear() {
         return;
     }
-    // A9 + no-sidecar sound subset: the whole family is silent (checked once, cached).
+    // A9 sidecar leg (header above).
     if !folder.absence_family_available() {
         return;
     }
-    // Boot-surface leg (A2ii / reflect): every candidate must be answered NOT-a-function
-    // by the project's own PHP. A homonym (`Some(true)`) or unanswerable (`None`) ⇒ silence.
+    // Boot-surface leg (A2ii, header above): a homonym or unanswerable candidate ⇒ silence.
     for c in &candidates {
         match folder.boot_surface_function(c) {
             Some(false) => {}
@@ -24247,15 +23226,15 @@ fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mu
     if steins_catalog::builtin_class_supers(&lname).is_some() {
         return;
     }
-    // Dam leg (A5): class existence is dammed — eval / out-of-universe include mints.
+    // Dam leg (A5, header above).
     if !cx.dam.is_clear() {
         return;
     }
-    // A9 + no-sidecar sound subset.
+    // A9 sidecar leg (header above).
     if !folder.absence_family_available() {
         return;
     }
-    // Boot-surface leg (A2ii / reflect): the project's own PHP must answer not-found.
+    // Boot-surface leg (A2ii, header above).
     match folder.boot_surface_class_like(&lname) {
         Some(false) => {}
         Some(true) | None => return,
@@ -24285,25 +23264,19 @@ fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mu
 /// when every name the fetch could denote is undeclared in the universe, `None`
 /// otherwise (something declares it ⇒ silence).
 ///
-/// The resolution shape is `undefined_function_target`'s, reused rather than
-/// reinvented, because PHP resolves the two the same way — including the global
-/// fallback that classes do not get: an unqualified `FOO` inside `namespace App;`
-/// tries `App\FOO` and then the global `FOO` (`php -r`-witnessed on 8.5.9). Three
-/// differences, each forced by the language:
-///
-/// * **case**. Constants are case-sensitive; only the namespace prefix folds
-///   ([`steins_syntax::normalize_const_fqn`]). `defined('App\LOCAL')` and
-///   `defined('app\LOCAL')` are both true while `defined('App\local')` is false.
-/// * **imports**. An unqualified name consults `use const` imports
-///   ([`steins_syntax::NsCtx::const_imports`]), not `use function`; a qualified
-///   name's first segment consults the ordinary class/namespace imports, since
-///   that segment is a namespace either way.
-/// * **no catalog leg**. `undefined_function_target` treats a catalogued builtin as
-///   proof of presence; there is no such step here, and there must not be — the
-///   builtin catalog is never an absence oracle (ADR-0049 §1) and a *presence*
-///   catalog for constants would be a second, staler copy of the answer the sidecar
-///   already gives. Engine and extension constants are refuted (or not) by the boot
-///   surface alone.
+/// Reuses `undefined_function_target`'s resolution shape — PHP resolves the two the
+/// same way, including the global fallback classes lack: an unqualified `FOO` inside
+/// `namespace App;` tries `App\FOO` then global `FOO` (`php -r`-witnessed, 8.5.9).
+/// Three language-forced differences: constants are **case-sensitive** (only the
+/// namespace prefix folds, [`steins_syntax::normalize_const_fqn`] —
+/// `defined('App\LOCAL')`/`defined('app\LOCAL')` both true, `defined('App\local')`
+/// false); an unqualified name consults `use const` **imports**
+/// ([`steins_syntax::NsCtx::const_imports`]), not `use function` (a qualified name's
+/// first segment still uses the ordinary class/namespace imports); and there is
+/// **no catalog leg** — the builtin catalog is never an absence oracle (ADR-0049
+/// §1), and a presence catalog for constants would be a second, staler copy of the
+/// sidecar's answer, so engine/extension constants are refuted only by the boot
+/// surface.
 ///
 /// `display` is the source-cased primary target (PHP's own phrasing at the fatal);
 /// `candidates` are the normalized keys the boot-surface leg must also refute — two
@@ -24375,11 +23348,10 @@ fn undefined_constant_target(cx: &Cx, r: &NameRef) -> Option<(String, Vec<String
 
 /// Run the `constant.undefined` ladder for the file's bare constant fetches and
 /// emit one finding per provably-absent one (ADR-0078, issue #198). Called once per
-/// file, never under a descent; a fetch in a proven-dead region is skipped by the
-/// caller, which IS this id's guard leg — a `defined('X')` whose constant meets the
-/// firing conditions folds its branch dead under the same closure this ladder rests
-/// on (`constant_defined_verdict`), so the `if (defined('X')) { echo X; }` idiom is
-/// silent without a second mechanism.
+/// file, never under a descent; a fetch in a dead region is skipped by the caller,
+/// which IS this id's guard leg — a `defined('X')` meeting the firing conditions
+/// folds its branch dead under the same closure (`constant_defined_verdict`), so
+/// `if (defined('X')) { echo X; }` is silent without a second mechanism.
 fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: &mut Vec<Diagnostic>) {
     // Index leg (cheap, first): every candidate undeclared anywhere in the universe.
     // `const` statements and literal `define()` calls both land here, conditional or
@@ -24393,14 +23365,12 @@ fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &NameRef, out: 
     if !cx.dam.constants_are_clear() {
         return;
     }
-    // A9 + no-sidecar sound subset: the whole family is silent (checked once, cached).
+    // A9 sidecar leg (header above).
     if !folder.absence_family_available() {
         return;
     }
-    // Boot-surface leg (A2ii): the project's own PHP must answer not-defined for
-    // every candidate. This is where extension constants and anything an already-
-    // loaded bootstrap defined declare themselves; the builtin catalog is never
-    // consulted, because it is never an absence oracle (ADR-0049 §1).
+    // Boot-surface leg (A2ii): extension constants and an already-loaded bootstrap's
+    // `define()`s declare themselves here; the builtin catalog is never consulted.
     for c in &candidates {
         match folder.boot_surface_constant(c) {
             Some(false) => {}
@@ -24459,64 +23429,43 @@ fn check_array_duplicate_keys(cx: &Cx, out: &mut Vec<Diagnostic>) {
 // `class.extends-final` (ADR-0078, issue #183 — the member-kind port's P5 tracer).
 //
 // Both read the DECLARATION GRAPH only — the same edges `resolve_in_chain` walks,
-// read in the other direction. No flow analysis, no value domain, no receiver: a
-// class-like declaration either is or is not loadable, and PHP decides it at class
-// load, before a single statement of the body runs. Every runtime claim below is
-// `php -r`-witnessed (ADR-0049 point 10 discipline; PHP 8.5.9):
+// read in the other direction. No flow analysis, no value domain, no receiver: PHP
+// decides loadability at class load, before any statement runs. `php -r`-witnessed
+// (PHP 8.5.9): `abstract class B { abstract public function m(); } class C extends
+// B {}` → `Fatal error: Class C contains 1 abstract method and must therefore be
+// declared abstract or implement the remaining method (B::m)`; `interface I {
+// public function m(); } class C implements I {}` fatals the same way, `(I::m)` —
+// an interface is a requirement source like an abstract ancestor; adding `public
+// function __call($n, $a) {}` to C does NOT discharge it (unlike
+// `call.undefined-method`'s leg (d), the magic fallback is not an obstacle here);
+// and `final class F {} class C extends F {}` → `Class C cannot extend final class
+// F` (also for `abstract class C`, and `new class extends F {}` → `Class
+// F@anonymous cannot extend final class F`).
 //
-//   - `abstract class B { abstract public function m(); } class C extends B {}`
-//     → `Fatal error: Class C contains 1 abstract method and must therefore be
-//       declared abstract or implement the remaining method (B::m)`
-//   - `interface I { public function m(); } class C implements I {}`
-//     → the same fatal, `(I::m)` — an interface is a requirement source exactly
-//       like an abstract ancestor;
-//   - the same with `class C extends B { public function __call($n, $a) {} }`
-//     → STILL the same fatal. `__call` does **not** discharge an abstract method
-//       (it is a dispatch fallback, and the class never becomes instantiable), so
-//       unlike `call.undefined-method`'s leg (d) the magic fallback is deliberately
-//       NOT an obstacle here;
-//   - `final class F {} class C extends F {}`
-//     → `Fatal error: Class C cannot extend final class F` (also for an
-//       `abstract class C`, and for `$x = new class extends F {}`, which reports
-//       `Class F@anonymous cannot extend final class F`).
+// The dam (ADR-0046/0049 A5) does NOT gate these ids — the immunity asymmetry
+// (ADR-0049 A2) for a positive claim: only symbol *existence* is dammed (eval/
+// out-of-universe includes mint names but cannot reopen a declared class to add a
+// missing method body), and the fatal happens at declaration, not at a later call.
+// A2's identification legs still apply: every consulted ancestor and the subject's
+// own FQN must resolve UNIQUELY, and a `conditional` declaration anywhere re-dams
+// the claim (the `if (!class_exists('F')) { final class F {} }` polyfill-stub
+// leaves which declaration binds to load order). No sidecar leg needed.
 //
-// The dam (ADR-0046/0049 A5) does **not** gate these ids, and that is the immunity
-// asymmetry (ADR-0049 point 2 / A2) applied to a positive claim: only symbol
-// *existence* is dammed, because `eval` and out-of-universe includes mint names —
-// they cannot reopen a declared class to add the missing method body, and the fatal
-// happens at the declaration itself, not at a later call. What A2 *does* keep is the
-// identification of the textual declaration with the bound one, so the ladder below
-// carries A2's three legs: every consulted ancestor must resolve UNIQUELY in the
-// index (`Ambiguous` ⇒ silence), the subject's own FQN must be unique, and a
-// `conditional` declaration anywhere in the consulted set re-dams the claim (the
-// `if (!class_exists('F')) { final class F {} }` polyfill-stub shape leaves which
-// declaration binds to load order). No sidecar leg: these are not absence-of-symbol
-// claims the boot surface could answer, and an unconditional top-level homonym of a
-// project class is itself a declaration-collision fatal, never a silent rebinding.
+// Silence legs: a `use`d trait ANYWHERE in the chain (members not flattened, leg
+// (e) — could implement the method invisibly); an unresolvable/ambiguous PARENT
+// (the implementation could live there); a misshapen edge (`extends` naming an
+// interface/enum/trait, `implements` naming a non-interface — its own load-time
+// fatal); the "Cannot make non abstract method A::m() abstract in class B" shape
+// (fatals at that ancestor's own declaration, misnaming the subject); enums/traits
+// at the declaration site (no members lowered) and abstract classes/interfaces
+// (allowed abstract methods); anonymous classes for `class.abstract-unimplemented`
+// only (`new class` lowers edge-only, ADR-0049 A4 — no members, unimplemented
+// claim unfounded; `class.extends-final` needs no members and covers them).
 //
-// Obstacles, each a tested silence leg:
-//   - a `use`d trait ANYWHERE in the chain — a trait is a member source the object
-//     model does not flatten (the `resolve_in_chain` / ADR-0049 leg (e) obstacle),
-//     so a trait-using class could implement the method invisibly;
-//   - an unresolvable/ambiguous PARENT — the implementation could live there;
-//   - a misshapen edge (`extends` naming an interface/enum/trait, `implements`
-//     naming a non-interface): its own load-time fatal with a different message;
-//   - the "Cannot make non abstract method A::m() abstract in class B" shape
-//     (witnessed) — an ancestor re-declaring a concrete method abstract fatals at
-//     THAT declaration, so naming the subject class would misname the consequence;
-//   - enums and traits at the declaration site (no members are lowered for either)
-//     and abstract classes / interfaces (allowed to carry abstract methods);
-//   - anonymous classes, for `class.abstract-unimplemented` only: `new class`
-//     lowers edge-only (ADR-0049 A4 — parent + implements refs, no members), so
-//     their own definitions are invisible and an unimplemented-method claim would
-//     be unfounded. `class.extends-final` needs no members and DOES cover them.
-//
-// The ONE asymmetry, deliberate: an unresolvable INTERFACE is dropped rather than
-// silencing the class. A PHP interface never carries a method body in any version,
-// so an interface Steins cannot enumerate can only ADD requirements — dropping it
-// loses findings (`class C implements Countable {}` is silent) and can never
-// manufacture one. The parent direction is the opposite: a parent is a *definition*
-// source, so an unresolvable one must silence the whole claim.
+// The one deliberate asymmetry: an unresolvable INTERFACE is dropped rather than
+// silencing the class — it can only ADD requirements (no bodies), so dropping it
+// loses findings but never manufactures one. A parent is a *definition* source, so
+// an unresolvable one silences the whole claim.
 // ---------------------------------------------------------------------------
 
 /// How many unimplemented method names a `class.abstract-unimplemented` message
@@ -24564,10 +23513,8 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         if cd.is_interface || cd.is_enum || cd.is_trait {
             return None;
         }
-        // The trait obstacle (ADR-0049 leg (e)): trait members are not flattened into
-        // the class, so a trait use could discharge the requirement invisibly —
-        // witnessed silent: `trait T { public function m() {} } class C implements I
-        // { use T; }` runs clean.
+        // Trait obstacle (leg (e), header above) — witnessed silent: `trait T {
+        // public function m() {} } class C implements I { use T; }` runs clean.
         if cd.uses_traits {
             return None;
         }
@@ -24576,9 +23523,7 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         chain.push(cd);
         cur = match &cd.parent {
             None => None,
-            // A2 leg: the parent must resolve to a UNIQUE project declaration. Absent
-            // (a vendor/builtin ancestor) or Ambiguous ⇒ the implementation could live
-            // there ⇒ silence.
+            // A2 leg (header above): Absent or Ambiguous parent ⇒ silence.
             Some(pref) => Some(cx.find_class(&cx.units[file].tree.resolve_class_fqn(pref))?),
         };
     }
@@ -24589,9 +23534,7 @@ fn enumerate_ancestry<'a>(cx: &Cx<'a>, subject: &'a ClassDecl) -> Option<Ancestr
         if !iseen.insert(fqn.to_ascii_lowercase()) {
             continue; // interface diamonds are legal PHP — dedupe, never an obstacle.
         }
-        // The asymmetry: an interface Steins cannot resolve is DROPPED, not an
-        // obstacle. It can only add requirements (no bodies), so the requirements
-        // already proven stand.
+        // The interface asymmetry (header above): dropped, not an obstacle.
         let Some((ifile, idecl)) = cx.find_class(&fqn) else { continue };
         // `implements` naming a non-interface is another fatal entirely ("I cannot
         // implement F - it is not an interface", witnessed).
@@ -24794,140 +23737,53 @@ fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
 // ---------------------------------------------------------------------------
 // The rest of PHPStan's `OverridingMethodRule` surface: `override.final`,
 // `override.static-mismatch`, `override.visibility-weakened`,
-// `override.parameter-variance` and `override.return-variance`. Every one is a
-// fatal PHP raises **at class load**, off the same declaration graph the tracer
-// above reads, so they share its closure discipline verbatim — unique resolution
-// of every consulted ancestor, a `use`d trait anywhere in the chain is silence,
-// no sidecar leg, and no dam gate (the immunity asymmetry: `eval` can mint a
-// class but cannot re-open a declared one to change a signature already written).
-// `enumerate_ancestry` is reused as-is, so the tracer's silence legs are these
-// ids' silence legs by construction.
+// `override.parameter-variance`, `override.return-variance` — fatals PHP raises
+// **at class load**, off the same declaration graph the tracer above reads, so
+// they share its closure discipline verbatim (unique ancestor resolution, silence
+// on a `use`d trait anywhere in the chain, no sidecar leg, no dam gate;
+// `enumerate_ancestry` reused as-is). v1 judges native signatures only — a
+// docblock premise is Asserted (ADR-0037/0052 N2) and PHP ignores docblocks for
+// this fatal, so it's absent here, not demoted; the phpdoc twin waits on
+// ADR-0032's generics carry.
 //
-// **v1 judges native signatures only.** An `@param` / `@return` / generics premise
-// is Asserted (ADR-0037/0052 N2) and a docblock claim must never forge a
-// proof-layer finding; PHP does not read docblocks when it decides this fatal, so
-// a docblock premise is not merely demoted here, it is *absent*. The phpdoc twin
-// waits on ADR-0032's generics carry.
+// Rules, each witnessed on PHP 8.5.9 (`php -r`, legal counterparts confirmed clean):
+//   final — overriding a `final` method fatals (through a grandparent, from an
+//     `abstract`/anonymous child, for `__construct`); a final CHILD is legal.
+//   static mismatch — fatal both directions; `__construct` excluded (a separate,
+//     parent-less fatal).
+//   visibility — narrowing fatals (public→protected/private, protected→private);
+//     widening is clean.
+//   parameter variance (contravariance) — narrowing the accepted set fatals
+//     (`int|string`→`int`, `?int`→`int`, untyped→`int`, `iterable`→`array`,
+//     `bool`→`true`); widening/dropping/renaming/adding an OPTIONAL parameter are
+//     clean. Deferred (own id, an arity change this name would misname):
+//     adding/removing a REQUIRED parameter, by-ref mismatch.
+//   return variance (covariance) — widening the promise fatals (`int`→`int|string`,
+//     `int`→`?int`, `never`→`int`, `true`→`bool`); narrowing and adding a return
+//     type over none are clean. Dropping the parent's return type is also a fatal
+//     but a deliberate v1 silence: unrepresentable hints (`void`, `iterable`,
+//     `mixed`, DNF) lower to the same `None` an absent hint gives, indistinguishable
+//     — both sides must carry a lowered type.
+//   __construct — exempt from visibility/variance only while the parent's
+//     constructor is CONCRETE (abstract re-imposes both); not exempt from `final`.
+//     No other magic method is exempt from anything.
+//   private parent methods — silence: not inherited, so nothing to override.
+//   interfaces — same path; `enumerate_ancestry` already collects the transitive set.
+//   precedence — **final ≻ static ≻ visibility ≻ variance**, one finding per method.
 //
-// PHP 8.5.9 `php -r` witness table (every row run; the legal counterpart of each
-// firing row is run too and prints nothing):
+// Loss-only gaps: a `bool` arm vs a `true`/`false` literal folds to `Maybe`; the
+// relation carries PHP's weak-mode int→float widening, this pure subtype test
+// doesn't. Measured against the whole native-type matrix (13×13 over parameter/
+// return/interface/constructor positions, plus the modifier matrix — 774 fixtures,
+// `php -r` on 8.5.9): zero false positives, 49 yield losses exactly the
+// class-vs-class `Maybe` leg, the two allowances above, and the static-constructor
+// exclusion.
 //
-//   final
-//     `class P { final public function m() {} } class C extends P { public function m() {} }`
-//       → Fatal error: Cannot override final method P::m()
-//     — also for a `static` pair, a grandparent's `final`, an `abstract` child
-//       re-declaration, an anonymous child class, and `__construct`.
-//     `class P { public function m() {} } class C extends P { final public function m() {} }`
-//       → clean: the CHILD being final is legal.
-//
-//   static mismatch (both directions)
-//     `class P { public function m() {} } class C extends P { public static function m() {} }`
-//       → Fatal error: Cannot make non static method P::m() static in class C
-//     `class P { public static function m() {} } class C extends P { public function m() {} }`
-//       → Fatal error: Cannot make static method P::m() non static in class C
-//     `class P { public function __construct() {} } class C extends P { public static function __construct() {} }`
-//       → Fatal error: Method C::__construct() cannot be static — a DIFFERENT fatal
-//         (it needs no parent at all), so `__construct` is excluded from this id.
-//
-//   visibility weakened
-//     public → protected / public → private
-//       → Fatal error: Access level to C::m() must be public (as in class P)
-//     protected → private
-//       → Fatal error: Access level to C::m() must be protected (as in class P) or weaker
-//     protected → public, private → public, private → protected → all clean (widening).
-//
-//   parameter variance (contravariance: the child must accept everything the parent does)
-//     `P::m(int|string $x)` / `C::m(int $x)`
-//       → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string|int $x)
-//     `P::m(?int $x)` / `C::m(int $x)`, `P::m($x)` / `C::m(int $x)`,
-//     `P::m(iterable $x)` / `C::m(array $x)`, `P::m(bool $x)` / `C::m(true $x)`,
-//     `P::m(string $x)` / `C::m(int $x)` — all the same fatal.
-//     LEGAL, witnessed clean: `int` → `int|string`, `int` → `?int`, `array` →
-//     `iterable`, `true` → `bool`, dropping the type entirely, renaming the
-//     parameter, and adding an OPTIONAL parameter.
-//     NOT judged in v1 (silence, its own deferred id — the shape is an arity
-//     change, not a variance one, and this id's name would misname it): adding a
-//     REQUIRED parameter (`Declaration of C::m(int $x, int $y) must be compatible
-//     with P::m(int $x)`), REMOVING a parameter (the same message, mirrored), and
-//     a by-reference mismatch (`C::m(int &$x)` vs `P::m(int $x)`).
-//
-//   return variance (covariance: the child must return only what the parent promised)
-//     `P::m(): int` / `C::m(): int|string`
-//       → Fatal error: Declaration of C::m(): string|int must be compatible with P::m(): int
-//     `P::m(): int` / `C::m(): ?int`, `P::m(): never` / `C::m(): int`,
-//     `P::m(): true` / `C::m(): bool` — all the same fatal.
-//     LEGAL, witnessed clean: `int|string` → `int`, `?int` → `int`, `iterable` →
-//     `array`, `int` → `never`, `mixed` → `int`, `self` → `static`, and ADDING a
-//     return type where the parent declares none.
-//     A child DROPPING the parent's return type IS a fatal (`Declaration of C::m()
-//     must be compatible with P::m(): int`), and is a deliberate v1 silence: the
-//     syntax layer lowers an unrepresentable hint (`void`, `iterable`, `mixed`, a
-//     DNF form) to the same `None` an *absent* hint lowers to, so "the child
-//     declares nothing" is not distinguishable from "the child declares something
-//     Steins does not carry". Both sides must therefore carry a lowered type.
-//
-//   __construct — the exemption, pinned exactly
-//     A constructor is NOT exempt from `final`: overriding a `final __construct`
-//     is the same `Cannot override final method P::__construct()` fatal.
-//     It IS exempt from the static id (a different fatal, above), and it is exempt
-//     from visibility and variance **when the parent's `__construct` is concrete**:
-//       `class P { public function __construct(int|string $x) {} }
-//        class C extends P { public function __construct(int $x) {} }`      → clean
-//       `class P { public function __construct() {} }
-//        class C extends P { private function __construct() {} }`           → clean
-//     The exemption ends the moment the parent's `__construct` is ABSTRACT — an
-//     interface method or an `abstract` declaration — where both fire again:
-//       `interface I { public function __construct(int|string $x); }
-//        class C implements I { public function __construct(int $x) {} }`
-//          → Declaration of C::__construct(int $x) must be compatible with I::__construct(string|int $x)
-//       `abstract class P { abstract public function __construct(); }
-//        class C extends P { protected function __construct() {} }`
-//          → Access level to C::__construct() must be public (as in class P)
-//     (`__destruct` and the other magic methods are NOT exempt from anything —
-//     `class P { public function __destruct() {} } class C extends P { private
-//     function __destruct() {} }` → `Access level to C::__destruct() must be public`.)
-//
-//   private parent methods — silence, and not an exemption but a non-inheritance
-//     `class P { private function m(int $x) {} } class C extends P { public static
-//      function m(string $y, array $z): void {} }` → clean. A private method is not
-//     inherited, so there is nothing to override; `final private function` is not
-//     even accepted (`Warning: Private methods cannot be final as they are never
-//     overridden by other classes`).
-//
-//   interface implementation — the SAME path, no separate one
-//     `interface I { public function m(int|string $x); } class C implements I {
-//      public function m(int $x) {} }` → the same `must be compatible` fatal, and
-//     likewise for the return, visibility and static ids. `enumerate_ancestry`
-//     already collects the transitive interface set, so an interface declaration is
-//     just another parent candidate.
-//
-//   runtime precedence, witnessed by pairing each violation with a narrowing:
-//     **final ≻ static ≻ visibility ≻ variance**. At most one finding is emitted per
-//     overriding method, in that order, so the id never misnames which fatal fires.
-//
-// The acceptance relation's own two yield losses, each a tested leg and each in the
-// direction that can only lose findings: a `bool` arm against a `true`/`false`
-// literal folds its finite members to `Maybe` (proven-PARTIAL coverage is
-// indistinguishable from ignorance at that fold), and the relation carries PHP's
-// weak-mode int→float widening, which PHP's *inheritance* check — a pure subtype
-// test with no coercion — does not. Both stay silent rather than being special-cased
-// out of the relation.
-//
-// Measured: the whole native-type matrix (13 types × 13 types over parameter,
-// return, interface and constructor positions, plus the modifier matrix — 774
-// fixtures) was run against `php -r` on 8.5.9. Zero false positives; the 49 yield
-// losses are exactly the class-vs-class `Maybe` leg, the two allowances above, and
-// the static-constructor exclusion.
-//
-// Deliberate silences beyond the ones above, each a tested leg: an interface
-// SUBJECT (`interface I extends J` re-declaring a method is the same fatal, but the
-// ancestry walk is class-shaped); an enum subject and an anonymous class (members
-// are not lowered for either, ADR-0043 / ADR-0049 A4); a child method declared
-// `abstract` over a CONCRETE parent (`Cannot make non abstract method P::m()
-// abstract in class C` — a different fatal, the tracer's `Satisfaction::Refused`
-// shape); a `self`/`static`/`parent` return keyword on either side, whose lowered
-// bound is the *declaring* class and would misname the comparison; and a variadic
-// or by-reference position on either side.
+// Further tested silences: an interface SUBJECT (class-shaped ancestry walk); an
+// enum/anonymous-class subject (members not lowered, ADR-0043/ADR-0049 A4); a
+// child method declared `abstract` over a concrete parent (`Satisfaction::Refused`);
+// a `self`/`static`/`parent` return keyword (bound is the *declaring* class, would
+// misname the comparison); a variadic or by-reference position on either side.
 // ---------------------------------------------------------------------------
 
 /// A parent-side declaration a subject method overrides: the method and the display
@@ -24997,22 +23853,16 @@ fn variance_pair<'a>(
 /// Whether `consumer` provably REFUSES some whole arm of `produced` — the one
 /// variance question both directions of the LSP check reduce to.
 ///
-/// This routes through **the** acceptance relation — `steins_contract`'s
+/// Routes through **the** acceptance relation — `steins_contract`'s
 /// `normalize::subsumes(a, b)` = "every value of `b`'s denotation is admitted by
-/// `a`", the `isSuperTypeOf` shape ADR-0030 registry entry 5 defines — applied
-/// **arm-wise**, exactly as `dedup_arms` / `subtract` apply it, and exactly as the
-/// issue names it. No second comparison path is introduced: `subsumes` is the only
-/// comparator, and `native_arms` is the same decomposition the contract lane already
-/// uses to carry a native type as arms.
-///
-/// Arm-wise is what makes the answer *decidable* here. Asked whole,
-/// `subsumes(int, int|string)` folds `[Yes, No]` to `Maybe` — the honest answer to
-/// "does `int` admit every `int|string` value?", since the fold cannot distinguish
-/// proven-partial coverage from ignorance. LSP asks the sharper question: is there
-/// an arm the consumer provably rejects? So each arm is asked on its own, and one
-/// `No` convicts. A `Maybe` arm never does — two unrelated class arms judge only
-/// through the reflexive is-a floor, so `Class(A)` vs `Class(B)` is `Maybe` and
-/// stays silent.
+/// `a`" (the `isSuperTypeOf` shape, ADR-0030 registry entry 5) — applied **arm-wise**
+/// (as `dedup_arms`/`subtract` do), via `native_arms`'s decomposition. Arm-wise is
+/// what makes this decidable: asked whole, `subsumes(int, int|string)` folds
+/// `[Yes, No]` to `Maybe`, since the fold can't distinguish partial coverage from
+/// ignorance. LSP asks the sharper question — is there an arm the consumer provably
+/// rejects? — so each arm is judged alone and one `No` convicts; a `Maybe` arm never
+/// does (two unrelated class arms judge only through the reflexive is-a floor, so
+/// `Class(A)` vs `Class(B)` is `Maybe` and stays silent).
 fn provably_refuses_an_arm(consumer: &NativeType, produced: &NativeType) -> bool {
     let c = native_to_contract(consumer);
     native_arms(produced).iter().any(|arm| normalize::subsumes(&c, arm) == Certainty::No)
@@ -25197,35 +24047,31 @@ fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
 //
 // The verified PHP 8.5 table is ASYMMETRIC (every row `php -r`-checked): too few
 // positional/named arguments to a userland target is always a fatal
-// `ArgumentCountError`; too MANY to a non-variadic runs clean (extras ignored) and
-// is NEVER a finding (the ADR-0002 consequence pattern, whatever PHPStan reports —
-// `call.too-many-arguments` stays REGISTERED_NOT_YET_EMITTED for the internal
-// slice, M2); an unknown named argument to a non-variadic is a fatal `Error`, while
-// a variadic silently collects it (`fv(x: 1)` → `{"x":1}`). A named argument that
-// overwrites a positional (`f(1, a: 5)`) is a fatal `Error` too — a DEFERRED id, so
-// it is a *silence* leg here. The verified runtime precedence is
-// **overwrite ≻ unknown-named ≻ too-few** (`f(z: 9)` on `f($a, $b)` throws the
-// unknown-name `Error`, not `ArgumentCountError`), and the checks below honor it so
-// the emitted id never misnames the runtime consequence. Internal (builtin) targets
-// take their arity from sidecar reflection and ship with the reflect slice (M2).
+// `ArgumentCountError`; too MANY to a non-variadic runs clean (extras ignored),
+// never a finding (ADR-0002; `call.too-many-arguments` stays
+// REGISTERED_NOT_YET_EMITTED for the internal slice, M2); an unknown named
+// argument to a non-variadic is a fatal `Error`, while a variadic silently
+// collects it (`fv(x: 1)` → `{"x":1}`). A named argument overwriting a positional
+// (`f(1, a: 5)`) is also a fatal `Error` — a DEFERRED id, a silence leg here.
+// Verified runtime precedence: **overwrite ≻ unknown-named ≻ too-few** (`f(z: 9)`
+// on `f($a, $b)` throws unknown-name, not `ArgumentCountError`), honored below so
+// the emitted id never misnames the consequence. Internal (builtin) targets take
+// their arity from sidecar reflection, shipped with the reflect slice (M2).
 //
-// Provability rests entirely on the RESOLVED TARGET's ground-truth signature:
-//   - functions: a uniquely-indexed userland function (ADR-0049 A2 legs — not
-//     Ambiguous, not builtin-shadowed; a conditional declaration re-dams the claim;
-//     the boot-surface function-homonym is cleared via the sidecar);
-//   - methods/constructors/statics: ONLY under a proven-EXACT receiver. The
-//     declared-receiver variant is UNSOUND — an override may ADD optional
-//     parameters (`P::m(int $a)` vs `Q::m($a = 0, $b = 0)`), so `$p->m()` on a
-//     declared `P` holding a `Q` satisfies the runtime contract and runs; a finding
-//     there is a false positive, REFUSED outright (never deferred to a contract
-//     lane, unlike `phpdoc.undefined-method`). Exactness reuses S2's gate: `new`,
-//     a `class_exact` heap object, or a textual `Class::` static; `$this`
-//     (membership, A1), `self::`/`static::`/`parent::`, `?->`, and every dynamic
-//     form are silent.
+// Provability rests on the RESOLVED TARGET's ground-truth signature: functions —
+// a uniquely-indexed userland function (ADR-0049 A2 legs: not Ambiguous, not
+// builtin-shadowed; conditional declaration re-dams; boot-surface homonym cleared
+// via sidecar); methods/constructors/statics — ONLY under a proven-EXACT receiver.
+// The declared-receiver variant is UNSOUND: an override may ADD optional
+// parameters (`P::m(int $a)` vs `Q::m($a = 0, $b = 0)`), so `$p->m()` on a
+// declared `P` holding a `Q` satisfies the runtime contract and runs — a finding
+// there is a false positive, REFUSED outright (never deferred, unlike
+// `phpdoc.undefined-method`). Exactness reuses S2's gate: `new`, a `class_exact`
+// heap object, or a textual `Class::` static; `$this` (membership, A1),
+// `self::`/`static::`/`parent::`, `?->`, and every dynamic form are silent.
 // Call-site conditions: no argument unpacking (`...` ⇒ count unproven; counting
-// proven Singleton arrays is deferred); the first-class-callable `f(...)` is not a
-// call; named binding is resolved against the target's parameter names
-// case-SENSITIVELY, exactly as PHP binds them.
+// proven Singleton arrays is deferred); `f(...)` is not a call; named binding
+// resolves case-SENSITIVELY, exactly as PHP binds parameter names.
 // ---------------------------------------------------------------------------
 
 /// A resolved arity target: the callee's parameter list (the ground-truth
@@ -25499,9 +24345,9 @@ fn emit_arity(cx: &Cx, call: &CallExpr, target: &ArityTarget, out: &mut Vec<Diag
 }
 
 /// Run the full ADR-0049 §6 userland arity ladder for one call and emit
-/// `call.too-few-arguments` / `call.unknown-named-argument` iff every leg holds.
-/// Called only from the plain per-scope pass (`descent.is_none()`) so a site is
-/// judged once, never re-emitted under an interprocedural descent.
+/// `call.too-few-arguments` / `call.unknown-named-argument` iff every leg
+/// holds. Called only from the plain per-scope pass (`descent.is_none()`),
+/// so a site is judged once, never re-emitted under an interprocedural descent.
 fn check_arity(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -25527,53 +24373,38 @@ fn check_arity(
 // `call.printf-too-few-arguments` (ADR-0078, issue #188).
 //
 // A `printf`-family call whose FOLDED LITERAL format string demands more
-// placeholders than the call proves it supplies is a fatal in PHP 8, exactly
-// as with `call.too-few-arguments` — but the evidence is a folded format
-// string, not a resolved callee signature (ADR-0078's naming decision), so
-// this stays a distinct id and never launders into the M2 internal-arity slot
-// (`call.too-many-arguments`, still `REGISTERED_NOT_YET_EMITTED`).
+// placeholders than it's proven to supply is a fatal in PHP 8, same as
+// `call.too-few-arguments` — but the evidence is a folded format string, not
+// a resolved callee signature, so this is a distinct id, never laundered
+// into the M2 internal-arity slot (`call.too-many-arguments`, still
+// `REGISTERED_NOT_YET_EMITTED`).
 //
-// Every runtime claim below is `php -r`-witnessed (PHP 8.5.9, `php --version`
-// checked at authoring time):
+// `php -r`-witnessed (PHP 8.5.9); unproven/malformed formats always decline
+// (`None`, whole-format silence) rather than guess — a missed finding is safe:
+//   printf("%s %s", "one")              => ArgumentCountError: 3 required, 2 given
+//   sprintf("%s %s", "one")             => ArgumentCountError: 3 required, 2 given
+//   fprintf(STDOUT, "%s %s", "one")     => ArgumentCountError: 4 required, 3 given
+//   vprintf("%s %s", ["one"])           => ValueError: arguments array must contain 2, 1 given
+//   vsprintf("%s %s", ["one"])          => ValueError: arguments array must contain 2, 1 given
+//   sprintf("%s", "one", "two")         => "one" (too MANY runs clean, never a
+//                                                  finding — ADR-0002/0049 §6 asymmetry)
+//   sprintf("100%%")                    => "100%" (`%%` is not a placeholder)
+//   sprintf("%1$s %1$s", "a")           => "a a" (positional ref is MAX not additive)
+//   sprintf("%s %s %1$s", "a", "b")     => "a b a" (auto-index and positional refs
+//                                                    are independent counters)
+//   sprintf("%z", "x")                  => ValueError: unknown format specifier "z" (UNPROVEN)
+//   sprintf("%05.2f %-10s %'x10d", 1.0) => parses fine given enough args
+//   sprintf("%0$s", "x")                => ValueError: argument number specifier
+//                                                  must be > 0 (`%0$` invalid)
 //
-//   php -r 'printf("%s %s", "one");'
-//     => ArgumentCountError: 3 arguments are required, 2 given
-//   php -r 'sprintf("%s %s", "one");'
-//     => ArgumentCountError: 3 arguments are required, 2 given
-//   php -r 'fprintf(STDOUT, "%s %s", "one");'
-//     => ArgumentCountError: 4 arguments are required, 3 given
-//   php -r 'vprintf("%s %s", ["one"]);'
-//     => ValueError: The arguments array must contain 2 items, 1 given
-//   php -r 'vsprintf("%s %s", ["one"]);'
-//     => ValueError: The arguments array must contain 2 items, 1 given
-//   php -r 'sprintf("%s", "one", "two");'          // too MANY — runs clean
-//     => string(3) "one"                              (never a finding: ADR-0002/0049 §6 asymmetry)
-//   php -r 'sprintf("100%%");'                      // `%%` is not a placeholder
-//     => string(4) "100%"
-//   php -r 'sprintf("%1$s %1$s", "a");'             // positional MAX, not additive
-//     => string(3) "a a"                               (1 required, not 2)
-//   php -r 'sprintf("%s %s %1$s", "a", "b");'       // auto-index is independent of
-//     => string(5) "a b a"                             positional refs interleaved with it
-//   php -r 'sprintf("%z", "x");'                    // unknown conversion char
-//     => ValueError: Unknown format specifier "z"       (UNPROVEN here — silence, never guess)
-//   php -r 'sprintf("%05.2f %-10s %\'x10d", 1.0);'  // width/precision/flags parse fine
-//     => (no error when enough args are given — the shapes from the issue's examples)
-//   php -r 'sprintf("%0$s", "x");'
-//     => ValueError: Argument number specifier must be greater than zero and less than 2147483647
-//        (an explicit `%0$` position is itself invalid — declined, never guessed)
-//
-// The count PHP actually requires for a malformed/dangling `%` (e.g. a bare
-// trailing `%`, or `%1$` with no type char) does not match a simple
-// placeholder count — witnessed, but deliberately NOT reproduced here: this
-// parser declines (returns `None`, whole-format silence) on anything it
-// cannot walk to a complete, recognized specifier, per the "never guess"
-// directive; a missed finding is always the safe side.
+// A malformed/dangling `%` makes PHP's required count diverge from a simple
+// placeholder count — witnessed but deliberately not reproduced here.
 // ---------------------------------------------------------------------------
 
 /// One `printf`-family target's call shape (ADR-0078): which positional
-/// argument carries the format string, and whether the values arrive as
-/// trailing positional arguments (`printf`/`sprintf`/`fprintf`) or as a single
-/// array argument right after the format (`vprintf`/`vsprintf`).
+/// argument carries the format string, and whether values arrive as
+/// trailing positional arguments (`printf`/`sprintf`/`fprintf`) or a single
+/// array right after the format (`vprintf`/`vsprintf`).
 #[derive(Clone, Copy)]
 enum PrintfShape {
     /// Format at `format_pos`; every argument after it is one value.
@@ -25583,11 +24414,10 @@ enum PrintfShape {
 }
 
 /// Recognize a call as a `printf`-family builtin (ADR-0078 scope: `printf`,
-/// `sprintf`, `fprintf`, `vprintf`, `vsprintf`), or `None` for anything else —
-/// including a namespaced/aliased/userland-shadowed spelling of the same name,
-/// which [`global_function_callee`] already refuses to call global (the same
-/// entry point every other builtin recognizer in this file opens with, e.g.
-/// `existence_predicate`).
+/// `sprintf`, `fprintf`, `vprintf`, `vsprintf`), or `None` otherwise —
+/// including a namespaced/aliased/userland-shadowed spelling, which
+/// [`global_function_callee`] already refuses (same entry point every
+/// builtin recognizer here uses, e.g. `existence_predicate`).
 fn printf_family_shape(cx: &Cx, call: &CallExpr) -> Option<(&'static str, PrintfShape)> {
     let callee = global_function_callee(cx, call)?;
     let (name, shape): (&'static str, PrintfShape) = if callee.eq_ignore_ascii_case("printf") {
@@ -25607,33 +24437,23 @@ fn printf_family_shape(cx: &Cx, call: &CallExpr) -> Option<(&'static str, Printf
 }
 
 /// The number of argument slots a `printf`-family format string demands
-/// (ADR-0078): the maximum over every recognized specifier's 1-based position
-/// — an explicit `%n$` position, or the next value of an independent
-/// auto-increment counter for every NON-positional specifier, in source order
-/// (`php -r`-witnessed: `sprintf("%s %2$s %s", "a", "b")` succeeds on 2 args
-/// because the auto counter advances only across the two non-positional
-/// `%s`es, landing on the same slot the explicit `%2$s` already named — the
-/// counters are independent, never additive).
+/// (ADR-0078): the maximum over every recognized specifier's 1-based
+/// position — an explicit `%n$` position, or the next value of an
+/// independent auto-increment counter for every NON-positional specifier, in
+/// source order (counters are independent, never additive; see the witness
+/// table above for `%s %2$s %s`).
 ///
 /// `None` — whole-format UNPROVEN, silence — when ANY `%`-sequence fails to
-/// walk to a complete, recognized specifier: an unknown conversion character
-/// (`php -r`-witnessed `ValueError: Unknown format specifier "z"` for `%z`),
-/// a dangling `%` with nothing after it, or an explicit position that parses
-/// but is not a valid 1-based index (`%0$`, witnessed
-/// `ValueError: Argument number specifier must be greater than zero…`).
-/// `%%` is recognized as the literal-percent escape ONLY when the two `%`
-/// bytes are directly adjacent (no flags/width/positional prefix between
-/// them) — `php -r`-witnessed that `%5%` is NOT the same shape (it does not
-/// behave like a plain `%%`), so this parser declines it via the general
-/// specifier path below rather than guessing it means anything.
+/// walk to a complete recognized specifier: an unknown conversion character,
+/// a dangling `%`, or an explicit position that isn't a valid 1-based index
+/// (`%0$`, see witness table). `%%` is the literal-percent escape ONLY when
+/// the two `%` bytes are directly adjacent.
 ///
-/// Recognized conversion characters (per the PHP manual's `sprintf` format
-/// spec, PHP 8.5): `b c d e E f F g G h H o s u x X`. `%` itself is
-/// deliberately excluded from this set — it is the escape's own vocabulary,
-/// not a general type character after flags/width.
+/// Recognized conversion characters (PHP manual's `sprintf` spec, PHP 8.5):
+/// `b c d e E f F g G h H o s u x X`.
 fn printf_placeholder_count(fmt: &PhpStr) -> Option<usize> {
-    // php-src walks the format **byte by byte**, so this reader does too — a lossy
-    // decode would have shifted every position after an invalid byte.
+    // php-src walks the format byte by byte, so this reader does too — a
+    // lossy decode would shift every position after an invalid byte.
     let b = fmt.as_bytes();
     let n = b.len();
     let mut i = 0usize;
@@ -25754,12 +24574,10 @@ fn check_printf_arity(
     poisoned: bool,
     out: &mut Vec<Diagnostic>,
 ) {
-    // Call-site conditions (ADR-0078 scope): a purely positional call only —
-    // `positional_only` already excludes both argument unpacking (`...$args`,
-    // whose cardinality is a runtime value) and named arguments (the
-    // printf-family signatures are effectively unnamed/variadic, so a named
-    // argument's binding here is not proven), and the first-class-callable
-    // shape (`sprintf(...)`) naturally has too few args to ever qualify below.
+    // Purely positional calls only (ADR-0078 scope): `positional_only` excludes
+    // both unpacking (`...$args`, runtime cardinality) and named arguments (not
+    // provably bound against an effectively-variadic signature); the
+    // first-class-callable shape (`sprintf(...)`) naturally has too few args.
     if !call.positional_only {
         return;
     }
@@ -25770,10 +24588,10 @@ fn check_printf_arity(
         PrintfShape::Variadic { format_pos } | PrintfShape::Array { format_pos } => format_pos,
     };
     let Some(format_arg) = call.args.get(format_pos) else { return };
-    // The format string must come through the fold gate as a proven literal
-    // (a `Singleton` string fact) — a plain local, a global `const`/`define()`
-    // value, or a foldable concatenation all qualify exactly as they do for
-    // every other proof-layer fold consumer; a non-folded format is silence.
+    // Format string must come through the fold gate as a proven literal
+    // (`Singleton` string fact) — a plain local, a global const/`define()`, or
+    // a foldable concatenation all qualify, as for any proof-layer fold
+    // consumer; a non-folded format is silence.
     let Some(ArgValue::Str(fmt)) = cx.resolve_literal(&format_arg.value, env, poisoned, folder)
     else {
         return;
@@ -25787,13 +24605,11 @@ fn check_printf_arity(
 
     match shape {
         PrintfShape::Variadic { format_pos } => {
-            // `printf`/`sprintf` (format_pos 0) / `fprintf` (format_pos 1):
-            // every argument after the format is one value. PHP counts the
-            // format (and, for `fprintf`, the stream) as required arguments
-            // too, so `php_required` = everything before the values
-            // (`format_pos + 1`) plus the placeholder count, and
-            // `php_given` is simply the call's whole positional arg count
-            // (php -r-witnessed above: both match exactly).
+            // Every argument after the format is one value; PHP counts the
+            // format (and, for `fprintf`, the stream) as required too, so
+            // `php_required` = `format_pos + 1` + placeholder count, and
+            // `php_given` is the call's positional arg count (matches the
+            // witnesses above).
             let supplied = call.args.len().saturating_sub(format_pos + 1);
             if supplied >= required {
                 return;
@@ -25816,13 +24632,10 @@ fn check_printf_arity(
             });
         }
         PrintfShape::Array { format_pos } => {
-            // `vprintf`/`vsprintf`: the values arrive as ONE array argument
-            // right after the format. Report only against a proven array
-            // shape of KNOWN size (ADR-0078: "unknown size = silence") — the
-            // same fold gate resolves an array literal, or a variable proven
-            // to hold one, to a concrete `ArgValue::Array` whose element
-            // count IS the array's proven size; anything else (an unresolved
-            // variable, a non-array, a call result) is silence.
+            // Values arrive as ONE array argument after the format. Report
+            // only against a proven array of KNOWN size (ADR-0078: "unknown
+            // size = silence") — an unresolved variable, non-array, or call
+            // result is silence.
             let Some(array_arg) = call.args.get(format_pos + 1) else { return };
             let Some(ArgValue::Array(items)) =
                 cx.resolve_literal(&array_arg.value, env, poisoned, folder)
@@ -25856,49 +24669,28 @@ fn check_printf_arity(
 // (ADR-0049 A13): `call.undefined-method` when every arm is `Verified`,
 // `phpdoc.undefined-method` when any arm is `Asserted`.
 //
-// Where S2 fires on a proven-exact receiver (`class_exact`), S6 fires on a receiver
-// whose *declared* type — a native `C $o` parameter, a phpdoc `@param User|Guest`,
-// narrowed by branch analysis (N4) down to a surviving contract-arm list — provably
-// lacks the method under a stricter ladder: "conditional is not enough" (§8), so
-// each surviving arm must clear both the §4 chain legs AND **descendant closure**
-// (a subclass, incl. an `eval`-minted one, could satisfy the contract and define
-// the method).
+// S2 fires on a proven-exact receiver (`class_exact`); S6 fires on a receiver
+// whose *declared* type — native `C $o`, phpdoc `@param User|Guest`, narrowed
+// by branch analysis (N4) to a surviving contract-arm list — provably lacks
+// the method under a stricter ladder ("conditional is not enough", §8): each
+// arm must clear the §4 chain legs AND **descendant closure** (a subclass,
+// incl. `eval`-minted, could define the method). A13 routes the id: a native
+// declaration is runtime-enforced (`Verified`), a docblock claim is not
+// (`Asserted`) — ADR-0052 N2's minimum over the lane decides, all `Verified`
+// → [`CALL_UNDEFINED_METHOD_ID`] (same id/claim as S2, ADR-0022), any
+// `Asserted` → [`PHPDOC_UNDEFINED_METHOD_ID`]. No id renamed or added.
 //
-// **The A13 routing.** The ladder above is one ladder and it does not move; what
-// moves is which id carries the result. A native declaration is runtime-enforced
-// evidence (`Verified` — PHP raises a `TypeError` at the boundary or the value
-// conforms), a docblock claim is not (`Asserted`). ADR-0052 N2's minimum over the
-// lane's arms is therefore the whole discriminator:
-//
-// * **every arm `Verified`** → [`CALL_UNDEFINED_METHOD_ID`], the proof layer at the
-//   `Default` floor — the same id S2 emits, because it is the same claim at the
-//   same certainty (ADR-0022 decouples id from emitter). The evidence string keeps
-//   the declared-receiver phrasing so a reader can tell which ladder proved it.
-// * **any arm `Asserted`** → [`PHPDOC_UNDEFINED_METHOD_ID`], the contract layer,
-//   exactly as before. After routing this id fires only where a docblock premise
-//   participates, which is what its name says.
-//
-// Neither id is renamed and none is added: `ALL_EMITTABLE_IDS` is unchanged as a
-// set.
-//
-// **Disjointness from S2 (stated in code).** The invariant is over SITES, not over
-// ids: S2 owns `class_exact` receivers; S6 requires the receiver be NOT exact — an
-// inexact/lower-bound `$var` carrying a narrowed arm lane. A receiver is never
-// judged by both emitters — an exact object has no contract lane consulted here
-// (the `is_exact` bail), and a lane-carrying var is never `class_exact` — so the
-// two emitters can share the proof-layer id without ever double-reporting a call.
-//
-// The Asserted half **accepts Asserted premises** (contract layer, ADR-0052 §5):
-// the narrowed lane's arms may be `Asserted` (a `@param` refinement) — the finding
-// is coherent at the min stratum. Both halves respect `absence_family_available`
-// (A9 monkey-patch silence + the A2ii homonym leg needs a live sidecar) and the A11
-// version-skew demotion of descendant closure.
+// Disjointness from S2 is over sites (S2 owns `class_exact`, S6 requires
+// NOT-exact), so the two never double-report. The Asserted half accepts
+// Asserted premises (ADR-0052 §5, e.g. a `@param` refinement); both halves
+// respect `absence_family_available` and the A11 version-skew demotion of
+// descendant closure.
 // ---------------------------------------------------------------------------
 
-/// The `(receiver-var, method)` an S6 claim can rest on, or `None` when the call is
-/// out of scope for the declared-receiver lane (silence). Only a plain
-/// `$var->method(...)` qualifies: `?->` (leg l), static/`$this`/`new`/dynamic forms,
-/// and the first-class-callable shape are excluded exactly as S2 excludes them.
+/// The `(receiver-var, method)` an S6 claim can rest on, or `None` when out
+/// of scope (silence). Only a plain `$var->method(...)` qualifies — `?->`,
+/// static/`$this`/`new`/dynamic forms, and the first-class-callable shape
+/// are excluded exactly as S2 excludes them.
 fn phpdoc_undefined_method_receiver(call: &CallExpr) -> Option<(String, String)> {
     // Leg (l): the first-class-callable form builds a Closure, never a call.
     if !call.positional_only && call.args.is_empty() {
@@ -25914,30 +24706,28 @@ fn phpdoc_undefined_method_receiver(call: &CallExpr) -> Option<(String, String)>
 
 /// The project-wide descendant enumeration of a union member (ADR-0049 §8 / A4).
 enum DescendantClosure<'a> {
-    /// The member is `final` (or an enum): no subclass can exist — extending it is
-    /// fatal — so the arm is immune and needs no descendant scan and no dam.
+    /// `final` (or an enum): no subclass can exist, so the arm is immune —
+    /// no descendant scan, no dam needed.
     Immune,
-    /// The member's descendant declarations are **completely enumerated** (no
-    /// obstacle): every declared class either provably is-a the member (collected
-    /// here) or provably is not, over declarations (both halves of an Ambiguous FQN)
-    /// with alias-edge parent matching and interface edge kinds. A non-empty set
-    /// still requires the dam clear (an `eval`-minted subclass) before it closes.
+    /// Descendant declarations are **completely enumerated**: every declared
+    /// class either provably is-a the member (collected here) or provably is
+    /// not, over both halves of an Ambiguous FQN with alias-edge parent
+    /// matching. Still requires the dam clear (an `eval`-minted subclass)
+    /// before it closes.
     Enumerated(Vec<(usize, &'a ClassDecl)>),
-    /// Closure is tainted — Unknown ⇒ silence. An anonymous class could extend the
-    /// member (invisible to the index), a candidate's is-a is Unknown (incomplete
-    /// hierarchy), the member itself is Ambiguous/absent, or a catalog-backed verdict
-    /// is demoted under a PHP-minor skew (A11).
+    /// Tainted — Unknown ⇒ silence: an anonymous class could extend the
+    /// member (invisible to the index), a candidate's is-a is Unknown
+    /// (incomplete hierarchy), the member is Ambiguous/absent, or a
+    /// catalog-backed verdict is demoted under a PHP-minor skew (A11).
     Obstacle,
 }
 
-/// Whether the specific declaration `cd` (in file `file`) provably **is-a**
-/// `target` (lowercase FQN), walking its own inheritance edges directly rather than
-/// through the deduped index — so an Ambiguous declaration still contributes as a
-/// descendant (A4). A direct edge resolving to the *same index site* as `target`
-/// counts as `Yes`, which folds literal `class_alias` edges into parent matching
-/// (`class B extends LegacyName` with `class_alias('T', 'LegacyName')` makes B a
-/// descendant of T). Deeper hops defer to the trinary [`Cx::is_a`] oracle, whose
-/// `Unknown` (an unresolvable/uncatalogued ancestor) taints the enumeration.
+/// Whether declaration `cd` (in file `file`) provably **is-a** `target`
+/// (lowercase FQN), walking its own inheritance edges directly rather than
+/// the deduped index, so an Ambiguous declaration still counts (A4). A
+/// direct edge to the *same index site* as `target` counts as `Yes`, folding
+/// literal `class_alias` edges into parent matching. Deeper hops defer to
+/// the trinary [`Cx::is_a`] oracle, whose `Unknown` taints the enumeration.
 fn decl_is_a(cx: &Cx, file: usize, cd: &ClassDecl, target: &str) -> IsA {
     let tree = &cx.units[file].tree;
     let arm_site = match cx.index.resolve_class(target) {
@@ -25963,8 +24753,7 @@ fn decl_is_a(cx: &Cx, file: usize, cd: &ClassDecl, target: &str) -> IsA {
         if en.eq_ignore_ascii_case(target) {
             return IsA::Yes;
         }
-        // Alias-edge / site-identity parent match (A4): the direct edge resolves to
-        // the same index site as the arm.
+        // Alias-edge / site-identity parent match (A4).
         if let (Some(a), Res::Unique(es)) = (arm_site, cx.index.resolve_class(en))
             && es == a
         {
@@ -25983,22 +24772,22 @@ fn decl_is_a(cx: &Cx, file: usize, cd: &ClassDecl, target: &str) -> IsA {
 /// A query-style whole-universe function (ADR-0048): recomputed per run, no ordering
 /// dependence. See [`DescendantClosure`].
 fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
-    // The member must resolve Unique — an Ambiguous/absent member cannot be closed.
+    // Must resolve Unique — an Ambiguous/absent member cannot be closed.
     let Some((_, arm_cd)) = cx.find_class(arm_fqn) else {
         return DescendantClosure::Obstacle;
     };
-    // A `final` class or an enum has no subclass — extending it is fatal — so the
-    // arm is immune (A9 already gated finality via `absence_family_available`).
+    // `final` or an enum has no subclass — extending it is fatal — so the arm
+    // is immune (A9 already gated finality via `absence_family_available`).
     if arm_cd.is_final || arm_cd.is_enum {
         return DescendantClosure::Immune;
     }
     // A11: a PHP-minor skew can fake a catalog-backed is-a edge, so descendant
-    // closure demotes to Unknown (blanket v1) — silence, never a wrong narrowing.
+    // closure demotes to Unknown (blanket v1) — silence, never wrong narrowing.
     if cx.a11_demote_catalog() {
         return DescendantClosure::Obstacle;
     }
-    // A4 anonymous-class obstacle: an anon class is invisible to the index, so any
-    // one whose extends/implements edge could reach the member taints closure.
+    // A4: an anon class is invisible to the index, so any one whose
+    // extends/implements edge could reach the member taints closure.
     for unit in cx.units {
         for edge in unit.tree.anonymous_class_edges() {
             let refs = edge.parent.iter().chain(edge.implements.iter());
@@ -26008,7 +24797,7 @@ fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
                 if en.eq_ignore_ascii_case(arm_fqn) {
                     return DescendantClosure::Obstacle;
                 }
-                // is-a-or-Unknown against the member ⇒ a possible invisible descendant.
+                // is-a-or-Unknown ⇒ a possible invisible descendant.
                 match cx.is_a(en, arm_fqn) {
                     IsA::Yes | IsA::Unknown => return DescendantClosure::Obstacle,
                     IsA::No => {}
@@ -26016,9 +24805,8 @@ fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
             }
         }
     }
-    // Enumerate declared descendants over ALL declarations (not the deduped index —
-    // both halves of an Ambiguous FQN count, A4). A single Unknown candidate (an
-    // incompletely-enumerated hierarchy) taints the whole closure.
+    // Over ALL declarations, not the deduped index — both halves of an
+    // Ambiguous FQN count (A4). One Unknown candidate taints the whole closure.
     let mut descendants: Vec<(usize, &'a ClassDecl)> = Vec::new();
     for (fi, unit) in cx.units.iter().enumerate() {
         for cd in unit.tree.classes() {
@@ -26035,13 +24823,11 @@ fn descendant_closure<'a>(cx: &Cx<'a>, arm_fqn: &str) -> DescendantClosure<'a> {
     DescendantClosure::Enumerated(descendants)
 }
 
-/// Whether a descendant declaration could **introduce** `method` (or an obstacle
-/// that hides it) below a member whose own chain already lacks it (ADR-0049 §8). A
-/// descendant that declares the method, uses a trait, is an enum (A3, methods
-/// unlowered), carries `__call`, or stands in the reach of a magic-member docblock
-/// tag (A14) is a witness that the runtime object — though contract-typed as the
-/// member — may answer the call. Any such descendant makes the absence claim fail
-/// (silence).
+/// Whether a descendant declaration could **introduce** `method` (or hide an
+/// obstacle to it) below a member whose own chain already lacks it (ADR-0049
+/// §8): declares the method, uses a trait, is an enum (A3, methods
+/// unlowered), carries `__call`, or is in reach of a magic-member docblock
+/// tag (A14). Any such descendant fails the absence claim (silence).
 fn descendant_introduces_method(cx: &Cx, cd: &ClassDecl, method: &str) -> bool {
     cd.is_enum
         || cd.is_trait
@@ -26077,9 +24863,9 @@ fn arm_provably_lacks_method(
             return None;
         }
     }
-    // Descendant closure (A4): the arm is final-immune, or its descendant set is
-    // fully enumerated AND the dam is clear (an `eval`-minted subclass), and no
-    // descendant introduces the method.
+    // Descendant closure (A4): the arm is final-immune, or its descendant set
+    // is fully enumerated AND the dam is clear (an `eval`-minted subclass),
+    // and no descendant introduces the method.
     match descendant_closure(cx, arm_fqn) {
         DescendantClosure::Immune => {}
         DescendantClosure::Obstacle => return None,
@@ -26087,13 +24873,9 @@ fn arm_provably_lacks_method(
             if !cx.dam.is_clear() {
                 return None; // eval could mint a subclass carrying the method.
             }
-            // ADR-0079 §2.5 needs NO leg of its own here, and deliberately does not
-            // grow a dead one: a member-incomplete descendant can only exist while a
-            // non-vendor file is unparsable, and that file is itself a dam site, so
-            // the `is_clear()` guard directly above has already returned. Should the
-            // §3 position-aware refinement ever let a file be unparsable *without*
-            // damming, this loop gains the same `member_incomplete` question the
-            // chain walk asks.
+            // ADR-0079 §2.5 needs no leg here: a member-incomplete descendant
+            // implies an unparsable non-vendor file, itself a dam site already
+            // caught above (revisit if §3 ever allows unparsable-without-dam).
             for (_, dcd) in &descendants {
                 if descendant_introduces_method(cx, dcd, method) {
                     return None;
@@ -26108,40 +24890,27 @@ fn arm_provably_lacks_method(
     Some(simple_chain.first().cloned().unwrap_or_else(|| arm_fqn.to_owned()))
 }
 
-/// Read a narrowed contract-arm lane as the declared-receiver lane's **conjunct
-/// lists** — one inner list per arm, holding the class FQNs a receiver of that arm
-/// must satisfy *all* of — or `None` when the lane is out of scope (silence).
+/// Read a narrowed contract-arm lane as the declared-receiver lane's
+/// **conjunct lists** — one inner list per arm, holding the class FQNs a
+/// receiver of that arm must satisfy *all* of — or `None` when the lane is
+/// out of scope (silence).
 ///
-/// This is where issue #238's intersection consumption enters, and where issue
-/// #234's inhabitance rule is honoured. Three arm shapes, and only three:
+/// Three arm shapes, and only three (issue #238's intersection consumption):
+/// `Class(f)` (one conjunct, pre-#238 behaviour); `Inter([Class, …])` (the
+/// conjuncts of a declared `Foo&Bar` receiver); anything else — silence (a
+/// scalar/array/null arm means the receiver may not be an object; an
+/// intersection with a non-class member, `Foo&callable` or a template arm,
+/// names a constraint this lane cannot close over).
 ///
-/// * `Class(f)` — one conjunct, the pre-#238 behaviour exactly;
-/// * `Inter([Class, …])` — the conjuncts of a declared `Foo&Bar` receiver;
-/// * anything else — silence. A scalar/array/null arm means the receiver may not be
-///   an object at all, and an intersection carrying a non-class member (`Foo&callable`,
-///   a template arm) names a constraint this lane cannot close over.
-///
-/// # The #234 rule, and why an uninhabited arm is SILENCE
-///
-/// An intersection the posture proves empty
-/// ([`normalize::provably_uninhabited`]) takes the whole lane out: no value
-/// inhabits it, so there is no receiver to make a claim about, and every claim
-/// about one would be vacuous.
-///
-/// Silence is not merely the polite answer here, it is the **FP-safe** one, and it
-/// is the exact hazard #234 planted its guard against. The natural implementation
-/// of `final Svc & MockObject` is "this collapses to nothing", and a lane that
-/// collapses to nothing has no conjunct to look a method up on — so *every* method
-/// call on that receiver would be provably-absent and fire. Under a project running
-/// `dg/bypass-finals`, where the mock subclass genuinely exists, that is a false
-/// positive on the **proof layer** (`call.undefined-method`, the `Default` floor
-/// since ADR-0049 A13). Returning `None` here means the collapse can never fire,
-/// under either posture.
-///
-/// The posture is read from [`Cx::final_keyword`], never assumed: under
-/// [`FinalKeyword::Stripped`] the emptiness leg does not run at all, the
-/// intersection is inhabited, and its members are looked up as the union the issue
-/// specifies.
+/// **#234: an uninhabited arm is SILENCE.** An intersection the posture
+/// proves empty ([`normalize::provably_uninhabited`]) takes the whole lane
+/// out — no value inhabits it, so every claim about it is vacuous. FP-safe:
+/// `final Svc & MockObject` naturally collapses to nothing, and a
+/// no-conjunct lane would make every method call on it provably-absent —
+/// under `dg/bypass-finals`, where the mock subclass genuinely exists, a
+/// false positive on the proof layer (ADR-0049 A13). Posture is read from
+/// [`Cx::final_keyword`], never assumed: under [`FinalKeyword::Stripped`]
+/// the emptiness leg doesn't run and members are looked up as the union.
 fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Option<Vec<Vec<String>>> {
     let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
     let mut lane: Vec<Vec<String>> = Vec::with_capacity(arms.len());
@@ -26170,16 +24939,11 @@ fn declared_receiver_conjuncts(cx: &Cx, arms: &[ContractArm]) -> Option<Vec<Vec<
     (!lane.is_empty()).then_some(lane)
 }
 
-/// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the declared-receiver
-/// finding iff the receiver's narrowed contract-arm lane consists entirely of class
-/// arms that **each** provably lack the method under descendant closure. Any leg
-/// failure on any arm is silence.
-///
-/// The id is chosen by [`declared_receiver_id`] from the lane's minimum stratum
-/// (ADR-0049 A13): all-`Verified` arms carry the proof-layer
-/// [`CALL_UNDEFINED_METHOD_ID`], any `Asserted` arm keeps the contract-layer
-/// [`PHPDOC_UNDEFINED_METHOD_ID`]. The ladder above the choice is identical for both
-/// — the routing moves findings between two existing ids, never a firing condition.
+/// Run the ADR-0049 §8 ladder for one `$var->method()` and emit the
+/// declared-receiver finding iff the receiver's narrowed contract-arm lane
+/// consists entirely of class arms that **each** provably lack the method
+/// under descendant closure. Any leg failure on any arm is silence; the id
+/// itself is [`declared_receiver_id`]'s call (A13 routing, see above).
 fn check_phpdoc_undefined_method(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -26198,37 +24962,33 @@ fn check_phpdoc_undefined_method(
     if store.is_exact(&var) {
         return;
     }
-    // The narrowed declared-type arm lane (N4's accessor). No lane ⇒ nothing declared
-    // to close over.
+    // The narrowed declared-type arm lane (N4's accessor). No lane ⇒ nothing
+    // declared to close over.
     let Some(arms) = store.contract_arms(&var) else {
         return;
     };
     if arms.is_empty() {
         return;
     }
-    // Every surviving arm must be a class/interface arm, or an intersection of them
-    // (issue #238). A scalar/array/null arm means the runtime receiver may be a
-    // non-object, so a method-absence claim does not hold (a different error, out of
-    // this lane) — silence.
+    // Every surviving arm must be a class/interface arm, or an intersection
+    // of them (issue #238); a scalar/array/null arm means the runtime
+    // receiver may be a non-object, so absence doesn't hold here — silence.
     let Some(lane) = declared_receiver_conjuncts(cx, arms) else {
         return;
     };
-    // A13: the minimum over the PARTICIPATING arms — the ones the ladder is about to
-    // close over, i.e. exactly the lane that survived narrowing. Computed here, next
-    // to the arm read, so it can never drift from the arms the claim rests on.
+    // A13: minimum over the participating (post-narrowing) arms, computed
+    // here so it can never drift from the arms the claim rests on.
     let id = declared_receiver_id(arms);
-    // A9 (monkey-patch) + A2ii's honest consequence: without a live sidecar, or with
-    // a runtime-redefinition extension loaded, the id is silent (checked once).
+    // A9 (monkey-patch) + A2ii: without a live sidecar, or with a
+    // runtime-redefinition extension loaded, the id is silent.
     if !folder.absence_family_available() {
         return;
     }
-    // Every arm must provably lack the method under its closed ladder — and for an
-    // intersection arm, every CONJUNCT must, because member lookup over an inhabited
-    // intersection is the union of the arms (issue #234): a method defined on either
-    // conjunct resolves, so only a method absent from all of them is absent from the
-    // intersection. `arm_provably_lacks_method` answers `None` both for "the method
-    // is there" and for "a leg could not close", so one fold covers both the
-    // either-arm-resolves rule and the `Maybe`-is-silence rule.
+    // Every arm — and for an intersection, every CONJUNCT — must provably
+    // lack the method: member lookup over an inhabited intersection is the
+    // union of the arms (issue #234), so only absence from all conjuncts
+    // counts. `arm_provably_lacks_method` returns `None` both for "method is
+    // there" and "a leg couldn't close", covering both rules in one fold.
     let mut arm_names: Vec<String> = Vec::with_capacity(lane.len());
     for conjuncts in &lane {
         let mut names: Vec<String> = Vec::with_capacity(conjuncts.len());
@@ -26258,16 +25018,12 @@ fn check_phpdoc_undefined_method(
     });
 }
 
-/// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13): the
-/// proof-layer [`CALL_UNDEFINED_METHOD_ID`] when EVERY arm is `Verified` — a native
-/// declaration PHP enforces at the call boundary — and the contract-layer
-/// [`PHPDOC_UNDEFINED_METHOD_ID`] as soon as one arm is `Asserted`.
-///
-/// This is [`Stratum::min`] folded over the lane and nothing else: the rule is
-/// ADR-0052 N2's, read rather than re-derived, so it is commutative, associative
-/// and order-independent (ADR-0048). An `Asserted` arm can never launder into
-/// `Verified` upstream ([`refine_declared_arms`]), which is what makes the fold a
-/// sound gate rather than a convention.
+/// The declared-receiver lane's id for a narrowed arm lane (ADR-0049 A13):
+/// proof-layer [`CALL_UNDEFINED_METHOD_ID`] when EVERY arm is `Verified`
+/// (native, PHP-enforced), contract-layer [`PHPDOC_UNDEFINED_METHOD_ID`] as
+/// soon as one arm is `Asserted`. [`Stratum::min`] folded over the lane —
+/// ADR-0052 N2's rule, order-independent (ADR-0048). An `Asserted` arm never
+/// launders into `Verified` upstream ([`refine_declared_arms`]).
 fn declared_receiver_id(arms: &[ContractArm]) -> &'static str {
     let min = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
     match min {
@@ -26279,45 +25035,34 @@ fn declared_receiver_id(arms: &[ContractArm]) -> &'static str {
 // ---------------------------------------------------------------------------
 // The offset family: `offset.missing` / `offset.on-unsupported` (ADR-0049 §7 / S3).
 //
-// A value-domain absence proof: a read `$base[$key]` provably emits an `E_WARNING`
-// because the whole container value is known (a Verified `Singleton`/all-array
-// `OneOf`) and the key is provably absent, or the base is a proven non-offsetable
-// scalar/null. Provability is value-domain evidence only (§7): `General`/`Refined`,
-// objects, string bases, and any non-`Verified` fact (N2) are silent.
+// A value-domain absence proof: a read `$base[$key]` provably emits an
+// `E_WARNING` because the whole container value is known (a Verified
+// `Singleton`/all-array `OneOf`) and the key is provably absent, or the base
+// is a proven non-offsetable scalar/null. Value-domain evidence only (§7):
+// `General`/`Refined`, objects, string bases, and any non-`Verified` fact
+// (N2) are silent.
 //
-// **Read-context whitelist (A7).** The emitter is called ONLY from the whitelisted
-// read positions — a plain assignment-RHS, a return operand, and the SOURCE of a
-// destructuring assignment (issue #288) — in the plain per-scope pass. Every silence
-// context (`isset`/`??`/`array_key_exists`/`unset`, write lvalues, by-ref/
-// unresolved-callee argument positions, array elements) never reaches here: `??`
-// lowers its operand into an [`ArgValue::Coalesce`] (not a top-level `OffsetRead`),
-// a write lvalue never lowers to an `Assign`/`Return` value, and
-// `isset`/`unset`/`array_key_exists` are constructs/calls the lowering keeps out of
-// these value slots entirely.
+// **Read-context whitelist (A7).** Called ONLY from a plain assignment-RHS,
+// a return operand, and the SOURCE of a destructuring assignment (issue
+// #288). Every silence context (`isset`/`??`/`array_key_exists`/`unset`,
+// write lvalues, by-ref/unresolved-callee argument positions, array
+// elements) never reaches here by construction of the lowering. Destructure
+// source: `[$a, $b] = $m;` reads `$m[0]`/`$m[1]` (witnessed PHP 8.5.9,
+// `Undefined array key`); keys are PHP's own — positional (a hole `[, $b]`
+// skips its index), explicit for `['a' => $x] = $m`, nested patterns
+// recurse; TARGETS stay silent (write positions, ADR-0049/0052 audit note
+// G7(e)). See [`StmtKind::Destructure`] / [`check_destructure_source`].
 //
-// The destructure source was an **omission**, not a decision: `[$a, $b] = $m;` reads
-// `$m[0]` and `$m[1]` — witnessed at PHP 8.5.9, two `Undefined array key` warnings —
-// and the v1 deferral list below never named it, so nothing here had ever weighed it.
-// Its keys are PHP's own: positional for `[$a, $b]` / `list($a, $b)` (a hole `[, $b]`
-// consumes its index without reading it), explicit for `['a' => $x] = $m`, and a
-// nested pattern reads the outer key and recurses. The pattern's TARGETS remain
-// silent — they are write positions, and stay so (the ADR-0049/0052 soundness audit
-// note's G7(e)). See [`StmtKind::Destructure`] for the read derivation and
-// [`check_destructure_source`] for the judgment.
-//
-// v1 scope (deferred-with-comment, all safe silence): the Error-grade object case
-// (needs the ArrayAccess is-a surface), the TypeError string-key-on-string case,
-// string-base offset reads (in-range present / uninitialized-offset warning), the
-// call-argument read position (the by-ref / unresolved-callee autovivification risk,
-// A7), the compound-assignment read half, and a destructure source read below the
-// first pattern level (an intermediate base no leg can resolve — the same silence a
-// chained `$m[0][1]` read has).
+// v1 scope (deferred, all safe silence): Error-grade object case (needs
+// ArrayAccess is-a), TypeError string-key-on-string, string-base offset
+// reads, call-argument read position (autovivification, A7), compound-
+// assignment read half, destructure source below the first pattern level.
 // ---------------------------------------------------------------------------
 
 /// Severity grade of an offset finding (ADR-0049 §7 verified table). The
-/// `warning-handler` posture gates only [`Self::Warning`]; [`Self::Fatal`] (the
-/// object `Error` / string-key `TypeError` cases) would emit under both — but those
-/// cases are not implemented, so every finding here is currently `Warning`.
+/// `warning-handler` posture gates only [`Self::Warning`]; [`Self::Fatal`]
+/// (object `Error` / string-key `TypeError`) is unimplemented, so every
+/// finding here is currently `Warning`.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OffsetGrade {
     Warning,
@@ -26325,10 +25070,10 @@ enum OffsetGrade {
     Fatal,
 }
 
-/// Canonicalize a proven key [`Val`] to a domain array key (ADR-0049 A10), reusing
-/// the SAME [`php_canonical_int_string`] primitive as the write/lowering side — so
-/// `$a = [5 => 'x']; $a["5"]` resolves to the present key `5`, while `"05"`/`"+5"`
-/// stay strings. `None` for an array key (an illegal offset type — a distinct
+/// Canonicalize a proven key [`Val`] to a domain array key (ADR-0049 A10),
+/// reusing the SAME [`php_canonical_int_string`] primitive as the
+/// write/lowering side — `$a = [5 => 'x']; $a["5"]` resolves to key `5`,
+/// while `"05"`/`"+5"` stay strings. `None` for an array key (a distinct
 /// TypeError, out of scope here) or a non-finite float.
 fn offset_key_of(v: &Val) -> Option<VKey> {
     match v {
@@ -26345,10 +25090,10 @@ fn offset_key_of(v: &Val) -> Option<VKey> {
     }
 }
 
-/// The proven `Verified` value-domain fact for an offset-read operand (base or key),
-/// or `None` when unproven, poisoned, or below the proof stratum (N2). A bare `Var`
-/// reads the env (requiring `Verified`); a literal / fully-literal array resolves
-/// directly (literals are `Verified` whole values). Every other form is unproven.
+/// The proven `Verified` value-domain fact for an offset-read operand (base
+/// or key), or `None` when unproven, poisoned, or below the proof stratum
+/// (N2). A bare `Var` reads the env (requiring `Verified`); a literal/fully-
+/// literal array resolves directly. Every other form is unproven.
 fn offset_operand_fact(
     arg: &ArgValue,
     env: &HashMap<String, Known>,
@@ -26403,22 +25148,19 @@ fn check_offset_read(
     span: Span,
     out: &mut Vec<Diagnostic>,
 ) {
-    // A9 (global): the whole family is silent without a live, monkey-patch-free
-    // sidecar (checked once, cached) — the uniform absence-family availability gate.
+    // A9 (global): silent without a live, monkey-patch-free sidecar.
     if !folder.absence_family_available() {
         return;
     }
-    // Legs (b)/(e): the base must be a proven `Verified` whole value (N2). An object
-    // base (fact `None` — object state lives in the heap, not the value domain) is
-    // silent: the ArrayAccess-arbitrary-code / non-ArrayAccess-`Error` split is the
-    // deferred object case.
+    // Legs (b)/(e): base must be a proven `Verified` whole value (N2). An
+    // object base (fact `None`, state lives in the heap) is silent — the
+    // ArrayAccess/non-ArrayAccess object split is the deferred case.
     let Some(base_fact) = offset_operand_fact(base, env, poisoned, cx.php_minor) else {
         return;
     };
 
-    // Case 1 — a proven non-offsetable scalar/null base (`offset.on-unsupported`,
-    // warning-grade): the read warns regardless of the key, so no proven key is
-    // required. Only a `Singleton` fires (a mixed/abstract base is silent).
+    // Case 1 — proven non-offsetable scalar/null base (`offset.on-unsupported`,
+    // warning-grade): warns regardless of key. Only `Singleton` fires.
     if let Fact::Singleton(v) = &base_fact
         && let Some(word) = unsupported_base_word(v)
     {
@@ -26436,8 +25178,8 @@ fn check_offset_read(
         return;
     }
 
-    // Case 2 — a container base (`offset.missing`, warning-grade): the key must be a
-    // proven single value (leg (c)), canonicalized through the shared helper (A10).
+    // Case 2 — container base (`offset.missing`, warning-grade): key must be
+    // a proven single value (leg (c)), canonicalized via the shared helper (A10).
     let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, cx.php_minor)
     else {
         return;
@@ -26498,45 +25240,39 @@ fn check_offset_read(
 // Shape-aware reads (ADR-0062 §4's read row, S3).
 //
 // The value-lane sibling of `check_offset_read`: where that function judges a
-// PROVEN whole container for an absence FINDING, this one answers "what does the
-// declaration say this key holds" against the abstract stratum, and emits
-// nothing at all. The two never overlap — a `Fact::Shape` base falls into
-// `check_offset_read`'s silent `_` arm, and an `Asserted` shape seed is invisible
-// to its `Verified`-only operand gate to begin with (A-G9's corollary: shape-
+// PROVEN whole container for an absence FINDING, this one answers "what does
+// the declaration say this key holds" against the abstract stratum, and
+// emits nothing. The two never overlap — a `Fact::Shape` base falls into
+// `check_offset_read`'s silent `_` arm, and an `Asserted` shape seed is
+// invisible to its `Verified`-only operand gate (A-G9's corollary: shape-
 // derived facts never feed proof-layer findings).
 // ---------------------------------------------------------------------------
 
 /// What a constant-key read against an abstract shape found (ADR-0062 §4).
-///
-/// The three no-fact outcomes are deliberately distinct even though S3 renders
-/// them identically (unknown, silent): they are exactly the finding ladder S6
-/// wires (A-G10) — [`Self::MaybeMissing`] is `offset.maybe-missing`'s site and
-/// [`Self::DeclaredAbsent`] is `offset.undeclared`'s. Keeping the distinction in
-/// the return type now means S6 adds emitters, not a second read path.
+/// The three no-fact outcomes are deliberately distinct even though S3
+/// renders them identically (unknown, silent): they are the finding ladder
+/// S6 wires (A-G10) — [`Self::MaybeMissing`] is `offset.maybe-missing`'s
+/// site, [`Self::DeclaredAbsent`] is `offset.undeclared`'s.
 #[derive(Debug, Clone, PartialEq)]
 enum ShapeRead {
-    /// A `Required` field: its value slot (`None` — an unknown slot — is the
-    /// honest floor, A-G1a).
+    /// A `Required` field: its value slot (`None` is the honest floor, A-G1a).
     Present(Option<Fact>),
-    /// An `Optional` field, undischarged: **no fact**, and specifically never
-    /// the slot's value ∪ null (A-G9 — reads are never null-poisoned).
-    ///
-    /// The declared slot rides along but [`Self::into_fact`] does not yield it —
-    /// the read surface must stay null-poison-free. Its ONE consumer is
-    /// [`ShapeRead::taken_fact`], the `??` left-arm reading, where missing-ness
-    /// is fall-through rather than a value (A-G11).
+    /// An `Optional` field, undischarged: **no fact**, never the slot's value
+    /// ∪ null (A-G9 — reads are never null-poisoned). The declared slot rides
+    /// along but [`Self::into_fact`] doesn't yield it; its ONE consumer is
+    /// [`ShapeRead::taken_fact`] (the `??` left-arm reading, where missing-
+    /// ness is fall-through, not a value, A-G11).
     MaybeMissing(Option<Fact>),
     /// The declaration proves the key is not there: an `Absent` field, a key
-    /// outside a `Sealed` shape's fields, or a key the unsealed tail's own key
-    /// class rejects.
+    /// outside a `Sealed` shape's fields, or a key the tail's key class rejects.
     DeclaredAbsent,
     /// An undeclared key admitted by an `Unsealed` tail: the tail's value bound.
     Tail(Option<Fact>),
 }
 
 impl ShapeRead {
-    /// The fact this read yields, if any. Every no-fact outcome collapses here —
-    /// the distinction above is for S6's emitters, not for the value lane.
+    /// The fact this read yields, if any. Every no-fact outcome collapses
+    /// here — the distinction above is for S6's emitters, not the value lane.
     fn into_fact(self) -> Option<Fact> {
         match self {
             ShapeRead::Present(f) | ShapeRead::Tail(f) => f,
@@ -26545,16 +25281,11 @@ impl ShapeRead {
     }
 
     /// The value this read yields **when a `??` takes the arm** (S5, A-G11).
-    ///
-    /// A non-final `??` arm is used only when `isset` holds of it, so its
-    /// missing-ness is fall-through, not a value: an undischarged optional field
-    /// still yields its declared slot here, and the `??` fold's `clear_null` is
-    /// what applies the `isset` half. A *declared absence* yields nothing —
-    /// nothing admitted by the shape can take that arm.
-    ///
-    /// This is not a weakening of A-G9: the fact never reaches a read surface,
-    /// only the `??` join, and the join is where PHP itself says the arm's value
-    /// is the one the expression has.
+    /// A non-final `??` arm is used only when `isset` holds of it, so
+    /// missing-ness is fall-through: an undischarged optional field still
+    /// yields its declared slot; a declared absence yields nothing. Not a
+    /// weakening of A-G9 — the fact never reaches a read surface, only the
+    /// `??` join, where PHP says the arm's value is what the expression has.
     fn taken_fact(self) -> Option<Fact> {
         match self {
             ShapeRead::Present(f) | ShapeRead::Tail(f) | ShapeRead::MaybeMissing(f) => f,
@@ -26567,9 +25298,8 @@ impl ShapeRead {
 fn shape_read(shape: &ShapeFact, key: &VKey) -> ShapeRead {
     use steins_domain::{Presence, Tail};
     match shape.field(key) {
-        // The witness bit is provenance, not extension: a declared-Required and a
-        // guard-Verified key read the same value (the presence stratum is what S6
-        // consumes, and it lives on the field, not on the read).
+        // The witness bit is provenance, not extension: a declared-Required
+        // and a guard-Verified key read the same value.
         Some((_, Presence::Required { .. }, slot)) => {
             ShapeRead::Present(slot.as_deref().cloned())
         }
@@ -26588,14 +25318,14 @@ fn shape_read(shape: &ShapeFact, key: &VKey) -> ShapeRead {
     }
 }
 
-/// Resolve a read site `base[key]` to the **shape and canonical key** it names, or
-/// decline. The one resolver both the value lane ([`shape_read_at`]) and the strict
-/// leg's emitters (S6) go through, so a read and a finding can never disagree about
-/// which field they mean.
+/// Resolve a read site `base[key]` to the **shape and canonical key** it
+/// names, or decline. The one resolver both the value lane
+/// ([`shape_read_at`]) and the strict leg's emitters (S6) go through, so a
+/// read and a finding can never disagree about which field they mean.
 ///
-/// `None` — decline — when the base carries no shape fact, when the base is
-/// **nullable** (the value may be null, so no field is guaranteed; narrowing that is
-/// S4's job), or when the key is not a proven single value.
+/// Declines (`None`) when the base carries no shape fact, is **nullable**
+/// (no field is guaranteed then; narrowing that is S4's job), or the key is
+/// not a proven single value.
 fn shape_site_at<'a>(
     base: &ArgValue,
     key: &ArgValue,
@@ -26618,9 +25348,8 @@ fn shape_site_at<'a>(
     Some((shape, canon, known.stratum))
 }
 
-/// Resolve a read site `base[key]` against the abstract stratum: the base's own
-/// shape fact and the offset family's proven-key resolution ([`offset_key_of`],
-/// the ONE canonicalization), plus the stratum the result inherits.
+/// Resolve a read site `base[key]` against the abstract stratum, plus the
+/// stratum the result inherits.
 fn shape_read_at(
     base: &ArgValue,
     key: &ArgValue,
@@ -26638,43 +25367,33 @@ fn shape_read_at(
 // The offset family's STRICT leg (ADR-0062 S6 / A-G10, issue #51).
 //
 // Two contract-layer ids, both at `Floor::Strict`, emitted from the SAME
-// whitelisted read positions the proof leg uses (a plain assignment-RHS and a
-// return operand) plus one position the proof leg deliberately does not judge:
-// the right-most arm of a `??` chain.
+// whitelisted read positions the proof leg uses (plain assignment-RHS,
+// return operand) plus one the proof leg does not judge: the right-most arm
+// of a `??` chain. Every finding reads a `Fact::Shape` — `Asserted` — so
+// A-G9's corollary holds by construction: nothing below consults or
+// produces a proof-layer fact/id.
 //
-// **Evidence discipline.** Every finding here reads a `Fact::Shape` — the declared
-// envelope, `Asserted`. A-G9's corollary holds by construction: nothing below
-// consults a proof-layer fact, and nothing below can produce a proof-layer id.
+// Silent, and why: `ShapeRead::Present` (proved clean, never by skip);
+// `ShapeRead::Tail` (unsealed tail's value bound, OUT of v1 scope, A-G10, a
+// future id mirroring PHPStan's two-flag split); every non-whitelisted read
+// position (`isset`/`array_key_exists`/`unset` argument, write lvalue,
+// array element, non-final `??` arm) never reaches these emitters (A7).
 //
-// **What is silent, and why.**
-//
-// * `ShapeRead::Present` — S3 reads it, S4's guards promoted it, or S5's cover
-//   ladder proved it. Guarded code is clean *by proof*, never by skip.
-// * `ShapeRead::Tail` — the unsealed tail's value bound. A general map/list read is
-//   OUT of v1 scope (A-G10): it stays silent here and is a future separate id,
-//   mirroring PHPStan's own two-flag split.
-// * Every non-whitelisted read position — an `isset`/`array_key_exists`/`unset`
-//   argument, a write lvalue, an array element, a NON-final `??` arm — never
-//   reaches these emitters at all, exactly as in the proof leg (A7).
-//
-// **The `??` split** (issue #51 §2). PHP protects only the arms it may fall
-// *through*; the right-most arm is evaluated as a plain read under the premise
-// `¬isset` of every arm to its left. So the left arms stay silent on every surface
-// and the final arm is judged — under S5's accumulated premise ladder, which is
-// what makes the disjunctive-assert pattern clean rather than a wolf cry.
+// **The `??` split** (issue #51 §2): PHP protects only the arms it may fall
+// *through*; the right-most arm is a plain read under the premise `¬isset`
+// of every arm to its left. Left arms stay silent everywhere; the final arm
+// is judged under S5's accumulated premise ladder — clean, not a wolf cry.
 // ---------------------------------------------------------------------------
 
-/// Render the evidence + consequence clauses shared by both strict-leg ids, in the
-/// offset family's established message discipline (see `check_offset_read`): what
-/// the declaration says, then what PHP does at runtime, quoted verbatim.
+/// Render the evidence + consequence clauses shared by both strict-leg ids:
+/// what the declaration says, then what PHP does at runtime, quoted verbatim.
 fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -> String {
     let (our_key, php_key) = render_offset_key(canon);
     let declared = render_shape_fact(shape, false);
-    // `{base} is {declared}` mirrors `offset.missing`'s own evidence clause. The
-    // spelling is the shape fact's, which may differ from the source text (a
-    // sealed shape's head is canonicalized, and issue #163 takes it from the
-    // shape's own `is_list`) — the same rendering the dump surface shows, so the
-    // two never disagree about what Steins believes.
+    // `{base} is {declared}` mirrors `offset.missing`'s evidence clause. The
+    // spelling is the shape fact's, which may differ from source text (a
+    // sealed shape's head is canonicalized, issue #163 takes it from `is_list`)
+    // — the same rendering the dump surface shows.
     match kind {
         "undeclared" => format!(
             "offset {our_key} is outside the declared shape — {base} is {declared}, which cannot carry the key; reads null with \"Undefined array key {php_key}\""
@@ -26688,14 +25407,13 @@ fn strict_leg_message(kind: &str, base: &str, shape: &ShapeFact, canon: &VKey) -
     }
 }
 
-/// Judge one whitelisted **plain** read `base[key]` against the declared shape and
-/// emit at most one strict-leg finding (ADR-0062 S6).
+/// Judge one whitelisted **plain** read `base[key]` against the declared
+/// shape and emit at most one strict-leg finding (ADR-0062 S6).
 ///
-/// Deliberately NOT gated on [`Folder::absence_family_available`], unlike the proof
-/// leg: A9's gate exists because a monkey-patched runtime can invalidate a
-/// *value-domain* absence proof. This leg's evidence is the docblock, which no
-/// sidecar posture can move, so gating it would withhold a contract claim for a
-/// reason that does not apply to it.
+/// Deliberately NOT gated on [`Folder::absence_family_available`], unlike
+/// the proof leg: A9's gate exists because a monkey-patched runtime can
+/// invalidate a *value-domain* absence proof. This leg's evidence is the
+/// docblock, which no sidecar posture can move.
 fn check_shape_read(
     cx: &Cx,
     base: &ArgValue,
@@ -26711,10 +25429,10 @@ fn check_shape_read(
     judge_shape_read(cx, shape, &canon, &base.render(), span, out);
 }
 
-/// The emitter half of [`check_shape_read`], taking the resolved site rather than
-/// deriving it — so a read position whose base is not a bare variable (the
-/// destructure source of issue #288, whose base may be the call expression itself)
-/// judges through exactly the same ladder and the same message discipline.
+/// The emitter half of [`check_shape_read`], taking the resolved site rather
+/// than deriving it — so a read whose base is not a bare variable (the
+/// destructure source of issue #288, whose base may be the call expression
+/// itself) judges through the same ladder and message discipline.
 fn judge_shape_read(
     cx: &Cx,
     shape: &ShapeFact,
@@ -26749,26 +25467,23 @@ fn judge_shape_read(
     }
 }
 
-/// Judge the source of a destructuring assignment `[$a, $b] = <source>;` as the
-/// read position it is (issue #288, the ADR-0049 §7 A7 whitelist extended).
+/// Judge the source of a destructuring assignment `[$a, $b] = <source>;` as
+/// the read position it is (issue #288, ADR-0049 §7 A7 whitelist extended).
 ///
-/// Both legs run, exactly as they do at the assignment-RHS position: the proof leg
-/// ([`check_offset_read`]) on a `Verified` whole container, and the strict leg
-/// ([`judge_shape_read`]) on the declared shape. They stay disjoint by the same
-/// construction as everywhere else — the proof leg's operand gate takes `Verified`
-/// facts and a shape is `Asserted`.
+/// Both legs run, as at the assignment-RHS position: the proof leg
+/// ([`check_offset_read`]) on a `Verified` whole container, the strict leg
+/// ([`judge_shape_read`]) on the declared shape — disjoint via the usual
+/// `Verified` vs. `Asserted` operand gates.
 ///
-/// Two source spellings carry a shape, and both are judged: a bare variable (its
-/// env fact) and a statically-named call (its declared-return arms, the ADR-0069
-/// floor — the value the caller is about to destructure). The call spelling is the
-/// one the plain-assignment position never needs, because there the value has been
-/// bound to a name first.
+/// Two source spellings carry a shape, both judged: a bare variable (its env
+/// fact) and a statically-named call (its declared-return arms, ADR-0069
+/// floor). The call spelling is the one plain assignment never needs — there
+/// the value is already bound to a name.
 ///
 /// **Depth 1 only.** `reads` records the full key path of a nested pattern
-/// (`[[$a], $b]` reads `$m[0]`, `$m[0][0]`, `$m[1]`), because that is what PHP
-/// reads; a path below the first level names an intermediate base neither leg can
-/// resolve — the same silence a chained `$x = $m[0][1];` read already has — so it
-/// is skipped here rather than judged against a base nobody proved.
+/// (`[[$a], $b]` reads `$m[0]`, `$m[0][0]`, `$m[1]`, what PHP itself reads);
+/// a path below the first level names an intermediate base neither leg can
+/// resolve — same silence as a chained `$x = $m[0][1];` read.
 #[allow(clippy::too_many_arguments)]
 fn check_destructure_source(
     w: &WalkCx,
@@ -26819,14 +25534,11 @@ fn check_destructure_source(
     }
 }
 
-/// Judge the **right-most arm** of a `??` chain in a whitelisted value position
-/// (ADR-0062 S6, issue #51 §2).
-///
-/// The arm walk mirrors [`eval_coalesce_fact`]'s exactly — same projection test,
-/// same premise accumulation, same invalidation on a non-projection arm, same
-/// settle-and-stop — because the two must agree on which arm PHP actually
-/// evaluates. Only the final arm can produce a finding; every arm before it is
-/// protected by the operator.
+/// Judge the **right-most arm** of a `??` chain in a whitelisted value
+/// position (ADR-0062 S6, issue #51 §2). The arm walk mirrors
+/// [`eval_coalesce_fact`]'s exactly — same projection test, premise
+/// accumulation, invalidation, settle-and-stop — so the two agree on which
+/// arm PHP evaluates. Only the final arm can produce a finding.
 fn check_coalesce_final_arm(
     cx: &Cx,
     value: &ArgValue,
@@ -26919,23 +25631,18 @@ fn judge_coalesce_final(
 // Shape narrowing (ADR-0062 S4): guards on the fact lane, subtraction on the
 // arm lane, and the collapse that mints one from the other.
 //
-// Two lanes, one pass. A binding whose declaration has ONE array arm carries a
-// `Fact::Shape` in the env and is refined by the domain's narrowing operators;
-// a binding whose declaration has SEVERAL array arms carries none — the union
-// lives in the arm lane (A-G3) — and is refined by deleting arms. The moment
-// subtraction leaves exactly one array arm the two meet: `seed_shape_fact`
-// mints the fact, and the same guard that did the subtraction then promotes it.
+// A binding with ONE array arm carries `Fact::Shape`, refined by the domain's
+// narrowing operators; SEVERAL arms carry none (union lives in the arm lane,
+// A-G3) and are refined by deleting arms. When subtraction leaves exactly one
+// arm, `seed_shape_fact` mints the fact and the same guard promotes it.
 //
-// **Reachability is deliberately untouched.** None of this feeds `eval_cond`,
-// `mark_dead`, or the dead-region set. A shape fact is `Asserted` (A-G9's
-// corollary), and a dead region computed from an `Asserted` premise would let
-// the env-free direct pass stop reporting on a live path — an FP class that must
-// stay closed. `Fact::truthy` / `is_null` / `int_in` /
-// `satisfies_str` are *decisive* on `Fact::Shape` (`truthy` reads `non_empty`,
-// the other three answer `No` outright), so the first caller that routes a
-// shape fact into a verdict re-opens exactly that question; the tripwire test
-// `shape_facts_do_not_decide_guard_verdicts` in `tests/shape_guards.rs` is
-// what makes that a deliberate decision rather than a silent one.
+// Reachability is deliberately untouched (feeds none of `eval_cond`,
+// `mark_dead`, the dead-region set): a shape fact is `Asserted` (A-G9's
+// corollary), and a dead region from an `Asserted` premise would silence the
+// env-free direct pass on a live path — an FP class that must stay closed.
+// `Fact::truthy`/`is_null`/`int_in`/`satisfies_str` are decisive on
+// `Fact::Shape`, so tripwire test `shape_facts_do_not_decide_guard_verdicts`
+// (tests/shape_guards.rs) guards against a caller reopening that question.
 // ---------------------------------------------------------------------------
 
 /// Which presence predicate a guard tests — A-G8's flavor discipline applied to
@@ -26963,17 +25670,14 @@ enum ShapeGuard {
     Tag { var: String, key: VKey, tags: Vec<ArgValue>, loose: bool },
     /// A **disjunctive**-presence guard (A-G8, S5): `isset($x['a']) ||
     /// isset($x['b'])` and its `array_key_exists` twin, over ONE binding, at
-    /// truth polarity. `flavor` is the weakest claim every disjunct implies — a
-    /// mixed disjunction reads as [`PresenceFlavor::KeyExists`], because
-    /// `isset(k)` implies `k` exists but not conversely.
+    /// truth polarity. `flavor` is the weakest claim every disjunct implies —
+    /// a mixed disjunction reads as [`PresenceFlavor::KeyExists`].
     Cover { var: String, keys: Vec<VKey>, flavor: PresenceFlavor },
     /// `array_all($x, $f)` falsy / `array_any($x, $f)` truthy (A8, ADR-0062
     /// §4, PHP 8.4): the ONE unconditional leg of each — `array_all([], f)`
     /// and `array_any([], f)` are respectively always true and always false,
-    /// so only the branch that leg refutes proves `$x` non-empty. The opposite
-    /// (vacuous-on-empty) branch is never recorded — [`collect_shape_guards`]
-    /// pushes this only at the firing polarity, so its absence on that branch
-    /// is silence, not a claim.
+    /// so only the branch that leg refutes proves `$x` non-empty.
+    /// [`collect_shape_guards`] pushes this only at the firing polarity.
     NonEmpty { var: String },
     /// **A count comparison** (issue #272): `count($x) <op> <int>` resolved to
     /// the entry-count interval the branch proves. Both polarities record —
@@ -27032,20 +25736,13 @@ fn array_all_any_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
 /// The binding whose entry count an operand **is** — `count($x)` / `sizeof($x)`
 /// over a bare local (issue #272), or `None` for everything else.
 ///
-/// Four refusals, each a soundness or scope requirement rather than a
-/// convenience:
-///
-/// * the callee must denote the **global builtin** ([`global_function_callee`],
-///   the same rule the presence predicates use): a project function named
-///   `count` counts whatever it likes;
-/// * the call must be **positional-only with exactly one argument** — the mode
-///   argument (`count($x, COUNT_RECURSIVE)`) counts nested entries, which is a
-///   different number, and the named spelling (`count(value: $x)`) is refused
-///   with it rather than pattern-matched a second way;
-/// * the argument must be a **bare local**, since that is the only thing the
-///   fact lanes can be keyed by;
-/// * the operand must be a *resolvable* call (`CondOperand::Other`'s `call`),
-///   so `count($x) + 1` — an operand that merely contains one — declines.
+/// Refusals, each a soundness/scope requirement: callee must denote the
+/// **global builtin** ([`global_function_callee`], not a project function
+/// named `count`); call must be **positional-only with exactly one argument**
+/// (`count($x, COUNT_RECURSIVE)` counts nested entries — a different number —
+/// and `count(value: $x)` is refused with it); argument must be a **bare
+/// local** (the only thing fact lanes key by); operand must be a *resolvable*
+/// call (`CondOperand::Other`'s `call`), so `count($x) + 1` declines.
 fn count_subject<'a>(cx: &Cx, operand: &'a CondOperand) -> Option<&'a str> {
     let call = operand_call(operand)?;
     let callee = global_function_callee(cx, call)?;
@@ -27096,26 +25793,20 @@ fn negate_cmp(op: CmpOp) -> CmpOp {
 /// **The count-comparison guard** (issue #272): the entry-count interval
 /// `count($x) <op> <bound>` proves on branch `then`.
 ///
-/// The comparison is first normalized to read left-to-right (`flip_ordering`
-/// mirrors a Yoda `0 < count($x)`), then negated on the false branch, and only
-/// then read against the bound's own interval `[lo, hi]`. Reading it against an
-/// *interval* rather than a literal is what makes a bounded variable work, and
-/// each row below is the weakest sound claim over the whole interval:
-///
-/// * `> bound` — the bound is at least `lo`, so the count is at least `lo + 1`;
-/// * `>= bound` — at least `lo`;
-/// * `< bound` / `<= bound` — the mirror, against `hi`;
-/// * `===` / `==` — the count lies in `[lo, hi]` (a literal makes that a point);
-/// * `!==` / `!=` — nothing, **except** against the point `0`, where the
-///   complement is representable: the array is non-empty.
+/// The comparison is normalized to read left-to-right (`flip_ordering` mirrors
+/// a Yoda `0 < count($x)`), negated on the false branch, then read against the
+/// bound's own interval `[lo, hi]` (not a literal, so a bounded variable also
+/// works) — each case is the weakest sound claim over that interval: `>`/`>=`
+/// give at least `lo`(+1); `<`/`<=` mirror against `hi`; `===`/`==` give
+/// `[lo, hi]`; `!==`/`!=` give nothing except against the point `0`, where the
+/// complement (non-empty) is representable.
 ///
 /// PHP compares `count($x)` as an int, so a loose comparison against an int
 /// bound is the strict one; a non-int bound never reaches here
-/// ([`operand_int_bound`] declines it) rather than being loosely coerced.
+/// ([`operand_int_bound`] declines it).
 ///
-/// An interval the ordering empties (`count($x) < 0`) declines: the branch is
-/// in fact impossible, and death is the verdict's business (ADR-0052 §2), not a
-/// narrowing operator's.
+/// An interval the ordering empties (`count($x) < 0`) declines — the branch is
+/// impossible, and death is the verdict's business (ADR-0052 §2).
 fn count_guard(
     cx: &Cx,
     env: &HashMap<String, Known>,
@@ -27150,16 +25841,15 @@ fn count_guard(
 
 /// Collect the shape guards a condition establishes at polarity `then`.
 ///
-/// The polarity walk is `collect_refine`'s, verbatim in structure: `Not` flips,
-/// `And` contributes on the true path, `Or` on the false one (De Morgan).
-/// Everything else contributes nothing, so an unmodeled condition
-/// narrows nothing rather than narrowing wrongly.
+/// The polarity walk mirrors `collect_refine`'s structure: `Not` flips, `And`
+/// contributes on the true path, `Or` on the false one (De Morgan). Everything
+/// else contributes nothing, so an unmodeled condition narrows nothing rather
+/// than narrowing wrongly.
 ///
 /// `env` is read for **operand bounds only** (issue #272's `count($x) === $n`,
-/// where the comparison's other side is a binding carrying an int interval);
-/// every guard here is still decided from the condition's own syntax, so the
-/// walk stays replayable in the ADR-0048 §1 sense — the env it reads is the one
-/// the walk itself built to this point.
+/// where the other side is a binding carrying an int interval); every guard is
+/// still decided from the condition's own syntax, so the walk stays replayable
+/// in the ADR-0048 §1 sense.
 fn collect_shape_guards(
     cx: &Cx,
     cond: &CondExpr,
@@ -27183,13 +25873,12 @@ fn collect_shape_guards(
             out.push(ShapeGuard::Truthy { var: v.clone(), positive: then });
         }
         // `$x[k] === <lit>` and its negation-by-polarity twin `!($x[k] !== <lit>)`.
-        // Only the *positive* reading of a tag guard subtracts: knowing the tag is
-        // NOT `'circle'` kills an arm only if that arm's tag slot admits nothing
-        // else, which is a residue question A-G4 does not open in v1.
+        // Only the *positive* reading subtracts: "tag is NOT 'circle'" kills an
+        // arm only if that arm's slot admits nothing else — a residue question
+        // A-G4 does not open in v1.
         CondExpr::Cmp { op, lhs, rhs } => {
             // A count comparison (issue #272) is the one comparison form whose
-            // operand is a *call*; it cannot also be a tag guard, so it takes
-            // the arm and returns.
+            // operand is a *call*; it cannot also be a tag guard.
             if let Some(g) = count_guard(cx, env, *op, lhs, rhs, then) {
                 out.push(g);
                 return;
@@ -27247,11 +25936,9 @@ fn collect_shape_guards(
                 }
                 return;
             }
-            // A8: `array_all` fires on its falsy branch (`array_all([], f)` is
-            // vacuously true, so falsy means at least one element existed and
-            // failed); `array_any` fires on its truthy branch (`array_any([],
-            // f)` is vacuously false). The opposite branch of each is a vacuity
-            // trap — it proves nothing about emptiness — so it pushes no guard.
+            // A8: `array_all` fires falsy (vacuously true on `[]`, so falsy means
+            // an element existed and failed); `array_any` fires truthy (vacuously
+            // false on `[]`). The opposite branch is a vacuity trap — no guard.
             if let Some(pred) = array_all_any_predicate(cx, call) {
                 if call.args.len() != 2 {
                     return;
@@ -27272,16 +25959,14 @@ fn collect_shape_guards(
             collect_shape_guards(cx, b, then, env, out);
         }
         // De Morgan: `¬(isset a ∨ isset b)` is `¬isset a ∧ ¬isset b`, so the false
-        // branch of a disjunction is just both disjuncts at false polarity — the
-        // per-key S4 narrowing, distributed by the walk itself. Nothing S5-specific
-        // is needed here; the cover lives on the TRUE branch only.
+        // branch is just both disjuncts at false polarity (per-key S4 narrowing);
+        // the cover (S5) lives on the TRUE branch only.
         CondExpr::Or(a, b) if !then => {
             collect_shape_guards(cx, a, then, env, out);
             collect_shape_guards(cx, b, then, env, out);
         }
         // The true branch of a disjunction (A-G8, S5). Individually a disjunct
-        // proves nothing — either could be the false one — so the ONLY thing
-        // recorded is the disjunctive fact itself.
+        // proves nothing, so only the disjunctive fact itself is recorded.
         CondExpr::Or(..) if then => {
             if let Some(g) = disjunctive_cover(cx, cond) {
                 out.push(g);
@@ -27295,11 +25980,10 @@ fn collect_shape_guards(
 /// depth-1 constant-key presence test over a named binding.
 type PresenceDisjunct = (String, VKey, PresenceFlavor);
 
-/// Flatten a `||` chain into its presence disjuncts. `false` — and the whole
-/// cover is abandoned — the moment ANY disjunct is something else: a non-presence
-/// condition (`isset($x['a']) || $y`), a deeper path, or a key that does not
-/// resolve to a constant. A disjunction is only as strong as its weakest disjunct,
-/// so one unmodelled arm makes the whole claim unrecordable rather than partial.
+/// Flatten a `||` chain into its presence disjuncts. Returns `false` — the
+/// whole cover abandoned — if ANY disjunct is something else: a non-presence
+/// condition, a deeper path, or a non-constant key. A disjunction is only as
+/// strong as its weakest disjunct, so one unmodelled arm voids the whole claim.
 fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>) -> bool {
     match cond {
         CondExpr::Or(a, b) => {
@@ -27333,18 +26017,15 @@ fn presence_disjuncts(cx: &Cx, cond: &CondExpr, out: &mut Vec<PresenceDisjunct>)
 /// The [`ShapeGuard::Cover`] a truth-context disjunction records, or `None` when
 /// A-G11's v1 scope declines it.
 ///
-/// Three conditions, each a soundness requirement rather than a convenience:
-///
-/// * **every** disjunct is a modelled presence test (see [`presence_disjuncts`]);
-/// * they all test the **same** binding — a cover is a fact about one array, and
-///   `isset($x['a']) || isset($y['b'])` says nothing about either;
-/// * at least two distinct keys remain, so the claim really is disjunctive (a
-///   singleton would be presence, which the domain's `normalize` promotes anyway).
+/// Requires: **every** disjunct is a modelled presence test (see
+/// [`presence_disjuncts`]); they all test the **same** binding (a cover is a
+/// fact about one array); at least two distinct keys remain (a singleton would
+/// be presence, which `normalize` promotes anyway).
 ///
 /// Flavor is the **weakest** claim every disjunct implies: all-`isset` gives an
-/// Isset-cover ("at least one present and non-null"); any `array_key_exists`
-/// disjunct drags the whole cover down to KeyExists, since a present-null entry
-/// satisfies that disjunct without satisfying `isset`.
+/// Isset-cover; any `array_key_exists` disjunct drags the whole cover down to
+/// KeyExists, since a present-null entry satisfies that disjunct without
+/// satisfying `isset`.
 fn disjunctive_cover(cx: &Cx, cond: &CondExpr) -> Option<ShapeGuard> {
     let mut parts: Vec<PresenceDisjunct> = Vec::new();
     if !presence_disjuncts(cx, cond, &mut parts) || parts.len() < 2 {
@@ -27365,18 +26046,16 @@ fn disjunctive_cover(cx: &Cx, cond: &CondExpr) -> Option<ShapeGuard> {
 }
 
 /// **Apply every shape guard of `cond` at polarity `then`** to a branch's cloned
-/// env and store. Runs after `apply_refinements` in the branch walk, so a shape
-/// operator is the last word on a `Fact::Shape` binding — none of the scalar
-/// refinement operators can express anything about one anyway.
+/// env and store. Runs after `apply_refinements`, so a shape operator is the
+/// last word on a `Fact::Shape` binding — no scalar refinement operator can
+/// express anything about one anyway.
 ///
 /// `witnessed` is the **evidence stratum of the condition itself** (ADR-0058's
-/// table): `true` for a condition the runtime evaluated — an `if`, an `assert()`
-/// — and `false` for one whose only evidence is a docblock, which today means a
-/// `@phpstan-assert true $cond` tag on a userland assertion helper. It reaches
-/// exactly one operator, [`ShapeFact::promote_present`]; every other narrowing
-/// here (arm subtraction, cover recording, `mark_absent`) is already confined to
-/// the `Asserted` shape lane, whose stratum is A-G9's corollary and does not vary
-/// per guard.
+/// table): `true` for a runtime-evaluated condition (`if`, `assert()`), `false`
+/// for docblock-only evidence (a `@phpstan-assert true $cond` tag on a userland
+/// helper). It reaches exactly one operator, [`ShapeFact::promote_present`];
+/// every other narrowing here is already confined to the `Asserted` shape lane
+/// (A-G9's corollary), whose stratum does not vary per guard.
 fn apply_shape_narrowing(
     cx: &Cx,
     cond: &CondExpr,
@@ -27414,8 +26093,7 @@ fn apply_shape_guard(
 /// An emptied lane drops to no-fact, never a death signal (ADR-0052 §2).
 fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
     let Some(arms) = store.contract.get(g.var()) else { return };
-    // A single-arm lane has no discrimination to do; leaving it alone keeps the
-    // fact lane the only thing this guard can move for the common case.
+    // A single-arm lane has no discrimination to do.
     if arms.len() < 2 {
         return;
     }
@@ -27424,12 +26102,10 @@ fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
     if kept.len() == arms.len() {
         return;
     }
-    // **A count guard never empties the lane** (issue #272). Every other guard
-    // here refutes an arm on a *structural* ground, and an emptied lane means
-    // the binding is out of vocabulary; a count guard refutes on arithmetic, so
-    // an emptied lane means the branch is unreachable — a claim §2 reserves for
-    // the verdict, and one that would erase the binding for the *join* as well
-    // as for the branch. The lane is left whole instead.
+    // **A count guard never empties the lane** (issue #272). Other guards refute
+    // an arm on structural grounds, where an emptied lane means out-of-vocabulary;
+    // a count guard refutes on arithmetic, where an emptied lane would mean the
+    // branch is unreachable — a claim §2 reserves for the verdict. Left whole.
     if kept.is_empty() && matches!(g, ShapeGuard::Count { .. }) {
         return;
     }
@@ -27448,21 +26124,20 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
     match g {
         ShapeGuard::Present { key, flavor, positive, .. } => {
             // `isset($x[k])` on a `null` base is false — PHP decides it, so the
-            // arm dies. `array_key_exists` on null is a TypeError, not a false
-            // verdict, so it kills nothing (the conservative reading).
+            // arm dies. `array_key_exists` on null is a TypeError, so it kills
+            // nothing (the conservative reading).
             if matches!(ty, ContractTy::Null) {
                 return !(*positive && *flavor == PresenceFlavor::Isset);
             }
             let Some(shape) = shape else { return true };
             if *positive {
-                // Sealed-by-default is what makes the idiom sound (A-G3): an arm
-                // that cannot hold `k` at all cannot be the live one.
+                // Sealed-by-default makes the idiom sound (A-G3): an arm that
+                // cannot hold `k` at all cannot be the live one.
                 arm_can_hold_key(&shape, key)
             } else {
-                // The false branch kills arms where `k` is `Required` — for
-                // `isset` only when the value cannot be null, because a
-                // present-null entry makes `isset` false without the key being
-                // absent (the A-G8 S2 flavor correction, applied to guards).
+                // False branch kills arms where `k` is `Required` — for `isset`
+                // only when the value cannot be null, since a present-null entry
+                // makes `isset` false without the key being absent (A-G8 S2).
                 match shape.field(key) {
                     Some((_, p, slot)) if p.is_required() => match flavor {
                         PresenceFlavor::KeyExists => false,
@@ -27474,9 +26149,8 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
                 }
             }
         }
-        // A tag guard asks the field's declared value contract whether it admits
-        // the literal; a `No` verdict kills the arm (A-G4). An undeclared or
-        // unknown-slot field answers nothing and keeps it.
+        // Asks the field's declared value contract whether it admits the literal;
+        // a `No` verdict kills the arm (A-G4). Undeclared/unknown-slot keeps it.
         ShapeGuard::Tag { key, tags, loose, .. } => {
             let Some(shape) = shape else { return true };
             let Some((_, presence, Some(slot))) = shape.field(key) else { return true };
@@ -27485,39 +26159,30 @@ fn shape_arm_survives(g: &ShapeGuard, ty: &ContractTy, php_minor: Option<(u16, u
             }
             tags.iter().any(|t| tag_possible(slot, t, *loose, php_minor))
         }
-        // Truthiness, list-ness, and A8's non-emptiness leg are all properties
-        // of the whole array, not of a key, and every array arm can be
-        // non-empty or a list for *some* value the arm admits — so v1
-        // subtracts nothing here and refines the fact lane only.
+        // Truthiness, list-ness, and A8's non-emptiness are whole-array
+        // properties, and every arm can be non-empty/a list for *some* value it
+        // admits — v1 subtracts nothing here, refines the fact lane only.
         ShapeGuard::Truthy { .. } | ShapeGuard::IsList { .. } | ShapeGuard::NonEmpty { .. } => {
             true
         }
-        // A count guard **does** discriminate arms (issue #272), through the
-        // one interval each array arm already publishes: an arm none of whose
-        // admitted arrays can have a count in `range` cannot be the live one.
-        // `array{}` dies under `count($x) > 0`; `array<int>` survives it, since
-        // its interval is `int<0, max>`. A non-array arm keeps its place —
-        // `count()` accepts a `Countable`, whose entry count no shape bounds —
-        // EXCEPT the `Null` arm, which dies unconditionally (issue #289):
-        // `count(null)` raises a `TypeError`, so reaching this branch at all —
-        // whichever polarity — already proves the subject was not null. This
-        // is arithmetic reachability (ADR-0052 §2 territory in spirit, but not
-        // a death verdict — only this one arm of the union is refuted, exactly
-        // as any other arm-discriminating guard here refutes an arm), not a
-        // structural claim about the count itself, so it is decided before
-        // `to_shape_fact` is even consulted.
+        // A count guard **does** discriminate arms (issue #272), through each
+        // array arm's own count interval: an arm whose interval excludes `range`
+        // cannot be live (`array{}` dies under `count($x) > 0`; `array<int>`
+        // survives, interval `int<0, max>`). Non-array arms keep their place
+        // (`count()` accepts `Countable`) EXCEPT `Null`, which dies unconditionally
+        // (issue #289): `count(null)` raises a `TypeError`, so reaching this
+        // branch at all already proves the subject was not null — arithmetic
+        // reachability, decided before `to_shape_fact` is even consulted.
         ShapeGuard::Count { range, .. } => {
             if matches!(ty, ContractTy::Null) {
                 return false;
             }
             shape.is_none_or(|s| s.count_range().intersect(*range).is_some())
         }
-        // **Covers on arms are future work** (A-G8's home for them is inside the
-        // shape fact, and A-G3 keeps unions in the arm lane). An arm that can hold
-        // NONE of the covered keys is in fact refuted by the disjunction — the
-        // same sealed-by-default reasoning `Present { positive: true }` uses — but
-        // v1 records covers on a single-shape fact only, so nothing is subtracted
-        // here and no discriminated union changes shape because of one.
+        // **Covers on arms are future work.** An arm holding NONE of the covered
+        // keys is in fact refuted (same sealed-by-default reasoning as
+        // `Present { positive: true }`), but v1 records covers on a single-shape
+        // fact only, so nothing is subtracted here.
         ShapeGuard::Cover { .. } => true,
     }
 }
@@ -27537,9 +26202,9 @@ fn arm_can_hold_key(shape: &ShapeFact, k: &VKey) -> bool {
 
 /// Could the slot's declared value equal the tag? `loose` selects PHP's `==`
 /// (the `switch` reading), whose truth set is a superset of `===`'s — so a
-/// finite slot is compared through the one comparison judgment ([`eval_cmp`])
-/// rather than by `admits`, and an abstract slot under a loose comparison keeps
-/// the arm (its truth set is not decidable from the fact alone).
+/// finite slot is compared through [`eval_cmp`] rather than by `admits`, and an
+/// abstract slot under a loose comparison keeps the arm (undecidable from the
+/// fact alone).
 fn tag_possible(slot: &Fact, tag: &ArgValue, loose: bool, php_minor: Option<(u16, u16)>) -> bool {
     match slot.finite_members() {
         Some(members) => {
@@ -27553,16 +26218,15 @@ fn tag_possible(slot: &Fact, tag: &ArgValue, loose: bool, php_minor: Option<(u16
     }
 }
 
-/// **The collapse rule** (A-G3): once subtraction leaves a lane whose array
-/// vocabulary is one arm, that lane states a single shape truth — so mint it
-/// into the fact lane through the S3 lowering ([`seed_shape_fact`], the same one
-/// entry-state seeding uses, so a minted fact and a seeded one are identical by
-/// construction).
+/// **The collapse rule** (A-G3): once subtraction leaves a lane with one array
+/// arm, that lane states a single shape truth — mint it into the fact lane
+/// through the S3 lowering ([`seed_shape_fact`], the same one entry-state
+/// seeding uses).
 ///
-/// Only ever *adds* a fact: a binding that already carries one (seeded, or minted
-/// by an earlier guard on the same branch) is left to the refinement step, and a
-/// binding carrying a non-shape fact — a proven `Singleton` array, say — is
-/// strictly better information and is never overwritten.
+/// Only ever *adds* a fact: a binding that already carries one (seeded, or
+/// minted by an earlier guard) is left to the refinement step; a binding
+/// carrying a non-shape fact (e.g. a proven `Singleton` array) is strictly
+/// better information and is never overwritten.
 fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Store) {
     if env.get(var).is_some_and(|k| k.fact.is_some()) {
         return;
@@ -27572,45 +26236,39 @@ fn mint_collapsed_shape(var: &str, env: &mut HashMap<String, Known>, store: &Sto
     let line = env.get(var).map_or(0, |k| k.line);
     env.insert(
         var.to_owned(),
-        // `Asserted`, for the same reason entry-state seeding is: A-G9's
-        // corollary is normative, and the stratum is what enforces it.
+        // `Asserted`, same reason entry-state seeding is (A-G9's corollary).
         Known::value_strat(fact, line, Some(SHAPE_REFINED.to_owned()), Stratum::Asserted),
     );
 }
 
 /// **The value lane's answer to a count guard** (issue #272): the fact that
 /// replaces a *proven* array the branch's count interval excludes, or `None`
-/// when the value survives and must be left exactly as it is.
+/// when the value survives unchanged.
 ///
-/// Why this exists at all. Every other shape guard narrows a `Fact::Shape` and
-/// says nothing about a proven `Fact::Singleton(Val::Array(…))` — it cannot,
-/// because presence and list-ness are *already decided* on a literal, so a
-/// literal that satisfies the guard is untouched and one that does not is a
-/// contradiction the guard forms could not express. A count comparison can
-/// express it: `count($x) > 0` on a binding the walk proved to be `[]` is a
-/// branch the literal cannot reach. Before the count guard existed such a
-/// comparison lowered to `CondExpr::Opaque` and the opaque path *dropped* the
-/// binding, so the stale literal never survived; the lowering lift keeps the
-/// comparison, and without this the literal would ride into the arm and the
-/// contract checker would convict on it (`resolve_cval` reads exactly this
-/// lane). The two lanes are narrowed in one place so they cannot disagree.
+/// Other shape guards narrow only `Fact::Shape` and say nothing about a proven
+/// `Fact::Singleton(Val::Array(…))`, since presence/list-ness are already
+/// decided on a literal. A count comparison can still contradict a literal
+/// (`count($x) > 0` where `$x` is proven `[]`): before this guard existed, such
+/// a comparison lowered to `CondExpr::Opaque`, which dropped the binding, so
+/// the stale literal never survived; keeping the comparison means the literal
+/// must be narrowed here too, or the contract checker (`resolve_cval`) would
+/// convict on a stale value. Both lanes are narrowed in one place so they
+/// cannot disagree.
 ///
-/// The replacement is **not** a lifted-and-narrowed shape. The entries are what
-/// the branch refutes, so nothing about them — not their keys, not their value
-/// types — survives as proof; what survives is "an array whose entry count lies
-/// in `range`", which is the honest floor and still a narrowing. Marking the
-/// branch dead instead is the verdict's business, never a narrowing operator's
+/// The replacement is **not** a lifted-and-narrowed shape: nothing about the
+/// refuted entries (keys, value types) survives as proof, only "an array whose
+/// entry count lies in `range`" — the honest floor, still a narrowing. Marking
+/// the branch dead is the verdict's business, not a narrowing operator's
 /// (ADR-0052 §2).
 ///
-/// A `OneOf` of arrays filters member-wise, which is sharper: only the members
-/// the interval excludes drop, and a surviving remainder stays a proven value
-/// set. A `OneOf` with any non-array member is left alone — `count()` accepts a
-/// `Countable` too, and this rule has no business guessing at one.
+/// A `OneOf` of arrays filters member-wise (sharper: only excluded members
+/// drop). A `OneOf` with any non-array member is left alone — `count()`
+/// accepts a `Countable` too, and this rule does not guess at one.
 fn refuted_array_value(fact: &Fact, range: IntRange) -> Option<Fact> {
     let in_range = |entries: &[(VKey, Val)]| {
         i64::try_from(entries.len()).is_ok_and(|n| range.contains(n))
     };
-    // "An array, with this entry count": everything the guard leaves standing.
+    // "An array with this entry count": everything the guard leaves standing.
     let widened = || Fact::Shape {
         shape: Box::new(ShapeFact::plain_array().narrow_count(range)),
         nullable: false,
@@ -27642,9 +26300,8 @@ fn refuted_array_value(fact: &Fact, range: IntRange) -> Option<Fact> {
 fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed: bool) {
     use steins_domain::Presence;
     let Some(known) = env.get(g.var()) else { return };
-    // **Value-lane coherence first** (issue #272): a count guard is the one guard
-    // here that can refute a *proven* array outright, and the value lane is where
-    // the contract checker looks. See [`refuted_array_value`].
+    // **Value-lane coherence first** (issue #272): a count guard is the one
+    // guard that can refute a *proven* array outright. See [`refuted_array_value`].
     if let ShapeGuard::Count { range, .. } = g
         && let Some(fact) = known.fact.as_ref()
         && let Some(next) = refuted_array_value(fact, *range)
@@ -27665,9 +26322,8 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
                 *flavor == PresenceFlavor::Isset,
                 witnessed,
             )),
-            // `isset($x[k])` is false when `$x` is null, so the true branch also
-            // proves the base non-null. `array_key_exists` on null raises a
-            // TypeError rather than answering false, so it proves nothing here.
+            // `isset($x[k])` false when `$x` is null, so true branch also proves
+            // non-null. `array_key_exists` on null raises TypeError, proves nothing.
             nullable: nullable && *flavor == PresenceFlavor::KeyExists,
         }),
         ShapeGuard::Present { key, flavor, positive: false, .. } => {
@@ -27685,19 +26341,18 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
                     Some(Fact::Shape { shape: Box::new(shape.mark_absent(key)), nullable })
                 }
                 // A `Required` field with a non-nullable slot makes this branch
-                // runtime-impossible. **Deliberate v1 conservatism**: the env is
-                // left unchanged rather than the region marked dead. Death is the
-                // verdict's business (ADR-0052 §2), the premise here is `Asserted`
-                // (A-G9), and an `Asserted`-derived dead region would stop the
-                // env-free direct pass from reporting on a live path.
+                // runtime-impossible. **Deliberate v1 conservatism**: env left
+                // unchanged rather than marking the region dead — death is the
+                // verdict's business (ADR-0052 §2), and this premise is `Asserted`
+                // (A-G9), whose dead region would silence a live path.
                 _ => None,
             }
         }
         ShapeGuard::Truthy { positive: true, .. } => {
             Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable })
         }
-        // A falsy array is the empty array — but only when the base cannot be
-        // null, since `null` is falsy too and would make the claim wrong.
+        // A falsy array is the empty array — only when the base cannot be null,
+        // since `null` is falsy too.
         ShapeGuard::Truthy { positive: false, .. } => {
             (!nullable).then(|| Fact::Singleton(Val::Array(Vec::new())))
         }
@@ -27705,13 +26360,9 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
             shape: Box::new(shape.set_is_list(Certainty::from_bool(*positive))),
             nullable,
         }),
-        // A8: the guard only ever fires on the leg that proves non-emptiness
-        // (collect_shape_guards never pushes it on the vacuous branch), so
-        // there is no positive/negative split to make here — unlike
-        // `Truthy`, whose false branch also needs a distinct (empty-array)
-        // reading. The concrete/value lane is untouched: `array_all`/
-        // `array_any` say nothing about entry order or values, only that at
-        // least one entry exists.
+        // A8: fires only on the leg that proves non-emptiness (unlike `Truthy`,
+        // no positive/negative split needed). Value lane untouched: `array_all`/
+        // `array_any` say nothing about order or values, only that an entry exists.
         ShapeGuard::NonEmpty { .. } => {
             Some(Fact::Shape { shape: Box::new(shape.set_non_empty()), nullable })
         }
@@ -27770,14 +26421,13 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
 /// **Barrier first, then one binding.** The walk still clears the whole env and
 /// store, exactly as the pre-S4 `Barrier` lowering did — an offset write can
 /// alias through references the trace does not model — and only then puts back
-/// the base binding's array shape with the key promoted or removed. That order
-/// is the containment: this rule can move the shape lane and nothing else, so a
-/// finding that did not premise a shape fact cannot move with it.
+/// the base binding's array shape with the key promoted or removed. This rule
+/// can move the shape lane and nothing else, so a finding that did not premise
+/// a shape fact cannot move with it.
 ///
-/// The by-ref sweep needs no separate fence: everything is dropped before
-/// anything is restored, and the restore reads facts captured *before* the
-/// clear, so a by-ref exposure that dropped the fact earlier in the walk leaves
-/// nothing to restore.
+/// The by-ref sweep needs no separate fence: the restore reads facts captured
+/// *before* the clear, so a by-ref exposure dropped earlier leaves nothing to
+/// restore.
 fn apply_offset_write(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -27792,16 +26442,13 @@ fn apply_offset_write(
     // Capture before the barrier clears everything.
     let before = env.get(base).cloned();
     let arms = store.contract.get(base).cloned();
-    // The written value's fact, resolved in the PRE-write env through the same
-    // ladder an ordinary assignment uses; `None` (an unresolvable rvalue, or the
-    // `unset` case) leaves the slot unknown, which is the honest floor.
-    //
-    // The ladder is [`transfer_arg_known`]'s (issue #327), so a written value
-    // that is *abstract but known* — `$a['k'] = $x` with a natively-typed
-    // `int $x` — lands as `int` rather than as unknown, and brings its own
-    // stratum with it (ADR-0061 §3's derivation clause: the binding cannot come
-    // out more trusted than what was written into it). A poisoned scope keeps
-    // the literal-only path, because an env read there is not evidence.
+    // The written value's fact, resolved in the PRE-write env through
+    // [`transfer_arg_known`]'s ladder (issue #327), so a value that is
+    // *abstract but known* (`$a['k'] = $x` with natively-typed `int $x`) lands
+    // as `int` rather than unknown, carrying its own stratum (ADR-0061 §3: the
+    // binding cannot come out more trusted than what was written into it).
+    // `None` (unresolvable rvalue, or `unset`) leaves the slot unknown. A
+    // poisoned scope keeps the literal-only path — an env read there isn't evidence.
     let (slot, slot_stratum) = match value {
         None => (None, Stratum::Verified),
         Some(v) if w.scope.poisoned => (
@@ -27822,10 +26469,9 @@ fn apply_offset_write(
     let Some(known) = before else { return };
     // A base holding an order-witnessed VALUE takes the same path, by lifting
     // (issue #327). Before this, `$b = ['p' => 1]; $b['q'] = 2;` dropped `$b`
-    // entirely — the one write undid everything the literal had proven, which is
-    // the [`array_literal_fact`] cliff reached from the other direction. The lift
-    // is where the exact value honestly becomes a shape; the update rules below
-    // are then the ones ADR-0062 §4 already specifies, unchanged.
+    // entirely — the [`array_literal_fact`] cliff reached from the other
+    // direction. The lift turns the exact value into a shape; the update rules
+    // below are ADR-0062 §4's, unchanged.
     let lifted;
     let (shape, nullable): (&ShapeFact, &bool) = match &known.fact {
         Some(Fact::Shape { shape, nullable }) => (shape.as_ref(), nullable),
@@ -27838,11 +26484,9 @@ fn apply_offset_write(
     let Some(first) = keys.first().and_then(|k| guard_key(k, php_minor)) else { return };
 
     // The order witness this write hands on, when the base had one (issue #327).
-    // A witnessed base stays witnessed through a write, because a write to an
-    // array whose construction was observed produces another array whose
-    // construction was observed: PHP appends a new key at the end, leaves an
-    // existing key where it is, and `unset` takes one out of the sequence. Every
-    // rebuild below drops the witness on the way, so it is re-attached once, at
+    // A witnessed base stays witnessed through a write: PHP appends a new key at
+    // the end, leaves an existing key where it is, and `unset` removes one from
+    // the sequence. Rebuilds below drop the witness; it is re-attached once, at
     // the end, from the sequence computed here.
     let witnessed_order: Option<Vec<VKey>> = shape.order.as_ref().map(|order| {
         let mut order: Vec<VKey> = order.clone();
@@ -27861,41 +26505,32 @@ fn apply_offset_write(
         None => {
             // `unset($x[k])` — the key is proven gone. Cover interplay (a cover
             // containing `k` dies with it, A-G8) is handled inside `mark_absent`;
-            // the *sharper* law that shrinks a cover instead of dropping it is
-            // S5's, with the rest of the cover lane.
+            // the *sharper* law shrinking a cover instead of dropping it is S5's.
             shape.mark_absent(&first)
         }
         Some(_) => {
             // A write makes the key real: `Required { witnessed: true }` with the
             // value's own fact. A nested write (`$x['a']['b'] = v`) autovivifies
             // the OUTER key and **clears its slot**: the inner array just changed
-            // in a way the declared slot may no longer describe (a `string` written
-            // under `array<string, int>`), so carrying the declaration across would
-            // state something the write may have falsified. Unknown is the honest
-            // floor; a real nested-shape update is not v1.
+            // in a way the declared slot may no longer describe, so carrying the
+            // declaration across could state something the write falsified.
+            // Unknown is the honest floor; a real nested-shape update is not v1.
             let nested = keys.len() > 1;
             // A write can only add an entry, so the learned count **ceiling**
-            // (issue #272) does not survive it; the floor does, and does not
-            // need re-deriving.
+            // (issue #272) does not survive it; the floor does.
             let mut next = shape.relax_count_ceiling().promote_present(&first, false, true);
-            // Writing an UNDECLARED key under a `Sealed` tail: the declaration
-            // says the key cannot be there and the code just put it there, so the
-            // runtime value has diverged from the docblock. Resolved the A-G5
-            // way — "flow refinement lives in the domain form": the write is
-            // order-witnessed truth, so the field is added AND the tail unseals.
-            // Keeping `Sealed` would leave a fact that rejects the very array the
-            // code just built; unsealing is sound and loses only the declared
-            // sealing, on this binding, from this point on.
+            // Writing an UNDECLARED key under a `Sealed` tail: the runtime value
+            // has diverged from the docblock. Resolved the A-G5 way — the write
+            // is order-witnessed truth, so the field is added AND the tail
+            // unseals. Keeping `Sealed` would reject the very array the code just
+            // built; unsealing loses only the declared sealing, from this point on.
             //
             // **Unless the sealing was witnessed too** (issue #327). A base whose
-            // construction this walk observed — `$a = []; $a['k'] = $x;` — has no
-            // docblock to have diverged from: its sealing is a fact about the
-            // array the code built, and adding a key to it yields another array
-            // the code built, still exactly known. There the write EXTENDS the
-            // sealed shape by the new key instead of opening the tail. It has to
-            // be added by hand: `promote_present` can only promote a key a sealed
-            // shape already declares, and the whole point here is that this one
-            // does not.
+            // construction this walk observed (`$a = []; $a['k'] = $x;`) has no
+            // docblock to have diverged from, so the write EXTENDS the sealed
+            // shape by the new key instead of opening the tail — added by hand,
+            // since `promote_present` only promotes a key a sealed shape already
+            // declares.
             if let Some(order) = witnessed_order.as_ref()
                 && next.field(&first).is_none()
             {
@@ -27909,11 +26544,9 @@ fn apply_offset_write(
                     fields,
                     Tail::Sealed,
                     // Recomputed denotationally from the NEW key sequence: an
-                    // append can make a list (`[]` then key `0`) or break one
-                    // (a string key), and the old flag survives neither. The
-                    // sequence is what decides it, which is what the witness is
-                    // for — the canonically sorted fields cannot tell
-                    // `[1 => …, 0 => …]` from a list.
+                    // append can make a list or break one, and the old flag
+                    // survives neither. The canonically sorted fields cannot
+                    // tell `[1 => …, 0 => …]` from a list — the sequence can.
                     Certainty::from_bool(steins_domain::keys_are_a_list(order.iter())),
                     true,
                     next.covers.clone(),
@@ -27934,9 +26567,8 @@ fn apply_offset_write(
         }
     };
     // Re-attach the witness the rebuilds dropped. `with_order` re-checks it
-    // against the shape it lands on, so a sequence the update invalidated
-    // (a tail that ended up unsealed, a key count that no longer matches) is
-    // refused here rather than believed.
+    // against the landing shape, so a sequence the update invalidated (unsealed
+    // tail, mismatched key count) is refused rather than believed.
     let next = match witnessed_order {
         Some(order) => next.with_order(order),
         None => next,
@@ -28015,9 +26647,9 @@ fn emit_offset(
     out.push(Diagnostic { id, path: cx.path().to_owned(), line: pos.line, column: pos.column, message, facet: None, fix: None });
 }
 
-/// Outcome of a resolved method/static call (ADR-0075): the return-fact summary
-/// **and** the declared return arms, both computed against the store **before**
-/// the assignment may unbind a self-assign receiver (`$o = $o->m(1)`).
+/// Outcome of a resolved method/static call (ADR-0075): return-fact summary
+/// **and** declared return arms, both computed against the store **before** the
+/// assignment may unbind a self-assign receiver (`$o = $o->m(1)`).
 struct MethodCallOutcome {
     summary: Option<ReturnSummary>,
     return_arms: Option<Vec<ContractArm>>,
@@ -28056,9 +26688,9 @@ fn handle_method_call(
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
-    // The argument-contract check runs for every argument shape — the positional
-    // prefix and the named arguments (Gap A: `new Foo(n: 0)` / `$o->m(n: 0)` were
-    // previously skipped wholesale by the `positional_only` guard below).
+    // Runs for every argument shape — positional prefix and named arguments
+    // (Gap A: `new Foo(n: 0)` / `$o->m(n: 0)` were previously skipped wholesale
+    // by the `positional_only` guard below).
     check_method_args(
         cx,
         folder,
@@ -28075,8 +26707,8 @@ fn handle_method_call(
     );
 
     // The binding descent maps positional arguments to parameters, so it stays
-    // positional-only (a named/spread call's parameter binding is not modeled here);
-    // the contract check above already covered the arguments.
+    // positional-only (named/spread parameter binding is not modeled here); the
+    // contract check above already covered the arguments.
     if !call.positional_only {
         return MethodCallOutcome { summary: None, return_arms };
     }
@@ -28153,9 +26785,9 @@ fn check_method_args(
 
         let mut native_fired = false;
         if let Some(ty) = param.ty.as_ref() {
-            // Resolved value + provenance + trust stratum (issue #127 review): the
-            // proof gate uses the stratum that arrived with the resolution, not a
-            // syntactic re-read that would launder an Asserted fold to Verified.
+            // Resolved value + provenance + trust stratum (issue #127 review): uses
+            // the stratum that arrived with the resolution, not a syntactic
+            // re-read that would launder an Asserted fold to Verified.
             let resolved: Option<(ArgValue, Option<String>, Stratum)> = match &arg.value {
                 v if v.is_literal() => Some((v.clone(), None, Stratum::Verified)),
                 ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
@@ -28328,9 +26960,8 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
 /// where a native scalar/union type `ty` is required provably raise a
 /// `TypeError` under PHP 8.1+ (honoring `strict`)?
 ///
-/// The table was settled **empirically against PHP 8.5.8** (the analyzer's floor
-/// is 8.1, ADR-0011; these union-coercion rules have been stable since 8.0). The
-/// reproduction snippets and outputs (union members, both modes):
+/// Settled **empirically against PHP 8.5.8** (analyzer floor 8.1, ADR-0011;
+/// union-coercion rules stable since 8.0):
 ///
 /// ```text
 /// COERCIVE (error iff the value coerces to NO member):
@@ -28357,13 +26988,11 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
 ///
 /// ADR-0043 stage 3 opens two definite-No arms, both riding the trinary is-a
 /// oracle on `cx`: a **proven object value** (`new` / enum case) errors iff every
-/// union member provenly rejects its exact class, and a **scalar value** now sees
-/// through any `Instance` union members (an object member never accepts a scalar —
-/// no coercion exists — so the verdict rests on the scalar members, exactly as the
-/// empirically-verified `member_accepts_*` tables already encode via their
-/// `Instance => false` arms). A `null` value against an object-bearing type stays
-/// silent (null-vs-object is out of scope; preserves the pre-stage-3 behavior and
-/// sidesteps the `has_null_default` implicit-nullable interplay).
+/// union member provenly rejects its exact class; a **scalar value** sees through
+/// any `Instance` union members (no coercion exists for those, exactly as the
+/// `member_accepts_*` tables' `Instance => false` arms encode). A `null` value
+/// against an object-bearing type stays silent (out of scope; sidesteps the
+/// `has_null_default` implicit-nullable interplay).
 fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
     let strict = cx.strict();
     match arg {
@@ -28419,15 +27048,13 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
 /// ADR-0043 stage 3 — the object-world native definite-No is **guard-blind inside
 /// a binding descent** and must be suppressed there. A descent rebinds a callee's
 /// parameter to a hypothetical caller value, but the callee's in-body `instanceof`
-/// / type guards that would narrow that value are unmodeled (e.g. Carbon's
+/// guards that would narrow it are unmodeled (e.g. Carbon's
 /// `if ($x instanceof DateTimeInterface) { … $x … }` is dead for a string `$x`,
-/// yet the walk cannot prove it because the guard flows through an intermediate
-/// boolean). Checking an object-world mismatch on a descent-bound value is
-/// therefore unsound — exactly the reason descent-bound property writes are also
-/// unchecked (see `apply_prop_assign`). Scalar-vs-scalar descent checks, whose
-/// guards the walk *can* evaluate, are unaffected: only a judgment that touches an
-/// object type (an `Instance`-bearing param, or a proven object value) is
-/// suppressed. In the non-descent direct/propagation passes this is always `false`.
+/// but the walk cannot prove it — the guard flows through an intermediate
+/// boolean). Checking an object-world mismatch on a descent-bound value is thus
+/// unsound, the same reason descent-bound property writes are unchecked (see
+/// `apply_prop_assign`). Only a judgment touching an object type is suppressed;
+/// scalar-vs-scalar descent checks are unaffected. Always `false` outside descent.
 fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value: &ArgValue) -> bool {
     in_descent
         && (ty.has_instance() || matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)))
@@ -28444,9 +27071,8 @@ fn member_accepts_strict(m: &TypeMember, arg: &ArgValue) -> bool {
         TypeMember::Scalar(ScalarType::Bool) => matches!(arg, ArgValue::Bool(_)),
         TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
         // Object member (ADR-0043): no scalar literal is a member of a class type
-        // or an object intersection. Unreachable in stage 1 (the `has_instance`
-        // guard in `is_type_error` short-circuits before any member is inspected);
-        // explicit for stage 3.
+        // or intersection. Unreachable in stage 1 (`has_instance` short-circuits
+        // in `is_type_error` first); explicit for stage 3.
         TypeMember::Instance { .. } | TypeMember::InstanceInter(_) => false,
     }
 }
@@ -28468,9 +27094,8 @@ fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
         },
         // No value coerces *into* a bool-literal; only the exact bool matches.
         TypeMember::BoolLiteral(b) => matches!(arg, ArgValue::Bool(v) if v == b),
-        // Object member (ADR-0043): no scalar coerces into a class type or an
-        // object intersection. See `member_accepts_strict` — unreachable in stage 1,
-        // explicit for stage 3.
+        // Object member (ADR-0043): see `member_accepts_strict` — unreachable in
+        // stage 1, explicit for stage 3.
         TypeMember::Instance { .. } | TypeMember::InstanceInter(_) => false,
     }
 }
@@ -28479,16 +27104,14 @@ fn member_accepts_coercive(m: &TypeMember, arg: &ArgValue) -> bool {
 /// `strict`, or `None` when the pass fatals at entry or the coercion is
 /// uncertain (silence is safe — ADR-0002).
 ///
-/// For a single-scalar type the exact per-scalar coercion is reproduced (keeping
-/// interprocedural binding precise). For a **union** the value is bound only when
-/// it already matches a member's own type exactly — Steins does not guess which
-/// member PHP would coerce a mismatched value into, so it stops the descent
-/// (silent) rather than risk an unsound bound value.
+/// A single-scalar type reproduces the exact per-scalar coercion (precise
+/// interprocedural binding). A **union** binds only when the value already
+/// matches a member's own type exactly — Steins does not guess which member PHP
+/// would coerce a mismatch into, so it stops the descent (silent) instead.
 fn coerce_into_param(cx: &Cx, ty: &NativeType, value: &ArgValue) -> Option<ArgValue> {
-    // ADR-0043 stage 1 — an object-bearing type binds the value verbatim, exactly
-    // as the pre-ADR-0043 `None`-typed (untracked) parameter did: the caller's
-    // `None => bind raw value` path is reproduced here so an object parameter does
-    // not abort the interprocedural descent. No scalar coercion applies to objects.
+    // ADR-0043 stage 1 — an object-bearing type binds the value verbatim, as the
+    // pre-ADR-0043 untracked parameter did, so an object parameter does not abort
+    // the interprocedural descent. No scalar coercion applies to objects.
     if ty.has_instance() {
         return Some(value.clone());
     }
@@ -28515,32 +27138,27 @@ fn coerce_into_param(cx: &Cx, ty: &NativeType, value: &ArgValue) -> Option<ArgVa
 ///
 /// PHP converts at every typed boundary; recording the *assigned* fact verbatim
 /// is how #48's soundness hole opened: an int written to a `float` property read
-/// back as the int `1`, `=== 1` folded true on a value the runtime holds as
-/// `1.0`, and a dead branch's `null` premised a proof-layer `call.on-null` on
-/// code that runs clean.
+/// back as int `1`, `=== 1` folded true on a value the runtime holds as `1.0`.
 ///
-/// The table is deliberately narrower than [`coerce_scalar`]'s coercive-mode
-/// table, because a stored fact must be right under `declare(strict_types=1)`
-/// and without it alike, and this seam does not consult the file's mode. Only
-/// **mode-independent** outcomes are stored:
+/// Deliberately narrower than [`coerce_scalar`]'s coercive-mode table: a stored
+/// fact must be right whether or not `declare(strict_types=1)` is set, and this
+/// seam does not consult the file's mode. Only **mode-independent** outcomes
+/// are stored:
 ///
 /// - a value/base whose runtime type exactly matches a union member stores
-///   as-is (no conversion happens in either mode);
-/// - an int into a type with a `float` member and no `int` member stores as the
-///   float it becomes — the ONE implicit conversion PHP performs in both modes
-///   (the strict-mode int→float widening exception), value-precisely for the
-///   finite layers and as `General` float for the abstract ones (the int
-///   refinement is an int-domain claim; the domain has no float refinement, so
-///   widening drops it — wider, never wrong);
+///   as-is (no conversion in either mode);
+/// - an int into a `float`-member/no-`int`-member type stores as the float it
+///   becomes — the ONE implicit conversion PHP performs in both modes (the
+///   strict-mode int→float widening exception) — value-precisely for finite
+///   layers, `General` float for abstract ones (the domain has no float
+///   refinement, so widening drops it: wider, never wrong);
 /// - `null` into a nullable type stores as-is;
-/// - everything else drops the fact: under strict types the write fatals (no
-///   fact is the soundest fact), and under coercive mode the conversion may be
-///   computable but storing nothing is sound where storing the unconverted
-///   fact was not.
+/// - everything else drops the fact: strict types fatals the write (no fact is
+///   soundest), coercive mode's conversion may be computable but storing
+///   nothing is still sound.
 ///
-/// An object-bearing type stores verbatim (ADR-0043 stage 1: the native scalar
-/// machinery treats such a slot as untracked, and the object arm never reaches
-/// here — object rvalues are excluded before storage).
+/// An object-bearing type stores verbatim (ADR-0043 stage 1: treated as
+/// untracked; object rvalues are excluded before storage).
 fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact> {
     if ty.has_instance() {
         return Some(fact);
@@ -28556,9 +27174,8 @@ fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact> {
             // int→float can merge previously-distinct members; `from_vals` re-dedupes.
             coerced.and_then(Fact::from_vals)
         }
-        // A union keeps the arms the native type actually has: the parameter
-        // is the gate, so an arm it does not admit cannot arrive. Losing every
-        // arm is no fact rather than an empty one.
+        // A union keeps only the arms the native type admits (the parameter is
+        // the gate). Losing every arm is no fact rather than an empty one.
         Fact::Union { arms, nullable } => {
             let kept: Vec<(Base, Option<Refinement>)> =
                 arms.into_iter().filter(|(b, _)| native_has_base(ty, *b)).collect();
@@ -28727,17 +27344,16 @@ use Certainty as Tri;
 /// (normalized keys), or an object of an exact class (a `New` fact).
 ///
 /// An object additionally carries its **class-level generic type arguments**
-/// (ADR-0032 tier 3, issue #10, extended by the ADR-0032 inheritance-edge
-/// amendment / issue #294): a set of [`GenericCarry`] edges, each naming the class
-/// that *declares* the templates its arguments align to. The vector is empty when
-/// the class is non-generic and documents no parameterized inheritance edge, or
-/// when nothing could be proven — an empty carry is the honest floor (acceptance
-/// then answers `Maybe` on the argument half, never a manufactured `No`). These
-/// live in the contract lane, not the object-free value lattice (ADR-0035/0043 §4).
+/// (ADR-0032 tier 3, issue #10, extended by issue #294): a set of
+/// [`GenericCarry`] edges, each naming the class that *declares* the templates
+/// its arguments align to. Empty when the class is non-generic or nothing could
+/// be proven — the honest floor (acceptance answers `Maybe`, never a manufactured
+/// `No`). Lives in the contract lane, not the object-free value lattice
+/// (ADR-0035/0043 §4).
 ///
-/// `Clone`/`PartialEq` exist because the carry now survives a variable binding on
-/// the heap ([`HeapObj::targs`], ADR-0032 binding amendment / issue #295): it is
-/// cloned out of the heap at every use and compared for identity at a branch join.
+/// `Clone`/`PartialEq` exist because the carry survives a variable binding on
+/// the heap ([`HeapObj::targs`], issue #295): cloned out at every use, compared
+/// for identity at a branch join.
 #[derive(Clone, PartialEq)]
 enum CVal {
     Scalar(ArgValue),
@@ -28752,15 +27368,14 @@ enum CVal {
 
 /// One class-level generic parameterization an object carries: the FQN of the class
 /// that **declares** the templates, plus one argument per declared template in
-/// declaration order (ADR-0032 amendment, issue #294).
+/// declaration order (issue #294).
 ///
-/// Naming the owner is what makes the carry survive inheritance. Stage 1's carry was
-/// a bare positional vector, implicitly aligned to the object's *own* class; that
-/// assumption breaks the moment `final class IntBox extends Box` documents
-/// `@extends Box<int>`, because the object is an `IntBox` and the templates are
-/// `Box`'s. Acceptance therefore looks up the edge whose owner **is** the class the
-/// contract names, and stays silent when no edge matches — never comparing one
-/// class's arguments against another's parameters.
+/// Naming the owner is what makes the carry survive inheritance. Stage 1's carry
+/// was a bare positional vector implicitly aligned to the object's *own* class;
+/// that breaks for `final class IntBox extends Box` with `@extends Box<int>`,
+/// where the object is `IntBox` but the templates are `Box`'s. Acceptance looks
+/// up the edge whose owner **is** the class the contract names, silent when none
+/// matches — never comparing one class's arguments against another's parameters.
 #[derive(Clone, PartialEq)]
 struct GenericCarry {
     /// The class declaring the `@template`s `args` aligns to (resolved FQN).
@@ -28773,14 +27388,13 @@ struct GenericCarry {
     site: Option<(usize, u32)>,
 }
 
-/// One carried type argument. Two provenances, because the two facts differ in
-/// kind: a `new` site proves a **value** flowed in (ADR-0032 tier-1 propagation
-/// feeding tier 3), whereas an inheritance edge states a **type** the author wrote.
+/// One carried type argument. Two provenances: a `new` site proves a **value**
+/// flowed in (tier-1 propagation feeding tier 3), an inheritance edge states a
+/// **type** the author wrote.
 ///
-/// The distinction is also what the binding-carry sweep reads (ADR-0032 binding
-/// amendment / issue #295): a `Val` is a fact about the values one object holds and
-/// a mutating receiver call invalidates it; a `Ty` is what the author declared about
-/// the class and no call can touch it, so it is sweep-immune.
+/// The distinction is also what the binding-carry sweep reads (issue #295): a
+/// `Val` is a fact about the values one object holds, invalidated by a mutating
+/// receiver call; a `Ty` is declared and sweep-immune.
 #[derive(Clone, PartialEq)]
 enum CArg {
     /// A proven value from the `new` site (`new Box('x')` → `'x'`).
@@ -28797,13 +27411,13 @@ struct Envelopes {
     params: Vec<(String, PType)>,
     ret: Option<PType>,
     /// Parameter names (no `$`) that an assertion tag (`@phpstan-assert` &c.)
-    /// targets on this same declaration — the function is an **assertion helper**
-    /// for them (see [`check_phpdoc_param`]). Property/`$this->…` assertion targets
-    /// are excluded (they say nothing about a call-site argument).
+    /// targets on this declaration — the function is an **assertion helper** for
+    /// them (see [`check_phpdoc_param`]). Property/`$this->…` targets excluded
+    /// (say nothing about a call-site argument).
     assert_params: HashSet<String>,
-    /// The full assertion specs on this declaration (Feature D): the asserted type
-    /// applied to the caller's env after a call (`Always`), or in guard position
-    /// (`IfTrue`/`IfFalse`). Property/`$this` targets are excluded (as above).
+    /// Full assertion specs on this declaration (Feature D): asserted type applied
+    /// to the caller's env after a call (`Always`), or in guard position
+    /// (`IfTrue`/`IfFalse`). Property/`$this` targets excluded (as above).
     asserts: Vec<AssertSpec>,
 }
 
@@ -28832,11 +27446,10 @@ impl Envelopes {
     }
 
     /// Neutralize every envelope identifier naming a template from `shadow` (issue
-    /// #5): a `@template`-declared name is a template parameter, not a class, so it
+    /// #5): a `@template`-declared name is a template parameter, not a class, and
     /// must not lower to a class contract that would reject real arguments. Applied
     /// in two idempotent stages — [`parse_envelopes`] applies this declaration's own
-    /// `@template` names, then a member-check site applies the enclosing class-like's
-    /// class-level `@template` names — so a `no-op` empty set costs nothing.
+    /// `@template` names, a member-check site applies the enclosing class-like's.
     fn shadow_templates(&mut self, shadow: &TemplateShadow) {
         if shadow.is_empty() {
             return;
@@ -28859,14 +27472,11 @@ impl Envelopes {
 /// docblock, inside every member docblock).
 ///
 /// **Case-insensitive by decision.** PHPStan treats template names as
-/// case-sensitive identifiers, so strictly `@template Model` would not shadow a
-/// `@param model`. Steins folds case instead, for three reasons: (1) zero-FP is
-/// paramount and over-shadowing only ever *silences* a diagnostic — it can never
-/// manufacture one; (2) the whole identifier pipeline (`is_known_class`, contract
-/// lowering, `accepts_identifier`) already normalizes to lowercase, so a folded
-/// shadow set composes uniformly instead of needing a lone case-sensitive path; (3)
-/// the only observable divergence from PHPStan is Steins staying silent where
-/// PHPStan would still resolve the class — and silence is the safe side (ADR-0029).
+/// case-sensitive, so strictly `@template Model` would not shadow `@param model`.
+/// Steins folds case instead: over-shadowing only ever *silences* a diagnostic;
+/// the identifier pipeline already normalizes to lowercase; and the only
+/// divergence from PHPStan is staying silent where it would still resolve the
+/// class, the safe side (ADR-0029).
 ///
 /// Each name also carries its declared **bound**, when that bound is one Steins can
 /// stand behind — see [`TemplateShadow`] and [`vocabulary_bound`].
@@ -28931,17 +27541,14 @@ impl TemplateShadow {
 /// `string`, `int|list<int>`, and their kin.
 ///
 /// Deliberately narrow (issue #293). A **class** bound (`@template T of HasName`)
-/// declines here rather than being half-checked: class bounds are the common case in
-/// real code, and admitting them would put a class contract on every templated
-/// parameter in the corpus — a large, unmeasured surface for what is meant to be the
-/// smallest slice that closes `generics_template_bound_array`. `Opaque` (an
-/// unreadable bound), `mixed` (a bound that constrains nothing), and `object` (the
-/// class world's own top) decline for the same reason: none of them is information a
-/// check can act on, and two of them are the class direction in disguise.
+/// declines rather than being half-checked — admitting it would put a class
+/// contract on every templated parameter in the corpus, an unmeasured surface
+/// beyond the slice that closes `generics_template_bound_array`. `Opaque`,
+/// `mixed`, and `object` decline too: none is information a check can act on.
 ///
-/// Soundness is one-directional and holds in the direction that matters: whatever
-/// binds to `T` inhabits `T`, and `T` is *at most* its bound, so judging a value
-/// against the bound can only miss violations, never manufacture one.
+/// Soundness is one-directional: whatever binds to `T` inhabits `T`, and `T` is
+/// *at most* its bound, so judging against the bound can only miss violations,
+/// never manufacture one.
 fn vocabulary_bound(text: &str) -> Option<PType> {
     use steins_contract::ContractTy as C;
     let parsed = steins_phpdoc::parse_type(text).ok()?;
@@ -28956,18 +27563,14 @@ fn vocabulary_bound(text: &str) -> Option<PType> {
 }
 
 /// Rewrite every **bare, unqualified** identifier naming a template from `shadow`
-/// to its declared bound, or to an opaque node when it has none (issue #5, extended
-/// by issue #293). The neutral node is [`PKind::Unsupported`], which lowers to
-/// `ContractTy::Opaque` and rides `accepts` as `Maybe` — exactly the silence a
-/// template already gets today when it names no existing class (ADR-0032: templates
-/// are transparent/thin where propagation does not reach). A bounded template
-/// becomes its bound instead: `T` under `@template T of array` reads as `array`,
-/// keeping the template's own span so a diagnostic still points at the `@param`.
-/// A `\`-qualified or namespaced reference (`\Model`, `App\Model`) is **never**
-/// shadowed — qualification opts out of the template namespace. Idempotent (a
-/// vocabulary bound contains no template names to rewrite on a second pass);
-/// recurses through every composite so a nested `list<Model>` / `array{a: Model}`
-/// is neutralized too.
+/// to its declared bound, or to an opaque node when it has none (issue #5,
+/// extended by #293). The neutral node is [`PKind::Unsupported`], which lowers
+/// to `ContractTy::Opaque` and rides `accepts` as `Maybe` — the same silence a
+/// template gets today when it names no existing class. A bounded template
+/// becomes its bound instead (`T` under `@template T of array` reads as
+/// `array`), keeping the template's own span so a diagnostic still points at
+/// the `@param`. A `\`-qualified or namespaced reference is **never** shadowed.
+/// Idempotent; recurses through every composite (nested `list<Model>` too).
 fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
     match &mut ty.kind {
         PKind::Identifier(name) => {
@@ -29019,9 +27622,8 @@ fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
 fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     let text = docblock?;
     // A `@phpstan-`/`@psalm-` prefixed tag overrides the plain one for the same
-    // target (PHPStan precedence; ADR-0029). Track whether each recorded envelope
-    // came from a prefixed tag so a later prefixed tag wins but a plain one never
-    // displaces a prefixed one.
+    // target (PHPStan precedence; ADR-0029): a later prefixed tag wins, a plain
+    // one never displaces a prefixed one.
     let mut params: Vec<(String, PType)> = Vec::new();
     let mut param_prefixed: HashSet<String> = HashSet::new();
     let mut ret: Option<PType> = None;
@@ -29031,10 +27633,9 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     for tag in scan_docblock(text) {
         // An assertion tag targeting a parameter marks it an assert-helper param
         // (its `@param` is a post-condition; ADR-0030). Property targets are inert.
-        // All three kinds (Always/IfTrue/IfFalse) and the negated form exempt alike:
-        // whatever the type or condition, the parameter is not being *constrained*
-        // on entry, so a call-site argument cannot violate it. The spec is also
-        // recorded (with its parsed type) for post-call application (Feature D).
+        // All three kinds (Always/IfTrue/IfFalse) and the negated form exempt alike
+        // since the parameter is not *constrained* on entry. Also recorded for
+        // post-call application (Feature D).
         if let TagKind::Assert { kind: akind, negated } = tag.kind
             && !tag.property_target
             && let Some(var) = &tag.var_name
@@ -29087,15 +27688,14 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
         }
     }
     // Return an envelope set whenever there is anything to check *or* any assertion
-    // to remember: an assert-only docblock still carries the exemption fact, so a
-    // sibling `@param` (added later, or resolved in another pass) sees it.
+    // to remember: an assert-only docblock still carries the exemption fact.
     if !(!params.is_empty() || ret.is_some() || !assert_params.is_empty()) {
         return None;
     }
     let mut env = Envelopes { params, ret, assert_params, asserts };
-    // Shadow this declaration's own `@template` names in its envelope types (issue
-    // #5). A member-check site additionally applies the enclosing class-like's
-    // class-level templates (idempotent second stage).
+    // Shadow this declaration's own `@template` names (issue #5); a member-check
+    // site additionally applies the enclosing class-like's class-level templates
+    // (idempotent second stage).
     env.shadow_templates(&template_names_of(Some(text)));
     Some(env)
 }
@@ -29139,11 +27739,10 @@ impl<'a> Cx<'a> {
         match value {
             v if v.is_literal() => Some(CVal::Scalar(v.clone())),
             // `new Class(args)` — a proven object of exactly `Class`, carrying the
-            // generic parameterizations it can prove: the type-argument values that
-            // flow into it (ADR-0032 tier 3, issue #10) or, for a template-free
-            // class, the ancestor parameterization its `@extends`/`@implements`
-            // documents (ADR-0032 amendment, issue #294). Empty carry when
-            // non-generic / unprovable (FP-safe).
+            // generic parameterizations it can prove: type-argument values flowing
+            // in (ADR-0032 tier 3, issue #10) or, for a template-free class, the
+            // ancestor parameterization its `@extends`/`@implements` documents
+            // (issue #294). Empty carry when non-generic / unprovable (FP-safe).
             ArgValue::New(class_ref, args, _) if !poisoned => {
                 let class = self.class_fqn(class_ref);
                 let carry = self.infer_generic_carry(&class, args, env, store, poisoned, folder);
@@ -29180,17 +27779,16 @@ impl<'a> Cx<'a> {
                     Some(CVal::Resource)
                 } else if store.is_exact(name) {
                     // Only an EXACT object becomes a `CVal::Object` (audit G1): the
-                    // phpdoc-acceptance consumer draws a No-side `is_a` conclusion from
-                    // it, which a lower-bound `$this` would make unsound. An inexact
-                    // object stays unresolved (silent) — acceptance never fires on it.
+                    // phpdoc-acceptance consumer draws a No-side `is_a` conclusion,
+                    // which a lower-bound `$this` would make unsound. An inexact
+                    // object stays unresolved (silent).
                     //
                     // Generic type arguments DO travel through a variable binding
-                    // (ADR-0032 binding amendment, issue #295): the allocation records
-                    // them, so `$x = new Box('x'); f($x)` judges both halves. The carry
-                    // read here is whatever survives on this path — a receiver method
-                    // call has already swept the value half (`Store::sweep_targs`),
-                    // which is what keeps a post-mutation `f($x)` silent rather than
-                    // convicting it on a stale argument.
+                    // (issue #295): the allocation records them, so
+                    // `$x = new Box('x'); f($x)` judges both halves. A receiver
+                    // method call has already swept the value half
+                    // (`Store::sweep_targs`), keeping a post-mutation `f($x)` silent
+                    // rather than convicting it on a stale argument.
                     store
                         .class_of(name)
                         .map(|c| CVal::Object(c.to_owned(), store.targs_of(name).to_vec()))
@@ -29200,16 +27798,10 @@ impl<'a> Cx<'a> {
             }
             // The resolved value goes back through this function rather than
             // straight into `CVal::Scalar`, exactly as the `Var` arm above sends
-            // its singleton back (issue #329).
-            //
-            // It read `.map(CVal::Scalar)` while a call could only ever resolve
-            // to a *scalar* — the fold's own results. Once the transfer rung's
-            // arrays became visible here, that wrapped a `Val::Array` in the
-            // scalar carrier and the acceptance relation, asked whether a
-            // "scalar" inhabits `non-empty-list<string>`, correctly said no:
+            // its singleton back (issue #329). Previously `.map(CVal::Scalar)`
+            // wrapped a resolved `Val::Array` in the scalar carrier, so
             // `take(array_values(['x']))` was convicted where the identical
-            // `take(['x'])` and `$b = array_values(['x']); take($b)` were both
-            // silent. Same value, three provenances, one verdict now.
+            // `take(['x'])` was silent — same value, different provenance.
             ArgValue::Call(..) => {
                 let lit = self.resolve_literal(value, env, poisoned, folder)?;
                 self.resolve_cval(&lit, env, store, poisoned, folder)
@@ -29233,11 +27825,10 @@ impl<'a> Cx<'a> {
     }
 
     /// Whether `fqn` names a **known class** — a Unique project class or a
-    /// catalogued builtin (ADR-0043 stage 4). This is the same closure predicate
-    /// the is-a oracle uses ([`Self::ancestors_of`] returns `Some`): only a known
-    /// class may make a proven scalar a definite non-member. An unresolved bare
-    /// identifier (a `@template` param, a `@phpstan-type` alias, or an uncatalogued
-    /// external) is *not* known, so a scalar against it stays silent.
+    /// catalogued builtin (ADR-0043 stage 4), via the same closure predicate the
+    /// is-a oracle uses ([`Self::ancestors_of`] returns `Some`). Only a known
+    /// class may make a proven scalar a definite non-member; an unresolved bare
+    /// identifier stays silent.
     fn is_known_class(&self, fqn: &str) -> bool {
         self.ancestors_of(fqn.trim_start_matches('\\')).is_some()
     }
@@ -29271,12 +27862,10 @@ impl<'a> Cx<'a> {
     /// (ADR-0056 §8) — every union member does, and `ty.nullable` is irrelevant
     /// because no resource is null.
     ///
-    /// Stronger than [`Self::object_is_type_error`] in one specific way, and the
-    /// difference is the point: the object version has to demote `string` to a
-    /// strict-mode-only reject, because a `__toString` object really does coerce
-    /// into a `string` parameter in coercive mode. **There is no `__toResource`.**
-    /// PHP offers a resource no coercion path into any scalar at a parameter
-    /// boundary, in either mode — probed at 8.5.9:
+    /// Stronger than [`Self::object_is_type_error`]: that version demotes `string`
+    /// to a strict-mode-only reject, since a `__toString` object coerces into
+    /// `string` in coercive mode. **There is no `__toResource`.** PHP offers a
+    /// resource no coercion path into any scalar, in either mode — probed at 8.5.9:
     ///
     /// ```text
     /// function b(bool $x){} … b($h);  → must be of type bool, resource given
@@ -29284,17 +27873,15 @@ impl<'a> Cx<'a> {
     /// function s(string $x){} … s($h);→ must be of type string, resource given
     /// ```
     ///
-    /// (all three from a file with NO `declare(strict_types=1)`), so this predicate
-    /// never consults [`Self::strict`] and the finding is mode-independent.
+    /// (all from a file with NO `declare(strict_types=1)`), so this predicate
+    /// never consults [`Self::strict`] — the finding is mode-independent.
     ///
     /// An object member rejects too — a resource is not an instance of anything.
-    /// That is the opposite direction from the `Maybe` the resource *contract*
-    /// gives an object value (`unrepresentable_verdict`), and the asymmetry is
-    /// deliberate rather than an oversight: there the docblock is the suspect
-    /// (PHP 8 left a decade of `@param resource $ch` behind on parameters that now
-    /// take a `CurlHandle`), here the *value* is proven — by a row this engine
-    /// corroborated through §7's tripwire — and a native `\CurlHandle` parameter
-    /// handed a real `fopen()` stream is a genuine TypeError, not stale prose.
+    /// This is the opposite of the `Maybe` the resource *contract* gives an
+    /// object value (`unrepresentable_verdict`): there the docblock is the
+    /// suspect (PHP 8 left `@param resource $ch` behind on params that now take
+    /// a `CurlHandle`), here the *value* is proven, and a native `\CurlHandle`
+    /// parameter handed a real `fopen()` stream is a genuine TypeError.
     fn resource_is_type_error(&self, ty: &NativeType) -> bool {
         ty.members.iter().all(|m| match m {
             TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
@@ -29321,10 +27908,9 @@ impl<'a> Cx<'a> {
         match m {
             TypeMember::Instance { fqn, .. } => self.is_a(class_fqn, fqn) == IsA::No,
             // An intersection (`A&B&…`) demands membership in **every** conjunct,
-            // so it definitively rejects the object the moment the is-a oracle
-            // proves non-membership (`IsA::No`) in **any** one of them. An
-            // incomplete hierarchy on the remaining conjuncts stays silent — the
-            // one proven `No` is already a sound definite reject.
+            // so it definitively rejects the moment the is-a oracle proves
+            // non-membership in **any** one — an incomplete hierarchy on the rest
+            // stays silent.
             TypeMember::InstanceInter(cs) => {
                 cs.iter().any(|c| self.is_a(class_fqn, &c.fqn) == IsA::No)
             }
@@ -29349,11 +27935,10 @@ impl<'a> Cx<'a> {
     /// (ADR-0043 §2), or `None` when unresolvable/non-literal (→ silent).
     ///
     /// - `Class::class` → the FQN **string** literal. Only a written name
-    ///   (`Named`) is resolved: it preserves the declared source casing (verified
-    ///   against php 8.5.8 — `::class` yields the `use`-target's declared casing).
+    ///   (`Named`) is resolved, preserving declared source casing (verified
+    ///   against PHP 8.5.8 — `::class` yields the `use`-target's declared casing).
     ///   `self`/`parent`/`static::class` resolve only to the lowercase-normalized
-    ///   index FQN, so emitting them would risk a wrong-case string — left
-    ///   unproven (documented deferral).
+    ///   index FQN, so emitting them risks a wrong-case string — left unproven.
     /// - An enum case → an [`ArgValue::EnumCase`] **object** value of the enum
     ///   class (never its backing scalar — an enum case is an object).
     /// - A class constant with a literal initializer → that literal, resolved
@@ -29422,46 +28007,40 @@ impl<'a> Cx<'a> {
     /// The **trinary is-a oracle** (ADR-0043 §3): is a value of exact class
     /// `sub_fqn` an instance of `super_fqn`?
     ///
-    /// - **`Yes`** — a supertype path exists: the parent chain *and* the
-    ///   transitive `implements` closure (class→interface and interface→interface,
-    ///   since a lowered interface's extends become parent+implements). Reflexive
-    ///   (`sub == super` is `Yes`).
+    /// - **`Yes`** — a supertype path exists: parent chain plus transitive
+    ///   `implements` closure. Reflexive (`sub == super` is `Yes`).
     /// - **`No`** — only under a **completely enumerated hierarchy**: every
-    ///   ancestor edge reachable from `sub` resolved either Unique in-project or in
-    ///   the catalog's builtin tree, and `super` is absent from that closed
-    ///   ancestor set. This is the Certainty discipline applied to subtyping —
-    ///   non-membership is provable only under closure.
-    /// - **`Unknown`** — the enumeration is incomplete: some ancestor is
-    ///   unresolvable/ambiguous, or the chain leaves the project into an
-    ///   uncatalogued builtin, or `sub`/`super` is itself unknown.
+    ///   ancestor edge reachable from `sub` resolved (in-project or catalog
+    ///   builtin), and `super` is absent from that closed set — the Certainty
+    ///   discipline applied to subtyping.
+    /// - **`Unknown`** — the enumeration is incomplete: an ancestor is
+    ///   unresolvable, the chain leaves the project into an uncatalogued
+    ///   builtin, or `sub`/`super` is itself unknown.
     ///
     /// Enums (ADR-0043): a lowered enum is-a its explicit `implements` plus the
     /// implicit `UnitEnum` interface, and a *backed* enum additionally is-a
     /// `BackedEnum` (which the catalog records as extending `UnitEnum`).
     ///
-    /// A `use`d trait does **not** force `Unknown`: in PHP a trait adds methods,
-    /// never types, so it cannot change the is-a relation — [`Self::ancestors_of`]
-    /// simply ignores trait use and reports the class's real parent/interfaces.
+    /// A `use`d trait does **not** force `Unknown`: a trait adds methods, never
+    /// types, so it cannot change the is-a relation — [`Self::ancestors_of`]
+    /// ignores trait use.
     fn is_a(&self, sub_fqn: &str, super_fqn: &str) -> IsA {
         self.is_a_tracked(sub_fqn, super_fqn).0
     }
 
     /// [`Self::is_a`], additionally reporting whether the verdict was **catalog-
-    /// backed** — whether any ancestor edge on the walk resolved through the builtin
-    /// catalog ([`steins_catalog::builtin_class_supers`]) rather than in-project
-    /// source. ADR-0052 A11 reads this: a catalog-backed verdict used for arm
-    /// deletion is demoted to `Unknown` on a PHP-minor skew (the builtin edge set
-    /// may differ from the catalog pin). A reflexive or purely in-project verdict is
-    /// never catalog-backed (`false`), so a project's own `A|B` union narrows under
-    /// A11 exactly as before — the demotion touches only builtin-dependent edges.
+    /// backed** — any ancestor edge resolved through the builtin catalog
+    /// ([`steins_catalog::builtin_class_supers`]) rather than in-project source.
+    /// ADR-0052 A11 reads this: a catalog-backed verdict used for arm deletion is
+    /// demoted to `Unknown` on a PHP-minor skew. A purely in-project verdict is
+    /// never catalog-backed, so a project's own `A|B` union narrows unaffected.
     fn is_a_tracked(&self, sub_fqn: &str, super_fqn: &str) -> (IsA, bool) {
         let target = super_fqn.trim_start_matches('\\');
         // `Stringable` is implicitly implemented by any class with a `__toString`
-        // method (PHP 8.0+), which the explicit parent/`implements` closure does
-        // not see. For this target only: a proven `__toString` on any visited class
-        // is a definite `Yes`, and a visited trait-using class (whose merged methods
-        // are unmodeled — it *might* declare `__toString`) forces `Unknown` rather
-        // than an unsound `No`.
+        // method (PHP 8.0+), invisible to the explicit parent/`implements` closure.
+        // For this target only: a proven `__toString` is a definite `Yes`, and a
+        // trait-using class (merged methods unmodeled — might declare
+        // `__toString`) forces `Unknown` rather than an unsound `No`.
         let stringable_target = target.eq_ignore_ascii_case("Stringable");
         let mut queue: Vec<String> = vec![sub_fqn.trim_start_matches('\\').to_owned()];
         let mut seen: HashSet<String> = HashSet::new();
@@ -29509,10 +28088,9 @@ impl<'a> Cx<'a> {
     }
 
     /// The **direct** supertypes (parent + `implements`, plus an enum's implicit
-    /// interfaces) of `fqn`, or `None` when `fqn` is an unknown external (not a
-    /// Unique project class, not a catalogued builtin) — which makes the is-a
-    /// enumeration incomplete. A resolvable class with no supertypes returns an
-    /// empty vector (fully enumerated, a root).
+    /// interfaces) of `fqn`, or `None` when `fqn` is an unknown external — which
+    /// makes the is-a enumeration incomplete. A resolvable class with no
+    /// supertypes returns an empty vector (fully enumerated, a root).
     fn ancestors_of(&self, fqn: &str) -> Option<Vec<String>> {
         if let Some((file, cd)) = self.find_class(fqn) {
             let tree = &self.units[file].tree;
@@ -29551,10 +28129,9 @@ enum IsA {
 
 /// The **project** is-a oracle for contract-arm subtraction (ADR-0052 N4): the
 /// steins-infer implementor of steins-contract's [`normalize::IsaOracle`] seam.
-/// It wraps the real trinary hierarchy ([`Cx::is_a_tracked`]) and applies the A11
-/// version-skew demotion — keeping steins-contract free of any steins-infer /
-/// catalog dependency (the polarity law stays in steins-contract; the hierarchy
-/// and version knowledge stay here).
+/// Wraps the real trinary hierarchy ([`Cx::is_a_tracked`]) and applies the A11
+/// version-skew demotion, keeping steins-contract free of any steins-infer/
+/// catalog dependency.
 struct ProjectIsa<'c, 'a> {
     cx: &'c Cx<'a>,
     /// Whether a catalog-backed verdict must demote to `Unknown` (A11 skew).
@@ -29570,14 +28147,13 @@ impl normalize::IsaOracle for ProjectIsa<'_, '_> {
             IsA::Unknown => Certainty::Maybe,
         };
         // A11: a decisive but catalog-backed verdict falls to `Unknown` on a minor
-        // skew — the arm is then kept in both polarities (the FP-safe side).
+        // skew — the arm is kept in both polarities (FP-safe).
         if self.demote_catalog && catalog && c != Certainty::Maybe { Certainty::Maybe } else { c }
     }
 
     fn is_final(&self, fqn: &str) -> bool {
         // Only an in-project `final` class or enum is provably closed; a builtin
-        // (finality untracked in the catalog) stays open → the positive branch keeps
-        // its arm (FP-safe).
+        // (finality untracked) stays open — the positive branch keeps its arm.
         self.cx.find_class(fqn).is_some_and(|(_, cd)| cd.is_final || cd.is_enum)
     }
 }
@@ -29644,14 +28220,13 @@ fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
 /// [`check_phpdoc_param`] already lowers through — and the lowered contract is
 /// judged against the proven value by [`steins_contract::admits_val`].
 ///
-/// The divergence this convergence removed: this lane kept a hand-maintained
-/// sibling match on the raw phpdoc AST, and it had drifted. `non-positive-int`,
-/// `numeric`, `number`, `non-zero-int`, `int-range<…>` and the `boolean`/`integer`/
-/// `double` synonyms were enforced against an abstract fact and silent against a
-/// *proven* value — strictly less knowledge applied to strictly more information.
+/// This converges a formerly hand-maintained sibling match on the raw phpdoc AST
+/// that had drifted: `non-positive-int`, `numeric`, `int-range<…>`, and the
+/// `boolean`/`integer`/`double` synonyms were enforced against an abstract fact
+/// but silent against a *proven* value.
 ///
-/// Two judgments stay lane-local, because the value domain has no inhabitant for
-/// them (ADR-0035/0038 — there is no `Val::Object`):
+/// Two judgments stay lane-local — the value domain has no inhabitant for them
+/// (ADR-0035/0038 — there is no `Val::Object`):
 ///
 /// * a **class name** — which the one table reports as its `Class` catch-all —
 ///   rides this crate's trinary is-a oracle and its `is_known_class` gate;
@@ -29667,21 +28242,18 @@ fn accepts_identifier(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
     // Pseudo-type/class precedence (PHPStan's `tryResolvePseudoTypeClassType`): a
     // keyword PHP does not *reserve* — `integer`, `boolean`, `double`, `number`,
     // `closure`, … — is a legal class name, and a class of that name in scope wins
-    // over the keyword. `steins-contract` answers the vocabulary half (which
-    // spellings are shadowable at all); the registry half is necessarily ours, and
-    // this is why the identifier path delegates rather than being replaced by the
-    // one table outright.
+    // over the keyword. `steins-contract` answers the vocabulary half; the
+    // registry half is necessarily ours, hence the delegation instead of a
+    // straight table replacement.
     //
-    // The gate is **in-project declaration**, not `is_known_class`, and that is a
-    // deliberate narrowing of PHPStan's rule: the seeded catalog carries global
-    // class-likes whose names collide with pseudo-types (`number` is in there,
-    // implementing `Stringable`), and letting those shadow would silently turn the
-    // overwhelmingly-intended `@param number` (int|float) into a class contract in
-    // every non-namespaced file — a false positive manufactured out of a name
-    // collision the docblock author never saw. A project that declares its own
-    // `class Integer` and then writes `@param Integer` plainly means that class;
-    // that is the case the rule exists for, and the case the conformance fixture
-    // states. Same in-project/catalog cut as `ProjectIsa::is_final` (ADR-0043 A11).
+    // The gate is **in-project declaration**, not `is_known_class` — deliberately
+    // narrower than PHPStan's rule: the seeded catalog carries global class-likes
+    // colliding with pseudo-types (`number` implements `Stringable`), and letting
+    // those shadow would silently turn `@param number` (int|float) into a class
+    // contract in every non-namespaced file, an FP from a collision the author
+    // never saw. A project declaring its own `class Integer` and writing
+    // `@param Integer` means that class — the case the rule exists for. Same
+    // in-project/catalog cut as `ProjectIsa::is_final` (ADR-0043 A11).
     if steins_contract::is_shadowable_pseudo_type(name)
         && cx.find_class(&cx.resolve_pclass(cfile, coff, name)).is_some()
     {
@@ -29715,39 +28287,30 @@ fn cval_as_val(v: &CVal) -> Option<Val> {
 /// (ADR-0043's world, which the object-free value lattice has no inhabitant for) or
 /// an array holding one.
 ///
-/// It reads the **lowered** contract rather than the keyword, so it states only what
+/// Reads the **lowered** contract rather than the keyword, so it states only what
 /// is true of *every* object, or of an array whose members are unknown — no keyword
-/// knowledge is duplicated here. This is the convergence debt of the identifier
-/// path, and it is exactly the debt `steins-contract` cannot retire: hosting it
-/// would mean giving the value domain an object inhabitant.
+/// knowledge duplicated here. `steins-contract` cannot host this: doing so would
+/// mean giving the value domain an object inhabitant.
 fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
     use steins_contract::ContractTy as C;
     use steins_contract::MixedCut;
     match v {
         CVal::Object(..) => match cty {
             C::Mixed | C::ObjectAny => Tri::Yes,
-            // Both cuts of `mixed` keep every object: an object is not null,
-            // and PHP has considered every object truthy since PHP 7 (no
-            // `count()`-based falsiness survives), so `non-empty-mixed` admits
-            // it too. This is the arm that keeps `f(new stdClass())` against
+            // Both cuts of `mixed` keep every object: not null, and every object
+            // truthy since PHP 7 — the arm that keeps `f(new stdClass())` against
             // `@param non-empty-mixed` from being a manufactured `No`.
             C::MixedMinus(_) => Tri::Yes,
-            // An object may be `Traversable`, may have `__invoke`, and a
-            // provenance-flavored string type is non-extensional (ADR-0038) — none
-            // of it provable from the class name alone.
+            // An object may be `Traversable`, may have `__invoke` — none of it
+            // provable from the class name alone.
             C::Opaque | C::IterableOf { .. } | C::CallableTy { .. } | C::StrOpaque => Tri::Maybe,
             // `@param resource $ch` handed an object — ADR-0056 §8.5's named FP
-            // channel, and the one verdict the resource leaf declines to reach.
-            // An object is genuinely not a resource, so a definite `No` is
-            // *true*; it is also, overwhelmingly, a report against a docblock PHP
-            // 8's own migration made stale, on code that works. `curl_init()`
-            // returned a resource for twenty years and returns a `CurlHandle` now,
-            // and the `@param resource $ch` above the function that consumes it
-            // did not move. Convicting there calls the programmer a liar about rot
-            // they inherited. The other direction — a proven RESOURCE against a
-            // native class parameter — is not this case and does convict
-            // (`resource_is_type_error`): there the value is proven and the
-            // docblock is not involved.
+            // channel. An object genuinely is not a resource, so `No` would be
+            // true, but overwhelmingly this is a stale docblock from PHP 8's own
+            // migration (`curl_init()` returned a resource for twenty years, a
+            // `CurlHandle` now) on code that works. The other direction — a
+            // proven RESOURCE against a native class parameter — does convict
+            // (`resource_is_type_error`): there the value is proven, not the doc.
             C::Resource => Tri::Maybe,
             // Every other lowered form denotes scalars, null, or arrays, of which no
             // object is a member (pure set membership, no coercion — ADR-0030).
@@ -29757,9 +28320,8 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
         // contents are not, so only the contract's own array-ness answers.
         CVal::Array(entries) => match cty {
             C::Mixed | C::ArrayAny { non_empty: false } => Tri::Yes,
-            // An array's falsiness is its emptiness alone, and that *is*
-            // decided here however unrepresentable its members are — so both
-            // cuts answer exactly, with no reference to the contents.
+            // An array's falsiness is its emptiness alone, decided here however
+            // unrepresentable its members are — no reference to contents needed.
             C::MixedMinus(MixedCut::Null) => Tri::Yes,
             C::MixedMinus(MixedCut::Falsy) => {
                 if entries.is_empty() { Tri::No } else { Tri::Yes }
@@ -29773,34 +28335,27 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             | C::Opaque => Tri::Maybe,
             _ => Tri::No,
         },
-        // A resource (ADR-0056 §8). Exact almost everywhere, because a resource is
-        // a leaf with no hierarchy: the only `Maybe`s below are the two honest
-        // ones, and the object arm — which is the FP channel worth spelling out.
+        // A resource (ADR-0056 §8). Exact almost everywhere — a leaf with no
+        // hierarchy, so only two `Maybe`s and the object arm (FP channel) need care.
         CVal::Resource => match cty {
             C::Mixed | C::Resource => Tri::Yes,
             // Both cuts keep every resource: none is null, and every resource is
             // truthy — a CLOSED one included (`fclose($h); (bool) $h === true` at
-            // 8.5.9), which is the case a "surely a closed handle is falsy" guess
-            // would get wrong.
+            // 8.5.9).
             C::MixedMinus(_) => Tri::Yes,
             // `object` and a named class are where PHP 8's migration left its
-            // wreckage. A resource is *not* an object, so the honest answer looks
-            // like `No` — but the code this would fire on is overwhelmingly a
-            // stale `@param resource $ch` / `@return CurlHandle` pair straddling
-            // the migration, where the docblock is wrong and the value is fine.
-            // Convicting there calls the programmer a liar about rot they
-            // inherited. `Maybe` (ADR-0056 §8's named FP channel).
+            // wreckage. A resource is *not* an object, so `No` would be honest,
+            // but the code this fires on is overwhelmingly a stale
+            // `@param resource $ch` / `@return CurlHandle` pair straddling the
+            // migration. `Maybe` (ADR-0056 §8's named FP channel).
             C::ObjectAny | C::Class(_) => Tri::Maybe,
-            // A resource may be `Traversable`-adjacent in nobody's imagination,
-            // but `Opaque` is unknown by definition and `callable` admits a
-            // resource in no PHP (`is_callable($h) === false`) — the first stays
-            // `Maybe` because it says nothing, the second decides.
+            // `Opaque` is unknown by definition; `callable` admits a resource in
+            // no PHP (`is_callable($h) === false`) — the first stays `Maybe`, the
+            // second decides.
             C::Opaque => Tri::Maybe,
             // Every other lowered form denotes scalars, null, arrays or callables,
-            // and no resource is a member of any of them. Pure set membership, no
-            // coercion — and unlike the scalar-to-scalar cases there is not even a
-            // weak-mode path: PHP rejects a resource at a `string`/`int`/`float`/
-            // `bool` boundary in both modes (probed at 8.5.9).
+            // and no resource is a member. PHP rejects a resource at any scalar
+            // boundary in both modes (probed at 8.5.9).
             _ => Tri::No,
         },
         // Unreachable in practice: `resolve_cval` yields only literal scalars here.
@@ -29813,30 +28368,23 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
 /// cannot host. Rides the trinary is-a oracle for a proven object value
 /// (`Yes`→Yes, `No`→No, `Unknown`→Maybe) and rejects a proven scalar against a
 /// *known* class — phpdoc acceptance is pure set membership (ADR-0030 registry 1,
-/// no coercion), so no scalar is ever a class instance, in either mode. The
-/// `is_known_class` gate is the safety valve: an unresolved bare identifier may be
-/// a `@template` param or a `@phpstan-type` alias (which can denote a scalar), so
-/// it stays silent — the same closure discipline the is-a oracle applies to
-/// non-membership.
+/// no coercion). The `is_known_class` gate is the safety valve: an unresolved bare
+/// identifier may be a `@template`/`@phpstan-type` alias denoting a scalar, so it
+/// stays silent.
 fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) -> Tri {
     let target = cx.resolve_pclass(cfile, coff, name);
     match v {
         CVal::Object(obj, _) => match cx.is_a(obj, &target) {
             IsA::Yes => Tri::Yes,
-            // A definite `No` requires a *known* target: an object whose own
-            // hierarchy is closed is-a-No against an unresolved name, but that
-            // name may be a `@template`/`@phpstan-type` alias the object *does*
-            // satisfy — so gate on `is_known_class`, as for the scalar arm.
+            // A definite `No` requires a *known* target: an unresolved name may
+            // be a `@template`/`@phpstan-type` alias the object *does* satisfy.
             IsA::No if cx.is_known_class(&target) => Tri::No,
             IsA::No | IsA::Unknown => Tri::Maybe,
         },
-        // A resource is a non-instance for exactly the reason a scalar is, and
-        // gated the same way (ADR-0056 §8.5): only a KNOWN target may make it a
-        // definite `No`, since an unresolved bare identifier may be a
-        // `@template` param or a `@phpstan-type` alias. Without this arm the
-        // contract layer would be quieter than the proof layer about the very
-        // same pairing (`resource_is_type_error` convicts on a native
-        // `\CurlHandle` parameter), which is backwards.
+        // A resource is a non-instance for the same reason a scalar is, gated the
+        // same way (ADR-0056 §8.5). Without this arm the contract layer would be
+        // quieter than the proof layer about the same pairing
+        // (`resource_is_type_error` convicts on a native `\CurlHandle` param).
         CVal::Scalar(_) | CVal::Resource if cx.is_known_class(&target) => Tri::No,
         // An array is likewise never a class instance, but it is left
         // intentionally undecided here (out of the stage-4 scope).
@@ -29847,14 +28395,11 @@ fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
 /// Acceptance for a literal constant type (`'foo'`, `123`, `1.5`, `true`, …) by
 /// value equality; a const-fetch (`Foo::BAR`) is unresolved → silent.
 fn accepts_const(c: &ConstExpr, v: &CVal) -> Tri {
-    // A const-fetch type (`Foo::BAR`, `self::CONST`, or an enum-case type like
-    // `Suit::Hearts`) is unresolved here — its denotation is unknown, so it must
-    // stay silent for *every* value (ADR-0043 stage 4): an enum-case object or the
-    // referenced literal may well inhabit it, and a returned/passed value that *is*
-    // that very constant must never be manufactured into a `No`. This guards the
-    // class-const value resolution (which now flows enum cases and const literals
-    // into the contract check) from firing on `@return self::CONST { return
-    // self::CONST; }` tautologies.
+    // A const-fetch type (`Foo::BAR`, `self::CONST`, `Suit::Hearts`) is unresolved
+    // here, so it must stay silent for *every* value (ADR-0043 stage 4): a
+    // returned/passed value that *is* that very constant must never be
+    // manufactured into a `No` — guards against firing on
+    // `@return self::CONST { return self::CONST; }` tautologies.
     if matches!(c, ConstExpr::Fetch { .. }) {
         return Tri::Maybe;
     }
@@ -29894,23 +28439,19 @@ fn string_lit_value(lit: &StringLit) -> &str {
 /// projection reads (census bucket vi, const tier).
 ///
 /// This is an **operand resolver, not a second projection**: it answers only "what
-/// array does this reference denote", and hands the answer to the same
-/// `project_key_of`/`project_value_of` the inline tier uses. It lives here rather
-/// than in `steins-contract` because the answer needs the project index, which that
-/// crate deliberately does not carry.
+/// array does this reference denote", handing the answer to the same
+/// `project_key_of`/`project_value_of` the inline tier uses. Lives here (not in
+/// `steins-contract`) because it needs the project index.
 ///
-/// `None` — the honest floor, which the caller turns back into the context-free
-/// delegation and hence into silence — whenever any step is unproven: a
-/// non-const-fetch operand, an unresolvable class, a constant with no *literal*
-/// initializer (`ClassDecl::consts` records only literals, so absence never means
-/// "no such constant"), a non-array constant, an array whose runtime keys are
-/// version-dependent, or an element that is not a scalar literal.
+/// `None` — the honest floor, turned into silence by the caller — whenever any
+/// step is unproven: a non-const-fetch operand, an unresolvable class, a constant
+/// with no *literal* initializer, a non-array constant, version-dependent runtime
+/// keys, or a non-scalar-literal element.
 ///
-/// Deliberately **not** covered: a backed **enum** operand (`value-of<Suit>`).
-/// Its backing values are recorded (`EnumCaseDecl::value`) but never read — the
-/// const resolver returns an enum case as an *object* by design (ADR-0043 §2), so
-/// projecting backing scalars would be new semantics, not a new resolver. Named as
-/// a ceiling rather than guessed at.
+/// Deliberately **not** covered: a backed **enum** operand (`value-of<Suit>`). Its
+/// backing values are recorded but never read — the const resolver returns an
+/// enum case as an *object* by design (ADR-0043 §2), so projecting backing
+/// scalars would be new semantics, a named ceiling.
 fn const_operand_shape(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> Option<ContractTy> {
     let PKind::Const(ConstExpr::Fetch { class, name }) = &ty.kind else { return None };
     let fqn = cx.resolve_pclass(cfile, coff, class);
@@ -29960,21 +28501,16 @@ fn accepts_generic(
         // list semantics.
         //
         // NOT converged onto `lower_generic` + `admits_val` (unlike the
-        // `associative-array`/`int`/`key-of` arms below): a residue-slice attempt
-        // at that convergence regressed `nested_generic_fires_on_inner_mismatch`
+        // `associative-array`/`int`/`key-of` arms below): that convergence
+        // regressed `nested_generic_fires_on_inner_mismatch`
         // (`steins-infer/tests/generics_carry.rs`) — `list<Box<int>>` with a
         // `Box<string>` element must still fire `No`, but a `Box` element is an
-        // **object**, which `cval_as_val` cannot represent (the value domain has
-        // no object inhabitant, ADR-0035/0038), so the whole array collapses to
-        // `None` → `Maybe`, silently losing the inner-mismatch detection. Unlike
-        // the associative-array/`key-of` arms (whose fixtures never exercise an
-        // object element), this leg is reached for arrays of PROJECT OBJECTS
-        // (`list<Box<int>>`, `array<string, User>`, …), so `check_arraylike`'s
-        // per-element recursion through the lane-local `accepts()` — which
-        // dispatches object elements to `accepts_class_generic`/
-        // `accepts_class_name` — is load-bearing, not incidental duplication.
-        // Kept as the stricter-correct side per the fixture, ADR-0062 §5's own
-        // discipline: one relation only where the value domain can host it.
+        // **object**, which `cval_as_val` cannot represent, so the array collapses
+        // to `Maybe`, losing inner-mismatch detection. This leg is reached for
+        // arrays of PROJECT OBJECTS, so `check_arraylike`'s per-element recursion
+        // through `accepts()` (dispatching to `accepts_class_generic`/
+        // `accepts_class_name`) is load-bearing — one relation only where the
+        // value domain can host it (ADR-0062 §5).
         "array" | "non-empty-array" | "list" | "non-empty-list" => {
             let CVal::Array(entries) = v else { return Tri::No };
             let non_empty = base_lc.starts_with("non-empty");
@@ -29989,11 +28525,9 @@ fn accepts_generic(
             };
             check_arraylike(cx, cfile, coff, entries, key_ty, val_ty, require_list, non_empty)
         }
-        // `int<lo, hi>` and Phan's `int-range<lo, hi>` — the same bounded range under
-        // two base names. Neither the recognized spellings nor the bound grammar
-        // (`min`/`max`/integer literals, an unparseable bound → `Opaque` → silent)
-        // is restated here: the one generic table lowers it and the shared relation
-        // judges it, exactly as the identifier path does (ADR-0030, ADR-0062 §5).
+        // `int<lo, hi>` and Phan's `int-range<lo, hi>` — the same bounded range
+        // under two base names. The one generic table lowers it and the shared
+        // relation judges it, exactly as the identifier path does (ADR-0062 §5).
         "int" | "int-range" if args.len() == 2 => match cval_as_val(v) {
             Some(val) => {
                 steins_contract::admits_val(&steins_contract::lower_generic(base, args), &val)
@@ -30001,11 +28535,9 @@ fn accepts_generic(
             None => Tri::Maybe,
         },
         // Phan's `associative-array<K, V>` / `non-empty-associative-array<K, V>`
-        // (census bucket ix): unlike the plain-array arm above, this does not
-        // restate a hand-rolled list check — `lower_generic` already carries the
-        // not-a-list refusal (`MapOf.not_list`, seeded `is_list = No` via
-        // `to_shape_fact`), so the shared relation judges it exactly as the
-        // `int`/`int-range` delegation just above does.
+        // (census bucket ix): unlike the plain-array arm above, `lower_generic`
+        // already carries the not-a-list refusal (`MapOf.not_list`), so the
+        // shared relation judges it directly.
         "associative-array" | "non-empty-associative-array" if matches!(args.len(), 1 | 2) => {
             match cval_as_val(v) {
                 Some(val) => {
@@ -30016,19 +28548,14 @@ fn accepts_generic(
         }
         // `key-of<T>` / `value-of<T>` (census bucket vi, inline tier): the one
         // generic table projects the key/value set out of the lowered operand and
-        // the shared relation judges the result, so this lane restates neither the
-        // projection nor the "which operands are enumerable" rule. An operand the
-        // projection cannot read (a template, a class-constant fetch, an unsealed
-        // shape) lowers to `Opaque`, which is `Maybe` for every value — the floor
-        // arrives through the same delegation rather than a guard here.
+        // the shared relation judges the result. An operand the projection cannot
+        // read lowers to `Opaque`, `Maybe` for every value.
         "key-of" | "value-of" if args.len() == 1 => {
             let Some(val) = cval_as_val(v) else { return Tri::Maybe };
-            // The operand comes from one of two resolvers, and the projection that
-            // reads it is the SAME function either way: `lower_generic` resolves the
-            // context-free operands (an inline shape, `array<K, V>`, `list<T>`), and
-            // the const-fetch resolver just below supplies the one operand only this
-            // lane can see — a class constant holding an array, which needs the
-            // project index. Two resolvers, one projection rule (ADR-0030).
+            // Two resolvers, one projection rule (ADR-0030): `lower_generic`
+            // resolves context-free operands (inline shape, `array<K, V>`,
+            // `list<T>`); the const-fetch resolver below supplies the one operand
+            // only this lane can see — a class constant holding an array.
             let projected = const_operand_shape(cx, cfile, coff, &args[0].ty).map(|shape| {
                 if base_lc == "key-of" {
                     steins_contract::project_key_of(&shape)
@@ -30049,26 +28576,23 @@ fn accepts_generic(
 }
 
 /// Acceptance of a value against a class-level generic contract `Class<A, …>`
-/// (ADR-0032 tier 3, issue #10; inheritance edges by the ADR-0032 amendment, issue
-/// #294). The class half rides the trinary is-a oracle exactly as the bare-class
-/// identifier path; the argument half judges ONLY through the carried edge whose
-/// **owner is the class the contract names** — the object's own class when it
-/// declares the templates, an ancestor when `@extends Box<int>` does.
+/// (ADR-0032 tier 3, issue #10; inheritance edges via issue #294). The class half
+/// rides the trinary is-a oracle exactly as the bare-class identifier path; the
+/// argument half judges ONLY through the carried edge whose **owner is the class
+/// the contract names** — the object's own class when it declares the templates,
+/// an ancestor when `@extends Box<int>` does.
 ///
 /// Honesty bounds (zero-FP):
 /// - A **non-object** value is silent (`Maybe`): the bare-class identifier path
-///   owns scalar-vs-class `No`; a *generic* spelling never manufactures it here.
+///   owns scalar-vs-class `No`.
 /// - The class half only **gates**: a `No`/`Unknown` is-a answers `Maybe`, never a
-///   manufactured `No` — generic-class *class-mismatch* reporting is deferred, so
-///   the sole `No` this arm yields comes from a provable **argument-half** violation
-///   on an object that **is** the required class.
-/// - **No matching edge** (an empty carry, or one owned by a different class) or an
-///   **arity mismatch** answers `Maybe` (no provable knowledge / library-author
-///   inconsistency stays a thin lint, per ADR-0032).
-/// - A **non-invariant** template position answers `Maybe` whatever its argument
-///   says. Steins models neither variance direction, and reading a
-///   `@template-covariant` position invariantly convicts correct code — a false
-///   positive, not a miss. See [`template_variances`].
+///   manufactured `No` — the sole `No` here comes from a provable **argument-half**
+///   violation on an object that **is** the required class.
+/// - **No matching edge** or an **arity mismatch** answers `Maybe`.
+/// - A **non-invariant** template position answers `Maybe` regardless of its
+///   argument — Steins models neither variance direction, and reading a
+///   `@template-covariant` position invariantly would convict correct code. See
+///   [`template_variances`].
 fn accepts_class_generic(
     cx: &Cx,
     cfile: usize,
@@ -30117,9 +28641,8 @@ fn class_key(fqn: &str) -> String {
 }
 
 /// The declared variance of each class-level `@template` of `owner`, in declaration
-/// order. Empty when the class is unresolvable or declares none — and an absent
-/// entry reads as [`Variance::Invariant`], which is the only reading that can
-/// produce a verdict, so the arity checks upstream carry the weight.
+/// order. Empty when the class is unresolvable or declares none — an absent entry
+/// reads as [`Variance::Invariant`], the only reading that can produce a verdict.
 fn template_variances(cx: &Cx, owner: &str) -> Vec<Variance> {
     cx.find_class(owner)
         .and_then(|(_, cd)| cd.docblock.as_deref())
@@ -30132,21 +28655,16 @@ fn template_variances(cx: &Cx, owner: &str) -> Vec<Variance> {
 
 /// Judge a **declared** type argument against a **carried type** one — the
 /// type-vs-type face of the argument half, reached only from an inheritance edge
-/// (ADR-0032 amendment, issue #294).
+/// (issue #294).
 ///
-/// It delegates to [`steins_contract::subsumes`], the relation that already answers
-/// "does every inhabitant of `b` inhabit `a`" (ADR-0071 §2.1); no second relation is
-/// introduced. Two gates keep it FP-safe beyond what `subsumes` guarantees on its
-/// own:
+/// Delegates to [`steins_contract::subsumes`] ("does every inhabitant of `b`
+/// inhabit `a`", ADR-0071 §2.1); no second relation introduced. Two gates keep it
+/// FP-safe:
 ///
-/// - A carried type mentioning an **unresolvable class name** stays silent. A bare
-///   identifier the project does not declare may be a `@phpstan-type` alias
-///   denoting a scalar, and `subsumes(int, Class("Alias"))` would then be a
-///   manufactured `No`. This is the same `is_known_class` safety valve
-///   [`accepts_class_name`] applies, for the same reason.
-/// - The verdict is the relation's own trinary. `subsumes` carries no class
-///   hierarchy, so a cross-class position answers `Maybe` — generic class-half
-///   reporting stays deferred here exactly as it is above.
+/// - A carried type mentioning an **unresolvable class name** stays silent (same
+///   `is_known_class` safety valve [`accepts_class_name`] applies).
+/// - `subsumes` carries no class hierarchy, so a cross-class position answers
+///   `Maybe`.
 fn accepts_carried_ty(
     cx: &Cx,
     site: Option<(usize, u32)>,
@@ -30305,25 +28823,18 @@ fn key_cval(k: &VKey) -> CVal {
 /// A function/method whose docblock carries an assertion tag (`@phpstan-assert`
 /// and its `-if-true`/`-if-false`/negated variants) targeting parameter `$x` is an
 /// **assertion helper for `$x`**: its `@param` for `$x` states a *post*-condition
-/// that the helper establishes about `$x`, not a precondition its callers must
-/// satisfy. Checking a call-site argument against it is therefore semantically
-/// wrong — the whole point of such a helper is to be called with a *wider* value
-/// (e.g. `mixed`/`string|int`) and to narrow it. So we skip `phpdoc.param-mismatch`
-/// for that parameter. This holds for all three assert kinds and the negated form.
+/// the helper establishes, not a precondition callers must satisfy — such a helper
+/// is meant to be called with a *wider* value and narrow it. So
+/// `phpdoc.param-mismatch` is skipped for that parameter, for all three assert
+/// kinds and the negated form.
 ///
-/// Scope of the exemption, deliberately narrow:
-/// - **Other parameters** of the same function are still checked (the tag exempts
-///   only its own target).
-/// - **`@return`** checking is unaffected (a different relation entirely).
-/// - **Native** runtime checks are unaffected: a native type hint is a real
-///   runtime gate regardless of any docblock assertion, so it still fires (and,
-///   firing first, already suppresses this phpdoc check at that site).
+/// Scope, deliberately narrow: other parameters are still checked; `@return`
+/// checking is unaffected; native runtime checks are unaffected (a real runtime
+/// gate fires regardless, and firing first already suppresses this check).
 ///
-/// This slice does **not** implement the *positive* refinement effect — applying
-/// the asserted type to the caller's environment after the call. That is a
-/// branch-analysis capability and lands with the structured trace tree / value
-/// domain (ADR-0031, ADR-0035); here we only suppress the incorrect precondition
-/// reading.
+/// This slice does **not** apply the asserted type to the caller's environment
+/// after the call (a branch-analysis capability landing with the structured trace
+/// tree); it only suppresses the incorrect precondition reading.
 #[allow(clippy::too_many_arguments)]
 fn check_phpdoc_param(
     cx: &Cx,
@@ -30349,17 +28860,15 @@ fn check_phpdoc_param(
     let Some(ty) = envelopes.param(&param.name) else { return };
 
     // ADR-0063 P3 — the refined callable spellings' obligations, propagation-pass
-    // lane. A variable bound to a PROVEN closure value carries no scalar fact at all
-    // (`Known::closure` sets `fact: None`), so neither the proven-value lane nor the
-    // abstract-fact lane below can see it; the obligation is judged here instead,
-    // against the closure's definition, exactly as [`check_callable_arg`] judges a
-    // closure written directly in argument position.
+    // lane. A variable bound to a PROVEN closure value carries no scalar fact
+    // (`Known::closure` sets `fact: None`), so neither lane below can see it; the
+    // obligation is judged here against the closure's definition, exactly as
+    // [`check_callable_arg`] judges one written directly in argument position.
     //
     // Restricted to a non-descent site on purpose: a `ClosureVal` records only its
-    // definition *offset*, and the fixpoint's closure symbol is file-keyed. Outside a
-    // descent the env and `cx` are the same file by construction; inside one they can
-    // differ, and a same-offset closure in the other file would be a different
-    // closure. Documented ceiling rather than a guess.
+    // definition *offset*, and the fixpoint's closure symbol is file-keyed —
+    // outside a descent, env and `cx` are the same file by construction; inside
+    // one they can differ. Documented ceiling rather than a guess.
     if !in_descent
         && let ArgValue::Var(name) = value
         && let Some(cv) = env.get(name).and_then(|k| k.closure.as_ref())
@@ -30374,15 +28883,12 @@ fn check_phpdoc_param(
     let param_name = &param.name;
     let rendered = match cx.resolve_cval(value, env, store, poisoned, folder) {
         Some(cv) => {
-            // A parameter that is nullable by its native type, or implicitly nullable
-            // via a `= null` default, accepts `null` regardless of a non-nullable
-            // `@param` spelling — PHP/PHPStan honor this, so reporting it would be a
-            // false positive.
+            // A parameter nullable by its native type, or implicitly nullable via a
+            // `= null` default, accepts `null` regardless of a non-nullable
+            // `@param` spelling — PHP/PHPStan honor this.
             if matches!(cv, CVal::Scalar(ArgValue::Null))
                 // ADR-0043 stage 1: consult native nullability only for scalar-value
-                // types. An object-bearing type contributes no native-nullable signal
-                // here (it lowered to `None` before ADR-0043), so `?Foo` does not
-                // change which `null` arguments this guard accepts.
+                // types — `?Foo` (object-bearing) contributes no signal here.
                 && (param.has_null_default
                     || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance()))
             {
@@ -30392,31 +28898,27 @@ fn check_phpdoc_param(
                 return;
             }
             // ADR-0043 stage 4: a class-touching verdict is guard-blind inside a
-            // binding descent (mirror of the native `object_world_guard_blind`) —
-            // the callee's in-body type guards that would narrow the rebound value
-            // are unmodeled. Scalar-vs-scalar phpdoc checks stay live.
+            // binding descent (mirror of `object_world_guard_blind`). Scalar-vs-
+            // scalar phpdoc checks stay live.
             if phpdoc_object_guard_blind(in_descent, ty, Some(&cv)) {
                 return;
             }
             rendered_cval(&cv)
         }
-        // Abstract-fact path (Feature E, ADR-0030/0035): an argument that resolves
-        // to an abstract fact (not a proven value — e.g. a native-seeded param or a
-        // guard-refined var) is judged by the domain's **set** acceptance via
-        // `steins_contract::admits_fact`. Only a definite `No` (every value the fact
-        // admits is rejected) reports; `Maybe` is silent.
+        // Abstract-fact path (Feature E, ADR-0030/0035): an argument resolving to
+        // an abstract fact (not a proven value) is judged by the domain's **set**
+        // acceptance via `steins_contract::admits_fact`. Only a definite `No`
+        // reports; `Maybe` is silent.
         None => {
             let Some(fact) = arg_abstract_fact(value, env, poisoned) else { return };
             let cty = steins_contract::lower(ty);
             // ADR-0043 stage 4 — the class valve. A class-touching contract used to
-            // stay silent against every fact. It opens for exactly one sound case:
-            // a **pure class contract of known classes** (`Foo`, `Foo|null`, `A|B`)
-            // against a definite scalar fact. The abstract-fact domain is scalar-only
-            // (ADR-0035/0038 — no object inhabitant), so any fact here is a definite
-            // scalar, and a scalar is never a member of a class type (pure set
-            // membership, no coercion). It stays shut for an unknown identifier — a
-            // `@template` param or `@phpstan-type` alias may denote a scalar — and,
-            // like the proven path, for any class-touching verdict inside a descent.
+            // stay silent against every fact; it opens for exactly one sound case:
+            // a **pure class contract of known classes** against a definite scalar
+            // fact (the abstract-fact domain is scalar-only, ADR-0035/0038, and a
+            // scalar is never a class member — pure set membership, no coercion).
+            // Stays shut for an unknown identifier (may be a `@template`/
+            // `@phpstan-type` alias) and, like the proven path, inside a descent.
             let open_class_valve = is_pure_class_contract(cx, cfile, coff, ty)
                 && !phpdoc_object_guard_blind(in_descent, ty, None);
             if contract_touches_class(&cty) && !open_class_valve {
@@ -30447,19 +28949,17 @@ fn check_phpdoc_param(
 /// and run the same declared-contract acceptance judgment [`check_phpdoc_param`]
 /// applies to a positional argument (Gap A). Named-argument binding is PHP-exact:
 ///
-/// - **case-sensitive** name matching (`f(A: 1)` on `$a` is a fatal `Error`, not a
-///   binding — PHP does not fold case here), so an unmatched name binds nothing and
-///   is silent (the arity lane owns that `Error`);
-/// - a **variadic** collector parameter takes the named argument as a keyed element
-///   (`function f(...$rest)`, `f(x: 1)`), never a scalar contract, so it is skipped;
+/// - **case-sensitive** name matching (`f(A: 1)` on `$a` is a fatal `Error`), so an
+///   unmatched name binds nothing (the arity lane owns that `Error`);
+/// - a **variadic** collector parameter takes the named argument as a keyed
+///   element, never a scalar contract, so it is skipped;
 /// - a **by-ref** parameter is skipped exactly as the positional lane skips it;
-/// - a name that resolves to a parameter already filled by a **positional**
-///   argument (index `< positional_count`) is the deferred overwrite `Error` — a
-///   fatal, so neither the positional nor this lane reports it (mirrors
-///   [`emit_arity`]'s overwrite guard).
+/// - a name resolving to a parameter already filled **positionally** (index
+///   `< positional_count`) is the deferred overwrite `Error` — a fatal, so neither
+///   lane reports it (mirrors [`emit_arity`]'s overwrite guard).
 ///
-/// `positional_count` is the call's positional-argument arity (`call.args.len()`);
-/// every other argument is shared verbatim with the positional-lane call.
+/// `positional_count` is `call.args.len()`; every other argument is shared
+/// verbatim with the positional-lane call.
 #[allow(clippy::too_many_arguments)]
 fn check_named_phpdoc_params(
     cx: &Cx,
@@ -30520,11 +29020,10 @@ enum CallableViolation {
 
 /// Lower a native scalar/union type to a [`ContractTy`] for the callable-signature
 /// variance check (issue #11). Scalars and bool-literals map to their contract
-/// arm; an object member maps to a class arm (which [`normalize::subsumes`] judges
-/// only reflexively, so cross-class comparisons stay `Maybe` — silent); a nullable
-/// hint adds a `null` arm. A [`NativeType`] is always representable — the syntax
-/// layer already dropped `mixed`/`iterable`/`callable`/intersection hints to
-/// `None`, so nothing here needs an `Opaque` escape.
+/// arm; an object member maps to a class arm ([`normalize::subsumes`] judges it
+/// only reflexively, so cross-class comparisons stay `Maybe`); a nullable hint
+/// adds a `null` arm. A [`NativeType`] is always representable — the syntax layer
+/// already dropped `mixed`/`iterable`/`callable`/intersection hints to `None`.
 fn native_to_contract(nt: &NativeType) -> ContractTy {
     let mut arms: Vec<ContractTy> = nt
         .members
@@ -30551,15 +29050,12 @@ fn native_to_contract(nt: &NativeType) -> ContractTy {
 }
 
 /// Whether a contract arm is decidable by the **scalar** overlap relation — the
-/// only positions the callable-variance check will fire a definite `No` on
-/// (issue #11). A bare identifier in a callable signature (`callable(T): T`) is
-/// syntactically indistinguishable from a class name, and is far more often an
-/// unbound `@template` than a real class (ADR-0032/0051 — no call-site template
-/// solver), so a `Class`/`ObjectAny`/`Opaque`/array/callable arm is treated as
-/// undecidable here and stays silent (zero-FP). Only scalar/literal/null arms —
-/// where `subsumes` gives a sound `No` and no template can hide — are judged.
-/// `StrOpaque` (`class-string` et al.) and `Mixed` never yield a decidable `No`
-/// anyway, so excluding them costs nothing.
+/// only positions the callable-variance check fires a definite `No` on (issue
+/// #11). A bare identifier in a callable signature is syntactically
+/// indistinguishable from a class name and far more often an unbound `@template`
+/// than a real class (no call-site template solver), so `Class`/`ObjectAny`/
+/// `Opaque`/array/callable arms stay silent (zero-FP). Only scalar/literal/null
+/// arms — where `subsumes` gives a sound `No` and no template can hide — are judged.
 fn scalar_decidable(ty: &ContractTy) -> bool {
     match ty {
         ContractTy::Base(_)
@@ -30582,28 +29078,20 @@ fn scalar_decidable(ty: &ContractTy) -> bool {
 ///
 /// This is the **declared-contract** relation (ADR-0030 divergence #1 — envelope
 /// checking, no runtime coercion; PHP does *not* enforce a `callable(int): string`
-/// docblock at runtime, verified with `php -r`, so the claim is contract-layer),
-/// and it reuses the single overlap relation [`normalize::subsumes`] (the
-/// `isSuperTypeOf` shape) as its comparator rather than a bespoke one:
+/// docblock at runtime, verified with `php -r`), reusing the single overlap
+/// relation [`normalize::subsumes`] as its comparator:
 ///
-/// - **Parameters are contravariant.** At each contract position the closure's
-///   declared parameter must accept everything the contract supplies:
-///   `subsumes(closure_param, contract_param)`. A closure accepting WIDER than the
-///   contract is fine; one requiring NARROWER is the violation. Only a definite
-///   `No` (a scalar mismatch such as `string` vs `int`) reports; an undeclared
-///   parameter, a template, or a cross-class comparison is `Maybe` → silent. A
-///   by-reference position (either side) is skipped — by-ref callable semantics
-///   are unverified, so Steins stays silent (zero-FP).
-/// - **Return is covariant.** The closure's declared return must be subsumed by
-///   the contract's: `subsumes(contract_ret, closure_ret)`. A closure returning
-///   narrower/equal is fine; a provably-disjoint return (e.g. `int` vs `string`)
-///   is the violation. Only a definite `No` reports; an undeclared return is silent.
+/// - **Parameters are contravariant**: `subsumes(closure_param, contract_param)`.
+///   A closure accepting WIDER than the contract is fine; NARROWER is the
+///   violation. Only a definite `No` reports; template/cross-class is `Maybe`. A
+///   by-reference position (either side) is skipped — semantics unverified.
+/// - **Return is covariant**: `subsumes(contract_ret, closure_ret)`. Narrower/
+///   equal is fine; a provably-disjoint return is the violation. Undeclared
+///   return is silent.
 /// - **Arity.** A closure REQUIRING more parameters (no default, non-variadic)
-///   than the contract supplies would `ArgumentCountError` when the callee invokes
-///   it with the contract's arity — verified against PHP 8.5 (`Too few arguments`).
-///   PHP ignores surplus arguments, so a closure with FEWER params, or extra
-///   OPTIONAL/variadic params, is fine. Skipped when the contract is itself
-///   variadic (the callee may pass any number of arguments).
+///   than the contract supplies would `ArgumentCountError` (verified PHP 8.5,
+///   `Too few arguments`). Extra OPTIONAL/variadic params are fine. Skipped when
+///   the contract is itself variadic.
 fn callable_sig_violation(
     sig: &steins_contract::CallableSig,
     closure_params: &[Param],
@@ -30663,9 +29151,8 @@ enum ObligationViolation {
 }
 
 /// The [`ClosureTarget`] a lowered [`ClosureRef`] argument denotes — the one shape
-/// [`callable_obl_violation`] judges, so the direct pass (a closure written *in*
-/// argument position) and the propagation pass (a variable holding a proven closure
-/// value) ask exactly the same question.
+/// [`callable_obl_violation`] judges, so the direct pass and the propagation pass
+/// ask exactly the same question.
 fn closure_target_of_ref(cref: &ClosureRef) -> ClosureTarget {
     match cref {
         ClosureRef::Anonymous { def_offset, .. } => ClosureTarget::Scope(*def_offset),
@@ -30674,20 +29161,17 @@ fn closure_target_of_ref(cref: &ClosureRef) -> ClosureTarget {
 }
 
 /// Judge a bound callable against the obligations of a refined callable spelling
-/// (ADR-0063 §2 decision 4). `None` is "no proven violation" — the zero-FP floor:
-/// every leg that cannot see the callable's definition answers `None` rather than
-/// guessing, so an opaque callable value is silent by construction.
+/// (ADR-0063 §2 decision 4). `None` is "no proven violation" — every leg that
+/// cannot see the callable's definition answers `None` rather than guessing.
 ///
-/// The two obligations are decided by different machinery, which is why the ADR
-/// keeps them separate: `static` is written in the syntax (a mechanical binding
-/// check against [`Scope::is_static`]), purity is a property of the body that only
-/// the effect fixpoint can answer ([`Cx::provably_impure`]).
+/// The two obligations are decided by different machinery: `static` is written in
+/// the syntax ([`Scope::is_static`]), purity is a property of the body only the
+/// effect fixpoint can answer ([`Cx::provably_impure`]).
 ///
 /// `closure_only` is **not** judged here: a closure literal and a first-class
-/// callable both evaluate to a real `Closure` instance, so they satisfy it by
+/// callable both evaluate to a real `Closure` instance, satisfying it by
 /// construction. The spelling's closure half bites on the *value* side instead
-/// (`steins_contract::admits_val`/`admits_fact` — a callable-string is not a
-/// `Closure`), which is exactly the fixtures' claim that the two halves of
+/// (`steins_contract::admits_val`/`admits_fact`) — the two halves of
 /// `pure-closure` fail independently.
 fn callable_obl_violation(
     cx: &Cx,
@@ -30700,9 +29184,8 @@ fn callable_obl_violation(
             if obl.is_static && !scope.is_static {
                 return Some(ObligationViolation::StaticBinding);
             }
-            // Closures are same-file, and every caller of this leg judges a closure
-            // written in the file `cx` points at, so the fixpoint's file-keyed
-            // closure symbol matches by construction.
+            // Closures are same-file, so the fixpoint's file-keyed closure symbol
+            // matches by construction.
             if obl.pure
                 && cx.provably_impure(&Sym::Closure(cx.path().to_owned(), *def_offset))
             {
@@ -30712,11 +29195,10 @@ fn callable_obl_violation(
         }
         ClosureTarget::Named(nameref) => {
             // `f(...)` — a first-class callable of a free function. It evaluates to a
-            // `Closure` with no bound `$this`, so it satisfies the static-binding
-            // obligation the way `static function () {}` does; only purity can be
-            // violated, and only when the name resolves to a *user* function whose
-            // body the fixpoint actually read (a builtin or an ambiguous name has no
-            // envelope to judge, so it stays silent).
+            // `Closure` with no bound `$this`, satisfying the static-binding
+            // obligation like `static function () {}`; only purity can be violated,
+            // and only when the name resolves to a *user* function the fixpoint
+            // actually read (builtin/ambiguous names have no envelope, stay silent).
             if !obl.pure {
                 return None;
             }
@@ -30766,14 +29248,10 @@ fn push_obligation_diag(
 /// Check a closure / first-class-callable argument at a call site against a
 /// declared `callable(...)` `@param` contract (issue #11), emitting at most one
 /// `phpdoc.param-mismatch`. Silent unless the contract carries a signature AND the
-/// bound callable's declared *native* signature (Verified — ADR-0052 N2) provably
-/// violates it. Reuses the `phpdoc.param-mismatch` lane: a callable argument that
-/// breaks the declared callable signature *is* a violation of the callee's
-/// `@param $callback` (id-choice recorded in the commit body).
+/// bound callable's declared *native* signature provably violates it.
 ///
-/// The closure's declared signature is a static CST fact — it does not depend on
-/// the call-site environment (captures do not change the parameter/return hints),
-/// so this rides the env-free direct pass (no overlap with the propagation pass).
+/// The closure's declared signature is a static CST fact — captures do not change
+/// parameter/return hints — so this rides the env-free direct pass.
 fn check_callable_arg(
     cx: &Cx,
     envelopes: &Envelopes,
@@ -30786,11 +29264,10 @@ fn check_callable_arg(
     let Some(ty) = envelopes.param(&param.name) else { return };
     let ContractTy::CallableTy { sig, obl } = steins_contract::lower(ty) else { return };
 
-    // ADR-0063 P3: the refined spellings' obligations come first. They are decided
-    // from the bound callable's *definition* (its `static` keyword, its inferred
-    // effect envelope) rather than from the declared call shape, so they apply to a
-    // bare `pure-callable` that carries no signature at all — and when both halves
-    // are violated the obligation is the more specific report.
+    // ADR-0063 P3: the refined spellings' obligations come first. Decided from
+    // the bound callable's *definition*, not the declared call shape, so they
+    // apply to a bare `pure-callable` with no signature; when both halves are
+    // violated, the obligation is the more specific report.
     if !obl.is_bare()
         && let Some(violation) = callable_obl_violation(cx, obl, &closure_target_of_ref(closure))
     {
@@ -30803,7 +29280,7 @@ fn check_callable_arg(
     // Resolve the bound callable's declared native signature. Anonymous closures
     // address their own scope by definition offset; a first-class callable naming
     // a user function reuses the function-resolution leg (S5) — a builtin or
-    // unresolvable name has no ground-truth signature, so it stays silent (Maybe).
+    // unresolvable name has no ground-truth signature, stays silent.
     let (closure_params, closure_ret): (&[Param], Option<&NativeType>) = match closure {
         ClosureRef::Anonymous { def_offset, .. } => {
             let Some(scope) = cx.closure_scope(*def_offset) else { return };
@@ -30858,16 +29335,13 @@ fn check_callable_arg(
 ///
 /// * The **reflected envelope** is `return_type` lowered to a single-base fact
 ///   (`bool`, `int`, `string`, `float`, or their `?T` nullable form). A multi-base
-///   union (`int|false`), a non-scalar (`array`, `object`, a class, `void`), or
-///   `mixed` is not representable as one [`Fact`] and yields `None` — the union
-///   case belongs to the contract-lane arms (§4) and remains deferred.
-/// * A **curated refinement** (`curated`, a phpdoc type string such as
-///   `int<0, max>` or `non-empty-string`) is admitted only when `minor_matches_pin`
-///   holds (the A11 pin, §2), it lowers to a fact of the SAME base as the envelope,
-///   AND the envelope extensionally subsumes it ([`normalize::subsumes`] `== Yes`).
-///   Otherwise the envelope stands alone. Curation may narrow within the envelope;
-///   it may never widen or cross bases — so a stale curated row loses precision,
-///   never manufactures a wrong premise the runtime disowns.
+///   union, a non-scalar, or `mixed` is not representable as one [`Fact`] and
+///   yields `None` — the union case belongs to the contract-lane arms (§4).
+/// * A **curated refinement** (a phpdoc type string like `int<0, max>`) is
+///   admitted only when `minor_matches_pin` holds (the A11 pin, §2), it lowers to
+///   the SAME base as the envelope, AND the envelope extensionally subsumes it
+///   ([`normalize::subsumes`] `== Yes`). Otherwise the envelope stands alone.
+///   Curation may narrow within the envelope; it may never widen or cross bases.
 fn admit_return_fact(return_type: &str, curated: Option<&str>, minor_matches_pin: bool) -> Option<Fact> {
     let envelope_ty = steins_contract::lower_str(return_type)?;
     let envelope = envelope_fact(&envelope_ty)?;
@@ -30904,27 +29378,21 @@ fn fact_base(f: &Fact) -> Option<Base> {
 }
 
 /// Lower a reflected envelope [`ContractTy`] to the single-base value-domain
-/// [`Fact`] it seeds, or `None` when it is not a single representable scalar base:
-/// a bare `Base(b)` → `General{b}`, and a two-member `?T` union (`{Null, Base(b)}`)
-/// → `General{b, nullable}`. Everything else (multi-base unions, non-scalars,
-/// `mixed`) yields `None`.
+/// [`Fact`] it seeds, or `None` when not a single representable scalar base: a
+/// bare `Base(b)` → `General{b}`, a two-member `?T` union → `General{b, nullable}`.
+/// Everything else (multi-base unions, non-scalars, `mixed`) yields `None`.
 fn envelope_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         // **Still the nullable pair only, and now that is a decision** (issue
-        // #339). `Fact::Union` could hold any scalar union here, and generalising
-        // this arm was tried and reverted: the reflected declaration is the
-        // ENGINE's, which is coarse by construction (`abs` declares `int|float`),
-        // while ADR-0069's curated floor carries the sharp row for the same name
-        // (`int<1, max>|0|float`). The envelope rung sits ABOVE the floor, so an
-        // envelope that answers in more cases *shadows* the sharper row — 13 nsrt
-        // rows went from `int<0, max>|float` to `int|float` on exactly that path.
-        //
-        // A wider envelope is not wrong, but it is not an improvement either, and
-        // buying it at the cost of the curated rows is a bad trade. Widening this
-        // arm therefore waits on the ladder question — whether the floor may
-        // refine *within* a union envelope the way ADR-0061 §2 has the type rung
-        // refine within a scalar one — which is its own decision.
+        // #339). Generalising `Fact::Union` here was tried and reverted: the
+        // reflected declaration is coarse by construction (`abs` declares
+        // `int|float`), while ADR-0069's curated floor carries the sharp row
+        // (`int<1, max>|0|float`). The envelope rung sits ABOVE the floor, so a
+        // wider envelope *shadows* the sharper row — 13 nsrt rows regressed from
+        // `int<0, max>|float` to `int|float` on exactly that path. Widening waits
+        // on whether the floor may refine *within* a union envelope (ADR-0061 §2's
+        // question for the type rung), its own decision.
         ContractTy::Union(members) if members.len() == 2 && members.iter().any(|m| matches!(m, ContractTy::Null)) => {
             let base = members.iter().find_map(|m| match m {
                 ContractTy::Base(b) => Some(*b),
@@ -30963,12 +29431,10 @@ fn union_envelope(members: &[ContractTy]) -> Option<Fact> {
 }
 
 /// Lower a curated refinement [`ContractTy`] to a value-domain [`Fact`] (ADR-0056
-/// §1.2), or `None` when it is not a scalar refinement the domain carries. Handles
-/// the base layer and the two Refined refinements (`int<lo, hi>`, string
-/// predicates); a two-member `?T` nullable wrapper is unwrapped and re-nulled.
-/// Unions of more than the nullable pair, and non-scalars, yield `None` — a
-/// curated row that cannot be a single fact simply does not refine (the envelope
-/// stands).
+/// §1.2), or `None` when not a scalar refinement the domain carries: the base
+/// layer, the two Refined refinements (`int<lo, hi>`, string predicates), and a
+/// two-member `?T` nullable wrapper. Unions past the nullable pair, and
+/// non-scalars, yield `None` — the envelope stands alone.
 fn contractty_to_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
@@ -31056,36 +29522,27 @@ const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverified";
 ///
 /// # Why these arms are `Verified` when the declared floor's are not
 ///
-/// ADR-0069's floor is `Asserted` because a `functionMap` row is a *claim about a
-/// PHP* that the analyzing PHP was never asked to confirm; the row and the engine
-/// can silently disagree. These rows cannot disagree with the engine in that way,
-/// because the disagreement is checkable and is checked: [`Folder::builtin_resource_return`]
-/// admits the row only while this engine declares NO return type for the name. A
-/// migrated function (`curl_init` → `CurlHandle|false`) declares one and is
-/// refused; a genuine resource producer declares none *because the language has no
-/// syntax for it*, not because anyone forgot. What is left after the tripwire is a
-/// claim the engine corroborates in the only way it is able to.
+/// ADR-0069's floor is `Asserted` because a `functionMap` row is an unconfirmed
+/// claim about the analyzing PHP. These rows cannot disagree with the engine in
+/// that way: [`Folder::builtin_resource_return`] admits the row only while this
+/// engine declares NO return type for the name. A migrated function
+/// (`curl_init` → `CurlHandle|false`) declares one and is refused; a genuine
+/// resource producer declares none because the language has no syntax for it.
 ///
-/// The project-shadowing check comes first, as it does for the floor: a project
-/// function named `fopen` is not this `fopen`.
+/// The project-shadowing check comes first, as for the floor.
 /// Whether `var`'s contract lane says it holds a **resource and nothing else**
 /// (ADR-0056 §8) — the single condition under which the argument families may
 /// read that lane.
 ///
-/// Three requirements, and each rules out a specific way of being wrong:
+/// Three requirements, each ruling out a specific way of being wrong:
 ///
 /// * **exactly one arm.** `resource|false` straight out of `fopen()` is not a
-///   proven resource — the call may have failed, and `false` IS accepted by a
-///   `bool` parameter. Only after the `=== false` guard has killed that arm is
-///   there one value class left to judge.
-/// * **that arm is [`ContractTy::Resource`].** Not a supertype of it, not an
-///   `Opaque` that might contain one.
+///   proven resource until the `=== false` guard kills that arm.
+/// * **that arm is [`ContractTy::Resource`].** Not a supertype, not an `Opaque`
+///   that might contain one.
 /// * **`Verified`.** ADR-0052 §3 keeps the contract lane away from the proof
-///   layer, and rightly: most of what seeds it is a docblock. This is the narrow
-///   opening §7 argues for and no wider — a lane arm that reached `Asserted` by
-///   any route, including a `@return resource` docblock on a project function,
-///   does not qualify. The stratum check is what makes "read the contract lane"
-///   safe here without being safe in general.
+///   layer — a lane arm reaching `Asserted` by any route, including a
+///   `@return resource` docblock, does not qualify.
 fn store_holds_resource(store: &Store, var: &str) -> bool {
     matches!(
         store.contract_arms(var),
@@ -31124,26 +29581,19 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     }
     let declared = steins_catalog::declared_return(name)?;
     let arms = flatten_arms(steins_contract::lower_str(declared)?);
-    // The resolver is the **identity**, and now that the mining admits class rows
-    // (`imageloadfont` = `GdFont`) that is a claim worth stating rather than an
-    // accident of there being nothing to resolve.
+    // The resolver is the **identity**, a claim worth stating now that mining
+    // admits class rows (`imageloadfont` = `GdFont`).
     //
     // `refine_declared_arms`' resolver exists to turn a *relative* class name in a
-    // project docblock into an FQN against the declaring namespace — `@return Node`
-    // inside `namespace App;` means `App\Node`. A functionMap row has no declaring
-    // namespace and never carries a relative name: every class it names is a global
-    // builtin FQN, written as PHP resolves it (`GdFont`, `CurlHandle`, and the
-    // already-qualified `ast\Node` for a namespaced extension). Running a project
-    // namespace resolver over those would MANGLE them — `GdFont` read from inside
-    // `namespace App;` would become `App\GdFont`, a class that does not exist — so
-    // the identity is not merely sufficient here, it is the only correct resolver.
-    //
-    // `ContractTy::Class` already normalizes on the way in (`lower_identifier` strips
-    // a leading `\` and case-folds), so the arms compare by `class_eq` exactly as the
-    // generation-time countersign compared them, and the identity preserves that
-    // normalization instead of disturbing it. The same argument covers a class
-    // *inside* an array row's element type and at the top level, for the same
-    // reason and through the same seam.
+    // project docblock into an FQN against the declaring namespace. A functionMap
+    // row has no declaring namespace: every class it names is a global builtin FQN
+    // as PHP resolves it (`GdFont`, `CurlHandle`, already-qualified `ast\Node`).
+    // Running a project namespace resolver over those would MANGLE them (`GdFont`
+    // inside `namespace App;` would become `App\GdFont`), so identity is the only
+    // correct resolver — and it preserves `ContractTy::Class`'s own normalization
+    // (`lower_identifier` strips a leading `\`, case-folds), matching the
+    // generation-time countersign. Same argument for a class inside an array row's
+    // element type.
     refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
 }
 
@@ -31152,34 +29602,26 @@ fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
 ///
 /// Both abstract layers are reachable from here, through the lowering each already
 /// owns — [`seed_shape_fact`] for an array arm (ADR-0062 S3), [`contractty_to_fact`]
-/// for a scalar one. That is the whole of ADR-0071's consumption side: the array
-/// vocabulary needed no new seam, because a builtin row and a project function's
-/// `@return array{…}` are the same arm list by the time they arrive here.
+/// for a scalar one. A builtin row and a project function's `@return array{…}` are
+/// the same arm list by the time they arrive here, so the array vocabulary needed
+/// no new seam.
 ///
-/// The single-fact rule is the reason the #73 pins survive every widening unchanged.
-/// A one-arm row (`string`, `array{a: int}`) binds `$r = f(...)` to one fact, which
-/// is what premises the contract-layer return check. A genuinely multi-arm row
-/// (`string|false`, `false|array`) has no single fact — the value domain carries no
-/// union layer over either the scalar or the array vocabulary — so it stays in the
-/// arm lane alone, exactly where a hand-written `@param string|false` would live,
-/// and narrows through the same operators.
+/// The single-fact rule is why #73's pins survive every widening unchanged. A
+/// one-arm row binds `$r = f(...)` to one fact, premising the contract-layer
+/// return check. A genuinely multi-arm row (`string|false`, `false|array`) has no
+/// single fact — the value domain carries no union layer over either vocabulary —
+/// so it stays in the arm lane alone.
 ///
-/// A `?T` **scalar** pair is one fact (the domain carries `nullable` as a side flag),
-/// which is how the `?string` rows keep the rendering they had at #73. A `?array{…}`
-/// row is **not**: [`fact_with_null`] refuses a shape, so the row lives in the arm
-/// lane alone. That is a designed refusal rather than a gap — the floor states one
-/// nullability rule and applies it to whatever the arms denote, and declining is the
-/// FP-safe side of it (the arms still carry the null, so nothing is lost to the
-/// declared surface or to guard subtraction).
+/// A `?T` **scalar** pair is one fact (`nullable` is a side flag), which is how
+/// `?string` rows keep their #73 rendering. A `?array{…}` row is **not**:
+/// [`fact_with_null`] refuses a shape, so it lives in the arm lane alone — a
+/// designed refusal, the FP-safe side (the arms still carry the null).
 ///
-/// A **class** row (`GdFont`, `?GdFont`, bare `object`) declines here too, and for a
-/// stronger reason than either of those: the value domain has no object inhabitant at
-/// all (ADR-0035/0038), so there is no fact to seed rather than a fact this refuses to
-/// seed. Both lowerings say so independently — [`contractty_to_fact`] has no arm for
-/// `Class`/`ObjectAny`, and `to_shape_fact` (through [`seed_shape_fact`]) has none
-/// either. A class row is therefore **arm-lane only**, unconditionally: it reaches the
-/// declared surface and guard subtraction, and it puts nothing whatever into the value
-/// lane, which is why it can never become a premise anywhere.
+/// A **class** row (`GdFont`, `?GdFont`, bare `object`) declines for a stronger
+/// reason: the value domain has no object inhabitant at all (ADR-0035/0038), so
+/// there is no fact to seed. Both lowerings say so independently
+/// ([`contractty_to_fact`] has no `Class`/`ObjectAny` arm, `to_shape_fact` has
+/// none either) — a class row is **arm-lane only**, unconditionally.
 fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
     let (nulls, rest): (Vec<ContractArm>, Vec<ContractArm>) =
         arms.iter().cloned().partition(|a| matches!(a.ty, ContractTy::Null));
@@ -31196,14 +29638,12 @@ fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
 ///
 /// `steins_catalog::declared_return_changed_at` is the change oracle — a
 /// `Some(m)` says the builtin's declared return type last moved at minor `m`, so
-/// the mined row (stated at the pin) is only known good for a target lying
-/// **wholly at or above** `m`. That is stricter than "does not straddle": a target
-/// entirely *below* the boundary does not straddle it either, and the row would be
-/// as wrong there as in the straddling case.
+/// the mined row is only known good for a target lying **wholly at or above** `m`
+/// (stricter than "does not straddle": a target entirely below the boundary is
+/// just as wrong).
 ///
 /// An **undeclared target admits**: the row is Asserted anyway, and its consumers
-/// tolerate that grade. A name the oracle does not list admits unconditionally —
-/// its declared return type never moved across the supported line.
+/// tolerate that grade. A name the oracle does not list admits unconditionally.
 fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarget>) -> bool {
     let Some(boundary) = steins_catalog::declared_return_changed_at(name) else {
         return true;
@@ -31216,33 +29656,27 @@ fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarget>) -> boo
 
 /// The **argument-dependent** return rung (ADR-0061 §1) for the two ADR-0062 §4
 /// transfers that read the abstract array stratum: `count($x)` and
-/// `array_is_list($x)`. `None` — decline — is a first-class outcome (ADR-0061 §1),
-/// and the caller falls through to the argument-insensitive envelope rung exactly
-/// as before.
+/// `array_is_list($x)`. `None` — decline — is a first-class outcome, and the
+/// caller falls through to the argument-insensitive envelope rung.
 ///
 /// The rule fires only on a single-argument call whose one argument is a bare
 /// variable carrying a non-nullable [`Fact::Shape`] — or a [`Fact::Singleton`]
 /// array, lifted to a shape ([`ShapeFact::lift`]) once the value lane's own
 /// order-dependent projections (issue #118) have first refused the name, so a
-/// literal array is never worse off than a declared one; a nullable base
-/// declines (the value may be null, which is a TypeError rather than a count),
-/// a second argument declines (`count($x, COUNT_RECURSIVE)` counts something
-/// else), and a project function shadowing the simple name declines through
+/// literal array is never worse off than a declared one. A nullable base
+/// declines, a second argument declines (`count($x, COUNT_RECURSIVE)` counts
+/// something else), and a project function shadowing the name declines through
 /// [`builtin_call_return_fact`]'s own check.
 ///
-/// **The admission gate is ADR-0061 §2's, unweakened**: the computed fact is
-/// seeded only when the sidecar-backed envelope for this name exists (which is
-/// where the sidecar-presence and PHP-minor-pin legs live, via
-/// [`Folder::builtin_return_fact`]) AND the fact is extensionally inside it —
-/// checked in the domain itself, as `envelope ⊔ out == envelope`. A rule that
-/// claims something the running engine's own declaration disowns is discarded,
-/// never demoted.
+/// **The admission gate is ADR-0061 §2's, unweakened**: seeded only when the
+/// sidecar-backed envelope for this name exists AND the fact is extensionally
+/// inside it (`envelope ⊔ out == envelope`). A rule claiming something the
+/// running engine's own declaration disowns is discarded, never demoted.
 ///
 /// **Stratum is ADR-0061 §3's derivation clause**: the output carries the
-/// argument fact's stratum, which for a declared shape is always `Asserted` — so
+/// argument fact's stratum, `Asserted` for a declared shape — so
 /// `count($declaredShape)` can never premise a proof-layer finding (A-G9's
-/// corollary), while `count()` of a *proven* array keeps folding to a Singleton
-/// on the value rung above, untouched.
+/// corollary), while `count()` of a *proven* array folds to a Singleton unchanged.
 fn shape_builtin_return_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -31257,27 +29691,23 @@ fn shape_builtin_return_fact(
     }
     // The argument-DISPATCHED family (ADR-0064 seam ii, DR3) sits at the same
     // seam, one step earlier: its rules read arguments this rung's single-shape
-    // pattern cannot even bind (a separator, a literal flag, a subject's base).
-    // Declining falls straight through to the shape rung below, unchanged.
+    // pattern cannot even bind. Declining falls straight through to the shape
+    // rung below, unchanged.
     if let Some(out) = arg_dispatch_return_fact(cx, folder, name, args, env, store) {
         return Some(out);
     }
     // **The subject binds by what it resolves to, not by how it was spelled**
-    // (issue #328 L1). A bare variable reads the env, as it always did; an array
-    // written *at the call site* resolves through the seeding ladder — the same
-    // one an assignment takes — so `count(['a' => $x, 'b' => $x])` is no longer
-    // strictly worse than `$a = ['a' => $x, 'b' => $x]; count($a)`, which is
-    // what it was for as long as this pattern said `Var` and nothing else.
+    // (issue #328 L1). A bare variable reads the env; an array written *at the
+    // call site* resolves through the seeding ladder, so
+    // `count(['a' => $x, 'b' => $x])` is no worse than the two-statement spelling.
     //
-    // Deliberately only these three forms. Every other spelling would have to be
-    // resolved to find out it is not an array, and resolution can dispatch to
-    // the engine — most calls reaching this rung are not in the family at all,
-    // so the cheap syntactic gate stays nearly as cheap as it was.
+    // Deliberately only these three forms — every other spelling would need
+    // resolving to find out it is not an array, and most calls reaching this
+    // rung are not in the family at all.
     //
     // The `Call` form is what makes a projection *of* a projection compose
     // (`array_values(array_keys([…]))`, issue #329). It terminates because each
-    // level strips one call from a finite expression, and it answers what the
-    // two-statement spelling answers — which is the property its fixture pins.
+    // level strips one call from a finite expression.
     let seeded;
     let (subject_fact, subject_stratum) = match args {
         [ArgValue::Var(var), ..] => {
@@ -31304,15 +29734,12 @@ fn shape_builtin_return_fact(
     // **The value lane's own privilege** (ADR-0062 §2): a subject whose fact is a
     // witnessed `Val::Array` carries true insertion order, so the order-dependent
     // projection may be *executed* rather than widened. Taken before the shape
-    // binding below, because a `Singleton` is not a `Fact::Shape`.
+    // binding below, since a `Singleton` is not a `Fact::Shape`.
     //
-    // A name that projection declines (every name but the one issue #118
-    // authored it for) is not a dead end: the same entries LIFT to a `ShapeFact`
-    // (issue #262) and fall through to the rung below exactly as a seeded
-    // `Fact::Shape` would. A literal array is strictly more informative than any
-    // declared shape, so lifting only sharpens what the rung below can answer —
-    // `count($x)` over `[1, 2, 3]` reaches the same `count_range()` a sealed
-    // `array{int, int, int}` would.
+    // A name that projection declines is not a dead end: the same entries LIFT to
+    // a `ShapeFact` (issue #262) and fall through to the rung below exactly as a
+    // seeded `Fact::Shape` would — a literal array only sharpens what that rung
+    // can answer.
     let lifted;
     let shape: &ShapeFact = match subject_fact {
         Fact::Singleton(Val::Array(entries)) => {
@@ -31327,12 +29754,10 @@ fn shape_builtin_return_fact(
     };
 
     // **The positional projections, executed** (issue #328). A shape that
-    // witnessed its own construction — a literal the walk saw built, or the
-    // `lift` just above — carries a realizable key sequence, so the family may
-    // run over it instead of taking the key-set widening below. A shape that
-    // witnessed nothing has no sequence, falls straight through, and keeps
-    // exactly the answer it has today: that is ADR-0062 §7's declined import,
-    // and it stays declined.
+    // witnessed its own construction carries a realizable key sequence, so the
+    // family may run over it instead of taking the key-set widening below. A
+    // shape that witnessed nothing falls straight through (ADR-0062 §7's
+    // declined import, stays declined).
     if let Some(order) = shape.witnessed_order() {
         let entries: Vec<(VKey, Option<Fact>)> = order
             .iter()
@@ -31380,12 +29805,11 @@ fn shape_builtin_return_fact(
 /// **ADR-0061 §3's derivation clause over every argument the call passes**: `min`
 /// of the subject's own stratum and each other argument's.
 ///
-/// For the single-argument arms this is the subject's stratum unchanged, so the
-/// two forms are observably identical there; the argument-reading arm
-/// (`array_slice`, issue #118) is where an offset read out of a docblock-claimed
-/// binding can lower it. It is computed **after** a rule has produced a fact and
-/// never before, because reaching an argument's fact can dispatch to the engine
-/// and most calls arriving here are not in this family at all.
+/// For single-argument arms this is the subject's stratum unchanged; the
+/// argument-reading arm (`array_slice`, issue #118) is where an offset read out
+/// of a docblock-claimed binding can lower it. Computed **after** a rule has
+/// produced a fact and never before, since most calls arriving here are not in
+/// this family at all.
 fn derivation_stratum(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -31407,17 +29831,15 @@ fn derivation_stratum(
 /// written against, and — where the declaration pins too little on its own —
 /// its arity must be too (ADR-0064 Amendment B).
 ///
-/// Three refusals, each of which an existing rung already applied by hand before
-/// issue #118 gave them one home:
+/// Three refusals, each an existing rung already applied by hand before issue
+/// #118 gave them one home:
 ///
 /// 1. **A project function shadowing the simple name** is not the builtin.
-/// 2. **A silent engine withholds.** No sidecar, an A9 monkey-patch extension
-///    loaded, or a name the engine declares nothing about: the rule is withheld
-///    rather than trusted.
-/// 3. **A moved signature withholds.** An engine that answers no arity (an older
-///    runner, a replay table recorded before the field) withholds exactly as a
-///    silent declaration does; an arity that is not the pinned one means this
-///    engine's signature has moved and the rule is stale.
+/// 2. **A silent engine withholds.** No sidecar, an A9 monkey-patch, or a name
+///    the engine declares nothing about: withheld rather than trusted.
+/// 3. **A moved signature withholds.** An engine answering no arity withholds
+///    exactly as a silent declaration does; a non-pinned arity means the
+///    signature has moved and the rule is stale.
 fn transfer_declaration_admits(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -31442,81 +29864,68 @@ fn transfer_declaration_admits(
 /// `array_values`/`array_keys`/… row, §2's rule, §7's declined import 1).
 ///
 /// A `Fact::Shape` is a key *set*, never a key sequence: field order in the fact
-/// is the domain's canonical [`VKey`] order, which has nothing to do with the
-/// insertion order of any array the shape admits. So every transfer here is a
-/// **sound widening** that reads only order-independent structure — the value
-/// union, the key union, the key classes, `non_empty`, and the denotational
-/// `is_list`. None of them may produce `list{k1, k2}` in declaration order; that
-/// is exactly the upstream defect (phpstan/phpstan#14940) this ADR declines.
+/// is the domain's canonical [`VKey`] order, unrelated to insertion order. So
+/// every transfer here is a **sound widening** reading only order-independent
+/// structure — the value union, the key union, the key classes, `non_empty`, and
+/// the denotational `is_list`. None may produce `list{k1, k2}` in declaration
+/// order — the upstream defect (phpstan/phpstan#14940) this ADR declines.
 ///
 /// Concrete arrays never come here: they are order-**witnessed**, and the fold
-/// seam runs the real builtin on the real array (ADR-0004/0028), which is where
-/// an exact, order-correct answer legitimately comes from.
+/// seam runs the real builtin on the real array (ADR-0004/0028) for an exact,
+/// order-correct answer.
 ///
 /// **The admission gate** is [`Folder::builtin_return_type`]: the running engine
 /// must itself declare the return type this transfer assumes (`array` for the
-/// four array-valued projections, `string|int|null` for the key-member pair).
-/// It carries the same sidecar-presence and A9 monkey-patch legs the ADR-0061 §2
-/// envelope gate does, so a redefined builtin, or a run with no PHP, withholds
-/// the rule rather than trusting it.
+/// four array-valued projections, `string|int|null` for the key-member pair),
+/// carrying the same sidecar-presence and A9 monkey-patch legs the ADR-0061 §2
+/// envelope gate does.
 ///
 /// # The read-position family and its arity second leg (ADR-0064 Amendment B)
 ///
 /// The ten names `current reset end next prev key array_pop array_shift
 /// array_first array_last` read *a position* rather than restructuring the array,
 /// so their answer is drawn from the shape's **value** union (or, for `key`, its
-/// key union) rather than from a new shape. `key` reuses the `array_key_first`
-/// arm verbatim — same widening, same real `string|int|null` pin.
+/// key union). `key` reuses the `array_key_first` arm verbatim.
 ///
-/// The nine value forms declare a bare **`mixed`**, which pins nothing: every rule
-/// output is inside `mixed`, so the declaration check degenerates to a presence
-/// test. ADR-0064 Amendment B rules that inadmissible and requires the **arity
-/// second leg** — [`Folder::builtin_param_counts`] must report the signature the
-/// rule was written against (`(1, 1)` for all ten, measured at `PINNED_PHP`).
-/// An engine that cannot answer the arity withholds the rule exactly as an engine
-/// silent on the declaration does.
+/// The nine value forms declare a bare **`mixed`**, which pins nothing on its own.
+/// ADR-0064 Amendment B rules that inadmissible and requires the **arity second
+/// leg** — [`Folder::builtin_param_counts`] must report `(1, 1)` for all ten
+/// (measured at `PINNED_PHP`). An engine that cannot answer the arity withholds
+/// the rule exactly as one silent on the declaration does.
 ///
-/// **The internal pointer is not modeled**, and that boundary is where each arm's
-/// `false`/`null` arm comes from (probes at 8.5.8):
+/// **The internal pointer is not modeled**, the source of each arm's `false`/
+/// `null` arm (probes at 8.5.8):
 ///
 /// * `next`/`prev` are **unconditionally** `∪ false` — they step off the end of
 ///   even a non-empty array (`$a = [1]; next($a) === false`).
-/// * `current`/`reset`/`end` add `false` only when the shape may be empty
-///   (`current([]) === false`); on a non-empty shape they take the union alone,
-///   which is upstream PHPStan's position too. It assumes the pointer has not
-///   already been advanced past the end — the one place this family reads a
-///   runtime state Steins does not carry. It is tolerable exactly here: the fact
-///   is shape-derived, so ADR-0062 A-G9's corollary keeps it out of every
-///   proof-layer premise, and the fp-gate is the standing instrument.
+/// * `current`/`reset`/`end` add `false` only when the shape may be empty; on a
+///   non-empty shape they take the union alone (matching upstream PHPStan),
+///   assuming the pointer has not already advanced past the end. Tolerable here
+///   since ADR-0062 A-G9's corollary keeps a shape-derived fact out of every
+///   proof-layer premise, with the fp-gate as the standing instrument.
 /// * `array_pop`/`array_shift`/`array_first`/`array_last` never touch the pointer;
-///   they add `null` on a possibly-empty shape (`array_pop($e = []) === null`).
+///   they add `null` on a possibly-empty shape.
 ///
 /// A `∪ false` is now sayable (issue #339): `Fact::Union` holds a two-base union,
-/// so `next($x)` over an `int`-valued shape answers rather than declining. The
-/// answer is `int|bool` and not `int|false` — the `Bool` base carries no
-/// refinement, so the finite `false` widens to its base when it becomes an arm.
-/// Sound, coarser than the reference implementation, and recorded in ADR-0085 §5
-/// as the finite-member-beside-an-abstract-arm limit.
+/// so `next($x)` over an `int`-valued shape answers `int|bool` (not `int|false` —
+/// the `Bool` base carries no refinement, so `false` widens to its base). Sound,
+/// coarser than the reference implementation (ADR-0085 §5).
 ///
 /// **Mutation is not this function's business, and must not be.** Six of the ten
-/// (`array_pop array_shift next prev reset end`) take argument 0 by reference and
-/// move or shorten it. The *return* is computed from the pre-call shape, which is
-/// correct; the argument's own fact is dropped after the statement by the walk's
-/// call-argument invalidation (the `Stmt::invalidated` entries — a by-ref
-/// position never passes the gate), and `steins_catalog::out_params` carries
-/// all six so the ADR-0063 §2.3 by-ref coloring agrees. No stale shape survives
-/// a mutating call.
+/// take argument 0 by reference and move or shorten it. The *return* is computed
+/// from the pre-call shape, which is correct; the argument's own fact is dropped
+/// after the statement by the walk's call-argument invalidation, and
+/// `steins_catalog::out_params` carries all six so ADR-0063 §2.3's by-ref
+/// coloring agrees.
 ///
 /// # The argument channel (issue #118, ADR-0062 Amendment B)
 ///
 /// The v1 report declined `array_slice` because "the seam is single-argument by
-/// construction". That constraint was the decline's whole content, so the
-/// implementation removed it rather than weakening the rule: the rung now receives
-/// the CALL's argument list, and an arm may read a sibling argument's fact through
-/// [`transfer_arg_fact`] — the very reader the DR3 rung next door already owns.
-/// Every arm that does not ask keeps the single-shape shape it always had, and the
-/// §2 order boundary is untouched: what the arms read is a `$preserve_keys` flag,
-/// an offset, and a length — never field declaration order.
+/// construction" — so the implementation grew the seam instead: the rung now
+/// receives the CALL's argument list, and an arm may read a sibling argument's
+/// fact through [`transfer_arg_fact`] (the DR3 rung's own reader). Arms that
+/// don't ask keep the single-shape shape they always had; the §2 order boundary
+/// is untouched — arms read only a `$preserve_keys` flag, an offset, a length.
 fn shape_projection_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -31821,9 +30230,8 @@ fn witnessed_family_fact(
     // ---- The POSITION READERS (issue #328 wave 2) ---------------------------
     //
     // ADR-0062 §4 answers these from the key *set* — "SOME key of the set, never
-    // the declared-first one", §2's rule at its sharpest, and correct for a
-    // declaration that admits every permutation. A witnessed order is the other
-    // provenance: the sequence was observed, so first really is first.
+    // the declared-first one". A witnessed order is the other provenance: the
+    // sequence was observed, so first really is first.
     //
     // Probed at 8.5.9: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`,
     // `array_key_last(…) === 'a'`, `array_first(…) === 1`, `array_last(…) === 2`,
@@ -31833,9 +30241,8 @@ fn witnessed_family_fact(
     // `end` read the internal array pointer, which Steins does not model; the
     // existing arm tolerates that only because a shape-derived fact can never
     // premise a proof-layer finding (A-G9's corollary). A witnessed literal is
-    // `Verified`, so an exact answer here WOULD be admissible as a premise, and
-    // the pointer assumption would ride into a proof with it. They keep the
-    // widening.
+    // `Verified`, so an exact answer here would ride the pointer assumption into
+    // a proof with it — they keep the widening.
     let position: Option<GatedFact<'_>> = match lower.as_str() {
         "array_key_first" | "array_key_last" | "array_first" | "array_last"
             if args.len() == 1 =>
@@ -31869,10 +30276,9 @@ fn witnessed_family_fact(
 
     // ---- `array_slice` on the witnessed lane, with unknown slots -------------
     //
-    // The exact slice already existed for a fully-proven `Val::Array`
-    // (Amendment B). It reads offsets and keys and never a value, so nothing
-    // about it needed the values to be known — `array_slice(['x', $s, 'z'], 1)`
-    // is `list{string, 'z'}`, which the value-only rung could not say.
+    // The exact slice already existed for a fully-proven `Val::Array`. It reads
+    // offsets and keys and never a value, so `array_slice(['x', $s, 'z'], 1)` is
+    // `list{string, 'z'}`, which the value-only rung could not say.
     if lower == "array_slice" && (2..=4).contains(&args.len()) {
         let (offset, length, preserve) = slice_window(cx, folder, args, env, store)?;
         let out = slice_witnessed_entries(entries, offset, length, preserve);
@@ -31893,10 +30299,9 @@ fn witnessed_family_fact(
         let out: Vec<(VKey, Option<Fact>)> = match lower.as_str() {
             // `array_fill_keys($keys, $value)`: every value of `$keys` becomes a
             // key, all mapped to the same `$value`. Probed:
-            // `array_fill_keys(['1', 2], 'v') === [1 => 'v', 2 => 'v']` (the
-            // key cast normalizes), `array_fill_keys(['a', 'a'], 1) === ['a' => 1]`
-            // (one entry). Its second argument is a plain VALUE, not a sequence —
-            // which is why the sibling is read per-arm rather than once up front.
+            // `array_fill_keys(['1', 2], 'v') === [1 => 'v', 2 => 'v']`,
+            // `array_fill_keys(['a', 'a'], 1) === ['a' => 1]`. Its second argument
+            // is a plain VALUE, not a sequence, so it is read per-arm.
             "array_fill_keys" => {
                 let fill = transfer_arg_fact(cx, folder, second, env, store);
                 let mut out: Vec<(VKey, Option<Fact>)> = Vec::with_capacity(entries.len());
@@ -31935,19 +30340,15 @@ fn witnessed_family_fact(
             // intersection, and **the order comes from the first array** (probed:
             // `array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
             //    === ['b' => 2, 'a' => 1]`). Key identity is the domain's own
-            // normalized `VKey`, which is what makes `array_diff_key([5 => 1,
-            // '5x' => 2], ['5' => 9]) === ['5x' => 2]` fall out — `'5'` and `5`
-            // are one key.
+            // normalized `VKey` (`array_diff_key([5 => 1, '5x' => 2], ['5' => 9])
+            // === ['5x' => 2]`).
             //
-            // Values are never read, so unknown slots cost nothing at all here.
-            // The second argument contributes its **key set** and nothing else —
-            // not its order, not its values — so unlike `array_combine` it may be
-            // a *declared* shape. Reading a declaration's key set is not the §7
-            // declined import: the import that is declined is reading its key
-            // *order*, and a set has none. What the set does need is to be
-            // certain, which is why [`key_set_of`] insists on a sealed tail and
-            // no optional field: a key that may or may not be there decides
-            // neither the difference nor the intersection.
+            // Values are never read, so unknown slots cost nothing. The second
+            // argument contributes only its **key set**, so unlike `array_combine`
+            // it may be a *declared* shape — reading a declaration's key set is
+            // not the §7 declined import (order, not set). The set must be
+            // certain, which is why [`key_set_of`] insists on a sealed tail and no
+            // optional field.
             other_name => {
                 let other = key_set_of(cx, folder, second, env, store)?;
                 let want = other_name == "array_intersect_key";
@@ -32033,8 +30434,7 @@ fn witnessed_family_fact(
 ///
 /// # Three sibling functions, three different casts — measured, not recalled
 ///
-/// The whole reason this is its own function is that the obvious assumption is
-/// wrong three ways. At 8.5.9, for the value `1.5`:
+/// At 8.5.9, for the value `1.5`:
 ///
 /// | seam | answer |
 /// | --- | --- |
@@ -32042,9 +30442,8 @@ fn witnessed_family_fact(
 /// | `array_fill_keys([1.5], v)` / `array_combine([1.5], [v])` | string `'1.5'` |
 /// | `array_flip([1.5])` ([`flip_key_of`]) | the entry is **skipped** |
 ///
-/// Three neighbouring builtins, three rules, and no amount of reasoning about
-/// "PHP's array key cast" produces them — only running the engine does
-/// (ADR-0004). So this cast serves exactly the pair it was probed for.
+/// No amount of reasoning about "PHP's array key cast" produces these — only
+/// running the engine does (ADR-0004). This cast serves exactly the pair probed.
 ///
 /// **The float declines** rather than taking the measured `'1.5'`. PHP renders a
 /// float to string under the `precision` ini directive, so the *key* of
@@ -32072,13 +30471,11 @@ fn array_key_cast(v: &Val) -> Option<VKey> {
 /// The witnessed entry sequence an argument denotes (issue #328 wave 2) — the
 /// one seam the two-array names read their sibling through.
 ///
-/// It answers for the same two provenances the subject binding accepts, and for
-/// the same reason: a `Singleton` array is an observed value, and a sealed,
-/// all-required shape carrying an order witness is an observed construction. A
-/// declared shape has no sequence and answers `None`, which is what keeps the
-/// §7 declined import declined on the *second* argument too — a rule that reads
-/// `array_intersect_key($x, array{a: int, b: int})` must not read that
-/// declaration's field order any more than it may read the subject's.
+/// Answers for the same two provenances the subject binding accepts: a
+/// `Singleton` array is an observed value, a sealed all-required shape carrying
+/// an order witness is an observed construction. A declared shape has no
+/// sequence and answers `None` — keeping the §7 declined import declined on the
+/// *second* argument too.
 fn witnessed_entries_of(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32116,13 +30513,11 @@ type GatedFact<'a> = (Fact, &'a [&'a str], Option<(u32, u32)>);
 /// The **certain key set** of an argument (issue #328 wave 2) — every key it
 /// has, and no key it might not have.
 ///
-/// Weaker than [`witnessed_entries_of`] in what it demands and in what it
-/// yields: no order witness is required, because a set has no order, and none is
-/// returned. That is the whole reason it exists — `array_diff_key` and
-/// `array_intersect_key` read their second argument's key set only, so a
-/// *declared* `array{a: int, b: int}` is a perfectly good second argument even
-/// though its field order means nothing (ADR-0062 §7's declined import is about
-/// reading declaration *order*, and there is no order here to read).
+/// Weaker than [`witnessed_entries_of`]: no order witness required, none
+/// returned. `array_diff_key`/`array_intersect_key` read their second argument's
+/// key set only, so a *declared* `array{a: int, b: int}` is a perfectly good
+/// second argument even though its field order means nothing (§7's declined
+/// import is about reading order, and there is none here).
 ///
 /// The set has to be certain, which is what the two refusals enforce:
 ///
@@ -32322,12 +30717,11 @@ fn slice_preserve_keys(
 /// **`array_slice` on the ORDER-DECLARED lane** — the widening floor, sound for
 /// *any* offset and length (issue #118, ADR-0062 Amendment B).
 ///
-/// The v1 decline's stated cost was that "the shape-only answer carries no more
-/// than the reflected `array` envelope already does". That is false, and the
-/// element union is the counterexample: `array_slice(list<Foo>, $n)` is a
-/// `list<Foo>`, and the envelope says `array`. Six claims, each read from
-/// order-INDEPENDENT structure only (§2 — no field declaration order is consulted,
-/// and the arguments the arm reads are a flag, an offset, and a length):
+/// The v1 decline's stated cost was "the shape-only answer carries no more than
+/// the reflected `array` envelope already does" — false: `array_slice(list<Foo>,
+/// $n)` is a `list<Foo>`, and the envelope says `array`. Six claims, each read
+/// from order-INDEPENDENT structure only (§2 — no field declaration order
+/// consulted, only a flag, an offset, and a length):
 ///
 /// * **Element bound** — the slice's values are a subset of the subject's, so
 ///   [`shape_value_union`] carries across unchanged.
@@ -32365,10 +30759,9 @@ fn slice_preserve_keys(
 ///   a non-empty subject — `array_slice([1,2,3], 10) === []`,
 ///   `array_slice([1,2,3], 1, 0) === []` — so the flag is dropped unconditionally.
 ///
-/// **The size bound is deliberately not claimed.** The result's entry count is
-/// bounded above by the subject's, and expressing that would need a sealed result
-/// shape with keys the projection cannot name; the tail is unsealed instead, which
-/// is the sound direction. The issue left this optional and the widening is worth
+/// **The size bound is deliberately not claimed.** Expressing it would need a
+/// sealed result shape with keys the projection cannot name; the tail is
+/// unsealed instead, the sound direction. Left optional — the widening is worth
 /// more than the arithmetic.
 fn slice_widening(
     cx: &Cx,
@@ -32511,19 +30904,18 @@ fn fact_admitting_false(f: &Fact) -> Option<Fact> {
 /// engine's own reflected *declaration* must be the one the rule was written
 /// against. These results are array/nullable-union facts the scalar envelope path
 /// (`envelope_fact`) cannot represent at all, so there is no envelope to be
-/// extensionally inside — the declaration is what countersigns them, and it
-/// carries the same sidecar-presence and A9 monkey-patch legs. A run with no PHP,
-/// a monkey-patch extension, a project function shadowing the name, or an engine
-/// whose declaration has moved withholds the rule rather than trusting it.
+/// extensionally inside — the declaration itself countersigns them, carrying the
+/// same sidecar-presence and A9 monkey-patch legs. A run with no PHP, a
+/// monkey-patch extension, a project function shadowing the name, or an engine
+/// whose declaration has moved withholds the rule.
 ///
 /// **Stratum is ADR-0061 §3's derivation clause**: `min` over every argument the
-/// call passes, exactly as [`value_stratum`]'s own `Call` arm computes it — a
-/// transfer premised on a docblock-claimed separator is `Asserted` and can never
-/// premise a proof-layer finding.
+/// call passes — a transfer premised on a docblock-claimed separator is
+/// `Asserted` and can never premise a proof-layer finding.
 ///
 /// Every rule below is **independently implemented** (ADR-0061 §4): authored from
 /// `php -r` probes against `PINNED_PHP` and php.net's documented semantics, not
-/// from phpstan-src text — hence no port header on this module.
+/// from phpstan-src text.
 fn arg_dispatch_return_fact(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32576,13 +30968,10 @@ fn arg_dispatch_return_fact(
             (fact, declared, None)
         }
     };
-    // ADR-0064 Amendment B, enforced structurally at this rung too. Until issue #118
-    // this assertion was a flat *refusal* — the rung had no arity leg to offer, so a
-    // `mixed` pin could only be a hole, and `json_decode`'s is the recorded decline
-    // above. `min`/`max` declare a bare `mixed` and are otherwise the batch's most
-    // load-bearing rule, so the rung grew the same second leg the S7 rung next door
-    // already carried, and the assertion became the same OBLIGATION: name `mixed`
-    // and you must pin the signature the rule was written against.
+    // ADR-0064 Amendment B, enforced structurally at this rung too. `min`/`max`
+    // declare a bare `mixed`, so the rung grew the same arity second leg the S7
+    // rung carries: name `mixed` and you must pin the signature the rule was
+    // written against.
     debug_assert!(
         !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")) || arity.is_some(),
         "{lower}: a `mixed` declaration pin requires the arity second leg"
@@ -32618,21 +31007,18 @@ fn transfer_arg_fact(
 /// The same fact **with the stratum it enters at** — the two are computed together
 /// because the second leg below can change both at once.
 ///
-/// The env fact is the first answer, as it always was. Where it is only the
-/// *envelope* (`Fact::General`, which is what a native `string $s` parameter seeds
-/// and says nothing this rung can transfer), the **declared contract arm lane** is
-/// consulted instead: `@param non-empty-string $s` on a natively-typed `string`
-/// parameter lives there and nowhere else, because ADR-0052 §9's entry-state
-/// seeding puts only *array* arms into the value lane (ADR-0062 A-G9's corollary),
-/// leaving every scalar refinement in the arm lane for the contract surface.
+/// The env fact is the first answer. Where it is only the *envelope*
+/// (`Fact::General`, what a native `string $s` parameter seeds), the **declared
+/// contract arm lane** is consulted instead: `@param non-empty-string $s` on a
+/// natively-typed `string` parameter lives there and nowhere else, since
+/// ADR-0052 §9's entry-state seeding puts only *array* arms into the value lane
+/// (A-G9's corollary).
 ///
-/// Reading it here is the narrowest possible widening of that seam: nothing about
-/// entry state moves, the variable's own dump is unchanged, and only a rule that
-/// asked for this argument sees it. The arm's own stratum comes with it, so a
-/// refinement the docblock merely *claims* enters `Asserted` and can never premise
-/// a proof-layer finding (ADR-0061 §3's derivation clause). An arm lane that
-/// lowers to no better than the envelope contributes nothing, so a plain native
-/// `string $s` keeps the `Verified` stratum it already had.
+/// This is the narrowest possible widening of that seam: nothing about entry
+/// state moves, only a rule that asked for this argument sees it. The arm's own
+/// stratum comes with it, so a docblock-*claimed* refinement enters `Asserted`
+/// and can never premise a proof-layer finding (ADR-0061 §3). An arm lane
+/// lowering to no better than the envelope contributes nothing.
 fn transfer_arg_known(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32659,9 +31045,8 @@ fn transfer_arg_known(
     }
     // An array literal the value path cannot prove whole still denotes a fact
     // (issue #327), and a rule reading it as an ARGUMENT should see the same one
-    // an assignment would bind. Without this a sibling argument like
-    // `array_combine(['a', 'b'], [1, $x])` reads nothing at all, which is the
-    // seeding cliff surviving one seam further out.
+    // an assignment would bind — otherwise a sibling argument like
+    // `array_combine(['a', 'b'], [1, $x])` reads nothing at all.
     if let ArgValue::Array(items) = value
         && let Some((lit, strat)) = cx
             .resolve_literal_strat(value, env, false, folder)
@@ -32702,12 +31087,9 @@ fn declared_arm_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
 /// not be empty`.
 ///
 /// **Two declines, both load-bearing.** An empty (or not-known-non-empty)
-/// separator declines — the `ValueError` form has no return value to describe,
-/// and an unknown separator might be it. And the three-argument form declines
-/// **because `$limit` breaks non-emptiness outright**: the probe
-/// `explode(',', 'a,b,c', -5)` returns `array(0){}` at 8.5.8, so a rule that kept
-/// `non-empty` across a limit argument would be a false premise, not a lost
-/// refinement.
+/// separator declines — the `ValueError` form has no return value to describe.
+/// The three-argument form declines **because `$limit` breaks non-emptiness
+/// outright**: `explode(',', 'a,b,c', -5)` returns `array(0){}` at 8.5.8.
 fn explode_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32728,28 +31110,22 @@ fn explode_transfer(
 /// `range($start, $end [, $step])` → **`non-empty-list<int>`** for integral
 /// bounds and step, **`non-empty-list<mixed>`** otherwise.
 ///
-/// The unconditional half is the stronger claim and the one worth having: PHP's
-/// `range` always returns a *packed* array — keys `0..n-1`, so a list — with at
-/// least one entry, because equal bounds still produce one (`range(1, 1)` →
-/// `[1]`, witnessed at 8.5.8). No argument shape changes that: `range(3, 1)` is
-/// the three-element descending list, and `range('a', 'c')` is
-/// `['a', 'b', 'c']` — a non-empty list of strings. Every input PHP 8.3+ refuses
-/// (`$step` of `0`, a `$step` larger than the span, a negative `$step` on an
-/// increasing range — all three witnessed as `ValueError` at 8.5.8) produces no
-/// value at all, so non-emptiness survives them vacuously.
+/// The unconditional half is the stronger claim: PHP's `range` always returns a
+/// *packed* array (a list) with at least one entry, since equal bounds still
+/// produce one (`range(1, 1)` → `[1]`, witnessed at 8.5.8). No argument shape
+/// changes that: `range(3, 1)` is the three-element descending list, and
+/// `range('a', 'c')` is `['a', 'b', 'c']`. Every input PHP 8.3+ refuses (`$step`
+/// of `0`, too large, or negative on an increasing range — all `ValueError` at
+/// 8.5.8) produces no value at all, so non-emptiness survives vacuously.
 ///
-/// The element bound is where the arguments dispatch, and it is **narrower than
-/// "any float involved"** on purpose: PHP 8.3's saner-`range` semantics make
-/// `range(1, 3, 1.0)` an *int* array (witnessed), so a float step does not imply
-/// a float result, while `range(1, 2, 0.5)` and `range(1.0, 3.0)` are float
-/// arrays. Rather than encode that fractional-part rule, the transfer claims
-/// `int` only when every bound and the step are known integral and leaves the
-/// element unknown otherwise — the list-ness and the non-emptiness still land.
+/// The element bound is **narrower than "any float involved"** on purpose: PHP
+/// 8.3's saner-`range` makes `range(1, 3, 1.0)` an *int* array, while
+/// `range(1, 2, 0.5)` and `range(1.0, 3.0)` are float arrays. Rather than encode
+/// that fractional-part rule, the transfer claims `int` only when every bound
+/// and step are known integral and leaves the element unknown otherwise.
 ///
-/// The integrality test is [`fact_is_int`], which also passes a *nullable* int.
-/// That is sound for the same vacuous reason the `ValueError` inputs are:
-/// `range(null, 3)` is a `TypeError` at 8.3+, so the `null` member of such a fact
-/// contributes no returned value for the claim to be wrong about.
+/// The integrality test is [`fact_is_int`], which also passes a *nullable* int —
+/// sound vacuously, since `range(null, 3)` is a `TypeError` at 8.3+.
 fn range_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32778,18 +31154,16 @@ fn range_transfer(
 /// string subject, **`array|null`** for an array one.
 ///
 /// The reflected declaration is the three-member `array|string|null`, which
-/// `envelope_fact` cannot represent (multi-base) — so today the call carries *no*
-/// fact at all, and the subject's own base is exactly what splits it. `$subject`
-/// alone governs: `preg_replace(['/a/', '/b/'], 'z', 'ab')` is `'zz'`, a string,
+/// `envelope_fact` cannot represent (multi-base), so `$subject`'s own base is
+/// what splits it: `preg_replace(['/a/', '/b/'], 'z', 'ab')` is `'zz'`, a string,
 /// despite the array `$pattern` (witnessed at 8.5.8).
 ///
 /// The `null` arm is **kept on both sides**, deliberately. A string subject
-/// genuinely returns `null` on a PCRE error (`@preg_replace('/a', 'b', 'aaa')` →
-/// `NULL`, witnessed). The array-subject probes returned `array(0){}` rather than
-/// `null` on the same errors — but "no probe produced null" is not a proof that
-/// none can, and ADR-0061 §2's ledger only balances one way: a kept-but-impossible
-/// `null` costs one arm of precision, a dropped-but-possible one is a false
-/// premise. `$limit`/`&$count` may follow without changing the answer.
+/// genuinely returns `null` on a PCRE error (witnessed). Array-subject probes
+/// returned `array(0){}` on the same errors, but "no probe produced null" is not
+/// proof none can — ADR-0061 §2's ledger only balances one way: a
+/// kept-but-impossible `null` costs one arm of precision, a dropped-but-possible
+/// one is a false premise.
 fn preg_replace_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32827,26 +31201,20 @@ fn preg_replace_transfer(
 ///
 /// # The load-bearing PHP fact
 ///
-/// **`min`/`max` RETURN ONE OF THEIR ARGUMENTS**, whatever PHP's comparison
-/// semantics did on the way — not a coerced copy of one, and never a value that
-/// was not passed in. Witnessed at `PINNED_PHP` (8.5.8): `min('a', 1)` is
-/// `int(1)`, the second argument verbatim, and `min([3, '1', 2])` is
-/// `string(1) "1"`, an element verbatim. So the union of the argument facts admits
-/// the result **unconditionally** — the rule needs no premise about comparability,
-/// ordering, or type juggling, which is exactly what makes it worth having where a
-/// per-type case analysis would not be.
+/// **`min`/`max` RETURN ONE OF THEIR ARGUMENTS**, not a coerced copy. Witnessed
+/// at `PINNED_PHP` (8.5.8): `min('a', 1)` is `int(1)`, the second argument
+/// verbatim; `min([3, '1', 2])` is `string(1) "1"`, an element verbatim. So the
+/// union of the argument facts admits the result **unconditionally** — the rule
+/// needs no premise about comparability, ordering, or type juggling.
 ///
 /// # The ladder
 ///
-/// 1. **Two or more arguments, all int-ranged** → the *composed interval*, which is
+/// 1. **Two or more arguments, all int-ranged** → the *composed interval*,
 ///    strictly sharper than the union: for `a ∈ [l₁, h₁]`, `b ∈ [l₂, h₂]`,
-///    `min(a, b) ∈ [min(l₁, l₂), min(h₁, h₂)]` (`min(a, b) ≤ a ≤ h₁` and
-///    `≤ b ≤ h₂`, and both endpoints are attained), and `max` dually. This is
-///    interval arithmetic over declared knowledge — the `count()`/`strlen`
-///    precedent — never a re-derivation of what PHP compared. A composition that
-///    collapses to a point spells the point (`min(1, 2)` is `1`), which is what
-///    keeps the rule from being *worse* than a fold on constant arguments; `min`
-///    and `max` are not on the folding allowlist, so nothing else answers them.
+///    `min(a, b) ∈ [min(l₁, l₂), min(h₁, h₂)]`, `max` dually. Interval
+///    arithmetic over declared knowledge, never a re-derivation of what PHP
+///    compared. A composition collapsing to a point spells the point (`min(1,
+///    2)` is `1`), since `min`/`max` are not on the folding allowlist.
 /// 2. **Two or more arguments otherwise** → the plain domain join of the facts.
 /// 3. **One argument** → the unary ARRAY form: the shape's own value union
 ///    ([`shape_value_union`]), because the result is one of the array's *elements*.
@@ -32854,24 +31222,21 @@ fn preg_replace_transfer(
 ///
 /// # The declines, each for a stated reason
 ///
-/// * **Any argument without a usable fact declines the whole rule.** A union over
-///   the arguments that *did* answer is not sound — the missing one could hold the
-///   winner — so there is no partial answer to give.
+/// * **Any argument without a usable fact declines the whole rule** — the missing
+///   one could hold the winner, so no partial answer.
 /// * **A join the four-layer domain cannot spell declines** — `min($int, $string)`
-///   is an `int|string`, a two-base union with no single [`Fact`], exactly as
-///   `json_decode`'s six-base envelope is. See the deviation note in ADR-0062
-///   Amendment B: the design called for these to enter the *arm* lane, which has no
-///   argument-dependent channel at this seam, so the honest floor stands instead.
-/// * **A nullable int leaves the interval path** and takes the union: `min(null, 5)`
-///   is `NULL` at 8.5.8, so an `?int` argument must not yield a bare `int` claim.
-///   The union carries the null side correctly (`int|null` is one fact).
+///   is a two-base union with no single [`Fact`], like `json_decode`'s. ADR-0062
+///   Amendment B called for these to enter the *arm* lane, which has no
+///   argument-dependent channel here, so the honest floor stands.
+/// * **A nullable int leaves the interval path** and takes the union: `min(null,
+///   5)` is `NULL` at 8.5.8, so an `?int` argument must not yield a bare `int`.
 /// * **A one-argument call whose fact is not an array declines** — `min(5)` is a
-///   `TypeError`, and a rule describes a call that returns.
+///   `TypeError`.
 /// * **A zero-argument call declines** — `min()` is an `ArgumentCountError`.
 ///
-/// `min([])` throwing a `ValueError` costs the rule nothing and buys it no
-/// `non_empty` premise: a throw is the *absence* of a return, so there is no value
-/// for the claim to be wrong about (the same vacuity [`range_transfer`] leans on).
+/// `min([])` throwing a `ValueError` costs the rule nothing: a throw is the
+/// *absence* of a return, so there is no value for the claim to be wrong about
+/// (the same vacuity [`range_transfer`] leans on).
 fn min_max_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32951,14 +31316,13 @@ fn fact_int_range(f: &Fact) -> Option<IntRange> {
 ///
 /// The reflected declaration is `?string`, and the `null` half is precisely the
 /// `$return = false` behavior: the export is *printed* and nothing is returned.
-/// A literal `true` flag is therefore the whole transfer — it strips the null
-/// arm, and nothing else about `$value` matters (`var_export(null, true)` is the
-/// four-character string `'NULL'`, not `null`; witnessed at 8.5.8).
+/// A literal `true` flag strips the null arm, and nothing else about `$value`
+/// matters (`var_export(null, true)` is the four-character string `'NULL'`, not
+/// `null`; witnessed at 8.5.8).
 ///
 /// The one-argument and literal-`false` forms decline: the reflected `?string`
-/// envelope already describes them exactly, and a rule that restated its own
-/// envelope would add a stratum-carrying fact where a `Verified` one already
-/// stands (ADR-0061 §3's replace-if-weaker corollary).
+/// envelope already describes them exactly (ADR-0061 §3's replace-if-weaker
+/// corollary).
 fn var_export_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -32975,45 +31339,26 @@ fn var_export_transfer(
 /// **The string-predicate transfers** (issue #77) — the residual half of the names
 /// whose constant half the fold lane already owns.
 ///
-/// A string builtin called on a *known constant* folds to a Singleton one rung up
-/// (ADR-0028). Called on a string the walk only knows *predicates* about —
-/// `non-empty-string`, `lowercase-string`, a `'foo'|'bar'` union — nothing computed
-/// before this table. It answers one question per name: **which
-/// [`StrPreds`](steins_domain::StrPreds) bits survive the call, and which does the
-/// call establish on its own?**
-///
-/// The shape is uniform, so the whole family is one rule rather than twenty-five:
+/// A string builtin on a *known constant* folds to a Singleton one rung up
+/// (ADR-0028). On a string the walk knows only *predicates* about, this table
+/// answers one question per name: which [`StrPreds`](steins_domain::StrPreds) bits
+/// survive the call, and which does the call establish on its own?
 ///
 /// ```text
 /// out = (preds(arg0) ∩ KEEP(name, args)) ∪ FORCE(name, args)
 /// ```
 ///
-/// with `out == ∅` meaning **decline** — an empty summary is exactly the reflected
-/// `string` envelope, and restating an envelope would put a stratum-carrying fact
-/// where a `Verified` one already stands (ADR-0061 §3's replace-if-weaker
-/// corollary, the same reason [`var_export_transfer`] declines its one-argument
-/// form). `strlen` is the one member whose output is not a string: a non-empty
-/// subject makes it `int<1, max>`, one notch inside the curated `int<0, max>` row.
+/// `out == ∅` means **decline**: an empty summary is exactly the reflected `string`
+/// envelope, and restating it would put a stratum-carrying fact where a `Verified`
+/// one already stands (ADR-0061 §3's replace-if-weaker corollary). `strlen` is the
+/// one member whose output is not a string.
 ///
-/// # What the two casing bits MEAN here, and why the forced leg is total
-///
-/// `LOWERCASE` is `strtolower($s) === $s`, which
-/// [`php_str_is_lowercase`](steins_domain::php_str_is_lowercase) implements as **no
-/// ASCII uppercase byte** — PHP 8.2+ made the two case functions locale-insensitive
-/// and byte-wise, so nothing outside `A-Z`/`a-z` participates. Two consequences the
-/// table leans on, both probed at `PINNED_PHP` (8.5.8):
-///
-/// * `strtolower('ÄB') === 'Äb'` — the non-ASCII byte is untouched, and the result
-///   still has no ASCII uppercase byte. So `strtolower` **forces** `LOWERCASE` for
-///   *any* input, including one carrying no fact at all, and `strtoupper` mirrors it
-///   (`strtoupper('äb') === 'äB'`). This is the one leg that fires without reading
-///   the subject: the claim is about the function, not its argument.
-/// * A transfer that only ever *removes* bytes or *inserts* uncased ones preserves
-///   both casing bits — `trim`, `substr`, `strrev`, `str_repeat`, `implode`. That is
-///   why an explicit `trim` charlist changes nothing here: the output is still a
-///   substring of the input.
-///
-/// # The table
+/// Casing, probed at `PINNED_PHP` (8.5.8): `LOWERCASE` is "no ASCII uppercase
+/// byte", since PHP 8.2+ made both case functions locale-insensitive and byte-wise.
+/// `strtolower`/`strtoupper` **force** their bit for *any* input including a
+/// factless one (`strtolower('ÄB') === 'Äb'`); a transfer that only removes bytes
+/// or inserts uncased ones preserves both bits (`trim`, `substr`, `strrev`,
+/// `str_repeat`, `implode`), so an explicit `trim` charlist changes nothing.
 ///
 /// | name(s) | keeps | forces | declines |
 /// | --- | --- | --- | --- |
@@ -33034,69 +31379,39 @@ fn var_export_transfer(
 /// | `strlen` | — | `int<1, max>` at a non-empty subject | — |
 ///
 /// Only those five bits move (`NON_EMPTY`, `NON_FALSY`, `NUMERIC`, `LOWERCASE`,
-/// `UPPERCASE`). `DECIMAL_INT` and `NON_DECIMAL_INT` are never propagated even
-/// where they would survive (`ucfirst(' 1e5')` is still numeric): dropping a bit
-/// is a widening, and keeping the table to the measured axis is worth more than
-/// the rows it would buy.
+/// `UPPERCASE`). `DECIMAL_INT`/`NON_DECIMAL_INT` are never propagated even where
+/// they would survive: dropping a bit is a widening, and keeping the table to the
+/// measured axis is worth more than the rows it would buy.
 ///
 /// # The declines, each for a stated reason
 ///
-/// * **`escapeshellcmd`** — in upstream PHPStan's own non-empty set, and **wrong**
-///   there: `escapeshellcmd("\x80") === ''` at 8.5.8 (it drops an invalid multibyte
-///   sequence). A measured counterexample outranks upstream's say-so (ADR-0061 §2:
-///   "upstream's say-so is provenance, not evidence"), so the name is refused.
+/// * **`escapeshellcmd`** — upstream PHPStan's non-empty set is wrong here:
+///   `escapeshellcmd("\x80") === ''` at 8.5.8 (ADR-0061 §2).
 /// * **`urldecode`/`rawurldecode` keep `NON_EMPTY` only** — upstream propagates
-///   non-falsiness through them too, and `urldecode('%30') === '0'` refutes it.
+///   non-falsiness too, refuted by `urldecode('%30') === '0'`.
 /// * **Any `mb_*` name** — encoding- and locale-dependent, the catalog's standing
-///   exclusion (`steins_catalog` lib.rs "Deliberate exclusions"). `mb_strtolower`
-///   and `mb_substr` are *absent by that rule*, not by oversight.
-/// * **`substr` non-emptiness away from offset zero** — `substr($nonEmpty, 1, 1)`
-///   may be non-empty, and proving it needs the subject's own length, which a
-///   predicate summary does not carry (`substr('a', 1, 1) === ''`). Issue #41
-///   takes only the offset-zero sliver, where the window is anchored at the first
-///   byte and the clamping does the rest; every other offset still declines.
-/// * **`strtr` casing and non-falsiness** — both refuted at the pin
-///   (`strtr('a', 'a', 'A') === 'A'`; `strtr('a', 'ax', '0x') === '0'`), the
-///   second against upstream PHPStan's own claim for both arities.
+///   exclusion.
+/// * **`substr` non-emptiness away from offset zero** — needs the subject's own
+///   length, which a predicate summary lacks (`substr('a', 1, 1) === ''`); issue
+///   #41 takes only the offset-zero sliver.
+/// * **`strtr` casing and non-falsiness** — both refuted at the pin.
 /// * **`sprintf` casing, and every non-constant format** — a conversion may emit
-///   uppercase (`sprintf('%X', 255) === 'FF'`) or nothing at all
-///   (`sprintf('%.0s', 'abc') === ''`), so only a *literal byte in a constant
-///   format* is claimed, and the scanner refuses any format it cannot parse.
-/// * **`sprintf`'s hex pair, `%x`/`%X`** — issue #41's NUMERIC slice excludes both:
-///   `sprintf('%14x', 255) === 'ff'` and `sprintf('%14X', 255) === 'FF'`, neither a
-///   numeric string, though upstream PHPStan's `bug-7387.php` fixture claims
-///   `numeric-string` for both. A measured counterexample outranks upstream's
-///   say-so (ADR-0061 §2) for the second time in this table.
+///   uppercase (`'%X'` → `FF`) or nothing (`'%.0s'` → `''`); only a literal byte
+///   in a constant format is claimed.
+/// * **`sprintf`'s `%x`/`%X`** — excluded from NUMERIC: `sprintf('%14x', 255)
+///   === 'ff'` is not a numeric string, though upstream's `bug-7387.php` fixture
+///   claims it is (ADR-0061 §2 again).
 /// * **`sprintf`'s `%e`/`%f`/`%g` away from a proven `int` value** — the float
-///   formatter renders `NAN`/`INF`/`-INF` verbatim (`sprintf('%f', NAN) === 'NaN'`),
-///   and a numeric-*string* argument can overflow its own `(float)` cast to `INF`
-///   (`sprintf('%f', "1e400") === 'INF'`). Only a native `int` value closes both
-///   holes (PHP has no `int` spelling of either special value), so the rule reads
-///   the value argument's fact for exactly these three type characters — `b`/`d`/
-///   `o` need no such gate, because PHP's int CAST (not float format) clamps any
-///   input, `NAN`/`INF` included, to a definite in-range integer.
+///   formatter renders `NAN`/`INF` verbatim and a numeric-string argument can
+///   overflow to `INF`; `b`/`d`/`o` need no gate since PHP's int cast clamps.
 /// * **`sprintf`'s `%c %s %u %h %H %E %F %G`** — unmeasured for this slice.
-///   Upstream's fixture claims `numeric-string` for several (`%u`/`%h`/`%H`
-///   plausibly by the same int-cast argument admitting `%d`/`%b`/`%o`), but this
-///   rule widens only on a witness it has taken itself, not on upstream's say-so
-///   — a future slice, not this one.
-/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the same float-trio gate `sprintf` clears
-///   with its own second argument needs a proven `int` VALUE, and `vsprintf`'s
-///   value sits inside the values array rather than at a fixed argument position.
-///   Opening that array for one element's fact is more machinery than this slice's
-///   measured rows need (both `vsprintf` rows in `bug-7387.php` and
-///   `lowercase-string-sprintf.php` are `%d`, the unconditional int-cast leg), so
-///   the float trio stays declined for `vsprintf` — a stated decline, not a guess.
-/// * **`str_replace`/`substr_replace`/`parse_str`** — nsrt asks for casing through
-///   them too; they need a second subject's predicates (or an out-parameter) rather
-///   than this table's single-subject shape. Not modeled by this table.
-///
-/// # Unions are read directly (the #75 survey's nuance)
+/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the value sits inside the values array
+///   rather than a fixed position; opening it is more machinery than needed.
+/// * **`str_replace`/`substr_replace`/`parse_str`** — need a second subject's
+///   predicates or an out-parameter, not this table's single-subject shape.
 ///
 /// A `Fact::OneOf` of constant strings answers by **intersecting** each member's
-/// summary — `'foo'|'bar'` is `LOWERCASE`, and `trim($fooOrBar, $s)` is a
-/// `lowercase-string`. That path needs no fold and is not blocked on #74, which
-/// gates only the sidecar route; [`fact_str_preds`] is the whole of it.
+/// summary — `'foo'|'bar'` is `LOWERCASE`.
 fn str_pred_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -33144,9 +31459,8 @@ fn str_pred_out(
 ) -> Option<StrPreds> {
     /// The length axis: `non-empty-string` and its `non-falsy-string` refinement.
     const LENGTH: StrPreds = StrPreds::NON_EMPTY.union(StrPreds::NON_FALSY);
-    /// The casing pair. Both bits together is "no cased character at all", which is
-    /// a legitimate summary (`''`, `'123'`) and survives every transfer that keeps
-    /// either one.
+    /// The casing pair. Both bits together is "no cased character at all" (`''`,
+    /// `'123'`) and survives every transfer that keeps either one.
     const CASING: StrPreds = StrPreds::LOWERCASE.union(StrPreds::UPPERCASE);
     /// Everything this table ever propagates.
     const BOTH_AXES: StrPreds = LENGTH.union(CASING);
@@ -33163,10 +31477,9 @@ fn str_pred_out(
     match lower {
         // ---- Removal only: the output is a SUBSTRING of the subject ----------
         //
-        // `trim('  ') === ''` kills the length axis outright, and an explicit
-        // charlist changes nothing on either axis — `ltrim('0abc', '0') === 'abc'`
-        // is still a substring, so casing survives a charlist that could strip the
-        // whole string. `chop` is `rtrim` (same reflected `string`, same 1..=2).
+        // `trim('  ') === ''` kills the length axis outright; an explicit charlist
+        // changes nothing (`ltrim('0abc', '0') === 'abc'` is still a substring).
+        // `chop` is `rtrim` (same reflected `string`, same 1..=2).
         "trim" | "ltrim" | "rtrim" | "chop" => {
             (1..=2).contains(&args.len()).then(|| subject.intersect(CASING))
         }
@@ -33216,24 +31529,20 @@ fn str_pred_out(
         // ---- Byte MAPPING: the length is preserved, the bytes are not --------
         //
         // `strtr($s, $from, $to)` maps single bytes 1:1 over the common prefix of
-        // `$from`/`$to`, so the output length EQUALS the subject's and non-emptiness
-        // survives (`strtr('ab', 'ab', 'xy') === 'xy'`, `strtr('a', 'abc', 'x')
-        // === 'x'`). Nothing else does, and both refusals are measured at 8.5.9:
+        // `$from`/`$to`, so the output length EQUALS the subject's and
+        // non-emptiness survives (`strtr('ab', 'ab', 'xy') === 'xy'`). Both
+        // refusals measured at 8.5.9:
         //
         // * **Casing** — `strtr('a', 'a', 'A') === 'A'`: the map's target byte is
-        //   arbitrary, so neither bit can be carried.
-        // * **`NON_FALSY`** — `strtr('a', 'ax', '0x') === '0'`. Upstream PHPStan
-        //   propagates non-falsiness through both arities; a one-byte subject
-        //   mapped onto `'0'` refutes it, and a measured counterexample outranks
-        //   upstream's say-so (ADR-0061 §2). The same shape refutes the array form:
-        //   `strtr('a', ['a' => '0']) === '0'`.
+        //   arbitrary.
+        // * **`NON_FALSY`** — `strtr('a', 'ax', '0x') === '0'`, refuting upstream
+        //   PHPStan's claim for both arities (ADR-0061 §2). Same shape for the
+        //   array form: `strtr('a', ['a' => '0']) === '0'`.
         //
-        // The array form replaces whole substrings rather than bytes, so the length
-        // is no longer preserved and a value of `''` DELETES one
-        // (`strtr('a', ['a' => '']) === ''`). Non-emptiness survives it only when
-        // every replacement value is known non-empty — read off the array's own
-        // values by [`array_value_preds`], which declines an array this rung cannot
-        // see through.
+        // The array form replaces whole substrings, so length is not preserved and
+        // `''` DELETES an entry (`strtr('a', ['a' => '']) === ''`). Non-emptiness
+        // survives only when every replacement value is known non-empty, read off
+        // by [`array_value_preds`].
         "strtr" => match args {
             [_subject, pairs] => {
                 let vals = array_value_preds(cx, folder, pairs, env, store)?;
@@ -33254,7 +31563,7 @@ fn str_pred_out(
         // ---- Repetition: length survives only at a provable multiplier ≥ 1 ----
         //
         // `str_repeat('a', 0) === ''`. Casing survives regardless — `''` carries
-        // both casing bits, so the zero case cannot falsify a casing claim.
+        // both casing bits.
         "str_repeat" => {
             let [_subject, times] = args else { return None };
             let once = transfer_arg_fact(cx, folder, times, env, store)
@@ -33264,15 +31573,13 @@ fn str_pred_out(
         }
         // ---- Padding: the subject is a SUBSEQUENCE of the output --------------
         //
-        // So the length axis always survives (`str_pad` never shortens: a `$length`
-        // below the subject's own returns it unchanged). The output length is
-        // `max(strlen($subject), $length)`, which makes a provable `$length >= 1`
-        // FORCE non-emptiness whatever the subject was — `str_pad('', 1) === ' '`,
-        // while `str_pad('', 0) === ''` and `str_pad('', -5) === ''`.
+        // The length axis always survives (`str_pad` never shortens). Output
+        // length is `max(strlen($subject), $length)`, so a provable `$length >= 1`
+        // FORCES non-emptiness whatever the subject was — `str_pad('', 1) === ' '`,
+        // while `str_pad('', 0) === ''`.
         //
-        // Casing needs the pad string too, since the padding is inserted verbatim.
-        // An absent pad argument is `' '`, which has no cased character and so
-        // carries both bits; an unknown one contributes nothing and drops casing.
+        // Casing needs the pad string too. An absent pad argument is `' '`, no
+        // cased character, carrying both bits; an unknown one drops casing.
         "str_pad" => {
             if !(2..=4).contains(&args.len()) {
                 return None;
@@ -33293,11 +31600,9 @@ fn str_pred_out(
         }
         // ---- The FORCED casing pair ------------------------------------------
         //
-        // Byte-wise ASCII case mapping (locale-insensitive since 8.2): the length is
+        // Byte-wise ASCII case mapping (locale-insensitive since 8.2): length is
         // preserved, so both length bits survive, and the target casing holds for
-        // ANY input — the one leg that fires with no subject fact at all. The
-        // OPPOSITE casing is dropped: `strtolower('AB')` is `'ab'`, which has
-        // lowercase bytes, so an `uppercase-string` subject does not stay one.
+        // ANY input. The OPPOSITE casing is dropped: `strtolower('AB')` is `'ab'`.
         "strtolower" => {
             let [_] = args else { return None };
             Some(subject.intersect(LENGTH).union(StrPreds::LOWERCASE))
@@ -33310,8 +31615,7 @@ fn str_pred_out(
         //
         // `ucfirst('abc') === 'Abc'` breaks `LOWERCASE` but cannot break
         // `UPPERCASE` (it only ever uppercases). `lcfirst` is the mirror. `ucwords`
-        // is `ucfirst` at every word boundary, with the same asymmetry, and its
-        // optional `$separators` argument does not change it.
+        // is `ucfirst` at every word boundary, same asymmetry.
         "ucfirst" => {
             let [_] = args else { return None };
             Some(subject.intersect(LENGTH.union(StrPreds::UPPERCASE)))
@@ -33329,8 +31633,7 @@ fn str_pred_out(
         // bit holds exactly when the glue and every admitted element hold it. The
         // one-argument form's glue is `''`, which carries both. The length axis is
         // NOT claimed: `implode(',', [])` is `''`, and proving otherwise needs the
-        // array's non-emptiness *and* an element's — a join this arm leaves to a
-        // separate rule.
+        // array's non-emptiness *and* an element's.
         "implode" | "join" => {
             let (glue, array) = match args {
                 [array] => (CASING, array),
@@ -33343,13 +31646,10 @@ fn str_pred_out(
         }
         // ---- The escaping family: insertion only ------------------------------
         //
-        // Each of these only ever *inserts* bytes (backslashes, entities, percent
-        // escapes) or copies them, so a non-empty subject stays non-empty and a
-        // non-falsy one cannot collapse to `'0'` (that would need a one-byte output
-        // from a one-byte non-`'0'` input, and every one-byte input either survives
-        // or grows). Casing is NOT claimed: `htmlspecialchars('<')` is `'&lt;'`
-        // (lowercase letters appear) and `urlencode('ä')` is `'%C3%A4'` (uppercase
-        // hex), so both bits genuinely break.
+        // Each of these only ever *inserts* bytes or copies them, so a non-empty
+        // subject stays non-empty and a non-falsy one cannot collapse to `'0'`.
+        // Casing is NOT claimed: `htmlspecialchars('<')` is `'&lt;'` and
+        // `urlencode('ä')` is `'%C3%A4'` (uppercase hex) — both bits break.
         "addslashes" | "escapeshellarg" | "urlencode" | "rawurlencode" => {
             let [_] = args else { return None };
             Some(subject.intersect(LENGTH))
@@ -33361,22 +31661,17 @@ fn str_pred_out(
         "preg_quote" => (1..=2).contains(&args.len()).then(|| subject.intersect(LENGTH)),
         // `urldecode('%30') === '0'`: decoding SHRINKS, so a non-falsy subject can
         // decode to the falsy `'0'`. Non-emptiness still holds — every `%XX` triple
-        // yields one byte and every other byte yields itself, so the output is never
-        // shorter than one byte for a non-empty input.
+        // yields one byte and every other byte yields itself.
         "urldecode" | "rawurldecode" => {
             let [_] = args else { return None };
             Some(subject.intersect(StrPreds::NON_EMPTY))
         }
-        // The one gated pair, and the gate is the engine's own: without
-        // `ENT_SUBSTITUTE` an invalid encoding sequence makes the whole call answer
-        // `''`. A missing flags argument is the 8.1+ default
-        // (`ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401` == 11, read off
-        // `ReflectionFunction` at the pin), which carries the bit; an explicit
-        // non-constant flags argument cannot be checked and declines everything.
-        // The `$encoding`/`$double_encode` arguments do not move the boundary —
-        // probed at 8.5.8 across UTF-8, ISO-8859-1, SJIS and two unsupported
-        // charsets, every substitute-flag answer for a non-empty subject was
-        // non-empty.
+        // The one gated pair: without `ENT_SUBSTITUTE` an invalid encoding sequence
+        // makes the whole call answer `''`. A missing flags argument is the 8.1+
+        // default (`ENT_QUOTES | ENT_SUBSTITUTE | ENT_HTML401` == 11), which
+        // carries the bit; a non-constant flags argument declines everything. The
+        // `$encoding`/`$double_encode` arguments do not move the boundary — probed
+        // at 8.5.8 across UTF-8, ISO-8859-1, SJIS and two unsupported charsets.
         "htmlspecialchars" | "htmlentities" => {
             if !(1..=4).contains(&args.len()) {
                 return None;
@@ -33394,27 +31689,24 @@ fn str_pred_out(
         // ---- issue #41's NUMERIC slice on top of it ----------------------------
         //
         // Both names carry their format at argument 0 (ADR-0078's `PrintfShape`),
-        // so both read [`sprintf_emits_a_literal`] and
+        // reading [`sprintf_emits_a_literal`] and
         // [`sprintf_whole_numeric_conversion`] the same way — the difference is
-        // only WHERE the one value being converted lives: `sprintf`'s own second
-        // positional argument, or somewhere inside `vsprintf`'s values array.
+        // only WHERE the converted value lives: `sprintf`'s own second positional
+        // argument, or inside `vsprintf`'s values array.
         //
-        // Every conversion can produce nothing (`sprintf('%.0s', 'abc') === ''`), so
-        // the only thing a format proves on its own is the literal text between the
-        // conversions. `'%%'` counts — it emits one `'%'`.
+        // Every conversion can produce nothing (`sprintf('%.0s', 'abc') === ''`),
+        // so a format only proves the literal text between conversions. `'%%'`
+        // counts — it emits one `'%'`.
         //
         // NUMERIC is a SEPARATE, stricter question — [`sprintf_whole_numeric_conversion`]
-        // answers it — and forces `StrPreds::NUMERIC` (which closes to `NON_EMPTY`
-        // too, see `StrPreds::close`) when the WHOLE format is one admitted
-        // conversion. `b`/`d`/`o` are forced unconditionally (PHP's int cast cannot
-        // render anything but digits, whatever the value) for EITHER name — issue
-        // #41's `vsprintf('%d', $array)` row (`bug-7387.php`) is exactly this leg,
-        // and it needs no look inside `$array` at all. `e`/`f`/`g` are forced only
-        // when the paired value argument is provably an `int` — a float value could
-        // BE `NAN`/`INF`, which renders as the non-numeric `'NaN'`/`'INF'` literal —
-        // and only `sprintf` exposes that argument positionally; `vsprintf`'s value
-        // sits inside the array this rule does not open, so the float trio stays
-        // declined there (a stated decline, not a guess).
+        // answers it — forcing `StrPreds::NUMERIC` (closes to `NON_EMPTY` too) when
+        // the WHOLE format is one admitted conversion. `b`/`d`/`o` are forced
+        // unconditionally (PHP's int cast cannot render anything but digits) for
+        // EITHER name — issue #41's `vsprintf('%d', $array)` row (`bug-7387.php`)
+        // needs no look inside `$array` at all. `e`/`f`/`g` are forced only when
+        // the paired value argument is provably an `int` — a float value could BE
+        // `NAN`/`INF` — and only `sprintf` exposes that argument positionally;
+        // `vsprintf`'s stays declined there.
         "sprintf" | "vsprintf" => {
             let Some(Fact::Singleton(Val::Str(fmt))) = transfer_arg_fact(cx, folder, &args[0], env, store)
             else {
@@ -33460,10 +31752,9 @@ fn arg_str_preds(
 
 /// The predicate summary EVERY value a fact admits satisfies.
 ///
-/// The finite layers are read directly, which is the #75 survey's union nuance in
-/// one line: a `OneOf` of constant strings intersects its members' summaries, so
-/// `'foo'|'bar'` is `LOWERCASE` and `'foo'|'BAR'` is neither casing. No fold and no
-/// #74 dependency — that issue gates the sidecar route only.
+/// The finite layers are read directly: a `OneOf` of constant strings intersects
+/// its members' summaries, so `'foo'|'bar'` is `LOWERCASE` and `'foo'|'BAR'` is
+/// neither casing.
 fn fact_str_preds(f: &Fact) -> Option<StrPreds> {
     match f {
         Fact::Singleton(Val::Str(s)) => Some(StrPreds::of(s)),
@@ -33486,12 +31777,11 @@ fn fact_str_preds(f: &Fact) -> Option<StrPreds> {
 
 /// The predicate summary every element of `implode`'s array argument satisfies.
 ///
-/// An abstract shape answers through [`shape_value_union`] — one unknown slot there
-/// already yields `None`, which is exactly the decline this rule wants. A fully
-/// known array answers by intersecting its values, and the empty array answers the
-/// summary of `''` (both casing bits), because that is what it implodes to.
-/// A non-string element declines: `implode` casts it, and what the cast produces is
-/// the element's business, not this rule's.
+/// An abstract shape answers through [`shape_value_union`] — one unknown slot
+/// already yields `None`, the decline this rule wants. A fully known array
+/// answers by intersecting its values; the empty array answers the summary of
+/// `''` (both casing bits), what it implodes to. A non-string element declines —
+/// `implode` casts it, and the cast is the element's business, not this rule's.
 fn implode_element_preds(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -33503,11 +31793,9 @@ fn implode_element_preds(
 }
 
 /// The predicate summary every VALUE of an array argument satisfies, with **no
-/// seed** — the difference from [`implode_element_preds`], whose `''` seed is
-/// `implode`'s own answer for the empty array and would silently drop the length
-/// axis for any caller asking a different question. `strtr`'s array form is that
-/// caller: it needs "every replacement value is non-empty", and the empty array
-/// (whose answer is the unchanged subject) declines here rather than pretending.
+/// seed** — unlike [`implode_element_preds`], whose `''` seed is `implode`'s own
+/// answer for the empty array. `strtr`'s array form needs "every replacement
+/// value is non-empty", and the empty array declines here rather than pretending.
 fn array_value_preds(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -33644,10 +31932,8 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 /// # Why a stricter grammar than [`sprintf_emits_a_literal`]
 ///
 /// That scanner answers "does a byte definitely come out"; this one answers "is
-/// the WHOLE output determined by one conversion", which is a narrower question
-/// with its own admitted vocabulary — a single unrecognized byte anywhere (a
-/// literal character, a second `%`, a custom pad, a position) is a decline here
-/// even where the general scanner would still walk past it.
+/// the WHOLE output determined by one conversion" — a single unrecognized byte
+/// anywhere is a decline here even where the general scanner would walk past it.
 ///
 /// # The admitted flags, probed at `PINNED_PHP` (8.5.9)
 ///
@@ -33678,10 +31964,8 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 /// # The type-character split: int-cast vs. float-format
 ///
 /// `b`/`d`/`o` go through PHP's int cast (`zend_dval_to_lval`), which clamps any
-/// input — including a float `NAN`/`INF`, or a numeric string that overflows on
-/// cast — to a definite, in-range integer. There is no value for which the int
-/// cast renders anything but ASCII digits (and an optional leading `-`), so these
-/// three are admitted UNCONDITIONALLY, independent of the value argument's type:
+/// input to a definite, in-range integer, rendering only ASCII digits (and an
+/// optional leading `-`), so these three are admitted UNCONDITIONALLY:
 ///
 /// ```text
 /// php -r 'var_dump(sprintf("%d", NAN));'        // "0"   (int-cast clamps; NUMERIC)
@@ -33701,20 +31985,17 @@ fn sprintf_emits_a_literal(fmt: &[u8]) -> Option<bool> {
 ///
 /// A native PHP `int` cannot hold `NAN`/`INF` at all (and `null`'s `(float)` cast
 /// is the finite `0.0`), so the call site admits `e`/`f`/`g` only when the value
-/// argument's own fact is provably `int` (via [`fact_is_int`], which treats `null`
-/// as immaterial for exactly this reason) — the same boundary PHPStan's own
-/// `bug-7387.php` fixture draws by typing that argument `int $i` rather than
-/// `float`.
+/// argument's own fact is provably `int` (via [`fact_is_int`], `null`-immaterial)
+/// — the same boundary PHPStan's own `bug-7387.php` fixture draws by typing that
+/// argument `int $i` rather than `float`.
 ///
 /// # What stays out of this slice
 ///
 /// `%x`/`%X` are the excluded hex pair (`sprintf('%14x', 255) === 'ff'`, not a
 /// numeric string — upstream PHPStan's `bug-7387.php` claims `numeric-string` for
 /// both and is wrong at this pin). `%c`/`%s`/`%u`/`%h`/`%H`/`%E`/`%F`/`%G` are
-/// unmeasured for this slice (upstream's fixture claims `numeric-string` for
-/// several of them too, `%u`/`%h`/`%H` plausibly by the same int-cast argument
-/// that clears `%d`/`%b`/`%o`) and are left to a future slice rather than widened
-/// on an unwitnessed guess.
+/// unmeasured for this slice, left to a future slice rather than an unwitnessed
+/// guess.
 fn sprintf_whole_numeric_conversion(fmt: &[u8]) -> Option<u8> {
     let n = fmt.len();
     if n < 2 || fmt[0] != b'%' {
@@ -33844,17 +32125,14 @@ type ShapeField = (VKey, steins_domain::Presence, Option<Box<Fact>>);
 /// with every `Required` position before every `Optional` one.
 ///
 /// `is_list == Yes` is **realizable order**: every admitted value passes
-/// `array_is_list`, so its keys are `0..n-1` in that sequence — a semantic
-/// guarantee, not the declaration artifact `docs/phpstan-divergences.md`
-/// records as PHPStan's real-FP class. Consuming it is sound by the fact's own
-/// definition ([`ShapeFact::admits`] enforces the verdict against the entries'
-/// real order).
+/// `array_is_list`, a semantic guarantee, not the declaration artifact
+/// `docs/phpstan-divergences.md` records as PHPStan's real-FP class. Consuming
+/// it is sound by the fact's own definition ([`ShapeFact::admits`]).
 ///
-/// The structural verification is deliberate rather than assumed: `is_list`
-/// can arrive from an `array_is_list` guard on a shape whose declared key set
-/// does not cohere with it (the intersection admits nothing), and a projection
-/// built from such fields would reason from positions no admitted value has.
-/// Those shapes decline to the set widening instead.
+/// The structural verification is deliberate rather than assumed: `is_list` can
+/// arrive from a guard on a shape whose declared key set does not cohere with it,
+/// and a projection built from such fields would reason from positions no
+/// admitted value has. Those shapes decline to the set widening instead.
 fn sealed_list_sequence(shape: &ShapeFact) -> Option<&[ShapeField]> {
     use steins_domain::{Presence, Tail};
     if shape.is_list != Certainty::Yes || !matches!(shape.tail, Tail::Sealed) {
@@ -33881,11 +32159,9 @@ fn sealed_list_sequence(shape: &ShapeFact) -> Option<&[ShapeField]> {
 /// projection preserves the entry count.
 ///
 /// **The SEQUENCE lane** (issue #165): on a proven list the keys are already
-/// `0..n-1` in realizable order, so the projection is the **identity** — the
-/// subject's own shape, element types, optionality and non-emptiness intact
-/// (probed: `array_values(["x", 1]) === ["x", 1]`). This needs no structural
-/// gate: identity is exact for every value `is_list == Yes` admits, sealed or
-/// unsealed alike.
+/// `0..n-1` in realizable order, so the projection is the **identity** (probed:
+/// `array_values(["x", 1]) === ["x", 1]`). No structural gate needed: identity
+/// is exact for every value `is_list == Yes` admits, sealed or unsealed alike.
 fn project_values(shape: &ShapeFact) -> ShapeFact {
     use steins_domain::{KeyClass, Tail};
     if shape.is_list == Certainty::Yes {
@@ -33951,8 +32227,8 @@ fn project_keys(shape: &ShapeFact) -> ShapeFact {
 ///
 /// * **The result key class is `int` only when every value is an `int`.** A
 ///   *string* value does not give a string key: PHP's own array-key cast turns
-///   `'5'` into `5` (`array_flip(['a' => '5']) === [5 => 'a']`), so a string-valued
-///   flip can produce integer keys and the honest class is `array-key`.
+///   `'5'` into `5` (`array_flip(['a' => '5']) === [5 => 'a']`), so the honest
+///   class is `array-key`.
 /// * **`non_empty` is dropped.** `array_flip` skips (with a warning) any entry
 ///   whose value is not `int|string`, so a non-empty input can flip to `[]`.
 ///
@@ -33976,25 +32252,20 @@ fn project_flip(shape: &ShapeFact) -> ShapeFact {
 /// the subject's value union (issue #336).
 ///
 /// The cast is what decides this, not the base: a `decimal-int-string` value
-/// produces an **integer** key, because PHP rewrites a string that spells an
-/// integer the way it writes one back. So `array_flip(list<decimal-int-string>)`
-/// is keyed by `int`, which the previous all-int test could not see — it read
-/// the values' base and a string base is not an int.
+/// produces an **integer** key, so `array_flip(list<decimal-int-string>)` is
+/// keyed by `int`, which the previous all-int test could not see (it read the
+/// values' base, and a string base is not an int).
 ///
-/// Where the cast declines the answer is a two-base union
-/// (`int | non-decimal-int-string` for a plain string, and its numeric
-/// refinement for a numeric string), which is exactly `array-key`'s territory
-/// and no sharper thing this slot can hold: [`KeyClass`] has three values, and
-/// the union is not one of them. The floor is taken knowingly rather than by
-/// omission — see [`steins_domain::Fact::array_key_cast`] for the sharp forms.
+/// Where the cast declines, the answer is a two-base union (`array-key`'s
+/// territory, no sharper thing this slot can hold — [`KeyClass`] has three
+/// values). Taken knowingly — see [`steins_domain::Fact::array_key_cast`].
 /// The key class `array_fill_keys`'s result has (issue #336 piece 2): the
 /// array-key cast of the subject's value union, since every value becomes a key.
 ///
-/// Shares [`flipped_key_class`]'s reading of the cast and differs from it in
-/// what it does with a value the cast declines — `array_flip` *skips* such an
-/// entry while `array_fill_keys` *keeps* it under a cast this crate will not
-/// name (a float's ini-dependent rendering, an array's `'Array'`), so the class
-/// falls to `array-key` rather than the entry being lost.
+/// Shares [`flipped_key_class`]'s reading of the cast and differs in what it
+/// does with a value the cast declines — `array_flip` *skips* such an entry,
+/// `array_fill_keys` *keeps* it under an unnamed cast, so the class falls to
+/// `array-key` rather than the entry being lost.
 fn filled_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
     use steins_domain::KeyClass;
     let Some(values) = shape_value_union(shape) else { return KeyClass::ArrayKey };
@@ -34039,9 +32310,9 @@ fn flipped_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
 /// keep their keys, integer keys are renumbered `0..n-1`** (measured:
 /// `array_reverse(['a' => 1, 5 => 2, 9 => 3]) === [0 => 3, 1 => 2, 'a' => 1]`).
 ///
-/// The result's key SET is therefore the input's string keys plus a fresh integer
-/// prefix — which is why the fields are dropped rather than carried, and why the
-/// `is_list` verdict is a three-way read of the input's key structure:
+/// The result's key SET is the input's string keys plus a fresh integer prefix,
+/// so fields are dropped rather than carried, and `is_list` is a three-way read
+/// of the input's key structure:
 ///
 /// * **`Yes`** when no admitted array can carry a string key (a sealed tail whose
 ///   declared keys are all integers, or an `int`-classed unsealed tail with the
@@ -34055,13 +32326,10 @@ fn flipped_key_class(shape: &ShapeFact) -> steins_domain::KeyClass {
 /// **The SEQUENCE lane** (issue #165), for a sealed, **all-required** proven
 /// list only: the result is the reversed sequence — position `i` takes the
 /// subject's position `n-1-i` value slot (probed: `array_reverse(["a", "b",
-/// "c"]) === ["c", "b", "a"]`, and likewise at lengths 1 and 2). Any
-/// `Optional` key declines to the widening below: a variable-length reversal
-/// smears every position (probed: `"a"` lands at index 0 in
-/// `array_reverse(["a"])` but at index 1 in `array_reverse(["a", "b"])`), so
-/// the positional claim is not statable. The unsealed `list<T>` already takes
-/// its element-identity answer from the widening (`all_int_keys` below), with
-/// `non-empty-` surviving.
+/// "c"]) === ["c", "b", "a"]`). Any `Optional` key declines to the widening
+/// below: a variable-length reversal smears every position (`"a"` lands at
+/// index 0 in `array_reverse(["a"])` but index 1 in `array_reverse(["a", "b"])`),
+/// so the positional claim is not statable.
 fn project_reverse(shape: &ShapeFact) -> ShapeFact {
     use steins_domain::{KeyClass, Presence, Tail};
     if let Some(fields) = sealed_list_sequence(shape)
@@ -34190,12 +32458,9 @@ fn contract_touches_class(ty: &steins_contract::ContractTy) -> bool {
 
 /// ADR-0043 stage 4 — the phpdoc-side analogue of [`object_world_guard_blind`]. A
 /// class-touching phpdoc verdict is unsound inside a binding descent: the callee's
-/// in-body type guards on the rebound value are unmodeled (the same reason the
-/// native object-world check is suppressed there). "Touches a class" means the
-/// proven value is an object, or the contract references a class name (a bare
-/// identifier the lowering treats as a class). Scalar-vs-scalar phpdoc checks —
-/// whose guards the walk *can* evaluate — are unaffected. Always `false` outside a
-/// descent.
+/// in-body type guards on the rebound value are unmodeled. "Touches a class"
+/// means the proven value is an object, or the contract references a class name.
+/// Scalar-vs-scalar phpdoc checks are unaffected. Always `false` outside a descent.
 fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) -> bool {
     in_descent
         && (matches!(cv, Some(CVal::Object(..)))
@@ -34205,12 +32470,11 @@ fn phpdoc_object_guard_blind(in_descent: bool, ty: &PType, cv: Option<&CVal>) ->
 /// ADR-0043 stage 4 — is `ty` a **pure class contract**: a known class name, or a
 /// union/nullable built only from known class names and `null` (e.g. `Foo`,
 /// `Foo|null`, `?Foo`, `A|B`)? Only such a contract may let a definite scalar fact
-/// open the [`contract_touches_class`] valve. The `is_known_class` gate is the
-/// safety valve — an unresolved bare identifier may be a `@template` param or a
-/// `@phpstan-type` alias (which can denote a scalar), so it disqualifies the whole
-/// contract. A contract touching an array/generic/shape/intersection/callable, or
-/// any scalar/pseudo-type keyword, is *not* pure-class (returns `false`): those
-/// cases keep the existing silence.
+/// open the [`contract_touches_class`] valve. `is_known_class` is the safety
+/// valve — an unresolved bare identifier may be a `@template`/`@phpstan-type`
+/// alias denoting a scalar, disqualifying the whole contract. A contract touching
+/// array/generic/shape/intersection/callable, or any scalar/pseudo-type keyword,
+/// is *not* pure-class.
 fn is_pure_class_contract(cx: &Cx, cfile: usize, coff: u32, ty: &PType) -> bool {
     fn walk(cx: &Cx, cfile: usize, coff: u32, ty: &PType, saw_class: &mut bool) -> bool {
         match &ty.kind {
@@ -34763,20 +33027,13 @@ mod n4_carrier_tests {
         // non-extensional arms (`CallableTy`/`StrOpaque`/`Opaque`) have
         // `subsumes(x, x) == Maybe`, so `arm_eq` alone could NOT collapse two
         // identical copies — a branch-union then doubled the pile at every join,
-        // reaching 2^depth. Structural equality must collapse them. A whole pile of
-        // one opaque arm dedups to a single arm regardless of count.
-        // (`Mixed`/`ObjectAny` are arm_eq-reflexive already, so were never affected.)
-        // The `\Closure $schemaClosure` arm observed exploding in the survey, plus
-        // the other non-extensional floors. Each is an arm `arm_eq` cannot prove
-        // equal to ITSELF (`subsumes(x, x) == Maybe`), so before the fix a 64-copy
-        // pile stayed 64 and doubled at the next join.
+        // reaching 2^depth. Structural equality must collapse them.
+        // (`Mixed`/`ObjectAny` are arm_eq-reflexive already, unaffected.)
         //
         // The survey's OTHER exploding arm, `array $options`, is deliberately no
-        // longer in this list: ADR-0071 gave the array vocabulary a structural
-        // denotation, so every array arm is now arm_eq-reflexive (asserted below,
-        // and pinned in steins-contract's `array_arms_are_arm_eq_reflexive`). The
-        // structural-equality collapse still catches it first, so the regression
-        // this test guards stays guarded from both sides.
+        // longer in this list: ADR-0071 made every array arm arm_eq-reflexive
+        // (pinned in steins-contract's `array_arms_are_arm_eq_reflexive`), so the
+        // structural-equality collapse still catches it first.
         for ty in [
             ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() },
             ContractTy::StrOpaque,
@@ -35004,14 +33261,12 @@ mod dump_render_tests {
     //! end-to-end emitter is covered by the `dump_surface` integration test.
     //!
     //! The earlier ADR-0053 §9 pin — collapse a finite fact to its base type on the
-    //! dump path, deferring value-literal spelling to assertType — is reversed FOR
-    //! THE DUMP PATH by the rendering-fidelity fix: value-precision is the differ-
-    //! entiator the dump surface exists to show, and PHPStan itself renders constant
-    //! types (`5`, `false`, `'a'`). The `annotate`/docblock renderer
-    //! (`render_value_domain` → `spell_arms(summarize_vals(...))`) keeps the base-
-    //! collapsed spelling unchanged; its byte-parity suite in `steins-edit` is
-    //! untouched. §9's message *frame* is non-contractual (§7); only the rendered
-    //! fact changed.
+    //! dump path — is reversed FOR THE DUMP PATH by the rendering-fidelity fix:
+    //! value-precision is what the dump surface exists to show, and PHPStan itself
+    //! renders constant types (`5`, `false`, `'a'`). The `annotate`/docblock
+    //! renderer keeps the base-collapsed spelling unchanged (untouched byte-parity
+    //! suite in `steins-edit`). §9's message *frame* is non-contractual; only the
+    //! rendered fact changed.
     use super::*;
 
     fn i(n: i64) -> Val {

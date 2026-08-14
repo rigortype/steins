@@ -2,47 +2,34 @@
 //! summaries a project had at capture time, and the delta a later run reports
 //! against them.
 //!
-//! # Why a second file
+//! Deliberately NOT the `.steins-baseline.jsonl` diagnostic channel (ADR-0022),
+//! sharing nothing with it but file-IO idioms: that file records *findings to
+//! suppress*, this one records *facts to compare* — no suppression, no exit-code
+//! gating, and a different rewrite lifecycle (debt-paydown vs. new review "before").
 //!
-//! This is deliberately NOT the `.steins-baseline.jsonl` diagnostic channel
-//! (ADR-0022) and shares nothing with it but its file-IO idioms. That file records
-//! *findings to suppress*; this one records *facts to compare*, produces no
-//! suppression, and gates no exit code. Folding them together would make one file
-//! answer two questions with two lifecycles — the diagnostic baseline is rewritten
-//! when debt is paid down, the effect baseline whenever the review story wants a
-//! new "before".
+//! **Format:** one JSON object, a `version` field, then a `functions` array
+//! sorted by `(file, symbol)` for diff stability. Each entry carries sorted
+//! `proven` labels, sorted `declared` bounds (normalized: a bound `proven`
+//! already subsumes is not stored, as it is not rendered), and `exhaustive`.
+//! `file` is relative to the baseline file's directory, forward slashes;
+//! `symbol` is namespace-qualified (`App\Checkout::confirm`).
 //!
-//! # Format
+//! **Comparison universe:** only a function present on **both** sides is
+//! compared. A key on one side alone is silent — a rename/delete must never
+//! manufacture a "removed effect" claim, since the effects didn't go anywhere,
+//! the name did (issue #69's acceptance criterion). Those keys are counted in a
+//! one-line footer, never itemized.
 //!
-//! One JSON object: a `version` field, then a `functions` array sorted by
-//! `(file, symbol)` for diff stability. Each entry carries the sorted `proven`
-//! labels, the sorted `declared` bounds (the normalized display set — a bound the
-//! proven lane already subsumes is not stored, exactly as it is not rendered), and
-//! the `exhaustive` bit. `file` is relative to the baseline file's directory,
-//! forward slashes; `symbol` is the namespace-qualified name
-//! (`App\Checkout::confirm`).
-//!
-//! # The comparison universe
-//!
-//! Only a function present on **both** sides is compared. A key on one side alone
-//! is silent — a renamed or deleted function must never manufacture a "removed
-//! effect" claim, since its effects did not go anywhere, its name did (issue #69's
-//! acceptance criterion). Those keys are counted in a one-line footer and never
-//! itemized.
-//!
-//! # What the categories mean (ADR-0067 §2.6)
-//!
-//! * A **proven** label that appeared is always confident: an occurrence exists
-//!   now that did not exist before. This is the headline event.
-//! * A **proven** label that vanished is only confident when the *current* summary
-//!   is exhaustive. A non-exhaustive summary says "these effects, and possibly
-//!   more" — it cannot prove an absence, so the candidate is reported hedged.
-//! * A label that left the **declared** lane and appeared in the **proven** one is
-//!   a *materialization*: one event, not a removal plus an addition. The bound was
-//!   always there; the code now demonstrably does it.
-//! * Declared-lane additions and removals are bound changes and say so.
-//! * Exhaustiveness transitions are their own category, never folded into a label
-//!   event.
+//! **Categories (ADR-0067 §2.6):**
+//! * A **proven** label appearing is always confident (the headline event).
+//! * A **proven** label vanishing is confident only when the *current* summary
+//!   is exhaustive — non-exhaustive means "these, and possibly more", so it
+//!   cannot prove an absence and is reported hedged.
+//! * A label leaving **declared** and appearing in **proven** is a
+//!   *materialization*: one event, not a removal plus an addition.
+//! * Declared-lane additions/removals are bound changes and say so.
+//! * Exhaustiveness transitions are their own category, never folded into a
+//!   label event.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -100,10 +87,9 @@ pub fn render(functions: Vec<Entry>) -> String {
 }
 
 /// Parse an effect-baseline file. `Err` carries a human message for an unreadable
-/// shape or an unknown version — unlike the diagnostic baseline's hand-edit
-/// tolerance, a malformed file here has no partial reading that is honest: a
-/// dropped entry would silently shrink the comparison universe and read as
-/// "unchanged".
+/// shape or unknown version — unlike the diagnostic baseline's hand-edit
+/// tolerance, a dropped entry here would silently shrink the comparison universe
+/// and read as "unchanged", so there is no honest partial reading.
 pub fn parse(text: &str) -> Result<Document, String> {
     let doc: Document =
         serde_json::from_str(text).map_err(|e| format!("cannot parse effect baseline: {e}"))?;
@@ -165,9 +151,7 @@ pub struct Event {
 }
 
 impl Event {
-    /// The text-format line: `<file> <symbol>: <marker> <label>`. The marker set
-    /// keeps the headline literal — "this refactor added `io.net.http` to
-    /// `Checkout::confirm`" reads off the `+` line directly.
+    /// The text-format line: `<file> <symbol>: <marker> <label>`.
     #[must_use]
     pub fn line(&self) -> String {
         let label = self.label.as_deref().unwrap_or("");
@@ -204,24 +188,19 @@ pub struct Diff {
 
 /// Compare a captured baseline against the current run's entries.
 ///
-/// # Subsumption is deliberately not collapsed
-///
-/// Baseline proven `io` against current proven `io.net.http` is reported as an
-/// **add** of `io.net.http` and a remove-candidate of `io` (subject to the
-/// exhaustive gate), not as a single "refined" event. Two reasons to keep it
-/// literal: a hierarchy-aware diff has to decide whether a coarse
-/// label narrowing is even the same fact — it usually is not, since `io` most
-/// often came from a different call site than `io.net.http` — and a wrong
-/// collapse *hides* an addition, which is the one event this surface exists to
-/// show. Smarter matching must be deliberate; it cannot happen by accident.
+/// Subsumption is deliberately not collapsed: baseline proven `io` against
+/// current proven `io.net.http` reports as an **add** of `io.net.http` and a
+/// remove-candidate of `io` (subject to the exhaustive gate), not one "refined"
+/// event — `io` usually came from a different call site than `io.net.http`, and
+/// a wrong collapse would *hide* an addition, the one event this surface exists
+/// to show. Smarter matching must be deliberate, never accidental.
 #[must_use]
 pub fn diff(baseline: &[Entry], current: &[Entry]) -> Diff {
     let index = |entries: &[Entry]| -> BTreeMap<(String, String), Entry> {
         let mut map = BTreeMap::new();
         for e in entries {
-            // First writing wins: a duplicate key (the same qualified symbol twice
-            // in one file) has no honest second reading, and dropping the later one
-            // keeps capture and comparison agreeing.
+            // First writing wins: a duplicate qualified symbol has no honest
+            // second reading.
             map.entry((e.file.clone(), e.symbol.clone())).or_insert_with(|| e.clone());
         }
         map
@@ -232,8 +211,7 @@ pub fn diff(baseline: &[Entry], current: &[Entry]) -> Diff {
     let mut events = Vec::new();
     let mut compared = 0usize;
     for (key, b) in &base {
-        // The rename/delete silence rule: a key on one side only is not an effect
-        // change at all, so it never reaches a category.
+        // Rename/delete silence: a key on one side only never reaches a category.
         let Some(c) = cur.get(key) else { continue };
         compared += 1;
         events.extend(compare_one(b, c));
@@ -259,8 +237,8 @@ fn compare_one(b: &Entry, c: &Entry) -> Vec<Event> {
     let bd: BTreeSet<&str> = b.declared.iter().map(String::as_str).collect();
     let cd: BTreeSet<&str> = c.declared.iter().map(String::as_str).collect();
 
-    // The materialized set first: it *consumes* both halves of what would otherwise
-    // read as a declared removal plus a proven addition (ADR-0067 §2.6 — one event).
+    // Materialized set first: consumes both halves of what would otherwise read
+    // as a declared removal plus a proven addition (ADR-0067 §2.6 — one event).
     let materialized: BTreeSet<&str> =
         bd.iter().copied().filter(|l| !bp.contains(l) && cp.contains(l)).collect();
 
@@ -280,9 +258,7 @@ fn compare_one(b: &Entry, c: &Entry) -> Vec<Event> {
         }
     }
     for l in bp.difference(&cp) {
-        // The honesty gate: only an exhaustive *current* summary can claim an
-        // absence. Non-exhaustive means "these effects, and possibly more", which
-        // is exactly the state in which a missing label proves nothing.
+        // Honesty gate: only an exhaustive current summary can claim an absence.
         let category =
             if c.exhaustive { Category::ProvenRemoved } else { Category::ProvenRemovedMaybe };
         events.push(emit(category, l));
@@ -291,8 +267,7 @@ fn compare_one(b: &Entry, c: &Entry) -> Vec<Event> {
         events.push(emit(Category::DeclaredAdded, l));
     }
     for l in bd.difference(&cd) {
-        // A materialized label left the declared lane by becoming proven; that is
-        // already one reported event and must not double as a bound removal.
+        // Already reported as materialization; must not also read as a removal.
         if !materialized.contains(l) {
             events.push(emit(Category::DeclaredRemoved, l));
         }
@@ -361,8 +336,7 @@ mod tests {
         assert_eq!(confident.events[0].category, Category::ProvenRemoved);
         assert_eq!(confident.events[0].line(), "a.php f: - io.db");
 
-        // Non-exhaustive current side: the same candidate, hedged, plus its own
-        // coverage event — the two are never folded together.
+        // Non-exhaustive: same candidate, hedged, plus its own coverage event.
         let hedged = diff(&[b], &[entry("f", &[], &[], false)]);
         let cats: Vec<Category> = hedged.events.iter().map(|e| e.category).collect();
         assert!(cats.contains(&Category::ProvenRemovedMaybe), "got: {cats:?}");
@@ -385,8 +359,7 @@ mod tests {
 
     #[test]
     fn subsumption_is_not_collapsed() {
-        // Baseline `io`, current `io.net.http`: an add and a remove-candidate, kept
-        // literal on purpose (see `diff`'s docs).
+        // See `diff`'s docs: kept literal on purpose.
         let b = entry("f", &["io"], &[], true);
         let c = entry("f", &["io.net.http"], &[], true);
         let d = diff(&[b], &[c]);

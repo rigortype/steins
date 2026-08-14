@@ -1,11 +1,9 @@
 //! End-to-end tests for `steins.toml [paths] vendor-dirs` (issue #181): the
 //! no-manifest config channel for a project that predates or ignores Composer.
 //!
-//! Each test runs the real `steins` binary in a private temp dir (its own CWD),
-//! mirroring `tests/profile.rs`'s isolation discipline — `steins.toml` is read
-//! from the process's working directory, not from the analyzed path, so these
-//! cannot reuse the checked-in `tests/fixtures` directories the way the
-//! Composer-manifest tests do.
+//! Each test runs the real binary in a private temp dir, mirroring
+//! `tests/profile.rs`'s isolation discipline: `steins.toml` reads from the CWD,
+//! not the analyzed path, so these can't reuse the checked-in `tests/fixtures`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -15,12 +13,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns the binary with `GITHUB_ACTIONS` scrubbed, since `check`'s format
+/// auto-detection (ADR-0054 §6) reads it and would else emit workflow commands.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -63,15 +57,13 @@ fn lib(name: &str) -> String {
     format!("<?php\nfunction {name}(int $h): int {{ return $h; }}\n{name}(\"xyz\");\n")
 }
 
-// ---- no config: the literal `vendor` floor only ----------------------------
+// No config: the literal `vendor` floor only.
 
 #[test]
 fn no_manifest_no_key_only_the_literal_vendor_directory_is_suppressed() {
     let dir = workdir("literal-only");
     write(&dir, "app.php", APP);
-    // `vendor/` — the historical literal — is suppressed...
     write(&dir, "vendor/acme/lib.php", &lib("heightVendor"));
-    // ...but `3rdparty/` is not, with no `steins.toml` in play at all.
     write(&dir, "3rdparty/acme/lib.php", &lib("heightThirdparty"));
 
     let r = run_in(&dir, &["check", "."]);
@@ -90,7 +82,7 @@ fn no_manifest_no_key_only_the_literal_vendor_directory_is_suppressed() {
     );
 }
 
-// ---- `[paths] vendor-dirs` fills the no-manifest gap -----------------------
+// `[paths] vendor-dirs` fills the no-manifest gap.
 
 #[test]
 fn steins_toml_paths_vendor_dirs_suppresses_the_declared_directory() {
@@ -117,8 +109,7 @@ fn steins_toml_paths_vendor_dirs_suppresses_the_declared_directory() {
 
 #[test]
 fn steins_toml_paths_vendor_dirs_still_honours_the_vendor_literal_too() {
-    // The config channel is additive: declaring `3rdparty` does not withdraw the
-    // `vendor` literal a project may also still carry.
+    // Additive: declaring `3rdparty` does not withdraw the `vendor` literal too.
     let dir = workdir("additive");
     write(&dir, "steins.toml", "[paths]\nvendor-dirs = [\"3rdparty\"]\n");
     write(&dir, "app.php", APP);
@@ -138,10 +129,8 @@ fn steins_toml_paths_vendor_dirs_still_honours_the_vendor_literal_too() {
 
 #[test]
 fn a_present_composer_manifest_needs_no_paths_section_at_all() {
-    // Zero-config stays true for a Composer project (acceptance criterion): a
-    // `composer.json` in the same directory as a `steins.toml` with no `[paths]`
-    // section resolves exactly as it always has — Composer's own declared
-    // `vendor-dir` answers, `[paths]` never enters into it.
+    // Acceptance criterion: a `composer.json` beside a `steins.toml` with no
+    // `[paths]` section still resolves via Composer's own `vendor-dir` (zero-config).
     let dir = workdir("zero-config-with-manifest");
     write(
         &dir,
@@ -162,15 +151,14 @@ fn a_present_composer_manifest_needs_no_paths_section_at_all() {
     );
 }
 
-// ---- whole-path-component matching stays, for the config channel too ------
+// Whole-path-component matching stays, for the config channel too.
 
 #[test]
 fn a_declared_vendor_dir_never_matches_a_component_prefix_or_suffix() {
     let dir = workdir("no-prefix-suffix");
     write(&dir, "steins.toml", "[paths]\nvendor-dirs = [\"3rdparty\"]\n");
     write(&dir, "app.php", APP);
-    // `3rdparty_extra/` and `my3rdparty.php` share characters with the declared
-    // name but are not the whole component — must stay first-party.
+    // Shares characters with the declared name but is not the whole component.
     write(&dir, "3rdparty_extra/acme/lib.php", &lib("heightExtra"));
     write(&dir, "my3rdparty.php", &lib("heightSuffix"));
 
@@ -186,9 +174,8 @@ fn a_multi_component_declared_entry_matches_only_the_whole_contiguous_run() {
     let dir = workdir("multi-component");
     write(&dir, "steins.toml", "[paths]\nvendor-dirs = [\"lib/deps\"]\n");
     write(&dir, "app.php", APP);
-    // The whole `lib/deps` run: vendor.
+    // The whole `lib/deps` run is vendor; `lib` and `deps` split by `other/` are not.
     write(&dir, "lib/deps/acme/lib.php", &lib("heightDeps"));
-    // `lib` and `deps` both present but NOT contiguous: not vendor.
     write(&dir, "lib/other/deps/acme/lib.php", &lib("heightSplit"));
 
     let r = run_in(&dir, &["check", "."]);

@@ -1,11 +1,10 @@
 //! End-to-end tests for `steins version` and `steins license` (issue #43).
 //!
-//! Both carry a legal obligation rather than a convenience: the release archive
-//! ships `LICENSE` and `THIRD-PARTY-LICENSES.md` beside the binary, but nothing
-//! downstream keeps them together — the Homebrew formula installs the executable
-//! and the third-party notices and *not* `LICENSE`, and `cargo install --git`
-//! produces a bare binary. So the notices are embedded, and these tests check
-//! that what is embedded is the real thing rather than a stub.
+//! Legal obligation, not convenience: the release archive ships `LICENSE` and
+//! `THIRD-PARTY-LICENSES.md` beside the binary, but nothing downstream keeps them
+//! together (Homebrew installs the executable + third-party notices but not
+//! `LICENSE`; `cargo install --git` produces a bare binary) — so the notices are
+//! embedded, and these tests check the embedded copy is real, not a stub.
 
 use std::process::{Command, Stdio};
 
@@ -13,12 +12,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -52,8 +47,7 @@ fn license_carries_our_terms_and_the_bundled_notices() {
     assert!(out.contains("Apache License"), "our own license text is missing");
     assert!(out.contains("TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION"));
 
-    // The dependencies' notices, whose MIT/BSD/ISC terms require them to
-    // accompany a binary distribution.
+    // Dependency notices — MIT/BSD/ISC terms require them alongside the binary.
     assert!(out.contains("Third-Party Licenses"));
     assert!(out.contains("Permission is hereby granted"), "an MIT body must be present");
 
@@ -64,18 +58,15 @@ fn license_carries_our_terms_and_the_bundled_notices() {
 
 #[test]
 fn license_carries_phpstans_notice() {
-    // PHPStan is Steins' direct model (README "Acknowledgments") but is not a
-    // Rust dependency `cargo xtask licenses` can discover, so
-    // `THIRD-PARTY-LICENSES.md` alone would never carry its notice — this has
-    // to be guaranteed some other way, which is why it is embedded directly
-    // (see `LICENSE_PHPSTAN` in `main.rs`).
+    // PHPStan is Steins' direct model (README "Acknowledgments") but isn't a Rust
+    // dependency `cargo xtask licenses` can discover, so it's embedded directly
+    // (`LICENSE_PHPSTAN` in `main.rs`).
     let (code, out) = run(&["license"]);
     assert_eq!(code, 0);
     assert!(out.contains("PHPStan"), "must credit PHPStan as the direct model");
     assert!(out.contains("Copyright (c) 2016 Ondřej Mirtes"), "PHPStan's own copyright notice is missing");
     assert!(out.contains("Copyright (c) 2025 PHPStan s.r.o."), "PHPStan s.r.o.'s copyright notice is missing");
-    // PHPStan's own MIT body must appear ahead of the third-party dependency
-    // notices, not merely somewhere among the 39 other MIT-licensed crates.
+    // Must lead the dependency notices, not merely appear among the 39 other MIT crates.
     let before_third_party = out.split("Third-Party Licenses").next().expect("a prefix");
     assert!(
         before_third_party.contains("Copyright (c) 2016 Ondřej Mirtes"),
@@ -85,10 +76,7 @@ fn license_carries_phpstans_notice() {
 
 #[test]
 fn the_embedded_notices_are_generated_not_a_stub() {
-    // Guards the failure this whole surface exists to prevent: a placeholder or
-    // truncated notices file that makes the command look compliant while
-    // carrying nothing. Assert real bodies and a real dependency, never merely
-    // that the output is non-empty.
+    // Guards against a placeholder/truncated notices file that looks compliant.
     let (_, out) = run(&["license"]);
     assert!(out.matches("\n## ").count() >= 30, "expected the licence sections");
     assert!(out.contains("Used by:"));
@@ -102,13 +90,9 @@ fn the_embedded_notices_are_generated_not_a_stub() {
 
 #[test]
 fn typographic_variants_stay_in_their_own_sections() {
-    // cargo-about groups on exact license text, so Apache-2.0 shipped centred by
-    // one crate and flush-left by another produces two sections of the same
-    // name — left that way deliberately (matching rigortype/lisplens's
-    // about.toml/about.hbs, which carries no merge pass either): one crate, one
-    // block, is easier to scan than a merged notice, and every crate's own
-    // copyright line stays paired with its own license body rather than pooled
-    // above a shared one.
+    // cargo-about groups on exact license text: Apache-2.0 centred by one crate,
+    // flush-left by another, produces two sections of the same name — left that
+    // way deliberately, one block per crate keeping each copyright line paired with its body.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
     assert_eq!(
@@ -120,16 +104,11 @@ fn typographic_variants_stay_in_their_own_sections() {
 
 #[test]
 fn mit_is_one_section_per_crates_license_text() {
-    // Each MIT-licensed crate keeps its own section — no permission-notice
-    // merge collapses distinct copyright holders into one block. The embedded
-    // copy is what a `brew install` user reads, so the property is checked on
-    // the command's output and not only on the file.
+    // No permission-notice merge collapses distinct copyright holders into one block.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
     let mit_sections = third_party.matches("\n## MIT License").count();
     assert!(mit_sections >= 30, "expected dozens of separate MIT sections, found {mit_sections}");
-    // Each section carries exactly one permission notice — nothing pools
-    // several crates' grants under one heading.
     for section in third_party.split("\n## MIT License").skip(1) {
         let body = section.split("\n## ").next().unwrap_or(section);
         assert_eq!(
@@ -142,9 +121,8 @@ fn mit_is_one_section_per_crates_license_text() {
 
 #[test]
 fn a_closed_pipe_is_not_a_crash() {
-    // `steins license` emits thousands of lines, so `| head` and quitting `less`
-    // early are the normal ways to read it. `println!` panics on EPIPE; this
-    // pins that the command does not.
+    // `steins license` emits thousands of lines, so `| head`/early-quit `less`
+    // is normal; `println!` panics on EPIPE — pins that the command does not.
     let mut child = steins_cmd()
         .arg("license")
         .stdout(Stdio::piped())

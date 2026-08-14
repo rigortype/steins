@@ -1,20 +1,17 @@
 //! Issue #48 — PHP converts at every **native-typed slot** boundary, and the
 //! stored fact must be the converted value, not the assigned one.
 //!
-//! The regression is a proof-layer false positive: an int written to a `float`
-//! property was read back as `1`, making `$x === 1` fold true although runtime
-//! holds `1.0`, and producing a false `call.on-null` from the dead branch.
+//! The regression: an int written to a `float` property read back as `1`, making
+//! `$x === 1` fold true though runtime holds `1.0` — a false `call.on-null`.
 //!
-//! Fixtures cover typed properties, promoted properties, property and parameter
-//! defaults, parameters, and returns. A `float` return drops an int value from
-//! the summary lane: imprecise but sound.
+//! Fixtures cover typed/promoted properties, defaults, parameters, and returns; a
+//! `float` return drops an int value from the summary lane: imprecise but sound.
 
 use steins_domain::Fact;
 use steins_infer::{Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The sound-subset folder with the absence family available (no PHP in a unit
-/// test; nothing here folds).
+/// Sound-subset folder with the absence family available (no PHP in a unit test).
 #[derive(Default)]
 struct Mock;
 
@@ -32,9 +29,8 @@ impl Folder for Mock {
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every assertion below keeps meaning what it meant before it landed.
+    // The `untyped.*` family (ADR-0078, #200) reports on the fixtures' own
+    // (deliberately untyped) declarations, not the behaviour under test — dropped.
     check_with(&tree, &[], "t.php", &mut Mock)
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -53,9 +49,8 @@ fn dumps(src: &str) -> Vec<String> {
 // The demonstrated proof-layer FP, as a regression test
 
 
-/// The probe that answered the issue's exposure question: this source runs
-/// clean on real PHP (the else branch executes — `1.0 === 1` is false), so the
-/// zero-FP surface must not claim a proven null call on it.
+/// The probe answering the issue's exposure question: runs clean on real PHP (the
+/// else branch executes — `1.0 === 1` is false), so no proven null call may fire.
 #[test]
 fn the_dead_branch_null_call_fp_is_closed() {
     let src = "<?php\n\
@@ -77,8 +72,8 @@ fn the_dead_branch_null_call_fp_is_closed() {
 
 #[test]
 fn a_typed_property_write_stores_the_converted_float() {
-    // The bug-12393 shape: an int-typed value crossing into a float property
-    // through `$this`, read back inside the same method.
+    // The bug-12393 shape: an int-typed value crossing into a float property via
+    // `$this`, read back in the same method.
     let dumped = dumps(
         "<?php\n\
          class B {\n\
@@ -127,10 +122,8 @@ fn a_float_property_literal_default_stores_the_converted_default() {
     assert_eq!(dumped, ["dumped type: 3.0"]);
 }
 
-/// Already correct before #48 via `coerce_into_param` (the descent binding
-/// converts `7` to `7.0` before it enters the callee env; the dump surface
-/// shows the standalone walk's `float` seed — the descent walk is summary-only).
-/// Pinned so the parameter boundary can never show the unconverted int.
+/// Already correct before #48 via `coerce_into_param` (converts before entering the
+/// callee env); pinned so the param boundary can never show the unconverted int.
 #[test]
 fn a_float_param_receiving_an_int_argument_never_shows_the_int() {
     let dumped = dumps(
@@ -145,9 +138,8 @@ fn a_float_param_receiving_an_int_argument_never_shows_the_int() {
     );
 }
 
-/// A `float` return over an int return: the summary lane declines the value
-/// (consumption is only-stricter-than-the-envelope), so the call site sees the
-/// declared envelope, never the unconverted int — imprecise, recorded, sound.
+/// A `float` return over an int return: the summary lane declines the value (only
+/// stricter-than-envelope), so callers see the declared envelope, never the int.
 #[test]
 fn a_float_return_over_an_int_return_never_leaks_the_int() {
     let dumped = dumps(
@@ -189,9 +181,8 @@ fn a_float_or_false_slot_converts_int_and_keeps_false() {
 
 #[test]
 fn a_mode_dependent_conversion_drops_to_unknown() {
-    // `"5"` into `float`: coercive mode stores 5.0, strict mode fatals — the
-    // stored fact is mode-dependent, so nothing sound can be recorded and the
-    // slot goes Unknown rather than keeping the string.
+    // `"5"` into `float`: coercive mode stores 5.0, strict mode fatals — mode-
+    // dependent, so the slot goes Unknown rather than keeping the string.
     let dumped = dumps(
         "<?php\n\
          class S { public float $f; }\n\
@@ -226,10 +217,9 @@ fn a_float_write_to_a_float_slot_is_untouched() {
     );
     assert_eq!(dumped, ["dumped type: 2.5"]);
 }
-/// The positive side of the drop test above, closed by the issue-#60 run: the
-/// summary now CONVERTS through the declared return boundary (the same
-/// `coerce_fact_to_native` the property/param writes use), so both call forms see
-/// the float PHP actually returns — value-precise, not just non-leaking.
+/// The positive side of the drop test above (issue #60): the summary now CONVERTS
+/// through the declared return boundary (same `coerce_fact_to_native` as
+/// property/param writes), so both call forms see the float PHP actually returns.
 #[test]
 fn a_float_return_converts_the_int_value_precisely() {
     let dumped = dumps(

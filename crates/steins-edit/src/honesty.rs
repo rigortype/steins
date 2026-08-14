@@ -1,55 +1,34 @@
 //! Transform #2 — phpdoc-honesty repair (ADR-0037 point 4 / ADR-0041 point 4).
 //!
-//! The inverse of promotion. Where a `@param`/`@return` tag **lies** — call-site
-//! or return propagation proves values the declared type does not admit — this
-//! transform rewrites the tag's *type text* to the proven truth, turning a lying
-//! docblock into machine-fixed debt (ADR-0037: widen a lying `@param int $id` to
-//! the observed proven union `int|numeric-string`).
+//! Inverse of promotion: where a `@param`/`@return` tag lies (call-site or return
+//! proof contradicts the declared type), rewrite the tag's type text to the
+//! proven join (ADR-0037: widen a lying `@param int $id` to `int|numeric-string`).
 //!
-//! ## Enumeration domain
-//! Exactly the sites where `phpdoc.param-mismatch` / `phpdoc.return-mismatch`
-//! fire, restricted to v1 scope:
-//! - **Free functions and methods** (ADR-0043 §6). Free-function candidates prove
-//!   against [`sweep_free_functions`]; method candidates key on the `Sym::Method`
-//!   identity `(class_fqn, method)` and prove against [`sweep_methods`], subject to
-//!   the same ADR-0041 §1 eligibility split as method promotion (a non-eligible
-//!   method refuses `method-inheritance`; a magic method refuses `magic-method`).
-//!   The free-function and method sweeps are independent, so a method candidate's
-//!   verdict never perturbs a free-function one.
-//! - **Literal-only proofs**: a non-literal call-site argument (`@param`) or a
-//!   non-literal return (`@return`) refuses rather than guesses. The
-//!   abstract-fact portion of a mismatch (a typed `$var` with no literal value)
-//!   is outside v1's literal scope — the same soundness-not-completeness posture
-//!   promotion takes.
+//! Scope (v1): sites where `phpdoc.param-mismatch`/`phpdoc.return-mismatch` fire.
+//! Free functions prove against [`sweep_free_functions`]; methods key on
+//! `(class_fqn, method)` and prove against [`sweep_methods`], under the same
+//! ADR-0041 §1 eligibility split as method promotion (non-eligible refuses
+//! `method-inheritance`; magic refuses `magic-method`); the sweeps are
+//! independent (ADR-0043 §6). Literal-only: a non-literal call-site argument or
+//! return refuses rather than guesses (same soundness-not-completeness posture
+//! as promotion).
 //!
-//! ## The widened type is the join of proven facts ONLY
-//! The declared type is never gratuitously unioned in (ADR-0041): if callers pass
-//! `int` and numeric-string literals, the honest type is `int|numeric-string`; if
-//! no caller passes `int` where `@param int` is declared, the honest type is what
-//! is proven, not `int|…`. Proven beats declared (ADR-0037 iron rule). The join
-//! is rendered via [`crate::common::render_value_domain`]; a set with no faithful
-//! phpdoc spelling refuses `type-not-renderable` rather than over-widening.
+//! Widened type = join of proven facts only, never gratuitously unioned with the
+//! declared type (ADR-0041) — proven beats declared (ADR-0037 iron rule).
+//! Rendered via [`crate::common::render_value_domain`]; a set with no faithful
+//! phpdoc spelling refuses `type-not-renderable`.
 //!
-//! ## `@param` vs `@return`
-//! - `@param`: all call sites must be enumerable and every relevant argument
-//!   literal-proven (the same obstacles → same refusals as promotion). The join
-//!   is over **all** observed args (not only the violating ones — the honest type
-//!   must admit every observed value).
-//! - `@return`: the join is over the function's **own** return-site facts; every
-//!   return path must be literal-proven or refuse `return-not-proven`. No caller
-//!   sweep is needed. A body whose returns v1 cannot fully enumerate (a loop /
-//!   `try` / `switch` that may hide a return, or a fall-through that implicitly
-//!   returns `null`) refuses `return-not-proven` rather than under-widen.
+//! `@param`: all call sites enumerable, every relevant argument literal-proven;
+//! join is over **all** observed args, not only the violating ones. `@return`:
+//! join is over the function's own return-site facts; every path literal-proven
+//! or refuse `return-not-proven` (hidden loop/try/switch return, or implicit
+//! `null` fall-through). No caller sweep needed for `@return`.
 //!
-//! ## Planner-level safety (ADR-0041, binding)
-//! Docblock-only edits cannot compile-fatal, but two disciplines are enforced by
-//! construction, not by the post-check:
-//! - Never contradict an existing **native** hint: if a native hint exists and
-//!   the proven join is not admitted by it, that is a different disease — refuse
-//!   `native-contradicts-proven`, it needs human eyes.
-//! - `@phpstan-`/`@psalm-` precedence: rewrite the **governing** tag; leave a
-//!   plain sibling untouched only when it still admits the proven join, else
-//!   rewrite both.
+//! Planner-level safety (ADR-0041, binding), enforced by construction: never
+//! contradict an existing native hint (refuse `native-contradicts-proven` —
+//! human eyes); `@phpstan-`/`@psalm-` precedence rewrites the governing tag,
+//! leaving a plain sibling untouched only if it still admits the proven join,
+//! else rewriting both.
 
 use std::collections::HashMap;
 
@@ -75,11 +54,8 @@ use crate::obstacles::{self, VouchSet};
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
 
-// ---- Stable refusal reason names (ADR-0034 point 2, honesty-specific) ------
-//
-// The caller-enumerability reasons (`dynamic-call-present`,
-// `function-referenced-as-value`, `resolution-ambiguous`, `named-or-spread-args`,
-// `argument-not-proven`) are shared with promotion and re-exported here.
+// Stable refusal reason names (ADR-0034 point 2, honesty-specific).
+// Caller-enumerability reasons are shared with promotion, re-exported here.
 pub use crate::common::{
     REASON_AMBIGUOUS, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT,
     REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE, REASON_NAMED_OR_SPREAD,
@@ -87,16 +63,14 @@ pub use crate::common::{
 };
 pub use crate::common::REASON_ARG_NOT_PROVEN as REASON_ARGUMENT_NOT_PROVEN;
 
-/// A `@return` site whose return paths v1 cannot fully prove as literals: a
-/// non-literal return, a body that may fall through (implicitly returning `null`),
-/// or one whose returns hide inside a loop/`try`/`switch` the trace does not model.
+/// A `@return` whose paths v1 can't fully prove: non-literal return, implicit
+/// `null` fall-through, or a hidden loop/`try`/`switch` return.
 pub const REASON_RETURN_NOT_PROVEN: &str = "return-not-proven";
-/// The proven value set has no faithful ADR-0029 phpdoc spelling (e.g. it mixes in
-/// an array). Refusing is honest; over-widening to make rendering easy is a new lie.
+/// No faithful ADR-0029 phpdoc spelling for the proven set; over-widening to
+/// ease rendering would be a new lie.
 pub const REASON_TYPE_NOT_RENDERABLE: &str = "type-not-renderable";
-/// An existing **native** hint on the same param/return does not admit the proven
-/// join — a different disease (the native contract is being violated at runtime),
-/// which needs human eyes, not a docblock rewrite.
+/// An existing native hint doesn't admit the proven join — a runtime contract
+/// violation needing human eyes, not a docblock rewrite.
 pub const REASON_NATIVE_CONTRADICTS: &str = "native-contradicts-proven";
 
 /// The phpdoc-honesty transform (ADR-0037 point 4).
@@ -109,21 +83,12 @@ impl Transform for PhpdocHonesty {
     }
 }
 
-/// Plan the phpdoc-honesty repair over `project`. Pure planning: no files are
-/// written and no diagnostics are re-checked here — the caller (CLI) drives the
-/// dry-run diff, the dual-verification post-check, and any `--apply` write
-/// (ADR-0034 point 3).
-///
-/// `vouches` are the user-vouched dynamic-code sites (`steins.toml`); pass
-/// [`VouchSet::empty`] when none. A standing (unvouched) `eval` / dynamic-include
-/// obstacle (ADR-0046 §2) makes "all callers proven" unknowable project-wide, so
-/// *every* candidate refuses while one remains.
-///
-/// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
-/// identity. No honesty decision reads the map: the plan is identical whether it
-/// is `None`, an identity [`single_region`](crate::PartitionMap::single_region)
-/// map, or a fully-declared map. The parameter reserves the seam for scoped
-/// enumeration (ADR-0047 §2) without changing any verdict.
+/// Plan the phpdoc-honesty repair over `project`. Pure planning (ADR-0034 point
+/// 3): no files written, no re-check; the CLI drives dry-run/post-check/`--apply`.
+/// `vouches`: user-vouched dynamic sites (`steins.toml`; [`VouchSet::empty`] for
+/// none) — an unvouched `eval`/dynamic-include obstacle (ADR-0046 §2) refuses
+/// every candidate. `partitions`: region map (ADR-0047 §6/§2), unread by
+/// honesty; `None` means single-region identity.
 #[must_use]
 pub fn plan_phpdoc_honesty(
     db: &dyn Db,
@@ -131,17 +96,14 @@ pub fn plan_phpdoc_honesty(
     vouches: &VouchSet,
     partitions: Option<&crate::regions::PartitionMap>,
 ) -> TransformReport {
-    // The region map is accepted but not consumed: no honesty verdict reads it.
     let _ = partitions;
     let sweep = sweep_free_functions(db, project);
-    // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
-    // ADR-0041 §1 eligibility verdicts (honesty applies the same split).
+    // Class-world reverse sweep (ADR-0043 §6): targets, taints, ADR-0041 §1 eligibility.
     let msweep = sweep_methods(db, project);
     let files: Vec<SourceFile> = project.files(db).to_vec();
     let fqn_counts = count_fqns(db, &files);
 
-    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and — if
-    // any stands unvouched — every candidate refuses with its reason.
+    // Dynamic-code obstacles (ADR-0046 §2): unvouched ⇒ every candidate refuses.
     let dynamism = obstacles::detect(db, project, vouches);
     let blocking = dynamism.blocking_reason();
 
@@ -152,15 +114,11 @@ pub fn plan_phpdoc_honesty(
 
     for &file in &files {
         let path = file.path(db);
-        // Vendor files participate in the reverse SWEEP but are never transform
-        // CANDIDATES: a docblock rewrite into `vendor/` is outside the tool's write
-        // contract (composer overwrites it; vendor diagnostics are off, ADR-0015).
-        // Candidate enumeration is project-only; the sweeps above still span vendor.
+        // Vendor files feed the sweep but never become rewrite candidates (ADR-0015).
         if layout.is_vendor(path) {
             continue;
         }
         let tree = parse(db, file);
-        // Free-function bodies by written name, for `@return` return-site scans.
         let scopes = scopes_by_function(tree);
         for func in tree.functions() {
             let tags = func.docblock.as_deref().map(scan_docblock).unwrap_or_default();
@@ -173,7 +131,6 @@ pub fn plan_phpdoc_honesty(
                 &mut oracle,
             );
         }
-        // Method bodies keyed by `(class_fqn, method)`, for method `@return` scans.
         let method_scopes = scopes_by_method(tree);
         for class in tree.classes() {
             for method in &class.methods {
@@ -200,8 +157,6 @@ pub fn plan_phpdoc_honesty(
     }
 }
 
-// ---- `@param` honesty ------------------------------------------------------
-
 #[allow(clippy::too_many_arguments)]
 fn plan_params(
     func: &FunctionDecl,
@@ -217,26 +172,18 @@ fn plan_params(
 ) {
     let target = sweep.targets.get(&func.fqn);
     for (idx, param) in func.params.iter().enumerate() {
-        // Governing `@param` for this parameter (`@phpstan-`/`@psalm-` wins).
         let (Some(gov), plain) = param_tags(tags, TagKind::Param, Some(&param.name)) else {
             continue;
         };
-        // Assertion-helper exemption (ADR-0030): a `@…-assert T $x` makes `@param`
-        // a post-condition, so the checker never fires param-mismatch here.
         if assert_targets(tags, &param.name) {
             continue;
         }
-        // The declared contract must parse; otherwise there is no envelope and no
-        // mismatch fires — out of domain (not a candidate).
         let Some((gov_contract, _consumed)) = tag_contract(gov) else { continue };
 
-        // Gather the observed literal values at this position, and detect whether
-        // any of them proves the tag lies (a param-mismatch would fire). A `null`
-        // value that the parameter accepts by native-nullable / `= null` default
-        // is not a violation (mirrors `check_phpdoc_param`).
+        // A `null` admitted by native-nullable/`= null` default is not a lie
+        // (mirrors `check_phpdoc_param`).
         let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
-        // An object-bearing native type gives no native-nullable signal (only
-        // scalar-value types carry one), so it never proves a `null` argument safe.
+        // Object-bearing native types carry no nullable signal — never prove `null` safe.
         let null_ok = param.has_null_default
             || param.ty.as_ref().is_some_and(|t| t.nullable && !t.has_instance());
         let mut lie = false;
@@ -259,7 +206,6 @@ fn plan_params(
         // Enumerated site (ADR-0034 point 3b): must end transformed-or-refused.
         oracle.enumerated += 1;
         let site = param_site(path, tree, func, param);
-        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate.
         if let Some((reason, detail)) = blocking {
             oracle.refused += 1;
             refusals.push(Refusal::new(site, *reason, detail.clone()));
@@ -278,8 +224,7 @@ fn plan_params(
     }
 }
 
-/// Decide a single `@param` honesty candidate: `Ok(edits)` to rewrite the
-/// governing (and possibly the plain) tag, `Err((reason, detail))` to refuse.
+/// Decide a `@param` candidate: `Ok` rewrites (governing, maybe plain); `Err` refuses.
 #[allow(clippy::too_many_arguments)]
 fn decide_param(
     func: &FunctionDecl,
@@ -293,8 +238,7 @@ fn decide_param(
     sweep: &FreeFnSweep,
     fqn_counts: &HashMap<String, usize>,
 ) -> Result<Vec<Edit>, (&'static str, String)> {
-    // All callers must be enumerable (shared obstacles), and the reaching calls
-    // must be positional.
+    // Callers must be enumerable, and the reaching calls positional.
     check_caller_enumerability(func, sweep, fqn_counts)?;
     if target.is_some_and(|t| t.named_or_spread) {
         return Err((
@@ -303,8 +247,6 @@ fn decide_param(
         ));
     }
 
-    // Every observed argument at this position must be a proven literal — the join
-    // must admit *every* observed value, not only the violating ones.
     let matches = |p: usize| if param.variadic { p >= idx } else { p == idx };
     let mut vals: Vec<Val> = Vec::new();
     if let Some(t) = target {
@@ -326,18 +268,14 @@ fn decide_param(
     }
     dedup(&mut vals);
 
-    // Never contradict an existing native hint (ADR-0041): if the native type does
-    // not admit the proven join, that is a different disease (human eyes).
-    // An object-bearing native type is outside the native-guard's scalar domain, so
-    // skip it — only scalar-value hints constrain the docblock rewrite.
+    // Never contradict an existing native hint (ADR-0041; human eyes needed).
+    // Object-bearing native types are outside the guard's scalar domain — skipped.
     if let Some(nt) = param.ty.as_ref().filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, &param.name)?;
     }
 
     build_tag_edits(path, doc_start, gov, plain, &vals)
 }
-
-// ---- `@return` honesty -----------------------------------------------------
 
 #[allow(clippy::too_many_arguments)]
 fn plan_return(
@@ -356,13 +294,11 @@ fn plan_return(
     };
     let Some((gov_contract, _consumed)) = tag_contract(gov) else { return };
 
-    // The function's own return-site values (structurally-visible returns; the
-    // checker models the same set).
+    // Own return-site values (structurally-visible; same set the checker models).
     let Some(scope) = scopes.get(func.name.as_str()) else { return };
     let mut returns: Vec<&ArgValue> = Vec::new();
     collect_returns(&scope.stmts, &mut returns);
 
-    // Lie detection: some *literal* return violates the declared `@return`.
     let lie = returns.iter().any(|v| {
         arg_to_val(v).is_some_and(|val| admits_val(&gov_contract, &val) == Certainty::No)
     });
@@ -372,7 +308,6 @@ fn plan_return(
 
     oracle.enumerated += 1;
     let site = return_site(path, tree, func);
-    // A standing project-global obstacle (ADR-0046 §2) refuses every candidate.
     if let Some((reason, detail)) = blocking {
         oracle.refused += 1;
         refusals.push(Refusal::new(site, *reason, detail.clone()));
@@ -398,16 +333,14 @@ fn decide_return(
     scope: &Scope,
     returns: &[&ArgValue],
 ) -> Result<Vec<Edit>, (&'static str, String)> {
-    // A body whose returns v1 cannot fully enumerate (a loop / `try` / `switch`
-    // may hide a return the trace does not model) cannot be widened soundly.
+    // Loop/try/switch may hide a return v1 can't enumerate — can't widen soundly.
     if contains_opaque(&scope.stmts) {
         return Err((
             REASON_RETURN_NOT_PROVEN,
             "the body contains a loop/try/switch whose return paths v1 cannot enumerate".to_owned(),
         ));
     }
-    // A body that may fall off the end implicitly returns `null`; widening from the
-    // explicit returns alone would omit it. Refuse rather than under-widen.
+    // Falling off the end implicitly returns `null` — refuse rather than omit it.
     if !stmts_terminate(&scope.stmts) {
         return Err((
             REASON_RETURN_NOT_PROVEN,
@@ -427,8 +360,6 @@ fn decide_return(
     }
     dedup(&mut vals);
 
-    // An object-bearing native return type is outside the native-guard's scalar
-    // domain — skip it; only scalar-value returns constrain the rewrite.
     if let Some(nt) = ret.filter(|t| !t.has_instance()) {
         native_guard(nt, &vals, "return")?;
     }
@@ -436,11 +367,8 @@ fn decide_return(
     build_tag_edits(path, doc_start, gov, plain, &vals)
 }
 
-// ---- Method `@param` / `@return` honesty (ADR-0043 §6) ---------------------
-
-/// The ADR-0041 §1 eligibility gate, shared by method `@param` and `@return`
-/// honesty: `Ok(())` when the method may host a rewrite, else the reserved
-/// `magic-method` / `method-inheritance` refusal.
+/// The ADR-0041 §1 eligibility gate shared by method `@param`/`@return` honesty:
+/// `Ok(())` if eligible, else `magic-method` / `method-inheritance`.
 fn method_eligibility_gate(
     msweep: &MethodSweep,
     key: &(String, String),
@@ -634,8 +562,7 @@ fn plan_method_return(
     }
 }
 
-/// Map each method to its scope, keyed `(class_fqn, method)` (both lowercased) —
-/// for method `@return` return-site scans.
+/// Each method's scope, keyed `(class_fqn, method)` (lowercased), for `@return` scans.
 fn scopes_by_method(tree: &SourceTree) -> HashMap<(String, String), &Scope> {
     let mut map = HashMap::new();
     for scope in tree.scopes() {
@@ -646,11 +573,8 @@ fn scopes_by_method(tree: &SourceTree) -> HashMap<(String, String), &Scope> {
     map
 }
 
-// ---- Shared decision mechanics --------------------------------------------
-
 /// Build the tag-type replacement edit(s): rewrite the governing tag's type-text
-/// span to the rendered join; also rewrite a plain sibling when it too fails to
-/// admit the join (ADR-0041 precedence reconciliation).
+/// span; also rewrite a plain sibling that fails to admit the join (ADR-0041).
 fn build_tag_edits(
     path: &str,
     doc_start: u32,
@@ -667,8 +591,6 @@ fn build_tag_edits(
     edits.push(type_edit(path, doc_start, gov, &rendered)?);
 
     if let Some(pl) = plain {
-        // Leave the plain sibling untouched only if it still admits the proven
-        // join with Certainty::Yes; otherwise it too is lying — rewrite both.
         let plain_admits = tag_contract(pl).is_some_and(|(c, _)| admits_all(&c, vals));
         if !plain_admits {
             edits.push(type_edit(path, doc_start, pl, &rendered)?);
@@ -677,9 +599,8 @@ fn build_tag_edits(
     Ok(edits)
 }
 
-/// The file byte span of a tag's *type text* (only the type prefix, never the
-/// `@return` description tail), replaced by `rendered`. Absolute span =
-/// `docblock_span.start` + `DocTag.type_span.start` + the parsed type's length.
+/// The file byte span of a tag's *type text* (never the `@return` description
+/// tail): `docblock_span.start` + `DocTag.type_span.start` + parsed length.
 fn type_edit(
     path: &str,
     doc_start: u32,
@@ -699,8 +620,7 @@ fn type_edit(
     })
 }
 
-/// Whether the native type admits every proven value with [`Certainty::Yes`];
-/// otherwise the native hint contradicts the proof (a different disease).
+/// Whether the native type admits every proven value at [`Certainty::Yes`] (else contradicts).
 fn native_guard(nt: &NativeType, vals: &[Val], what: &str) -> Result<(), (&'static str, String)> {
     let contract = native_contract(nt);
     if admits_all(&contract, vals) {
@@ -716,8 +636,7 @@ fn native_guard(nt: &NativeType, vals: &[Val], what: &str) -> Result<(), (&'stat
     }
 }
 
-/// Add the decided edits to the plan, updating the oracle. An overlap (an internal
-/// invariant break, never a panic) is surfaced as a refusal.
+/// Adds edits to the plan; an overlap (an invariant break) refuses, not panics.
 fn account(
     plan: &mut EditPlan,
     oracle: &mut CompletenessOracle,
@@ -756,15 +675,10 @@ fn account(
     }
 }
 
-// ---- Tag helpers -----------------------------------------------------------
-
-/// The governing tag of `kind` (and its plain sibling when a `@phpstan-`/`@psalm-`
-/// prefixed tag governs). For `@param`, `name` selects the parameter; for
-/// `@return`, pass `None`.
-///
-/// Returns `(governing, other_plain)`: the governing tag the checker enforces, and
-/// the plain sibling *only when* the governing one is prefixed (so both may need
-/// reconciling). When the plain tag itself governs, `other_plain` is `None`.
+/// The governing tag of `kind` (`@phpstan-`/`@psalm-` wins over plain); `name`
+/// selects the `@param`, or pass `None` for `@return`. Returns `(governing,
+/// other_plain)`: `other_plain` is the plain sibling only when governing is
+/// prefixed; `None` when the plain tag itself governs.
 fn param_tags<'a>(
     tags: &'a [DocTag],
     kind: TagKind,
@@ -800,9 +714,8 @@ fn assert_targets(tags: &[DocTag], name: &str) -> bool {
     })
 }
 
-/// Parse a tag's declared type, returning its lowered contract and the byte length
-/// of the type prefix within the tag's `type_text` (so the edit replaces only the
-/// type, never a `@return` description). `None` when the type does not parse.
+/// Parse a tag's declared type: its lowered contract and the byte length of the
+/// type prefix (so the edit replaces only the type). `None` if it doesn't parse.
 fn tag_contract(tag: &DocTag) -> Option<(ContractTy, u32)> {
     let parsed = parse_type(&tag.type_text).ok()?;
     Some((lower(&parsed.ty), parsed.consumed))
@@ -812,8 +725,6 @@ fn dedup(vals: &mut Vec<Val>) {
     vals.sort();
     vals.dedup();
 }
-
-// ---- Return-site trace walking --------------------------------------------
 
 /// Map each free-function written name to its scope (for `@return` return scans).
 fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
@@ -826,9 +737,8 @@ fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
     map
 }
 
-/// Collect every structurally-visible `return <value>` in a statement list,
-/// recursing into `if`/`match` sub-traces (the same visibility the checker's trace
-/// has — returns inside an `Opaque` loop/try are not modeled here or there).
+/// Collect every structurally-visible `return <value>`, recursing into `if`/`match`
+/// sub-traces — a return inside an `Opaque` loop/try is not modeled here or there.
 fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     for s in stmts {
         match &s.kind {
@@ -855,9 +765,8 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     }
 }
 
-/// Whether the statement list contains a construct whose internal control flow —
-/// and thus any return inside it — the trace does not model (`Opaque`/`Barrier`).
-/// Recurses into modeled `if`/`match` sub-traces.
+/// Whether the list contains control flow the trace doesn't model (`Opaque`/
+/// `Barrier`); recurses into modeled `if`/`match` sub-traces.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Opaque { .. } | StmtKind::Barrier => true,
@@ -874,10 +783,8 @@ fn contains_opaque(stmts: &[Stmt]) -> bool {
     })
 }
 
-/// Whether control provably cannot fall off the end of this statement list: some
-/// statement is a guaranteed terminator (`return`/`throw`/`exit`, or an
-/// `if`/`match` whose every branch — including a present `else`/`default` —
-/// terminates).
+/// Whether control provably cannot fall off the end: some statement is a
+/// guaranteed terminator, or an `if`/`match` whose every branch terminates.
 fn stmts_terminate(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_terminates)
 }

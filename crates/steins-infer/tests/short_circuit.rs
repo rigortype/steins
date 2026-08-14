@@ -1,16 +1,13 @@
-//! Short-circuit refinement tests (ADR-0052 §6 / N3): env-threaded
-//! `&&`/`||` verdicts, retained guard calls with sequenced invalidation, nested
-//! `-if-true`/`-if-false` consumption, ternary-arm threading, and the `$a ?? $b`
-//! rvalue fact.
+//! Short-circuit refinement tests (ADR-0052 §6 / N3): env-threaded `&&`/`||`
+//! verdicts, retained guard calls with sequenced invalidation, nested
+//! `-if-true`/`-if-false` consumption, ternary-arm threading, and `$a ?? $b`.
 //!
-//! The through-line: the RIGHT operand of `&&`/`||` evaluates under the env the
-//! LEFT operand establishes (`then_refinements(a)` for `&&`, `else_refinements(a)`
-//! for `||`), exactly as PHP sequences them — so a contradiction (`$x===5 && $x===7`)
-//! is proven dead, a tautology (`$x===5 || $x===7` over `{5,7}`) proves its else
-//! dead, and a guard method call keeps its receiver on the guarded path. Every
-//! new visibility is checked against the zero-FP discipline: the threaded env is
-//! walk-local (never leaks past the verdict), and an Asserted `-if-true` narrowing
-//! consumed in a nested position still cannot premise a proof-layer id.
+//! Through-line: the RIGHT operand of `&&`/`||` evaluates under the env the LEFT
+//! establishes (`then_refinements(a)` for `&&`, `else_refinements(a)` for `||`),
+//! as PHP sequences them — so `$x===5 && $x===7` proves dead, `$x===5 || $x===7`
+//! over `{5,7}` proves its else dead, and a guard method call keeps its receiver.
+//! Zero-FP discipline: the threaded env is walk-local, and an Asserted `-if-true`
+//! narrowing in a nested position still cannot premise a proof-layer id.
 
 use steins_infer::{Diagnostic, ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -18,9 +15,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // Drop `untyped.*` (ADR-0078, #200): it flags the fixtures' own deliberately
+    // untyped signatures, not the behavior under test.
     check(&tree, &functions, "demo.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -42,9 +38,8 @@ const HDR: &str = "<?php\nfunction width(int $w): int { return $w; }\n";
 
 #[test]
 fn and_threading_prunes_contradiction() {
-    // `$x === 5 && $x === 6`: the right operand evaluates under `$x = 5` (the left's
-    // then-refinement), so `$x === 6` is a decided No → the whole `&&` is No → the
-    // then-branch is dead, preventing a finding inside dead code.
+    // `$x === 5 && $x === 6`: right operand evaluates under `$x = 5` (left's
+    // then-refinement) → decided No → then-branch dead, no finding inside it.
     let src = format!(
         "{HDR}function f($x): void {{ $bad = \"abc\"; if ($x === 5 && $x === 6) {{ width($bad); }} }}"
     );
@@ -53,9 +48,8 @@ fn and_threading_prunes_contradiction() {
 
 #[test]
 fn and_threading_control_non_contradiction_stays_live() {
-    // The control: `$x === 5 && $x === 5` is NOT a contradiction — under threading
-    // the right operand is Yes, the `&&` is Maybe, the then-branch is LIVE, and the
-    // finding fires. This proves the prune above is the contradiction, not a bug.
+    // Control: `$x === 5 && $x === 5` is not a contradiction — threading makes the
+    // right operand Yes, the branch stays LIVE, proving the prune above isn't a bug.
     let src = format!(
         "{HDR}function f($x): void {{ $bad = \"abc\"; if ($x === 5 && $x === 5) {{ width($bad); }} }}"
     );
@@ -66,9 +60,8 @@ fn and_threading_control_non_contradiction_stays_live() {
 
 #[test]
 fn or_threading_prunes_tautology_else() {
-    // `$x === 5 || $x === 7` over `$x ∈ {5,7}`: the right operand evaluates under the
-    // left's else-refinement (`$x !== 5` → `$x = 7`), so `$x === 7` is Yes → the
-    // `||` is Yes and the else branch is dead.
+    // `$x === 5 || $x === 7` over `$x ∈ {5,7}`: right operand evaluates under the
+    // left's else-refinement (`$x !== 5` → `$x = 7`) → Yes → else branch dead.
     let src = format!(
         "{HDR}function f($c): void {{ $bad = \"abc\"; $x = $c ? 5 : 7; if ($x === 5 || $x === 7) {{ }} else {{ width($bad); }} }}"
     );
@@ -89,10 +82,9 @@ fn or_threading_control_non_tautology_else_stays_live() {
 
 #[test]
 fn ternary_then_arm_sees_then_refinement() {
-    // `($x === "abc") ? $x : "abc"`: the undecided guard joins the two arms; the
-    // THEN arm `$x` resolves under `then_refinements` (`$x = "abc"`), so both arms
-    // are `"abc"` → the join collapses to `Singleton("abc")` → `width($w)` fires.
-    // Without arm threading the then arm `$x` was unknown → no fact → silent.
+    // `($x === "abc") ? $x : "abc"`: the THEN arm `$x` resolves under
+    // `then_refinements` → both arms `"abc"` → join collapses to `Singleton` →
+    // fires. Without arm threading `$x` was unknown → no fact → silent.
     let src = format!(
         "{HDR}function f($x): void {{ $w = ($x === \"abc\") ? $x : \"abc\"; width($w); }}"
     );
@@ -103,12 +95,9 @@ fn ternary_then_arm_sees_then_refinement() {
 
 #[test]
 fn guard_method_call_preserves_receiver() {
-    // Issue #9 / §6 payoff (i): `$u !== null && $u->name()` — the guard method call
-    // `$u->name()` does NOT rebind its receiver `$u`, so `$u` (an exact `U`) survives
-    // into the then-branch and `$u->m("abc")` resolves and fires (a real TypeError).
-    // The OLD blanket `cond_invalidations` forgot `$u` (the call's read-set included
-    // the receiver), so the body could not resolve the call — the over-invalidation
-    // the sequenced version fixes.
+    // Issue #9 / §6 payoff (i): a guard method call `$u->name()` does NOT rebind
+    // its receiver, so `$u` survives into the then-branch and resolves. The OLD
+    // blanket `cond_invalidations` forgot `$u` — the over-invalidation this fixes.
     let src = "<?php
 class U {
     public function name(): string { return \"x\"; }
@@ -124,9 +113,8 @@ function f(): void {
 
 #[test]
 fn guard_method_call_no_fp_on_typed_param() {
-    // The named regression shape in its bare form: `$x !== null && $x->foo()` on a
-    // (non-seeded) typed param stays SILENT — the threading adds visibility, never a
-    // false positive.
+    // The named regression shape, bare: `$x !== null && $x->foo()` on a typed param
+    // stays SILENT — threading adds visibility, never a false positive.
     let src = "<?php
 class U { public function foo(): bool { return true; } }
 function f(?U $x): void {
@@ -140,10 +128,8 @@ function f(?U $x): void {
 
 #[test]
 fn sequenced_by_ref_invalidation_forgets_receiver() {
-    // `nuke($x)` takes `$x` by reference and nulls it. In `nuke($x) && cond()`, the
-    // by-ref invalidation lands at the call's position, so the then-branch no longer
-    // sees the stale `Foo` class — `$x->m("abc")` cannot resolve → silent. This is
-    // the sequencing counterpart of the receiver-preservation test.
+    // `nuke(&$x)` nulls `$x` by reference; in `nuke($x) && cond()` the invalidation
+    // lands at the call's position, so the stale `Foo` class can't resolve → silent.
     let src = "<?php
 class Foo { public function m(int $w): void {} }
 function nuke(&$x): bool { $x = null; return true; }
@@ -158,10 +144,8 @@ function f(): void {
 
 #[test]
 fn sequenced_control_receiver_call_keeps_receiver() {
-    // Control / contrast: when `$x` is the guard call's RECEIVER (`$x->check()`)
-    // rather than an argument, it is NOT forgotten (a method call does not rebind
-    // its receiver), so the body resolves and fires. This isolates the silence above
-    // as the by-ref ARGUMENT effect, not a blanket guard-call forget.
+    // Control: `$x` as the guard call's RECEIVER (not an argument) is NOT forgotten,
+    // isolating the silence above as the by-ref ARGUMENT effect, not a blanket one.
     let src = "<?php
 class Foo {
     public function m(int $w): void {}
@@ -180,9 +164,8 @@ function f(): void {
 
 #[test]
 fn nested_if_true_fires_contract_layer() {
-    // `if ($c && isInt($x))` — the guard call `isInt` sits in a NESTED `&&` position.
-    // Its `@phpstan-assert-if-true int` is consumed on the then branch (Asserted),
-    // so `takesString($x)` fires the contract-layer mismatch.
+    // `isInt`'s guard sits in a NESTED `&&` position; its `@phpstan-assert-if-true
+    // int` is consumed on the then branch (Asserted) → contract-layer mismatch fires.
     let src = "<?php
 /** @phpstan-assert-if-true int $x */
 function isInt($x): bool { return true; }
@@ -201,9 +184,8 @@ function f($c, mixed $x): void {
 
 #[test]
 fn nested_if_true_cannot_premise_proof() {
-    // The stratum gate survives the nested position (N2 rule, §5): a nested
-    // `@phpstan-assert-if-true null` narrows `$x` at the Asserted stratum, so the
-    // downstream `takesInt($x)` (a native `int` param — proof layer) stays SILENT.
+    // Stratum gate survives nesting (N2, §5): a nested `@phpstan-assert-if-true null`
+    // narrows at the Asserted stratum, so a native `int` param (proof layer) is silent.
     let src = "<?php
 /** @phpstan-assert-if-true null $x */
 function isNull($x): bool { return true; }
@@ -219,10 +201,8 @@ function f($c, mixed $x): void {
 
 #[test]
 fn or_short_path_does_not_leak_right_operand_fact() {
-    // `if ($c || $x === "abc")` — the `||` is true via `$c` WITHOUT testing `$x`, so
-    // the then-branch must NOT assume `$x === "abc"`. `then_refinements` of an `||`
-    // is empty (De Morgan attributes only on the false path), so `width($x)` sees an
-    // unrefined `$x` → silent. A leak would flag it.
+    // `$c || $x === "abc"` is true via `$c` without testing `$x`; `then_refinements`
+    // of `||` is empty (De Morgan attributes only the false path) → unrefined, silent.
     let src = format!(
         "{HDR}function f($c, $x): void {{ if ($c || $x === \"abc\") {{ width($x); }} }}"
     );
@@ -252,9 +232,8 @@ fn coalesce_equal_operands_is_singleton() {
 
 #[test]
 fn coalesce_differing_operands_widens_and_is_silent() {
-    // `$a ?? $b` with differing operands → a widening OneOf, which never resolves to
-    // one proven value → silent. The widening is the FP-safe side: a fact `??` cannot
-    // narrow to a single bad value it is not sure of.
+    // Differing operands → widening OneOf, never one proven value → silent. FP-safe:
+    // `??` cannot narrow to a single bad value it isn't sure of.
     let src = format!(
         "{HDR}function f(): void {{ $a = \"abc\"; $b = 5; $x = $a ?? $b; width($x); }}"
     );
@@ -263,10 +242,8 @@ fn coalesce_differing_operands_widens_and_is_silent() {
 
 #[test]
 fn coalesce_on_array_offset_manufactures_nothing() {
-    // Adversarial: `$arr['k'] ?? "abc"` — the offset lowers to `Other` (no offset
-    // machinery yet), so the `??` sees no fact for the left operand and yields NO
-    // fact. `width($x)` stays silent — `??` never manufactures certainty for a value
-    // it cannot spell.
+    // Adversarial: `$arr['k']` lowers to `Other` (no offset machinery yet), so `??`
+    // sees no left-operand fact and yields none — never manufactures certainty.
     let src = format!(
         "{HDR}function f(array $arr): void {{ $x = $arr['k'] ?? \"abc\"; width($x); }}"
     );

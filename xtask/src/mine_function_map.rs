@@ -1,54 +1,32 @@
 //! `mine-function-map`: build the committed declared-return mining TOML from a
 //! pinned phpstan-src checkout (ADR-0069 / issues #73, #79).
 //!
-//! # The pipeline, and why it has three stages
+//! # The pipeline
 //!
-//! 1. **PHP reads PHP.** `docs/research/phpstan-mining/mine_function_map.php` is
-//!    `require`d by the real engine and emits JSON — the functionMap key grammar
-//!    (alternate-signature ticks, `::` method rows) and the forward-applied delta
-//!    ladder are PHPStan's own, and transcribing either into Rust would be a
-//!    second implementation to keep in sync.
-//! 2. **Rust lowers.** Every candidate return-type string is lowered through
-//!    [`steins_contract::lower_str`] and kept only when the lowering flattens to an
-//!    **arm list the declared-contract machinery carries**: the scalar bases, their
-//!    literals, the two scalar refinements (`int<lo, hi>`, the string predicates),
-//!    `null` and the array vocabulary — exactly the vocabulary `steins-infer`'s
-//!    declared-return arm lane already seeds for a project function (ADR-0052 §9).
-//!    A row the arm lane could not carry is dropped here, at generation time, so
-//!    the shipped table has no rows the seam would silently discard.
+//! 1. PHP reads PHP: `docs/research/phpstan-mining/mine_function_map.php` is `require`d by
+//!    the real engine and emits JSON, avoiding a second Rust implementation of PHPStan's own
+//!    functionMap grammar and delta ladder.
+//! 2. Rust lowers: each candidate return-type string goes through
+//!    [`steins_contract::lower_str`] and is kept only if it flattens to an arm list the
+//!    declared-contract arm lane carries (ADR-0052 §9) — scalar bases, their literals, the
+//!    two scalar refinements (`int<lo, hi>`, string predicates), `null`, and the array
+//!    vocabulary. Everything else is dropped at generation time, so the shipped table never
+//!    holds a row the consumer would silently discard. Widened twice: #79 dropped the #73
+//!    single-base-envelope requirement (`string`, `?int`), admitting `T|false` failure unions
+//!    and scalar refinements; ADR-0071 admitted the array vocabulary (`array`, `list<T>`,
+//!    `array<K, V>`, `array{…}`, `iterable<K, V>`) once `subsumes` could judge array pairs
+//!    instead of answering `Maybe`. Objects, `mixed`/`void`/`never` and opaque strings stay
+//!    dropped and counted.
+//! 3. The engine countersigns: every surviving row is checked arm-wise against the real
+//!    sidecar's `reflect(name)` at the pin (PHP 8.5.8) via
+//!    [`steins_contract::normalize::subsumes`], total in both directions — every row arm
+//!    subsumed by some engine arm (never invented), and every engine arm subsuming some row
+//!    arm (may sharpen, never drop: `string` vs `?string` loses a null, `int` vs `int|false`
+//!    loses the failure arm; both excluded and listed verbatim). A name unknown to the engine
+//!    is excluded; a function with no declared return type is not a disagreement — that's
+//!    where the map adds reach.
 //!
-//!    The filter widened twice. Issue #79 dropped the #73 requirement that a row
-//!    lower to a single-base **envelope** (`string`, `?int`), admitting the
-//!    `T|false` failure unions and the scalar refinements — the rows where
-//!    functionMap genuinely exceeds reflection. ADR-0071 then admitted the **array
-//!    vocabulary** (`array`, `list<T>`, `array<K, V>`, `array{…}`, `iterable<K,
-//!    V>`), whose blocker was never the lowering but the countersign: `subsumes`
-//!    answered `Maybe` about every array pair, so stage 3 could not have signed
-//!    them. Objects, `mixed`/`void`/`never` and the opaque-string form stay
-//!    dropped, still counted — the same vacuity, awaiting the same treatment.
-//! 3. **The engine countersigns.** Every surviving row is put to the *real*
-//!    sidecar's `reflect(name)` at the pin (PHP 8.5.8) and judged **arm-wise**
-//!    through [`steins_contract::normalize::subsumes`] — the same acceptance
-//!    relation `admit_return_fact` uses to admit a curated refinement against a
-//!    reflected envelope. The correspondence must be total in both directions:
-//!
-//!    * every **row** arm is subsumed by some engine arm — the row refines the
-//!      engine's declaration and never invents an arm outside it
-//!      (`non-empty-string` under the engine's `string` is agreement; `int` under
-//!      the engine's `string` is not);
-//!    * every **engine** arm subsumes some row arm — the row may sharpen an arm
-//!      but may not *drop* one. This is the #73 catch, kept: `string` against the
-//!      engine's `?string` silently loses a null, `int` against the engine's
-//!      `int|false` silently loses the failure arm, and both are excluded and
-//!      listed verbatim.
-//!
-//!    A name the engine does not know as a function is excluded too. A function
-//!    the engine knows but for which it declares **no** return type is not a
-//!    disagreement — those rows are precisely where the map adds reach over
-//!    reflection.
-//!
-//! This is ADR-0069 §3's "rot answered by machinery, not diligence": the per-row
-//! evidence bar of ADR-0056 is automated rather than waived.
+//! ADR-0069 §3: rot answered by machinery, not diligence.
 //!
 //! # Usage
 //!
@@ -56,11 +34,10 @@
 //! cargo xtask mine-function-map [/path/to/phpstan-src]
 //! ```
 //!
-//! The default checkout path is `~/repo/php/phpstan-src`. The checkout is read
-//! **only** — never modified, never checked out to another ref. Its `HEAD` is
-//! recorded in the emitted TOML as the mining pin.
+//! Default checkout: `~/repo/php/phpstan-src`, read-only. Its `HEAD` becomes
+//! the mining pin recorded in the emitted TOML.
 //!
-//! Output: `docs/research/phpstan-mining/declared_returns.toml` (the source of
+//! Output: `docs/research/phpstan-mining/declared_returns.toml` (source of
 //! record). `cargo xtask gen-catalog` turns that into the shipped Rust table.
 
 use std::collections::BTreeMap;
@@ -107,16 +84,8 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
         return Err(format!("{} malformed signature rows: {:?}", mined.malformed.len(), mined.malformed));
     }
 
-    // Stage 2 — lowerability. `floor_row` is the whole filter: a row whose lowering
-    // does not flatten to an arm list the declared-contract lane carries is dropped.
-    //
-    // The drop is counted BY REASON, and the reasons are classified on the LOWERED
-    // TOP-LEVEL shape exactly as the #73 slice classified them, so every run's
-    // buckets are directly comparable. Each widening empties a bucket and shrinks
-    // the union residue beside it: #79 took the multi-base unions and the scalar
-    // refinements, ADR-0071 takes the shaped arrays and the unions whose only
-    // uncarriable arm was an array one. The object, void and unparseable buckets
-    // are untouched by either relaxation and must read identically across all three.
+    // Stage 2 — lowerability: `floor_row` is the whole filter (see its doc and
+    // [`Dropped`] for the drop reasons).
     let mut candidates: BTreeMap<String, Row> = BTreeMap::new();
     let mut dropped = Dropped::default();
     for (name, ty) in &mined.rows {
@@ -174,13 +143,11 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
             admitted.insert(name.clone(), row.canon.clone());
         };
         match refl.return_type.as_deref() {
-            // The engine declares nothing: the map is adding reach, not contradicting.
+            // The engine declares nothing: the map adds reach, not a contradiction.
             None => {
                 typeless += 1;
                 admit(row);
             }
-            // The arm-wise countersign (module docs, stage 3): the row may refine
-            // every arm the engine declares, and may drop none of them.
             Some(engine_ty) if countersigned(&row.arms, engine_ty) => admit(row),
             Some(engine_ty) => {
                 disagree.insert(name.clone(), vec![row.canon.clone(), engine_ty.to_owned()]);
@@ -225,25 +192,21 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
     Ok(())
 }
 
-/// An admitted candidate row: its canonical spelling (what the TOML stores and the
-/// consumer re-lowers) and the arms that spelling denotes.
+/// An admitted candidate row: its canonical spelling (what the TOML stores and the consumer
+/// re-lowers) and the arms that spelling denotes.
 struct Row {
     /// The canonical phpdoc spelling, produced by `spell_arms` and verified to
     /// re-lower to [`Self::arms`].
     canon: String,
     /// The flattened arm list the declared-contract lane would carry.
     arms: Vec<ContractTy>,
-    /// Whether this row is a #73-shaped **envelope** — a bare scalar base or its
-    /// `?T` nullable pair. The complement is the #79 population, counted separately
-    /// so the slice's own reach stays legible in the header.
+    /// Whether this row is a #73-shaped **envelope** — a bare scalar base or its `?T` nullable
+    /// pair. The complement is the #79 population, counted separately.
     envelope: bool,
-    /// Whether [`Self::canon`] is the **raw source spelling** rather than
-    /// `spell_arms`' canonical one, because the speller declined the arms. Counted
-    /// (not stored in the TOML) so the size of that path stays visible: `spell_arms`
-    /// refuses a class arm outright, so every object row takes it. Such a row
-    /// countersigns and lowers correctly — the source string lowers by construction —
-    /// but the *dump* surface renders it through its own class-aware path rather than
-    /// through the speller.
+    /// Whether [`Self::canon`] is the raw source spelling rather than `spell_arms`' canonical
+    /// one, because the speller declined the arms — always true for a class arm. Such a row
+    /// still countersigns and lowers correctly (the source string lowers by construction);
+    /// only the dump surface's rendering differs.
     source_spelled: bool,
 }
 
@@ -261,49 +224,34 @@ struct Counts {
 }
 
 /// Rows dropped for lowering to something the declared-contract arm lane cannot
-/// carry, split by reason (ADR-0069 §5), classified on the LOWERED TOP-LEVEL shape.
-///
-/// The classification is deliberately unchanged from the #73 slice so every run
-/// compares directly. The array bucket empties at ADR-0071, the object bucket loses
-/// its object half at the object slice, and the union bucket shrinks each time to
-/// its residue — the unions still carrying an arm from one of the remaining
-/// buckets, and the strings whose only spelling is the opaque form. The
-/// refinement, void and unparseable buckets are untouched by all three relaxations
-/// and must read identically across every run; that invariance is the check that
-/// the classification is still made on the same lowered top-level shape.
+/// carry, split by reason (ADR-0069 §5), classified on the LOWERED TOP-LEVEL
+/// shape — unchanged from the #73 slice so every run compares directly. The
+/// refinement, void and unparseable buckets must read identically across
+/// every run; that invariance is the check that classification hasn't drifted.
 #[derive(Default)]
 struct Dropped {
-    /// `array{…}`, `list<T>`, `array<K, V>`, `iterable<T>` — the shaped-array rows.
-    /// Emptied by ADR-0071, which gave the countersign a denotation for them; the
-    /// bucket stays so a later pin's regression is legible rather than invisible.
+    /// `array{…}`, `list<T>`, `array<K, V>`, `iterable<T>` — the shaped-array rows. Emptied by
+    /// ADR-0071 (which gave the countersign a denotation for them); kept so a later pin's
+    /// regression is legible.
     arrays: usize,
-    /// Multi-base unions that are not the `?T` nullable pair — `string|false`,
-    /// `int|string`, the whole `T|false` failure-arm family.
+    /// Multi-base unions that are not the `?T` nullable pair — `string|false`, `int|string`,
+    /// the whole `T|false` failure-arm family.
     unions: usize,
-    /// Scalar types richer than a base: `non-empty-string`, `int<0, 255>`,
-    /// `positive-int`, literal types, the opaque string family.
+    /// Scalar types richer than a base: `non-empty-string`, `int<0, 255>`, `positive-int`,
+    /// literal types, the opaque string family.
     refinements: usize,
-    /// Everything lowering to `Opaque` or `CallableTy` — and, before the object
-    /// slice, `Class`/`ObjectAny` too.
-    ///
-    /// **The name undersells what it holds, and the composition is worth writing
-    /// down** because the label alone would mislead a later reader. `void` lowers to
-    /// `Opaque` (it is not a value type), and so does the `resource` family
-    /// (`resource`/`open-resource`/`closed-resource` are `KNOWN_UNENFORCED`
-    /// keywords), so both land here rather than in [`Self::voidish`], which holds
-    /// only `mixed`/`never`/the `mixed`-minus cuts. At the ADR-0071 pin the 620 rows
-    /// were 146 class/`object`, 322 `void`, 149 `resource`, 2 `Closure` (the callable
-    /// keyword, not a class arm) and 1 `int-mask<…>`; the object slice carries the
-    /// 146 and leaves 474.
-    ///
-    /// The split is left as it is rather than corrected, because these counts are
-    /// the cross-run comparison series ADR-0069's table is built on and moving a row
-    /// between buckets now would make the columns incomparable for a naming reason.
+    /// Everything lowering to `Opaque` or `CallableTy` — and, before the object slice,
+    /// `Class`/`ObjectAny` too. Also holds `void` and the `resource` family (both lower to
+    /// `Opaque`, not to [`Self::voidish`]). At the ADR-0071 pin the 620 rows were 146
+    /// class/`object`, 322 `void`, 149 `resource`, 2 `Closure`, 1 `int-mask<…>`; the object
+    /// slice carried off the 146, leaving 474. Left uncorrected: these counts are the
+    /// cross-run comparison series ADR-0069's table is built on, and moving a row between
+    /// buckets would make the columns incomparable.
     objects: usize,
     /// `void`, `never`, `mixed`, and the `mixed`-minus-a-cut spellings.
     voidish: usize,
-    /// A type string the phpdoc grammar does not accept at all (an empty return
-    /// type, a PHPStan-internal spelling such as `__benevolent<…>`).
+    /// A type string the phpdoc grammar does not accept at all (an empty return type, a
+    /// PHPStan-internal spelling such as `__benevolent<…>`).
     unparseable: usize,
 }
 
@@ -312,8 +260,8 @@ impl Dropped {
         self.arrays + self.unions + self.refinements + self.objects + self.voidish + self.unparseable
     }
 
-    /// Charge one dropped row to its reason bucket, judged on the LOWERED type so
-    /// the classification is the grammar's, not a substring guess.
+    /// Charge one dropped row to its reason bucket, judged on the LOWERED type so the
+    /// classification is the grammar's, not a substring guess.
     fn charge(&mut self, ty: &str) {
         let Some(lowered) = steins_contract::lower_str(ty) else {
             self.unparseable += 1;
@@ -337,13 +285,9 @@ impl Dropped {
             ContractTy::Class(_)
             | ContractTy::ObjectAny
             | ContractTy::CallableTy { .. }
-            // `resource` was already charged here while it lowered to `Opaque`
-            // (ADR-0069 §5's "objects / class names / callable / resource"), and
-            // it stays here now that ADR-0056 §8 gave it a leaf of its own — the
-            // bucket is a comparison series, so the row must not migrate. What
-            // keeps these rows OUT of the admitted table is unchanged and is the
-            // countersign, not the lowering: the engine declares no return type
-            // for a genuine resource producer, so there is nothing to agree with.
+            // `resource` stays in this bucket (ADR-0069 §5) so the comparison series doesn't
+            // shift; it's excluded by the countersign, not the lowering — a genuine resource
+            // producer has no declared return type.
             | ContractTy::Resource
             | ContractTy::Opaque => &mut self.objects,
             ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::Never => &mut self.voidish,
@@ -360,8 +304,8 @@ fn default_checkout() -> Result<PathBuf, String> {
     Ok(PathBuf::from(home).join("repo/php/phpstan-src"))
 }
 
-/// The checkout's `HEAD` — the mining pin recorded in the TOML and the generated
-/// file. Read-only: `git rev-parse`, nothing else.
+/// The checkout's `HEAD` — the mining pin recorded in the TOML and the generated file.
+/// Read-only: `git rev-parse`, nothing else.
 fn git_head(root: &Path) -> Result<String, String> {
     let out = Command::new("git")
         .args(["-C", &root.display().to_string(), "rev-parse", "HEAD"])
@@ -390,9 +334,9 @@ fn run_miner(root: &Path) -> Result<Mined, String> {
     serde_json::from_slice(&out.stdout).map_err(|e| format!("parse miner JSON: {e}"))
 }
 
-/// Flatten a lowered contract into a top-level arm list, dissolving nested unions —
-/// the generator's copy of `steins-infer`'s `flatten_arms`, which is the shape the
-/// consuming floor rung will hand to the declared-contract lane.
+/// Flatten a lowered contract into a top-level arm list, dissolving nested unions — the
+/// generator's copy of `steins-infer`'s `flatten_arms`, which is the shape the consuming floor
+/// rung will hand to the declared-contract lane.
 fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
     match cty {
         ContractTy::Union(members) => members.into_iter().flat_map(flatten_arms).collect(),
@@ -400,48 +344,23 @@ fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
     }
 }
 
-/// Whether one arm is carriable by the declared-contract lane the floor seeds into
-/// (ADR-0052 §9): the scalar bases, their literals, the two scalar refinements,
-/// `null`, and — since ADR-0071 — the **array vocabulary** (`array`, `list<T>`,
-/// `array<K, V>`, `iterable<K, V>`, `array{…}`). This is the vocabulary `subsumes`
-/// decides *extensionally*, so the engine countersign is a real question for every
-/// admitted row rather than a vacuous `Maybe`.
+/// Whether one arm is carriable by the declared-contract lane the floor seeds into (ADR-0052
+/// §9): scalar bases, their literals, the two scalar refinements, `null`, the array
+/// vocabulary (`array`, `list<T>`, `array<K, V>`, `iterable<K, V>`, `array{…}`, ADR-0071),
+/// and the class vocabulary (a named `ContractTy::Class` or bare `object`, added by the
+/// object slice). Checked per arm, so `?ClassName` is carriable by composition.
 ///
-/// The array arms were the #79 slice's largest deferral, and the deferral was never
-/// about lowering: `lower_str` has always parsed `array{a: int}`. It was about the
-/// relation. ADR-0071 gave `subsumes` a structural denotation for the whole
-/// vocabulary — `array ⊇ array{dirname: string}` now answers `Yes`, and
-/// `?array ⊉ array` answers a *proven* `No` — so the countersign discharges here.
-/// Seeding was already plumbed: a single array arm reaches the value lane through
-/// `seed_shape_fact`, a multi-arm row lives in the arm lane exactly as
-/// `string|false` does (ADR-0069's value-lane rule).
+/// Array admission tracks `subsumes` gaining a structural denotation for the vocabulary at
+/// ADR-0071 (`array ⊇ array{dirname: string}` is `Yes`; `?array ⊉ array` is a proven `No`).
+/// Class admission needed no new rule: `subsumes_class` is reflexive, so a row naming the
+/// engine's own class name countersigns (clause 2 of [`countersigned`]); a differing name
+/// stays `Maybe` and is refused — this is what catches the stale pre-8.0 rows (functionMap
+/// says `resource` where PHP 8 returns `GdImage`/`CurlHandle`).
 ///
-/// Since the object slice it also carries the **class vocabulary** — a named class
-/// (`ContractTy::Class`) and bare `object` — and that widening needed no new rule at
-/// all. `subsumes_class` is a *reflexive* floor, and reflexivity is exactly the
-/// question a functionMap row poses: the row says `GdFont`, the engine says `GdFont`,
-/// and `GdFont ⊆ GdFont` answers `Yes` in both directions, so clause (2) of
-/// [`countersigned`] admits it. The asymmetry is the whole point. A row whose name
-/// *differs* from the engine's leaves `subsumes_class` at `Maybe`, which is not
-/// `Yes`, so the row is refused and listed — and the stale pre-8.0 rows are precisely
-/// that population (functionMap still says `resource` where PHP 8 returns a `GdImage`
-/// or a `CurlHandle`). The floor cannot admit a hierarchy claim it has no hierarchy
-/// to check, and it never needs to: it only ever admits a name the engine itself
-/// spelled the same way.
-///
-/// The check is **per arm**, so `?ClassName` — a `Null` arm beside a `Class` one —
-/// becomes carriable by composition rather than by a case of its own.
-///
-/// Everything else stays out, still counted (ADR-0069 §5 as amended by #79):
-/// `callable` (a `CallableTy` countersign would still be vacuous — the reflexive
-/// floor says nothing about a signature), intersections, and `resource`, which is
-/// *not* a class arm: `resource`/`open-resource`/`closed-resource` are
-/// `KNOWN_UNENFORCED` keywords and lower to `ContractTy::Opaque`, so they never
-/// reach the class vocabulary and this widening does not touch them. Also out:
-/// `mixed`/`never`/the `mixed`-minus cuts (nothing to say), and `StrOpaque` (no
-/// faithful spelling — `spell_arms` refuses it). `self`/`static`/`parent` lower to
-/// `Opaque` for the same keyword reason, so no relative-class spelling survives
-/// lowering into a `Class` arm either.
+/// Still out, still counted (ADR-0069 §5 as amended by #79): `callable`, intersections,
+/// `resource` (`KNOWN_UNENFORCED` keywords lowering to `Opaque`, not a class arm),
+/// `mixed`/`never`/the `mixed`-minus cuts, `StrOpaque` (no faithful spelling), and
+/// `self`/`static`/`parent` (lower to `Opaque` as keywords).
 fn arm_is_carriable(ty: &ContractTy) -> bool {
     matches!(
         ty,
@@ -463,24 +382,22 @@ fn arm_is_carriable(ty: &ContractTy) -> bool {
     )
 }
 
-/// Whether an arm list is the #73-shaped **envelope** — a bare scalar base, or that
-/// base paired with `null`. Used only for counting: the envelope rows are the #73
-/// population, and the complement is what issue #79 added.
+/// Whether an arm list is the #73-shaped **envelope** — a bare scalar base, or that base
+/// paired with `null`. Used only for counting: the envelope rows are the #73 population, and
+/// the complement is what issue #79 added.
 fn is_envelope(arms: &[ContractTy]) -> bool {
     let bases = arms.iter().filter(|a| matches!(a, ContractTy::Base(_))).count();
     let nulls = arms.iter().filter(|a| matches!(a, ContractTy::Null)).count();
     bases == 1 && bases + nulls == arms.len()
 }
 
-/// The floor row a declared type string contributes, or `None` when the arm lane
-/// cannot carry it.
+/// The floor row a declared type string contributes, or `None` when the arm lane cannot carry
+/// it.
 ///
-/// The stored spelling is *canonical* — `spell_arms` over the lowered arms — so the
-/// shipped table is normalized and two spellings of one type compare equal. It is
-/// verified to round-trip (re-lowering the canonical spelling must yield an
-/// arm-equal list); a spelling that does not round-trip would be a row the consumer
-/// re-lowers differently from what was countersigned, so the raw source string —
-/// which lowers correctly by construction — is stored instead.
+/// The stored spelling is `spell_arms` over the lowered arms — canonical, so two spellings of
+/// one type compare equal — and verified to round-trip (re-lowering it must yield an arm-equal
+/// list). When it doesn't, the raw source string is stored instead, since it lowers correctly
+/// by construction.
 fn floor_row(ty: &str) -> Option<Row> {
     let arms = flatten_arms(steins_contract::lower_str(ty)?);
     if arms.is_empty() || !arms.iter().all(arm_is_carriable) {
@@ -495,9 +412,9 @@ fn floor_row(ty: &str) -> Option<Row> {
 
 /// Whether re-lowering `spelled` yields the same arm **multiset** as `arms`.
 ///
-/// Order-insensitive on purpose: `?string` and `string|null` lower to the same two
-/// arms in different orders, and the speller states one of them. What must not
-/// differ is the denotation, and that is what an arm-for-arm pairing checks.
+/// Order-insensitive on purpose: `?string` and `string|null` lower to the same two arms in
+/// different orders, and the speller states one of them. What must not differ is the
+/// denotation, and that is what an arm-for-arm pairing checks.
 fn round_trips(spelled: &str, arms: &[ContractTy]) -> bool {
     let Some(mut back) = steins_contract::lower_str(spelled).map(flatten_arms) else {
         return false;
@@ -516,32 +433,18 @@ fn round_trips(spelled: &str, arms: &[ContractTy]) -> bool {
     true
 }
 
-/// The generation-time engine countersign (ADR-0069 §3, widened by issue #79):
-/// whether the candidate row is consistent with the pinned engine's own declaration
-/// in one of the two shapes an Asserted floor row may take.
+/// Implements the module doc's stage 3 (ADR-0069 §3, widened by #79). A row is admitted when
+/// either clause holds:
 ///
-/// The relation throughout is [`steins_contract::normalize::subsumes`], the single
-/// acceptance relation the checker enforces. A row is admitted when either holds:
+/// 1. **Bounds the engine** (`engine ⊆ row`, the #73 rule): a true upper bound, possibly
+///    coarse (`bool` over `true` says less but nothing false).
+/// 2. **Refines the engine, arm-wise** (the #79 addition): every row arm lands under some
+///    engine arm, and every engine arm covers some row arm — sharpening an arm is fine,
+///    dropping one isn't. `non-empty-string` under `string` passes; `string` under `?string`
+///    doesn't (else "refines" would readmit the #73 catch: a hidden null or failure arm).
 ///
-/// 1. **The row BOUNDS the engine** (`engine ⊆ row`) — the #73 rule, kept verbatim.
-///    The row is a true upper bound on everything the engine's declaration admits,
-///    possibly a coarse one: `bool` over the engine's `true` says less than the
-///    engine does, but nothing it says is false.
-/// 2. **The row REFINES the engine, arm-wise** — the #79 addition, and the same
-///    subset discipline `admit_return_fact` applies to a curated refinement against
-///    a reflected envelope. The arm correspondence must be total in **both**
-///    directions: every row arm lands under some engine arm (the row never invents
-///    an arm outside the declaration), and every engine arm covers some row arm
-///    (the row may sharpen an arm but may not **drop** one). `non-empty-string`
-///    under `string` passes; `string` under `?string` does not.
-///
-/// Everything else is a disagreement, listed verbatim. The second clause of (2) is
-/// what keeps the #73 catch list intact through the relaxation: without it, "the row
-/// refines" would readmit exactly the rows the pinned engine disowns — `string`
-/// hiding the null in `?string`, `int` hiding the failure arm in `int|false`.
-///
-/// An engine type that does not lower at all is an answer this cannot judge, so it
-/// counts as disagreement — the refusing side.
+/// Everything else, including an engine type that fails to lower, is a disagreement, listed
+/// verbatim.
 fn countersigned(row: &[ContractTy], engine_ty: &str) -> bool {
     let Some(engine_ty) = steins_contract::lower_str(engine_ty) else {
         return false;
@@ -550,8 +453,7 @@ fn countersigned(row: &[ContractTy], engine_ty: &str) -> bool {
     if engine.is_empty() {
         return false;
     }
-    // (1) The row bounds the engine: rebuild the row as one type and ask directly,
-    // so a union row is judged as a union rather than arm by arm.
+    // (1) rebuild the row as one type so a union is judged as a union.
     let row_ty = match row {
         [only] => only.clone(),
         many => ContractTy::Union(many.to_vec()),
@@ -559,7 +461,7 @@ fn countersigned(row: &[ContractTy], engine_ty: &str) -> bool {
     if steins_contract::normalize::subsumes(&row_ty, &engine_ty).is_yes() {
         return true;
     }
-    // (2) The row refines the engine, arm-wise and totally in both directions.
+    // (2) arm-wise, totally in both directions.
     let covers = |e: &ContractTy, r: &ContractTy| steins_contract::normalize::subsumes(e, r).is_yes();
     row.iter().all(|r| engine.iter().any(|e| covers(e, r)))
         && engine.iter().all(|e| row.iter().any(|r| covers(e, r)))
@@ -698,8 +600,7 @@ fn render(
     );
     let _ = writeln!(s, "[version_sensitive]");
     for (name, minors) in version_sensitive {
-        // The highest boundary is the one that governs: the map states the pin's
-        // signature, which is correct only at or above the last change.
+        // The highest boundary governs: the map states the pin's signature.
         let last = minors.iter().max().cloned().unwrap_or_default();
         let all = minors.join(", ");
         let _ = writeln!(s, "{name:?} = {last:?}  # changed at: {all}");
@@ -760,61 +661,38 @@ mod tests {
 
     #[test]
     fn the_arm_lane_carries_scalars_unions_and_refinements() {
-        // The #73 population, unchanged and still canonicalized.
         assert_eq!(canon("string").as_deref(), Some("string"));
         assert_eq!(canon("bool").as_deref(), Some("bool"));
         assert_eq!(canon("?string").as_deref(), Some("string|null"));
         assert_eq!(canon("string|null").as_deref(), Some("string|null"));
-        // What issue #79 added: the `T|false` failure family and the scalar
-        // refinements — the two buckets #73 counted and dropped.
         assert_eq!(canon("string|false").as_deref(), Some("string|false"));
         assert_eq!(canon("int|false").as_deref(), Some("int|false"));
         assert_eq!(canon("non-empty-string").as_deref(), Some("non-empty-string"));
-        // An int range canonicalizes to the interval it already was: the speller
-        // states PHPStan's own spelling rather than the phpdoc keyword sugar
-        // (issue #90), so this row is now a fixed point of the mining.
+        // The speller states PHPStan's own interval spelling, not the phpdoc
+        // keyword sugar (issue #90).
         assert_eq!(canon("int<0, max>").as_deref(), Some("int<0, max>"));
         assert_eq!(canon("non-negative-int").as_deref(), Some("int<0, max>"));
-        // What ADR-0071 added: the array vocabulary, alone and inside a union. The
-        // blocker was never the lowering — it was `subsumes`, which answered `Maybe`
-        // about every array pair and so made the stage-3 countersign vacuous.
         assert_eq!(canon("array").as_deref(), Some("array"));
         assert_eq!(canon("array{a: int}").as_deref(), Some("array{a: int}"));
         assert_eq!(canon("list<string>").as_deref(), Some("list<string>"));
         assert_eq!(canon("array<string, int>").as_deref(), Some("array<string, int>"));
-        // A union whose only uncarriable arm WAS the array one now travels whole. The
-        // canonical order is the speller's — array members follow the scalar ones
-        // (ADR-0062 §6, D4) — so the stored spelling is `false|array`, not the source's.
+        // Canonical order follows the speller: array members after scalar ones
+        // (ADR-0062 §6, D4), so this is `false|array`, not the source order.
         assert_eq!(canon("array|false").as_deref(), Some("false|array"));
-        // What the object slice added: a named class and bare `object`, per arm — so
-        // `?GdFont` follows without a case of its own. `spell_arms` refuses a class
-        // arm, so the stored spelling is the SOURCE string, which keeps the engine's
-        // casing (`ContractTy::Class` normalizes to lowercase and could not restate
-        // it) and lowers back by construction.
         assert_eq!(canon("GdFont").as_deref(), Some("GdFont"));
         assert_eq!(canon("?GdFont").as_deref(), Some("?GdFont"));
         assert_eq!(canon("object").as_deref(), Some("object"));
         assert_eq!(canon("GdImage|false").as_deref(), Some("GdImage|false"));
-        // Still out, still counted. `resource` is the load-bearing one: it is a
-        // KNOWN_UNENFORCED keyword lowering to `Opaque`, NOT a `Class` arm, so
-        // widening the class vocabulary leaves the whole resource family outside —
-        // which is what keeps the stale pre-8.0 `resource` rows uncarriable instead
-        // of letting them countersign reflexively against each other.
         assert_eq!(canon("resource"), None);
         assert_eq!(canon("open-resource"), None);
         assert_eq!(canon("closed-resource"), None);
         assert_eq!(canon("resource|false"), None);
         assert_eq!(canon("array|resource"), None);
-        // `callable` and the intersections keep their deferral: a reflexive floor
-        // says nothing about a signature, so their countersign stays vacuous.
         assert_eq!(canon("callable"), None);
-        // `Closure` is the callable KEYWORD in this vocabulary, not a class arm —
-        // `lower_identifier` case-folds before it consults the table, so the class
-        // spelling and the keyword are the same name and the keyword wins.
+        // `lower_identifier` case-folds before consulting the table, so the
+        // `Closure` keyword wins over any class spelling of the same name.
         assert_eq!(canon("Closure"), None);
         assert_eq!(canon("Countable&Traversable"), None);
-        // The relative-class spellings lower to `Opaque` as keywords, so none of them
-        // sneaks in as a `Class` arm.
         assert_eq!(canon("static"), None);
         assert_eq!(canon("self"), None);
         assert_eq!(canon("void"), None);
@@ -825,55 +703,30 @@ mod tests {
     #[test]
     fn the_countersign_decides_class_rows_by_reflexivity_alone() {
         let arms = |ty: &str| floor_row(ty).expect("carriable").arms;
-        // The admitting case, and the ONLY one: the row names the class the engine
-        // names. `subsumes_class` is reflexive, so both directions of clause (2)
-        // close without a hierarchy anywhere in steins-contract.
         assert!(countersigned(&arms("GdFont"), "GdFont"), "imageloadfont's shape");
         assert!(countersigned(&arms("GdFont"), "\\GdFont"), "the leading `\\` is normalized away");
         assert!(countersigned(&arms("gdfont"), "GdFont"), "class names are case-folded");
         assert!(countersigned(&arms("?GdFont"), "?GdFont"));
         assert!(countersigned(&arms("object"), "object"));
-        // A row may still be a coarse upper BOUND, clause (1), exactly as `bool` is
-        // over the engine's `true`: every class instance is an object.
         assert!(countersigned(&arms("object"), "GdFont"));
-        // And it may REFINE in the one direction that needs no hierarchy: a class
-        // under bare `object` is the class analogue of `non-empty-string` under
-        // `string`, decided by the universal "every instance is an object" rule
-        // rather than by any is-a edge.
         assert!(countersigned(&arms("GdImage"), "object"));
-        // Different names stay `Maybe`, which is not `Yes` — refused and listed. This
-        // is the asymmetry the whole widening rests on: the floor admits only a name
-        // the engine itself spelled, so it never states a hierarchy claim it has no
-        // hierarchy to check.
         assert!(!countersigned(&arms("GdFont"), "GdImage"));
-        // The genuinely HIERARCHY-DEPENDENT question is refused in both directions,
-        // which is the deferral ADR-0071 §2.3 names. A real is-a oracle would decide
-        // these; the reflexive floor answers `Maybe` and the row is listed.
+        // Genuinely hierarchy-dependent questions are refused both ways
+        // (ADR-0071 §2.3's deferral) — a real is-a oracle would decide these.
         assert!(!countersigned(&arms("ArrayObject"), "Traversable"), "a subclass row");
         assert!(!countersigned(&arms("Traversable"), "ArrayObject"), "a superclass row");
-        // The stale pre-8.0 population, from both sides. A `resource` row is not even
-        // carriable (it lowers to `Opaque`), so it never reaches here; were it forced
-        // through, `Opaque` is `Maybe` on both clauses and the row is still refused.
-        // Either way it lands in a count, never in the table.
         assert!(floor_row("resource").is_none(), "the resource rows stay uncarriable");
         assert!(
             !countersigned(&[steins_contract::ContractTy::Opaque], "GdImage"),
             "curl_init's era: functionMap says `resource`, PHP 8 returns a CurlHandle"
         );
-        // A DROPPED arm is refused for classes exactly as for scalars and arrays: the
-        // row hides the null the engine declares. This is `ftp_raw`'s catch one
-        // vocabulary over.
         assert!(!countersigned(&arms("GdFont"), "?GdFont"), "a class row may not hide a null");
         assert!(countersigned(&arms("?GdFont"), "GdFont"), "but it may bound one, clause (1)");
-        // A row that INVENTS an arm the engine excludes AND fails to bound is refused:
-        // `GdImage` neither lands under the engine's `GdFont` nor covers it.
         assert!(!countersigned(&arms("GdFont|GdImage"), "?GdFont"));
     }
 
     #[test]
     fn every_admitted_spelling_round_trips() {
-        // The stored spelling must re-lower to the arms that were countersigned, or
-        // the consumer reads a different type than the engine signed off on.
         for ty in ["string", "?int", "string|false", "non-empty-string", "int<0, 255>", "int|string|null"] {
             let row = floor_row(ty).expect("carriable");
             let back = floor_row(&row.canon).expect("the canonical spelling must re-lower");
@@ -884,61 +737,41 @@ mod tests {
     #[test]
     fn the_countersign_admits_refinements_and_refuses_dropped_arms() {
         let arms = |ty: &str| floor_row(ty).expect("carriable").arms;
-        // The reach case: the row refines what the engine declares.
         assert!(countersigned(&arms("non-empty-string"), "string"));
         assert!(countersigned(&arms("string|false"), "string|false"));
         assert!(countersigned(&arms("false"), "bool"));
         assert!(countersigned(&arms("int<0, 255>"), "int"));
-        // The #73 clause, kept: a row that BOUNDS the engine stands even when it is
-        // coarser than the engine's own declaration.
         assert!(countersigned(&arms("bool"), "true"));
         assert!(countersigned(&arms("string|null"), "string"));
-        // A DROPPED arm is the #73 catch, preserved: the engine can return a null or
-        // a `false` the row does not state.
         assert!(!countersigned(&arms("string"), "?string"), "xml_error_string's shape");
         assert!(!countersigned(&arms("int"), "int|false"), "intlcal_get's shape");
         assert!(!countersigned(&arms("bool"), "int|bool"), "ldap_compare's shape");
         assert!(!countersigned(&arms("string"), "array|string|bool"), "pg_last_notice's shape");
-        // An arm the engine excludes is not by itself a refusal: `int|false` over
-        // the engine's `int` is a coarse upper bound, and clause (1) admits it for
-        // the same reason `bool` over `true` stands. What it must not do is ALSO
-        // fail to bound — see the `substr_compare` shape below.
+        // An excluded arm is not by itself a refusal if the row still bounds
+        // (clause 1) — it must ALSO fail to bound, as below.
         assert!(countersigned(&arms("int|false"), "int"));
         assert!(!countersigned(&arms("int<-1, 1>|false"), "int"), "substr_compare's shape");
         assert!(!countersigned(&arms("int"), "string"), "pg_port's shape");
         assert!(!countersigned(&arms("int"), "bool"), "imageinterlace's shape");
-        // An engine type this cannot lower is an answer it cannot judge — refuse.
         assert!(!countersigned(&arms("string"), "void"), "sodium_add's shape");
     }
 
     #[test]
     fn the_countersign_decides_array_rows_rather_than_shrugging_at_them() {
         let arms = |ty: &str| floor_row(ty).expect("carriable").arms;
-        // The mining workhorse (ADR-0071 §2.1, the `b = Shape` row): a reflected
-        // `array` is all PHP can natively declare, and the row refines it. Clause (2)
-        // signs it — every row arm under an engine arm, every engine arm over a row
-        // arm — where before ADR-0071 `subsumes` answered `Maybe` and clause (2) could
-        // never close. This is the entire 388-row bucket in one assertion.
+        // The mining workhorse (ADR-0071 §2.1): the entire 388-row bucket in
+        // one assertion.
         assert!(countersigned(&arms("array{dirname: string, basename: string}"), "array"));
         assert!(countersigned(&arms("list<string>"), "array"), "str_split's shape");
         assert!(countersigned(&arms("array<string, int>"), "array"));
         assert!(countersigned(&arms("non-empty-array"), "array"));
-        // Reflexively, and through the `?T` pair on both sides.
         assert!(countersigned(&arms("array"), "array"));
         assert!(countersigned(&arms("array{a: int}|null"), "?array"));
-        // A DROPPED arm is refused for arrays exactly as for scalars: the engine's
-        // `?array` can return a null the row does not state. `ftp_raw`'s shape, and
-        // the reason ADR-0071's proven `No` matters as much as its proven `Yes`.
         assert!(!countersigned(&arms("array"), "?array"), "ftp_raw's shape");
         assert!(!countersigned(&arms("array{a: int}"), "?array"));
         assert!(!countersigned(&arms("null|array"), "array|false|null"), "mysqli_fetch_row's shape");
-        // An arm outside the declaration is refused, and the array arm does not
-        // bootstrap a bound: `array{a: int}` neither refines `string` nor covers it.
         assert!(!countersigned(&arms("array{a: int}"), "string"));
         assert!(!countersigned(&arms("list<string>"), "int|false"));
-        // And the scalar-shaped catch that has an ARRAY on the engine side keeps its
-        // verdict: clause (2) needs every engine arm to cover some row arm, and the
-        // engine's `array` covers nothing in a row of `{string}`.
         assert!(!countersigned(&arms("string"), "array|string|bool"), "pg_last_notice's shape");
     }
 }

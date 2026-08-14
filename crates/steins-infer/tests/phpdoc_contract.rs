@@ -67,10 +67,9 @@ fn refinement_predicates_on_proven_scalars() {
     assert_eq!(param_count(&format!("{nf}f(\"1\");")), 0);
 }
 
-/// The casing pair, straight off the conformance fixtures
-/// (`phpdoc_advanced_fallback_{,non_empty_}{lower,upper}case_string`): the
-/// refinement is `strtolower($s) === $s`, so an uncased literal satisfies both
-/// and the `non-empty-` half fails independently of the casing half.
+/// The casing pair (`phpdoc_advanced_fallback_{,non_empty_}{lower,upper}case_string`):
+/// refinement is `strtolower($s) === $s`, so an uncased literal satisfies both,
+/// and `non-empty-` fails independently of the casing half.
 #[test]
 fn casing_predicates_on_proven_string_literals() {
     let lc = "<?php /** @param lowercase-string $s */ function f($s): void {}\n";
@@ -159,11 +158,10 @@ fn list_shape_is_positional() {
     assert_eq!(param_count(&format!("{f}f(['x', 1]);")), 1, "positional type mismatch");
 }
 
-/// ADR-0062 §5 — the acceptance-convergence fixture, proven-value side. The
-/// unsealed tail carries a **key** contract as well as a value contract, and the
-/// proven path judges both: it shares `steins-contract`'s one shape relation
-/// instead of re-implementing it (this was the measured divergence — the int key
-/// `9` used to pass `...<string, int>` here while the fact path rejected it).
+/// ADR-0062 §5 — acceptance-convergence, proven-value side: the unsealed tail
+/// carries a KEY contract too, and the proven path now judges both via
+/// `steins-contract`'s one shape relation (previously the int key `9` wrongly
+/// passed `...<string, int>` here while the fact path rejected it).
 #[test]
 fn unsealed_tail_key_contract_is_checked() {
     let f = "<?php /** @param array{a: int, ...<string, int>} $s */ function f(array $s): void {}\n";
@@ -215,8 +213,8 @@ fn class_name_unresolved_or_non_object_is_silent() {
     // A scalar into a class-name type is silent (only New-exact facts are checked).
     let f = "<?php /** @param Foo $a */ function f($a): void {}\n";
     assert_eq!(param_count(&format!("{f}f(5);")), 0, "scalar vs class name → silent");
-    // An unrelated New fact stays silent too (no proof of non-membership; interfaces
-    // etc. are untracked, so we never manufacture a class violation).
+    // An unrelated New fact stays silent too — interfaces etc. are untracked, so
+    // we never manufacture a class violation without proof of non-membership.
     let g = "<?php class Bar {}\n/** @param Foo $a */ function g($a): void {}\n";
     assert_eq!(param_count(&format!("{g}g(new Bar());")), 0, "unresolved/unrelated → silent");
 }
@@ -316,9 +314,9 @@ fn inline_ignore_suppresses_param_mismatch() {
     assert_eq!(outcome.suppressed, 1);
 }
 
-// N. Assertion-helper exemption (ADR-0030): a `@…-assert` on parameter `$x`
-//    makes its `@param $x` a POST-condition, so arguments are not checked
-//    against it. Sibling params and `@return` stay checked; native stays a gate.
+// N. Assertion-helper exemption (ADR-0030): a `@…-assert` on parameter `$x` makes
+//    `@param $x` a POST-condition, so arguments aren't checked against it — but
+//    sibling params, `@return`, and the native gate stay checked.
 
 #[test]
 fn assert_target_param_is_exempt() {
@@ -397,12 +395,9 @@ fn property_assert_target_does_not_exempt() {
     assert_eq!(param_count(src), 1, "property assert target must NOT exempt the param");
 }
 
-// 8. Named arguments bind in the contract lane (Gap A).
-
-// A named argument `f(n: <expr>)` binds to its parameter by name (case-sensitive,
-// as PHP does) and is judged against that parameter's `@param` envelope exactly as
-// a positional argument is. Before this landed the whole named/mixed call was
-// skipped by the positional-only guards, so every one of these fired NOTHING.
+// 8. Named arguments bind in the contract lane (Gap A): `f(n: <expr>)` binds by
+//    name (case-sensitive) and is judged like a positional argument — previously
+//    the positional-only guards skipped named/mixed calls entirely (fired NOTHING).
 
 #[test]
 fn named_arg_wrong_literal_fires_on_plain_function() {
@@ -477,14 +472,12 @@ fn named_arg_native_nullable_accepts_null() {
     assert_eq!(param_count(&format!("{f}f(n: null);")), 0, "null accepted via nullable default");
 }
 
-// Conformance slice C1 — the one identifier table.
-
-// Each test below mirrors one `php-typing-conformance` case, and its assertions
-// are read off that fixture's `E?:` probe lines and its silent (accepting) call
-// sites. These spellings were already known to `steins-contract::lower_identifier`
-// (the table the abstract-fact lane lowers through) but were silent on the
-// proven-value lane, which kept a hand-maintained sibling match. The lanes now
-// share one table.
+// Conformance slice C1 — the one identifier table. Each test below mirrors one
+// `php-typing-conformance` case, assertions read off that fixture's `E?:` probe
+// lines and its silent (accepting) sites. These spellings were already known to
+// `steins-contract::lower_identifier` (the abstract-fact lane's table) but were
+// silent on the proven-value lane, which kept a hand-maintained sibling match —
+// the two lanes now share one table.
 
 /// `phpdoc_advanced_param_typehint_boolean_synonym`: `boolean` is `bool`, and is
 /// still *enforced* as one.
@@ -640,11 +633,10 @@ fn non_empty_associative_array_rejects_empty_and_list_arguments() {
     );
 }
 
-/// The convergence itself: a class name is *not* keyword vocabulary, so it must
+/// The convergence itself: a class name isn't keyword vocabulary, so it must
 /// still ride the is-a oracle and the `is_known_class` gate rather than be judged
-/// as a contract atom. An unresolved identifier (a `@template` param or a
-/// `@phpstan-type` alias) must stay silent — the latent false positive the one
-/// table's `Class` catch-all would otherwise manufacture.
+/// as a contract atom. An unresolved identifier (`@template`, `@phpstan-type`)
+/// must stay silent — the FP the one table's `Class` catch-all would manufacture.
 #[test]
 fn unknown_identifier_stays_silent_after_convergence() {
     let f = "<?php /** @template T\n * @param T $value */ function f($value): void {}\n";
@@ -657,10 +649,9 @@ fn unknown_identifier_stays_silent_after_convergence() {
 
 /// `phpdoc_advanced_pseudotype_class_precedence`: a same-named class in scope
 /// takes precedence over a phpdoc **pseudo-type** keyword (PHPStan's
-/// `TypeNodeResolver::tryResolvePseudoTypeClassType`). PHP does not reserve
-/// `Integer`/`Boolean`/`Double`/`Number`, so each is a legal class name — and
-/// resolving `@param Integer` to `int` would both miss the real violation and
-/// manufacture one against an actual `Integer` instance.
+/// `TypeNodeResolver::tryResolvePseudoTypeClassType`) — PHP doesn't reserve
+/// `Integer`/`Boolean`/`Double`/`Number`, so resolving `@param Integer` to `int`
+/// would miss the real violation and manufacture one against a real instance.
 #[test]
 fn a_same_named_class_shadows_a_pseudo_type_keyword() {
     let f = "<?php final class Integer {}\n/** @param Integer $value */ function f($value): void {}\n";
@@ -691,13 +682,11 @@ fn a_reserved_type_word_is_never_shadowed() {
     assert_eq!(param_count(&format!("{f}f('5');")), 1, "and still rejects a numeric string");
 }
 
-// C5 — the array-key-cast pair (census bucket vii).
-
-// `decimal-int-string` is the string PHP writes an integer back as, so it is
-// cast to `int` as an array key; `non-decimal-int-string` is its complement
-// within `string`. The two fixtures
-// (`phpdoc_advanced_fallback_{,non_}decimal_int_string`) probe exactly the
-// strings that separate them from `numeric-string`.
+// C5 — the array-key-cast pair (census bucket vii): `decimal-int-string` is the
+// string PHP writes an integer back as, so it casts to `int` as an array key;
+// `non-decimal-int-string` is its complement within `string`. The two fixtures
+// (`phpdoc_advanced_fallback_{,non_}decimal_int_string`) probe the strings that
+// separate them from `numeric-string`.
 
 #[test]
 fn decimal_int_string_rejects_the_non_canonical_numerics() {
@@ -751,11 +740,10 @@ fn the_decimal_pair_lowers_to_string_facts() {
     assert_eq!(findings(src2).len(), 0, "a non-decimal-int-string is a string");
 }
 
-/// The negation ceiling, stated as a test rather than a comment: the predicate
-/// set is a conjunction over positive literals, so an *abstract* fact carrying
-/// one bit cannot be refuted against the other. Only proven values decide —
-/// which they do, so the ceiling costs precision exactly when the value is not
-/// in hand (here: a returned value the analyzer cannot evaluate).
+/// The negation ceiling, stated as a test: the predicate set is a conjunction
+/// over positive literals, so an *abstract* fact carrying one bit can't be
+/// refuted against the other — only proven values decide, so the ceiling costs
+/// precision exactly when no value is in hand.
 #[test]
 fn the_complementary_pair_is_not_refutable_abstractly() {
     let abstract_src = "<?php\n\

@@ -1,22 +1,14 @@
-//! The interop stratum's **vocabulary** check (`effect.interop-unknown-label`,
-//! issue #311): telling a typo'd effect label from a human's prose, in the one
-//! position where PHPStan itself reads neither.
+//! The interop stratum's **vocabulary** check (`effect.interop-unknown-label`, issue
+//! #311): tells a typo'd effect label from a human's prose, where PHPStan reads neither.
 //!
-//! The ADR-0082 amendment settled the *bound*: any label the registry does not
-//! know makes the whole tag unspecified, so `@phpstan-impure database` is as
-//! harmless under Steins as it is under upstream, which discards everything after
-//! the tag name. The cost is that a genuine typo — `@phpstan-impure io.netw` —
-//! silently checks nothing. This id is the visibility the interop spec's fail-open
-//! paragraph asks for, and it is a *different* id from the attribute stratum's
-//! `effect.unknown-label` on purpose: that one is mechanics, unsuppressable and on
-//! every profile, which is the fail-closed posture the ruling refused for
-//! docblocks.
+//! ADR-0082 settled the *bound*: an unrecognized label makes the whole tag unspecified
+//! (matching upstream), so a genuine typo silently checks nothing. This id is the
+//! interop spec's fail-open visibility for that cost — suppressible, unlike the
+//! attribute stratum's `effect.unknown-label`.
 //!
-//! The hard half is what stays silent, so that is what most of this file pins. The
-//! rule reports only where something makes label-intent evident — a near miss, a
-//! recognized label elsewhere in the same list, a dot-path shape, or a spelling
-//! Steins retired — and a lone far-off word matches none of those, on every
-//! surface, forever.
+//! The hard half is what stays silent, so that is what most of this file pins: only a
+//! near miss, a recognized sibling label, a dot-path shape, or a retired spelling
+//! reports — never a lone far-off word.
 
 use std::collections::BTreeMap;
 
@@ -46,16 +38,12 @@ fn surfaced(name: &str, d: &Diagnostic) -> bool {
     ProfileConfigs(BTreeMap::new()).resolve(Some(name)).unwrap().is_surfaced(d)
 }
 
-// ---- THE GUARANTEE: prose is never read as a fumbled label -------------------
+// THE GUARANTEE: prose is never read as a fumbled label.
 
 #[test]
 fn a_one_word_note_is_silent_on_every_profile_forever() {
-    // The motivating shape, and the acceptance criterion of the ruling: `database`
-    // is a word a human wrote in a position upstream throws away. It is far from
-    // every label, it has no dot, it is alone in its list, and Steins never
-    // retired it — so there is nothing here that says "label" rather than "note",
-    // and a heuristic that fired on it would be a false positive on someone's
-    // English.
+    // The motivating shape: `database` is far from every label, has no dot, is
+    // alone in its list, and was never retired — nothing says "label" over "note".
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure database */\n",
@@ -65,8 +53,7 @@ fn a_one_word_note_is_silent_on_every_profile_forever() {
     let all = check(&tree, tree.functions(), "test.php");
     let effectful: Vec<&Diagnostic> = all.iter().filter(|d| d.id.starts_with("effect.")).collect();
     assert!(effectful.is_empty(), "prose earns no effect finding at all: {effectful:#?}");
-    // And not merely off the default surface — off every built-in one. There is no
-    // profile a user can opt into that turns this into a finding.
+    // Off every built-in surface — no profile a user can opt into turns this into a finding.
     for name in ["default", "contracts", "strict", "pedantic"] {
         let shown: Vec<&Diagnostic> =
             all.iter().filter(|d| surfaced(name, d) && d.id == INTEROP_UNKNOWN_LABEL_ID).collect();
@@ -74,7 +61,7 @@ fn a_one_word_note_is_silent_on_every_profile_forever() {
     }
 }
 
-// ---- Signal (a): near a known label ------------------------------------------
+// Signal (a): near a known label.
 
 #[test]
 fn a_near_miss_reports_with_the_registry_suggestion() {
@@ -94,9 +81,8 @@ fn a_near_miss_reports_with_the_registry_suggestion() {
 
 #[test]
 fn the_near_miss_is_off_the_default_surface_and_on_at_contracts() {
-    // The surface half of the ruling: a bare `steins check` cannot start failing
-    // over docblocks written before this feature existed. Enabling envelope
-    // enforcement is what turns on the check that keeps enforcement honest.
+    // A bare `steins check` cannot start failing over pre-existing docblocks; enabling
+    // envelope enforcement is what turns on the check that keeps enforcement honest.
     let d = one_vocabulary(concat!(
         "<?php\n",
         "/** @phpstan-impure io.netw */\n",
@@ -109,10 +95,8 @@ fn the_near_miss_is_off_the_default_surface_and_on_at_contracts() {
 
 #[test]
 fn nondet_tyme_reports_through_the_near_miss_signal_not_the_shape_one() {
-    // Pinning WHICH signal fires: `tyme` → `time` is one edit, so this is signal
-    // (a) and carries a suggestion. Its dot-path shape (signal (c)) is real but
-    // never consulted — the evidence is weighed in order, and the suggestion is
-    // the more useful answer.
+    // Pins WHICH signal fires: `tyme` → `time` is one edit, so signal (a) wins over
+    // the dot-path shape (signal (c)) — evidence is weighed in order.
     let d = one_vocabulary(concat!(
         "<?php\n",
         "/** @phpstan-impure nondet.tyme */\n",
@@ -125,14 +109,12 @@ fn nondet_tyme_reports_through_the_near_miss_signal_not_the_shape_one() {
     );
 }
 
-// ---- Signal (b): a recognized sibling in the same list -----------------------
+// Signal (b): a recognized sibling in the same list.
 
 #[test]
 fn a_recognized_sibling_makes_even_a_prose_shaped_token_report() {
-    // The deliberately aggressive edge, constructed to be exactly that: `database`
-    // is the very token the guarantee above protects, and here it reports — because
-    // `io.db` sits beside it in the list. A comma-separated list containing a real
-    // effect label is a label list; the whole tag still goes ⊤ regardless.
+    // The deliberately aggressive edge: `database` is the very token the guarantee
+    // above protects, but here it reports because `io.db` sits beside it in the list.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure io.db, database */\n",
@@ -144,8 +126,7 @@ fn a_recognized_sibling_makes_even_a_prose_shaped_token_report() {
         "unknown effect label 'database' in @phpstan-impure on save() — the whole tag reads as \
          unspecified and bounds nothing"
     );
-    // No suggestion clause: intent is evident, but nothing in the vocabulary is
-    // close enough to name, and guessing would be worse than silence.
+    // No suggestion: nothing in the vocabulary is close enough to name.
     assert!(!d.message.contains("did you mean"));
     // The recognized member is not itself reported.
     assert_eq!(of_id(src, INTEROP_UNKNOWN_LABEL_ID).len(), 1);
@@ -153,12 +134,11 @@ fn a_recognized_sibling_makes_even_a_prose_shaped_token_report() {
     assert!(of_id(src, EFFECT_ID).is_empty(), "an inert tag checks nothing, typo or not");
 }
 
-// ---- Signal (c): dot-path shape ----------------------------------------------
+// Signal (c): dot-path shape.
 
 #[test]
 fn a_dot_path_reports_though_nothing_is_near_it() {
-    // `cache.warmup` is far from every registry entry and alone in its list, so
-    // only its shape speaks — and a one-word English note cannot take that shape.
+    // `cache.warmup` is far from every entry and alone in its list — only its shape speaks.
     let d = one_vocabulary(concat!(
         "<?php\n",
         "/** @phpstan-impure cache.warmup */\n",
@@ -171,14 +151,12 @@ fn a_dot_path_reports_though_nothing_is_near_it() {
     );
 }
 
-// ---- Signal (d): a spelling this project retired -----------------------------
+// Signal (d): a spelling this project retired.
 
 #[test]
 fn the_retired_output_root_gets_the_d_v2_migration_and_no_phantom_bound() {
-    // `output` → `io.output` is distance 3, past the suggestion cap, so without the
-    // retirement table this docblock would be told nothing — in exactly the project
-    // that most needs telling. The tag is inert all the same: the migration aid
-    // does not resurrect a bound out of a retired name.
+    // `output` → `io.output` is distance 3, past the suggestion cap, hence the
+    // retirement table; the tag stays inert regardless (no resurrected bound).
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure output */\n",
@@ -211,12 +189,11 @@ fn the_exactly_replaceable_retirement_names_its_one_replacement() {
     );
 }
 
-// ---- Class-level tags --------------------------------------------------------
+// Class-level tags.
 
 #[test]
 fn a_class_level_tag_is_reported_once_on_the_class() {
-    // One declaration, one finding — not one per method it would have covered. The
-    // anchor is the class name, where a declaration-level finding belongs.
+    // One declaration, one finding — not one per method it would have covered.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-all-methods-impure io.netw */\n",
@@ -251,14 +228,13 @@ fn a_method_tag_is_reported_at_the_method() {
     assert_eq!(d.line, 4);
 }
 
-// ---- Shadowing: a docblock nobody read cannot mislead anybody -----------------
+// Shadowing: a docblock nobody read cannot mislead anybody.
 
 #[test]
 fn an_attribute_envelope_shadows_the_docblocks_vocabulary_too() {
     // ADR-0082 §1's shadowing is total: with an attribute present the docblock is
-    // never consulted for the bound, so its spelling is not a claim anybody is
-    // being held to, and reporting it would be reporting a line the analyzer
-    // deliberately did not read.
+    // never consulted for the bound, so reporting its spelling would report a line
+    // the analyzer deliberately did not read.
     let src = concat!(
         "<?php\n",
         "class Client {\n",
@@ -273,7 +249,7 @@ fn an_attribute_envelope_shadows_the_docblocks_vocabulary_too() {
     assert!(of_id(src, UNKNOWN_LABEL_ID).is_empty());
 }
 
-// ---- The attribute stratum keeps its own id, layer and floor ------------------
+// The attribute stratum keeps its own id, layer, and floor.
 
 #[test]
 fn the_attribute_spelling_still_earns_its_own_mechanics_id() {
@@ -295,10 +271,8 @@ fn the_attribute_spelling_still_earns_its_own_mechanics_id() {
 
 #[test]
 fn the_attribute_spelling_of_a_retired_label_now_says_what_to_write() {
-    // The one attribute-side change (issue #311): the message text when the label
-    // is a known retirement. Same id, same layer, same floor, same firing rule —
-    // before the table this ended at `'output'` and left the reader stuck, because
-    // the edit-distance suggestion cannot reach an ADR-0083 rename.
+    // Issue #311's one attribute-side change: before the table this stuck at 'output',
+    // since edit-distance can't reach an ADR-0083 rename. Same id, layer, floor.
     let src = "<?php\n#[\\Steins\\Effect('output')]\nfunction render(): void { echo 'hi'; }\n";
     let f = of_id(src, UNKNOWN_LABEL_ID);
     assert_eq!(f.len(), 1);
@@ -311,13 +285,12 @@ fn the_attribute_spelling_of_a_retired_label_now_says_what_to_write() {
     assert_eq!(f[0].id, UNKNOWN_LABEL_ID, "still the mechanics id it always was");
 }
 
-// ---- Suppression: a contract-layer id a migration can absorb ------------------
+// Suppression: a contract-layer id a migration can absorb.
 
 #[test]
 fn the_id_is_suppressible_by_name() {
-    // Why the layer matters in practice: a codebase mid-migration may carry many of
-    // these, and the contract layer is what lets a baseline or an inline ignore
-    // absorb them. The mechanics id it is NOT could do neither.
+    // Why the layer matters: a mid-migration codebase may carry many of these, and
+    // the contract layer is what lets a baseline or inline ignore absorb them.
     use steins_infer::apply_inline_ignores;
     let src = concat!(
         "<?php\n",

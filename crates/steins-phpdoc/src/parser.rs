@@ -1,26 +1,23 @@
 //! The recursive-descent type parser — a faithful port of phpstan/phpdoc-parser's
-//! `TypeParser` algorithm (ADR-0029).
-//!
-//! The port preserves the details that decide compatibility:
-//! - `parse` vs `subParse`: top-level union/intersection parsing stops at a
-//!   *different* operator and leaves it as trailing input (`A & B | C` yields
-//!   `(A & B)` with `| C` unconsumed), whereas the parenthesized `subParse`
-//!   variant is newline-tolerant and single-operator.
-//! - horizontal-whitespace sensitivity: `array{…}` is a shape but `array {…}` is
-//!   the identifier `array`; `T[K]` is offset access but `T [K]` is not.
+//! `TypeParser` algorithm (ADR-0029). Preserves the details that decide
+//! compatibility:
+//! - `parse` vs `subParse`: top-level union/intersection stops at a *different*
+//!   operator, leaving it as trailing input (`A & B | C` → `(A & B)` with `| C`
+//!   unconsumed); the parenthesized `subParse` is newline-tolerant, single-operator.
+//! - horizontal-whitespace sensitivity: `array{…}` is a shape, `array {…}` is the
+//!   identifier `array`; `T[K]` is offset access, `T [K]` is not.
 //! - the callable-vs-generic and const-fetch save-point/backtrack dance.
-//! - the `<tag>…</tag>` HTML heuristic that makes `Foo <p>desc` stop at `Foo`.
+//! - the `<tag>…</tag>` HTML heuristic: `Foo <p>desc` stops at `Foo`.
 //!
-//! The parser never panics on input: any construct it cannot accept yields a
-//! [`ParseError`]. Callers treat an error (and, in the wider design, a
-//! [`crate::ast::TypeKind::Unsupported`] node) as "no envelope" — silence.
+//! Never panics: an unaccepted construct yields [`ParseError`]; callers treat an
+//! error (and, in the wider design, [`crate::ast::TypeKind::Unsupported`]) as
+//! "no envelope" — silence.
 
 use crate::ast::*;
 use crate::lexer::{Token, TokenKind, tokenize};
 
-/// A parse failure. Carries a message and the byte offset/line at which the
-/// unexpected token sits. Messages are informative only — compatibility is
-/// judged on *whether* we reject, not on message text.
+/// A parse failure: message plus the byte offset/line of the unexpected token.
+/// Compatibility is judged on *whether* we reject, not on message text.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParseError {
     pub message: String,
@@ -49,17 +46,15 @@ pub struct TypeParse {
     pub ty: Type,
     /// `true` when the parse consumed the entire input; `false` when a type
     /// prefix was parsed and trailing tokens remain (the reference's "partial"
-    /// case — e.g. a `@param` type followed by `$name` and a description).
+    /// case, e.g. `@param` type followed by `$name` and a description).
     pub at_end: bool,
     /// Byte length of the consumed prefix (the end offset of the parsed type).
     pub consumed: u32,
 }
 
-/// Parse a full type-expression string.
-///
-/// Returns the parsed type plus whether all input was consumed. Mirrors the
-/// reference `TypeParser::parse`, which parses a type prefix and does not itself
-/// require the input to be exhausted.
+/// Parse a full type-expression string: the parsed type plus whether all input
+/// was consumed. Mirrors reference `TypeParser::parse`, which parses a type
+/// prefix and does not itself require the input to be exhausted.
 pub fn parse_type(input: &str) -> PResult<TypeParse> {
     let tokens = tokenize(input);
     let mut p = Parser::new(tokens);
@@ -468,8 +463,8 @@ impl Parser {
         ident: Type,
     ) -> PResult<Type> {
         if self.is_kind(TokenKind::OpenAngle) {
-            // Could be an HTML-tagged description, a callable with templates, or a
-            // generic. Peek for HTML first.
+            // Could be HTML-tagged description, templated callable, or generic —
+            // peek for HTML first.
             let sp = self.save();
             let is_html = self.is_html();
             self.restore(sp);
@@ -655,22 +650,14 @@ impl Parser {
         false
     }
 
-    /// Try to parse one of PHPStan's **accessory predicates** — `hasOffset(K)`,
-    /// `hasOffsetValue(K, V)` — starting at `name`, with the cursor rewound on
-    /// failure.
+    /// Parses PHPStan's **accessory predicates** — `hasOffset(K)`,
+    /// `hasOffsetValue(K, V)` — starting at `name`; cursor rewound on failure.
     ///
-    /// PHPStan spells these with call syntax (`hasOffset('foo')`), not generic
-    /// syntax, but they *mean* what a generic argument list means: a base name
-    /// applied to types. So they lower onto the existing
-    /// [`TypeKind::Generic`] node rather than a variant of their own — nothing
-    /// downstream needs a new arm, and `steins_contract`'s intersection fold
-    /// reads them exactly as it reads `array<K, V>`.
-    ///
-    /// The name list is closed ([`is_accessory_predicate`]) and checked before
-    /// this is called, so an ordinary class named `Foo` followed by a
-    /// parenthesized description is untouched: the bare identifier still wins,
-    /// as it did before, and only the two spellings the array vocabulary can
-    /// actually consume are claimed here.
+    /// These use call syntax but mean what a generic argument list means, so they
+    /// lower onto [`TypeKind::Generic`] rather than a variant of their own:
+    /// `steins_contract`'s intersection fold reads them exactly as `array<K, V>`.
+    /// The name list is closed ([`is_accessory_predicate`]) and checked first, so
+    /// an ordinary class `Foo(...)` is untouched.
     fn try_parse_accessory(&mut self, start: u32, name: String) -> PResult<Option<Type>> {
         let sp = self.save();
         match self.parse_accessory(start, name) {
@@ -682,10 +669,9 @@ impl Parser {
         }
     }
 
-    /// [`Self::try_parse_accessory`]'s body: `Name(T1, T2, …)` into a
-    /// [`TypeKind::Generic`]. An empty argument list is rejected — a predicate
-    /// with nothing to predicate over says nothing, and letting it through
-    /// would turn `hasOffset()` into a silent `array` widening.
+    /// [`Self::try_parse_accessory`]'s body: `Name(T1, T2, …)` → [`TypeKind::Generic`].
+    /// Empty argument lists are rejected — `hasOffset()` would otherwise silently
+    /// widen to `array`.
     fn parse_accessory(&mut self, start: u32, base: String) -> PResult<Type> {
         self.consume(TokenKind::OpenParen)?;
         self.skip_ws_comments();
@@ -1018,13 +1004,11 @@ impl Parser {
                 sealed = false;
                 self.skip_ws_comments();
                 if self.is_kind(TokenKind::OpenAngle) {
-                    // The tail grammar is chosen by the shape's ARRAY-ness, not by
-                    // one of the two array spellings: an array tail carries an
-                    // optional key (`...<V>` / `...<K, V>`), a list tail carries a
-                    // value alone, its key class being `int` by definition. Testing
-                    // `kind == Array` here left `non-empty-array{…, ...<K, V>}`
-                    // parsing under the LIST grammar, which rejects the comma — so
-                    // a shape Steins' own speller emits could not be read back.
+                    // Tail grammar follows ARRAY-ness, not the exact spelling: an
+                    // array tail allows an optional key (`...<V>`/`...<K, V>`), a
+                    // list tail is value-only (key is `int` by definition). Matching
+                    // only `kind == Array` broke `non-empty-array{…, ...<K, V>}`
+                    // round-trips (LIST grammar rejects the comma).
                     unsealed = Some(
                         if matches!(kind, ArrayShapeKind::Array | ArrayShapeKind::NonEmptyArray) {
                             self.parse_array_shape_unsealed()?
@@ -1226,20 +1210,18 @@ impl Parser {
     }
 }
 
-/// PHPStan's **array** accessory predicates, the only names for which the
-/// call-syntax spelling `Name(…)` is parsed as an applied type (issue #238).
+/// PHPStan's **array** accessory predicates: the only names whose call-syntax
+/// spelling `Name(…)` parses as an applied type (issue #238).
 ///
-/// The list is closed on purpose, and it is closed at the *array* half. PHPStan
-/// also spells object accessories this way (`hasProperty(foo)`,
-/// `hasMethod(doFoo)`) and template bounds carry parenthesized provenance
-/// (`T (method Foo::bar(), argument)`); neither has a contract-side fold to land
-/// in, so parsing them would only move an honest refusal from the parser to the
-/// lowering. `hasOffset` / `hasOffsetValue` are here because ADR-0062's array
-/// vocabulary already carries what they say — key presence, and the value at a
-/// key — so there is somewhere for them to go.
+/// Closed on purpose, at the *array* half only: PHPStan also spells object
+/// accessories this way (`hasProperty(foo)`, `hasMethod(doFoo)`) and template
+/// bounds carry parenthesized provenance, but neither has a contract-side fold
+/// to land in — parsing them would just move an honest refusal downstream.
+/// `hasOffset`/`hasOffsetValue` land here because ADR-0062's array vocabulary
+/// already carries what they say (key presence, value at a key).
 ///
-/// Matching is case-insensitive: PHPStan's own rendering is camelCase, and phpdoc
-/// type keywords are matched case-blind everywhere else in this parser.
+/// Case-insensitive: PHPStan renders these camelCase, and phpdoc keywords are
+/// matched case-blind everywhere else in this parser.
 fn is_accessory_predicate(name: &str) -> bool {
     name.eq_ignore_ascii_case("hasOffset") || name.eq_ignore_ascii_case("hasOffsetValue")
 }

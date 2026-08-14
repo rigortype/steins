@@ -1,29 +1,27 @@
 //! Issue #327 — an array literal keeps its fact when its elements do not.
 //!
-//! `val_of` needs a proven value per element and answers `None` on the first one
-//! it cannot build, so before this slice a single unproven element dropped the
-//! fact for the **whole** array: keys, entry count, sealing and every proven
-//! sibling, all at once. `['p' => 1, 'q' => $s]` knew nothing.
+//! `val_of` needs a proven value per element and answers `None` on the first
+//! unprovable one, so before this slice a single unproven element dropped the
+//! fact for the **whole** array — keys, count, sealing, every proven sibling.
 //!
-//! What survives an unknown element is everything that was never about the
-//! values. `normalize_array` resolves auto indices, last-wins duplicates and the
-//! version-dependent next-int rule without inspecting one, so the key sequence is
-//! computable whatever the elements are — and a literal, by being a literal,
-//! seals its own key universe.
+//! What survives is everything that was never about values: `normalize_array`
+//! resolves auto indices, last-wins duplicates, and the version-dependent
+//! next-int rule without inspecting one, so the key sequence is computable
+//! regardless — a literal, by being a literal, seals its own key universe.
 //!
 //! Two disciplines are pinned here beside the answers:
 //!
 //! * **The concrete path is untouched.** A fully-literal array is still a
-//!   `Singleton`, still `Verified`, still spelled as it always was. Every
-//!   assertion that says so is a *negative* test — the slice is not allowed to
-//!   pay for the abstract case with the concrete one.
-//! * **Order is provenance.** A literal-seeded shape prints and projects the
-//!   order it was *built* in; a declared shape keeps the canonical key order,
-//!   because trusting a docblock's field order in a positional projection is
-//!   phpstan/phpstan#14940's false-positive class (ADR-0062 §2, §7).
+//!   `Singleton`, still `Verified`, still spelled as always — every assertion
+//!   saying so is a *negative* test guarding against the abstract case
+//!   costing the concrete one.
+//! * **Order is provenance.** A literal-seeded shape prints/projects build
+//!   order; a declared shape keeps canonical key order, because trusting a
+//!   docblock's field order positionally is phpstan/phpstan#14940's FP class
+//!   (ADR-0062 §2, §7).
 //!
-//! Every expected type here was measured against PHPStan 2.2.2 — the comment on
-//! each is that oracle's answer, not a recollection.
+//! Every expected type here was measured against PHPStan 2.2.2 — the comment
+//! on each is that oracle's answer, not a recollection.
 
 use std::collections::HashMap;
 
@@ -89,7 +87,7 @@ fn dump(body: &str) -> String {
     one_type(&format!("<?php\nfunction f(int $x, string $s): void {{ {body} }}\n"))
 }
 
-// ---- The cliff, closed -----------------------------------------------------
+// The cliff, closed
 
 #[test]
 fn one_unknown_element_costs_that_element_and_nothing_else() {
@@ -126,8 +124,7 @@ fn a_positional_literal_keeps_its_list_ness() {
 
 #[test]
 fn an_element_nobody_proved_is_present_with_an_unknown_value() {
-    // The key is proven there; only its value is not. `mixed` is the slot, not
-    // the array.
+    // The key is proven; only its value is not — `mixed` is the slot, not the array.
     assert_eq!(
         dump("$c = ['k' => strlen($s) > 2 ? [] : new \\stdClass()]; \\PHPStan\\dumpType($c);"),
         "dumped type: array{k: mixed}"
@@ -142,12 +139,11 @@ fn nesting_recurses_rather_than_flattening_to_unknown() {
     );
 }
 
-// ---- Order is provenance ---------------------------------------------------
+// Order is provenance
 
 #[test]
 fn a_literal_prints_the_order_it_was_built_in() {
-    // The witnessed order is the REVERSE of the canonical key order the fields
-    // are sorted into, so this is the case that distinguishes the two.
+    // Witnessed order is the REVERSE of canonical key order — the distinguishing case.
     assert_eq!(
         dump("$d = ['b' => 1, 'a' => $x]; \\PHPStan\\dumpType($d);"),
         "dumped type: array{b: 1, a: int}"
@@ -165,9 +161,8 @@ fn a_declared_shape_keeps_the_canonical_order() {
 
 #[test]
 fn the_key_sequence_decides_list_ness_not_the_key_set() {
-    // `[1 => $x, 0 => $x]` has the key SET of a two-element list and is not one:
-    // `array_is_list` reads the sequence. The canonically sorted fields cannot
-    // tell it from `[0 => …, 1 => …]`, which is why the witness exists.
+    // `[1 => $x, 0 => $x]` has the key SET of a two-element list but isn't one:
+    // `array_is_list` reads the sequence, which sorted fields can't distinguish.
     assert_eq!(
         dump("$a = [1 => $x, 0 => $x]; \\PHPStan\\dumpType($a);"),
         "dumped type: array{1: int, 0: int}"
@@ -178,7 +173,7 @@ fn the_key_sequence_decides_list_ness_not_the_key_set() {
     );
 }
 
-// ---- The concrete path is untouched ---------------------------------------
+// The concrete path is untouched
 
 #[test]
 fn a_fully_literal_array_is_still_a_proven_value() {
@@ -198,8 +193,7 @@ fn a_fully_literal_array_is_still_a_proven_value() {
 #[test]
 fn an_unresolvable_key_set_declines_the_whole_literal() {
     // ADR-0049 A12: with no pinned minor, a literal straddling the 8.3 next-int
-    // change has unproven KEYS, and a guessed key set is wrong rather than
-    // wide. Neither path may seed anything.
+    // change has unproven KEYS — a guessed key set is wrong, not wide; silent.
     assert_eq!(
         dump("$a = [-5 => 'a', 'b', 'c']; \\PHPStan\\dumpType($a);"),
         "dumped type: unknown"
@@ -210,7 +204,7 @@ fn an_unresolvable_key_set_declines_the_whole_literal() {
     );
 }
 
-// ---- The write path (ADR-0062 §4's write row) ------------------------------
+// The write path (ADR-0062 §4's write row)
 
 #[test]
 fn a_write_onto_a_witnessed_literal_extends_it() {
@@ -227,10 +221,9 @@ fn a_write_onto_a_witnessed_literal_extends_it() {
 
 #[test]
 fn a_witnessed_write_keeps_the_sealing_a_declared_one_loses() {
-    // **The distinction, side by side.** A witnessed base has no docblock to
-    // have diverged from — its sealing is a fact about the array the code
-    // built, so adding a key extends the shape. A DECLARED base's sealing is a
-    // claim the write just falsified, so the tail opens (`...`).
+    // A witnessed base has no docblock to diverge from — its sealing is a fact
+    // about the array the code built, so a write extends the shape. A DECLARED
+    // base's sealing is a claim the write just falsified, so the tail opens (`...`).
     assert_eq!(
         dump("$g = ['p' => 1]; $g['q'] = 2; \\PHPStan\\dumpType(count($g));"),
         "dumped type: 2"
@@ -267,14 +260,13 @@ fn unset_takes_the_key_out_of_the_sequence() {
     );
 }
 
-// ---- Stratum ---------------------------------------------------------------
+// Stratum
 
 #[test]
 fn a_literal_over_a_declared_element_is_asserted() {
-    // ADR-0061 §3's derivation clause: the shape cannot come out more trusted
+    // ADR-0061 §3's derivation clause: the shape can't come out more trusted
     // than the element facts it consumed. A `@param` refinement is `Asserted`,
-    // so the literal built from it is too — and A-G9's corollary then keeps it
-    // out of every proof-layer premise.
+    // so the literal is too — A-G9's corollary keeps it out of proof-layer premises.
     let src = "<?php\n/** @param non-empty-string $v */\n\
                function f(string $v): void { $a = ['k' => $v]; \\PHPStan\\dumpType($a); }\n";
     assert_eq!(one_type(src), "dumped type: array{k: non-empty-string} (asserted)");
@@ -282,20 +274,18 @@ fn a_literal_over_a_declared_element_is_asserted() {
 
 #[test]
 fn a_literal_over_native_elements_stays_verified() {
-    // A native `int $x` is the engine's own guarantee, not a claim, so nothing
-    // here is demoted: the keys were observed and the slot is `Verified`.
+    // A native `int $x` is the engine's own guarantee, not a claim — nothing here is demoted.
     let out = dump("$a = ['k' => $x]; \\PHPStan\\dumpType($a);");
     assert_eq!(out, "dumped type: array{k: int}");
     assert!(!out.contains("asserted"));
 }
 
-// ---- Zero emission ---------------------------------------------------------
+// Zero emission
 
 #[test]
 fn no_finding_is_premised_on_a_seeded_literal() {
-    // The sweep `one_type` runs per fixture, over the whole matrix at once: a
-    // shape the walk *derived* must not become a finding's premise (ADR-0062
-    // A-G9's corollary).
+    // `one_type` runs per fixture over the whole matrix: a shape the walk
+    // *derived* must not become a finding's premise (ADR-0062 A-G9's corollary).
     for body in [
         "$c = ['p' => 1, 'q' => $s]; $y = $c['p']; $z = $c['q'];",
         "$c = ['p' => 1, 'q' => $s]; $y = count($c);",

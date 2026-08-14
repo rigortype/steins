@@ -2,45 +2,39 @@
 //! it traces: a function-like that declares a native non-void return type and
 //! whose body **provably falls through** to the closing brace.
 //!
-//! PHP's own consequence, `php -r`-witnessed on 8.5.9 — a fatal `TypeError`
-//! raised when control reaches the end, not at declaration time:
-//!
-//! ```text
-//! TypeError: f(): Return value must be of type int, none returned
-//! TypeError: A::m(): Return value must be of type int, none returned
-//! TypeError: {closure:Command line code:1}(): Return value must be of type int, none returned
-//! ```
+//! PHP's consequence, `php -r`-witnessed on 8.5.9: a fatal `TypeError` when
+//! control reaches the end, not at declaration time — e.g. for `f`:
+//! `TypeError: f(): Return value must be of type int, none returned` (methods
+//! and closures get the same sentence, named `A::m()` / `{closure:…}()`).
 //!
 //! # The definite/possibly split
 //!
-//! Two ids come off one judgment, and the discriminator is a *second* question —
-//! does the body exit the function anywhere at all (`body_has_terminator`)?
+//! One judgment yields two ids, discriminated by whether the body exits the
+//! function anywhere at all (`body_has_terminator`):
 //!
-//! * **`type.return-missing`** (proof / `Default`) — the body falls through and
-//!   exits nowhere: a stub, an empty body, pure side effects. *Every* execution
-//!   fatals.
-//! * **`type.return-maybe-missing`** (proof / `Strict`) — the body falls through
-//!   and *does* return/throw/exit somewhere, just not on every path. Same fatal,
-//!   reached only along the uncovered edge. Floored at `strict` because that class
-//!   is dominated by code that is correct by construction and unprovable by
-//!   analysis — phpstan-src's own `src/` carries two, verbatim below, and passes
-//!   its own missing-return rule.
+//! * **`type.return-missing`** (proof / `Default`) — falls through and exits
+//!   nowhere: every execution fatals.
+//! * **`type.return-maybe-missing`** (proof / `Strict`) — falls through but
+//!   also returns/throws/exits on some path; same fatal, reached only along
+//!   the uncovered edge. Floored at `strict`: dominated by code that is
+//!   correct by construction and unprovable by analysis — phpstan-src's own
+//!   `src/` carries two such cases (verbatim below) and passes its own
+//!   missing-return rule.
 //!
-//! Every firing fixture below asserts which of the two it routes to, because a
-//! finding on the wrong id is a floor mistake, not a wording one.
+//! Every firing fixture asserts which id it routes to; a finding on the wrong
+//! id is a floor mistake, not a wording one.
 //!
 //! # The asymmetry these tests pin
 //!
-//! `BodyEnd::Unknown` — a body whose exit edges the judgment cannot bound — is
-//! **terminating** for this consumer: silence. A future dead-code consumer must
-//! read the very same `Unknown` the other way (not terminal, so never report a
-//! statement dead). Every silence leg below says which of the two reasons it is
-//! silent for: *proven to terminate* or *undecided, and undecided means silence
-//! here*. That distinction is the point of the file — a leg that goes silent for
-//! the wrong reason is a bug this suite is meant to catch.
+//! `BodyEnd::Unknown` — exit edges the judgment cannot bound — is
+//! **terminating** for this consumer (silence), but a future dead-code
+//! consumer must read the same `Unknown` the other way (not terminal). Every
+//! silence leg below states which reason it is silent for: *proven to
+//! terminate* or *undecided, and undecided means silence here* — a leg silent
+//! for the wrong reason is a bug this suite exists to catch.
 //!
-//! No sidecar, no env, no folder: both premises are declaration-and-shape facts,
-//! so every fixture uses the sound-subset [`NoFold`].
+//! Both premises are declaration-and-shape facts, so every fixture uses the
+//! sound-subset [`NoFold`].
 
 use steins_infer::profile::ProfileConfigs;
 use steins_infer::{
@@ -50,8 +44,7 @@ use steins_infer::{
 use steins_syntax::SourceTree;
 
 /// Every finding of the return-missing PAIR — never one id alone, so a fixture
-/// that silently migrates from one to the other fails a floor assertion rather
-/// than passing as "still fires".
+/// migrating from one id to the other fails a floor assertion, not "still fires".
 fn diags(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     check_full(&tree, "test.php", &mut NoFold, true)
@@ -60,7 +53,7 @@ fn diags(src: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Exactly one finding, on the **definite** id: the body exits nowhere, so every
+/// Exactly one finding, on the **definite** id: body exits nowhere, every
 /// execution fatals.
 fn definite(src: &str) -> Diagnostic {
     let d = diags(src);
@@ -83,27 +76,21 @@ fn assert_silent(src: &str, why: &str) {
     assert!(d.is_empty(), "expected silence ({why}), got {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
-// Registry wiring for the pair: the layer is shared (same fatal), the floor is
-// not (the corpus measurement).
-// ---------------------------------------------------------------------------
+// Registry wiring: layer shared (same fatal); floor differs (the corpus measurement).
 
 #[test]
 fn the_pair_shares_a_layer_and_splits_on_the_floor() {
-    // The consequence is one `TypeError`, so the layer cannot differ — a proof
-    // finding does not become a contract finding because its path is conditional.
+    // One `TypeError` consequence, so the layer cannot differ by path-conditionality.
     assert_eq!(layer(TYPE_RETURN_MISSING_ID), Some(Layer::Proof));
     assert_eq!(layer(TYPE_RETURN_MAYBE_MISSING_ID), Some(Layer::Proof));
-    // The floor is where the measurement lands: unconditional on a bare check,
-    // conditional only under `--profile strict`.
+    // Floor is where the measurement lands: unconditional by default, strict-only
+    // if conditional.
     assert_eq!(surface_floor(TYPE_RETURN_MISSING_ID), Some(Floor::Default));
     assert_eq!(surface_floor(TYPE_RETURN_MAYBE_MISSING_ID), Some(Floor::Strict));
 }
 
-// ---------------------------------------------------------------------------
-// Firing, class 1 — UNCONDITIONAL fall-through: the body exits nowhere, so every
-// execution fatals. `type.return-missing`, `Default` floor.
-// ---------------------------------------------------------------------------
+// Firing 1 — unconditional fall-through (exits nowhere): `type.return-missing`,
+// `Default` floor.
 
 #[test]
 fn fires_on_plain_fall_through() {
@@ -125,7 +112,7 @@ function f(): int {
 
 #[test]
 fn fires_on_empty_body() {
-    // The corpus's own dominant shape: a test double / stub `function (): bool {}`.
+    // Corpus's own dominant shape: a stub `function (): bool {}`.
     definite("<?php\nfunction f(): int {\n}\n");
 }
 
@@ -154,9 +141,8 @@ function f(): int {
 
 #[test]
 fn fires_on_loop_then_nothing() {
-    // A `foreach` always has an exit edge (the iteration exhausts), so the body
-    // provably falls through. No `return` anywhere in it, so this is the
-    // unconditional class: every call runs the loop and then off the end.
+    // `foreach` always has an exit edge (iteration exhausts) and no `return` here,
+    // so this is the unconditional class: every call runs the loop then off the end.
     definite(
         "<?php
 function f(): int {
@@ -203,7 +189,6 @@ class A {
 
 #[test]
 fn fires_on_a_closure() {
-    // Witnessed: a closure body falls off the same fatal, named `{closure:…}()`.
     let d = definite(
         "<?php
 $f = function (): int {
@@ -233,8 +218,8 @@ fn fires_on_a_union_return_type() {
 
 #[test]
 fn fires_on_types_that_lower_to_no_native_type() {
-    // `: array` / `: mixed` lower to no `NativeType` at all, yet both fatal
-    // identically — which is why the premise reads the RAW hint.
+    // `: array` / `: mixed` lower to no `NativeType` at all, yet both fatal —
+    // which is why the premise reads the RAW hint.
     for ty in ["array", "mixed"] {
         let src = format!("<?php\nfunction f(): {ty} {{\n    $x = 1;\n}}\n");
         let d = definite(&src);
@@ -258,14 +243,11 @@ function f(): int {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Firing, class 2 — CONDITIONAL fall-through: the body returns/throws somewhere,
-// just not on every path. `type.return-maybe-missing`, `Strict` floor.
-// ---------------------------------------------------------------------------
+// Firing 2 — conditional fall-through (returns/throws somewhere, not every
+// path): `type.return-maybe-missing`, `Strict` floor.
 
 #[test]
 fn a_conditional_finding_is_absent_below_strict_and_present_at_strict() {
-    // The floor's whole purpose, asserted through the surface rather than argued.
     let src = "<?php
 function f(): int {
     if ($c) {
@@ -344,9 +326,8 @@ function f(): int {
 
 #[test]
 fn fires_when_a_loop_returns_on_a_match_but_the_collection_may_be_empty() {
-    // The escape edge is "no element matched" — a real edge, taken for inputs that
-    // may never occur. The `return` lives inside an `Opaque` loop body, invisible
-    // to the trace IR, which is why the discriminator is computed over the CST.
+    // Escape edge "no element matched" is real (may never occur); `return` sits in
+    // an `Opaque` loop body invisible to the trace IR, so the discriminator uses the CST.
     maybe(
         "<?php
 function f(): int {
@@ -374,10 +355,10 @@ function f(): int {
 
 #[test]
 fn fires_on_the_phpstan_src_no_default_switch_shape() {
-    // `TypeNodeResolver.php:697` and `ClassNameUsageLocation.php:128`, reduced: a
-    // `switch` over a string parameter, no `default`, every case returns. The
-    // no-match edge exists in the CFG; the strings that take it do not exist in the
-    // program. phpstan-src passes its own `MissingReturnRule` on both.
+    // `TypeNodeResolver.php:697` / `ClassNameUsageLocation.php:128`, reduced: a
+    // `switch` with no `default`, every case returns; the no-match edge exists in
+    // the CFG but not in the program's data — phpstan-src passes its own
+    // `MissingReturnRule`.
     maybe(
         "<?php
 function resolve(string $name): string {
@@ -396,8 +377,7 @@ function resolve(string $name): string {
 
 #[test]
 fn fires_on_the_phpstan_src_shape_inside_a_closure() {
-    // `TypeNodeResolver.php:697` is that switch inside a closure, which is where
-    // the shape actually sits.
+    // `TypeNodeResolver.php:697`'s switch, but this time inside a closure.
     let d = maybe(
         "<?php
 $f = function (string $name): string {
@@ -441,8 +421,7 @@ function f(): int {
 }
 ",
     );
-    // A `break` leaves a construct, never the function, so a body full of them is
-    // still the unconditional class.
+    // A `break` leaves a construct, never the function — still the unconditional class.
     definite(
         "<?php
 function f(): int {
@@ -456,9 +435,7 @@ function f(): int {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Silence, leg 1: the body is PROVEN to terminate.
-// ---------------------------------------------------------------------------
+// Silence 1: the body is PROVEN to terminate.
 
 #[test]
 fn silent_on_a_trailing_return() {
@@ -509,8 +486,7 @@ fn silent_on_a_trailing_throw() {
 
 #[test]
 fn silent_on_a_trailing_exit() {
-    // `exit;` / `die;` surface as a real trace terminator (`StmtKind::Exit`), which
-    // is what makes this a *proof* of termination rather than an undecided case.
+    // `exit`/`die` surface as a real terminator (`StmtKind::Exit`) — proof, not undecided.
     assert_silent(
         "<?php\nfunction f(): int {\n    exit;\n}\n",
         "proven: `exit` never returns to the caller",
@@ -524,9 +500,8 @@ fn silent_on_a_trailing_exit() {
 
 #[test]
 fn silent_on_an_unconditional_infinite_loop() {
-    // `while (true)` with no `break` has NO exit edge, so the body terminates —
-    // this is a proof leg, not an undecided one. Witnessed: PHP accepts
-    // `function f(): int { while (true) {} }` and never reaches the TypeError.
+    // `while (true)` with no `break` has no exit edge (proof, not undecided).
+    // Witnessed: PHP accepts `while (true) {}` and never reaches the TypeError.
     assert_silent(
         "<?php
 function f(): int {
@@ -562,8 +537,7 @@ function f(): int {
 #[test]
 fn silent_on_a_match_statement_whose_every_arm_terminates() {
     // No `default`: PHP throws `\UnhandledMatchError` on no match, so the implicit
-    // no-match arm is a terminator too. Every arm terminating therefore proves the
-    // whole construct terminal.
+    // no-match arm is a terminator too — every arm terminating proves the whole construct.
     assert_silent(
         "<?php
 function f(): int {
@@ -596,8 +570,8 @@ function f(): int {
 
 #[test]
 fn silent_on_a_call_to_a_never_returning_callee() {
-    // Witnessed: `function g(): never { exit(1); } function f(): int { g(); }` runs
-    // clean — control never reaches `f`'s closing brace.
+    // Witnessed: with a `: never` callee that exits, control never reaches `f`'s
+    // closing brace — runs clean.
     assert_silent(
         "<?php
 function g(): never {
@@ -630,18 +604,14 @@ function f(): int {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Silence, leg 2: the body is UNDECIDED — and undecided means silence *here*.
-// A dead-code consumer must read every one of these the other way round.
-// ---------------------------------------------------------------------------
+// Silence 2: UNDECIDED body — silence *here*; a dead-code consumer reads it the other way.
 
 #[test]
 fn silent_on_a_try_catch_tail() {
-    // The recorded exclusion. `finally` OVERWRITES the exit point — witnessed on
-    // 8.5.9, `try { return 1; } finally { return 2; }` evaluates to 2, and a
-    // returning `finally` swallows an in-flight exception — so neither direction
-    // can be read off the block ends. Undecided ⇒ silence for THIS id; a dead-code
-    // consumer must not call the statement after it unreachable either.
+    // `finally` overwrites the exit point — witnessed on 8.5.9: `try { return 1; }
+    // finally { return 2; }` evaluates to 2 and swallows an in-flight exception, so
+    // neither direction is readable off the block ends. Undecided ⇒ silence here;
+    // a dead-code consumer must not call the next statement unreachable either.
     assert_silent(
         "<?php
 function f(): int {
@@ -688,8 +658,8 @@ function f(): int {
 
 #[test]
 fn silent_on_an_infinite_loop_containing_a_break() {
-    // `while (true)` WITH a `break` somewhere inside: the break may belong to a
-    // nested `switch` or loop, so whether this loop has an exit edge is undecided.
+    // `while (true)` WITH a `break` inside: the break may belong to a nested
+    // `switch`/loop, so whether this loop has an exit edge is undecided.
     assert_silent(
         "<?php
 function f(): int {
@@ -723,21 +693,18 @@ function f(): int {
 
 #[test]
 fn silent_on_an_include() {
-    // Included code can `exit` the whole script, so the fall-through path has an
-    // exit this judgment cannot see.
+    // Included code can `exit` the whole script — an exit this judgment can't see.
     assert_silent(
         "<?php\nfunction f(): int {\n    include 'x.php';\n}\n",
         "undecided: `include` brings in code that can terminate the script",
     );
 }
 
-// ---------------------------------------------------------------------------
-// Silence, leg 3: the DECLARATION premise is absent — nothing to demand.
-// ---------------------------------------------------------------------------
+// Silence 3: the DECLARATION premise is absent — nothing to demand.
 
 #[test]
 fn silent_on_a_generator_body() {
-    // A body with `yield` returns a `Generator` from the CALL; the declared type
+    // A `yield` body returns a `Generator` from the CALL; the declared type
     // describes that object, never a body exit (ADR-0057 §5).
     assert_silent(
         "<?php\nfunction f(): Generator {\n    yield 1;\n}\n",
@@ -755,9 +722,9 @@ fn silent_on_void_and_never() {
         "<?php\nfunction f(): void {\n    $x = 1;\n}\n",
         "no premise: `void` demands no value",
     );
-    // `never` falling through IS a fatal, but a different one with a different
-    // sentence (`never-returning function must not implicitly return`), and
-    // ADR-0022 makes one id one consequence.
+    // `never` falling through IS a fatal, but a different one — different sentence
+    // (`never-returning function must not implicitly return`); ADR-0022: one id,
+    // one consequence.
     assert_silent(
         "<?php\nfunction f(): never {\n    $x = 1;\n}\n",
         "no premise: `never`'s fall-through is a different id's consequence",
@@ -815,7 +782,7 @@ class A {
 
 #[test]
 fn silent_on_an_arrow_function() {
-    // Excluded by construction a third way: an arrow body lowers to a `return`.
+    // Excluded by construction: an arrow body lowers to a `return`.
     assert_silent(
         "<?php\n$f = fn (): int => 1;\n",
         "no premise: an arrow body IS a return, so the trace always terminates",
@@ -834,9 +801,7 @@ $f = function (): int {
     );
 }
 
-// ---------------------------------------------------------------------------
 // Registry wiring.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_id_is_suppressible_by_name() {

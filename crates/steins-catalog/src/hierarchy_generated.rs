@@ -5,11 +5,11 @@
 // cross-checked against PHP 8.5.8. Source of record is the TOML; run
 // `cargo xtask gen-catalog` to regenerate after editing it.
 //
-// Each row: (lowercased class/interface name, its DIRECT supertypes with
-// declared casing preserved — `extends` then `implements`). The is-a oracle
-// (ADR-0043) walks these transitively; a name absent here is an unknown
-// external (→ oracle `Unknown`, never `No`). Builtin enums are deliberately
-// omitted (incomplete implicit-interface/backing data — see gen_catalog.rs).
+// Each row: (lowercased class/interface name, DIRECT supertypes with declared
+// casing — `extends` then `implements`). The is-a oracle (ADR-0043) walks
+// these transitively; an absent name is an unknown external (→ `Unknown`,
+// never `No`). Builtin enums are omitted (incomplete implicit-interface/
+// backing data — see gen_catalog.rs).
 //
 // Sorted by key for binary search.
 

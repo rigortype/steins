@@ -2,42 +2,38 @@
 //! preconditions proven against the inference engine, and dual verification.
 //!
 //! Layers:
-//! - [`plan`] — the pure span+splice transaction ([`EditPlan`]) and its overlap
-//!   discipline. No inference dependency.
+//! - [`plan`] — the pure span+splice transaction ([`EditPlan`]); no inference
+//!   dependency.
 //! - [`diff`] — a minimal unified-diff renderer for dry-run display.
 //! - [`transform`] — the shared vocabulary: [`Refusal`], [`CompletenessOracle`],
 //!   [`TransformReport`], the [`Transform`] trait.
-//! - [`common`] — the machinery the two phpdoc transforms genuinely share: the
-//!   reverse-sweep refusal reasons, candidate/value helpers, and the value-domain
-//!   → ADR-0029 phpdoc **type rendering**.
-//! - [`regions`] — the region model (ADR-0047): the pure config→region
-//!   assignment ([`PartitionMap`]). It is threaded through to the planners but no
-//!   planner decides on it: with one region the planner runs whole-universe, and
-//!   the map reserves the seam for scoped enumeration without changing a verdict.
-//! - [`obstacles`] — project-global dynamic-code obstacle detection (ADR-0046 §2):
-//!   `eval` / dynamic-`include` sites that make "all callers proven" unknowable,
-//!   the vendor presumption, and the `steins.toml` vouching valve.
-//! - [`promote`] — the first transform, phpdoc→native parameter promotion
-//!   (ADR-0034 point 4 / ADR-0037), which reaches into `steins-infer` to prove
-//!   *all call sites flow the native type* — the precondition structurally
-//!   unavailable to modular tools.
-//! - [`honesty`] — the second transform, phpdoc-honesty repair (ADR-0037 point 4
-//!   / ADR-0041 point 4): the inverse of promotion, widening a *lying*
+//! - [`common`] — machinery shared by the phpdoc transforms: reverse-sweep
+//!   refusal reasons, candidate/value helpers, ADR-0029 phpdoc type rendering.
+//! - [`regions`] — the region model (ADR-0047): pure config→region assignment
+//!   ([`PartitionMap`]), threaded through the planners but not yet decided on by
+//!   any of them — reserves the seam for scoped enumeration without changing a
+//!   verdict.
+//! - [`obstacles`] — project-global dynamic-code obstacle detection (ADR-0046
+//!   §2): `eval` / dynamic-`include` sites that make "all callers proven"
+//!   unknowable, the vendor presumption, and the `steins.toml` vouching valve.
+//! - [`promote`] — first transform, phpdoc→native parameter promotion
+//!   (ADR-0034 point 4 / ADR-0037): proves *all call sites flow the native
+//!   type*, a precondition structurally unavailable to modular tools.
+//! - [`honesty`] — second transform, phpdoc-honesty repair (ADR-0037 point 4 /
+//!   ADR-0041 point 4): the inverse of promotion, widening a *lying*
 //!   `@param`/`@return` to the proven truth from call-site / return evidence.
-//! - [`envelope`] — the third transform, `@throws` envelope seeding (issue #115
-//!   / ADR-0040): writes the proven-escape set behind `throw.undeclared` as
+//! - [`envelope`] — third transform, `@throws` envelope seeding (issue #115 /
+//!   ADR-0040): writes the proven-escape set behind `throw.undeclared` as
 //!   declared `@throws` tags, creating or losslessly extending docblocks.
-//! - [`effects_envelope`] — the fifth transform, interop-envelope emission
-//!   (issue #303 / ADR-0082 §7): the sister of [`envelope`], writing the proven
-//!   effect *bound* as upstream's parameterized purity tags — a per-declaration
-//!   `@phpstan-impure <labels>` where inference is exhaustive, a class-level
-//!   `@phpstan-all-methods-pure` where every declared method is provenly pure,
-//!   and nothing at all anywhere a tag would be a lie or a no-op.
-//! - [`loops`] — the fourth transform, loop→`array_map` (ADR-0076 / ADR-0010's
+//! - [`effects_envelope`] — fifth transform, interop-envelope emission (issue
+//!   #303 / ADR-0082 §7): sister of [`envelope`], writing the proven effect
+//!   *bound* as upstream's purity tags (`@phpstan-impure <labels>` per
+//!   declaration, `@phpstan-all-methods-pure` class-level) — nothing where a tag
+//!   would be a lie or a no-op.
+//! - [`loops`] — fourth transform, loop→`array_map` (ADR-0076 / ADR-0010's
 //!   flagship): the first **effect-preconditioned** rewrite, gated on the engine
-//!   *proving* the loop body's effect lane and throw set empty. Where the phpdoc
-//!   transforms reach for call-site evidence, this one reaches for the effect and
-//!   throw fixpoints, restricted to the loop's own byte span.
+//!   *proving* the loop body's effect lane and throw set empty, via the effect/
+//!   throw fixpoints restricted to the loop's own byte span.
 //!
 //! ADR-0034's dual verification (post-check: zero new diagnostics after apply;
 //! oracle: every site transformed-or-refused) is the safety net the CLI wires in.

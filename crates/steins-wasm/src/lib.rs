@@ -1,83 +1,56 @@
-//! The browser-playground module (ADR-0065): `check` and `annotate` over a single
-//! in-memory PHP source, compiled to `wasm32-unknown-unknown` and exposed through
-//! a hand-rolled C ABI. No wasm-bindgen: the JS glue is ~40 lines the playground
-//! owns, and the wasm dependency graph stays exactly the analysis graph.
+//! The browser-playground module (ADR-0065): `check`/`annotate` over one
+//! in-memory PHP source, compiled to `wasm32-unknown-unknown` behind a
+//! hand-rolled C ABI (no wasm-bindgen; JS glue is ~40 lines).
 //!
 //! # Posture
 //!
-//! The browser has no PHP *of its own*, so [`sw_check`]/[`sw_annotate`] are the
-//! **sound subset** (ADR-0004): the folder is [`NoFold`], findings that require
-//! executing PHP are omitted, and nothing false is added. On the CLI that posture
-//! is announced on stderr; a wasm module has no stderr a user reads, so the notice
-//! travels as **data** — the `notice` field of every envelope — and the frontend
-//! renders it as a banner.
-//!
-//! When the caller *can* run PHP (php-wasm, issue #64), the replay entry points
-//! below lift that posture — see [Replay](#replay).
+//! No PHP is available in-browser, so [`sw_check`]/[`sw_annotate`] give the
+//! **sound subset** (ADR-0004): [`NoFold`], PHP-execution findings omitted,
+//! nothing false added. The posture travels as **data** (the `notice` field,
+//! rendered as a banner) since wasm has no stderr. The replay entry points
+//! below lift it when PHP is reachable (php-wasm, issue #64).
 //!
 //! # ABI
 //!
 //! Byte-buffer in, JSON envelope out, single-threaded by construction:
-//!
-//! 1. `sw_alloc(len)` a source buffer, write UTF-8 into wasm memory;
-//! 2. `sw_check(src_ptr, src_len, prof_ptr, prof_len)` or
-//!    `sw_annotate(src_ptr, src_len)` — both return `0` and leave the envelope in
-//!    a thread-local result buffer (a wasm instance is one thread; the
-//!    thread-local is just the idiomatic non-`static mut` spelling);
-//! 3. `sw_result_ptr()` / `sw_result_len()` to read it;
-//! 4. `sw_dealloc` the source buffer.
+//! `sw_alloc(len)` a source buffer and write UTF-8 into it; call `sw_check`
+//! or `sw_annotate` (returns `0`, leaves the envelope in a thread-local
+//! buffer); read it via `sw_result_ptr()`/`sw_result_len()`; `sw_dealloc` the
+//! source buffer.
 //!
 //! # Replay
 //!
-//! `Folder::fold` is synchronous and php-wasm's JS API is not, so the fold surface
-//! is reached by a **request-replay fixpoint** (ADR-0066) rather than by calling
-//! out mid-walk. `sw_check_replay` / `sw_annotate_replay` take one extra buffer —
-//! a JSON object mapping *request key* to the raw JSON-RPC `result` for that
-//! request — and add two keys to the envelope: `"pending"`, the requests the run
-//! could not answer (first-occurrence order, deduped), and `"boot"`, the engine
-//! surface as the shared fold policy sees it (see the private `boot_json`).
+//! `Folder::fold` is synchronous and php-wasm's JS API is not, so the fold
+//! surface is reached by a **request-replay fixpoint** (ADR-0066):
+//! `sw_check_replay`/`sw_annotate_replay` take an extra JSON-object buffer
+//! (request key → raw JSON-RPC `result`) and add `"pending"` (unanswered
+//! requests, first-occurrence order, deduped) and `"boot"` (engine surface
+//! per the shared fold policy) to the envelope.
 //!
-//! The caller's loop is:
+//! Caller's loop: call with the table it has (`{}` first pass); empty
+//! `pending` means render; otherwise answer each pending key (parses as
+//! `{"method", "params"}`; the answer is `steins_handle`'s raw `result` for
+//! that call), insert under the SAME key strings, repeat.
 //!
-//! 1. call with the table it has (`{}` on the first pass);
-//! 2. if `pending` is empty, the run is complete — render it;
-//! 3. otherwise answer each pending key — it parses as `{"method", "params"}`, and
-//!    the answer is the raw `result` object `steins_handle` returns for exactly
-//!    that method/params — insert the answers under the SAME key strings, and go
-//!    to 1.
+//! **Non-empty `pending` ⇒ NoFold-degraded results that MUST NOT be
+//! rendered** (would flicker as the loop converges). Termination is the
+//! answered set strictly growing; exhausting the caller's iteration cap falls
+//! back to the non-replay entry points, never a half-converged render.
 //!
-//! **A non-empty `pending` means the results are NoFold-degraded and MUST NOT be
-//! rendered.** An unanswered request declines exactly as a dead sidecar declines,
-//! so what comes back is sound and less precise — never a partial lie — but
-//! showing it would flicker findings in and out as the loop converges. Termination
-//! is by the answered set strictly growing; the iteration cap belongs to the
-//! caller, and exhausting it means falling back to the non-replay entry points,
-//! never to displaying a half-converged run.
+//! `boot` makes the precision boundary legible (issue #61 S2) — which lanes
+//! are live is known only to the booted engine's policy — and travels as
+//! data for the same reason `notice` does.
 //!
-//! `boot` exists because the *precision boundary* has to be legible (issue #61's
-//! second half): with an engine loaded, "which lanes are live" is a property of
-//! the engine that booted, and only the policy knows it. It travels as **data**
-//! for the same reason the `notice` does — a wasm module has no stream a user
-//! reads — and the frontend, not this crate, decides how to say it.
+//! Every envelope carries `"ok"`: `true` + payload, or `false` + `"error"`
+//! (unknown profile, or invalid UTF-8). Never traps: a PHP-rejected snippet
+//! parses with recovery, reported in `parse_errors` — since ADR-0079
+//! (issue #180) also as a `syntax.unparsable` finding, with `parse_errors`
+//! the per-error detail (position, not just first + count).
 //!
-//! Every envelope carries `"ok"`: `true` with the analysis payload, `false` with
-//! an `"error"` string (an unknown profile — the CLI's exit-2 analogue as data,
-//! or invalid UTF-8 input). The call itself never traps on user input: a snippet
-//! that PHP would reject parses with recovery and analyzes, exactly as the CLI
-//! treats it, and its recovered parse errors are reported in the envelope's
-//! `parse_errors`. Since ADR-0079 (issue #180) the CLI is no longer silent about
-//! them either — the same snippet also carries a `syntax.unparsable` finding — so
-//! `parse_errors` is now the *detailed* view of what the finding names once: every
-//! recovered error with its position, not just the first plus a count.
-//!
-//! The `findings` array mirrors the CLI's `--format json` schema key for key
-//! (`id`, `layer`, `level`, `path`, `line`, `column`, `message`, plus the facet
-//! key when the id declares one), so a playground reader and a CI reader learn
-//! one schema. The pipeline is the CLI's, minus the channels that have no
-//! meaning for a pasted snippet: vendor filtering (no layout), `[[policy]]`
-//! (no config file), and the baseline (no filesystem). Inline `@steins-ignore`
-//! **is** applied — a snippet demonstrating suppression must behave like the
-//! real tool, including `suppress.unmatched` anti-rot.
+//! `findings` mirrors the CLI's `--format json` schema key for key. The
+//! pipeline is the CLI's minus channels meaningless for a pasted snippet:
+//! vendor filtering, `[[policy]]`, baseline. Inline `@steins-ignore` **is**
+//! applied, including `suppress.unmatched` anti-rot.
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
@@ -89,14 +62,13 @@ use steins_infer::{
     Folder, NoFold, SOUND_SUBSET_NOTICE, TableFolder, annotate_project, check_project_with_runtime,
 };
 
-/// The diagnostic path a playground snippet analyzes under. One file, one
-/// project; the name only has to be stable and self-describing in messages.
+/// The diagnostic path a playground snippet analyzes under (stable,
+/// self-describing in messages).
 const SNIPPET_PATH: &str = "playground.php";
 
 thread_local! {
-    /// The last envelope produced by [`sw_check`]/[`sw_annotate`]. A wasm
-    /// instance is single-threaded, so one buffer is the whole story; the JS
-    /// glue copies it out immediately after the call.
+    /// The last envelope from [`sw_check`]/[`sw_annotate`]; one wasm instance is
+    /// single-threaded, so one buffer is the whole story.
     static RESULT: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
@@ -125,8 +97,7 @@ pub extern "C" fn sw_alloc(len: usize) -> *mut u8 {
 ///
 /// # Safety
 ///
-/// `ptr` must come from [`sw_alloc`] with the same `len`, and must not be used
-/// afterwards.
+/// `ptr` must come from [`sw_alloc`] with the same `len` and not be used after.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sw_dealloc(ptr: *mut u8, len: usize) {
     if !ptr.is_null() {
@@ -148,7 +119,6 @@ pub extern "C" fn sw_result_len() -> usize {
 }
 
 /// # Safety
-///
 /// `ptr`/`len` must describe readable wasm memory (normally an [`sw_alloc`]
 /// buffer the caller filled).
 unsafe fn read_str<'a>(ptr: *const u8, len: usize) -> Result<&'a str, ()> {
@@ -160,12 +130,10 @@ unsafe fn read_str<'a>(ptr: *const u8, len: usize) -> Result<&'a str, ()> {
     std::str::from_utf8(bytes).map_err(|_| ())
 }
 
-/// Check `src` under the built-in profile named by `prof` (empty = `default`)
-/// and leave the JSON envelope in the result buffer. Always returns `0`; the
-/// envelope's `ok` field is the real verdict.
+/// Check `src` under the built-in profile named by `prof` (empty = `default`).
+/// Always returns `0`; the envelope's `ok` field is the real verdict.
 ///
 /// # Safety
-///
 /// Both pointer/length pairs must describe readable wasm memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sw_check(
@@ -184,11 +152,9 @@ pub unsafe extern "C" fn sw_check(
     set_result(check_impl(source, selected))
 }
 
-/// Annotate `src` (the `steins annotate` margin facts) and leave the JSON
-/// envelope in the result buffer. Always returns `0`.
+/// Annotate `src` (the `steins annotate` margin facts). Always returns `0`.
 ///
 /// # Safety
-///
 /// The pointer/length pair must describe readable wasm memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sw_annotate(src_ptr: *const u8, src_len: usize) -> i32 {
@@ -198,17 +164,12 @@ pub unsafe extern "C" fn sw_annotate(src_ptr: *const u8, src_len: usize) -> i32 
     set_result(annotate_impl(source))
 }
 
-/// [`sw_check`] with a **replay table** (ADR-0066): `table` is a UTF-8 JSON object
-/// mapping request key to the raw JSON-RPC `result` for that request (`{}` is
-/// valid and is how a loop starts). The envelope gains `"pending"`, always present
-/// and empty exactly when the run is complete.
-///
-/// Non-empty `pending` ⇒ the findings are NoFold-degraded and MUST NOT be
-/// rendered; answer the pending requests, insert them into the table under the
-/// same key strings, and call again. See the module docs.
+/// [`sw_check`] with a **replay table** (ADR-0066): `table` maps request key to
+/// the raw JSON-RPC `result` (`{}` starts a loop). Envelope gains `"pending"`
+/// (always present, empty iff complete) — see the module docs for the
+/// non-empty-`pending` rule and the caller loop.
 ///
 /// # Safety
-///
 /// All three pointer/length pairs must describe readable wasm memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sw_check_replay(
@@ -240,10 +201,9 @@ pub unsafe extern "C" fn sw_check_replay(
 }
 
 /// [`sw_annotate`] with a **replay table** — the annotate twin of
-/// [`sw_check_replay`], with the same `pending` contract.
+/// [`sw_check_replay`], same `pending` contract.
 ///
 /// # Safety
-///
 /// Both pointer/length pairs must describe readable wasm memory.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn sw_annotate_replay(
@@ -264,12 +224,11 @@ pub unsafe extern "C" fn sw_annotate_replay(
     set_result(with_replay_extras(&mut envelope, &mut folder))
 }
 
-/// Read the replay table buffer: a JSON **object** of key → raw `result` value.
-/// Anything else (invalid UTF-8, unparseable JSON, a non-object) is the
-/// `error_envelope` path — a malformed table is a caller bug, not a fold outcome.
+/// Read the replay table buffer: a JSON **object** of key → raw `result`
+/// value. Anything else is the `error_envelope` path — a malformed table is a
+/// caller bug, not a fold outcome.
 ///
 /// # Safety
-///
 /// The pointer/length pair must describe readable wasm memory.
 unsafe fn read_table(
     ptr: *const u8,
@@ -287,17 +246,14 @@ unsafe fn read_table(
     }
 }
 
-/// Attach the two replay-only keys — `"boot"` and `"pending"` — to `envelope` and
-/// hand it back. Both are always present on a replay envelope, so a caller never
-/// has to distinguish "complete" from "an older module that does not report
-/// pending"; neither ever appears on the plain [`sw_check`]/[`sw_annotate`]
-/// envelopes, which stay byte-identical to ADR-0065's.
+/// Attach the replay-only `"boot"`/`"pending"` keys to `envelope`. Both are
+/// always present on a replay envelope (never on plain [`sw_check`]/
+/// [`sw_annotate`] envelopes, which stay byte-identical to ADR-0065's).
 ///
-/// Order matters. The summary is taken **before** the pending list, so the `env`
-/// question it needs is recorded as a miss like any other: a run that could not
-/// describe its own boot surface reports that as pending and converges one
-/// iteration later with the description filled in. A converged run therefore
-/// always carries a complete `boot`.
+/// Order matters: the summary is taken **before** the pending list, so a run
+/// that cannot describe its own boot surface reports that as pending and
+/// converges one iteration later with `boot` filled in — a converged run
+/// therefore always carries a complete `boot`.
 fn with_replay_extras(
     envelope: &mut serde_json::Value,
     folder: &mut TableFolder,
@@ -311,18 +267,14 @@ fn with_replay_extras(
     envelope.take()
 }
 
-/// The boot object (issue #64 S3): the engine surface **as the shared policy sees
-/// it**, as data.
+/// The boot object (issue #64 S3): the engine surface **as the shared policy
+/// sees it**, as data — fields come from [`steins_infer::SurfaceSummary`],
+/// which reads the same helpers that gate admission.
 ///
-/// Every field comes from [`steins_infer::SurfaceSummary`], which reads the very
-/// helpers that gate admission — so this describes the gates rather than
-/// paraphrasing them, and the declining fold names are the catalog's own rows
-/// rather than a list typed into a frontend. Since ADR-0028's 2026-08-14
-/// amendment they travel as TWO fields, because they are two classes: the
-/// refused rows each have a recorded divergence, the unverified rows have
-/// nothing measured, and §4 of that amendment forbids merging them into one
-/// list (the refused list's one-divergence-per-row discipline is what makes it
-/// auditable). The prose belongs to the UI; what travels is the shape.
+/// Since ADR-0028's 2026-08-14 amendment, refused and unverified fold names
+/// travel as TWO fields: refused rows have a recorded divergence, unverified
+/// rows have nothing measured, and §4 of that amendment forbids merging them
+/// into one list.
 fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "label": s.label,
@@ -334,9 +286,8 @@ fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
         "curated_rows": s.curated_rows,
         "absence_family": s.absence_family,
     });
-    // Named only where naming them is the boundary: on the width-safe subset the
-    // refusals are exactly what the visitor does not get, and everywhere else the
-    // lane already says the whole story (all of it, or none of it).
+    // Named only where it's the boundary: width-safe subset refusals are exactly
+    // what the visitor doesn't get; elsewhere the lane already says it all.
     if s.fold_lane == steins_infer::FoldLane::WidthSafeSubset {
         obj["refused_folds"] = serde_json::json!(s.refused_folds);
         obj["unverified_folds"] = serde_json::json!(s.unverified_folds);
@@ -349,17 +300,15 @@ fn check_impl(source: &str, selected: Option<&str>) -> serde_json::Value {
     check_with_folder(source, selected, &mut NoFold)
 }
 
-/// [`check_impl`] over an arbitrary folder. The ONE analysis body: the sound-subset
-/// entry point and the replay entry point differ in the folder they hand it and in
-/// nothing else, so the replay path cannot acquire a different pipeline.
+/// [`check_impl`] over an arbitrary folder — the ONE analysis body; sound-subset
+/// and replay entry points differ only in the folder they hand it.
 fn check_with_folder(
     source: &str,
     selected: Option<&str>,
     folder: &mut dyn Folder,
 ) -> serde_json::Value {
-    // No steins.toml in a browser: the profile table is empty, so `selected`
-    // resolves against the built-ins alone and an unknown name is the CLI's
-    // exit-2 config error, delivered as data.
+    // No steins.toml in a browser: `selected` resolves against built-ins alone;
+    // an unknown name is the CLI's exit-2 config error, delivered as data.
     let configs = ProfileConfigs(BTreeMap::new());
     let surface = match configs.resolve(selected) {
         Ok(s) => s,
@@ -369,9 +318,9 @@ fn check_with_folder(
     let db = SteinsDatabase::default();
     let file = SourceFile::new(&db, SNIPPET_PATH.to_owned(), source.to_owned());
     let project = Project::new(&db, vec![file], ProjectLayout::fallback(), PluginFacts::none());
-    // `warning_handler_abort = true` is the CLI's DEFAULT (ADR-0049 §7: a proven
-    // E_WARNING is a proven runtime break; only `[runtime] warning-handler =
-    // "null"` opts out, and a browser snippet has no steins.toml).
+    // `warning_handler_abort = true` is the CLI DEFAULT (ADR-0049 §7): only
+    // `[runtime] warning-handler = "null"` opts out, and a browser snippet has
+    // no steins.toml to set it.
     let mut findings = check_project_with_runtime(&db, project, folder, true);
 
     // The CLI pipeline (ADR-0050 §6) minus the snippet-meaningless channels:
@@ -480,8 +429,7 @@ mod tests {
         assert!(msg.contains("strict"), "the ladder names its rungs: {msg}");
     }
 
-    /// The four built-ins all resolve; the strict rung is selectable here the
-    /// way it is on the CLI.
+    /// The four built-in profiles all resolve, strict included, same as the CLI.
     #[test]
     fn builtin_profiles_resolve() {
         for p in ["default", "contracts", "throws-direct", "strict"] {
@@ -492,8 +440,7 @@ mod tests {
     }
 
     /// A syntactically broken snippet analyzes with recovery and REPORTS its
-    /// parse errors in the envelope — the playground states what the CLI today
-    /// keeps silent.
+    /// parse errors — the playground states what the CLI today keeps silent.
     #[test]
     fn broken_syntax_reports_parse_errors() {
         let v = check_impl("<?php\nfunction f( {\n", None);
@@ -525,11 +472,9 @@ mod tests {
         assert!(!v["lines"].as_array().unwrap().is_empty());
     }
 
-    /// The trace annotation (ADR-0074) emits in the playground: the scanner and
-    /// the shared `stmt_docblock` adoption are in the zero-dep path, so a
-    /// statement-adopted `/** @psalm-trace $x */` reports `debug.trace` through
-    /// the wasm envelope exactly as in the CLI — warn-level, debug lane, at the
-    /// tag's own position, carrying the statement's exit fact.
+    /// The trace annotation (ADR-0074): the scanner + `stmt_docblock` adoption
+    /// are zero-dep, so `/** @psalm-trace $x */` reports `debug.trace` exactly
+    /// as the CLI does — warn, debug lane, at the tag's own position.
     #[test]
     fn trace_annotation_emits_in_the_playground() {
         let src = "<?php\n/** @psalm-trace $x */\n$x = 'GET';\n";
@@ -554,11 +499,11 @@ mod tests {
 /// malformed-table path, and a fully-answered canned table folding the flagship.
 ///
 /// The table is captured from the differential oracle in
-/// `steins-infer/tests/replay_fold.rs` — a real `php` answered these exact
-/// requests — and hardcoded here so the pin survives without a PHP dependency.
-/// Only the extension list is trimmed; nothing else is edited. Hardcoding the key
-/// strings is deliberate: they are the interchange format S2's loop echoes back,
-/// so a silent change to the key shape must break a test.
+/// `steins-infer/tests/replay_fold.rs` (a real `php` answered these requests)
+/// and hardcoded so the pin survives without a PHP dependency — only the
+/// extension list is trimmed. Key strings are hardcoded deliberately: they are
+/// the interchange format S2's loop echoes back, so a silent shape change must
+/// break a test.
 #[cfg(test)]
 mod replay {
     use super::*;
@@ -610,9 +555,9 @@ mod replay {
         ])
     }
 
-    /// The `env` answer php-wasm 0.1.0 actually gives: PHP 8.5.2 — the pinned
-    /// minor — on a 32-bit `embed` build. The whole point of the boot object is
-    /// that this row, and not the version string alone, decides what is live.
+    /// The `env` answer php-wasm 0.1.0 actually gives: PHP 8.5.2 (pinned minor)
+    /// on a 32-bit `embed` build — this row, not the version string alone,
+    /// decides what is live.
     fn php_wasm_env() -> serde_json::Value {
         serde_json::json!({
             "php_version": "8.5.2",
@@ -640,10 +585,9 @@ mod replay {
             .collect()
     }
 
-    /// An empty table: a real envelope, and the questions the run wants answered.
-    /// The first one is always `env` — the integer-width gate (issue #64) will not
-    /// dispatch a value question to an engine whose arithmetic it has not
-    /// established.
+    /// An empty table: a real envelope plus the questions the run wants answered.
+    /// The first is always `env` — the integer-width gate (issue #64) won't
+    /// dispatch a value question to an engine whose arithmetic isn't established.
     #[test]
     fn an_empty_table_returns_an_ok_envelope_and_pending_requests() {
         let v = check_replay(FLAGSHIP, HashMap::new());
@@ -676,11 +620,10 @@ mod replay {
         assert_eq!(dumps, vec!["dumped type: 'Hello, World! Hello, World! '"]);
     }
 
-    /// The issue-#64 acceptance criterion on the machine the browser actually
-    /// has: php-wasm 0.1.0 is PHP **8.5.2** built **32-bit**, and the flagship
-    /// still inlines there. `str_repeat` is on the verified width-safe subset
-    /// (ADR-0066 S1.5 amendment) and every integer in the call is in range, so the
-    /// fold is admitted — the whole point of relaxing the blanket width decline.
+    /// The issue-#64 acceptance criterion: php-wasm 0.1.0 is PHP **8.5.2** built
+    /// **32-bit**, and the flagship still folds — `str_repeat` is on the verified
+    /// width-safe subset (ADR-0066 S1.5 amendment) and every integer in the call
+    /// is in range.
     #[test]
     fn the_flagship_folds_on_a_32_bit_engine() {
         let mut table = answered_table();
@@ -698,11 +641,10 @@ mod replay {
         assert_eq!(dumps, vec!["dumped type: 'Hello, World! Hello, World! '"]);
     }
 
-    /// …and a width-REFUSED builtin stays declined on that same 32-bit engine,
-    /// even with the answer sitting in the table. `intval("3000000000")` is
-    /// `3000000000` on a 64-bit engine and the saturated `2147483647` on a 32-bit
-    /// one, silently — so the gate is upstream of the table and a pre-answered
-    /// wrong literal cannot reach a finding.
+    /// …and a width-REFUSED builtin stays declined on the same 32-bit engine
+    /// even with the answer in the table. `intval("3000000000")` silently
+    /// saturates to `2147483647` on 32-bit vs `3000000000` on 64-bit — the gate
+    /// is upstream of the table, so a pre-answered wrong literal cannot surface.
     #[test]
     fn a_width_refused_builtin_stays_declined_on_a_32_bit_engine() {
         const SRC: &str = "<?php\n$x = intval(\"3000000000\");\n\\PHPStan\\dumpType($x);\n";
@@ -716,8 +658,8 @@ mod replay {
                 serde_json::json!({ "kind": "value", "value": 2_147_483_647_i64, "type": "int" }),
             ),
             // The declined fold falls back to the reflected return envelope
-            // (ADR-0056 R1), which is width-independent — so the run still reaches
-            // its fixpoint, one rung less precise.
+            // (ADR-0056 R1, width-independent) — the run still reaches fixpoint,
+            // one rung less precise.
             (
                 INTVAL_REFLECT_KEY.to_owned(),
                 serde_json::json!({
@@ -767,22 +709,16 @@ mod replay {
     /// The boot object on the machine the browser actually has (issue #64 S3):
     /// the boundary a visitor must be able to read, as data.
     ///
-    /// Each field is pinned against the gate it reports, not against a constant:
-    /// the width-safe lane, curated rows DECLINED (ADR-0066's amendment keeps
-    /// Gate 2's `int_size == 8` leg), the absence family LIVE (existence is not
-    /// arithmetic), and the refused names taken from the catalog rather than
-    /// spelled here — a tenth refusal added to the catalog appears in the envelope
-    /// without anyone editing JS.
+    /// Each field is pinned against the gate it reports: width-safe lane,
+    /// curated rows DECLINED (ADR-0066's amendment keeps Gate 2's `int_size == 8`
+    /// leg), absence family LIVE (existence is not arithmetic), refused names
+    /// taken from the catalog so a new refusal appears without editing JS.
     ///
-    /// `fold_total` moved 46 → 48 with ADR-0028's 2026-08-14 wave 1 (`array_merge`,
-    /// `explode`), which is the number growing and not the boundary moving:
-    /// `fold_safe` is unchanged, so this engine folds exactly what it folded
-    /// before, and the two new names are among the ones it does not get.
-    /// `refused_folds` is deliberately unchanged with it — the unverified rows
-    /// decline on the same gate but have no divergence to report, and this field is
-    /// the one that reports divergences. They are named by `unverified_folds`
-    /// instead, a separate field because ADR-0028's 2026-08-14 amendment §4
-    /// forbids conflating the two classes.
+    /// `fold_total` moved 46 → 48 with ADR-0028's 2026-08-14 wave 1
+    /// (`array_merge`, `explode`) — the count growing, not the boundary moving:
+    /// `fold_safe` unchanged, and the two new names land in `unverified_folds`
+    /// (no divergence to report), not `refused_folds` — see `boot_json` for why
+    /// those are separate fields.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -841,10 +777,9 @@ mod replay {
         assert!(boot.get("unverified_folds").is_none(), "…and nothing is unverified there either");
     }
 
-    /// A run that could not reach the engine describes nothing, and SAYS so by
-    /// asking: `env` is pending, so the loop answers it and the next iteration
-    /// carries the description. A converged run always has a complete boot object
-    /// — which is what lets the UI read one without a null check per field.
+    /// A run that could not reach the engine describes nothing, and SAYS so:
+    /// `env` is pending, so the next iteration carries the description. A
+    /// converged run always has a complete boot object — no null check per field.
     #[test]
     fn an_unanswered_run_has_an_empty_boot_and_asks_for_it() {
         let v = check_replay("<?php\n$a = 1;\n", HashMap::new());
@@ -877,10 +812,9 @@ mod replay {
         assert_eq!(annotated["boot"], checked["boot"]);
     }
 
-    /// The same source through the sound-subset entry point stays NoFold: the
-    /// replay exports are additive, and `sw_check` is byte-identical to before.
-    /// Neither replay-only key may appear here — engine-off behaviour is the
-    /// acceptance criterion, and an extra envelope key IS a behaviour change.
+    /// The same source through the sound-subset entry point stays NoFold — the
+    /// replay exports are additive, `sw_check` byte-identical to before. Neither
+    /// replay-only key may appear: an extra envelope key IS a behaviour change.
     #[test]
     fn the_non_replay_entry_point_is_unchanged() {
         let plain = check_impl(FLAGSHIP, None);
@@ -949,10 +883,9 @@ mod replay {
 mod strict_leg {
     use super::*;
 
-    /// The strict rung through the playground path fires exactly as the CLI does,
-    /// pinning the `warning_handler_abort = true` default documented in
-    /// `check_with_folder`: the playground must never be quieter than
-    /// `steins check --profile strict` on the same snippet.
+    /// The strict rung fires exactly as the CLI does, pinning the
+    /// `warning_handler_abort = true` default (see `check_with_folder`): the
+    /// playground must never be quieter than `steins check --profile strict`.
     #[test]
     fn strict_fixture_fires_maybe_missing() {
         let src = "<?php\n/** @param array{a?: string} $d */\nfunction f(array $d): void { $x = $d[\"a\"]; }\n";

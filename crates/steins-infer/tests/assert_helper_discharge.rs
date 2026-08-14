@@ -2,24 +2,21 @@
 //! ADR-0062's discharge ladder.
 //!
 //! `assert(isset($d['a']))` discharges a strict-leg finding because its argument
-//! survives lowering as a condition. `Util_Assert::true(isset($d['a']))` — the
-//! same claim, spelled through a project's own assertion helper, and the ONLY
-//! `offset.maybe-missing` class the 2026-07-29 corpus sweep found — did not,
-//! because the value lowering of `isset(…)` is `Other`: there was nothing left to
-//! consume by the time the callee's `@phpstan-assert true $c` tag was read.
+//! survives lowering as a condition. The same claim spelled through a project's
+//! own assertion helper — the only `offset.maybe-missing` class the 2026-07-29
+//! corpus sweep found — did not, because the value lowering of `isset(…)` is
+//! `Other`: nothing was left to consume by the time the callee's
+//! `@phpstan-assert true $c` tag was read.
 //!
 //! Three disciplines are pinned here:
 //!
 //! * **Same walk.** The helper's condition argument goes through the guard walk
-//!   `assert()` uses, so presence promotion, `&&`/`||` distribution, the S5
-//!   disjunctive cover and tag discrimination all arrive at once, and a form the
-//!   walk does not model narrows nothing rather than narrowing wrongly.
-//! * **The tag is the contract, at the tag's stratum.** ADR-0058's table: a
-//!   helper carrying only a `@phpstan-assert` tag is **Asserted** — the discharge
-//!   is real (the finding is contract-layer over an `Asserted` shape, A-G9), but
-//!   no proof-layer id may be premised on it, and the presence promotion records
-//!   the declared stratum, not a witness. Verified needs the §3 descent proof,
-//!   which this file does not exercise.
+//!   `assert()` uses, so a form the walk does not model narrows nothing rather
+//!   than narrowing wrongly.
+//! * **The tag is the contract, at the tag's stratum** (ADR-0058): a helper
+//!   carrying only a `@phpstan-assert` tag is **Asserted** — the discharge is real
+//!   (A-G9) but no proof-layer id may be premised on it. Verified needs the §3
+//!   descent proof, which this file does not exercise.
 //! * **No tag, no discharge.** An untagged helper — however obviously it throws —
 //!   is silent here; its body proof is I2's job.
 
@@ -92,8 +89,8 @@ fn one_type(src: &str) -> String {
 
 #[test]
 fn a_tagged_helper_over_isset_discharges_the_read() {
-    // The corpus pattern, verbatim in structure:
-    //   Util_Assert::true(isset($options['user_id'])); $x = $options['user_id'];
+    // The corpus pattern, verbatim in structure: a helper asserting `isset` on a
+    // key, then a read of that key on the next statement.
     let src = fixture("array{a?: string}", "Assert::true(isset($d['a'])); $x = $d['a'];");
     assert!(ids(&src).is_empty(), "the helper-guarded read must be clean: {:?}", diagnostics(&src));
 }

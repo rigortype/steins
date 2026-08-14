@@ -1,57 +1,42 @@
 //! The canonical abstract array fact (ADR-0062 §3 and Amendment A).
 //!
-//! One form covers every array truth the fact lane can hold (A-G1): plain
-//! `array` is the degenerate shape (no fields, an untyped unsealed tail),
-//! `array<K, V>` types the tail, `list<T>` types the tail and pins `is_list`
-//! to `Yes`, and `array{…}`/`list{…}` declare fields. There is deliberately
-//! **no** array-`General` variant — the degenerate shape absorbs ADR-0035's
-//! layer-4 array text.
+//! One form covers every array truth (A-G1): plain `array` is the degenerate
+//! shape (no fields, untyped unsealed tail), `array<K, V>` types the tail,
+//! `list<T>` types the tail and pins `is_list` to `Yes`, `array{…}`/`list{…}`
+//! declare fields. No array-`General` variant: the degenerate shape absorbs
+//! ADR-0035's layer-4 array text.
 //!
-//! Three things this module does not do, each by ADR ruling:
+//! Declined by ADR ruling: `ContractTy` (slots are `Option<Box<Fact>>`,
+//! A-G1a, to avoid inverting the contract-crate dependency; `None` is the
+//! unknown floor); next-auto-index (ADR-0062 §3; append widens the tail
+//! instead); and general meet (A-G7; narrowing is only S4's targeted
+//! operators — [`ShapeFact::promote_present`], [`ShapeFact::mark_absent`],
+//! [`ShapeFact::set_non_empty`], [`ShapeFact::set_is_list`],
+//! [`ShapeFact::narrow_count`] — never a general ⊓).
 //!
-//! * **No `ContractTy`.** Field and tail value slots are recursive
-//!   `Option<Box<Fact>>` (A-G1a): the contract crate depends on this one, so
-//!   naming its vocabulary here would invert the dependency. `None` is the
-//!   honest floor — "no fact", which is what a class-typed or callable-typed
-//!   field lowers to.
-//! * **No next-auto-index.** ADR-0062 §3 declines an abstract
-//!   `nextAutoIndexes`; append widens the tail instead.
-//! * **No general meet** (A-G7). Narrowing arrives as the targeted refinement
-//!   operators of S4 ([`ShapeFact::promote_present`],
-//!   [`ShapeFact::mark_absent`], [`ShapeFact::set_non_empty`],
-//!   [`ShapeFact::set_is_list`], [`ShapeFact::narrow_count`]) — never a
-//!   general ⊓.
+//! `is_list` is denotational, not syntactic (§3, RFC #14939): recomputed from
+//! key structure by [`ShapeFact::normalize`]; a caller's flag may sharpen it,
+//! never contradict it.
 //!
-//! `is_list` is **denotational**, never syntactic (§3, RFC #14939): it is
-//! recomputed from the key structure by [`ShapeFact::normalize`], and a
-//! caller's own flag can only sharpen the computed answer, never contradict
-//! it.
-//!
-//! Naming note: the ADR writes `VKey` for the field key; this crate already
-//! owns that type as [`Key`], and the domain has exactly one key vocabulary.
+//! Naming: the ADR's `VKey` is this crate's [`Key`] — one key vocabulary.
 
 use crate::certainty::Certainty;
 use crate::fact::Fact;
 use crate::range::IntRange;
 use crate::value::{Key, Val};
 
-/// Field-width bound for a single shape (A-G6).
-///
-/// This is PHPStan's `ARRAY_COUNT_LIMIT`, imported as-is rather than invented:
-/// lifting or seeding a shape with more fields than this degrades to the
-/// tail-only summary. Orthogonal to the `OneOf` cap, which governs how many
-/// *whole arrays* stay finite; ADR-0062 §7 declines the union-degradation role
-/// this constant plays upstream.
+/// Field-width bound for a single shape (A-G6); PHPStan's `ARRAY_COUNT_LIMIT`,
+/// imported as-is. Beyond it, a lift/seed degrades to the tail-only summary.
+/// Distinct from the `OneOf` cap (whole-array union size); ADR-0062 §7
+/// declines that union-degradation role here.
 pub const SHAPE_WIDTH_LIMIT: usize = 256;
 
 /// Whether a key is in the array, and on what evidence.
 ///
-/// The `witnessed` bit on `Required` is the **presence stratum** (§3): the
-/// domain-local form of the Verified/Asserted split. `true` means a runtime
-/// guard or observation established presence; `false` means presence is
-/// declared. Presence stratum and value stratum are independent (A-G9), and
-/// the bit never changes what the fact *admits* — it is provenance, not
-/// extension.
+/// `Required.witnessed` is the presence stratum (§3, the Verified/Asserted
+/// split): `true` = a runtime guard/observation established presence, `false`
+/// = declared. Independent of the value stratum (A-G9); provenance only, it
+/// never changes what the fact admits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Presence {
     /// The key is present.
@@ -192,26 +177,21 @@ impl Cover {
 /// One field of a shape: key, presence, and the value slot.
 type Field = (Key, Presence, Option<Box<Fact>>);
 
-/// The canonical abstract array fact.
+/// The canonical abstract array fact, built through [`ShapeFact::normalize`]
+/// (and the constructors that call it), which establishes:
 ///
-/// Built through [`ShapeFact::normalize`] (and the constructors that call it),
-/// which is what establishes the invariants:
-///
-/// * `fields` sorted by key, one entry per key (ints before strings, each
-///   ascending — the [`Key`] order);
+/// * `fields` sorted by key ([`Key`] order: ints before strings), one per key;
 /// * no `Absent` field under a `Sealed` tail (sealing already proves absence);
-/// * `covers` an antichain of key sets of size ≥ 2, none containing a
-///   `Required` key, sorted deterministically;
-/// * `is_list` denotationally computed from the key structure, sharpened but
-///   never contradicted by the caller's flag;
-/// * `non_empty` implied by any `Required` field **or** by a `count_bound`
-///   whose floor is at least 1;
-/// * `count_bound` clamped to the non-negative ints, and — under a `Sealed`
-///   tail whose declared key set the floor already exhausts — discharged into
-///   `Required` presence (the exact-count pin, issue #272);
-/// * `order` absent — [`ShapeFact::normalize_counted`] never mints an order
-///   witness, so every derived shape loses it and only the two construction
-///   sites that actually observed an insertion order set it (issue #327).
+/// * `covers` a deterministic antichain, size ≥ 2, none containing a
+///   `Required` key;
+/// * `is_list` computed from key structure, sharpened but never contradicted
+///   by the caller's flag;
+/// * `non_empty` implied by any `Required` field or a `count_bound` floor ≥ 1;
+/// * `count_bound` clamped non-negative, discharged into `Required` presence
+///   under a `Sealed` tail the floor already exhausts (the exact-count pin,
+///   issue #272);
+/// * `order` absent by default — only [`ShapeFact::lift`] and other
+///   observed-construction sites set it (issue #327).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ShapeFact {
     /// Declared keys, sorted, one entry per key.
@@ -225,48 +205,26 @@ pub struct ShapeFact {
     /// Disjunctive-presence facts (A-G8).
     pub covers: Vec<Cover>,
     /// **The count accessory** (issue #272): an entry-count interval learned
-    /// from something *other* than the key structure — a `count($x)`
-    /// comparison guard. [`IntRange::NON_NEGATIVE`] is "nothing learned", and
-    /// [`ShapeFact::count_range`] reports this interval met with the
-    /// structural one, so the two can never disagree.
+    /// from a `count($x)` guard, independent of the key structure — met with
+    /// the structural interval by [`ShapeFact::count_range`], so the two
+    /// never disagree.
     pub count_bound: IntRange,
-    /// **The order witness** (issue #327): the key sequence in the order the
-    /// array was *observed* to be built, when this shape came from a place
-    /// that saw the construction — an array literal in the source, or the
-    /// [`ShapeFact::lift`] of an order-witnessed value.
+    /// **The order witness** (issue #327): the observed build-order key
+    /// sequence, set only by [`ShapeFact::lift`] and literal-construction
+    /// sites that saw the real build.
     ///
-    /// # Provenance, not extension
+    /// Provenance, not extension — [`ShapeFact::admits`] never reads it, and
+    /// two shapes differing only here admit the same values. It lets an
+    /// order-dependent projection use a *realizable* order instead of the
+    /// canonical sort `fields` uses (ADR-0062 §2) — the same role as
+    /// `Presence::Required { witnessed }`. A *declared* order (e.g.
+    /// `@param array{b: int, a: int}`) is never trusted this way (that is
+    /// phpstan/phpstan#14940's false-positive class, ADR-0062 §7), so such a
+    /// shape gets `None`.
     ///
-    /// Nothing about *which arrays this shape admits* depends on it:
-    /// [`ShapeFact::admits`] never reads it, the acceptance relation never
-    /// reads it, and two shapes that differ only here admit exactly the same
-    /// values. What it records is how the shape was learned, so that an
-    /// order-dependent projection may consume a *realizable* order instead of
-    /// the canonical key order `fields` is sorted into (ADR-0062 §2). The
-    /// existing `Presence::Required { witnessed }` bit is the same kind of
-    /// component and is documented the same way.
-    ///
-    /// # Why declaration order may never appear here
-    ///
-    /// A `@param array{b: int, a: int}` shape gets `None`. Trusting the
-    /// declaration's field order in a positional projection is exactly
-    /// phpstan/phpstan#14940's false-positive class, which ADR-0062 §7
-    /// declines by name. The witness exists to keep the two provenances apart,
-    /// not to blur them.
-    ///
-    /// # The drop discipline
-    ///
-    /// [`ShapeFact::normalize_counted`] — the canonical constructor every
-    /// derived shape goes through — always sets this to `None`. So a join, a
-    /// widening, a projection, a guard narrowing, a `mark_absent`, anything at
-    /// all that rebuilds the struct **loses** the witness, and the only way to
-    /// have one is to have just observed the order. Losing it costs precision
-    /// and can never cost soundness, which is the direction this domain takes
-    /// whenever the two trade off.
-    ///
-    /// When present, it is a permutation of the shape's own field keys and the
-    /// tail is `Sealed`; [`ShapeFact::with_order`] enforces both and refuses
-    /// the witness rather than storing an inconsistent one.
+    /// [`ShapeFact::normalize_counted`] always sets this `None`; any rebuild
+    /// loses the witness. When present it is a permutation of the field keys
+    /// under a `Sealed` tail; [`ShapeFact::with_order`] enforces both.
     pub order: Option<Vec<Key>>,
 }
 
@@ -279,12 +237,10 @@ pub fn array_is_list(entries: &[(Key, Val)]) -> bool {
     keys_are_a_list(entries.iter().map(|(k, _)| k))
 }
 
-/// [`array_is_list`] over the keys alone — the same predicate for a caller that
-/// witnessed the key order but not every value (issue #327).
-///
-/// It reads the sequence, not the set: `[1 => 'a', 0 => 'b']` has the key set of
-/// a two-element list and is not one, which is exactly why an order witness
-/// cannot be reconstructed from the canonically sorted `fields`.
+/// [`array_is_list`] over keys alone, for a caller that witnessed key order
+/// but not every value (issue #327). Reads the sequence, not the set:
+/// `[1 => 'a', 0 => 'b']` has a list's key set but is not one — why the order
+/// witness cannot be reconstructed from the sorted `fields`.
 #[must_use]
 pub fn keys_are_a_list<'a, I: Iterator<Item = &'a Key>>(keys: I) -> bool {
     keys.enumerate().all(|(i, k)| match k {
@@ -351,24 +307,12 @@ impl ShapeFact {
     }
 
     /// [`ShapeFact::normalize`] with a **count accessory** (issue #272).
-    ///
-    /// Three things happen to `count_bound` here and nowhere else:
-    ///
-    /// * it is clamped to the non-negative ints — no array has fewer than zero
-    ///   entries, and an interval that survives nothing of that clamp is
-    ///   dropped rather than kept (widening, the safe side: a count claim
-    ///   contradicting the domain is not a death signal, ADR-0052 §2);
-    /// * a floor of 1 or more implies `non_empty`, so the two flags state the
-    ///   same truth once;
-    /// * under a `Sealed` tail whose declared, non-`Absent` key set the floor
-    ///   already exhausts, **every declared key is present** — the exact-count
-    ///   pin. It is discharged into `Required` presence at `witnessed: false`,
-    ///   because the evidence is a count comparison, not an observation of the
-    ///   key itself (A-G9's presence stratum); an already-witnessed key keeps
-    ///   its bit.
-    ///
-    /// There is no such pin under an `Unsealed` tail: a floor there says
-    /// nothing about *which* keys are present, only how many entries exist.
+    /// `count_bound` clamps to the non-negative ints (dropped if nothing
+    /// survives — widening, ADR-0052 §2); a floor ≥1 implies `non_empty`; and
+    /// under a `Sealed` tail whose declared keys the floor exhausts, every
+    /// declared key becomes `Required` (the exact-count pin), at
+    /// `witnessed: false` unless already witnessed (A-G9). No pin under
+    /// `Unsealed` — a floor there bounds count only, not keys.
     #[must_use]
     pub fn normalize_counted(
         mut fields: Vec<Field>,
@@ -383,9 +327,8 @@ impl ShapeFact {
         fields.sort_by(|a, b| a.0.cmp(&b.0));
         fields.dedup_by(|a, b| a.0 == b.0);
 
-        // A singleton cover is not a disjunction — it *is* presence, so it is
-        // promoted rather than dropped. An empty cover claims nothing
-        // satisfiable; dropping it widens, which is the safe side.
+        // A singleton cover is presence, not a disjunction, so it's promoted;
+        // an empty cover claims nothing and is dropped (widening).
         let mut kept: Vec<Cover> = Vec::new();
         for mut c in covers {
             c.keys.sort();
@@ -398,15 +341,13 @@ impl ShapeFact {
         }
         fields.sort_by(|a, b| a.0.cmp(&b.0));
 
-        // A sealed tail already proves absence, so an `Absent` field carries no
-        // information the shape does not have twice.
+        // A sealed tail already proves absence; an `Absent` field is redundant.
         if matches!(tail, Tail::Sealed) {
             fields.retain(|(_, p, _)| !matches!(p, Presence::Absent));
         }
 
-        // The exact-count pin: a sealed shape with no room left for an absent
-        // declared key. `declared` counts the fields that survived the retain
-        // above, so it is exactly the array's admitted key set.
+        // Exact-count pin: no room left for an absent declared key; `declared`
+        // is exactly the array's admitted key set (post-retain, above).
         if matches!(tail, Tail::Sealed)
             && i64::try_from(fields.len()).is_ok_and(|declared| count_bound.lo() >= declared)
         {
@@ -426,23 +367,17 @@ impl ShapeFact {
         let computed = compute_is_list(&fields, &tail, non_empty);
         let is_list = sharpen_is_list(computed, is_list);
 
-        // `order: None` unconditionally — see the field's drop discipline. This
-        // is the whole enforcement: every derived shape in the crate is built
-        // here, so none of them can carry a witness it did not earn.
+        // `order: None` unconditionally — the drop discipline's enforcement
+        // point (every derived shape is built here).
         ShapeFact { fields, tail, is_list, non_empty, covers, count_bound, order: None }
     }
 
-    /// Attach an **order witness** (issue #327) — the key sequence in the order
-    /// the array was observed to be built.
+    /// Attach an **order witness** (issue #327): the observed build order.
     ///
-    /// Refuses, returning the shape unwitnessed, unless the claim is consistent
-    /// with the shape it is attached to: the tail must be `Sealed` (an unsealed
-    /// tail admits keys the sequence does not mention, so there is no sequence
-    /// to state), and `order` must be a permutation of the field keys — same
-    /// length, every key present, no duplicates. A caller that computed the
-    /// order from the same entries it built the fields from satisfies both by
-    /// construction; the check is here so that a caller that did not cannot
-    /// install a witness the rest of the domain would then believe.
+    /// Refuses (returns unwitnessed) unless the tail is `Sealed` (an unsealed
+    /// tail admits keys the sequence can't state) and `order` is a permutation
+    /// of the field keys — same length, every key present, no duplicates. This
+    /// guards against a caller installing a witness it never actually observed.
     #[must_use]
     pub fn with_order(mut self, order: Vec<Key>) -> ShapeFact {
         let consistent = matches!(self.tail, Tail::Sealed)
@@ -455,11 +390,9 @@ impl ShapeFact {
         self
     }
 
-    /// The observed key sequence, when this shape witnessed one and every field
-    /// is `Required` — the precondition an order-dependent projection needs
-    /// (issue #328). An optional field makes the sequence variable-length, so
-    /// no single sequence describes every admitted value and the witness alone
-    /// is not enough.
+    /// The observed key sequence, when witnessed and every field is `Required`
+    /// (issue #328) — an optional field makes length variable, so no single
+    /// sequence would describe every admitted value.
     #[must_use]
     pub fn witnessed_order(&self) -> Option<&[Key]> {
         let order = self.order.as_deref()?;
@@ -493,40 +426,26 @@ impl ShapeFact {
             || self.fields.iter().any(|(_, p, _)| !matches!(p, Presence::Absent))
     }
 
-    /// Does this shape already establish `c` (A-G8)?
-    ///
-    /// Either it carries a cover whose claim entails `c`, or one of `c`'s keys
-    /// is `Required` here. **Deviation, deliberate:** a `Required` key
-    /// discharges a `KeyExists` cover unconditionally, but an `Isset` cover
-    /// only when the field's slot proves the value non-null — a required key
-    /// whose value may be null does not make `isset` true, and keeping a cover
-    /// the operand does not satisfy would make the join reject values the
-    /// operand admits.
+    /// Does this shape already establish `c` (A-G8)? Either a carried cover
+    /// entails `c`, or one of `c`'s keys is `Required` here — a `Required` key
+    /// discharges `KeyExists` unconditionally but `Isset` only when the slot
+    /// proves non-null (a nullable required value doesn't make `isset` true).
     #[must_use]
     pub fn implies_cover(&self, c: &Cover) -> bool {
         self.covers.iter().any(|own| own.subsumes(c))
             || c.keys.iter().any(|k| self.key_implies(k, c.flavor))
     }
 
-    /// **Cover recording** (A-G8, S5): the true branch of a disjunction of
-    /// depth-1 constant-key presence tests over one binding —
-    /// `isset($x['a']) || isset($x['b'])`.
+    /// **Cover recording** (A-G8, S5): the true branch of
+    /// `isset($x['a']) || isset($x['b'])` — "at least one of `keys` satisfies
+    /// `flavor`", nothing more. Canonicalized by [`ShapeFact::normalize`]: a
+    /// singleton promotes to `Required { witnessed: true }` instead of being
+    /// stored, a cover with an already-`Required` key drops, and covers stay a
+    /// deterministic antichain.
     ///
-    /// The claim recorded is "at least one of `keys` satisfies `flavor`", which
-    /// is exactly what the disjunction being true says and nothing more. Every
-    /// canonicalization is [`ShapeFact::normalize`]'s, so the S2 invariants hold
-    /// by construction rather than by a second rule here:
-    ///
-    /// * a **singleton** input is not a disjunction — it *is* presence, and is
-    ///   promoted to `Required { witnessed: true }` instead of stored;
-    /// * a cover one of whose keys is already `Required` is redundant and drops;
-    /// * the surviving covers stay a deterministically ordered antichain.
-    ///
-    /// `non_empty` follows from the claim and is set: a cover says at least one
-    /// of its keys is present, so no admitted array is empty — the same floor
-    /// [`ShapeFact::count_range`] applies to a covered shape.
-    /// [`ShapeFact::mark_absent`] drops the flag and re-derives it, so the flag
-    /// and the covers never disagree.
+    /// Sets `non_empty`: a cover claims some key present, so no admitted array
+    /// is empty. [`ShapeFact::mark_absent`] re-derives the flag so it never
+    /// disagrees with the covers.
     #[must_use]
     pub fn record_cover(&self, keys: Vec<Key>, flavor: CoverFlavor) -> ShapeFact {
         let mut covers = self.covers.clone();
@@ -543,26 +462,15 @@ impl ShapeFact {
     }
 
     /// **Cover discharge** (A-G11): does some cover prove `key` present, given
-    /// that every *other* member of that cover is known absent?
+    /// every *other* member of that cover is in `absent_keys`? This is what a
+    /// `??` right-arm consumes once its left arms fail `isset`.
     ///
-    /// This is the query the `??` right-arm rule consumes: the arms to the left
-    /// of `key` failed their `isset`, which is what populates `absent_keys`, and
-    /// a cover all of whose other members are in that set has only `key` left to
-    /// satisfy it.
-    ///
-    /// The returned [`CoverFlavor`] is the *claim*, not the verdict — the two
-    /// discharge under different conditions and the second one is the caller's
-    /// (A-G11's table, and the domain has no business knowing about `??`):
-    ///
-    /// * [`CoverFlavor::Isset`] — present **and non-null**, so the discharge is
-    ///   unconditional and the value additionally loses `null`.
-    /// * [`CoverFlavor::KeyExists`] — present, value possibly null. A
-    ///   present-**null** member satisfies the cover while `??` still falls
-    ///   through it, so the caller must check that every `absent_keys` member's
-    ///   value slot ([`ShapeFact::field`]) is provably non-nullable before
-    ///   trusting it.
-    ///
-    /// `Isset` wins when both claims are available: it is the stronger one.
+    /// The returned [`CoverFlavor`] is the claim, not the verdict:
+    /// [`CoverFlavor::Isset`] discharges unconditionally (present and
+    /// non-null); [`CoverFlavor::KeyExists`] leaves value nullability to the
+    /// caller, who must confirm each `absent_keys` member's slot
+    /// ([`ShapeFact::field`]) is non-nullable before trusting a present-null
+    /// member as "fell through". `Isset` wins when both claims are available.
     #[must_use]
     pub fn cover_proves(&self, key: &Key, absent_keys: &[Key]) -> Option<CoverFlavor> {
         self.covers
@@ -585,18 +493,14 @@ impl ShapeFact {
 
     /// **Lift** an order-witnessed array value into the abstract stratum
     /// (A-G5): every entry becomes `Required { witnessed: true }` with a
-    /// `Singleton` value slot, the tail seals, and `is_list` is the real
-    /// [`array_is_list`] verdict.
+    /// `Singleton` slot, the tail seals, `is_list` is the real
+    /// [`array_is_list`] verdict. A nested array lifts to a `Singleton` slot
+    /// (strictly more precise than a nested shape).
     ///
-    /// A nested array lifts to a `Singleton` slot rather than a nested shape:
-    /// the singleton is strictly more precise.
-    ///
-    /// Beyond [`SHAPE_WIDTH_LIMIT`] fields the lift degrades to the tail-only
-    /// summary (A-G6) — and *that* is where order-witnessed-ness is honestly
-    /// lost, because the summary keeps no keys to sequence. Below the limit the
-    /// entries' own order rides along as the [`ShapeFact::order`] witness
-    /// (issue #327): the caller handed over a value it had observed, so the
-    /// sequence is realizable, not declared.
+    /// Beyond [`SHAPE_WIDTH_LIMIT`] fields it degrades to the tail-only
+    /// summary (A-G6), losing the order witness (no keys left to sequence);
+    /// below the limit the observed order rides along as
+    /// [`ShapeFact::order`] (issue #327).
     #[must_use]
     pub fn lift(entries: &[(Key, Val)]) -> ShapeFact {
         let is_list = Certainty::from_bool(array_is_list(entries));
@@ -624,25 +528,17 @@ impl ShapeFact {
             .with_order(entries.iter().map(|(k, _)| k.clone()).collect())
     }
 
-    /// **The partially-known literal** (issue #327): the shape an array whose
-    /// construction was observed denotes, when some of its *values* were not.
-    ///
-    /// [`ShapeFact::lift`]'s sibling, and the difference is the whole point —
-    /// `lift` needs a proven value per entry, this one takes `None` for an
-    /// entry whose value nothing proved. Everything else is identical, because
-    /// everything else was never about the values: the keys were observed, so
-    /// each is `Required { witnessed: true }`; no other key can appear, so the
-    /// tail is `Sealed`; the key *sequence* was observed, so `is_list` is
-    /// denotational rather than guessed and the order rides along as the
-    /// witness.
-    ///
-    /// This is what keeps `['p' => 1, 'q' => $s]` from collapsing to nothing:
-    /// one unknown value costs exactly that value, not the key set, not the
-    /// entry count, and not the sibling entries that *were* proven.
+    /// **The partially-known literal** (issue #327): [`ShapeFact::lift`]'s
+    /// sibling for when construction was observed but some *values* were not
+    /// — takes `None` for an unproven entry's slot. Keys were still observed,
+    /// so each field is `Required { witnessed: true }`, the tail is `Sealed`,
+    /// and the order rides along as the witness. Keeps
+    /// `['p' => 1, 'q' => $s]` from collapsing: an unknown value costs only
+    /// that value, not the key set or sibling entries.
     ///
     /// Beyond [`SHAPE_WIDTH_LIMIT`] entries it degrades to the tail-only
-    /// summary (A-G6) exactly as `lift` does, and an unknown slot anywhere
-    /// makes that summary's value bound unknown too.
+    /// summary like `lift`, and any unknown slot makes that summary's value
+    /// bound unknown too.
     #[must_use]
     pub fn from_witnessed_entries(entries: &[(Key, Option<Fact>)]) -> ShapeFact {
         let is_list = Certainty::from_bool(keys_are_a_list(entries.iter().map(|(k, _)| k)));
@@ -716,8 +612,8 @@ impl ShapeFact {
         if self.non_empty && entries.is_empty() {
             return false;
         }
-        // The count accessory is extensional (issue #272): an array outside the
-        // learned interval is not admitted, whatever its keys say.
+        // The count accessory is extensional (issue #272): outside the
+        // learned interval, not admitted, whatever the keys say.
         match i64::try_from(entries.len()) {
             Ok(n) if !self.count_bound.contains(n) => return false,
             _ => {}
@@ -734,25 +630,13 @@ impl ShapeFact {
     }
 
     /// **The entry count every admitted array can have** (ADR-0062 §4's
-    /// `count($x)` row), as an inclusive interval.
-    ///
-    /// * **Floor** — one entry per `Required` field, floored at 1 when
-    ///   `non_empty` (or a cover) says the array cannot be empty: a cover
-    ///   claims at least one of its keys is there.
-    /// * **Ceiling** — a `Sealed` tail bounds the array by its declared,
-    ///   non-`Absent` key set (this is the one place PHPStan has an exact
-    ///   size, mirrored); an `Unsealed` tail admits arbitrarily many
-    ///   undeclared keys, so the ceiling is the domain's own top.
-    ///
-    /// `lo == hi` is exactly the exact-size case (a sealed, all-required
-    /// shape, or a `count_bound` pinned to a point) — the caller spells that
-    /// as a literal rather than an interval.
-    ///
-    /// The **learned** `count_bound` (issue #272) is met with the structural
-    /// interval here, which is the only place the two meet. A `count_bound`
-    /// that shares no point with the structure is a contradiction the domain
-    /// declines to represent (ADR-0052 §2: an emptied lane is no-fact, never a
-    /// death signal), so the structural answer stands.
+    /// `count($x)` row), as an inclusive interval: floor is one per
+    /// `Required` field (floored at 1 when `non_empty` or a cover forbids
+    /// empty); ceiling is a `Sealed` tail's declared, non-`Absent` keys
+    /// (mirrors PHPStan's one exact-size case) or unbounded under `Unsealed`.
+    /// `lo == hi` is the exact-size case. The learned `count_bound`
+    /// (issue #272) meets the structural interval here; a contradicting bound
+    /// is no-fact (ADR-0052 §2), so the structural answer stands.
     #[must_use]
     pub fn count_range(&self) -> IntRange {
         let required = self.fields.iter().filter(|(_, p, _)| p.is_required()).count();
@@ -763,9 +647,7 @@ impl ShapeFact {
             Tail::Sealed => i64::try_from(declared).unwrap_or(i64::MAX),
             Tail::Unsealed { .. } => i64::MAX,
         };
-        // `lo <= hi` holds by construction (required ⊆ declared, and a
-        // non-empty sealed shape declares at least one key); the fallback
-        // keeps the constructor total rather than trusting that argument.
+        // `lo <= hi` holds by construction; the fallback just keeps this total.
         let structural = IntRange::new(lo, hi).unwrap_or(IntRange::NON_NEGATIVE);
         structural.intersect(self.count_bound).unwrap_or(structural)
     }
@@ -813,11 +695,8 @@ impl ShapeFact {
             Certainty::all_of([self.is_list, other.is_list]),
             self.non_empty && other.non_empty,
             covers,
-            // The accessory joins by **hull**: the union of two count intervals
-            // is bounded by the smaller floor and the larger ceiling, and the
-            // hull is the least interval containing both. A side that learned
-            // nothing carries `NON_NEGATIVE`, which absorbs the other — the
-            // join of "at least 3 entries" with "no idea" is "no idea".
+            // Accessory joins by hull; a side with `NON_NEGATIVE` (learned
+            // nothing) absorbs the other.
             self.count_bound.hull(other.count_bound),
         )
     }
@@ -826,54 +705,36 @@ impl ShapeFact {
     // Narrowing operators (ADR-0062 S4; A-G7's targeted refinements — see the
     // module doc's "No general meet").
     //
-    // Each one is a *narrowing*: the returned shape admits every array the
-    // receiver admits that also satisfies the guard. Where the guard's exact
-    // meet is not representable the operator takes the widening side, which
-    // keeps the law as stated (⊇, never =). The three places that happens are
-    // named at their site: a guard on a key a `Sealed` tail forbids, a
-    // `Singleton(null)` slot stripped of null, and `mark_absent`'s dropped
-    // `non_empty`.
+    // Each is a narrowing: result admits every receiver-admitted array that
+    // also satisfies the guard, widening (never bottoming) where the exact
+    // meet isn't representable — noted at each such site.
     //
-    // Every operator routes through `normalize`, so `is_list`, `non_empty` and
-    // the cover antichain are re-derived rather than patched. `promote_present`,
-    // `set_non_empty` and `set_is_list` may still *carry* the receiver's
-    // `is_list` across (the flag can only sharpen a computed `Maybe`, §3),
-    // because each of them returns a shape whose denotation is a SUBSET of the
-    // receiver's — a claim that held for every admitted array still holds for
-    // fewer. `mark_absent` is the exception and says why at its own site.
+    // All route through `normalize`, re-deriving `is_list`/`non_empty`/covers.
+    // `promote_present`, `set_non_empty`, `set_is_list` may still carry the
+    // receiver's `is_list` (it only sharpens a computed `Maybe`, §3) because
+    // each returns a subset of the receiver's denotation; `mark_absent` is the
+    // exception, explained at its own site.
     // ------------------------------------------------------------------
 
     /// **Presence promotion** (ADR-0062 §4's guard row, #51 L3): the true
     /// branch of `isset($x[k])` (`strip_null`) or `array_key_exists(k, $x)`
-    /// (no strip).
+    /// (no strip). `k` becomes `Required { witnessed }` — presence stratum
+    /// moves, value stratum doesn't (A-G9); `strip_null` also drops `null`
+    /// since `isset` is false on present-null. `witnessed` is the guard's own
+    /// stratum (ADR-0058): a runtime guard passes `true`, a docblock-only
+    /// claim (e.g. a userland `@phpstan-assert` helper) passes `false` —
+    /// provenance only, never a second narrowing semantics.
     ///
-    /// `k` becomes `Required { witnessed }` — the presence stratum moves, the
-    /// value stratum does not (A-G9). With `strip_null` the value slot
-    /// additionally loses `null`, because `isset` is false on a present-null
-    /// entry; `array_key_exists` tests existence only and leaves the slot
-    /// alone.
-    ///
-    /// **`witnessed` is the guard's own stratum** (ADR-0058's table, read into
-    /// the presence bit §3 defines): a runtime guard — an `if`, an `assert()` —
-    /// observed the key, so it passes `true`; a promotion whose only evidence is
-    /// a docblock claim — a `@phpstan-assert true $cond` on a userland assertion
-    /// helper, the tag lane, Asserted — passes `false`. The bit never changes
-    /// what the fact admits, so this is provenance discipline, not a second
-    /// narrowing semantics.
-    ///
-    /// An undeclared `k` becomes a field only when the tail can supply it: its
-    /// slot starts from the tail's own value bound. When the tail cannot
-    /// (`Sealed`, or an `Unsealed` key class that rejects `k`) no admitted
-    /// array has `k`, so the guard's meet is empty and the shape is returned
-    /// unchanged — a widening, and the one place this operator is not exact.
+    /// An undeclared `k` becomes a field only if the tail can supply it
+    /// (rejected by `Sealed` or a non-admitting `Unsealed` key class), in
+    /// which case the shape returns unchanged — the one inexact case here.
     #[must_use]
     pub fn promote_present(&self, k: &Key, strip_null: bool, witnessed: bool) -> ShapeFact {
         let mut fields = self.fields.clone();
         match fields.iter_mut().find(|(fk, _, _)| fk == k) {
             Some((_, p, slot)) => {
-                // A promotion never *lowers* an already-witnessed presence: the
-                // earlier runtime observation still stands (join mins the strata,
-                // a re-promotion must not).
+                // Never lowers an already-witnessed presence (join mins
+                // strata; re-promotion must not).
                 let keep = matches!(*p, Presence::Required { witnessed: true });
                 *p = Presence::Required { witnessed: witnessed || keep };
                 if strip_null {
@@ -881,8 +742,8 @@ impl ShapeFact {
                 }
             }
             None => match &self.tail {
-                // The guard is runtime-impossible against this shape; claiming
-                // the key would be unsound the other way round, so widen.
+                // Runtime-impossible against this shape; widen rather than
+                // claim it unsoundly.
                 Tail::Sealed => return self.clone(),
                 Tail::Unsealed { key: class, value } => {
                     if !class.admits_key(k) {
@@ -899,28 +760,20 @@ impl ShapeFact {
             self.is_list,
             self.non_empty,
             self.covers.clone(),
-            // As a *guard* this operator records a key the array already had,
-            // so the entry count is unchanged and the accessory carries. As the
-            // shape half of an offset **write** the count may grow past the
-            // ceiling — that call site relaxes it first
+            // As a guard the count is unchanged; a write may grow past the
+            // ceiling, so that call site relaxes it first
             // ([`ShapeFact::relax_count_ceiling`]).
             self.count_bound,
         )
     }
 
-    /// **Drop a learned count ceiling** (issue #272), keeping the floor.
+    /// **Drop a learned count ceiling** (issue #272), keeping the floor. The
+    /// one operator that widens: `$x[k] = v` can only add or overwrite an
+    /// entry, so "at least n" survives but "at most n" doesn't.
     ///
-    /// The one operator here that *widens*, and it exists for the one event
-    /// that invalidates a ceiling while leaving a floor sound: an offset write.
-    /// `$x[k] = v` can only add an entry or overwrite one, so "at least n"
-    /// survives it and "at most n" does not.
-    ///
-    /// The order witness does not survive it either, and this is the one place
-    /// that has to say so by hand: the struct-update below is the sole
-    /// construction that does not run through
-    /// [`ShapeFact::normalize_counted`], and the very event it models — a write
-    /// that may append a key the sequence does not mention — is what makes the
-    /// witness stale (issue #327).
+    /// Also drops the order witness by hand, since this is the sole
+    /// construction that bypasses [`ShapeFact::normalize_counted`] — the write
+    /// it models may append a key the sequence doesn't mention (issue #327).
     #[must_use]
     pub fn relax_count_ceiling(&self) -> ShapeFact {
         let relaxed = IntRange::new(self.count_bound.lo(), i64::MAX)
@@ -928,15 +781,10 @@ impl ShapeFact {
         ShapeFact { count_bound: relaxed, order: None, ..self.clone() }
     }
 
-    /// **The count narrowing** (issue #272): meet the learned entry-count
-    /// interval with `want`, the interval the branch's `count($x)` comparison
-    /// proves.
-    ///
-    /// A narrowing like every other operator in this block — the result admits
-    /// every array the receiver admits whose entry count lies in `want` — and
-    /// like them it widens rather than bottoms where the meet is empty
-    /// ([`ShapeFact::count_range`] states that rule once, for both halves of
-    /// the interval).
+    /// **The count narrowing** (issue #272): meet the learned count interval
+    /// with `want` (the branch's `count($x)` comparison). Widens rather than
+    /// bottoms on an empty meet, like the rest of this block
+    /// ([`ShapeFact::count_range`] states the rule once).
     #[must_use]
     pub fn narrow_count(&self, want: IntRange) -> ShapeFact {
         let met = self.count_bound.intersect(want).unwrap_or(self.count_bound);
@@ -951,28 +799,16 @@ impl ShapeFact {
     }
 
     /// **Proven absence**: `unset($x[k])`, and the false branch of
-    /// `array_key_exists(k, $x)`.
+    /// `array_key_exists(k, $x)`. `k` becomes [`Presence::Absent`]; under a
+    /// `Sealed` tail `normalize` drops the field (sealing already proves it).
     ///
-    /// `k` becomes [`Presence::Absent`]; under a `Sealed` tail `normalize`
-    /// then drops the field outright, because sealing already proves the
-    /// absence and the domain keeps one representation per claim.
-    ///
-    /// **Two laws, and the stronger one governs.** As a *guard* the operator
-    /// only has to keep what the receiver admits without `k`; as `unset` it
-    /// must keep `v \ {k}` for every `v` the receiver admits — a set the
-    /// receiver itself need not admit. The `unset` law is what forces the two
-    /// components below to be re-derived rather than carried:
-    ///
-    /// * **`is_list` is recomputed** (`Maybe` in, `normalize` decides). Carrying
-    ///   it is unsound under `unset`: `array{a: string}` is `No`, and removing
-    ///   `a` leaves `[]`, which *is* a list. §4's row says as much — "`is_list`
-    ///   recomputed (a mid-list unset is No/Maybe by position knowledge)".
-    /// * **`non_empty` is dropped** and re-derived from the surviving
-    ///   `Required` fields: the flag cannot say whether it came from a
-    ///   `non-empty-array{…}` declaration or from the key just removed.
-    ///
-    /// **Covers containing `k` are killed** rather than shrunk, as required by
-    /// A-G8's invalidation law.
+    /// Two laws, stronger governs: as a *guard* it need only keep what the
+    /// receiver admits without `k`; as `unset` it must keep `v \ {k}` for
+    /// every admitted `v`. The `unset` law forces re-derivation: `is_list`
+    /// recomputed (carrying it is unsound — `array{a: string}` is `No`, but
+    /// removing `a` leaves `[]`, a list; §4's row) and `non_empty` dropped
+    /// (can't tell a declaration's `non-empty` from the just-removed key).
+    /// Covers containing `k` are killed, not shrunk (A-G8's invalidation law).
     #[must_use]
     pub fn mark_absent(&self, k: &Key) -> ShapeFact {
         let mut fields = self.fields.clone();
@@ -991,10 +827,8 @@ impl ShapeFact {
         }
         let covers: Vec<Cover> =
             self.covers.iter().filter(|c| !c.keys.contains(k)).cloned().collect();
-        // The count **floor** goes for the same reason `non_empty` does: under
-        // the `unset` law the removed key may have been the entry the floor was
-        // counting. The ceiling survives — removing an entry cannot push the
-        // count above a bound it already respected.
+        // Floor drops (same reason as `non_empty`); ceiling survives — removal
+        // can't push count above an already-respected bound.
         let count_bound =
             IntRange::new(0, self.count_bound.hi()).unwrap_or(IntRange::NON_NEGATIVE);
         ShapeFact::normalize_counted(
@@ -1021,13 +855,11 @@ impl ShapeFact {
     }
 
     /// **The `is_list` flag flip** (RFC #14939's C1): `array_is_list($x)`
-    /// narrows to [`Certainty::Yes`] on the true branch and
-    /// [`Certainty::No`] on the false one. A pure flag flip — no structural
-    /// surgery, which is exactly the RFC's point.
+    /// narrows to [`Certainty::Yes`]/[`Certainty::No`] — a pure flag flip, no
+    /// structural surgery.
     ///
-    /// `normalize` still owns the verdict: a flag contradicting the computed
-    /// one loses (§3), and it loses *soundly* — a computed `No` means no
-    /// admitted array is a list, so the true branch's meet is empty.
+    /// `normalize` still owns the verdict: a contradicting flag loses (§3),
+    /// soundly — a computed `No` means the true branch's meet is empty.
     #[must_use]
     pub fn set_is_list(&self, want: Certainty) -> ShapeFact {
         ShapeFact::normalize_counted(
@@ -1041,9 +873,9 @@ impl ShapeFact {
     }
 }
 
-/// Drop `null` from a value slot. `None` (the unknown floor) stays unknown, and
-/// a slot that is *exactly* `null` degrades to unknown rather than to an empty
-/// fact — the domain has no bottom, and widening is the safe direction.
+/// Drop `null` from a value slot. `None` stays unknown; a slot that is
+/// exactly `null` degrades to unknown, not an empty fact (no bottom in this
+/// domain — widening is safe).
 fn strip_null_slot(slot: &Option<Box<Fact>>) -> Option<Box<Fact>> {
     slot.as_deref().and_then(strip_null_fact).map(Box::new)
 }
@@ -1080,10 +912,9 @@ fn tail_summary<'a, I: Iterator<Item = (&'a Key, &'a Val)>>(entries: I) -> Tail 
     }
 }
 
-/// [`tail_summary`] for entries whose values are facts rather than values, and
-/// may be unknown (issue #327). One unknown slot makes the whole value bound
-/// unknown — the tail says what *every* undeclared entry satisfies, and nothing
-/// is known about the one that was never proven.
+/// [`tail_summary`] for fact-valued entries that may be unknown (issue #327).
+/// One unknown slot makes the whole bound unknown — the tail states what
+/// *every* undeclared entry satisfies.
 fn slot_tail_summary(entries: &[(Key, Option<Fact>)]) -> Tail {
     let mut key: Option<KeyClass> = None;
     let mut value: Option<Fact> = None;
@@ -1113,9 +944,8 @@ fn field_of<'a>(fields: &'a [Field], k: &Key) -> Option<&'a Field> {
 }
 
 /// A singleton cover is presence: promote the key to
-/// `Required { witnessed: true }`. A proven-`Absent` key (or a key a sealed
-/// tail forbids) contradicts the cover; dropping the cover widens, which is
-/// the safe side.
+/// `Required { witnessed: true }`. A proven-`Absent` key (or a sealed-tail
+/// rejection) contradicts the cover, so it's dropped instead (widening).
 fn promote_present(fields: &mut Vec<Field>, k: &Key, tail: &Tail) {
     match fields.iter_mut().find(|(fk, _, _)| fk == k) {
         Some((_, p @ (Presence::Optional | Presence::Required { .. }), _)) => {
@@ -1144,9 +974,8 @@ fn antichain(mut covers: Vec<Cover>) -> Vec<Cover> {
     out
 }
 
-/// A caller may know `is_list` more precisely than the key structure does
-/// (a lifted literal knows its real order); it may never contradict it, and
-/// on a contradiction the computed value wins.
+/// A caller's flag may sharpen `is_list` (e.g. a lifted literal's real
+/// order); never contradict it — the computed value wins on conflict.
 fn sharpen_is_list(computed: Certainty, given: Certainty) -> Certainty {
     match computed {
         Certainty::Maybe => given,
@@ -1154,21 +983,17 @@ fn sharpen_is_list(computed: Certainty, given: Certainty) -> Certainty {
     }
 }
 
-/// **Denotational `is_list`** (§3, RFC #14939).
-///
-/// `Yes` iff *every* admitted value passes [`array_is_list`], `No` iff *none*
-/// does, `Maybe` otherwise. Because `array{…}` is an order-agnostic key set,
-/// a shape whose realizable key sets can have two members admits both
-/// insertion orders, so only one of them is a list — which is why
-/// `array{0: T, 1: U}` is `Maybe` and not `Yes`.
+/// **Denotational `is_list`** (§3, RFC #14939). `Yes` iff every admitted
+/// value passes [`array_is_list`], `No` iff none does, `Maybe` otherwise.
+/// `array{…}` is order-agnostic, so ≥2 keys admit multiple insertion orders —
+/// why `array{0: T, 1: U}` is `Maybe`, not `Yes`.
 fn compute_is_list(fields: &[Field], tail: &Tail, non_empty: bool) -> Certainty {
     let present: Vec<&Key> = fields
         .iter()
         .filter(|(_, p, _)| !matches!(p, Presence::Absent))
         .map(|(k, _, _)| k)
         .collect();
-    // Every admitted value is a list iff no undeclared key can appear and at
-    // most one key — key `0` — can, so no permutation is realizable.
+    // A list iff no undeclared key can appear and at most key `0` is present.
     if matches!(tail, Tail::Sealed)
         && (present.is_empty() || (present.len() == 1 && *present[0] == Key::Int(0)))
     {
@@ -1203,16 +1028,15 @@ fn list_is_admitted(fields: &[Field], tail: &Tail, non_empty: bool) -> bool {
     }
 
     if max < 0 {
-        // Nothing is required: the empty array is a list, unless `non_empty`
-        // forbids it — in which case key `0` has to come from somewhere.
+        // Nothing required: the empty array is a list unless `non_empty`
+        // forbids it, in which case key `0` has to come from somewhere.
         return !non_empty || tail_supplies_int || available(0);
     }
     if tail_supplies_int {
         return true;
     }
-    // Filling `0..=max` needs at least that many declared keys; the cheap
-    // bound keeps a sparse required key like `array{1000000: T}` from walking
-    // a million candidates.
+    // Cheap bound: filling `0..=max` needs that many declared keys — avoids
+    // walking sparse gaps like `array{1000000: T}`.
     let Ok(span) = usize::try_from(max) else { return false };
     if span.saturating_add(1) > fields.len() {
         return false;
@@ -1253,9 +1077,7 @@ mod tests {
         entries
     }
 
-    // ------------------------------------------------------------------
     // The denotational is_list table (ADR-0062 §3, RFC #14939)
-    // ------------------------------------------------------------------
 
     #[test]
     fn is_list_row_empty_shape_is_yes() {
@@ -1372,13 +1194,11 @@ mod tests {
 
     #[test]
     fn is_list_sparse_required_key_does_not_walk_the_gap() {
-        // The cheap bound: a million candidate keys are never enumerated.
         assert_eq!(sealed(vec![(k(1_000_000), req(), int_slot(2))]).is_list, Certainty::No);
     }
 
     #[test]
     fn a_caller_flag_sharpens_maybe_but_never_contradicts() {
-        // `list<T>`: typed tail + isList Yes (A-G1).
         let list_of = ShapeFact::normalize(
             Vec::new(),
             Tail::Unsealed { key: KeyClass::Int, value: slot(Fact::General { base: Base::Int, nullable: false }) },
@@ -1387,7 +1207,6 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(list_of.is_list, Certainty::Yes);
-        // A contradicting flag loses to the computed verdict.
         let contradicted = ShapeFact::normalize(
             vec![(ks("a"), req(), int_slot(1))],
             Tail::Sealed,
@@ -1398,9 +1217,7 @@ mod tests {
         assert_eq!(contradicted.is_list, Certainty::No);
     }
 
-    // ------------------------------------------------------------------
     // normalize invariants
-    // ------------------------------------------------------------------
 
     #[test]
     fn normalize_sorts_fields_ints_before_strings() {
@@ -1509,9 +1326,7 @@ mod tests {
         ShapeFact::normalize(fields, Tail::Sealed, Certainty::Maybe, false, covers)
     }
 
-    // ------------------------------------------------------------------
     // admits
-    // ------------------------------------------------------------------
 
     #[test]
     fn admits_required_and_optional_fields() {
@@ -1521,9 +1336,7 @@ mod tests {
         ]);
         assert!(s.admits(&arr(vec![(ks("a"), Val::Int(1))])));
         assert!(s.admits(&arr(vec![(ks("a"), Val::Int(1)), (ks("b"), Val::Int(2))])));
-        // missing required
         assert!(!s.admits(&arr(vec![(ks("b"), Val::Int(2))])));
-        // optional present with the wrong value
         assert!(!s.admits(&arr(vec![(ks("a"), Val::Int(1)), (ks("b"), Val::Int(9))])));
     }
 
@@ -1534,9 +1347,7 @@ mod tests {
         assert!(s.admits(&arr(vec![(ks("a"), Val::Array(vec![]))])));
     }
 
-    // ------------------------------------------------------------------
     // The count accessory (issue #272)
-    // ------------------------------------------------------------------
 
     /// `array<array-key, mixed>` with a learned count interval.
     fn counted(lo: i64, hi: i64) -> ShapeFact {
@@ -1572,9 +1383,7 @@ mod tests {
 
     #[test]
     fn a_contradicting_count_widens_rather_than_bottoming() {
-        // `array{a: int, b: int}` has exactly two entries; a guard claiming five
-        // is a contradiction the domain declines to represent, so the structural
-        // answer stands.
+        // A guard claiming five contradicts the exact two entries; structural stands.
         let two = sealed(vec![(ks("a"), req(), None), (ks("b"), req(), None)]);
         assert_eq!(two.narrow_count(IntRange::point(5)).count_range(), IntRange::point(2));
     }
@@ -1591,8 +1400,7 @@ mod tests {
         let pinned = s.narrow_count(IntRange::new(2, i64::MAX).expect("ordered"));
         assert!(pinned.field(&k(1)).expect("declared").1.is_required());
         assert_eq!(pinned.count_range(), IntRange::point(2));
-        // An unsealed tail pins nothing: a floor says how many entries exist,
-        // never which keys they are.
+        // An unsealed tail pins nothing: a floor bounds count only, not keys.
         let open = counted(2, i64::MAX);
         assert!(open.fields.is_empty());
     }
@@ -1630,7 +1438,6 @@ mod tests {
             IntRange::new(2, i64::MAX).expect("ordered")
         );
         assert_eq!(s.mark_absent(&ks("gone")).count_range(), IntRange::new(0, 3).expect("ordered"));
-        // A presence promotion is a guard, not a write: the count is unchanged.
         assert_eq!(
             s.promote_present(&ks("a"), false, true).count_range(),
             IntRange::new(2, 3).expect("ordered")
@@ -1658,9 +1465,7 @@ mod tests {
 
     #[test]
     fn admits_unsealed_checks_the_tail_key_class_and_value() {
-        // An unsealed tail's key class bounds undeclared keys:
-        // `array{a: int, ...<string, int>}` rejects `['a' => 1, 9 => 2]`
-        // (ADR-0062 §1).
+        // `array{a: int, ...<string, int>}` rejects `['a' => 1, 9 => 2]` (ADR-0062 §1).
         let s = ShapeFact::normalize(
             vec![(ks("a"), req(), slot(Fact::General { base: Base::Int, nullable: false }))],
             Tail::Unsealed {
@@ -1730,7 +1535,6 @@ mod tests {
         assert!(!exists.admits(&[]));
         assert!(isset.admits(&arr(vec![(ks("a"), Val::Int(1))])));
         assert!(exists.admits(&arr(vec![(ks("a"), Val::Int(1))])));
-        // present-but-null satisfies KeyExists, never Isset.
         assert!(!isset.admits(&arr(vec![(ks("a"), Val::Null)])));
         assert!(exists.admits(&arr(vec![(ks("a"), Val::Null)])));
     }
@@ -1743,9 +1547,7 @@ mod tests {
         assert_eq!(witnessed.admits(&v), declared.admits(&v));
     }
 
-    // ------------------------------------------------------------------
     // count_range (ADR-0062 §4)
-    // ------------------------------------------------------------------
 
     #[test]
     fn count_of_a_sealed_all_required_shape_is_exact() {
@@ -1802,9 +1604,7 @@ mod tests {
         assert_eq!(s.count_range(), IntRange::new(1, 2).expect("ordered"));
     }
 
-    // ------------------------------------------------------------------
     // lift
-    // ------------------------------------------------------------------
 
     #[test]
     fn lift_makes_every_entry_required_and_witnessed() {
@@ -1855,9 +1655,7 @@ mod tests {
         assert_eq!(s.fields.len(), SHAPE_WIDTH_LIMIT);
     }
 
-    // ------------------------------------------------------------------
     // from_witnessed_entries (issue #327)
-    // ------------------------------------------------------------------
 
     #[test]
     fn an_unknown_value_costs_that_value_and_nothing_else() {
@@ -1872,7 +1670,6 @@ mod tests {
         assert_eq!(s.is_list, Certainty::No);
         assert!(s.fields.iter().all(|(_, p, _)| *p == Presence::Required { witnessed: true }));
         assert!(s.admits(&arr(vec![(ks("p"), Val::Int(1)), (ks("q"), Val::Str("x".into()))])));
-        // The proven sibling keeps its exact value; a different one is refused.
         assert!(!s.admits(&arr(vec![(ks("p"), Val::Int(2)), (ks("q"), Val::Str("x".into()))])));
     }
 
@@ -1881,8 +1678,6 @@ mod tests {
         let s = ShapeFact::from_witnessed_entries(&[(ks("k"), None)]);
         assert_eq!(s.field(&ks("k")).map(|(_, p, _)| *p), Some(Presence::Required { witnessed: true }));
         assert_eq!(s.field(&ks("k")).and_then(|(_, _, v)| v.clone()), None);
-        // Unknown admits anything at that key — but the key itself is proven
-        // present, which is what `array_key_exists` and `count` read.
         assert!(s.admits(&arr(vec![(ks("k"), Val::Int(1))])));
         assert!(s.admits(&arr(vec![(ks("k"), Val::Null)])));
         assert!(!s.admits(&[]));
@@ -1894,9 +1689,7 @@ mod tests {
         let listy = ShapeFact::from_witnessed_entries(&[(k(0), None), (k(1), None)]);
         assert_eq!(listy.is_list, Certainty::Yes);
         assert_eq!(listy.witnessed_order(), Some([k(0), k(1)].as_slice()));
-        // The same key SET, built in the other order, is not a list — and the
-        // canonically sorted fields cannot tell the two apart, so this is the
-        // case that would go wrong without the witness.
+        // Same key set, reverse order — not a list; sorted `fields` can't tell these apart.
         let backwards = ShapeFact::from_witnessed_entries(&[(k(1), None), (k(0), None)]);
         assert_eq!(backwards.is_list, Certainty::No);
         assert_eq!(backwards.witnessed_order(), Some([k(1), k(0)].as_slice()));
@@ -1912,7 +1705,6 @@ mod tests {
         assert!(matches!(s.tail, Tail::Unsealed { key: KeyClass::Int, .. }));
         assert_eq!(s.is_list, Certainty::Yes);
         assert!(s.non_empty);
-        // No fields to sequence, so no witness either.
         assert_eq!(s.order, None);
     }
 
@@ -1944,15 +1736,11 @@ mod tests {
         assert_eq!(ShapeFact::from_witnessed_entries(&slots), ShapeFact::lift(&entries));
     }
 
-    // ------------------------------------------------------------------
     // the order witness (issue #327)
-    // ------------------------------------------------------------------
 
     #[test]
     fn lift_records_the_order_it_saw_not_the_canonical_one() {
-        // `['b' => 1, 'a' => 2]`: the witnessed order is the REVERSE of the
-        // canonical key order the fields are sorted into, which is the whole
-        // reason the witness has to exist separately from `fields`.
+        // Order is the REVERSE of canonical sort — why the witness exists apart from `fields`.
         let s = ShapeFact::lift(&arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]));
         assert_eq!(s.fields.iter().map(|(k, _, _)| k.clone()).collect::<Vec<_>>(), vec![ks("a"), ks("b")]);
         assert_eq!(s.witnessed_order(), Some([ks("b"), ks("a")].as_slice()));
@@ -1960,8 +1748,7 @@ mod tests {
 
     #[test]
     fn a_shape_that_witnessed_nothing_has_no_order() {
-        // The declared lane: `array{b: int, a: int}` carries field order that
-        // means nothing about runtime order (phpstan/phpstan#14940).
+        // Declared order means nothing about runtime order (phpstan/phpstan#14940).
         let s = sealed(vec![
             (ks("b"), Presence::Required { witnessed: false }, int_slot(1)),
             (ks("a"), Presence::Required { witnessed: false }, int_slot(2)),
@@ -1974,25 +1761,21 @@ mod tests {
     fn every_derived_shape_loses_the_witness() {
         let a = ShapeFact::lift(&arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]));
         let b = ShapeFact::lift(&arr(vec![(ks("a"), Val::Int(2)), (ks("b"), Val::Int(1))]));
-        // Two witnesses that disagree cannot both survive, so neither does.
+        // Every rebuild drops the witness, agreeing or not.
         assert_eq!(a.join(&b).order, None);
-        // …and it is not the disagreement that drops it: every rebuild does.
         assert_eq!(a.join(&a).order, None);
         assert_eq!(a.set_non_empty().order, None);
         assert_eq!(a.mark_absent(&ks("a")).order, None);
         assert_eq!(a.promote_present(&ks("a"), false, true).order, None);
         assert_eq!(a.set_is_list(Certainty::No).order, None);
-        // The one construction that bypasses `normalize_counted` drops it by
-        // hand, because the write it models can append an unmentioned key.
+        // Bypasses `normalize_counted` by hand — models a write that can append a key.
         assert_eq!(a.relax_count_ceiling().order, None);
     }
 
     #[test]
     fn an_inconsistent_witness_is_refused_rather_than_stored() {
         let s = sealed(vec![(ks("a"), Presence::Required { witnessed: true }, int_slot(1))]);
-        // A key the shape does not have.
         assert_eq!(s.clone().with_order(vec![ks("zzz")]).order, None);
-        // The right keys, the wrong count.
         assert_eq!(s.clone().with_order(vec![ks("a"), ks("a")]).order, None);
         assert_eq!(s.clone().with_order(Vec::new()).order, None);
         // An unsealed tail has keys outside any sequence, so there is none.
@@ -2004,14 +1787,12 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(open.with_order(vec![ks("a")]).order, None);
-        // The consistent claim is stored.
         assert_eq!(s.with_order(vec![ks("a")]).order, Some(vec![ks("a")]));
     }
 
     #[test]
     fn an_optional_field_has_no_single_sequence() {
-        // `list{int, 1?: string}` realizes as one entry or two, so the witness
-        // is kept but `witnessed_order` declines to hand out a sequence.
+        // `list{int, 1?: string}`: 1 or 2 entries — witness kept, `witnessed_order` declines.
         let s = ShapeFact::normalize(
             vec![
                 (k(0), Presence::Required { witnessed: true }, int_slot(1)),
@@ -2029,8 +1810,8 @@ mod tests {
 
     #[test]
     fn the_witness_is_extensionally_inert() {
-        // Two shapes differing only in the witness admit exactly the same
-        // values — the property that lets `admits` ignore it entirely.
+        // Two shapes differing only in the witness admit the same values —
+        // `admits` ignores it.
         let entries = arr(vec![(ks("b"), Val::Int(1)), (ks("a"), Val::Int(2))]);
         let witnessed = ShapeFact::lift(&entries);
         let mut bare = witnessed.clone();
@@ -2041,21 +1822,17 @@ mod tests {
         assert_eq!(witnessed.is_list, bare.is_list);
     }
 
-    // ------------------------------------------------------------------
     // join
-    // ------------------------------------------------------------------
 
     #[test]
     fn join_sealed_disjoint_keys_absorbs_into_optionality() {
-        // A-G5's worked example: Sealed{a} ⊔ Sealed{b} = {a?, b?} + Sealed.
         let a = ShapeFact::lift(&arr(vec![(ks("a"), Val::Int(1))]));
         let b = ShapeFact::lift(&arr(vec![(ks("b"), Val::Int(2))]));
         let j = a.join(&b);
         assert_eq!(j.tail, Tail::Sealed);
         assert_eq!(j.field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Optional));
         assert_eq!(j.field(&ks("b")).map(|(_, p, _)| *p), Some(Presence::Optional));
-        // Neither key is required any more, but both operands were non-empty,
-        // so the join still knows at least one of them is there.
+        // Neither key required now, but both were non-empty — join still knows one is there.
         assert!(j.non_empty);
         assert!(!j.admits(&[]));
         assert!(j.admits(&arr(vec![(ks("a"), Val::Int(1))])));
@@ -2090,7 +1867,6 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(a.join(&b).field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Optional));
-        // Both sides proving absence keeps it proven.
         assert_eq!(a.join(&a).field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Absent));
     }
 
@@ -2185,7 +1961,6 @@ mod tests {
         assert_eq!(with.join(&with).covers, vec![cover.clone()]);
         assert!(with.join(&without).covers.is_empty());
 
-        // A Required member implies the cover, so the join keeps it.
         let required_a = sealed(vec![(ks("a"), req(), int_slot(1))]);
         assert!(required_a.implies_cover(&cover));
         assert_eq!(with.join(&required_a).covers, vec![cover]);
@@ -2215,9 +1990,7 @@ mod tests {
         assert!(j.admits(&b), "join lost the right operand");
     }
 
-    // ------------------------------------------------------------------
     // Narrowing operators (S4)
-    // ------------------------------------------------------------------
 
     fn unsealed(fields: Vec<Field>, key: KeyClass, value: Option<Box<Fact>>) -> ShapeFact {
         ShapeFact::normalize(
@@ -2259,10 +2032,9 @@ mod tests {
 
     #[test]
     fn promote_present_carries_the_guards_own_presence_stratum() {
-        // ADR-0058's table in the presence bit: a runtime guard witnesses the key,
-        // a docblock-only claim (`@phpstan-assert true $cond` on a userland helper,
-        // the tag lane) promotes at the declared stratum. Neither changes what the
-        // fact admits — the bit is provenance (§3).
+        // ADR-0058: a runtime guard witnesses the key; a docblock-only claim
+        // (e.g. a userland `@phpstan-assert` helper) promotes at the
+        // declared stratum — provenance only (§3).
         let s = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))]);
         let declared = s.promote_present(&ks("a"), true, false);
         assert_eq!(
@@ -2276,7 +2048,6 @@ mod tests {
         );
         let v = arr(vec![(ks("a"), Val::Int(1))]);
         assert_eq!(declared.admits(&v), witnessed.admits(&v), "the bit never extends the fact");
-        // A declared promotion never un-witnesses an already-observed key.
         assert_eq!(
             witnessed.promote_present(&ks("a"), true, false).field(&ks("a")).map(|(_, p, _)| *p),
             Some(Presence::Required { witnessed: true })
@@ -2285,8 +2056,7 @@ mod tests {
 
     #[test]
     fn promote_present_of_an_exactly_null_slot_degrades_to_unknown() {
-        // No non-null value inhabits the slot, so `isset` is impossible; the
-        // domain has no bottom, and unknown is the widening side.
+        // `isset` is impossible (no non-null value); unknown is the widening side.
         let s = sealed(vec![(ks("a"), Presence::Optional, slot(Fact::Singleton(Val::Null)))]);
         assert_eq!(s.promote_present(&ks("a"), true, true).field(&ks("a")).and_then(|(_, _, v)| v.clone()), None);
     }
@@ -2314,7 +2084,6 @@ mod tests {
     fn promote_present_is_a_no_op_where_the_key_cannot_exist() {
         let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
         assert_eq!(s.promote_present(&ks("zz"), true, true), s);
-        // …and where the tail's key class rejects it.
         let t = unsealed(Vec::new(), KeyClass::Int, None);
         assert_eq!(t.promote_present(&ks("a"), true, true), t);
     }
@@ -2331,7 +2100,6 @@ mod tests {
 
     #[test]
     fn promote_present_keeps_a_declared_list_flag() {
-        // `list<string>`: typed int tail + isList Yes (A-G1).
         let l = ShapeFact::normalize(
             Vec::new(),
             Tail::Unsealed {
@@ -2354,8 +2122,7 @@ mod tests {
         let n = s.mark_absent(&ks("a"));
         assert!(n.field(&ks("a")).is_none(), "sealed already proves the absence");
         assert!(!n.admits(&arr(vec![(ks("a"), Val::Str("x".into()))])));
-        // `unset($x['a'])` on `['a' => 'x']` leaves `[]`, which is a list — the
-        // receiver's `is_list = No` must not survive the removal.
+        // `unset` on `['a' => 'x']` leaves `[]`, a list; `is_list = No` must not survive it.
         assert_eq!(s.is_list, Certainty::No);
         assert_eq!(n.is_list, Certainty::Maybe);
         assert!(n.admits(&[]));
@@ -2375,7 +2142,6 @@ mod tests {
         let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
         assert!(s.non_empty);
         assert!(!s.mark_absent(&ks("a")).non_empty);
-        // A surviving required field re-derives the flag.
         let two = sealed(vec![(ks("a"), req(), int_slot(1)), (ks("b"), req(), int_slot(2))]);
         assert!(two.mark_absent(&ks("a")).non_empty);
     }
@@ -2421,8 +2187,7 @@ mod tests {
         let n = s.set_non_empty();
         assert!(n.non_empty);
         assert!(!n.admits(&[]));
-        // The sealed one-optional shape is now exactly one entry (the fixture
-        // behind `if ($t) { count($t) }` → `1`).
+        // Now exactly one entry (`if ($t) { count($t) }` → `1`).
         assert_eq!(n.count_range(), IntRange::point(1));
     }
 
@@ -2438,8 +2203,7 @@ mod tests {
 
     #[test]
     fn set_is_list_flips_the_flag_both_ways() {
-        // `array<int, string>` — the computed verdict is Maybe, so the flag
-        // decides.
+        // `array<int, string>`: computed verdict is Maybe, so the flag decides.
         let s = unsealed(
             Vec::new(),
             KeyClass::Int,
@@ -2455,8 +2219,7 @@ mod tests {
 
     #[test]
     fn set_is_list_never_contradicts_the_computed_verdict() {
-        // A required string key can never be a list; the flag loses, soundly —
-        // the true branch's meet is empty.
+        // Required string key can never be a list; flag loses soundly — meet is empty.
         let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
         assert_eq!(s.set_is_list(Certainty::Yes).is_list, Certainty::No);
     }
@@ -2543,10 +2306,8 @@ mod tests {
         }
     }
 
-    /// `mark_absent`'s **second** law, the one `unset($x[k])` needs: the result
-    /// admits `v \ {k}` for every `v` the receiver admits — a set the receiver
-    /// itself generally does not admit, which is why `is_list` and `non_empty`
-    /// are re-derived there and carried everywhere else.
+    /// `mark_absent`'s second law (`unset($x[k])`): admits `v \ {k}` for every
+    /// receiver-admitted `v` — why `is_list`/`non_empty` are re-derived, not carried.
     #[test]
     fn mark_absent_admits_every_receiver_member_minus_the_key() {
         for s in &operator_shape_universe() {
@@ -2566,9 +2327,7 @@ mod tests {
         }
     }
 
-    // ------------------------------------------------------------------
     // record_cover / cover_proves (A-G8 recording, A-G11 discharge) — S5
-    // ------------------------------------------------------------------
 
     #[test]
     fn record_cover_stores_a_two_key_disjunction() {
@@ -2578,13 +2337,11 @@ mod tests {
         ])
         .record_cover(vec![ks("b"), ks("a")], CoverFlavor::Isset);
         assert_eq!(s.covers, vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)]);
-        // The claim implies it: at least one key is present, so no admitted
-        // array is empty.
+        // Claim implies it: at least one key present, so no admitted array is empty.
         assert!(s.non_empty);
     }
 
-    /// The S2 invariant, reached through the S5 constructor: a singleton input is
-    /// presence, not a disjunction.
+    /// The S2 invariant via the S5 constructor: a singleton is presence, not a disjunction.
     #[test]
     fn record_cover_promotes_a_singleton_instead_of_storing_it() {
         let s = sealed(vec![(ks("a"), Presence::Optional, int_slot(1))])
@@ -2596,8 +2353,8 @@ mod tests {
         );
     }
 
-    /// Recording composes with S4: a cover one of whose keys a guard already
-    /// promoted normalizes away rather than being carried as a weaker twin.
+    /// Recording composes with S4: a cover whose key a guard already promoted
+    /// normalizes away rather than being carried as a weaker twin.
     #[test]
     fn record_cover_normalizes_away_against_an_already_required_key() {
         let s = sealed(vec![
@@ -2660,14 +2417,12 @@ mod tests {
         ]);
         let exists = base.record_cover(vec![ks("a"), ks("b")], CoverFlavor::KeyExists);
         assert_eq!(exists.cover_proves(&ks("b"), &[ks("a")]), Some(CoverFlavor::KeyExists));
-        // Both claims present: the stronger one is reported, and the antichain has
-        // already dropped the weaker twin.
+        // Both claims present: stronger reported; antichain already dropped the weaker.
         let both = exists.record_cover(vec![ks("a"), ks("b")], CoverFlavor::Isset);
         assert_eq!(both.cover_proves(&ks("b"), &[ks("a")]), Some(CoverFlavor::Isset));
     }
 
-    /// The S5 recording law, checked over the operator vectors: an array that
-    /// satisfies the disjunction survives the recording.
+    /// The S5 recording law: an array satisfying the disjunction survives the recording.
     #[test]
     fn record_cover_admits_every_member_satisfying_the_disjunction() {
         let pair: Vec<Key> = OPERATOR_KEYS.iter().map(|s| ks(s)).collect();
@@ -2695,10 +2450,8 @@ mod tests {
         }
     }
 
-    /// The discharge law A-G11 rests on, checked over the operator vectors: when
-    /// `cover_proves` answers, the key really is present in every admitted array
-    /// whose `absent` members are absent-or-null (`Isset`) / absent
-    /// (`KeyExists`).
+    /// The discharge law A-G11 rests on: `cover_proves` answering means the key is
+    /// present whenever `absent` members are absent-or-null (Isset) / absent (KeyExists).
     #[test]
     fn cover_proves_only_when_the_key_is_really_present() {
         let pair: Vec<Key> = OPERATOR_KEYS.iter().map(|s| ks(s)).collect();
@@ -2714,9 +2467,9 @@ mod tests {
                     let Some(got) = covered.cover_proves(&ks("b"), &[ks("a")]) else {
                         continue;
                     };
-                    // The premise: the `??` arms to the left fell through, which
-                    // for `isset` means absent-or-null and for `array_key_exists`
-                    // (given the caller's non-nullable-slot check) means absent.
+                    // Premise: left `??` arms fell through — absent-or-null for
+                    // `isset`, absent for `array_key_exists` (given the
+                    // caller's non-nullable check).
                     let fell_through = match got {
                         CoverFlavor::Isset => entry(&ks("a")).is_none_or(|val| *val == Val::Null),
                         CoverFlavor::KeyExists => entry(&ks("a")).is_none(),

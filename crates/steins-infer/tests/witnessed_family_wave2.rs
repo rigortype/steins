@@ -4,30 +4,23 @@
 //! Wave 1 took the four restructuring projections. This takes the names that
 //! qualify under the same test — *restructures the argument, reads no value
 //! semantics beyond key normalization* — and were still answering the key-set
-//! widening:
+//! widening: position readers (`array_key_first`/`array_key_last`/`array_first`/
+//! `array_last`), `array_slice` over a witnessed shape (previously needed every
+//! value proven though it reads none), `array_fill_keys`/`array_combine` (keys
+//! come from values through a measured cast), and `array_diff_key`/
+//! `array_intersect_key` (pure key-set work).
 //!
-//! * **position readers** `array_key_first` / `array_key_last` / `array_first` /
-//!   `array_last`, exact once first really is first;
-//! * **`array_slice`** over a witnessed shape, where the exact slice previously
-//!   needed every value proven even though it reads none of them;
-//! * **`array_fill_keys` / `array_combine`**, whose keys come from values
-//!   through a cast measured here rather than assumed;
-//! * **`array_diff_key` / `array_intersect_key`**, pure key-set work.
-//!
-//! Two disciplines are pinned throughout, as in wave 1:
-//!
-//! * **The declared lane does not move.** A shape with no order witness is a key
-//!   set, and every position reader over one keeps its `'a'|'b'` answer — that
-//!   is phpstan/phpstan#14940's FP class, declined by ADR-0062 §7.
+//! Two disciplines pinned throughout, as in wave 1:
+//! * **The declared lane does not move.** A shape with no order witness is a
+//!   key set, and every position reader over one keeps its `'a'|'b'` answer —
+//!   phpstan/phpstan#14940's FP class, declined by ADR-0062 §7.
 //! * **The pointer family stays out.** `key`/`current`/`reset`/`end` read the
-//!   internal array pointer, which Steins does not model. The existing arm
-//!   tolerates that only because a shape-derived fact never premises a
-//!   proof-layer finding; a witnessed literal is `Verified`, so an exact answer
-//!   would carry the pointer assumption into a proof.
+//!   unmodeled internal array pointer; the existing arm tolerates that only
+//!   because a shape-derived fact never premises a proof-layer finding, while a
+//!   witnessed literal is `Verified` and would carry the assumption into a proof.
 //!
-//! Every expectation below was probed at PHP 8.5.9 and cross-checked against
-//! PHPStan 2.2.2. Several rows are *sharper* than that oracle, which is noted
-//! where it happens.
+//! Every expectation was probed at PHP 8.5.9 and cross-checked against PHPStan
+//! 2.2.2; rows *sharper* than that oracle are noted where it happens.
 //!
 //! NB: a variable handed to a call is invalidated after that statement
 //! (pre-existing by-ref conservatism), so each fixture uses its parameters once.
@@ -38,8 +31,8 @@ use steins_domain::Fact;
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// A mock sidecar declaring what each admission gate reads: the reflected return
-/// type per name, plus the read-position family's arity second leg.
+/// A mock sidecar: the reflected return type per name, plus the read-position
+/// family's arity second leg.
 #[derive(Default)]
 struct Mock {
     types: HashMap<String, String>,
@@ -67,8 +60,7 @@ impl Mock {
         for f in ["array_first", "array_last"] {
             types.insert(f.to_owned(), "mixed".to_owned());
         }
-        // `key` is declared so the pointer-family test below exercises the
-        // *widening* rather than falling through to the declared-return floor.
+        // `key` declared so its test exercises the *widening*, not the floor.
         types.insert("key".to_owned(), "string|int|null".to_owned());
         Mock { types }
     }
@@ -87,8 +79,8 @@ impl Folder for Mock {
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
         self.types.get(&name.to_ascii_lowercase()).cloned()
     }
-    /// Measured at `PINNED_PHP`: the read-position family takes one required
-    /// parameter, `array_slice` takes four with two required.
+    /// Measured at `PINNED_PHP`: read-position takes 1 required param;
+    /// `array_slice` takes 4 with 2 required.
     fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
         let n = name.to_ascii_lowercase();
         if n == "array_slice" {
@@ -123,37 +115,32 @@ fn declared(decl: &str, expr: &str) -> String {
     ))
 }
 
-// ---- Position readers ------------------------------------------------------
+// Position readers
 
+/// Exact once the position is witnessed. **Sharper than PHPStan 2.2.2**, which
+/// answers `'a'|'b'` and `int` here — it holds a constant array but does not
+/// consume its order for these names.
 #[test]
 fn the_position_readers_are_exact_on_a_witnessed_order() {
-    // Probed: `array_key_first(['b' => 1, 'a' => 2]) === 'b'`,
-    // `array_key_last(…) === 'a'`, `array_first(…) === 1`, `array_last(…) === 2`.
-    // **Sharper than PHPStan 2.2.2**, which answers `'a'|'b'` and `int` here —
-    // it holds a constant array but does not consume its order for these.
     assert_eq!(dump("array_key_first(['b' => 1, 'a' => $x])"), "dumped type: 'b'");
     assert_eq!(dump("array_key_last(['b' => 1, 'a' => $x])"), "dumped type: 'a'");
     assert_eq!(dump("array_first(['b' => 1, 'a' => $x])"), "dumped type: 1");
     assert_eq!(dump("array_last(['b' => 1, 'a' => $x])"), "dumped type: int");
 }
 
+/// An empty witnessed sequence is exactly the proof the array is empty.
 #[test]
 fn the_empty_array_answers_null() {
-    // Probed: all four answer `null` on `[]`, and an empty witnessed sequence is
-    // exactly the proof that the array is empty.
     for f in ["array_key_first", "array_key_last", "array_first", "array_last"] {
         assert_eq!(dump(&format!("{f}([])")), "dumped type: null", "{f} on []");
     }
 }
 
+/// `array_first` declines rather than claiming `mixed` when nothing proved the
+/// slot (this mock has no catalog floor, so the decline surfaces as `unknown`;
+/// a real run shows ADR-0069's floor instead — either way the *rule* said nothing).
 #[test]
 fn a_value_reader_declines_on_an_unknown_slot() {
-    // `array_first` answers the slot's own fact at whatever layer it was proven.
-    // Nothing proved this one, so there is no answer to give and the rule
-    // declines — honest silence rather than a claim of `mixed`. (This mock
-    // carries no catalog floor, so the decline surfaces as `unknown`; a real run
-    // shows ADR-0069's floor for the name instead. Either way the *rule* said
-    // nothing, which is what this pins.)
     assert_eq!(
         dump("array_first([strlen($s) > 2 ? [] : new \\stdClass(), 'z'])"),
         "dumped type: unknown"
@@ -165,11 +152,11 @@ fn a_value_reader_declines_on_an_unknown_slot() {
     );
 }
 
+/// **The negative pin.** ADR-0062 §2 at its sharpest: PHPStan answers `'a'` for
+/// `array_key_first(array{a: int, b: int})` and is wrong on `['b' => 2, 'a' => 1]`,
+/// which the declaration admits just as well.
 #[test]
 fn a_declared_shape_still_answers_some_key_of_the_set() {
-    // **The negative pin.** ADR-0062 §2 at its sharpest: PHPStan answers `'a'`
-    // for `array_key_first(array{a: int, b: int})` and is wrong on
-    // `['b' => 2, 'a' => 1]`, which the declaration admits just as well.
     assert_eq!(
         declared("array{a: int, b: int}", "array_key_first($v)"),
         "dumped type: 'a'|'b' (asserted)"
@@ -185,11 +172,10 @@ fn a_declared_shape_still_answers_some_key_of_the_set() {
     );
 }
 
+/// `key`/`current`/`reset`/`end` stay deliberately outside the witnessed rung
+/// (see module header: unmodeled pointer, unsound at `Verified`).
 #[test]
 fn the_pointer_family_keeps_its_widening() {
-    // `key`/`current`/`reset`/`end` read the internal pointer, which is not
-    // modeled. They are deliberately outside the witnessed rung — see the module
-    // header for why an exact answer here would be unsound at `Verified`.
     assert_eq!(dump("key(['b' => 1, 'a' => 2])"), "dumped type: 'a'|'b'");
     assert_eq!(
         declared("array{a: int, b: int}", "key($v)"),
@@ -197,100 +183,82 @@ fn the_pointer_family_keeps_its_widening() {
     );
 }
 
-// ---- array_slice over a witnessed shape ------------------------------------
+// array_slice over a witnessed shape
 
+/// `array_slice` reads offsets and keys and never a value, so an unproven slot
+/// can travel through it unread.
 #[test]
 fn the_exact_slice_no_longer_needs_every_value_proven() {
-    // `array_slice` reads offsets and keys and never a value, so the slots can
-    // travel through it unread. Probed: `array_slice(['x', 'y', 'z'], 1)`
-    // renumbers from zero.
     assert_eq!(dump("array_slice(['x', $s, 'z'], 1)"), "dumped type: list{string, 'z'}");
-    // The key rule, verbatim from the probe:
-    // `array_slice(['a' => 1, 5 => 2, 'b' => 3, 9 => 4], 1)
-    //    === [0 => 2, 'b' => 3, 1 => 4]` — string keys survive, integer keys are
-    // renumbered `0..` in the surviving order.
+    // Key rule: string keys survive, integer keys renumber `0..` in the surviving order.
     assert_eq!(
         dump("array_slice(['a' => 1, 5 => 2, 'b' => $x, 9 => 4], 1)"),
         "dumped type: array{0: 2, b: int, 1: 4}"
     );
 }
 
+/// The fully-proven path is untouched, and the two rules agree wherever both apply.
 #[test]
 fn the_value_only_slice_still_answers_what_it_did() {
-    // The fully-proven path is untouched, and the two agree wherever both apply.
     assert_eq!(dump("array_slice(['a', 'b', 'c'], 1)"), "dumped type: list{'b', 'c'}");
     assert_eq!(dump("array_slice(['a', 'b', 'c'], -1)"), "dumped type: list{'c'}");
     assert_eq!(dump("array_slice(['a', 'b', 'c'], 1, 1)"), "dumped type: list{'b'}");
 }
 
+/// The offset is not a proven int, so there is no window to take — the
+/// shape-level widening answers instead of a guess.
 #[test]
 fn an_unproven_window_falls_to_the_widening() {
-    // The offset is not a proven int, so there is no window to take — the
-    // shape-level widening answers instead of a guess.
     assert_eq!(dump("array_slice(['x', $s, 'z'], $x)"), "dumped type: list<string>");
 }
 
-// ---- array_fill_keys / array_combine ---------------------------------------
+// array_fill_keys / array_combine
 
+/// Numeric strings normalize to the integer key (`'01'` is not numeric-canonical
+/// and stays a string key); duplicates collapse; the filled value travels at
+/// whatever layer it was proven.
 #[test]
 fn values_become_keys_through_the_measured_cast() {
-    // Probed: `array_fill_keys(['a', 'b'], 1) === ['a' => 1, 'b' => 1]`.
     assert_eq!(dump("array_fill_keys(['a', 'b'], 1)"), "dumped type: array{a: 1, b: 1}");
-    // Probed: `array_fill_keys(['1', 2], 'v') === [1 => 'v', 2 => 'v']` — a
-    // numeric string normalizes to the integer key.
     assert_eq!(dump("array_fill_keys(['1', 2], 'v')"), "dumped type: array{1: 'v', 2: 'v'}");
-    // …but `'01'` is not numeric-canonical and stays a string key.
     assert_eq!(dump("array_fill_keys(['01'], 'v')"), "dumped type: array{'01': 'v'}");
-    // Probed: `array_fill_keys(['a', 'a'], 1) === ['a' => 1]` — one entry.
     assert_eq!(dump("array_fill_keys(['a', 'a'], 1)"), "dumped type: array{a: 1}");
-    // The filled value travels at whatever layer it was proven.
     assert_eq!(dump("array_fill_keys(['a'], $x)"), "dumped type: array{a: int}");
-    // Probed: `array_fill_keys([true, null], 'v') === [1 => 'v', '' => 'v']`.
     assert_eq!(dump("array_fill_keys([true, null], 'v')"), "dumped type: array{1: 'v', '': 'v'}");
 }
 
+/// The KEY declines (not the value): PHP renders a float to string under the
+/// `precision` ini directive, so `array_fill_keys([1.5], 'v')`'s key depends on
+/// runtime configuration (same reason `concat_cast` excludes floats — unlike
+/// `$a[1.5]`'s int cast or `array_flip`'s skip). Issue #336 piece 2: the shape
+/// lane still answers non-empty and filled with `'v'`; only the key goes unnamed.
 #[test]
 fn a_float_key_declines_because_its_spelling_is_a_setting() {
-    // Probed: `array_fill_keys([1.5], 'v') === ['1.5' => 'v']` — the float is
-    // *string*-cast here, unlike `$a[1.5]` (int 1) and unlike `array_flip`
-    // (skipped). What is declined is the KEY: PHP renders a float to string
-    // under the `precision` ini directive, so the key of
-    // `array_fill_keys([0.1 + 0.2], 'v')` depends on the runtime's
-    // configuration — the same reason `concat_cast` excludes floats.
-    //
-    // The exact rung therefore declines and the shape lane answers what it can
-    // (issue #336 piece 2): the entry count and the VALUE are not in doubt, so
-    // the array is non-empty and filled with `'v'`. Only the key goes unnamed.
     assert_eq!(dump("array_fill_keys([1.5], 'v')"), "dumped type: non-empty-array<'v'>");
 }
 
 #[test]
 fn combine_zips_positionally_and_resolves_duplicates_last_wins() {
-    // Probed: `array_combine(['a', 'b'], [1, 2]) === ['a' => 1, 'b' => 2]`.
     assert_eq!(dump("array_combine(['a', 'b'], [1, $x])"), "dumped type: array{a: 1, b: int}");
-    // Probed: `array_combine(['1', 'b'], [1, 2]) === [1 => 1, 'b' => 2]`.
     assert_eq!(dump("array_combine(['1', 'b'], [1, 2])"), "dumped type: array{1: 1, b: 2}");
-    // Probed: `array_combine(['a', 'a'], [1, 2]) === ['a' => 2]` — last wins.
     assert_eq!(dump("array_combine(['a', 'a'], [1, 2])"), "dumped type: array{a: 2}");
 }
 
+/// A length mismatch raises `ValueError` — no return value to state, so the
+/// rule declines rather than inventing one.
 #[test]
 fn a_length_mismatch_is_a_call_that_does_not_return() {
-    // Probed: `array_combine(['a'], [1, 2])` raises a `ValueError`. There is no
-    // return value to state, so the rule declines rather than inventing one.
     assert_eq!(
         dump("array_combine(['a'], [1, 2])"),
         "dumped type: associative-array<mixed> (asserted)"
     );
 }
 
-// ---- array_diff_key / array_intersect_key ----------------------------------
+// array_diff_key / array_intersect_key
 
+/// Order comes from the FIRST array, not the second and not the canonical one.
 #[test]
 fn the_key_set_operations_keep_the_first_arrays_order() {
-    // Probed: `array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])
-    //    === ['b' => 2, 'a' => 1]` — the order is the FIRST array's, not the
-    // second's and not the canonical one.
     assert_eq!(
         dump("array_intersect_key(['b' => 2, 'a' => 1], ['a' => 9, 'b' => 8])"),
         "dumped type: array{b: 2, a: 1}"
@@ -301,11 +269,10 @@ fn the_key_set_operations_keep_the_first_arrays_order() {
     );
 }
 
+/// `'5'` and `5` are one key, so the `5` entry is removed. **Sharper than
+/// PHPStan 2.2.2**, which answers `array<5|'5x', 1|2>` here.
 #[test]
 fn key_identity_is_the_normalized_key() {
-    // Probed: `array_diff_key([5 => 1, '5x' => 2], ['5' => 9]) === ['5x' => 2]`
-    // — `'5'` and `5` are one key, so the `5` entry is removed. **Sharper than
-    // PHPStan 2.2.2**, which answers `array<5|'5x', 1|2>` here.
     assert_eq!(dump("array_diff_key([5 => 1, '5x' => 2], ['5' => 9])"), "dumped type: array{'5x': 2}");
 }
 
@@ -317,39 +284,38 @@ fn values_are_never_read_so_unknown_slots_cost_nothing() {
     );
 }
 
+/// A set has no order, so reading a *declaration's* key set is not the §7
+/// declined import — only its key ORDER is declined. Result order still comes
+/// from the first (witnessed) array.
 #[test]
 fn a_declared_second_argument_contributes_its_key_set() {
-    // A set has no order, so reading a *declaration's* key set is not the §7
-    // declined import — what is declined is reading its key ORDER. The result's
-    // order still comes from the first (witnessed) array.
     let src = "<?php\n/** @param array{a: int, b: int} $v */\n\
                function f(array $v): void { \\PHPStan\\dumpType(array_intersect_key(['a' => 1, 'b' => 2], $v)); }\n";
     assert_eq!(one_type(src), "dumped type: array{a: 1, b: 2} (asserted)");
 }
 
+/// Neither an OPTIONAL key nor an unsealed tail decides the set.
 #[test]
 fn an_uncertain_key_set_declines() {
-    // An OPTIONAL key decides neither the difference nor the intersection…
     let optional = "<?php\n/** @param array{a: int, b?: int} $v */\n\
                     function f(array $v): void { \\PHPStan\\dumpType(array_intersect_key(['a' => 1, 'b' => 2], $v)); }\n";
     assert_eq!(one_type(optional), "dumped type: array (asserted)");
-    // …and neither does an unsealed tail, whose undeclared keys could be anything.
     let unsealed = "<?php\n/** @param array<string, int> $v */\n\
                     function f(array $v): void { \\PHPStan\\dumpType(array_diff_key(['a' => 1], $v)); }\n";
     assert_eq!(one_type(unsealed), "dumped type: array (asserted)");
 }
 
+/// Unlike the key-set pair, `array_combine` zips POSITIONALLY, so its second
+/// argument needs a realizable order, which a declaration has none of (§7
+/// declined import applied to the sibling argument).
 #[test]
 fn combine_will_not_read_a_declared_shape_positionally() {
-    // Unlike the key-set pair, `array_combine` zips POSITIONALLY, so its second
-    // argument needs a realizable order and a declaration has none. This is the
-    // §7 declined import applied to the sibling argument.
     let src = "<?php\n/** @param array{a: int, b: int} $v */\n\
                function f(array $v): void { \\PHPStan\\dumpType(array_combine(['x', 'y'], $v)); }\n";
     assert_eq!(one_type(src), "dumped type: associative-array<mixed> (asserted)");
 }
 
-// ---- The gate --------------------------------------------------------------
+// The gate
 
 #[test]
 fn a_silent_engine_withholds_every_name_in_the_wave() {
@@ -382,35 +348,33 @@ fn a_silent_engine_withholds_every_name_in_the_wave() {
     }
 }
 
-// ---- The abstract array-key cast (issue #336, first rung) -------------------
+// The abstract array-key cast (issue #336, first rung)
 
+/// The CAST decides the key class, not the value's base: a `decimal-int-string`
+/// is a string whose key is `int`, because PHP rewrites a string that spells an
+/// integer the way it writes one back — invisible to the old all-int test.
 #[test]
 fn a_flipped_decimal_int_string_is_keyed_by_int() {
-    // The CAST decides the key class, not the value's base. A
-    // `decimal-int-string` is a string whose base says "string" and whose key
-    // is an `int`, because PHP rewrites a string that spells an integer the way
-    // it writes one back. The old all-int test could not see this.
     assert_eq!(
         declared("list<decimal-int-string>", "array_flip($v)"),
         "dumped type: array<int, int> (asserted)"
     );
 }
 
+/// The complement: every string that keeps its identity as an array key.
 #[test]
 fn a_flipped_non_decimal_int_string_stays_string_keyed() {
-    // The complement: every string that keeps its identity as an array key.
     assert_eq!(
         declared("list<non-decimal-int-string>", "array_flip($v)"),
         "dumped type: array<string, int> (asserted)"
     );
 }
 
+/// `string` casts to `int | non-decimal-int-string` and `numeric-string` to
+/// `int | numeric-string&non-decimal-int-string` — two-base unions neither a
+/// `Fact` nor a `KeyClass` can hold, so the key falls to `array-key` knowingly.
 #[test]
 fn the_two_base_unions_take_the_array_key_floor() {
-    // A plain `string` casts to `int | non-decimal-int-string` and a
-    // `numeric-string` to `int | numeric-string&non-decimal-int-string`. Both
-    // are two-base unions, which neither a `Fact` nor a `KeyClass` can hold, so
-    // the key falls to `array-key` — knowingly, and not by omission.
     assert_eq!(declared("list<string>", "array_flip($v)"), "dumped type: array<int> (asserted)");
     assert_eq!(
         declared("list<numeric-string>", "array_flip($v)"),
@@ -433,22 +397,21 @@ fn a_witnessed_flip_reads_the_cast_too() {
     );
 }
 
+/// Exact where the abstract rung declines: each proven value has an exact key,
+/// so a mixed set is only `array-key` when the keys really differ in class.
 #[test]
 fn a_finite_value_set_casts_key_by_key() {
-    // Exact where the abstract rung declines: each proven value has an exact
-    // key, so a mixed set is only `array-key` when the keys really differ in
-    // class. Probed: `array_flip(['1', '2']) === [1 => 0, 2 => 1]` (both cast).
     assert_eq!(dump("array_flip(['1', '2'])"), "dumped type: array{1: 0, 2: 1}");
     assert_eq!(dump("array_flip(['a', 'b'])"), "dumped type: array{a: 0, b: 1}");
 }
 
-// ---- array_fill_keys on the declared lane (#336 piece 2) -------------------
+// array_fill_keys on the declared lane (#336 piece 2)
 
+/// The witnessed lane computes entry by entry; here only the key CLASS is
+/// knowable, from the array-key CAST of the value union — which is what lets a
+/// `string`-based value key an `int` array.
 #[test]
 fn fill_keys_over_a_declared_subject_answers_the_key_class() {
-    // The witnessed lane computes this entry by entry; here only the key CLASS
-    // is knowable, and it comes from the array-key CAST of the value union —
-    // which is what lets a `string`-based value key an `int` array.
     assert_eq!(
         declared("list<decimal-int-string>", "array_fill_keys($v, null)"),
         "dumped type: array<int, null> (asserted)"
@@ -464,12 +427,11 @@ fn fill_keys_over_a_declared_subject_answers_the_key_class() {
     );
 }
 
+/// Every value becomes a key — none is skipped — so a non-empty subject fills a
+/// non-empty array; `array_flip` drops non-`int|string` values instead
+/// (`array_fill_keys` keeps even an array value, as string key `'Array'`).
 #[test]
 fn fill_keys_keeps_non_emptiness_where_flip_drops_it() {
-    // Every value becomes a key — none is skipped — so a non-empty subject
-    // fills a non-empty array. `array_flip` drops it because a value that is
-    // not `int|string` is skipped entirely; probed at 8.5.9, `array_fill_keys`
-    // keeps even an array value (as the string key `'Array'`, with a warning).
     assert_eq!(
         declared("non-empty-list<decimal-int-string>", "array_fill_keys($v, null)"),
         "dumped type: non-empty-array<int, null> (asserted)"

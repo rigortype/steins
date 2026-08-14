@@ -1,10 +1,9 @@
 //! The **process transport**: a resident `php` child speaking the wire format over
-//! NDJSON. Native-only (`cfg(not(target_arch = "wasm32"))`) — no wasm runtime can
-//! spawn a process, and gating the module rather than the crate keeps
-//! [`crate::wire`] available everywhere (ADR-0066).
-//!
-//! Every request/response shape here comes from [`crate::wire`]; this file owns
-//! only the framing, the timeout, and the poison-and-respawn discipline.
+//! NDJSON. Native-only (`cfg(not(target_arch = "wasm32"))`) since no wasm runtime
+//! can spawn a process; gating the module rather than the crate keeps
+//! [`crate::wire`] available everywhere (ADR-0066). Every request/response shape
+//! comes from [`crate::wire`]; this file owns only framing, timeout, and the
+//! poison-and-respawn discipline.
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
@@ -19,17 +18,14 @@ use crate::wire::{
     preg_compile_params, reflect_class_params, reflect_params,
 };
 
-/// The runner source, baked into the binary.
-///
-/// Passed to `php -r` as an argv element (see [`Channel::open`]) — nothing is
-/// ever written to disk, so there is no per-instance or per-process temp file
-/// to leak or to clean up.
+/// The runner source, baked into the binary. Passed to `php -r` as an argv
+/// element (see [`Channel::open`]) — never written to disk, so there is no
+/// per-instance or per-process temp file to leak or clean up.
 const RUNNER_SRC: &str = include_str!("../runner.php");
 
 /// [`RUNNER_SRC`] with its leading `<?php` tag line removed, ready for `-r`
-/// (which forbids the open tag — the code it runs is implicitly PHP already).
-/// Stripped by prefix rather than a hardcoded byte offset, so a change to the
-/// tag line (e.g. trailing whitespace) fails loudly here instead of silently
+/// (which forbids the open tag). Stripped by prefix rather than a hardcoded
+/// byte offset, so a tag-line change fails loudly here instead of silently
 /// mis-slicing the program.
 fn runner_code() -> &'static str {
     RUNNER_SRC.strip_prefix("<?php\n").expect(
@@ -45,13 +41,12 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// How many times one [`Sidecar`] will replace a dead child before giving up.
 ///
-/// The storm brake. A run that kills three children is being fed input that
-/// kills children, and each respawn costs a PHP startup. Past the cap the
-/// instance stays poisoned and every later request widens immediately.
+/// The storm brake: killing three children means the input itself kills
+/// children, and each respawn costs a PHP startup. Past the cap the instance
+/// stays poisoned and every later request widens immediately.
 ///
-/// Public so a run's **coverage report** can say which side of the brake it
-/// ended on (issue #245) — see [`Sidecar::respawns`]. It is a reporting input,
-/// never a request gate.
+/// Public so a run's coverage report can say which side of the brake it ended
+/// on (issue #245) — see [`Sidecar::respawns`]. A reporting input, never a gate.
 pub const RESPAWN_CAP: u32 = 3;
 
 /// One live child and the thread draining it — everything a respawn replaces.
@@ -70,31 +65,25 @@ impl Channel {
     /// Launch `php -r <code>` — the runner source passed as a single argv
     /// element, never touching disk — and start draining its stdout.
     ///
-    /// # Why argv, not a file, and not stdin
+    /// # Why argv, not a file or stdin
     ///
-    /// stdin is already spoken for: it *is* the NDJSON request stream this
-    /// `Channel` writes to below. `php < script.php` (or piping the source in)
-    /// would have PHP consume stdin to EOF as the program text before running
-    /// anything, which would eat the protocol stream instead of the source.
-    /// argv is the channel with no such conflict, and `runner.php` qualifies:
-    /// it uses none of `__FILE__`/`__DIR__`/`$argv` and has no closing `?>`,
-    /// so it means the same thing whether PHP reads it from a file or from
-    /// `-r`. At ~16 KB it sits far under both `ARG_MAX` (~1 MB on macOS) and
-    /// Linux's `MAX_ARG_STRLEN` (128 KB) — see `runner_size_stays_under_the_argv_limit`.
+    /// stdin is already the NDJSON request stream `Channel` writes to below;
+    /// `php < script.php` would consume it as program text first. argv has no
+    /// such conflict, and `runner.php` qualifies: no `__FILE__`/`__DIR__`/
+    /// `$argv`, no closing `?>`. At ~16 KB it sits far under `ARG_MAX` (~1 MB
+    /// macOS) and Linux's `MAX_ARG_STRLEN` (128 KB) — see
+    /// `runner_size_stays_under_the_argv_limit`.
     ///
-    /// Two trade-offs are accepted: the source is visible in `ps`/`/proc`
-    /// (it is not a secret — the same file ships readable in the binary), and
-    /// a PHP parse error would report against "Command line code" rather than
-    /// a filename (moot in practice: stderr is discarded below regardless).
+    /// Trade-offs: source is visible in `ps`/`/proc` (not a secret), and a
+    /// parse error reports against "Command line code" (moot: stderr discarded).
     fn open() -> std::io::Result<Self> {
         let mut child = Command::new("php")
             .arg("-r")
             .arg(runner_code())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            // Discard PHP's stderr: warnings/notices must never reach us, and we
-            // treat any real failure as a widen anyway. It is also where an
-            // uncatchable fatal prints its message before the process dies.
+            // Discard stderr: warnings must never reach us, real failures widen
+            // anyway; this is also where an uncatchable fatal prints before death.
             .stderr(Stdio::null())
             .spawn()?;
 
@@ -140,35 +129,28 @@ impl Channel {
 
 /// A resident PHP sidecar process plus its request loop.
 ///
-/// Spawned lazily by the caller (only when the first foldable call is actually
-/// encountered). Dropping it closes the child's stdin, so the runner's read loop
-/// ends and the process exits; [`Drop`] also kills and reaps the child.
+/// Spawned lazily, only when the first foldable call is encountered. Dropping
+/// it closes the child's stdin, ending the runner's read loop; [`Drop`] also
+/// kills and reaps the child.
 ///
 /// # Surviving a dead child
 ///
-/// Not every way a child can die is catchable in PHP. An allocation that exhausts
-/// `memory_limit` is a fatal, not a `Throwable`; so is a stack overflow or a
-/// segfault in an extension. `str_repeat('x', 2000000000)` is an ordinary literal
-/// call on the folding allowlist, and before the runner pinned `memory_limit` it
-/// could claim a gigabyte before dying. The runner cannot defend against this
-/// class from the inside, so the transport defends from the outside: it replaces
+/// Not every death is catchable in PHP: an allocation past `memory_limit`, a
+/// stack overflow, or an extension segfault are fatal, not `Throwable`.
+/// `str_repeat('x', 2000000000)` — an ordinary allowlisted call — could claim a
+/// gigabyte before the runner pinned `memory_limit`. The runner can't defend
+/// from the inside, so the transport defends from the outside: it replaces
 /// the child.
 ///
-/// The discipline is deliberately asymmetric.
+/// Asymmetric discipline: the request whose reply never arrived **still
+/// fails** (widens) and is never retried on the fresh child — it is the
+/// likely bomb, and retrying would re-arm the fatal. The *next* request
+/// revives the instance (`Sidecar::revive`), up to `RESPAWN_CAP` times, so one
+/// poisoned fold costs one answer, not the whole run.
 ///
-/// * The request whose reply never arrived **still fails**. It widens, exactly as
-///   before. It is never retried on the fresh child: that request is the likely
-///   bomb, and retrying it would re-arm the same fatal.
-/// * The *next* request revives the instance (`Sidecar::revive`), up to
-///   `RESPAWN_CAP` times per instance. So one poisoned fold costs one answer,
-///   not the whole run.
-///
-/// Nothing is replayed, because there is nothing to replay: the runner is a pure
-/// per-request dispatcher with no cross-request state — no session, no accumulated
-/// definitions, no cursor. A fresh child answers the next request identically to
-/// the one it replaced, which is what makes a respawn transparent rather than a
-/// resynchronization problem.
-///
+/// Nothing is replayed: the runner is a pure per-request dispatcher with no
+/// cross-request state, so a fresh child answers identically — a respawn is
+/// transparent, not a resynchronization problem.
 pub struct Sidecar {
     chan: Channel,
     next_id: u64,
@@ -192,12 +174,10 @@ impl Sidecar {
     }
 
     /// Make sure a live child is available, replacing a dead one if the cap
-    /// allows. `true` means a request may be sent; `false` means this instance is
-    /// finished and every caller must widen.
-    ///
-    /// Cheap on the healthy path (one bool), and the *only* place `poisoned` is
-    /// cleared. The counter charges attempts, not successes: a respawn that fails
-    /// to start `php` is exactly the situation the cap exists to bound.
+    /// allows. `true` means a request may be sent; `false` means every caller
+    /// must widen. The *only* place `poisoned` is cleared; charges attempts,
+    /// not successes — a respawn that fails to start `php` is what the cap
+    /// exists to bound.
     fn revive(&mut self) -> bool {
         if !self.poisoned {
             return true;
@@ -227,35 +207,27 @@ impl Sidecar {
     }
 
     /// Whether the child is dead **right now** — not whether this instance is
-    /// finished.
+    /// finished. `true` means a prior request killed the child; it says nothing
+    /// about the next request, which revives the instance if `RESPAWN_CAP`
+    /// allows ("a transport failure just happened", not "a value was widened").
     ///
-    /// `true` says a prior request failed and killed the child; it says nothing
-    /// about the next request, which will revive the instance if the
-    /// `RESPAWN_CAP` allows. The predicate means "a transport failure just
-    /// happened", not "a value was widened".
-    ///
-    /// The permanent state — cap exhausted, every later request widens — is
-    /// deliberately not exposed as a predicate: no caller has a use for it that
-    /// is not better served by simply making the request and widening on the
-    /// answer, and a "permanently dead" flag invites exactly the run-long
-    /// disabling this recovery exists to prevent.
+    /// The permanent state (cap exhausted, every later request widens) is
+    /// deliberately not a predicate: no caller needs it over simply requesting
+    /// and widening, and such a flag would invite the run-long disabling this
+    /// recovery exists to prevent.
     #[must_use]
     pub fn is_poisoned(&self) -> bool {
         self.poisoned
     }
 
-    /// Respawn attempts charged against [`RESPAWN_CAP`] so far — how many children
-    /// this instance has already buried (issue #245).
+    /// Respawn attempts charged against [`RESPAWN_CAP`] so far — how many
+    /// children this instance has already buried (issue #245).
     ///
-    /// **Reporting only.** It exists so a long run can state its coverage posture
-    /// in its own output — "the child died twice and was replaced twice" reads very
-    /// differently from "the budget is spent and every later request widens" — and
-    /// a reader who is comparing counts needs to know which one happened. It is
-    /// deliberately NOT the "permanently dead" predicate [`Self::is_poisoned`]'s
-    /// doc declines to offer: gating a request on `respawns() >= RESPAWN_CAP`
-    /// re-creates exactly the run-long disabling the respawn discipline exists to
-    /// prevent. Make the request and widen on the answer, as before; read this only
-    /// to describe what happened.
+    /// **Reporting only.** Lets a long run state its coverage posture — "died
+    /// twice, replaced twice" reads differently from "budget spent". Not the
+    /// "permanently dead" predicate [`Self::is_poisoned`] declines to offer:
+    /// gating a request on `respawns() >= RESPAWN_CAP` would re-create the
+    /// run-long disabling this discipline exists to prevent.
     #[must_use]
     pub fn respawns(&self) -> u32 {
         self.respawns
@@ -271,9 +243,9 @@ impl Sidecar {
     /// Ask the project's own PHP whether `target` exists among builtins and loaded
     /// extensions (ADR-0024 surface / ADR-0049 §1 oracle (b)). A definitive
     /// *not-found* is `Some(Reflection)` with `exists() == false`; any sidecar
-    /// failure (poison, timeout, malformed/`widen` reply) is `None` — "unknown",
-    /// never a wrong not-found (the zero-FP contract). Older runners without the
-    /// `reflect` method reply `widen`, which maps to `None` as well.
+    /// failure (poison, timeout, malformed/`widen` reply, or an old runner
+    /// without this method) is `None` — "unknown", never a wrong not-found (the
+    /// zero-FP contract).
     pub fn reflect(&mut self, target: &str) -> Option<Reflection> {
         if !self.revive() {
             return None;
@@ -285,12 +257,9 @@ impl Sidecar {
     /// Ask the project's own PHP for the **declaration** behind a resident
     /// class-like (issue #269) — the class-world half of the ADR-0024 `reflect`
     /// surface, and the only honest source for a class an installed extension
-    /// provides (ADR-0049 §1).
-    ///
-    /// `Some(ClassReflection)` whose `declaration` is `None` is a definitive
-    /// not-found on this boot surface; any sidecar failure — poison, timeout, a
-    /// `widen`, a runner too old to implement the method — is `None`, "unknown",
-    /// never a wrong declaration and never a half-read one.
+    /// provides (ADR-0049 §1). `Some(ClassReflection)` with `declaration: None`
+    /// is a definitive not-found; any sidecar failure is `None`, "unknown" —
+    /// never a wrong or half-read declaration.
     pub fn reflect_class(&mut self, target: &str) -> Option<ClassReflection> {
         if !self.revive() {
             return None;
@@ -300,10 +269,9 @@ impl Sidecar {
     }
 
     /// Ask the project's own PCRE whether it accepts `pattern` (issue #189 /
-    /// ADR-0078, ADR-0004's ask-the-real-thing). `Some(PregCompile::Refuses{..})`
-    /// is the only answer that licenses a finding; `Some(Compiles)` and `None` —
-    /// poison, timeout, a `widen`, a runner too old to implement the method — are
-    /// both silence at the consumer.
+    /// ADR-0078, ADR-0004's ask-the-real-thing). Only
+    /// `Some(PregCompile::Refuses{..})` licenses a finding; `Some(Compiles)` and
+    /// any sidecar failure are both silence at the consumer.
     pub fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
         if !self.revive() {
             return None;
@@ -312,13 +280,11 @@ impl Sidecar {
         parse_preg_compile_result(value.get("result")?)
     }
 
-    /// Ask the project's own PHP whether the global constant `name` is defined
-    /// (issue #198 / ADR-0078) — the existence oracle for extension constants and
-    /// anything an already-loaded bootstrap defined. `name` is the resolved FQN,
-    /// case as written. `Some(NotDefined)` is the only answer that lets the
-    /// `constant.undefined` ladder continue; `Some(Defined)` and `None` — poison,
-    /// timeout, a `widen`, a runner too old to implement the method — are both
-    /// silence at the consumer.
+    /// Ask the project's own PHP whether the global constant `name` (resolved
+    /// FQN, case as written) is defined (issue #198 / ADR-0078) — the existence
+    /// oracle for extension constants and bootstrap-defined names. Only
+    /// `Some(NotDefined)` lets the `constant.undefined` ladder continue;
+    /// `Some(Defined)` and any sidecar failure are both silence at the consumer.
     pub fn constant_defined(&mut self, name: &str) -> Option<ConstantDefined> {
         if !self.revive() {
             return None;
@@ -345,11 +311,11 @@ impl Sidecar {
 
     /// Send `method`/`params` **verbatim** and return the raw `result` value.
     ///
-    /// The answering primitive of the ADR-0066 replay loop: a pending request is a
-    /// canonical `{"method", "params"}` object, and answering it means handing that
-    /// object to a real engine and putting the `result` back in the table. Doing so
-    /// through this method — rather than re-deriving the params from a typed call —
-    /// is what makes a replay run and a direct run the *same* dispatch.
+    /// The answering primitive of the ADR-0066 replay loop: a pending request is
+    /// a canonical `{"method", "params"}` object, answered by handing it to a
+    /// real engine and putting `result` back in the table. Going through this
+    /// method, not re-deriving params from a typed call, makes replay and
+    /// direct runs the *same* dispatch.
     pub fn call_raw(&mut self, method: &str, params: serde_json::Value) -> Option<serde_json::Value> {
         self.request(method, params)?.get("result").cloned()
     }

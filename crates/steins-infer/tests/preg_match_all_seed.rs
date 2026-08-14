@@ -1,20 +1,17 @@
 //! Issue #168 (slice D of #148) — the `preg_match_all` out-parameter seed and
 //! the shape-changing flags.
 //!
-//! The witness is ADR-0077's existing `ReturnTruthy`: the return is `int|false`,
-//! a truthy value is an int >= 1, and that proves both that the pattern compiled
-//! and that at least one match landed — so on the truthy branch every
-//! PATTERN_ORDER column is a written, non-empty list. The zero-match case
-//! (`ret = 0`) also writes (empty columns — measured) but is indistinguishable
-//! from `false` on the falsy branch, so the falsy side stays unseeded.
+//! Witness: ADR-0077's `ReturnTruthy` — return is `int|false`, truthy means an
+//! int >= 1, proving the pattern compiled and at least one match landed, so on
+//! the truthy branch every PATTERN_ORDER column is a written, non-empty list.
+//! `ret = 0` also writes (empty columns — measured) but is indistinguishable
+//! from `false` on the falsy branch, which stays unseeded.
 //!
-//! Every shape claim below was produced by running PHP 8.5.9 during this
-//! slice's implementation, most importantly the padding rule:
-//! `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)` measured
+//! Every shape claim below was measured on PHP 8.5.9. Padding rule:
+//! `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)` gives
 //! `[['1a','2','3a'], ['1','2','3'], ['a','','a']]` — every column has exactly
-//! `ret` entries, and an unmatched group contributes `''` to its column
-//! **wherever it sits**. `preg_match`'s trailing-absence machinery must not be
-//! consulted for a column element.
+//! `ret` entries; an unmatched group contributes `''` **wherever it sits**
+//! (`preg_match`'s trailing-absence rule does not apply to a column element).
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -69,12 +66,10 @@ fn refuses(src: &str) {
 
 #[test]
 fn pattern_order_writes_one_padded_column_per_group() {
-    // Measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m)` gives
-    // `[['1a','2','3a'], ['1','2','3'], ['a','','a']]`. Column 0 is the
-    // whole-expression refinement (slice E), column 1 keeps its body refinement
-    // (the group cannot go unmatched), and column 2 is padded with `''` — its
-    // element is the body unioned with `''`, which the literal enumeration
-    // (issue #177) spells exactly: `''|'a'`.
+    // Column 0 is the whole-expression refinement (slice E); column 1 keeps its
+    // body refinement (group cannot go unmatched); column 2 is padded with `''`
+    // — its element is the body unioned with `''`, spelled by the literal
+    // enumeration (issue #177) as `''|'a'`.
     assert_eq!(
         all_shape(r"'/(\d)(a)?/'", None),
         "list{non-empty-list<non-empty-string>, non-empty-list<numeric-string>, \
@@ -85,12 +80,11 @@ fn pattern_order_writes_one_padded_column_per_group() {
 #[test]
 fn a_trailing_optional_group_is_still_a_padded_required_column() {
     // THE TRAP (issue #168): under `preg_match`, `(b)?` in `/(a)(b)?/` is an
-    // absent-able OPTIONAL key whose element keeps its floor. In a PATTERN_ORDER
-    // column the trailing-absence rule does not exist: the column is always
-    // written, and the unmatched case pads it with `''` wherever the group sits
-    // (measured: `preg_match_all('/(a)(b)?/', 'a', $m)` gives
+    // absent-able OPTIONAL key. In a PATTERN_ORDER column trailing-absence
+    // doesn't exist: the column is always written, padded with `''` wherever
+    // the group sits (measured: `preg_match_all('/(a)(b)?/', 'a', $m)` gives
     // `[['a'], ['a'], ['']]`). Both claims are pinned against the same run's
-    // `preg_match` shape so the divergence itself is the assertion.
+    // `preg_match` shape, so the divergence itself is the assertion.
     assert_eq!(
         all_shape("'/(a)(b)?/'", None),
         "list{non-empty-list<non-empty-string>, non-empty-list<'a'>, \
@@ -111,9 +105,8 @@ fn a_trailing_optional_group_is_still_a_padded_required_column() {
 
 #[test]
 fn an_explicit_pattern_order_flag_is_the_default() {
-    // `PREG_PATTERN_ORDER` (= 1, verified via `php -r`) adds no information; the
-    // two spellings must produce the identical fact, and the constant must
-    // resolve by value.
+    // `PREG_PATTERN_ORDER` (= 1, verified via `php -r`) adds no information —
+    // the two spellings must produce the identical fact, resolving by value.
     let default = all_shape(r"'/(\d)(a)?/'", None);
     assert_eq!(all_shape(r"'/(\d)(a)?/'", Some("PREG_PATTERN_ORDER")), default);
     assert_eq!(all_shape(r"'/(\d)(a)?/'", Some("1")), default);
@@ -135,19 +128,17 @@ fn named_groups_put_the_name_beside_its_numeric_twin() {
 
 #[test]
 fn set_order_is_a_non_empty_list_of_preg_match_success_shapes() {
-    // Issue #168 rule 3, pinned by comparing the two paths on one pattern IN THE
-    // SAME RUN: each SET_ORDER set follows the `preg_match` success-shape rules
-    // (measured: `preg_match_all('/(\d)(a)?/', '1a 2 3a', $m, PREG_SET_ORDER)`
-    // gives `[['1a','1','a'], ['2','2'], ['3a','3','a']]` — trailing absence
-    // applies per set: `['2','2']` has no key 2).
+    // Issue #168 rule 3, pinned by comparing both paths on one pattern IN THE
+    // SAME RUN: each SET_ORDER set follows `preg_match`'s success-shape rules
+    // (measured: `PREG_SET_ORDER` on `/(\d)(a)?/` over `'1a 2 3a'` gives
+    // `[['1a','1','a'], ['2','2'], ['3a','3','a']]`; trailing absence applies per set).
     for (pattern, flags) in [
         (r"'/(\d)(a)?/'", None),
         ("'/(a)(b)?(c)/'", None),
         (r"'/(?<d>\d)(a)?/'", None),
-        // The per-set entries follow the flag variants too, through the one
+        // Per-set entries follow the flag variants too, through the one
         // constructor: nullability and offset pairs (measured:
-        // `PREG_SET_ORDER|PREG_UNMATCHED_AS_NULL` on `/(\d)(a)?/` gives
-        // `[['1a','1','a'], ['2','2',null]]`).
+        // `PREG_SET_ORDER|PREG_UNMATCHED_AS_NULL` gives `[['1a','1','a'], ['2','2',null]]`).
         (r"'/(\d)(a)?/'", Some("514")),
         (r"'/(\d)(a)?/'", Some("258")),
     ] {
@@ -174,10 +165,9 @@ fn set_order_is_a_non_empty_list_of_preg_match_success_shapes() {
 
 #[test]
 fn unmatched_as_null_turns_the_padding_into_null() {
-    // Measured: `preg_match_all('/(\d)(a)?/', '1a 2', $m, PREG_UNMATCHED_AS_NULL)`
-    // gives `[['1a','2'], ['1','2'], ['a',null]]` — the `''` padding becomes an
-    // explicit `null`, so the element keeps its body — the literal, issue #177
-    // — and gains `|null`, while a group that cannot go unmatched is untouched.
+    // Measured: `PREG_UNMATCHED_AS_NULL` on `/(\d)(a)?/` over `'1a 2'` gives
+    // `[['1a','2'], ['1','2'], ['a',null]]` — `''` padding becomes explicit
+    // `null`: the element keeps its literal body (issue #177) and gains `|null`.
     assert_eq!(
         all_shape(r"'/(\d)(a)?/'", Some("PREG_UNMATCHED_AS_NULL")),
         "list{non-empty-list<non-empty-string>, non-empty-list<numeric-string>, \
@@ -187,10 +177,9 @@ fn unmatched_as_null_turns_the_padding_into_null() {
 
 #[test]
 fn offset_capture_wraps_column_elements_in_measured_pairs() {
-    // Measured: `preg_match_all('/(\d)(a)?/', '1a 2', $m, PREG_OFFSET_CAPTURE)`
-    // gives `[[['1a',0],['2',3]], [['1',0],['2',3]], [['a',1],['',-1]]]` — the
-    // padded entry is `['', -1]`, so `-1` reaches exactly the padded columns and
-    // the offset floor stays 0 everywhere else.
+    // Measured: `PREG_OFFSET_CAPTURE` on `/(\d)(a)?/` over `'1a 2'` gives
+    // `[[['1a',0],['2',3]], [['1',0],['2',3]], [['a',1],['',-1]]]` — padded entry
+    // is `['', -1]`, so `-1` reaches exactly the padded columns, floor 0 elsewhere.
     assert_eq!(
         all_shape(r"'/(\d)(a)?/'", Some("PREG_OFFSET_CAPTURE")),
         "list{non-empty-list<list{non-empty-string, int<0, max>}>, \
@@ -211,9 +200,8 @@ fn offset_capture_wraps_column_elements_in_measured_pairs() {
 
 #[test]
 fn the_falsy_branch_and_the_unguarded_call_stay_unseeded() {
-    // `0` writes empty columns and `false` writes nothing at all (both
-    // measured); the falsy branch cannot tell them apart, so it carries nothing
-    // — ADR-0077's discipline, unchanged for the second name.
+    // `0` writes empty columns, `false` writes nothing (both measured); the
+    // falsy branch can't tell them apart — ADR-0077's discipline, unchanged here.
     refuses(
         "<?php\nfunction f(string $s): void {\n\
          if (preg_match_all('/(a)/', $s, $m)) { } else { \\PHPStan\\dumpType($m); }\n}\n",
@@ -239,10 +227,9 @@ fn a_comparison_witness_rides_the_existing_machinery() {
         "<?php\nfunction f(string $s): void {\n\
          if (preg_match_all('/(a)/', $s, $m) !== 0) { \\PHPStan\\dumpType($m); }\n}\n",
     );
-    // `> 0` is truthiness-equivalent for `int|false` but the ordering
-    // comparison declines before a witness is asked (ADR-0077 #162 amendment:
-    // admitting orderings is a separate precision change). Pinned as a decline
-    // so the day it changes, this line is the one that moves.
+    // `> 0` is truthiness-equivalent for `int|false`, but the ordering
+    // comparison declines before a witness is asked (ADR-0077 #162: admitting
+    // orderings is a separate change) — pinned so this line moves the day it does.
     refuses(
         "<?php\nfunction f(string $s): void {\n\
          if (preg_match_all('/(a)/', $s, $m) > 0) { \\PHPStan\\dumpType($m); }\n}\n",

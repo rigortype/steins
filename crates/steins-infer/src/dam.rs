@@ -1,42 +1,33 @@
 //! The checker-side runtime-definition dam (ADR-0049 §2, ADR-0046 applied
-//! checker-side).
-//!
-//! Function- and class-*existence* absence claims are unsound while the universe
-//! contains dynamic code that can mint names the reference scan never sees. This
-//! module aggregates the **whole-universe** dam fact: every dam site across the
-//! lowered project. It is a *query answer* (ADR-0048) — recomputed per run from the
-//! lowered universe, with no entry state, no ordering dependence, and no
-//! cross-scope coupling. Method-*absence* claims need no dam (PHP cannot reopen a
-//! defined class — the immunity asymmetry of ADR-0049 §2), so this fact gates only
-//! the existence ids.
+//! checker-side): aggregates the **whole-universe** dam fact, every dam site
+//! across the lowered project, since function/class-existence *absence* claims
+//! are unsound while dynamic code can mint names the reference scan never sees.
+//! A *query answer* (ADR-0048) — recomputed per run, no entry state, no
+//! ordering dependence. Method-*absence* needs no dam (PHP cannot reopen a
+//! defined class — ADR-0049 §2), so this fact gates only the existence ids.
 //!
 //! ## The dam set
-//! - every `eval(...)` (code as data — ADR-0046 §2 universe havoc);
-//! - every **non-vendor** `include`/`require` whose path is not provably
-//!   in-universe: `Unproven`, or a bare-relative / `./`-prefixed literal (A5, as
-//!   amended — runtime resolves those against `include_path` → the script dir →
-//!   CWD, so directory-relative belief is unsound), or an absolute / `__DIR__`-
-//!   anchored literal that resolves *outside* the analyzed universe;
-//! - every `class_alias(...)` naming a **runtime-minted** class (a class-name mint
-//!   the reference scan cannot resolve — [`steins_syntax::DynamismKind::ClassAlias`]);
-//! - every **non-vendor** file that fails to parse (ADR-0079 §2.2): a recovery point
-//!   is a place the world is not enumerated, so it may have swallowed a class or a
-//!   function declaration outright;
+//! - every `eval(...)` (ADR-0046 §2 universe havoc);
+//! - every **non-vendor** `include`/`require` whose path is `Unproven`, or a
+//!   bare-relative / `./`-prefixed literal (A5: resolves against `include_path`
+//!   → script dir → CWD, so directory-relative belief is unsound), or an
+//!   absolute / `__DIR__`-anchored literal resolving *outside* the universe;
+//! - every `class_alias(...)` naming a **runtime-minted** class
+//!   ([`steins_syntax::DynamismKind::ClassAlias`]);
+//! - every **non-vendor** file that fails to parse (ADR-0079 §2.2) — may have
+//!   swallowed a class or function declaration;
 //! - every `define(...)` naming a **runtime-minted constant** (issue #198 —
-//!   [`steins_syntax::DynamismKind::DefineDynamic`]). This is the one kind with a
-//!   narrower blast radius: it dams `constant.undefined` only, since `define()`
-//!   cannot mint a function or a class ([`DamKind::dams_names`]).
+//!   [`steins_syntax::DynamismKind::DefineDynamic`]); narrower: dams
+//!   `constant.undefined` only ([`DamKind::dams_names`]).
 //!
-//! The vendor presumption of ADR-0046 §2 carries over verbatim: `eval` /
-//! dynamic-include inside a `vendor/` path is composer plumbing, presumed
-//! universe-internal. (A `class_alias` whose two names are known at compile time —
-//! string literals, or the `X::class` constant, which the *compiler* resolves and
-//! which therefore mints nothing at run time (issue #36) — instead contributes an
-//! index edge; it is never a dam site.)
+//! Vendor presumption (ADR-0046 §2): `eval`/dynamic-include under `vendor/` is
+//! presumed composer plumbing. A `class_alias` with compile-time-known names
+//! (literals, or `X::class` — issue #36) mints nothing and is never a dam site;
+//! it contributes an index edge instead.
 //!
-//! The existence ids read this fact (`call.undefined-function`, `class.undefined`,
-//! `call.undefined-method`'s homonym leg). The vouch valve (ADR-0046) and
-//! checker-side region scoping (ADR-0047 §9) are deferred; v1 is whole-universe.
+//! Read by `call.undefined-function`, `class.undefined`, and
+//! `call.undefined-method`'s homonym leg. Vouch valve (ADR-0046) and
+//! checker-side region scoping (ADR-0047 §9) deferred; v1 is whole-universe.
 
 use std::collections::HashSet;
 
@@ -45,8 +36,8 @@ use steins_syntax::{DynamismKind, IncludePath};
 
 use crate::FileUnit;
 
-/// The kind of a dam site (ADR-0049 §2). Mirrors the dynamism taxonomy the
-/// existence ids reason about; carried so triage/coverage surfaces can name it.
+/// The kind of a dam site (ADR-0049 §2), carried so triage/coverage surfaces
+/// can name it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DamKind {
     /// An `eval(...)` construct.
@@ -57,40 +48,23 @@ pub enum DamKind {
     /// compile-time and mints an index edge instead).
     ClassAlias,
     // parse failure (ADR-0079, issue #180)
-    /// A **non-vendor** file `SourceTree::parse` recovered from (ADR-0079 §2.2).
-    /// Unlike the three above, the site is not a *construct* — it is the whole
-    /// file, positioned at its first parse error. Its blast radius is also wider:
-    /// besides the whole-universe existence dam every kind carries, an
-    /// `Unparsable` site makes the class-likes THAT FILE declares member-incomplete
-    /// (§2.5, [`DamFacts::file_is_unparsable`]) — `eval` can mint a new name but
-    /// cannot reopen a defined class, whereas a mangled class body can have lost
-    /// methods.
+    /// A **non-vendor** file `SourceTree::parse` recovered from (ADR-0079 §2.2), at
+    /// its first parse error. Wider blast radius: also makes the class-likes that
+    /// file declares member-incomplete (§2.5, [`DamFacts::file_is_unparsable`]).
     Unparsable,
-    // end parse failure (ADR-0079, issue #180)
     // global constants (ADR-0078, issue #198)
-    /// A `define(...)` naming a **runtime-minted constant** — the constant-side twin
-    /// of [`Self::ClassAlias`] (a `define` with a literal name mints a declaration
-    /// record instead and is never a dam site).
-    ///
-    /// The only kind with a **narrower** blast radius than the rest: `define()` can
-    /// mint a constant and nothing else, so this site dams `constant.undefined` and
-    /// leaves the function/class-existence ids alone. That asymmetry is spelled in
-    /// [`DamKind::dams_names`], not open-coded at the consumers.
+    /// A `define(...)` naming a **runtime-minted constant** — the constant-side
+    /// twin of [`Self::ClassAlias`] (a literal-name `define` is never a dam site).
+    /// Narrower blast radius: dams `constant.undefined` only
+    /// ([`DamKind::dams_names`] spells the asymmetry).
     DefineDynamic,
-    // end global constants (ADR-0078, issue #198)
 }
 
 impl DamKind {
     /// Whether the site can mint a **function or class-like name** — the question
-    /// [`DamFacts::is_clear`] asks. True for every kind but
-    /// [`Self::DefineDynamic`], whose mint is a constant.
-    ///
-    /// The converse needs no method: every kind here can mint a *constant*
-    /// (`eval` and an unproven include obviously; a mangled file may have swallowed
-    /// a `const` statement; a computed `class_alias` is the one that arguably
-    /// cannot, and is kept in the conservative direction rather than carved out
-    /// for a gain nobody asked for), so the constant question is simply "any site
-    /// at all" — see [`DamFacts::constants_are_clear`].
+    /// [`DamFacts::is_clear`] asks. True for every kind but [`Self::DefineDynamic`].
+    /// No converse method: every kind can plausibly mint a *constant* too, so
+    /// that question is just "any site at all" — [`DamFacts::constants_are_clear`].
     #[must_use]
     pub const fn dams_names(self) -> bool {
         !matches!(self, Self::DefineDynamic)
@@ -122,14 +96,10 @@ impl DamFacts {
     }
 
     /// Whether the universe is **dam-clear** for *name* existence: no site that can
-    /// mint a function or class-like name stands, so those absence claims are
-    /// undammed (subject to the per-id ladder legs).
-    ///
-    /// A [`DamKind::DefineDynamic`] site does not count here (issue #198): a
-    /// computed `define()` mints a constant, and reading it as a universe-wide name
-    /// dam would silence `call.undefined-function` and `class.undefined` over
-    /// something that cannot touch either. The constant ladder asks
-    /// [`Self::constants_are_clear`] instead.
+    /// mint a function or class-like name stands. [`DamKind::DefineDynamic`]
+    /// doesn't count (issue #198): it mints only a constant, so it must not
+    /// silence `call.undefined-function`/`class.undefined` — the constant ladder
+    /// asks [`Self::constants_are_clear`] instead.
     #[must_use]
     pub fn is_clear(&self) -> bool {
         !self.sites.iter().any(|s| s.kind.dams_names())
@@ -143,7 +113,6 @@ impl DamFacts {
     pub fn constants_are_clear(&self) -> bool {
         self.sites.is_empty()
     }
-    // end global constants (ADR-0078, issue #198)
 
     /// The number of dam sites (the report/doctor posture's "N dammed sites").
     #[must_use]
@@ -151,9 +120,9 @@ impl DamFacts {
         self.sites.len()
     }
 
-    /// Whether there are no dam sites at all (the `len() == 0` twin clippy pairs
-    /// with [`Self::len`]; identical to [`Self::constants_are_clear`], and *not* to
-    /// [`Self::is_clear`], which filters by kind).
+    /// Whether there are no dam sites at all (clippy-required `len() == 0` twin;
+    /// identical to [`Self::constants_are_clear`], unlike kind-filtered
+    /// [`Self::is_clear`]).
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.sites.is_empty()
@@ -161,33 +130,23 @@ impl DamFacts {
 
     // parse failure (ADR-0079, issue #180)
     /// Whether `path` is a standing [`DamKind::Unparsable`] site — the
-    /// **member-incompleteness** question of ADR-0079 §2.5, which the
-    /// method-absence ladders ask of every class-like they walk through.
-    ///
-    /// Deliberately narrower than [`Self::is_clear`]: name existence is dammed
-    /// universe-wide by *any* site, but member enumeration is only unprovable for
-    /// the class-likes the broken file itself declares. And deliberately built on
-    /// the site list rather than on `parse_errors()` directly, so the ADR-0046 §2
-    /// vendor presumption applies to both legs at once — a broken vendor file is
-    /// not a site, so it neither dams nor makes its classes member-incomplete.
+    /// **member-incompleteness** question of ADR-0079 §2.5, asked by the
+    /// method-absence ladders. Narrower than [`Self::is_clear`]: unprovable only
+    /// for the broken file's own class-likes. Built on the site list, not
+    /// `parse_errors()`, so the ADR-0046 §2 vendor presumption applies to both.
     #[must_use]
     pub fn file_is_unparsable(&self, path: &str) -> bool {
         self.sites.iter().any(|s| s.kind == DamKind::Unparsable && s.path == path)
     }
-    // end parse failure (ADR-0079, issue #180)
 }
 
 /// Compute the whole-universe dam fact from the lowered `units` (ADR-0049 §2).
-/// A query answer — pure over the universe, no ordering dependence (ADR-0048).
-///
-/// `layout` decides which files get ADR-0046 §2's vendor presumption. It is a
-/// project input rather than a path guess precisely because the presumption is a
-/// documented soundness trade: extending it to first-party code would silence
-/// real obstacles.
+/// A query answer, no ordering dependence (ADR-0048). `layout` decides which
+/// files get ADR-0046 §2's vendor presumption — a project input, not a path
+/// guess, since extending it to first-party code would silence real obstacles.
 #[must_use]
 pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
-    // The analyzed universe: every project + vendor file, path-normalized for
-    // include resolution (a proven include is benign only if it lands here).
+    // Every project + vendor file, path-normalized for include resolution.
     let universe: HashSet<String> = units.iter().map(|u| normalize_path(u.path)).collect();
 
     let mut sites = Vec::new();
@@ -195,22 +154,13 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
         let tree = u.tree;
         let vendor = layout.is_vendor(u.path);
         // parse failure (ADR-0079, issue #180)
-        // One site per broken file, at the first error — recovery cascades make
-        // every position after the first unreliable, so the count of further errors
-        // is the emitter's business and the position is the first one's. The vendor
-        // presumption of ADR-0046 §2 carries over verbatim (§2.3): parser test
-        // suites ship deliberately broken PHP, so a `vendor/` file is not a site.
+        // One site per broken file at its first error — recovery cascades make
+        // later positions unreliable. Vendor presumption carries over (ADR-0046
+        // §2.3): parser test suites ship deliberately broken PHP.
         //
-        // Deferred with design (ADR-0079 §3): a *position-aware* refinement would
-        // keep the absence family alive when the recovery region is provably inside
-        // a statement body, since a body cannot have swallowed a top-level
-        // declaration. It is not built here — it needs the syntax-tree contract to
-        // expose the recovery REGIONS (the spans recovery skipped), which the
-        // backend does not surface. When it lands, this site gains a region and the
-        // consumers below consult it; nothing else changes shape. A naive
-        // implementation would be wrong: conditional class declarations inside
-        // bodies are legal PHP, so the body-local judgment must still check the
-        // region for declaration keywords.
+        // Deferred (ADR-0079 §3): a position-aware refinement could spare a
+        // recovery region provably inside a statement body, but needs the syntax
+        // tree to expose recovery regions, which it does not yet.
         if !vendor && let Some(first) = tree.parse_errors().first() {
             let pos = tree.position(first.span.start);
             sites.push(DamSite {
@@ -220,12 +170,11 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
                 kind: DamKind::Unparsable,
             });
         }
-        // end parse failure (ADR-0079, issue #180)
         for site in tree.dynamism_sites() {
             let pos = tree.position(site.span.start);
             let kind = match &site.kind {
-                // Vendor presumption (ADR-0046 §2): eval/dynamic-include in vendor/
-                // is autoload plumbing, presumed universe-internal.
+                // Vendor presumption (ADR-0046 §2): autoload plumbing, presumed
+                // universe-internal.
                 DynamismKind::Eval if vendor => continue,
                 DynamismKind::Eval => DamKind::Eval,
                 DynamismKind::Include(_) if vendor => continue,
@@ -235,14 +184,12 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
                     }
                     DamKind::Include
                 }
-                // A `class_alias` whose name is not known at compile time is a runtime
-                // name mint. The vendor presumption does not extend to it: unlike
-                // autoload include/eval, an aliasing call mints a *project-visible*
-                // class name regardless of where it sits, so it dams even in vendor.
+                // Vendor presumption does not extend here: aliasing mints a
+                // project-visible name regardless of where it sits, so it dams even
+                // in vendor.
                 DynamismKind::ClassAlias => DamKind::ClassAlias,
-                // A computed `define` mints a project-visible CONSTANT name wherever
-                // it sits, so — exactly like `class_alias` and for the same reason —
-                // the vendor presumption does not extend to it.
+                // Same reason as `class_alias`: a computed `define` mints a
+                // project-visible name wherever it sits, so it dams even in vendor.
                 DynamismKind::DefineDynamic => DamKind::DefineDynamic,
             };
             sites.push(DamSite { path: u.path.to_owned(), line: pos.line, column: pos.column, kind });
@@ -252,11 +199,10 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
 }
 
 /// Whether a proven include path resolves inside the analyzed universe (ADR-0049
-/// A5, amended). **Only** absolute literals and `__DIR__`-anchored concatenations
-/// can be benign, and only when they resolve to an indexed file. A bare-relative or
-/// `./`-prefixed literal (both `IncludePath::Literal` without a leading `/`) is
-/// never benign — runtime resolves it against `include_path` → the script dir →
-/// CWD, so a same-named in-universe neighbor cannot prove the universe closed.
+/// A5, amended). Only absolute literals and `__DIR__`-anchored concatenations can
+/// be benign, and only if they resolve to an indexed file. A bare-relative or
+/// `./`-prefixed literal is never benign — it resolves against `include_path` →
+/// script dir → CWD at runtime, so an in-universe neighbor proves nothing.
 fn include_is_benign(ip: &IncludePath, from: &str, universe: &HashSet<String>) -> bool {
     match ip {
         IncludePath::Unproven => false,
@@ -272,12 +218,9 @@ fn include_is_benign(ip: &IncludePath, from: &str, universe: &HashSet<String>) -
     }
 }
 
-// ---- Path helpers (POSIX-style, `/`-separated) -----------------------------
-//
-// Deliberately duplicated from the transform-side obstacle scanner: A5 says the
-// checker dam and the transform oracle share one *corrected* judgment, but the
-// transform side keeps its (under-damming) rule byte-identical in S1, so the
-// checker owns the corrected copy here rather than reaching across the crate.
+// Path helpers (POSIX-style, `/`-separated). Deliberately duplicated from the
+// transform-side obstacle scanner: A5 keeps the transform's rule byte-identical
+// in S1, so the checker owns this corrected copy rather than reaching across.
 
 fn is_absolute(p: &str) -> bool {
     p.starts_with('/') || p.starts_with('\\')
@@ -441,8 +384,8 @@ mod tests {
 
     #[test]
     fn an_unparsable_vendor_file_is_not_a_site() {
-        // ADR-0079 §2.3, carrying ADR-0046 §2 over verbatim: parser test suites ship
-        // deliberately broken PHP, so a `vendor/` break is presumed plumbing.
+        // ADR-0079 §2.3 / ADR-0046 §2: parser test suites ship deliberately broken
+        // PHP, so a `vendor/` break is presumed plumbing.
         let t = tree(BROKEN);
         let units = [FileUnit { path: "vendor/pkg/tests/broken.php", tree: &t }];
         let facts = dam_facts(&units, &ProjectLayout::fallback());
@@ -452,10 +395,8 @@ mod tests {
 
     #[test]
     fn member_incompleteness_is_per_file_while_the_dam_is_universe_wide() {
-        // The two questions the site list answers are deliberately different reaches
-        // (§2.5): `is_clear` is false for EVERY file once one break stands, but
-        // `file_is_unparsable` is true only of the broken one — otherwise the member
-        // leg would be a second whole-universe dam.
+        // §2.5: `is_clear` is false for EVERY file once one break stands, but
+        // `file_is_unparsable` is true only of the broken one.
         let broken = tree(BROKEN);
         let sound = tree("<?php\nclass R { public function g(): void {} }\n");
         let units = [
@@ -468,13 +409,10 @@ mod tests {
         assert!(!facts.file_is_unparsable("src/r.php"));
     }
 
-    // end parse failure (ADR-0079, issue #180)
-
     #[test]
     fn one_runtime_name_class_alias_dams_the_whole_universe() {
-        // The blast radius the fix is about: the fact is a universe-wide boolean, so
-        // a single runtime-minted name in ONE file dams every other file's existence
-        // claims. That remains true — the fix narrows what counts, not the reach.
+        // The fact is a universe-wide boolean: a single runtime-minted name in ONE
+        // file dams every other file's existence claims.
         let clean = tree("<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy');\n");
         let dirty = tree("<?php\nclass_alias($computed, 'Other');\n");
         let units = [
@@ -489,10 +427,8 @@ mod tests {
     // global constants (ADR-0078, issue #198)
     #[test]
     fn a_runtime_name_define_dams_constants_only() {
-        // The one kind with a narrower blast radius. `define()` can mint a constant
-        // and nothing else, so reading it as a universe-wide NAME dam would silence
-        // `call.undefined-function` and `class.undefined` over something that cannot
-        // touch either.
+        // `define()` mints only a constant, so reading it as a NAME dam would
+        // silence `call.undefined-function`/`class.undefined` needlessly.
         let t = tree("<?php\ndefine('KNOWN', 1);\ndefine($computed, 2);\n");
         let units = [FileUnit { path: "src/a.php", tree: &t }];
         let facts = dam_facts(&units, &ProjectLayout::fallback());
@@ -504,9 +440,8 @@ mod tests {
 
     #[test]
     fn a_runtime_name_define_in_vendor_still_dams() {
-        // The `class_alias` argument, verbatim: an aliasing or defining call mints a
-        // project-visible name regardless of where it sits, so the ADR-0046 §2 vendor
-        // presumption does not extend to it.
+        // Same as `class_alias`: a defining call mints a project-visible name
+        // regardless of where it sits, so vendor presumption does not apply.
         let t = tree("<?php\ndefine($computed, 1);\n");
         let units = [FileUnit { path: "vendor/pkg/boot.php", tree: &t }];
         let facts = dam_facts(&units, &ProjectLayout::fallback());
@@ -515,8 +450,8 @@ mod tests {
 
     #[test]
     fn every_ordinary_kind_dams_constants_too() {
-        // The converse of the asymmetry above: `eval` and an unproven include can
-        // mint a constant just as easily as a function, so both valves close.
+        // Converse of the asymmetry above: `eval` and an unproven include mint a
+        // constant as easily as a function, so both valves close.
         for src in ["<?php\neval($code);\n", "<?php\ninclude 'config.php';\n"] {
             let t = tree(src);
             let units = [FileUnit { path: "src/a.php", tree: &t }];
@@ -525,5 +460,4 @@ mod tests {
             assert!(!facts.constants_are_clear(), "{src}");
         }
     }
-    // end global constants (ADR-0078, issue #198)
 }

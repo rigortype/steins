@@ -1,17 +1,16 @@
 //! Short-circuit refinement, the reachability half (ADR-0052 §6 / issue #266
 //! slice 1): the spans PHP's own evaluation order proves are **never evaluated**.
 //!
-//! §6 promised it in one clause — "the direct env-free pass stands down on spans
-//! covered here exactly as `mark_dead` already models" — and the threading slice
-//! (N3) delivered the verdict half without it. The result was a live false-positive
-//! class: `$x === 2 && f("bad")` reported inside an operand the engine short-circuits
-//! past, `$c ? f("bad") : 0` inside the arm a decided guard never takes, and
-//! `$x ?? f("bad")` inside a right operand a proven-present left never reaches.
+//! §6 promised the direct env-free pass would stand down on spans `mark_dead`
+//! already models, but the threading slice (N3) delivered only the verdict half.
+//! The gap was a live false-positive class: `$x === 2 && f("bad")` reported
+//! inside a short-circuited operand, `$c ? f("bad") : 0` inside an arm a decided
+//! guard never takes, `$x ?? f("bad")` inside a right operand a proven-present
+//! left never reaches.
 //!
-//! Every test here is a PAIR: the decided form must be silent (the code does not
-//! run), and its undecided twin must still fire (the suppression is the decision,
-//! not a blanket). The direction of every movement this file pins is
-//! **finding-removing** — no test here gains a finding.
+//! Every test here is a PAIR: the decided form must be silent, and its undecided
+//! twin must still fire (the suppression is the decision, not a blanket). Every
+//! movement this file pins is **finding-removing** — no test here gains a finding.
 
 use steins_infer::{Diagnostic, ID, check};
 use steins_syntax::SourceTree;
@@ -19,8 +18,7 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family reports on the fixtures' own (deliberately bare)
-    // declarations, not on the behaviour under test.
+    // Drop `untyped.*`: it flags the fixtures' own deliberately bare declarations.
     check(&tree, &functions, "demo.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -126,11 +124,9 @@ fn coalesce_right_operand_control_fires_when_left_is_unknown() {
 
 #[test]
 fn an_asserted_left_operand_does_not_silence_the_coalesce_right() {
-    // `@phpstan-assert int $x` is a CLAIM (ADR-0052 §5). Marking a span dead is a
-    // reachability assertion, and reachability is proof-only — so an Asserted
-    // "present" must NOT stand the direct pass down. If a lying tag could do that,
-    // it would buy silence on a live path, which is the one thing the stratum rule
-    // exists to prevent.
+    // `@phpstan-assert int $x` is a CLAIM (ADR-0052 §5), and reachability is
+    // proof-only — an Asserted "present" must NOT stand the direct pass down, or a
+    // lying tag could buy silence on a live path, the one thing this rule prevents.
     let src = format!(
         "{HDR}/** @phpstan-assert int $v */
 function assertInt(mixed $v): void {{}}

@@ -1,21 +1,19 @@
 //! ADR-0049 §4 / S2: `call.undefined-method`.
 //!
 //! The absence-proof ladder fires only under complete closure (ADR-0013 zero-FP).
-//! Under the pure `NoFold` subset the id is silent by design (no sidecar to answer
-//! the A2ii homonym question), so these tests drive a [`Boot`] mock folder that
-//! stands in for the runtime boot surface: `available` is A9's global gate, and
-//! `builtins` is the set of names the boot surface knows as class-likes. Every
-//! ladder leg ships with a **silence fixture** proving the id stays quiet when that
-//! leg fails (the ADR-0049 §10 silence-matrix discipline), alongside the firing
-//! fixtures that prove it speaks when every leg holds.
+//! Under pure `NoFold` the id is silent by design (no sidecar to answer the A2ii
+//! homonym question), so these tests drive a [`Boot`] mock standing in for the
+//! runtime boot surface (`available`: A9's global gate; `builtins`: names the
+//! boot surface knows as class-likes). Every ladder leg ships a **silence
+//! fixture** proving the id stays quiet when that leg fails (ADR-0049 §10),
+//! alongside firing fixtures proving it speaks when every leg holds.
 
 use steins_infer::{CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, check_with};
 use steins_syntax::SourceTree;
 
-/// A boot-surface mock: `available` is the A9 family-availability gate; `builtins`
-/// are the lowercased names the boot surface reports as resident class-likes (the
-/// A2ii homonyms); `reflect_fails` simulates a mid-run sidecar failure (every
-/// existence query returns Unknown).
+/// A boot-surface mock (`available`: A9 family gate; `builtins`: lowercased
+/// resident class-like names, the A2ii homonyms; `reflect_fails`: simulates a
+/// mid-run sidecar failure — every existence query returns Unknown).
 struct Boot {
     available: bool,
     builtins: Vec<String>,
@@ -23,8 +21,7 @@ struct Boot {
 }
 
 impl Boot {
-    /// The common case: family available, empty boot surface (project classes are
-    /// never homonyms), reflect answers cleanly.
+    /// The common case: family available, empty boot surface, reflect answers cleanly.
     fn ready() -> Self {
         Boot { available: true, builtins: Vec::new(), reflect_fails: false }
     }
@@ -122,19 +119,18 @@ fn fires_with_mixed_positional_and_named_arguments() {
 #[test]
 fn silent_on_named_only_arguments_conflated_with_first_class_callable() {
     // Lowering represents BOTH the first-class callable `m(...)` and a named-only
-    // call `m(x: 1)` as `args: [], positional_only: false` — they are
-    // indistinguishable in the current CallExpr shape. Since the first-class form
-    // MUST stay silent (leg l — it builds a Closure, it does not invoke) and the two
-    // cannot be told apart, S2 conservatively silences both. A completeness loss on
-    // named-only calls, never an FP (the zero-FP identity governs the tie-break).
+    // call `m(x: 1)` as `args: [], positional_only: false`, indistinguishable in
+    // the current CallExpr shape; since the first-class form MUST stay silent
+    // (leg l), S2 conservatively silences both — a completeness loss, never an FP
+    // (zero-FP governs the tie-break).
     let d = fires("<?php\nclass Order {}\n$o = new Order();\n$o->tyop(x: 1);\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn fires_case_insensitively_on_absence() {
-    // `TYOP` vs a chain that defines only `pay` — still undefined (folding-insensitive
-    // absence). A defined `Pay`/`pay` would silence; `tyop` is genuinely absent.
+    // `TYOP` vs a chain defining only `pay` — still undefined; a defined `Pay`/`pay`
+    // would silence, so this isolates case-insensitive matching from genuine absence.
     let d = fires("<?php\nclass Order { public function pay() {} }\n$o = new Order();\n$o->TYOP();\n");
     assert_eq!(d.len(), 1, "{d:?}");
 }
@@ -174,8 +170,7 @@ fn silent_leg_a_on_this_receiver() {
 
 #[test]
 fn silent_leg_a_on_laundered_this_alias() {
-    // The audit's 13th FP class (template method): `$u = $this; $u->handle()` where a
-    // subclass defines `handle`. The alias is a lower bound → inexact → silent.
+    // The audit's 13th FP class (template method): the alias is a lower bound → inexact → silent.
     let d = fires(
         "<?php\nclass Handler { public int $n = 0; public function run() { $u = $this; $u->handle(); } }\nclass MailHandler extends Handler { public function handle() {} }\n(new MailHandler())->run();\n",
     );
@@ -324,8 +319,7 @@ fn silent_self_static_parent_calls() {
 
 #[test]
 fn silent_on_inexact_non_final_this_seed() {
-    // A non-final class's `$this` is a lower bound even without laundering; a direct
-    // `$this->tyop()` in an overridable class must not fire (also leg-a coverage).
+    // A non-final class's `$this` is a lower bound even without laundering (also leg-a coverage).
     let d = fires(
         "<?php\nclass Shape { public int $sides = 0; public function draw() { $this->tyop(); } }\nclass Square extends Shape { public function tyop() {} }\n",
     );
@@ -336,9 +330,8 @@ fn silent_on_inexact_non_final_this_seed() {
 
 #[test]
 fn adversarial_final_this_still_routes_through_receiver_legs() {
-    // A `final` class's `$this` IS exact — but a direct `$this->m()` receiver is
-    // still `Receiver::This`, which S2 excludes (A1). This must stay silent even
-    // though exactness is provable, because S2 v1 never rests on a `$this` receiver.
+    // A `final` class's `$this` IS exact, but `$this->m()` is still `Receiver::This`,
+    // which S2 excludes (A1) — S2 v1 never rests on a `$this` receiver.
     let d = fires(
         "<?php\nfinal class Leaf { public int $n = 0; public function run() { $this->tyop(); } }\n",
     );
@@ -373,16 +366,11 @@ fn adversarial_abstract_method_declaration_counts_as_present() {
 
 #[test]
 fn adversarial_declared_type_parameter_receiver_is_not_s2s() {
-    // THE soundness boundary: a `Shape $s` parameter is a *declared* receiver, not an
-    // exact one — a subclass passed at runtime may define the method (and `eval` can
-    // mint such a subclass). This is S6's descendant-closure lane, never S2's: the
-    // heap seeds no exact object for a declared param, so `class_exact` is false and
-    // S2's receiver leg (A1) refuses the site.
-    //
-    // Since ADR-0049 A13 the two lanes SHARE this id when the declared arm is native
-    // (`Verified`), so the boundary is stated the way it is now enforced — the
-    // finding here exists, and it is the declared-receiver lane's, carrying that
-    // lane's descendant-closure evidence rather than S2's exact-receiver evidence.
+    // THE soundness boundary: `Shape $s` is a *declared* receiver, not an exact
+    // one (a runtime subclass may define the method), so it's S6's
+    // descendant-closure lane, never S2's (A1 refuses: no exact heap object).
+    // Since ADR-0049 A13 the two lanes SHARE this id for a native declared arm,
+    // so the finding here exists but carries S6's evidence, not S2's.
     let d = fires(
         "<?php\nclass Shape { public function area() {} }\nfunction f(Shape $s): void { $s->tyop(); }\n",
     );
@@ -396,8 +384,7 @@ fn adversarial_declared_type_parameter_receiver_is_not_s2s() {
 
 #[test]
 fn adversarial_object_returned_from_call_receiver_is_silent() {
-    // `make()->tyop()` — the receiver is a call result, never an exact heap object in
-    // v1 (leg l: method-on-call-result is out of scope). Silent.
+    // A call-result receiver is never an exact heap object in v1 (leg l: out of scope).
     let d = fires(
         "<?php\nclass Shape {}\nfunction make(): Shape { return new Shape(); }\nmake()->tyop();\n",
     );
@@ -406,9 +393,8 @@ fn adversarial_object_returned_from_call_receiver_is_silent() {
 
 #[test]
 fn adversarial_reassigned_receiver_loses_exactness() {
-    // `$o = new Order(); $o = maybe(); $o->tyop();` — the rebind to an unknown call
-    // result drops the exact-object binding, so the stale `new Order()` fact cannot
-    // launder the receiver back to exact.
+    // The rebind to an unknown call result drops the exact-object binding, so the
+    // stale `new Order()` fact cannot launder the receiver back to exact.
     let d = fires(
         "<?php\nclass Order {}\nfunction maybe() { return null; }\n$o = new Order();\n$o = maybe();\n$o->tyop();\n",
     );

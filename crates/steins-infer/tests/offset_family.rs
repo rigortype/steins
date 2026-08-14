@@ -233,10 +233,9 @@ fn silent_after_by_ref_argument_poisoning() {
 // Stratum discipline (N2) — the assert() construct is Verified.
 
 // FLIPPED by the 2026-07-25 owner ruling (ADR-0052 amendment "assert() reads as a
-// throw-guard", slice I0): `assert($v === [])` narrows at the Verified stratum
-// unconditionally (the ruling reads assert() as `if (!$expr) throw` and never
-// consults `zend.assertions`; the abolished `[runtime] zend-assertions` knob is
-// gone). Pre-ruling this fixture was SILENT (Asserted, gated); it now FIRES.
+// throw-guard", slice I0): `assert($v === [])` now narrows at the Verified stratum
+// unconditionally — assert() reads as `if (!$expr) throw`, never consulting the
+// abolished `zend.assertions` knob. Pre-ruling this fixture was SILENT; now FIRES.
 
 
 #[test]
@@ -250,13 +249,10 @@ fn fires_on_assert_empty_singleton() {
 
 #[test]
 fn silent_on_assert_non_empty_list_read() {
-    // The conformance `assertions_assert_non_empty_list` OTHER function: after
-    // `assert($v !== [])`, reading `$v[0]` must stay SILENT. Post-ruling the assert()
-    // narrowing is Verified (not gated by the abolished stratum rule), so the silence
-    // MECHANISM is now the refinement's SHAPE: `!== []` yields a non-empty fact, NOT a
-    // `Singleton` — and `offset.missing` requires proving the key ABSENT, which a mere
-    // non-empty array does not (it need not carry key 0). Silence from unprovable
-    // absence, not from an Asserted stratum gate — and crucially not a false positive.
+    // Conformance `assertions_assert_non_empty_list` pair: after `assert($v !== [])`,
+    // `$v[0]` must stay SILENT. Post-ruling, silence comes from the refinement's
+    // SHAPE — `!== []` yields non-empty, NOT `Singleton`, and `offset.missing` needs
+    // the key proven ABSENT, which is unprovable here (not a stratum gate, not a FP).
     let src = "<?php\nfunction h(array $v): int {\n    assert($v !== []);\n    return $v[0];\n}\n";
     assert!(missing(src).is_empty(), "assert($v !== []) leaves key-0 absence unprovable → silent");
 }

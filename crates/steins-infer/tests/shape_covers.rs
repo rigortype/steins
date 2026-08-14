@@ -1,22 +1,17 @@
 //! ADR-0062 S5 — KeyCover recording (A-G8) and the `??` right-arm discharge
 //! (A-G11): the disjunctive-assert pattern, end to end.
 //!
-//! What this suite pins, beyond the spellings:
-//!
-//! * **Only the disjunction is recorded.** A `||` of presence tests over ONE
-//!   binding records the disjunctive claim and nothing else; a disjunct over a
-//!   different binding, a non-presence disjunct, or a non-constant key records
-//!   nothing at all rather than something partial.
-//! * **Flavor is the weakest disjunct's.** All-`isset` gives an Isset-cover;
-//!   one `array_key_exists` disjunct drags the whole cover to KeyExists.
-//! * **The premise ladder is fragile on purpose.** Any `??` arm that is not a
-//!   pure depth-1 projection drops every accumulated `¬isset` premise (A-G11's
-//!   by-ref/global conservatism), so nothing after it discharges.
-//! * **KeyExists discharges conditionally.** With a nullable premise slot the
-//!   right arm may truly be missing at runtime — real semantics, not
-//!   imprecision — and the chain declines to spell a value.
-//! * **Zero emission.** As in S3/S4, no fixture here may produce a non-debug
-//!   finding: a discharge only ever ADDS a value fact.
+//! What this suite pins, beyond the spellings: **only the disjunction is
+//! recorded** (a `||` of presence tests over ONE binding records the claim;
+//! a different binding, a non-presence disjunct, or a non-constant key
+//! records nothing rather than something partial); **flavor is the weakest
+//! disjunct's** (all-`isset` gives an Isset-cover, one `array_key_exists`
+//! drags the whole cover to KeyExists); **the premise ladder is fragile on
+//! purpose** (a `??` arm that isn't a pure depth-1 projection drops every
+//! accumulated `¬isset` premise per A-G11's by-ref/global conservatism);
+//! **KeyExists discharges conditionally** (a nullable premise slot means the
+//! right arm may truly be missing at runtime, so the chain declines); and
+//! **zero emission** (as in S3/S4, a discharge only ever ADDS a value fact).
 
 use std::collections::HashMap;
 
@@ -144,9 +139,8 @@ fn a_three_key_cover_needs_every_other_member_refuted() {
     );
 }
 
-/// Flavor is the weakest disjunct's: one `array_key_exists` makes the whole cover
-/// a KeyExists-cover, which still discharges here because the premise slot is
-/// non-nullable.
+/// One `array_key_exists` disjunct still discharges here: the premise slot is
+/// non-nullable (see module doc: flavor is the weakest disjunct's).
 #[test]
 fn a_mixed_flavor_disjunction_reads_as_key_exists() {
     assert_eq!(
@@ -161,10 +155,9 @@ fn a_mixed_flavor_disjunction_reads_as_key_exists() {
 
 // A-G11's refusals
 
-/// The KeyExists condition (A-G11's discharge table). `array_key_exists('a', $v)`
-/// is satisfied by a present-**null** `a`, which makes `isset($v['a'])` false — so
-/// `??` falls through it and `b` may genuinely be missing. Real semantics, not
-/// imprecision: the chain declines to spell a value.
+/// A-G11's discharge table: `array_key_exists` is satisfied by a present-**null**
+/// key, which makes `isset` false — so `??` falls through and `b` may genuinely
+/// be missing. Real semantics, not imprecision.
 #[test]
 fn a_key_exists_cover_declines_over_a_nullable_premise_slot() {
     assert_eq!(
@@ -191,10 +184,9 @@ fn an_isset_cover_discharges_over_a_nullable_slot() {
     );
 }
 
-/// A-G11's conservatism: a call between the arms may write through a reference or
-/// a global, so every accumulated `¬isset` premise is dropped and the arm after it
-/// discharges nothing — even though the call arm itself has a perfectly visible
-/// fact (the control below shows the same chain without it).
+/// A-G11's conservatism: a call between arms may write through a reference or a
+/// global, dropping every accumulated `¬isset` premise (control below: the same
+/// chain without the intervening arm discharges fine).
 #[test]
 fn a_non_projection_arm_invalidates_the_premise_ladder() {
     let src = format!(
@@ -275,9 +267,8 @@ fn a_non_constant_key_records_nothing() {
 
 // Recording composes with S4
 
-/// A cover one of whose keys a guard already promoted normalizes away (the S2
-/// invariant reached through the S5 constructor) — and the read discharges
-/// through presence rather than through the cover.
+/// A cover whose key a guard already promoted normalizes away (S2 invariant via
+/// the S5 constructor) — the read discharges through presence, not the cover.
 #[test]
 fn a_cover_over_an_already_required_key_normalizes_away() {
     let src = fixture(
@@ -289,8 +280,7 @@ fn a_cover_over_an_already_required_key_normalizes_away() {
 }
 
 /// De Morgan on the FALSE branch: `¬(isset a ∨ isset b)` is `¬isset a ∧ ¬isset b`,
-/// which the polarity walk distributes to the per-key S4 narrowing. Both keys are
-/// marked absent, and a sealed shape with no fields is the empty array.
+/// distributed to per-key S4 narrowing — both keys absent, sealed shape empties.
 #[test]
 fn the_false_branch_marks_every_disjunct_key_absent() {
     let src = fixture(
@@ -312,10 +302,9 @@ fn a_required_final_arm_needs_no_cover() {
     );
 }
 
-/// The base's nullability: the WHOLE disjunction being true means some `isset`
-/// returned true, and `isset` on an offset of `null` is false — so an all-`isset`
-/// disjunction proves the base is a non-null array, and the read that needs a
-/// non-nullable base goes through.
+/// The whole disjunction being true means some `isset` returned true, and `isset`
+/// on an offset of `null` is false — so an all-`isset` disjunction proves the
+/// base is non-null too, and the read that needs it goes through.
 #[test]
 fn an_isset_disjunction_clears_the_bases_nullable_flag() {
     let src = "<?php\n/** @param array{a?: string, b?: string}|null $v */\n\

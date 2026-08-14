@@ -1,25 +1,19 @@
 //! `cargo xtask licenses` — regenerate `THIRD-PARTY-LICENSES.md` from the
 //! dependencies bundled into the release binary.
 //!
-//! A thin wrapper around `cargo about generate about.hbs`: this used to run a
-//! second pass that merged sections sharing a license body (collapsing, on this
-//! tree, 39 MIT sections with 36 distinct copyright holders into one section
-//! listing every holder above a single shared body). That reads as one
-//! license with many attributions, which is accurate, but it is also the
-//! opposite of how a reader scans a notices file — one crate, one block — and
-//! it made every MIT-licensed crate here harder to find than it needed to be.
-//! So this wrapper does none of that: cargo-about's own per-license-text
-//! grouping is left exactly as it renders, and a crate whose license happens
-//! to typographically differ from another crate's otherwise-identical text
-//! lands in its own section rather than being folded into one. Nothing here
-//! is UNIQUE to this repo — `rigortype/lisplens` ships the same `about.toml` +
-//! `about.hbs` shape with no post-processing at all, and this file now matches
-//! it.
+//! A thin wrapper around `cargo about generate about.hbs`, with no post-
+//! processing: cargo-about's own per-license-text grouping renders as-is, so a
+//! crate whose license text typographically differs from another's otherwise-
+//! identical text gets its own section rather than being folded in. (An
+//! earlier pass merged shared-body sections — collapsing 39 MIT sections with
+//! 36 distinct copyright holders into one — which reads accurately but defeats
+//! one-crate-one-block scanning; dropped in favor of matching
+//! `rigortype/lisplens`'s unprocessed `about.toml`/`about.hbs` shape.)
 //!
-//! `xtask` stays the entry point (`cargo xtask licenses`) rather than a bare
-//! `cargo about generate ... -o ...` because `xtask` is already this repo's
-//! home for generation steps, and finding the repo root and reporting the
-//! byte count on success are conveniences worth keeping in one place.
+//! `xtask` stays the entry point rather than a bare `cargo about generate` call
+//! because `xtask` is already this repo's home for generation steps, and
+//! finding the repo root and reporting the byte count are worth keeping in one
+//! place.
 
 use std::path::Path;
 use std::process::Command;

@@ -39,9 +39,7 @@ fn silent_dumps(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
 fn one_type(src: &str) -> String {
     let tree = SourceTree::parse(src);
     let ds = check(&tree, &[], "t.php");
-    // `untyped.*` (ADR-0078, issue #200) is excluded alongside the dumps: these
-    // fixtures declare bare `array` parameters on purpose, and a contract-layer id
-    // observing the missing value type is not arm subtraction speaking.
+    // Same `untyped.*` exclusion as `silent_dumps` above (ADR-0078, issue #200).
     let other: Vec<&Diagnostic> = ds
         .iter()
         .filter(|d| !d.id.starts_with("debug.") && !d.id.starts_with("untyped."))
@@ -101,9 +99,8 @@ fn the_strpos_floor_row_loses_its_false_arm_under_the_guard() {
     // The control: the whole mined row, at the `Asserted` grade the floor seeds.
     // Its `positive-int|0` reads as the one interval it denotes (issue #90).
     assert_eq!(one_type(STRPOS_UNGUARDED), "dumped type: int<0, max>|false (asserted)");
-    // …and under the guard, the `false` arm is gone. The int arm survives (it is
-    // disjoint from `false`), which is strictly more than PHPStan's `int` — the row
-    // says so, so the lane says so.
+    // Under the guard, the `false` arm is gone; the int arm survives (disjoint
+    // from `false`) — strictly more than PHPStan's plain `int`, so the row says so.
     assert_eq!(one_type(STRPOS_GUARDED), "dumped type: int<0, max> (asserted)");
 }
 
@@ -156,9 +153,8 @@ function f($x): void {
 
 #[test]
 fn every_identity_spelling_of_the_guard_reaches_the_lane() {
-    // `collect_refine` carries the branch polarity and `var_literal` normalizes the
-    // operand order, so all four spellings of "on this branch, `$x` is not `false`"
-    // are one refinement.
+    // `collect_refine` carries the branch polarity and `var_literal` normalizes
+    // operand order, so all four spellings of "`$x` is not `false`" are one refinement.
     assert_eq!(then_branch("string|false", "$x !== false"), "dumped type: string (asserted)");
     assert_eq!(else_branch("string|false", "$x === false"), "dumped type: string (asserted)");
     assert_eq!(then_branch("string|false", "false !== $x"), "dumped type: string (asserted)");
@@ -246,10 +242,9 @@ fn an_int_literal_exclusion_deletes_its_arm() {
     // A literal not in the lane deletes nothing.
     assert_eq!(then_branch("1|2|3", "$x !== 7"), "dumped type: 1|2|3 (asserted)");
     // A run of literals is NOT absorbed into an interval (issue #90 merges a
-    // literal only into an interval it abuts, never literal-to-literal). That
-    // refusal is what keeps this whole family narrowable: `int<1, 3>` has no arm
-    // for `!== 2` to delete, so collapsing `1|2|3` would have cost exactly the
-    // discrimination these arms exist to carry.
+    // literal only into an interval it abuts, never literal-to-literal) — that
+    // refusal keeps this family narrowable: collapsing `1|2|3` would cost the
+    // discrimination `int<1, 3>` (no arm for `!== 2`) couldn't carry.
 }
 
 #[test]
@@ -341,8 +336,7 @@ fn the_null_subtrahend_still_works_exactly_as_before() {
 
 /// A mock PHP answering the two reflection surfaces the string-predicate transfer
 /// rung consults — the declaration (its admission gate) and the reflected envelope
-/// it falls back to when a transfer declines, so a decline reads as `string` rather
-/// than `unknown`.
+/// it falls back to when a transfer declines, so a decline reads `string`, not `unknown`.
 struct Mock {
     types: HashMap<String, String>,
     facts: HashMap<String, Fact>,

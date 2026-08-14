@@ -68,15 +68,12 @@ fn a_dynamic_callee_taints_exhaustiveness() {
 
 #[test]
 fn a_declared_bound_lands_in_its_own_lane_and_never_in_the_proven_one() {
-    // ADR-0067's lane wall. A `#[\Steins\Effect]` envelope on an interface method
-    // is a CAP imported through an injected receiver, never an occurrence proof:
-    // "at most io, and possibly more" is not "provably nothing".
-    //
-    // Note which bit does NOT carry it. The effect pass *discharges* the
-    // exhaustiveness taint here — an envelope is a checked contract, so the call
-    // site is no longer unknown — which is exactly why the declared lane has to
-    // be reported separately: a proven-purity gate reading `exhaustive` alone
-    // would admit this call.
+    // ADR-0067's lane wall: a `#[\Steins\Effect]` envelope on an interface method
+    // is a CAP imported through an injected receiver, never an occurrence proof —
+    // "at most io, and possibly more" is not "provably nothing". The effect pass
+    // *discharges* the exhaustiveness taint here (the call site is no longer
+    // unknown), which is exactly why the declared lane must be reported
+    // separately: a proven-purity gate reading `exhaustive` alone would admit this call.
     let src = "<?php\ninterface Repo {\n    #[\\Steins\\Effect('io')]\n    public function load(int $id): int;\n}\nfunction f(Repo $r): int {\n    // region-start\n    $y = $r->load(1);\n    // region-end\n    return $y;\n}\n";
     let r = region(src);
     assert!(r.labels.is_empty(), "a declared bound leaked into the proven lane: {r:?}");
@@ -92,10 +89,9 @@ fn a_throw_inside_the_region_is_proven() {
 
 #[test]
 fn an_enclosing_catch_does_not_absorb_the_regions_throw() {
-    // The load-bearing asymmetry (ADR-0076 §2.3). The whole function's escaping
-    // throw set is empty — the `catch` absorbs it — but the REGION still throws,
-    // and that is exactly what the enclosing `catch` would observe as partial
-    // accumulation. Stripping the guards is what makes the two answers differ.
+    // The load-bearing asymmetry (ADR-0076 §2.3): the whole function's escaping
+    // throw set is empty (the `catch` absorbs it) but the REGION still throws —
+    // stripping the guards is what makes the two answers differ.
     let src = "<?php\nfunction f(int $n): int {\n    try {\n        // region-start\n        throw new RuntimeException('no');\n        // region-end\n    } catch (RuntimeException $e) {\n        return 0;\n    }\n    return $n;\n}\n";
     let r = region(src);
     assert_eq!(

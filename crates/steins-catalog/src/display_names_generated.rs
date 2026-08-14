@@ -5,12 +5,11 @@
 // cross-checked against PHP 8.5.8. Source of record is the TOML; run
 // `cargo xtask gen-catalog` to regenerate after editing it.
 //
-// Each row: (lowercased class/interface/enum name, the casing php-src
-// DECLARES it with). Display fidelity only — every judgment compares
-// through the case-insensitive `class_eq`, so nothing may decide on this
-// table. Unlike HIERARCHY it keeps the enum rows: the enum exclusion
-// there guards the is-a oracle against an incomplete super-edge set, and
-// a display name has no such soundness gate.
+// Each row: (lowercased name, php-src's DECLARED casing). Display fidelity
+// only — judgments compare via the case-insensitive `class_eq`, so nothing
+// decides on this table. Unlike HIERARCHY, enum rows are kept: HIERARCHY
+// excludes them to guard the is-a oracle against an incomplete super-edge
+// set, a soundness gate that doesn't apply here.
 //
 // Sorted by key for binary search.
 

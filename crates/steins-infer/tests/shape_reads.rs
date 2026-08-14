@@ -2,16 +2,14 @@
 //! declared array `@param` into the value lane, constant-key reads against it,
 //! and the `count`/`array_is_list` transfers (§4).
 //!
-//! Two disciplines are pinned here, not just the spellings:
+//! Two disciplines pinned here, not just the spellings: **A-G9** (a read is never
+//! null-poisoned — an undischarged optional key yields NO fact, never declared
+//! value ∪ null) and **zero emission**, A-G9's corollary (shape reads must not
+//! produce a finding; every test asserts the non-debug diagnostic list is empty,
+//! and [`no_findings_from_shape_reads`] sweeps the matrix).
 //!
-//! * **A-G9** — a read is never null-poisoned. An undischarged optional key
-//!   yields NO fact, never the declared value ∪ null.
-//! * **Zero emission (A-G9's corollary)** — shape reads must not produce a
-//!   finding. Every test that exercises a shape asserts the non-debug diagnostic
-//!   list is empty, and [`no_findings_from_shape_reads`] sweeps the matrix.
-//!
-//! NB: a variable handed to a call is invalidated after that statement
-//! (pre-existing by-ref conservatism), so each fixture dumps a binding once.
+//! NB: a variable handed to a call is invalidated after that statement (pre-existing
+//! by-ref conservatism), so each fixture dumps a binding once.
 
 use std::collections::HashMap;
 
@@ -19,10 +17,9 @@ use steins_domain::{Base, Fact, IntRange, Refinement};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// A mock sidecar answering the reflected envelopes these transfers consult,
-/// plus the absence-family boot surface (there is no PHP in a unit test). Without an envelope the type
-/// rung is *withheld*, which is the gate working — so a transfer test needs
-/// this mock to observe anything at all.
+/// A mock sidecar answering the reflected envelopes these transfers consult, plus the
+/// absence-family boot surface (no real PHP in a unit test). Without an envelope the
+/// type rung is *withheld* (the gate working), so a transfer test needs this mock.
 #[derive(Default)]
 struct Mock {
     facts: HashMap<String, Fact>,
@@ -57,9 +54,8 @@ impl Folder for Mock {
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every assertion below keeps meaning what it meant before it landed.
+    // `untyped.*` (ADR-0078, issue #200) reports on the fixtures' own deliberately
+    // untyped declarations, not the behaviour under test — dropped here.
     check_with(&tree, &[], "t.php", &mut Mock::sidecar())
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -86,7 +82,7 @@ fn dump(decl: &str, expr: &str) -> String {
     one_type(&fixture(decl, &format!("\\PHPStan\\dumpType({expr});")))
 }
 
-// ---- Seeding (the shape reaches the value lane) ----------------------------
+// Seeding (the shape reaches the value lane).
 
 #[test]
 fn a_declared_shape_param_spells_its_shape() {
@@ -98,12 +94,12 @@ fn a_declared_shape_param_spells_its_shape() {
 
 #[test]
 fn a_declared_list_param_spells_the_generic_form() {
-    // The degenerate form (A-G1) spells as the generic vocabulary it lowered
-    // from — never as a brace shape holding only a tail.
+    // The degenerate form (A-G1) spells as the generic vocabulary it lowered from —
+    // never as a brace shape holding only a tail.
     assert_eq!(dump("list<string>", "$v"), "dumped type: list<string> (asserted)");
 }
 
-// ---- Reads (§4's read row) -------------------------------------------------
+// Reads (§4's read row).
 
 #[test]
 fn a_required_field_reads_its_value_slot() {
@@ -112,15 +108,15 @@ fn a_required_field_reads_its_value_slot() {
 
 #[test]
 fn an_optional_field_reads_unknown_and_is_never_null_poisoned() {
-    // A-G9: NOT `int|null`. The missing-ness hazard is S6's strict-leg finding,
-    // never a type pollution.
+    // A-G9: NOT `int|null`. The missing-ness hazard is S6's strict-leg finding, never
+    // a type pollution.
     assert_eq!(dump("array{a: string, b?: int}", "$v['b']"), "dumped type: unknown");
 }
 
 #[test]
 fn an_undeclared_key_under_a_sealed_shape_reads_unknown_and_emits_nothing() {
-    // The `ShapeRead::DeclaredAbsent` outcome — S6 wires `offset.undeclared`
-    // here; S3 spells unknown and says nothing.
+    // `ShapeRead::DeclaredAbsent`: S6 wires `offset.undeclared` here, S3 spells
+    // unknown and says nothing.
     assert_eq!(dump("array{a: string, b?: int}", "$v['zzz']"), "dumped type: unknown");
 }
 
@@ -131,8 +127,7 @@ fn an_unsealed_tail_supplies_the_value_bound_for_an_undeclared_key() {
 
 #[test]
 fn a_key_the_tail_key_class_rejects_reads_unknown() {
-    // `array<string, int>` cannot hold the int key 3 — declared absence, not a
-    // tail read.
+    // `array<string, int>` can't hold int key 3 — declared absence, not a tail read.
     assert_eq!(dump("array<string, int>", "$v[3]"), "dumped type: unknown");
 }
 
@@ -143,14 +138,14 @@ fn a_nested_array_field_reads_a_nested_shape() {
 
 #[test]
 fn an_unrepresentable_slot_reads_unknown() {
-    // A class-typed field has no fact form (A-G1a's honest floor); the declared
-    // fidelity stays in the arm lane.
+    // A class-typed field has no fact form (A-G1a's honest floor); fidelity stays
+    // in the arm lane.
     assert_eq!(dump("array{a: Foo}", "$v['a']"), "dumped type: unknown");
 }
 
 #[test]
 fn a_nullable_base_declines_the_read() {
-    // The base may be null, so no field is guaranteed — narrowing that is S4's.
+    // Base may be null, so no field is guaranteed — narrowing that is S4's.
     let src = "<?php\n/** @param array{a: string}|null $v */\n\
                function f(?array $v): void { \\PHPStan\\dumpType($v['a']); }\n";
     assert_eq!(one_type(src), "dumped type: unknown");
@@ -158,8 +153,7 @@ fn a_nullable_base_declines_the_read() {
 
 #[test]
 fn an_unproven_key_declines_the_read() {
-    // The key resolution is the offset family's: a proven single value or
-    // nothing.
+    // Key resolution is the offset family's: a proven single value or nothing.
     let src = "<?php\n/** @param array{a: string} $v */\n\
                function f(array $v, string $k): void { \\PHPStan\\dumpType($v[$k]); }\n";
     assert_eq!(one_type(src), "dumped type: unknown");
@@ -167,7 +161,7 @@ fn an_unproven_key_declines_the_read() {
 
 #[test]
 fn a_read_binds_into_the_env_for_later_use() {
-    // The read is a value-lane binding, not a dump-only rendering.
+    // A value-lane binding, not a dump-only rendering.
     let src = "<?php\n/** @param array{a: string} $v */\n\
                function f(array $v): void { $x = $v['a']; \\PHPStan\\dumpType($x); }\n";
     assert_eq!(one_type(src), "dumped type: string (asserted)");
@@ -175,11 +169,11 @@ fn a_read_binds_into_the_env_for_later_use() {
 
 #[test]
 fn php_key_normalization_is_the_offset_familys() {
-    // `'5'` denotes the int key 5 (the ONE canonicalization, ADR-0049 A10).
+    // `'5'` denotes int key 5 (the ONE canonicalization, ADR-0049 A10).
     assert_eq!(dump("array{5: string}", "$v['5']"), "dumped type: string (asserted)");
 }
 
-// ---- Transfers (§4's count / array_is_list rows) ---------------------------
+// Transfers (§4's count / array_is_list rows).
 
 #[test]
 fn count_of_a_sealed_all_required_shape_is_exact() {
@@ -198,7 +192,7 @@ fn count_of_an_optional_only_shape_starts_at_zero() {
 
 #[test]
 fn count_of_a_non_empty_generic_floors_at_one() {
-    // An unsealed tail has no ceiling, so the range IS `positive-int`.
+    // Unsealed tail has no ceiling, so the range IS `positive-int`.
     assert_eq!(dump("non-empty-list<string>", "count($v)"), "dumped type: int<1, max> (asserted)");
 }
 
@@ -210,8 +204,8 @@ fn array_is_list_answers_the_denotational_flag() {
 
 #[test]
 fn array_is_list_declines_on_maybe() {
-    // `array{a?: string}` admits both `[]` (a list) and `['a' => …]` (not one),
-    // so the flag answers nothing and the envelope rung stands.
+    // `array{a?: string}` admits both `[]` (a list) and `['a' => …]` (not one), so
+    // the flag answers nothing and the envelope rung stands.
     assert_eq!(dump("array{a?: string}", "array_is_list($v)"), "dumped type: bool");
 }
 
@@ -231,35 +225,33 @@ fn a_transfer_binds_into_the_env_for_later_use() {
     assert_eq!(one_type(src), "dumped type: 2 (asserted)");
 }
 
-// ---- A literal array LIFTS to a shape when the value lane declines (#262) --
+// A literal array LIFTS to a shape when the value lane declines (#262).
 
 #[test]
 fn count_of_a_literal_array_lifts_to_its_shape() {
-    // `$v = [1, 2, 3]` binds a `Fact::Singleton(Val::Array(..))`, not a
-    // `Fact::Shape` — the value-lane privilege (issue #118) claims `count` first
-    // and, having no projection for it, must fall through to `ShapeFact::lift`
-    // rather than give up: a literal array is strictly more informative than any
-    // declared one, so `count` over it is exact, `Verified` (not `(asserted)` —
-    // no docblock was consulted).
+    // `$v = [1, 2, 3]` binds `Fact::Singleton(Val::Array(..))`, not `Fact::Shape` —
+    // the value-lane privilege (issue #118) claims `count` first, has no projection
+    // for it, and must fall through to `ShapeFact::lift` rather than give up: a
+    // literal array is strictly more informative than any declared one, so `count`
+    // over it is exact and `Verified` (no `(asserted)` — no docblock consulted).
     let src = "<?php\nfunction f(): void { $v = [1, 2, 3]; \\PHPStan\\dumpType(count($v)); }\n";
     assert_eq!(one_type(src), "dumped type: 3");
 }
 
 #[test]
 fn array_is_list_of_a_literal_array_also_lifts() {
-    // The same fallback serves every name this rung answers for, not just
-    // `count` — `array_is_list` over a witnessed literal falls through too.
+    // Same fallback serves every name this rung answers for, not just `count`.
     let src = "<?php\nfunction f(): void { $v = [1, 2, 3]; \\PHPStan\\dumpType(array_is_list($v)); }\n";
     assert_eq!(one_type(src), "dumped type: true");
 }
 
-// ---- Emission discipline (A-G9's corollary) --------------------------------
+// Emission discipline (A-G9's corollary).
 
 #[test]
 fn shape_reads_feed_nothing_but_the_strict_leg() {
-    // A-G9: a shape-derived fact may produce only the contract-layer offset ids.
-    // No proof-layer id may appear; enumerating the two allowed ids prevents a new
-    // contract finding from slipping in unnoticed.
+    // A-G9: a shape-derived fact may produce only the contract-layer offset ids, no
+    // proof-layer id — enumerating the two allowed ids catches a new contract
+    // finding slipping in unnoticed.
     let strict_leg = ["offset.undeclared", "offset.maybe-missing"];
     let bodies = [
         "$x = $v['a']; return;",
@@ -288,10 +280,9 @@ fn shape_reads_feed_nothing_but_the_strict_leg() {
 
 #[test]
 fn a_shape_seed_does_not_disturb_the_proof_leg() {
-    // The PROOF-layer offset check judges proven whole values only; a shape base is
-    // silent there, and the `Asserted` seed is invisible to its Verified-only
-    // operand gate. The contract-layer leg may report `$v['nope']` as a declared
-    // absence, but the proof leg must remain silent.
+    // The PROOF-layer offset check judges proven whole values only: a shape base is
+    // silent there, invisible to its Verified-only operand gate — even though the
+    // contract-layer leg may report `$v['nope']` as a declared absence.
     let shaped = "<?php\n/** @param array{a: string} $v */\n\
                   function f(array $v): void { $x = $v['nope']; }\n";
     let ds = diagnostics(shaped);
@@ -312,8 +303,8 @@ fn a_shape_seed_does_not_disturb_the_proof_leg() {
 
 #[test]
 fn a_multi_array_arm_lane_seeds_no_shape_fact() {
-    // A-G3: a shape∪shape union lives in the arm lane until a guard subtracts it
-    // to one (S4). No fact ⇒ no read, no transfer.
+    // A-G3: a shape∪shape union lives in the arm lane until a guard subtracts it to
+    // one (S4) — no fact means no read, no transfer.
     let src = "<?php\n/** @param array{a: string}|array{b: int} $v */\n\
                function f(array $v): void { \\PHPStan\\dumpType(count($v)); }\n";
     assert_eq!(one_type(src), "dumped type: int<0, max>");
@@ -329,8 +320,8 @@ fn a_mixed_union_seeds_no_shape_fact() {
 
 #[test]
 fn a_nullable_shape_keeps_the_null_arm_in_the_fact() {
-    // A-G2: `nullable` is the side-flag, never a field inside the shape — and a
-    // nullable base declines every read until S4 narrows it.
+    // A-G2: `nullable` is the side-flag, never a field inside the shape; a nullable
+    // base declines every read until S4 narrows it.
     let src = "<?php\n/** @param array{a: string}|null $v */\n\
                function f(?array $v): void { \\PHPStan\\dumpType(count($v)); }\n";
     assert_eq!(one_type(src), "dumped type: int<0, max>");

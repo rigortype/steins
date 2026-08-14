@@ -114,15 +114,13 @@ fn fires_on_key_value_and_by_ref_forms_too() {
 
 
 // Firing fixture — the abstract (`Refined`/`General`) leg, via a type-predicate
-// guard (DR2/ADR-0064 §5) rather than a literal assignment.
+// guard (DR2/ADR-0064 §5), not a literal assignment.
 
 
 #[test]
 fn fires_on_is_int_narrowed_subject() {
-    // `is_int($x)` mints `Fact::General { base: Int, nullable: false }` at the
-    // Verified stratum for a parameter that otherwise carries no fact — a proven
-    // scalar BASE, not a concrete value, which is the "value-domain fact proving
-    // scalar" leg the id also fires on.
+    // `is_int($x)` mints `Fact::General { base: Int, nullable: false }` — a proven
+    // scalar BASE, not a concrete value, which the id also fires on.
     let src = "<?php\nfunction f($x) {\n    if (is_int($x)) {\n        foreach ($x as $v) {\n            echo $v;\n        }\n    }\n}\n";
     let d = diags(src);
     assert_eq!(d.len(), 1, "{d:#?}");
@@ -138,10 +136,8 @@ fn fires_on_is_int_narrowed_subject() {
 
 #[test]
 fn fires_on_is_bool_narrowed_subject_without_a_literal_quote() {
-    // The `General{Bool}` case: proven non-iterable (a scalar base), but no
-    // single warning word can be attributed (PHP names the concrete
-    // `true`/`false`, never the bare word `bool`) — so this fixture pins that the
-    // finding still fires, just without a fabricated literal quote.
+    // `General{Bool}`: proven non-iterable, but PHP names the concrete `true`/`false`,
+    // never the bare word `bool` — so the finding still fires, without a fabricated quote.
     let src = "<?php\nfunction f($x) {\n    if (is_bool($x)) {\n        foreach ($x as $v) {\n            echo $v;\n        }\n    }\n}\n";
     let d = diags(src);
     assert_eq!(d.len(), 1, "{d:#?}");
@@ -189,10 +185,8 @@ fn silent_on_traversable_subject() {
 
 #[test]
 fn silent_on_unenumerable_class_subject() {
-    // A class-typed parameter whose hierarchy is not enumerable here (it could
-    // implement `Traversable` out of view) — an object carries no value-domain
-    // fact at all, so this is silence by the same construction as every other
-    // object case, never a special-cased hierarchy walk.
+    // A class-typed parameter with an unenumerable hierarchy carries no value-domain
+    // fact — same construction as every other object case, never a hierarchy walk.
     let d = diags(
         "<?php\nfunction f(SomeExternalClass $x) {\n    foreach ($x as $v) {\n        echo $v;\n    }\n}\n",
     );
@@ -225,9 +219,8 @@ fn silent_on_unannotated_param() {
 
 #[test]
 fn silent_on_union_subject() {
-    // A `Maybe`-typed join (one branch an int, the other an array): the merged
-    // fact is a heterogeneous `OneOf`, deliberately out of this id's scope (no
-    // single warning word to attribute) — silence, not a false proof.
+    // A `Maybe`-typed join merges to a heterogeneous `OneOf`, deliberately out of
+    // this id's scope (no single warning word to attribute) — silence, not a false proof.
     let d = diags(
         "<?php\nif (rand()) {\n    $a = 1;\n} else {\n    $a = [1, 2];\n}\nforeach ($a as $v) {\n    echo $v;\n}\n",
     );
@@ -245,8 +238,7 @@ fn silent_on_dynamic_subject_expression() {
 }
 
 
-// The `warning-handler` gate (ADR-0049 §7) — both postures, `readonly.reassigned`'s
-// single-id-family precedent judged the same way `offset.missing` is.
+// The `warning-handler` gate (ADR-0049 §7) — both postures, judged like `offset.missing`.
 
 
 #[test]

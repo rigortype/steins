@@ -18,9 +18,7 @@ fn fetches(src: &str) -> Vec<String> {
     SourceTree::parse(src).const_refs().iter().map(|r| r.raw.clone()).collect()
 }
 
-// ---------------------------------------------------------------------------
 // The key normalizer.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn normalization_folds_the_namespace_and_keeps_the_final_segment() {
@@ -28,15 +26,12 @@ fn normalization_folds_the_namespace_and_keeps_the_final_segment() {
     assert_eq!(normalize_const_fqn("\\FOO"), "FOO");
     assert_eq!(normalize_const_fqn("App\\LOCAL"), "app\\LOCAL");
     assert_eq!(normalize_const_fqn("APP\\Sub\\Local"), "app\\sub\\Local");
-    // The two spellings PHP treats as one name collapse; the one it treats as
-    // different does not.
+    // Namespace-folded spellings collapse to one name; final-segment case does not.
     assert_eq!(normalize_const_fqn("App\\LOCAL"), normalize_const_fqn("app\\LOCAL"));
     assert_ne!(normalize_const_fqn("App\\LOCAL"), normalize_const_fqn("App\\local"));
 }
 
-// ---------------------------------------------------------------------------
 // Declarations.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_global_const_statement_declares_its_bare_name() {
@@ -55,10 +50,9 @@ fn a_multi_item_const_statement_declares_each_item() {
 
 #[test]
 fn a_literal_define_declares_an_absolute_name() {
-    // `define()` is NOT resolved against the current namespace: inside
-    // `namespace App;`, `define('FOO', 1)` declares the GLOBAL `FOO` (witnessed —
-    // `namespace App; define('G','g'); echo G;` prints `g` through the fallback,
-    // and `defined('App\G')` is false).
+    // `define()` ignores the current namespace: `define('FOO', 1)` inside
+    // `namespace App;` declares the global `FOO` (witnessed: `namespace App;
+    // define('G','g'); echo G;` prints `g`, `defined('App\G')` is false).
     assert_eq!(decls("<?php\nnamespace App;\ndefine('FOO', 1);\n"), ["FOO"]);
     assert_eq!(decls("<?php\ndefine('Ns\\\\FOO', 1);\n"), ["ns\\FOO"]);
 }
@@ -75,9 +69,7 @@ fn a_class_constant_is_not_a_global_declaration() {
     assert!(decls("<?php\nenum E { const K = 1; case A; }\n").is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // The computed-`define()` dam site.
-// ---------------------------------------------------------------------------
 
 fn define_dam_sites(src: &str) -> usize {
     SourceTree::parse(src)
@@ -115,9 +107,7 @@ fn a_namespaced_define_is_a_different_function_entirely() {
     assert!(decls(src).is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // Fetches.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn bare_constant_fetches_are_collected_in_every_spelling() {
@@ -135,9 +125,7 @@ fn a_class_constant_access_is_not_a_bare_fetch() {
     assert!(fetches("<?php\necho W::SIZE, W::class;\n").is_empty());
 }
 
-// ---------------------------------------------------------------------------
 // `use const` imports.
-// ---------------------------------------------------------------------------
 
 /// The namespace context covering a byte offset just inside `needle`.
 fn ctx_at<'a>(tree: &'a SourceTree, src: &str, needle: &str) -> &'a steins_syntax::NsCtx {
@@ -151,9 +139,8 @@ fn a_plain_use_const_binds_an_exact_case_alias() {
     let tree = SourceTree::parse(src);
     let ctx = ctx_at(&tree, src, "echo FOO");
     assert_eq!(ctx.const_imports.get("FOO").map(String::as_str), Some("Other\\FOO"));
-    // Case-sensitive: the lowercased spelling binds nothing.
+    // Case-sensitive (no lowercased alias) and const-scoped (no leak into fn/class maps).
     assert!(!ctx.const_imports.contains_key("foo"));
-    // …and it must not have leaked into the function or class maps.
     assert!(ctx.fn_imports.is_empty() && ctx.class_imports.is_empty());
 }
 

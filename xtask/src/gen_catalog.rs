@@ -3,53 +3,41 @@
 //!
 //! # Source of record
 //!
-//! `docs/research/phpsrc-mining/hierarchy.toml` is the *source of record*: 368
-//! production class/interface/enum declarations mined from php-src
-//! `6bc7c26cf67a9480b5ef9d6191aebe87fa931183` and cross-checked against PHP
-//! 8.5.8. It records **direct** edges (`extends` + `implements`); the is-a
-//! oracle computes the transitive closure by walking `builtin_class_supers`
-//! ([the crosscheck](docs/research/phpsrc-mining/crosscheck.txt) verified that
-//! closure-of-direct-edges == runtime `class_implements` for a sample).
+//! `docs/research/phpsrc-mining/hierarchy.toml`: 368 class/interface/enum
+//! declarations mined from php-src `6bc7c26cf67a9480b5ef9d6191aebe87fa931183`,
+//! cross-checked against PHP 8.5.8. Records **direct** `extends`/`implements`
+//! edges; the is-a oracle walks `builtin_class_supers` for the transitive
+//! closure ([crosscheck](docs/research/phpsrc-mining/crosscheck.txt) confirmed
+//! it equals runtime `class_implements` for a sample).
 //!
-//! This command reads that TOML with the `toml` crate (an xtask-only dependency;
-//! the shipped `steins-catalog` crate stays dependency-free) and emits a
-//! committed Rust source file — `crates/steins-catalog/src/hierarchy_generated.rs`
-//! — containing a single sorted `&[(&str, &[&str])]` table for binary-search
-//! lookup. No runtime TOML parsing, no new shipped dependency.
+//! Parsed here via the xtask-only `toml` crate (shipped `steins-catalog` stays
+//! dependency-free) into committed `hierarchy_generated.rs`: a sorted
+//! `&[(&str, &[&str])]` table for binary search.
 //!
-//! # What is emitted, and what is deliberately not
+//! # What is emitted, and what is not
 //!
-//! * **`kind = 'class'` and `kind = 'interface'` rows are emitted** — direct
-//!   supers, lowercased key preserving declared-casing supers. Namespaced names
-//!   are kept (backslash preserved in the key); the oracle resolves them the same
-//!   way it resolves a global name.
-//! * **`kind = 'enum'` rows are SKIPPED** — the mining extractor did not capture
-//!   an enum's implicit `UnitEnum`/`BackedEnum` interfaces nor its backing, so
-//!   the recorded super-set (empty) is *incomplete*. Emitting it would let the
-//!   oracle read a builtin enum as a fully-enumerated root and return a spurious
-//!   `No` against `UnitEnum`/`BackedEnum` — unsound. Absence → `None` → `Unknown`
-//!   is the FP-safe verdict ADR-0043 §3 requires when enumeration is incomplete.
-//!   (Re-mining enum backing would let these move to a sound `Some`.)
+//! * `kind = 'class'`/`'interface'`: emitted, direct supers, lowercased key,
+//!   declared casing kept, namespaces preserved.
+//! * `kind = 'enum'`: SKIPPED — mining didn't capture implicit
+//!   `UnitEnum`/`BackedEnum` interfaces or backing, so the (empty) recorded
+//!   super-set is incomplete and would make the oracle return a spurious `No`
+//!   against those interfaces. Absence → `None` → `Unknown` is the FP-safe
+//!   verdict ADR-0043 §3 requires; re-mining backing data would allow `Some`.
 //!
-//! Two further tables ride the same pipeline: the curated return-fact refinements
-//! ([`gen_return_facts`], from `phpsrc-mining/return_facts.toml`) and the ADR-0069
-//! declared-return floor ([`gen_declared_returns`], from
-//! `phpstan-mining/declared_returns.toml`, whose own source of record is produced
-//! by `cargo xtask mine-function-map`).
+//! Two further tables ride the pipeline: curated return-fact refinements
+//! ([`gen_return_facts`], `return_facts.toml`) and the ADR-0069 declared-return
+//! floor ([`gen_declared_returns`], `phpstan-mining/declared_returns.toml`,
+//! sourced by `cargo xtask mine-function-map`).
 //!
-//! A fourth table is a *byproduct* of the hierarchy source: the builtin-class
-//! **display-name** table (`display_names_generated.rs`), lowercased key → the
-//! casing php-src declares. It exists because `ContractTy::Class` case-folds on
-//! the way in (that is what makes `class_eq` comparison work) and the project
-//! index knows nothing about a builtin, so without it the dump surface renders
-//! `gmp` where PHPStan renders `GMP` (the ADR-0069 third-amendment residual).
-//! Unlike the hierarchy table it **keeps the enum rows**: the enum exclusion
-//! guards the is-a oracle against an incomplete super-edge set, and a display
-//! name has no such soundness gate — the casing is the casing.
+//! A fourth, byproduct table: builtin-class **display names**
+//! (`display_names_generated.rs`), lowercased key → php-src's declared casing
+//! — needed because `ContractTy::Class` case-folds (`class_eq`), so the dump
+//! surface would otherwise render `gmp` where PHPStan renders `GMP`
+//! (ADR-0069 third-amendment residual). Unlike HIERARCHY it keeps enum rows:
+//! display has no soundness gate to guard.
 //!
-//! Run `cargo xtask gen-catalog` after editing any of those TOMLs; the committed
-//! generated files must stay in sync (a test asserts the table is sorted and
-//! self-consistent).
+//! Run `cargo xtask gen-catalog` after editing any of those TOMLs; a test
+//! asserts the committed files stay sorted and self-consistent.
 
 use std::collections::BTreeMap;
 
@@ -61,10 +49,10 @@ pub fn run() -> Result<(), String> {
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: Doc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
 
-    // Lowercase-keyed, sorted (BTreeMap) → deterministic binary-search table.
-    // Enums are skipped (see module docs); classes/interfaces are kept.
+    // Lowercase-keyed BTreeMap → deterministic binary-search table. Enums are
+    // skipped (see module docs); classes/interfaces are kept.
     let mut table: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    // The display-name table keeps EVERY row, enums included (see module docs).
+    // Keeps EVERY row, enums included (see module docs).
     let mut display: BTreeMap<String, String> = BTreeMap::new();
     let mut skipped_enums = 0usize;
     for c in &doc.class {
@@ -110,14 +98,10 @@ pub fn run() -> Result<(), String> {
 }
 
 /// Regenerate the **resource-return** table (ADR-0056 §8) from
-/// `docs/research/phpsrc-mining/resource_returns.toml` into
-/// `crates/steins-catalog/src/resource_returns_generated.rs`.
-///
-/// Only two fields survive transcription — the name and whether the stub's
-/// `@return` carries a `false` arm. Everything else in the TOML (the stub path,
-/// the probe transcript, the confidence grade) is the *evidence* that justifies
-/// the row's existence, and evidence belongs in the source of record where a
-/// reviewer reads it, not in a generated lookup table.
+/// `resource_returns.toml` into `resource_returns_generated.rs`. Only two
+/// fields survive transcription — name and whether the stub's `@return`
+/// carries a `false` arm; the rest (stub path, probe transcript, confidence
+/// grade) is evidence that belongs in the source of record, not here.
 fn gen_resource_returns() -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/resource_returns.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
@@ -127,9 +111,8 @@ fn gen_resource_returns() -> Result<(), String> {
     let mut table: BTreeMap<String, bool> = BTreeMap::new();
     for f in &doc.function {
         let key = f.name.to_ascii_lowercase();
-        // The stub's `@return` is the whole vocabulary here: `resource` or
-        // `resource|false`. Anything else is a mis-transcribed row, and it must
-        // fail the build rather than reach the table as a silent `false`-less one.
+        // The stub's `@return` vocabulary is only `resource` or `resource|false`;
+        // anything else is a mis-transcribed row and must fail the build.
         let may_be_false = match f.arms.as_str() {
             "resource" => false,
             "resource|false" => true,
@@ -149,8 +132,8 @@ fn gen_resource_returns() -> Result<(), String> {
     Ok(())
 }
 
-/// The `[[function]]` array-of-tables shape of `resource_returns.toml`. The
-/// evidence keys (`stub`, `probe`, `confidence`) are documentation and ignored.
+/// The `[[function]]` shape of `resource_returns.toml`; evidence keys
+/// (`stub`, `probe`, `confidence`) are documentation and ignored.
 #[derive(serde::Deserialize)]
 struct ResourceDoc {
     #[serde(default)]
@@ -191,21 +174,19 @@ fn render_resource_returns(table: &BTreeMap<String, bool>) -> String {
 }
 
 /// Regenerate the builtin **declared-return floor** (ADR-0069, issues #73/#79)
-/// from `docs/research/phpstan-mining/declared_returns.toml` into
-/// `crates/steins-catalog/src/declared_returns_generated.rs`.
-///
-/// Two tables come out of one source of record: the declared rows themselves, and
-/// the A11-shaped change oracle (`[version_sensitive]`) the consumer's target gate
-/// reads. The TOML is produced by `cargo xtask mine-function-map`, which owns the
-/// mining, the lowerability filter and the engine cross-check; this function only
-/// transcribes it, so the two commands can be re-run independently (mining needs a
-/// phpstan-src checkout and a live `php`; generation needs neither).
+/// from `phpstan-mining/declared_returns.toml` into
+/// `declared_returns_generated.rs`. Two tables come from one source of
+/// record: the declared rows, and the A11-shaped change oracle
+/// (`[version_sensitive]`) the target gate reads. The TOML is produced by
+/// `cargo xtask mine-function-map` (mining, lowerability filter, engine
+/// cross-check); this function only transcribes it, so mining (needs
+/// phpstan-src + live `php`) and generation (needs neither) run
+/// independently.
 fn gen_declared_returns() -> Result<(), String> {
     let src = repo_root().join("docs/research/phpstan-mining/declared_returns.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: EnvelopeDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
 
-    // Lowercase-keyed, sorted (BTreeMap) → deterministic binary-search tables.
     let mut rows: BTreeMap<String, String> = BTreeMap::new();
     for (name, ty) in &doc.declared {
         rows.insert(name.to_ascii_lowercase(), ty.clone());
@@ -235,8 +216,8 @@ fn parse_minor(s: &str) -> Option<(u16, u16)> {
     Some((major.parse().ok()?, minor.parse().ok()?))
 }
 
-/// The shape of `declared_returns.toml`. Exclusion sections are documentation of
-/// the refusals and are deliberately not read here — nothing is generated from them.
+/// The shape of `declared_returns.toml`. Exclusion sections document refusals
+/// and are deliberately not read — nothing is generated from them.
 #[derive(serde::Deserialize)]
 struct EnvelopeDoc {
     meta: EnvelopeMeta,
@@ -362,17 +343,14 @@ fn render_declared_returns(
 }
 
 /// Regenerate the builtin return-fact refinement table (ADR-0056) from
-/// `docs/research/phpsrc-mining/return_facts.toml` into
-/// `crates/steins-catalog/src/return_facts_generated.rs`. Each row is a curated
-/// refinement (a phpdoc type string) keyed by the lowercased builtin name; the
-/// table may be empty (R1 lands zero rows — the reflected envelope alone serves
-/// the bool family). See the TOML header for the sourcing discipline.
+/// `return_facts.toml` into `return_facts_generated.rs`. Each row is a curated
+/// phpdoc-type refinement keyed by lowercased builtin name; may be empty (R1
+/// lands zero rows — the reflected envelope alone serves the bool family).
 fn gen_return_facts() -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/return_facts.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: ReturnDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
 
-    // Lowercase-keyed, sorted (BTreeMap) → deterministic binary-search table.
     let mut table: BTreeMap<String, String> = BTreeMap::new();
     for f in &doc.function {
         let key = f.name.to_ascii_lowercase();
@@ -388,9 +366,8 @@ fn gen_return_facts() -> Result<(), String> {
     Ok(())
 }
 
-/// The `[[function]]` array-of-tables shape of `return_facts.toml`. A row carries
-/// the curated `refinement` phpdoc string; other keys (evidence/probe notes) are
-/// documentation and ignored here.
+/// The `[[function]]` shape of `return_facts.toml`; other keys (evidence/probe
+/// notes) are documentation and ignored here.
 #[derive(serde::Deserialize)]
 struct ReturnDoc {
     #[serde(default)]

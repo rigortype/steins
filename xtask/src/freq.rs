@@ -2,21 +2,19 @@
 //!
 //! # Methodology (whole-project revision)
 //!
-//! Each corpus package is now loaded as ONE project (one salsa DB), so
-//! [`steins_infer::resolves_to_user_function`] can resolve every function call
-//! against the project symbol index using PHP name resolution (namespace
-//! fallback + `use` imports). A call is counted **only when it does not resolve
-//! to a userland function defined anywhere in its package** — so cross-file
-//! userland calls (previously counted as an upper-bound contaminant) are now
-//! excluded. The result is a *true builtin ranking*: what remains is builtins
-//! and genuinely-unresolved names, which is exactly the signal that should drive
-//! the catalog's effect-coloring order. Names are folded case-insensitively by
-//! last namespace segment.
+//! Each corpus package loads as ONE project (one salsa DB), so
+//! [`steins_infer::resolves_to_user_function`] resolves every call against the
+//! project symbol index (namespace fallback + `use` imports). A call counts
+//! **only when it does not resolve to a userland function anywhere in its
+//! package**, excluding cross-file userland calls (previously an upper-bound
+//! contaminant). What remains is a *true builtin ranking* — the signal that
+//! should drive the catalog's effect-coloring order. Names fold
+//! case-insensitively by last namespace segment.
 //!
 //! Private-corpus scope: `freq` measures ONLY the pinned public corpus
 //! ([`PACKAGES`]). Local projects from `corpus.local.toml` (ADR-0013 §4) are
-//! deliberately ignored here — the committed frequency report must never contain
-//! private-code measurements. (They are consumed only by `fp-gate`.)
+//! ignored — the committed report must never contain private-code measurements
+//! (they are consumed only by `fp-gate`).
 
 use std::collections::HashMap;
 
@@ -42,9 +40,8 @@ pub fn run() -> Result<(), String> {
         }
     }
 
-    // Each package is its own project; count in parallel across packages, then
-    // merge. Resolution against the package's project index removes userland
-    // cross-file calls.
+    // Count in parallel per package, then merge; resolution against each
+    // package's project index removes userland cross-file calls.
     let (counts, file_count): (HashMap<String, u64>, usize) = PACKAGES
         .par_iter()
         .map(|pkg| count_package(&checkout_dir(pkg.name)))

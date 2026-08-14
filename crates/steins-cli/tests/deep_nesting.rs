@@ -1,23 +1,16 @@
 //! Regression test for issue #246 at the binary's own entry point.
 //!
-//! `SourceTree::parse`'s lowering walkers (`scan_effect_origins` and its siblings
-//! in `crates/steins-syntax/src/lib.rs`) recurse one frame per CST node. A
-//! property-fetch chain is a finite tree and the walk terminates, but the descent
-//! costs stack in proportion to depth: measured on the OS default ~8 MiB stack,
-//! `steins check` aborted with `fatal runtime error: stack overflow` at roughly
-//! 520 `->next` levels in a debug build and roughly 2,700 in a release one.
-//! phpstan-src's own `tests/bench/data/nullsafe-chain-walk.php` is 1,000 levels
-//! deep, which is past the first number and 40% of the way to the second.
+//! `SourceTree::parse`'s lowering walkers recurse one frame per CST node: on the
+//! OS default ~8 MiB stack, `steins check` aborted with `fatal runtime error:
+//! stack overflow` at ~520 `->next` levels in debug, ~2,700 in release.
+//! phpstan-src's own 1,000-level fixture is past the first ceiling.
 //!
 //! PR #253 gave the nsrt harness a sized worker thread; `main` now does the same
-//! for every subcommand (`WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`).
-//! This drives the real binary over a chain past BOTH ceilings, so it is a
-//! meaningful check in either build profile.
+//! for every subcommand (`WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`),
+//! driving the real binary past both ceilings in either build profile.
 //!
-//! A stack overflow is not a catchable panic — there is no assertion to make on
-//! the failure side from inside the process. Running the binary as a subprocess
-//! is what makes the failure observable: an overflow kills it by signal (no exit
-//! code) after printing to stderr, and both are asserted below.
+//! A stack overflow isn't a catchable panic, so failure is asserted as a
+//! subprocess signal death (no exit code) with the stderr message, below.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -26,20 +19,16 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection (ADR-0054 §6)
+/// reads it and would otherwise emit workflow commands instead of plain text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
     cmd
 }
 
-/// Past the release ceiling (~2,700) as well as the debug one (~520), so the
-/// test does not quietly stop testing anything under `--release`.
+/// Past both measured ceilings (~520 debug, ~2,700 release), so `--release`
+/// stays meaningful too.
 const CHAIN_DEPTH: usize = 3_000;
 
 fn workdir(tag: &str) -> PathBuf {

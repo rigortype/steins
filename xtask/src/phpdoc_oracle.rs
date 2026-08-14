@@ -1,20 +1,18 @@
 //! `phpdoc-oracle`: the differential compatibility check for `steins-phpdoc`
-//! (ADR-0029). It runs the *real* phpstan/phpdoc-parser (via the PHP sidecar in
+//! (ADR-0029). Runs the *real* phpstan/phpdoc-parser (via the PHP sidecar in
 //! `harness/phpdoc-oracle/dump.php`) as an oracle and diffs it against our parser
-//! over two sources:
-//!
-//!   (a) the ported reference fixtures — regenerating `reference-types.expected`,
-//!       or, with `--check`, diffing instead of writing (CI mode);
-//!   (b) every `@param`/`@return`/`@var`/`@throws` type expression extracted from
-//!       the public corpus `.php` files — printing any disagreement verbatim.
+//! over two sources: (a) the ported reference fixtures — regenerating
+//! `reference-types.expected`, or with `--check`, diffing instead of writing (CI
+//! mode); (b) every `@param`/`@return`/`@var`/`@throws` type expression extracted
+//! from the public corpus `.php` files, printing any disagreement verbatim.
 //!
 //! A disagreement where we parse *differently* (a wrong parse) is a bug and fails
-//! the command; a disagreement where we say "unsupported/error" while the
-//! reference accepts is a coverage gap — counted, not failed (silence is safe).
+//! the command; one where we say "unsupported/error" while the reference accepts
+//! is a coverage gap — counted, not failed (silence is safe).
 //!
-//! Requires `php` + `composer` and an installed harness `vendor/`. When any is
-//! absent the command prints a clear message and succeeds (it is optional tooling,
-//! never a hard gate on machines without PHP).
+//! Requires `php` + `composer` and an installed harness `vendor/`. When absent the
+//! command prints a message and succeeds — optional tooling, never a hard gate on
+//! machines without PHP.
 
 use std::collections::BTreeMap;
 use std::io::Write;
@@ -57,9 +55,7 @@ pub fn run(check: bool) -> Result<(), String> {
     corpus_stage(&root, &harness, &dump)
 }
 
-// ----------------------------------------------------------------------------
 // (a) fixtures
-// ----------------------------------------------------------------------------
 
 fn fixtures_stage(
     root: &Path,
@@ -77,10 +73,8 @@ fn fixtures_stage(
     let expected = fixtures_dir.join("reference-types.expected");
 
     // Read as bytes: the corpus carries one non-UTF-8 identifier line the raw
-    // reference suite contains. dump.php does its own C-unescaping.
-    // Read as bytes: the corpus carries one non-UTF-8 identifier line the raw
-    // reference suite contains. dump.php does its own C-unescaping, and returns
-    // bytes so the one 0xA0-bearing verdict round-trips byte-faithfully.
+    // reference suite contains. dump.php does its own C-unescaping and returns
+    // bytes, so the 0xA0-bearing verdict round-trips byte-faithfully.
     let inputs = std::fs::read(&txt).map_err(|e| format!("cannot read {}: {e}", txt.display()))?;
     let verdicts = run_oracle(harness, dump, &inputs)?;
 
@@ -142,9 +136,7 @@ fn first_diff(a: &[&str], b: &[&str]) -> String {
     String::new()
 }
 
-// ----------------------------------------------------------------------------
 // (b) corpus
-// ----------------------------------------------------------------------------
 
 fn corpus_stage(root: &Path, harness: &Path, dump: &Path) -> Result<(), String> {
     let corpus = root.join("corpus");
@@ -277,9 +269,7 @@ fn docblocks(text: &str) -> Vec<&str> {
     blocks
 }
 
-// ----------------------------------------------------------------------------
-// verdict classification (shared shape with the crate's reference-corpus test)
-// ----------------------------------------------------------------------------
+// Verdict classification (shared shape with the crate's reference-corpus test)
 
 enum RefVerdict {
     Ok(String),
@@ -389,9 +379,7 @@ fn c_escape(s: &str) -> String {
     out
 }
 
-// ----------------------------------------------------------------------------
 // PHP subprocess plumbing
-// ----------------------------------------------------------------------------
 
 /// Run `php dump.php`, feeding `input` (C-escaped lines) on stdin and returning
 /// its stdout verdict lines.
