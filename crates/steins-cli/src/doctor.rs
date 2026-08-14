@@ -1,48 +1,34 @@
 //! `steins doctor` (ADR-0054 Part II).
 //!
-//! Doctor is the **index-bound posture mirror** (ADR-0054 §8): it reads
-//! configuration, the environment (via the sidecar's `env()`), and index-level
-//! facts (declared `@throws` envelopes, the diagnostic registry, the baseline
-//! header) and renders a plain, quiet, sectioned report. It NEVER runs a
-//! diagnostic emitter — "doctor asks what the world is; check asks what is
-//! wrong". Its exit never depends on what `check` would find.
+//! Index-bound posture mirror (ADR-0054 §8): reads config, the environment
+//! (sidecar `env()`), and index-level facts into a plain sectioned report.
+//! Never runs a diagnostic emitter — "doctor asks what the world is; check
+//! asks what is wrong" — so its exit never depends on what `check` finds.
 //!
 //! # Exit semantics (ADR-0054 §10)
 //!
-//! * **0** — report produced, including *degraded* postures (no reachable PHP,
-//!   monkey-patch extensions, dormant baseline entries, catalog skew). Degradation
-//!   is surfaced loudly but exit-neutrally (ADR-0004 crying-wolf prohibition).
-//! * **1** — a hard *configuration contradiction*: an unparseable `steins.toml`, a
-//!   profile-resolution error, an unparseable baseline file, or a violated
-//!   `[doctor] require` assertion (an unknown assertion NAME is also this lane —
-//!   §14) — exactly the conditions under which `check` diverges from declared
-//!   intent, or a strictness the project itself opted into.
-//! * **2** — doctor's own usage errors: an unknown flag, a second path, a
-//!   `--baseline` with no argument, an unrecognized `--format` value, and — §10
-//!   amendment — a path argument that names nothing.
+//! * **0** — degraded postures included (no reachable PHP, monkey-patch
+//!   extensions, dormant baseline, catalog skew) — loud but exit-neutral
+//!   (ADR-0004 crying-wolf prohibition).
+//! * **1** — configuration contradiction: unparseable `steins.toml`, a
+//!   profile-resolution error, unparseable baseline, or a violated/unknown
+//!   `[doctor] require` assertion (§14).
+//! * **2** — usage errors: unknown flag, second path, bad `--baseline`/
+//!   `--format` argument, or (§10 amendment) a missing path.
 //!
 //! # Scope
 //!
-//! Nine sections, in the ADR-0054 §9 numbered order plus C4's additions: Runtime
-//! (sidecar/PHP health, SAPI/monkey-patch lines A6/A9), Config + active surface,
-//! Layout (the ADR-0015 vendor resolution), Coverage posture (dam statistics, the
-//! opaque-construct inventory, the reflected class world off a live engine —
-//! issue #269 — and the vouch/vendor/sound-subset lines), Envelopes
-//! (the G1-demote written-but-unchecked notice — ADR-0054 §9.4's Active-surface
-//! content), Baseline, Catalog (A11 pin skew), Registry totality (the mechanics
-//! self-check), and Require (`[doctor] require`, ADR-0054 §14). Two C4 lines the
-//! ADR lists are not rendered, each for a documented reason rather than an
-//! oversight: the **dump-site count** (ADR-0053 §13 / ADR-0054's own §9.2 text)
-//! waits on the D3/D4 recognizer, which has not landed; `contract_touches_class`'s
-//! project-wide count (ADR-0049 §11) needs the checker's whole-project symbol
-//! index, which lives deep inside `steins-infer`'s private `Cx`/`Index` machinery
-//! with no index-only surface doctor can reach without standing up a second
-//! inference pipeline — exactly the "no new analysis passes" line issue #268
-//! draws. Both land with the slice that lands their recognizer.
+//! Nine sections, ADR-0054 §9 order plus C4's additions: Runtime, Config +
+//! active surface, Layout (ADR-0015), Coverage posture (dam stats, opaque
+//! constructs, reflected class world — issue #269), Envelopes (G1-demote
+//! notice, §9.4), Baseline, Catalog (A11 pin skew), Registry totality,
+//! Require (§14). Two C4 lines are not rendered: dump-site count (ADR-0053
+//! §13, unlanded D3/D4 recognizer) and `contract_touches_class`'s project
+//! count (ADR-0049 §11, blocked by issue #268's ban on a second inference
+//! pipeline); both land with their recognizer.
 //!
-//! `--format json` (ADR-0054 §14) renders the identical `Vec<Section>` this file
-//! builds once, so `text`/`json` invariance is structural, not a second render
-//! path to keep in sync (see [`render_json`]'s schema doc).
+//! `--format json` (§14) renders the identical `Vec<Section>` built once, so
+//! text/json invariance is structural (see [`render_json`]).
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -60,18 +46,15 @@ use steins_syntax::{OpaqueConstruct, ReflectionKind, SourceTree};
 use crate::baseline;
 use crate::profile;
 
-/// One parsed file of the scanned tree — doctor's whole index. Parsed once in
-/// [`run_doctor`] and shared by every section that reads source-level facts, so the
-/// report costs exactly one parse per file. This is the deepest doctor ever looks:
-/// index-bound by construction (ADR-0054 §8), no emitter, no inference.
+/// One parsed file of the scanned tree — doctor's whole index (ADR-0054 §8: no
+/// emitter, no inference). Parsed once in [`run_doctor`], shared by every section.
 struct ParsedFile {
     path: String,
     tree: SourceTree,
 }
 
-/// One report section (ADR-0054 §9): a title plus already-formatted body lines.
-/// Both renderings (`text`/`json`) walk the same `Vec<Section>` — the point-9
-/// numbered structure IS the schema (ADR-0054 §14's `--format json`).
+/// One report section (ADR-0054 §9): a title plus formatted body lines. Both
+/// renderers walk the same `Vec<Section>`, which is the JSON schema too (§14).
 struct Section {
     name: &'static str,
     lines: Vec<String>,
@@ -83,9 +66,7 @@ impl Section {
     }
 }
 
-/// Push one formatted line onto a [`Section`]'s body — the doctor-local twin of
-/// `outln!` that buffers instead of writing, so the same section data feeds
-/// either renderer.
+/// Push one formatted line onto a [`Section`]'s body.
 macro_rules! line {
     ($sec:expr, $($arg:tt)*) => {
         $sec.lines.push(format!($($arg)*))
@@ -149,34 +130,23 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // A path argument naming nothing is doctor's own usage error (ADR-0054 §10
-    // amendment) — the third exit code, not the environment-degradation 0 and not
-    // the config-contradiction 1. Checked before the header line: a report about a
-    // tree that is not there is worse than no report.
+    // Missing path = usage error, exit 2 (§10 amendment).
     if let Err(code) = crate::reject_missing_paths(&paths) {
         return code;
     }
 
-    // Environment facts report at exit 0 (ADR-0054 §10); a configuration the world
-    // refutes flips this and exits 1.
-    let mut contradiction = false;
+    let mut contradiction = false; // flips to exit 1 on a config contradiction (§10)
 
     let banner = "steins doctor — posture report (index-bound; runs no checks)";
 
-    // One parse of the tree, one layout discovery, shared by every section below.
-    // Routed through the same `resolve_layout` every other surface uses (issue
-    // #181), so doctor's Layout section reports exactly what `check` would
-    // filter — including `steins.toml [paths] vendor-dirs` when set.
+    // One parse, one layout discovery; same `resolve_layout` every surface uses (#181).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let layout = crate::resolve_layout(std::slice::from_ref(&root.to_string_lossy().into_owned()));
     let files = parse_project(&root);
 
     let mut sections: Vec<Section> = Vec::new();
 
-    // The live child, when there is one, outlives its section: the Coverage
-    // posture's reflected class world (issue #269) is the same engine's answer
-    // about the same run, and spawning a second `php` to ask it would be a second
-    // runtime the report could not honestly attribute the first one's numbers to.
+    // The live child outlives its section, reused by Coverage posture (#269).
     let (runtime_section, mut runtime_facts) = section_runtime(no_php, &layout);
     sections.push(runtime_section);
 
@@ -220,17 +190,14 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     }
 
     if contradiction {
-        // ExitCode::FAILURE == 1: the doctor config-contradiction code (ADR-0054 §10).
+        // FAILURE == 1: the config-contradiction code (ADR-0054 §10).
         ExitCode::FAILURE
     } else {
         ExitCode::SUCCESS
     }
 }
 
-/// Print every section exactly as the pre-C4 doctor did: a blank line, the
-/// section name, then its body lines verbatim (already carrying their own
-/// leading-space indentation) — byte-identical to the historical output for the
-/// sections that existed before this change.
+/// Print each section: blank line, name, body lines verbatim.
 fn render_text(banner: &str, sections: &[Section]) {
     outln!("{banner}");
     for s in sections {
@@ -242,37 +209,20 @@ fn render_text(banner: &str, sections: &[Section]) {
     }
 }
 
-/// Render the same `sections` as JSON (ADR-0054 §14): the schema IS the point-9
-/// section list, one object per section with its name and body lines. Lines are
-/// trimmed of the text renderer's leading-space indentation (a display nicety for
-/// terminals, not a machine-readable fact); nesting is not otherwise represented
-/// in this v1 shape.
+/// Render `sections` as JSON (ADR-0054 §14): one object per section, lines
+/// trimmed of the text renderer's leading-space indentation.
 ///
 /// ```json
 /// {
 ///   "schema": "steins.doctor/v1",
-///   "banner": "steins doctor — posture report (index-bound; runs no checks)",
+///   "banner": "...",
 ///   "exit_code": 0,
-///   "sections": [
-///     {"name": "Runtime", "lines": ["PHP sidecar: spawned ok", "..."]},
-///     {"name": "Config + active surface", "lines": ["..."]},
-///     {"name": "Layout", "lines": ["..."]},
-///     {"name": "Coverage posture", "lines": ["..."]},
-///     {"name": "Envelopes", "lines": ["..."]},
-///     {"name": "Baseline", "lines": ["..."]},
-///     {"name": "Catalog", "lines": ["..."]},
-///     {"name": "Registry totality", "lines": ["..."]},
-///     {"name": "Require", "lines": ["..."]}
-///   ]
+///   "sections": [{"name": "Runtime", "lines": ["..."]}, ...]
 /// }
 /// ```
 ///
-/// `sections` is always exactly this list, in this order, whether a given
-/// section's `lines` are empty-of-content prose (e.g. "none") or numerous — the
-/// *structure* is fixed, never the *content*, which is the same format-invariance
-/// discipline Part I's four formats hold for `check` (ADR-0054 point 1).
-/// `schema` is versioned so a future incompatible reshape bumps it rather than
-/// breaking a consumer silently.
+/// Structure is fixed, content is not (same format-invariance discipline as
+/// `check`, ADR-0054 point 1). `schema` is versioned for future reshapes.
 fn render_json(banner: &str, sections: &[Section], exit_code: u8) {
     let doc = serde_json::json!({
         "schema": "steins.doctor/v1",
@@ -289,32 +239,22 @@ fn render_json(banner: &str, sections: &[Section], exit_code: u8) {
     outln!("{}", serde_json::to_string_pretty(&doc).unwrap_or_else(|_| "{}".to_owned()));
 }
 
-/// Facts the Runtime section computes that later sections (Catalog, Require) also
-/// need — carried out rather than recomputed, since doctor spawns the sidecar at
-/// most once per run.
+/// Facts the Runtime section computes that later sections (Catalog, Require)
+/// also need; doctor spawns the sidecar at most once per run.
 struct RuntimeFacts {
-    /// Whether the sidecar spawned AND its `env()` round-trip succeeded — the
-    /// `"sidecar"` [`RequireFacts`] leg.
+    /// The sidecar spawned AND `env()` succeeded — the `"sidecar"` [`RequireFacts`] leg.
     sidecar_ok: bool,
     /// The sidecar-reported `(major, minor)`, when the round-trip succeeded.
     runtime_minor: Option<(u16, u16)>,
     /// Whether a monkey-patch extension (ADR-0049 A9) is loaded.
     monkey_patch_present: bool,
-    /// The **live child**, when one answered `env()` (issue #269) — carried out
-    /// so Coverage posture's reflected-class-world line can put a further
-    /// question to the SAME engine this report's other Runtime facts came from.
-    /// The live child, when there is one, outlives its section: a second
-    /// spawn would be a second runtime the report could not honestly
-    /// attribute the first one's numbers to. Every degraded posture —
-    /// `--no-php`, no `php` on PATH, a spawn that then failed to answer —
-    /// leaves this `None`.
+    /// The live child, reused by Coverage posture (issue #269). `None` when degraded.
     sidecar: Option<Sidecar>,
 }
 
-/// Section 1 — Runtime (ADR-0054 §9.1): sidecar spawn health, PHP version, SAPI,
-/// loaded-extension count, the monkey-patch line (A9), the A6 SAPI-undeclared
-/// line, and the analysis TARGET version with its skew against the runtime
-/// (issue #28).
+/// Section 1 — Runtime (ADR-0054 §9.1): sidecar health, PHP version, SAPI,
+/// extension count, monkey-patch line (A9), A6 SAPI-undeclared line, and
+/// analysis TARGET skew against the runtime (issue #28).
 fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFacts) {
     let mut sec = Section::new("Runtime");
     let target = layout.php_target();
@@ -341,13 +281,8 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                 line!(sec, "  PHP version: {}", env.php_version);
                 line!(sec, "  SAPI: {}", env.sapi);
                 line!(sec, "  loaded extensions: {}", env.extensions.len());
-                // The fold lane's integer-width gate (issue #64), stated as its
-                // CONSEQUENCE rather than as a number nobody can act on. `env`
-                // already carried `int_size` — this costs no extra traffic — and
-                // the width is the one runtime fact that silently decides how much
-                // of the folding allowlist a run gets. Refused and unverified rows
-                // decline together here because the gate makes no distinction
-                // between them; the Catalog section is where their counts differ.
+                // Fold lane's integer-width gate (#64): width decides allowlist size;
+                // refused/unverified counts differ only in Catalog.
                 match env.int_size {
                     Some(8) => line!(
                         sec,
@@ -370,8 +305,7 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                     ),
                 }
                 // Monkey-patch presence (ADR-0049 A9): a loaded `uopz`/`runkit7`/
-                // `Componere` silently voids the entire absence-proof family — the
-                // exact incompleteness ADR-0004 forbids leaving unsaid, so name it.
+                // `Componere` silently voids the entire absence-proof family.
                 let present: Vec<&str> = env
                     .extensions
                     .iter()
@@ -426,13 +360,8 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
 }
 
 /// The A6 SAPI-existence-oracle line (ADR-0049 A6, ADR-0054 §9.1): `[runtime]
-/// sapi` names the serving surface and is what would unlock a firing claim
-/// against the curated SAPI-provided names below — that key is itself
-/// deferred-with-design (`steins_infer::is_sapi_provided_function`'s doc), so it
-/// is undeclared on every run today, and this line says so rather than leaving
-/// the standing of `fastcgi_finish_request()` and friends unstated. Printed on
-/// every run (`--no-php` included): the standing does not depend on whether a
-/// sidecar answered this run, only on whether the project declared its SAPI.
+/// sapi` is deferred-with-design and undeclared every run. Printed even under
+/// `--no-php`: depends on the project's SAPI declaration, not on the sidecar.
 fn section_sapi_notice(sec: &mut Section) {
     let mut names: Vec<String> = SAPI_PROVIDED_FUNCTIONS_EXACT.iter().map(|s| (*s).to_owned()).collect();
     names.extend(SAPI_PROVIDED_FUNCTION_PREFIXES.iter().map(|p| format!("{p}*")));
@@ -444,20 +373,14 @@ fn section_sapi_notice(sec: &mut Section) {
     );
 }
 
-/// Section 2 — Config + active surface (ADR-0054 §9.3/§9.4). Returns the resolved
-/// display surface plus the config-derived facts other sections need (the
-/// `[transform.vouch]` site count for Coverage posture, `[doctor] require` for the
-/// Require section). An unparseable `steins.toml` or a profile-resolution error is
-/// a configuration contradiction (`*contradiction = true`, exit 1); the section
-/// still renders on the built-in `default` surface so the rest of the report is
-/// produced.
+/// Section 2 — Config + active surface (ADR-0054 §9.3/§9.4): resolved surface
+/// plus config-derived facts other sections need. Unparseable `steins.toml`
+/// or profile-resolution error is a contradiction (exit 1); still renders default.
 struct ConfigOutcome {
     surface: profile::Surface,
-    /// `[transform.vouch] sites` count — read alongside the rest of the config so
-    /// Coverage posture's vouch line needs no second `steins.toml` parse.
+    /// `[transform.vouch] sites` count, read here to avoid a second toml parse.
     vouch_sites: usize,
-    /// `[doctor] require` as declared (validated later, in [`section_require`],
-    /// since its facts are not all known yet at config-parse time).
+    /// `[doctor] require` as declared; validated later in [`section_require`].
     require: Vec<String>,
 }
 
@@ -481,7 +404,7 @@ fn section_config(contradiction: &mut bool) -> (Section, ConfigOutcome) {
             (c.check, c.profile, c.runtime, vouch_sites, require)
         }
         None => {
-            // A genuine absence (not the parse-error fallback, which already printed).
+            // Genuine absence, not the parse-error fallback (already printed).
             if !*contradiction {
                 line!(sec, "  steins.toml: not found (built-in defaults govern)");
             }
@@ -499,8 +422,7 @@ fn section_config(contradiction: &mut bool) -> (Section, ConfigOutcome) {
             line!(sec, "  profile resolution: ERROR — {e}");
             line!(sec, "  (configuration contradiction — doctor exits 1, ADR-0054 §10)");
             *contradiction = true;
-            // Fall back to the built-in default surface so the remaining sections
-            // render; the run already exits 1 on the contradiction.
+            // Fall back to the default surface so remaining sections still render.
             profile::ProfileConfigs::default()
                 .resolve(None)
                 .expect("the built-in default profile always resolves")
@@ -517,18 +439,11 @@ fn section_config(contradiction: &mut bool) -> (Section, ConfigOutcome) {
     (sec, ConfigOutcome { surface, vouch_sites, require })
 }
 
-/// The `[runtime]` pseudo-constant lines of the Config section (ADR-0037 §2; the
-/// ADR-0054 §9 item that had been listed as not-covered).
-///
-/// Named-silence discipline: a posture that changes what Steins will and will not
-/// claim must be visible without reading the source, and a *default* posture is
-/// still a posture — both keys print on every run, tagged with where the value came
-/// from, so "I never declared that" and "I declared it and it did not take" are
-/// distinguishable from the report alone. An unrecognized *value* is a
-/// warn-and-proceed in `check`; doctor names it here as the environment fact it is.
+/// The `[runtime]` pseudo-constant lines of the Config section (ADR-0037 §2).
+/// Both keys print every run tagged with their source (declared/default), so
+/// "never declared" and "declared but didn't take" stay distinguishable.
 fn section_runtime_postures(sec: &mut Section, runtime_cfg: Option<crate::RuntimeConfig>) {
-    // Declared-ness is read before the config is consumed: the resolved value alone
-    // cannot distinguish an absent key from one spelled at its default.
+    // Read before consuming config; resolved value alone can't tell absent from default.
     let declared = |v: &Option<String>| if v.is_some() { "declared" } else { "default" };
     let (wh_src, fk_src) = match &runtime_cfg {
         Some(r) => (declared(&r.warning_handler), declared(&r.final_keyword)),
@@ -560,9 +475,8 @@ fn section_runtime_postures(sec: &mut Section, runtime_cfg: Option<crate::Runtim
     }
 }
 
-/// The Runtime section's TARGET lines (issue #28): what version range the
-/// analysis is about, where that came from, and — when a runtime answered —
-/// the skew between the two, named in the direction it degrades.
+/// Runtime section's TARGET lines (issue #28): declared range, its source, and
+/// the skew against the runtime when one answered.
 fn section_target(sec: &mut Section, target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>) {
     match target {
         None => {
@@ -595,7 +509,7 @@ fn section_target(sec: &mut Section, target: Option<&PhpTarget>, runtime_minor: 
     }
 }
 
-/// The `(major, minor)` of the sidecar's version report, for the skew line.
+/// `(major, minor)` from the sidecar's version report, for the skew line.
 fn parse_env_minor(v: &str) -> Option<(u16, u16)> {
     let mut it = v.split('.');
     let major = it.next()?.parse().ok()?;
@@ -604,14 +518,10 @@ fn parse_env_minor(v: &str) -> Option<(u16, u16)> {
     Some((major, minor))
 }
 
-/// Section 3 — Layout (ADR-0015): which trees this run treats as somebody else's.
-///
-/// Vendor classification decides whether a finding is reported at all and whether
-/// a declaration is a transform candidate, and a wrong answer moves findings
-/// between "ours" and "theirs" without saying so. It is resolved from the
-/// project's own `composer.json` — `config.vendor-dir` plus the autoload roots —
-/// so the report names the manifest that answered, and says plainly when nothing
-/// did and the directory-name floor is carrying the whole decision.
+/// Section 3 — Layout (ADR-0015): which trees this run treats as vendor,
+/// deciding whether a finding is reported or a declaration is a transform
+/// candidate. Resolved from `composer.json`, falling back to the `vendor`
+/// directory-name floor when no manifest governs.
 fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
     let mut sec = Section::new("Layout");
     if layout.is_fallback() {
@@ -632,43 +542,19 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
 }
 
 /// Section 4 — Coverage posture (ADR-0054 §9.2): what this run parsed and then
-/// declined to reason about.
+/// declined to reason about — the crying-wolf-required measurement of a quiet
+/// analyzer (`Scope::poisoned` marks eval-affected locals unknown, ADR-0046
+/// §1). None of these is a diagnostic (no registry id, baseline entry, or
+/// fp-gate counter):
 ///
-/// A diagnostic-driven pipeline cannot see what produces no diagnostics: a scope
-/// full of `extract()` and a scope proven clean print the same nothing. Steins is
-/// *correct* on those scopes — `Scope::poisoned` makes every local unknown, so the
-/// "eval rewrote my local" false-positive class is structurally impossible
-/// (ADR-0046 §1). Under the
-/// crying-wolf prohibition the risk is symmetrical: a quiet analyzer that cannot say
-/// *why* it is quiet is asking to be trusted on nothing. This section is the
-/// measurement, so a silent run is a claim with numbers behind it.
-///
-/// Facts, each from an existing surface and none of them a diagnostic (no
-/// registry id, no baseline entry, no fp-gate counter):
-///
-/// 1. **Poisoned scopes** as a share of all scopes, with the sites broken down by
-///    construct kind. Both come from `Scope::opaque`, which the poison predicate
-///    itself populates — one walk decides poisoning and enumerates the reasons, so
-///    the inventory cannot drift from the behaviour it describes.
-/// 2. **Dam sites** (ADR-0049 §2 / ADR-0054 §9.2's designed line), broken down by
-///    eval / unproven-or-out-of-universe include / non-literal `class_alias`. These
-///    are the *existence*-claim conditionals, a different soundness hole from scope
-///    havoc: they answer "could a name exist that the reference scan never saw".
-/// 3. **Reflection-driven invocation** sites — inventoried even though they poison
-///    no scope and dam no claim, and labelled as the guess they are.
-/// 4. **The reflected class world** (issue #269) — class-like names this tree
-///    references that resolve on neither the project index nor the builtin
-///    catalog but DO resolve off the project's own PHP, asked through the same
-///    live engine the Runtime section spawned (see [`section_reflected_classes`]).
-/// 5. **The sound-subset id list** (ADR-0054 §9.2 / A2(ii)) — printed only when no
-///    sidecar answered this run, naming exactly which absence claims it silences.
-/// 6. **The vendor posture** (ADR-0015) — a static policy fact, not a per-project
-///    measurement, printed every run so the report is self-contained.
-/// 7. **The `[transform.vouch]` count** (ADR-0046 §2) — read from config, not
-///    consulted by the checker's own dam yet (`dam.rs`'s own doc: "the vouch
-///    valve … `[is]` deferred; v1 is whole-universe"), so the line says both the
-///    count and that boundary honestly rather than implying the dam already
-///    reads it.
+/// 1. Poisoned scopes, share of all, by construct kind (`Scope::opaque`).
+/// 2. Dam sites (ADR-0049 §2) — could a name exist the reference scan never saw.
+/// 3. Reflection-driven invocation sites — a labelled guess.
+/// 4. The reflected class world (issue #269), off the project's own PHP via
+///    the engine Runtime spawned ([`section_reflected_classes`]).
+/// 5. The sound-subset id list (A2(ii)) — only when no sidecar answered.
+/// 6. The vendor posture (ADR-0015) — static, printed always.
+/// 7. The `[transform.vouch]` count (ADR-0046 §2) — not yet dam-consulted (`dam.rs`).
 fn section_coverage(
     root: &Path,
     files: &[ParsedFile],
@@ -688,11 +574,8 @@ fn section_coverage(
     let mut constructs = [0usize; OpaqueConstruct::ALL.len()];
     let mut reflection = [0usize; ReflectionKind::ALL.len()];
     for f in files {
-        // Sites are counted per *construct in the source*, not per affected scope: a
-        // `use (&$x)` capture is recorded on the enclosing scope AND on the closure's
-        // own (one aliasing fact, two silenced scopes — ADR-0033), and both carry the
-        // captured variable's span. The scope count above already reports the two;
-        // counting the construct twice would answer "grep your source for this" wrong.
+        // Counted per construct, not per affected scope: `use (&$x)` sits on both
+        // scopes (ADR-0033); double-counting misanswers "grep for this".
         let mut seen = std::collections::HashSet::new();
         for scope in f.tree.scopes() {
             scopes += 1;
@@ -732,12 +615,8 @@ fn section_coverage(
         );
     }
 
-    // The dam (ADR-0049 §2): the same query answer `check` computes, recomputed here
-    // from the same lowered universe. It does not track the construct counts above in
-    // either direction — vendor `eval`/dynamic-include is presumed universe-internal
-    // and a proven in-universe include is benign (both drop out), while a
-    // runtime-name `class_alias` dams without poisoning any scope (it appears only
-    // here).
+    // The dam (ADR-0049 §2): same answer `check` computes, recomputed here,
+    // independent of the counts above (`class_alias` dams without poisoning a scope).
     let units: Vec<FileUnit<'_>> =
         files.iter().map(|f| FileUnit { path: &f.path, tree: &f.tree }).collect();
     let dam = dam_facts(&units, layout);
@@ -753,12 +632,8 @@ fn section_coverage(
                 DamKind::Eval => 0,
                 DamKind::Include => 1,
                 DamKind::ClassAlias => 2,
-                // parse failure (ADR-0079, issue #180)
-                DamKind::Unparsable => 3,
-                // end parse failure (ADR-0079, issue #180)
-                // global constants (ADR-0078, issue #198)
-                DamKind::DefineDynamic => 4,
-                // end global constants (ADR-0078, issue #198)
+                DamKind::Unparsable => 3, // parse failure (ADR-0079, issue #180)
+                DamKind::DefineDynamic => 4, // global constants (ADR-0078, issue #198)
             };
             dam_counts[i] += 1;
         }
@@ -777,9 +652,7 @@ fn section_coverage(
                 ]
             )
         );
-        // The name valve is only closed by a kind that can mint a name — a universe
-        // whose only sites are runtime-name `define`s keeps its function/class
-        // existence claims (ADR-0078, issue #198).
+        // Name valve closes only for a kind that can mint a name (ADR-0078, #198).
         if dam.is_clear() {
             line!(
                 sec,
@@ -791,8 +664,7 @@ fn section_coverage(
                 "    existence-absence claims (undefined function/class) stay silent where these stand (ADR-0049 §2)"
             );
         }
-        // global constants (ADR-0078, issue #198): every kind closes the constant
-        // valve, so the operator is told that separately.
+        // Every dam kind closes the constant valve too (ADR-0078, #198).
         line!(
             sec,
             "    `constant.undefined` stays silent where any of these stand — a runtime-name define is a constant-only dam"
@@ -809,8 +681,7 @@ fn section_coverage(
             breakdown(&reflection, ReflectionKind::ALL.map(ReflectionKind::label))
         );
     }
-    // Stated on every run, not only a non-zero one: the honest reading of a `0` here
-    // is "the recognizer saw nothing", not "the code reflects nowhere".
+    // Stated even on 0: reads as "recognizer saw nothing", not "code doesn't reflect".
     line!(
         sec,
         "    (this list is a guess until measured: the recognizer is syntactic, it names no receiver type, and it is not exhaustive)"
@@ -818,9 +689,7 @@ fn section_coverage(
 
     section_reflected_classes(&mut sec, files, sidecar);
 
-    // The sound-subset id list (ADR-0054 §9.2, A2(ii)): named only when no sidecar
-    // answered — the same condition the Runtime section's degraded-posture lines
-    // key on, but with the specific ids that go silent rather than a general note.
+    // Sound-subset id list (ADR-0054 §9.2, A2(ii)): only when no sidecar answered.
     if !sidecar_ok {
         line!(
             sec,
@@ -831,10 +700,8 @@ fn section_coverage(
     // Vendor posture (ADR-0015): a policy fact, not a per-project measurement.
     line!(sec, "  vendor posture: findings under a vendor root are suppressed by default (ADR-0015)");
 
-    // The `[transform.vouch]` count (ADR-0046 §2 / ADR-0049 §4). The checker's own
-    // whole-universe dam does not consult it yet (`dam.rs`'s doc comment records
-    // the vouch valve as deferred), so the line says the count AND that boundary —
-    // an existing config surface rendered honestly, not a new analysis pass.
+    // `[transform.vouch]` count (ADR-0046 §2 / ADR-0049 §4); dam.rs's dam does
+    // not consult it yet.
     if vouch_sites == 0 {
         line!(
             sec,
@@ -850,42 +717,24 @@ fn section_coverage(
     sec
 }
 
-/// How many distinct unanswered class names doctor will put to the engine.
-///
-/// A round trip apiece, on a report that must stay quick; a tree with thousands of
-/// unresolved names is answered honestly by a sample plus the count it came from,
-/// not by a minute of IPC. `check` has no such cap — it asks about the names its
-/// walk actually reaches, when it reaches them.
+/// Cap on distinct unanswered class names put to the engine (one round trip
+/// apiece); `check` has no such cap.
 const REFLECT_QUERY_CAP: usize = 200;
 
-/// How many resolved names are printed before the line summarizes the rest.
+/// How many resolved names print before the line summarizes the rest.
 const REFLECT_DISPLAY_CAP: usize = 8;
 
-/// The **reflected class world** (issue #269), inside Coverage posture: the class
-/// names this tree references that neither a source declaration nor a builtin-catalog
-/// row answers, but the *project's own PHP* does.
-///
-/// This is the origin surface for the reflect slice. A class an installed extension
-/// provides (`Redis`, `Random\Randomizer`, `Dom\Element`) is invisible to both of
-/// Steins' static class worlds, and the engine running the project is the only
-/// honest source for it (ADR-0049 §1 — ask the real thing, never a curated stub
-/// list). Naming the resolved ones with the extension that declares them is what
-/// makes "where did this fact come from" answerable.
-///
-/// The line is printed **only when a live engine answered**. Under `--no-php`, with
-/// no `php` on PATH, or after a failed handshake there is no question to report the
-/// answer to, and the section stays exactly what it was before this surface existed.
-///
-/// Doctor stays index-bound (ADR-0054 §8): this reads declarations and asks the
-/// environment, and runs no emitter. The reflected declarations it finds convict
-/// nothing — see `steins_infer::Folder::reflected_class`.
+/// The reflected class world (issue #269): class names this tree references
+/// that neither a declaration nor the builtin catalog answers, but the
+/// project's own PHP does (e.g. `Redis` — ADR-0049 §1, ask the real thing).
+/// Printed only when a live engine answered; convicts nothing (ADR-0054 §8;
+/// see `steins_infer::Folder::reflected_class`).
 fn section_reflected_classes(sec: &mut Section, files: &[ParsedFile], sidecar: Option<&mut Sidecar>) {
     let Some(sc) = sidecar else {
         return;
     };
 
-    // Every class-like the project itself declares, by the same lowercased key the
-    // index uses. Declared here means answered here — the engine is never asked.
+    // Every class-like the project declares, keyed like the index; never asked.
     let mut declared: std::collections::HashSet<String> = std::collections::HashSet::new();
     for f in files {
         for cd in f.tree.classes() {
@@ -893,10 +742,7 @@ fn section_reflected_classes(sec: &mut Section, files: &[ParsedFile], sidecar: O
         }
     }
 
-    // The unanswered names, deduped, in first-encounter order so a report is stable
-    // and its sample is the reader's own first few. Lowercased throughout: PHP class
-    // names are case-insensitive, and it is the key both the index and the catalog
-    // are written in. The engine's reply carries the declaration's own casing back.
+    // Unanswered names, deduped in first-encounter order; lowercased (case-insensitive).
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut unanswered: Vec<String> = Vec::new();
     for f in files {
@@ -921,8 +767,7 @@ fn section_reflected_classes(sec: &mut Section, files: &[ParsedFile], sidecar: O
     let asked = unanswered.len().min(REFLECT_QUERY_CAP);
     let mut resolved: Vec<String> = Vec::new();
     for fqn in unanswered.iter().take(asked) {
-        // A decline (`None`) and a not-found are both "not resolved here". Only a
-        // declaration counts, and it is counted with the origin it arrived with.
+        // A decline and a not-found are both "not resolved here".
         let Some(reflection) = sc.reflect_class(fqn) else {
             continue;
         };
@@ -963,8 +808,7 @@ fn section_reflected_classes(sec: &mut Section, files: &[ParsedFile], sidecar: O
     );
 }
 
-/// `poisoned/total` as a percentage, or `n/a` for an empty denominator. One decimal:
-/// the number is a posture, not a metric anyone should diff on.
+/// `poisoned/total` as a percentage, or `n/a` for an empty denominator.
 fn share(part: usize, whole: usize) -> String {
     if whole == 0 {
         return "n/a".to_owned();
@@ -974,9 +818,8 @@ fn share(part: usize, whole: usize) -> String {
     format!("{pct:.1}%")
 }
 
-/// `label N` pairs for the non-zero counts, comma-joined in the array's order. Zero
-/// counts are dropped: a list of nine kinds where one fired reads as noise, and the
-/// total is already on the line.
+/// `label N` pairs for non-zero counts, comma-joined. Zero counts are dropped
+/// as noise; the total is already on the line.
 fn breakdown<const N: usize>(counts: &[usize; N], labels: [&str; N]) -> String {
     counts
         .iter()
@@ -987,9 +830,8 @@ fn breakdown<const N: usize>(counts: &[usize; N], labels: [&str; N]) -> String {
         .join(", ")
 }
 
-/// Parse every `.php` file under `root` once. Unreadable files are skipped silently
-/// (the same tolerance `check`'s collection has); parse errors are not: a recovered
-/// tree still carries scopes and sites, which is exactly the ADR-0003 posture.
+/// Parse every `.php` file under `root` once. Unreadable files are skipped
+/// silently; a recovered parse tree still carries scopes and sites (ADR-0003).
 fn parse_project(root: &Path) -> Vec<ParsedFile> {
     let mut files = Vec::new();
     crate::collect_php_files(root, &mut files);
@@ -1007,14 +849,12 @@ fn parse_project(root: &Path) -> Vec<ParsedFile> {
         .collect()
 }
 
-/// Render a path relative to `cwd` when it sits underneath it, else absolute.
-/// Doctor's output is read next to the shell it was run from.
+/// Path relative to `cwd` when underneath it, else absolute.
 fn display_path(cwd: &Path, p: &Path) -> String {
     p.strip_prefix(cwd).unwrap_or(p).display().to_string()
 }
 
-/// A comma-joined root list, or `none declared` for an empty one — an autoload
-/// block a project simply does not have.
+/// Comma-joined root list, or `none declared` for an empty one.
 fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
     if paths.is_empty() {
         return "none declared".to_owned();
@@ -1022,11 +862,9 @@ fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
     paths.iter().map(|p| display_path(cwd, p)).collect::<Vec<_>>().join(", ")
 }
 
-/// Section 5 — Envelopes (ADR-0054 §9.4, the G1-amendment written-but-unchecked
-/// notice — the "Active surface" content the ADR's own numbered list gives its own
-/// entry). An index scan (never the checker): count declarations carrying a written
-/// `@throws` tag, then state whether the active surface checks them. This is the
-/// designed answer to "wrote `@throws`, got silence".
+/// Section 5 — Envelopes (ADR-0054 §9.4, G1-amendment written-but-unchecked
+/// notice). Index scan, never the checker: count declarations with a written
+/// `@throws`, state whether the active surface checks them.
 fn section_envelopes(files: &[ParsedFile], surface: &profile::Surface) -> Section {
     let mut sec = Section::new("Envelopes");
     let n = count_throws_envelopes(files);
@@ -1047,9 +885,8 @@ fn section_envelopes(files: &[ParsedFile], surface: &profile::Surface) -> Sectio
     sec
 }
 
-/// Count declarations (functions + methods) that carry a written `@throws` tag,
-/// reading the docblock trivia of the already-parsed tree. Index-bound: it reads
-/// parsed source; it runs no inference.
+/// Count declarations (functions + methods) carrying a written `@throws` tag.
+/// Index-bound: reads parsed source, runs no inference.
 fn count_throws_envelopes(files: &[ParsedFile]) -> usize {
     let mut count = 0usize;
     for file in files {
@@ -1074,14 +911,11 @@ fn declares_throws(docblock: Option<&str>) -> bool {
     docblock.is_some_and(|d| scan_docblock(d).iter().any(|t| t.kind == TagKind::Throws))
 }
 
-/// Section 6 — Baseline (ADR-0054 §9.5): the capture surface (profile + id count
-/// from the header) versus the active surface, and the dormant-entry count
-/// (entries whose id is outside the active surface — kept, not stale). Doctor
-/// accepts `--baseline <path>`; absent that it discovers the conventional default
-/// file, and reports "none" when neither resolves. An unparseable baseline file is
-/// a configuration contradiction (exit 1, ADR-0054 §10). Returns the dormant count
-/// (`0` when there is no baseline, or no capture-surface header, to compare
-/// against) for the `"no-dormant-baseline"` [`RequireFacts`] leg.
+/// Section 6 — Baseline (ADR-0054 §9.5): capture surface versus active
+/// surface, and dormant-entry count (id outside active — kept, not stale).
+/// Accepts `--baseline <path>`, else the default file, else "none";
+/// unparseable = configuration contradiction (exit 1, §10). Returns the
+/// dormant count (`0` absent) for `"no-dormant-baseline"` in [`RequireFacts`].
 fn section_baseline(
     cli_path: Option<&str>,
     surface: &profile::Surface,
@@ -1089,8 +923,7 @@ fn section_baseline(
 ) -> (Section, usize) {
     let mut sec = Section::new("Baseline");
 
-    // Resolve the file: an explicit `--baseline` wins; else the conventional default
-    // (the same file `check` auto-loads) when it exists.
+    // Explicit `--baseline` wins; else the same default file `check` auto-loads.
     let file: Option<PathBuf> = match cli_path {
         Some(p) => Some(PathBuf::from(p)),
         None => {
@@ -1105,14 +938,13 @@ fn section_baseline(
     let text = match std::fs::read_to_string(&file) {
         Ok(t) => t,
         Err(_) => {
-            // An explicit `--baseline` to a missing path is reported absent, not failed.
+            // Missing `--baseline` path is reported absent, not failed.
             line!(sec, "  none ({} not readable)", file.display());
             return (sec, 0);
         }
     };
 
-    // Unparseable = the header line is not even valid JSON (ADR-0054 §10 contradiction).
-    // Entry lines stay hand-edit-tolerant (baseline::parse ignores unparsable ones).
+    // Unparseable = header not valid JSON (§10 contradiction); entries stay tolerant.
     let header_ok = text
         .lines()
         .next()
@@ -1141,15 +973,8 @@ fn section_baseline(
                 surface.name,
                 surface.surface_ids().len()
             );
-            // Dormant (ADR-0050 §8): an entry whose id is outside the ACTIVE surface —
-            // kept, not stale, because this profile simply never looks for it. The
-            // debug lane (ADR-0053 §4/§8, issue #108) never reads "outside the
-            // surface" — `surfaces_id` excludes it unconditionally, so it would
-            // otherwise always count here — but a debug finding is checked on
-            // every profile and a debug baseline entry can never be matched again,
-            // so "kept, not stale" is the wrong story for it; `check` (main.rs's
-            // `match_baseline`) reports the same entry as stale, and this line must
-            // not contradict that by calling it dormant.
+            // Dormant (ADR-0050 §8): outside active, kept not stale. Debug-lane entries
+            // (ADR-0053 §4/§8, #108) are excluded — `match_baseline` calls those stale.
             let dormant = entries
                 .iter()
                 .filter(|e| !surface.surfaces_id(&e.id))
@@ -1165,7 +990,7 @@ fn section_baseline(
             dormant
         }
         None => {
-            // A pre-ADR-0050 header (no capture surface) is reported as such, not failed.
+            // Pre-ADR-0050 header (no capture surface).
             line!(sec, "  capture surface: none recorded (pre-capture-surface baseline header)");
             0
         }
@@ -1178,14 +1003,10 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "y" } else { "ies" }
 }
 
-/// The Catalog section's version-pin verdict (ADR-0052 amendment A11): three
-/// states, not two, because "not skewed" and "cannot say" are different claims
-/// with different fixes — a target range fixes a skew, but nothing fixes an
-/// unconfirmable comparison except giving doctor a version to compare (a target
-/// or a sidecar). Section *rendering* treats [`Self::Unconfirmed`] exactly like
-/// [`Self::Confirmed`] (the checker's own silence-over-absence default, ADR-0004
-/// crying-wolf); the `[doctor] require` evaluation of `"catalog-pin-match"` does
-/// not — see [`evaluate_assertion`]'s doc.
+/// The Catalog section's version-pin verdict (ADR-0052 amendment A11). Three
+/// states: "not skewed" and "cannot say" have different fixes. Rendering
+/// treats [`Self::Unconfirmed`] like [`Self::Confirmed`] (ADR-0004); the
+/// `"catalog-pin-match"` require assertion does not ([`evaluate_assertion`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CatalogSkew {
     /// A target or the runtime minor is known and matches the pin exactly.
@@ -1196,20 +1017,11 @@ enum CatalogSkew {
     Unconfirmed,
 }
 
-/// Section 7 — Catalog (ADR-0052 amendment A11): the builtin catalog's pinned
-/// php-src minor versus this run's version answer, and the hierarchy/foldable
-/// entry counts as freshness context.
-///
-/// Mirrors `steins-infer`'s own (private) `effective_php_view` skew rule exactly:
-/// a declared TARGET is skewed unless it is *exactly* the pin (a range, not a
-/// point, so even a range containing the pin is not the same claim as being it);
-/// with no target, the sidecar-reported runtime minor is compared instead; with
-/// neither, the checker treats the run as unskewed (no comparison basis, and
-/// silence-over-absence is the same crying-wolf discipline as everywhere else in
-/// this report) — rendered here as "unconfirmed", not asserted as a fact nobody
-/// measured. Returns the [`CatalogSkew`] verdict for the `"catalog-pin-match"`
-/// [`RequireFacts`] leg, which reads `Unconfirmed` differently than this section's
-/// own text does (see [`evaluate_assertion`]).
+/// Section 7 — Catalog (ADR-0052 amendment A11): pinned php-src minor versus
+/// this run's version, plus hierarchy/foldable counts as freshness context.
+/// Mirrors `steins-infer`'s private skew rule: a declared TARGET is skewed
+/// unless exactly the pin; else the sidecar runtime minor; else "unconfirmed"
+/// (not asserted unskewed). Returns [`CatalogSkew`] for [`evaluate_assertion`].
 fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>) -> (Section, CatalogSkew) {
     let mut sec = Section::new("Catalog");
     let pin = steins_catalog::PINNED_PHP;
@@ -1253,13 +1065,8 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
             "  A11 consequence: catalog-backed is-a demoted to Unknown for arm deletion and descendant closure (ADR-0052 amendment A11)"
         );
     }
-    // The foldable allowlist's integer-width classification is three-valued since
-    // ADR-0028's 2026-08-14 amendment, and the breakdown is freshness context in
-    // the same sense the totals are: it describes the CATALOG, not this project or
-    // this run. Refused and unverified decline on the same gate and are reported
-    // apart anyway, because they differ in what the project can do about them — a
-    // refused row has a divergence on record and is not coming back; an unverified
-    // one is waiting on probes nobody has run.
+    // Integer-width classification is three-valued (ADR-0028, 2026-08-14); describes
+    // the CATALOG, not the project. Refused (on record) vs unverified (awaiting probes).
     line!(
         sec,
         "  hierarchy table: {} row(s); foldable allowlist: {} name(s) (width: {} safe / {} refused / {} unverified) (freshness context, not a per-project fact)",
@@ -1272,14 +1079,10 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
     (sec, skew)
 }
 
-/// Section 8 — Registry totality (ADR-0054 §9.7): the mechanics self-check. Every
-/// emittable id must be registered with a layer, and the registry's ids must
-/// partition exactly into `ALL_EMITTABLE_IDS` and `REGISTERED_NOT_YET_EMITTED`
-/// with no overlap and no phantom entries. Redundant with `tests/registry.rs`
-/// today — the ADR names this explicitly ("exactly the check that stops being
-/// redundant the day plugin registration puts ids into the registry at
-/// runtime") — so this section runs the identical partition test over the
-/// registry doctor actually links against, in the actual binary a user runs.
+/// Section 8 — Registry totality (ADR-0054 §9.7): mechanics self-check.
+/// Registry ids must partition exactly into `ALL_EMITTABLE_IDS` and
+/// `REGISTERED_NOT_YET_EMITTED`. Redundant with `tests/registry.rs` today,
+/// until plugin registration adds ids at runtime.
 fn section_registry() -> Section {
     let mut sec = Section::new("Registry totality");
     let emittable: std::collections::HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
@@ -1321,9 +1124,8 @@ fn section_registry() -> Section {
     sec
 }
 
-/// The facts [`section_require`] evaluates named assertions against — one field
-/// per known assertion name, gathered from the sections computed earlier in
-/// [`run_doctor`] so this section recomputes nothing.
+/// The facts [`section_require`] evaluates named assertions against, gathered
+/// from earlier sections in [`run_doctor`] so this section recomputes nothing.
 struct RequireFacts {
     sidecar_ok: bool,
     catalog_skew: CatalogSkew,
@@ -1331,19 +1133,13 @@ struct RequireFacts {
     dormant_count: usize,
 }
 
-/// The known `[doctor] require` assertion names (ADR-0054 §14), each paired with
-/// the sentence printed on a PASS/FAIL line and the fact it reads from
-/// [`RequireFacts`]. A name outside this list is a hard config error (the
-/// `deny_unknown_fields` posture generalized to a value rather than a struct key,
-/// since the string names data `[doctor]`'s own serde shape cannot gate).
+/// Known `[doctor] require` assertion names (ADR-0054 §14). A name outside this
+/// list is a hard config error (serde can't gate a string value).
 const KNOWN_ASSERTIONS: &[&str] = &["sidecar", "catalog-pin-match", "no-monkey-patch", "no-dormant-baseline"];
 
-/// Section 9 — Require (ADR-0054 §14): `[doctor] require = [...]` turns a named
-/// posture line from a report-only fact into an exit-1 assertion — the
-/// lenient-default opt-in point 10 promised. Not configured is not a failure:
-/// this section always renders, but says "not configured" and leaves
-/// `*contradiction` untouched when the list is empty. An unknown name is a
-/// configuration contradiction, same lane as an unparseable `steins.toml`.
+/// Section 9 — Require (ADR-0054 §14): `[doctor] require = [...]` turns a
+/// posture line into an exit-1 assertion. Empty list renders "not configured",
+/// no contradiction. An unknown name is a config contradiction.
 fn section_require(names: Vec<String>, facts: &RequireFacts, contradiction: &mut bool) -> Section {
     let mut sec = Section::new("Require");
     if names.is_empty() {
@@ -1388,11 +1184,9 @@ fn section_require(names: Vec<String>, facts: &RequireFacts, contradiction: &mut
     sec
 }
 
-/// Evaluate one `[doctor] require` assertion name against the already-gathered
-/// [`RequireFacts`]. `None` for an unrecognized name — the caller turns that into
-/// the configuration-contradiction line, keeping the "unknown name" case out of
-/// the PASS/FAIL bool space entirely (a `false` here would print as a violation
-/// of a real posture, not the config typo it actually is).
+/// Evaluate one `[doctor] require` assertion against [`RequireFacts`]. `None`
+/// for an unrecognized name, so a config typo can't print as a violated
+/// posture; the caller turns `None` into the contradiction line.
 fn evaluate_assertion(name: &str, facts: &RequireFacts) -> Option<(bool, &'static str)> {
     match name {
         "sidecar" => Some((
@@ -1403,16 +1197,8 @@ fn evaluate_assertion(name: &str, facts: &RequireFacts) -> Option<(bool, &'stati
                 "no PHP sidecar answered this run (Runtime section)"
             },
         )),
-        // The one assertion where the section's own rendering and the require
-        // verdict deliberately disagree on `Unconfirmed` (orchestrator ruling,
-        // issue #268): the default report's lenient-default silence-over-absence
-        // is right for a posture that is only ever *described*, but `require` is
-        // the named strictness opt-in ADR-0054 §14 designed — the caller is
-        // asking doctor to GUARANTEE the pin match, and a guarantee doctor cannot
-        // confirm is exactly the violation the assertion exists to surface. So
-        // only `Confirmed` passes; `Skewed` and `Unconfirmed` both fail, with
-        // distinct messages so the fix is legible (declare a target/get a sidecar
-        // vs. actually move off the skewed version).
+        // Disagrees with the section's rendering on `Unconfirmed` (#268): `require`
+        // demands a guarantee, so only `Confirmed` passes; both others fail.
         "catalog-pin-match" => Some(match facts.catalog_skew {
             CatalogSkew::Confirmed => {
                 (true, "the analysis version matches the catalog's php-src pin (Catalog section)")

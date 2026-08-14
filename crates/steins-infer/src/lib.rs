@@ -889,86 +889,61 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 /// The registry id for a function-like that **runs off the end of its body** while
 /// declaring a native return type PHP demands a value for (ADR-0078, issue #199).
 ///
-/// Witnessed on PHP 8.5.9 — the consequence is a fatal `TypeError` at the moment
-/// control reaches the closing brace, not at declaration time:
+/// Witnessed on PHP 8.5.9: a fatal `TypeError` at the moment control reaches the
+/// closing brace (`f(): Return value must be of type int, none returned`), not at
+/// declaration time. A live-path break, so **proof** layer at the `Default` floor,
+/// and not behind the ADR-0049 §7 warning-handler gate — no declared posture makes
+/// a `TypeError` survivable.
 ///
-/// ```text
-/// TypeError: f(): Return value must be of type int, none returned
-/// TypeError: A::m(): Return value must be of type int, none returned
-/// TypeError: {closure:…}(): Return value must be of type int, none returned
-/// ```
+/// `type.*` rather than a `return.*` family because ADR-0078 §1 puts an id in the
+/// family its premise names, and the premise is the written native return
+/// declaration — the same Verified evidence [`RETURN_MISMATCH_ID`] reads, asked one
+/// step earlier ("you returned no value" vs "the value is the wrong type").
 ///
-/// A live-path break, so **proof** layer at the `Default` floor. It is *not*
-/// behind the ADR-0049 §7 warning-handler gate: a `TypeError` is fatal and no
-/// declared posture makes it survivable.
+/// # The definite/possibly split
 ///
-/// # Why `type.*` and not a `return.*` family
+/// A `FallsThrough` body comes in two populations (measured on the corpus, 26
+/// findings, 2026-08-08), floored differently by the zero-FP policy (ADR-0078 §1.3):
 ///
-/// The premise is the **native return declaration** — the same Verified evidence
-/// [`RETURN_MISMATCH_ID`]'s native leg reads, asked one step earlier: that id says
-/// *the value you returned is the wrong type*, this one says *you returned no
-/// value at all*. ADR-0078 §1 puts an id in the family its premise names, and the
-/// premise here is a written type, so `type.*` it is (the ADR flags this row as
-/// added beyond its grilled table; landing the id discharges the flag).
+/// * **no function exit anywhere** — a stub, an empty body, a body of pure side
+///   effects. Every execution reaches the brace, so the fatal is unconditional.
+///   **This id**, `Default` floor.
+/// * **an exit somewhere, not covering every path** — a no-`default` `switch` whose
+///   cases all return, an `if` with no `else`. The edge is real but may be taken
+///   only for inputs the program never produces (phpstan-src's own `src/` carries
+///   two such shapes and passes its own missing-return rule).
+///   [`TYPE_RETURN_MAYBE_MISSING_ID`], `Strict` floor.
 ///
-/// # The definite/possibly split — why this id is not alone
+/// The discriminator is [`body_has_terminator`], a separate question from the fold
+/// rather than a refinement of it.
 ///
-/// A body whose fold is `FallsThrough` comes in two populations, measured on the
-/// corpus (2026-08-08 gate triage, 26 findings), and the zero-FP policy floors
-/// them differently (ADR-0078 §1.3, the `maybe-` convention):
+/// # The two premises, both required
 ///
-/// * **no function exit anywhere in the body** — a stub, an empty body, a body of
-///   pure side effects (`function (): bool {}` in a test double). *Every*
-///   execution reaches the closing brace, so the fatal is unconditional. **This
-///   id**, `Default` floor.
-/// * **an exit somewhere, but not covering every path** — a `return` in every
-///   taken arm with an uncovered escape edge (a no-`default` `switch` over a
-///   string whose every case returns; an `if` with no `else`; a loop that returns
-///   on a match). The fall-through edge is real, but may be taken only for inputs
-///   the program never produces — phpstan-src's own `src/` carries two such shapes
-///   and passes its own missing-return rule. [`TYPE_RETURN_MAYBE_MISSING_ID`],
-///   `Strict` floor.
+/// 1. **The declaration demands a value** — a written, non-`void`, non-`never` hint,
+///    read from `Scope::ret_hint` (the *raw* hint, because `: array` / `: mixed` /
+///    `: self` lower to no `NativeType` yet all three fatal identically). `?int` and
+///    `int|string` demand one too: nullable is not optional. A generator body is
+///    excluded — its declared type describes the `Generator` the *call* produces
+///    (ADR-0057 §5) — and `never` is excluded because its fall-through is a
+///    different fatal, and ADR-0022 makes one id one consequence.
+/// 2. **The body provably falls through** ([`BodyEnd::provably_falls_through`]). An
+///    undecided body (`try`/`catch`, a `goto`, an unstructurable `switch`) counts as
+///    terminating: never accuse a body of running off its end on evidence that only
+///    failed to prove it did not.
 ///
-/// The discriminator is [`body_has_terminator`], which is a *separate question*
-/// from the fold, not a refinement of it — see its own docs.
-///
-/// # What has to be proven, and what is deliberately not
-///
-/// Two independent premises, both required:
-///
-/// 1. **The declaration demands a value.** A written, non-`void`, non-`never`
-///    return hint — read from `Scope::ret_hint`, the *raw* hint, because
-///    `: array` / `: mixed` / `: self` lower to no `NativeType` yet all three
-///    fatal identically. `?int` and `int|string` demand one too: nullable is not
-///    optional. A generator body (`yield` anywhere) is excluded — its declared
-///    type describes the `Generator` the *call* produces, never a body exit
-///    (ADR-0057 §5). `never` is excluded because its fall-through is a different
-///    fatal with a different sentence (`never-returning function must not
-///    implicitly return`), and ADR-0022 makes one id one consequence.
-/// 2. **The body provably falls through** —
-///    [`BodyEnd::provably_falls_through`], the ADR-0078 reachability foundation.
-///    The asymmetry that type documents is this id's safe side: an undecided body
-///    (`try`/`catch`, a `goto`, an unstructurable `switch`) counts as
-///    **terminating**, i.e. silence. Never accuse a body of running off its end
-///    on evidence that only failed to prove it did not.
-///
-/// Abstract methods and interface methods are excluded **by construction**: the
-/// lowering builds a `Scope` only for a concrete body, so a body-less declaration
-/// is not a candidate at all. `__construct`/`__destruct` are excluded by
-/// construction too — PHP forbids a return type on either. An arrow function is
-/// excluded by construction a third way: its body lowers to a single `return`.
+/// Excluded by construction: abstract and interface methods (a `Scope` is built only
+/// for a concrete body), `__construct`/`__destruct` (PHP forbids a return type), and
+/// arrow functions (the body lowers to a single `return`).
 ///
 /// # The recorded obstacle: never-returning callees
 ///
 /// `function g(): never { exit(1); } function f(): int { g(); }` runs clean
-/// (witnessed 8.5.9) — `g()` never returns, so control never reaches `f`'s closing
-/// brace. The reachability judgment is index-free and reads a statement-position
-/// call as falling through, so this id applies the refinement itself: a scope
-/// containing a statement-position call to a resolvable callee declaring `: never`
-/// is silent, whole. A callee that never returns without *declaring* `never` —
-/// the legacy `function redirect($u) { header(…); exit; }` — is **not** modelled,
-/// and is this id's one named over-report risk; inferring `never` from a callee's
-/// own `BodyEnd` is exactly what a later consumer of this foundation can add.
+/// (witnessed 8.5.9). The reachability judgment is index-free and reads a
+/// statement-position call as falling through, so this id applies the refinement
+/// itself: a scope containing such a call to a resolvable callee declaring `: never`
+/// is silent, whole. A callee that never returns without *declaring* it — the legacy
+/// `function redirect($u) { header(…); exit; }` — is not modelled, and is this id's
+/// one named over-report risk.
 pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 
 /// The registry id for the **possibly** leg of [`TYPE_RETURN_MISSING_ID`]
@@ -12185,94 +12160,65 @@ fn walk_trace(
 /// The variables `stmt` hands to a call whose facts nevertheless **survive** it
 /// (ADR-0070) — the precise reading of the blanket `Stmt::invalidated` drop.
 ///
-/// Takes the evidence rather than the statement, because two positions carry
-/// it: a statement's [`Stmt::invalidated`], and a comparison operand's
-/// [`CondOperand::Other`] `sites` (issue #158 — `count($a) === count($b)` hands
-/// `$a` to the same by-value parameter `count($a);` does, and the branch has the
-/// same right to keep its shape).
+/// Takes the evidence rather than the statement, because two positions carry it:
+/// [`Stmt::invalidated`], and a comparison operand's [`CondOperand::Other`] `sites`
+/// (issue #158 — `count($a) === count($b)` hands `$a` to the same by-value
+/// parameter `count($a);` does).
 ///
-/// # Why anything may survive at all
-///
-/// PHP passes scalars, strings and arrays **by value** (copy-on-write): the
-/// callee's parameter is a separate zval, and writing it cannot reach the
-/// caller's binding. So `array_first($a)` — a by-value argument — leaves `$a`
-/// exactly as it was, and forgetting `$a`'s shape there is a precision loss with
-/// no soundness content. Only a `&$x` parameter (an alias of the caller's
-/// lvalue) and an object *handle* (whose referent the callee can mutate) pierce
-/// that, and the first is refused below. The second — an object handle — is
-/// admitted since the 2026-08-09 amendment (issue #295): a by-value callee can
-/// mutate the referent's state, but that state is swept by ADR-0036 earlier in
-/// the same statement, and nothing else about the handle is reachable from the
-/// callee. See [`is_value_semantic`].
+/// Anything survives at all because PHP passes scalars, strings and arrays **by
+/// value** (copy-on-write): the callee's parameter is a separate zval, so forgetting
+/// the caller's shape is a precision loss with no soundness content. Only a `&$x`
+/// parameter and an object *handle* pierce that; the first is refused below, and the
+/// second is admitted since the 2026-08-09 amendment (issue #295) because the
+/// referent's state is swept by ADR-0036 earlier in the same statement and nothing
+/// else about the handle is reachable. See [`is_value_semantic`].
 ///
 /// # The gate — all five must hold, per variable
 ///
 /// 1. **Every** occurrence of the name in this statement's call arguments is a
-///    recorded site on its [`steins_syntax::InvalidatedVar`] entry — an entry
-///    with an unprovable occurrence anywhere is `opaque` and carries no sites
-///    (the syntax layer's completeness invariant) — and each of
-///    those callees **resolves with a known signature**: a project function the
-///    index knows (its declared [`Param::by_ref`] answers directly), or a
-///    builtin whose argument semantics the catalog states
+///    recorded site on its [`steins_syntax::InvalidatedVar`] entry (an entry with an
+///    unprovable occurrence is `opaque` and carries no sites), and each callee
+///    **resolves with a known signature** — a project function ([`Param::by_ref`]
+///    answers directly) or a builtin the catalog states
 ///    ([`steins_catalog::by_value_arg`]). A name nobody knows refuses.
-/// 2. The argument is **by value** at that position. Call-time pass-by-reference
-///    was removed in PHP 8, so this is a property of the declaration alone; a
-///    `&$x` parameter, an argument past the declared arity, and a variadic
-///    position all refuse.
-/// 3. The variable denotes a **value-semantic** thing, or a **heap object
-///    handle** (the 2026-08-09 amendment). A closure value and a bare
-///    guard-derived class bound still drop.
+/// 2. The argument is **by value** at that position. Call-time pass-by-reference was
+///    removed in PHP 8, so this is a property of the declaration alone; a `&$x`
+///    parameter, an argument past the declared arity, and a variadic position refuse.
+/// 3. The variable denotes a **value-semantic** thing or a **heap object handle**. A
+///    closure value and a bare guard-derived class bound still drop.
 /// 4. The scope is **not poisoned**. Every aliasing / scope-injection construct
 ///    (`$x = &$y`, `global`, `static $x`, `$$v`, `extract`/`compact`, `eval`,
-///    `include`, a by-ref `use (&$x)`) poisons the whole scope, so a live
-///    reference into a local can never coexist with a surviving fact here. The
-///    same veto is applied to the *callee's* body for a project function, which
-///    is what closes the one route a by-value argument does not describe — a
-///    callee reaching a caller local through `global` at top-level scope.
-/// 5. Language constructs never reach this path: `isset`/`empty`/`unset`/`list`
-///    are not call nodes, so the lowering records no site for them.
+///    `include`, a by-ref `use (&$x)`) poisons the whole scope. The same veto applies
+///    to a project callee's own body, which closes the one route a by-value argument
+///    does not describe: a callee reaching a caller local through `global`.
+/// 5. Language constructs never reach this path — `isset`/`empty`/`unset`/`list` are
+///    not call nodes, so the lowering records no site.
 ///
-/// # The dump-surface exception (ADR-0053)
+/// # Read-site exceptions
 ///
-/// A recognized dump callee — the reserved `PHPStan\dumpType` pair (D3) or the
-/// global `var_dump` (D4) — is a **read**: it observes the walk's facts at the
-/// call position and binds nothing (§10 §3). Such a site keeps the argument's
-/// every binding (object holders included — nothing is handed anywhere that
-/// could mutate the referent's state) and is exempt from conditions 1–3, so the
-/// dump surface stays idempotent: the second dump of a variable answers exactly
-/// what the first one did. Recognition is the emitters' own — resolved-FQN,
-/// definition-insensitive for the reserved pair ([`dump_family`]'s rule) — so
-/// the gate and the emitter can never disagree about what a dump is.
+/// A recognized dump callee — the reserved `PHPStan\dumpType` pair (D3) or global
+/// `var_dump` (D4) — is a **read** that binds nothing (ADR-0053 §10 §3), so it keeps
+/// every binding including object holders and is exempt from conditions 1–3. That
+/// keeps the dump surface idempotent: the second dump of a variable answers what the
+/// first did. Recognition is the emitters' own resolved-FQN rule ([`dump_family`]),
+/// so gate and emitter cannot disagree.
 ///
-/// # The harness assertType exception (oracle idea B)
-///
-/// In the **harness universe only** — the [`ASSERT_SINK`] installed by
-/// [`collect_assert_types`] — a `PHPStan\Testing\assertType('T', $e)` site is
-/// the same kind of read: the observer records facts at the call position and
-/// binds nothing, so its arguments survive exactly like a dump's. This is what
-/// keeps the measurement honest when a corpus file asserts one variable twice
-/// (phpstan-src's nsrt files do, routinely): the second assertion must observe
-/// the same env the first did, not one degraded by the first assertion's own
-/// scaffolding. The exception is deliberately **not** unconditional, unlike the
-/// dump pair's: the dumps earn theirs by being normal-check-surface features
-/// (D3/D4 emit diagnostics in every check), while `assertType` has no
-/// normal-check emitter — with the sink absent, [`is_assert_read_site`] is
-/// `false` everywhere and the check surface stays byte-identical (the
-/// [`emit_asserts`] pin), so a project that really calls
-/// `PHPStan\Testing\assertType` keeps the ordinary conservative treatment.
+/// In the **harness universe only** ([`ASSERT_SINK`], installed by
+/// [`collect_assert_types`]), a `PHPStan\Testing\assertType` site is the same kind of
+/// read — which is what keeps a file that asserts one variable twice honest, as
+/// phpstan-src's nsrt files routinely do. Deliberately not unconditional, unlike the
+/// dumps': they earn theirs by emitting diagnostics in every check, while
+/// `assertType` has no normal-check emitter, so with the sink absent
+/// [`is_assert_read_site`] is `false` everywhere and the check surface stays
+/// byte-identical (the [`emit_asserts`] pin).
 ///
 /// # Replayability (ADR-0048)
 ///
-/// The verdict is a **pure function** of (the statement's recorded sites, the
-/// project index, the static catalog, the walk-local env/store at this point,
-/// and which universe is running — the harness sink is installed for a whole
-/// [`collect_assert_types`] run and absent for a whole check, never toggled
-/// mid-walk, so it selects a universe rather than injecting per-name state).
-/// It asks the engine nothing — no sidecar reflection, no boot surface, no fold
-/// — so there is no per-name engine state to memo (the issue #63 discipline
-/// applies vacuously here, and deliberately so), and no global ordering can
-/// enter a kept fact. Two runs of the same universe over the same sources
-/// decide identically, with or without PHP.
+/// The verdict is a **pure function** of the statement's recorded sites, the project
+/// index, the static catalog, the walk-local env/store, and which universe is running
+/// (the sink is installed for a whole run, never toggled mid-walk). It asks the engine
+/// nothing — no reflection, no boot surface, no fold — so no per-name engine state
+/// exists to memo and no global ordering can enter a kept fact.
 fn by_value_survivors<'s>(
     cx: &Cx<'_>,
     poisoned: bool,
@@ -24794,140 +24740,72 @@ fn check_declaration_fatals(cx: &Cx, dead: &[Span], out: &mut Vec<Diagnostic>) {
 // ---------------------------------------------------------------------------
 // The rest of PHPStan's `OverridingMethodRule` surface: `override.final`,
 // `override.static-mismatch`, `override.visibility-weakened`,
-// `override.parameter-variance` and `override.return-variance`. Every one is a
-// fatal PHP raises **at class load**, off the same declaration graph the tracer
-// above reads, so they share its closure discipline verbatim — unique resolution
-// of every consulted ancestor, a `use`d trait anywhere in the chain is silence,
-// no sidecar leg, and no dam gate (the immunity asymmetry: `eval` can mint a
-// class but cannot re-open a declared one to change a signature already written).
-// `enumerate_ancestry` is reused as-is, so the tracer's silence legs are these
-// ids' silence legs by construction.
+// `override.parameter-variance`, `override.return-variance`. Each is a fatal PHP
+// raises **at class load**, off the same declaration graph the tracer above reads,
+// so they share its closure discipline verbatim — unique resolution of every
+// consulted ancestor, silence if a `use`d trait is anywhere in the chain, no
+// sidecar leg, no dam gate (`eval` can mint a class but cannot re-open a declared
+// one). `enumerate_ancestry` is reused as-is, so the tracer's silence legs are
+// these ids' silence legs by construction.
 //
-// **v1 judges native signatures only.** An `@param` / `@return` / generics premise
-// is Asserted (ADR-0037/0052 N2) and a docblock claim must never forge a
-// proof-layer finding; PHP does not read docblocks when it decides this fatal, so
-// a docblock premise is not merely demoted here, it is *absent*. The phpdoc twin
-// waits on ADR-0032's generics carry.
+// **v1 judges native signatures only.** A docblock premise is Asserted
+// (ADR-0037/0052 N2) and PHP does not read docblocks when it decides this fatal,
+// so such a premise is absent here rather than demoted. The phpdoc twin waits on
+// ADR-0032's generics carry.
 //
-// PHP 8.5.9 `php -r` witness table (every row run; the legal counterpart of each
-// firing row is run too and prints nothing):
+// The rules, each witnessed on PHP 8.5.9 with `php -r` (the legal counterpart of
+// every firing row was run too and prints nothing):
 //
-//   final
-//     `class P { final public function m() {} } class C extends P { public function m() {} }`
-//       → Fatal error: Cannot override final method P::m()
-//     — also for a `static` pair, a grandparent's `final`, an `abstract` child
-//       re-declaration, an anonymous child class, and `__construct`.
-//     `class P { public function m() {} } class C extends P { final public function m() {} }`
-//       → clean: the CHILD being final is legal.
+//   final — overriding a parent's `final` method fatals, including through a
+//     grandparent, from an `abstract` or anonymous child, and for `__construct`.
+//     The CHILD being final is legal.
+//   static mismatch — fatal in BOTH directions. `__construct` is excluded: making
+//     it static is a different fatal that needs no parent at all.
+//   visibility — narrowing fatals (public → protected/private, protected →
+//     private); widening is clean.
+//   parameter variance (contravariance) — narrowing the accepted set fatals
+//     (`int|string` → `int`, `?int` → `int`, untyped → `int`, `iterable` →
+//     `array`, `bool` → `true`). Widening, dropping the type, renaming, and adding
+//     an OPTIONAL parameter are clean. NOT judged in v1 (its own deferred id,
+//     because the shape is an arity change this id's name would misname): adding
+//     or removing a REQUIRED parameter, and a by-reference mismatch.
+//   return variance (covariance) — widening the promise fatals (`int` →
+//     `int|string`, `int` → `?int`, `never` → `int`, `true` → `bool`). Narrowing,
+//     and adding a return type where the parent declares none, are clean. A child
+//     DROPPING the parent's return type is also a fatal but is a deliberate v1
+//     silence: the syntax layer lowers an unrepresentable hint (`void`,
+//     `iterable`, `mixed`, a DNF form) to the same `None` an absent hint gives, so
+//     the two are indistinguishable. Both sides must carry a lowered type.
+//   __construct — exempt from visibility and variance **only while the parent's
+//     constructor is concrete**; the exemption ends the moment it is abstract (an
+//     interface method or an `abstract` declaration), where both fire again. Not
+//     exempt from `final`. No other magic method is exempt from anything.
+//   private parent methods — silence, and not an exemption: a private method is
+//     not inherited, so there is nothing to override.
+//   interfaces — the same path, not a separate one; `enumerate_ancestry` already
+//     collects the transitive interface set.
+//   precedence — **final ≻ static ≻ visibility ≻ variance**, at most one finding
+//     per overriding method, so the id never misnames which fatal fires.
 //
-//   static mismatch (both directions)
-//     `class P { public function m() {} } class C extends P { public static function m() {} }`
-//       → Fatal error: Cannot make non static method P::m() static in class C
-//     `class P { public static function m() {} } class C extends P { public function m() {} }`
-//       → Fatal error: Cannot make static method P::m() non static in class C
-//     `class P { public function __construct() {} } class C extends P { public static function __construct() {} }`
-//       → Fatal error: Method C::__construct() cannot be static — a DIFFERENT fatal
-//         (it needs no parent at all), so `__construct` is excluded from this id.
+// Two yield losses come from the acceptance relation itself, both in the direction
+// that can only lose findings: a `bool` arm against a `true`/`false` literal folds
+// to `Maybe` (proven-partial coverage is indistinguishable from ignorance at that
+// fold), and the relation carries PHP's weak-mode int→float widening, which the
+// inheritance check — a pure subtype test — does not.
 //
-//   visibility weakened
-//     public → protected / public → private
-//       → Fatal error: Access level to C::m() must be public (as in class P)
-//     protected → private
-//       → Fatal error: Access level to C::m() must be protected (as in class P) or weaker
-//     protected → public, private → public, private → protected → all clean (widening).
+// Measured: the whole native-type matrix (13 × 13 types over parameter, return,
+// interface and constructor positions, plus the modifier matrix — 774 fixtures)
+// against `php -r` on 8.5.9. Zero false positives; the 49 yield losses are exactly
+// the class-vs-class `Maybe` leg, the two allowances above, and the
+// static-constructor exclusion.
 //
-//   parameter variance (contravariance: the child must accept everything the parent does)
-//     `P::m(int|string $x)` / `C::m(int $x)`
-//       → Fatal error: Declaration of C::m(int $x) must be compatible with P::m(string|int $x)
-//     `P::m(?int $x)` / `C::m(int $x)`, `P::m($x)` / `C::m(int $x)`,
-//     `P::m(iterable $x)` / `C::m(array $x)`, `P::m(bool $x)` / `C::m(true $x)`,
-//     `P::m(string $x)` / `C::m(int $x)` — all the same fatal.
-//     LEGAL, witnessed clean: `int` → `int|string`, `int` → `?int`, `array` →
-//     `iterable`, `true` → `bool`, dropping the type entirely, renaming the
-//     parameter, and adding an OPTIONAL parameter.
-//     NOT judged in v1 (silence, its own deferred id — the shape is an arity
-//     change, not a variance one, and this id's name would misname it): adding a
-//     REQUIRED parameter (`Declaration of C::m(int $x, int $y) must be compatible
-//     with P::m(int $x)`), REMOVING a parameter (the same message, mirrored), and
-//     a by-reference mismatch (`C::m(int &$x)` vs `P::m(int $x)`).
-//
-//   return variance (covariance: the child must return only what the parent promised)
-//     `P::m(): int` / `C::m(): int|string`
-//       → Fatal error: Declaration of C::m(): string|int must be compatible with P::m(): int
-//     `P::m(): int` / `C::m(): ?int`, `P::m(): never` / `C::m(): int`,
-//     `P::m(): true` / `C::m(): bool` — all the same fatal.
-//     LEGAL, witnessed clean: `int|string` → `int`, `?int` → `int`, `iterable` →
-//     `array`, `int` → `never`, `mixed` → `int`, `self` → `static`, and ADDING a
-//     return type where the parent declares none.
-//     A child DROPPING the parent's return type IS a fatal (`Declaration of C::m()
-//     must be compatible with P::m(): int`), and is a deliberate v1 silence: the
-//     syntax layer lowers an unrepresentable hint (`void`, `iterable`, `mixed`, a
-//     DNF form) to the same `None` an *absent* hint lowers to, so "the child
-//     declares nothing" is not distinguishable from "the child declares something
-//     Steins does not carry". Both sides must therefore carry a lowered type.
-//
-//   __construct — the exemption, pinned exactly
-//     A constructor is NOT exempt from `final`: overriding a `final __construct`
-//     is the same `Cannot override final method P::__construct()` fatal.
-//     It IS exempt from the static id (a different fatal, above), and it is exempt
-//     from visibility and variance **when the parent's `__construct` is concrete**:
-//       `class P { public function __construct(int|string $x) {} }
-//        class C extends P { public function __construct(int $x) {} }`      → clean
-//       `class P { public function __construct() {} }
-//        class C extends P { private function __construct() {} }`           → clean
-//     The exemption ends the moment the parent's `__construct` is ABSTRACT — an
-//     interface method or an `abstract` declaration — where both fire again:
-//       `interface I { public function __construct(int|string $x); }
-//        class C implements I { public function __construct(int $x) {} }`
-//          → Declaration of C::__construct(int $x) must be compatible with I::__construct(string|int $x)
-//       `abstract class P { abstract public function __construct(); }
-//        class C extends P { protected function __construct() {} }`
-//          → Access level to C::__construct() must be public (as in class P)
-//     (`__destruct` and the other magic methods are NOT exempt from anything —
-//     `class P { public function __destruct() {} } class C extends P { private
-//     function __destruct() {} }` → `Access level to C::__destruct() must be public`.)
-//
-//   private parent methods — silence, and not an exemption but a non-inheritance
-//     `class P { private function m(int $x) {} } class C extends P { public static
-//      function m(string $y, array $z): void {} }` → clean. A private method is not
-//     inherited, so there is nothing to override; `final private function` is not
-//     even accepted (`Warning: Private methods cannot be final as they are never
-//     overridden by other classes`).
-//
-//   interface implementation — the SAME path, no separate one
-//     `interface I { public function m(int|string $x); } class C implements I {
-//      public function m(int $x) {} }` → the same `must be compatible` fatal, and
-//     likewise for the return, visibility and static ids. `enumerate_ancestry`
-//     already collects the transitive interface set, so an interface declaration is
-//     just another parent candidate.
-//
-//   runtime precedence, witnessed by pairing each violation with a narrowing:
-//     **final ≻ static ≻ visibility ≻ variance**. At most one finding is emitted per
-//     overriding method, in that order, so the id never misnames which fatal fires.
-//
-// The acceptance relation's own two yield losses, each a tested leg and each in the
-// direction that can only lose findings: a `bool` arm against a `true`/`false`
-// literal folds its finite members to `Maybe` (proven-PARTIAL coverage is
-// indistinguishable from ignorance at that fold), and the relation carries PHP's
-// weak-mode int→float widening, which PHP's *inheritance* check — a pure subtype
-// test with no coercion — does not. Both stay silent rather than being special-cased
-// out of the relation.
-//
-// Measured: the whole native-type matrix (13 types × 13 types over parameter,
-// return, interface and constructor positions, plus the modifier matrix — 774
-// fixtures) was run against `php -r` on 8.5.9. Zero false positives; the 49 yield
-// losses are exactly the class-vs-class `Maybe` leg, the two allowances above, and
-// the static-constructor exclusion.
-//
-// Deliberate silences beyond the ones above, each a tested leg: an interface
-// SUBJECT (`interface I extends J` re-declaring a method is the same fatal, but the
-// ancestry walk is class-shaped); an enum subject and an anonymous class (members
-// are not lowered for either, ADR-0043 / ADR-0049 A4); a child method declared
-// `abstract` over a CONCRETE parent (`Cannot make non abstract method P::m()
-// abstract in class C` — a different fatal, the tracer's `Satisfaction::Refused`
-// shape); a `self`/`static`/`parent` return keyword on either side, whose lowered
-// bound is the *declaring* class and would misname the comparison; and a variadic
-// or by-reference position on either side.
+// Further deliberate silences, each a tested leg: an interface SUBJECT (the same
+// fatal, but the ancestry walk is class-shaped); an enum or anonymous-class subject
+// (members are not lowered for either, ADR-0043 / ADR-0049 A4); a child method
+// declared `abstract` over a concrete parent (a different fatal, the tracer's
+// `Satisfaction::Refused` shape); a `self`/`static`/`parent` return keyword, whose
+// lowered bound is the *declaring* class and would misname the comparison; and a
+// variadic or by-reference position on either side.
 // ---------------------------------------------------------------------------
 
 /// A parent-side declaration a subject method overrides: the method and the display
@@ -32975,45 +32853,28 @@ fn var_export_transfer(
 /// **The string-predicate transfers** (issue #77) — the residual half of the names
 /// whose constant half the fold lane already owns.
 ///
-/// A string builtin called on a *known constant* folds to a Singleton one rung up
-/// (ADR-0028). Called on a string the walk only knows *predicates* about —
-/// `non-empty-string`, `lowercase-string`, a `'foo'|'bar'` union — nothing computed
-/// before this table. It answers one question per name: **which
-/// [`StrPreds`](steins_domain::StrPreds) bits survive the call, and which does the
-/// call establish on its own?**
-///
-/// The shape is uniform, so the whole family is one rule rather than twenty-five:
+/// A string builtin on a *known constant* folds to a Singleton one rung up
+/// (ADR-0028). On a string the walk knows only *predicates* about, this table
+/// answers one question per name: which [`StrPreds`](steins_domain::StrPreds) bits
+/// survive the call, and which does the call establish on its own?
 ///
 /// ```text
 /// out = (preds(arg0) ∩ KEEP(name, args)) ∪ FORCE(name, args)
 /// ```
 ///
-/// with `out == ∅` meaning **decline** — an empty summary is exactly the reflected
-/// `string` envelope, and restating an envelope would put a stratum-carrying fact
-/// where a `Verified` one already stands (ADR-0061 §3's replace-if-weaker
-/// corollary, the same reason [`var_export_transfer`] declines its one-argument
-/// form). `strlen` is the one member whose output is not a string: a non-empty
-/// subject makes it `int<1, max>`, one notch inside the curated `int<0, max>` row.
+/// `out == ∅` means **decline**: an empty summary is exactly the reflected `string`
+/// envelope, and restating it would put a stratum-carrying fact where a `Verified`
+/// one already stands (ADR-0061 §3's replace-if-weaker corollary). `strlen` is the
+/// one member whose output is not a string.
 ///
-/// # What the two casing bits MEAN here, and why the forced leg is total
-///
-/// `LOWERCASE` is `strtolower($s) === $s`, which
-/// [`php_str_is_lowercase`](steins_domain::php_str_is_lowercase) implements as **no
-/// ASCII uppercase byte** — PHP 8.2+ made the two case functions locale-insensitive
-/// and byte-wise, so nothing outside `A-Z`/`a-z` participates. Two consequences the
-/// table leans on, both probed at `PINNED_PHP` (8.5.8):
-///
-/// * `strtolower('ÄB') === 'Äb'` — the non-ASCII byte is untouched, and the result
-///   still has no ASCII uppercase byte. So `strtolower` **forces** `LOWERCASE` for
-///   *any* input, including one carrying no fact at all, and `strtoupper` mirrors it
-///   (`strtoupper('äb') === 'äB'`). This is the one leg that fires without reading
-///   the subject: the claim is about the function, not its argument.
-/// * A transfer that only ever *removes* bytes or *inserts* uncased ones preserves
-///   both casing bits — `trim`, `substr`, `strrev`, `str_repeat`, `implode`. That is
-///   why an explicit `trim` charlist changes nothing here: the output is still a
-///   substring of the input.
-///
-/// # The table
+/// Casing, probed at `PINNED_PHP` (8.5.8): `LOWERCASE` is "no ASCII uppercase
+/// byte", since PHP 8.2+ made both case functions locale-insensitive and byte-wise.
+/// Hence two legs the table leans on — `strtolower`/`strtoupper` **force** their bit
+/// for *any* input including a factless one (`strtolower('ÄB') === 'Äb'`), a claim
+/// about the function rather than its argument; and a transfer that only removes
+/// bytes or inserts uncased ones preserves both bits (`trim`, `substr`, `strrev`,
+/// `str_repeat`, `implode`), which is why an explicit `trim` charlist changes
+/// nothing.
 ///
 /// | name(s) | keeps | forces | declines |
 /// | --- | --- | --- | --- |
@@ -33034,69 +32895,47 @@ fn var_export_transfer(
 /// | `strlen` | — | `int<1, max>` at a non-empty subject | — |
 ///
 /// Only those five bits move (`NON_EMPTY`, `NON_FALSY`, `NUMERIC`, `LOWERCASE`,
-/// `UPPERCASE`). `DECIMAL_INT` and `NON_DECIMAL_INT` are never propagated even
-/// where they would survive (`ucfirst(' 1e5')` is still numeric): dropping a bit
-/// is a widening, and keeping the table to the measured axis is worth more than
-/// the rows it would buy.
+/// `UPPERCASE`). `DECIMAL_INT`/`NON_DECIMAL_INT` are never propagated even where
+/// they would survive: dropping a bit is a widening, and keeping the table to the
+/// measured axis is worth more than the rows it would buy.
 ///
 /// # The declines, each for a stated reason
 ///
-/// * **`escapeshellcmd`** — in upstream PHPStan's own non-empty set, and **wrong**
-///   there: `escapeshellcmd("\x80") === ''` at 8.5.8 (it drops an invalid multibyte
-///   sequence). A measured counterexample outranks upstream's say-so (ADR-0061 §2:
-///   "upstream's say-so is provenance, not evidence"), so the name is refused.
+/// * **`escapeshellcmd`** — in upstream PHPStan's non-empty set and wrong there:
+///   `escapeshellcmd("\x80") === ''` at 8.5.8. A measured counterexample outranks
+///   upstream's say-so (ADR-0061 §2).
 /// * **`urldecode`/`rawurldecode` keep `NON_EMPTY` only** — upstream propagates
-///   non-falsiness through them too, and `urldecode('%30') === '0'` refutes it.
+///   non-falsiness too, and `urldecode('%30') === '0'` refutes it.
 /// * **Any `mb_*` name** — encoding- and locale-dependent, the catalog's standing
-///   exclusion (`steins_catalog` lib.rs "Deliberate exclusions"). `mb_strtolower`
-///   and `mb_substr` are *absent by that rule*, not by oversight.
-/// * **`substr` non-emptiness away from offset zero** — `substr($nonEmpty, 1, 1)`
-///   may be non-empty, and proving it needs the subject's own length, which a
-///   predicate summary does not carry (`substr('a', 1, 1) === ''`). Issue #41
-///   takes only the offset-zero sliver, where the window is anchored at the first
-///   byte and the clamping does the rest; every other offset still declines.
-/// * **`strtr` casing and non-falsiness** — both refuted at the pin
-///   (`strtr('a', 'a', 'A') === 'A'`; `strtr('a', 'ax', '0x') === '0'`), the
-///   second against upstream PHPStan's own claim for both arities.
+///   exclusion. `mb_strtolower`/`mb_substr` are absent by that rule, not oversight.
+/// * **`substr` non-emptiness away from offset zero** — proving it needs the
+///   subject's own length, which a predicate summary does not carry
+///   (`substr('a', 1, 1) === ''`). Issue #41 takes only the offset-zero sliver.
+/// * **`strtr` casing and non-falsiness** — both refuted at the pin, the second
+///   against upstream's claim for both arities.
 /// * **`sprintf` casing, and every non-constant format** — a conversion may emit
-///   uppercase (`sprintf('%X', 255) === 'FF'`) or nothing at all
-///   (`sprintf('%.0s', 'abc') === ''`), so only a *literal byte in a constant
-///   format* is claimed, and the scanner refuses any format it cannot parse.
-/// * **`sprintf`'s hex pair, `%x`/`%X`** — issue #41's NUMERIC slice excludes both:
-///   `sprintf('%14x', 255) === 'ff'` and `sprintf('%14X', 255) === 'FF'`, neither a
-///   numeric string, though upstream PHPStan's `bug-7387.php` fixture claims
-///   `numeric-string` for both. A measured counterexample outranks upstream's
-///   say-so (ADR-0061 §2) for the second time in this table.
+///   uppercase (`'%X'` → `FF`) or nothing (`'%.0s'` → `''`), so only a literal byte
+///   in a constant format is claimed and the scanner refuses formats it cannot parse.
+/// * **`sprintf`'s `%x`/`%X`** — excluded from the NUMERIC slice: `sprintf('%14x',
+///   255) === 'ff'` is not a numeric string, though upstream's `bug-7387.php`
+///   fixture claims it is. ADR-0061 §2 again.
 /// * **`sprintf`'s `%e`/`%f`/`%g` away from a proven `int` value** — the float
-///   formatter renders `NAN`/`INF`/`-INF` verbatim (`sprintf('%f', NAN) === 'NaN'`),
-///   and a numeric-*string* argument can overflow its own `(float)` cast to `INF`
-///   (`sprintf('%f', "1e400") === 'INF'`). Only a native `int` value closes both
-///   holes (PHP has no `int` spelling of either special value), so the rule reads
-///   the value argument's fact for exactly these three type characters — `b`/`d`/
-///   `o` need no such gate, because PHP's int CAST (not float format) clamps any
-///   input, `NAN`/`INF` included, to a definite in-range integer.
-/// * **`sprintf`'s `%c %s %u %h %H %E %F %G`** — unmeasured for this slice.
-///   Upstream's fixture claims `numeric-string` for several (`%u`/`%h`/`%H`
-///   plausibly by the same int-cast argument admitting `%d`/`%b`/`%o`), but this
-///   rule widens only on a witness it has taken itself, not on upstream's say-so
-///   — a future slice, not this one.
-/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the same float-trio gate `sprintf` clears
-///   with its own second argument needs a proven `int` VALUE, and `vsprintf`'s
-///   value sits inside the values array rather than at a fixed argument position.
-///   Opening that array for one element's fact is more machinery than this slice's
-///   measured rows need (both `vsprintf` rows in `bug-7387.php` and
-///   `lowercase-string-sprintf.php` are `%d`, the unconditional int-cast leg), so
-///   the float trio stays declined for `vsprintf` — a stated decline, not a guess.
-/// * **`str_replace`/`substr_replace`/`parse_str`** — nsrt asks for casing through
-///   them too; they need a second subject's predicates (or an out-parameter) rather
-///   than this table's single-subject shape. Not modeled by this table.
-///
-/// # Unions are read directly (the #75 survey's nuance)
+///   formatter renders `NAN`/`INF` verbatim and a numeric-string argument can
+///   overflow its own cast to `INF`. Only a native `int` closes both holes, so the
+///   rule reads the value's fact for exactly these three characters; `b`/`d`/`o`
+///   need no gate because PHP's int cast clamps any input to an in-range integer.
+/// * **`sprintf`'s `%c %s %u %h %H %E %F %G`** — unmeasured for this slice. This
+///   rule widens only on a witness it has taken itself.
+/// * **`vsprintf`'s `%e`/`%f`/`%g`** — the same gate needs a proven `int` VALUE, and
+///   `vsprintf`'s value sits inside the values array rather than at a fixed
+///   position; opening it is more machinery than the measured rows need.
+/// * **`str_replace`/`substr_replace`/`parse_str`** — need a second subject's
+///   predicates or an out-parameter, not this table's single-subject shape.
 ///
 /// A `Fact::OneOf` of constant strings answers by **intersecting** each member's
-/// summary — `'foo'|'bar'` is `LOWERCASE`, and `trim($fooOrBar, $s)` is a
-/// `lowercase-string`. That path needs no fold and is not blocked on #74, which
-/// gates only the sidecar route; [`fact_str_preds`] is the whole of it.
+/// summary — `'foo'|'bar'` is `LOWERCASE`. That path needs no fold and is not
+/// blocked on #74, which gates only the sidecar route; [`fact_str_preds`] is all of
+/// it.
 fn str_pred_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,

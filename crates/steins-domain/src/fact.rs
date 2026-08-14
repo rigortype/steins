@@ -2,11 +2,10 @@
 //!
 //! Soundness contract (property-tested in `tests/lattice.rs`, proved for every
 //! value in `spike/lean-domain` — ADR-0059):
-//! `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` whenever the join is representable; a
-//! `None` join means the caller must drop the fact (γ = everything), which
-//! is always safe. Widening from the finite layers is *computed*: the
-//! summary a value set widens to is derived by evaluating predicates on
-//! every member, so precision loss is measured, never guessed (ADR-0035).
+//! `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` whenever the join is representable; a `None` join means the
+//! caller must drop the fact (γ = everything), which is always safe. Widening from the finite
+//! layers is *computed*: the summary a value set widens to is derived by evaluating predicates
+//! on every member, so precision loss is measured, never guessed (ADR-0035).
 
 use crate::certainty::Certainty;
 use crate::php::php_is_falsy;
@@ -20,11 +19,9 @@ use crate::value::{Base, Key, Val};
 /// Maximum cardinality of the [`Fact::OneOf`] layer.
 pub const CAP: usize = 8;
 
-/// A refinement on a scalar base (the third layer's content).
-///
-/// Invariants (enforced by [`Fact::refined`]): a `Str` refinement carries a
-/// non-empty predicate set, an `Int` refinement a non-full interval —
-/// otherwise the fact *is* the General form.
+/// A refinement on a scalar base (the third layer's content). Invariant, enforced by
+/// [`Fact::refined`]: a `Str` refinement carries a non-empty predicate set, an `Int`
+/// refinement a non-full interval — otherwise the fact *is* the General form.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Refinement {
     /// String predicates (implication-closed bitset).
@@ -33,97 +30,68 @@ pub enum Refinement {
     Int(IntRange),
 }
 
-/// One arm of a [`Fact::Union`]: a scalar base and what is known about the
-/// values of that base, `None` being that base's `General` (issue #339).
+/// One arm of a [`Fact::Union`]: a scalar base and what is known about the values of that
+/// base, `None` being that base's `General` (issue #339).
 pub type UnionArm = (Base, Option<Refinement>);
 
-/// What is known about a single value, in one of the four layers.
+/// What is known about a single value, in one of the four layers. Every
+/// variant but `Singleton`/`OneOf` carries `nullable: bool` for whether `null`
+/// is also admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Fact {
     /// Layer 1: exactly this value.
     Singleton(Val),
     /// Layer 2: one of these values (sorted, deduped, `2..=CAP`).
     OneOf(Vec<Val>),
-    /// Layer 3: a scalar base constrained by a refinement; `nullable` adds
-    /// the null value to the denotation.
+    /// Layer 3: a scalar base constrained by a refinement.
     Refined {
-        /// The scalar base.
         base: Base,
-        /// The refinement (see invariants on [`Refinement`]).
+        /// See invariants on [`Refinement`].
         refinement: Refinement,
-        /// Whether `null` is also admitted.
         nullable: bool,
     },
     /// Layer 4: just a scalar base (plus optionally null).
     General {
-        /// The scalar base.
         base: Base,
-        /// Whether `null` is also admitted.
         nullable: bool,
     },
-    /// **Layer 3½: an abstract union across bases** (issue #339).
+    /// **Layer 3½: an abstract union across bases** (issue #339): one arm per [`Base`], each
+    /// carrying the same `Option<Refinement>` the single-base layers do (`None` = that base's
+    /// General) — the form for a value like `1|'x'` once it widens past [`CAP`]. Bounded at
+    /// four arms (PHP's scalar bases), a small map rather than an open lattice — what makes
+    /// [`Fact::join`] total, not partial, over the abstract layers.
     ///
-    /// The finite layers have always carried a mixed-base union exactly —
-    /// `$c ? 1 : 'x'` is `Fact::OneOf([Int(1), Str("x")])`, whatever the bases.
-    /// The abstract layers could not, so a value that started as `1|'x'` and
-    /// widened past [`CAP`] became **nothing** rather than `int|string`, and
-    /// every rule whose answer spanned two bases — `int|false` returns,
-    /// `json_decode`'s envelope, `in_array`'s `int|string|false`, `min`/`max` —
-    /// declined for want of a form to say it in.
+    /// Invariants, established by [`Fact::union`] (the only way in): arms sorted by [`Base`],
+    /// one entry per base; at least two arms (one collapses to `Refined`/`General`, none to
+    /// nothing); `nullable` carries `null` for the whole union, as for one base.
     ///
-    /// This is that form: one arm per [`Base`], each carrying the same
-    /// `Option<Refinement>` the single-base layers do (`None` being that base's
-    /// General). PHP has four scalar bases, so the union is **bounded at four
-    /// arms** — it is a small map, not an open lattice, which is what makes
-    /// [`Fact::join`] total over the abstract layers instead of partial.
-    ///
-    /// # Invariants (established by [`Fact::union`], which is the only way in)
-    ///
-    /// * arms sorted by [`Base`], **one entry per base**;
-    /// * **at least two** arms — one collapses to `Refined`/`General`, none to
-    ///   nothing, so a `Union` always says something neither of those can;
-    /// * `nullable` carries `null` for the whole union, exactly as it does for
-    ///   one base.
-    ///
-    /// # What is not an arm
-    ///
-    /// The array stratum. `array|string` is a real PHP type and this is not the
-    /// form for it: [`ShapeFact`] is recursive and joining it into a scalar
-    /// union would make the layer mutually recursive with the shape algebra for
-    /// one spelling. A union with an array in it declines, as it does today.
+    /// Not an arm: the array stratum. `array|string` is real PHP, but folding [`ShapeFact`]
+    /// (recursive) into a scalar union would make the layer mutually recursive with the shape
+    /// algebra for one spelling — a union with an array declines.
     Union {
         /// One [`UnionArm`] per base, sorted, `2..=4` of them.
         arms: Vec<UnionArm>,
-        /// Whether `null` is also admitted.
         nullable: bool,
     },
-    /// The abstract array stratum (ADR-0062 §3, A-G2): one canonical
-    /// [`ShapeFact`] plus the same `nullable` side-flag the other abstract
-    /// layers carry.
-    ///
-    /// There is no array-`General` variant: the degenerate shape
-    /// ([`ShapeFact::plain_array`]) *is* plain `array`. Field-value
-    /// nullability lives in that field's own slot fact, never here — one
-    /// representation per claim.
+    /// The abstract array stratum (ADR-0062 §3, A-G2): one canonical [`ShapeFact`] plus the
+    /// same `nullable` side-flag the other abstract layers carry. No array-`General` variant:
+    /// the degenerate shape ([`ShapeFact::plain_array`]) *is* plain `array`. Field-value
+    /// nullability lives in that field's own slot fact, never here — one representation per
+    /// claim.
     Shape {
-        /// The array shape.
         shape: Box<ShapeFact>,
-        /// Whether `null` is also admitted.
         nullable: bool,
     },
 }
 
 impl Fact {
     /// **The array-key cast, at the type level** (issue #336): the fact
-    /// describing `$a[$v]`'s key when all that is known about `$v` is this
-    /// fact.
+    /// describing `$a[$v]`'s key when all that is known about `$v` is this fact.
     ///
-    /// PHP casts an array key eagerly, and the interesting half is the string
-    /// one: a string that spells an integer *the way PHP writes one back*
-    /// becomes that integer, and every other string keeps its identity. Those
-    /// two classes are exactly [`StrPreds::DECIMAL_INT`] and
-    /// [`StrPreds::NON_DECIMAL_INT`], which is why this function can be written
-    /// at all — the vocabulary to name the halves already exists.
+    /// PHP casts an array key eagerly; the interesting half is the string one: a string
+    /// spelling an integer the way PHP writes one back becomes that integer, everything else
+    /// keeps its identity — exactly [`StrPreds::DECIMAL_INT`] and
+    /// [`StrPreds::NON_DECIMAL_INT`].
     ///
     /// # The grid, probed at PHP 8.5.9
     ///
@@ -137,28 +105,21 @@ impl Fact {
     /// | `bool` | `int` | `true` is `1`, `false` is `0` |
     /// | `float` | — | declines; see below |
     ///
-    /// The `numeric-string` and plain `string` rows are **sharper than
-    /// `array-key`**: a string that survives the cast is by definition one PHP
-    /// does not rewrite, which is a predicate this domain carries. They are
-    /// two-base unions, which [`Fact::Union`] (issue #339) is the form for —
-    /// before it, both declined.
+    /// The `numeric-string` and plain `string` rows are sharper than `array-key` (a string
+    /// surviving the cast is one PHP doesn't rewrite). Both are two-base unions, expressible
+    /// only via [`Fact::Union`] (issue #339).
     ///
     /// # What it declines, and why
     ///
-    /// * **`float`** — PHP renders a float to string under the `precision` ini
-    ///   directive at some of these seams, so the key would depend on the
-    ///   runtime's configuration. (And the seams disagree: `$a[1.5]` truncates
-    ///   to `1` while `array_fill_keys([1.5], v)` writes `'1.5'`.) A key this
-    ///   crate cannot state without knowing a setting is a key it does not
-    ///   state.
-    /// * **`array`** — an illegal offset type, a `TypeError` rather than a key.
-    /// * Anything whose base is not a scalar, and any fact whose own layer this
-    ///   cannot express.
+    /// * **`float`** — PHP renders a float to string under the `precision` ini directive, and
+    ///   seams disagree (`$a[1.5]` truncates to `1`, `array_fill_keys([1.5], v)` writes
+    ///   `'1.5'`); a key depending on a setting isn't one this crate states.
+    /// * **`array`** — an illegal offset type, a `TypeError`, not a key.
+    /// * Anything whose base isn't scalar, or whose own layer this can't express.
     ///
-    /// A `Singleton`/`OneOf` of proven values is **not** handled here: those
-    /// have exact keys, and the callers compute them value-by-value with the
-    /// per-seam casts (which, as the float row shows, are not all this one).
-    /// This is the abstract rung, for when nothing exact is available.
+    /// `Singleton`/`OneOf` values are not handled here: callers compute their exact keys
+    /// value-by-value with the per-seam casts (not all like this one, per the float row). This
+    /// is the abstract rung only.
     #[must_use]
     pub fn array_key_cast(&self) -> Option<Fact> {
         let int = || Fact::General { base: Base::Int, nullable: false };
@@ -168,15 +129,13 @@ impl Fact {
             Fact::Refined { base, refinement: Refinement::Str(p), nullable: false } => {
                 (*base, *p)
             }
-            // An int refinement survives the cast untouched — the key IS the
-            // integer — so the fact passes straight through.
+            // The key IS the integer, so an int refinement passes straight through.
             Fact::Refined { base: Base::Int, refinement: Refinement::Int(_), nullable: false } => {
                 return Some(self.clone());
             }
             // A union casts arm by arm and joins the results (issue #339): the
-            // arms are alternatives, and so are their keys. `int|string` keys
-            // `int|non-decimal-int-string`, because the string half splits and
-            // the int half is already a key.
+            // arms are alternatives, so are their keys — `int|string` keys as
+            // `int|non-decimal-int-string`.
             Fact::Union { arms, nullable: false } => {
                 let mut acc: Option<Fact> = None;
                 for (base, refinement) in arms {
@@ -197,7 +156,7 @@ impl Fact {
         match base {
             Base::Int => Some(int()),
             // `true`/`false` cast to `1`/`0` (a `null` VALUE is a `Singleton`,
-            // which this abstract rung does not handle — see the doc comment).
+            // not handled by this abstract rung — see the doc comment).
             Base::Bool => Some(int()),
             Base::String => {
                 // A string already known to spell an integer casts whole; one
@@ -208,16 +167,10 @@ impl Fact {
                 if preds.contains_all(StrPreds::NON_DECIMAL_INT) {
                     return Some(str_with(preds));
                 }
-                // Otherwise both halves are live and the answer is a union:
-                // `int` for the strings PHP rewrites, and — for the ones it
-                // does not — every predicate the input had plus the fact that
-                // it survived, which IS `non-decimal-int-string`. So a plain
-                // `string` keys as `int|non-decimal-int-string` and a
-                // `numeric-string` as `int|numeric-string&non-decimal-int-string`,
-                // both strictly sharper than `array-key`.
-                //
-                // Before issue #339 this had nowhere to go — a `Fact` carried
-                // one `Base` — and declined.
+                // Otherwise both halves are live: `int` for strings PHP rewrites,
+                // and `non-decimal-int-string` (the input's predicates plus the
+                // fact of surviving) for the rest — a union, expressible only
+                // since issue #339 gave `Fact` more than one `Base`.
                 int().join(&str_with(preds.union(StrPreds::NON_DECIMAL_INT).close()))
             }
             Base::Float => None,
@@ -230,10 +183,9 @@ impl Fact {
         Fact::Singleton(v)
     }
 
-    /// Build a finite fact from values: deduped and sorted; one value is a
-    /// Singleton, up to [`CAP`] a OneOf, beyond that the **computed
-    /// widening** to a Refined/General summary. `None` for an empty input
-    /// or an unsummarizable overflow (e.g. mixed scalar bases, arrays).
+    /// Build a finite fact from values: deduped and sorted; one value is a Singleton, up to
+    /// [`CAP`] a OneOf, beyond that the **computed widening** to a Refined/General summary.
+    /// `None` for an empty input or an unsummarizable overflow (e.g. mixed bases, arrays).
     #[must_use]
     pub fn from_vals(mut vals: Vec<Val>) -> Option<Fact> {
         vals.sort();
@@ -257,30 +209,21 @@ impl Fact {
         if empty { Fact::General { base, nullable } } else { Fact::Refined { base, refinement, nullable } }
     }
 
-    /// **The normalising union constructor** (issue #339) — the only way to
-    /// build [`Fact::Union`], and what establishes its invariants.
-    ///
-    /// Arms are sorted by base and merged one-per-base: two arms of the same
-    /// base join into one (their refinements joined, which is the *widening*
-    /// join the single-base layers already use, so nothing here is a new
-    /// semantics). A union that ends up with one arm collapses to
-    /// `Refined`/`General`, and one with none is `None` — a fact must say
-    /// something.
+    /// **The normalising union constructor** (issue #339) — the only way to build
+    /// [`Fact::Union`], and what establishes its invariants: arms sorted by base and merged
+    /// one-per-base (two arms of the same base join via the same widening join the
+    /// single-base layers use); one resulting arm collapses to `Refined`/`General`, none is
+    /// `None` — a fact must say something.
     #[must_use]
     pub fn union(arms: Vec<UnionArm>, nullable: bool) -> Option<Fact> {
         let mut merged: Vec<UnionArm> = Vec::with_capacity(arms.len());
         for (base, refinement) in arms {
-            // A contentless refinement IS that base's General, and storing it
-            // as `Some` would be a second spelling of one fact. `Fact::refined`
-            // enforces this for the single-base layers; an arm is the same
-            // layer one level in, so it gets the same rule.
-            //
-            // This is not tidiness: without it `join` is **not associative**.
-            // `Singleton(1) ⊔ (Singleton('a') ⊔ numeric-string)` reaches the
-            // string arm as `None` while `(Singleton(1) ⊔ Singleton('a')) ⊔
-            // numeric-string` reaches it as `Some(<empty preds>)` — the same
-            // denotation, two structures, and the vector universe finds 35698
-            // of them.
+            // A contentless refinement IS that base's General (same rule as
+            // `Fact::refined`, one layer in) — without it `join` is NOT
+            // associative: two groupings of `Singleton(1) ⊔ Singleton('a') ⊔
+            // numeric-string` reach the string arm as `None` vs. `Some(<empty
+            // preds>)`, same denotation, two structures. The vector universe
+            // finds 35698 such cases.
             let refinement = refinement.filter(|r| !refinement_is_empty(*r));
             match merged.iter_mut().find(|(b, _)| *b == base) {
                 Some(slot) => {
@@ -327,17 +270,14 @@ impl Fact {
                 _ => {
                     v.base() == Some(*base)
                         && match (refinement, v) {
-                            // Read through the extensional projection: a
-                            // contextual predicate (`class-string`) has no
-                            // member test here, so γ is over-approximated —
-                            // the sound direction for the join contract.
+                            // Extensional projection only: a contextual predicate
+                            // (`class-string`) has no member test, so γ is
+                            // over-approximated — the sound join direction.
                             (Refinement::Str(p), Val::Str(s)) => {
                                 StrPreds::of(s).contains_all(p.extensional())
                             }
                             (Refinement::Int(r), Val::Int(i)) => r.contains(*i),
-                            // Base matched but refinement kind cannot apply:
-                            // unreachable by construction (Str↔String,
-                            // Int↔Int); be safe extensionally.
+                            // Unreachable by construction (Str↔String, Int↔Int).
                             _ => false,
                         }
                 }
@@ -417,12 +357,9 @@ impl Fact {
         }
     }
 
-    /// Certainty that the value is a string satisfying every predicate in
-    /// `pred`.
-    ///
-    /// A contextual predicate in `pred` (`class-string`) can be *refuted* by a
-    /// concrete string — `""` names no class — but never proven here, so a
-    /// value that survives the extensional part answers `Maybe`.
+    /// Certainty that the value is a string satisfying every predicate in `pred`. A contextual
+    /// predicate (`class-string`) can be *refuted* by a concrete string (`""` names no class)
+    /// but never proven, so a value surviving the extensional part answers `Maybe`.
     #[must_use]
     pub fn satisfies_str(&self, pred: StrPreds) -> Certainty {
         let eval_one = |v: &Val| match v {
@@ -452,9 +389,8 @@ impl Fact {
             Fact::General { base, .. } => {
                 if *base == Base::String { Certainty::Maybe } else { Certainty::No }
             }
-            // A union answers for every arm at once: `Yes` only where each
-            // arm is, `No` only where none can be. A non-string arm is a
-            // definite `No` on its own, so a mixed union is at best `Maybe`.
+            // Per-arm: `Yes` only if every arm is; a non-string arm is `No` on
+            // its own, so a mixed union is at best `Maybe`.
             Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, refinement)| {
                 match refinement {
                     Some(r) => Fact::refined(*base, *r, *nullable).satisfies_str(pred),
@@ -489,9 +425,7 @@ impl Fact {
             Fact::General { base, .. } => {
                 if *base == Base::Int { Certainty::Maybe } else { Certainty::No }
             }
-            // A union answers for every arm at once: `Yes` only where each
-            // arm is, `No` only where none can be. A non-int arm is a
-            // definite `No` on its own, so a mixed union is at best `Maybe`.
+            // Per-arm, as in `satisfies_str`: `Yes` only if every arm is.
             Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, refinement)| {
                 match refinement {
                     Some(r) => Fact::refined(*base, *r, *nullable).int_in(range),
@@ -535,10 +469,8 @@ impl Fact {
             }
             Fact::Refined { base, refinement, nullable } => {
                 let (f, t) = match (base, refinement) {
+                    // A truthy string exists for any predicate set; NON_FALSY excludes falsy.
                     (Base::String, Refinement::Str(p)) => {
-                        // Some truthy string satisfies any predicate set
-                        // ("5" satisfies all three); falsy strings ("", "0")
-                        // are excluded exactly by NON_FALSY.
                         (!p.contains_all(StrPreds::NON_FALSY), true)
                     }
                     (Base::Int, Refinement::Int(r)) => {
@@ -551,22 +483,17 @@ impl Fact {
             }
             Fact::General { .. } => (true, true),
             Fact::Shape { shape, nullable } => {
-                // An array is falsy exactly when empty; `null` is falsy too.
-                // The truthy side is over-approximated to `true`: deciding that
-                // a shape admits *only* `[]` buys nothing until a consumer asks
-                // (`ShapeFact::can_be_non_empty` is the query when one does),
-                // and over-approximating pushes the verdict toward `Maybe`,
-                // which is the honest direction for a trinary.
+                // Falsy exactly when empty (or null); truthy is over-approximated to
+                // `true` until a consumer asks `ShapeFact::can_be_non_empty` — the
+                // honest direction for a trinary.
                 (!shape.non_empty || *nullable, true)
             }
         }
     }
 }
 
-/// Join where at least one operand is a [`Fact::Shape`].
-///
-/// `None` — drop the fact — for anything outside `array|null`: mixed-base
-/// unions stay un-facted, exactly as for scalars (A-G2).
+/// Join where at least one operand is a [`Fact::Shape`]. `None` (drop the fact) for anything
+/// outside `array|null`: mixed-base unions stay un-facted, exactly as for scalars (A-G2).
 fn join_shape(a: &Fact, b: &Fact) -> Option<Fact> {
     let (sa, na) = shape_view(a)?;
     let (sb, nb) = shape_view(b)?;
@@ -574,16 +501,14 @@ fn join_shape(a: &Fact, b: &Fact) -> Option<Fact> {
     let shape = match (sa, sb) {
         (Some(x), Some(y)) => x.join(&y),
         (Some(x), None) | (None, Some(x)) => x,
-        // Both operands were null-only, so neither was a Shape — unreachable
-        // through `join`, and dropping the fact is the safe answer anyway.
+        // Both null-only, so neither was a Shape — unreachable through `join`.
         (None, None) => return None,
     };
     Some(Fact::Shape { shape: Box::new(shape), nullable })
 }
 
-/// `(the array shape, nullability)` for an array-shaped fact; `None` when the
-/// fact denotes anything outside `array|null`. A concrete array lifts (A-G5),
-/// which is where order-witnessed-ness is honestly lost.
+/// `(the array shape, nullability)` for an array-shaped fact; `None` outside `array|null`. A
+/// concrete array lifts (A-G5), where order-witnessed-ness is honestly lost.
 fn shape_view(f: &Fact) -> Option<(Option<ShapeFact>, bool)> {
     match f {
         Fact::Shape { shape, nullable } => Some((Some((**shape).clone()), *nullable)),
@@ -608,11 +533,10 @@ fn shape_view(f: &Fact) -> Option<(Option<ShapeFact>, bool)> {
     }
 }
 
-/// The **computed descent** for an over-`CAP` set of arrays (ADR-0062 §3):
-/// keys present in every member are `Required { witnessed: true }`, keys in
-/// some are `Optional`, and the tail seals because the members enumerate every
-/// key there is. Value slots are the members' own widening, so the summary is
-/// derived member by member — never a threshold heuristic (ADR-0035).
+/// The **computed descent** for an over-`CAP` set of arrays (ADR-0062 §3): keys present in
+/// every member are `Required { witnessed: true }`, keys in some are `Optional`, and the tail
+/// seals since the members enumerate every key there is. Value slots are the members' own
+/// widening — a summary derived member by member, never a threshold heuristic (ADR-0035).
 fn shape_descent(members: &[&Val], nullable: bool) -> Fact {
     let entries: Vec<&[(Key, Val)]> = members
         .iter()
@@ -689,17 +613,11 @@ fn summarize(vals: &[Val]) -> Option<Fact> {
         return Some(shape_descent(&scalars, nullable));
     }
     let base = first.base()?;
-    // **A mixed-base overflow becomes a union** (issue #339), where it used to
-    // become nothing: `1|'x'` widening past `CAP` is `int|string`, not the
-    // absence of a fact. Each base is summarized on its own members — the same
-    // per-base computation as below — and the arms are then merged.
+    // A mixed-base overflow becomes a union (issue #339): `1|'x'` widening past `CAP` is
+    // `int|string`, not an absent fact. But only when every member HAS a scalar base — an
+    // array has none, so a set mixing arrays with scalars still drops the fact whole (keeping
+    // the scalars and losing the array would admit less than the set contained).
     if scalars.iter().any(|v| v.base() != Some(base)) {
-        // …but only when every member HAS a scalar base. An array has none
-        // (`Val::base()` is `None` for it) and is not an arm of this layer, so
-        // a set mixing arrays with scalars still drops the fact whole. Keeping
-        // the scalar members and silently losing the array would build a fact
-        // that does not admit a value the set contained — the one thing the
-        // widening must never do, and what the vector universe caught.
         if scalars.iter().any(|v| v.base().is_none()) {
             return None;
         }
@@ -755,9 +673,7 @@ fn join_finite_abstract(finite: &[Val], abs: &Fact) -> Option<Fact> {
                 Some(Fact::refined(*base, *refinement, true))
             }
             Fact::General { base, .. } => Some(Fact::General { base: *base, nullable: true }),
-            // A union takes the nullability the same way — beside its arms
-            // (issue #339). Before the union layer existed, `abs` could only be
-            // one of the two above, which is what the old `unreachable!` said.
+            // A union takes nullability the same way, beside its arms (#339).
             Fact::Union { arms, .. } => Fact::union(arms.clone(), true),
             Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => {
                 unreachable!("abs is abstract by caller contract")
@@ -767,20 +683,10 @@ fn join_finite_abstract(finite: &[Val], abs: &Fact) -> Option<Fact> {
     }
 }
 
-/// The join of two abstract facts (issue #339).
-///
-/// It used to return `None` the moment the bases differed, which is where
-/// `int|string` died: the finite layers carried `1|'x'` exactly and the moment
-/// it widened past [`CAP`] there was no form left to hold it. With
-/// [`Fact::Union`] there is, so this **concatenates the arms** and lets the
-/// union constructor merge them per base — the same-base case is the old
-/// refinement join, unchanged, and the different-base case is now a union
-/// instead of a dropped fact.
-///
-/// It is total over the abstract layers: two facts with arms always join,
-/// because a union of at most four bases always exists. `None` survives for one
-/// reason only — a fact with no abstract arms at all (a finite or array fact),
-/// which the caller routes elsewhere.
+/// The join of two abstract facts (issue #339): concatenates the arms and lets [`Fact::union`]
+/// merge them per base (same-base is the refinement join; different-base becomes a union arm).
+/// Total over the abstract layers — a union of at most four bases always exists. `None`
+/// survives only for a fact with no abstract arms at all (finite or array), routed elsewhere.
 fn join_abstract(a: &Fact, b: &Fact) -> Option<Fact> {
     let (mut arms, anull) = a.abstract_arms()?;
     let (brms, bnull) = b.abstract_arms()?;
@@ -788,9 +694,9 @@ fn join_abstract(a: &Fact, b: &Fact) -> Option<Fact> {
     Fact::union(arms, anull || bnull)
 }
 
-/// Is this refinement contentless — the whole base rather than a part of it?
-/// The predicate [`Fact::refined`] already applies when it collapses a `Refined`
-/// to a `General`, lifted out so union arms can be held to the same invariant.
+/// Is this refinement contentless — the whole base rather than a part of it? Same predicate
+/// [`Fact::refined`] applies collapsing `Refined` to `General`, lifted out so union arms can
+/// be held to the same invariant.
 fn refinement_is_empty(r: Refinement) -> bool {
     match r {
         Refinement::Str(p) => p.is_empty(),
@@ -798,10 +704,9 @@ fn refinement_is_empty(r: Refinement) -> bool {
     }
 }
 
-/// Join two refinements **of the same base** (issue #339): the widening join
-/// the single-base layers already use, lifted out so the union constructor and
-/// `join_abstract` share one definition. `None` on either side is that base's
-/// General, which absorbs.
+/// Join two refinements **of the same base** (issue #339): the widening join the single-base
+/// layers already use, lifted out so [`Fact::union`] and `join_abstract` share one definition.
+/// `None` on either side is that base's General, which absorbs.
 fn join_refinements(a: Option<Refinement>, b: Option<Refinement>) -> Option<Refinement> {
     match (a, b) {
         (Some(Refinement::Str(p)), Some(Refinement::Str(q))) => Some(Refinement::Str(p.intersect(q))),
@@ -814,9 +719,7 @@ fn join_refinements(a: Option<Refinement>, b: Option<Refinement>) -> Option<Refi
 #[cfg(test)]
 mod tests {
 
-    // ------------------------------------------------------------------
-    // the array-key cast (issue #336)
-    // ------------------------------------------------------------------
+    // -- the array-key cast (issue #336) --
 
     /// Every expectation here is a probe at PHP 8.5.9: the value was used as an
     /// array key and the resulting key's type and identity read back.
@@ -827,8 +730,7 @@ mod tests {
 
         // `decimal-int-string` always casts: '0', '-1', '9223372036854775807'.
         assert_eq!(s(StrPreds::DECIMAL_INT.close()).array_key_cast(), Some(int.clone()));
-        // `non-decimal-int-string` never does, and keeps its identity — so it
-        // keeps its predicates too: '', '00', '+1', ' 1', '1e3', '-0'.
+        // `non-decimal-int-string` never does: '', '00', '+1', ' 1', '1e3', '-0'.
         assert_eq!(
             s(StrPreds::NON_DECIMAL_INT).array_key_cast(),
             Some(s(StrPreds::NON_DECIMAL_INT))
@@ -837,9 +739,6 @@ mod tests {
 
     #[test]
     fn the_two_base_unions_are_now_expressible() {
-        // A plain `string` keys as `int | non-decimal-int-string` and a
-        // `numeric-string` as `int | numeric-string&non-decimal-int-string`.
-        // Both used to decline for want of a form; `Fact::Union` is the form.
         let plain = Fact::General { base: Base::String, nullable: false }
             .array_key_cast()
             .expect("a string keys");
@@ -875,16 +774,12 @@ mod tests {
 
     #[test]
     fn a_float_declines_because_its_key_is_a_setting() {
-        // PHP renders a float to string under the `precision` ini directive at
-        // some of these seams, and the seams disagree with each other
-        // (`$a[1.5]` truncates to 1, `array_fill_keys([1.5], v)` writes '1.5').
         assert_eq!(Fact::General { base: Base::Float, nullable: false }.array_key_cast(), None);
     }
 
     #[test]
     fn a_nullable_fact_declines() {
-        // `null` is a value, not an abstract class this rung handles; a
-        // nullable fact mixes the two and is left to the caller.
+        // `null` is a value, left to the caller, not this abstract rung.
         assert_eq!(Fact::General { base: Base::String, nullable: true }.array_key_cast(), None);
     }
     use super::*;
@@ -918,9 +813,8 @@ mod tests {
         let vals: Vec<Val> =
             ["5", "12", "3.4", "007", " 8 ", "9e2", "44", "0", "17"].iter().map(|v| s(v)).collect();
         let f = Fact::from_vals(vals).unwrap();
-        // All numeric (hence non-empty), but "0" kills NON_FALSY. All lowercase
-        // too — `"9e2"` has a cased character and it is the lowercase one, so
-        // only UPPERCASE falls out of the intersection.
+        // All numeric (hence non-empty), but "0" kills NON_FALSY; all lowercase
+        // ("9e2"'s cased char is lowercase), so only UPPERCASE falls out.
         let expected =
             StrPreds::NUMERIC.union(StrPreds::NON_EMPTY).union(StrPreds::LOWERCASE);
         assert_eq!(f, Fact::refined(Base::String, Refinement::Str(expected), false));
@@ -932,8 +826,7 @@ mod tests {
         let refined = Fact::refined(Base::String, Refinement::Str(StrPreds::of("xy")), false);
         let j = lit.join(&refined).unwrap();
         assert!(j.admits(&s("abc")) && j.admits(&s("xy")));
-        // "abc" and "xy" are both non-falsy and non-numeric → NON_FALSY
-        // (with implied NON_EMPTY) survives the intersection.
+        // Both non-falsy, non-numeric → NON_FALSY (implying NON_EMPTY) survives.
         assert_eq!(
             j,
             Fact::refined(Base::String, Refinement::Str(StrPreds::of("xy").intersect(StrPreds::of("abc"))), false)
@@ -951,16 +844,12 @@ mod tests {
 
     #[test]
     fn mixed_bases_join_into_a_union() {
-        // This test used to pin `None` — `mixed_bases_are_unrepresentable` —
-        // and that was the wall issue #339 removes. The join is now total over
-        // the abstract layers, and each arm keeps its own refinement rather
-        // than being flattened into the other's.
+        // Used to pin `None` before issue #339; now total, each arm keeping
+        // its own refinement rather than being flattened into the other's.
         let a = Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false);
         let b = Fact::refined(Base::String, Refinement::Str(StrPreds::NON_EMPTY), false);
         let j = a.join(&b).expect("mixed bases now join");
         assert!(j.admits(&Val::Int(5)) && j.admits(&s("x")));
-        // …and neither arm was widened on the way: the int stays positive and
-        // the string stays non-empty.
         assert!(!j.admits(&Val::Int(-5)), "the int refinement survived: {j:?}");
         assert!(!j.admits(&s("")), "the string refinement survived: {j:?}");
         assert!(!j.admits(&Val::Bool(true)), "no arm was invented: {j:?}");
@@ -990,8 +879,6 @@ mod tests {
 
     #[test]
     fn a_mixed_overflow_summarizes_to_a_union() {
-        // The everyday cliff: a finite mixed union that outgrows `CAP` used to
-        // become NOTHING rather than `int|string`.
         let mut vals: Vec<Val> = (0..6).map(Val::Int).collect();
         vals.extend((0..6).map(|i| s(&format!("v{i}"))));
         let f = Fact::from_vals(vals).expect("an over-CAP mixed set summarizes");

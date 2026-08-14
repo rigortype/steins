@@ -1,16 +1,13 @@
 //! `fp-gate`: run the full proof-layer pipeline over the pinned corpus.
 //!
-//! ADR-0013: one proof-layer diagnostic on working code is a release blocker,
-//! so this gate exits nonzero the moment any diagnostic fires on a clean-parsing
-//! file — that is exactly the triage material we want surfaced, never hidden.
+//! ADR-0013: any proof-layer diagnostic on clean-parsing code is a release
+//! blocker, so the gate exits nonzero the moment one fires.
 //!
 //! Whole-project mode (ADR-0009/0015): each corpus package is analyzed as ONE
-//! project (a single salsa DB holding all its `.php` files), so cross-file
-//! calls, class chains, and effects resolve. Packages run in parallel (rayon);
-//! within a package the analysis is one project run. Files that fail to parse
-//! are still included in the project (so resolution stays complete — a partial
-//! tree can only *silence*, never add a false positive), but any diagnostic that
-//! lands in a parse-error file is excluded from the gate count.
+//! project (one salsa DB over all its `.php` files) so cross-file resolution
+//! works; packages run in parallel (rayon). Parse-error files stay in the
+//! project (a partial tree can only silence, never add a false positive), but
+//! their own diagnostics are excluded from the gate count.
 
 use std::cell::RefCell;
 use std::collections::HashSet;
@@ -26,9 +23,9 @@ use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_r
 use crate::corpus_local::{self, LocalProject};
 
 /// Per-project result of the gate run (a pinned corpus package or an unpinned
-/// local project). `diagnostics` holds only the findings that count against the
-/// gate; for local projects, vendor findings are excluded (ADR-0015) and tallied
-/// separately in `vendor_suppressed`.
+/// local project). `diagnostics` holds only findings that count against the
+/// gate; local-project vendor findings are excluded (ADR-0015) and tallied in
+/// `vendor_suppressed`.
 struct PackageReport {
     name: String,
     /// The pinned release tag, or empty for a local (unpinned) project.
@@ -38,54 +35,39 @@ struct PackageReport {
     file_count: usize,
     parse_error_files: Vec<String>,
     diagnostics: Vec<Diagnostic>,
-    /// NEW `phpdoc.*` declared-contract findings, held separately: in this run
-    /// they are **measurement mode** (ADR-0030 relation #1 landing) — reported and
-    /// counted per package but excluded from the red/green verdict.
+    /// `phpdoc.*` contract findings (ADR-0030 relation #1): measurement mode,
+    /// counted per package, excluded from red/green.
     phpdoc: Vec<Diagnostic>,
-    /// `throw.*` findings (ADR-0040/0007), held in the same **measurement mode**
-    /// as `phpdoc.*`: they are contract-layer claims about the code's own
-    /// `@throws` documentation (an undeclared checked throw, a Liskov-widened
-    /// override), never runtime-breakage — TRUE ones abound in working code
-    /// (the checked-exception volume ADR-0007 keeps quiet by default), so they
-    /// gate only as a per-package increase tripwire.
+    /// `throw.*` findings (ADR-0040/0007), same measurement mode: TRUE
+    /// findings saturate working code (ADR-0007), so only a per-package
+    /// increase reds.
     throws: Vec<Diagnostic>,
-    /// `effect.*` **contract-layer** findings (`effect.envelope-exceeded`,
-    /// `effect.liskov-widened`, `effect.interop-unknown-label`), held in
-    /// measurement mode under ADR-0050 §9: the recorded gate-policy delta moves
-    /// them off red-on-sight onto the same per-package increase tripwire as
-    /// `phpdoc.*`/`throw.*`, matching their declared-contract semantics. None of the
-    /// three needs a Steins annotation to fire: `effect.interop-unknown-label`
-    /// (issue #311) reads upstream's own `@phpstan-impure`, and since issue #303 the
-    /// envelope pair reads upstream's purity tags the same way — which is how the
-    /// private monorepo's `@phpstan-all-methods-pure` classes seeded
-    /// [`EFFECT_EXPECTED`]'s first row on code that has never heard of Steins.
-    /// `effect.unknown-label` is **mechanics**, not contract — it stays on the
-    /// red-on-sight path in `diagnostics`, never here.
+    /// `effect.*` contract findings (ADR-0050 §9): read purity tags, Steins's
+    /// own or upstream's (`@phpstan-all-methods-pure`/`@phpstan-impure`,
+    /// issues #303/#311) — how [`EFFECT_EXPECTED`]'s first row seeded on code
+    /// with no Steins annotation. `effect.unknown-label` is mechanics, stays
+    /// red-on-sight in `diagnostics`.
     effects: Vec<Diagnostic>,
-    /// **Possibly-grade** proof findings — the `strict`-floored proof ids
-    /// (ADR-0081 §8), held in the same measurement mode as `phpdoc.*`/`throw.*`:
-    /// counted per package against [`POSSIBLY_EXPECTED`] and gating only on an
-    /// increase. Their definite siblings (`variable.undefined`,
-    /// `property.undefined`, `type.return-missing`) stay red-on-sight in
-    /// `diagnostics`, never here.
+    /// Possibly-grade proof findings — `strict`-floored ids (ADR-0081 §8) —
+    /// counted against [`POSSIBLY_EXPECTED`]. Definite siblings
+    /// (`variable.undefined`, `property.undefined`, `type.return-missing`)
+    /// stay red-on-sight in `diagnostics`.
     possibly: Vec<Diagnostic>,
-    /// Triaged TRUE runtime-layer positives (real broken corpus code Steins
-    /// correctly proves; see [`EXPECTED_PROOF_FINDINGS`]). Reported prominently
-    /// but excluded from the red/green verdict — matched at finding precision so
-    /// any drift falls back into `diagnostics` and reds the gate.
+    /// Triaged TRUE runtime-layer positives (see [`EXPECTED_PROOF_FINDINGS`]),
+    /// matched at finding precision so any drift falls back into
+    /// `diagnostics` and reds the gate.
     expected_true: Vec<Diagnostic>,
     /// Vendor findings suppressed from the gate count (local projects only).
     vendor_suppressed: usize,
-    /// The revision recorded in `corpus.local.toml` for this local project, i.e.
-    /// the state its seeded baselines were measured at. `None` for pinned corpus
-    /// packages (whose revision lives in the tracked `corpus.lock.toml`) and for a
-    /// local entry that records none.
+    /// The revision recorded in `corpus.local.toml`. `None` for pinned
+    /// packages (revision lives in `corpus.lock.toml`) or an unrecorded local
+    /// entry.
     recorded_revision: Option<String>,
-    /// The revision the local project's checkout is actually on this run, or
-    /// `None` when it could not be read (see [`corpus_local::checkout_revision`]).
+    /// The revision the local checkout is actually on, or `None` if
+    /// unreadable (see [`corpus_local::checkout_revision`]).
     measured_revision: Option<String>,
-    /// Whether that checkout also carries uncommitted or untracked content, which
-    /// decides whether a matching revision may be believed (see [`WorktreeState`]).
+    /// Whether the checkout carries uncommitted/untracked content (see
+    /// [`WorktreeState`]).
     worktree: WorktreeState,
     elapsed: Duration,
 }
@@ -101,25 +83,18 @@ impl PackageReport {
     }
 }
 
-/// Whether a local project's working tree carries anything on top of the revision
-/// it reports — the difference between "the files measured ARE that commit" and
-/// "the files measured are that commit plus whatever the operator has in flight".
-///
-/// This exists because a revision match alone is not evidence about the *files*,
-/// and a private corpus is somebody's working checkout, where a dirty tree is the
-/// normal state. The match arm is the one message that tells the operator to stop
-/// looking at the corpus and go triage findings; issuing it confidently against a
-/// tree that is not exactly the recorded commit is a wrong answer in the direction
-/// of "don't look", which is the expensive direction.
+/// Whether a local project's working tree carries anything on top of the
+/// revision it reports. Only a clean match is good evidence about the files,
+/// not just the commit — a private corpus is normally a dirty checkout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WorktreeState {
     /// `git status --porcelain` was empty.
     Clean,
-    /// Non-empty: modified, staged, or untracked content sits on top. The gate
-    /// walks the filesystem rather than the index, so untracked counts as dirty.
+    /// Non-empty (modified/staged/untracked) — a filesystem walk, so
+    /// untracked counts as dirty.
     Dirty,
-    /// Undeterminable (not a git checkout, no `git`, a spawn failure, a non-zero
-    /// exit) — reported as unknown rather than assumed clean.
+    /// Undeterminable (no git, spawn failure, non-zero exit) — unknown,
+    /// never assumed clean.
     Unknown,
 }
 
@@ -134,25 +109,17 @@ impl WorktreeState {
     }
 }
 
-/// How a local project's **recorded** baseline revision relates to the revision
-/// its checkout was actually sitting on when this run measured it.
-///
-/// This is the whole point of `revision` in `corpus.local.toml`. The pinned
-/// packages are reproducible by construction (`corpus.lock.toml` records a commit
-/// per package), so a count move there can only be the analyzer. A local project
-/// is a live working tree that nothing here checks out, so a count move is
-/// ambiguous between "the analyzer regressed" and "the corpus moved" — and
-/// resolving that ambiguity after the fact costs archaeology in a repository this
-/// one cannot see. Recording the measured revision collapses the ambiguity at the
-/// moment the baseline is seeded, which is the only moment it is cheap.
+/// How a local project's recorded baseline revision relates to its current
+/// one. Pinned packages are reproducible by construction (`corpus.lock.toml`);
+/// `revision` in `corpus.local.toml` exists to collapse the
+/// analyzer-vs-corpus-drift ambiguity for local (unpinned) projects.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RevisionStatus {
-    /// A revision is recorded and the checkout is on it. `worktree` decides how far
-    /// that may be believed: only a CLEAN tree makes the measured files identical
-    /// to the seeded ones.
+    /// A revision is recorded and the checkout is on it. Only a CLEAN
+    /// `worktree` makes the measured files identical to the seeded ones.
     Matches { revision: String, worktree: WorktreeState },
-    /// A revision is recorded and the checkout is somewhere else: the corpus moved
-    /// under the baseline.
+    /// A revision is recorded and the checkout is somewhere else: the corpus
+    /// moved under the baseline.
     Differs { recorded: String, measured: String },
     /// No revision is recorded. `measured` is what the checkout is on now (or
     /// `None` if even that is unknown) — printed so a human can record it.
@@ -162,19 +129,11 @@ enum RevisionStatus {
     Unreadable { recorded: String },
 }
 
-/// Classify a recorded revision against a measured one.
-///
-/// Comparison is case-insensitive and **abbreviation-tolerant**: a human writing
-/// `revision` by hand naturally pastes a short sha, so one value being a prefix of
-/// the other counts as a match provided the shorter is at least
-/// [`MIN_REVISION_PREFIX`] characters. A shorter fragment than that is not enough
-/// evidence of identity and is treated as a difference — erring toward "the corpus
-/// may have moved", which asks for a re-measure rather than silently blessing a
-/// count.
-///
-/// `worktree` is carried onto a match and nowhere else: a revision that already
-/// differs, or was never recorded, is inconclusive whatever the tree's cleanliness,
-/// while a match is the one verdict cleanliness can overturn.
+/// Classify a recorded revision against a measured one. Case-insensitive and
+/// abbreviation-tolerant (either may prefix the other if the shorter is at
+/// least [`MIN_REVISION_PREFIX`] chars; shorter than that is a difference).
+/// `worktree` is carried onto a match only — an already-inconclusive verdict
+/// stays inconclusive regardless of cleanliness.
 fn classify_revision(
     recorded: Option<&str>,
     measured: Option<&str>,
@@ -209,10 +168,9 @@ fn revisions_agree(a: &str, b: &str) -> bool {
     shorter >= MIN_REVISION_PREFIX && (a.starts_with(b) || b.starts_with(a))
 }
 
-/// The line printed for a local project in the ordinary run — not only on RED. A
-/// gate that speaks only when it is angry teaches nothing: the operator should see
-/// what state the corpus was measured in on every green run too, so that the day it
-/// moves, the previous run's output is already a record of where it moved from.
+/// The line printed for a local project on every run, not only when a
+/// tripwire trips — so the previous run's output already records the corpus
+/// state before the day it moves.
 fn revision_summary_line(status: &RevisionStatus) -> String {
     match status {
         RevisionStatus::Matches { revision, worktree: WorktreeState::Clean } => format!(
@@ -268,49 +226,36 @@ fn revision_tripwire_line(status: &RevisionStatus) -> String {
     }
 }
 
-/// Which counter partition a finding routes into (ADR-0050 §9 / ADR-0053 §8). The
-/// **layer** (read from the steins-infer registry) is the gate's partitioning
-/// carrier, and this classification is the one place it is decided — exhaustive on
-/// [`Layer`] so a new variant is a *compile error* here until its gate posture is
-/// stated, never a silent fall-through into a counting bucket.
+/// Which counter partition a finding routes into (ADR-0050 §9 / ADR-0053 §8),
+/// keyed off the finding's **layer** (steins-infer registry). Exhaustive on
+/// [`Layer`] so a new variant is a compile error here until its gate posture
+/// is stated.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GateBucket {
-    /// proof + mechanics (and any unregistered id, treated conservatively): gate
-    /// **red on sight** (ADR-0013).
+    /// proof + mechanics (and any unregistered id): red on sight (ADR-0013).
     RedOnSight,
-    /// contract: **measurement mode** — reported and counted, gates only on a
-    /// per-package increase past the seeded baseline (ADR-0050 §9).
+    /// contract: measurement mode — counted, gates only on a per-package
+    /// increase past the seeded baseline (ADR-0050 §9).
     Measurement,
-    /// **possibly-grade** proof ids — the `maybe-` siblings, the proof-layer rows
-    /// the registry floors at `strict` (ADR-0081 §8). Measurement mode, on the same
-    /// per-package increase tripwire as the contract families and for the same
-    /// reason: the claim is *"some path"*, so a true finding on working code is the
-    /// id's own yield rather than a defect the corpus is supposed to be free of,
-    /// and the default profile a corpus user runs never shows one.
-    ///
-    /// This is where the zero-FP policy's FP tolerance is absorbed for these ids —
-    /// not by omitting the check, and not by suppressing a finding, but by the
-    /// `strict` opt-in the floor already encodes. A count that *grows* is still a
-    /// regression and still reds.
+    /// possibly-grade proof ids — `maybe-` siblings floored at `strict`
+    /// (ADR-0081 §8). Same increase tripwire as contract: "some path" is the
+    /// id's own yield, not a corpus defect — the zero-FP tolerance for these
+    /// ids is absorbed via the `strict` opt-in, not suppression.
     Tripwire,
-    /// debug (ADR-0053 §8): requested introspection, **excluded from every counter**
-    /// — not red-on-sight, not a tripwire, not `EXPECTED_PROOF_FINDINGS` material. A
-    /// dump is not a finding. Vacuous today (no debug emitter until ADR-0053 D3/D4),
-    /// so the gate output is byte-identical to the pre-dump run.
+    /// debug (ADR-0053 §8): requested introspection, excluded from every
+    /// counter — a dump is not a finding. Vacuous today (no emitter until
+    /// ADR-0053 D3/D4).
     Excluded,
 }
 
-/// Route a finding to its [`GateBucket`] by layer. Unregistered ids (no layer) are
-/// conservatively red-on-sight, exactly as before. The `Layer::Debug` arm is what
-/// keeps a future dump id out of every counter (ADR-0053 §8).
+/// Route a finding to its [`GateBucket`] by layer. Unregistered ids are
+/// conservatively red-on-sight.
 fn gate_bucket(d: &Diagnostic) -> GateBucket {
     match layer(d.id) {
         Some(Layer::Contract) => GateBucket::Measurement,
         Some(Layer::Debug) => GateBucket::Excluded,
-        // A proof id floored at `strict` is a possibly-grade claim (ADR-0078 §1.3's
-        // `maybe-` convention, mechanized): derived from the registry rather than
-        // listed here, so a new `maybe-` sibling takes the right posture the day it
-        // registers and no id list can drift from the floors.
+        // Possibly-grade (ADR-0078 §1.3's `maybe-` convention): derived from the
+        // registry so a new sibling takes the right posture on registration.
         Some(Layer::Proof) if surface_floor(d.id) == Some(Floor::Strict) => {
             GateBucket::Tripwire
         }
@@ -318,74 +263,52 @@ fn gate_bucket(d: &Diagnostic) -> GateBucket {
     }
 }
 
-/// Whether a diagnostic is **contract-layer** (ADR-0050 §9): measurement-mode
-/// partitioning. A thin wrapper over [`gate_bucket`] so the layer decision lives in
-/// exactly one exhaustive place.
+/// Whether a diagnostic is contract-layer (ADR-0050 §9): measurement-mode
+/// partitioning, via [`gate_bucket`].
 fn is_contract(d: &Diagnostic) -> bool {
     gate_bucket(d) == GateBucket::Measurement
 }
 
-/// Whether a diagnostic is **debug-layer** (ADR-0053 §8): excluded from every gate
-/// counter. Read from the same exhaustive [`gate_bucket`] partition.
+/// Whether a diagnostic is debug-layer (ADR-0053 §8): excluded from every gate
+/// counter.
 fn is_debug(d: &Diagnostic) -> bool {
     gate_bucket(d) == GateBucket::Excluded
 }
 
-/// Whether a diagnostic is a **possibly-grade** proof finding (ADR-0081 §8) — the
-/// `strict`-floored proof ids, counted against [`POSSIBLY_EXPECTED`] and gating
-/// only on a per-package increase. One id table, not one per family: the three ids
-/// share a posture, not a prefix.
+/// Whether a diagnostic is a possibly-grade proof finding (ADR-0081 §8), the
+/// `strict`-floored proof ids counted against [`POSSIBLY_EXPECTED`]. One id
+/// table, not one per family — the three ids share a posture, not a prefix.
 fn is_possibly(d: &Diagnostic) -> bool {
     gate_bucket(d) == GateBucket::Tripwire
 }
 
-/// Whether a diagnostic is one of the measurement-mode `phpdoc.*` **contract** ids.
-///
-/// Selected by prefix **and** layer, the `is_effect_contract` shape. The family
-/// stopped being layer-homogeneous with ADR-0078 §1.5 (issue #186): `phpdoc.*` now
-/// carries the docblock-hygiene mechanics ids beside the contract ones, and a bare
-/// prefix test would have counted a mechanics finding against `PHPDOC_EXPECTED`
-/// *and* left it red-on-sight — double-counted, and its tripwire quietly absorbing
-/// an anti-rot id the layer says must never be absorbed.
+/// Whether a diagnostic is a measurement-mode `phpdoc.*` contract id. Selected
+/// by prefix AND layer (the `is_effect_contract` shape): since ADR-0078 §1.5 /
+/// issue #186, `phpdoc.*` also carries docblock-hygiene mechanics ids, and a
+/// bare prefix test would double-count one.
 fn is_phpdoc(d: &Diagnostic) -> bool {
     d.id.starts_with("phpdoc.") && is_contract(d)
 }
 
-/// Whether a diagnostic is one of the measurement-mode `throw.*` contract ids
+/// Whether a diagnostic is a measurement-mode `throw.*` contract id
 /// (ADR-0040) — the prefix keys its own count table (all `throw.*` are contract).
 fn is_throw(d: &Diagnostic) -> bool {
     d.id.starts_with("throw.")
 }
 
-/// Whether a diagnostic is one of the `effect.*` **contract** ids
-/// (`effect.envelope-exceeded` / `effect.liskov-widened`) — the ADR-0050 §9 delta
-/// family. Selected by layer *and* prefix so `effect.unknown-label` (mechanics)
-/// is excluded and stays red-on-sight.
+/// Whether a diagnostic is an `effect.*` contract id (`effect.envelope-exceeded`
+/// / `effect.liskov-widened`), the ADR-0050 §9 delta family. Selected by layer
+/// AND prefix so `effect.unknown-label` (mechanics) stays red-on-sight.
 fn is_effect_contract(d: &Diagnostic) -> bool {
     d.id.starts_with("effect.") && is_contract(d)
 }
 
-// untyped surface (ADR-0078, issue #200)
-//
-// A contract-layer id belonging to NONE of the three families above — which is
-// exactly what `untyped.*` is — is **dropped by the `!is_contract` retain and
-// counted nowhere**. Verified against this file when the family landed, and worth
-// writing down because the reading is not obvious in either direction:
-//
-// * It CANNOT turn the gate red. The retain runs off [`gate_bucket`]'s layer
-//   partition, not off any family prefix, so a contract id with no expected table
-//   never joins the red-on-sight `diagnostics` list. This is the property that
-//   matters, and it is a property of the layer — nothing about the family had to be
-//   special-cased for it, unlike issue #186's `is_phpdoc` fix, where a MECHANICS id
-//   was wrongly *absorbed* by a contract table (the opposite defect).
-// * It is therefore also not *reported* by the gate: there is no `UNTYPED_EXPECTED`
-//   row, no count column, no tripwire. Deliberate for now — a tripwire seeded before
-//   the corpus measurement would pin an arbitrary number. When the measurement
-//   decides the `iterable-value` / `generics` floors (ADR-0078's
-//   `Contracts→Strict by measurement` rows), seeding a fourth table here beside
-//   `PHPDOC_EXPECTED` / `THROW_EXPECTED` / `EFFECT_EXPECTED` is the one-family edit
-//   that turns the family into an increase tripwire.
-// end untyped surface (ADR-0078, issue #200)
+// untyped surface (ADR-0078, issue #200): `untyped.*` is a contract-layer id
+// with no family table, so `!is_contract` drops it from `diagnostics` (never
+// red) but nothing counts or reports it either — no tripwire, deliberately (a
+// tripwire seeded pre-measurement would pin an arbitrary number). Adding an
+// `UNTYPED_EXPECTED` table beside the other three turns it into one, once the
+// `iterable-value` / `generics` floors are decided.
 
 /// Permanent gate policy for `phpdoc.*` findings (ADR-0030 relation #1).
 ///
@@ -806,15 +729,11 @@ fn possibly_expected(name: &str) -> usize {
     POSSIBLY_EXPECTED.iter().find(|(n, _)| *n == name).map_or(0, |(_, c)| *c)
 }
 
-/// A single **triaged TRUE proof-layer positive** the corpus legitimately
-/// contains: real broken code that Steins correctly proves. Unlike the
-/// measurement-mode `phpdoc.*`/`throw.*` families this is a *runtime-layer*
-/// finding, where the standing bar is a strict **zero** (ADR-0013). An entry here
-/// is not a weakening of that bar but a recorded, verbatim-triaged exception,
-/// matched at **finding precision** (package + id + path + line + a message
-/// fingerprint): any drift — a different line, a different message, a second
-/// finding — no longer matches and re-reds the gate, so this can never mask a
-/// future regression the way a bare count could.
+/// A triaged TRUE proof-layer positive the corpus legitimately contains: real
+/// broken code Steins correctly proves. Unlike measurement-mode `phpdoc.*`/
+/// `throw.*`, this is runtime-layer (standing bar: zero, ADR-0013), so an
+/// entry is a recorded exception matched at finding precision (package + id +
+/// path + line + message fingerprint) — any drift re-reds the gate.
 struct ExpectedProofFinding {
     /// Package / local-project name the finding belongs to.
     package: &'static str,
@@ -828,27 +747,12 @@ struct ExpectedProofFinding {
     message_contains: &'static str,
 }
 
-/// Triaged TRUE proof-layer positives (ADR-0043 §5 gate discipline). Each is a
-/// place where real corpus code is genuinely wrong and Steins now proves it; the
-/// triage lives in the comment beside the row. Adding a row is a conscious,
-/// orchestrator-visible act — never a silent suppression.
+/// Triaged TRUE proof-layer positives (ADR-0043 §5). Each row's triage is in
+/// the comment beside it; adding a row is a conscious, orchestrator-visible act.
 const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
-    // Surfaced by the ADR-0043 builtin-hierarchy ingestion (php-src mining): once
-    // `stdClass` entered the closed hierarchy as a mined root (supers = []), the
-    // is-a oracle can prove `stdClass` is-a-NO against every member of the
-    // external union `MongoDB\Client|MongoDB\Driver\Manager`, so the definite-No
-    // acceptance arm fires. The finding is in monolog's OWN test, which
-    // deliberately constructs the invalid argument and asserts the resulting
-    // TypeError:
-    //   public function testConstructorShouldThrowExceptionForInvalidMongo() {
-    //       $this->expectException(\TypeError::class);
-    //       new MongoDBHandler(new \stdClass, 'db', 'collection');   // ← here
-    //   }
-    // against `__construct(Client|Manager $mongodb, …)` under `declare(strict_types=1)`.
-    // Steins proves exactly the TypeError the test expects — a TRUE positive, not
-    // an FP. (Verbatim triage in the ingestion session; sound because `stdClass`
-    // has a fully-enumerated empty ancestor set and cannot be a subtype of either
-    // external class.)
+    // monolog's own test deliberately constructs `new MongoDBHandler(new
+    // \stdClass, …)` and asserts the TypeError; `stdClass` is a mined root with
+    // no supers (ADR-0043), so it is-a-NOs the `Client|Manager` union. TRUE.
     ExpectedProofFinding {
         package: "Seldaek/monolog",
         id: "type.argument-mismatch",
@@ -858,18 +762,11 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         // (diagnostics render the declared casing; matching stays lowercased).
         message_contains: "cannot become MongoDB\\Client|MongoDB\\Driver\\Manager",
     },
-    // ADR-0049 S2: the flagship absence id `call.undefined-method` fired 10 times,
-    // all on the legacy monorepo, all STATIC calls (`__callStatic` absent). Every
-    // one was triaged verbatim against the checkout and is TRUE — a genuine call to
-    // a method that exists nowhere in a final, trait-free, fully-enumerated chain,
-    // so PHP would fatal `Error: Call to undefined method C::m()` at runtime. The
-    // OSS packages fired zero (mature code does not call methods its own tests would
-    // fatal on) — the point-2 core-yield prediction (method-absence needs no dam, so
-    // the dynamism-heavy monorepo still yields) stands. Path suffixes are chosen to
-    // key each finding precisely while omitting the private-corpus directory name.
-    //
-    // A DAO batch calls a legacy accessor that was removed/renamed: the DAO is a
-    // `final class` with no such method anywhere in the tree.
+    // ADR-0049 S2: `call.undefined-method` fired 10 times, all monorepo, all
+    // static calls into a final/trait-free/fully-enumerated chain — genuine
+    // `Error: Call to undefined method` fatals. TRUE, all 10. OSS packages:
+    // zero. A DAO batch calls a legacy accessor removed/renamed from its
+    // final DAO class.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "call.undefined-method",
@@ -939,10 +836,9 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 229,
         message_contains: "Sample_Common::hasCookie() — hierarchy fully enumerated",
     },
-    // An auth model calls `OAuth2Model::checkPassword()` statically, but that method
-    // exists only as an *instance* method on the caller (`OAuth2ClientModel`);
-    // `OAuth2Model` is `final` and declares no such method — a genuine undefined
-    // static-method fatal.
+    // `OAuth2Model::checkPassword()` is called statically, but exists only as an
+    // instance method on the caller `OAuth2ClientModel`; `OAuth2Model` is final
+    // with no such method — genuine undefined-static-method fatal.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "call.undefined-method",
@@ -950,19 +846,10 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 106,
         message_contains: "OAuth2Model::checkPassword() — hierarchy fully enumerated",
     },
-    // ADR-0049 S5: the userland arity arm `call.too-few-arguments` fired twice on
-    // the legacy monorepo, both genuine `ArgumentCountError`s a run would hit,
-    // triaged verbatim against the checkout and both TRUE. (The two grouped-`use`
-    // `Query::__construct` findings that also fired were false positives from an
-    // unlowered grouped-`use` import; that resolution bug is fixed in the paired
-    // commit, and those findings are now correctly silent.) The OSS packages and
-    // phpstan-src fired zero. Path suffixes start past the serving-domain path
-    // component (the private-corpus naming rule).
-    //
-    // An admin mail-preview handler calls a static template helper whose
-    // example-builder requires its `$lang` argument, with none passed — the
-    // helper is `public static function getEmailExamples($lang)`, so the call
-    // fatals with `ArgumentCountError` the moment `_postEmail()` runs.
+    // ADR-0049 S5: `call.too-few-arguments` fired twice on the monorepo, both
+    // TRUE ArgumentCountErrors (two grouped-`use` `Query::__construct` FPs from
+    // an unlowered import are fixed in the paired commit and no longer fire).
+    // An admin mail-preview handler calls `getEmailExamples($lang)` with no args.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "call.too-few-arguments",
@@ -970,10 +857,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 64,
         message_contains: "getEmailExamples(): 0 passed, 1 required",
     },
-    // An API test script passes only the host to a three-required-parameter static
-    // method: `AppApi_Testing::requestToAllAppApiEndpoints($target_host,
-    // $host_header, $oauth_token)` called with one argument — a provable
-    // `ArgumentCountError` (1 passed, 3 required) when the script executes.
+    // A test script calls `requestToAllAppApiEndpoints($host, $header, $token)`
+    // with one argument — ArgumentCountError (1 passed, 3 required).
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "call.too-few-arguments",
@@ -981,11 +866,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 14,
         message_contains: "AppApi_Testing::requestToAllAppApiEndpoints(): 1 passed, 3 required",
     },
-    // ADR-0078 issue #190: `call.on-non-object` fired once, on a phpunit
-    // end-to-end regression fixture whose own name states the intent —
-    // `dataProviderThatTriggersPhpError` (`$foo = []; $foo->bar();`, issue
-    // 5451's reproduction). The provider genuinely fatals when invoked; that
-    // is what the fixture is FOR. Triaged TRUE 2026-08-08.
+    // ADR-0078 #190: `dataProviderThatTriggersPhpError` (`$foo = []; $foo->bar();`)
+    // is issue 5451's reproduction fixture — genuinely fatals by design. TRUE.
     ExpectedProofFinding {
         package: "sebastianbergmann/phpunit",
         id: "call.on-non-object",
@@ -993,11 +875,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 20,
         message_contains: "proven array on this path",
     },
-    // ADR-0078 issue #184: `override.visibility-weakened` fired once, on another
-    // phpunit end-to-end regression fixture (issue 6294's reproduction) — a class
-    // deliberately committed to weaken a parent's visibility so the harness can
-    // observe the engine fatal. Same category as the 5451 pin above. Triaged
-    // TRUE 2026-08-08.
+    // ADR-0078 #184: issue 6294's reproduction fixture deliberately weakens a
+    // parent's visibility to observe the engine fatal. TRUE, same class as above.
     ExpectedProofFinding {
         package: "sebastianbergmann/phpunit",
         id: "override.visibility-weakened",
@@ -1005,21 +884,12 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 17,
         message_contains: "weakens the visibility",
     },
-    // ADR-0078 issue #187: the new mechanics id `array.duplicate-key` fired 19
-    // times, all on the legacy monorepo, all TRUE — triaged verbatim against the
-    // checkout on 2026-08-08. One config key is silently overwritten by a later
-    // entry in the same literal (its variable-bound value is dead code); twelve
-    // are duplicate integer ids in an append-grown allowlist literal; one is a
-    // repeated series-options key; one is a repeated analytics path key; three
-    // are duplicated test-fixture keys; one is a repeated view-parameter key.
-    // Mechanics layer, red-on-sight bucket (ADR-0050 §1) — pinned here like the
-    // S2 ten above, not weakened. The count is coupled to the drifted checkout
-    // revision the gate already flags (the "revision DIFFERS" warning below):
-    // reseeding the corpus baseline may move these lines, and the pins should be
-    // re-cut at that sitting.
-    //
-    // A config accessor literal binds 'x_restricts' twice; the earlier value is
-    // dead the moment the array is built.
+    // ADR-0078 #187: `array.duplicate-key` fired 19 times, all monorepo, all
+    // TRUE: 1 config key overwritten (dead value), 12 duplicate allowlist ids,
+    // 1 series-options key, 1 analytics path key, 3 test-fixture keys, 1
+    // view-parameter key. Mechanics/red-on-sight (ADR-0050 §1); a corpus
+    // reseed may move these lines. A config accessor literal binds
+    // 'x_restricts' twice below; the earlier value is dead.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "array.duplicate-key",
@@ -1027,9 +897,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 2495,
         message_contains: "array key 'x_restricts' is declared twice",
     },
-    // An append-grown integer allowlist literal: twelve ids were added more than
-    // once across the literal's history, each overwriting an earlier entry with
-    // an identical value — the duplication carries no information, only churn.
+    // An append-grown integer allowlist literal: 12 ids duplicated across its
+    // history, each overwriting an identical value — churn, no information.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "array.duplicate-key",
@@ -1130,8 +999,7 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 554,
         message_contains: "array key '/novel/index.php' is declared twice",
     },
-    // A test fixture rebinds 'illust_sanity_level' three separate times across
-    // three separate literals in the same file — copy-paste drift, not one bug.
+    // A test fixture rebinds 'illust_sanity_level' 3x across 3 literals — copy-paste drift.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "array.duplicate-key",
@@ -1161,16 +1029,11 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 236,
         message_contains: "array key 'tag' is declared twice",
     },
-    // ADR-0078 / issue #183: the declaration-fatal tracer's ONE corpus finding,
-    // triaged TRUE for the analyzed runtime on 2026-08-08. A ClockMock test double
-    // extends a `final` class and carries the other tool's inline ignore for the
-    // same rule, whose stated reason is that the runtime strips `final` (ClockMock
-    // rewrites classes through ext-uopz) — the author's own acknowledgment that the
-    // declaration is illegal as written. The PHP Steins analyzes reports no uopz
-    // loaded, so on that runtime the class load genuinely fatals and the message's
-    // claim holds. Issue #205 tracks demoting final-immunity claims when the sidecar
-    // reports a final-stripping extension; this pin is re-cut if that lands or the
-    // corpus reseeds.
+    // ADR-0078 #183: the declaration-fatal tracer's one corpus finding, TRUE.
+    // A ClockMock test double extends a `final` class, relying on ext-uopz to
+    // strip `final` at runtime; Steins's analyzed PHP has no uopz loaded, so the
+    // fatal is real. Issue #205 tracks demoting this once the sidecar reports a
+    // final-stripping extension.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "class.extends-final",
@@ -1178,21 +1041,11 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 14,
         message_contains: "cannot extend final class ExDateTimeImmutable",
     },
-    // -----------------------------------------------------------------------
-    // Docblock hygiene (ADR-0078 / issue #186), triaged 2026-08-08.
-    //
-    // The six mechanics ids are red-on-sight like the proof layer, so every TRUE
-    // corpus site is pinned here at finding precision. All eleven public-corpus
-    // sites were read at source and are TRUE under Steins's own semantics; the
-    // per-package triage is in the comment above each group. Nothing about the
-    // private corpus is pinned by this wave — it is measured and reported only.
-    // -----------------------------------------------------------------------
-    //
-    // nikic/PHP-Parser — the fuzzing driver builds a `$lexer` and then captures it
-    // into a closure that never touches it (the closure works off the parser it
-    // also captures). A dead capture in a dev tool: unread, by-value, and the body
-    // holds no `compact`/`extract`/`$$`/`eval`/`include` that could consume it
-    // unspelled.
+    // Docblock hygiene (ADR-0078 / issue #186), triaged 2026-08-08: six
+    // mechanics ids, red-on-sight. All 11 public-corpus sites read TRUE at
+    // source; the private corpus is measured only, not pinned here. The
+    // fuzzing driver captures `$lexer` into a closure that never reads it
+    // (works off the parser it also captures) — a dead, by-value capture.
     ExpectedProofFinding {
         package: "nikic/PHP-Parser",
         id: "closure.unused-use",
@@ -1200,12 +1053,9 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 111,
         message_contains: "`use ($lexer)` is never read",
     },
-    // sebastianbergmann/phpunit — the mock generator stacks three `@var` docblocks
-    // in a row above one `return`. Under ADR-0073 only the LAST of a run adopts:
-    // each of the first two has another docblock as its nearest following trivium,
-    // which becomes the adopter for whatever comes after, so `$className` and
-    // `$type` are cast by nothing at all. The third is silent, correctly. Inert
-    // annotations, not wrong ones — which is exactly what the id claims.
+    // The mock generator stacks three `@var` docblocks above one `return`.
+    // ADR-0073: only the LAST of a run adopts, so `$className` and `$type`
+    // (the first two) are inert — correctly silent on the third. TRUE.
     ExpectedProofFinding {
         package: "sebastianbergmann/phpunit",
         id: "phpdoc.misplaced-var",
@@ -1220,15 +1070,12 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 578,
         message_contains: "sits where nothing adopts it",
     },
-    // composer/composer — the SAME virtual-parameter idiom as the symfony group
-    // below, in a vendored copy of `symfony/filesystem` that lives inside a
-    // functional-test FIXTURE tree (`tests/…/installed-versions2/vendor/…`):
-    // `tempnam(string $dir, string $prefix/*, string $suffix = ''*/)` documents
-    // `@param string $suffix` for an argument read back with `func_get_arg(2)`.
-    // TRUE by the same reading. It is pinned rather than vendor-suppressed because
-    // a pinned package is analyzed whole (ADR-0015's vendor split runs for local
-    // projects only), which is why `steins check` on the same tree hides it and
-    // the gate does not.
+    // The same virtual-parameter idiom as the symfony group below, in a
+    // vendored `symfony/filesystem` copy inside a fixture tree:
+    // `tempnam($dir, $prefix/*, $suffix=''*/)` documents `@param $suffix` for
+    // an argument read via `func_get_arg(2)`. TRUE. Pinned, not
+    // vendor-suppressed, because pinned packages are analyzed whole
+    // (ADR-0015's vendor split is local-project only).
     ExpectedProofFinding {
         package: "composer/composer",
         id: "phpdoc.stale-param",
@@ -1236,21 +1083,13 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 586,
         message_contains: "`@param $suffix` names no parameter",
     },
-    // symfony/console + symfony/process — two deliberate authoring idioms, both of
-    // which nonetheless leave a tag declaring nothing:
-    //
-    //   * `@return list<\SIG*>` / `@param list<\SIG*> $signals` spell a WILDCARD
-    //     over the `SIG*` constant family. No PHPDoc grammar admits it — PHPStan's
-    //     own parser rejects it too — so the envelope is lost to every reader, not
-    //     just to Steins. `phpdoc.unparsable`'s claim is precisely "the tag
-    //     declares nothing", and it holds.
-    //   * `SymfonyStyle`'s three progress helpers document `@param string|null
-    //     $format` as a VIRTUAL parameter: the real signature is
-    //     `progressStart(int $max = 0 /* , ?string $format = null *\/)` — the
-    //     second argument is commented out for BC and read back with
-    //     `func_get_arg(1)`. The tag names no parameter of the declaration, which
-    //     is exactly what the id says, and the reason PHPStan reports
-    //     `parameter.notFound` on the identical shape.
+    // Two deliberate idioms that still leave a tag declaring nothing:
+    //   * `@return list<\SIG*>` wildcards the `SIG*` constant family — no
+    //     PHPDoc grammar admits it (PHPStan's parser rejects it too). TRUE.
+    //   * `SymfonyStyle`'s progress helpers document a virtual `$format` param
+    //     (real signature comments it out for BC, read via `func_get_arg(1)`) —
+    //     names no parameter of the declaration. TRUE; PHPStan reports
+    //     `parameter.notFound` on the same shape.
     ExpectedProofFinding {
         package: "symfony/console",
         id: "phpdoc.unparsable",
@@ -1286,19 +1125,10 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 1276,
         message_contains: "does not parse (expected CloseAngle, found Wildcard)",
     },
-    // thephpleague/flysystem — three inert `@var` casts in `MountManager`, two
-    // shapes:
-    //
-    //   * `move()`/`copy()` (245, 262) write `/** @var … $sourceFilesystem */`
-    //     immediately followed by a SINGLE-star `/* @var … $destinationFilesystem */`.
-    //     The one-star form is a plain block comment, so it is not a docblock at
-    //     all — and it still sits in the gap, breaking ADR-0073's strict adjacency
-    //     for the docblock above it. Neither line casts anything.
-    //   * `determineFilesystemAndPath()` (358) stacks two docblocks, so the first
-    //     is shadowed by the second exactly as in the phpunit group above.
-    //
-    // This is a real divergence from tools with a laxer association rule, and it
-    // is exactly what a Steins adopter needs to hear about their own file.
+    // Three inert `@var` casts in `MountManager`, two shapes: `move()`/`copy()`
+    // (245, 262) follow a real `/** @var */` with a single-star `/* @var */`
+    // (a plain comment), breaking ADR-0073 adjacency; `determineFilesystemAndPath()`
+    // (358) stacks two docblocks, shadowing the first (phpunit shape above). TRUE.
     ExpectedProofFinding {
         package: "thephpleague/flysystem",
         id: "phpdoc.misplaced-var",
@@ -1320,16 +1150,11 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 358,
         message_contains: "sits where nothing adopts it",
     },
-    // The legacy monorepo's five, verified at source by the orchestrator on
-    // 2026-08-08 and all TRUE. Path suffixes are cut to the shortest fragment that
-    // still keys the row 1:1 (the private-corpus naming rule) — do not lengthen
-    // them. Like every row on this unpinned corpus, a re-cut of the checkout can
-    // move a line number and re-red the gate; that is the pin working, not drift
-    // to be papered over.
-    //
-    // A `@phpstan-param` naming a parameter the signature genuinely lacks: the
-    // options array it documents is built inline in the body, so the tag is
-    // refactor rot.
+    // The monorepo's five, verified at source 2026-08-08, all TRUE. Path
+    // suffixes are cut to the shortest 1:1-keying fragment (private-corpus
+    // naming rule) — a checkout re-cut can move a line and re-red the gate,
+    // which is the pin working, not drift to paper over. A `@phpstan-param`
+    // below names a parameter the signature lacks — refactor rot.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "phpdoc.stale-param",
@@ -1346,10 +1171,9 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 105,
         message_contains: "sits where nothing adopts it",
     },
-    // Two `@var` casts written as the LAST statement of a branch. The author means
-    // them for the code after the closing brace, but next-statement adoption
-    // (ADR-0073) ends at the `}` — in Steins and in every tool that adopts
-    // next-statement-only — so the annotation is inert exactly as written.
+    // Two `@var` casts as the last statement of a branch, meant for the code
+    // after `}` — but ADR-0073 next-statement adoption ends at the brace, so
+    // both are inert as written.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "phpdoc.misplaced-var",
@@ -1364,8 +1188,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 317,
         message_contains: "sits where nothing adopts it",
     },
-    // A pseudo-tuple `@return [$total, $illust_ids]` — a spelling no PHPDoc grammar
-    // admits, so the tag declares nothing to any reader.
+    // A pseudo-tuple `@return [$total, $illust_ids]` — no PHPDoc grammar admits
+    // it, so the tag declares nothing.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "phpdoc.unparsable",
@@ -1373,31 +1197,14 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 91,
         message_contains: "does not parse",
     },
-    // ---------------------------------------------------------------------
-    // `type.return-missing` (ADR-0078 §5, issue #199) — the reachability
-    // foundation's tracer, triaged 2026-08-08.
-    //
-    // **Deliberately-stub test doubles**, every row. Empty or
-    // never-returning-by-intent bodies carrying a real return type. Each WOULD
-    // fatal `Return value must be of type T, none returned` the moment it were
-    // invoked — and several exist precisely so that invoking them is invalid.
-    // Nothing here is a bug in the package; nothing here is an FP either. This is
-    // what the unconditional class looks like in mature OSS: not broken production
-    // code, but fixtures.
-    //
-    // Its `maybe-` sibling `type.return-maybe-missing` used to be pinned here too,
-    // on the reading that "the proof layer is gated whole, floor or not". ADR-0081
-    // §8 supersedes that: a possibly-grade id claims only that *a* path reaches the
-    // site, so a true finding on working code is the id's own yield rather than a
-    // defect the corpus should be free of, and the `strict` floor already keeps it
-    // off every default-profile run. Its eleven rows moved to the per-package
-    // `POSSIBLY_EXPECTED` count, which still reds on an increase. The two registers
-    // that comment used to distinguish are now two buckets.
-    // ---------------------------------------------------------------------
+    // `type.return-missing` (ADR-0078 §5, issue #199), triaged 2026-08-08: every
+    // row is a deliberately-stub test double — an empty/never-returning body
+    // carrying a real return type, which would fatal if invoked. Not bugs, not
+    // FPs — fixtures. Its `maybe-` sibling moved to `POSSIBLY_EXPECTED` under
+    // ADR-0081 §8 (a possibly-grade id claims only that *a* path reaches the site).
 
-    // Carbon — two macro bodies registered ONLY so the PHPStan extension under test
-    // can read their declared return type: `Carbon::macro('foo', function ():
-    // CarbonInterval {});`. The closure is never called; its body is `{}`.
+    // Two macro bodies registered only so the PHPStan extension under test can
+    // read their declared return type; the closure body is `{}`, never called.
     ExpectedProofFinding {
         package: "briannesbitt/Carbon",
         id: "type.return-missing",
@@ -1412,15 +1219,11 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 238,
         message_contains: "Return value must be of type Carbon, none returned",
     },
-    // guzzle — eight `FnStream`/`MockHandler` decorator closures whose whole body is
-    // `self::fail('the body must not be read')`. They exist to BE invalid: reaching
-    // one is the test's failure condition. `Assert::fail()` is declared `: never` by
-    // PHPUnit, which would silence these through the never-returning-callee veto —
-    // but PHPUnit is not in guzzle's analysed universe here, so there is no
-    // declaration to resolve. The rows are correct as things stand and are expected
-    // to disappear the day cross-package callee resolution reaches them; that
-    // disappearance is a gate event, which is the point of pinning at finding
-    // precision.
+    // Eight `FnStream`/`MockHandler` decorator closures whose body is
+    // `self::fail(...)` — reaching one IS the test's failure condition.
+    // `Assert::fail(): never` would silence these, but PHPUnit is outside
+    // guzzle's analysed universe here. Expected to disappear once cross-package
+    // callee resolution reaches them — that disappearance is a gate event.
     ExpectedProofFinding {
         package: "guzzle/guzzle",
         id: "type.return-missing",
@@ -1477,8 +1280,8 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 380,
         message_contains: "Return value must be of type ResponseInterface, none returned",
     },
-    // phpunit — a `tests/_files` fixture implementing the `Event` interface with two
-    // empty method bodies, both carrying the interface's declared return types.
+    // A `tests/_files` fixture implementing `Event` with two empty method
+    // bodies carrying the interface's declared return types.
     ExpectedProofFinding {
         package: "sebastianbergmann/phpunit",
         id: "type.return-missing",
@@ -1493,9 +1296,9 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 21,
         message_contains: "DummyEvent::asString(): Return value must be of type string",
     },
-    // symfony/console — the `NonStringInput` test double: an `Input` subclass whose
-    // three overrides are empty bodies carrying the parent's return types. The test
-    // it serves drives the listener, never these methods.
+    // `NonStringInput`: an `Input` subclass whose three overrides are empty
+    // bodies carrying the parent's return types; the test drives the listener,
+    // never these methods.
     ExpectedProofFinding {
         package: "symfony/console",
         id: "type.return-missing",
@@ -1517,33 +1320,18 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 126,
         message_contains: "NonStringInput::getParameterOption(): Return value must be of type mixed",
     },
-    // ---------------------------------------------------------------------
-    // `variable.undefined` (ADR-0078, issue #194) — triaged at source
-    // 2026-08-08. Eleven TRUE positives: reads of a name that appears as no
-    // binding form anywhere in its scope, so PHP warns and the read yields null.
-    // The two remaining sites from the same run were an FP shape (a same-variable
-    // `empty($x) ? … : …` ternary, whose else arm runs only when `$x` is bound)
-    // and are gone at source — the checker now shields both arms of a
-    // same-variable `isset`/`empty` conditional, so they are not pinned here.
-    //
-    // The OSS one is a fixture doing its job. The ten monorepo ones split into:
-    // four exception-message reads of a name that does not exist (including one
-    // `$this->$mode` dynamic-property typo that meant `->mode`, and an obvious
-    // `$withd` for `$width`); one logger field silently null ever since its
-    // variable was renamed; one KVS setter storing `(int)$count` of a never-bound
-    // name, hence always zero — a live defect; two batch-script reads of a deleted
-    // `$offset` that work only by accident (`array_splice(…, null)` degrades to a
-    // single whole-list pass); one deleted-parameter read on a return path; and one
-    // stale test fixture. The standing re-cut note applies: a corpus reseed moves
-    // these lines and must re-triage rather than re-pin blindly.
-    //
-    // Path suffixes are kept SHORT on purpose — several full paths carry the
-    // private project's name, which must not enter a tracked file. Do not lengthen
-    // them.
-    //
-    // The warning-observation fixture: `$a = $b;` with no `$b` anywhere, written to
-    // make PHPUnit observe a PHP warning. Steins reports the one unsuppressed read
-    // and stays silent on the `@`-suppressed twin beneath it.
+    // `variable.undefined` (ADR-0078, issue #194), triaged 2026-08-08. Eleven
+    // TRUE positives — reads of a name bound nowhere in scope. Two FP-shaped
+    // sites from the same run (a same-variable `empty($x)?:` ternary) are fixed
+    // at source (both isset/empty arms now shield) and not pinned here. The ten
+    // monorepo ones: 4 exception-message typos (incl. `$this->$mode` for
+    // `->mode`, `$withd` for `$width`), 1 renamed logger field, 1 KVS setter
+    // always storing 0 (live defect), 2 accidental-pass `$offset` reads
+    // (`array_splice(…, null)` degrades gracefully), 1 deleted-parameter read,
+    // 1 stale fixture. Path suffixes are kept short — full paths carry the
+    // private project's name. `$a = $b;` below (no `$b` anywhere) is written
+    // to make PHPUnit observe a PHP warning; the `@`-suppressed twin beneath
+    // stays silent, correctly.
     ExpectedProofFinding {
         package: "sebastianbergmann/phpunit",
         id: "variable.undefined",
@@ -1580,8 +1368,7 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         line: 71,
         message_contains: "$payment_method_code is never bound",
     },
-    // Two reads of a deleted `$offset` in one batch script — live only because
-    // `array_splice(…, null)` degrades to a single whole-list pass.
+    // The two `$offset` reads below rely on that same accidental degrade.
     ExpectedProofFinding {
         package: "pxxxx-monorepo",
         id: "variable.undefined",
@@ -1673,21 +1460,19 @@ pub fn run() -> Result<bool, String> {
     reports.sort_by_key(|r| PACKAGES.iter().position(|p| p.name == r.name).unwrap_or(usize::MAX));
 
     // Private-corpus injection point (ADR-0013 §4): each `[[project]]` in the
-    // optional (gitignored) `corpus.local.toml` is analyzed as one project, in
-    // parallel like the packages, applying the CLI's vendor default — vendor
-    // files are indexed for inference but their findings don't count.
+    // optional (gitignored) `corpus.local.toml` is analyzed like a package;
+    // vendor files are indexed but their findings don't count.
     let locals = corpus_local::read_local()?;
     let mut local_reports: Vec<PackageReport> =
         locals.par_iter().map(analyze_local).collect();
     local_reports.sort_by(|a, b| a.name.cmp(&b.name));
 
     // Measurement-mode regression tripwires (see `PHPDOC_EXPECTED` /
-    // `THROW_EXPECTED`): a package regresses iff a count *exceeds* its seeded
-    // expectation. Both `phpdoc.*` and `throw.*` are contract-layer.
+    // `THROW_EXPECTED`): a package regresses iff its count exceeds the baseline.
     let regressions = phpdoc_regressions(&reports, &local_reports);
     let throw_regressions = measurement_regressions(&reports, &local_reports, "throw", |r| r.throws.len(), throw_expected);
     // ADR-0050 §9 delta family: `effect.*`-contract findings gate as an increase
-    // tripwire too. Empty today (no corpus envelopes), so no package can regress.
+    // tripwire too, same shape as `phpdoc.*`/`throw.*`.
     let effect_regressions = measurement_regressions(&reports, &local_reports, "effect", |r| r.effects.len(), effect_expected);
     // ADR-0081 §8: the possibly-grade proof ids gate as an increase tripwire too.
     let possibly_regressions = measurement_regressions(&reports, &local_reports, "possibly", |r| r.possibly.len(), possibly_expected);
@@ -1701,9 +1486,8 @@ pub fn run() -> Result<bool, String> {
         &possibly_regressions,
     );
 
-    // RED on any counted proof-layer finding — package diagnostics plus local
-    // *non-vendor* diagnostics (vendor findings never gate; ADR-0015) — OR on any
-    // measurement-mode count that has regressed past its expected baseline.
+    // RED on any proof-layer finding (package + local non-vendor diagnostics;
+    // vendor never gates, ADR-0015) OR any measurement-mode regression.
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
     Ok(total_diags == 0
@@ -1751,10 +1535,8 @@ fn measurement_regressions(
 
 // Default posture (ADR-0004): the gate folds via the PHP sidecar. Each rayon
 // worker owns one resident `SidecarFolder` (thread-local), reused across the
-// packages that worker analyzes.
-//
-// Reuse makes the folder CARRY STATE between projects, so every use must go
-// through [`check_under_target`] — see its comment for what forgetting cost.
+// packages it analyzes — which carries state between projects, so every use
+// must go through [`check_under_target`] (see its doc for what forgetting cost).
 thread_local! {
     static FOLDER: RefCell<SidecarFolder> = RefCell::new(SidecarFolder::enabled());
 }
@@ -1762,25 +1544,14 @@ thread_local! {
 /// Check `project` on the resident folder, configured for **this** project's
 /// declared PHP target (issue #28).
 ///
-/// The ONE way to reach `FOLDER`, because the pairing is not optional. A resident
-/// folder reused across projects keeps the previous project's `php_target`, and that
-/// target gates the ADR-0056 curated return-fact admission (`range == {PINNED_PHP}`
-/// exactly) and the absence family (`target_admits_runtime`). Analyzing a project
-/// under a *different* project's declared target therefore silently changes which
-/// facts are seeded.
-///
-/// That is exactly what issue #63 was: `analyze_local` called `check_project` on the
-/// resident folder directly and never set the target, so each local project was
-/// judged under whichever corpus package's target its rayon worker happened to hold
-/// — `>=8.4.1`, `7.2.5`, `^7.4 || ^8.0`, whatever the work-stealing produced. The
-/// local corpus's `phpdoc.*` count swung between 536 and 483 run to run on unchanged
-/// code, and with `RAYON_NUM_THREADS=1` (one worker, always the same leftover
-/// target) it looked perfectly stable. Two sessions' triage was spent on a
-/// "regression" that was this.
-///
-/// Taking the target by argument rather than reading it back off the layout keeps the
-/// call sites honest: there is no way to check a project without saying what it
-/// targets.
+/// RULE: this is the only way to reach `FOLDER`. A resident folder reused
+/// across projects keeps the previous project's `php_target`, which gates
+/// ADR-0056 curated-fact admission and the absence family, so skipping this
+/// call silently changes which facts get seeded. Issue #63 is exactly that:
+/// `analyze_local` judged each local project under whichever leftover target
+/// its rayon worker held, swinging the local corpus's `phpdoc.*` count
+/// 536↔483 run to run (invisible under `RAYON_NUM_THREADS=1`), and cost two
+/// sessions of triage before this was found to be the cause.
 fn check_under_target(
     db: &SteinsDatabase,
     project: Project,
@@ -1812,16 +1583,13 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         inputs.push(SourceFile::new(&db, rel, text));
     }
 
-    // Identify parse-error files (their diagnostics are excluded from the count).
-    //
-    // ADR-0079 (issue #180) makes most of this redundant and one part of it a
-    // deliberate blind spot. Redundant: the analyzer itself now emits nothing but
-    // `syntax.unparsable` from a file that failed to parse, so there are no
-    // inference findings left here to drop. The blind spot: this retain also drops
-    // that new id, so a pre-existing unparsable corpus file cannot turn the gate red
-    // on a finding whose remedy lives in someone else's repository. What it does NOT
-    // drop is the *consequence* — a non-vendor unparsable file is a dam site, so the
-    // existence family goes silent across that package, which can only lower counts.
+    // Identify parse-error files (their diagnostics are excluded from the
+    // count). ADR-0079 (#180): mostly redundant now (a failed-parse file emits
+    // only `syntax.unparsable`, nothing else to drop) but still a deliberate
+    // blind spot for that id — a pre-existing unparsable file can't red the
+    // gate on a remedy that lives elsewhere. What it does NOT drop: a
+    // non-vendor unparsable file dams the existence family for that package,
+    // only ever lowering counts.
     let mut parse_error_files = Vec::new();
     for &input in &inputs {
         if !parse(&db, input).parse_errors().is_empty() {
@@ -1834,37 +1602,34 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
     // (ADR-0015): the package's own `composer.json` decides what is vendor.
     let layout = composer::discover(&[dir.to_path_buf()], root);
     // The declared target PHP range (issue #28) gates the folder's absence
-    // family and curated-fact admission — the gate measures the analyzer as the
-    // CLI ships it, so the corpus packages' own `require.php` declarations
-    // apply here too. The resident folder drops target-dependent memos on the
-    // change, so cross-package reuse stays sound.
+    // family and curated-fact admission — the gate measures the analyzer as
+    // the CLI ships it, so each package's own `require.php` applies. The
+    // resident folder drops target-dependent memos on the change, keeping
+    // cross-package reuse sound.
     let php_target = layout.php_target().cloned();
     let plugins = steins_db::PluginFacts::discover(&layout, None);
     let project = Project::new(&db, inputs, layout, plugins);
     let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
-    // Measurement-mode split (ADR-0050 §9): contract-layer findings are reported +
-    // counted but do not gate on sight (only their per-package increase tripwire
-    // does). The **layer** (from the steins-infer registry) is the gate carrier;
-    // the family prefix keys each separate count table — `phpdoc.*`, `throw.*`, and
-    // the ADR-0050 §9 `effect.*` delta. Proof and mechanics stay red-on-sight in
-    // `diags` (`is_contract` keeps `effect.unknown-label`, a mechanics id, there).
+    // Measurement-mode split (ADR-0050 §9): contract-layer findings are counted
+    // but gate only via their per-package increase tripwire, not on sight. The
+    // layer (steins-infer registry) is the gate carrier; prefix keys each count
+    // table (`phpdoc.*`, `throw.*`, `effect.*`). Proof/mechanics — including
+    // `effect.unknown-label` — stay red-on-sight in `diags`.
     let phpdoc: Vec<Diagnostic> = diags.iter().filter(|d| is_phpdoc(d)).cloned().collect();
     let throws: Vec<Diagnostic> = diags.iter().filter(|d| is_throw(d)).cloned().collect();
     let effects: Vec<Diagnostic> = diags.iter().filter(|d| is_effect_contract(d)).cloned().collect();
     let possibly: Vec<Diagnostic> = diags.iter().filter(|d| is_possibly(d)).cloned().collect();
-    // Debug-layer findings (ADR-0053 §8) are excluded from every counter before the
-    // contract split and the red-on-sight retain: a dump is requested introspection,
-    // not a finding. Dropped outright — not reported, not counted. Vacuous today (no
-    // debug emitter until D3/D4), so `diags` is byte-identical to the pre-dump run.
+    // Debug-layer findings (ADR-0053 §8) are dropped outright before the
+    // contract split — a dump is requested introspection, not a finding.
+    // Vacuous today (no emitter until D3/D4).
     diags.retain(|d| !is_debug(d));
     diags.retain(|d| !is_contract(d));
     diags.retain(|d| !is_possibly(d));
-    // Split off triaged TRUE runtime-layer positives (reported, not gated). The
-    // ADR-0049 S2 flagship `call.undefined-method` now flows through this
-    // red-on-sight channel like any proof-layer id, with its triaged TRUE corpus
-    // findings pinned in `EXPECTED_PROOF_FINDINGS` (any un-pinned finding reds).
+    // Split off triaged TRUE runtime-layer positives (reported, not gated); e.g.
+    // the ADR-0049 S2 `call.undefined-method` findings pinned in
+    // `EXPECTED_PROOF_FINDINGS` — any un-pinned finding still reds the gate.
     let expected_true: Vec<Diagnostic> =
         diags.iter().filter(|d| is_expected_true_positive(name, d)).cloned().collect();
     diags.retain(|d| !is_expected_true_positive(name, d));
@@ -1898,9 +1663,9 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let start = Instant::now();
     let root = Path::new(&proj.path);
 
-    // Read what the tree is on BEFORE walking it, so the revision and cleanliness
-    // reported beside a count describe the state that count was taken at. Both
-    // reads degrade to "unknown" rather than failing or asserting.
+    // Read the tree's state BEFORE walking it, so revision/cleanliness match
+    // the count they're reported beside. Both degrade to "unknown" rather
+    // than failing.
     let measured_revision = corpus_local::checkout_revision(root);
     let worktree = WorktreeState::from_dirty(corpus_local::checkout_is_dirty(root));
 
@@ -1920,25 +1685,19 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         inputs.push(SourceFile::new(&db, rel, text));
     }
 
-    // The same exclusion, and the same ADR-0079 reading, as the corpus path above.
-    //
-    // ADR-0079 §4 asks the corpus to be swept for pre-existing unparsable files
-    // before the id ships, and for what it finds to be recorded as corpus facts
-    // rather than rediscovered as surprises. Swept 2026-08-08; the local root holds
-    // exactly three, each with a cascade of further errors behind its first:
+    // Same exclusion/ADR-0079 reading as the corpus path above. Swept
+    // 2026-08-08; the local root holds exactly three pre-existing unparsable
+    // files, each with further errors cascading behind its first:
     //
     //   vendor/apache/thrift/lib/php/lib/Thrift/Transport/TCurlClient.php:95  (+8)
     //   vendor/apache/thrift/lib/php/lib/Thrift/Transport/THttpClient.php:100 (+8)
     //   php-openid/Tests/Auth/OpenID/HMAC.php:66                              (+6)
     //
-    // All three are VENDOR, so §2.3's presumption applies to all three: none is a
-    // dam site, none makes its class-likes member-incomplete, and each one's
-    // `syntax.unparsable` finding is dropped by the retain below in any case. The
-    // consequence worth writing down is that the dam never engages on this corpus
-    // today — so the §2.5 member-incomplete leg is exercised by fixtures alone
-    // (`crates/steins-infer/tests/parse_failure_dam.rs`) until a NON-vendor break
-    // appears here, at which point the existence family goes silent for that
-    // package and these counts fall. They cannot rise.
+    // All three are VENDOR, so none is a dam site and each `syntax.unparsable`
+    // is dropped below anyway — the §2.5 member-incomplete leg stays exercised
+    // by fixtures alone (`crates/steins-infer/tests/parse_failure_dam.rs`)
+    // until a NON-vendor break appears here, at which point these counts can
+    // only fall, never rise.
     let mut parse_error_files = Vec::new();
     for &input in &inputs {
         if !parse(&db, input).parse_errors().is_empty() {
@@ -1948,9 +1707,8 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
 
     let layout = composer::discover(&[root.to_path_buf()], root);
-    // A local project declares a target like any other (issue #63): this call used
-    // to go straight to the resident folder, inheriting whichever corpus package's
-    // target the worker last held.
+    // A local project declares a target like any other (issue #63): this used
+    // to go straight to the resident folder without setting it.
     let php_target = layout.php_target().cloned();
     let plugins = steins_db::PluginFacts::discover(&layout, None);
     let project = Project::new(&db, inputs, layout.clone(), plugins);
@@ -2035,8 +1793,8 @@ fn print_report(
             r.diagnostics.len(),
             r.elapsed.as_secs_f64()
         );
-        // What state the corpus was measured in — printed on EVERY run for a local
-        // project, green included, not only when a tripwire trips.
+        // Printed on every run for a local project, green included — not only
+        // when a tripwire trips.
         if r.local {
             println!("    {}", revision_summary_line(&r.revision()));
         }
@@ -2068,10 +1826,9 @@ fn print_report(
         }
     }
 
-    // Measurement-mode summary: the `phpdoc.*` declared-contract ids, counted per
-    // package against the `PHPDOC_EXPECTED` baseline. These do NOT gate on their
-    // own existence (TRUE contract-layer findings live in released code, ADR-0030);
-    // a package gates red only if its count *increased* past the baseline.
+    // `phpdoc.*` declared-contract ids, counted per package against
+    // `PHPDOC_EXPECTED`. They do not gate on existence (TRUE contract findings
+    // live in released code, ADR-0030); only an increase past baseline reds.
     let total_phpdoc: usize = reports.iter().chain(local_reports.iter()).map(|r| r.phpdoc.len()).sum();
     let total_expected: usize = PHPDOC_EXPECTED.iter().map(|(_, c)| *c).sum();
     println!("\n=== phpdoc.* measurement mode (contract layer — gates only on INCREASE) ===\n");
@@ -2102,10 +1859,9 @@ fn print_report(
     println!("phpdoc.* TOTAL: {total_phpdoc} (expected baseline {total_expected})");
     print_tripwire("phpdoc.*", regressions, local_reports);
 
-    // Measurement-mode summary for the `throw.*` contract-layer ids (ADR-0040):
-    // counted per package against `THROW_EXPECTED`, gating only on INCREASE. The
-    // volume is far larger than `phpdoc.*` (checked-exception saturation), so only
-    // per-package counts and a small sample print — never every finding.
+    // `throw.*` contract-layer ids (ADR-0040), counted against `THROW_EXPECTED`,
+    // gating only on increase. Volume is far larger than `phpdoc.*` (checked-
+    // exception saturation), so only counts and a small sample print.
     let total_throw: usize = reports.iter().chain(local_reports.iter()).map(|r| r.throws.len()).sum();
     let total_throw_expected: usize = THROW_EXPECTED.iter().map(|(_, c)| *c).sum();
     println!("\n=== throw.* measurement mode (contract layer — gates only on INCREASE) ===\n");
@@ -2139,15 +1895,11 @@ fn print_report(
     println!("throw.* TOTAL: {total_throw} (expected baseline {total_throw_expected})");
     print_tripwire("throw.*", throw_regressions, local_reports);
 
-    // Measurement-mode summary for the `effect.*` **contract** ids (ADR-0050 §9
-    // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). The section is
-    // **suppressed while dormant** — it prints nothing unless an effect finding
-    // lands, the expected table is seeded, or a regression trips — which kept the
-    // gate report byte-identical to the pre-convergence run while the family was
-    // vacuous, and surfaced it the day the corpus grew an envelope. That day was
-    // 2026-08-12: the interop-envelope run (#303) reads upstream's purity tags, the
-    // private monorepo carries three of them, and the dormancy guard has been off
-    // ever since (see [`EFFECT_EXPECTED`]'s seeded row).
+    // `effect.*` contract ids (ADR-0050 §9 delta). Suppressed while dormant —
+    // prints nothing unless a finding lands, the table is seeded, or a
+    // regression trips — kept the report byte-identical pre-convergence. Off
+    // since 2026-08-12, when #303's interop-envelope run made the private
+    // monorepo's purity tags fire (see [`EFFECT_EXPECTED`]'s seeded row).
     let total_effect: usize = reports.iter().chain(local_reports.iter()).map(|r| r.effects.len()).sum();
     if total_effect > 0 || !EFFECT_EXPECTED.is_empty() || !effect_regressions.is_empty() {
         let total_effect_expected: usize = EFFECT_EXPECTED.iter().map(|(_, c)| *c).sum();
@@ -2182,11 +1934,10 @@ fn print_report(
         print_tripwire("effect.*", effect_regressions, local_reports);
     }
 
-    // Measurement-mode summary for the **possibly-grade** proof ids (ADR-0081 §8):
-    // the `strict`-floored rows, counted per package against `POSSIBLY_EXPECTED`
-    // and gating only on INCREASE. Every finding prints — unlike `throw.*` the
-    // volume is triageable, and unlike `phpdoc.*` a reader has no prefix to go
-    // looking for these under.
+    // Possibly-grade proof ids (ADR-0081 §8), the `strict`-floored rows,
+    // counted against `POSSIBLY_EXPECTED`, gating only on increase. Every
+    // finding prints — the volume is triageable and there's no prefix to
+    // search under.
     let total_possibly: usize =
         reports.iter().chain(local_reports.iter()).map(|r| r.possibly.len()).sum();
     println!(
@@ -2284,13 +2035,10 @@ fn print_report(
     }
 }
 
-/// Print one measurement family's tripwire verdict, and — for a tripped **local**
-/// project — the recorded-vs-measured revision line beside it.
-///
-/// That line is where the whole mechanism earns its keep: a raised count on a
-/// pinned package can only be the analyzer, but on a live working tree it is
-/// ambiguous, and the operator is standing right here, at the moment of the RED,
-/// deciding whether to triage findings or re-measure the corpus.
+/// Print one measurement family's tripwire verdict, and — for a tripped local
+/// project — the recorded-vs-measured revision line: a raised count on a
+/// pinned package can only be the analyzer, but on a live tree it's
+/// ambiguous, and this is where the operator decides to triage or re-measure.
 fn print_tripwire(family: &str, regressions: &[PhpdocRegression], local_reports: &[PackageReport]) {
     if regressions.is_empty() {
         println!("{family} tripwire: OK — no package exceeds its expected baseline.");

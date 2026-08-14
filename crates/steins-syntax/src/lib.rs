@@ -367,31 +367,22 @@ pub struct Param {
     pub span: Span,
 }
 
-/// A structural effect-origin candidate found by scanning a function body's CST
-/// subtree (ADR-0005 effect envelopes). Syntax only reports *where* a primitive
-/// effect could arise; the catalog/inference layer decides which are proven
-/// findings (uncatalogued builtins widen to silence, same-file user calls become
-/// propagation edges — `steins_catalog::effect_labels` and the effects pass).
+/// A structural effect-origin candidate from a CST scan of a function body
+/// (ADR-0005). Reports only *where* a primitive effect could arise; the
+/// catalog/inference layer decides which are proven (uncatalogued builtins →
+/// silence, same-file calls → propagation edges via `steins_catalog::effect_labels`).
+/// The scan does not descend into nested function/closure/class bodies (separate
+/// scopes) but does see constructs nested in control flow — why the effects pass
+/// reads this instead of the linear trace. It is structural, not
+/// reachability-aware: an `echo` in dead code is still reported, since the
+/// envelope is a contract about the code, not one execution path.
 ///
-/// The scan does **not** descend into nested function/closure/class bodies,
-/// which are separate scopes. It *does*
-/// see constructs nested inside control flow (an `echo` inside an `if`), which
-/// is why the effects pass reads this instead of the linear trace.
-///
-/// The scan is **structural**, not reachability-aware: an `echo` in provably
-/// dead code is still reported as an origin. This is deliberate — an effect
-/// envelope (ADR-0005) is a contract about the function's *code*, not a single
-/// execution path, so the mere presence of an effectful construct in the body is
-/// what `Pure` forbids.
-/// The classification of one call argument's **lvalue root**, for by-ref
-/// out-parameter effect coloring (ADR-0063 §2.3). Recorded for every positional
-/// argument of a statically-named call; the effects pass reads only the
-/// positions `steins_catalog::out_params` declares by-ref, so the classification
-/// costs nothing when the callee has no out-parameter row.
-///
-/// The distinction is the whole point of the `mutate.local` color: `preg_match`
-/// writing `$matches` and `preg_match` writing `$this->matches` are the same
-/// function and *different effects*, and only the argument says which.
+/// Classifies one call argument's **lvalue root**, for by-ref out-parameter
+/// effect coloring (ADR-0063 §2.3). Recorded for every positional argument of a
+/// statically-named call; free when the callee has no out-parameter row. This is
+/// what lets `mutate.local` distinguish `preg_match` writing `$matches` from
+/// writing `$this->matches` — same function, different effect, decided only by
+/// the argument.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RefTarget {
     /// A binding **private to the calling frame**: a plain `$v` (or an offset
@@ -419,26 +410,21 @@ const SUPERGLOBALS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EffectOrigin {
     /// A call to a statically-named function at `span` (the callee identifier).
-    /// `name` carries the full reference (raw spelling + qualification) so the
-    /// effects pass can resolve it project-wide: it may resolve to a builtin
-    /// (classified via the catalog), a user function anywhere in the project (an
-    /// effect propagation edge), or nothing (ambiguous → taints exhaustiveness).
-    /// Dynamic and method calls are not recorded here.
+    /// `name` is the full reference so the effects pass can resolve it
+    /// project-wide: a builtin (via the catalog), a user function anywhere in
+    /// the project (a propagation edge), or nothing (ambiguous → taints
+    /// exhaustiveness). Dynamic and method calls are not recorded here.
     ///
     /// `arg_targets` classifies each **positional** argument's lvalue root for
-    /// by-ref out-parameter coloring (ADR-0063 §2.3), in order — so its length is
-    /// the positional arity, which is the conditional row's arity leg. It is
-    /// `None` when the argument list uses a named or spread argument: positional
-    /// mapping is defeated there, and every argument-conditional judgment is then
-    /// withheld rather than guessed (the same silence an uncatalogued builtin
-    /// gets). `Some(vec![])` is a genuine zero-argument call and is *not* the
-    /// same thing — `preg_match(matches: $m, …)` supplies its out-parameter,
-    /// `preg_match()` does not.
+    /// by-ref out-parameter coloring (ADR-0063 §2.3), in call order. `None`
+    /// when the argument list uses a named or spread argument (positional
+    /// mapping defeated, so judgments are withheld rather than guessed);
+    /// `Some(vec![])` is a genuine zero-argument call, distinct from a call
+    /// that only supplies its out-parameter by name (`preg_match(matches: $m)`).
     ///
-    /// `const_args` carries the call's first two positional arguments in their
-    /// proven-constant form, for the argument-dependent narrowing of a
-    /// wrapper-capable stream row (issue #318; the ADR-0064 symbolic
-    /// argument-dependent transfer seam) — see [`ConstArgs`].
+    /// `const_args` carries the first two positional arguments in
+    /// proven-constant form, for the argument-dependent stream-row narrowing
+    /// of issue #318 (ADR-0064 symbolic transfer) — see [`ConstArgs`].
     Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>>, const_args: ConstArgs },
     /// An `echo` / `print` / short-echo (`<?=`) construct, or non-blank inline
     /// HTML between a `?>` and the next `<?php`, at `span` — the
@@ -448,46 +434,41 @@ pub enum EffectOrigin {
     /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
     /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
     Exit { keyword: &'static str, span: Span },
-    /// A method or static-method call whose *receiver* is one the effects pass
-    /// can resolve without a flow environment (`$this->`, `self::`, `parent::`,
-    /// `Foo::`, `new Foo()->`). Recorded so a `#[\Steins\Pure]` method can have
-    /// its resolved method→method effect edges propagated (the class-world
-    /// analogue of the `EffectOrigin::Call` function edge), and so a *declared*
-    /// receiver ([`EffectRecv::Var`] / [`EffectRecv::PropRead`], ADR-0067) can
-    /// carry an interface envelope into the caller's declared lane. Receivers
-    /// outside those forms (`static::m()`, `$o->$m()`, a written-to variable) are
-    /// **not** recorded — no provable edge and no declared bound either.
+    /// A method/static-method call whose *receiver* the effects pass can
+    /// resolve without a flow environment (`$this->`, `self::`, `parent::`,
+    /// `Foo::`, `new Foo()->`). Lets a `#[\Steins\Pure]` method propagate
+    /// resolved method→method effect edges (the class-world analogue of
+    /// `EffectOrigin::Call`), and lets a *declared* receiver ([`EffectRecv::Var`]
+    /// / [`EffectRecv::PropRead`], ADR-0067) carry an interface envelope into
+    /// the caller's declared lane. Other receiver forms (`static::m()`,
+    /// `$o->$m()`, a written-to variable) are not recorded.
     MethodCall { receiver: EffectRecv, method: String, span: Span },
     /// A call the scan cannot classify to a statically-named target: a dynamic
-    /// function call (`$f()`, `$arr['x']()`), or a method / static call whose
-    /// receiver or selector is not statically resolvable (`$obj->m()`,
-    /// `$var::m()`, `$o->$m()`). It contributes **no** proven effect finding (it
-    /// stays silent, like every unprovable effect), but it marks the enclosing
-    /// body's effect set **non-exhaustive**: the analyzer cannot prove the call
-    /// is effect-free. Consumed only by the effects-exhaustiveness bit (the
-    /// annotate `…?` marker); the envelope check ignores it. `span` is the call.
+    /// call (`$f()`, `$arr['x']()`), or a method/static call with an
+    /// unresolvable receiver or selector (`$obj->m()`, `$var::m()`, `$o->$m()`).
+    /// Contributes no proven effect but marks the body's effect set
+    /// **non-exhaustive**; consumed only by the exhaustiveness bit (annotate's
+    /// `…?` marker), ignored by the envelope check. `span` is the call.
     Opaque { span: Span },
-    /// A call to a statically-named function that passes at least one **resolvable
-    /// callback argument** (an inline closure, a first-class callable, or a
-    /// string-literal function name), at the given positional index (ADR-0033
-    /// invocation shapes). Emitted *instead of* [`Self::Call`] for such calls. The
-    /// effects pass consults `steins_catalog::invocation_shape` on `callee`: for a
-    /// known higher-order builtin it edges to the callback at the shape's callback
-    /// param (its own base is pure); otherwise it falls back to normal `callee`
-    /// resolution (the callback is just an argument). `arg_count` is the positional
-    /// arity, so a resolvable callback at a *non*-callback position still taints.
+    /// A call to a statically-named function passing at least one **resolvable
+    /// callback argument** (inline closure, first-class callable, or
+    /// string-literal function name), ADR-0033 invocation shapes. Emitted
+    /// *instead of* [`Self::Call`]. The effects pass consults
+    /// `steins_catalog::invocation_shape` on `callee`: a known higher-order
+    /// builtin edges to the callback at the shape's callback param; otherwise
+    /// it falls back to normal `callee` resolution. `arg_count` is the
+    /// positional arity, so a resolvable callback at a non-callback position
+    /// still taints.
     ///
-    /// `arg_targets` is the same per-position lvalue-root classification
-    /// [`Self::Call`] carries, and is always `arg_count` long here (this variant
-    /// is only produced for all-positional argument lists). Higher-order invokers
-    /// are out-parameter writers too — `usort($rows, $cmp)` sorts `$rows` in
-    /// place — so the by-ref row must be read on this arm as well.
+    /// `arg_targets` is [`Self::Call`]'s per-position lvalue-root
+    /// classification, always `arg_count` long (this variant is only produced
+    /// for all-positional argument lists) — higher-order invokers are
+    /// out-parameter writers too (`usort($rows, $cmp)` sorts in place).
     ///
-    /// `const_args` is the same proven-constant pair [`Self::Call`] carries, and
-    /// it is not redundant here: a string-literal argument *is* a resolvable
-    /// callback reference, so `file_get_contents('/etc/hosts')` arrives on this
-    /// arm rather than on `Call`, and the stream narrowing of issue #318 has to
-    /// read it from both.
+    /// `const_args` is [`Self::Call`]'s proven-constant pair; not redundant
+    /// here, since a string-literal argument is itself a resolvable callback
+    /// (`file_get_contents('/etc/hosts')` arrives on this arm, not `Call`), and
+    /// issue #318's stream narrowing must read it from both.
     HigherOrder {
         callee: NameRef,
         callbacks: Vec<(usize, CallbackRef)>,
@@ -504,13 +485,11 @@ pub enum EffectOrigin {
 }
 
 /// One call argument in the form a **structural** scan can prove constant
-/// (issue #318): the evidence an argument-dependent catalog row is narrowed on.
-///
-/// There is deliberately no third variant. A variable, a concatenation, an
-/// interpolated string, a class constant, an array element — each of them is a
-/// dataflow question, and this scan does not ask dataflow questions (ADR-0001):
-/// the argument is simply absent from [`ConstArgs`] and the consumer keeps
-/// whatever its argument-blind default was.
+/// (issue #318): the evidence an argument-dependent catalog row narrows on.
+/// No third variant: anything requiring dataflow (a variable, concatenation,
+/// interpolated string, class constant, array element) is a question this
+/// scan does not ask (ADR-0001) — it's simply absent from [`ConstArgs`], and
+/// the consumer keeps its argument-blind default.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallTarget {
     /// A quoted string literal with **no interpolation**, by its decoded value
@@ -524,13 +503,11 @@ pub enum CallTarget {
 }
 
 /// The **proven-constant leading arguments** of a named call (issue #318):
-/// positions 0 and 1, each `None` unless [`CallTarget`] could read it.
-///
-/// Two positions, because two is what the argument-dependent stream rows need —
-/// the target (`file_get_contents($path)`, `fwrite($handle, …)`), plus either a
-/// mode (`fopen($path, $mode)`) or a second target (`copy($from, $to)`). A named
-/// or spread argument anywhere in the list defeats positional mapping and leaves
-/// both fields empty, exactly as `arg_targets` is withheld wholesale there.
+/// positions 0 and 1, each `None` unless [`CallTarget`] could read it. Two
+/// positions because that's what argument-dependent stream rows need — a
+/// target (`file_get_contents($path)`) plus a mode (`fopen($path, $mode)`) or
+/// second target (`copy($from, $to)`). A named or spread argument anywhere
+/// defeats positional mapping and empties both fields, same as `arg_targets`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct ConstArgs {
     /// Positional argument 0.
@@ -568,13 +545,12 @@ pub enum EffectRecv {
     /// its FQN.
     ClassName(NameRef),
     /// `$r->m()` where `$r` is a name this frame **never writes** (ADR-0067
-    /// declared lane). Carries the variable name (no `$`); the effects pass reads
-    /// the enclosing declaration's parameter list for its declared type, and
-    /// contributes the *declared* envelope of a project interface's method — never
-    /// a proven effect, and never a resolved body edge. A receiver whose declared
-    /// type is not a project interface (or whose method carries no envelope)
-    /// resolves to nothing and taints exhaustiveness like
-    /// [`EffectOrigin::Opaque`].
+    /// declared lane). Carries the variable name (no `$`); the effects pass
+    /// reads the enclosing declaration's parameter type and contributes the
+    /// *declared* envelope of a project interface method — never a proven
+    /// effect or resolved body edge. A receiver whose declared type is not a
+    /// project interface (or whose method carries no envelope) taints
+    /// exhaustiveness like [`EffectOrigin::Opaque`].
     Var(String),
     /// `$this->repo->m()` where `repo` is a property this frame never writes — the
     /// property-read twin of [`Self::Var`], carrying the property name. Resolved
@@ -650,13 +626,11 @@ pub struct ThrowOrigin {
 /// A recognized effect-envelope declaration (ADR-0005/0006/0018): the upper
 /// bound of effects a function or method promises not to exceed.
 ///
-/// The `labels` are hierarchical dot-path effect labels (ADR-0018). The **empty**
-/// set is the tightest bound — pure — spelled `#[\Steins\Pure]`; a non-empty set
-/// comes from `#[\Steins\Effect('io', 'nondet.time')]`. When both `#[\Steins\Pure]`
-/// and `#[\Steins\Effect(...)]` decorate the same declaration the two are
-/// contradictory (`Pure` = empty upper bound, the tighter of the two); Pure wins,
-/// `labels` is empty, and no contradiction diagnostic is emitted (see
-/// `attrs_effect_envelope`).
+/// `labels` are hierarchical dot-path effect labels (ADR-0018). The **empty**
+/// set is the tightest bound (`#[\Steins\Pure]`); non-empty comes from
+/// `#[\Steins\Effect('io', 'nondet.time')]`. If both attributes decorate the
+/// same declaration, `Pure` wins (tighter bound), `labels` stays empty, and no
+/// contradiction diagnostic is emitted (see `attrs_effect_envelope`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct EffectEnvelope {
     /// The declared effect labels (ADR-0018 dot-paths). Empty = `Pure`.
@@ -673,8 +647,7 @@ pub struct FunctionDecl {
     pub name: String,
     /// The fully-qualified name, lowercase-normalized (namespace + `\` + name;
     /// PHP function/namespace names are case-insensitive). The project index
-    /// keys on this. For a global (un-namespaced) function it equals the
-    /// lowercased simple name.
+    /// keys on this; for a global function it equals the lowercased simple name.
     pub fqn: String,
     pub params: Vec<Param>,
     /// The native scalar/union return type, or `None` when untyped / non-scalar
@@ -682,26 +655,23 @@ pub struct FunctionDecl {
     pub ret: Option<NativeType>,
     // untyped surface (ADR-0078, issue #200)
     /// The file byte span of the native **return** type hint as written, or
-    /// `None` when the declaration writes none. The return-side twin of
-    /// [`Param::hint_span`], and for the same reason: `void`, `never`, `array`
-    /// and friends are real declarations that [`Self::ret`] models as `None`.
+    /// `None` when none is written. Return-side twin of [`Param::hint_span`]:
+    /// `void`, `never`, `array` and friends are real declarations [`Self::ret`]
+    /// models as `None`.
     pub ret_span: Option<Span>,
     // end untyped surface (ADR-0078, issue #200)
     pub span: Span,
     /// The file byte span of the function's **body block**, braces included.
-    ///
-    /// [`Self::span`] is the *name* span, so it cannot answer questions about what
-    /// the body does. This one can, and it exists for exactly one consumer: the
-    /// ADR-0032 argument-pass carry gate (issue #295), which must decide whether a
-    /// callee could possibly touch an object handed to it. PHP locals are
-    /// **lexical** — a name a body never spells cannot be read, written, captured
-    /// or passed on by it — and every construct that reaches a binding
-    /// non-lexically (`$$v`, `extract`/`compact`, `eval`, `include`, `global`, a
-    /// by-ref `use`) is on the give-up list that sets [`Scope::poisoned`]. So a
-    /// token scan over this span is a sound "the callee cannot reach it" oracle,
-    /// where the linear trace — which drops nested sub-expressions to
-    /// [`ArgValue::Other`] and unrecognized statements to [`StmtKind::Barrier`] —
-    /// is not.
+    /// [`Self::span`] is the *name* span and can't answer what the body does.
+    /// Exists for the ADR-0032 argument-pass carry gate (issue #295), which must
+    /// decide whether a callee could touch an object handed to it: PHP locals
+    /// are **lexical** (a name the body never spells can't be read, written,
+    /// captured, or passed on), and every non-lexical escape (`$$v`,
+    /// `extract`/`compact`, `eval`, `include`, `global`, a by-ref `use`) sets
+    /// [`Scope::poisoned`]. A token scan over this span is thus a sound
+    /// "callee cannot reach it" oracle, unlike the linear trace, which drops
+    /// nested sub-expressions to [`ArgValue::Other`] and unrecognized
+    /// statements to [`StmtKind::Barrier`].
     pub body_span: Span,
     /// The recognized `#[\Steins\Pure]` / `#[\Steins\Effect(...)]` envelope on
     /// this function, if present (ADR-0005/0006/0018). `Some` opts the function
@@ -709,33 +679,31 @@ pub struct FunctionDecl {
     /// `attrs_effect_envelope`.
     pub effect_envelope: Option<EffectEnvelope>,
     /// Every structural effect-origin candidate in the body subtree, in source
-    /// order (see [`EffectOrigin`]). Computed for *all* functions, not just
-    /// `Pure`-declared ones, because the effects pass propagates a callee's
-    /// effects to `Pure` callers regardless of the callee's own annotations.
+    /// order ([`EffectOrigin`]). Computed for *all* functions, since the effects
+    /// pass propagates a callee's effects to `Pure` callers regardless of the
+    /// callee's own annotations.
     pub effect_origins: Vec<EffectOrigin>,
     /// Every throw-relevant construct in the body, with its enclosing try/catch
     /// guards (ADR-0040 damming). Computed for *all* functions (the throw
-    /// fixpoint propagates callee throws regardless of annotations).
+    /// fixpoint propagates regardless of annotations).
     pub throw_origins: Vec<ThrowOrigin>,
     /// The raw `/** … */` docblock trivia immediately preceding this declaration,
-    /// if any (only whitespace between it and the declaration head — the same
-    /// association discipline as attributes; ADR-0029). The phpdoc bridge parses
-    /// `@param`/`@return` tags out of it into phpdoc envelopes.
+    /// if any (same adjacency discipline as attributes; ADR-0029). The phpdoc
+    /// bridge parses `@param`/`@return` tags out of it.
     pub docblock: Option<String>,
-    /// The **file byte span** of the associated docblock (the same trivium whose
-    /// text is [`Self::docblock`]), when one is adopted. `docblock` text is the
-    /// exact substring `[span.start, span.end)` of the source, so a docblock-
-    /// relative offset (e.g. a `steins_phpdoc` tag span) maps into the file by
-    /// adding `span.start`. Retained for the transform engine (ADR-0034), which
-    /// deletes a promoted `@param` tag's line in the file.
+    /// The file byte span of the associated docblock, when one is adopted.
+    /// `docblock` text is the exact substring `[span.start, span.end)`, so a
+    /// docblock-relative offset (e.g. a `steins_phpdoc` tag span) maps into the
+    /// file by adding `span.start`. Used by the transform engine (ADR-0034) to
+    /// delete a promoted `@param` tag's line.
     pub docblock_span: Option<Span>,
-    /// `true` when this function is declared inside a conditional/nested context
-    /// (anything but the program root or a bare namespace) — the function analogue
-    /// of [`ClassDecl::conditional`] (ADR-0049 A2i). A conditional function
-    /// declaration leaves *which* body binds at runtime to load order (the
-    /// `function_exists`-guarded polyfill beside a dam-site include is the shape),
-    /// so the arity check re-dams the claim: an arity finding on a conditional
-    /// target fires only when the whole-universe dam is clear.
+    /// `true` when declared inside a conditional/nested context (anything but
+    /// program root or a bare namespace) — function analogue of
+    /// [`ClassDecl::conditional`] (ADR-0049 A2i). A conditional declaration
+    /// leaves *which* body binds at runtime to load order (a
+    /// `function_exists`-guarded polyfill beside a dam-site include), so the
+    /// arity check re-dams: a finding on a conditional target fires only when
+    /// the whole-universe dam is clear.
     pub conditional: bool,
 }
 
@@ -1016,16 +984,12 @@ pub struct ClassDecl {
     pub consts: Vec<(String, ArgValue)>,
     // inaccessible members (ADR-0078, issue #185)
     /// The **declared visibility** of every class constant, as `(name, visibility)`
-    /// pairs — the surface [`Self::consts`] deliberately does not carry.
-    ///
-    /// Two differences from [`Self::consts`], and both are why this is a separate
-    /// list rather than a third tuple field: a constant with a non-literal
-    /// initializer (`const K = self::J . 'x';`) is **recorded here** though it is
-    /// absent there, so this list's absence of a name really does mean "this
-    /// class-like declares no such constant"; and the value list's meaning
-    /// (ADR-0043 §2 "no proven literal") is a contract other consumers already
-    /// read. Names are stored as written (constant names are case-sensitive).
-    /// Enum cases are not constants for this purpose — they live in
+    /// pairs — the surface [`Self::consts`] deliberately does not carry. A
+    /// separate list rather than a third tuple field because a constant with a
+    /// non-literal initializer (`const K = self::J . 'x';`) is recorded here
+    /// though absent from `consts`, so this list's absence of a name really
+    /// does mean "no such constant". Names are stored as written
+    /// (case-sensitive). Enum cases are not constants here — they live in
     /// [`Self::enum_cases`] and are always public.
     pub const_visibility: Vec<(String, Visibility)>,
     // untyped surface (ADR-0078, issue #200)
@@ -1034,34 +998,31 @@ pub struct ClassDecl {
     pub const_decls: Vec<ClassConstDecl>,
     // end untyped surface (ADR-0078, issue #200)
     /// The names of the class-body **hooked** properties this declaration drops.
-    ///
-    /// A `public int $p { get => … }` member binds no value and is not lowered to a
-    /// [`PropertyDecl`] at all, which is right for every value check and wrong for
-    /// any check that asks "does this class declare `p`?". A hooked property
-    /// **overrides an inherited one** (`php -r`-witnessed at 8.5.9: a child's
-    /// `public int $p { get => 42; }` over a parent's `protected int $p` prints
-    /// `42`), so a member-visibility claim that could not see it would convict legal
-    /// code. Recording the bare names keeps that door shut without putting a
-    /// value-less property back on the surface every other consumer walks.
+    /// A `public int $p { get => … }` member binds no value and is not lowered
+    /// to a [`PropertyDecl`], right for every value check but wrong for "does
+    /// this class declare `p`?" A hooked property **overrides an inherited
+    /// one** (`php -r`-witnessed at 8.5.9: a child's `public int $p { get => 42; }`
+    /// over a parent's `protected int $p` prints `42`), so a member-visibility
+    /// claim blind to it would convict legal code. Recording bare names keeps
+    /// that door shut without putting a value-less property back on the surface.
     pub hooked_properties: Vec<String>,
     // end inaccessible members (ADR-0078, issue #185)
     // member absence (ADR-0078, issue #197)
-    /// `true` when the declaration carries `#[AllowDynamicProperties]`.
+    /// `true` when the declaration carries `#[AllowDynamicProperties]`. The
+    /// attribute re-licenses what PHP 8.2 deprecated: writing an undeclared
+    /// property on such a class is legal and creates it, so the property set
+    /// is **open** and no enumeration can prove a name absent —
+    /// `property.undefined` treats the attribute anywhere in a receiver's
+    /// chain as an obstacle, like `__get`.
     ///
-    /// The attribute re-licences what PHP 8.2 deprecated: writing an undeclared
-    /// property on such a class is legal and creates it, so the class's property
-    /// set is **open** and no enumeration of its declarations can prove a name
-    /// absent. `property.undefined` therefore treats the attribute anywhere in a
-    /// receiver's chain as an obstacle, exactly as it treats `__get`.
-    ///
-    /// Recognized by the attribute's **name only**, in either the bare
+    /// Recognized by the attribute's **name only**, bare
     /// (`#[AllowDynamicProperties]`) or fully-qualified
-    /// (`#[\AllowDynamicProperties]`) spelling. PHP itself resolves the name
-    /// against the current namespace, so a namespaced file without a `use` import
-    /// would not really get the engine attribute — but a class *meaning* to be
-    /// open and failing to import it is still a class whose author writes dynamic
-    /// properties, and over-silencing there costs an absence claim, never a wrong
-    /// one. Matching is case-insensitive (PHP class-name semantics).
+    /// (`#[\AllowDynamicProperties]`). PHP itself resolves the name against
+    /// the current namespace, so a namespaced file without the `use` import
+    /// wouldn't really get the engine attribute — but a class meaning to be
+    /// open and failing to import it still writes dynamic properties, and
+    /// over-silencing there costs only an absence claim. Matching is
+    /// case-insensitive.
     pub allows_dynamic_properties: bool,
     // end member absence (ADR-0078, issue #197)
     /// `true` if the class `use`s any trait. Trait methods are merged into the
@@ -1106,49 +1067,40 @@ pub enum ArgValue {
     Var(String),
     /// A call `name(args...)` to a statically-named function. `name` is the
     /// identifier's **last segment** (no namespace survives into the value IR), so
-    /// value-position resolution is by unique simple name project-wide. `args` are
-    /// the lowered argument values: a zero-argument call resolves through the
-    /// constant-function lane, and a call **with** arguments resolves through the
-    /// T0 binding-descent summary (issue #60) — as a dumped/checked argument and
-    /// as a nested argument of another descent. A foldable builtin's argument that
-    /// is itself a project call resolves the same way (issue #127): `strtoupper(g(1))`
-    /// folds once `g(1)`'s Singleton summary is a concrete arg, under the same
-    /// descent guard as nested binding.
+    /// resolution is by unique simple name project-wide. `args` are the lowered
+    /// argument values: a zero-argument call resolves through the constant-function
+    /// lane, and a call **with** arguments through the T0 binding-descent summary
+    /// (issue #60), as a checked argument or a nested argument of another descent.
+    /// A foldable builtin's argument that is itself a project call resolves the
+    /// same way (issue #127): `strtoupper(g(1))` folds once `g(1)`'s summary is a
+    /// concrete arg, under the same descent guard.
     Call(String, Vec<ArgValue>),
     /// `new ClassName(args...)` — a construction rvalue. [`NameRef`] is the class
-    /// reference as written (resolved to an FQN project-wide at use time).
-    /// Carried so an assignment `$x = new Foo(...)` can record `$x`'s **exact
-    /// class** in the propagation environment (the object's runtime class is
-    /// fixed at construction). Not a scalar literal — it never flows into a
-    /// scalar type check.
-    /// The third field is the constructor's **named** arguments (`new Foo(n: 1)`),
-    /// so a promoted-property seed can bind them by name exactly as it binds the
-    /// positional `args` (Gap A value-binding side); empty for a positional-only
-    /// construction.
+    /// reference as written (resolved to an FQN project-wide at use time), carried
+    /// so `$x = new Foo(...)` can record `$x`'s **exact class** (fixed at
+    /// construction). Not a scalar literal. The third field is the constructor's
+    /// **named** arguments (`new Foo(n: 1)`), so a promoted-property seed can bind
+    /// them by name exactly as the positional `args`; empty for positional-only.
     New(NameRef, Vec<ArgValue>, Vec<NamedArg>),
     /// An array literal `[...]` / `array(...)` whose keys are all literal-or-absent
-    /// and whose element values recursively lower (ADR-0001 array values in the
-    /// trace IR). Each entry pairs a lowered [`ArrayKey`] with its value. A spread
-    /// (`...`), an unrepresentable element, or a non-literal key lowers the **whole**
-    /// array to [`ArgValue::Other`] (the safe side). Keys carry PHP key-normalization
-    /// (`"5"` → `Int(5)`, floats truncate, `bool`→`int`, `null`→`""`); auto keys
-    /// (`ArrayKey::Auto`) receive their next-int position during normalization
-    /// ([`normalize_array`]), where duplicate keys resolve last-wins.
+    /// and whose element values recursively lower (ADR-0001). Each entry pairs a
+    /// lowered [`ArrayKey`] with its value. A spread (`...`), an unrepresentable
+    /// element, or a non-literal key lowers the **whole** array to
+    /// [`ArgValue::Other`] (safe side). Keys carry PHP key-normalization (`"5"` →
+    /// `Int(5)`, floats truncate, `bool`→`int`, `null`→`""`); auto keys
+    /// (`ArrayKey::Auto`) get their next-int position during [`normalize_array`],
+    /// where duplicates resolve last-wins.
     Array(Vec<(ArrayKey, ArgValue)>),
     /// A ternary `$c ? A : B` in rvalue position, lowered as a **conditional
-    /// value** (ADR-0031): the walk evaluates `cond` against the env and,
-    /// when decided, resolves to the chosen arm; when undecided it joins the two
-    /// arms (a `OneOf` if both are literal, else unknown). Short-ternary `?:` and
-    /// null-coalescing `??` are **not** lowered here because their operands need
-    /// negative/definedness facts outside this domain.
+    /// value** (ADR-0031): the walk evaluates `cond` and, when decided, resolves to
+    /// the chosen arm; when undecided it joins both (a `OneOf` if both are literal,
+    /// else unknown). Short-ternary `?:` and `??` are not lowered here — their
+    /// operands need negative/definedness facts outside this domain.
     ///
-    /// `then_span`/`else_span` are the source extents of the two arms. PHP
-    /// evaluates exactly one of them, so a decided guard proves the other one's
-    /// span **unevaluated** — the walk records it as dead (ADR-0052 §6: "the
-    /// direct env-free pass stands down on spans covered here exactly as
-    /// `mark_dead` already models"). They are carried for that one purpose and
-    /// are deliberately outside the [`Hash`] impl: two ternaries that differ only
-    /// in position denote the same value.
+    /// `then_span`/`else_span` are the two arms' source extents. PHP evaluates
+    /// exactly one, so a decided guard proves the other's span **unevaluated** —
+    /// recorded dead (ADR-0052 §6). Deliberately outside the [`Hash`] impl: two
+    /// ternaries differing only in position denote the same value.
     Ternary {
         cond: Box<CondExpr>,
         then_val: Box<ArgValue>,
@@ -1157,126 +1109,105 @@ pub enum ArgValue {
         else_span: Span,
     },
     /// A closure value (ADR-0033): a `function (...) use (...) {...}` / arrow
-    /// `fn(...) => …` expression lowered to its own [`Scope`], or a first-class
-    /// callable (`strtolower(...)`) naming a function target. Carried in the trace
-    /// so an assignment `$f = fn(...) => …;` records a `Fact`-carrying closure
-    /// value (in `steins-infer`), and a later `$f(...)` resolves by binding descent
-    /// into the closure's scope. Not a scalar — never flows into a scalar check.
+    /// `fn(...) => …` lowered to its own [`Scope`], or a first-class callable
+    /// (`strtolower(...)`) naming a function target. Lets `$f = fn(...) => …;`
+    /// record a `Fact`-carrying closure value, and a later `$f(...)` resolve by
+    /// binding descent into the closure's scope. Not a scalar.
     Closure(ClosureRef),
-    /// A property read `$var->prop` in rvalue position (ADR-0036 object state). Only
-    /// a **simple variable receiver** is represented (`$this->p` uses `var = "this"`);
-    /// a chain `$a->b->c` or a dynamic property name (`$a->$p`) lowers to
-    /// [`ArgValue::Other`]. The walk resolves it against the heap: a known
-    /// object ref with a props entry flows that fact; an unknown receiver yields no
-    /// fact (silent).
+    /// A property read `$var->prop` in rvalue position (ADR-0036). Only a
+    /// **simple variable receiver** is represented (`$this->p` uses `var = "this"`);
+    /// a chain `$a->b->c` or dynamic name (`$a->$p`) lowers to [`ArgValue::Other`].
+    /// Resolved against the heap: a known object ref with a props entry flows that
+    /// fact; an unknown receiver yields no fact.
     PropFetch { var: String, prop: String },
-    /// `clone $var` (ADR-0036): a shallow copy of the object `$var` holds. The walk
-    /// mints a NEW allocation id with a COPY of the source object's props (PHP shallow
+    /// `clone $var` (ADR-0036): a shallow copy of the object `$var` holds. Mints a
+    /// new allocation id with a copy of the source object's props (PHP shallow
     /// clone), so post-clone writes to one are invisible to the other. Only a bare
     /// variable operand is represented; `clone <expr>` lowers to [`ArgValue::Other`].
     Clone(String),
     /// A class-constant / enum-case access `Class::NAME` (ADR-0043): the class
-    /// portion (an explicit name or `self`/`static`/`parent`) plus the constant
-    /// or case name. Syntactically a class-const and an enum-case are identical
-    /// (`Suit::Hearts` vs `Config::TIMEOUT`); the enum distinction needs the
-    /// project index, so lowering emits this uniform form and the inference layer
-    /// reinterprets it against a resolved enum (→ an [`ArgValue::EnumCase`] object
-    /// value) or resolves the literal constant value. Until then it is an
-    /// **unproven** value — treated exactly like [`ArgValue::Other`] (never flows
-    /// into a scalar check, resolves to no proven value).
+    /// portion (an explicit name or `self`/`static`/`parent`) plus the constant or
+    /// case name. Syntactically identical to an enum-case (`Suit::Hearts` vs
+    /// `Config::TIMEOUT`); the enum distinction needs the project index, so
+    /// lowering emits this uniform form and inference reinterprets it against a
+    /// resolved enum (→ [`ArgValue::EnumCase`]) or resolves the literal constant.
+    /// Until then it is **unproven** — treated like [`ArgValue::Other`].
     ClassConst(StaticClass, String),
-    /// An enum-case object value `Enum::Case` (ADR-0043): the resolved,
-    /// lowercase enum FQN plus the case name. This is an *object* value of the
-    /// enum class (is-a the enum's interfaces + `UnitEnum`/`BackedEnum`). It is
-    /// produced by the inference layer when a [`ArgValue::ClassConst`] resolves
-    /// against a lowered enum — lowering never emits it directly (enum identity
-    /// is a project-index fact, not a syntactic one). Like [`ArgValue::New`] it is
-    /// not a scalar literal; native scalar checks stay silent on it.
+    /// An enum-case object value `Enum::Case` (ADR-0043): resolved lowercase enum
+    /// FQN plus case name. An *object* value of the enum class (is-a the enum's
+    /// interfaces + `UnitEnum`/`BackedEnum`), produced by inference when an
+    /// [`ArgValue::ClassConst`] resolves against a lowered enum — lowering never
+    /// emits it directly (enum identity is a project-index fact). Not a scalar.
     EnumCase(String, String),
-    /// A null-coalescing rvalue `$a ?? $b` (ADR-0052 §6): the value is `$a` when it
-    /// is set-and-non-null, else `$b`. The walk resolves it to
-    /// `clear_null(fact($a)) join fact($b)` — the non-null part of `$a` unioned with
-    /// `$b`. Only reached when both operands lower to a representable value; an
-    /// operand the domain cannot spell (notably an array offset `$arr['k']`, which
-    /// lowers to [`Self::Other`]) yields no fact, so `??` never manufactures a fact
-    /// for a value it cannot see. Short-ternary `?:` still widens to `Other`.
+    /// A null-coalescing rvalue `$a ?? $b` (ADR-0052 §6): `$a` when set-and-non-null,
+    /// else `$b`, resolved as `clear_null(fact($a)) join fact($b)`. Reached only
+    /// when both operands lower to a representable value — an operand the domain
+    /// cannot spell (e.g. `$arr['k']`, which lowers to [`Self::Other`]) yields no
+    /// fact, so `??` never manufactures one for a value it cannot see. `?:` still
+    /// widens to `Other`.
     ///
-    /// The third field is the RIGHT operand's source extent. `??` gates it the
-    /// way a ternary gates its arms: a left operand proven set-and-non-null means
-    /// PHP never evaluates the right, and the walk records that span dead
-    /// (ADR-0052 §6). Outside the [`Hash`] impl, for the same reason as
-    /// [`Self::Ternary`]'s arm spans.
+    /// The third field is the RIGHT operand's source extent: a left operand proven
+    /// set-and-non-null means PHP never evaluates the right, recorded dead
+    /// (ADR-0052 §6). Outside the [`Hash`] impl, same reason as [`Self::Ternary`].
     Coalesce(Box<ArgValue>, Box<ArgValue>, Span),
-    /// An array/offset read `$base[$key]` in **rvalue** position (ADR-0049 §7 / S3).
-    /// `base` and `key` are the lowered sub-expressions (each may itself be any
-    /// [`ArgValue`], commonly a [`Self::Var`] base and a literal/`Var` key). This is
-    /// never a *proven* value (`val_of` yields `None`, [`Self::is_literal`] is
-    /// `false`): the walk resolves the base to a container `Fact` and the key to a
-    /// proven value, then judges `offset.missing` / `offset.on-unsupported` **only in
-    /// the whitelisted read contexts** (ADR-0049 A7: plain assignment-RHS and return
-    /// operands). It is a *silence carrier* everywhere else — an operand of `??`
-    /// ([`Self::Coalesce`]), a write lvalue, an `isset`/`array_key_exists` argument,
-    /// or an array element never fires (the array element case collapses the whole
-    /// literal to [`Self::Other`], as an offset read is not a proven element value).
+    /// An array/offset read `$base[$key]` in **rvalue** position (ADR-0049 §7/S3).
+    /// `base`/`key` are the lowered sub-expressions. Never a *proven* value
+    /// (`val_of` is `None`, [`Self::is_literal`] is `false`): the walk resolves
+    /// `base` to a container `Fact` and `key` to a proven value, then judges
+    /// `offset.missing` / `offset.on-unsupported` **only in whitelisted read
+    /// contexts** (ADR-0049 A7: assignment-RHS, return operands). Elsewhere it is
+    /// a silence carrier — a `??` operand, write lvalue, `isset`/
+    /// `array_key_exists` argument, or array element (which collapses the whole
+    /// literal to [`Self::Other`]) never fires.
     OffsetRead { base: Box<ArgValue>, key: Box<ArgValue> },
     /// A string concatenation `$a . $b` (issue #59). Lowered **structurally**, not
-    /// folded here: the operands commonly include a [`Self::Var`] whose value only
-    /// the walk knows (a parameter bound to a caller's literal, say), so the join
-    /// belongs at resolution time where the env is in hand. Left-nested for a chain
-    /// (`a . b . c` is `Concat(Concat(a, b), c)`), matching PHP's left associativity.
+    /// folded here — operands commonly include a [`Self::Var`] whose value only
+    /// the walk knows, so the join belongs at resolution time. Left-nested for a
+    /// chain (`a . b . c` is `Concat(Concat(a, b), c)`), matching PHP associativity.
     ///
-    /// This is not itself a proven value ([`Self::is_literal`] is `false`) — it
-    /// resolves to one exactly when both operands resolve to values whose string
-    /// cast is *total and environment-independent*. See the inference layer's
-    /// `concat_cast` for that admission rule and why `float` is excluded.
+    /// Not itself a proven value ([`Self::is_literal`] is `false`) — resolves to
+    /// one exactly when both operands resolve to values whose string cast is
+    /// *total and environment-independent*. See `concat_cast` for that admission
+    /// rule and why `float` is excluded.
     ///
     /// A compound `.=` lowers its rvalue to [`Self::Other`] (see [`StmtKind`]).
     Concat(Box<ArgValue>, Box<ArgValue>),
     /// A bare **global-constant fetch** (`PREG_SET_ORDER`, `SOME_CONST`) in value
     /// position (issue #168), carried with its qualification kind. Like
-    /// [`ArgValue::ClassConst`] this is an **unproven** value (never a literal,
-    /// never concrete): PHP resolves an unqualified constant through the current
-    /// namespace before falling back to the global one, so only a consumer that
-    /// applies the engine-constant shadow discipline (issue #29's `PHP_VERSION_ID`
-    /// rules) may read a value out of it. Every other consumer treats it exactly
-    /// like the [`ArgValue::Other`] it lowered to before.
+    /// [`ArgValue::ClassConst`], **unproven**: PHP resolves an unqualified constant
+    /// through the current namespace before falling back to the global one, so
+    /// only a consumer applying the engine-constant shadow discipline (issue #29's
+    /// `PHP_VERSION_ID` rules) may read a value out of it; every other consumer
+    /// treats it like [`ArgValue::Other`].
     GlobalConst(NameRef),
-    /// A binary-operator expression in **value** position (issue #260): the
-    /// operator-value node.
-    ///
-    /// Lowered structurally, exactly like [`Self::Concat`] and [`Self::Coalesce`]:
-    /// an operand is commonly a [`Self::Var`] whose value only the walk knows, so
-    /// the decision belongs at resolution time where the env is in hand. This is
-    /// never a proven value on its own ([`Self::is_literal`] is `false`) — it
-    /// resolves to one exactly when the evaluator can decide it.
-    ///
-    /// Only [`ValueOp`]-representable operators reach here; every other binary
-    /// operator still lowers to [`Self::Other`], so the node never claims reach it
-    /// does not have.
+    /// A binary-operator expression in **value** position (issue #260). Lowered
+    /// structurally, like [`Self::Concat`]/[`Self::Coalesce`]: an operand is
+    /// commonly a [`Self::Var`] whose value only the walk knows, so resolution
+    /// happens where the env is in hand. Not itself proven ([`Self::is_literal`]
+    /// is `false`). Only [`ValueOp`]-representable operators reach here; every
+    /// other binary operator lowers to [`Self::Other`].
     Binary { op: ValueOp, lhs: Box<ArgValue>, rhs: Box<ArgValue> },
     Other,
 }
 
 /// Identifies the target of an [`ArgValue::Closure`] (ADR-0033). Either an
 /// anonymous closure/arrow expression lowered to its own [`Scope`] (addressed by
-/// the definition-site byte offset, matching [`ScopeOwner::Closure`]), or a
+/// definition-site byte offset, matching [`ScopeOwner::Closure`]), or a
 /// first-class callable naming a free function.
 ///
-/// The captured environment snapshot (by-value `use`/arrow auto-capture) is **not**
-/// stored here — `captures` lists only the captured *names*; the value snapshot of
-/// each is taken at closure-creation time by the inference walk (reading the
-/// definition-site env), which is the semantically correct PHP by-value capture.
+/// The captured environment snapshot is **not** stored here — `captures` lists
+/// only names; each value snapshot is taken at closure-creation time by the
+/// inference walk (reading the definition-site env), PHP's by-value capture.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ClosureRef {
     /// A closure/arrow expression with its own scope at `def_offset` (the closure
-    /// keyword's byte offset; the closure scope's [`ScopeOwner::Closure`] carries
-    /// the same). `captures` are the by-value captured variable names — explicit
-    /// `use ($x)` for closures, the free variables of the body for arrow fns.
+    /// keyword's byte offset, matching [`ScopeOwner::Closure`]). `captures` are
+    /// the by-value captured names — explicit `use ($x)` for closures, the free
+    /// variables of the body for arrow fns.
     Anonymous { def_offset: u32, captures: Vec<String> },
-    /// A first-class callable of a named free function: `strtolower(...)`. Resolves
-    /// as a function name through project/catalog resolution. Method and static
-    /// first-class callables (`$o->m(...)`, `Foo::m(...)`) lower to
-    /// [`ArgValue::Other`].
+    /// A first-class callable of a named free function: `strtolower(...)`.
+    /// Resolves via project/catalog resolution. Method and static first-class
+    /// callables (`$o->m(...)`, `Foo::m(...)`) lower to [`ArgValue::Other`].
     FunctionName(NameRef),
 }
 
@@ -1293,18 +1224,14 @@ pub enum ArrayKey {
     /// A string key that is not integer-like. A byte string (ADR-0080).
     Str(PhpStr),
     /// **A key the source does not spell as a literal** (issue #336): `[$k => $v]`,
-    /// `[f() => $v]`, `[FOO => $v]`.
-    ///
-    /// Before this existed, one such key lowered the **whole** literal to
-    /// [`ArgValue::Other`], so `array_key_first([$string => null])` and every
-    /// `foreach ([$k => $v] as …)` had no fact to work from at all. The key
-    /// expression is carried instead, so the walk can ask what it *is* even
-    /// though it cannot say which key it lands on.
-    ///
-    /// It is **not** a normalized key and never becomes one: [`normalize_array`]
-    /// declines a literal containing it, because the next-auto-index chain runs
-    /// through it (an unknown key may be an integer, which moves every following
-    /// `Auto` position) and a guessed key set is wrong rather than wide.
+    /// `[f() => $v]`, `[FOO => $v]`. Before this existed, such a key lowered the
+    /// **whole** literal to [`ArgValue::Other`], leaving `array_key_first` and
+    /// `foreach` with no fact at all; the key expression is carried instead, so
+    /// the walk can ask what it *is* even without knowing which key it lands on.
+    /// Never a normalized key: [`normalize_array`] declines a literal containing
+    /// one, since the next-auto-index chain runs through it (an unknown key may
+    /// be an integer, shifting every following `Auto` position) and a guessed key
+    /// set is wrong rather than wide.
     Expr(Box<ArgValue>),
 }
 
@@ -1543,39 +1470,33 @@ pub struct DuplicateArrayKey {
 }
 
 /// Scan one [`ArrayLiteralSite`]'s elements for PHP-key-equal duplicates
-/// (issue #187, `array.duplicate-key`), reusing the exact key coercion
-/// (`lower_array_key`, via [`ArrayLiteralElement::key`]) and next-auto-index
-/// rule (`next_auto_index`) [`normalize_array`] applies to fold a whole
-/// literal — no second coercion table.
+/// (issue #187, `array.duplicate-key`), reusing [`normalize_array`]'s exact key
+/// coercion (`lower_array_key`) and next-auto-index rule (`next_auto_index`).
 ///
 /// Pairing is **adjacent**: each later occurrence is reported against the
-/// nearest earlier occurrence of the same key, matching how PHP itself
-/// overwrites the slot in place (three occurrences of one key yield two
-/// findings — first-shadowed-by-second, second-shadowed-by-third — never one
-/// finding naming the first and third).
+/// nearest earlier occurrence of the same key, matching how PHP overwrites the
+/// slot in place (three occurrences of one key yield two findings, never one
+/// naming the first and third).
 ///
-/// An element whose key the fold gate cannot pin (`None` — a variable, a
-/// call, a spread, a destructuring hole) is skipped, and — since its actual
-/// runtime key could be an integer that shifts the auto-increment counter —
-/// every `Auto` element after it is unresolvable too and skipped as well
-/// (silence, never a guess: `php -r '$x=5; var_export([$x=>"a","b"]);'` →
-/// `[5=>"a", 6=>"b"]`, so an unproven key genuinely moves later positions).
+/// An element whose key the fold gate cannot pin (`None`: a variable, call,
+/// spread, destructuring hole) is skipped, and every `Auto` element after it
+/// is skipped too — its runtime key could be an integer shifting the
+/// auto-increment counter (`php -r '$x=5; var_export([$x=>"a","b"]);'` →
+/// `[5=>"a", 6=>"b"]`), so this is silence, never a guess.
 ///
-/// `php_minor` selects the next-int rule exactly as [`normalize_array`] does.
-/// When it is `None`, both rules run in parallel per `Auto` element; the
-/// element resolves only while they agree, and the first disagreement poisons
-/// every `Auto` element after it too (the version-dependent leg of ADR-0049
-/// A12, resolved per element rather than for the whole literal).
+/// `php_minor` selects the next-int rule as [`normalize_array`] does. When
+/// `None`, both rules run in parallel per `Auto` element; an element resolves
+/// only while they agree, and the first disagreement poisons every later
+/// `Auto` element too (ADR-0049 A12's version-dependent leg, resolved per
+/// element rather than for the whole literal).
 ///
-/// String keys compare as **byte strings** (ADR-0080), so a literal spelling
-/// four distinct invalid-UTF-8 bytes declares four distinct keys.
-/// `corpus/symfony__console/Helper/QuestionHelper.php:356` —
-/// `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3]` — is silent because those
-/// keys genuinely differ, not because the scan declines to look at them. Until
-/// [`PhpStr`] landed they all decoded to one `"\u{FFFD}"` and this scan needed
-/// a guard skipping any U+FFFD-bearing key (issue #187), which also cost the
-/// true positive on a literal that repeats a real `"\u{FFFD}"`; both the guard
-/// and its cost are gone.
+/// String keys compare as **byte strings** (ADR-0080): a literal spelling four
+/// distinct invalid-UTF-8 bytes declares four distinct keys —
+/// `corpus/symfony__console/Helper/QuestionHelper.php:356`'s
+/// `["\xC0"=>1, "\xD0"=>1, "\xE0"=>2, "\xF0"=>3]` is silent because those keys
+/// genuinely differ. Before [`PhpStr`], they all decoded to one `"\u{FFFD}"`,
+/// requiring a guard that also cost a true positive on a literal repeating a
+/// real `"\u{FFFD}"`; both the guard and its cost are gone.
 #[must_use]
 pub fn duplicate_array_keys(
     site: &ArrayLiteralSite,
@@ -1710,17 +1631,13 @@ impl ArgValue {
 
     /// Whether this is a **self-evident value**: a scalar literal, or an array
     /// literal whose every element is itself self-evident (recursively).
-    ///
-    /// This is [`Self::is_literal`] extended over the array carrier, and it is the
-    /// predicate both guard narrowing ([`CondOperand::Literal`]) and the fold seam
-    /// (ADR-0028) need: an array is a *value* exactly when nothing inside it is
-    /// still unresolved. One `Var`/call/offset-read element anywhere in the tree
-    /// leaves the whole array unproven — it widens rather than folding (issue #39),
-    /// which is the only reading compatible with the zero-FP bar (ADR-0002).
-    ///
-    /// The empty array is concrete (`count([])` is a fold, not a widen). Keys need
-    /// no test: lowering already refuses a non-literal key by collapsing the whole
-    /// literal to [`Self::Other`] (see `lower_array_key`).
+    /// Extends [`Self::is_literal`] over the array carrier — the predicate
+    /// guard narrowing ([`CondOperand::Literal`]) and the fold seam (ADR-0028)
+    /// need: a `Var`/call/offset-read element anywhere in the tree leaves the
+    /// whole array unproven, widening rather than folding (issue #39, the only
+    /// reading compatible with the zero-FP bar, ADR-0002). The empty array is
+    /// concrete; keys need no test since lowering already collapses a
+    /// non-literal key to [`Self::Other`] (`lower_array_key`).
     #[must_use]
     pub fn is_concrete_value(&self) -> bool {
         match self {
@@ -1958,18 +1875,16 @@ pub struct CallExpr {
     /// [`Self::args`] — `Some` only where the argument is a condition the
     /// [`CondExpr`] vocabulary models (`isset(…)`, `empty(…)`, their `!`/`&&`/
     /// `||` compositions, a constant-key comparison, a named call), `None`
-    /// everywhere else.
+    /// everywhere else. [`ArgValue`] cannot express `isset($d['a'])` as a value,
+    /// but a userland assertion helper called on it is a guard the ADR-0058 tag
+    /// lane consumes exactly like `assert(isset($d['a']))` — only if the
+    /// condition survives lowering, which is what this field is for. Populated
+    /// purely syntactically (lowering knows nothing about `@phpstan-assert`
+    /// tags).
     ///
-    /// [`ArgValue`] cannot express `isset($d['a'])` as a value, but a userland
-    /// assertion helper called on it is a guard the analysis consumes exactly as it
-    /// consumes `assert(isset($d['a']))` (ADR-0058's tag lane) — only if the
-    /// *condition* survives lowering, and this field is where it survives.
-    /// Populated purely syntactically: the lowering knows nothing about which
-    /// callees carry `@phpstan-assert` tags.
-    ///
-    /// **Empty when no argument has a guard reading** (the overwhelming case), so
-    /// an ordinary call allocates nothing; index with [`Self::arg_cond`], which
-    /// treats a short vector as all-`None`. Deliberately NOT a condition the branch
+    /// Empty when no argument has a guard reading (the common case), so an
+    /// ordinary call allocates nothing; index with [`Self::arg_cond`], which
+    /// treats a short vector as all-`None`. Not itself a condition the branch
     /// walk may evaluate as an `if`.
     pub arg_conds: Vec<Option<CondExpr>>,
 }
@@ -2064,54 +1979,41 @@ pub enum CondOperand {
     /// appear here; a non-literal expression lowers the operand to [`Self::Other`].
     Literal(ArgValue),
     /// `$var[<literal>]` — a **constant-key projection**, depth exactly one
-    /// (ADR-0062 A-G4: binding base, constant key). Carried so a
-    /// tagged-union guard (`$s['kind'] === 'circle'`, `match ($s['kind'])`,
-    /// `switch ($s['kind'])`) can subtract the base's array arms by the field's
-    /// `admits` verdict.
-    ///
-    /// Only the shape-narrowing pass reads this variant. Other consumers derive
-    /// no verdict or value-lane refinement from it.
+    /// (ADR-0062 A-G4: binding base, constant key). Lets a tagged-union guard
+    /// (`$s['kind'] === 'circle'`, `match`/`switch ($s['kind'])`) subtract the
+    /// base's array arms by the field's `admits` verdict. Only the
+    /// shape-narrowing pass reads this variant.
     Offset { var: String, key: Box<ArgValue> },
     /// A bare **global-constant fetch** (`PHP_VERSION_ID`, `SOME_CONST`), carried
-    /// as the reference was written (issue #29). Lowered so the version-guard
-    /// fold can recognize the engine's `PHP_VERSION_ID` and decide the branch
-    /// against the resolved target range. Other consumers derive no verdict or
-    /// refinement from it.
+    /// as written (issue #29), so the version-guard fold can recognize
+    /// `PHP_VERSION_ID` and decide the branch against the resolved target range.
+    /// Other consumers derive no verdict from it.
     Const(NameRef),
     /// Anything else (a call, a property fetch, an arithmetic sub-expression, …)
     /// — unrepresentable for the *verdict*, but never opaque about what it did.
-    ///
-    /// A comparison operand is a position where arbitrary PHP runs, and the
-    /// operand variants above cannot say so: before these two fields existed,
-    /// `preg_match($re, $s, $m) === 1` lowered to a `Cmp` that mentioned neither
-    /// the call nor `$m`, so the branch walk had nothing to invalidate and an
-    /// earlier `$m = []` survived into the branch as a false `list{}` (issue
-    /// #158). What is unmodeled here is the operand's *value*, not its effects.
+    /// Before these fields existed, `preg_match($re, $s, $m) === 1` lowered to a
+    /// `Cmp` mentioning neither the call nor `$m`, so the branch walk had
+    /// nothing to invalidate and an earlier `$m = []` survived into the branch
+    /// as a false `list{}` (issue #158). Only the operand's *value* goes
+    /// unmodeled here, not its effects.
     Other {
-        /// The call this operand **is**, when it is a statically-resolvable one
-        /// (`named_call` — the same recognition [`CondExpr::Call`] uses in
-        /// guard position). `None` for a dynamic callee and for an operand that
-        /// merely *contains* a call (`f($x) + 1`), whose invalidation still
-        /// lands through `invalidates`.
+        /// The call this operand **is**, when statically-resolvable (same
+        /// recognition [`CondExpr::Call`] uses in guard position). `None` for a
+        /// dynamic callee or an operand that merely *contains* a call
+        /// (`f($x) + 1`), whose invalidation still lands through `invalidates`.
         call: Option<Box<CallExpr>>,
         /// The variables a write inside this operand may have rebound — the
-        /// operand's **invalidation set**, and deliberately not "every variable
-        /// it mentions": it is empty unless the subtree contains something that
-        /// can write a variable of this scope at all
-        /// (`operand_writers`). `$o->p === $s` writes nothing, so `$o` and
-        /// `$s` keep their facts across it; `f($o->p) === $s` may write both.
+        /// **invalidation set**, deliberately not "every variable mentioned":
+        /// empty unless the subtree contains a writer (`operand_writers`).
+        /// `$o->p === $s` writes nothing; `f($o->p) === $s` may write both.
         invalidates: Vec<String>,
-        /// The ADR-0070 by-value evidence for the names in `invalidates`, in the
-        /// shape [`Stmt::invalidated`] carries it — so a fact the callee provably
-        /// cannot reach (`count($a) === count($b)` hands `$a` and `$b` to a
-        /// by-value parameter) survives the comparison, exactly as it survives a
-        /// statement-position call.
-        ///
-        /// **Empty means no exemption may be granted**, and it is empty whenever
-        /// the operand contains a writer that is not a call
-        /// (`OperandWriters::Any`): the gate describes what a *callee* can do
-        /// to its arguments and says nothing about an assignment or an `++`
-        /// sitting beside it, so `f($y) + ($y = 1)` keeps the blanket drop.
+        /// The ADR-0070 by-value evidence for the names in `invalidates`, in
+        /// [`Stmt::invalidated`]'s shape — a fact the callee provably cannot
+        /// reach (`count($a) === count($b)` hands both by-value) survives the
+        /// comparison, as it survives a statement-position call. Empty means no
+        /// exemption may be granted; empty whenever the operand contains a
+        /// non-call writer (`OperandWriters::Any`), so `f($y) + ($y = 1)` keeps
+        /// the blanket drop.
         sites: Vec<InvalidatedVar>,
     },
 }
@@ -2136,28 +2038,23 @@ pub enum CondExpr {
     /// `a || b` / `a or b`.
     Or(Box<CondExpr>, Box<CondExpr>),
     /// A resolvable **call in guard position** (`if (isFoo($x))`). Retained (not
-    /// opaqued) so the inference layer can (a) consume the callee's
-    /// `@phpstan-assert-if-true`/`-if-false` envelopes on the matching branch
-    /// (ADR-0052 §5, at the `Asserted` stratum) and (b) fold a recognized existence
-    /// predicate to a real Yes/No/Maybe verdict (`method_exists`/`function_exists`/
-    /// `class_exists` …, ADR-0049 §4 / N3). Other guard calls evaluate to
-    /// `Maybe`; `reads` invalidates their variables on the excluded path.
+    /// opaqued) so inference can consume the callee's
+    /// `@phpstan-assert-if-true`/`-if-false` envelope (ADR-0052 §5, `Asserted`
+    /// stratum) and fold a recognized existence predicate
+    /// (`method_exists`/`function_exists`/`class_exists`, ADR-0049 §4/N3) to a
+    /// real verdict. Other guard calls evaluate to `Maybe`; `reads` invalidates
+    /// their variables on the excluded path.
     Call { call: Box<CallExpr>, reads: Vec<String> },
     /// `isset($var[<literal>])` — a **key-presence guard**, depth exactly one
     /// (ADR-0062 S4). PHP's `isset` is true when the key exists *and* its value
-    /// is not null, which is the distinction the narrowing consumes: the true
-    /// branch promotes presence and strips `null` from the value slot.
-    ///
-    /// Only this exact form is lowered. `isset($x)` on a bare variable and an
-    /// `isset` over a property/dynamic key lower to [`Self::Opaque`].
-    /// `empty($x[<literal>])` —
-    /// the same depth-one scope — lowers to `!isset(…) || !…` in terms of this
-    /// variant (PHP's own definition of the construct); every other `empty`
-    /// form stays `Opaque`.
-    /// A multi-argument `isset($a['x'], $b['y'])` — a conjunction by PHP
-    /// semantics — lowers to an [`Self::And`] chain of these, but only when
-    /// *every* operand fits the form; otherwise the whole construct stays
-    /// `Opaque`.
+    /// is not null; the true branch promotes presence and strips `null` from
+    /// the value slot. Only this exact form is lowered — `isset($x)` on a bare
+    /// variable, and an `isset` over a property/dynamic key, go to
+    /// [`Self::Opaque`]. `empty($x[<literal>])` at the same depth lowers to
+    /// `!isset(…) || !…` in terms of this variant (PHP's own definition);
+    /// every other `empty` form stays `Opaque`. A multi-argument
+    /// `isset($a['x'], $b['y'])` (a conjunction by PHP semantics) lowers to an
+    /// [`Self::And`] chain, only when every operand fits this form.
     Isset { var: String, key: Box<ArgValue> },
     /// A condition the lowering cannot model. `reads` lists every bare variable it
     /// mentions, so a branch guarded by an opaque condition still invalidates
@@ -2274,79 +2171,70 @@ pub enum StmtKind {
     Exit { span: Span },
     /// A recognized *control-flow* construct (`while`/`for`/`foreach`/
     /// `do-while`/`switch`/`match`-statement/`try`/nested block) whose internal
-    /// data-flow the trace does not model, but whose **write set and read set** it
-    /// does. Under the ADR-0027 ratchet, the walk forgets only the variables the
-    /// construct might touch **or branch on**, rather than all known values.
+    /// data-flow the trace does not model, but whose **write set and read set**
+    /// it does. Under the ADR-0027 ratchet, the walk forgets only the variables
+    /// the construct might touch **or branch on**, not all known values.
     ///
     /// * `writes` — the over-approximated set of variable names the subtree may
-    ///   assign (any assignment lvalue, compound assign, increment/decrement,
-    ///   `foreach` value/key binding, `catch` parameter, `list()`
-    ///   destructuring) *plus* every variable handed to any call inside it
-    ///   (by-ref conservatism). Over-collection is always sound — it only
-    ///   forgets more. Nested function/closure bodies are separate scopes and
-    ///   their internal writes are **not** counted.
-    /// * `reads` — every *other* variable the subtree merely *mentions*
-    ///   (conditions included), i.e. every direct variable in the subtree not
-    ///   already in `writes`. A construct that **reads** a variable may branch on
-    ///   it and early-return, so the fall-through path can *exclude* the currently-
-    ///   known value: continuing with the binding intact would assert an
-    ///   unreachable path (a real soundness hole — a `?int` guard `if ($x == null)
-    ///   { return; }` filters `null` out, yet the tail would otherwise still see
-    ///   `$x = null`). Invalidating reads too closes it. Over-collection is sound;
-    ///   nested function/closure bodies are not descended, same as `writes`.
+    ///   assign (any assignment lvalue, compound assign, inc/dec, `foreach`
+    ///   value/key binding, `catch` parameter, `list()` destructuring) plus
+    ///   every variable handed to any call inside it (by-ref conservatism).
+    ///   Over-collection is sound. Nested function/closure bodies are separate
+    ///   scopes and not counted.
+    /// * `reads` — every other variable the subtree merely mentions (conditions
+    ///   included) not already in `writes`. A construct that reads a variable
+    ///   may branch on it and early-return, so the fall-through path must
+    ///   exclude the currently-known value — continuing with the binding intact
+    ///   would assert an unreachable path (`?int` guard
+    ///   `if ($x == null) { return; }` filters `null`, but the tail would
+    ///   otherwise still see `$x = null`). Same nested-scope exclusion as
+    ///   `writes`.
     /// * `poisons` — `true` if the subtree contains any ADR-0001 poison marker
     ///   (reference/`global`/`static`/variable-variable/`extract`/`include`/
-    ///   by-ref `use`, …). When set, the walk clears the whole env, exactly as a
-    ///   `Barrier` would; the enclosing scope is independently poisoned too.
-    /// * `may_return` — `true` if the subtree contains a `return` the walk cannot
-    ///   see as a top-level [`StmtKind::Return`] (e.g. `return` inside a
-    ///   `foreach`/`try` body). Return-fact summaries (ADR-0057 T0) contribute the
-    ///   declared floor for such a construct so a visible sibling `return null`
-    ///   cannot become a false Singleton (ADR-0075 / issue #126 review). Nested
-    ///   function/closure bodies are separate scopes and are not counted.
+    ///   by-ref `use`). Clears the whole env like a `Barrier`; the enclosing
+    ///   scope is independently poisoned too.
+    /// * `may_return` — `true` if the subtree contains a `return` not visible as
+    ///   a top-level [`StmtKind::Return`] (e.g. inside a `foreach`/`try` body).
+    ///   Return-fact summaries (ADR-0057 T0) contribute the declared floor so a
+    ///   visible sibling `return null` can't become a false Singleton
+    ///   (ADR-0075 / issue #126). Nested function/closure bodies not counted.
     ///
-    /// Limitation: if every branch returns early, fall-through code is dead, but
-    /// this representation cannot prove that without branch/reachability analysis.
+    /// Limitation: cannot prove fall-through code dead when every branch returns
+    /// early, without branch/reachability analysis.
     Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool, may_return: bool },
     /// `$var[<lit>] = <rvalue>;` / `$var[<lit>][<lit>] = <rvalue>;` — a
-    /// **constant-key offset write** (ADR-0062 A-G8's invalidation table).
-    ///
-    /// This is a [`Self::Barrier`] carrying one extra piece of information. The
-    /// walk still forgets the whole env and store exactly as a barrier does —
-    /// an array write can alias anything the lowering cannot bound — and then
-    /// re-establishes *only* the base binding's array shape with the key promoted.
-    ///
-    /// `keys` has one or two entries (depth 1, plus the autovivification case
-    /// A-G8 names); `$x[] = v` (append), a dynamic key, and a compound operator
-    /// (`+=`, `.=`) all stay a plain `Barrier`.
+    /// **constant-key offset write** (ADR-0062 A-G8's invalidation table). A
+    /// [`Self::Barrier`] carrying one extra fact: the walk still forgets the
+    /// whole env and store (an array write can alias anything unbounded), then
+    /// re-establishes *only* the base binding's array shape with the key
+    /// promoted. `keys` has one or two entries (depth 1, plus the
+    /// autovivification case A-G8 names); `$x[] = v` (append), a dynamic key,
+    /// and a compound operator (`+=`, `.=`) all stay a plain `Barrier`.
     OffsetWrite { base: String, keys: Vec<ArgValue>, value: ArgValue },
     /// `unset($var[<lit>]);` — a **constant-key offset unset** (A-G8). Same
     /// containment as [`Self::OffsetWrite`]: barrier semantics plus a
     /// `mark_absent` on the base's shape. A multi-target `unset`, a dynamic key,
     /// and `unset($var)` itself all stay a plain `Barrier`.
     OffsetUnset { base: String, key: ArgValue },
-    /// `[$a, $b] = <source>;` / `list($a, $b) = <source>;` — an array-destructuring
-    /// assignment (issue #288).
+    /// `[$a, $b] = <source>;` / `list($a, $b) = <source>;` — array destructuring
+    /// (issue #288). A [`Self::Barrier`] carrying one extra fact: the **reads
+    /// the source undergoes**. A destructure evaluates `<source>[k]` once per
+    /// target, like a plain assignment-RHS read, and PHP warns
+    /// `Undefined array key k` for every missing key. Targets are writes and
+    /// are not modeled — the walk still forgets the whole env and store.
     ///
-    /// This is a [`Self::Barrier`] carrying one extra piece of information: the
-    /// **reads the source undergoes**. A destructure evaluates `<source>[k]` once
-    /// per target, exactly as a plain assignment-RHS read would, and PHP warns
-    /// `Undefined array key k` for every key that is not there. The targets are
-    /// *writes* and are not modeled — the walk still forgets the whole env and
-    /// store, as a barrier does — so this variant adds a read position and no
-    /// value lane at all.
+    /// `reads` holds one **key path** per target, outermost key first, in
+    /// source order: `[$a, $b]` is `[[0], [1]]`, `['a' => $x]` is `[["a"]]`, a
+    /// nested pattern `[[$a], $b]` recurses to `[[0], [0, 0], [1]]` (the outer
+    /// read happens too, and is what PHP warns about first). A skipped hole
+    /// (`[, $b]`) consumes its index without reading it. `call` carries the
+    /// full [`CallExpr`] when the source is a statically-named call
+    /// (`[$a, $b] = f();`), so the read judgment can reach its declared return.
     ///
-    /// `reads` holds one **key path** per target, outermost key first, in source
-    /// order: `[$a, $b]` is `[[0], [1]]`, `['a' => $x]` is `[["a"]]`, and a nested
-    /// pattern `[[$a], $b]` recurses to `[[0], [0, 0], [1]]` — the outer read
-    /// happens too, and it is the one PHP warns about first. A skipped hole
-    /// (`[, $b]`) consumes its index without reading it, so it contributes no path.
-    /// `call` carries the full [`CallExpr`] when the source *is* a statically-named
-    /// call (`[$a, $b] = f();`), so the read judgment can reach its declared return.
-    ///
-    /// A pattern the lowering cannot read faithfully stays a plain [`Self::Barrier`]:
-    /// a by-reference target (`[&$a] = $m` aliases `$m[0]` into existence with no
-    /// warning — it is not a read), a spread, or a non-literal key.
+    /// A pattern the lowering cannot read faithfully stays a plain
+    /// [`Self::Barrier`]: a by-reference target (`[&$a] = $m` aliases `$m[0]`
+    /// into existence with no warning — not a read), a spread, or a
+    /// non-literal key.
     Destructure { source: ArgValue, call: Option<CallExpr>, reads: Vec<Vec<ArgValue>>, span: Span },
     /// Any construct the trace does not model *and* whose write set it cannot
     /// bound (`goto`, labels, `declare`, `__halt_compiler`, and anything the
@@ -2357,38 +2245,34 @@ pub enum StmtKind {
 // reachability foundation (ADR-0078, issue #199)
 
 /// Where a statement — or a whole statement list — leaves control (ADR-0078,
-/// issue #199): the **terminality judgment** the reachability foundation is built
-/// from. Computed at lowering time from the CST (see `stmt_end`), so every
+/// issue #199): the **terminality judgment** the reachability foundation is
+/// built from. Computed at lowering time from the CST (`stmt_end`), so every
 /// consumer reads one answer instead of re-deriving control flow from the
-/// deliberately lossy trace IR.
+/// lossy trace IR.
 ///
-/// The judgment is over the **syntactic control-flow graph**, not over path
+/// The judgment is over the **syntactic control-flow graph**, not path
 /// feasibility: a branch condition is read as non-deterministic (both edges
-/// live), exactly as PHP's own compiler and every other reachability analysis
-/// read it. What the judgment does model precisely is a construct with *no exit
-/// edge at all* — `return`, `throw`, `exit`, an `unhandled` `match`, a
-/// `while (true)` with no `break`.
+/// live), as PHP's compiler and every reachability analysis reads it. What it
+/// models precisely is a construct with *no exit edge at all* — `return`,
+/// `throw`, `exit`, an `unhandled` `match`, a `while (true)` with no `break`.
 ///
-/// # The safe-side asymmetry — the spine of this design
+/// # The safe-side asymmetry
 ///
-/// [`Self::Unknown`] is not a third outcome to be smoothed away; it is the honest
-/// answer for a construct whose exit edges the judgment cannot bound (a
-/// `try`/`catch`, a `goto`, a `switch` that resisted structuring). **The safe
-/// side of `Unknown` differs by consumer, and each consumer must say which side
-/// it takes:**
+/// [`Self::Unknown`] is the honest answer for a construct whose exit edges the
+/// judgment cannot bound (`try`/`catch`, `goto`, an unstructurable `switch`).
+/// Its safe side differs by consumer, and each must say which side it takes:
 ///
-/// * `type.return-missing` (issue #199) — the accusation is *"this body runs off
-///   its end"*. Only [`Self::FallsThrough`] may be accused, so `Unknown` counts
-///   as **terminating**: silence. It asks [`Self::provably_falls_through`].
-/// * a future dead-code consumer (`UnreachableStatementRule` and the level-4
-///   family) — the accusation is *"the statement after this one never runs"*.
-///   Only [`Self::Terminates`] may be accused, so `Unknown` counts as **not
-///   terminal**: silence. It asks [`Self::provably_terminates`].
+/// * `type.return-missing` (issue #199) accuses *"this body runs off its
+///   end"*. Only [`Self::FallsThrough`] may be accused, so `Unknown` counts as
+///   **terminating**: silence. Asks [`Self::provably_falls_through`].
+/// * a future dead-code consumer (`UnreachableStatementRule`, level-4 family)
+///   accuses *"the statement after this one never runs"*. Only
+///   [`Self::Terminates`] may be accused, so `Unknown` counts as **not
+///   terminal**: silence. Asks [`Self::provably_terminates`].
 ///
-/// Both predicates exist so that neither consumer is ever tempted to write
-/// `!= Terminates` or `!= FallsThrough` — the two negations are exactly the
-/// mistake this type exists to prevent, and each would invert the other
-/// consumer's safe side.
+/// Both predicates exist so neither consumer writes `!= Terminates` or
+/// `!= FallsThrough` — the two negations are exactly the mistake this type
+/// prevents, each inverting the other consumer's safe side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BodyEnd {
     /// Control provably never reaches the end: `return` / `throw` / `exit`, a
@@ -2422,21 +2306,20 @@ impl BodyEnd {
         matches!(self, Self::Terminates)
     }
 
-    /// Join the ends of the **alternative arms** of a branch construct (the arms of
-    /// an `if`/`match`/`switch`, including the implicit no-match arm). The join is
-    /// the arms' least upper bound in the order *every arm terminates* →
-    /// *some arm provably falls through* → *undecided*:
+    /// Join the ends of the **alternative arms** of a branch construct
+    /// (`if`/`match`/`switch`, including the implicit no-match arm) — the least
+    /// upper bound in the order *every arm terminates* → *some arm falls
+    /// through* → *undecided*:
     ///
-    /// * every arm [`Self::Terminates`] ⇒ the construct terminates;
-    /// * any arm [`Self::FallsThrough`] ⇒ the construct falls through (that arm is
-    ///   a terminator-free path to the successor, whatever the others do);
-    /// * otherwise (only `Terminates` and `Unknown` arms) ⇒ [`Self::Unknown`].
+    /// * every arm [`Self::Terminates`] ⇒ terminates;
+    /// * any arm [`Self::FallsThrough`] ⇒ falls through (a terminator-free path
+    ///   to the successor, whatever the others do);
+    /// * otherwise (only `Terminates`/`Unknown` arms) ⇒ [`Self::Unknown`].
     ///
-    /// An empty arm list answers [`Self::Terminates`], the identity: a construct
-    /// with no arms at all offers no path to its successor. (Callers supply the
-    /// implicit arm explicitly — an `if` with no `else` joins in a
-    /// `FallsThrough`, a `match` with no `default` joins in a `Terminates`
-    /// because PHP throws `\UnhandledMatchError` there.)
+    /// An empty arm list answers [`Self::Terminates`] (the identity). Callers
+    /// supply the implicit arm explicitly — an `if` with no `else` joins in
+    /// `FallsThrough`; a `match` with no `default` joins in `Terminates`,
+    /// since PHP throws `\UnhandledMatchError` there.
     #[must_use]
     pub fn join_arms(arms: impl IntoIterator<Item = Self>) -> Self {
         let mut acc = Self::Terminates;
@@ -2453,18 +2336,17 @@ impl BodyEnd {
 
 /// The terminality of an ordered statement list — the tail judgment the whole
 /// foundation exists to answer (ADR-0078, issue #199). Reads each entry's
-/// [`Stmt::end`], which the lowering already computed from the CST.
+/// [`Stmt::end`], already computed from the CST at lowering.
 ///
-/// The fold is *not* "the last statement decides":
+/// Not "the last statement decides":
 ///
-/// * the **first** [`BodyEnd::Terminates`] wins outright — everything after it is
-///   unreachable, so the list terminates however the tail is written. This is what
-///   makes `[try { … } catch { … }, return 1;]` answer `Terminates` rather than
-///   inheriting the `try`'s `Unknown`;
-/// * a [`BodyEnd::Unknown`] entry does **not** stop the scan; it is remembered.
-///   Control may or may not reach past it, so the list's end is undecided *unless*
-///   a later entry terminates unconditionally (see above);
-/// * an empty list [`BodyEnd::FallsThrough`] — the identity — which is exactly
+/// * the **first** [`BodyEnd::Terminates`] wins outright — everything after is
+///   unreachable, so `[try { … } catch { … }, return 1;]` answers `Terminates`
+///   rather than inheriting the `try`'s `Unknown`;
+/// * a [`BodyEnd::Unknown`] entry does not stop the scan; it is remembered, so
+///   the list's end is undecided unless a later entry terminates
+///   unconditionally;
+/// * an empty list answers [`BodyEnd::FallsThrough`] (the identity), exactly
 ///   what makes an `if` with no `else` fall through.
 #[must_use]
 pub fn body_end(stmts: &[Stmt]) -> BodyEnd {
@@ -2517,72 +2399,63 @@ pub struct Stmt {
     /// their own spans). Used by the walk to record proven-dead regions.
     pub span: Span,
     /// The variables this statement passes as an argument to *any* call, one
-    /// entry per name, each carrying the evidence ADR-0070's by-value gate
-    /// consults. The checker marks every entry's name unknown *after* the
-    /// statement — PHP by-reference parameters could mutate them, so a value
-    /// can't be trusted past a call it was handed to (conservatively covering
-    /// unseen `&$x` signatures). That blanket drop is the sound floor, and the
-    /// name set here is complete; an entry whose every occurrence is a provable
-    /// by-value site is the one thing the walk may excuse from it, and the
-    /// entry itself now says which it is.
+    /// entry per name, carrying the evidence ADR-0070's by-value gate consults.
+    /// The checker marks every entry's name unknown *after* the statement — a
+    /// by-reference parameter could mutate it, so a value can't be trusted past
+    /// a call it was handed to (covering unseen `&$x` signatures). That blanket
+    /// drop is the sound floor; an entry whose every occurrence is a provable
+    /// by-value site is the one thing the walk may excuse, and the entry says
+    /// which it is.
     pub invalidated: Vec<InvalidatedVar>,
     /// Every place this statement puts a value into PHP's **string context**
     /// (ADR-0078, issue #193) — an `echo`/`print` operand, an interpolated
-    /// string's embedded expressions, a `(string)` cast, and both operands of a
-    /// `.` concatenation. Collected centrally by `lower_stmt` from the statement's
-    /// own expressions, so a consumer reads one list instead of re-deriving five
-    /// syntactic shapes; the walk judges each site against the statement's ENTRY
-    /// env, which is where PHP evaluates them.
-    ///
-    /// Empty for every statement kind whose expressions are not collected — see
-    /// `string_context_sites` for the boundary and why it is where it is.
+    /// string's embedded expressions, a `(string)` cast, both operands of `.`.
+    /// Collected centrally by `lower_stmt`, so a consumer reads one list
+    /// instead of re-deriving five syntactic shapes; the walk judges each site
+    /// against the statement's ENTRY env, where PHP evaluates them. Empty for
+    /// statement kinds whose expressions are not collected — see
+    /// `string_context_sites` for that boundary.
     pub string_contexts: Vec<StringContextSite>,
     /// Where this statement leaves control (ADR-0078, issue #199) — the
-    /// per-statement half of the reachability foundation, and the only thing
+    /// per-statement half of the reachability foundation, the only thing
     /// [`body_end`] reads.
     ///
-    /// Computed centrally by `lower_stmt` from the **CST**, not from
-    /// [`Self::kind`]: the trace IR erases `while`/`for`/`try`/`switch` into an
-    /// undifferentiated [`StmtKind::Opaque`] and `goto` into a
-    /// [`StmtKind::Barrier`], so a judgment derived from the IR alone could never
-    /// tell a `while (true)` (no exit edge) from a `foreach` (always one) nor a
-    /// `goto` (unbounded) from a `global $x;` (plainly falls through). The CST
-    /// still has all of it in hand at lowering time, which is why the answer is
-    /// computed there and carried here.
+    /// Computed centrally by `lower_stmt` from the **CST**, not [`Self::kind`]:
+    /// the trace IR erases `while`/`for`/`try`/`switch` into an undifferentiated
+    /// [`StmtKind::Opaque`] and `goto` into [`StmtKind::Barrier`], so a
+    /// judgment from the IR alone could never tell a `while (true)` (no exit
+    /// edge) from a `foreach` (always one), or `goto` (unbounded) from
+    /// `global $x;` (falls through). The CST still has it all at lowering time.
     ///
     /// Deliberately independent of [`Self::kind`]: a `break;` is a
-    /// [`StmtKind::Barrier`] whose `end` is [`BodyEnd::Terminates`] (control
-    /// leaves the enclosing list), and a `while (true) {}` is a
-    /// [`StmtKind::Opaque`] whose `end` is [`BodyEnd::Terminates`] too. Nothing
-    /// may infer one field from the other.
+    /// [`StmtKind::Barrier`] whose `end` is [`BodyEnd::Terminates`], and a
+    /// `while (true) {}` is a [`StmtKind::Opaque`] whose `end` is also
+    /// `Terminates`. Nothing may infer one field from the other.
     pub end: BodyEnd,
-    /// Whether this statement's **whole CST subtree** contains a function exit — a
-    /// `return`, a `throw`, an `exit`/`die` (ADR-0078 §5, issue #199). Nested
-    /// function-likes are not counted: their exits are their own scope's.
+    /// Whether this statement's **whole CST subtree** contains a function exit —
+    /// a `return`, `throw`, `exit`/`die` (ADR-0078 §5, issue #199). Nested
+    /// function-likes are not counted (their exits are their own scope's).
     ///
-    /// Orthogonal to [`Self::end`], and that is the point. `end` asks *does control
-    /// reach past this statement*; this asks *does the subtree exit the function
+    /// Orthogonal to [`Self::end`] by design: `end` asks *does control reach
+    /// past this statement*; this asks *does the subtree exit the function
     /// anywhere*. `if ($c) { return 1; }` answers `FallsThrough` and `true`;
-    /// `foreach ($xs as $x) { $s .= $x; }` answers `FallsThrough` and `false`. The
-    /// pair is what splits a falling-through body into the unconditional and the
-    /// conditional class — see [`body_has_terminator`].
-    ///
-    /// Computed from the CST for the same reason `end` is: the trace IR erases a
-    /// loop body, a `try` block and an unstructured `switch` case entirely, so a
-    /// `return` inside any of them is invisible from the IR alone.
+    /// `foreach ($xs as $x) { $s .= $x; }` answers `FallsThrough` and `false`.
+    /// The pair splits a falling-through body into the unconditional and
+    /// conditional class — see [`body_has_terminator`]. Computed from the CST
+    /// for the same reason `end` is (the trace IR erases loop/`try`/unstructured
+    /// `switch` bodies entirely).
     pub has_terminator: bool,
 }
 
 impl Stmt {
-    /// A statement **under construction**: its kind and by-ref evidence, with the
-    /// span, the string-context sites and the terminality left for `lower_stmt` to
-    /// fill in centrally (`span` is [`ZERO_SPAN`] until then, the invariant that
-    /// function documents).
+    /// A statement **under construction**: kind and by-ref evidence set, with
+    /// span, string-context sites and terminality left for `lower_stmt` to fill
+    /// in centrally (`span` is [`ZERO_SPAN`] until then).
     ///
-    /// `end` starts at [`BodyEnd::FallsThrough`] — the value that is correct for
-    /// every straight-line statement and therefore the one whose *absence* of a
-    /// central fill would be least surprising; the two lowering paths that bypass
-    /// `lower_stmt` (`lower_arm_body`, the arrow-function body) set it themselves.
+    /// `end` starts at [`BodyEnd::FallsThrough`] — correct for every
+    /// straight-line statement, so its *absence* of a central fill is least
+    /// surprising; the two lowering paths that bypass `lower_stmt`
+    /// (`lower_arm_body`, the arrow-function body) set it themselves.
     fn lowered(kind: StmtKind, invalidated: Vec<InvalidatedVar>) -> Stmt {
         Stmt {
             kind,
@@ -2688,13 +2561,11 @@ pub enum ScopeOwner {
 }
 
 /// A construct on the ADR-0001 whole-scope give-up list: code the analyzer parses
-/// and then declines to reason about (ADR-0046 §1 "scope havoc"). Each variant is a
-/// *reason* [`Scope::poisoned`] is set, and the set of variants is the poison
-/// predicate's own vocabulary rather than a description of it: `scan_opaque` is the
-/// single walk behind both the predicate and this inventory, so a construct added to
-/// the give-up list cannot fail to appear in what `steins doctor` reports. A
-/// hand-maintained parallel list would drift from the real behaviour, which is
-/// exactly the silence this inventory exists to measure.
+/// and then declines to reason about (ADR-0046 §1 "scope havoc"). Each variant
+/// is a *reason* [`Scope::poisoned`] is set; `scan_opaque` is the single walk
+/// behind both the predicate and this inventory, so a construct added to the
+/// give-up list cannot fail to appear in what `steins doctor` reports — a
+/// hand-maintained parallel list would drift from real behavior.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OpaqueConstruct {
     /// `eval(<expr>)` — code as data (also a [`DynamismKind::Eval`] dam site).
@@ -2831,15 +2702,14 @@ pub struct Scope {
     pub stmts: Vec<Stmt>,
     /// Every instance/static method call in this scope's body, **comprehensively**
     /// (including calls nested inside sub-expressions the linear trace drops to
-    /// [`ArgValue::Other`]), in source order, and NOT descending into nested
-    /// function/closure/class bodies (those are their own scopes). Unlike
-    /// [`Self::stmts`] — which captures only statement-position calls — this is the
-    /// sound caller-enumeration surface the method-transform reverse sweep needs
-    /// (ADR-0043 §6): a candidate method is safe to rewrite only when *every* call
-    /// that could reach it is accounted for, so a nested `$this->m($bad)` must be
-    /// visible here even though the trace never modeled it. Constructor (`new`)
-    /// calls are omitted — the constructor is magic and never a transform
-    /// candidate. Empty when the body has no method calls.
+    /// [`ArgValue::Other`]), in source order, not descending into nested
+    /// function/closure/class bodies (their own scopes). Unlike [`Self::stmts`]
+    /// (statement-position calls only), this is the sound caller-enumeration
+    /// surface the method-transform reverse sweep needs (ADR-0043 §6): a
+    /// candidate method is safe to rewrite only when every call that could
+    /// reach it is accounted for, so a nested `$this->m($bad)` must be visible
+    /// here. Constructor (`new`) calls are omitted (never a transform
+    /// candidate).
     pub method_calls: Vec<CallExpr>,
     /// Parameters of a closure/arrow scope ([`ScopeOwner::Closure`]) — a closure
     /// has no [`FunctionDecl`] to look them up on, so binding descent and native
@@ -2876,107 +2746,94 @@ pub struct Scope {
     /// methods adopt on their decls).
     pub docblock: Option<String>,
     /// The by-value `use ($x)` captures of a `function (…) use (…) {…}` scope
-    /// whose name the closure body **never mentions** (issue #186, the
-    /// `closure.unused-use` mechanics id). A syntactic fact, computed at lowering
-    /// where the CST is still in hand.
+    /// whose name the closure body **never mentions** (issue #186,
+    /// `closure.unused-use`). A syntactic fact, computed at lowering.
     ///
-    /// Three deliberate silences make the list a safe firing set:
+    /// Three deliberate silences make the list safe:
     ///
-    /// * A by-ref `use (&$x)` capture is **never** listed — it is an out-channel
-    ///   (the closure writes through it), so "unread" says nothing about it. It
-    ///   is recorded as an [`OpaqueConstruct::ByRefCapture`] site instead.
-    /// * A *mention* — not a read — clears a capture: any `$x` token anywhere in
-    ///   the body subtree counts, **including inside nested closures and their
-    ///   own `use ($x)` clauses**, which the scope-local walks stop at.
-    ///   Over-collection only removes entries, so it is the safe direction.
-    /// * The whole list is empty when the body holds a construct that can consume
-    ///   a name without spelling it (`compact` / `extract` / `get_defined_vars` /
-    ///   `$$x` / `eval` / `include`) — the scope-local dam.
+    /// * A by-ref `use (&$x)` capture is never listed — it's an out-channel
+    ///   (the closure writes through it), so "unread" says nothing about it;
+    ///   recorded as an [`OpaqueConstruct::ByRefCapture`] site instead.
+    /// * A *mention*, not a read, clears a capture: any `$x` token anywhere in
+    ///   the body subtree counts, including inside nested closures and their
+    ///   own `use ($x)` clauses. Over-collection only removes entries.
+    /// * The whole list is empty when the body holds a name dam
+    ///   (`compact`/`extract`/`get_defined_vars`/`$$x`/`eval`/`include`).
     ///
-    /// Empty for arrow functions (their captures are *derived* from the body, so
-    /// an unused one cannot exist) and for every non-closure scope.
+    /// Empty for arrow functions (captures are *derived* from the body, so an
+    /// unused one cannot exist) and for every non-closure scope.
     pub unused_captures: Vec<UnusedCapture>,
     // undefined variables (ADR-0078, issue #194)
     /// Every read of a name this scope **never binds** — the firing set of
-    /// `variable.undefined` (issue #194). A syntactic fact, computed at lowering
-    /// where the CST is still in hand, exactly as [`Self::unused_captures`] is.
+    /// `variable.undefined` (issue #194). A syntactic fact, computed at
+    /// lowering, like [`Self::unused_captures`].
     ///
-    /// The proof is closed-world over one scope's own text and deliberately
-    /// **ordering-blind**: a name that appears as a binding form *anywhere* in the
-    /// scope — before, after, or in a branch that never runs — is bound here. A read
-    /// that precedes its only assignment is therefore silence; that is
-    /// `variable.maybe-undefined`'s territory and waits on the reachability
-    /// foundation (issue #199).
+    /// The proof is closed-world over the scope's own text and deliberately
+    /// **ordering-blind**: a name bound *anywhere* in the scope — before,
+    /// after, or in a dead branch — counts as bound. A read preceding its only
+    /// assignment is silence here; that is `variable.maybe-undefined`'s
+    /// territory (issue #199).
     ///
-    /// The list is empty — never merely shorter — in four cases, each a place where
-    /// the closed world does not hold:
+    /// The list is empty — never merely shorter — where the closed world
+    /// doesn't hold:
     ///
-    /// * **Top-level script scopes.** `include` splices the *including* scope's whole
-    ///   symbol table into the included file's top level, so a file's own text can
-    ///   never prove a top-level name unbound (the template-partial idiom). No
-    ///   function-like scope has that channel: a call frame starts empty.
-    /// * **Arrow-function scopes.** `fn () => $x` auto-captures every free variable
-    ///   from the enclosing scope, so an arrow body's reads are the *enclosing*
-    ///   scope's question, not this one's (witnessed: `$x = 3; fn () => $x + 1` is
-    ///   silent at 8.5.9).
-    /// * **A scope carrying a name dam** — `extract` / `compact` /
-    ///   `get_defined_vars` / `$$x` / `${…}` / `eval` / `include` / `require`. The
-    ///   same scope-local dam [`Self::unused_captures`] uses, for the same reason:
-    ///   each can consume or mint a binding without spelling it.
-    /// * A read whose name is a superglobal, `$this`, or `$http_response_header`
-    ///   (the engine binds all three), which is filtered at collection.
+    /// * **Top-level script scopes** — `include` splices the including
+    ///   scope's whole symbol table in, so a file's own text can never prove a
+    ///   top-level name unbound. No function-like scope has that channel.
+    /// * **Arrow-function scopes** — `fn () => $x` auto-captures every free
+    ///   variable from the enclosing scope, so its reads are the *enclosing*
+    ///   scope's question (witnessed silent: `$x = 3; fn () => $x + 1` at
+    ///   8.5.9).
+    /// * **A scope carrying a name dam** — `extract`/`compact`/
+    ///   `get_defined_vars`/`$$x`/`${…}`/`eval`/`include`/`require`, the same
+    ///   dam [`Self::unused_captures`] uses: each can consume or mint a
+    ///   binding without spelling it.
+    /// * A read of a superglobal, `$this`, or `$http_response_header` (engine
+    ///   binds all three), filtered at collection.
     ///
-    /// `isset($x)` / `empty($x)` / `$x ?? d` / `unset($x)` / `@$x` reads are excluded
-    /// at collection too, but for a different reason: PHP *legalizes* them (witnessed
-    /// silent at 8.5.9), so they are not this finding at all (ADR-0078 §3 defers the
-    /// pointless-guard reading entirely).
+    /// `isset($x)`/`empty($x)`/`$x ?? d`/`unset($x)`/`@$x` reads are also
+    /// excluded, but because PHP *legalizes* them (witnessed silent at 8.5.9)
+    /// — ADR-0078 §3 defers that reading entirely.
     ///
-    /// One residue the syntax side cannot settle is left for the checker: a bare
-    /// `$x` passed to a **statically-named function** may be an out-parameter, and
-    /// whether the callee declares `&$p` needs the cross-file index. Those reads are
-    /// collected here and subtracted in `steins-infer` (ADR-0077's by-value oracle).
-    /// Every *other* call shape — method, static, dynamic, `new`, and every named
-    /// argument — binds its bare-variable arguments right here, since no
-    /// name is even available to resolve.
+    /// One residue is left for the checker: a bare `$x` passed to a
+    /// **statically-named function** may be an out-parameter, needing the
+    /// cross-file index to know if the callee declares `&$p`. Those reads are
+    /// collected here and subtracted in `steins-infer` (ADR-0077's by-value
+    /// oracle). Every other call shape binds its bare-variable arguments
+    /// outright, having no name to resolve.
     pub undefined_reads: Vec<UndefinedRead>,
-    /// The reads of names *some* paths through this scope reach unbound (ADR-0081,
-    /// issue #267) — the firing set of `variable.maybe-undefined`, and **disjoint
-    /// from [`Self::undefined_reads`] by construction**: a name the scope binds
-    /// nowhere is the definite id's, a name it binds somewhere can only be this
-    /// one's.
+    /// The reads of names *some* paths through this scope reach unbound
+    /// (ADR-0081, issue #267) — the firing set of `variable.maybe-undefined`,
+    /// **disjoint from [`Self::undefined_reads`] by construction**: a name the
+    /// scope binds nowhere is the definite id's, a name it binds somewhere can
+    /// only be this one's.
     ///
-    /// Produced by the binding-presence pass, which walks the same statements in
-    /// program order over a three-valued lattice, subtracts a branch arm that
-    /// provably terminates, iterates loop bodies to a fixpoint and consumes
-    /// `isset`/`empty` guards with polarity. Every silence [`Self::undefined_reads`]
-    /// documents is inherited verbatim — the name dams, the top-level and
-    /// arrow-function scopes, the guard exclusions, the superglobals — plus one of
-    /// its own: a `goto` or a label anywhere in the scope dams the pass, because a
-    /// jump to an arbitrary label is an exit edge the traversal cannot bound.
+    /// Produced by the binding-presence pass: walks the same statements in
+    /// program order over a three-valued lattice, subtracts a provably
+    /// terminating branch arm, iterates loop bodies to a fixpoint, and
+    /// consumes `isset`/`empty` guards with polarity. Every silence
+    /// [`Self::undefined_reads`] documents is inherited, plus one of its own:
+    /// a `goto`/label anywhere dams the pass (an unbounded jump target).
     ///
-    /// The same [`Self::ref_arg_candidates`] residue is left for the checker here,
-    /// with one refinement the definite id does not need: an out-parameter binds
-    /// from its **call site forward**, so a candidate subtracts only the reads that
-    /// follow it.
+    /// The same [`Self::ref_arg_candidates`] residue is left for the checker,
+    /// with one refinement: an out-parameter binds from its **call site
+    /// forward**, so a candidate subtracts only the reads that follow it.
     pub maybe_undefined_reads: Vec<UndefinedRead>,
-    /// Every bare-variable positional argument at a **function call** in this scope
-    /// — the out-parameter candidates [`Self::undefined_reads`] cannot settle alone,
-    /// since whether `f($x)` writes `$x` is a property of `f`'s declaration and needs
-    /// the cross-file index.
+    /// Every bare-variable positional argument at a **function call** in this
+    /// scope — the out-parameter candidates [`Self::undefined_reads`] cannot
+    /// settle alone, since whether `f($x)` writes `$x` needs the cross-file
+    /// index.
     ///
-    /// Recorded **independently of [`Self::undefined_reads`]**, and deliberately so:
-    /// an out-parameter is a *binding form*, and a binding must not depend on whether
-    /// its argument occurrence happened to be collected as a read. It is not —
-    /// `@proc_open($cmd, $spec, $pipes)` sits inside an error-control guard, so the
-    /// `$pipes` occurrence is withheld from the read list while PHP binds `$pipes`
-    /// exactly as it would without the `@` (symfony/console `Terminal.php`, the
-    /// corpus site that made the point).
+    /// Recorded **independently of [`Self::undefined_reads`]**: an
+    /// out-parameter is a binding form and must not depend on whether its
+    /// argument happened to be collected as a read. It isn't —
+    /// `@proc_open($cmd, $spec, $pipes)` sits inside an error-control guard,
+    /// so `$pipes` is withheld from the read list while PHP still binds it
+    /// (symfony/console `Terminal.php`, the corpus site that made the point).
     ///
-    /// Only plain function calls appear here. Every other call shape — method,
-    /// static, dynamic, `new`, and every named argument — has no callee name to
-    /// resolve, so it binds its bare-variable arguments outright at lowering.
-    /// Empty whenever [`Self::undefined_reads`] is (a dammed or non-reporting
-    /// scope has nothing to subtract from).
+    /// Only plain function calls appear here; every other call shape has no
+    /// callee name to resolve, so it binds bare-variable arguments outright at
+    /// lowering. Empty whenever [`Self::undefined_reads`] is.
     pub ref_arg_candidates: Vec<UndefinedRead>,
     // end undefined variables (ADR-0078, issue #194)
 }
@@ -3332,25 +3189,23 @@ pub struct AppendStmt {
 
 /// One **operator application** whose operand types PHP's own arithmetic table
 /// can refuse: an arithmetic, bitwise or shift binary operator, or a unary
-/// `-`/`+`/`~` (issue #191). Every such application in the file produces one of
-/// these, with both operands lowered to [`ArgValue`] — the value IR is
-/// where a literal `[]` and a `$var` carrying an env fact are spelled the same
-/// way, so the `type.invalid-operand` judge reads one shape.
+/// `-`/`+`/`~` (issue #191). Every such application produces one of these, both
+/// operands lowered to [`ArgValue`] — the value IR is where a literal `[]` and
+/// a `$var` carrying an env fact are spelled the same way, so
+/// `type.invalid-operand` reads one shape.
 ///
-/// Purely syntactic, like [`ForeachSite`]: nothing here decides a finding. What
-/// the operands *are* is a value-domain question answered in `steins-infer`
-/// against the enclosing statement's entry env.
+/// Purely syntactic, like [`ForeachSite`]: what the operands *are* is a
+/// value-domain question answered in `steins-infer` against the enclosing
+/// statement's entry env.
 ///
-/// Three operator families are deliberately **absent** (each a witnessed
-/// non-fatal or another id's territory, see the judge's table):
+/// Three operator families are deliberately **absent**:
 ///
-/// * `.` — concatenation is issue #193's id (`string.non-stringable` /
-///   `string.array-conversion`); array-in-concat is a *warning*, not a fatal;
-/// * every comparison (`< > <= >= <=> == != === !== <>`) — `php -r`-witnessed at
-///   8.5.9 to be legal for **every** operand pair, arrays and objects included,
-///   so `InvalidComparisonOperationRule` contributes no fatal row at all;
-/// * `++`/`--` — fatal on an array (`Cannot increment array`), but a mutation
-///   statement rather than an operand expression; out of v1's reach.
+/// * `.` — concatenation is issue #193's id; array-in-concat is a *warning*,
+///   not a fatal;
+/// * every comparison (`< > <= >= <=> == != === !== <>`) — `php -r`-witnessed
+///   at 8.5.9 legal for every operand pair, arrays and objects included;
+/// * `++`/`--` — fatal on an array, but a mutation statement rather than an
+///   operand expression; out of v1's reach.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct OperandSite {
     /// The whole operator application's span (`$a + $b`, `-$a`) — where the
@@ -3793,16 +3648,18 @@ impl SourceTree {
         &self.class_alias_edges
     }
 
-    /// The anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read by
-    /// the declared-receiver lane's descendant closure (S6) to detect an invisible
-    /// descendant of a union member (an anon class is never in the class index).
-    /// Class references at the positions verified to break at run time (ADR-0049
-    /// §5 / S4, widened by issue #182): the hard-error expressions (`new X`,
-    /// `X::m()`, `X::CONST`, `X::$prop`), inheritance (`extends` / `implements` /
-    /// `use <Trait>`), `catch (X $e)`, and parameter / return / property native
-    /// type declarations. Consumed by the `class.undefined` per-file pass;
-    /// `self`/`static`/`parent`, dynamic classes, `X::class`, `instanceof` and the
-    /// docblock positions are excluded at collection.
+    /// The anonymous-class inheritance edges found file-wide (ADR-0049 A4). Read
+    /// by the declared-receiver lane's descendant closure (S6) to detect an
+    /// invisible descendant of a union member (an anon class is never in the
+    /// class index).
+    /// Class references at the positions verified to break at run time
+    /// (ADR-0049 §5/S4, widened by issue #182): hard-error expressions
+    /// (`new X`, `X::m()`, `X::CONST`, `X::$prop`), inheritance
+    /// (`extends`/`implements`/`use <Trait>`), `catch (X $e)`, and
+    /// parameter/return/property native type declarations. Consumed by the
+    /// `class.undefined` per-file pass; `self`/`static`/`parent`, dynamic
+    /// classes, `X::class`, `instanceof` and docblock positions are excluded
+    /// at collection.
     #[must_use]
     pub fn hard_class_refs(&self) -> &[NameRef] {
         &self.hard_class_refs
@@ -3851,20 +3708,19 @@ impl SourceTree {
 
     // member absence (ADR-0078, issue #197)
     /// Every property name this file writes, deduplicated, in source order
-    /// (ADR-0078, issue #197). Purely syntactic — no receiver is resolved — and
+    /// (ADR-0078, issue #197). Purely syntactic — no receiver is resolved —
     /// read project-wide as the dynamic-property obstacle for
     /// `property.undefined`.
     ///
-    /// The over-approximation is the point. A write is what creates a dynamic
-    /// property, so a class may declare nothing named `p` and still answer `$o->p`
-    /// at runtime because some other file did `$o->p = 1` first — deprecated on a
-    /// plain class since PHP 8.2, deprecated and not an error, with the read that
-    /// follows clean (witnessed at 8.5.9). Resolving *which* object each write
-    /// lands on is the deferred `property.dynamic-write` slice's problem, and a
-    /// name-keyed obstacle needs none of it: it costs the absence claims for names
-    /// the project assigns somewhere — exactly the names a dynamic write could have
-    /// created — while the typo shape the check exists for (`$user->emial`) is
-    /// written nowhere and survives.
+    /// The over-approximation is the point: a write is what creates a dynamic
+    /// property, so a class declaring nothing named `p` can still answer
+    /// `$o->p` at runtime because some other file did `$o->p = 1` first
+    /// (deprecated, not an error, since PHP 8.2; the later read is clean,
+    /// witnessed at 8.5.9). Resolving *which* object each write lands on is
+    /// deferred (`property.dynamic-write`); this name-keyed obstacle costs
+    /// only the absence claims for names the project assigns somewhere, while
+    /// the typo shape the check exists for (`$user->emial`) is written
+    /// nowhere and survives.
     #[must_use]
     pub fn property_write_names(&self) -> &[String] {
         &self.property_writes.names
@@ -3991,24 +3847,22 @@ impl SourceTree {
 
     /// Whether a docblock trivium ending at `doc_end` is followed by **nothing an
     /// adoption rule could attach it to** — the negative side of
-    /// [`Self::stmt_docblock`]'s grammar, and the ADR-0029 declaration grammar's
-    /// too (issue #186, the `phpdoc.misplaced-var` mechanics id).
+    /// [`Self::stmt_docblock`]'s grammar (issue #186, `phpdoc.misplaced-var`).
     ///
-    /// Deliberately answered from the *text*, not from the lowered trace: a
-    /// statement inside a construct the trace keeps opaque (a loop body, a `try`,
-    /// a `switch` arm) has no [`Stmt`] to query, so enumerating adopters would call
-    /// a perfectly ordinary annotation misplaced. What this asks instead is
-    /// whether any construct can follow **at all**: skipping whitespace from
-    /// `doc_end` lands on end-of-file, a closing `}`, or another comment (which
-    /// then becomes the nearest preceding trivium for whatever follows, so this
-    /// docblock adopts nothing either way).
+    /// Answered from the *text*, not the lowered trace: a statement inside a
+    /// construct the trace keeps opaque (loop body, `try`, `switch` arm) has no
+    /// [`Stmt`] to query, so enumerating adopters would call an ordinary
+    /// annotation misplaced. This instead asks whether any construct can
+    /// follow **at all**: skipping whitespace from `doc_end` lands on
+    /// end-of-file, a closing `}`, or another comment (which then adopts
+    /// whatever follows, so this docblock adopts nothing either way).
     ///
-    /// A `?>` close tag is deliberately **not** a proof: the inline HTML after it
-    /// is an output statement, and the template idiom
-    /// `<?php /** @var View $v */ ?>` is a legal annotation, not rot.
+    /// A `?>` close tag is deliberately **not** a proof: the inline HTML after
+    /// it is an output statement, and `<?php /** @var View $v */ ?>` is a
+    /// legal annotation, not rot.
     ///
-    /// A `true` answer is therefore a proof of non-adoption; a `false` answer is
-    /// merely "something follows", not a proof that it adopts.
+    /// `true` is a proof of non-adoption; `false` only means "something
+    /// follows", not that it adopts.
     #[must_use]
     pub fn docblock_adopts_nothing(&self, doc_end: u32) -> bool {
         let Some(rest) = self.text.get(doc_end as usize..) else { return true };
@@ -4146,19 +4000,7 @@ struct Lowered {
     preg_flag_const_declared: bool,
     /// Issue #168: see [`SourceTree::preg_flag_const_aliased`].
     preg_flag_const_aliased: bool,
-    /// Class references at the **positions verified to break at run time**
-    /// (ADR-0049 §5 / S4, widened by issue #182), in four groups:
-    /// the original hard-error expressions (`new X`, `X::m()`, `X::CONST`,
-    /// `X::$prop` — fatal `Error`); inheritance (`extends`, `implements`, `use
-    /// <Trait>` — fatal at class load); `catch (X $e)` (never matches, the handler
-    /// is silently dead); and native type declarations on a parameter, return or
-    /// property (`TypeError` on the first typed use).
-    ///
-    /// Explicit named classes only — `self`/`static`/`parent`, dynamic class exprs,
-    /// and the `X::class` magic constant (a plain string since 8.0, never an error)
-    /// are excluded at collection, so the collection IS exactly the verified
-    /// finding-position set. `instanceof` and the docblock positions error nothing
-    /// and are deliberately absent (the ADR-0078 contract twins).
+    /// Issue #182 / ADR-0049 §5/S4: see [`SourceTree::hard_class_refs`].
     hard_class_refs: Vec<NameRef>,
     // member absence (ADR-0078, issue #197)
     property_writes: PropertyWrites,
@@ -4168,22 +4010,10 @@ struct Lowered {
 }
 
 // member absence (ADR-0078, issue #197)
-/// Every property name a file **writes**, plus whether it writes one under a name
-/// only the runtime knows (ADR-0078, issue #197).
-///
-/// A write is what creates a dynamic property, so this is the evidence a
-/// `property.undefined` claim needs and cannot get from a class declaration: a
-/// class may declare nothing named `p` and still answer `$o->p` at runtime because
-/// some other file did `$o->p = 1` first (deprecated on a plain class since PHP
-/// 8.2 — deprecated, not an error, and the read that follows is clean; witnessed
-/// at 8.5.9).
-///
-/// Names, not receivers: resolving *which* object each write lands on is the
-/// deferred `property.dynamic-write` slice's problem, and a name-keyed obstacle
-/// needs none of it. The over-silence costs the absence claims for names the
-/// project assigns somewhere — which are exactly the names a dynamic write could
-/// have created — while the typo shape the check exists for (`$user->emial`) is
-/// written nowhere and survives.
+/// Every property name a file **writes**, plus whether it writes one under a
+/// runtime-computed name (ADR-0078, issue #197) — the storage behind
+/// [`SourceTree::property_write_names`] and
+/// [`SourceTree::writes_computed_property_name`]; see those for the rationale.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 struct PropertyWrites {
     /// The written names, deduplicated, as written (property names are
@@ -4745,24 +4575,22 @@ fn classify_class_alias(c: &FunctionCall<'_>, rc: &RefResolver, out: &mut Lowere
     }
 }
 
-/// Classify a `define(...)` call (ADR-0078, issue #198), the constant-side twin of
-/// [`classify_class_alias`]: a **compile-time** name argument mints a
-/// [`GlobalConstDecl`] the index reads as evidence of definition; a name that only
-/// exists at run time makes it a [`DynamismKind::DefineDynamic`] dam site, because a
-/// computed `define` can mint *any* constant name and no scan can enumerate it.
+/// Classify a `define(...)` call (ADR-0078, issue #198), the constant-side twin
+/// of [`classify_class_alias`]: a **compile-time** name argument mints a
+/// [`GlobalConstDecl`]; a name only known at run time makes it a
+/// [`DynamismKind::DefineDynamic`] dam site, since a computed `define` can mint
+/// any constant name no scan can enumerate.
 ///
-/// Two deliberate differences from the `class_alias` classifier:
+/// Two deliberate differences from the `class_alias` classifier: the name is
+/// **not** resolved against the namespace or `use` imports (`define('FOO', 1)`
+/// inside `namespace App;` declares the global `FOO`, not `App\FOO` —
+/// `php -r`-witnessed on 8.5.9 — so the literal is the whole FQN); and
+/// `X::class` is not accepted as a name (a compile-time string, but not an
+/// idiom worth special-casing, so it falls through to the dam).
 ///
-/// * the name is **not** resolved against the namespace or `use` imports.
-///   `define('FOO', 1)` inside `namespace App;` declares the global `FOO`, not
-///   `App\FOO` — `php -r`-witnessed on 8.5.9 — so the literal is the whole FQN.
-/// * `X::class` is not accepted as a name. It is a compile-time string, but a
-///   `define` keyed on a class name is not an idiom worth a special case; it falls
-///   through to the dam, which is the sound direction.
-///
-/// Callee recognition is `class_alias`'s: the unqualified spelling (subject to PHP's
-/// global function fallback) or the fully-qualified `\define`; a namespaced
-/// `Foo\define` is a different symbol and is ignored entirely.
+/// Callee recognition is `class_alias`'s: the unqualified spelling (subject to
+/// PHP's global function fallback) or the fully-qualified `\define`; a
+/// namespaced `Foo\define` is ignored entirely.
 fn classify_define(c: &FunctionCall<'_>, out: &mut Lowered) {
     let Expression::Identifier(id) = c.function else { return };
     if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
@@ -4801,29 +4629,25 @@ fn qualify_const_decl(rc: &RefResolver, offset: u32, name: &str) -> String {
 }
 
 /// Lower one `class_alias` argument to the normalized index-key FQN it names at
-/// **compile time**, or `None` when the name is only known at run time (which dams
-/// — ADR-0049 §2). Two shapes qualify, and they normalize *differently* on purpose:
+/// **compile time**, or `None` when only known at run time (which dams —
+/// ADR-0049 §2). Two shapes qualify, normalized *differently* on purpose:
 ///
-/// - a **string literal** (including a literal-only concatenation): a runtime FQN,
-///   spelled out in full. PHP does not resolve it against `use` imports or the
+/// - a **string literal** (including a literal-only concatenation): a full
+///   FQN as written — PHP does not resolve it against `use` imports or the
 ///   current namespace, so neither does [`normalize_alias_fqn`].
-/// - **`X::class`** (issue #36): since PHP 8.0 this is a plain compile-time string —
-///   no autoload, no runtime lookup, the named class need not even exist. It is
-///   therefore *not* a runtime class-name mint and must not dam. Its spelling **is**
-///   subject to ordinary class-name resolution, so it goes through the same
-///   [`RefResolver`] every other class reference uses — plain, aliased, and grouped
-///   `use` imports; the enclosing namespace; and the `namespace\X` relative
-///   form — rather than being taken as spelled. Taking the raw spelling would key
-///   the edge on a name no declaration ever carries.
+/// - **`X::class`** (issue #36): since PHP 8.0 a compile-time string (no
+///   autoload, no runtime lookup, the class need not exist), so it must not
+///   dam. Its spelling *is* subject to ordinary class-name resolution via the
+///   same [`RefResolver`] every other class reference uses, rather than being
+///   taken as spelled — the raw spelling would key the edge on a name no
+///   declaration carries.
 ///
-/// Deliberately **not** widened past those two:
-/// - `self::class` / `parent::class` are lexically knowable in principle, but this
-///   walk is file-wide and carries no enclosing-class context; `static::class` is
-///   late-static-bound and not knowable at the site at all. All three keep damming,
-///   which is the sound direction (a dam only silences absence claims).
-/// - a variable, a constant, a function call, or any concatenation touching one:
-///   [`lower_concat`] folds only literals and `__DIR__`, so `Foo::class . $suffix`
-///   and friends stay unproven and keep damming.
+/// Deliberately **not** widened past those two: `self::class`/`parent::class`
+/// are lexically knowable in principle, but this walk is file-wide with no
+/// enclosing-class context, and `static::class` is late-bound and unknowable
+/// at the site at all — all three keep damming (sound direction). A variable,
+/// constant, function call, or concatenation touching one also keeps damming:
+/// [`lower_concat`] folds only literals and `__DIR__`.
 fn lower_alias_name(expr: &Expression<'_>, rc: &RefResolver) -> Option<String> {
     let expr = expr.unparenthesized();
     // `X::class` — an explicitly-named class only (`self`/`static`/`parent` and a
@@ -5531,27 +5355,21 @@ fn collect_steins_aliases_into(node: &Node<'_, '_>, out: &mut SteinsAttrAliases)
 
 /// Recognize a `#[\Steins\Pure]` or `#[\Steins\Effect(...)]` envelope attribute
 /// in an attribute-list sequence (a function or method declaration), returning
-/// the resolved [`EffectEnvelope`]. Recognition is deliberately conservative (a
-/// false match imposes always-on checks the author never requested): a name
-/// matches only when it is
-///
-/// * a fully-qualified `\Steins\Pure` / `\Steins\Effect` or qualified
-///   `Steins\Pure` / `Steins\Effect`, or
-/// * a bare / aliased name that a `use Steins\Pure[ as X];` /
-///   `use Steins\Effect[ as X];` import binds.
-///
-/// So JetBrains' `#[Pure]` **without** the import, and `#[JetBrains\PhpStorm\Pure]`,
-/// do not match. Matching is case-insensitive (PHP class-name semantics).
+/// the resolved [`EffectEnvelope`]. Deliberately conservative (a false match
+/// imposes always-on checks the author never requested): a name matches only
+/// as a fully-qualified/qualified `\Steins\Pure`/`\Steins\Effect`, or a
+/// bare/aliased name a `use Steins\Pure[ as X];`/`use Steins\Effect[ as X];`
+/// import binds. So JetBrains' `#[Pure]` without the import, and
+/// `#[JetBrains\PhpStorm\Pure]`, do not match. Matching is case-insensitive.
 ///
 /// For `#[\Steins\Effect(...)]` the arguments must be **plain string literals**
-/// (`'io'`, `'nondet.time'`); any non-literal argument (a class constant like
-/// `Effects::IO`, a concatenation, or a named argument) cannot be resolved
-/// without constant resolution and makes the whole attribute *unrecognized* (no
-/// envelope or checking), the conservative choice.
+/// (`'io'`, `'nondet.time'`); any non-literal argument (a class constant, a
+/// concatenation, a named argument) cannot be resolved without constant
+/// resolution and makes the whole attribute *unrecognized*.
 ///
 /// `#[\Steins\Pure]` and `#[\Steins\Effect(...)]` on the same declaration are
 /// contradictory (Pure = empty upper bound, the tighter one); **Pure wins**
-/// (empty `labels`), with no diagnostic about the contradiction here.
+/// (empty `labels`), with no diagnostic about the contradiction.
 // member absence (ADR-0078, issue #197)
 /// Whether an attribute list carries PHP's own `#[AllowDynamicProperties]`
 /// (ADR-0078, issue #197) — see [`ClassDecl::allows_dynamic_properties`] for what
@@ -5891,25 +5709,24 @@ where
 }
 
 /// The two ways a frame's *binding* changes without any assignment the shared
-/// collectors can see — both of them writes as far as the declared-receiver gate
-/// is concerned:
+/// collectors can see — both writes as far as the declared-receiver gate is
+/// concerned:
 ///
-/// * a **by-ref closure capture**, `function () use (&$r) { … }`. The capture
-///   aliases the enclosing binding, so the closure can rebind `$r` from inside a
-///   scope [`collect_assign_writes`] deliberately stops at — and it can do so
-///   whenever it is *called*, which is not a fact this structural scan tracks.
-///   The name is therefore written unconditionally, whatever the closure body
-///   does with it. A by-value `use ($r)` or an arrow-function capture is a copy
-///   and rebinds nothing, so neither disqualifies the receiver.
-/// * a **`global $r;`** statement, which rebinds the name to the interpreter's
-///   global of that name — legal even when `$r` is a parameter. (`static $r;`
-///   over a parameter name is a PHP compile error, so there is nothing to catch.)
+/// * a **by-ref closure capture**, `function () use (&$r) { … }`. It aliases
+///   the enclosing binding, so the closure can rebind `$r` from inside a scope
+///   [`collect_assign_writes`] deliberately stops at, whenever it is *called*
+///   — not a fact this structural scan tracks — so the name is written
+///   unconditionally. A by-value `use ($r)` or arrow-function capture is a
+///   copy and rebinds nothing.
+/// * a **`global $r;`** statement, rebinding the name to the interpreter's
+///   global — legal even when `$r` is a parameter (`static $r;` over a
+///   parameter name is a PHP compile error, so nothing to catch there).
 ///
-/// Over-collection is sound here: it only ever makes a receiver fall back to the
-/// pre-ADR-0067 taint. So the walk descends through nested closures too — a
-/// capture found there names *that* frame's binding, and forgetting one more name
-/// in ours costs nothing. Named function/class-like declarations are their own
-/// lexical world and are not descended.
+/// Over-collection is sound: it only makes a receiver fall back to the
+/// pre-ADR-0067 taint. The walk descends through nested closures too — a
+/// capture found there names *that* frame's binding, costing nothing extra.
+/// Named function/class-like declarations are their own lexical world and are
+/// not descended.
 fn collect_frame_rebinds(node: &Node<'_, '_>, out: &mut Vec<String>) {
     match node {
         Node::Closure(cl) => {
@@ -6778,13 +6595,12 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
 /// `None` when the argument is not a condition the [`CondExpr`] vocabulary
 /// models.
 ///
-/// This is not `lower_cond` under another name, and the difference is the point:
-/// `lower_cond` is total (it answers `Opaque { reads }` for everything it cannot
-/// model, walking the subtree to collect those reads), whereas this runs on
-/// **every argument of every call in the project** and must therefore decline in
-/// O(1) for the shapes that dominate real code — a variable, a literal, a
-/// property fetch, a concatenation. So each arm is a positive recognition, the
-/// fallback is a bare `None`, and only the recognized arms may walk anything.
+/// Not `lower_cond` under another name: `lower_cond` is total (answers
+/// `Opaque { reads }` for anything unmodeled, walking the subtree to collect
+/// reads), but this runs on **every argument of every call in the project**
+/// and must decline in O(1) for the dominant shapes (a variable, literal,
+/// property fetch, concatenation) — each arm is a positive recognition, the
+/// fallback a bare `None`, and only recognized arms may walk anything.
 fn lower_guard_arg(expr: &Expression<'_>) -> Option<CondExpr> {
     // Out of headroom (issue #264): the guard is unmodelled, which claims nothing
     // on either polarity — exactly what an unrecognized operand already yields.
@@ -7390,18 +7206,17 @@ fn lower_int_literal(raw: &[u8]) -> ArgValue {
 
 fn lower_literal(lit: &Literal<'_>) -> ArgValue {
     match lit {
-        // An integer literal that does not fit `int` is a **float** in PHP, not a
-        // wrapped int (issue #62). The promotion is the lexer's and applies to every
-        // base — decimal, hex, octal, binary, underscore-separated alike — so the
-        // test is on the parsed value, not the spelling. A cast of
-        // `9223372036854775808` to `i64` would produce the wrong value, `i64::MIN`;
-        // negating it also wraps to itself. (`PHP_INT_MIN` has no
-        // integer-literal spelling at all — it is written `-PHP_INT_MAX - 1`.)
+        // An integer literal that does not fit `int` is a **float** in PHP, not
+        // a wrapped int (issue #62), for every base alike, so the test is on
+        // the parsed value, not the spelling: casting `9223372036854775808` to
+        // `i64` would give the wrong value, `i64::MIN` (and negating it wraps
+        // to itself). `PHP_INT_MIN` has no integer-literal spelling at all —
+        // it's written `-PHP_INT_MAX - 1`.
         //
-        // The parser's own `value` is NOT usable for the overflow decision: it is a
-        // `u64` that SATURATES, so `99999999999999999999` arrives as `u64::MAX` —
-        // indistinguishable from a real `0xFFFFFFFFFFFFFFFF` and three orders of
-        // magnitude off PHP's `1.0E+20`. The spelling is re-read instead.
+        // The parser's own `value` is NOT usable for the overflow decision: a
+        // `u64` that SATURATES, so `99999999999999999999` arrives as
+        // `u64::MAX` — indistinguishable from `0xFFFFFFFFFFFFFFFF` and three
+        // orders of magnitude off PHP's `1.0E+20`. The spelling is re-read.
         Literal::Integer(li) => lower_int_literal(li.raw),
         Literal::Float(lf) => ArgValue::Float(lf.value.0),
         // The parser hands over the escape-decoded **bytes** (`"\xC0"` arrives as
@@ -7579,21 +7394,19 @@ fn stmt_closure_adoption(es: &ExpressionStatement<'_>, docs: &DocIndex<'_>) -> O
 }
 
 /// The docblock a closure/arrow scope adopts (issue #128), by the shared
-/// whitespace-gap discipline (ADR-0029's "only whitespace between", the same
-/// grammar `SourceTree::stmt_docblock` gives the inline-`@var` lane) in two
-/// positions, in precedence order:
+/// whitespace-gap discipline (ADR-0029, the same grammar
+/// `SourceTree::stmt_docblock` gives the inline-`@var` lane), in two
+/// positions, precedence order:
 ///
-/// 1. **Inline** — the docblock immediately preceding the closure expression's
-///    own first token (`$f = /** @return string */ function () {…}`; the first
-///    token is the attribute list or `static` when present, else
-///    `function`/`fn` — exactly `span().start`).
+/// 1. **Inline** — the docblock immediately preceding the closure's own first
+///    token (`$f = /** @return string */ function () {…}`; the attribute list
+///    or `static` when present, else `function`/`fn`).
 /// 2. **Statement-level** — the enclosing statement's docblock, handed down by
 ///    `collect_scopes` only when that statement is a simple assignment whose
-///    whole RHS is this very closure (the [`StmtAdoption`] def-offset gate).
+///    whole RHS is this closure (the [`StmtAdoption`] def-offset gate).
 ///
-/// Both positions read one grammar (`DocIndex::preceding`): a blank line still
-/// adopts, while an intervening non-doc comment — or any code — breaks the
-/// adjacency.
+/// Both positions read one grammar (`DocIndex::preceding`): a blank line
+/// still adopts, but an intervening non-doc comment or code breaks adjacency.
 fn adopt_closure_docblock(
     docs: &DocIndex<'_>,
     first_token: u32,
@@ -8778,16 +8591,15 @@ fn presence_stmt(
 /// The names a statement-position `assert()` proves bound in everything after it.
 ///
 /// `assert(isset($x));` is a boundness guard whose *only* continuation is the
-/// true-polarity one: ADR-0052 slice I0 already reads `assert()` as Verified
-/// evidence, and with assertions enabled a failed one throws `AssertionError`
-/// (witnessed at 8.5.9 under `zend.assertions=1`), so control reaches the next
-/// statement exactly when the condition held. With assertions compiled out the call
-/// does not run at all — and then neither does anything the assertion was
-/// protecting, so the refinement cannot manufacture a claim either way.
+/// true-polarity one: ADR-0052 slice I0 reads `assert()` as Verified evidence,
+/// and with assertions enabled a failed one throws `AssertionError` (witnessed
+/// at 8.5.9 under `zend.assertions=1`), so control reaches the next statement
+/// exactly when the condition held. With assertions compiled out the call
+/// doesn't run at all, so the refinement cannot manufacture a claim either way.
 ///
-/// The polarity is [`guard_bound_names`]' own, so `assert(isset($x) && $x > 1)`
-/// refines through the conjunction and `assert(!isset($x))` refines nothing —
-/// there is no continuation on which that spelling proves a binding.
+/// The polarity is [`guard_bound_names`]'s own: `assert(isset($x) && $x > 1)`
+/// refines through the conjunction, `assert(!isset($x))` refines nothing —
+/// no continuation on which that spelling proves a binding.
 fn assert_bound_names(s: &Statement<'_>) -> Vec<String> {
     let Statement::Expression(es) = s else {
         return Vec::new();
@@ -9472,23 +9284,21 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
 ///
 /// # Recorded obstacles — silences this judgment names rather than hides
 ///
-/// * **`try`/`catch`/`finally` is `Unknown`, full stop (issue #199's "handled or
-///   explicitly excluded with a reason").** The reason is `finally`, which
+/// * **`try`/`catch`/`finally` is `Unknown`, full stop.** `finally`
 ///   *overwrites the exit point*: witnessed on 8.5.9,
-///   `try { return 1; } finally { return 2; }` returns `2`, and a `finally` that
-///   returns also swallows an in-flight exception from the `try`. So a `try`
-///   whose block and every `catch` terminate can still fall through, and a `try`
-///   that plainly falls through can still terminate. Judging either direction
-///   from the block ends alone would be wrong in both, so the whole construct is
-///   undecided until a later slice models `finally` properly.
+///   `try { return 1; } finally { return 2; }` returns `2`, and a returning
+///   `finally` also swallows an in-flight exception from the `try`. So a `try`
+///   whose block and every `catch` terminate can still fall through, and vice
+///   versa — judging from the block ends alone would be wrong either way, so
+///   the whole construct is undecided until a later slice models `finally`.
 /// * **A call to a function proven never to return is not judged here.** A
-///   statement-position call answers `FallsThrough`, because deciding otherwise
-///   needs the project index (which callee? does it declare `: never`?) and this
+///   statement-position call answers `FallsThrough` — deciding otherwise needs
+///   the project index (does the callee declare `: never`?), and this
 ///   judgment is deliberately index-free and env-free. `type.return-missing`
-///   applies that refinement itself, at the emitter, where the index lives.
-/// * **An infinite `Traversable`.** `foreach ($generator as $v)` over a generator
-///   that never ends has no exit edge, and this judgment says `FallsThrough`
-///   anyway. Bounding it would need the iterator's value, which is exactly the
+///   applies that refinement itself, at the emitter.
+/// * **An infinite `Traversable`.** `foreach ($generator as $v)` over a
+///   never-ending generator has no exit edge, yet this judgment says
+///   `FallsThrough` anyway — bounding it needs the iterator's value, which is
 ///   whole-program reasoning the syntactic CFG reading rules out.
 fn stmt_end(s: &Statement<'_>) -> BodyEnd {
     match s {
@@ -9536,26 +9346,25 @@ fn block_end(statements: &[Statement<'_>]) -> BodyEnd {
 }
 
 /// An `if`'s terminality: the join over its arms, with the **implicit empty
-/// `else`** joined in as [`BodyEnd::FallsThrough`] when no `else` is written.
-///
-/// That implicit arm is the whole reason `if ($c) { return 1; }` is reported by
-/// `type.return-missing` and `if ($c) { return 1; } else { return 2; }` is not.
+/// `else`** joined in as [`BodyEnd::FallsThrough`] when no `else` is written —
+/// why `if ($c) { return 1; }` is reported by `type.return-missing` and
+/// `if ($c) { return 1; } else { return 2; }` is not.
 ///
 /// # The one place a condition is read
 ///
-/// Branch conditions are otherwise non-deterministic here (see [`stmt_end`]), but
-/// a **literal** one is not a branch at all: `if (true) { return 1; }` has no
-/// no-branch path to add, and reading it as one would accuse a function that
-/// demonstrably returns. So a provably-true condition ends the chain at its own
-/// arm (no later `elseif`, no `else`, no implicit arm), and a provably-false one
+/// Branch conditions are otherwise non-deterministic here (see [`stmt_end`]),
+/// but a **literal** one is not a branch at all: `if (true) { return 1; }` has
+/// no no-branch path to add, and reading it as one would accuse a function
+/// that demonstrably returns. A provably-true condition ends the chain at its
+/// own arm (no later `elseif`/`else`/implicit arm); a provably-false one
 /// contributes no arm.
 ///
 /// **Recorded obstacle:** only *literals* are read. A constant-folded guard —
 /// `if (PHP_VERSION_ID >= 80000) { return 1; }`, `if (self::ENABLED) { … }` —
-/// still contributes the implicit fall-through arm, because folding it needs the
-/// project index and the version view this judgment deliberately does without.
-/// A guard of that shape with no `else` is `type.return-missing`'s second named
-/// over-report risk, alongside the undeclared never-returning callee.
+/// still contributes the implicit fall-through arm, since folding needs the
+/// project index this judgment deliberately does without. A guard of that
+/// shape with no `else` is `type.return-missing`'s second named over-report
+/// risk, alongside the undeclared never-returning callee.
 fn if_end(i: &mago_syntax::cst::If<'_>) -> BodyEnd {
     let body = &i.body;
     let mut chain: Vec<(&Expression<'_>, &[Statement<'_>])> =
@@ -9769,24 +9578,22 @@ fn match_end(m: &mago_syntax::cst::Match<'_>) -> BodyEnd {
 ///
 /// # The position boundary, and why it is here
 ///
-/// Four statement kinds are read: an expression statement, a `return`, and the two
-/// `echo` forms. Together they carry the constructs the ids exist for —
-/// `$s = "x $v";`, `f((string) $v)`, `return 'a' . $v;`, `echo $v;`, `print $v;`,
-/// `<?= $v ?>` — and each is a position where the walk's ENTRY env is exactly the
-/// env PHP evaluates the expression in.
+/// Four statement kinds are read: an expression statement, `return`, and the
+/// two `echo` forms — `$s = "x $v";`, `f((string) $v)`, `return 'a' . $v;`,
+/// `echo $v;`, `print $v;`, `<?= $v ?>` — each a position where the walk's
+/// ENTRY env is exactly the env PHP evaluates the expression in.
 ///
-/// Everything else is recorded silence, for one reason: a branch condition, a loop
-/// header, a `match` subject and a `switch` case are evaluated in an env the
-/// statement-position pass does not hold (an `elseif` condition runs only after the
-/// previous branch was refuted; a loop header runs once per iteration), and the
-/// bodies of the unstructured constructs are not lowered as statements at all
-/// (`lower_opaque` keeps only their write/read sets). This is the same position
-/// boundary every other value-reading check carries — the preg pattern check's
-/// "statement pass plus the `if` guard" — minus the guard, because `if ((string) $v)`
-/// is not an idiom the way `if (preg_match(…))` is.
+/// Everything else is recorded silence: a branch condition, loop header,
+/// `match` subject or `switch` case is evaluated in an env this pass does not
+/// hold (an `elseif` condition runs only after the previous branch is
+/// refuted; a loop header runs once per iteration), and unstructured
+/// construct bodies are not lowered as statements at all (`lower_opaque`
+/// keeps only write/read sets). Same position boundary every other
+/// value-reading check carries, minus the `if`-guard the preg pattern check
+/// adds — `if ((string) $v)` is not an idiom the way `if (preg_match(…))` is.
 ///
 /// Nested statements are never descended: an `if` branch's body is lowered by
-/// [`lower_stmt`] itself and collects its own sites, so nothing is counted twice.
+/// [`lower_stmt`] itself and collects its own sites, so nothing double-counts.
 fn string_context_sites(s: &Statement<'_>) -> Vec<StringContextSite> {
     let mut out = Vec::new();
     match s {
@@ -10759,31 +10566,27 @@ fn call_invalidation(node: &Node<'_, '_>) -> Vec<InvalidatedVar> {
 }
 
 /// The one walk behind [`Stmt::invalidated`]: exactly [`collect_call_vars`]'
-/// shape — the same four call nodes, the same "a bare `$v` argument"
-/// recognition, the same descent — but recording each occurrence's evidence on
-/// the name's entry as it collects the name, so the name set and its evidence
-/// are one answer by construction. A describable occurrence appends a
-/// `(callee, position)` site; an unprovable one marks the entry opaque, which
-/// discards every site the name has and refuses it any future one — an opaque
-/// entry carries no sites, whatever the occurrence order was.
+/// shape — same four call nodes, same "bare `$v` argument" recognition, same
+/// descent — but recording each occurrence's evidence on the name's entry as
+/// it collects it, so the name set and its evidence are one answer by
+/// construction. A describable occurrence appends a `(callee, position)` site;
+/// an unprovable one marks the entry opaque, discarding every site it has and
+/// refusing it any future one.
 ///
 /// Unprovable, and therefore opaque (kept on the blanket drop):
 ///
-/// * a method / nullsafe-method / static-method call — the receiver's own
-///   mutability is a separate question (ADR-0070 §4) and no `NameRef` names the
-///   target anyway;
+/// * a method/nullsafe-method/static-method call — receiver mutability is a
+///   separate question (ADR-0070 §4) and no `NameRef` names the target anyway;
 /// * a dynamic function callee (`$f($a)`, `($o->cb)($a)`) — nothing to resolve;
 /// * an argument list carrying a **named** or **spread** argument, or a
-///   first-class callable (`f(...)`) — positional mapping is defeated there, so
-///   a position index would be a guess;
-/// * an occurrence inside a nested function-like body (`nested`) — a closure,
-///   arrow-function or (anonymous-)class member body is a different variable
-///   scope, so a bare `$v` there is not this scope's `$v`; the name is still
-///   collected (the blanket drop's conservatism) but no site may vouch for it.
+///   first-class callable (`f(...)`) — positional mapping is defeated, so a
+///   position index would be a guess;
+/// * an occurrence inside a nested function-like body (`nested`) — a
+///   different variable scope, so a bare `$v` there is not this scope's `$v`;
+///   still collected (blanket-drop conservatism) but no site may vouch for it.
 ///
 /// Language constructs (`isset`, `empty`, `unset`, `list`, `eval`, `exit`) are
-/// not call nodes and never reach this walk, so this path cannot change their
-/// semantics.
+/// not call nodes and never reach this walk.
 fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: bool) {
     let nested = nested
         || matches!(
