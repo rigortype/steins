@@ -7,9 +7,12 @@
 //! widen. Locale-, timezone-, encoding-, global-, and nondeterminism-sensitive
 //! functions remain excluded.
 //!
-//! `WIDTH_REFUSED` differs from exclusion: its names are foldable on a proven
-//! 64-bit engine but decline on 32-bit. The following excluded names have
-//! separate portability or semantic evidence:
+//! `WIDTH_REFUSED` and `WIDTH_UNVERIFIED` differ from exclusion: their names are
+//! foldable on a proven 64-bit engine but decline on 32-bit. The two are
+//! mechanically identical and differ only in evidence — a refused row has a
+//! recorded divergence, an unverified row has nothing at all (see
+//! [`WidthClass`]). The following excluded names have separate portability or
+//! semantic evidence:
 //!
 //! * `strtotime`, `date`, `idate` are `nondet.time` and timezone-coupled even
 //!   with explicit timestamps. Probes gave `idate("Y", 0)` as `1970` under UTC
@@ -92,25 +95,74 @@ pub mod preg;
 ///
 /// # Where the list lives
 ///
-/// The allowlist is the union of the integer-width classes `WIDTH_SAFE` and
-/// `WIDTH_REFUSED` (issue #64). A name without a width verdict is not foldable.
-/// Entries are limited to portable ASCII-cased string operations and other
-/// deterministic functions; `mb_*`, locale-sensitive, and `nondet` functions are
-/// excluded.
+/// The allowlist is the union of the three integer-width classes `WIDTH_SAFE`,
+/// `WIDTH_REFUSED` and `WIDTH_UNVERIFIED` (issue #64, and ADR-0028's 2026-08-14
+/// amendment §4 for the third). A name without a width verdict is not foldable —
+/// so [`foldable`] is a *derived* predicate, "has a class at all", and
+/// [`width_class`] is the primitive. Entries are limited to portable ASCII-cased
+/// string operations and other deterministic functions; `mb_*`, locale-sensitive,
+/// and `nondet` functions are excluded.
 #[must_use]
 pub fn foldable(name: &str) -> bool {
-    width_safe(name) || width_refused(name)
+    width_class(name).is_some()
 }
 
 /// The number of names on the folding allowlist (ADR-0054 §9.6's Catalog section
 /// "freshness context", the [`foldable`] twin of [`hierarchy_entry_count`]): the
-/// union of `WIDTH_SAFE` and `WIDTH_REFUSED`, which is exactly what
-/// [`foldable`] tests — the two lists are disjoint by construction (a name has one
-/// width verdict), so counting both and summing is the same set [`foldable`]
-/// answers `true` for.
+/// union of the three width classes, which is exactly what [`foldable`] tests —
+/// the lists are disjoint by construction (a name has one width verdict), so
+/// counting each and summing is the same set [`foldable`] answers `true` for.
 #[must_use]
 pub fn foldable_entry_count() -> usize {
-    WIDTH_SAFE.len() + WIDTH_REFUSED.len()
+    WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len()
+}
+
+/// Which integer-width class a foldable name sits in — the **primitive** the
+/// folding allowlist is derived from (ADR-0028's 2026-08-14 amendment §4).
+///
+/// `None` means the name is not on the allowlist at all. The three `Some` arms are
+/// a classification of *evidence*, not of behaviour: only [`WidthClass::Safe`]
+/// changes what the fold gate admits, and the other two are mechanically
+/// identical to each other. They are kept apart precisely so they cannot be
+/// conflated — the refused rows' one-recorded-divergence-per-row discipline is
+/// what makes them auditable, and folding unevidenced rows into that list would
+/// erase it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WidthClass {
+    /// **Measured, and it agrees.** Differential probes (php-wasm 0.1.0 at
+    /// `PHP_INT_SIZE = 4` against `php` 8.5.8 at 8) found the 32-bit engine either
+    /// returns the identical value and type tag or declines, for every argument
+    /// tuple the range guard admits. Folds everywhere, browser included.
+    Safe,
+    /// **Measured, and it disagrees.** At least one probe is on record where both
+    /// engines answered and the answers (or their type tags) differ, silently.
+    /// Folds only on a provably 64-bit engine.
+    Refused,
+    /// **Not measured.** No differential probe has been run for the name, so
+    /// nothing is known either way. Folds only on a provably 64-bit engine —
+    /// mechanically the same gate [`WidthClass::Refused`] rides, which is what
+    /// `foldable`'s default-deny sentence has always described. See
+    /// `WIDTH_UNVERIFIED` for why the names sit here rather than being re-derived.
+    Unverified,
+}
+
+/// The width class of `name` (case-insensitive), or `None` when the name is not
+/// on the folding allowlist.
+///
+/// The lists are disjoint (pinned by `the_width_classes_partition_the_allowlist`),
+/// so the search order below is a cost decision and not a precedence rule.
+#[must_use]
+pub fn width_class(name: &str) -> Option<WidthClass> {
+    let listed = |list: &[&str]| list.iter().any(|&f| name.eq_ignore_ascii_case(f));
+    if listed(WIDTH_SAFE) {
+        Some(WidthClass::Safe)
+    } else if listed(WIDTH_REFUSED) {
+        Some(WidthClass::Refused)
+    } else if listed(WIDTH_UNVERIFIED) {
+        Some(WidthClass::Unverified)
+    } else {
+        None
+    }
 }
 
 /// Whether folding `name` is **safe on a 32-bit engine** (case-insensitive), given
@@ -145,12 +197,12 @@ pub fn width_safe(name: &str) -> bool {
     WIDTH_SAFE.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
-/// The complement of [`width_safe`] *within the folding allowlist* — a name that
-/// is foldable and whose 32-bit behaviour is refused. Not the same as
-/// `!width_safe(name)`, which is also true of every name that is not foldable at
-/// all; see `WIDTH_REFUSED` for the refusals and their probes.
+/// A name that is foldable and whose 32-bit behaviour is **refused on recorded
+/// evidence**. Not the same as `!width_safe(name)`, which is also true of every
+/// unverified name and of every name that is not foldable at all; see
+/// `WIDTH_REFUSED` for the refusals and their probes.
 fn width_refused(name: &str) -> bool {
-    WIDTH_REFUSED.iter().any(|&f| name.eq_ignore_ascii_case(f))
+    width_class(name) == Some(WidthClass::Refused)
 }
 
 /// The verified width-safe names, in catalog order — the *extension* of
@@ -164,15 +216,30 @@ pub fn width_safe_names() -> &'static [&'static str] {
     WIDTH_SAFE
 }
 
-/// The refused names, in catalog order — the complement of [`width_safe_names`]
-/// *within* the folding allowlist ([`foldable`] is the union of the two by
-/// construction, so this is that complement and not a third list to keep in step).
+/// The refused names, in catalog order — the [`WidthClass::Refused`] rows, the
+/// extension of the private `width_refused` predicate.
 ///
-/// These are the folds a 32-bit engine does not get, by name. See `WIDTH_REFUSED`
-/// for each refusal's probe evidence.
+/// These are folds a 32-bit engine does not get **because a divergence is on
+/// record**. Since ADR-0028's 2026-08-14 amendment they are no longer the whole
+/// complement of [`width_safe_names`]: [`width_unverified_names`] declines beside
+/// them on the same gate, with no evidence behind it. A caller that wants "what
+/// does not fold here" wants both; a caller that wants "what have we caught PHP
+/// doing" wants this one. See `WIDTH_REFUSED` for each refusal's probe evidence.
 #[must_use]
 pub fn width_refused_names() -> &'static [&'static str] {
     WIDTH_REFUSED
+}
+
+/// The unverified names, in catalog order — the [`WidthClass::Unverified`] rows,
+/// the sibling accessor of [`width_refused_names`].
+///
+/// The two lists together are the complement of [`width_safe_names`] within the
+/// folding allowlist, and both decline on anything but a provably 64-bit engine.
+/// See `WIDTH_UNVERIFIED` for what "unverified" commits the catalog to, which is
+/// deliberately nothing.
+#[must_use]
+pub fn width_unverified_names() -> &'static [&'static str] {
+    WIDTH_UNVERIFIED
 }
 
 /// The verified width-safe half of the folding allowlist (issue #64).
@@ -355,6 +422,52 @@ const WIDTH_REFUSED: &[&str] = &[
     // issue #78 — a `long` hiding inside string work
     "version_compare",
 ];
+
+/// The **unverified rows** of the width classification (ADR-0028's 2026-08-14
+/// amendment §4, issue #330) — the third place, and the one that claims nothing.
+///
+/// `WIDTH_SAFE` is evidenced by differential probes and `WIDTH_REFUSED` by a
+/// recorded divergence per row. A name with neither belonged to neither, which is
+/// why the allowlist held no array-returning name at all. This list is that gap
+/// turned into a row: **not measured**, so the name folds only on a provably
+/// 64-bit engine and declines in the browser — exactly what [`foldable`]'s
+/// default-deny sentence already described.
+///
+/// The evidence discipline is the point, and it runs the other way from the two
+/// lists above: **the correct number of probes behind a row here today is zero.**
+/// The class means "nobody looked". A probe that found agreement would move the
+/// row to `WIDTH_SAFE`; a probe that found a divergence would move it to
+/// `WIDTH_REFUSED` with the divergence written out. Either way the row leaves.
+/// Promotion path: php-wasm differential probes, then `WIDTH_SAFE`.
+///
+/// Both names are admitted by the amendment's §5 strictly-stronger rule — their
+/// Rust rungs are type-level only, so the fold upgrades a type to a value on the
+/// all-literal path and the rung survives beneath it as the no-sidecar floor —
+/// and both are here rather than re-derived in Rust because ADR-0004 says the
+/// fold is the value the project's own PHP produces:
+///
+/// * `explode` — the rung is `non-empty-list<string>` (`explode_transfer`). Its
+///   own semantics are the reason not to reimplement it: an empty `$separator` is
+///   a `ValueError` since PHP 8.0 (not the pre-8 `false`), and a negative
+///   `$limit` drops that many trailing pieces and can empty the result outright
+///   (`explode(',', 'a,b,c', -5)` is `[]` at `PINNED_PHP`, which is why the rung
+///   declines the three-argument form). The `$limit` parameter is an `int`, so a
+///   width verdict is not obviously vacuous and is therefore not assumed.
+/// * `array_merge` — no value rung at all. PHP resolves duplicate **string** keys
+///   last-wins and **renumbers** integer keys from zero in argument order, so the
+///   result's keys are a function of the engine's own array construction rather
+///   than of the arguments as written. That is the same reasoning §2 of the
+///   2026-07-26 amendment gives for the argument wire's entry list, applied to a
+///   name whose whole job is to exercise it.
+///
+/// Deferred to a later slice **with** php-wasm probes, admissible by §5 but not
+/// admitted here: `range`, `preg_split`, `str_split`, `array_unique`,
+/// `array_fill`. `range` in particular has a live 64-bit/32-bit question (its
+/// integer sequence is machine arithmetic), so it is the one least appropriate to
+/// wave through unmeasured — and `range` and `str_split` are also the runner's
+/// own budget probes in `crates/steins-sidecar/tests/protocol.rs`, which rely on
+/// them NOT being gated by this list.
+const WIDTH_UNVERIFIED: &[&str] = &["array_merge", "explode"];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when the function is **uncatalogued** (unknown effects — the safe,
@@ -2113,40 +2226,89 @@ fn levenshtein(a: &str, b: &str) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use super::{WIDTH_REFUSED, WIDTH_SAFE, effect_labels, foldable, width_safe};
+    use super::{
+        WIDTH_REFUSED, WIDTH_SAFE, WIDTH_UNVERIFIED, WidthClass, effect_labels, foldable,
+        foldable_entry_count, width_class, width_safe,
+    };
 
-    /// The allowlist is the union of the two width classes, so "every foldable
+    /// The allowlist is the union of the three width classes, so "every foldable
     /// name has a width verdict" is structural. What still needs pinning is that
-    /// the two classes are DISJOINT (a name in both would be silently admitted on
-    /// a 32-bit engine while the refused table claims otherwise), that no name is
-    /// listed twice within a class, and that the size is the 46 the ADR-0066
-    /// amendments tabulate.
+    /// the classes are pairwise DISJOINT (a name in two of them would be silently
+    /// admitted on a 32-bit engine while another table claims otherwise), that no
+    /// name is listed twice within a class, and that the size is the 48 the
+    /// ADR-0066 amendments plus ADR-0028's 2026-08-14 wave 1 tabulate.
     #[test]
     fn the_width_classes_partition_the_allowlist() {
-        for name in WIDTH_SAFE {
-            assert!(!WIDTH_REFUSED.contains(name), "{name} is classified twice");
-            assert!(foldable(name), "{name} is classified but not foldable");
-            assert_eq!(
-                WIDTH_SAFE.iter().filter(|&n| n == name).count(),
-                1,
-                "{name} is listed twice in WIDTH_SAFE"
-            );
-        }
-        for name in WIDTH_REFUSED {
-            assert!(foldable(name), "{name} is classified but not foldable");
-            assert_eq!(
-                WIDTH_REFUSED.iter().filter(|&n| n == name).count(),
-                1,
-                "{name} is listed twice in WIDTH_REFUSED"
-            );
+        for (list, class, label) in [
+            (WIDTH_SAFE, WidthClass::Safe, "WIDTH_SAFE"),
+            (WIDTH_REFUSED, WidthClass::Refused, "WIDTH_REFUSED"),
+            (WIDTH_UNVERIFIED, WidthClass::Unverified, "WIDTH_UNVERIFIED"),
+        ] {
+            for name in list {
+                assert!(foldable(name), "{name} is classified but not foldable");
+                assert_eq!(
+                    width_class(name),
+                    Some(class),
+                    "{name} is listed in {label} but classifies elsewhere"
+                );
+                assert_eq!(
+                    list.iter().filter(|&n| n == name).count(),
+                    1,
+                    "{name} is listed twice in {label}"
+                );
+                // Disjointness, stated against the two OTHER lists by name so a
+                // failure says which pair collided.
+                for (other, other_label) in [
+                    (WIDTH_SAFE, "WIDTH_SAFE"),
+                    (WIDTH_REFUSED, "WIDTH_REFUSED"),
+                    (WIDTH_UNVERIFIED, "WIDTH_UNVERIFIED"),
+                ] {
+                    if other_label != label {
+                        assert!(
+                            !other.contains(name),
+                            "{name} is classified twice ({label} and {other_label})"
+                        );
+                    }
+                }
+            }
         }
         assert_eq!(WIDTH_SAFE.len(), 37, "the verified width-safe subset");
         assert_eq!(WIDTH_REFUSED.len(), 9, "the refused rows");
+        assert_eq!(WIDTH_UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
-            WIDTH_SAFE.len() + WIDTH_REFUSED.len(),
-            46,
-            "the allowlist size the ADR-0066 amendments tabulate"
+            foldable_entry_count(),
+            48,
+            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1"
         );
+        assert_eq!(
+            WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len(),
+            foldable_entry_count(),
+            "the count is the three lists and nothing else"
+        );
+    }
+
+    /// The third class, named — and the *distinction* it exists to keep, which no
+    /// count can pin: an unverified name declines exactly where a refused one
+    /// does, and is not one.
+    #[test]
+    fn the_unverified_rows_decline_like_refused_ones_without_being_them() {
+        for name in ["array_merge", "explode", "Array_Merge", "EXPLODE"] {
+            assert_eq!(width_class(name), Some(WidthClass::Unverified));
+            assert!(foldable(name), "{name} folds on a 64-bit engine");
+            assert!(!width_safe(name), "{name} declines on anything narrower");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
+        }
+        // The class is evidence, not behaviour: nothing here may leak into the
+        // refused rows, whose one-divergence-per-row discipline is auditable only
+        // because the list contains nothing unevidenced.
+        assert!(!super::width_refused("explode"));
+        assert!(!super::width_refused("array_merge"));
+        // …and the deferred names of `WIDTH_UNVERIFIED`'s doc block are genuinely
+        // still off the allowlist, so the runner's own budget probes (`range`,
+        // `str_split` in `steins-sidecar/tests/protocol.rs`) stay ungated.
+        for name in ["range", "preg_split", "str_split", "array_unique", "array_fill"] {
+            assert_eq!(width_class(name), None, "{name} is deferred, not admitted");
+        }
     }
 
     /// The nine refused rows, named. Each is a *silent* value divergence on a
@@ -2231,19 +2393,34 @@ mod tests {
     /// displayed subsets cannot drift from the gate (issue #64).
     #[test]
     fn the_name_accessors_agree_with_the_predicates() {
-        use super::{width_refused, width_refused_names, width_safe_names};
+        use super::{width_refused, width_refused_names, width_safe_names, width_unverified_names};
         assert_eq!(width_safe_names(), WIDTH_SAFE);
         assert_eq!(width_refused_names(), WIDTH_REFUSED);
+        assert_eq!(width_unverified_names(), WIDTH_UNVERIFIED);
         for name in width_safe_names() {
             assert!(width_safe(name), "{name} is listed safe but the predicate declines it");
         }
         for name in width_refused_names() {
             assert!(!width_safe(name), "{name} is listed refused but the predicate admits it");
-            assert!(width_refused(name), "{name} is listed refused but is not in the complement");
+            assert!(width_refused(name), "{name} is listed refused but the predicate disagrees");
             assert!(foldable(name), "a refused name is still on the folding allowlist");
         }
+        for name in width_unverified_names() {
+            assert!(!width_safe(name), "{name} is listed unverified but the predicate admits it");
+            assert!(!width_refused(name), "{name} is unverified, which is not refused");
+            assert!(foldable(name), "an unverified name is still on the folding allowlist");
+        }
+        // The two non-safe lists together ARE the complement of the safe one — the
+        // property `width_refused_names` alone used to carry, restated where it is
+        // now true.
+        assert_eq!(
+            width_refused_names().len() + width_unverified_names().len(),
+            foldable_entry_count() - width_safe_names().len(),
+            "refused ∪ unverified is exactly what a 32-bit engine does not fold"
+        );
         assert_eq!(width_safe_names().len(), 37);
         assert_eq!(width_refused_names().len(), 9);
+        assert_eq!(width_unverified_names().len(), 2);
     }
 
     /// Default-deny: a name without a width classification is not width-safe.
