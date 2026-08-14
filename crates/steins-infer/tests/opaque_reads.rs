@@ -47,9 +47,8 @@ getRole(null);
 
 #[test]
 fn false_guard_in_descended_callee_is_silent() {
-    // The second observed shape: an `=== false` early-return guard. `make(false)`
-    // descends binding `$token = false`; `if ($token === false) { return; }`
-    // filters it out, so `use_token(string $token)` never sees the bool false.
+    // Second observed shape: an `=== false` guard. `make(false)` binds `$token =
+    // false`; `if ($token === false) { return; }` filters it, so `use_token` never sees false.
     let src = "<?php
 declare(strict_types=1);
 function use_token(string $token): void {}
@@ -67,15 +66,11 @@ make(false);
 
 #[test]
 fn guard_reading_local_survives_structured_if() {
-    // EXPECTATION CHANGE (ADR-0031, was `..._is_silent` → 0): the structured `if`
-    // no longer blanket-invalidates a variable merely *read* by a branch. This is
-    // the precision payoff. Original intent — "a guard that could exclude a value
-    // must not keep it on an unreachable path" — is now enforced by *modeling* the
-    // control flow instead of by forgetting: here `$val = "abc"`, the guard
-    // `$val !== ""` is provably TRUE (so the then-branch is the only live path and
-    // it falls through), and `echo $val` merely READS `$val` without filtering it.
-    // The fact survives, and the proven TypeError at `width($val)` is now FLAGGED
-    // (the ADR-0031 read-of-$w-no-longer-kills-the-fact case).
+    // EXPECTATION CHANGE (ADR-0031, was `..._is_silent` → 0): structured `if` no
+    // longer blanket-invalidates a variable merely *read* by a branch — modeled
+    // instead of forgotten. Here `$val = "abc"`, guard `$val !== ""` is provably
+    // TRUE (then-branch is the only live path and falls through), and `echo $val`
+    // only READS it, not filters — the fact survives and `width($val)` is FLAGGED.
     let src = "<?php
 declare(strict_types=1);
 function width(int $w): int { return $w; }
@@ -92,10 +87,9 @@ width($val);
 
 #[test]
 fn construct_reading_other_var_preserves_unrelated_fact() {
-    // The read-set must not over-forget: a construct that reads/writes only OTHER
-    // variables leaves the tracked `$w` known, so the proven TypeError still
-    // FIRES. Here the `if` reads `$cond` and calls `use_it($cond)`; neither `reads`
-    // nor `writes` mentions `$w`.
+    // Read-set must not over-forget: a construct reading/writing only OTHER vars
+    // leaves tracked `$w` known, so the TypeError still FIRES. Here `if` reads
+    // `$cond` and calls `use_it($cond)`; neither `reads` nor `writes` mentions `$w`.
     let src = "<?php
 function width(int $w): int { return $w; }
 function use_it($c): void {}
@@ -113,13 +107,10 @@ width($w);
 
 #[test]
 fn instanceof_guard_prunes_dead_return_path() {
-    // EXPECTATION CHANGE (ADR-0031, was `..._drops_exact_class_fact` → 0): the
-    // original intent — "an `instanceof` guard must not let a fall-through assert an
-    // unreachable type" — is now met by *branch pruning* rather than by forgetting
-    // the fact. `$x = new Foo()` proves `$x instanceof Foo` (verdict Yes), so
-    // `!(...)` is No: the early-`return` then-branch is DEAD, the fall-through keeps
-    // `$x`'s exact class, and `$x->m("abc")` resolves + is FLAGGED. The bad path the
-    // old read-invalidation feared is proven dead, not merely forgotten.
+    // EXPECTATION CHANGE (ADR-0031, was `..._drops_exact_class_fact` → 0): met now
+    // by *branch pruning*, not forgetting. `$x = new Foo()` proves `$x instanceof
+    // Foo` (Yes), so `!(...)` is No: the early-`return` then-branch is DEAD, the
+    // fall-through keeps `$x`'s exact class, and `$x->m("abc")` resolves + FLAGS.
     let src = "<?php
 class Foo { public function m(int $w): void {} }
 $x = new Foo();
@@ -131,9 +122,8 @@ $x->m(\"abc\");
 
 #[test]
 fn method_call_without_guard_still_resolves() {
-    // Control: with no intervening guard reading `$x`, the exact-class fact
-    // survives and `$x->m("abc")` is flagged — proving the previous test's
-    // silence is caused by the guard's read, not by a broken class fact.
+    // Control: with no guard reading `$x`, the exact-class fact survives and fires —
+    // proving the previous test's silence is the guard's read, not a broken fact.
     let src = "<?php
 class Foo { public function m(int $w): void {} }
 $x = new Foo();
