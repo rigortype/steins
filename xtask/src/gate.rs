@@ -920,12 +920,24 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // `type.return-maybe-missing` rows this bucket absorbed from
     // `EXPECTED_PROOF_FINDINGS`.
     ("phpstan/phpstan-src", 10),
-    // 120 — 111 `variable.maybe-undefined` over 85,282 files plus the 9
-    // `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
-    // Measured against the checkout this run saw, which already differs from the
-    // revision `corpus.local.toml` records (the same drift the `phpdoc.*` tripwire
-    // reports); reseed with that one when the checkout is reconciled.
-    ("pxxxx-monorepo", 120),
+    // 120 → 121 (+1), 2026-08-14, with issue #330 PR2: `array_merge` joined the
+    // fold allowlist, so a call to it stopped being an uncatalogued name whose
+    // by-ref parameters might WRITE an argument — and an argument read became a
+    // read (the issue #77 bind-free distinction). The row it surfaces is a test
+    // data-provider returning `array_merge($a, $b)` where `$b` is bound only
+    // inside a `foreach` over a class-constant list: bound on the paths where
+    // the loop ran, undefined (PHP warns, reads null) where it did not. The
+    // SAME function already carries two baselined rows of the SAME shape — an
+    // inner-loop variable read after its loop — so this is the third sibling
+    // becoming visible, not a new class of claim. TRUE at the possibly grade.
+    //
+    // Before this entry: 120 — 111 `variable.maybe-undefined` over 85,282 files
+    // plus the 9 `type.return-maybe-missing` rows absorbed from
+    // `EXPECTED_PROOF_FINDINGS`. Measured against the checkout this run saw,
+    // which already differs from the revision `corpus.local.toml` records (the
+    // same drift the `phpdoc.*` tripwire reports); reseed with that one when
+    // the checkout is reconciled.
+    ("pxxxx-monorepo", 121),
 ];
 
 /// The expected possibly-grade count for a package/local-project name (0 if
