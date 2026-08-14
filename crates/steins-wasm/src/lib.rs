@@ -316,9 +316,13 @@ fn with_replay_extras(
 ///
 /// Every field comes from [`steins_infer::SurfaceSummary`], which reads the very
 /// helpers that gate admission — so this describes the gates rather than
-/// paraphrasing them, and the refused-fold names are the catalog's own complement
-/// rather than a list typed into a frontend. The prose belongs to the UI; what
-/// travels is the shape.
+/// paraphrasing them, and the refused-fold names are the catalog's own refused
+/// rows rather than a list typed into a frontend. Those rows stopped being the
+/// whole `foldable ∧ !width_safe` complement in ADR-0028's 2026-08-14 amendment:
+/// the unverified rows decline beside them with no divergence to report, which
+/// means `fold_safe` and `fold_total` (which do count them) already tell a reader
+/// how many names go unnamed here. The prose belongs to the UI; what travels is
+/// the shape.
 fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "label": s.label,
@@ -765,9 +769,17 @@ mod replay {
     /// Each field is pinned against the gate it reports, not against a constant:
     /// the width-safe lane, curated rows DECLINED (ADR-0066's amendment keeps
     /// Gate 2's `int_size == 8` leg), the absence family LIVE (existence is not
-    /// arithmetic), and the refused names taken from the catalog complement rather
-    /// than spelled here — a fourth refusal added to the catalog appears in the
-    /// envelope without anyone editing JS.
+    /// arithmetic), and the refused names taken from the catalog rather than
+    /// spelled here — a tenth refusal added to the catalog appears in the envelope
+    /// without anyone editing JS.
+    ///
+    /// `fold_total` moved 46 → 48 with ADR-0028's 2026-08-14 wave 1 (`array_merge`,
+    /// `explode`), which is the number growing and not the boundary moving:
+    /// `fold_safe` is unchanged, so this engine folds exactly what it folded
+    /// before, and the two new names are among the ones it does not get.
+    /// `refused_folds` is deliberately unchanged with it — the unverified rows
+    /// decline on the same gate but have no divergence to report, and this field is
+    /// the one that reports divergences.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -781,12 +793,12 @@ mod replay {
         assert_eq!(boot["fold_lane"], "width_safe_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 46);
-        assert_eq!(boot["fold_safe"], 37);
+        assert_eq!(boot["fold_total"], 48);
+        assert_eq!(boot["fold_safe"], 37, "wave 1 grew the allowlist, not this engine's share");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::width_refused_names()),
-            "the refusals are the catalog complement"
+            "the refusals are the catalog's refused rows"
         );
         assert_eq!(
             boot["refused_folds"],

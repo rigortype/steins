@@ -173,7 +173,15 @@ assert(boot !== undefined && boot !== null, "a replay envelope carries a boot ob
 assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
 assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
 assert(boot.fold_lane === "width_safe_subset", `a 32-bit engine folds the width-safe subset (got ${boot.fold_lane})`);
-assert(boot.fold_safe === 37 && boot.fold_total === 46, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+// 48 = 37 width-safe + 9 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
+// added `array_merge` and `explode` as the first WIDTH_UNVERIFIED rows: the
+// allowlist grew, this engine's share did not, so `fold_safe` is unmoved and the
+// two new names are among the ones the browser does NOT fold.
+assert(boot.fold_safe === 37 && boot.fold_total === 48, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+// `refused_folds` stays the nine REFUSED rows — the ones with a recorded
+// divergence, which is what the boundary panel's sentence about them claims. The
+// unverified rows decline on the same gate with nothing on record, so they are not
+// merged in here.
 assert(
   Array.isArray(boot.refused_folds) &&
     boot.refused_folds.join(",") === "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare",

@@ -479,6 +479,156 @@ fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
     assert!(folder.absence_family_available(), "a 32-bit engine still witnesses absence");
 }
 
+/// The **unverified** leg of the same gate (ADR-0028's 2026-08-14 amendment §4,
+/// issue #330): a name whose width nobody has measured declines on a 32-bit
+/// engine exactly as a refused one does, and folds at width 8.
+///
+/// This is the browser-parity pin, and it needs no php-wasm to state: php-wasm
+/// 0.1.0 reports `PHP_INT_SIZE = 4`, so the first half below IS what the
+/// playground does with an all-literal `explode`. The point of the fixture is
+/// that no code was added to make it happen — the gate asks
+/// `steins_catalog::width_safe`, `explode` is not certified, and a third catalog
+/// class that changes only the *evidence* changes nothing here. If the gate ever
+/// grows a case per class, this pair is what catches it.
+#[test]
+fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
+    use steins_sidecar::{FoldKey, FoldValue};
+    /// `explode(',', 'a,b')` — the engine's answer, spelled once for both widths
+    /// so the two halves differ only in the reported machine.
+    fn pieces() -> FoldResult {
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Str("a".to_owned())),
+            (FoldKey::Int(1), FoldValue::Str("b".to_owned())),
+        ]))
+    }
+    let args = [ArgValue::Str(",".into()), ArgValue::Str("a,b".into())];
+    assert_eq!(
+        steins_catalog::width_class("explode"),
+        Some(steins_catalog::WidthClass::Unverified),
+        "the fixture is about the unverified class, not the refused one",
+    );
+
+    // php-wasm's machine. Every argument is a string — the range guard has no
+    // integer to reject — so the decline is the NAME's, and it is refused before
+    // the engine is touched.
+    let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("explode", pieces());
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(folder.fold("explode", &args), None);
+    assert!(
+        folder.engine_mut().dispatched.is_empty(),
+        "an unverified name is refused before dispatch: {:?}",
+        folder.engine_mut().dispatched
+    );
+
+    // The same call, the same table, on a proven 64-bit engine: it folds, and the
+    // array result comes back. So the decline above is the width and not a
+    // missing answer or a broken array path.
+    let engine = FakeEngine::new("8.5.8", Some(8)).with_fold("explode", pieces());
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(
+        folder.fold("explode", &args),
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("a".into())),
+            (ArrayKey::Int(1), ArgValue::Str("b".into())),
+        ]))
+    );
+    assert_eq!(folder.engine_mut().dispatched, vec!["explode".to_owned()]);
+}
+
+/// The same pair over the REPLAY transport, which is the one the browser
+/// actually runs (ADR-0066): a 32-bit table holding the *right* answer still
+/// folds nothing, and asks nothing — the gate is upstream of the table, so an
+/// unverified name cannot be talked into folding by pre-answering it.
+#[test]
+fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
+    let fold_answer = serde_json::json!({
+        "kind": "value",
+        "type": "array",
+        "value": { "__steins_array": [[0, "a"], [1, "b"]] },
+    });
+    let args = [FoldArg::Str(",".to_owned()), FoldArg::Str("a,b".to_owned())];
+
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.2", 4); // php-wasm 0.1.0
+    with_fold(&mut t, "explode", &args, fold_answer.clone());
+    let mut folder = TableFolder::with_table(t);
+    assert_eq!(
+        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())]),
+        None
+    );
+    assert!(folder.pending().is_empty(), "a declined fold asks nothing: {:?}", folder.pending());
+
+    // …and the identical table with `int_size: 8` folds it, so the table is not
+    // the thing that was wrong.
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.8", 8);
+    with_fold(&mut t, "explode", &args, fold_answer);
+    let mut folder = TableFolder::with_table(t);
+    assert_eq!(
+        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())]),
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("a".into())),
+            (ArrayKey::Int(1), ArgValue::Str("b".into())),
+        ]))
+    );
+}
+
+/// **The rung survives as the floor**, end to end, on the machine the browser
+/// actually has (ADR-0028's 2026-08-14 amendment §5).
+///
+/// This is the case no local sidecar can produce, and the one that decides whether
+/// admitting `explode` cost anything. On a 32-bit engine the fold declines — the
+/// row is unverified — but reflection is not width-gated, so the type-level rung
+/// `explode_transfer` has always had still runs and still answers
+/// `non-empty-list<string>`. The fold shadows that rung on the all-literal 64-bit
+/// path and removes it nowhere.
+///
+/// The reflect answer is load-bearing rather than decoration: the rung is admitted
+/// only when the engine's declaration matches the one it was written against
+/// (`array`, ADR-0061's independent-implementation cross-check), so a table without
+/// it would fall to the ADR-0069 declared floor and this fixture would be pinning
+/// the wrong rung.
+#[test]
+fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
+    const SRC: &str = "<?php\n\\PHPStan\\dumpType(explode(\",\", \"a,b,c\"));\n";
+    let dumps = |folder: &mut dyn Folder| -> Vec<String> {
+        findings_with(SRC, folder)
+            .iter()
+            .filter(|d| d.id == DEBUG_TYPE_ID)
+            .map(|d| d.message.replace("dumped type: ", ""))
+            .collect()
+    };
+    let fold_answer = serde_json::json!({
+        "kind": "value",
+        "type": "array",
+        "value": { "__steins_array": [[0, "a"], [1, "b"], [2, "c"]] },
+    });
+    let args =
+        [FoldArg::Str(",".to_owned()), FoldArg::Str("a,b,c".to_owned())];
+
+    // php-wasm's machine: the fold declines, the rung answers.
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.2", 4);
+    with_reflect(&mut t, "explode", fn_reflection("explode", "array"));
+    with_fold(&mut t, "explode", &args, fold_answer.clone());
+    assert_eq!(
+        dumps(&mut TableFolder::with_table(t)),
+        vec!["non-empty-list<string>".to_owned()],
+        "the type-level transfer is what the browser keeps"
+    );
+
+    // The same table at width 8: the fold answers instead, strictly stronger.
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.8", 8);
+    with_reflect(&mut t, "explode", fn_reflection("explode", "array"));
+    with_fold(&mut t, "explode", &args, fold_answer);
+    assert_eq!(
+        dumps(&mut TableFolder::with_table(t)),
+        vec!["list{'a', 'b', 'c'}".to_owned()],
+        "a value, where the line above had a type"
+    );
+}
+
 /// The fold lane's width gate, ADMITTED leg (issue #64 S1.5): a verified
 /// width-safe builtin over in-range arguments folds on a 32-bit engine and IS
 /// dispatched to. Without this the width tests would all be satisfied by a lane

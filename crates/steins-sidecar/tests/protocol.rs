@@ -542,6 +542,38 @@ fn fold_divide_by_zero_is_a_throw() {
     assert_eq!(r, FoldResult::Throw { class: "DivisionByZeroError".to_owned() });
 }
 
+/// `explode('', 'x')` is a `ValueError` at `PINNED_PHP`, and the seam reports it as
+/// a throw rather than inventing a return value.
+///
+/// This edge is the reason `explode` sits in `WIDTH_UNVERIFIED` rather than getting
+/// a Rust reimplementation: PHP 8.0 replaced the pre-8 `false` return with the
+/// throw, and a re-derivation written today would have to know which side of that
+/// change the project's engine is on. Asking it is cheaper and cannot be wrong
+/// (ADR-0004). Sibling of `fold_divide_by_zero_is_a_throw`, and the *only* place
+/// the `Throw` for this call is observable — by the time the inference lane sees
+/// it, a throw and a widen are the same decline.
+#[test]
+fn fold_explode_with_an_empty_separator_is_a_throw() {
+    let Some(mut sc) = spawn_or_skip("fold_explode_with_an_empty_separator_is_a_throw") else {
+        return;
+    };
+    assert_eq!(
+        sc.fold("explode", &[s(""), s("x")]),
+        FoldResult::Throw { class: "ValueError".to_owned() }
+    );
+    // The same process answers the non-empty call next, with the array result the
+    // 2026-08-14 amendment carries back — so the throw is the argument's and not
+    // the name's.
+    assert_eq!(
+        sc.fold("explode", &[s(","), s("a,b")]),
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Str("a".to_owned())),
+            (FoldKey::Int(1), FoldValue::Str("b".to_owned())),
+        ]))
+    );
+    assert!(!sc.is_poisoned());
+}
+
 #[test]
 fn fold_unknown_function_widens() {
     let Some(mut sc) = spawn_or_skip("fold_unknown_function_widens") else { return };
