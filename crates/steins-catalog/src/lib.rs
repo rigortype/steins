@@ -59,6 +59,11 @@ mod display_names_generated;
 /// Consulted only by [`return_fact`]. The table may be empty.
 mod return_facts_generated;
 
+/// The **resource-return** table (ADR-0056 §8), generated from
+/// `docs/research/phpsrc-mining/resource_returns.toml` by the same command.
+/// Consulted only by [`resource_return`].
+mod resource_returns_generated;
+
 /// The builtin declared-return floor (ADR-0069), generated from
 /// `docs/research/phpstan-mining/declared_returns.toml` by `cargo xtask
 /// gen-catalog`. Consulted only by [`declared_return`] and
@@ -1984,6 +1989,39 @@ pub fn return_fact(name: &str) -> Option<&'static str> {
         .map(|i| return_facts_generated::RETURN_FACTS[i].1)
 }
 
+/// Whether the builtin `name` returns a legacy PHP **resource**, and whether its
+/// return carries a `false` failure arm (ADR-0056 §8). `Some(true)` is
+/// `resource|false`, `Some(false)` is a bare `resource`, `None` is every other
+/// builtin.
+///
+/// # This answer is a proposal, and two of its three conditions are not here
+///
+/// `resource` is the one type PHP cannot spell in a declaration, so the reflected
+/// envelope that anchors every other return fact (ADR-0056 §1) is structurally
+/// unavailable — `fopen` declares nothing and never will. The row below is
+/// condition 1 of §7's gate, the php-src stub reading at the pin. The consumer
+/// (steins-infer) supplies the other two before it seeds anything:
+///
+/// * **the tripwire** — the analyzing engine must declare NO return type for this
+///   name. PHP 8 migrated most of the resource world to objects, and an engine
+///   that answers `CurlHandle|false` has *disowned* the row; curation yields to
+///   it, exactly as §1 requires. This is what keeps the 89 rotted `functionMap`
+///   names (ADR-0069 §5) out without a hand-maintained denylist, and what will
+///   switch a row off by itself the day its function migrates.
+/// * **the minor pin** — the project PHP minor must equal [`PINNED_PHP`], the
+///   same version gate [`return_fact`]'s refinements pass through.
+///
+/// Matching is case-insensitive and backslash-trimmed, as everywhere else in this
+/// crate; the generated keys are lowercased and sorted for binary search.
+#[must_use]
+pub fn resource_return(name: &str) -> Option<bool> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    resource_returns_generated::RESOURCE_RETURNS
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| resource_returns_generated::RESOURCE_RETURNS[i].1)
+}
+
 /// The **declared return type** of a builtin `name` (ADR-0069, issues #73/#79): the
 /// canonical phpdoc spelling of the type the builtin declares (`"string"`,
 /// `"string|false"`, `"non-empty-string"`), or `None` when no row covers it.
@@ -2383,6 +2421,40 @@ mod tests {
         assert_eq!(super::return_fact("dirname"), None);
         assert_eq!(super::return_fact("DIRNAME"), None);
         assert_eq!(super::return_fact("\\dirname"), None);
+    }
+
+    #[test]
+    fn resource_returns_carry_the_stub_reading_and_nothing_else() {
+        // The three bare-`resource` rows and the `resource|false` majority — the
+        // `false` arm is READ from the stub, never assumed, because the guard
+        // machinery downstream behaves differently for the two.
+        assert_eq!(super::resource_return("fopen"), Some(true));
+        assert_eq!(super::resource_return("tmpfile"), Some(true));
+        assert_eq!(super::resource_return("stream_context_create"), Some(false));
+        assert_eq!(super::resource_return("stream_context_get_default"), Some(false));
+        assert_eq!(super::resource_return("stream_context_set_default"), Some(false));
+        // The migration's other side. These once returned resources and now
+        // return objects, so php-src's stubs no longer name `resource` and they
+        // were never mined — the row is absent before §8.2's tripwire is even
+        // consulted, which is the second belt the TOML header describes.
+        for migrated in ["curl_init", "imagecreate", "finfo_open", "ldap_connect", "odbc_connect"] {
+            assert_eq!(
+                super::resource_return(migrated),
+                None,
+                "{migrated} returns an object on PHP 8 — it must not be a resource row",
+            );
+        }
+        // Arrays OF resources are not resource rows (ADR-0056 §8.7): the arms are
+        // an array and the element type has no carrier.
+        assert_eq!(super::resource_return("stream_socket_pair"), None);
+        assert_eq!(super::resource_return("get_resources"), None);
+        // The shared lookup contract, as for every other table here.
+        assert_eq!(super::resource_return("FOPEN"), Some(true));
+        assert_eq!(super::resource_return("\\fopen"), Some(true));
+        // Well-formed for binary search.
+        let t = super::resource_returns_generated::RESOURCE_RETURNS;
+        assert!(t.windows(2).all(|w| w[0].0 < w[1].0), "RESOURCE_RETURNS must be sorted by key");
+        assert!(!t.is_empty(), "the table is the whole point; an empty one is a generation bug");
     }
 
     /// Spellings treated as single-base envelopes when partitioning generated rows.
