@@ -6,7 +6,7 @@
 //! null-poisoned — an undischarged optional key yields NO fact, never declared
 //! value ∪ null) and **zero emission**, A-G9's corollary (shape reads must not
 //! produce a finding; every test asserts the non-debug diagnostic list is empty,
-//! and [`no_findings_from_shape_reads`] sweeps the matrix).
+//! and [`shape_reads_feed_nothing_but_the_strict_leg`] sweeps the matrix).
 //!
 //! NB: a variable handed to a call is invalidated after that statement (pre-existing
 //! by-ref conservatism), so each fixture dumps a binding once.
