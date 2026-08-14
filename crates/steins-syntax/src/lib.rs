@@ -1960,20 +1960,17 @@ pub struct CallExpr {
     /// `||` compositions, a constant-key comparison, a named call), `None`
     /// everywhere else.
     ///
-    /// [`ArgValue`] cannot express `isset($d['a'])` as a value, but
-    /// `Util_Assert::true(isset($d['a']));` is a guard the
-    /// analysis can consume exactly as it consumes `assert(isset($d['a']))`
-    /// (ADR-0058's tag lane), but only if the *condition* survives lowering; this
-    /// field is where it survives. Populated purely syntactically — the lowering
-    /// knows nothing about which callees carry `@phpstan-assert` tags — and read
-    /// only by that consumer.
+    /// [`ArgValue`] cannot express `isset($d['a'])` as a value, but a userland
+    /// assertion helper called on it is a guard the analysis consumes exactly as it
+    /// consumes `assert(isset($d['a']))` (ADR-0058's tag lane) — only if the
+    /// *condition* survives lowering, and this field is where it survives.
+    /// Populated purely syntactically: the lowering knows nothing about which
+    /// callees carry `@phpstan-assert` tags.
     ///
     /// **Empty when no argument has a guard reading** (the overwhelming case), so
     /// an ordinary call allocates nothing; index with [`Self::arg_cond`], which
-    /// treats a short vector as all-`None`. It is deliberately NOT a condition
-    /// the branch walk may evaluate as an `if`: a [`CondExpr::Call`] built here
-    /// carries its real `reads`, but the walk never sees this field as a guard
-    /// position.
+    /// treats a short vector as all-`None`. Deliberately NOT a condition the branch
+    /// walk may evaluate as an `if`.
     pub arg_conds: Vec<Option<CondExpr>>,
 }
 

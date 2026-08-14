@@ -19997,12 +19997,12 @@ fn asserted_boolean(spec: &AssertSpec) -> Option<bool> {
 /// discharge ladder): route a userland assertion helper's condition argument
 /// through the SAME guard walk `assert($cond)` uses.
 ///
-/// `Util_Assert::true(isset($options['user_id']));` is the corpus pattern this
-/// exists for. `assert(isset(…))` discharges the strict leg because its argument
-/// survives lowering as a condition; the helper form did not, because the value
-/// lowering of `isset(…)` is [`ArgValue::Other`] — nothing to consume. With the
-/// condition retained (`CallExpr::arg_conds`) the two forms differ in exactly one
-/// respect, and it is the one ADR-0058 legislates:
+/// A house helper asserting `isset($options['key'])` before the read is the corpus
+/// pattern this exists for. `assert(isset(…))` discharges the strict leg because
+/// its argument survives lowering as a condition; the helper form did not, because
+/// the value lowering of `isset(…)` is [`ArgValue::Other`] — nothing to consume.
+/// With the condition retained (`CallExpr::arg_conds`) the two forms differ in
+/// exactly one respect, and it is the one ADR-0058 legislates:
 ///
 /// * **Stratum.** `assert()` is *Verified, unconditionally* (the 2026-07-25
 ///   ruling reads it as `if (!$cond) throw`). A helper carrying only a

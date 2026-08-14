@@ -481,281 +481,115 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // phpdoc contract predicts — TRUE, released, working test code.
     ("nikic/PHP-Parser", 15),
     // The private monorepo (corpus.local.toml); matched by its local project name.
-    // 333 → 357 (+24) with ADR-0031 branch-sensitive analysis: the structured `if`
-    // walk, ternary values, and positive refinement now reach proven values that
-    // were previously buried inside `Opaque` control-flow blocks, so the phpdoc
-    // contract layer sees more of them.
     //
-    // 357 → 404 (+47) with the ADR-0035 "refined layer goes live" milestone: the
-    // env now stores the four-layer `steins_domain::Fact`, and three new sound
-    // inference sources feed the contract layer — native-type parameter *seeding*
-    // (`int $x` ⇒ `General{Int}`), guard *refinements* that produce Refined/General
-    // facts (`$n > 0` ⇒ positive-int, `$s !== ''` ⇒ non-empty-string), and
-    // `@phpstan-assert` *application* — checked via `steins_contract::admits_fact`
-    // (only a definite `No` reports). 8 of the increase are the new abstract-fact
-    // findings (a seeded/refined scalar flowing into an incompatible `@param`, e.g.
-    // positive-int → `@param string`, non-empty-string → `@param int`, int →
-    // `@param string`); the rest are concrete values the richer propagation now
-    // reaches. All sampled increases are TRUE no-coercion contract violations in
-    // released test code, never runtime findings — the runtime gate stays GREEN.
-    // Class-shaped `@param`s are held silent against scalar facts (template safety),
-    // so no template FPs. Baseline moved deliberately per ADR-0030/0035.
+    // Ledger of every move, oldest first. Standing conditions unless a row says
+    // otherwise: proof layer 0, every OSS package unchanged (the soundness signal —
+    // a wrong checker change lights up well-typed OSS first), `throw.*` and
+    // possibly-grade at their own baselines, PHPStan reporting the identical class.
+    // A decrease never gates; it is adopted consciously and recorded so the next
+    // reader knows the cause.
     //
-    // 404 → 405 (+1) with the ADR-0036 object-state milestone: the new
-    // `phpdoc.property-mismatch` check (a proven/abstract value assigned to a
-    // property whose `@var` contract definitely rejects it). The single pxxxx
-    // increase is a TRUE finding — a model class's `$id` property is `@var
-    // numeric-string`, and a test assigns an int literal to it (a value that
-    // is not a numeric *string*); PHPStan flags the identical `assign.propertyType`.
-    // Property checks run only in the plain per-scope pass (never under a binding
-    // descent, whose caller values in-body guards would narrow), so the descent-bound
-    // guard-blind candidates seen mid-development do not reach the gate.
-    //
-    // 405 → 439 (+34) with ADR-0043 stage 4 (phpdoc-side class contracts + the
-    // enum-case/class-const value resolution that feeds them). The delta was
-    // baseline-diffed (a HEAD worktree) and triaged verbatim; all 34 net-new (36
-    // added, 2 pre-existing FPs removed) are TRUE:
-    //   - class-const string args vs `@param int`/`int[]` (a DAO's `TYPE_*`
-    //     consts holding `"3"`-style numeric strings into `int`; a const list of
-    //     numeric-string ids into `int[]`) — the stringly-typed DB-illusion
-    //     pattern (ADR-0037), now that class-const args resolve to their literals.
-    //   - proven scalars/objects vs a class-typed contract: a service-name string
-    //     vs an enum param, an int literal vs a `SomeInterface|false` union,
-    //     a float literal (an `@phpstan-ignore` intentional wrong type) vs a
-    //     scalar|`BackedEnum` union, a prose string literal vs a `list<Model>`
-    //     param, `null` assigned to a property whose `@var` names a PDO
-    //     wrapper class on `disconnect()`.
-    //   - sealed array-shape violations surfaced once a value became provable (its
-    //     class-const/`::class`/enum elements now resolve): two finder methods'
-    //     options arrays carrying a key their `@param array{…}` omits; a
-    //     data-provider `expected => SomeException::class` (a *string*) where
-    //     the `@return array<…, array<untyped>>` wants an array; a
-    //     metadata-defaults const carrying an extra key vs its `@return array{…}`.
-    // The 2 removed are pre-existing FPs the stage cleared: an unresolved const-fetch
-    // *type* (`SomeClass::LIST_*`) no longer manufactures a No against an array
-    // value (const-fetch types are silent), and a `[]`-vs-`non-empty-list` finding a
-    // `count()===0`-guarded value could never actually reach. Runtime layer GREEN.
-    //
-    // 439 → 434 (−5), 2026-07-24 evening: LIVE-TREE DRIFT, not a checker change —
-    // the unpinned monorepo checkout gained ~210 files during the day and some
-    // previously-counted finding sites changed. Decrease adopted consciously
-    // (a decrease never gates; recorded so the next reader knows the cause).
-    //
-    // 434 → 477 (+43) with ADR-0056 R1 (builtin return facts): a uniquely-resolved
-    // builtin call now seeds its REFLECTED RETURN ENVELOPE into the value domain
-    // (`trim()`/`substr()`/… ⇒ `General{String}`), the runtime's own
-    // `getReturnType()` — so a request string read as
-    // `trim(ParamHelper::…->asString())` and passed to a method's `@param int`
-    // becomes a proven contract mismatch the phpdoc layer now sees. All 43 were
-    // baseline-diffed (a stashed HEAD) and triaged verbatim: every one is a
-    // `string`/`non-empty-string` value → `@param int` in a request-handling
-    // controller (AJAX/Rpc/admin htdocs), PHPStan flags each identically — the
-    // stringly-typed request-param → int-param pattern (same class the +47/ADR-0035
-    // note above already recorded). Two render `non-empty-string`: the seeded
-    // `General{String}` refined by an existing `=== ''` guard before the call — the
-    // envelope composing correctly with narrowing. 0 findings disappeared; every
-    // OSS package is unchanged (the soundness signal — a wrong envelope would light
-    // up well-typed OSS too). Runtime/proof layer stays GREEN (0). throw.* is
-    // unmoved by this change (44563 before and after).
-    // 477 → 487 (+10), 2026-07-29 with DR2 (is_* guard narrowing, ADR-0064
-    // seam v): the by-ref exemption now lets a request-param string's fact
-    // SURVIVE a pure `is_numeric`/`is_array` guard instead of being
-    // forgotten, so the guarded value reaches the call and the phpdoc layer
-    // judges it. All 10 were baseline-diffed (set-diff vs the pre-slice
-    // build; 0 disappeared) and triaged verbatim: every one is the standing
-    // stringly-typed request-param idiom — `is_numeric($x)`-guarded
-    // string/numeric-string handed to a `@param int`/`int[]` method
-    // (`is_numeric` proves numeric-STRING-ness, not int-ness). PHPStan
-    // reports each identically at level 6+. Every OSS package is unchanged
-    // (the soundness signal); proof layer stays 0 — one proof-layer FP the
-    // slice initially introduced (a refuting guard leaving a stale
-    // Singleton premise on an unreachable branch) was found by this same
-    // gate and fixed in-slice: a refuted fact now DROPS.
-    // 487 → 497 (+10), 2026-08-02: the ADR-0072 designed unlock (shape
-    // facts judged against contracts — the acceptance relation's third
-    // face). Baseline-diffed against the pre-slice build: exactly 10 new,
-    // 0 disappeared. Triaged verbatim, 10/10 TRUE, one class: a sealed
-    // `array{…}` @param that under-declares keys its call sites provably
-    // always pass (both docblock declarations read at source for the
-    // sampled pair — the callee's four-key sealed shape against a caller
-    // contract carrying six required keys), plus one plural-records-vs-
-    // singular-record annotation where presence and value obligations
-    // fail together. PHPStan reports the identical class for sealed
-    // shapes. Every OSS package unchanged (the CI fp-gate stayed green on
-    // the same commit); proof layer 0 throughout; nsrt LOST 0.
-    // 497 → 498 (+1), 2026-08-02, with ADR-0073 (inline `@var` cast seeding,
-    // PR #121): the new finding is the SAME sealed-array-shape class the
-    // +10/ADR-0072 entry above already recorded, surfaced by a different
-    // path — a controller's statement-level `/** @var array{9 keys} */`
-    // cast now seeds the full shape it names, and the very next statement
-    // hands that value to a sibling class's static setter whose declared
-    // `@param array{…}` is sealed at 8 keys — one key short of the cast.
-    // TRUE: read both docblocks at source (not just the finding text) —
-    // the setter's contract genuinely under-declares what its one caller
-    // (the inline cast says so explicitly) always passes. Every OSS
-    // package unchanged; proof layer 0; the gate is GREEN again at 498.
-    // 498 → 499 (+1), 2026-08-05: CORPUS STATE, not an engine change, and
-    // attributed as such two ways rather than by triaging the finding.
-    // (a) Every public package's count is EXACT in the same run — a checker
-    //     change that manufactured a phpdoc finding would light up
-    //     well-typed OSS too, and none moved. (b) Running the gate at the
-    //     very commit where 498 was seeded GREEN, against today's local
-    //     checkout, reproduces 499 exactly — so the movement is on the
-    //     corpus side of the measurement by construction, with Steins held
-    //     fixed. The local checkout was on a feature branch when 498 was
-    //     seeded and has since advanced to its own master plus two pulls:
-    //     813 files changed, 350 of them PHP.
-    //     NOT triaged finding-by-finding, and this entry does not claim to
-    //     be: identifying which finding is new needs the previous corpus
-    //     state, which nobody retained. That is exactly the gap the
-    //     `revision` record in the paired commit closes going forward.
-    // 499 → 500 (+1), 2026-08-05, with ADR-0077 (out-parameter fact seeding,
-    // PR #152): the designed unlock, and the first finding this capability
-    // could ever have produced. A capture-group element read after a guard
-    // that proved the match happened now carries `string` where it carried
-    // nothing at all before, and that read is handed straight to a method
-    // whose docblock declares an int parameter — so the annotation and the
-    // value genuinely disagree. TRUE, triaged by reading the site rather
-    // than inferred from the count: the group is a digit class, which is
-    // what makes the annotation look plausible and is exactly no defence —
-    // PCRE hands back a string whatever the group matched. It is the same
-    // stringly-typed-value → `@param int` class the +43/ADR-0056 and
-    // +10/DR2 entries above already recorded, reached by a new path. Every
-    // OSS package is unchanged (the CI fp-gate is green on this same
-    // commit — the soundness signal); proof layer 0; `throw.*` unmoved at
-    // its own baseline, so `THROW_EXPECTED` does not move with this.
-    // **Reseed 2026-08-09, 500 → 507, and the corpus pin moves with it**
-    // (`565b106a…` → `5b026671…`, the two-file discipline). The gate had
-    // printed RED on this entry for two sessions, which is the failure mode
-    // a stale baseline actually has: a standing red trains the reader to
-    // skim past it, and the next real regression arrives into an alarm
-    // nobody reads.
-    //
-    // Separating drift from regression by re-measuring at the seeded
-    // revision was not possible — the corpus checkout is 9.8 GB and the
-    // machine had 2.1 GB free — so the accounting is indirect and is
-    // recorded here rather than implied. Of the 316 files carrying any
-    // finding in this run, **5 moved between the seeded revision and the
-    // measured one** (`Illust/Common.php`, `Novel/BookGenerator.php`,
-    // `Twitter/CardHelper.php`, `User/Common.php`,
-    // `User/LoginValidator.php`), and those five carry 14 findings — a
-    // channel wide enough to account for a +7 delta several times over,
-    // though not a proof that it did. What *is* proven: the proof layer
-    // stayed at 0 across every measurement this session, and each
-    // analyzer-side movement was measured back-to-back at one checkout and
-    // triaged (issue #272 alone removed 4 findings of a false-positive
-    // class and added 3 verified-true declared-contract debts, 508 → 507).
-    // 507 → 513 (+6), 2026-08-09, with issue #288's second half: a project
-    // call's DECLARED RETURN SHAPE now seeds the caller's value lane, the
-    // return-side mirror of the `@param` seeding ADR-0062 S3 already did —
-    // so `$x = f();` carries `f()`'s `@return array{…}` where it previously
-    // carried only an arm nothing could project. Baseline-diffed against
-    // the pre-slice build at one checkout: exactly 6 new, 0 disappeared,
-    // and every OSS package is unchanged (the soundness signal). All 6
-    // triaged by reading BOTH docblocks at source, 6/6 TRUE, and all one
-    // class — the sealed-shape under-declaration the +10/ADR-0072 and
-    // +1/ADR-0073 entries above already recorded, reached by the new path:
-    //   - 1 site: an HTTP wrapper whose `@return` is a three-key sealed
-    //     shape (status/headers/body) handed to a queue factory whose
-    //     `@param` seals at two (status/body) — the `headers` key is
-    //     genuinely outside the declared parameter.
-    //   - 3 sites (same callee, three callers): a ranking helper's
-    //     `@return array[]` — a list of records — handed to a private
-    //     method whose `@param` spells ONE record's seven-key shape while
-    //     its own prose calls the parameter a list. The plural-vs-singular
-    //     annotation defect the +10/ADR-0072 entry names, now with the
-    //     producing side declared too.
-    //   - 2 sites (same callee, two callers): an options builder whose
-    //     `@return` seals ELEVEN keys, handed to a post-filter whose
-    //     `@param` seals the same ten minus `fields` — the one key the
-    //     caller provably always passes, and which the caller itself reads
-    //     off the same value two lines earlier.
-    // PHPStan reports the identical class for sealed shapes. Proof layer 0
-    // throughout; `throw.*` unmoved at its own baseline (44107), so
-    // `THROW_EXPECTED` does not move with this; possibly-grade unmoved
-    // (150); nsrt admissible unmoved (2817).
-    //
-    // **513 -> 528 (+15) with issue #293**, template bounds read as
-    // upper-bound contracts. Measured on the branch rebased onto the #288
-    // merge, so the two waves' findings are disjoint by measurement rather
-    // than by assumption. Every one is `phpdoc.param-mismatch` and every one
-    // was read at its source:
-    //
-    // - **12 sites** call an assertion helper declared
-    //   `@template T of list<string>` with `@phpstan-param T $collection`,
-    //   passing lists that hold `null` or ints — `[null, 'show', 0, 'hide',
-    //   1]` and `[0, 1]` among them. The helper's own bound says what it
-    //   accepts; these callers do not meet it.
-    // - **2 sites** call the `list<int>` sister with the wrong shape: one
-    //   passes constants that are literally the strings `'0'`/`'1'`, the
-    //   other a string-keyed map where a list is declared.
-    // - **1 site is a genuine defect rather than a loose annotation**: it
-    //   asserts *string* membership over a constant that a sibling call site
-    //   asserts *int* membership over, and the helper's
-    //   `@phpstan-assert value-of<T>` then narrows the value to `string`
-    //   against an `@param int` on the very next call. Two of the fifteen
-    //   would disappear if that were fixed upstream; the baseline is seeded
-    //   at what the corpus says today, not at what it should say.
-    //
-    // Nothing else moved: proof layer 0, `throw.*` 44107 = baseline,
-    // possibly-grade 150 = baseline, every OSS package byte-identical.
-    //
-    // **528 -> 526 (-2), 2026-08-09, and the corpus owner did this, not the
-    // analyzer.** The +15 entry above named one site as a genuine defect
-    // rather than a loose annotation — a constant asserted as holding
-    // strings at one call site and ints at its sibling — and predicted that
-    // fixing it upstream would take two findings with it. It was fixed, and
-    // exactly two went. The prediction landing on the nose is the reason
-    // this reseed is a one-line edit rather than a re-triage: the remaining
-    // 526 are the same rows, read at source, that the entry above records.
-    //
-    // A drop never trips the tripwire, so this buys no alarm. It buys the
-    // entry back its meaning, which is the whole argument of the 2026-08-09
-    // reseed two entries up: a baseline above the truth swallows exactly
-    // that many real regressions in silence.
-    //
-    // **526 -> 536 (+10), 2026-08-15, and it is two mechanisms, not one.**
-    // Measured as a finding-level diff rather than a count: the 2026-08-09 seed
-    // commit (86df4c6) re-run today still reports exactly 526 on the same corpus
-    // checkout, so the delta below is the analyzer's and nothing else's. Twelve
-    // rows are new, two are the *same two sites* with a refined rendering
-    // (`mixed` -> `int|string` inside a shape, two sites in one helper, counted
-    // before and after alike) — twelve minus those two is the +10. Every one of
-    // the twelve was read at its source:
-    //
-    // - **6 sites: an undeclared key under a sealed shape**, the exact class the
-    //   `composer/composer` entry at the top of this table records, arriving here
-    //   from the same array-literal work (issue #327: a literal keeps its fact when
-    //   its elements do not). Two hand a two-key literal to a `@phpstan-param`
-    //   sealing one optional key, the second key nowhere in the declaration; one
-    //   hands an extra key to a helper whose `@param` seals six other names; three
-    //   hand a **list of records to a `@param string[]`**, at three more sites of a
-    //   call whose fourth site was already counted in the 526. TRUE, and PHPStan
-    //   reports the identical class for sealed shapes.
-    // - **4 sites: a union the value domain could not hold until ADR-0085.**
-    //   Two request handlers (three sites in one, one in the other) read a request
-    //   parameter through a `trim()` over a parameter-helper chain and hand the
-    //   result to `@param int` / `@param float`. The value is a `string` at runtime
-    //   — `trim` returns one whatever it is given — so this is the numeric-string
-    //   case this table's own doc comment names as the archetypal TRUE
-    //   declared-contract violation. It was silent because a `string|bool` had no
-    //   carrier: the single-base wall meant the argument fell back to an
-    //   unjudgeable `mixed`, and Maybe is silence. `Fact::Union` gave it one, which
-    //   is also why the two re-rendered rows above move their spelling and not
-    //   their count.
-    //
-    // The corpus is byte-identical across the move (`corpus.local.toml`'s pin plus
-    // an overlay whose mtimes all predate the 2026-08-09 seed), `throw.*` unmoved
-    // at 43886 = baseline, possibly-grade unmoved at its own row, every OSS package
-    // at its own expectation.
-    //
-    // Read the attribution beside [`EFFECT_EXPECTED`]'s row before reading a delay
-    // into this one. Both families' fallout landed days before this reseed and
-    // waited for a gate run with the private corpus mounted: `corpus.local.toml` is
-    // gitignored, so the agent worktrees that landed #303, #327 and #341 all
-    // measured the public packages only. That is a hole in the workflow, not in the
-    // analyzer, and it is why this entry can cite mechanisms from three separate
-    // merges at once.
+    //   333 → 357  ADR-0031 branch-sensitive analysis: values previously buried in
+    //              `Opaque` control flow reach the contract layer.
+    //   357 → 404  ADR-0035 refined layer — native-type seeding, guard refinements,
+    //              `@phpstan-assert` application. 8 abstract-fact findings, the rest
+    //              concrete; all TRUE no-coercion violations in released test code.
+    //              Class-shaped `@param`s stay silent against scalar facts (template
+    //              safety), so no template FPs.
+    //   404 → 405  ADR-0036 object state: the first `phpdoc.property-mismatch` — an
+    //              int literal assigned to a `@var numeric-string` property. Property
+    //              checks run only in the plain per-scope pass, never under a binding
+    //              descent, whose caller values in-body guards would narrow.
+    //   405 → 439  ADR-0043 stage 4 (class contracts + the enum-case/class-const
+    //              resolution feeding them). 36 added, 2 pre-existing FPs removed, all
+    //              34 net TRUE: class-const numeric strings into `int`/`int[]` (the
+    //              ADR-0037 DB-illusion pattern); proven scalars/objects against
+    //              class-typed contracts; sealed-shape violations that became provable
+    //              once their const/`::class`/enum elements resolved.
+    //   439 → 434  2026-07-24, LIVE-TREE DRIFT rather than a checker change — the
+    //              unpinned checkout gained ~210 files during the day.
+    //   434 → 477  ADR-0056 R1 builtin return facts: a uniquely-resolved builtin seeds
+    //              its reflected return envelope (`trim()` ⇒ `General{String}`), which
+    //              then reaches a `@param int`. All 43 triaged, every one the
+    //              stringly-typed request-param → int-param pattern; two render
+    //              `non-empty-string`, the envelope composing with an existing
+    //              `=== ''` guard.
+    //   477 → 487  2026-07-29, DR2 `is_*` guard narrowing (ADR-0064 seam v): a fact now
+    //              SURVIVES a pure guard instead of being forgotten. All 10 the same
+    //              idiom — `is_numeric` proves numeric-STRING-ness, not int-ness. One
+    //              proof-layer FP the slice introduced (a refuted fact left standing on
+    //              an unreachable branch) was caught by this gate and fixed in-slice.
+    //   487 → 497  2026-08-02, ADR-0072 shape facts judged against contracts. 10/10
+    //              TRUE, one class: a sealed `array{…}` `@param` under-declaring keys
+    //              its call sites provably always pass.
+    //   497 → 498  2026-08-02, ADR-0073 inline `@var` cast seeding (PR #121) — the same
+    //              sealed-shape class reached by a new path.
+    //   498 → 499  2026-08-05, CORPUS STATE rather than an engine change, attributed
+    //              two ways instead of by triage: every public package is exact in the
+    //              same run, and the gate re-run at the commit that seeded 498
+    //              reproduces 499 against today's checkout. NOT triaged
+    //              finding-by-finding — that needs the previous corpus state, which
+    //              nobody retained, and which the `revision` record now closes.
+    //   499 → 500  2026-08-05, ADR-0077 out-parameter seeding (PR #152): a capture
+    //              group read after a guard that proved the match carries `string` into
+    //              a `@param int`. The group being a digit class is what makes the
+    //              annotation look plausible and is exactly no defence — PCRE hands
+    //              back a string whatever matched.
+    //   500 → 507  **Reseed 2026-08-09**, corpus pin moving with it (`565b106a…` →
+    //              `5b026671…`, the two-file discipline). Re-measuring at the seeded
+    //              revision was impossible (9.8 GB checkout, 2.1 GB free), so the
+    //              accounting is indirect and recorded rather than implied: of the 316
+    //              files carrying findings, 5 moved between the seeded and measured
+    //              revisions and carry 14 findings — a channel wide enough to account
+    //              for +7 several times over, not a proof that it did. Each
+    //              analyzer-side movement was measured back-to-back at one checkout
+    //              (issue #272 alone removed 4 FPs and added 3 verified debts, 508 →
+    //              507). The gate had printed RED here for two sessions, which is the
+    //              failure mode a stale baseline actually has: a standing red trains
+    //              the reader to skim past the next real regression.
+    //   507 → 513  2026-08-09, issue #288 — a project call's declared RETURN shape now
+    //              seeds the caller's value lane, the mirror of ADR-0062 S3's `@param`
+    //              seeding. 6/6 TRUE by reading both docblocks, all the sealed-shape
+    //              under-declaration class: a 3-key HTTP wrapper shape into a 2-key
+    //              `@param`; a list-of-records into a one-record `@param` (3 sites, one
+    //              callee); an 11-key options builder into a 10-key post-filter (2
+    //              sites), short exactly the key the caller always passes.
+    //   513 → 528  issue #293, template bounds read as upper-bound contracts. Measured
+    //              on the branch rebased onto the #288 merge, so the two waves are
+    //              disjoint by measurement rather than assumption. 12 sites pass lists
+    //              holding `null` or ints to a `@template T of list<string>` assertion
+    //              helper; 2 pass the wrong shape to its `list<int>` sister; 1 is a
+    //              genuine defect rather than a loose annotation — a constant asserted
+    //              as string membership at one site and int at its sibling — predicted
+    //              to take 2 findings with it when fixed. Seeded at what the corpus
+    //              says today, not at what it should say.
+    //   528 → 526  2026-08-09, and the corpus owner did this, not the analyzer: the
+    //              predicted fix landed and took exactly its two findings. The
+    //              prediction landing on the nose is why this was a one-line edit
+    //              rather than a re-triage.
+    //   526 → 536  2026-08-15, two mechanisms rather than one. Measured as a
+    //              finding-level diff: the 526-seed commit (86df4c6), re-run today
+    //              against the same checkout, still reports exactly 526, so the delta
+    //              is the analyzer's. Twelve rows are new; two are the same two sites
+    //              re-rendered (`mixed` -> `int|string` inside a shape), which is what
+    //              makes twelve a +10.
+    //              · 6 sites — an undeclared key under a sealed shape, the class the
+    //                `composer/composer` entry records, from the same array-literal
+    //                work (issue #327: a literal keeps its fact when its elements do
+    //                not). A two-key literal into a one-optional-key `@phpstan-param`
+    //                (2); an extra key into a six-name `@param` (1); a list of records
+    //                into a `@param string[]` (3), at three more sites of a call whose
+    //                fourth was already inside the 526.
+    //              · 4 sites — a `string|bool` with no carrier until ADR-0085's
+    //                `Fact::Union`: one base per fact meant the argument fell back to
+    //                an unjudgeable `mixed`, and Maybe is silence. The value is a
+    //                `string` at runtime, so this is the numeric-string archetype this
+    //                table's own doc names. The two re-rendered rows are the same
+    //                mechanism moving a spelling and not a count.
+    //              Both families' fallout predates the reseed: `corpus.local.toml` is
+    //              gitignored, so the agent worktrees that landed #303, #327 and #341
+    //              measured the public packages only — a hole in the workflow, not in
+    //              the analyzer. See [`EFFECT_EXPECTED`]'s row.
     ("pxxxx-monorepo", 536),
 ];
 
@@ -766,36 +600,25 @@ fn phpdoc_expected(name: &str) -> usize {
 
 /// Permanent gate policy for `throw.*` findings (ADR-0040/0007), identical in
 /// spirit to [`PHPDOC_EXPECTED`]: an undeclared **checked** throw escaping a
-/// written `@throws`, or a Liskov-widened override, is a real contract-layer
-/// claim about the code's own documentation — not a runtime-breakage proof. Such
-/// findings legitimately saturate working code (the very checked-exception volume
-/// ADR-0007 keeps quiet by default), so they are held in measurement mode and
-/// gate only as a per-package **increase** tripwire.
+/// written `@throws`, or a Liskov-widened override, is a contract-layer claim
+/// about the code's own documentation, not a runtime-breakage proof. Such
+/// findings saturate working code (the checked-exception volume ADR-0007 keeps
+/// quiet by default), so they are held in measurement mode and gate only as a
+/// per-package **increase** tripwire. Packages absent expect **zero**.
 ///
-/// Seeded from the first landing run of the throw system (ADR-0040). The
-/// monorepo count is dominated by two pervasive base exceptions
-/// (an assertion-failure base and the app-wide base exception) thrown far below `@throws`-
-/// annotated controllers — all TRUE undeclared-checked-throw findings, none
-/// runtime breakage. Update an entry consciously when a checker change moves a
-/// count. Packages absent expect **zero**.
-///
-/// The pxxxx count rose 35614 → 43963 with the closure wave (ADR-0033): throws
-/// now propagate through higher-order-builtin callbacks (`array_map(closure, …)`)
-/// and body-local `$fn()` closures that were previously opaque taints. Triaged
-/// (5-sample, verbatim): every new finding is a TRUE undeclared-checked-throw —
-/// exclusively the two pervasive base exceptions reached through a real
-/// callback edge (e.g. a controller method with `@throws ErrorException`
-/// calling `array_map` over a closure whose callee throws the app-wide base
-/// exception). No FP: the by-ref-invalidation guard keeps the
-/// local `$fn()` resolution sound, and the public corpus packages are unmoved.
-// Reconciled to actual after the closure-wave Stage D (interface/parent @throws
-// Liskov + `implements` lowering). The moves were triaged and are deterministic:
-// the increases are new `throw.liskov-widened` findings (phpunit +4, pxxxx +1 —
-// e.g. JsonMatches::fail declares InvalidJsonException while the abstraction
-// Constraint::fail declares only ExpectationFailedException: a true widening),
-// and the decreases (symfony/console 12→10, nikic 2→1) are `undeclared` counts
-// that dropped because lowering `implements` enriched the class chain, letting
-// throw subtype/absorption checks resolve where they previously widened.
+/// Seeded from the first landing run of the throw system (ADR-0040); the monorepo
+/// count is dominated by two pervasive base exceptions thrown far below
+/// `@throws`-annotated controllers. It rose 35614 → 43963 with the closure wave
+/// (ADR-0033), which propagates throws through higher-order-builtin callbacks and
+/// body-local `$fn()` closures that were previously opaque taints — triaged
+/// 5-sample, every one a TRUE undeclared checked throw through a real callback
+/// edge, with the by-ref-invalidation guard keeping `$fn()` resolution sound.
+// Reconciled to actual after closure-wave Stage D (interface/parent `@throws`
+// Liskov + `implements` lowering): the increases are new `throw.liskov-widened`
+// (phpunit +4, pxxxx +1 — an override declaring a narrower exception than the
+// abstraction it implements), and the decreases (symfony/console 12→10, nikic
+// 2→1) are `undeclared` counts that fell because lowering `implements` enriched
+// the class chain, letting subtype/absorption checks resolve where they widened.
 const THROW_EXPECTED: &[(&str, usize)] = &[
     ("composer/composer", 93),
     ("sebastianbergmann/phpunit", 84),
@@ -804,78 +627,48 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     ("symfony/console", 10),
     ("thephpleague/flysystem", 3),
     ("nikic/PHP-Parser", 1),
-    // Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own src/ as a
-    // local corpus project (tests/, e2e/ excluded — deliberately-broken fixtures).
-    // First run: 0 proof-layer, 0 phpdoc.*, 20 throw.undeclared. Triaged verbatim
-    // (5+ samples): every finding is a TRUE undeclared checked throw escaping a
-    // `@throws`-annotated declaration — e.g. FileCacheStorage::save() (@throws
-    // DirectoryCreatorException) throws ShouldNotHappenException directly at :81;
-    // CommandHelper::begin() (@throws InceptionNotSuccessfulException) throws
-    // ShouldNotHappenException/:162 and reaches ServiceCreationException origins;
-    // FileReader::read()'s CouldNotReadFileException escapes FixerApplication's
-    // @throws-annotated methods. Homogeneous checked-exception debt, none runtime
-    // breakage — the exact ADR-0040/0007 pattern the tripwire mode exists for.
-    // 20 -> 21, 2026-07-26: the local checkout advanced (192 src/ files changed),
-    // rewriting ValidateServiceTagsExtension onto the attribute collector. The new
-    // `getInterfaceTagMapping()` throws ShouldNotHappenException ("Interface %s
-    // claims multiple tags") and `beforeCompile()` — which calls it and declares
-    // only @throws MissingImplementedInterfaceInServiceWithTagException — lets it
-    // escape. Triaged verbatim against the pre-advance tree: that file held exactly
-    // one such throw before and holds two now, and the other 20 findings are
-    // unchanged in file, line and escaping method. A TRUE undeclared checked throw
-    // of the same homogeneous shape as the seeded 20, caught transitively (the
-    // throw is in the helper, the escape is attributed to the annotated caller),
-    // which is what the ADR-0040 damming machinery is for.
-    //
-    // 2026-08-08 (#186): this project's corpus scope moved from an `exclude`
-    // denylist onto the new positive `paths = ["src", "vendor"]` key in
-    // corpus.local.toml — the recorded decision that PHPStan's `tests/` tree is
-    // that project's own rule-fixture corpus, i.e. INPUTS written to be broken,
-    // and so outside an FP gate whose bar is zero false positives on code that
-    // works (the ADR-0079 §2.3 presumption for parser fixtures, applied to a
-    // whole tree). Re-measured under the scoping in the same run: 21, and
-    // `phpdoc.*` 0 — both UNCHANGED, because the denylist already named the same
-    // directories. The key buys enforcement, not a different corpus: an allowlist
-    // cannot silently readmit a fixture tree added later, and a denylist can.
+    // Registered 2026-07-24 (v0.1.0 run, oracle idea A): PHPStan's own `src/` as a
+    // local project. First run 0 proof-layer / 0 phpdoc.* / 20 throw.undeclared,
+    // triaged verbatim — homogeneous checked-exception debt (a `ShouldNotHappen`
+    // escaping a narrower `@throws`), the exact ADR-0040/0007 pattern tripwire mode
+    // exists for.
+    //   20 → 21  2026-07-26, the checkout advanced (192 src/ files). One rewritten
+    //            extension grew a second `ShouldNotHappenException` escaping a caller
+    //            declaring something else. Triaged against the pre-advance tree: that
+    //            file held one before and two now, the other 20 unchanged in file,
+    //            line and escaping method — a transitive catch, which is what the
+    //            damming machinery is for.
+    //   2026-08-08 (#186): scope moved from an `exclude` denylist to the positive
+    //            `paths = ["src", "vendor"]` key — PHPStan's `tests/` is that
+    //            project's own rule-fixture corpus, INPUTS written to be broken, so
+    //            outside a gate whose bar is zero FPs on working code (ADR-0079 §2.3
+    //            applied to a whole tree). Re-measured unchanged at 21 / 0, because
+    //            the denylist already named the same directories. The key buys
+    //            enforcement: an allowlist cannot silently readmit a fixture tree
+    //            added later, a denylist can.
     ("phpstan/phpstan-src", 21),
-    // 43964 → 44372 (+408), 2026-07-24 evening: LIVE-TREE DRIFT — the unpinned
-    // monorepo checkout gained ~210 files (84,038 → 84,248) during the day.
-    // Triaged (3-sample verbatim, gate printout): every sampled new finding is
-    // the standing homogeneous debt class — an `@throws`-annotated declaration
-    // with an undeclared base-exception escape (the app-wide base exception,
-    // Exception_MethodNotAllowed, a bare Throwable) — TRUE contract findings on
-    // newly-landed application code, none runtime breakage. The proof layer
-    // stayed at ZERO over the new files. Reseeded consciously.
-    // 44372 → 44343 (−29), 2026-08-01: the standing DOWNWARD live-tree drift,
-    // reseeded in its own pass (never inside a fix commit). The −29 has been
-    // observed unchanged across every session and checker commit since
-    // 2026-07-25 — cross-commit stability plus the #63 determinism fix rule
-    // out a checker-side cause; the monorepo working tree simply moved under
-    // the table (the same unpinned checkout the +408 entry above documents).
-    // Today's run: 44,343 = 44,342 undeclared + 1 liskov, phpdoc EXACT and
-    // proof-layer 0 alongside — a corpus change, not a behavior change. The
-    // gate trips on INCREASE only, so this entry existed as a permanent
-    // "below expected" nudge; this reseed retires it.
-    // 44343 → 44374 (+31), 2026-08-05: the same corpus-state movement the
-    // PHPDOC_EXPECTED entry for this project records, in the same run and
-    // established the same two ways — every public package's throw.* count
-    // is EXACT, and the gate run at the commit where 44343 was seeded GREEN
-    // reproduces 44374 against today's checkout with the engine held fixed.
-    // A +31 across a corpus delta of 813 files (350 PHP) is the standing
-    // homogeneous checked-exception debt arriving with new application
-    // code, the same class every reseed of this entry has recorded. NOT
-    // triaged finding-by-finding — at this volume the only honest evidence
-    // is the attribution above, and a finding-level diff would need the
-    // previous corpus state, which was not retained.
-    // **Reseed 2026-08-09, 44374 → 43886 (−488), downward**, with the corpus
-    // pin. This one has a direct attribution rather than an inferred one:
-    // the measured revision carries a commit that replaces a bespoke
-    // exception class with concrete assertions across the tree, and an
-    // assertion where a `throw` used to be is exactly one `throw.undeclared`
-    // fewer. A downward move never trips the tripwire, so this reseed buys
-    // no new alarm — it buys the entry back its meaning, since a baseline
-    // 488 above the truth would swallow the next 488 real regressions in
-    // silence.
+    // Ledger. Every move on this row has been corpus state, not a checker change,
+    // and the standing class is the same: an `@throws`-annotated declaration with an
+    // undeclared base-exception escape, arriving with new application code. The
+    // proof layer stayed 0 across all of them.
+    //   43964 → 44372  2026-07-24, live-tree drift (~210 files gained: 84,038 →
+    //                  84,248). 3-sample verbatim triage, all TRUE.
+    //   44372 → 44343  2026-08-01, the standing DOWNWARD drift, reseeded in its own
+    //                  pass (never inside a fix commit). Observed unchanged across
+    //                  every session since 2026-07-25 — cross-commit stability plus
+    //                  the #63 determinism fix rule out a checker cause.
+    //   44343 → 44374  2026-08-05, the corpus-state movement `PHPDOC_EXPECTED`
+    //                  records in the same run, established the same two ways (every
+    //                  public count exact; the gate at the 44343-seed commit
+    //                  reproduces 44374 today). NOT triaged finding-by-finding — at
+    //                  this volume the attribution is the only honest evidence, and a
+    //                  finding-level diff needs a corpus state nobody retained.
+    //   44374 → 43886  **Reseed 2026-08-09, downward**, with the corpus pin, and this
+    //                  one has a direct attribution: the measured revision replaces a
+    //                  bespoke exception class with concrete assertions across the
+    //                  tree, and an assertion where a `throw` used to be is exactly
+    //                  one `throw.undeclared` fewer. A baseline 488 above the truth
+    //                  would swallow the next 488 real regressions in silence.
     ("pxxxx-monorepo", 43886),
 ];
 
@@ -886,84 +679,61 @@ fn throw_expected(name: &str) -> usize {
 
 /// Permanent gate policy for the `effect.*` **contract** ids
 /// (`effect.envelope-exceeded`, `effect.liskov-widened`, and since issue #311
-/// `effect.interop-unknown-label`), the ADR-0050 §9 recorded delta. These moved off
-/// the runtime red-on-sight path onto the identical per-package **increase**
-/// tripwire as [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`], matching their
-/// declared-contract semantics (a proven behavior exceeds an envelope the code
-/// *declares* about itself; the program still runs).
+/// `effect.interop-unknown-label`), the ADR-0050 §9 recorded delta: these gate as
+/// the same per-package **increase** tripwire as [`PHPDOC_EXPECTED`] /
+/// [`THROW_EXPECTED`], matching their declared-contract semantics (a proven
+/// behavior exceeds an envelope the code *declares* about itself; it still runs).
 ///
-/// Seeded **empty** in 2026-08, on the reading that no ADR-0006 effect envelope
-/// exists in the pinned corpus or the legacy monorepo, so every package expects
-/// **zero** (absent = 0). That reading was about *Steins* annotations, and the
-/// row below is what it missed: the third id is the first of the three that can
-/// fire on code carrying no Steins annotation at all — it reads upstream's
-/// `@phpstan-impure` — and issue #303 gave the other two the same reach by
-/// teaching the scanner `@phpstan-all-methods-pure`. An interop tag is an
-/// envelope, so "no envelopes in the corpus" stopped being true the day the
-/// corpus was read for upstream's spelling rather than ours. Update an entry
-/// here consciously when a checker change legitimately moves a count.
+/// Seeded **empty** in 2026-08, on the reading that no ADR-0006 envelope exists in
+/// the corpus. The reading was about *Steins* annotations: all three ids fire on
+/// upstream's spellings too — `@phpstan-impure` since #311, and the envelope pair
+/// since #303 taught the scanner `@phpstan-all-methods-pure` — so "no envelopes in
+/// the corpus" stopped being true the day it was read for upstream's vocabulary.
 const EFFECT_EXPECTED: &[(&str, usize)] = &[
-    // **0 → 4442, 2026-08-15 — the first package to seed this table, and it
-    // carries no Steins annotation.** The private monorepo declares
-    // `@phpstan-all-methods-pure` on three classes, and the interop-envelope run
-    // (issue #303, master 7b3ecab, 2026-08-12) taught the docblock scanner to read
-    // that tag as an operative bound. Measured, not inferred: a binary built at
-    // 93eff42 (the merge before #303) reports **0** effect findings over the
-    // 5041-file subtree that holds all 4442 of them, and one built at 7b3ecab
-    // reports **4442** — the whole count arrives in one merge.
+    // **0 → 4442, 2026-08-15**, the first row in this table and it carries no Steins
+    // annotation: the private monorepo declares `@phpstan-all-methods-pure` on three
+    // classes, and #303 (master 7b3ecab, 2026-08-12) made that an operative bound.
+    // Measured, not inferred — a binary at 93eff42 (the merge before #303) reports 0
+    // over the 5041-file subtree holding all 4442; one at 7b3ecab reports 4442.
     //
-    // Attribution matters here because the first reading of this RED blamed the
-    // wrong interval, the resource-value run (#341). It is not that run: the
-    // findings over that same subtree are **byte-identical on both sides of it**
-    // (27,332 = 27,332, nothing added, nothing removed), and re-running the gate
-    // at 040658c — the commit whose record says green at 526/0 — reproduces
-    // 536/4442 today. The record was wrong rather than the analyzer: this is the
-    // first gate run since 2026-08-12 with the private corpus mounted at all.
-    // `corpus.local.toml` is gitignored, so an agent worktree measures the public
-    // packages only, and #303's fallout sat here unmeasured for three days.
+    // NOT the resource-value run (#341), which the first reading blamed: findings
+    // over that subtree are byte-identical on both sides of it (27,332 = 27,332),
+    // and the gate re-run at 040658c — the commit whose record claims green at
+    // 526/0 — reproduces 536/4442 today. `corpus.local.toml` is gitignored, so an
+    // agent worktree measures public packages only; this was simply the first run
+    // with the private corpus mounted since 2026-08-12.
     //
-    // **One root, one shape.** Names below are **placeholders** — the private
-    // corpus's own identifiers are not written into this repo, so do not grep for
-    // these. Every finding sits inside one of the three declaring classes — a
-    // generated URL builder `MyApp\Route\UrlBuilder` (4376), a validation wrapper
-    // `MyApp\Util\Validator` (54), a filter wrapper `MyApp\Util\Filter` (12) —
-    // across 795 call sites in 555 declared-pure methods, and every one of them
-    // reaches the same house logger `MyApp\Log\Debug` down the same chain: an
-    // assertion helper `MyApp\Util\Assertions` delegates to `Validator`, which
-    // delegates to `Filter`, whose `true`-rejecting arm logs. A site carries one
-    // finding per (label, origin) group — six for most of them, which is where 795
-    // sites become 4442 rows.
+    // One root, one shape. Names below are **placeholders**, since the corpus's own
+    // identifiers are not written into this repo — do not grep for them. Every
+    // finding sits in one of the three declaring classes (`MyApp\Route\UrlBuilder`
+    // 4376, `MyApp\Util\Validator` 54, `MyApp\Util\Filter` 12), across 795 call
+    // sites in 555 declared-pure methods, and each reaches the same house logger
+    // `MyApp\Log\Debug`: an assertion helper delegates to `Validator`, which
+    // delegates to `Filter`, whose `true`-rejecting arm logs. One finding per
+    // (label, origin) group, six for most sites — which is how 795 becomes 4442.
     //
     // TRUE, and the corpus says so in its own source: that logging call carries a
-    // `@phpstan-ignore impure.methodCall`, i.e. upstream's analyzer reports the
-    // same violation at the same line and the file suppresses it there. PHPStan
-    // stops at that suppression and reads the callee as pure for everyone above
-    // it; the proven lane does not (ADR-0067 — a declaration never manufactures a
-    // finding, and never erases one), so the effect keeps travelling to the
-    // callers that declare purity over it. The propagated rows are the same fact
-    // stated where it is still unfixed.
+    // `@phpstan-ignore impure.methodCall`, so upstream reports the same violation at
+    // the same line and suppresses it there. PHPStan then reads the callee as pure
+    // for everyone above it; the proven lane does not (ADR-0067 — a declaration
+    // neither manufactures nor erases a finding), so the effect travels to every
+    // caller declaring purity over it.
     //
-    // What the count is made of, so a later reader knows before deciding whether a
-    // move is a regression:
-    //   * 2148 `nondet.time` — a datetime utility (`MyApp\Util\Clock`) wrapping
-    //     `\time`/`\date`.
-    //   * 716 `nondet.random` — `mt_rand`, the log's own sampling gate.
-    //   * 716 `global.read` — a `getenv` on the CLI branch of a server-name lookup.
-    //   * 86 `io` — a `file_exists` on a language file.
-    //   * 776 `io.output.buffer` — **the one soft class.** `print_r($data, true)`
-    //     and `var_export($x, true)` are pure in return-mode, and the source proves
-    //     the `true` at each of the three origin sites; the label comes from this
-    //     catalog's deliberately arg-blind row, which `effect_labels`'s own doc
-    //     already records as an over-approximation. The root fix is a sibling of
-    //     `narrowed_stream_labels` — a call site that proves its argument narrows
-    //     the label — and it will move this row DOWN, which never trips the
-    //     tripwire.
+    // What the count is made of: 2148 `nondet.time` (a datetime utility wrapping
+    // `\time`/`\date`), 716 `nondet.random` (`mt_rand`, the log's sampling gate),
+    // 716 `global.read` (a `getenv`), 86 `io` (a `file_exists`), and 776
+    // `io.output.buffer` — the one soft class, where `print_r($x, true)` /
+    // `var_export($x, true)` are pure in return-mode and the source proves the
+    // `true` at each of the three origins. That label is this catalog's
+    // deliberately arg-blind row, which `effect_labels`' own doc already calls an
+    // over-approximation; the fix is a sibling of `narrowed_stream_labels` and will
+    // move this row DOWN, which never trips the tripwire.
     //
-    // Seeding rather than fixing is the zero-FP posture, not a retreat from it.
-    // The envelope violations are real; what makes 4442 of them is a house logger
-    // three inference hops under an assertion helper, which is the shape ADR-0084's
-    // `[effects]` attribution exists to discharge on the corpus owner's side. Until
-    // that lands, this row's job is to notice the 4443rd.
+    // Seeding rather than fixing is the zero-FP posture, not a retreat from it: the
+    // violations are real, and what makes 4442 of them is a house logger three hops
+    // under an assertion helper — the shape ADR-0084's `[effects]` attribution
+    // exists to discharge on the corpus owner's side. Until then this row's job is
+    // to notice the 4443rd.
     ("pxxxx-monorepo", 4442),
 ];
 
@@ -977,45 +747,33 @@ fn effect_expected(name: &str) -> usize {
 /// `variable.maybe-undefined`, `property.maybe-undefined` and
 /// `type.return-maybe-missing`, selected by floor rather than by name (see
 /// [`gate_bucket`]). Same per-package **increase** tripwire as
-/// [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`] / [`EFFECT_EXPECTED`].
+/// [`PHPDOC_EXPECTED`] / [`THROW_EXPECTED`] / [`EFFECT_EXPECTED`]; absent = zero.
 ///
-/// Why a count and not per-finding pins. A definite proof id claims the program
-/// breaks, so its corpus count belongs at zero and each exception is triaged
-/// verbatim into [`EXPECTED_PROOF_FINDINGS`]. A possibly-grade id claims only that
+/// A count and not per-finding pins, because a possibly-grade id claims only that
 /// *a* path reaches the site — the shape defensive house styles produce on purpose,
-/// and the reason the registry floors these at `strict` where no default-profile
-/// run shows them. Pinning each site individually would have meant hundreds of rows
-/// asserting that working code is working, and the twelve
-/// `type.return-maybe-missing` rows this table absorbed were already that shape.
+/// and why the registry floors these at `strict`. Pinning each would have meant
+/// hundreds of rows asserting that working code works. (A definite proof id claims
+/// the program breaks, so its count belongs at zero with each exception triaged
+/// into [`EXPECTED_PROOF_FINDINGS`].)
 ///
-/// Seeded 2026-08-09 from the run that landed the binding-presence pass, against
-/// the corpus revisions recorded in `corpus.lock.toml` / `corpus.local.toml`.
-/// **A count that grows is a regression and reds the gate**; a count that shrinks
-/// is reported and the baseline updated consciously. Packages absent from this
-/// table expect **zero**.
-/// The five classes the 2026-08-09 triage found, so a future reader knows what a
-/// count is made of before deciding whether a change to it is a regression:
+/// Seeded 2026-08-09 from the binding-presence run, at the revisions
+/// `corpus.lock.toml` / `corpus.local.toml` record. The five classes that triage
+/// found, so a reader knows what a count is made of:
 ///
-/// 1. **Genuinely conditional binding** (`if`/`elseif` with no `else`, a name bound
-///    only inside one arm) — TRUE, and the id's whole point.
-/// 2. **A loop variable read after its loop** (`foreach (…) {…} use($i);`) — TRUE;
-///    the zero-iteration path really does reach it unbound.
+/// 1. **Conditional binding** (`if`/`elseif` with no `else`) — TRUE, the id's point.
+/// 2. **A loop variable read after its loop** — TRUE; the zero-iteration path
+///    really does reach it unbound.
 /// 3. **Correlated conditions** — bound under `if (count($c) > 1)` and read under a
-///    second, textually identical `if (count($c) > 1)` whose body reassigns `$c`
-///    in between (symfony/console `Application.php:827`). TRUE under the syntactic
-///    control-flow reading this id is defined over; proving the two conditions
-///    agree is path feasibility, which no reachability analysis here attempts.
-/// 4. **A never-returning callee** (`$this->fail()`, `self::fail()`,
-///    `markTestSkipped()`, `exitWithErrorMessage()`) — FALSE. `stmt_end` reads a
-///    statement-position call as falling through because deciding otherwise needs
-///    the project index, and ADR-0081 §9 defers the refinement to the emitter side
-///    where the index lives. The six symfony/process rows, both Carbon rows and the
-///    phpunit row are this class.
-/// 5. **A binding in an argument position of a throwing call inside `try`**
-///    (`$app->find($name = 'x');` then `$name` read in the `catch`) — FALSE. PHP
+///    textually identical one whose body reassigns `$c` between. TRUE under the
+///    syntactic reading this id is defined over; proving the conditions agree is
+///    path feasibility, which nothing here attempts.
+/// 4. **A never-returning callee** (`$this->fail()`, `markTestSkipped()`) — FALSE.
+///    `stmt_end` reads a statement-position call as falling through because
+///    deciding otherwise needs the project index; ADR-0081 §9 defers the refinement
+///    to the emitter side, where the index lives.
+/// 5. **A binding in an argument of a throwing call inside `try`** — FALSE. PHP
 ///    evaluates arguments before entering the callee, so the binding is done before
-///    anything can throw; the pass weakens at statement granularity and cannot see
-///    inside. The four symfony/console `Tests/` rows are this class.
+///    anything can throw; the pass weakens at statement granularity.
 const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // 1 — `PluginManager.php:525`, class 1.
     ("composer/composer", 1),
@@ -1028,27 +786,17 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     ("symfony/process", 6),
     // 2 — both class 4 (`markTestSkipped()` in the serialization tests).
     ("briannesbitt/Carbon", 2),
-    // 10 — 8 `variable.maybe-undefined` (class 1 and class 4) plus the 2
-    // `type.return-maybe-missing` rows this bucket absorbed from
-    // `EXPECTED_PROOF_FINDINGS`.
+    // 10 — 8 `variable.maybe-undefined` (classes 1 and 4) plus the 2
+    // `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
     ("phpstan/phpstan-src", 10),
-    // 120 → 121 (+1), 2026-08-14, with issue #330 PR2: `array_merge` joined the
-    // fold allowlist, so a call to it stopped being an uncatalogued name whose
-    // by-ref parameters might WRITE an argument — and an argument read became a
-    // read (the issue #77 bind-free distinction). The row it surfaces is a test
-    // data-provider returning `array_merge($a, $b)` where `$b` is bound only
-    // inside a `foreach` over a class-constant list: bound on the paths where
-    // the loop ran, undefined (PHP warns, reads null) where it did not. The
-    // SAME function already carries two baselined rows of the SAME shape — an
-    // inner-loop variable read after its loop — so this is the third sibling
-    // becoming visible, not a new class of claim. TRUE at the possibly grade.
-    //
-    // Before this entry: 120 — 111 `variable.maybe-undefined` over 85,282 files
-    // plus the 9 `type.return-maybe-missing` rows absorbed from
-    // `EXPECTED_PROOF_FINDINGS`. Measured against the checkout this run saw,
-    // which already differs from the revision `corpus.local.toml` records (the
-    // same drift the `phpdoc.*` tripwire reports); reseed with that one when
-    // the checkout is reconciled.
+    // 120 (111 `variable.maybe-undefined` over 85,282 files + 9 absorbed
+    // `type.return-maybe-missing`) → 121, 2026-08-14 with issue #330 PR2:
+    // `array_merge` joined the fold allowlist, so it stopped being an uncatalogued
+    // name whose by-ref parameters might WRITE an argument, and an argument read
+    // became a read (the issue #77 bind-free distinction). The row is a data
+    // provider returning `array_merge($a, $b)` where `$b` is bound only inside a
+    // `foreach` — the third sibling of two already-baselined rows of that shape in
+    // the same function, not a new class of claim. TRUE at the possibly grade.
     ("pxxxx-monorepo", 121),
 ];
 
