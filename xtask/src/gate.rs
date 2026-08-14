@@ -53,10 +53,12 @@ struct PackageReport {
     /// `effect.liskov-widened`, `effect.interop-unknown-label`), held in
     /// measurement mode under ADR-0050 §9: the recorded gate-policy delta moves
     /// them off red-on-sight onto the same per-package increase tripwire as
-    /// `phpdoc.*`/`throw.*`, matching their declared-contract semantics. The first
-    /// two are vacuous on the corpus (no ADR-0006 envelope annotations exist in the
-    /// wild); the third (issue #311) reads upstream's own `@phpstan-impure` tags and
-    /// so can be nonzero on unannotated corpus code.
+    /// `phpdoc.*`/`throw.*`, matching their declared-contract semantics. None of the
+    /// three needs a Steins annotation to fire: `effect.interop-unknown-label`
+    /// (issue #311) reads upstream's own `@phpstan-impure`, and since issue #303 the
+    /// envelope pair reads upstream's purity tags the same way — which is how the
+    /// private monorepo's `@phpstan-all-methods-pure` classes seeded
+    /// [`EFFECT_EXPECTED`]'s first row on code that has never heard of Steins.
     /// `effect.unknown-label` is **mechanics**, not contract — it stays on the
     /// red-on-sight path in `diagnostics`, never here.
     effects: Vec<Diagnostic>,
@@ -847,13 +849,80 @@ fn throw_expected(name: &str) -> usize {
 /// declared-contract semantics (a proven behavior exceeds an envelope the code
 /// *declares* about itself; the program still runs).
 ///
-/// Seeded **empty**: no ADR-0006 effect envelopes exist in the pinned corpus or the
-/// legacy monorepo, so every package expects **zero** (absent = 0). The third id is
-/// the first of the three that can fire on code carrying no Steins annotation at
-/// all — it reads upstream's `@phpstan-impure` — so this family is no longer
-/// vacuous by construction. Update an entry here consciously when a checker change
-/// legitimately moves a count.
-const EFFECT_EXPECTED: &[(&str, usize)] = &[];
+/// Seeded **empty** in 2026-08, on the reading that no ADR-0006 effect envelope
+/// exists in the pinned corpus or the legacy monorepo, so every package expects
+/// **zero** (absent = 0). That reading was about *Steins* annotations, and the
+/// row below is what it missed: the third id is the first of the three that can
+/// fire on code carrying no Steins annotation at all — it reads upstream's
+/// `@phpstan-impure` — and issue #303 gave the other two the same reach by
+/// teaching the scanner `@phpstan-all-methods-pure`. An interop tag is an
+/// envelope, so "no envelopes in the corpus" stopped being true the day the
+/// corpus was read for upstream's spelling rather than ours. Update an entry
+/// here consciously when a checker change legitimately moves a count.
+const EFFECT_EXPECTED: &[(&str, usize)] = &[
+    // **0 → 4442, 2026-08-15 — the first package to seed this table, and it
+    // carries no Steins annotation.** The private monorepo declares
+    // `@phpstan-all-methods-pure` on three classes, and the interop-envelope run
+    // (issue #303, master 7b3ecab, 2026-08-12) taught the docblock scanner to read
+    // that tag as an operative bound. Measured, not inferred: a binary built at
+    // 93eff42 (the merge before #303) reports **0** effect findings over the
+    // 5041-file subtree that holds all 4442 of them, and one built at 7b3ecab
+    // reports **4442** — the whole count arrives in one merge.
+    //
+    // Attribution matters here because the first reading of this RED blamed the
+    // wrong interval, the resource-value run (#341). It is not that run: the
+    // findings over that same subtree are **byte-identical on both sides of it**
+    // (27,332 = 27,332, nothing added, nothing removed), and re-running the gate
+    // at 040658c — the commit whose record says green at 526/0 — reproduces
+    // 536/4442 today. The record was wrong rather than the analyzer: this is the
+    // first gate run since 2026-08-12 with the private corpus mounted at all.
+    // `corpus.local.toml` is gitignored, so an agent worktree measures the public
+    // packages only, and #303's fallout sat here unmeasured for three days.
+    //
+    // **One root, one shape.** Names below are **placeholders** — the private
+    // corpus's own identifiers are not written into this repo, so do not grep for
+    // these. Every finding sits inside one of the three declaring classes — a
+    // generated URL builder `MyApp\Route\UrlBuilder` (4376), a validation wrapper
+    // `MyApp\Util\Validator` (54), a filter wrapper `MyApp\Util\Filter` (12) —
+    // across 795 call sites in 555 declared-pure methods, and every one of them
+    // reaches the same house logger `MyApp\Log\Debug` down the same chain: an
+    // assertion helper `MyApp\Util\Assertions` delegates to `Validator`, which
+    // delegates to `Filter`, whose `true`-rejecting arm logs. A site carries one
+    // finding per (label, origin) group — six for most of them, which is where 795
+    // sites become 4442 rows.
+    //
+    // TRUE, and the corpus says so in its own source: that logging call carries a
+    // `@phpstan-ignore impure.methodCall`, i.e. upstream's analyzer reports the
+    // same violation at the same line and the file suppresses it there. PHPStan
+    // stops at that suppression and reads the callee as pure for everyone above
+    // it; the proven lane does not (ADR-0067 — a declaration never manufactures a
+    // finding, and never erases one), so the effect keeps travelling to the
+    // callers that declare purity over it. The propagated rows are the same fact
+    // stated where it is still unfixed.
+    //
+    // What the count is made of, so a later reader knows before deciding whether a
+    // move is a regression:
+    //   * 2148 `nondet.time` — a datetime utility (`MyApp\Util\Clock`) wrapping
+    //     `\time`/`\date`.
+    //   * 716 `nondet.random` — `mt_rand`, the log's own sampling gate.
+    //   * 716 `global.read` — a `getenv` on the CLI branch of a server-name lookup.
+    //   * 86 `io` — a `file_exists` on a language file.
+    //   * 776 `io.output.buffer` — **the one soft class.** `print_r($data, true)`
+    //     and `var_export($x, true)` are pure in return-mode, and the source proves
+    //     the `true` at each of the three origin sites; the label comes from this
+    //     catalog's deliberately arg-blind row, which `effect_labels`'s own doc
+    //     already records as an over-approximation. The root fix is a sibling of
+    //     `narrowed_stream_labels` — a call site that proves its argument narrows
+    //     the label — and it will move this row DOWN, which never trips the
+    //     tripwire.
+    //
+    // Seeding rather than fixing is the zero-FP posture, not a retreat from it.
+    // The envelope violations are real; what makes 4442 of them is a house logger
+    // three inference hops under an assertion helper, which is the shape ADR-0084's
+    // `[effects]` attribution exists to discharge on the corpus owner's side. Until
+    // that lands, this row's job is to notice the 4443rd.
+    ("pxxxx-monorepo", 4442),
+];
 
 /// The expected `effect.*`-contract count for a package/local-project name (0 if
 /// untabled — the all-zero seed).
@@ -2280,12 +2349,14 @@ fn print_report(
     print_tripwire("throw.*", throw_regressions, local_reports);
 
     // Measurement-mode summary for the `effect.*` **contract** ids (ADR-0050 §9
-    // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). Seeded empty
-    // and vacuous on the corpus (no ADR-0006 envelope annotations), so this whole
-    // section is **suppressed while dormant** — it prints nothing unless an effect
-    // finding lands, the expected table is seeded, or a regression trips. That
-    // keeps the gate report byte-identical to the pre-convergence run today, and
-    // surfaces the family the day the corpus grows an envelope.
+    // delta: `effect.envelope-exceeded` / `effect.liskov-widened`). The section is
+    // **suppressed while dormant** — it prints nothing unless an effect finding
+    // lands, the expected table is seeded, or a regression trips — which kept the
+    // gate report byte-identical to the pre-convergence run while the family was
+    // vacuous, and surfaced it the day the corpus grew an envelope. That day was
+    // 2026-08-12: the interop-envelope run (#303) reads upstream's purity tags, the
+    // private monorepo carries three of them, and the dormancy guard has been off
+    // ever since (see [`EFFECT_EXPECTED`]'s seeded row).
     let total_effect: usize = reports.iter().chain(local_reports.iter()).map(|r| r.effects.len()).sum();
     if total_effect > 0 || !EFFECT_EXPECTED.is_empty() || !effect_regressions.is_empty() {
         let total_effect_expected: usize = EFFECT_EXPECTED.iter().map(|(_, c)| *c).sum();
