@@ -123,20 +123,31 @@ echo
 echo "Exit codes reach the caller (ADR-0050 §7 — CI reads them)"
 binary="$(find vendor/typedduck/steins/composer/bin -name steins -type f -not -path '*/bin/steins' | head -1)"
 # A non-zero status is the point of this section, so `set -e` has to stand down
-# for it — `--version` is not a command steins has, and exits 2 saying so.
+# for it. `no-such-command` is the row that supplies one: the unknown-command
+# arm exits 2, and unlike a flag it cannot be quietly adopted by a later release
+# — which is exactly what happened to the `--version` this row used to use.
 set +e
-for args in "--version" "doctor --no-php"; do
+nonzero=0
+for args in "version" "doctor --no-php" "no-such-command"; do
   # shellcheck disable=SC2086
   "$binary" $args >/dev/null 2>&1; direct=$?
   # shellcheck disable=SC2086
   ./vendor/bin/steins $args >/dev/null 2>&1; shim=$?
   check "steins $args" "$shim" "$direct"
-  if [ "$args" = "--version" ] && [ "$direct" = "0" ]; then
-    echo "  FAIL    '$args' exits 0, so this comparison proves nothing about non-zero passthrough"
-    fail=1
+  if [ "$direct" != "0" ]; then
+    nonzero=1
   fi
 done
 set -e
+
+# Every row above passing while all of them exit 0 would be a section that reads
+# as green and tests nothing: a shim that clamped everything to 0 would pass it.
+# Assert the coverage rather than the command, so the next release to change an
+# exit code fails here instead of hollowing this out silently.
+if [ "$nonzero" = "0" ]; then
+  echo "  FAIL    every command above exited 0, so none of it proves non-zero passthrough"
+  fail=1
+fi
 
 echo
 echo "Nothing was left dirty"

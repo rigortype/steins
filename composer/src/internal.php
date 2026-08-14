@@ -19,7 +19,6 @@ use Composer\InstalledVersions;
 use PharData;
 use RuntimeException;
 
-use function array_map;
 use function chmod;
 use function count;
 use function curl_error;
@@ -27,9 +26,9 @@ use function curl_exec;
 use function curl_getinfo;
 use function curl_init;
 use function curl_setopt;
-use function escapeshellarg;
 use function extension_loaded;
 use function fclose;
+use function fflush;
 use function file;
 use function file_exists;
 use function file_get_contents;
@@ -37,6 +36,7 @@ use function file_put_contents;
 use function flock;
 use function fopen;
 use function fprintf;
+use function function_exists;
 use function fwrite;
 use function getenv;
 use function glob;
@@ -52,12 +52,18 @@ use function is_string;
 use function ltrim;
 use function mkdir;
 use function number_format;
+use function pcntl_async_signals;
+use function pcntl_exec;
+use function pcntl_get_last_error;
+use function pcntl_signal;
+use function pcntl_strerror;
 use function php_uname;
 use function preg_match;
 use function preg_split;
 use function proc_close;
 use function proc_get_status;
 use function proc_open;
+use function proc_terminate;
 use function shell_exec;
 use function str_contains;
 use function str_starts_with;
@@ -78,7 +84,14 @@ use const FILE_IGNORE_NEW_LINES;
 use const FILE_SKIP_EMPTY_LINES;
 use const LOCK_EX;
 use const LOCK_UN;
+// The four signal constants come from ext-pcntl, and so does every reference to
+// them: forward_signals() checks the extension is there before naming one.
+use const SIGHUP;
+use const SIGINT;
+use const SIGQUIT;
+use const SIGTERM;
 use const STDERR;
+use const STDOUT;
 
 /**
  * This package's name on Packagist — the key Composer's own metadata is under.
@@ -735,6 +748,14 @@ function ensure_binary(string $version, string $target, string $binDir): string
  * rendering, and a piped `--format json` all behave as they do for a
  * Homebrew-installed binary. This shim is a launcher, not a filter.
  *
+ * There are two ways to be that launcher, and the first is better wherever it
+ * is available. `pcntl_exec()` REPLACES this process with the analyzer: same
+ * pid, same descriptors, same process group, and no parent left over. Nothing
+ * can be delivered to the wrapper afterwards, because after the exec there is
+ * no wrapper. Without ext-pcntl the fallback spawns a child and waits on it,
+ * which reintroduces a problem the exec does not have — see
+ * {@see forward_signals()}.
+ *
  * @param list<string> $args Arguments to forward.
  *
  * @return never
@@ -743,14 +764,33 @@ function ensure_binary(string $version, string $target, string $binDir): string
  */
 function execute(string $executable, array $args): never
 {
-    $command = escapeshellarg($executable);
-    if ($args !== []) {
-        $command .= ' ' . implode(' ', array_map(escapeshellarg(...), $args));
+    if (function_exists('pcntl_exec')) {
+        // Whatever this shim has already written — the download progress, a
+        // warning — may still be sitting in a PHP stream buffer, and exec
+        // discards it along with the rest of the process image. Shutdown does
+        // not run either, so this is the last moment it can be got out.
+        fflush(STDOUT);
+        fflush(STDERR);
+
+        // The environment argument is OMITTED, not empty: passing [] hands the
+        // analyzer a bare environment, and it needs the inherited one. PATH is
+        // how the sidecar finds the project's `php` (steins-sidecar/src/lib.rs),
+        // and PAGER and SOURCE_DATE_EPOCH are read from it as well.
+        @pcntl_exec($executable, $args);
+
+        // Reached only when the exec itself failed: a binary that went away
+        // between ensure_binary() and here, or a vendor/ on a noexec mount.
+        // errno says which, and is the whole content of the message.
+        fwrite(STDERR, "steins: cannot execute {$executable}: " . pcntl_strerror(pcntl_get_last_error()) . "\n");
+        exit(1);
     }
 
     $pipes = [];
     $process = proc_open(
-        $command,
+        // The array form, so nothing spawns a shell to parse a command line:
+        // the arguments reach the analyzer as they arrived, and there is no
+        // quoting left to get wrong.
+        [$executable, ...$args],
         [
             0 => ['file', 'php://stdin', 'r'],
             1 => ['file', 'php://stdout', 'w'],
@@ -763,6 +803,8 @@ function execute(string $executable, array $args): never
         fwrite(STDERR, "steins: unable to start the analyzer process.\n");
         exit(1);
     }
+
+    namespace\forward_signals($process);
 
     do {
         usleep(STATUS_CHECK_INTERVAL);
@@ -777,4 +819,43 @@ function execute(string $executable, array $args): never
 
     proc_close($process);
     exit($code);
+}
+
+/**
+ * Relay the signals that end a run to the analyzer, on the fallback path only.
+ *
+ * A waiting parent with no handlers dies on its own SIGTERM and leaves the
+ * analyzer running — still holding the caller's stdout, so its output arrives
+ * after the shell prompt is back or after CI has recorded the step as finished,
+ * and its sidecars and temp files outlive the run. `timeout`, `docker stop` and
+ * a cancelled CI job all signal one pid, so all three land here.
+ *
+ * Ctrl-C is not one of the cases that needs this: the terminal signals the
+ * whole foreground process group, which the analyzer is already in. Relaying it
+ * anyway costs one redundant signal to a process that is dying, and buys the
+ * wrapper reporting the analyzer's fate instead of pre-empting it with its own.
+ *
+ * With ext-pcntl absent — or `disable_functions` covering it, which is why each
+ * function is asked for by name — nothing here runs and the orphan is back.
+ * There is no third mechanism: PHP without pcntl cannot see a signal coming.
+ *
+ * @param resource $process The analyzer, as returned by {@see proc_open()}.
+ *
+ * @internal
+ */
+function forward_signals($process): void
+{
+    if (!function_exists('pcntl_async_signals') || !function_exists('pcntl_signal')) {
+        return;
+    }
+
+    // Without this the handlers only run at a tick, and this process spends its
+    // life inside usleep().
+    pcntl_async_signals(true);
+
+    foreach ([SIGTERM, SIGINT, SIGHUP, SIGQUIT] as $signal) {
+        pcntl_signal($signal, static function (int $received) use ($process): void {
+            proc_terminate($process, $received);
+        });
+    }
 }

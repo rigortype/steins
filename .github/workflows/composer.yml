@@ -53,10 +53,12 @@ jobs:
       - run: composer/tests/package-contents.sh HEAD
 
   # ───────────────────────────────────────────────────────────────────────────
-  # Target detection and checksum reading, over the declared PHP range. These
-  # cover the machines CI is not: a runner never takes the arm64-musl branch,
-  # but a user does, and a wrong answer there costs them a download that
-  # succeeds and then fails at exec.
+  # Target detection, checksum reading, and the launch seam, over the declared
+  # PHP range. The first two cover the machines CI is not: a runner never takes
+  # the arm64-musl branch, but a user does, and a wrong answer there costs them
+  # a download that succeeds and then fails at exec. The third covers a seam
+  # whose failures are all silent — a lost exit code, a stream the analyzer
+  # cannot detect as a terminal, an analyzer left running after the wrapper.
   unit:
     name: unit (php ${{ matrix.php }})
     runs-on: ubuntu-latest
@@ -74,9 +76,15 @@ jobs:
         with:
           php-version: ${{ matrix.php }}
           coverage: none
+          # Named rather than left to the default set, because the launcher test
+          # asks for both paths by name: pcntl is what execute() prefers, and
+          # posix_kill is how the fixture stages a signalled analyzer. The
+          # fallback path is reached with disable_functions, so it needs neither.
+          extensions: pcntl, posix
 
       - run: php composer/tests/target-detection.php
       - run: php composer/tests/checksum.php
+      - run: php composer/tests/launcher.php
 
       - name: Syntax check every shipped PHP file
         run: |
