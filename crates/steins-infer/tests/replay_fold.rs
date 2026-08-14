@@ -573,6 +573,62 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     );
 }
 
+/// **The rung survives as the floor**, end to end, on the machine the browser
+/// actually has (ADR-0028's 2026-08-14 amendment §5).
+///
+/// This is the case no local sidecar can produce, and the one that decides whether
+/// admitting `explode` cost anything. On a 32-bit engine the fold declines — the
+/// row is unverified — but reflection is not width-gated, so the type-level rung
+/// `explode_transfer` has always had still runs and still answers
+/// `non-empty-list<string>`. The fold shadows that rung on the all-literal 64-bit
+/// path and removes it nowhere.
+///
+/// The reflect answer is load-bearing rather than decoration: the rung is admitted
+/// only when the engine's declaration matches the one it was written against
+/// (`array`, ADR-0061's independent-implementation cross-check), so a table without
+/// it would fall to the ADR-0069 declared floor and this fixture would be pinning
+/// the wrong rung.
+#[test]
+fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
+    const SRC: &str = "<?php\n\\PHPStan\\dumpType(explode(\",\", \"a,b,c\"));\n";
+    let dumps = |folder: &mut dyn Folder| -> Vec<String> {
+        findings_with(SRC, folder)
+            .iter()
+            .filter(|d| d.id == DEBUG_TYPE_ID)
+            .map(|d| d.message.replace("dumped type: ", ""))
+            .collect()
+    };
+    let fold_answer = serde_json::json!({
+        "kind": "value",
+        "type": "array",
+        "value": { "__steins_array": [[0, "a"], [1, "b"], [2, "c"]] },
+    });
+    let args =
+        [FoldArg::Str(",".to_owned()), FoldArg::Str("a,b,c".to_owned())];
+
+    // php-wasm's machine: the fold declines, the rung answers.
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.2", 4);
+    with_reflect(&mut t, "explode", fn_reflection("explode", "array"));
+    with_fold(&mut t, "explode", &args, fold_answer.clone());
+    assert_eq!(
+        dumps(&mut TableFolder::with_table(t)),
+        vec!["non-empty-list<string>".to_owned()],
+        "the type-level transfer is what the browser keeps"
+    );
+
+    // The same table at width 8: the fold answers instead, strictly stronger.
+    let mut t = Table::new();
+    with_env(&mut t, "8.5.8", 8);
+    with_reflect(&mut t, "explode", fn_reflection("explode", "array"));
+    with_fold(&mut t, "explode", &args, fold_answer);
+    assert_eq!(
+        dumps(&mut TableFolder::with_table(t)),
+        vec!["list{'a', 'b', 'c'}".to_owned()],
+        "a value, where the line above had a type"
+    );
+}
+
 /// The fold lane's width gate, ADMITTED leg (issue #64 S1.5): a verified
 /// width-safe builtin over in-range arguments folds on a 32-bit engine and IS
 /// dispatched to. Without this the width tests would all be satisfied by a lane

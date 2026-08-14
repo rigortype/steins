@@ -185,3 +185,163 @@ fn a_folded_array_is_verified_not_asserted() {
     let d = dumps(SRC, &mut folder);
     assert_eq!(d, vec!["list{'f00'}"], "no `(asserted)` marker: the engine answered");
 }
+
+// ---- wave 1: the width-UNVERIFIED names (ADR-0028 §4/§5, issue #330) -------
+
+/// `explode` folds to the engine's own pieces on the all-literal path. It is the
+/// amendment's §5 case in its purest form: the Rust rung answers a *type*
+/// (`non-empty-list<string>`), the fold answers the *value*, so the fold is
+/// strictly stronger and the rung stays underneath it.
+///
+/// It is on the allowlist as a `WIDTH_UNVERIFIED` row — it folds here, on a
+/// 64-bit engine, and declines in the browser, with no probe on record either
+/// way. `replay_fold.rs` pins that decline; this pins what a 64-bit engine gets.
+#[test]
+fn explode_folds_to_the_engines_own_pieces() {
+    let Some(mut folder) = live("explode_folds_to_the_engines_own_pieces") else { return };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(explode(\",\", \"a,b,c\"));\n\
+         \\PHPStan\\dumpType(explode(\",\", \"\"));\n\
+         \\PHPStan\\dumpType(explode(\",\", \"a,b,c\", 2));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "list{'a', 'b', 'c'}",
+            // `explode(',', '')` is `['']`, not `[]` — the witness the rung's
+            // non-emptiness rests on, now readable as a value.
+            "list{''}",
+            // The three-argument form the RUNG declines (a negative `$limit`
+            // breaks non-emptiness outright) folds without trouble: a fold is a
+            // claim about one argument tuple, and the engine evaluated this one.
+            "list{'a', 'b,c'}",
+        ]
+    );
+    assert_eq!(
+        steins_catalog::width_class("explode"),
+        Some(steins_catalog::WidthClass::Unverified),
+        "folds here, declines in the browser, with no probe on record either way"
+    );
+}
+
+/// `array_merge` folds to the engine's merged array — and the fixture is chosen to
+/// exercise exactly the two rules the catalog refuses to re-derive in Rust
+/// (ADR-0004): a duplicate **string** key resolves last-wins, and every **integer**
+/// key is renumbered from zero in argument order regardless of what it was.
+///
+/// `['k' => 'v', 7 => 's']` merged with `['k' => 'w', 3 => 't']` is
+/// `['k' => 'w', 0 => 's', 1 => 't']`: `'v'` lost to `'w'`, and `7`/`3` became
+/// `0`/`1`. Nothing in Rust computed that; the engine did, which is the whole
+/// argument for the name being on the list rather than getting a rung.
+#[test]
+fn array_merge_folds_with_the_engines_own_key_resolution() {
+    let Some(mut folder) = live("array_merge_folds_with_the_engines_own_key_resolution") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(array_merge([\"k\" => \"v\", 7 => \"s\"], [\"k\" => \"w\", 3 => \"t\"]));\n\
+         \\PHPStan\\dumpType(array_merge([\"a\", \"b\"], [\"c\"]));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "array{k: 'w', 0: 's', 1: 't'}",
+            // The unkeyed case beside it, so the fixture above cannot be passing
+            // because keys are being dropped wholesale.
+            "list{'a', 'b', 'c'}",
+        ]
+    );
+    assert_eq!(
+        steins_catalog::width_class("array_merge"),
+        Some(steins_catalog::WidthClass::Unverified)
+    );
+}
+
+/// **The fold shadows a floor it never removes** — §5's "strictly stronger" rule
+/// made observable: the same source, one folder apart.
+///
+/// The floor is two rungs, not one, and which one answers depends on the engine —
+/// a detail worth stating because it is easy to assume the `explode` rung is
+/// engine-free. It is not: `arg_dispatch_return_fact` admits a rule only when the
+/// engine's own reflected declaration matches the one the rule was written against
+/// (ADR-0061's independent-implementation cross-check), so with NO engine the rung
+/// declines with everything else and the answer is ADR-0069's declared-return
+/// floor, `list<string> (asserted)` — a type, still, and marked as a declaration's
+/// claim rather than an engine's. The rung proper stands where reflection works but
+/// the fold does not, which is exactly the browser; `replay_fold.rs` pins that on a
+/// 32-bit table, since it is the case no local sidecar can produce.
+#[test]
+fn the_explode_fold_shadows_a_floor_it_never_removes() {
+    const SRC: &str = "<?php\n\\PHPStan\\dumpType(explode(\",\", \"a,b,c\"));\n";
+    // No engine at all: no fold, no reflection, and therefore no rung either —
+    // the declared-return floor, which is still a type and still not lost.
+    assert_eq!(
+        dumps(SRC, &mut SidecarFolder::new(true)),
+        vec!["list<string> (asserted)"],
+        "a folderless run keeps the declared floor"
+    );
+    // With an engine: the value. Skipping here would leave the assertion above
+    // passing for the wrong reason, so the skip stays as loud as everywhere else.
+    let Some(mut folder) = live("the_explode_fold_shadows_a_floor_it_never_removes") else {
+        return;
+    };
+    assert_eq!(dumps(SRC, &mut folder), vec!["list{'a', 'b', 'c'}"]);
+}
+
+/// The over-budget case wave 0 could not construct. `str_replace` and
+/// `substr_replace` return an array bounded by their array *argument*, which the
+/// argument budget has already admitted — so no all-literal call of theirs can
+/// exceed the result budget. `explode` grows: a 257-piece subject is an ordinary
+/// literal and its result is one past the 256-entry bound.
+///
+/// What must happen is a *widen*, not a loss. The runner charges the budget before
+/// encoding and answers `'array result over entry budget'` (pinned as a protocol
+/// fact in `steins-sidecar/tests/protocol.rs`), the fold declines, and the dump
+/// falls back to the type-level floor. One entry below the bound the same call
+/// folds, so this is a boundary and not a blanket refusal of long results.
+#[test]
+fn an_over_budget_explode_widens_to_the_rung_rather_than_losing_the_answer() {
+    let Some(mut folder) =
+        live("an_over_budget_explode_widens_to_the_rung_rather_than_losing_the_answer")
+    else {
+        return;
+    };
+    /// `explode(',', 'x,x,…')` over `pieces` pieces, as source.
+    fn src(pieces: usize) -> String {
+        format!("<?php\n\\PHPStan\\dumpType(explode(\",\", \"{}\"));\n", vec!["x"; pieces].join(","))
+    }
+    assert_eq!(
+        dumps(&src(257), &mut folder),
+        vec!["non-empty-list<string>"],
+        "an over-budget result widens to the rung — the answer is coarser, never absent"
+    );
+    // 256 pieces is the last admissible width, and it folds. The dump is long, so
+    // it is checked by shape: a folded value, with every piece in it.
+    let d = dumps(&src(256), &mut folder);
+    assert_eq!(d.len(), 1);
+    assert!(d[0].starts_with("list{'x', 'x', "), "the boundary case folds, got: {}", &d[0][..40]);
+    assert_eq!(d[0].matches("'x'").count(), 256, "every piece survived the seam");
+}
+
+/// `explode('', 'x')` is a `ValueError` at `PINNED_PHP` — PHP 8.0 replaced the old
+/// `false` return with a throw — and that edge is precisely on the list of
+/// semantics the catalog declines to re-derive in Rust (`WIDTH_UNVERIFIED`).
+///
+/// The engine reports the throw, the fold declines, and the dump falls through.
+/// The rung declines here too, on its own separate grounds (an empty separator has
+/// no return value to describe, so there is no `non-empty` to promise), which is
+/// why the answer is ADR-0069's declared floor rather than the rung: two
+/// independent refusals agreeing, which is the shape a soundness floor is supposed
+/// to have. `steins-sidecar`'s protocol tests pin the `FoldResult::Throw` itself.
+#[test]
+fn an_empty_explode_separator_throws_and_falls_to_the_floor() {
+    let Some(mut folder) = live("an_empty_explode_separator_throws_and_falls_to_the_floor") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\\PHPStan\\dumpType(explode(\"\", \"x\"));\n";
+    assert_eq!(dumps(SRC, &mut folder), vec!["list<string> (asserted)"]);
+    // The `non-empty` is what the throw costs, and the contrast is one line away:
+    // a non-empty separator on the same folder folds to the value itself.
+    assert_eq!(
+        dumps("<?php\n\\PHPStan\\dumpType(explode(\",\", \"x\"));\n", &mut folder),
+        vec!["list{'x'}"]
+    );
+}
