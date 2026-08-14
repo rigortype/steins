@@ -148,7 +148,9 @@ array result.
    malformed rather than accepting it. Accepting it would mean Rust
    re-deriving a next-int this engine did not choose — the exact failure
    ADR-0004 exists to prevent — and rejecting it turns that class of runner
-   bug into a widen.
+   bug into a widen. A duplicated key is rejected on the same ground: a
+   materialized array cannot contain one, and honoring it would be Rust
+   choosing last-wins on the engine's behalf.
 
 3. **The result budget is the argument budget, charged twice.** The same 256
    entries / 8 levels, charged in the runner *before* encoding (so an
