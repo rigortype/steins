@@ -126,6 +126,15 @@ future consumer and this repo already demonstrated it does not generalize.
    `base64_encode`, `htmlspecialchars`). It changes the ADR-0024 protocol and
    the ADR-0066 replay transport, so it is its own change with its own
    version handshake. Until then, decision §2.6 holds and the lane is silent.
+
+   *Annotation (2026-08-14, ADR-0028's array-results amendment):* the version
+   handshake is **not** required, and budgeting for it overstates this work.
+   `runner.php` ships embedded in the binary (`include_str!`), the browser
+   executes that same text unmodified, and ADR-0066's table is built live per
+   session rather than recorded and shipped — so an old encoder never meets a
+   new decoder. The tagged envelope is its own discriminator, and the array
+   result decoder is already shaped so a bytes tag is a sibling inside it
+   rather than a new wire. What remains of this item is the encoding itself.
 2. **The read-time file decode.** Source files are read with
    `String::from_utf8_lossy` before parsing, so a *physically* non-UTF-8 file
    (as opposed to an ASCII file spelling `"\xC0"` as an escape, which is what

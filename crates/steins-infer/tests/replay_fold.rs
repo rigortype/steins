@@ -28,7 +28,7 @@ use steins_sidecar::{
     EnvInfo, FoldArg, FoldResult, PregCompile, Reflection, Sidecar, env_params, fold_params,
     reflect_params,
 };
-use steins_syntax::{ArgValue, SourceTree};
+use steins_syntax::{ArgValue, ArrayKey, SourceTree};
 
 // Table builders
 
@@ -91,6 +91,74 @@ fn a_table_hit_answers_the_fold() {
         Some(ArgValue::Str("AB".into()))
     );
     assert!(folder.pending().is_empty(), "a fully-answered run has nothing pending");
+}
+
+/// An array answer rides the replay transport unchanged (ADR-0028's 2026-08-14
+/// amendment, issue #330): the browser runs the same `runner.php` text through
+/// php-wasm and its reply lands in the answer table verbatim, so the envelope this
+/// table spells is the envelope that transport produces.
+///
+/// The amendment's §6 is what makes that safe to assume — the runner is embedded
+/// via `include_str!` and the table is built live in the session, so there is no
+/// pairing of an old encoder with a new decoder anywhere in the system.
+#[test]
+fn a_table_hit_answers_a_fold_with_an_array() {
+    let mut t = pinned_env_table();
+    let subject = FoldArg::Array(vec![(None, FoldArg::Str("aa".to_owned()))]);
+    with_fold(
+        &mut t,
+        "str_replace",
+        &[FoldArg::Str("a".to_owned()), FoldArg::Str("b".to_owned()), subject],
+        serde_json::json!({
+            "kind": "value",
+            "type": "array",
+            "value": { "__steins_array": [[0, "bb"], ["k", 7]] },
+        }),
+    );
+    let mut folder = TableFolder::with_table(t);
+    let args = [
+        ArgValue::Str("a".into()),
+        ArgValue::Str("b".into()),
+        ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str("aa".into()))]),
+    ];
+    assert_eq!(
+        folder.fold("str_replace", &args),
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("bb".into())),
+            (ArrayKey::Str("k".into()), ArgValue::Int(7)),
+        ]))
+    );
+    assert!(folder.pending().is_empty(), "a fully-answered run has nothing pending");
+}
+
+/// A malformed array answer is a **widen**, not a panic. The `null` key is the
+/// argument direction's absent-key spelling, which a materialized result cannot
+/// have; the replay transport is exactly where a stale or hand-edited answer table
+/// could put one, so the decline is pinned on this transport specifically.
+#[test]
+fn a_malformed_array_answer_widens_rather_than_panicking() {
+    let mut t = pinned_env_table();
+    let subject = FoldArg::Array(vec![(None, FoldArg::Str("aa".to_owned()))]);
+    with_fold(
+        &mut t,
+        "str_replace",
+        &[FoldArg::Str("a".to_owned()), FoldArg::Str("b".to_owned()), subject],
+        serde_json::json!({
+            "kind": "value",
+            "type": "array",
+            "value": { "__steins_array": [[serde_json::Value::Null, "bb"]] },
+        }),
+    );
+    let mut folder = TableFolder::with_table(t);
+    let args = [
+        ArgValue::Str("a".into()),
+        ArgValue::Str("b".into()),
+        ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str("aa".into()))]),
+    ];
+    assert_eq!(folder.fold("str_replace", &args), None, "a malformed answer widens");
+    // Answered-with-garbage is settled, not pending: re-asking would replay the
+    // same malformed reply forever.
+    assert!(folder.pending().is_empty(), "the question was answered, badly");
 }
 
 #[test]

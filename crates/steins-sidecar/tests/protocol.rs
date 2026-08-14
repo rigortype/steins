@@ -654,14 +654,107 @@ fn an_overflowing_next_int_key_widens_and_leaves_the_runner_alive() {
     assert_eq!(sc.fold("count", &[ok]), FoldResult::Value(FoldValue::Int(2)));
 }
 
+/// An array *result* crosses the seam since ADR-0028's 2026-08-14 amendment
+/// (issue #330). It rides the same `__steins_array` envelope the argument
+/// direction uses, with the one difference the amendment's §2 states: every key is
+/// **materialized**, because PHP has finished building this array.
 #[test]
-fn an_array_returning_fold_widens() {
-    let Some(mut sc) = spawn_or_skip("an_array_returning_fold_widens") else { return };
-    // Array *arguments* exist; an array *result* is a documented boundary
-    // (#41/#42) — the runner reports it faithfully, the Rust side widens.
-    let r = sc.fold("str_replace", &[s("a"), s("b"), list(vec![s("a")])]);
-    assert!(matches!(r, FoldResult::Widen { .. }), "array result widens, got {r:?}");
+fn an_array_returning_fold_comes_back_in_the_envelope() {
+    let Some(mut sc) = spawn_or_skip("an_array_returning_fold_comes_back_in_the_envelope") else {
+        return;
+    };
+    let r = sc.fold("str_replace", &[s("a"), s("b"), list(vec![s("a"), s("aa")])]);
+    assert_eq!(
+        r,
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Str("b".to_owned())),
+            (FoldKey::Int(1), FoldValue::Str("bb".to_owned())),
+        ])),
+        "the engine's array, with the keys it assigned"
+    );
+    assert!(!sc.is_poisoned());
+}
+
+/// The subject's keys survive the round trip **as their own kinds**: a string key
+/// stays a string key and an integer key stays an integer key, so nothing here
+/// flattens a keyed array into a list.
+///
+/// The `'5'`-versus-`5` half of that distinction cannot be exercised from this end:
+/// PHP casts an integer-like string key to an int when the array is built, so no
+/// materialized result can carry one. It is pinned at the decoder instead, where a
+/// malformed reply could still spell it.
+#[test]
+fn an_array_result_keeps_its_key_kinds() {
+    let Some(mut sc) = spawn_or_skip("an_array_result_keeps_its_key_kinds") else { return };
+    let subject = FoldArg::Array(vec![
+        (Some(FoldKey::Str("a".to_owned())), s("foo")),
+        (Some(FoldKey::Int(5)), s("boo")),
+    ]);
+    assert_eq!(
+        sc.fold("str_replace", &[s("o"), s("0"), subject]),
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Str("a".to_owned()), FoldValue::Str("f00".to_owned())),
+            (FoldKey::Int(5), FoldValue::Str("b00".to_owned())),
+        ]))
+    );
+}
+
+/// Both halves of the result budget, charged in the runner *before* the envelope is
+/// built so an oversized answer never becomes a megabyte of JSON. The numbers are
+/// the argument side's own (256 entries, 8 levels), and the tests sit on the
+/// boundary in both directions so a drift in either constant is caught.
+///
+/// The functions here are not on the fold allowlist — the runner does not gate,
+/// the Rust side does — which is what makes them usable as budget probes.
+#[test]
+fn an_over_budget_array_result_widens_at_the_runner() {
+    let Some(mut sc) = spawn_or_skip("an_over_budget_array_result_widens_at_the_runner") else {
+        return;
+    };
+    // 256 entries is the last admissible width; 257 is one past it.
+    assert!(matches!(
+        sc.fold("range", &[int(1), int(256)]),
+        FoldResult::Value(FoldValue::Array(_))
+    ));
+    assert_eq!(
+        sc.fold("range", &[int(1), int(257)]),
+        FoldResult::widen("array result over entry budget")
+    );
+    // 8 levels of nesting is the last admissible depth; 9 is one past it.
+    assert!(matches!(
+        sc.fold("json_decode", &[s("[[[[[[[[\"x\"]]]]]]]]"), FoldArg::Bool(true)]),
+        FoldResult::Value(FoldValue::Array(_))
+    ));
+    assert_eq!(
+        sc.fold("json_decode", &[s("[[[[[[[[[\"x\"]]]]]]]]]"), FoldArg::Bool(true)]),
+        FoldResult::widen("array result over depth budget")
+    );
     assert!(!sc.is_poisoned(), "a widened result is not a protocol failure");
+}
+
+/// A non-UTF-8 string *anywhere* in an array widens the **whole** result, for the
+/// same stated cause a bare binary string does (ADR-0080 §2.6). A partial array
+/// would be a wrong value, not a wider one.
+///
+/// `str_split("À")` is the cheapest way to reach this over a JSON wire: the
+/// argument is valid UTF-8 (two bytes, `C3 80`), and splitting it at length 1
+/// yields two single-byte strings, **neither** of which is valid UTF-8. Lifting
+/// this is ADR-0080 §3.1's tagged byte string.
+#[test]
+fn a_binary_string_inside_an_array_result_widens_the_whole_result() {
+    let Some(mut sc) = spawn_or_skip("a_binary_string_inside_an_array_result_widens_the_whole_result")
+    else {
+        return;
+    };
+    assert_eq!(sc.fold("str_split", &[s("À")]), FoldResult::widen("non-utf8 string"));
+    // The *scalar* form of the same refusal, which had a runner branch and no test.
+    assert_eq!(sc.fold("base64_decode", &[s("wA==")]), FoldResult::widen("non-utf8 string"));
+    assert!(!sc.is_poisoned());
+    // The same process answers an ordinary array next — the refusal is the value's.
+    assert!(matches!(
+        sc.fold("str_split", &[s("ab")]),
+        FoldResult::Value(FoldValue::Array(_))
+    ));
 }
 
 #[test]

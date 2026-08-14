@@ -118,3 +118,119 @@ the same pure function of (CST, entry state, query answers, fold memo). The
 stratum is the §5 derivation clause verbatim: every member answer is
 engine-`Verified`, but the composed fact consumed the input facts, so it
 carries `min` over them — an `Asserted` union in, an `Asserted` fact out.
+
+## Amendment (2026-08-14): array results cross the seam (issue #330)
+
+The amendment above carried an array *into* the sidecar and stopped there;
+its §5 declined the return direction, on the ground that "carrying a folded
+array back would seed synthesized array facts into the env, which is
+#41/#42's subject". That ground has since dissolved from two sides. #41/#42
+closed on the type rung, and issue #327 gave a literal with one unknown slot
+its own `Fact::Shape` rung — below the concrete path, reached only when a
+slot is unknown. A fold result has no unknown slot: PHP built the whole
+array, so it lands on the **concrete** path (`Val::Array` → `Fact::Singleton`)
+and never constructs a synthesized shape at all. The seam now carries an
+array result.
+
+1. **The `order` witness question does not arise.** #327's `ShapeFact::order`
+   is provenance-only and deliberately inert, because believing a *declaration*
+   order is the phpstan#14940 false-positive class. A `Val::Array` is
+   `Vec<(Key, Val)>` in insertion order — the order is part of the value, not
+   a claim about the source — so a folded `array_merge` answer needs no
+   witness and grants none.
+
+2. **The result envelope is the argument envelope, with a stricter key
+   rule.** Same `__steins_array` tag, same recursion, same nesting. But a
+   result is an array PHP has already finished building: every key is
+   materialized, duplicates are resolved, normalization has happened. The
+   absent-key spelling (`null`) that the argument direction needs is
+   therefore *unreachable* in a result, and the result decoder rejects it as
+   malformed rather than accepting it. Accepting it would mean Rust
+   re-deriving a next-int this engine did not choose — the exact failure
+   ADR-0004 exists to prevent — and rejecting it turns that class of runner
+   bug into a widen. A duplicated key is rejected on the same ground: a
+   materialized array cannot contain one, and honoring it would be Rust
+   choosing last-wins on the engine's behalf. So is an integer-like string
+   key (`"5"`, by `php_canonical_int_string` — the same primitive the
+   write side uses): the engine casts it to `5` when the array is built,
+   so keeping it as a string would be a *wrong* fact and re-casting it in
+   Rust would be the re-derivation this clause forbids.
+
+3. **The result budget is the argument budget, charged twice.** The same 256
+   entries / 8 levels, charged in the runner *before* encoding (so an
+   oversized answer never becomes a megabyte of JSON) and again on arrival
+   (so the gate's verdict and the decoder's are the same verdict computed
+   twice). Over budget widens. The invariant is symmetry: a shape admissible
+   as an argument is admissible as a result.
+
+   This is **not** issue #258's pre-flight bound and must not be merged into
+   it. #258 prices "the child will die allocating this" from the runner's
+   `memory_limit`, before the request is sent; this prices "how much value
+   the env will absorb", after it returns. `range(1, 1000000)` passes the
+   first and fails the second, so a single constant would have to be wrong
+   for one of them.
+
+4. **The integer-width classification becomes three-valued.** `WIDTH_SAFE`
+   is evidenced by differential probes and `WIDTH_REFUSED` by a recorded
+   divergence per row; a name with neither belonged to neither, which is why
+   the allowlist held no array-returning name. `WIDTH_UNVERIFIED` is that
+   third place: *not measured*, so the name folds only on a provably 64-bit
+   engine and declines in the browser — which is exactly what `foldable`'s
+   default-deny sentence already described, now a row instead of a gap.
+   `foldable` becomes a predicate derived from `width_class`, so that
+   "refused (a divergence is on record)" and "unverified (nobody looked)"
+   cannot be conflated: the refused rows' one-divergence-per-row discipline
+   is what makes them auditable, and mixing in unevidenced rows would erase
+   it. Promotion to `WIDTH_SAFE` is a later slice with php-wasm probes; the
+   correct number of probes behind an `UNVERIFIED` row today is zero.
+
+5. **A name joins the allowlist only when the fold is strictly stronger than
+   the rung it would shadow.** `array_slice` has an exact Rust rung that
+   answers `array_slice(['x', $s, 'z'], 1)` as `list{string, 'z'}` — with a
+   non-literal element, which a fold can never have. The fold would cover a
+   proper subset of what the rung already covers exactly, so it buys a second
+   implementation of the same answer and a fixture to keep them agreeing.
+   It stays off the list. `array_combine` and `array_fill_keys` are excluded
+   by the same rule (issue #335 gave them exact rungs). `explode` and `range`
+   are admitted by it: their rungs are type-level only
+   (`non-empty-list<string>`, `non-empty-list<int>`), so the fold upgrades a
+   type to a value on the all-literal path — and the rung survives beneath it
+   as the no-sidecar floor.
+
+   Note the rule cuts both ways: a name whose rung later becomes exact should
+   *leave* the allowlist, and this clause is the warrant.
+
+6. **No version handshake, because no two versions can meet.** `runner.php`
+   is embedded in the binary via `include_str!`; the browser runs that same
+   text unmodified inside php-wasm; ADR-0066's answer table is built live in
+   the session rather than recorded and shipped. There is no pairing of an
+   old encoder with a new decoder anywhere in the system, and the
+   `__steins_array` tag is its own discriminator in the one place a stale
+   pairing could otherwise be constructed. ADR-0080 §3.1 anticipated "its own
+   version handshake" for the byte-string wire; on the evidence above that
+   cost is not real, and §3.1 is annotated accordingly so the next reader does
+   not budget for it.
+
+7. **Byte strings slot in rather than being retrofitted.** `Val::Str` is
+   already a byte string (ADR-0080), so the domain is ready and the only
+   obstacle is JSON. The result decoder is therefore written so a tagged
+   bytes variant is a sibling of the array tag inside the same envelope, not
+   a new envelope. Until §3.1 lands, a non-UTF-8 string anywhere in a result
+   widens the whole result — pinned in both directions, including the
+   *scalar* result case that had a runner branch but no test.
+
+The whole change fires only when every argument is a literal, which is why it
+is last in its issue chain and why its wave order is by frequency against
+that condition: `str_replace` and `substr_replace` first, since they are
+already `WIDTH_SAFE` and only §5 held their array results back — so they need
+no width verdict and work in the browser — then `array_merge` and `explode`
+behind the new class.
+
+Against ADR-0048 once more: the answer is still a pure function of
+`(function, args)`, and an array answer does not weaken that — PHP's array
+construction is deterministic for a fixed argument list, and the insertion
+order the value carries is that determinism made visible rather than an
+extra input. The stratum is §5's derivation clause unchanged: an all-literal
+argument list is `Verified`, so a folded array is a `Verified` `Singleton`,
+with the same consequence #327 measured — a `Verified` array fact is strong
+enough to move the contract lanes, and that movement is a true positive.

@@ -57,6 +57,17 @@ pub enum FoldValue {
     Str(String),
     Bool(bool),
     Null,
+    /// An array the engine finished building (ADR-0028's 2026-08-14 amendment,
+    /// issue #330): its entries in insertion order, each with a **materialized**
+    /// key.
+    ///
+    /// The key is a plain [`FoldKey`] rather than the argument direction's
+    /// `Option<FoldKey>`, and that difference is the whole point. An argument
+    /// spells an absent key so the engine assigns its own next-int; a result has
+    /// no absent key left to spell, because PHP already assigned every one of
+    /// them. [`parse_fold_value`] rejects the absent spelling rather than
+    /// admitting it into a type this half of the wire cannot represent.
+    Array(Vec<(FoldKey, FoldValue)>),
 }
 
 /// The outcome of a `fold` request (ADR-0024). An exception is a *result*, not
@@ -320,9 +331,15 @@ pub enum ConstantDefined {
     NotDefined,
 }
 
-/// The wire tag that marks an array argument. A scalar argument encodes to a bare
-/// JSON scalar, so a JSON *object* can only ever be this envelope — the tag is a
-/// readability aid and a shape check for the runner, not a disambiguator.
+/// The wire tag that marks an array, in **both** directions: an array argument
+/// (issue #39) and, since ADR-0028's 2026-08-14 amendment, an array result
+/// (issue #330). One tag, because the two envelopes are the same envelope.
+///
+/// A scalar encodes to a bare JSON scalar, so a JSON *object* on this wire can
+/// only be a tagged envelope. Today the tag is therefore a readability aid and a
+/// shape check rather than a disambiguator — but the result decoder dispatches on
+/// it anyway, so ADR-0080 §3.1's `__steins_bytes` can join as a sibling tag
+/// rather than forcing a second envelope.
 pub const ARRAY_TAG: &str = "__steins_array";
 
 // ---------------------------------------------------------------------------
@@ -669,12 +686,87 @@ pub fn parse_fold_value(result: &serde_json::Value) -> Option<FoldValue> {
         "string" => value.as_str().map(|s| FoldValue::Str(s.to_owned())),
         "bool" => value.as_bool().map(FoldValue::Bool),
         "null" => Some(FoldValue::Null),
-        // An array **result** widens: issue #39 makes array literals fold
-        // *arguments*, and stops there deliberately. Carrying a folded array back
-        // as a value would seed synthesized array facts into the env, which is the
-        // array-return work of #41/#42 — a documented boundary, not an oversight.
+        // An array **result** crosses the seam since ADR-0028's 2026-08-14
+        // amendment (issue #330). The old boundary here cited #41/#42's
+        // array-return work; that closed on the type rung, and issue #327 gave a
+        // literal with an unknown slot its own `Fact::Shape` rung — which a fold
+        // result never reaches, because PHP built the whole array and it lands on
+        // the concrete path instead.
+        "array" => parse_fold_array(value).map(FoldValue::Array),
         // Anything else (objects, resources) has no literal in our IR at all.
         _ => None,
+    }
+}
+
+/// Decode an `{"__steins_array": [[key, value], …]}` envelope, or `None` for any
+/// malformed shape — which widens.
+///
+/// # Why this decoder is stricter than the runner's argument decoder
+///
+/// The two envelopes are the same envelope, but they describe arrays at different
+/// moments. An *argument* is an array literal as written, so it still spells the
+/// things the engine has yet to decide: an absent key (`null`) awaiting PHP's
+/// next-int, and a duplicate key awaiting PHP's last-wins. A *result* is an array
+/// PHP has already finished building — every key materialized, every duplicate
+/// resolved, normalization done — so neither spelling is reachable in one.
+///
+/// Both are therefore rejected rather than interpreted. Honoring a `null` key
+/// would mean re-deriving here a next-int this engine did not choose, and
+/// honoring a duplicate would mean choosing last-wins on the engine's behalf —
+/// the exact class of Rust-reimplements-PHP error ADR-0004 exists to prevent.
+/// Rejecting turns that class of runner bug into a widen instead.
+fn parse_fold_array(value: &serde_json::Value) -> Option<Vec<(FoldKey, FoldValue)>> {
+    let items = value.get(ARRAY_TAG)?.as_array()?;
+    let mut entries: Vec<(FoldKey, FoldValue)> = Vec::with_capacity(items.len());
+    for item in items {
+        let pair = item.as_array()?;
+        let [key, value] = pair.as_slice() else { return None };
+        let key = parse_fold_key(key)?;
+        // Linear, and deliberately so: the budget caps an envelope at a few
+        // hundred entries, so the quadratic term is bounded by a constant and a
+        // hash set would cost more than it saves.
+        if entries.iter().any(|(seen, _)| *seen == key) {
+            return None;
+        }
+        entries.push((key, parse_fold_leaf(value)?));
+    }
+    Some(entries)
+}
+
+/// Decode one materialized array key. A JSON `null` is the absent-key spelling an
+/// argument uses and a result cannot have; a float or any other JSON shape is not
+/// a PHP array key at all. Both widen.
+fn parse_fold_key(key: &serde_json::Value) -> Option<FoldKey> {
+    match key {
+        serde_json::Value::Number(n) if n.is_i64() => n.as_i64().map(FoldKey::Int),
+        serde_json::Value::String(s) => Some(FoldKey::Str(s.clone())),
+        _ => None,
+    }
+}
+
+/// Decode one value inside an envelope. Scalars arrive **bare** — there is no
+/// per-leaf `type` tag, because JSON already separates the five PHP scalars once
+/// the response preserves float-ness (`JSON_PRESERVE_ZERO_FRACTION`, which the
+/// runner sets on every reply).
+///
+/// A JSON *object* is the extension point: it dispatches on its tag, and today
+/// [`ARRAY_TAG`] is the only one. ADR-0080 §3.1's tagged byte string
+/// (`__steins_bytes`, base64) is meant to arrive as a **sibling arm of this
+/// match**, not as a second envelope — until it does, a non-UTF-8 string anywhere
+/// in a result widens the whole result at the runner.
+fn parse_fold_leaf(value: &serde_json::Value) -> Option<FoldValue> {
+    match value {
+        serde_json::Value::Null => Some(FoldValue::Null),
+        serde_json::Value::Bool(b) => Some(FoldValue::Bool(*b)),
+        serde_json::Value::Number(n) if n.is_i64() => n.as_i64().map(FoldValue::Int),
+        serde_json::Value::Number(n) => n.as_f64().map(FoldValue::Float),
+        serde_json::Value::String(s) => Some(FoldValue::Str(s.clone())),
+        serde_json::Value::Object(o) if o.contains_key(ARRAY_TAG) => {
+            parse_fold_array(value).map(FoldValue::Array)
+        }
+        // An untagged object, an unknown tag, or a bare JSON array (which the
+        // envelope replaces precisely because a JSON array cannot carry keys).
+        serde_json::Value::Object(_) | serde_json::Value::Array(_) => None,
     }
 }
 
@@ -835,6 +927,103 @@ mod tests {
         let outer = FoldArg::Array(vec![(None, inner)]);
         let p = fold_params("count", &[outer]);
         assert_eq!(p["args"][0][ARRAY_TAG][0][1][ARRAY_TAG][0][1], serde_json::json!(7));
+    }
+
+    /// An `{kind:"value", type:"array"}` reply carrying an entry-list envelope.
+    fn array_reply(entries: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({ "kind": "value", "type": "array", "value": { ARRAY_TAG: entries } })
+    }
+
+    /// The distinction the whole envelope exists for: JSON `"5"` and JSON `5` are
+    /// two different array keys, and a JSON *object* keyed by strings could not tell
+    /// them apart. (PHP itself never produces the string form in a materialized
+    /// array — see [`super::parse_fold_array`] — but the decoder must not be the
+    /// place that erases the difference.)
+    #[test]
+    fn an_array_result_decodes_int_and_string_keys_as_distinct() {
+        let r = array_reply(serde_json::json!([["5", "s"], [5, "i"]]));
+        assert_eq!(
+            parse_fold_result(&r),
+            FoldResult::Value(FoldValue::Array(vec![
+                (FoldKey::Str("5".to_owned()), FoldValue::Str("s".to_owned())),
+                (FoldKey::Int(5), FoldValue::Str("i".to_owned())),
+            ]))
+        );
+    }
+
+    /// Scalars ride bare inside the envelope, each landing on its own PHP type —
+    /// float-ness included, which the reply's `JSON_PRESERVE_ZERO_FRACTION` is what
+    /// keeps distinguishable from an int.
+    #[test]
+    fn an_array_result_decodes_bare_scalar_leaves() {
+        let r = array_reply(serde_json::json!([[0, 1], [1, 1.5], [2, true], [3, null], [4, "x"]]));
+        assert_eq!(
+            parse_fold_result(&r),
+            FoldResult::Value(FoldValue::Array(vec![
+                (FoldKey::Int(0), FoldValue::Int(1)),
+                (FoldKey::Int(1), FoldValue::Float(1.5)),
+                (FoldKey::Int(2), FoldValue::Bool(true)),
+                (FoldKey::Int(3), FoldValue::Null),
+                (FoldKey::Int(4), FoldValue::Str("x".to_owned())),
+            ]))
+        );
+    }
+
+    #[test]
+    fn a_nested_array_result_nests_its_envelope() {
+        let inner = serde_json::json!({ ARRAY_TAG: [[0, 7]] });
+        let r = array_reply(serde_json::json!([["k", inner]]));
+        assert_eq!(
+            parse_fold_result(&r),
+            FoldResult::Value(FoldValue::Array(vec![(
+                FoldKey::Str("k".to_owned()),
+                FoldValue::Array(vec![(FoldKey::Int(0), FoldValue::Int(7))]),
+            )]))
+        );
+    }
+
+    /// The result decoder's two strictnesses, and the ground under both (ADR-0028's
+    /// 2026-08-14 amendment §2): a materialized array has neither an absent key nor
+    /// a duplicate one, so admitting either spelling would mean this crate deciding
+    /// a next-int or a last-wins the engine never reported. Both widen instead.
+    #[test]
+    fn an_absent_or_duplicated_result_key_widens() {
+        let absent = array_reply(serde_json::json!([[serde_json::Value::Null, "x"]]));
+        assert_eq!(parse_fold_result(&absent), FoldResult::widen("unencodable value"));
+        let dup = array_reply(serde_json::json!([[1, "a"], [1, "b"]]));
+        assert_eq!(parse_fold_result(&dup), FoldResult::widen("unencodable value"));
+        // A duplicate reached through the *string* spelling is the same refusal.
+        let dup_str = array_reply(serde_json::json!([["k", "a"], ["k", "b"]]));
+        assert_eq!(parse_fold_result(&dup_str), FoldResult::widen("unencodable value"));
+        // A float key is not a PHP array key at all.
+        let float_key = array_reply(serde_json::json!([[1.5, "x"]]));
+        assert_eq!(parse_fold_result(&float_key), FoldResult::widen("unencodable value"));
+    }
+
+    #[test]
+    fn a_malformed_array_envelope_widens() {
+        // The tag is missing: a bare JSON array cannot carry keys, which is the
+        // whole reason the envelope exists.
+        let untagged = serde_json::json!({ "kind": "value", "type": "array", "value": [1, 2] });
+        assert_eq!(parse_fold_result(&untagged), FoldResult::widen("unencodable value"));
+        // An unknown tag, at the top and nested — the extension point ADR-0080 §3.1
+        // will fill, refusing everything until it does.
+        let unknown = serde_json::json!({
+            "kind": "value", "type": "array", "value": { "__steins_bytes": "wA==" },
+        });
+        assert_eq!(parse_fold_result(&unknown), FoldResult::widen("unencodable value"));
+        let nested_unknown = array_reply(serde_json::json!([[0, { "__steins_bytes": "wA==" }]]));
+        assert_eq!(parse_fold_result(&nested_unknown), FoldResult::widen("unencodable value"));
+        // An entry that is not a two-element pair.
+        let short = array_reply(serde_json::json!([[0]]));
+        assert_eq!(parse_fold_result(&short), FoldResult::widen("unencodable value"));
+        let long = array_reply(serde_json::json!([[0, "a", "b"]]));
+        assert_eq!(parse_fold_result(&long), FoldResult::widen("unencodable value"));
+        // An empty array is not malformed — it is an empty array.
+        assert_eq!(
+            parse_fold_result(&array_reply(serde_json::json!([]))),
+            FoldResult::Value(FoldValue::Array(vec![]))
+        );
     }
 
     #[test]
@@ -1049,6 +1238,10 @@ mod tests {
         assert_eq!(parse_fold_result(&w), FoldResult::widen("unknown function"));
     }
 
+    /// Note the `type:"array"` row: it is here as a **malformed envelope** (a bare
+    /// JSON array carries no keys), not as the old blanket refusal of array results
+    /// — that boundary is lifted by ADR-0028's 2026-08-14 amendment, and the
+    /// well-formed case is pinned above.
     #[test]
     fn an_unrecognized_fold_result_widens_never_values() {
         for bad in [

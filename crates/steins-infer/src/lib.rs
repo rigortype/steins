@@ -3079,13 +3079,53 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
 }
 
 /// Convert a folded value back to a literal [`ArgValue`].
+///
+/// An array result (ADR-0028's 2026-08-14 amendment, issue #330) is **charged
+/// against the argument budget on arrival**, deliberately using the argument
+/// side's own [`is_fold_arg`] rather than a second bound of its own. The
+/// amendment's invariant is that a shape admissible as an argument is admissible
+/// as a result; reusing the function makes the runner's pre-encode verdict and
+/// this one literally the same computation, so neither can drift into admitting
+/// what the other refuses. Over budget yields `None`, which widens.
 fn fold_value_to_arg(value: &FoldValue) -> Option<ArgValue> {
+    let arg = fold_value_shape(value)?;
+    if !is_fold_arg(&arg) {
+        return None;
+    }
+    Some(arg)
+}
+
+/// The shape half of [`fold_value_to_arg`], before the budget is charged.
+///
+/// The recursion is bounded by the decoder that produced `value`: `serde_json`
+/// refuses to parse past its own nesting limit, so no reply can hand this an
+/// envelope deep enough to exhaust the stack before the budget check runs.
+fn fold_value_shape(value: &FoldValue) -> Option<ArgValue> {
     Some(match value {
         FoldValue::Int(v) => ArgValue::Int(*v),
         FoldValue::Float(v) => ArgValue::Float(*v),
         FoldValue::Str(v) => ArgValue::Str(PhpStr::from(v.clone())),
         FoldValue::Bool(v) => ArgValue::Bool(*v),
         FoldValue::Null => ArgValue::Null,
+        FoldValue::Array(entries) => {
+            let mut items = Vec::with_capacity(entries.len());
+            for (k, v) in entries {
+                let key = match k {
+                    FoldKey::Int(i) => ArrayKey::Int(*i),
+                    // An integer-like string key is not a key PHP hands back: the
+                    // engine casts `"5"` to `5` when the array is built, so a
+                    // materialized result cannot carry one. Widening rather than
+                    // re-casting keeps the decoder's stance on unreachable
+                    // spellings uniform with its `null`-key and duplicate-key
+                    // rules — the alternative, letting it through as a string key,
+                    // would be a *wrong* fact rather than a wider one.
+                    FoldKey::Str(s) if php_canonical_int_string(s).is_some() => return None,
+                    FoldKey::Str(s) => ArrayKey::Str(PhpStr::from(s.clone())),
+                };
+                items.push((key, fold_value_shape(v)?));
+            }
+            ArgValue::Array(items)
+        }
     })
 }
 
