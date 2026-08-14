@@ -100,6 +100,19 @@ Evaluating an expression to a value-precise type at analysis time by executing
 the real PHP function in the sidecar, gated by a purity allowlist.
 _Avoid_: constant propagation (that is the static notion; folding executes PHP)
 
+**Array envelope**:
+The tagged entry-list wire form that carries a PHP array across the fold seam
+in either direction, because JSON can express neither PHP's key normalization
+nor its last-wins duplicates.
+_Avoid_: array literal (that is the source construct), JSON array
+
+**Width class**:
+A foldable name's verdict on whether its answer depends on the engine's integer
+width: *safe* (probed on both widths, agreed), *refused* (a divergence is on
+record), or *unverified* (never measured, so the name folds only on a proven
+64-bit engine).
+_Avoid_: 32-bit safety, portability class
+
 **Sound subset**:
 The diagnostic set emitted WITHOUT the sidecar — sound (zero-FP holds) but
 incomplete (findings requiring PHP execution widen away). What `--no-php`
