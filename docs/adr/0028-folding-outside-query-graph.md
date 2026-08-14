@@ -150,7 +150,11 @@ array result.
    ADR-0004 exists to prevent — and rejecting it turns that class of runner
    bug into a widen. A duplicated key is rejected on the same ground: a
    materialized array cannot contain one, and honoring it would be Rust
-   choosing last-wins on the engine's behalf.
+   choosing last-wins on the engine's behalf. So is an integer-like string
+   key (`"5"`, by `php_canonical_int_string` — the same primitive the
+   write side uses): the engine casts it to `5` when the array is built,
+   so keeping it as a string would be a *wrong* fact and re-casting it in
+   Rust would be the re-derivation this clause forbids.
 
 3. **The result budget is the argument budget, charged twice.** The same 256
    entries / 8 levels, charged in the runner *before* encoding (so an
