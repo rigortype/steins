@@ -316,9 +316,13 @@ fn with_replay_extras(
 ///
 /// Every field comes from [`steins_infer::SurfaceSummary`], which reads the very
 /// helpers that gate admission — so this describes the gates rather than
-/// paraphrasing them, and the refused-fold names are the catalog's own complement
-/// rather than a list typed into a frontend. The prose belongs to the UI; what
-/// travels is the shape.
+/// paraphrasing them, and the refused-fold names are the catalog's own refused
+/// rows rather than a list typed into a frontend. Those rows stopped being the
+/// whole `foldable ∧ !width_safe` complement in ADR-0028's 2026-08-14 amendment:
+/// the unverified rows decline beside them with no divergence to report, which
+/// means `fold_safe` and `fold_total` (which do count them) already tell a reader
+/// how many names go unnamed here. The prose belongs to the UI; what travels is
+/// the shape.
 fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "label": s.label,

@@ -37,6 +37,54 @@ Contents, in broad strokes: ASCII string transforms (`strtolower`, `trim`,
 `substr`, `str_replace`, `sprintf`, `strlen`, …) and pure numeric/conversion
 functions (`abs`, `intdiv`, …).
 
+### The three integer-width classes
+
+`foldable` is **derived**, not primitive. The primitive is `width_class(name)`,
+which answers `None` off the allowlist and otherwise one of three classes — so
+"on the allowlist" is exactly "has a width verdict at all". The class decides
+what a *narrow* engine may fold; on a provably 64-bit engine all three fold, and
+on anything else (an unreported width, a machine nobody has probed) nothing
+folds at all. Default-deny throughout (ADR-0066 §4, ADR-0028's 2026-08-14
+amendment §4).
+
+| class | evidence behind a row | folds on 64-bit | folds in the browser (php-wasm, `PHP_INT_SIZE = 4`) |
+| --- | --- | --- | --- |
+| `Safe` | differential probes, 32-bit against 64-bit | yes | yes, for argument tuples the range guard admits |
+| `Refused` | **one recorded divergence per row**, written out beside the name | yes | no |
+| `Unverified` | **none — and that is the correct amount** | yes | no |
+
+The evidence discipline differs per class and is the point of the split:
+
+- **`Safe`** is a positive claim, and it is earned by probing. The current
+  subset was verified with 661 adversarial tuples through the same dispatch core
+  both engines run.
+- **`Refused`** is also a positive claim — that the engines *disagree* — and the
+  ADR-0061 refused-row discipline requires the divergence to be on record beside
+  the name (`sprintf("%x", -1)` is `"ffffffffffffffff"` on one machine and
+  `"ffffffff"` on the other). One row, one witness. That record is the only
+  reason the refused list is auditable at all.
+- **`Unverified`** claims nothing. It means nobody looked, and **the correct
+  number of probes behind a row here today is zero** — evidence would move the
+  row out, to `Safe` if the engines agree and to `Refused` with its divergence
+  if they do not. Promotion path: php-wasm differential probes, then `Safe`.
+
+`Refused` and `Unverified` are *mechanically identical*: they ride the one
+`width_safe` question the fold gate asks, and neither folds on a narrow engine.
+They are kept apart because mixing unevidenced rows into the refused list would
+erase the one-witness-per-row discipline that makes it worth reading. Reporting
+follows the same line — doctor's Catalog section breaks the allowlist down by
+all three classes, while the playground's boundary panel names only the refused
+ones, because "here is the divergence we measured" is a sentence an unverified
+row cannot be given.
+
+A name reaches `Unverified` only when the fold is **strictly stronger** than the
+Rust rung it would shadow (the amendment's §5): `explode`'s rung is type-level
+(`non-empty-list<string>`), so the fold upgrades a type to a value on the
+all-literal path and the rung survives beneath it as the no-sidecar floor.
+`array_slice`, `array_combine` and `array_fill_keys` are excluded by that same
+rule — their rungs are already exact, and cover non-literal arguments a fold
+never can.
+
 **Deliberate exclusions**, even where frequent:
 
 - `mb_*` — encoding-dependent.
