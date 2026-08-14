@@ -316,13 +316,13 @@ fn with_replay_extras(
 ///
 /// Every field comes from [`steins_infer::SurfaceSummary`], which reads the very
 /// helpers that gate admission — so this describes the gates rather than
-/// paraphrasing them, and the refused-fold names are the catalog's own refused
-/// rows rather than a list typed into a frontend. Those rows stopped being the
-/// whole `foldable ∧ !width_safe` complement in ADR-0028's 2026-08-14 amendment:
-/// the unverified rows decline beside them with no divergence to report, which
-/// means `fold_safe` and `fold_total` (which do count them) already tell a reader
-/// how many names go unnamed here. The prose belongs to the UI; what travels is
-/// the shape.
+/// paraphrasing them, and the declining fold names are the catalog's own rows
+/// rather than a list typed into a frontend. Since ADR-0028's 2026-08-14
+/// amendment they travel as TWO fields, because they are two classes: the
+/// refused rows each have a recorded divergence, the unverified rows have
+/// nothing measured, and §4 of that amendment forbids merging them into one
+/// list (the refused list's one-divergence-per-row discipline is what makes it
+/// auditable). The prose belongs to the UI; what travels is the shape.
 fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
     let mut obj = serde_json::json!({
         "label": s.label,
@@ -339,6 +339,7 @@ fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
     // lane already says the whole story (all of it, or none of it).
     if s.fold_lane == steins_infer::FoldLane::WidthSafeSubset {
         obj["refused_folds"] = serde_json::json!(s.refused_folds);
+        obj["unverified_folds"] = serde_json::json!(s.unverified_folds);
     }
     obj
 }
@@ -779,7 +780,9 @@ mod replay {
     /// before, and the two new names are among the ones it does not get.
     /// `refused_folds` is deliberately unchanged with it — the unverified rows
     /// decline on the same gate but have no divergence to report, and this field is
-    /// the one that reports divergences.
+    /// the one that reports divergences. They are named by `unverified_folds`
+    /// instead, a separate field because ADR-0028's 2026-08-14 amendment §4
+    /// forbids conflating the two classes.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -814,6 +817,12 @@ mod replay {
                 "version_compare"
             ])
         );
+        assert_eq!(
+            boot["unverified_folds"],
+            serde_json::json!(steins_catalog::width_unverified_names()),
+            "the unverified rows are the catalog's own, in their own field"
+        );
+        assert_eq!(boot["unverified_folds"], serde_json::json!(["array_merge", "explode"]));
     }
 
     /// …and on a 64-bit engine at the pinned minor the whole surface is live, so
@@ -829,6 +838,7 @@ mod replay {
         assert_eq!(boot["curated_rows"], true);
         assert_eq!(boot["absence_family"], true);
         assert!(boot.get("refused_folds").is_none(), "nothing is refused on the full lane");
+        assert!(boot.get("unverified_folds").is_none(), "…and nothing is unverified there either");
     }
 
     /// A run that could not reach the engine describes nothing, and SAYS so by
@@ -846,6 +856,7 @@ mod replay {
         assert_eq!(boot["curated_rows"], false);
         assert_eq!(boot["absence_family"], false);
         assert!(boot.get("refused_folds").is_none());
+        assert!(boot.get("unverified_folds").is_none());
         assert_eq!(
             pending_of(&v),
             vec![ENV_KEY.to_owned()],

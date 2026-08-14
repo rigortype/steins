@@ -181,11 +181,16 @@ assert(boot.fold_safe === 37 && boot.fold_total === 48, `the counts come from th
 // `refused_folds` stays the nine REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
-// merged in here.
+// merged in here: ADR-0028's 2026-08-14 amendment §4 gives them their own field,
+// and the panel gives them their own sentence.
 assert(
   Array.isArray(boot.refused_folds) &&
     boot.refused_folds.join(",") === "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
+);
+assert(
+  Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
+  `the unverified folds are named apart from the refused ones (got ${JSON.stringify(boot.unverified_folds)})`,
 );
 assert(boot.curated_rows === false, "a curated row is pinned to a machine, not only a version");
 assert(boot.absence_family === true, "existence is not arithmetic — the absence family is live");

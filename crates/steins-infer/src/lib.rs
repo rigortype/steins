@@ -1967,6 +1967,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             fold_total: steins_catalog::foldable_entry_count(),
             fold_safe: steins_catalog::width_safe_names().len(),
             refused_folds: steins_catalog::width_refused_names(),
+            unverified_folds: steins_catalog::width_unverified_names(),
         }
     }
 
@@ -2401,9 +2402,17 @@ pub struct SurfaceSummary {
     /// is a sentence an unverified row cannot be given — and §4 of that amendment
     /// exists to stop the two being conflated, since the refused list's
     /// one-divergence-per-row discipline is the only thing that makes it
-    /// auditable. Naming the unverified rows to a reader wants its own field and
-    /// its own sentence.
+    /// auditable. Naming the unverified rows to a reader is
+    /// [`Self::unverified_folds`]' job.
     pub refused_folds: &'static [&'static str],
+    /// The [`steins_catalog::WidthClass::Unverified`] rows, by name — the folds a
+    /// [`FoldLane::WidthSafeSubset`] engine also does not get, but for the other
+    /// reason: nothing was measured, so there is no divergence to cite. Kept
+    /// apart from [`Self::refused_folds`] because ADR-0028's 2026-08-14
+    /// amendment §4 forbids conflating the classes — a renderer owes these a
+    /// different sentence ("not measured; folds only on a provably 64-bit
+    /// engine"), not a seat in the divergence list.
+    pub unverified_folds: &'static [&'static str],
 }
 
 /// The 32-bit argument range guard: `[-(2^31 - 1), 2^31 - 1]`.
