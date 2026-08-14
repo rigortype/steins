@@ -2,21 +2,20 @@
 //! resolve against the project's own PHP.
 //!
 //! A class an installed extension provides (`Redis`, `Random\Randomizer`,
-//! `Dom\Element`) has no source declaration and no builtin-catalog row, so both of
-//! Steins' static class worlds are silent about it. The engine running the project
-//! has the whole declaration, and ADR-0049 §1 says that engine is the only honest
-//! source for it: no curated stub list, no bundled class inventory.
+//! `Dom\Element`) has no source declaration and no builtin-catalog row, so both
+//! of Steins' static class worlds are silent about it. ADR-0049 §1: the running
+//! engine is the only honest source for it — no curated stub list, no bundled
+//! class inventory.
 //!
 //! # This slice resolves; it does not convict (owner ruling, 2026-08-09)
 //!
-//! A reflected declaration is an **envelope-grade** fact — the runtime's claim about
-//! its own class — and it restores coverage. No absence-family finding is premised
-//! on its completeness: `call.undefined-method`, `property.undefined`,
-//! `class-const.undefined`, `class.undefined` and the arity family all require a
-//! chain that is source-declared and uniquely resolved, and a reflected class never
-//! enters the project index, so none of their enumerations can be completed by one.
-//! The silence tests below are the structural proof of that: a member access on an
-//! extension class is exactly as silent with a live engine as without one.
+//! A reflected declaration is an **envelope-grade** fact that restores coverage,
+//! but premises no absence-family finding: `call.undefined-method`,
+//! `property.undefined`, `class-const.undefined`, `class.undefined` and the
+//! arity family all require a source-declared, uniquely-resolved chain, and a
+//! reflected class never enters the project index they enumerate over. The
+//! silence tests below are the structural proof: member access on an extension
+//! class is exactly as silent with a live engine as without one.
 //!
 //! Three halves, in the arrangement `constant_undefined.rs` set:
 //!
@@ -38,11 +37,10 @@ use steins_syntax::SourceTree;
 
 /// The always-available fixture class: ext-random is built into every PHP since
 /// 8.2, and `Random\Randomizer` carries no row in `steins-catalog`'s hierarchy
-/// table (verified: the table has no namespaced `random\*` key at all).
+/// table (verified: no namespaced `random\*` key at all).
 const EXTENSION_CLASS: &str = "Random\\Randomizer";
 
-/// The skip-if-absent optional-extension fixture. Nothing in CI loads ext-redis;
-/// where it IS loaded, the same resolution must happen with no code path of its own.
+/// The skip-if-absent optional-extension fixture. Nothing in CI loads ext-redis.
 const OPTIONAL_CLASS: &str = "Redis";
 
 fn run(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
@@ -60,14 +58,12 @@ fn live_or_skip(test: &str) -> Option<SidecarFolder> {
     Some(folder)
 }
 
-// ---------------------------------------------------------------------------
 // Live: the project's own PHP answers.
-// ---------------------------------------------------------------------------
 
-/// The acceptance criterion, end to end: a class no source declaration and no
-/// catalog row answers is offered to the engine before it settles Unknown, and the
-/// engine's answer carries the whole class world — methods with their signatures,
-/// constants, properties, hierarchy edges — plus the origin it came from.
+/// The acceptance criterion, end to end: a class no source or catalog row
+/// answers is offered to the engine, whose answer carries the whole class
+/// world — methods with signatures, constants, properties, hierarchy edges —
+/// plus the origin it came from.
 #[test]
 fn an_extension_class_resolves_off_the_projects_own_php() {
     let Some(mut folder) = live_or_skip("an_extension_class_resolves_off_the_projects_own_php")
@@ -80,7 +76,7 @@ fn an_extension_class_resolves_off_the_projects_own_php() {
         return;
     };
 
-    // The catalog genuinely does not answer this name — the premise of the slice.
+    // The catalog genuinely has no row for this name — the premise of the slice.
     assert!(
         steins_catalog::builtin_class_supers("random\\randomizer").is_none(),
         "the fixture class must be one the builtin catalog has no row for"
@@ -88,14 +84,12 @@ fn an_extension_class_resolves_off_the_projects_own_php() {
 
     assert_eq!(d.name, EXTENSION_CLASS);
     assert_eq!(d.kind, ReflectedClassKind::Class);
-    // The origin, which is what `doctor` prints beside the name.
+    // Origin: what `doctor` prints beside the name.
     assert!(d.internal, "{d:?}");
     assert_eq!(d.extension.as_deref(), Some("random"), "{d:?}");
-    // Methods with signatures.
     let get_int = d.methods.iter().find(|m| m.name == "getInt").expect("getInt: {d:?}");
     assert_eq!(get_int.params_required, 2, "{get_int:?}");
     assert_eq!(get_int.return_type.as_deref(), Some("int"), "{get_int:?}");
-    // Properties.
     assert!(d.properties.iter().any(|p| p.name == "engine"), "{d:?}");
 }
 
@@ -115,9 +109,8 @@ fn a_resident_class_carries_constants_and_hierarchy_edges() {
     assert!(d.interfaces.iter().any(|i| i == "Countable"), "{d:?}");
 }
 
-/// The skip-if-absent optional-extension case. Where ext-redis is loaded the class
-/// resolves through the identical path; where it is not, it is a structured
-/// not-found and the run keeps today's silence.
+/// The skip-if-absent optional-extension case: where ext-redis is loaded the
+/// class resolves through the identical path.
 #[test]
 fn an_optional_extension_class_resolves_where_the_extension_is_loaded() {
     let Some(mut folder) =
@@ -138,8 +131,8 @@ fn an_optional_extension_class_resolves_where_the_extension_is_loaded() {
     }
 }
 
-/// A class the engine does not have is a **structured not-found**, distinct from a
-/// decline, and it buys nothing on its own.
+/// A class the engine does not have is a **structured not-found**, distinct
+/// from a decline.
 #[test]
 fn a_class_no_extension_provides_is_a_structured_not_found() {
     let Some(mut folder) = live_or_skip("a_class_no_extension_provides_is_a_structured_not_found")
@@ -150,8 +143,7 @@ fn a_class_no_extension_provides_is_a_structured_not_found() {
     assert!(!answer.exists(), "{answer:?}");
 }
 
-/// Case-insensitivity: PHP class names are, so the query is too, and both spellings
-/// share one memo entry.
+/// Case-insensitivity: PHP class names are, so the query is too.
 #[test]
 fn the_class_query_is_case_insensitive() {
     let Some(mut folder) = live_or_skip("the_class_query_is_case_insensitive") else { return };
@@ -160,19 +152,16 @@ fn the_class_query_is_case_insensitive() {
     assert_eq!(lower, mixed, "one class, one answer");
 }
 
-// ---------------------------------------------------------------------------
 // The ruling: resolution buys silence and coverage, never a finding.
-// ---------------------------------------------------------------------------
 
 /// A method call, a property access and a class-constant fetch on a class the
 /// engine HAS: **byte-identical diagnostics** with a live engine and without one.
 ///
-/// This is the zero-movement proof for the slice. The reflected declaration is
-/// reachable — the test above resolves this very class, members and all — and the
-/// checks that could convict on it (`call.undefined-method`, `property.undefined`,
-/// `class-const.undefined`, the arity family) never see it, because a reflected
-/// class does not enter the project index they enumerate over. So the run with an
-/// engine and the run without one produce the same findings, down to the message.
+/// Zero-movement proof: the checks that could convict (`call.undefined-method`,
+/// `property.undefined`, `class-const.undefined`, the arity family) never see
+/// this class, since a reflected class does not enter the project index they
+/// enumerate over — so the run with an engine and without produce the same
+/// findings, down to the message.
 #[test]
 fn member_access_on_a_resolved_extension_class_is_as_silent_as_it_was() {
     let src = "<?php
@@ -206,9 +195,8 @@ function f(\\Random\\Randomizer $r): void {
     );
 }
 
-/// The same, for a class the engine does **not** have (ext-redis unloaded in CI):
-/// the pre-existing `class.undefined` leg is untouched, and no member finding is
-/// added by the reflect slice either way.
+/// The same, for a class the engine does **not** have (ext-redis unloaded in
+/// CI): the pre-existing `class.undefined` leg is untouched.
 #[test]
 fn an_unresolved_extension_class_gains_no_member_finding() {
     let src = "<?php
@@ -249,9 +237,7 @@ fn rendered(ds: &[Diagnostic]) -> Vec<String> {
     out
 }
 
-// ---------------------------------------------------------------------------
 // The sound subset: byte-identical to today.
-// ---------------------------------------------------------------------------
 
 /// `--no-php` never asks, and therefore never answers.
 #[test]
@@ -262,26 +248,23 @@ fn the_no_php_folder_declines() {
 }
 
 /// The `Folder` default is the sound subset: a folder that implements nothing
-/// declines, which is what keeps every non-sidecar caller (the salsa `diagnostics`
-/// query included) exactly as it was.
+/// declines, keeping every non-sidecar caller exactly as it was.
 #[test]
 fn the_folder_default_declines() {
     assert_eq!(NoFold.reflected_class(EXTENSION_CLASS), None);
 }
 
-// ---------------------------------------------------------------------------
 // Mocked: the memo and its env-identity key.
-// ---------------------------------------------------------------------------
 
 /// A transport that counts class queries and lets the test change the engine
-/// underneath the run — the two things the caching discipline is about.
+/// underneath the run.
 struct Counting {
     /// `reflect_class` calls served.
     class_calls: u32,
     /// The extension list `env()` reports; changing it is a changed runtime.
     extensions: Vec<String>,
-    /// The transport generation. Bumping it models the one thing that can change
-    /// the runtime under a run: the child died and was replaced (ADR-0024).
+    /// The transport generation: bumping it models a child dying and being
+    /// replaced (ADR-0024).
     restarts: u32,
 }
 

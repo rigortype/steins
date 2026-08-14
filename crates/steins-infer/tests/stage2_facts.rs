@@ -1,11 +1,11 @@
 //! Stage-2 abstract-fact tests (ADR-0031 negative facts, ADR-0035 four-layer
-//! domain): native-type parameter seeding (Feature B), guard refinements that
-//! produce Refined/General facts (Feature C), `@phpstan-assert` application
-//! (Feature D), and contract acceptance consuming abstract facts (Feature E).
+//! domain): native-type parameter seeding (B), guard refinements producing
+//! Refined/General facts (C), `@phpstan-assert` application (D), and contract
+//! acceptance consuming abstract facts (E), plus two adversarial counterexamples.
 //!
-//! An argument resolving to an abstract fact is judged by the domain's **set** acceptance
-//! (`steins_contract::admits_fact`) — only a definite `No` reports, `Maybe` is
-//! silent, so the zero-FP bar holds. Includes two adversarial counterexamples.
+//! An argument resolving to an abstract fact is judged by the domain's **set**
+//! acceptance (`steins_contract::admits_fact`) — only a definite `No` reports,
+//! `Maybe` is silent, so the zero-FP bar holds.
 
 use steins_infer::{
     CALL_ON_NULL_ID, Diagnostic, PARAM_MISMATCH_ID, RETURN_MISMATCH_ID, check,
@@ -67,9 +67,8 @@ fn seeded_int_into_wider_types_silent() {
 
 #[test]
 fn seeded_nullable_string_does_not_fire_on_class_or_template() {
-    // A seeded scalar fact vs a class-shaped @param stays silent (a bare
-    // identifier may be a template / type-alias) — consistent with the proven-
-    // value path treating scalar-vs-class as Maybe.
+    // A seeded scalar fact vs a class-shaped @param stays silent (a bare identifier
+    // may be a template/type-alias), consistent with the proven-value path.
     let src = "<?php
 /** @param T $x */ function identity($x) { return $x; }
 function f(string $s): void { identity($s); }
@@ -79,9 +78,8 @@ function f(string $s): void { identity($s); }
 
 #[test]
 fn nullable_class_param_is_not_seeded_null_guard_still_works() {
-    // `?U $u` is not a scalar → not seeded; the existing null-guard proof still
-    // rides on the `=== null` refinement (Singleton null), while `!== null` and a
-    // bare call stay silent.
+    // `?U $u` is not a scalar → not seeded; the null-guard proof still rides the
+    // `=== null` refinement (Singleton null); `!== null` and a bare call stay silent.
     let base = "<?php
 class U { public function m(): void {} }
 ";
@@ -110,14 +108,12 @@ function f(int $n): void { if ($n > 0) { want($n); } }
 ";
     assert_eq!(param_count(neg), 1, "$n > 0 → positive-int, disjoint from negative-int");
 
-    // …and it satisfies positive-int → silent (no report where the guard proves it).
     let pos = "<?php
 /** @param positive-int $x */ function want($x): void {}
 function f(int $n): void { if ($n > 0) { want($n); } }
 ";
     assert_eq!(param_count(pos), 0, "$n > 0 → positive-int satisfies positive-int");
 
-    // Without the guard, General{Int} vs negative-int is Maybe → silent.
     let ungated = "<?php
 /** @param negative-int $x */ function want($x): void {}
 function f(int $n): void { want($n); }
@@ -146,7 +142,6 @@ function f(string $s): void { if ($s !== '') { wantsEmpty($s); } }
 ";
     assert_eq!(param_count(src), 1, "!== '' → non-empty-string, disjoint from ''");
 
-    // Outside the guard the seeded General{String} vs '' is Maybe → silent.
     let ungated = "<?php
 /** @param '' $x */ function wantsEmpty($x): void {}
 function f(string $s): void { wantsEmpty($s); }
@@ -178,9 +173,9 @@ function f(string $s): void { if ($s) { wantsZero($s); } }
 
 #[test]
 fn oneof_member_removal_via_ne_enables_null_proof() {
-    // A `OneOf[null, \"s\"]` with `$x !== \"s\"` removes the string member, leaving
-    // `Singleton(null)` — which the null-dereference proof then fires on. Without
-    // member removal the receiver would stay a OneOf (Maybe) → silent.
+    // `OneOf[null, "s"]` with `$x !== "s"` removes the string member, leaving
+    // `Singleton(null)` for the null-dereference proof to fire on — without
+    // removal the receiver stays a OneOf (Maybe) → silent.
     let src = "<?php
 class U { public function m(): void {} }
 function f($c): void { $x = $c ? null : \"s\"; if ($x !== \"s\") { $x->m(); } }
@@ -246,11 +241,10 @@ fn seeded_param_returned_satisfies_return_contract() {
 
 #[test]
 fn counterexample_by_ref_param_is_not_seeded() {
-    // A by-reference parameter must NOT be seeded: the caller aliases the variable
-    // and may rebind it, so its entry type is not a fact we may propagate. If we
-    // seeded `General{Int}` here, `g($x)` would spuriously report against
-    // `@param string`. The value-typed sibling below *is* seeded (and fires),
-    // isolating the guard.
+    // A by-ref parameter must NOT be seeded: the caller aliases and may rebind it,
+    // so its entry type isn't a fact we may propagate — seeding `General{Int}`
+    // here would spuriously report `g($x)` against `@param string`. The
+    // value-typed sibling below *is* seeded (and fires), isolating the guard.
     let byref = "<?php
 /** @param string $s */ function g($s): void {}
 function f(int &$x): void { g($x); }
@@ -267,10 +261,8 @@ function f(int $x): void { g($x); }
 #[test]
 fn counterexample_assert_does_not_override_stronger_singleton() {
     // Assertion application is replace-if-weaker: it must never override a proven
-    // `Singleton`. Here `$v` is proven `\"5\"` (a valid string); asserting `int`
-    // must keep the singleton, so `needsString($v)` stays silent. Were the assert
-    // to override with `General{Int}`, `needsString(@param string)` would falsely
-    // fire.
+    // `Singleton`. `$v` is proven `"5"`; asserting `int` must keep that singleton
+    // (silent), since overriding with `General{Int}` would falsely fire `needsString`.
     let src = "<?php
 class Util { /** @phpstan-assert int $v */ public static function assertInt($v): void {} }
 /** @param string $x */ function needsString($x): void {}

@@ -1,7 +1,6 @@
 //! Syntax-layer acceptance tests for the closure wave (ADR-0033): closures,
-//! arrow functions, and first-class callables lower to `ArgValue::Closure` and
-//! get their own `ScopeOwner::Closure` scope carrying params/effects/throws, with
-//! by-value captures recorded and by-ref `use (&$x)` preserving poison.
+//! arrow functions, and first-class callables lower to `ArgValue::Closure` with
+//! their own `ScopeOwner::Closure` scope; by-ref `use (&$x)` poisons, by-value doesn't.
 
 use steins_syntax::{ArgValue, ClosureRef, Scope, ScopeOwner, SourceTree, StmtKind};
 
@@ -38,7 +37,6 @@ fn closure_expression_lowers_to_closure_value_with_own_scope() {
 
 #[test]
 fn arrow_function_lowers_and_auto_captures_free_vars() {
-    // fn () => $x auto-captures $x by value (arrow semantics).
     let src = "<?php\n$x = 1;\n$f = fn () => $x;\n";
     let tree = SourceTree::parse(src);
     match assigned_value(&tree, "f") {
@@ -52,7 +50,6 @@ fn arrow_function_lowers_and_auto_captures_free_vars() {
 
 #[test]
 fn arrow_params_are_not_captures() {
-    // fn ($w) => width($w): $w is a PARAM, not a capture.
     let src = "<?php\n$f = fn (int $w) => width($w);\n";
     let tree = SourceTree::parse(src);
     match assigned_value(&tree, "f") {
@@ -82,7 +79,6 @@ fn closure_use_by_value_records_captures() {
 
 #[test]
 fn by_ref_use_poisons_enclosing_and_closure_scope() {
-    // use (&$x) poisons BOTH the enclosing scope and the closure's own scope.
     let src = "<?php\n$x = 1;\n$f = function () use (&$x) { return $x; };\n";
     let tree = SourceTree::parse(src);
     let top = tree
@@ -117,7 +113,6 @@ fn first_class_callable_lowers_to_function_name() {
 
 #[test]
 fn method_first_class_callable_is_deferred_to_other() {
-    // $obj->m(...) and Foo::m(...) lower to Other with no scope.
     let src = "<?php\n$f = $obj->m(...);\n$g = Foo::m(...);\n";
     let tree = SourceTree::parse(src);
     assert!(matches!(assigned_value(&tree, "f"), Some(ArgValue::Other)));
@@ -149,11 +144,9 @@ fn closure_inside_function_body_gets_its_own_scope() {
     assert_eq!(closure_scopes(&tree).len(), 1);
 }
 
-// ---------------------------------------------------------------------------
-// The `static` keyword (ADR-0063 P3): a closure declared `static` can never be
-// bound to an object, so it can never reach `$this`. Syntactic, so the scope
-// records it verbatim and the contract layer's binding obligation is mechanical.
-// ---------------------------------------------------------------------------
+// The `static` keyword (ADR-0063 P3): a closure declared `static` can never
+// bind to an object (never reaches `$this`); syntactic, so the scope records it
+// verbatim and the contract layer's binding obligation is mechanical.
 
 #[test]
 fn static_keyword_is_recorded_on_closure_and_arrow_scopes() {

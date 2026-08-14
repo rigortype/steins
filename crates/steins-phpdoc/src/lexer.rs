@@ -1,18 +1,16 @@
 //! A hand-written lexer reproducing phpstan/phpdoc-parser's `Lexer` token
 //! stream for the type-expression grammar (ADR-0029).
 //!
-//! The reference lexer is a single anchored, case-insensitive PCRE alternation
-//! whose branch order decides ties. This lexer applies the same matchers in the
-//! same order at each position, so it produces the same tokens — including the
-//! whitespace and comment trivia the parser depends on (`array {` vs `array{`,
-//! offset-access vs `[]`, multi-line array shapes).
-//!
-//! Bytes that no branch matches (e.g. `\f`, `\v`) are skipped, exactly as
-//! `preg_match_all` drops unmatched input. A final [`TokenKind::End`] is appended.
+//! The reference lexer is one anchored, case-insensitive PCRE alternation whose
+//! branch order decides ties; this lexer applies the same matchers in the same
+//! order at each position, producing the same tokens — including the whitespace
+//! and comment trivia the parser depends on (`array {` vs `array{`, offset-access
+//! vs `[]`, multi-line array shapes). Bytes no branch matches (e.g. `\f`, `\v`)
+//! are skipped, as `preg_match_all` drops unmatched input. A final
+//! [`TokenKind::End`] is appended.
 
-/// Lexical token kinds. A subset of the reference lexer's tokens — the ones the
-/// type grammar reaches. Ordering here has no meaning; matcher precedence lives
-/// in [`tokenize`].
+/// Lexical token kinds reachable by the type grammar (a subset of the reference
+/// lexer's tokens). Ordering here has no meaning; precedence lives in [`tokenize`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Reference,
@@ -141,8 +139,7 @@ fn match_token(b: &[u8], pos: usize) -> Option<(TokenKind, usize)> {
     if let Some(e) = match_reference(b, pos) {
         return Some((TokenKind::Reference, e));
     }
-    // Single-char structural tokens (Union/Intersection/… ) that come before
-    // the multi-char and literal matchers.
+    // Single-char structural tokens, tried before the multi-char/literal matchers.
     match b[pos] {
         b'|' => return Some((TokenKind::Union, pos + 1)),
         b'&' => return Some((TokenKind::Intersection, pos + 1)),
@@ -301,8 +298,7 @@ fn match_reference(b: &[u8], pos: usize) -> Option<usize> {
     }
 }
 
-/// `//[^\r\n]*(?=\n|\r|\*/)` — a line comment that must be followed by a newline
-/// or `*/`.
+/// `//[^\r\n]*(?=\n|\r|\*/)` — a line comment, must be followed by newline or `*/`.
 fn match_comment(b: &[u8], pos: usize) -> Option<usize> {
     if !starts_with(b, pos, b"//") {
         return None;

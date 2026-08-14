@@ -1,59 +1,42 @@
 //! Region model (ADR-0047): the pure config→region assignment.
 //!
-//! A partitioned run divides the file universe into regions ([`RegionId`]) whose
-//! *nameability* the scoping rule (ADR-0047 §2) consults. This module owns
-//! only the assignment — a pure function of config + file path (ADR-0047 §6):
-//! given the declared partition path-sets and observer path-sets, [`PartitionMap`]
-//! answers "which region does this file's declaring scope belong to?".
+//! A partitioned run divides the file universe into regions ([`RegionId`])
+//! whose *nameability* the scoping rule (ADR-0047 §2) consults. [`PartitionMap`]
+//! is a pure function of config + file path (ADR-0047 §6) answering "which
+//! region does this file's declaring scope belong to?".
 //!
-//! ## Region kinds (ADR-0047 §1)
-//! - **Partition** Pᵢ — a user-declared, disjoint entry-point root.
-//! - **Shared** S — every first-party file no partition claims; the safe default
-//!   direction (unclaimed code keeps whole-universe preconditions). *Vendor* lives
-//!   inside S carrying its own presumption flag (ADR-0047 §5), so it is one
-//!   [`RegionId::Shared`] value with `vendor: true`.
-//! - **Observer** O — declared tests / dev-scripts that may reference any
-//!   partition.
+//! ## Region kinds (ADR-0047 §1, see [`RegionId`] for the encoding)
+//! **Partition** Pᵢ — a user-declared, disjoint entry-point root. **Shared**
+//! S — every unclaimed first-party file (the safe default: whole-universe
+//! preconditions); *vendor* lives inside S with its own presumption flag
+//! (ADR-0047 §5). **Observer** O — declared tests / dev-scripts that may
+//! reference any partition.
 //!
 //! ## Assignment precedence
-//! Planners receive the map but do not consult it when deciding a transform; the
-//! current planning invariant is whole-universe enumeration (ADR-0047 §6). Region
-//! assignment itself is fixed and deterministic:
-//! 1. **Vendor always wins.** A `vendor/` file is `Shared { vendor: true }` even
-//!    when a partition glob accidentally covers it — vendor is *always* shared
-//!    (ADR-0047 §1/§5), so a partition never claims vendor code.
-//! 2. **Observer** — a file matching a declared observer glob is an observer
-//!    (a test inside a service tree is a test, not that service's private code).
-//! 3. **Partition** — a first-party file matching exactly one partition's globs.
-//! 4. **Shared** — every remaining first-party file (`vendor: false`).
+//! Planners never consult the map when deciding a transform — the planning
+//! invariant is whole-universe enumeration (ADR-0047 §6). Deterministic
+//! order: vendor (always wins, even under a partition glob) → observer →
+//! partition → shared (see [`PartitionMap::region_of`]).
 //!
-//! ## Glob syntax (the minimal subset ADR-0047 §7's example needs)
-//! Partition and observer sets are **directory-prefix globs**, matching the
-//! dialect the repo already uses for `exclude`/`[paths.sets]`:
-//! - `*`  — any run of characters **except** the path separator `/`.
-//! - `**` — any run **including** `/` (spans directories); the ADR example's
-//!   `svc-a.example/**`, `batch/**`, `tests/**` form.
-//!
-//! No `?`, character classes, or brace expansion. Patterns and paths use `/`.
-//!
-//! Overlap detection (ADR-0047 §7 — "overlapping partition globs are a config
-//! error") is computed on each glob's **literal segment prefix** (the leading
-//! `/`-segments before the first wildcard): two partition globs conflict when one
-//! prefix is a segment-prefix of the other. This is exact for the documented
-//! `dir/**` form; a pattern beginning with a wildcard has an empty prefix and so
-//! is treated as overlapping every partition (deliberately conservative).
+//! ## Glob syntax (ADR-0047 §7)
+//! Directory-prefix globs, the repo's `exclude`/`[paths.sets]` dialect: `*`
+//! matches a run without `/`; `**` matches any run including `/`. No `?`,
+//! character classes, or brace expansion. Overlap ("overlapping partition
+//! globs are a config error") is computed on each glob's **literal segment
+//! prefix** (leading `/`-segments before the first wildcard): two globs
+//! conflict when one prefix is a segment-prefix of the other — exact for
+//! `dir/**`; a wildcard-leading glob has an empty prefix and so overlaps
+//! everything (deliberately conservative).
 
 use steins_db::ProjectLayout;
 
 /// Which region a file's declaring scope belongs to (ADR-0047 §1). *Vendor* is
-/// not a separate variant: it is [`RegionId::Shared`] with `vendor: true`, since
-/// vendor lives inside Shared but carries its own presumption (ADR-0047 §5).
+/// not a separate variant: it is [`RegionId::Shared`] with `vendor: true`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RegionId {
     /// A declared partition (entry-point root), identified by its config name.
     Partition(String),
-    /// Shared code. `vendor: true` marks the `vendor/` tree (ADR-0047 §5
-    /// presumption); `vendor: false` is first-party code no partition claims.
+    /// Shared code; `vendor: true` marks the `vendor/` tree (ADR-0047 §5).
     Shared { vendor: bool },
     /// A declared observer (tests, dev-scripts; ADR-0047 §1/§4).
     Observer,
@@ -107,17 +90,16 @@ struct Partition {
     globs: Vec<String>,
 }
 
-/// The region map (ADR-0047 §6): a pure function of config + file path. Built
-/// once at planning time; the salsa `Project`, index, and checker are untouched.
-///
-/// With no declared partitions and no observers this is the **single-region
-/// identity**: every first-party file is [`RegionId::shared`], preserving the
-/// planners' whole-universe posture when no `[transform.partitions]` section is
+/// The region map (ADR-0047 §6): a pure function of config + file path, built
+/// once at planning time (the salsa `Project`, index, and checker are
+/// untouched). With no declared partitions and no observers this is the
+/// **single-region identity**: every first-party file is [`RegionId::shared`]
+/// — the whole-universe posture when no `[transform.partitions]` section is
 /// present.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PartitionMap {
-    /// Declared partitions, in deterministic (name-sorted) order. Disjoint by
-    /// construction — [`PartitionMap::build`] rejects overlap.
+    /// Declared partitions, name-sorted; disjoint by construction
+    /// ([`PartitionMap::build`] rejects overlap).
     partitions: Vec<Partition>,
     /// Observer globs (ADR-0047 §1).
     observers: Vec<String>,
@@ -150,8 +132,7 @@ impl std::fmt::Display for PartitionConfigError {
 impl std::error::Error for PartitionConfigError {}
 
 impl PartitionMap {
-    /// The single-region identity: no partitions, no observers. Every first-party
-    /// file is [`RegionId::shared`], the whole-universe posture (ADR-0047 §1).
+    /// The single-region identity: no partitions, no observers (see struct doc).
     #[must_use]
     pub fn single_region() -> Self {
         Self::default()
@@ -169,15 +150,13 @@ impl PartitionMap {
         self.partitions.iter().map(|p| p.name.as_str()).collect()
     }
 
-    /// Build a map from declared partition sets (name → globs) and observer globs
-    /// (ADR-0047 §7). Partitions are stored name-sorted for deterministic
-    /// iteration; since they are disjoint, order never affects assignment.
+    /// Build a map from declared partition sets (name → globs) and observer
+    /// globs (ADR-0047 §7).
     ///
     /// # Errors
-    /// Returns [`PartitionConfigError`] when two partitions' globs overlap — the
-    /// declared path-sets must be disjoint (ADR-0047 §7). Observer globs are *not*
-    /// checked for overlap: an observer legitimately sits inside a partition tree
-    /// (a test) and wins the assignment precedence.
+    /// [`PartitionConfigError`] when two partitions' globs overlap — declared
+    /// path-sets must be disjoint. Observer globs are *not* checked: an
+    /// observer legitimately sits inside a partition tree and wins precedence.
     pub fn build(
         sets: impl IntoIterator<Item = (String, Vec<String>)>,
         observers: Vec<String>,
@@ -186,7 +165,6 @@ impl PartitionMap {
             sets.into_iter().map(|(name, globs)| Partition { name, globs }).collect();
         partitions.sort_by(|a, b| a.name.cmp(&b.name));
 
-        // Pairwise overlap check across distinct partitions (ADR-0047 §7).
         for i in 0..partitions.len() {
             for j in (i + 1)..partitions.len() {
                 for ga in &partitions[i].globs {
@@ -207,33 +185,29 @@ impl PartitionMap {
         Ok(Self { partitions, observers })
     }
 
-    /// Assign `path` to its region (ADR-0047 §1). Pure; see the module doc for the
-    /// precedence (vendor → observer → partition → shared). `layout` answers the
-    /// vendor question from the project's own manifest (ADR-0015).
+    /// Assign `path` to its region (ADR-0047 §1). Pure; precedence is vendor →
+    /// observer → partition → shared (module doc). `layout` answers the vendor
+    /// question from the project's own manifest (ADR-0015).
     #[must_use]
     pub fn region_of(&self, layout: &ProjectLayout, path: &str) -> RegionId {
-        // 1. Vendor always wins — a partition glob never claims a vendor tree.
         if layout.is_vendor(path) {
             return RegionId::vendor();
         }
-        // 2. Observer globs.
         if self.observers.iter().any(|g| glob_match(g, path)) {
             return RegionId::Observer;
         }
-        // 3. Partition (disjoint, so at most one matches).
         for p in &self.partitions {
             if p.globs.iter().any(|g| glob_match(g, path)) {
                 return RegionId::Partition(p.name.clone());
             }
         }
-        // 4. Unclaimed first-party → shared.
+        // Unclaimed first-party.
         RegionId::shared()
     }
 }
 
-/// The literal `/`-segment prefix of a glob: the leading segments before the
-/// first segment that contains a wildcard (`*`). `svc-a/**` → `["svc-a"]`;
-/// `a/b/c.php` → `["a", "b", "c.php"]`; `**/x` → `[]`.
+/// The literal `/`-segment prefix of a glob, up to the first wildcard segment.
+/// `svc-a/**` → `["svc-a"]`; `a/b/c.php` → `["a", "b", "c.php"]`; `**/x` → `[]`.
 fn literal_prefix(glob: &str) -> Vec<&str> {
     let mut out = Vec::new();
     for seg in glob.split('/') {
@@ -245,12 +219,8 @@ fn literal_prefix(glob: &str) -> Vec<&str> {
     out
 }
 
-/// Whether two partition globs can match a common path (ADR-0047 §7 overlap).
-/// Computed on the literal segment prefixes: they overlap when one prefix is a
-/// segment-prefix of the other (equal counts as overlap). Exact for the
-/// documented `dir/**` form; a wildcard-leading glob has an empty prefix and so
-/// overlaps everything (conservative — such a pattern is ambiguous for disjoint
-/// partitions).
+/// Whether two partition globs can match a common path (ADR-0047 §7 overlap;
+/// see module doc for the algorithm). Equal prefixes count as overlap.
 fn globs_overlap(a: &str, b: &str) -> bool {
     let pa = literal_prefix(a);
     let pb = literal_prefix(b);
@@ -344,7 +314,6 @@ mod tests {
 
     #[test]
     fn unclaimed_first_party_is_shared() {
-        // No partition/observer glob covers a shared-lib file → Shared (not vendor).
         assert_eq!(map().region_of(&ProjectLayout::fallback(), "lib/Support/Str.php"), RegionId::shared());
         assert_eq!(map().region_of(&ProjectLayout::fallback(), "src/Kernel.php"), RegionId::Shared { vendor: false });
     }
@@ -357,8 +326,7 @@ mod tests {
 
     #[test]
     fn vendor_beats_a_partition_claim() {
-        // A partition glob that accidentally covers vendor/ must NOT claim it:
-        // vendor is always shared (ADR-0047 §1/§5).
+        // ADR-0047 §1/§5.
         let m = PartitionMap::build(
             [("svc-a".to_owned(), vec!["svc-a.example/**".to_owned()])],
             vec![],
@@ -372,7 +340,6 @@ mod tests {
 
     #[test]
     fn observer_beats_partition_when_both_match() {
-        // A test file inside a service tree is an observer, not the service's code.
         let m = PartitionMap::build(
             [("svc-a".to_owned(), vec!["svc-a.example/**".to_owned()])],
             vec!["svc-a.example/tests/**".to_owned()],
@@ -411,7 +378,6 @@ mod tests {
 
     #[test]
     fn sibling_partitions_do_not_overlap() {
-        // Same ancestor, different subtrees — disjoint, must build.
         PartitionMap::build(
             [
                 ("a".to_owned(), vec!["shared/a/**".to_owned()]),
@@ -424,7 +390,6 @@ mod tests {
 
     #[test]
     fn wildcard_leading_glob_overlaps_conservatively() {
-        // Empty literal prefix → treated as overlapping every partition.
         assert!(PartitionMap::build(
             [
                 ("a".to_owned(), vec!["**/Generated.php".to_owned()]),

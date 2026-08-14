@@ -1,13 +1,12 @@
-//! Acceptance tests for the class-world extension of `type.argument-mismatch`
-//! and `effect.envelope-exceeded` (ADR-0001 sound dispatch).
+//! Acceptance tests for the class-world extension of `type.argument-mismatch` and
+//! `effect.envelope-exceeded` (ADR-0001 sound dispatch).
 //!
-//! Method calls resolve to a same-file target ONLY under rules that respect
-//! PHP's dynamic dispatch: exact-class receivers (`new Foo()`, `$x = new Foo()`)
-//! resolve exactly; `$this->`/`self::` resolve only under a private/final/
-//! final-class guard (a non-final public method may be overridden in another
-//! file); `parent::`/`Foo::` are exact; `static::` and unknown receivers are
-//! silent; a trait-using class or a chain that leaves the file gives up. Every
-//! resolved call runs the full direct/propagation/binding machinery.
+//! Method calls resolve to a same-file target ONLY under rules that respect PHP's dynamic
+//! dispatch: exact-class receivers (`new Foo()`, `$x = new Foo()`) resolve exactly;
+//! `$this->`/`self::` resolve only under a private/final/final-class guard (non-final public
+//! may be overridden elsewhere); `parent::`/`Foo::` are exact; `static::` and unknown
+//! receivers are silent; a trait-using class or an out-of-file chain gives up. Every resolved
+//! call runs the full direct/propagation/binding machinery.
 
 use steins_infer::{Diagnostic, EFFECT_ID, ID, check};
 use steins_syntax::SourceTree;
@@ -15,9 +14,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // The `untyped.*` family (ADR-0078, issue #200) reports on the fixtures' own untyped
+    // declarations, not the behaviour under test — dropped so counts keep prior meaning.
     check(&tree, &functions, "test.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))

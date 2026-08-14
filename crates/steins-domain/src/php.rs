@@ -1,14 +1,9 @@
-//! PHP value semantics the domain depends on, implemented to the letter of
-//! PHP 8.x and (where history was treacherous) verified against the real
-//! engine by `tests/php_oracle.rs` — the ask-the-real-thing discipline
-//! applied to unit semantics.
+//! PHP value semantics the domain depends on, implemented to the letter of PHP 8.x and
+//! verified against the real engine by `tests/php_oracle.rs` where history was treacherous.
 //!
-//! Every predicate here takes `impl AsRef<[u8]>` rather than `&str`, because a
-//! PHP string is a byte string (ADR-0080): they answer for a [`PhpStr`] whose
-//! bytes are not valid UTF-8 exactly as the engine does, and `&str` callers
-//! pass through unchanged. Each one is byte-oriented anyway — the engine's own
-//! rules are stated over bytes, and every byte >= 0x80 is uncased,
-//! non-numeric and non-digit under all of them.
+//! Every predicate takes `impl AsRef<[u8]>`, not `&str`: a PHP string is a byte string
+//! (ADR-0080) that need not be valid UTF-8; `&str` callers pass through unchanged, and every
+//! byte >= 0x80 is uncased, non-numeric and non-digit throughout.
 //!
 //! [`PhpStr`]: crate::PhpStr
 
@@ -34,12 +29,10 @@ fn trim_ws(mut b: &[u8]) -> &[u8] {
 
 /// PHP 8 `is_numeric()`.
 ///
-/// Grammar: optional leading whitespace (`" \t\n\r\v\f"`), optional sign,
-/// then an integer (`digits`), or a float (`digits "." digits?` |
-/// `digits? "." digits`), optionally followed by an exponent
-/// (`[eE] sign? digits`); trailing whitespace is allowed (PHP >= 8.0).
-/// Hex/binary/octal strings are NOT numeric. At least one digit must appear
-/// in the mantissa.
+/// Grammar: optional leading whitespace, optional sign, then an integer (`digits`) or float
+/// (`digits "." digits?` | `digits? "." digits`), optionally with an exponent (`[eE] sign?
+/// digits`); trailing whitespace is allowed (PHP >= 8.0). Hex/binary/octal strings are NOT
+/// numeric; at least one mantissa digit is required.
 #[must_use]
 pub fn php_is_numeric(s: impl AsRef<[u8]>) -> bool {
     let b = trim_ws(s.as_ref());
@@ -83,57 +76,49 @@ pub fn php_is_numeric(s: impl AsRef<[u8]>) -> bool {
     i == b.len()
 }
 
-/// PHP falsiness of a *string*: exactly `""` and `"0"` are falsy.
-/// (`"0.0"`, `" "`, and `"00"` are all truthy — the classic traps.)
+/// PHP falsiness of a *string*: exactly `""` and `"0"` are falsy. (`"0.0"`, `" "`, and
+/// `"00"` are all truthy — the classic traps.)
 #[must_use]
 pub fn php_str_is_falsy(s: impl AsRef<[u8]>) -> bool {
     let b = s.as_ref();
     b.is_empty() || b == b"0"
 }
 
-/// PHP's `strtolower($s) === $s` — the definition of PHPStan's
-/// `lowercase-string` (`AccessoryLowercaseStringType`), not "made of lowercase
-/// letters": a string with no cased character at all (`""`, `"123"`) qualifies.
+/// PHP's `strtolower($s) === $s` — PHPStan's `lowercase-string`
+/// (`AccessoryLowercaseStringType`), not "made of lowercase letters": a string with no cased
+/// character (`""`, `"123"`) qualifies.
 ///
-/// Byte-oriented on the ASCII letters, because that is what the engine does:
-/// since PHP 8.2 `strtolower()` is locale-independent and maps exactly `A-Z`
-/// to `a-z`, leaving every other byte alone. A UTF-8 `"Ä"` is therefore a
-/// `lowercase-string` under this rule *and* under the engine — its bytes are
-/// all >= 0x80, so no `A-Z` byte occurs. `tests/php_oracle.rs` asks the real
-/// engine, including the multibyte cases.
+/// Byte-oriented on ASCII letters, matching the engine: since PHP 8.2 `strtolower()` is
+/// locale-independent and maps only `A-Z` to `a-z`. A UTF-8 `"Ä"` therefore qualifies too
+/// (its bytes are all >= 0x80). Verified against the real engine, including multibyte cases,
+/// by `tests/php_oracle.rs`.
 #[must_use]
 pub fn php_str_is_lowercase(s: impl AsRef<[u8]>) -> bool {
     !s.as_ref().iter().any(u8::is_ascii_uppercase)
 }
 
-/// PHP's `strtoupper($s) === $s` — the mirror of [`php_str_is_lowercase`], and
-/// the definition of PHPStan's `uppercase-string`. The two are *not* exclusive:
-/// a string with no cased character satisfies both.
+/// PHP's `strtoupper($s) === $s` — mirrors [`php_str_is_lowercase`] as PHPStan's
+/// `uppercase-string`; not exclusive (an uncased string satisfies both).
 #[must_use]
 pub fn php_str_is_uppercase(s: impl AsRef<[u8]>) -> bool {
     !s.as_ref().iter().any(u8::is_ascii_lowercase)
 }
 
-/// PHP's array-key cast identity for integer-like strings — the definition of
-/// PHPStan's `decimal-int-string` (`AccessoryDecimalIntegerStringType`): the
-/// string spells an integer *the way PHP writes one back*, so `$a[$s]` stores
-/// it under an `int` key instead of keeping it a string key.
+/// PHP's array-key cast identity for integer-like strings — PHPStan's `decimal-int-string`
+/// (`AccessoryDecimalIntegerStringType`): the string spells an integer the way PHP writes
+/// one back, so `$a[$s]` casts to an `int` key instead of staying a string key.
 ///
-/// The engine's rule (`ZEND_HANDLE_NUMERIC_STR`), to the letter:
+/// The engine's rule (`ZEND_HANDLE_NUMERIC_STR`):
+/// * optional leading `-`, then only ASCII digits — no `+`, whitespace, `.`/`e`, or
+///   hex/octal/binary prefix;
+/// * no leading zero unless the whole string is `"0"`; `"-0"` does NOT qualify (PHP writes
+///   zero back as `"0"`), even though `is_numeric("-0")` is true;
+/// * must fit a platform `int`: `"9223372036854775808"` (one past `PHP_INT_MAX`) stays a
+///   string key, `"-9223372036854775808"` (`PHP_INT_MIN`) does not.
 ///
-/// * an optional leading `-`, then one or more ASCII digits and nothing else —
-///   no `+`, no whitespace, no `.`/`e`, no hex/octal/binary prefix;
-/// * no leading zero, unless the whole string is exactly `"0"`. `"-0"` is
-///   therefore **not** one: PHP writes zero back as `"0"`, so `"-0"` survives
-///   as a string key even though `is_numeric("-0")` is true;
-/// * the value fits in a platform `int`. `"9223372036854775808"` is one past
-///   `PHP_INT_MAX` and stays a string key, while `"-9223372036854775808"`
-///   (`PHP_INT_MIN`) does not.
-///
-/// This is strictly narrower than [`php_is_numeric`]: `"007"`, `"+1"`, `"00"`,
-/// `"1.2"`, `"18E+3"` and `" 1 "` are all numeric and all keep their string
-/// identity. `tests/php_oracle.rs` asks the real engine by inserting each case
-/// as an array key and reading back `is_int(array_key_first(...))`.
+/// Strictly narrower than [`php_is_numeric`]: `"007"`, `"+1"`, `"00"`, `"1.2"`, `"18E+3"`,
+/// `" 1 "` are all numeric but keep string identity. `tests/php_oracle.rs` verifies against
+/// the real engine via `is_int(array_key_first(...))`.
 #[must_use]
 pub fn php_str_is_decimal_int(s: impl AsRef<[u8]>) -> bool {
     let b = s.as_ref();
@@ -144,8 +129,7 @@ pub fn php_str_is_decimal_int(s: impl AsRef<[u8]>) -> bool {
     if digits[0] == b'0' && b.len() > 1 {
         return false;
     }
-    // Every byte is now ASCII (`-` plus digits), so the value is valid UTF-8
-    // and the range test is the engine's `PHP_INT_MAX` bound.
+    // All-ASCII, so valid UTF-8; the parse enforces the `PHP_INT_MAX` bound.
     std::str::from_utf8(b).is_ok_and(|s| s.parse::<i64>().is_ok())
 }
 
@@ -190,9 +174,7 @@ mod tests {
 
     #[test]
     fn casing_is_the_identity_test_not_a_letter_test() {
-        // Uncased strings satisfy both — the lattice fact the fixtures state.
-        // Multibyte: UTF-8 bytes are all >= 0x80, so no ASCII-cased byte occurs
-        // and `strtolower`/`strtoupper` leave the value alone (oracle-checked).
+        // Uncased strings, including multibyte, satisfy both.
         for both in ["", "123", "-", "\u{00c4}\u{00e4}", "\u{65e5}\u{672c}\u{8a9e}"] {
             assert!(php_str_is_lowercase(both), "expected lowercase: {both:?}");
             assert!(php_str_is_uppercase(both), "expected uppercase: {both:?}");
@@ -205,26 +187,22 @@ mod tests {
             assert!(php_str_is_uppercase(upper), "expected uppercase: {upper:?}");
             assert!(!php_str_is_lowercase(upper), "expected not lowercase: {upper:?}");
         }
-        // A single cased character disqualifies the whole string.
         assert!(!php_str_is_lowercase("abC"));
         assert!(!php_str_is_uppercase("ABc"));
     }
 
     #[test]
     fn decimal_int_is_the_array_key_cast_not_is_numeric() {
-        // The canonical spellings the fixture names, plus the range edges.
         for yes in ["0", "1", "1234", "-1", "123", "9223372036854775807", "-9223372036854775808"] {
             assert!(php_str_is_decimal_int(yes), "expected decimal-int: {yes:?}");
         }
-        // Numeric but not canonical — every one of these survives as a string
-        // key, which is exactly what separates this from `php_is_numeric`.
+        // Numeric but not canonical: survives as a string key.
         for no in ["007", "+1", "00", "-0", "1.2", "18E+3", "1e5", " 1", "1 ", "0.0", "-0.0"] {
             assert!(php_is_numeric(no), "fixture check — {no:?} should be numeric");
             assert!(!php_str_is_decimal_int(no), "expected not decimal-int: {no:?}");
         }
-        // Out of int range by one, on the positive side only.
+        // One past PHP_INT_MAX.
         assert!(!php_str_is_decimal_int("9223372036854775808"));
-        // Not integer-like at all.
         for no in ["", "abc", "-", "1,3", "0x1A", "１２３"] {
             assert!(!php_str_is_decimal_int(no), "expected not decimal-int: {no:?}");
         }

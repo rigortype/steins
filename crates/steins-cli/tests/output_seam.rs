@@ -1,8 +1,7 @@
 //! Output-seam contracts (issue #44): a closed stdout or stderr must neither
-//! panic nor alter the command's verdict.
-//!
-//! End-to-end tests cover long-output commands under `EPIPE`; a structural test
-//! prevents raw output calls from bypassing `steins-cli/src/out.rs`.
+//! panic nor alter the command's verdict. End-to-end tests cover long-output
+//! commands under `EPIPE`; a structural test bans raw output calls outside
+//! `steins-cli/src/out.rs`.
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -13,12 +12,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
+/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");

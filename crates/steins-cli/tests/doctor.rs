@@ -1,14 +1,7 @@
-//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3 plus C4's full
-//! posture set): the sections (Runtime, Config + active surface, Layout, Coverage
-//! posture, Envelopes, Baseline, Catalog, Registry totality, Require) and the exit
-//! semantics (§10 — environment degrades at 0, configuration contradicts at 1,
-//! usage at 2). `--format json` and `[doctor] require` (§14) get their own test
-//! groups near the bottom of this file.
-//!
-//! Each test runs the real `steins` binary in a private temp dir (its own CWD) so
-//! the auto-loaded `steins.toml` and `.steins-baseline.jsonl` are isolated. Most use
-//! `--no-php` for determinism (no dependency on a `php` on PATH); the Runtime section
-//! still renders (the sound-subset posture) and every run stays exit-neutral there.
+//! End-to-end tests for `steins doctor` (ADR-0054 Part II, C3/C4 posture set).
+//! Exit semantics per §10: environment degrades at 0, config contradicts at 1,
+//! usage at 2. Each test runs the real binary in an isolated temp-dir CWD;
+//! most use `--no-php` for determinism (Runtime still renders, exit-neutral).
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -20,12 +13,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
+/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -56,18 +46,11 @@ fn run_in(dir: &Path, args: &[&str]) -> Run {
     }
 }
 
-/// Wall-clock ceiling for the usage-error runs below. Generous next to a doctor
-/// run that does no work at all (it exits before the header), tight next to the
-/// unbounded filesystem walk it guards against.
+/// Wall-clock ceiling: generous next to a no-op run, tight against the walk it guards.
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// [`run_in`] with a deadline: on expiry the child is killed and the test fails
-/// with a hang report rather than blocking the suite.
-///
-/// `Command::output` waits forever, which is the wrong failure mode for a
-/// regression whose symptom *is* not terminating — CI would stall on a red build
-/// instead of reporting one. Piped output is drained on a thread so a child that
-/// fills its pipe buffer cannot deadlock against the timer.
+/// [`run_in`] with a deadline: kills the child and fails with a hang report
+/// instead of an unbounded wait; output drains on a thread to avoid pipe deadlock.
 fn run_in_within(dir: &Path, args: &[&str], timeout: Duration) -> Run {
     let mut child = steins_cmd()
         .args(args)
@@ -123,7 +106,7 @@ const THREE_THROWS: &str = "<?php\n\
     public function n(): void {}\n\
     }\n";
 
-// ------------------------------------------------------- all sections render ---
+// All sections render
 
 #[test]
 fn doctor_renders_all_sections_exit_zero() {
@@ -157,14 +140,12 @@ fn doctor_default_path_is_dot() {
 
 #[test]
 fn doctor_without_no_php_still_renders_runtime_and_exits_zero() {
-    // With or without a `php` on PATH the Runtime section renders and the run is
-    // exit-neutral: a missing sidecar is the sound subset, never a failure (§10).
+    // Runtime renders and stays exit-neutral regardless of `php` (§10 sound subset).
     let dir = workdir("runtime");
     write(&dir, "a.php", THREE_THROWS);
     let r = run_in(&dir, &["doctor", "."]);
     assert_eq!(r.code, 0, "environment facts report at 0; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("Runtime"), "stdout:\n{}", r.stdout);
-    // Either a live version line or the sound-subset posture — one must appear.
     assert!(
         r.stdout.contains("PHP version:") || r.stdout.contains("sound subset"),
         "runtime posture must render; stdout:\n{}",
@@ -172,14 +153,8 @@ fn doctor_without_no_php_still_renders_runtime_and_exits_zero() {
     );
 }
 
-/// The integer width, reported as the consequence it has (issue #64, and ADR-0028's
-/// 2026-08-14 amendment for why the declining set grew). `env` already carried
-/// `int_size`, so the line costs no extra sidecar traffic — which is the reason it
-/// is here at all and not deferred.
-///
-/// A local run is 64-bit (the repo's own `php`), so that is the branch this pins;
-/// the 32-bit branch is the browser's and is pinned in `steins-infer`'s replay
-/// tests, where a width can be supplied rather than found.
+/// Integer width consequence (issue #64, ADR-0028's 2026-08-14 amendment); `env`
+/// already carries `int_size`. 64-bit is pinned here, 32-bit in `steins-infer`.
 #[test]
 fn doctor_reports_the_engines_integer_width_and_its_fold_consequence() {
     let dir = workdir("int-width");
@@ -196,21 +171,18 @@ fn doctor_reports_the_engines_integer_width_and_its_fold_consequence() {
         "a native run is 64-bit and says so; stdout:\n{}",
         r.stdout
     );
-    // …and `--no-php` reports no width at all rather than guessing one: there is no
-    // engine to have a machine.
+    // `--no-php` reports no width at all rather than guessing one.
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert!(!r.stdout.contains("integer width:"), "stdout:\n{}", r.stdout);
 }
 
-// ---------------------------------------------------- reflected class world ---
+// Reflected class world
 
-/// A class ext-random provides (`Random\Randomizer`, always built in since PHP 8.2)
-/// beside one nothing provides — the two halves of issue #269's Coverage line.
+/// ext-random's `Random\Randomizer` (built-in 8.2) plus a class nothing provides (#269).
 const EXTENSION_CLASS_REFS: &str =
     "<?php\nfunction f(\\Random\\Randomizer $r, \\Steins\\NoSuchClass269 $n): void {}\n";
 
-/// The origin surface: doctor names the classes it resolved off the project's own
-/// PHP, and the extension each came from.
+/// Doctor names the classes it resolved off the project's own PHP, and origin extension.
 #[test]
 fn doctor_reports_the_reflected_class_world() {
     let dir = workdir("reflected");
@@ -222,9 +194,7 @@ fn doctor_reports_the_reflected_class_world() {
         return;
     }
     assert!(r.stdout.contains("reflected class world:"), "stdout:\n{}", r.stdout);
-    // ext-random is built in from 8.2; below that (or on a stripped build) the line
-    // still renders, it just resolves nothing — assert the origin only where the
-    // engine actually answered.
+    // ext-random is built in from 8.2; else the line renders but resolves nothing.
     if r.stdout.contains("Random\\Randomizer") {
         assert!(r.stdout.contains("Random\\Randomizer (random)"), "stdout:\n{}", r.stdout);
         assert!(
@@ -235,8 +205,7 @@ fn doctor_reports_the_reflected_class_world() {
     }
 }
 
-/// The sound subset is untouched: with `--no-php` there is no engine to ask, so the
-/// line does not appear at all and the report is exactly what it was.
+/// `--no-php` has no engine to ask, so the line does not appear at all.
 #[test]
 fn doctor_no_php_says_nothing_about_a_reflected_class_world() {
     let dir = workdir("reflected-nophp");
@@ -250,7 +219,7 @@ fn doctor_no_php_says_nothing_about_a_reflected_class_world() {
     );
 }
 
-// -------------------------------------------------------- active surface line ---
+// Active surface line
 
 #[test]
 fn doctor_reflects_configured_profile() {
@@ -267,14 +236,11 @@ fn doctor_reflects_configured_profile() {
     assert!(r.stdout.contains("[check] profile"), "provenance named; stdout:\n{}", r.stdout);
 }
 
-// ------------------------------------------ `[runtime]` pseudo-constant lines ---
+// `[runtime]` pseudo-constant lines
 
 #[test]
 fn doctor_names_both_runtime_postures_on_a_bare_project() {
-    // Named-silence discipline (ADR-0037 §2 family): a default posture is still a
-    // posture, so both keys print with their provenance even when `steins.toml` does
-    // not exist at all. Absence has to be legible from the report, not inferred from
-    // a missing line.
+    // Named-silence (ADR-0037 §2): both keys print with provenance even with no config.
     let dir = workdir("runtime-postures-default");
     write(&dir, "a.php", THREE_THROWS);
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
@@ -293,10 +259,7 @@ fn doctor_names_both_runtime_postures_on_a_bare_project() {
 
 #[test]
 fn doctor_reports_a_declared_final_keyword_posture() {
-    // Issue #234: the posture changes what Steins will claim about an intersection
-    // type, so it must be visible without reading the source — and the line must
-    // also carry the boundary, since `readonly` and the `final` diagnostics are
-    // exactly what a reader would otherwise assume it moved.
+    // Issue #234: affects intersection types; line must carry its readonly/final boundary.
     let dir = workdir("runtime-postures-stripped");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"stripped\"\n");
@@ -312,7 +275,6 @@ fn doctor_reports_a_declared_final_keyword_posture() {
         "the line names its own boundary; stdout:\n{}",
         r.stdout
     );
-    // The sibling posture is untouched by declaring this one.
     assert!(
         r.stdout.contains("[runtime] warning-handler: \"abort\" (default)"),
         "stdout:\n{}",
@@ -322,9 +284,7 @@ fn doctor_reports_a_declared_final_keyword_posture() {
 
 #[test]
 fn doctor_distinguishes_a_declared_default_from_an_absent_key() {
-    // `"enforced"` spelled out resolves to the same posture as absence, but the
-    // report says which one the project wrote — the difference between "I never
-    // declared that" and "I declared it and it did not take".
+    // Spelled `"enforced"` resolves like absence but reports "declared" not "default".
     let dir = workdir("runtime-postures-declared-default");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"enforced\"\n");
@@ -339,9 +299,7 @@ fn doctor_distinguishes_a_declared_default_from_an_absent_key() {
 
 #[test]
 fn doctor_names_an_unrecognized_runtime_value() {
-    // An unknown *value* on a known key is a warn-and-proceed in `check`; doctor
-    // reports it as the config fact it is, at exit 0 — the value is legible, so this
-    // is a degraded posture, not a contradiction.
+    // Unknown value: check warns-and-proceeds; doctor reports it degraded, not contradictory.
     let dir = workdir("runtime-postures-bad-value");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[runtime]\nfinal-keyword = \"bypassed\"\n");
@@ -361,9 +319,7 @@ fn doctor_names_an_unrecognized_runtime_value() {
 
 #[test]
 fn doctor_names_the_contract_layer_under_throws_direct() {
-    // Issue #108: `throws-direct` reaches contract-layer `throw.undeclared`
-    // through `enable`, despite sharing `Floor::Default`. The printed layer list
-    // must name every layer the surface admits.
+    // Issue #108: `throws-direct` reaches throw.undeclared via `enable`; list names it.
     let dir = workdir("throws-direct-layers");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[check]\nprofile = \"throws-direct\"\n");
@@ -378,11 +334,8 @@ fn doctor_names_the_contract_layer_under_throws_direct() {
 
 #[test]
 fn doctor_layer_line_excludes_debug_even_under_an_explicit_enable() {
-    // Review finding on issue #108 (PR #133): `enable = ["debug.type"]` is a
-    // pattern the config layer accepts (debug ids are registered), but the debug
-    // lane must not surface. `surfaces_id` excludes the debug lane before
-    // `enable`/`disable` are consulted, per `layers_on`'s doc comment ("the debug
-    // lane is display-only and never a surface layer").
+    // Issue #108/PR #133: `enable = ["debug.type"]` registers the debug id but must not
+    // surface — `surfaces_id` excludes it before `enable`/`disable` are consulted.
     let dir = workdir("debug-enable-layers");
     write(&dir, "a.php", THREE_THROWS);
     write(
@@ -411,7 +364,7 @@ fn doctor_default_profile_provenance() {
     );
 }
 
-// -------------------------------------------------------------- envelope scan ---
+// Envelope scan
 
 #[test]
 fn doctor_counts_written_throws_envelopes() {
@@ -445,7 +398,7 @@ fn doctor_envelope_notice_flips_under_contracts() {
     );
 }
 
-// ------------------------------------------------------------------- baseline ---
+// Baseline
 
 #[test]
 fn doctor_reports_no_baseline_when_absent() {
@@ -459,8 +412,7 @@ fn doctor_reports_no_baseline_when_absent() {
 #[test]
 fn doctor_reports_baseline_capture_surface_and_dormant() {
     let dir = workdir("baseline");
-    // A proof finding (width("abc")) plus a direct throw; capture under CONTRACTS so
-    // the baseline holds both the proof and the throw entry.
+    // A proof finding plus a direct throw, captured under CONTRACTS so both land.
     let mixed = "<?php\n\
         function width(int $w): int { return $w; }\n\
         width(\"abc\");\n\
@@ -480,10 +432,8 @@ fn doctor_reports_baseline_capture_surface_and_dormant() {
 
 #[test]
 fn doctor_never_counts_a_leftover_debug_entry_as_dormant() {
-    // `surfaces_id` excludes the debug lane unconditionally (issue #108). A
-    // leftover `debug.type` baseline entry must not be counted "dormant" here:
-    // `check` treats a debug entry as stale dead weight at every rung
-    // (`match_baseline` in main.rs), and `doctor` must not contradict that.
+    // `surfaces_id` excludes the debug lane unconditionally (issue #108); a leftover
+    // `debug.type` entry must not be reported dormant (`check` treats it as stale, main.rs).
     let dir = workdir("debug-not-dormant");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--no-php", "--set-baseline", "a.php"]).code, 0);
@@ -524,7 +474,7 @@ fn doctor_unparseable_baseline_is_a_contradiction() {
     assert!(r.stdout.contains("UNPARSEABLE"), "stdout:\n{}", r.stdout);
 }
 
-// ------------------------------------------------- config contradiction exits ---
+// Config contradiction exits
 
 #[test]
 fn doctor_malformed_toml_exits_one() {
@@ -549,8 +499,7 @@ fn doctor_unknown_profile_exits_one() {
 
 #[test]
 fn doctor_unknown_runtime_key_exits_one() {
-    // The unknown-[runtime]-key parse failure is exit 2 for check, but a config
-    // contradiction (exit 1) for doctor (§10).
+    // Unknown `[runtime]` key: exit 2 for check, exit 1 (contradiction) for doctor (§10).
     let dir = workdir("bad-runtime");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[runtime]\nzend-asertions = \"enabled\"\n");
@@ -558,7 +507,7 @@ fn doctor_unknown_runtime_key_exits_one() {
     assert_eq!(r.code, 1, "unknown [runtime] key → doctor exit 1; stdout:\n{}", r.stdout);
 }
 
-// ----------------------------------------------------------------- usage errors ---
+// Usage errors
 
 #[test]
 fn doctor_rejects_extra_paths() {
@@ -574,14 +523,9 @@ fn doctor_rejects_unknown_flag() {
     assert_eq!(r.code, 2, "unknown flag → usage error exit 2; stderr:\n{}", r.stderr);
 }
 
-/// ADR-0054 §10 amendment: a path argument that names nothing is doctor's own
-/// usage error (2) — the open half of the ADR-0050 §7 amendment, which settled
-/// the same question for `check`/`transform`/`effect-diff` and left doctor out.
-///
-/// Run under a timeout because the bug this closes was a *hang*, not a wrong
-/// code: `composer::discover` substituted the parent of a nonexistent path and,
-/// for a top-level `/typo`, walked all of `/`. A regression must red this test,
-/// not wedge CI until the job's own timeout kills it.
+/// ADR-0054 §10 amendment: a path naming nothing is doctor's own usage error (2) —
+/// completing ADR-0050 §7 (check/transform/effect-diff). Timeout-guarded: the bug
+/// closed here was a *hang* (`composer::discover` walked all of `/`), not a wrong code.
 #[test]
 fn doctor_rejects_a_path_that_names_nothing() {
     let dir = workdir("missing-path");
@@ -592,15 +536,11 @@ fn doctor_rejects_a_path_that_names_nothing() {
         "the missing path is named, with the same message the path-walking commands use; stderr:\n{}",
         r.stderr
     );
-    // Checked ahead of the header line: no posture report about a tree that is
-    // not there, not even the banner.
+    // No report at all — checked ahead of the header line.
     assert!(r.stdout.is_empty(), "no report emitted; stdout:\n{}", r.stdout);
 }
 
-/// The relative spelling is the same usage error, and is the one that actually
-/// bites: a typo'd subdirectory resolves against the CWD, so before the fix its
-/// seed was the *real* project root and doctor produced a plausible report about
-/// the wrong tree.
+/// Relative spelling bites: pre-fix, a typo'd subdirectory resolved against the CWD.
 #[test]
 fn doctor_rejects_a_relative_path_that_names_nothing() {
     let dir = workdir("missing-relative");
@@ -611,9 +551,7 @@ fn doctor_rejects_a_relative_path_that_names_nothing() {
     assert!(r.stdout.is_empty(), "stdout:\n{}", r.stdout);
 }
 
-/// The discriminator is existence, not emptiness — §10's exit-0 environment lane
-/// is untouched. A directory that exists and holds nothing is a real place doctor
-/// genuinely has a posture to report about.
+/// Existence, not emptiness, is the discriminator (§10's exit-0 environment lane).
 #[test]
 fn doctor_reports_on_an_existing_empty_path_at_zero() {
     let dir = workdir("existing-empty");
@@ -623,12 +561,9 @@ fn doctor_reports_on_an_existing_empty_path_at_zero() {
     assert!(r.stdout.contains("posture report"), "stdout:\n{}", r.stdout);
 }
 
-// ------------------------------------------------ coverage posture (issue #30) ---
+// Coverage posture (issue #30)
 
-/// One scope per give-up-list construct, plus a clean function and the four
-/// reflection shapes. 11 poisoned scopes over 17: the by-ref capture poisons the
-/// enclosing scope AND the closure's own — one aliasing fact, two silenced scopes,
-/// but one construct in the source (so it counts once in the construct breakdown).
+/// 11/17 scopes poisoned across give-up-list constructs (by-ref capture counts once).
 const OPAQUE: &str = "<?php\n\
     function with_eval(string $c): void { eval($c); }\n\
     function with_include(string $p): void { include $p; }\n\
@@ -655,7 +590,6 @@ fn doctor_inventories_the_opaque_constructs() {
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert_eq!(r.code, 0, "an inventory is a report, never a failure; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("Coverage posture"), "stdout:\n{}", r.stdout);
-    // The share, not a bare scalar: poisoned scopes against ALL scopes.
     assert!(
         r.stdout.contains("17 scope(s), 11 poisoned (64.7%)"),
         "expected the poisoned-scope share; stdout:\n{}",
@@ -690,7 +624,6 @@ fn doctor_inventories_reflection_sites_and_labels_them_a_guess() {
         "stdout:\n{}",
         r.stdout
     );
-    // The list is a guess until measured, and the report says so on every run.
     assert!(r.stdout.contains("a guess until measured"), "stdout:\n{}", r.stdout);
 }
 
@@ -699,8 +632,7 @@ fn doctor_reports_dam_sites_broken_down_by_kind() {
     let dir = workdir("dam");
     write(&dir, "a.php", OPAQUE);
     write(&dir, "b.php", "<?php\nclass_alias($src, 'B');\n");
-    // Issue #36: a `X::class` argument is compile-time, so this third file adds an
-    // index edge and NOT a fourth dam site — the count below is the assertion.
+    // Issue #36: `X::class` is compile-time, so this adds an index edge, not a 4th dam site.
     write(&dir, "c.php", "<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n");
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert!(
@@ -715,8 +647,7 @@ fn doctor_reports_dam_sites_broken_down_by_kind() {
 
 #[test]
 fn doctor_says_a_clean_tree_is_clean() {
-    // The point of the section: a quiet run states what it looked at, so silence
-    // over clean code reads differently from silence over opaque code.
+    // States what it looked at: clean-code silence differs from opaque-code silence.
     let dir = workdir("clean");
     write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
@@ -739,12 +670,11 @@ fn doctor_coverage_survives_an_empty_tree() {
     assert!(r.stdout.contains("no .php files under"), "stdout:\n{}", r.stdout);
 }
 
-// ------------------------------------------------------------------- coverage: sound subset ---
+// Coverage: sound subset
 
 #[test]
 fn doctor_names_the_sound_subset_ids_when_no_sidecar() {
-    // ADR-0054 §9.2 / A2(ii): the sound-subset line names exactly which absence
-    // claims go silent, not just that "some" do.
+    // ADR-0054 §9.2/A2(ii): names which absence claims go silent, not just "some".
     let dir = workdir("sound-subset");
     write(&dir, "a.php", "<?php\nfunction f(int $x): int { return $x + 1; }\nf(1);\n");
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
@@ -790,7 +720,7 @@ fn doctor_counts_vouched_sites_and_names_the_checker_boundary() {
     );
 }
 
-// --------------------------------------------------------------------------- Runtime: A6 SAPI ---
+// Runtime: A6 SAPI
 
 #[test]
 fn doctor_names_the_sapi_undeclared_curated_set() {
@@ -807,7 +737,7 @@ fn doctor_names_the_sapi_undeclared_curated_set() {
     );
 }
 
-// ------------------------------------------------------------------------------------ Catalog ---
+// Catalog
 
 #[test]
 fn doctor_catalog_reports_the_pin_and_freshness_context() {
@@ -826,11 +756,8 @@ fn doctor_catalog_reports_the_pin_and_freshness_context() {
         "stdout:\n{}",
         r.stdout
     );
-    // The width breakdown (ADR-0028's 2026-08-14 amendment §4, issue #330). The
-    // numbers come from the catalog's own accessors, so they are spelled here from
-    // the same source rather than hard-coded: what the assertion pins is that the
-    // clause reports all three classes and keeps refused apart from unverified,
-    // which is the distinction the amendment exists to protect.
+    // Width breakdown (ADR-0028's 2026-08-14 amendment §4, #330): from the catalog's
+    // own accessors, so refused stays distinguished from unverified.
     let expected = format!(
         "(width: {} safe / {} refused / {} unverified)",
         steins_catalog::width_safe_names().len(),
@@ -858,8 +785,7 @@ fn doctor_catalog_says_skew_is_unconfirmed_with_no_target_and_no_sidecar() {
 
 #[test]
 fn doctor_catalog_flags_skew_against_a_declared_target() {
-    // ADR-0052 A11: a target range that does not exactly match the catalog's pin
-    // is skewed — demonstrated with a `require.php` far from `steins_catalog::PINNED_PHP`.
+    // ADR-0052 A11: a target range not exactly matching the catalog's pin is skewed.
     let dir = workdir("catalog-skew");
     write(&dir, "a.php", "<?php\n$x = 1;\n");
     write(&dir, "composer.json", r#"{"require":{"php":"^7.4"}}"#);
@@ -872,7 +798,7 @@ fn doctor_catalog_flags_skew_against_a_declared_target() {
     );
 }
 
-// ----------------------------------------------------------------------- Registry totality ---
+// Registry totality
 
 #[test]
 fn doctor_registry_totality_is_consistent() {
@@ -895,7 +821,7 @@ fn doctor_registry_totality_is_consistent() {
     );
 }
 
-// ------------------------------------------------------------------------ `--format json` ---
+// `--format json`
 
 #[test]
 fn doctor_format_json_renders_the_same_section_structure_as_text() {
@@ -927,8 +853,7 @@ fn doctor_format_json_renders_the_same_section_structure_as_text() {
         ],
         "the json section list must match the text rendering's structure exactly"
     );
-    // Spot-check one section's content agrees between the two renderings (modulo
-    // the text renderer's leading-space indentation, which json trims).
+    // Spot-check: content agrees between renderings (json trims leading-space indentation).
     let envelopes = sections.iter().find(|s| s["name"] == "Envelopes").expect("Envelopes section");
     let envelope_line = envelopes["lines"][0].as_str().expect("a line");
     assert!(
@@ -963,7 +888,7 @@ fn doctor_format_requires_an_argument() {
     assert_eq!(r.code, 2, "stderr:\n{}", r.stderr);
 }
 
-// -------------------------------------------------------------------- `[doctor] require` ---
+// `[doctor] require`
 
 #[test]
 fn doctor_require_not_configured_by_default() {
@@ -1010,13 +935,8 @@ fn doctor_require_no_dormant_baseline_passes_with_no_baseline() {
 
 #[test]
 fn doctor_require_catalog_pin_match_unconfirmed_is_a_failure() {
-    // Orchestrator ruling on issue #268: `[doctor] require` is the named
-    // strictness opt-in (ADR-0054 §14) — the caller is asking doctor to
-    // GUARANTEE the pin match, so a comparison doctor cannot even attempt (no
-    // target, no sidecar) is a violation, not a free pass. This deliberately
-    // disagrees with the Catalog section's own rendering, which still reports
-    // "unskewed" by the default lenient-default posture (unaffected by this
-    // test — see `doctor_catalog_says_skew_is_unconfirmed_with_no_target_and_no_sidecar`).
+    // Orchestrator ruling, issue #268 (ADR-0054 §14): an unconfirmable comparison
+    // is a violation here, unlike the Catalog section's lenient default.
     let dir = workdir("require-catalog-unconfirmed");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[doctor]\nrequire = [\"catalog-pin-match\"]\n");
@@ -1031,14 +951,12 @@ fn doctor_require_catalog_pin_match_unconfirmed_is_a_failure() {
         "the failure message must distinguish unconfirmable from skewed; stdout:\n{}",
         r.stdout
     );
-    // The Catalog section's own text is untouched by this stricter require verdict.
     assert!(r.stdout.contains("skew is unconfirmed"), "stdout:\n{}", r.stdout);
 }
 
 #[test]
 fn doctor_require_catalog_pin_match_passes_on_a_confirmed_match() {
-    // A declared target that IS the catalog's pin (steins_catalog::PINNED_PHP is
-    // 8.5 as of this writing) confirms the match, so the assertion passes.
+    // steins_catalog::PINNED_PHP is 8.5 as of this writing — an exact match confirms.
     let dir = workdir("require-catalog-confirmed");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "composer.json", r#"{"require":{"php":"8.5.*"}}"#);
@@ -1081,8 +999,7 @@ fn doctor_require_unknown_assertion_is_a_hard_config_error() {
 
 #[test]
 fn doctor_require_rejects_an_unknown_toml_key() {
-    // `deny_unknown_fields` posture (issue #268 acceptance criteria): a misspelled
-    // key under `[doctor]` is a hard parse error, same as `[runtime]`/`[plugins]`.
+    // `deny_unknown_fields` (issue #268): a misspelled `[doctor]` key is a hard parse error.
     let dir = workdir("doctor-config-typo");
     write(&dir, "a.php", THREE_THROWS);
     write(&dir, "steins.toml", "[doctor]\nrequires = [\"sidecar\"]\n");

@@ -3,12 +3,11 @@
 //! [`Type`] is Steins' own type representation — no phpstan/phpdoc-parser type
 //! leaks here. Every node carries a byte [`Span`] into the source type string.
 //!
-//! The [`std::fmt::Display`] impls reproduce phpstan/phpdoc-parser's node
-//! `__toString()` **exactly** (ADR-0029): unions/intersections always
-//! parenthesize (`(A | B)`, `(A & B)`), a nullable member inside a union/
-//! intersection gets an extra pair of parens, postfix `[]` wraps callable/const/
-//! nullable bases, and so on. This canonical form is the compatibility contract
-//! checked against the real parser by the oracle harness.
+//! [`std::fmt::Display`] reproduces phpstan/phpdoc-parser's node `__toString()`
+//! **exactly** (ADR-0029): unions/intersections always parenthesize (`(A | B)`,
+//! `(A & B)`), a nullable member inside one gets an extra paren pair, postfix
+//! `[]` wraps callable/const/nullable bases. This canonical form is the
+//! compatibility contract the oracle harness checks against the real parser.
 
 use std::fmt;
 
@@ -38,9 +37,8 @@ impl Type {
     }
 }
 
-/// The shape of a [`Type`]. Variants mirror phpstan/phpdoc-parser's type nodes,
-/// restricted to the envelope-checking subset (ADR-0029) plus [`TypeKind::Unsupported`]
-/// for a grammatical construct we deliberately keep opaque.
+/// The shape of a [`Type`]: phpstan/phpdoc-parser's type nodes, restricted to the
+/// envelope-checking subset (ADR-0029) plus [`TypeKind::Unsupported`] for opaque constructs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeKind {
     /// A keyword, scalar, class name, or FQCN: `int`, `\App\User`, `self`, `true`.
@@ -71,9 +69,8 @@ pub enum TypeKind {
     Const(ConstExpr),
     /// `(T is U ? A : B)` and `($param is U ? A : B)`.
     Conditional(Conditional),
-    /// A construct inside the reference grammar that Steins keeps opaque: the raw
-    /// source text is retained so callers can render it, but it carries no
-    /// envelope.
+    /// A grammar construct Steins keeps opaque: raw source text retained for
+    /// rendering, but no envelope.
     Unsupported(String),
 }
 
@@ -222,9 +219,7 @@ pub enum ConditionalSubject {
     Parameter(String),
 }
 
-// ----------------------------------------------------------------------------
 // Display — the canonical form. Mirrors phpstan/phpdoc-parser node __toString().
-// ----------------------------------------------------------------------------
 
 impl fmt::Display for Type {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -515,9 +510,8 @@ fn escape_single_quoted(v: &str) -> String {
 }
 
 /// `addcslashes($v, "\n\r\t\f\v$\"\\")` — escape the C-notation controls plus
-/// `$`, `"`, `\` for a double-quoted literal. The reference additionally hex-
-/// escapes stray control/invalid-UTF-8 bytes; those don't occur in valid type
-/// strings, so the common escapes suffice for canonical equality.
+/// `$`, `"`, `\` for a double-quoted literal. The reference also hex-escapes
+/// stray control/invalid-UTF-8 bytes, which don't occur in valid type strings.
 fn escape_double_quoted(v: &str) -> String {
     let mut out = String::with_capacity(v.len());
     for ch in v.chars() {

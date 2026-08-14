@@ -1,8 +1,7 @@
-//! End-to-end CLI tests for `steins check --fix` (ADR-0010/0020, issue #114):
-//! the first fix family — dump-statement removal for the explicit pair
-//! (`debug.type` / `debug.phpdoc-type`, ADR-0053). The write is gated by the
-//! transform engine's dual-verification post-check (ADR-0034): zero new
-//! diagnostics or nothing is written, with a named refusal either way.
+//! End-to-end CLI tests for `steins check --fix` (ADR-0010/0020, issue #114): the
+//! first fix family — dump-statement removal for `debug.type`/`debug.phpdoc-type`
+//! (ADR-0053). Writes are gated by the transform engine's dual-verification
+//! post-check (ADR-0034): zero new diagnostics or nothing written, named refusal either way.
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,12 +10,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
+/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -86,16 +82,14 @@ fn fix_removes_the_dump_statement_and_a_rerun_is_clean() {
     let proj = TempProject::new("applies");
     proj.write("app.php", DUMP_SRC);
 
-    // Without --fix the dump reports and reds the run (ADR-0053 §3), and the
-    // file is untouched — the plain surface is unchanged by this feature.
+    // Without --fix: dump reports, reds the run (ADR-0053 §3), file untouched.
     let plain = run(&["check", proj.path()]);
     assert_eq!(plain.code, 1, "stdout:\n{}", plain.stdout);
     assert!(plain.stdout.contains("error[debug.type]"), "plain run:\n{}", plain.stdout);
     assert!(!plain.stdout.contains("fixed["), "plain run must not report fixes:\n{}", plain.stdout);
     assert_eq!(proj.read("app.php"), DUMP_SRC);
 
-    // --fix removes the statement, reports what it fixed, and the fixed
-    // finding does not count toward the exit code (nothing survives → 0).
+    // --fix removes the statement; the fixed finding doesn't count toward exit (→ 0).
     let fixed = run(&["check", "--fix", proj.path()]);
     assert_eq!(fixed.code, 0, "stdout:\n{}\nstderr:\n{}", fixed.stdout, fixed.stderr);
     assert!(fixed.stdout.contains("fixed[debug.type]"), "fix report:\n{}", fixed.stdout);
@@ -115,16 +109,12 @@ fn fix_removes_the_dump_statement_and_a_rerun_is_clean() {
 
 #[test]
 fn the_gate_passes_a_removal_beside_an_unrelated_error() {
-    // Why this family was chosen to go first: a recognized dump is transparent
-    // (ADR-0053 point 10 — it reads facts and binds nothing), so deleting its
-    // statement cannot change what the rest of the file proves. `$x->m()` on a
-    // proven-null receiver already reports BEFORE the edit, so the post-check's
-    // per-id count is unchanged and the gate passes: the dump is removed, and
-    // the unrelated finding survives untouched and still reds the run.
-    //
-    // The refusal side of the gate is exercised where it can be reached at all:
-    // `post_check_gate_refuses_a_regressing_fix` in `crates/steins-cli/src/main.rs`
-    // drives `apply_fixes` with a synthetic regressing payload.
+    // This family goes first because a recognized dump is transparent (ADR-0053
+    // point 10 — reads facts, binds nothing), so removing it can't change what the
+    // rest of the file proves; the unrelated `$x->m()` error already reports before
+    // the edit, so the post-check's per-id count is unchanged and the gate passes.
+    // The refusal side is exercised in `post_check_gate_refuses_a_regressing_fix`
+    // (`crates/steins-cli/src/main.rs`), via a synthetic regressing payload.
     let proj = TempProject::new("gatepass");
     let src = "<?php\n$x = null;\n\\PHPStan\\dumpType($x);\n$x->m();\n";
     proj.write("app.php", src);
@@ -147,23 +137,20 @@ fn the_gate_passes_a_removal_beside_an_unrelated_error() {
 fn json_findings_carry_the_fix_payload_without_the_flag() {
     let proj = TempProject::new("payload");
     proj.write("app.php", DUMP_SRC);
-    // A second file with a fix-less proof finding, to pin the negative: no
-    // `fix` key on findings that carry none.
+    // Second file with a fix-less finding, to pin the negative: no `fix` key when none exists.
     proj.write("other.php", "<?php\nfunction width(int $w): int { return $w; }\nwidth(\"abc\");\n");
 
     let r = run(&["check", "--format", "json", proj.path()]);
     assert_eq!(r.code, 1);
     let v: serde_json::Value = serde_json::from_str(&r.stdout).expect("valid json");
-    // A plain run's document has no `fix` run report.
     assert!(v.get("fix").is_none(), "no top-level fix key without --fix:\n{}", r.stdout);
     let findings = v["findings"].as_array().expect("findings array");
     let dump = findings
         .iter()
         .find(|d| d["id"] == "debug.type")
         .expect("debug.type finding present");
-    // The payload: title + edits mirroring steins-edit's `Edit` shape. The
-    // statement `\PHPStan\dumpType($x);` occupies bytes 14..36 and stands
-    // alone on its line, so the deletion swallows the whole line (14..37).
+    // Payload mirrors steins-edit's `Edit` shape. The statement occupies bytes
+    // 14..36 alone on its line, so deletion swallows the whole line (14..37).
     assert_eq!(dump["fix"]["title"], "remove the dump statement");
     let edits = dump["fix"]["edits"].as_array().expect("edits array");
     assert_eq!(edits.len(), 1);
@@ -171,7 +158,6 @@ fn json_findings_carry_the_fix_payload_without_the_flag() {
     assert_eq!(edits[0]["span"]["end"], 37);
     assert_eq!(edits[0]["replacement"], "");
     assert!(edits[0]["path"].as_str().unwrap().ends_with("app.php"));
-    // The finding without a fix carries no such key at all.
     let mismatch = findings
         .iter()
         .find(|d| d["id"] == "type.argument-mismatch")
@@ -198,8 +184,7 @@ fn fix_with_json_reports_the_fixed_array() {
 
 #[test]
 fn var_dump_is_not_fixed() {
-    // Scope guard (issue #114): `debug.var-dump` carries no fix — a
-    // `var_dump()` is legal working PHP.
+    // Scope guard (issue #114): `debug.var-dump` has no fix — `var_dump()` is legal PHP.
     let proj = TempProject::new("vardump");
     let src = "<?php\n$x = 1;\nvar_dump($x);\n";
     proj.write("app.php", src);
@@ -213,8 +198,8 @@ fn var_dump_is_not_fixed() {
 
 #[test]
 fn embedded_dump_is_not_fixed_and_still_reds_the_run() {
-    // `$y = dumpType($x);` — deleting the whole statement would delete the
-    // binding too, so no fix rides along; the finding survives at fail level.
+    // `$y = dumpType($x);`: deleting the statement would delete the binding too,
+    // so no fix rides along; the finding survives at fail level.
     let proj = TempProject::new("embedded");
     let src = "<?php\n$x = 1;\n$y = \\PHPStan\\dumpType($x);\n";
     proj.write("app.php", src);
@@ -243,8 +228,7 @@ fn fix_and_set_baseline_is_a_usage_error() {
 
 #[test]
 fn multi_argument_dump_is_fixed_once() {
-    // Two findings (one per argument), ONE statement deletion: the identical
-    // edits dedupe into a single splice, and both findings report as fixed.
+    // Two findings (one per arg), ONE deletion: identical edits dedupe into a single splice.
     let proj = TempProject::new("multiarg");
     proj.write("app.php", "<?php\n$x = 1;\n$y = 2;\n\\PHPStan\\dumpType($x, $y);\n");
 

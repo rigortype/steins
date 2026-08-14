@@ -1,9 +1,9 @@
 //! ADR-0052 N4 — class facts and instanceof subtraction, at the walk-integration
 //! level. N4 owns **no finding id** (S6 supplies `phpdoc.undefined-method`), so
-//! its observable contract is: (1) it emits nothing new, and (2) its carriers
-//! never reach the §3 NOT-fed consumers — most sharply `call.undefined-method`,
-//! whose ladder requires *exactness* a `Member` fact must not supply. The
-//! carrier-level narrowing is asserted in the `n4_carrier_tests` unit module.
+//! its contract is: (1) emits nothing new, (2) its carriers never reach the §3
+//! NOT-fed consumers — most sharply `call.undefined-method`, whose ladder needs
+//! *exactness* a `Member` fact must not supply. Carrier-level narrowing is
+//! asserted in the `n4_carrier_tests` unit module.
 
 use steins_infer::{CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
@@ -15,9 +15,8 @@ fn n(src: &str) -> usize {
 }
 
 /// A boot-surface mock making the absence family (`call.undefined-method`, S2)
-/// available with an empty homonym surface — the environment in which the id
-/// *would* fire on a proven-exact receiver, so a silence here proves the receiver
-/// was NOT treated as exact.
+/// available with an empty homonym surface — the id *would* fire on a
+/// proven-exact receiver, so silence here proves the receiver was NOT exact.
 struct Boot;
 impl Folder for Boot {
     fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
@@ -39,9 +38,8 @@ fn undefined_method(src: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// N4 leaves `{Guest}` on the else path but emits nothing — the
-/// `phpdoc.undefined-method` at the `$value->name()` site is S6's id, so the
-/// whole program is silent under N4.
+/// N4 leaves `{Guest}` on the else path but emits nothing — `$value->name()`'s
+/// `phpdoc.undefined-method` finding is S6's id, so the program is silent under N4.
 const FIXTURE: &str = "<?php
 declare(strict_types=1);
 interface Named { public function name(): string; }
@@ -61,7 +59,7 @@ fn conformance_fixture_emits_nothing_under_n4() {
 
 #[test]
 fn instanceof_narrowing_adds_no_findings() {
-    // A spread of instanceof shapes over declared unions — all silent under N4.
+    // Spread of instanceof shapes over declared unions — all silent under N4.
     let src = "<?php
 interface I {}
 final class A implements I {}

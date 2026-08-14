@@ -1,20 +1,13 @@
 //! The reverse call-site sweep for phpdoc→native parameter promotion
-//! (ADR-0034 point 4 / ADR-0037): the precondition *all callers proven*, which
-//! is structurally unavailable to modular tools.
+//! (ADR-0034 point 4 / ADR-0037): promotion requires *all callers proven*,
+//! structurally unavailable to modular tools. `steins-edit` reuses this
+//! engine's name resolution (`Cx::resolve_function`, `Index`) through this
+//! seam and owns enumeration, native-type mapping, acceptance
+//! (`steins-contract::admits_*`), refusals, and edits.
 //!
-//! This is the narrow seam the transform engine (`steins-edit`) reaches into: it
-//! reuses the inference engine's own name resolution (`Cx::resolve_function`,
-//! the project `Index`) rather than forking it, and returns plain data. The
-//! transform crate owns candidate enumeration, native-type mapping, the
-//! acceptance judgment (`steins-contract::admits_*`), refusal assembly, and the
-//! edit mechanics — none of which need the inference internals.
-//!
-//! This sweep covers **free-function** targets; method call-site resolution across
-//! receivers is the parallel [`sweep_methods`] below. A candidate is safe to
-//! promote only when *every* call that could reach it is accounted for; the sweep
-//! therefore also records the project-wide obstacles that make "all callers"
-//! unknowable — dynamic calls, first-class/string references, and unresolved
-//! same-name calls.
+//! Covers **free-function** targets ([`sweep_methods`] handles methods),
+//! recording what makes "all callers reached" unknowable: dynamic calls,
+//! value references, unresolved same-name calls.
 
 use std::collections::{HashMap, HashSet};
 
@@ -26,13 +19,11 @@ use steins_syntax::{
 
 use crate::{Cx, FileUnit, FnResolution, Index, Store, resolve_call_target};
 
-/// One positional argument observed flowing into a target free function at a call
-/// site that resolved uniquely to it.
+/// One positional argument observed at a call site resolving uniquely to a target.
 #[derive(Debug, Clone)]
 pub struct ObservedArg {
     /// The zero-based positional parameter index this argument fills.
     pub param_index: usize,
-    /// The caller's file path (for the refusal/audit site).
     pub caller_path: String,
     pub line: u32,
     pub column: u32,
@@ -40,14 +31,8 @@ pub struct ObservedArg {
     pub value: ArgValue,
 }
 
-/// A recorded obstacle *site* in a sweep (ADR-0047 §6): a file path plus a source
-/// position. Mirrors the `steins_edit::transform::SiteRef` shape used for dynamism
-/// obstacles (`steins-edit/src/obstacles.rs`) minus its human `label` — the label
-/// is a rendering concern the planner owns, and region attribution (ADR-0047 §2)
-/// keys purely on `path`; `line`/`column` only spell a better message. Carrying
-/// the site (instead of a bare boolean or bare name) is what lets the partition
-/// planner attribute each obstacle to its declaring region. With one region a site
-/// list is used only as "present / absent".
+/// A recorded obstacle *site* (ADR-0047 §6), so the partition planner can
+/// attribute each obstacle to its region (§2 keys on `path`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweepSite {
     pub path: String,
@@ -65,41 +50,26 @@ impl SweepSite {
 /// The reverse-sweep facts for one free-function target (keyed by lowercased FQN).
 #[derive(Debug, Clone, Default)]
 pub struct TargetSweep {
-    /// Every positional argument at every uniquely-resolving call site.
     pub observed: Vec<ObservedArg>,
-    /// A call resolving to this target used named or spread arguments (positional
-    /// mapping is unreliable) — the `named-or-spread-args` refusal trigger.
+    /// A call used named/spread args (positional mapping unreliable) —
+    /// `named-or-spread-args` refusal trigger.
     pub named_or_spread: bool,
 }
 
 /// The whole-project reverse sweep the promotion planner consumes.
 #[derive(Debug, Clone, Default)]
 pub struct FreeFnSweep {
-    /// Target lowercased FQN → observed args + flags.
     pub targets: HashMap<String, TargetSweep>,
-    /// The sites of dynamic (`$fn()`) or otherwise unrepresentable calls. Such a
-    /// call could target *any* free function, so while the list is non-empty every
-    /// candidate is tainted (`dynamic-call-present`). Conservative and sound: a
-    /// non-empty list taints every candidate, an empty one taints none. Region
-    /// attribution of the sites (ADR-0047 §2) is not yet consumed.
+    /// Dynamic (`$fn()`) call sites — taint every candidate (`dynamic-call-present`).
     pub dynamic_call_sites: Vec<SweepSite>,
-    /// Lowercased names (every qualified spelling seen, plus its last segment) that
-    /// appear as string or first-class-callable *values* → the sites at which they
-    /// so appear — the `function-referenced-as-value` trigger. A candidate whose
-    /// FQN or simple name is **present as a key** cannot be promoted (a
-    /// `call_user_func`-style caller is invisible to call resolution). Key presence
-    /// is the taint predicate; the site list preserves where the taint arose.
+    /// Names seen as callable *values* → sites (`function-referenced-as-value`).
     pub value_referenced_names: HashMap<String, Vec<SweepSite>>,
-    /// Lowercased simple names of function-callee calls that did **not** resolve to
-    /// a unique user function (ambiguous / builtin-shadowed / unknown) → the sites
-    /// of those calls. A candidate whose simple name is **present as a key** can't
-    /// be proven to see all of its callers (`resolution-ambiguous`).
+    /// Names unresolved to a unique function → sites (`resolution-ambiguous`).
     pub unresolved_simple_names: HashMap<String, Vec<SweepSite>>,
 }
 
-/// Sweep every call in `project`, attributing positional arguments to the free
-/// functions they uniquely resolve to and recording the obstacles that would make
-/// "all callers proven" unknowable.
+/// Sweep every call, attributing args to free functions and recording what
+/// makes "all callers proven" unknowable.
 #[must_use]
 pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
@@ -116,24 +86,15 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
         let tree = cx.tree();
         let path = cx.path();
         for call in tree.calls() {
-            // The site every obstacle this call raises is attributed to (the caller
-            // location; region attribution keys on `path`).
             let cp = tree.position(call.span.start);
             let call_site = SweepSite::new(path, cp.line, cp.column);
 
-            // Value-reference scan across every argument, regardless of callee
-            // kind: a function name flowing as a string/callable value is a caller
-            // invisible to resolution.
             for arg in &call.args {
                 collect_value_names(&arg.value, &call_site, &mut out.value_referenced_names);
             }
 
-            // `call_user_func`/`call_user_func_array` whose callable argument is an
-            // opaque runtime value (a bare variable, a call result, …) carries no
-            // name the scan above can see — it could hold ANY free function at
-            // runtime. Taint broadly, mirroring a direct dynamic `$fn()` call,
-            // rather than silently seeing nothing (same family as issue #6's
-            // callable-array gap).
+            // An opaque `call_user_func*` argument could hold ANY free function
+            // (issue #6's callable-array gap) — taint broadly.
             if let Callee::Function(name) = &call.receiver
                 && is_generic_invoker(name)
                 && let Some(callable_arg) = call.args.first()
@@ -175,24 +136,17 @@ pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
                         }
                     }
                 }
-                // Method / static / constructor calls are not free-function calls;
-                // their arguments were already scanned for value-references above.
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {}
             }
         }
 
-        // A first-class callable / function-name string can also flow through a
-        // non-call value position (`$g = f(...);`, `return 'f';`), invisible to
-        // `calls()`. Scan the scope traces too.
         scan_scope_values(tree, path, &mut out.value_referenced_names);
     }
     out
 }
 
-/// Scan every scope's linear trace for function-name-shaped values that escape
-/// through a non-call position (assignment / property-assignment / return rhs,
-/// recursing into structured `if`/`match` sub-traces). Each name found is recorded
-/// with the site of its enclosing statement.
+/// Scan every scope for function-name-shaped values escaping through
+/// assignment/return, recursing into `if`/`match`.
 fn scan_scope_values(tree: &SourceTree, path: &str, map: &mut HashMap<String, Vec<SweepSite>>) {
     for scope in tree.scopes() {
         scan_stmts(&scope.stmts, tree, path, map);
@@ -235,13 +189,11 @@ fn scan_stmts(
     }
 }
 
-/// Recursively collect function-name-shaped string and first-class-callable
-/// *values* into `map` (lowercased; both the full spelling with a leading `\`
-/// stripped and its last segment), each keyed name recording `site`.
+/// Recursively collect function-name-shaped values into `map` (full spelling +
+/// last segment, lowercased), keyed by `site`.
 fn collect_value_names(v: &ArgValue, site: &SweepSite, map: &mut HashMap<String, Vec<SweepSite>>) {
     match v {
-        // A name lane: a byte string is no PHP symbol name, so it seeds nothing
-        // (ADR-0080 §2.5).
+        // A byte string is no PHP symbol name (ADR-0080 §2.5).
         ArgValue::Str(s) => {
             if let Some(s) = s.as_str() {
                 insert_name_forms(s, site, map);
@@ -268,28 +220,18 @@ fn insert_name_forms(raw: &str, site: &SweepSite, map: &mut HashMap<String, Vec<
     push_name(map, norm, site);
 }
 
-/// Record `site` under `name` in a name→sites taint map (ADR-0047 §6 carriage):
-/// key presence is the taint predicate; the appended site records where the taint
-/// arose, for region attribution (ADR-0047 §2) and better messages.
+/// Record `site` under `name` in a name→sites taint map (ADR-0047 §6).
 fn push_name(map: &mut HashMap<String, Vec<SweepSite>>, name: String, site: &SweepSite) {
     map.entry(name).or_default().push(site.clone());
 }
 
-/// Whether `name` (a `Callee::Function` simple name, as written) is one of PHP's
-/// generic first-class-callable invokers — the `call_user_func*` family named
-/// explicitly in the `function-referenced-as-value` taxonomy (ADR-0041 §3):
-/// their first argument is *itself* the callable to invoke, so an opaque value
-/// there is invisible to ordinary call resolution.
+/// A `call_user_func*` invoker (ADR-0041 §3): its first arg is itself the callable.
 fn is_generic_invoker(name: &str) -> bool {
     name.eq_ignore_ascii_case("call_user_func") || name.eq_ignore_ascii_case("call_user_func_array")
 }
 
-/// Whether `v` is a runtime value the literal-value scan (`collect_value_names`)
-/// cannot already account for, and which could hold an arbitrary callable at
-/// runtime: a bare variable, a call result, a `new`, a ternary, a property fetch,
-/// … — anything that is neither a name-shaped literal (a string, a first-class-
-/// callable reference, a callable array — all already scanned) nor a scalar shape
-/// PHP would reject as a callable outright (`int`/`float`/`bool`/`null`).
+/// Whether `v` could hold an arbitrary callable: not a name-shaped literal nor
+/// a scalar PHP rejects outright as callable.
 fn callable_arg_is_opaque(v: &ArgValue) -> bool {
     !matches!(
         v,
@@ -303,44 +245,22 @@ fn callable_arg_is_opaque(v: &ArgValue) -> bool {
     )
 }
 
-// ===========================================================================
-// The method-call reverse sweep (ADR-0043 §6): the class-world analogue of
-// `sweep_free_functions`. Where a free function is keyed by its FQN, a method is
-// keyed by `(class_fqn, method_name)` — the `Sym::Method` shape — and its callers
-// arrive through the six receiver forms (`$this->m()`, `self::`/`parent::m()`,
-// `Foo::m()`, `(new Foo)->m()`, `$var->m()`). The sweep resolves each call to a
-// unique target method (the checker's own `resolve_call_target`) and attributes
-// its positional arguments; a call it cannot resolve to a unique target taints the
-// *method name* project-wide — the conservative soundness rule (a method M is
-// enumerable only if EVERY call that could reach M is resolved).
-//
-// Soundness-first precision limit (ADR-0043 §6): a `$var->m()` receiver resolves
-// only when the sweep can prove `$var`'s exact class. The sweep has no per-scope
-// object heap, so every `$var->m()` taints its method name. Enclosing-class-aware
-// `$this->`/`self::`/`parent::` and explicit `Foo::`/`new Foo()->` resolution is
-// precise, so private/final methods reachable only through those forms remain
-// enumerable.
-// ===========================================================================
+// The method-call reverse sweep (ADR-0043 §6), keyed by `(class_fqn, method_name)`.
+// An unresolved call taints the *method name* project-wide. Precision limit: no
+// per-scope object heap, so `$var->m()` always taints (can't prove its exact class).
 
-/// A method target key: `(class_fqn, method_name)`, both ASCII-lowercased — the
-/// [`steins_syntax`]/`Sym::Method` identity the checker keys method dispatch on.
+/// A method target key: `(class_fqn, method_name)`, lowercased.
 pub type MethodKey = (String, String);
 
-/// Whether a class method may host a phpdoc→native rewrite (the ADR-0041 §1
-/// eligibility split), computed from the class hierarchy alone (independent of any
-/// docblock). The transform crate turns a non-`Eligible` verdict into the reserved
-/// `magic-method` / `method-inheritance` refusal.
+/// Whether a class method may host a phpdoc→native rewrite (ADR-0041 §1 split),
+/// from the hierarchy alone; non-`Eligible` → `magic-method`/`method-inheritance`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MethodEligibility {
-    /// Private, or final, or a method of a final class, with no inheritance
-    /// involvement — narrowing its parameter cannot break Liskov substitution.
+    /// Private, final, or on a final class — narrowing cannot break Liskov.
     Eligible,
-    /// A magic method (`__construct`, `__wakeup`, `__toString`, any `__*`): never a
-    /// candidate (ADR-0046 §3). Carries no detail — the reason name says it all.
+    /// A magic method (`__*`, e.g. `__construct`): never a candidate (ADR-0046 §3).
     Magic,
-    /// The method is inheritance-involved (overridable, overriding, abstract, an
-    /// interface method, or in a class whose hierarchy is not fully resolvable), so
-    /// a partial rewrite would risk Liskov. Carries the human detail.
+    /// Inheritance-involved, so a partial rewrite would risk Liskov. Carries detail.
     Inheritance(String),
 }
 
@@ -348,34 +268,20 @@ pub enum MethodEligibility {
 /// consume (ADR-0043 §6). Parallel to [`FreeFnSweep`] but keyed on [`MethodKey`].
 #[derive(Debug, Clone, Default)]
 pub struct MethodSweep {
-    /// `(class_fqn, method)` → observed positional args + the named/spread flag,
-    /// for every call that resolved *uniquely and exactly* to that method.
     pub targets: HashMap<MethodKey, TargetSweep>,
-    /// The sites of dynamic method calls (`$o->$m()`, `$o::{$m}()`, or any
-    /// [`Callee::Dynamic`]) — each could target *any* method, so while the list is
-    /// non-empty every candidate is tainted (the `dynamic-call-present` refusal).
-    /// Conservative and sound: a non-empty list taints every method candidate, an
-    /// empty one taints none.
+    /// Dynamic method call sites — taint every candidate (`dynamic-call-present`).
     pub dynamic_method_sites: Vec<SweepSite>,
-    /// Lowercased method names that appear in a method call the sweep could NOT
-    /// resolve to a unique target (an unknown-class `$var->m()`, a non-final
-    /// overridable `self::m()`, a chain that leaves the project, …) → the sites of
-    /// those calls. A candidate whose name is **present as a key** cannot prove it
-    /// sees all its callers (`resolution-ambiguous`); the **first** recorded site
-    /// is the representative the refusal names (source order, as before).
+    /// Unresolved method names → sites (`resolution-ambiguous`); first is the
+    /// refusal's representative.
     pub unresolved_method_names: HashMap<String, Vec<SweepSite>>,
-    /// Lowercased method names referenced as a *value* — a callable string
-    /// `'Foo::m'` or a callable array `[$o, 'm']` — a caller invisible to call
-    /// resolution (`function-referenced-as-value`) → the sites of those references.
+    /// Method names referenced as a *value* → sites (`function-referenced-as-value`).
     pub value_referenced_methods: HashMap<String, Vec<SweepSite>>,
-    /// `(class_fqn, method)` → the ADR-0041 §1 eligibility verdict for *every*
-    /// method declared in the project (independent of its docblock).
+    /// The ADR-0041 §1 eligibility verdict, every declared method.
     pub eligibility: HashMap<MethodKey, MethodEligibility>,
 }
 
-/// Sweep every method call in `project`, attributing positional arguments to the
-/// methods they uniquely resolve to, recording the obstacles that make "all
-/// callers proven" unknowable, and computing each declared method's eligibility.
+/// Sweep every method call in `project`: attribute args, record what makes "all
+/// callers proven" unknowable, and compute each declared method's eligibility.
 #[must_use]
 pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
@@ -394,8 +300,7 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
         let tree = cx.tree();
         let path = cx.path();
 
-        // (1) Resolve method calls per scope (the scope owner supplies the enclosing
-        // class for `$this->`/`self::`/`parent::`).
+        // (1) Resolve method calls per scope (owner gives enclosing class).
         for scope in tree.scopes() {
             let enclosing = match &scope.owner {
                 ScopeOwner::Method { class, .. } => Some(class.as_str()),
@@ -404,8 +309,6 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
             for call in &scope.method_calls {
                 let cp = tree.position(call.span.start);
                 let call_site = SweepSite::new(path, cp.line, cp.column);
-                // Value-reference scan across every argument (a method name flowing
-                // as a callable string/array is a caller invisible to resolution).
                 for arg in &call.args {
                     collect_method_value_names(
                         &arg.value,
@@ -420,9 +323,8 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
             }
         }
 
-        // (2) A callable string/array can also flow through a value position
-        // (a free-function call arg like `usort($x, [$o, 'm'])`, an assignment, or a
-        // return) — scan free-function call args and scope traces too.
+        // (2) A callable can also flow through a free-function call arg, e.g.
+        // `usort($x, [$o, 'm'])`.
         for call in tree.calls() {
             let cp = tree.position(call.span.start);
             let call_site = SweepSite::new(path, cp.line, cp.column);
@@ -435,7 +337,7 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
                 );
             }
             if matches!(call.receiver, Callee::Dynamic) {
-                // `$arr['x']()` and friends could invoke a method via a callable.
+                // `$arr['x']()` and friends could invoke a method.
                 out.dynamic_method_sites.push(call_site);
             }
         }
@@ -460,8 +362,7 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
     out
 }
 
-/// Resolve one method/static call, attributing its args on a unique resolution or
-/// tainting its method name otherwise.
+/// Resolve one method/static call: attribute its args, or taint its method name.
 #[allow(clippy::too_many_arguments)]
 fn resolve_one_method_call(
     cx: &Cx,
@@ -508,9 +409,7 @@ fn resolve_one_method_call(
             }
         }
         None => {
-            // Unresolved to a unique target → taint the method name project-wide.
-            // The first site recorded (source order) is the representative the
-            // `resolution-ambiguous` refusal names.
+            // Taint project-wide; first recorded site is the refusal's representative.
             let p = tree.position(call.span.start);
             out.unresolved_method_names
                 .entry(method_name.to_ascii_lowercase())
@@ -522,13 +421,10 @@ fn resolve_one_method_call(
 
 /// The ADR-0041 §1 eligibility split, computed from the class hierarchy alone.
 fn method_eligibility(cx: &Cx, class: &ClassDecl, m: &MethodDecl) -> MethodEligibility {
-    // Magic methods are never candidates (ADR-0046 §3): `__construct`, `__wakeup`,
-    // `__toString`, and every other `__`-prefixed reserved name.
+    // Magic methods are never candidates (ADR-0046 §3).
     if m.is_constructor || m.name.starts_with("__") {
         return MethodEligibility::Magic;
     }
-    // Interface methods are inherited contract points; abstract methods are
-    // implemented by subclasses — both are inherently override sites.
     if class.is_interface {
         return MethodEligibility::Inheritance(
             "an interface method is an inherited contract point".to_owned(),
@@ -539,17 +435,12 @@ fn method_eligibility(cx: &Cx, class: &ClassDecl, m: &MethodDecl) -> MethodEligi
             "an abstract method is implemented (overridden) by every subclass".to_owned(),
         );
     }
-    // A trait-using class merges methods whose bodies live elsewhere, so override
-    // analysis is incomplete — refuse rather than misclassify.
     if class.uses_traits {
         return MethodEligibility::Inheritance(
             "the class `use`s a trait; trait methods merge in, so override analysis is incomplete"
                 .to_owned(),
         );
     }
-    // The promotable kind: private, or final, or a method of a final class. A
-    // non-final public/protected method on a non-final class may be overridden by a
-    // subclass, so narrowing its parameter could break Liskov substitution.
     let promotable = m.is_final || m.visibility == Visibility::Private || class.is_final;
     if !promotable {
         return MethodEligibility::Inheritance(
@@ -557,18 +448,13 @@ fn method_eligibility(cx: &Cx, class: &ClassDecl, m: &MethodDecl) -> MethodEligi
                 .to_owned(),
         );
     }
-    // A private method is not part of dispatch inheritance (PHP resolves it by the
-    // calling scope's class, never a subclass override), so narrowing it is always
-    // Liskov-safe — no ancestor analysis needed. "Not overridden by a subclass" is
-    // guaranteed for the other promotable kinds too: a final method cannot be
-    // overridden, and a final class cannot be subclassed.
+    // Private dispatches by the calling scope's class, never a subclass — always
+    // Liskov-safe, no ancestor walk needed.
     if m.visibility == Visibility::Private {
         return MethodEligibility::Eligible;
     }
-    // A final method, or a method of a final class, that is non-private: it must not
-    // *override* an ancestor's method of the same name (a caller holding the
-    // supertype could reach this body through dispatch, so narrowing would break
-    // Liskov). Prove the ancestor set is fully enumerated and free of that name.
+    // Must not *override* an ancestor method of the same name (a supertype
+    // caller could break Liskov).
     match overrides_ancestor(cx, &class.fqn, &m.name) {
         AncestorVerdict::Clean => MethodEligibility::Eligible,
         AncestorVerdict::Overrides => MethodEligibility::Inheritance(
@@ -584,19 +470,15 @@ fn method_eligibility(cx: &Cx, class: &ClassDecl, m: &MethodDecl) -> MethodEligi
 
 /// The result of the strict-ancestor override walk.
 enum AncestorVerdict {
-    /// The ancestor set is fully enumerated and no ancestor declares the method.
+    /// Fully enumerated; no ancestor declares the method.
     Clean,
-    /// Some ancestor declares a method of that name — the candidate overrides it.
+    /// Some ancestor declares a method of that name.
     Overrides,
-    /// The ancestor set is not fully enumerable (an unresolved parent/interface, a
-    /// trait-using ancestor, or a builtin whose methods are opaque).
+    /// Not fully enumerable (unresolved parent/interface, trait, opaque builtin).
     Incomplete,
 }
 
-/// Walk `class_fqn`'s strict ancestors (parent + `implements`, transitively) for a
-/// declaration of `method`. `Overrides` on the first hit; `Incomplete` if any
-/// ancestor edge cannot be enumerated (an unknown external, a trait-using class, or
-/// a builtin whose method surface is opaque to us).
+/// Walk `class_fqn`'s ancestors for `method`; `Incomplete` if any edge unenumerable.
 fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict {
     let Some(mut queue) = cx.ancestors_of(class_fqn) else {
         return AncestorVerdict::Incomplete;
@@ -612,8 +494,7 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
                 if cd.methods.iter().any(|mm| mm.name.eq_ignore_ascii_case(method)) {
                     return AncestorVerdict::Overrides;
                 }
-                // A trait-using ancestor may merge in a method of that name we cannot
-                // see — cannot prove "does not override".
+                // A trait ancestor may merge in a same-name method we can't see.
                 if cd.uses_traits {
                     incomplete = true;
                 }
@@ -622,8 +503,7 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
                     None => incomplete = true,
                 }
             }
-            // A catalogued builtin (or unknown external): its method surface is
-            // opaque, so we cannot prove the candidate does not override one of them.
+            // Builtin/unknown external: method surface is opaque.
             None => incomplete = true,
         }
     }
@@ -631,19 +511,11 @@ fn overrides_ancestor(cx: &Cx, class_fqn: &str, method: &str) -> AncestorVerdict
 }
 
 /// Extract a method name referenced as a *callable value* into `set`: a callable
-/// string `'Foo::method'` (name after the last `::`) or a callable array
-/// `[$target, 'method']` (a 2-element array whose second entry is a string method
-/// name). Recurses into arrays so a callable nested in a value is still seen.
-///
-/// A callable array whose method-name position (the second entry) is present but
-/// **not** a literal string — `[$obj, $var]`, `[$obj, someExpr()]`, … — names no
-/// method at all, so it cannot be added to `set`; left undetected, it would be a
-/// caller invisible to *every* method of whatever name `$var` resolves to at
-/// runtime (issue #6). Context-sensitively tracking what the variable might hold
-/// is out of scope (ADR-0041/0046): instead this mirrors the existing `$o->$m()`
-/// (`Callee::Dynamic`) handling and records a dynamic site — the broadest,
-/// conservative fallback that taints every method project-wide, exactly like an
-/// unresolvable dynamic method-call selector.
+/// string `'Foo::method'` or array `[$target, 'method']`, recursing into arrays.
+/// A non-literal method-name position (`[$obj, $var]`) names no method, and left
+/// undetected would be a caller invisible to any method the value could resolve
+/// to at runtime (issue #6); value tracking is out of scope (ADR-0041/0046), so
+/// this records a dynamic site instead, tainting every method project-wide.
 fn collect_method_value_names(
     v: &ArgValue,
     site: &SweepSite,
@@ -659,8 +531,7 @@ fn collect_method_value_names(
             }
         }
         ArgValue::Array(items) => {
-            // A classic callable array `[$obj, 'method']` / `[Foo::class, 'method']`
-            // is exactly two entries; the second is the method-name position.
+            // A callable array is exactly two entries; the second is the name.
             if items.len() == 2 {
                 match &items[1].1 {
                     ArgValue::Str(name) => {
@@ -670,8 +541,7 @@ fn collect_method_value_names(
                             push_name(set, name.to_ascii_lowercase(), site);
                         }
                     }
-                    // Non-literal method-name position: no name can be extracted, so
-                    // taint broadly rather than silently seeing nothing.
+                    // No name extractable: taint broadly rather than see nothing.
                     _ => dynamic.push(site.clone()),
                 }
             }
@@ -683,8 +553,8 @@ fn collect_method_value_names(
     }
 }
 
-/// Scan a scope's linear trace for callable values escaping through an assignment /
-/// property-assignment / return position, recursing into `if`/`match` sub-traces.
+/// Scan a scope's trace for callable values escaping through assignment or
+/// return, recursing into `if`/`match`.
 fn scan_scope_method_values(
     scope: &Scope,
     tree: &SourceTree,
@@ -737,9 +607,8 @@ fn scan_stmts_method_values(
     }
 }
 
-/// Whether `s` is a plain PHP identifier (a method-name shape) — so a random string
-/// literal that merely contains `::` or sits in a 2-element array is not mistaken
-/// for a callable reference.
+/// Whether `s` is a plain PHP identifier, so a random string merely containing
+/// `::` isn't mistaken for a callable reference.
 fn is_identifier(s: &str) -> bool {
     let mut chars = s.chars();
     matches!(chars.next(), Some(c) if c == '_' || c.is_ascii_alphabetic())

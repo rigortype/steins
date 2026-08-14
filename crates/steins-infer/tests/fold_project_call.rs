@@ -1,8 +1,7 @@
 //! Issue #127 — a foldable builtin's project-call argument resolves through the
 //! T0 summary, so `strtoupper(g(1))` folds once `g` proves a string.
 //!
-//! Project shadows, ambiguous simple names, conditional polyfills, and
-//! non-Singleton summaries still decline.
+//! Project shadows, ambiguous names, polyfills, and non-Singleton summaries decline.
 
 use steins_infer::{
     DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, RETURN_ID, check, check_with,
@@ -59,9 +58,7 @@ fn count(src: &str, id: &str, folder: Option<&mut dyn Folder>) -> usize {
 
 #[test]
 fn strtoupper_of_project_call_folds() {
-    // The gap the value IR documented: `strtoupper(g(1))` widened because the
-    // fold gate only saw direct literals. With #127, `g(1)`'s Singleton summary
-    // is a concrete fold argument.
+    // #127: `g(1)`'s Singleton summary is now a concrete fold argument.
     let src = "<?php\n\
         function g(int $t): string { return \"hi\"; }\n\
         $x = strtoupper(g(1));\n\
@@ -97,25 +94,19 @@ fn project_function_shadowing_the_builtin_declines() {
         function g(int $t): string { return \"hi\"; }\n\
         $x = strtoupper(g(1));\n\
         \\PHPStan\\dumpType($x);\n";
-    // Shadowed name: no fold. Summary of the project strtoupper may still bind
-    // via the method/function summary path if it descends — here the body returns
-    // a literal, so the summary can pin 'shadow'. Either way it must not invent
-    // 'HI' from the builtin.
+    // Shadowed name: no builtin fold; project summary may pin 'shadow', never 'HI'.
     let ty = one_type(src);
     assert_ne!(ty, "'HI'", "must not fold through a project-shadowed name: {ty}");
 }
 
 #[test]
 fn non_singleton_project_summary_declines_the_fold() {
-    // `g` returns opaque `(string) rand()` → no Singleton → fold gate declines.
-    // The assignment then takes the builtin declared-return floor (uppercase-string
-    // asserted), never invents a concrete folded string from a non-Singleton arg.
+    // `g` returns opaque `(string) rand()`: no Singleton, so the fold gate declines.
     let src = "<?php\n\
         function g(int $t): string { return (string) rand(); }\n\
         $x = strtoupper(g(1));\n\
         \\PHPStan\\dumpType($x);\n";
     let ty = one_folded(src);
-    // Floor or abstract refinement — never a concrete folded string like `'…'`.
     assert!(
         !ty.starts_with('\''),
         "must not invent a folded string literal from a non-Singleton arg: {ty}"
@@ -124,8 +115,7 @@ fn non_singleton_project_summary_declines_the_fold() {
 
 #[test]
 fn zero_arg_project_call_stays_on_const_fn_lane() {
-    // Zero-arg project calls are `resolve_const_fn`, not the T0 summary (T0 needs
-    // a bound arg). Flagship still works for the empty-arg constant form.
+    // Zero-arg calls use `resolve_const_fn`, not the T0 summary (which needs a bound arg).
     let src = "<?php\n\
         function hi(): string { return \"hi\"; }\n\
         $x = strtoupper(hi());\n\
@@ -135,9 +125,8 @@ fn zero_arg_project_call_stays_on_const_fn_lane() {
 
 // Recursion through a fold arg terminates
 
-/// Shared helpers for the Asserted-fold laundering fixtures (issue #127 review).
-/// `g` asserts its second arg is `'hi'` and returns it; `strtoupper(g(...))` folds
-/// to `'HI'` at Asserted — every proof-layer consumer must stay silent.
+/// Asserted-fold laundering fixtures (#127 review): `g` asserts arg 2 is `'hi'`, so
+/// `strtoupper(g(...))` folds to `'HI'` at Asserted — no consumer may launder to Verified.
 const ASSERTED_FOLD_PRELUDE: &str = "\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\
@@ -149,8 +138,7 @@ const ASSERTED_FOLD_PRELUDE: &str = "\
 
 #[test]
 fn asserted_project_summary_fold_stays_asserted() {
-    // Assignment path: fold result binds Asserted; env-read `takesInt($result)`
-    // must not launder to Verified.
+    // Assignment path: fold result binds Asserted; env-read must not launder to Verified.
     let src = format!(
         "<?php\n{ASSERTED_FOLD_PRELUDE}\
         $result = strtoupper(g(1, (string) rand()));\n\
@@ -167,8 +155,7 @@ fn asserted_project_summary_fold_stays_asserted() {
 
 #[test]
 fn asserted_fold_direct_free_function_argument_stays_silent() {
-    // Direct argument position — no assignment detour. The argument checker must
-    // use the fold's resolved stratum, not a syntactic re-read of the Call tree.
+    // Direct arg position: checker must use the fold's resolved stratum, not re-read the tree.
     let src = format!(
         "<?php\n{ASSERTED_FOLD_PRELUDE}\
         takesInt(strtoupper(g(1, (string) rand())));\n"
@@ -221,9 +208,8 @@ fn asserted_fold_return_position_stays_silent() {
 
 #[test]
 fn fold_arg_emits_binding_specific_finding() {
-    // Issue #127 review (High): when `g(1)` is resolved only as a fold argument,
-    // the nested descent must emit through the real findings sink — not a scratch
-    // that discards binding-specific diagnostics plain walk cannot see.
+    // #127 review: resolving `g(1)` as a fold argument must emit through the real
+    // findings sink, not a scratch that discards binding-specific diagnostics.
     // Strict mode: int→string is a proven TypeError only under the binding `$x = 1`.
     let src = "<?php\n\
         declare(strict_types=1);\n\
@@ -252,9 +238,8 @@ fn fold_arg_emits_binding_specific_finding() {
 
 #[test]
 fn mutual_recursion_through_fold_arg_terminates() {
-    // a → strtoupper(b($n)) → b → strtoupper(a($n)): the on-stack guard (when
-    // threaded) and depth bound keep this finite. Result is the arm floor or a
-    // proven value — never a hang, never a wrong partial fold.
+    // a → strtoupper(b($n)) → b → strtoupper(a($n)): the on-stack guard and depth
+    // bound keep this finite, giving the arm floor or a proven value, never a hang.
     let src = "<?php\n\
         function a(int $n): string {\n\
             if ($n <= 0) { return \"z\"; }\n\
@@ -267,7 +252,6 @@ fn mutual_recursion_through_fold_arg_terminates() {
         $x = a(1);\n\
         \\PHPStan\\dumpType($x);\n";
     let ty = one_folded(src);
-    // Bounded: either a concrete folded string or the declared string floor.
     assert!(
         ty == "string" || ty.starts_with('\''),
         "sound + terminating: {ty}"

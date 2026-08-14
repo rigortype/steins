@@ -2,20 +2,17 @@
 //! subtraction (presence- and tag-based), the collapse that mints a fact from a
 //! subtracted arm lane, and the A-G8 write/unset invalidation table.
 //!
-//! Four disciplines are pinned here, not just the spellings:
+//! Disciplines pinned here, not just the spellings: shape facts are `Asserted`
+//! (A-G9's corollary) and must never decide a guard verdict or prune a region —
+//! the historical FP class, tripwired by
+//! [`shape_facts_do_not_decide_guard_verdicts`]; zero emission (as in S3);
+//! flavor discipline (A-G8 S2) — `isset` strips null, `array_key_exists` does
+//! not, on both lanes; and the write rule is contained — `$x['k'] = v` /
+//! `unset($x['k'])` keep pre-S4 barrier semantics for every binding but the
+//! base's shape.
 //!
-//! * **No reachability from a shape truth.** Shape facts are `Asserted`
-//!   (A-G9's corollary), and they must not decide a guard verdict
-//!   or prune a region — the historical FP class. The tripwire is
-//!   [`shape_facts_do_not_decide_guard_verdicts`].
-//! * **Zero emission.** As in S3, no test here may produce a non-debug finding.
-//! * **Flavor discipline** (A-G8's S2 correction, applied to guards): `isset`
-//!   strips null and `array_key_exists` does not, on both lanes.
-//! * **Containment of the write rule.** `$x['k'] = v` and `unset($x['k'])` keep
-//!   the pre-S4 barrier semantics for every binding except the base's shape.
-//!
-//! NB: a variable handed to a call is invalidated after that statement
-//! (pre-existing by-ref conservatism), so each fixture dumps a binding once.
+//! NB: a call invalidates its argument after the statement (by-ref
+//! conservatism), so each fixture dumps a binding once.
 
 use std::collections::HashMap;
 
@@ -23,9 +20,8 @@ use steins_domain::{Base, Fact, IntRange, Refinement};
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The same mock sidecar S3's suite uses: the two reflected envelopes the
-/// ADR-0061 admission gate consults for the `count`/`array_is_list` transfers,
-/// plus the absence-family boot surface.
+/// The same mock sidecar S3's suite uses (ADR-0061 admission gate: `count`/
+/// `array_is_list` transfers, plus the absence-family boot surface).
 #[derive(Default)]
 struct Mock {
     facts: HashMap<String, Fact>,
@@ -62,8 +58,7 @@ fn diagnostics(src: &str) -> Vec<Diagnostic> {
     check_with(&tree, &[], "t.php", &mut Mock::sidecar())
 }
 
-/// The single `debug.type` body a one-dump source produces, asserting on the way
-/// that the source produced NO other finding (the zero-emission discipline).
+/// The single `debug.type` body a one-dump source produces (asserts zero-emission too).
 fn one_type(src: &str) -> String {
     let ds = diagnostics(src);
     let other: Vec<&Diagnostic> = ds.iter().filter(|d| !d.id.starts_with("debug.")).collect();
@@ -111,8 +106,8 @@ fn isset_promotion_does_not_leak_to_the_sibling_key() {
 
 #[test]
 fn isset_strips_null_from_the_value_slot_but_array_key_exists_does_not() {
-    // The A-G8 S2 flavor correction, applied to guards: `isset` is false on a
-    // present-null entry, `array_key_exists` is true.
+    // A-G8 S2 flavor correction: `isset` is false on a present-null entry,
+    // `array_key_exists` is true.
     assert_eq!(
         guarded("array{a?: string|null}", "isset($v['a'])", "$v['a']"),
         "dumped type: string (asserted)"
@@ -157,14 +152,11 @@ fn assert_isset_routes_through_the_same_guard_path() {
 
 // ---- `empty()` (S6-residue): PHP's own definition, lowered ------------------
 //
-// `empty(e)` ≡ `!isset(e) || !e`. The lowering says exactly that and adds no
-// `empty`-aware narrowing code anywhere, so both polarities below are the
-// compositional walk's answers, not a special case:
-//
-// * `empty(…)` TRUE is a disjunction of two negations — it records nothing,
-//   which is right (the key may be absent, or present and falsy);
-// * `empty(…)` FALSE is De Morgan'd to `isset(e) && e`, whose `isset` half is
-//   the ordinary presence promotion — so `!empty($v['a'])` discharges the read.
+// `empty(e)` ≡ `!isset(e) || !e`, lowered exactly that way with no
+// `empty`-aware narrowing code, so both polarities below fall out of the
+// compositional walk: TRUE is a disjunction of two negations (records
+// nothing — the key may be absent, or present and falsy); FALSE De Morgan's
+// to `isset(e) && e`, whose `isset` half is ordinary presence promotion.
 
 #[test]
 fn not_empty_promotes_the_key_exactly_as_isset_does() {
@@ -181,8 +173,7 @@ fn not_empty_promotes_the_key_exactly_as_isset_does() {
 
 #[test]
 fn not_empty_strips_null_from_the_slot() {
-    // Inherited from the `isset` half — `empty` is false only where `isset` is
-    // true, and a present-null entry is `empty`.
+    // Inherited from the `isset` half: a present-null entry is still `empty`.
     assert_eq!(
         guarded("array{a?: string|null}", "!empty($v['a'])", "$v['a']"),
         "dumped type: string (asserted)"
@@ -191,8 +182,7 @@ fn not_empty_strips_null_from_the_slot() {
 
 #[test]
 fn the_empty_true_branch_promotes_nothing() {
-    // Absent-or-falsy: nothing about presence is decided, so the read stays
-    // undischarged. Silence here is the correctness property, not a gap.
+    // Absent-or-falsy decides nothing about presence — silence is correct, not a gap.
     assert_eq!(guarded("array{a?: string}", "empty($v['a'])", "$v['a']"), "dumped type: unknown");
 }
 
@@ -241,8 +231,7 @@ fn empty_does_not_decide_a_guard_verdict_over_a_declared_shape() {
 
 #[test]
 fn not_isset_on_an_optional_non_nullable_key_proves_absence() {
-    // The only way `isset` can be false here is the key being absent, so the
-    // read that follows reads a proven-absent field.
+    // `isset` can only be false here if the key is absent, so the read proves it.
     assert_eq!(
         guarded_else("array{a?: string}", "isset($v['a'])", "$v['a']"),
         "dumped type: unknown"
@@ -251,9 +240,8 @@ fn not_isset_on_an_optional_non_nullable_key_proves_absence() {
 
 #[test]
 fn not_isset_on_a_required_non_nullable_key_leaves_the_env_alone() {
-    // Runtime-impossible, and deliberately NOT marked dead (§2: death is the
-    // verdict's business, and the premise here is `Asserted`). The declared
-    // value survives, which is the honest reading of "nothing was learned".
+    // Runtime-impossible but deliberately NOT marked dead (§2: death is the
+    // verdict's business); the declared value survives as "nothing was learned".
     assert_eq!(
         guarded_else("array{a: string}", "isset($v['a'])", "$v['a']"),
         "dumped type: string (asserted)"
@@ -312,10 +300,10 @@ fn array_is_list_flips_the_flag_on_both_branches() {
 // ---- array_all / array_any (A8, PHP 8.4, ADR-0062 §4) ----------------------
 //
 // Only ONE leg of each is unconditional: `array_all([], f)` is vacuously
-// true, so only its FALSY branch proves non-emptiness; `array_any([], f)` is
-// vacuously false, so only its TRUTHY branch does. The opposite branch of
-// each is the vacuity trap named in §4 — it must narrow NOTHING, so its pin
-// asserts the fact is exactly what an unguarded read would show.
+// true (only its FALSY branch proves non-emptiness); `array_any([], f)` is
+// vacuously false (only its TRUTHY branch does). The opposite branch of each
+// is the §4 vacuity trap — it must narrow NOTHING, pinned by matching the
+// unguarded read exactly.
 
 #[test]
 fn array_all_falsy_proves_non_empty_and_sharpens_count() {
@@ -337,9 +325,8 @@ fn array_any_truthy_proves_non_empty_and_sharpens_count() {
 
 #[test]
 fn array_all_truthy_is_the_vacuity_trap_and_narrows_nothing() {
-    // `array_all($v, f)` truthy could be the empty array (vacuously true) OR a
-    // fully-passing non-empty array — the leg §4 declines to import. `count`
-    // must read exactly as it would with no guard at all: `int<0, 1>`.
+    // The vacuity leg (see section note): `count` must read exactly as an
+    // unguarded read would, `int<0, 1>`.
     assert_eq!(
         guarded("array{a?: int}", "array_all($v, fn ($x) => $x > 0)", "count($v)"),
         one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType(count($v));"))
@@ -348,8 +335,7 @@ fn array_all_truthy_is_the_vacuity_trap_and_narrows_nothing() {
 
 #[test]
 fn array_any_falsy_is_the_vacuity_trap_and_narrows_nothing() {
-    // `array_any($v, f)` falsy could be the empty array OR a non-empty array
-    // where every element failed — the leg §4 declines to import.
+    // The vacuity leg's other half (see section note).
     assert_eq!(
         guarded_else("array{a?: int}", "array_any($v, fn ($x) => $x > 0)", "count($v)"),
         one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType(count($v));"))
@@ -358,8 +344,7 @@ fn array_any_falsy_is_the_vacuity_trap_and_narrows_nothing() {
 
 #[test]
 fn array_all_truthy_leaves_the_shape_fact_itself_unchanged() {
-    // Same vacuity pin, at the fact-lane level: dumping `$v` in the vacuous
-    // branch must not carry a `non-empty-` modifier.
+    // Same vacuity pin at the fact-lane level: no `non-empty-` modifier leaks in.
     assert_eq!(
         guarded("array{a?: int}", "array_all($v, fn ($x) => $x > 0)", "$v"),
         one_type(&fixture("array{a?: int}", "\\PHPStan\\dumpType($v);"))
@@ -386,9 +371,8 @@ fn not_array_all_proves_non_empty_via_the_negation_route() {
 
 #[test]
 fn array_all_any_do_not_special_case_the_concrete_lane() {
-    // The pure-guard-call exemption only spares a base carrying the shape lane.
-    // A proven concrete array is not exempt and retains by-ref-conservative
-    // invalidation, matching the unguarded call-argument baseline.
+    // The pure-guard-call exemption only spares the shape lane: a proven concrete
+    // array keeps ordinary by-ref-conservative invalidation.
     let guarded = one_type(
         "<?php\nfunction f(): void { $v = ['a' => 1]; \
          if (array_any($v, fn ($x) => $x > 0)) { \\PHPStan\\dumpType($v); } }\n",
@@ -432,10 +416,9 @@ fn a_namespaced_array_predicate_is_a_different_function() {
 
 #[test]
 fn a_namespace_relative_array_predicate_is_a_different_function() {
-    // `namespace\array_key_exists` reaches `App\array_key_exists` ONLY — no
-    // global fallback, a fatal at runtime when undefined. The stored raw name has
-    // the `namespace\` prefix stripped, so only the reference kind distinguishes
-    // it from the global spelling.
+    // `namespace\array_key_exists` reaches `App\array_key_exists` ONLY — no global
+    // fallback, a fatal at runtime when undefined; the stored raw name strips the
+    // `namespace\` prefix, so only the reference kind distinguishes it.
     assert_eq!(ns_guarded("namespace\\array_key_exists('a', $v)"), "dumped type: unknown");
 }
 
@@ -452,8 +435,7 @@ fn an_aliased_import_is_a_different_array_predicate() {
 
 // ---- Arm subtraction + the collapse mint (A-G3 / A-G4) ---------------------
 
-/// A two-array-arm union: the fact lane is empty at entry (A-G3 keeps the union
-/// in the arm lane) until a guard subtracts it to one.
+/// A two-array-arm union (A-G3 keeps it in the arm lane) until a guard subtracts it to one.
 fn union_guarded(decl: &str, guard: &str, expr: &str) -> String {
     one_type(&format!(
         "<?php\n/** @param {decl} $v */\nfunction f(array $v): void \
@@ -513,9 +495,9 @@ fn an_identity_comparison_on_a_constant_key_discriminates_too() {
 
 #[test]
 fn a_tag_guard_kills_only_the_arm_whose_slot_provably_cannot_match() {
-    // The `'square'` arm's tag slot rules `'circle'` out and dies; the arm whose
-    // tag is merely `string` could still match, survives, and — being the only
-    // survivor — collapses. Literal exclusivity is what A-G4 runs on.
+    // The `'square'` tag slot rules `'circle'` out and dies; the `string`-tagged
+    // arm could still match, survives, and collapses as the only survivor — literal
+    // exclusivity is what A-G4 runs on.
     assert_eq!(
         union_guarded(
             "array{kind: string, radius: int}|array{kind: 'square', side: int}",
@@ -537,14 +519,13 @@ fn a_tag_guard_kills_only_the_arm_whose_slot_provably_cannot_match() {
 
 #[test]
 fn a_flow_refined_fact_outspells_its_declared_arm() {
-    // The S3 deviation, flipped: an unrefined shape spells from the arm lane,
-    // a refined one from the fact.
+    // The S3 deviation, flipped: an unrefined shape spells from the arm lane, a
+    // refined one from the fact — sharper on two counts below (`Required` key,
+    // implied non-emptiness) that the declared arm alone never states.
     assert_eq!(
         one_type(&fixture("array{a?: string}", "\\PHPStan\\dumpType($v);")),
         "dumped type: array{a?: string} (asserted)"
     );
-    // Sharper on two counts: the key is `Required`, and the promotion implies
-    // non-emptiness — neither of which the declared arm says.
     assert_eq!(
         guarded("array{a?: string}", "isset($v['a'])", "$v"),
         "dumped type: array{a: string} (asserted)"
@@ -574,9 +555,8 @@ fn a_nested_write_autovivifies_the_outer_key_and_leaves_the_inner_slot_unknown()
 
 #[test]
 fn a_write_to_an_undeclared_key_under_a_sealed_tail_unseals_it() {
-    // The A-G5 lift reading: the write is order-witnessed truth, so the field is
-    // added AND the tail unseals — keeping `Sealed` would leave a fact that
-    // rejects the very array the code just built.
+    // A-G5 lift: the write is order-witnessed truth, so the field is added AND the
+    // tail unseals — `Sealed` would otherwise reject the array just built.
     assert_eq!(
         one_type(&fixture("array{a: string}", "$v['zz'] = 1; \\PHPStan\\dumpType($v['zz']);")),
         "dumped type: 1 (asserted)"
@@ -586,7 +566,7 @@ fn a_write_to_an_undeclared_key_under_a_sealed_tail_unseals_it() {
 #[test]
 fn unset_marks_the_key_absent_and_stays_silent() {
     // No `offset.missing`: the Asserted world never premises a proof-layer
-    // finding (A-G9's corollary), which `one_type` asserts for us.
+    // finding (A-G9's corollary) — `one_type` asserts that for us.
     assert_eq!(
         one_type(&fixture("array{a: string, b?: int}", "unset($v['a']); \\PHPStan\\dumpType($v['a']);")),
         "dumped type: unknown"
@@ -595,9 +575,8 @@ fn unset_marks_the_key_absent_and_stays_silent() {
 
 #[test]
 fn a_write_keeps_barrier_semantics_for_every_other_binding() {
-    // Containment: the offset-write rule may move the shape lane and nothing
-    // else, so an unrelated proven binding is still forgotten exactly as the
-    // pre-S4 `Barrier` lowering forgot it.
+    // Containment: the write rule may move only the shape lane, so an unrelated
+    // proven binding is still forgotten exactly as pre-S4 `Barrier` forgot it.
     assert_eq!(
         one_type(&fixture(
             "array{a?: string}",
@@ -609,9 +588,8 @@ fn a_write_keeps_barrier_semantics_for_every_other_binding() {
 
 #[test]
 fn a_by_ref_builtin_drops_the_shape_fact_before_a_write_can_restore_it() {
-    // The S3 fence, extended to writes: everything is dropped before anything is
-    // restored, so a by-ref exposure earlier in the walk leaves nothing to carry
-    // across the write.
+    // The S3 fence, extended to writes: drop precedes restore, so an earlier
+    // by-ref exposure leaves nothing to carry across the write.
     assert_eq!(
         one_type(&fixture(
             "array{a?: string}",
@@ -623,19 +601,16 @@ fn a_by_ref_builtin_drops_the_shape_fact_before_a_write_can_restore_it() {
 
 // ---- The reachability tripwire ---------------------------------------------
 
-/// **Tripwire.** `Fact::truthy`, `is_null`, `int_in`
-/// and `satisfies_str` are all *decisive* on `Fact::Shape` — `truthy` reads
-/// `non_empty`, and the other three answer `No` outright — so the first caller
-/// that routes a shape fact into a guard verdict re-opens the emission question
-/// the shape guard contract keeps closed.
-///
-/// The observable form of "closed": a guard over a shape-facted binding never
-/// prunes a region. If it did, the `else` branch below would be marked dead and
-/// its dump would vanish. Both dumps must survive.
+/// **Tripwire.** `Fact::truthy`, `is_null`, `int_in` and `satisfies_str` are all
+/// *decisive* on `Fact::Shape` (`truthy` reads `non_empty`; the other three
+/// answer `No` outright), so the first caller routing a shape fact into a guard
+/// verdict re-opens the emission question this contract keeps closed —
+/// observably: a guard over a shape-facted binding must never prune a region,
+/// so both dumps below must survive.
 #[test]
 fn shape_facts_do_not_decide_guard_verdicts() {
-    // `array{a: int}` is non-empty for every value it admits, so a `truthy`
-    // verdict read off the fact would be `Yes` and prune the else branch.
+    // `array{a: int}` is non-empty for every admitted value, so a `truthy`
+    // verdict read off the fact would wrongly prune the else branch.
     let src = "<?php\n/** @param array{a: int} $v */\nfunction f(array $v): void \
                { if ($v) { \\PHPStan\\dumpType(1); } else { \\PHPStan\\dumpType(2); } }\n";
     let ds = diagnostics(src);

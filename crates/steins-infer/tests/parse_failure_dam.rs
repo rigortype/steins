@@ -1,25 +1,20 @@
 //! ADR-0079 / issue #180: a file that fails to parse is named loudly
 //! (`syntax.unparsable`) and, unless it is vendor, dams the absence family.
 //!
-//! Before this slice a file `php -l` rejects analysed to **exit 0 with no
-//! diagnostic**: `SourceTree::parse` recovered, `parse_errors()` had no consumer
-//! outside a smoke test, and inference went on emitting proof-grade findings from
-//! the recovered tree. Two wrongs with different grades, and this file measures
-//! both:
-//!
-//! 1. **The silence** (§2.1). One mechanics-layer finding per broken file, at the
-//!    first error, naming the count of further ones.
-//! 2. **The unsoundness** (§2.2/§2.4/§2.5). A non-vendor break is a
-//!    [`DamKind::Unparsable`] site, so existence-absence goes quiet project-wide;
-//!    the broken file emits nothing else; and the class-likes it declares are
-//!    member-incomplete, so the method-absence ladders decline through them. Its
-//!    recovered declarations still count as **presence**, which can only silence.
-//!
+//! Before this slice, a file `php -l` rejects analysed to **exit 0 with no
+//! diagnostic** — `SourceTree::parse` recovered silently and inference kept
+//! emitting proof-grade findings from the recovered tree. This file measures both
+//! fixes: (1) **the silence** (§2.1), one mechanics finding per broken file at the
+//! first error, naming the count of further ones; (2) **the unsoundness**
+//! (§2.2/§2.4/§2.5), where a non-vendor break is a [`DamKind::Unparsable`] site that
+//! silences existence-absence project-wide, emits nothing else, and makes its
+//! class-likes member-incomplete so method-absence ladders decline through them
+//! (recovered declarations still count as **presence**, which can only silence).
 //! §2.3's vendor presumption (ADR-0046 §2, carried over verbatim) is the sharp
-//! edge, so it gets its own group: a broken `vendor/` file is not a dam site and
-//! its classes are not member-incomplete — parser test suites ship deliberately
-//! broken PHP. Every silence fixture below is paired against the negative control
-//! that fires without the break, so nothing here proves a silence by over-silencing.
+//! edge: a broken `vendor/` file is not a dam site and its classes are not
+//! member-incomplete — parser test suites ship deliberately broken PHP. Every
+//! silence fixture below is paired against a negative control that fires without
+//! the break, so nothing here proves a silence by over-silencing.
 
 use std::collections::BTreeMap;
 
@@ -31,13 +26,10 @@ use steins_infer::{
 };
 use steins_syntax::SourceTree;
 
-// ---------------------------------------------------------------------------
 // Harness
-// ---------------------------------------------------------------------------
 
-/// The boot-surface mock the absence-family suites use: the family is available
-/// (A9) and nothing is a boot-surface homonym, so every OTHER ladder leg holds and
-/// what these fixtures measure is the parse-failure leg alone.
+/// Boot mock: absence family available (A9), no boot-surface homonyms — isolates
+/// the parse-failure leg from every other ladder leg.
 struct Boot;
 
 impl Folder for Boot {
@@ -75,11 +67,10 @@ fn of(files: &[(&str, &str)], id: &str) -> Vec<Diagnostic> {
     findings(files).into_iter().filter(|d| d.id == id).collect()
 }
 
-/// [`findings`], but with a caller-supplied layout — issue #181's proof that the
-/// vendor presumption (§2.3) follows the SAME [`ProjectLayout::is_vendor`] answer
-/// as every other consumer, whether that answer came from a declared
-/// `composer.json` vendor-dir or `steins.toml [paths] vendor-dirs`, not a
-/// second, independently-literal `vendor` check.
+/// [`findings`] with a caller-supplied layout — issue #181: the vendor presumption
+/// (§2.3) follows the SAME [`ProjectLayout::is_vendor`] answer as every other
+/// consumer (declared `composer.json` vendor-dir or `steins.toml` vendor-dirs),
+/// not a second, independently-literal `vendor` check.
 fn findings_with_layout(files: &[(&str, &str)], layout: ProjectLayout) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> = files
@@ -102,18 +93,16 @@ fn composer_layout_with_vendor_dir(name: &str) -> ProjectLayout {
     ProjectLayout::new(dir, vec![root])
 }
 
-/// The breakage every fixture reuses: a `$this->s->` with no member name. One parse
-/// error, at line 3 column 45. Recovery keeps the class AND both method
-/// declarations — which is exactly why the file is dangerous: it *looks* complete.
+/// The breakage every fixture reuses: `$this->s->` with no member name (one parse
+/// error, line 3 col 45); recovery keeps the class and both methods — it *looks*
+/// complete, which is dangerous.
 const BROKEN: &str = "<?php\nclass Q {\n  public function f(): void { if ($this->s->) {} }\n  public function known(): void {}\n}\n";
 
 /// The same class, spelled so it parses. The negative control for every silence.
 const SOUND: &str =
     "<?php\nclass Q {\n  public function f(): void {}\n  public function known(): void {}\n}\n";
 
-// ---------------------------------------------------------------------------
 // 1. The silence ends (§2.1): one finding per broken file, at the first error.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_project_that_parses_says_nothing_about_parsing() {
@@ -140,8 +129,8 @@ fn a_single_error_claims_no_further_ones() {
 
 #[test]
 fn the_message_counts_the_further_errors() {
-    // Three recovered errors — the two after the first are reported as a COUNT, not
-    // as positions: recovery cascades make every position after the first a guess.
+    // Three recovered errors — only the first gets a position; the rest are a
+    // COUNT, since cascading recovery makes later positions a guess.
     let src = "<?php\nfunction a( int $x {\n}\nfunction b( int $y {\n}\n";
     let d = of(&[("src/fns.php", src)], SYNTAX_UNPARSABLE_ID);
     assert_eq!(d.len(), 1, "{d:?}");
@@ -178,9 +167,7 @@ fn the_message_names_the_project_wide_consequence_only_when_it_holds() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 2. The dam (§2.2): a non-vendor break silences existence-absence project-wide.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_broken_file_is_a_dam_site_of_its_own_kind() {
@@ -211,16 +198,12 @@ fn a_broken_non_vendor_file_silences_class_undefined() {
     assert!(of(&[caller, ("src/q.php", BROKEN)], CLASS_UNDEFINED_ID).is_empty());
 }
 
-// ---------------------------------------------------------------------------
-// 3. Member incompleteness (§2.5): the method-absence ladders decline through a
-//    class-like the broken file declares.
-// ---------------------------------------------------------------------------
+// 3. Member incompleteness (§2.5): method-absence ladders decline through its class-likes.
 
 #[test]
 fn method_absence_through_a_class_from_the_broken_file_is_silent() {
-    // `Q` survives recovery with both its methods — but a mangled class body can
-    // have LOST one, which is the asymmetry §1.2 names: `eval` cannot reopen a
-    // defined class, a parse failure can hide members of one it kept.
+    // `Q` survives recovery with both methods, but a mangled body can have LOST one
+    // (asymmetry per §1.2: `eval` can't reopen a class; a parse failure can hide members).
     let caller = ("src/main.php", "<?php\n(new Q())->missing();\n");
     assert_eq!(
         of(&[caller, ("src/q.php", SOUND)], CALL_UNDEFINED_METHOD_ID).len(),
@@ -232,9 +215,8 @@ fn method_absence_through_a_class_from_the_broken_file_is_silent() {
 
 #[test]
 fn member_incompleteness_reaches_down_an_inheritance_chain() {
-    // The leg is on the chain WALK, not on the receiver: a sound subclass of a
-    // broken-file parent inherits the incompleteness, because the missing method
-    // could be the parent's.
+    // Leg is on the chain WALK, not the receiver: a sound subclass of a broken-file
+    // parent inherits the incompleteness, since the missing method could be the parent's.
     let caller = ("src/main.php", "<?php\n(new Sub())->missing();\n");
     let sub = ("src/sub.php", "<?php\nclass Sub extends Q {}\n");
     assert_eq!(of(&[caller, sub, ("src/q.php", SOUND)], CALL_UNDEFINED_METHOD_ID).len(), 1);
@@ -243,11 +225,10 @@ fn member_incompleteness_reaches_down_an_inheritance_chain() {
 
 #[test]
 fn a_sound_class_beside_a_broken_file_keeps_its_method_absence() {
-    // The dam is whole-universe for NAME EXISTENCE, but member incompleteness is
-    // per-declaration (§2.5): a class declared in a file that parses is still
-    // enumerable, even while a sibling file is broken. Without this the leg would
-    // be a second whole-universe dam, and the method family would go dark on any
-    // project with one broken file anywhere.
+    // Dam is whole-universe for NAME EXISTENCE, but member incompleteness is
+    // per-declaration (§2.5): a class in a sound file stays enumerable even beside a
+    // broken sibling — otherwise the method family would go dark project-wide on
+    // any single broken file.
     let d = of(
         &[
             ("src/main.php", "<?php\n(new Sound())->missing();\n"),
@@ -259,16 +240,14 @@ fn a_sound_class_beside_a_broken_file_keeps_its_method_absence() {
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // 4. The broken file emits nothing else (§2.4).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_broken_file_emits_nothing_but_the_parse_finding() {
-    // The file carries a duplicate array key (mechanics, purely syntactic — it
-    // needs no engine and no dam) and a call to an undefined function. Both would
-    // fire from a file that parses; from this one, neither may: a finding built on
-    // a misparse is the manufactured-FP shape ADR-0002 forbids.
+    // Carries a duplicate array key (mechanics, purely syntactic) and a call to an
+    // undefined function — both would fire from a file that parses; from this one,
+    // neither may: a finding built on a misparse is the manufactured-FP shape
+    // ADR-0002 forbids.
     let rot = "$a = [1 => 'x', 1 => 'y'];\ntyop();\n";
     let sound_file = format!("<?php\n{rot}");
     let broken_file = format!("{BROKEN}{rot}");
@@ -282,16 +261,14 @@ fn the_broken_file_emits_nothing_but_the_parse_finding() {
     assert_eq!(ids, [SYNTAX_UNPARSABLE_ID], "{broken:?}");
 }
 
-// ---------------------------------------------------------------------------
 // 5. Presence survives (§2.4): a recovered declaration can still SILENCE.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_class_half_recovered_from_a_broken_file_still_answers_a_new_elsewhere() {
     // Presence can only silence an absence claim, never fire one, so a
-    // half-recovered declaration is safe in that direction and cross-file
-    // resolution keeps working. Measured through a VENDOR break, where no dam
-    // masks the answer: the silence here is the index doing its job, not the dam.
+    // half-recovered declaration is safe and cross-file resolution keeps working.
+    // Measured through a VENDOR break (no dam masks the answer): the silence here
+    // is the index doing its job, not the dam.
     let caller = ("src/main.php", "<?php\nnew Q();\n");
     assert_eq!(
         of(&[caller], CLASS_UNDEFINED_ID).len(),
@@ -304,14 +281,12 @@ fn a_class_half_recovered_from_a_broken_file_still_answers_a_new_elsewhere() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 6. The vendor presumption (§2.3), carried over verbatim from ADR-0046 §2.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_broken_vendor_file_still_reports() {
-    // The finding exists — it simply rides the CLI's ordinary vendor filter, like
-    // every other vendor finding. Nothing about the id itself is vendor-aware.
+    // Rides the CLI's ordinary vendor filter like any other finding — the id
+    // itself is not vendor-aware.
     let d = of(&[("vendor/pkg/q.php", BROKEN)], SYNTAX_UNPARSABLE_ID);
     assert_eq!(d.len(), 1, "{d:?}");
     assert_eq!(d[0].path, "vendor/pkg/q.php");
@@ -329,9 +304,9 @@ fn a_broken_vendor_file_is_not_a_dam_site() {
 
 #[test]
 fn a_broken_vendor_files_classes_are_not_member_incomplete() {
-    // The presumption is a recorded trade, not a proof: the same break that makes a
-    // first-party class unenumerable is presumed harmless in `vendor/`. Pinned so a
-    // future change to §2.3 has to change this test on purpose.
+    // Recorded trade, not a proof: the same break that makes a first-party class
+    // unenumerable is presumed harmless in `vendor/`; pinned so a §2.3 change is
+    // deliberate.
     let d = of(
         &[("src/main.php", "<?php\n(new Q())->missing();\n"), ("vendor/pkg/q.php", BROKEN)],
         CALL_UNDEFINED_METHOD_ID,
@@ -339,16 +314,12 @@ fn a_broken_vendor_files_classes_are_not_member_incomplete() {
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
-// 6b. Issue #181: the presumption follows the RESOLVED vendor answer, not a
-//     second literal-`vendor` check of its own.
-// ---------------------------------------------------------------------------
+// 6b. Issue #181: the presumption follows the RESOLVED vendor answer, not a literal check.
 
 #[test]
 fn the_presumption_follows_a_composer_declared_vendor_dir() {
-    // `3rdparty/` is not literally `vendor`, so a bespoke literal check inside the
-    // dam would miss it and wrongly dam the project. Routed through
-    // `ProjectLayout::is_vendor`, the composer-declared root answers correctly.
+    // `3rdparty/` isn't literally `vendor`; a bespoke literal check would miss it
+    // and wrongly dam the project. Routed through `ProjectLayout::is_vendor` instead.
     let layout = composer_layout_with_vendor_dir("3rdparty");
     let tree = SourceTree::parse(BROKEN);
     let units = [FileUnit { path: "3rdparty/pkg/q.php", tree: &tree }];
@@ -364,9 +335,8 @@ fn the_presumption_follows_a_composer_declared_vendor_dir() {
 
 #[test]
 fn the_presumption_still_applies_to_a_first_party_break_under_a_composer_project() {
-    // The flip side of the previous test: a break OUTSIDE the declared vendor dir
-    // still dams, even though the project has a composer.json. The presumption is
-    // not "any project with a manifest gets a free pass".
+    // Flip side: a break OUTSIDE the declared vendor dir still dams even with a
+    // composer.json present — having a manifest isn't a free pass.
     let layout = composer_layout_with_vendor_dir("3rdparty");
     let caller = ("src/main.php", "<?php\ntyop();\n");
     assert!(
@@ -391,16 +361,14 @@ fn the_presumption_follows_the_steins_toml_no_manifest_vendor_dirs() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // 7. Mechanics semantics: no profile can turn it off or demote it.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn no_profile_can_disable_or_demote_it() {
     // ADR-0050 §1 / diagnostic-policy.md: "no profile disables OR DEMOTES mechanics
-    // ids". A file that does not parse is apparatus rot, not a style opinion — if a
-    // profile could demote it to a warning, a project could go green over a file
-    // `php -l` rejects, which is the exact rot the mechanics layer exists to stop.
+    // ids" — a file that doesn't parse is apparatus rot, not a style opinion; a
+    // profile demoting it to a warning would let a project go green over a file
+    // `php -l` rejects.
     let mut m = BTreeMap::new();
     m.insert(
         "quiet".to_owned(),

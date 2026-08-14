@@ -1,7 +1,5 @@
 //! Integration tests for ADR-0043 §6 — phpdoc→native promotion extended to
-//! **methods**. Each test builds a real multi-file salsa project and asserts on
-//! the plan's edits AND the named refusal reasons, exercising the ADR-0041 §1
-//! eligibility split, the six receiver forms, and the method-call reverse sweep.
+//! **methods** — eligibility split (ADR-0041 §1), receiver forms, reverse sweep.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::plan_phpdoc_to_native;
@@ -30,12 +28,11 @@ fn only_reason(report: &TransformReport) -> &str {
     &report.refusals[0].reason
 }
 
-// ---- 1. Eligible promotion (private / final / final-class) -----------------
+// 1. Eligible promotion (private / final / final-class)
 
 #[test]
 fn private_method_promotes_via_this_call() {
-    // A private method is Liskov-safe by construction; its only callers are
-    // `$this->`/`self::`/`Self::` from inside the class, all resolvable.
+    // A private method is Liskov-safe: only `$this->`/`self::` callers exist.
     let src = "<?php\nclass C {\n/** @param int $x */\nprivate function m($x) { return $x; }\npublic function run() { return $this->m(1); }\n}\n";
     let report = plan(&[("c.php", src)]);
     assert_oracle_complete(&report);
@@ -69,8 +66,7 @@ fn final_method_on_nonfinal_class_promotes() {
 
 #[test]
 fn multi_receiver_form_sweep_all_proven() {
-    // The same eligible method reached through `$this->`, `self::`, `C::`, and
-    // `(new C())->` — every form must resolve and its literal argument prove.
+    // Every receiver form must resolve and its literal argument prove.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\npublic function a() { return $this->m(1); }\npublic function b() { return self::m(2); }\npublic function d() { return C::m(3); }\n}\n";
     let main = "<?php\n(new C())->m(4);\n";
     let report = plan(&[("c.php", c), ("main.php", main)]);
@@ -82,13 +78,7 @@ fn multi_receiver_form_sweep_all_proven() {
 
 #[test]
 fn zero_callers_method_refuses_no_observed_callers() {
-    // ADR-0047 §4 / ADR-0041 §3 amendment: the PHPUnit-shaped counterexample. A
-    // `final` test class's public method (e.g. a data-provider) with NO callers
-    // anywhere in the enumerated universe — its real callers arrive only via
-    // framework reflection, invisible to the sweep. Promoting here would emit a
-    // native declaration proven against zero call sites: a vacuous all-callers
-    // claim is zero evidence, not proof, and must refuse rather than fatal at
-    // runtime the first time reflection passes an inadmissible value.
+    // ADR-0047 §4 / ADR-0041 §3: reflection-only callers are zero evidence — must refuse.
     let src = "<?php\nfinal class C {\n/** @param string $s */\npublic function m($s) { return $s; }\n}\n";
     let report = plan(&[("c.php", src)]);
     assert_oracle_complete(&report);
@@ -96,7 +86,7 @@ fn zero_callers_method_refuses_no_observed_callers() {
     assert!(report.plan.is_empty(), "must not promote on zero observed callers");
 }
 
-// ---- 2. The eligibility split → method-inheritance -------------------------
+// 2. The eligibility split → method-inheritance
 
 #[test]
 fn overridable_public_method_refuses_inheritance() {
@@ -124,8 +114,7 @@ fn abstract_method_refuses_inheritance() {
 
 #[test]
 fn trait_using_class_refuses_inheritance() {
-    // A trait `use` merges methods whose bodies live elsewhere — override analysis
-    // is incomplete, so even a final method refuses.
+    // A trait `use` merges bodies from elsewhere — override analysis is incomplete.
     let src = "<?php\nfinal class C {\nuse T;\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
     let report = plan(&[("c.php", src)]);
     assert_eq!(only_reason(&report), REASON_METHOD_INHERITANCE);
@@ -148,7 +137,7 @@ fn unresolvable_parent_refuses_inheritance() {
     assert_eq!(only_reason(&report), REASON_METHOD_INHERITANCE);
 }
 
-// ---- 3. Magic methods are never candidates ---------------------------------
+// 3. Magic methods are never candidates
 
 #[test]
 fn magic_method_refuses_magic() {
@@ -159,12 +148,11 @@ fn magic_method_refuses_magic() {
     assert_eq!(only_reason(&report), REASON_MAGIC_METHOD);
 }
 
-// ---- 4. Call-sweep obstacles → refusals ------------------------------------
+// 4. Call-sweep obstacles → refusals
 
 #[test]
 fn unresolved_var_receiver_taints_method_name() {
-    // A `$o->m()` whose receiver class is unknown opens the target set for every
-    // `m` — the eligible C::m must refuse resolution-ambiguous.
+    // Unknown receiver class opens the target set for every `m` — refuses ambiguous.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
     let f = "<?php\nfunction f($o) { $o->m(1); }\n";
     let report = plan(&[("c.php", c), ("f.php", f)]);
@@ -203,12 +191,7 @@ fn callable_string_reference_refuses() {
 
 #[test]
 fn variable_method_callable_array_taints_all_methods() {
-    // Issue #6 (the stage-5 adversarial review's counterexample): a callable
-    // array whose SECOND element (the method-name position) is a non-literal
-    // expression names no method at all, so the literal-value scan that catches
-    // `[$obj, 'm']` cannot see it. Left undetected this is a caller invisible to
-    // resolution that could invoke any method named by `$var` at runtime — it
-    // must refuse broadly (mirroring `$o->$m()`), never promote.
+    // Issue #6: a non-literal method-name element is invisible to the scan — taints broadly.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
     let main =
         "<?php\nfunction f($obj, $var) { call_user_func([$obj, $var], 1); }\n";
@@ -228,7 +211,7 @@ fn wrong_literal_at_method_call_refuses_arg_not_proven() {
     assert_eq!(only_reason(&report), REASON_ARG_NOT_PROVEN);
 }
 
-// ---- 5. By-ref / variadic method params ------------------------------------
+// 5. By-ref / variadic method params
 
 #[test]
 fn variadic_method_param_promotes_when_all_trailing_proven() {
@@ -250,10 +233,7 @@ fn variadic_method_param_refuses_on_bad_trailing_arg() {
 
 #[test]
 fn by_ref_method_param_without_callers_refuses_no_observed_callers() {
-    // A by-ref param can only receive lvalues, never a literal at any call site —
-    // but the zero-caller gate applies before that question is even reached: no
-    // call site was observed at all, so this refuses `no-observed-callers`
-    // rather than promote vacuously.
+    // Zero-caller gate fires first: no call site observed → `no-observed-callers`.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m(&$x) { $x = 1; }\n}\n";
     let report = plan(&[("c.php", c)]);
     assert_oracle_complete(&report);
@@ -261,7 +241,7 @@ fn by_ref_method_param_without_callers_refuses_no_observed_callers() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 6. Edit mechanics (docblock, multibyte) -------------------------------
+// 6. Edit mechanics (docblock, multibyte)
 
 #[test]
 fn method_tag_deletion_leaves_valid_multiline_docblock() {
@@ -285,7 +265,7 @@ fn method_multibyte_body_preserved() {
     assert!(out.contains("caf\u{e9}"), "multibyte body preserved:\n{out}");
 }
 
-// ---- 7. Free-function behavior is unchanged when methods are present --------
+// 7. Free-function behavior is unchanged when methods are present
 
 #[test]
 fn free_function_and_method_coexist() {
@@ -297,14 +277,11 @@ fn free_function_and_method_coexist() {
     assert_eq!(report.oracle.transformed, 2, "{:#?}", report.refusals);
 }
 
-// ---- 8. Vendor files are never CANDIDATES (still callers/definitions) -------
+// 8. Vendor files are never CANDIDATES (still callers/definitions)
 
 #[test]
 fn vendor_function_and_method_are_never_candidates() {
-    // A promotable free function AND an eligible method both DEFINED in vendor/,
-    // each with a valid in-project caller. Vendor code is out of the transform's
-    // write contract (composer overwrites it, diagnostics are vendor-filtered), so
-    // neither may be enumerated as a candidate and no edit may target vendor/.
+    // Vendor is outside the write contract (composer overwrites it): no enumeration, no edit.
     let vendor = "<?php\n/** @param int $x */\nfunction pxxxx_v($x) { return $x; }\nfinal class V {\n/** @param int $y */\npublic function m($y) { return $y; }\n}\n";
     let app = "<?php\npxxxx_v(1);\n(new V())->m(2);\n";
     let report = plan(&[("vendor/acme/lib.php", vendor), ("src/app.php", app)]);
@@ -315,8 +292,7 @@ fn vendor_function_and_method_are_never_candidates() {
 
 #[test]
 fn vendor_caller_still_blocks_a_project_candidate() {
-    // The fix keeps vendor in CALLER enumeration: a vendor file calling a project
-    // function with a bad literal must still refuse the project candidate.
+    // Vendor still counts as a CALLER: a bad literal from vendor still refuses.
     let app = "<?php\n/** @param int $x */\nfunction pxxxx_p($x) { return $x; }\n";
     let vendor = "<?php\npxxxx_p('bad');\n";
     let report = plan(&[("src/app.php", app), ("vendor/acme/caller.php", vendor)]);
@@ -326,13 +302,11 @@ fn vendor_caller_still_blocks_a_project_candidate() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 9. First-class-callable method references taint the method ------------
+// 9. First-class-callable method references taint the method
 
 #[test]
 fn instance_first_class_callable_refuses() {
-    // `$o->m(...)` (PHP 8.1 first-class callable) references m as a value: the
-    // resulting Closure can be invoked with any argument later, so m's callers are
-    // not enumerable and it must not promote. (Unknown receiver → resolution-ambiguous.)
+    // `$o->m(...)` references m as a value — callers aren't enumerable (ambiguous).
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";
     let main = "<?php\n$o = new C();\n$cb = $o->m(...);\n";
     let report = plan(&[("c.php", c), ("main.php", main)]);
@@ -343,8 +317,7 @@ fn instance_first_class_callable_refuses() {
 
 #[test]
 fn static_first_class_callable_refuses() {
-    // `C::m(...)` — the static form of the same hole. Resolved receiver → the
-    // reference is a non-positional "call" → named-or-spread refusal (never promote).
+    // `C::m(...)`: resolved receiver → non-positional "call" → named-or-spread refusal.
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic static function m($x) { return $x; }\n}\n";
     let main = "<?php\n$cb = C::m(...);\n";
     let report = plan(&[("c.php", c), ("main.php", main)]);

@@ -1,18 +1,10 @@
 //! Shared machinery for the two phpdoc transforms — promotion (`promote`) and
-//! honesty repair (`honesty`).
-//!
-//! Both transforms enumerate free-function sites, prove facts against the same
-//! reverse call-site sweep (`steins_infer::promote::sweep_free_functions`), and
-//! speak the same first-class [`Refusal`](crate::transform::Refusal) vocabulary
-//! for the obstacles that make "all callers" unknowable. This module factors the
-//! pieces they genuinely share so neither forks the other (ADR-0034):
-//!
-//! - the four project-wide caller-enumerability refusal reasons plus
-//!   `argument-not-proven` (the reasons a *reverse sweep* can raise);
-//! - the `has_source_hint` / `arg_to_val` / native-contract helpers;
-//! - the value-domain → ADR-0029 phpdoc **type rendering** honesty uses to spell
-//!   a proven value set, and promotion re-uses nothing of (kept here so the
-//!   grammar-rendering policy lives in one place).
+//! honesty repair (`honesty`). Both sweep the same reverse call-site data
+//! (`steins_infer::promote::sweep_free_functions`) and speak the same
+//! [`Refusal`](crate::transform::Refusal) vocabulary. Factored here so neither
+//! forks the other (ADR-0034): the caller-enumerability refusal reasons, the
+//! `has_source_hint` / `arg_to_val` / native-contract helpers, and the
+//! value-domain → ADR-0029 phpdoc type rendering (honesty only).
 
 use std::collections::HashMap;
 
@@ -29,62 +21,41 @@ use steins_syntax::{
 
 use crate::transform::SiteRef;
 
-// ---- Shared refusal reason names (ADR-0034 point 2) -----------------------
-//
-// These are the reasons a reverse call-site sweep raises — the obstacles that
-// make "every caller is accounted for" unknowable. Both promotion and honesty's
-// `@param` widening share them verbatim; `promote` re-exports them so its public
-// `steins_edit::promote::REASON_*` paths keep resolving.
+// Shared refusal reason names (ADR-0034 point 2): raised by a reverse
+// call-site sweep. `promote` re-exports these as `steins_edit::promote::REASON_*`.
 
-/// A dynamic `$fn(...)` call exists in the project — it could target any free
-/// function, so no free-function candidate can prove all its callers.
+/// A dynamic `$fn(...)` call could target any free function; no candidate proves all callers.
 pub const REASON_DYNAMIC_CALL: &str = "dynamic-call-present";
-/// The function's name appears as a string / first-class-callable value (a
-/// `call_user_func`-style caller invisible to call resolution).
+/// The function's name appears as a string/callable value (invisible to call resolution).
 pub const REASON_REFERENCED_AS_VALUE: &str = "function-referenced-as-value";
-/// The function's name does not resolve uniquely project-wide (duplicate
-/// definition or builtin shadow), so its callers cannot be enumerated soundly.
+/// The function's name doesn't resolve uniquely (duplicate def or builtin shadow).
 pub const REASON_AMBIGUOUS: &str = "resolution-ambiguous";
-/// A call reaching this function used named or spread arguments (positional
-/// mapping is unreliable).
+/// A call reaching this function used named/spread args (unreliable positional mapping).
 pub const REASON_NAMED_OR_SPREAD: &str = "named-or-spread-args";
 /// At least one relevant call-site argument is not a proven literal.
 pub const REASON_ARG_NOT_PROVEN: &str = "argument-not-proven";
-/// A non-vendor project file contains an `eval(...)` — code as data can call any
-/// free function with no CST call site (ADR-0046 §2), so "all callers proven" is
-/// unknowable project-wide. A project-global obstacle: every candidate refuses.
+/// A non-vendor file contains `eval(...)` — code as data can call any free
+/// function invisibly (ADR-0046 §2); a project-global obstacle, every candidate refuses.
 pub const REASON_EVAL_PRESENT: &str = "eval-present";
-/// A non-vendor `include`/`require` whose path is unproven, or a proven literal
-/// that does not resolve inside the analyzed universe (ADR-0046 §2) — out-of-
-/// universe code (compiled-template caches) can define/call anything. A project-
-/// global obstacle: every candidate refuses.
+/// A non-vendor `include`/`require` with an unproven or out-of-universe path
+/// (ADR-0046 §2) can define/call anything; every candidate refuses.
 pub const REASON_DYNAMIC_INCLUDE: &str = "dynamic-include-present";
-/// The candidate is a method that is inheritance-involved — overridable, overriding
-/// an ancestor, abstract, an interface method, or in a class whose hierarchy is not
-/// fully resolvable (parent unresolvable, or a trait `use` that merges methods).
-/// Narrowing it could break Liskov substitution, so v1 refuses the whole method
-/// (ADR-0041 §1 eligibility split / ADR-0043 §6).
+/// Inheritance-involved candidate method (overridable, overriding, abstract,
+/// interface, unresolvable hierarchy) — could break Liskov substitution, so
+/// v1 refuses the whole method (ADR-0041 §1 / ADR-0043 §6).
 pub const REASON_METHOD_INHERITANCE: &str = "method-inheritance";
-/// The candidate is a magic method (`__construct`, `__wakeup`, `__toString`, any
-/// `__*`): a magic method is invoked by the runtime with no ordinary call site
-/// (and `__wakeup`/`__unserialize` by any `unserialize`), so it is never a
-/// promotion/honesty candidate (ADR-0046 §3).
+/// A magic method (`__construct`, `__wakeup`, `__toString`, any `__*`) is
+/// runtime-invoked with no ordinary call site, so never a candidate (ADR-0046 §3).
 pub const REASON_MAGIC_METHOD: &str = "magic-method";
-/// A **promotion** candidate whose enumerated caller set is empty: no call site
-/// anywhere in the analyzed universe resolved to this function/method. "All
-/// callers proven" over zero callers is vacuously true but carries zero evidence
-/// — it cannot enter the verified stratum (ADR-0037), and it is exactly the hole
-/// a framework's convention-reflection dispatch opens (a test runner invoking a
-/// data-provider method with no visible call site, ADR-0047 §4; amends the
-/// ADR-0041 §3 taxonomy). Honesty never reaches this: its own "lie" enumeration
-/// requires an observed violating value, so it cannot act on empty evidence by
-/// construction — this reason is promotion-only.
+/// **Promotion**-only: an empty caller set is vacuous "all callers proven" with
+/// zero evidence, so it can't enter the verified stratum (ADR-0037) — the
+/// framework reflection-dispatch hole (ADR-0047 §4; amends ADR-0041 §3).
+/// Honesty never hits this: its "lie" enumeration needs an observed violation.
 pub const REASON_NO_OBSERVED_CALLERS: &str = "no-observed-callers";
 
-// ---- Candidate / call-site helpers ----------------------------------------
+// Candidate / call-site helpers
 
-/// Count each FQN across the project so a duplicate definition (which makes
-/// resolution ambiguous) refuses rather than acts on thin evidence.
+/// Count each FQN across the project so a duplicate (ambiguous) definition refuses.
 #[must_use]
 pub fn count_fqns(db: &dyn Db, files: &[SourceFile]) -> HashMap<String, usize> {
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -108,7 +79,7 @@ pub fn param_site(path: &str, tree: &SourceTree, func: &FunctionDecl, param: &Pa
     )
 }
 
-/// A [`SiteRef`] for a function's `@return` site (anchored at the declaration).
+/// A [`SiteRef`] for a function's `@return` site.
 #[must_use]
 pub fn return_site(path: &str, tree: &SourceTree, func: &FunctionDecl) -> SiteRef {
     let p = tree.position(func.span.start);
@@ -133,8 +104,7 @@ pub fn method_param_site(
     )
 }
 
-/// A [`SiteRef`] for a candidate method's `@return` site (anchored at the method
-/// name identifier).
+/// A [`SiteRef`] for a candidate method's `@return` site.
 #[must_use]
 pub fn method_return_site(
     path: &str,
@@ -151,13 +121,10 @@ pub fn method_return_site(
     )
 }
 
-/// The project-wide obstacles that make "all callers proven" unknowable for a
-/// **method** target of name `method_name` (shared by method promotion and method
-/// `@param` honesty; ADR-0043 §6). `Ok(())` when the method's callers are
-/// enumerable; otherwise a named refusal.
-///
-/// The per-target `named-or-spread-args` obstacle is not here — it is a fact of one
-/// target's observed calls, checked where the observed args are proven.
+/// Project-wide obstacles making "all callers proven" unknowable for a method
+/// target (shared by method promotion and `@param` honesty; ADR-0043 §6).
+/// `Ok(())` when enumerable, else a named refusal. `named-or-spread-args` is
+/// not checked here — it's per-target, checked where observed args are proven.
 pub fn check_method_caller_enumerability(
     method_name: &str,
     sweep: &MethodSweep,
@@ -177,7 +144,6 @@ pub fn check_method_caller_enumerability(
         ));
     }
     if let Some(sites) = sweep.unresolved_method_names.get(&name) {
-        // Use the first source-ordered site as the representative.
         let site = &sites[0];
         return Err((
             REASON_AMBIGUOUS,
@@ -191,11 +157,9 @@ pub fn check_method_caller_enumerability(
 }
 
 /// Whether the source text at `param.span.start` carries a native type hint.
-///
-/// `param.ty == None` alone is ambiguous: it also means a *complex* hint was
-/// lowered away (`Foo|Bar $x`). So we inspect the raw bytes: from the parameter
-/// start, skip whitespace and the `&` / `...` markers; if the next token is the
-/// `$variable`, there is no hint.
+/// `param.ty == None` is ambiguous (a complex hint like `Foo|Bar $x` also
+/// lowers away), so the raw bytes are inspected: skip whitespace and `&`/`...`,
+/// then check whether the next token is `$variable`.
 #[must_use]
 pub fn has_source_hint(source: &str, param: &Param) -> bool {
     let start = param.span.start as usize;
@@ -218,18 +182,14 @@ pub fn has_source_hint(source: &str, param: &Param) -> bool {
     bytes.get(k) != Some(&b'$')
 }
 
-/// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when it
-/// is not a self-evident literal (a `$var`, a call, a `new`, a closure, …). Arrays
-/// are literal iff every element is.
+/// Convert a lowered [`ArgValue`] to a concrete domain [`Val`], or `None` when
+/// it is not a self-evident literal (a `$var`, a call, a `new`, a closure, …).
+/// Arrays are literal iff every element is.
 ///
-/// The transform sweeps run off the Salsa query path ([`steins_infer::promote`]),
-/// which carries no [`steins_infer::Folder`] — so no PHP minor is reachable here
-/// and this passes `None` to [`normalize_array`]. Under ADR-0049 A12 that is the
-/// conservative leg: an array literal straddling the 8.3 next-int change is *not*
-/// a self-evident literal for the edit layer, so the site refuses to promote
-/// rather than writing a declaration derived from a guessed key. Every
-/// version-independent literal is unaffected. Threading the minor into the sweeps
-/// would tighten this; A12 records it as the later refinement.
+/// No PHP minor is reachable here (the sweeps carry no [`steins_infer::Folder`]),
+/// so `None` goes to [`normalize_array`]. ADR-0049 A12: the conservative leg —
+/// an array literal straddling the 8.3 next-int change refuses rather than
+/// guess a key; threading the minor through would tighten this later.
 #[must_use]
 pub fn arg_to_val(v: &ArgValue) -> Option<Val> {
     match v {
@@ -257,9 +217,8 @@ fn norm_key(k: &NormKey) -> Key {
     }
 }
 
-/// Build the acceptance contract for a **native** type (native semantics, not
-/// phpdoc lowering): scalars → base, `true`/`false` → bool-literal, nullable adds
-/// `null`.
+/// Build the acceptance contract for a **native** type (not phpdoc lowering):
+/// scalars → base, `true`/`false` → bool-literal, nullable adds `null`.
 #[must_use]
 pub fn native_contract(nt: &NativeType) -> ContractTy {
     let mut members: Vec<ContractTy> = nt
@@ -271,12 +230,9 @@ pub fn native_contract(nt: &NativeType) -> ContractTy {
             TypeMember::Scalar(ScalarType::String) => ContractTy::Base(Base::String),
             TypeMember::Scalar(ScalarType::Bool) => ContractTy::Base(Base::Bool),
             TypeMember::BoolLiteral(b) => ContractTy::LitBool(*b),
-            // Object member (ADR-0043): the class contract. Callers that could feed
-            // an `Instance`-bearing type here guard it out first (the native-guard
-            // scalar domain), so this arm is exercised only once the object-world
-            // acceptance path opens; it is the honest lowering regardless.
+            // Object member (ADR-0043): the class contract, native-guarded.
             TypeMember::Instance { fqn, .. } => ContractTy::Class(fqn.clone()),
-            // An object intersection lowers to the conjunctive contract.
+            // Object intersection lowers to the conjunctive contract.
             TypeMember::InstanceInter(cs) => {
                 ContractTy::Inter(cs.iter().map(|c| ContractTy::Class(c.fqn.clone())).collect())
             }
@@ -292,18 +248,14 @@ pub fn native_contract(nt: &NativeType) -> ContractTy {
     }
 }
 
-/// The project-wide obstacles that make "all callers proven" unknowable for a
-/// free-function target (shared by promotion and `@param` honesty). `Ok(())` when
-/// the callers of `func` are enumerable; otherwise a named refusal.
-///
-/// The per-target `named-or-spread-args` obstacle is *not* here — it is a fact of
-/// one target's observed calls, checked where the observed args are proven.
+/// Free-function analog of [`check_method_caller_enumerability`]: the
+/// project-wide obstacles shared by promotion and `@param` honesty.
 pub fn check_caller_enumerability(
     func: &FunctionDecl,
     sweep: &FreeFnSweep,
     fqn_counts: &HashMap<String, usize>,
 ) -> Result<(), (&'static str, String)> {
-    // Any dynamic call site anywhere blocks enumerability (ADR-0047 §6).
+    // ADR-0047 §6.
     if !sweep.dynamic_call_sites.is_empty() {
         return Err((
             REASON_DYNAMIC_CALL,
@@ -330,35 +282,16 @@ pub fn check_caller_enumerability(
     Ok(())
 }
 
-// ---- Value-domain → phpdoc type rendering (ADR-0029 / ADR-0053 §7) ---------
-//
-// The *semantic* normal form — sort/dedup, the predicate-class collapse (numeric
-// literals → numeric-string, the bool pair → bool, null-fold) — lives in
-// `steins_contract::normalize::summarize_vals` (ADR-0052 §4). The
-// **plain-text arm spelling** — member ordering/join, the CAP-bounded literal-
-// union decision, the predicate-keyword ladder, and single-quote escaping —
-// lives in `steins_contract::spell` (ADR-0053 §7), shared with the
-// `annotate`/dump emitters in `steins-infer` (which cannot reach this crate: the
-// dependency runs steins-edit → steins-infer).
-//
-// What *stays* here is the **docblock armor**: the `*/`/raw-newline literal-safety
-// widening that is meaningless in terminal output but corrupts a `/** … */` block.
-// It pre-widens the arm list before delegating to the shared speller. The honesty
-// tests below (the renderer's oracle) and the cross-crate parity test pin the
-// armor and the shared spelling against each other.
+// Value-domain → phpdoc type rendering (ADR-0029 / ADR-0053 §7). Semantic
+// normal form lives in `summarize_vals` (ADR-0052 §4); arm spelling lives in
+// `steins_contract::spell` (ADR-0053 §7), shared with `steins-infer`'s
+// annotate/dump. What stays here is docblock armor, applied before delegating.
 
 /// Render a proven set of concrete values as a faithful phpdoc type (ADR-0029
-/// grammar) *safe to embed in a docblock*, or `None` when no faithful spelling
-/// exists (`type-not-renderable`).
-///
-/// The set is normalized by [`summarize_vals`] into an arm list; the docblock
-/// armor (`docblock_widen_unsafe_literals`) widens any literal group that cannot
-/// be embedded in a `/** … */` block (`*/` or a raw newline) to the tightest
-/// predicate keyword; then the shared [`spell_arms`] spells the (now docblock-safe)
-/// arms — member ordering, the CAP-bounded literal-union decision, the keyword
-/// ladder, and `\`/`'` escaping. Integer values render as `int`, string values as
-/// literal unions (`'a'|'b'`) or a refined-string keyword; an array-bearing set
-/// has no faithful scalar spelling and refuses.
+/// grammar) safe to embed in a docblock, or `None` when unrenderable
+/// (`type-not-renderable`). Pipeline: [`summarize_vals`] normalizes into arms →
+/// docblock armor widens unsafe literals → the shared [`spell_arms`] spells the
+/// result. Arrays have no faithful scalar spelling and refuse.
 #[must_use]
 pub fn render_value_domain(vals: &[Val]) -> Option<String> {
     let mut arms = summarize_vals(vals)?;
@@ -366,59 +299,44 @@ pub fn render_value_domain(vals: &[Val]) -> Option<String> {
     spell_arms(&arms)
 }
 
-/// Docblock armor (ADR-0053 §7): if a `LitStr` group carries any value that cannot
-/// be embedded in a `/** … */` block ([`docblock_literal_safe`]), replace the whole
-/// group with the tightest predicate-keyword arm ([`ContractTy::StrWith`]) *before*
-/// the shared speller runs. A single-quoted literal cannot represent `*/` (which
-/// closes the block early) or a raw newline (the phpdoc lexer rejects it), so such
-/// a value has no faithful literal spelling in a docblock and must widen.
-///
-/// A no-op when the group is all-safe (the shared speller then spells the literals)
-/// or absent. This is the only docblock-specific transformation; everything else is
-/// the shared terminal spelling. Terminal output has no such hazard, so the dump/
-/// annotate emitters call [`spell_arms`] directly, skipping this.
+/// Docblock armor (ADR-0053 §7): if a `LitStr` group carries any value unsafe
+/// for a `/** … */` block ([`docblock_literal_safe`]), replace the whole group
+/// with the tightest predicate keyword ([`ContractTy::StrWith`]) before the
+/// shared speller runs. No-op when the group is all-safe or absent; the only
+/// docblock-specific step (dump/annotate call [`spell_arms`] directly).
 fn docblock_widen_unsafe_literals(arms: &mut Vec<ContractTy>) {
-    // `summarize_vals` yields the string group as either one `StrWith` arm (numeric
-    // collapse) or distinct-sorted `LitStr` arms — never both.
+    // `summarize_vals` yields the string group as either one `StrWith` arm
+    // (numeric collapse) or distinct-sorted `LitStr` arms — never both.
     let lits: Vec<&PhpStr> = arms
         .iter()
         .filter_map(|a| if let ContractTy::LitStr(s) = a { Some(s) } else { None })
         .collect();
-    // A byte string is unsafe by construction: a docblock is text, and phpdoc has
-    // no escape that can carry those bytes (ADR-0080 §2.5), so it widens like any
-    // other literal the block cannot hold.
+    // A byte string is unsafe by construction — phpdoc has no escape for those
+    // bytes (ADR-0080 §2.5), so it widens too.
     if lits.is_empty() || lits.iter().all(|s| s.as_str().is_some_and(docblock_literal_safe)) {
         return;
     }
-    // The shared, implication-closed predicate summary of the group (the same
-    // intersection the terminal keyword ladder would compute).
+    // The shared, implication-closed predicate summary of the group.
     let mut preds = StrPreds::of(lits[0]);
     for s in &lits[1..] {
         preds = preds.intersect(StrPreds::of(s));
     }
-    // Replace the (canonically contiguous) `LitStr` arms with one keyword arm at the
-    // string slot, preserving the member order the speller re-imposes.
+    // Replace the contiguous `LitStr` arms with one keyword arm, preserving order.
     let at = arms.iter().position(|a| matches!(a, ContractTy::LitStr(_))).expect("a LitStr arm");
     arms.retain(|a| !matches!(a, ContractTy::LitStr(_)));
     arms.insert(at, ContractTy::StrWith(preds));
 }
 
-/// Whether a string can be spelled as a single-quoted phpdoc literal *inside a
-/// docblock* without corrupting it. Two byte sequences have no representation in a
-/// `/** … */` block and no single-quote escape can encode them:
-/// - `*/` closes the block comment early (a hard PHP parse error at the callsite);
-/// - a raw newline / carriage return, which the phpdoc lexer rejects in a quoted
-///   literal (it would also split the tag across physical lines).
-///
-/// A value carrying either has no faithful literal spelling and must widen to a
-/// keyword. (`\` and `'` themselves are handled by the shared speller's escaping.)
+/// Whether a string can be a single-quoted phpdoc literal inside a docblock
+/// without corrupting it: `*/` closes the block early (a parse error at the
+/// callsite), and a raw newline/CR is rejected by the phpdoc lexer — either
+/// forces a widen to a keyword. (`\`/`'` are handled by the speller's escaping.)
 fn docblock_literal_safe(s: &str) -> bool {
     !s.contains("*/") && !s.contains('\n') && !s.contains('\r')
 }
 
 /// Whether `contract` admits *every* value in `vals` with [`Certainty::Yes`] — the
-/// "the type faithfully covers the proof" test the native-contradiction guard and
-/// the prefixed/plain reconciliation both use.
+/// "type faithfully covers the proof" test used by the native-contradiction guard.
 #[must_use]
 pub fn admits_all(contract: &ContractTy, vals: &[Val]) -> bool {
     vals.iter().all(|v| admits_val(contract, v) == Certainty::Yes)
@@ -443,7 +361,7 @@ mod tests {
 
     #[test]
     fn int_and_numeric_strings_render_the_canonical_union() {
-        // ADR-0037 canonical: int + numeric-string callers → int|numeric-string.
+        // ADR-0037 canonical union.
         let r = render_value_domain(&[i(1), s("12"), s("34")]).unwrap();
         assert_eq!(r, "int|numeric-string");
         round_trips(&r);
@@ -459,7 +377,6 @@ mod tests {
     #[test]
     fn enum_like_strings_render_a_literal_union() {
         let r = render_value_domain(&[s("POST"), s("GET"), s("GET")]).unwrap();
-        // Distinct + sorted; not numeric → literal union.
         assert_eq!(r, "'GET'|'POST'");
         round_trips(&r);
     }
@@ -495,23 +412,16 @@ mod tests {
         round_trips(&r);
     }
 
-    /// A string bearing the docblock terminator `*/` has no faithful single-quoted
-    /// spelling (it would close the enclosing `/** … */`), so it must widen to a
-    /// keyword rather than render a corrupting literal.
     #[test]
     fn star_slash_string_never_renders_a_literal() {
         let r = render_value_domain(&[s("a*/b")]).unwrap();
         assert!(!r.contains("*/"), "rendered `{r}` still carries the docblock terminator");
         assert!(!r.contains('\''), "rendered `{r}` is a corrupting literal, not a keyword");
-        // The keyword is the grid cell the value's own predicates name (issue
-        // #240): `'a*/b'` is lowercase as well as non-falsy, and the armor's
-        // contract is that a literal widens to a KEYWORD, not to any one rung.
+        // issue #240: keyword is the grid cell the predicates name, not one rung.
         assert_eq!(r, "non-falsy-lowercase-string");
         round_trips(&r);
     }
 
-    /// The literal-union path (multiple distinct values ≤ CAP) is equally unsafe:
-    /// one `*/`-bearing member must force the whole group to a keyword.
     #[test]
     fn star_slash_in_a_union_forces_a_keyword() {
         let r = render_value_domain(&[s("ok"), s("a*/b")]).unwrap();
@@ -520,8 +430,6 @@ mod tests {
         round_trips(&r);
     }
 
-    /// A newline-bearing string cannot be a single-quoted phpdoc literal (the lexer
-    /// rejects raw newlines) — it widens to a keyword.
     #[test]
     fn newline_string_never_renders_a_literal() {
         let r = render_value_domain(&[s("line1\nline2")]).unwrap();
@@ -530,40 +438,32 @@ mod tests {
         round_trips(&r);
     }
 
-    /// `php_is_numeric` trims newlines, so `"5\n"` is numeric yet newline-bearing:
-    /// the single-value literal path would corrupt it — the numeric-string keyword
-    /// catches it (and admits it, since admission also trims).
+    /// `php_is_numeric` trims newlines, so `"5\n"` is numeric yet newline-bearing.
     #[test]
     fn newline_bearing_numeric_string_renders_the_keyword() {
         let r = render_value_domain(&[s("5\n")]).unwrap();
-        // `"5\n"` is numeric, is neither `''` nor `'0'`, and has no cased
-        // character — three predicates, one grid cell (issue #240).
+        // Three predicates (numeric, non-falsy, uncased), one grid cell (issue #240).
         assert_eq!(r, "non-falsy-numeric-uncased-string");
         assert!(!r.contains('\n') && !r.contains('\''));
         round_trips(&r);
     }
 
-    /// The **annotate parity** contract (ADR-0053 §7): the shared
-    /// `steins_contract::spell::spell_arms` — the one the `annotate`/dump emitters
-    /// in `steins-infer` call, byte-for-byte — reproduces this crate's docblock
-    /// renderer wherever the docblock armor is a no-op (every docblock-safe value
-    /// set). The extraction seam is byte-identical, so a dump and an `annotate`
-    /// margin for the same expression spell the same fact the same way. Where a
-    /// value is not docblock-safe (`*/` / raw newline), the two deliberately
-    /// diverge — the docblock renderer widens, the terminal speller spells the
-    /// literal — and that divergence is exactly the armor `steins-edit` keeps.
+    /// Annotate-parity contract (ADR-0053 §7): the shared `spell_arms` — also
+    /// called by `annotate`/dump in `steins-infer` — reproduces this renderer
+    /// byte-for-byte wherever the docblock armor is a no-op; diverges only on
+    /// docblock-unsafe values, where the renderer widens and the speller doesn't.
     #[test]
     fn shared_speller_is_byte_equal_to_the_docblock_renderer_on_safe_sets() {
         let safe_sets: Vec<Vec<Val>> = vec![
-            vec![i(1), s("12"), s("34")],       // int|numeric-string
-            vec![s("123")],                     // '123'
-            vec![s("POST"), s("GET"), s("GET")], // 'GET'|'POST'
-            vec![i(1), i(2), i(1)],             // int
-            vec![i(1), Val::Null],              // int|null
-            vec![Val::Bool(true), Val::Bool(false)], // bool
-            vec![Val::Bool(true)],              // true
-            vec![s("a'b"), s("c\\d")],          // escaped literal union
-            vec![Val::Float(1.5), i(2)],        // float|int-ish
+            vec![i(1), s("12"), s("34")],
+            vec![s("123")],
+            vec![s("POST"), s("GET"), s("GET")],
+            vec![i(1), i(2), i(1)],
+            vec![i(1), Val::Null],
+            vec![Val::Bool(true), Val::Bool(false)],
+            vec![Val::Bool(true)],
+            vec![s("a'b"), s("c\\d")],
+            vec![Val::Float(1.5), i(2)],
         ];
         for vals in &safe_sets {
             let docblock = render_value_domain(vals);
@@ -571,12 +471,11 @@ mod tests {
             assert_eq!(shared, docblock, "shared speller diverged from the renderer on {vals:?}");
         }
 
-        // The array-bearing refusal is shared too: both return `None`.
+        // Array-bearing refusal is shared too.
         assert_eq!(render_value_domain(&[Val::Array(vec![])]), None);
         assert_eq!(summarize_vals(&[Val::Array(vec![])]).and_then(|a| spell_arms(&a)), None);
 
-        // Documented divergence on a docblock-*unsafe* value: the renderer widens to
-        // a keyword, the shared terminal speller spells the (escaped) literal.
+        // Documented divergence: renderer widens, shared speller spells the literal.
         let unsafe_val = vec![s("a*/b")];
         assert_eq!(render_value_domain(&unsafe_val).unwrap(), "non-falsy-lowercase-string");
         assert_eq!(

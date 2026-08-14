@@ -1,44 +1,36 @@
 //! Transform #1 — phpdoc→native parameter promotion (ADR-0034 point 4 /
 //! ADR-0037).
 //!
-//! Where `@param int $x` documents a parameter that carries **no native hint in
+//! Where `@param int $x` documents a parameter with **no native hint in
 //! source**, and call-site value propagation proves *every* project call site
 //! flows a value the native type admits, this transform adds the native
-//! declaration (`int $x`) and deletes the now-redundant tag. The precondition —
-//! *all callers proven* — is structurally unavailable to modular tools (PHPStan,
-//! Rector), which is exactly why it belongs here (ADR-0034).
+//! declaration and deletes the now-redundant tag. "All callers proven" is
+//! structurally unavailable to modular tools (PHPStan, Rector) — exactly why
+//! it belongs here.
 //!
 //! ## Scope
-//! - **Free functions and methods** (ADR-0043 §6). Free-function candidates are
-//!   proven against [`sweep_free_functions`]; method candidates against
-//!   [`sweep_methods`], keyed on the `Sym::Method` identity `(class_fqn, method)`.
-//!   A method is a candidate only when the ADR-0041 §1 **eligibility split**
-//!   admits it — private, or final, or a method of a final class, with no
-//!   inheritance involvement (not overriding an ancestor, not abstract, not an
-//!   interface method, its class not trait-using). Every non-eligible method
-//!   refuses `method-inheritance`; a magic method refuses `magic-method` (ADR-0046
-//!   §3). By construction of the split, narrowing an eligible method's parameter
-//!   cannot break Liskov substitution: a private method is invisible to subtype
-//!   dispatch, and a final method / final-class method cannot be overridden — so
-//!   no supertype caller can reach a narrowed body it would violate.
+//! - **Free functions and methods** (ADR-0043 §6), proven against
+//!   [`sweep_free_functions`] / [`sweep_methods`] (keyed on `(class_fqn,
+//!   method)`). A method is a candidate only when the ADR-0041 §1
+//!   **eligibility split** admits it — private, final, or a final class's
+//!   method, with no inheritance involvement; non-eligible refuses
+//!   `method-inheritance`, a magic method refuses `magic-method` (ADR-0046
+//!   §3). The split guarantees narrowing cannot break Liskov substitution: no
+//!   supertype caller can reach a narrowed body it would violate.
 //! - Promotable phpdoc types are those representable as a
-//!   [`steins_syntax::NativeType`]: the four scalars, `true`/`false` literals,
-//!   `?T`, and unions of those (plus a `null` member). A finer phpdoc type
-//!   (`positive-int`, `non-empty-string`, `int<0, max>`, a class, an array, …) is
-//!   not representable and is refused `type-not-natively-representable`.
-//! - Only **literal** arguments prove a call site: a non-literal argument at any
-//!   call site is refused `argument-not-proven`. Folding-backed and `$var`-flow
-//!   proofs are out of scope, so an unprovable literal is a refusal, not a guess.
-//! - A candidate whose enumerated caller set is **empty** — no call site anywhere
-//!   resolved to it — refuses `no-observed-callers` rather than promote on a
-//!   vacuous "all callers proven" (ADR-0047 §4 / ADR-0037; amends ADR-0041 §3):
-//!   zero callers is zero evidence, and is exactly the shape a framework's
-//!   convention-reflection dispatch hides behind (a test runner invoking a
-//!   data-provider method with no visible call site).
+//!   [`steins_syntax::NativeType`] (scalars, `true`/`false`, `?T`, unions); a
+//!   finer type (`positive-int`, a class, an array, …) refuses
+//!   `type-not-natively-representable`.
+//! - Only **literal** arguments prove a call site; a non-literal refuses
+//!   `argument-not-proven` (folding/`$var`-flow proofs are out of scope).
+//! - An **empty** enumerated caller set refuses `no-observed-callers` rather
+//!   than promote on a vacuous "all callers proven" (ADR-0047 §4 / ADR-0037,
+//!   amends ADR-0041 §3): zero callers is zero evidence, exactly the shape a
+//!   framework's reflection dispatch hides behind (e.g. a test runner's
+//!   data-provider method).
 //!
-//! Every enumerated site is accounted for as transformed-or-refused (the
-//! completeness oracle, ADR-0034 point 3b). Refusals carry a stable named reason
-//! and human detail so an agent can read them and continue (ADR-0034 point 2).
+//! Every enumerated site ends transformed-or-refused (ADR-0034 point 3b); each
+//! refusal carries a stable named reason and human detail (ADR-0034 point 2).
 
 use steins_contract::{ContractTy, admits_val};
 use steins_db::{Db, Project, SourceFile, parse};
@@ -61,30 +53,26 @@ use crate::transform::{CompletenessOracle, Refusal, Transform, TransformReport};
 
 // ---- Stable refusal reason names (ADR-0034 point 2) -----------------------
 
-// The caller-enumerability reasons (`dynamic-call-present`,
-// `function-referenced-as-value`, `resolution-ambiguous`, `named-or-spread-args`,
-// `argument-not-proven`) are shared with honesty and live in `crate::common`;
-// re-exported here so the public `steins_edit::promote::REASON_*` paths still
-// resolve.
+// The caller-enumerability reasons are shared with honesty and live in
+// `crate::common`; re-exported so `steins_edit::promote::REASON_*` resolves.
 pub use crate::common::{
     REASON_AMBIGUOUS, REASON_ARG_NOT_PROVEN, REASON_DYNAMIC_CALL, REASON_DYNAMIC_INCLUDE,
     REASON_EVAL_PRESENT, REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE, REASON_NAMED_OR_SPREAD,
     REASON_NO_OBSERVED_CALLERS, REASON_REFERENCED_AS_VALUE,
 };
 
-/// The phpdoc type has no [`NativeType`] rendering and is not a scalar
+/// The phpdoc type has no [`NativeType`] rendering and isn't a scalar
 /// refinement either (arrays, generics, class names, callables, shapes).
 pub const REASON_NOT_REPRESENTABLE: &str = "type-not-natively-representable";
-/// The phpdoc type is a *refinement* of a native scalar (`positive-int`,
-/// `non-empty-string`, `int<0, max>`, a literal `5`): strictly finer than its
-/// native rendering, so promotion refuses rather than promote-and-keep (ADR-0041 pt 2).
+/// A *refinement* of a native scalar (`positive-int`, `int<0, max>`, a literal
+/// `5`): strictly finer than its native rendering, so promotion refuses rather
+/// than promote-and-keep (ADR-0041 pt 2).
 pub const REASON_FINER_THAN_NATIVE: &str = "phpdoc-finer-than-native";
-/// A `$x = null` default makes the parameter implicitly nullable, but the native
-/// type is not nullable — promoting would emit PHP-8.4-deprecated code.
+/// A `$x = null` default makes the parameter implicitly nullable, but the
+/// native type isn't — promoting would emit PHP-8.4-deprecated code.
 pub const REASON_IMPLICIT_NULLABLE: &str = "implicit-nullable-default";
-/// The parameter has a non-null default value that the native type does not
-/// provably admit (`int $x = 'str'` is a compile-time fatal; `int $x = PHP_INT_MAX`
-/// is valid but not provable here). Refusing keeps the emitted declaration legal.
+/// A non-null default the native type does not provably admit (`int $x =
+/// 'str'` is a fatal; `int $x = PHP_INT_MAX` is valid but unprovable here).
 pub const REASON_DEFAULT_INCOMPATIBLE: &str = "default-not-admitted-by-native";
 
 /// The phpdoc→native promotion transform (ADR-0034 point 4).
@@ -97,21 +85,14 @@ impl Transform for PhpdocToNative {
     }
 }
 
-/// Plan the phpdoc→native promotion over `project`. Pure planning: no files are
-/// written and no diagnostics are re-checked here — the caller (CLI) drives the
-/// dry-run diff, the dual-verification post-check, and any `--apply` write
-/// (ADR-0034 point 3).
-///
-/// `vouches` are the user-vouched dynamic-code sites (`steins.toml`); pass
-/// [`VouchSet::empty`] when none. A standing (unvouched) `eval` / dynamic-include
-/// obstacle (ADR-0046 §2) makes "all callers proven" unknowable project-wide, so
-/// *every* candidate refuses while one remains.
-///
+/// Plan the phpdoc→native promotion over `project`. Pure planning — the caller
+/// (CLI) drives the dry-run diff, dual-verification post-check, and `--apply`
+/// write (ADR-0034 point 3). `vouches` are the user-vouched dynamic-code sites
+/// (`steins.toml`), [`VouchSet::empty`] when none: a standing (unvouched)
+/// `eval` / dynamic-include obstacle (ADR-0046 §2) makes "all callers proven"
+/// unknowable project-wide, so *every* candidate refuses while one remains.
 /// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
-/// identity. No promotion decision reads the map: the plan is identical whether it
-/// is `None`, an identity [`single_region`](crate::PartitionMap::single_region)
-/// map, or a fully-declared map. The parameter reserves the seam for scoped
-/// enumeration (ADR-0047 §2) without changing any verdict.
+/// identity; no decision here reads it — the parameter reserves the seam.
 #[must_use]
 pub fn plan_phpdoc_to_native(
     db: &dyn Db,
@@ -119,22 +100,21 @@ pub fn plan_phpdoc_to_native(
     vouches: &VouchSet,
     partitions: Option<&crate::regions::PartitionMap>,
 ) -> TransformReport {
-    // The region map is accepted but not consumed: no promotion verdict reads it.
     let _ = partitions;
     let sweep = sweep_free_functions(db, project);
-    // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and the
-    // ADR-0041 §1 eligibility verdicts. Free-function behavior is unaffected.
+    // The class-world reverse sweep (ADR-0043 §6): method targets, taints, and
+    // ADR-0041 §1 eligibility verdicts.
     let msweep = sweep_methods(db, project);
 
-    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and — if
-    // any stands unvouched — every candidate refuses with its reason.
+    // Project-global dynamic-code obstacles (ADR-0046 §2): recorded once, and —
+    // if any stands unvouched — every candidate refuses with its reason.
     let dynamism = obstacles::detect(db, project, vouches);
     let blocking = dynamism.blocking_reason();
 
     let files: Vec<SourceFile> = project.files(db).to_vec();
 
-    // Count each FQN across the project so a duplicate definition (which makes
-    // resolution ambiguous) refuses rather than promotes on thin evidence.
+    // Count each FQN across the project so a duplicate definition (ambiguous
+    // resolution) refuses rather than promotes on thin evidence.
     let fqn_counts = count_fqns(db, &files);
 
     let mut plan = EditPlan::new();
@@ -144,11 +124,8 @@ pub fn plan_phpdoc_to_native(
 
     for &file in &files {
         let path = file.path(db);
-        // Vendor files participate in the reverse SWEEP (as callers and as
-        // definitions) but are never transform CANDIDATES: a rewrite into `vendor/`
-        // is outside the tool's write contract — composer overwrites it, and vendor
-        // diagnostics are off by default (ADR-0015). Candidate enumeration is
-        // project-only; caller/obstacle enumeration (above) still spans vendor.
+        // Vendor is in the reverse sweep (callers/definitions) but never a
+        // candidate: composer overwrites it (ADR-0015 write contract).
         if layout.is_vendor(path) {
             continue;
         }
@@ -198,20 +175,18 @@ fn plan_function(
     let tags = func.docblock.as_deref().map(scan_docblock).unwrap_or_default();
 
     for (idx, param) in func.params.iter().enumerate() {
-        // Domain gate 1: the parameter must have no native hint in source.
+        // Gate 1: no native hint in source. Gate 2: a promotable `@param` tag.
         if param.ty.is_some() || has_source_hint(source, param) {
             continue;
         }
-        // Domain gate 2: there must be a promotable `@param` tag for it.
         let Some(tag) = param_tag(&tags, &param.name) else { continue };
 
-        // This parameter is an *enumerated* site — it must end transformed or
-        // refused (the completeness oracle, ADR-0034 point 3b).
+        // Enumerated: must end transformed or refused (ADR-0034 point 3b).
         oracle.enumerated += 1;
         let site = param_site(path, tree, func, param);
 
-        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate
-        // before any per-site judgment: "all callers proven" is unknowable.
+        // A standing project-global obstacle (ADR-0046 §2) refuses every
+        // candidate before any per-site judgment.
         if let Some((reason, detail)) = blocking {
             oracle.refused += 1;
             refusals.push(Refusal::new(site, *reason, detail.clone()));
@@ -220,8 +195,8 @@ fn plan_function(
 
         match decide(func, param, idx, tag, source, sweep, fqn_counts) {
             Ok(native) => {
-                // Insert `"<native> "` at the parameter's start (covers `&`/`...`),
-                // and delete the now-redundant `@param` line.
+                // Insert `"<native> "` at the parameter's start (covers
+                // `&`/`...`), and delete the now-redundant `@param` line.
                 let insert = Edit {
                     path: path.to_owned(),
                     span: ByteSpan::at(param.span.start),
@@ -234,8 +209,8 @@ fn plan_function(
                     span: tag_deletion(source, doc_start, doc_text, tag, tags.len()),
                     replacement: String::new(),
                 };
-                // Overlap rejection is the plan's job; a rejection here is an
-                // internal invariant break, surfaced as a refusal (never a panic).
+                // Overlap here is an internal invariant break, surfaced as a
+                // refusal (never a panic).
                 if plan.add_edit(insert).and_then(|()| plan.add_edit(delete)).is_ok() {
                     oracle.transformed += 1;
                 } else {
@@ -266,24 +241,21 @@ fn decide(
     sweep: &FreeFnSweep,
     fqn_counts: &std::collections::HashMap<String, usize>,
 ) -> Result<NativeType, (&'static str, String)> {
-    // (a/b/b2) The native type mapping + default-value gates (shared with methods).
+    // (a/b/b2) Native type mapping + default-value gates (shared with methods).
     let native = native_of_candidate(param, tag)?;
 
-    // (c) Project-wide obstacles that make "all callers" unknowable (shared with
-    // honesty's `@param` widening).
+    // (c) Project-wide obstacles that make "all callers" unknowable (shared
+    // with honesty's `@param` widening).
     check_caller_enumerability(func, sweep, fqn_counts)?;
 
     // (d) Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
-    let _ = source; // (source already consulted in the domain gate)
+    let _ = source; // already consulted in the domain gate
     match sweep.targets.get(&func.fqn) {
         Some(target) => prove_target(target, idx, param.variadic, &native, &contract)?,
-        // No target entry means no observed callers anywhere in the enumerated
-        // universe. This is NOT vacuous proof (ADR-0047 §4 / ADR-0037): an
-        // "all-callers-proven" claim over zero callers is zero evidence, and
-        // exactly the shape a framework's convention-reflection dispatch hides
-        // behind (a test runner invoking this function with no visible call
-        // site). Refuse rather than promote on nothing.
+        // No target entry: no observed callers anywhere (ADR-0047 §4 /
+        // ADR-0037). NOT vacuous proof — zero callers is zero evidence, and
+        // exactly the shape a framework's reflection dispatch hides behind.
         None => {
             return Err((
                 REASON_NO_OBSERVED_CALLERS,
@@ -301,10 +273,9 @@ fn decide(
 /// The native-type mapping + default-value gates shared by free-function and method
 /// candidates (ADR-0041 points 2/3). `Ok(native)` to keep going, `Err` to refuse.
 fn native_of_candidate(param: &Param, tag: &DocTag) -> Result<NativeType, (&'static str, String)> {
-    // (a) Representability: the phpdoc type must map to a NativeType. A type that
-    // is strictly *finer* than a native scalar (`positive-int`, `non-empty-string`,
-    // `int<0, max>`) refuses distinctly from a genuinely non-scalar type (ADR-0041
-    // point 2).
+    // (a) Representability: a type strictly *finer* than a native scalar
+    // (`positive-int`, `int<0, max>`) refuses distinctly from a genuinely
+    // non-scalar type (ADR-0041 point 2).
     let parsed = parse_type(&tag.type_text).map_err(|_| {
         (REASON_NOT_REPRESENTABLE, format!("phpdoc type `{}` did not parse", tag.type_text))
     })?;
@@ -340,11 +311,10 @@ fn native_of_candidate(param: &Param, tag: &DocTag) -> Result<NativeType, (&'sta
         ));
     }
 
-    // (b2) Any other default value must be provably admitted by the native type,
-    // or the emitted declaration is a compile-time fatal (`int $x = 'str'`,
-    // `int $x = 3.0`, `int $x = []`). A non-representable default (a constant,
-    // `self::X`, an expression) cannot be proved by this literal-only analysis and
-    // is refused conservatively — `int $x = PHP_INT_MAX` is legal but unprovable.
+    // (b2) Any other default must be provably admitted, or the emitted
+    // declaration is a compile-time fatal. A non-representable default (a
+    // constant, `self::X`, an expression) is refused conservatively — this
+    // analysis is literal-only, so `int $x = PHP_INT_MAX` is legal but unprovable.
     if param.has_default && !param.has_null_default {
         let contract = native_contract(&native);
         let admitted = param
@@ -388,19 +358,16 @@ fn plan_method(
     let key = (class.fqn.to_ascii_lowercase(), method.name.to_ascii_lowercase());
 
     for (idx, param) in method.params.iter().enumerate() {
-        // Domain gate 1: the parameter must have no native hint in source.
         if param.ty.is_some() || has_source_hint(source, param) {
             continue;
         }
-        // Domain gate 2: there must be a promotable `@param` tag for it.
         let Some(tag) = param_tag(&tags, &param.name) else { continue };
 
-        // An *enumerated* site — it must end transformed or refused (the oracle).
         oracle.enumerated += 1;
         let site = method_param_site(path, tree, class, method, param);
 
-        // A standing project-global obstacle (ADR-0046 §2) refuses every candidate
-        // before any per-site judgment (an `eval` can call methods too).
+        // A standing obstacle (ADR-0046 §2) refuses first — an `eval` can call
+        // methods too.
         if let Some((reason, detail)) = blocking {
             oracle.refused += 1;
             refusals.push(Refusal::new(site, *reason, detail.clone()));
@@ -427,8 +394,8 @@ fn plan_method(
                 refusals.push(Refusal::new(site, REASON_METHOD_INHERITANCE, detail.clone()));
                 continue;
             }
-            // `Eligible` (or, defensively, an absent verdict → treat as ineligible).
             Some(MethodEligibility::Eligible) => {}
+            // Defensively, an absent verdict is treated as ineligible.
             None => {
                 oracle.refused += 1;
                 refusals.push(Refusal::new(
@@ -484,20 +451,14 @@ fn decide_method(
     msweep: &MethodSweep,
 ) -> Result<NativeType, (&'static str, String)> {
     let native = native_of_candidate(param, tag)?;
-
-    // Project-wide obstacles that make "all callers" unknowable for this method
-    // name (dynamic method call, callable-value reference, unresolved receiver).
     check_method_caller_enumerability(&method.name, msweep)?;
 
-    // Prove every observed call-site argument for this parameter position.
     let contract = native_contract(&native);
     match msweep.targets.get(key) {
         Some(target) => prove_target(target, idx, param.variadic, &native, &contract)?,
-        // No target entry → no observed callers anywhere in the enumerated
-        // universe (ADR-0047 §4 / ADR-0037): the motivating hole is exactly this
-        // shape — a final test class's data-provider method invoked only via
-        // framework reflection, invisible to the sweep. Refuse rather than
-        // promote on a vacuous zero-caller proof.
+        // No target entry: the motivating hole is exactly this shape — a final
+        // test class's data-provider method invoked only via framework
+        // reflection, invisible to the sweep (ADR-0047 §4 / ADR-0037).
         None => {
             return Err((
                 REASON_NO_OBSERVED_CALLERS,
@@ -526,9 +487,9 @@ fn prove_target(
             "a call reaching this function used named or spread arguments".to_owned(),
         ));
     }
-    // A variadic parameter at position `idx` collects *every* positional argument
-    // from `idx` onward, so each of them must be proven (not just the one at
-    // `idx`) — otherwise a bad later argument (`f(1, 'str')`) flows in unchecked.
+    // A variadic parameter at `idx` collects every positional argument from
+    // `idx` onward, so each must be proven — else a bad later argument
+    // (`f(1, 'str')`) flows in unchecked.
     let matches = |p: usize| if variadic { p >= idx } else { p == idx };
     for obs in target.observed.iter().filter(|o| matches(o.param_index)) {
         let Some(val) = arg_to_val(&obs.value) else {
@@ -573,11 +534,10 @@ fn param_tag<'a>(tags: &'a [DocTag], param_name: &str) -> Option<&'a DocTag> {
 
 /// Compute the file byte span to delete for a promoted `@param` tag, leaving a
 /// syntactically valid docblock.
-///
-/// - A tag on a line with no docblock delimiters → delete the whole physical line
-///   (plus its trailing newline).
-/// - A tag sharing a line with `/**` or `*/` and it is the docblock's only tag →
-///   delete the whole docblock.
+/// - No docblock delimiters on the tag's line → delete the whole physical
+///   line (plus its trailing newline).
+/// - Shares a line with `/**` or `*/` and is the docblock's only tag → delete
+///   the whole docblock.
 /// - Otherwise (delimiter line with sibling tags) → delete just the tag text.
 fn tag_deletion(
     source: &str,
@@ -628,7 +588,7 @@ fn phpdoc_to_native(ty: &PType) -> Option<NativeType> {
                     }
                     TypeKind::Identifier(name) => members.push(member_of(name)?),
                     TypeKind::Nullable(inner) => {
-                        // `?T` inside a union: fold its member in and mark nullable.
+                        // `?T` inside a union: fold its member in, mark nullable.
                         let nt = phpdoc_to_native(inner)?;
                         members.extend(nt.members);
                         nullable = true;
@@ -646,11 +606,11 @@ fn phpdoc_to_native(ty: &PType) -> Option<NativeType> {
     }
 }
 
-/// Whether a non-representable phpdoc type is a *refinement* of a native scalar
-/// (`positive-int`, `non-empty-string`, `int<0, max>`, a literal `5` / `'x'`), as
-/// opposed to genuinely non-scalar (arrays, classes, generic collections,
-/// callables, shapes). Drives the `phpdoc-finer-than-native` vs
-/// `type-not-natively-representable` split (ADR-0041 point 2).
+/// Whether a non-representable phpdoc type is a *refinement* of a native
+/// scalar (`positive-int`, `int<0, max>`, a literal), as opposed to genuinely
+/// non-scalar (arrays, classes, generics, callables, shapes). Drives the
+/// `phpdoc-finer-than-native` vs `type-not-natively-representable` split
+/// (ADR-0041 point 2).
 fn is_finer_than_native(ty: &PType) -> bool {
     match &ty.kind {
         TypeKind::Identifier(n) => is_refined_scalar_keyword(&n.to_ascii_lowercase()),
@@ -661,8 +621,8 @@ fn is_finer_than_native(ty: &PType) -> bool {
         }
         // `int<a, b>` — a bounded-int refinement (`array<…>` etc. are not).
         TypeKind::Generic { base, .. } => base.eq_ignore_ascii_case("int"),
-        // A union is "finer" only if every member is representable-or-finer and at
-        // least one member is a refinement — else it is genuinely non-representable.
+        // A union is "finer" only if every member is representable-or-finer and
+        // at least one is a refinement — else genuinely non-representable.
         TypeKind::Union { types, .. } => {
             let mut any_finer = false;
             for t in types {
@@ -694,29 +654,18 @@ fn native_member_repr(ty: &PType) -> bool {
     }
 }
 
-/// Whether `n` is a refined-scalar phpdoc keyword (a subtype of `int`/`string`) —
-/// finer than its native base, so promotion refuses `phpdoc-finer-than-native`
-/// rather than promoting it away.
+/// Whether `n` is a refined-scalar phpdoc keyword (subtype of `int`/`string`),
+/// finer than its native base — refuses `phpdoc-finer-than-native` rather than
+/// promoting it away.
 ///
-/// Queries `steins-contract`'s one identifier table (`steins_contract::lower_identifier`)
-/// rather than restating it: a refinement is exactly a lowered
-/// [`ContractTy::IntIn`]/[`ContractTy::StrWith`]/[`ContractTy::StrOpaque`] arm — an
-/// interval, a predicate-string class, or a non-extensional string subtype
-/// (`class-string`, `literal-string`, …). A bare `ContractTy::Base` (`int`,
-/// `string`, …) is natively representable, not a refinement, and
-/// [`ContractTy::Class`] is `lower_identifier`'s "not a keyword" signal — neither
-/// counts.
-///
-/// Delegating to the shared table keeps this predicate in lock-step with it:
-/// every `StrWith`/`StrOpaque`/`IntIn` spelling the table recognizes
-/// (`decimal-int-string`, `non-decimal-int-string`, `interface-string`,
-/// `numeric-int-string`, …) refuses promotion here, with no parallel list to drift.
-///
-/// Two spellings are not in `steins-contract`'s table at all:
-/// `interned-string`/`html-escaped-string` are project-local phpdoc conventions,
-/// not part of the cross-analyzer vocabulary the shared table is curated against —
-/// so they stay this predicate's own small residual, the one piece of vocabulary
-/// that cannot delegate.
+/// Delegates to `steins_contract::lower_identifier` rather than restating its
+/// table: a refinement is a lowered
+/// [`ContractTy::IntIn`]/[`ContractTy::StrWith`]/[`ContractTy::StrOpaque`] arm;
+/// `ContractTy::Base` is natively representable and [`ContractTy::Class`] is
+/// "not a keyword" — neither counts, keeping this in lock-step with the table,
+/// no parallel list to drift. `interned-string`/`html-escaped-string` are
+/// absent from it (project-local conventions) and stay this predicate's own
+/// residual.
 fn is_refined_scalar_keyword(n: &str) -> bool {
     if matches!(n, "interned-string" | "html-escaped-string") {
         return true;
@@ -743,9 +692,9 @@ fn member_of(name: &str) -> Option<TypeMember> {
     }
 }
 
-/// Pins `is_refined_scalar_keyword` to `steins_contract::lower_identifier`: every
-/// refined-scalar spelling the shared table recognizes must refuse promotion, and
-/// the two project-local spellings this predicate owns must too.
+/// Pins `is_refined_scalar_keyword` to `steins_contract::lower_identifier`:
+/// every recognized refined-scalar spelling, plus the two project-local ones,
+/// must refuse promotion.
 #[cfg(test)]
 mod is_refined_scalar_keyword_tests {
     use super::is_refined_scalar_keyword;
@@ -775,18 +724,16 @@ mod is_refined_scalar_keyword_tests {
         }
     }
 
-    /// The two project-local spellings absent from `steins-contract`'s shared
-    /// table stay recognized — the one piece of vocabulary this predicate keeps
-    /// as its own residual rather than delegating.
+    /// The two project-local spellings absent from the shared table stay
+    /// recognized.
     #[test]
     fn project_local_spellings_not_in_the_shared_table_still_refuse() {
         assert!(is_refined_scalar_keyword("interned-string"));
         assert!(is_refined_scalar_keyword("html-escaped-string"));
     }
 
-    /// These four spellings are `StrWith`/`StrOpaque` refinements in
-    /// `steins-contract`'s shared table, so promotion must refuse them rather than
-    /// silently promoting a refined type away.
+    /// `StrWith`/`StrOpaque` refinements missing from the old hand list must
+    /// now refuse too.
     #[test]
     fn spellings_missing_from_the_old_hand_list_now_refuse() {
         for n in ["decimal-int-string", "non-decimal-int-string", "interface-string", "numeric-int-string"]
@@ -795,8 +742,8 @@ mod is_refined_scalar_keyword_tests {
         }
     }
 
-    /// A bare native scalar keyword is not a refinement (natively
-    /// representable), and a class name is not a keyword at all — both false.
+    /// A bare native scalar keyword is not a refinement, and a class name is
+    /// not a keyword at all — both false.
     #[test]
     fn bare_scalars_and_class_names_are_not_refinements() {
         for n in ["int", "float", "string", "bool", "mixed", "array", "SomeClass"] {
@@ -804,4 +751,3 @@ mod is_refined_scalar_keyword_tests {
         }
     }
 }
-

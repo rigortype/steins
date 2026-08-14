@@ -1,8 +1,7 @@
 //! End-to-end tests for the suppression channels (ADR-0022/0023): inline
-//! `@steins-ignore` and the `.steins-baseline.jsonl` baseline.
-//!
-//! Each test runs the real `steins` binary in a private temp directory so the
-//! default baseline file and relative paths are fully isolated.
+//! `@steins-ignore` and the `.steins-baseline.jsonl` baseline. Each test runs
+//! the real `steins` binary in a private temp directory so the default
+//! baseline file and relative paths are fully isolated.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -12,12 +11,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s
+/// format auto-detection (ADR-0054 §6) reads it and would otherwise emit
+/// workflow commands (detection itself is tested in `tests/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -59,7 +55,7 @@ fn write(dir: &Path, name: &str, contents: &str) -> PathBuf {
 /// A single coercive int-argument finding: `width("abc")` on the given line.
 const WIDTH_DEF: &str = "<?php\nfunction width(int $w): int { return $w; }\n";
 
-// ------------------------------------------------------------------ inline ---
+// Inline ignore tests
 
 #[test]
 fn same_line_trailing_ignore_suppresses_its_own_line() {
@@ -120,7 +116,7 @@ fn comma_list_suppresses_and_reports_the_unmatched_member() {
     let dir = workdir("comma");
     write(&dir, "a.php", &format!("{WIDTH_DEF}width(\"abc\"); // @steins-ignore type.argument-mismatch, effect.envelope-exceeded\n"));
     let r = run_in(&dir, &["check", "a.php"]);
-    // The type finding is suppressed; the effect id matched nothing → unmatched.
+    // type.* is suppressed; effect.* matches nothing on the line → unmatched.
     assert_eq!(r.code, 1, "unmatched meta present → exit 1; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("1 diagnostics suppressed"), "got:\n{}", r.stdout);
     assert!(r.stdout.contains("error[suppress.unmatched]"), "got:\n{}", r.stdout);
@@ -136,7 +132,6 @@ fn unmatched_ignore_is_reported_at_the_comment() {
     assert_eq!(r.code, 1, "unmatched → exit 1; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("error[suppress.unmatched]"), "got:\n{}", r.stdout);
     assert!(r.stdout.contains("matches no diagnostic on line 3"), "got:\n{}", r.stdout);
-    // The meta-diagnostic is reported at the comment's own line (line 3).
     assert!(r.stdout.contains("a.php:3:"), "reported at comment location, got:\n{}", r.stdout);
 }
 
@@ -148,12 +143,12 @@ fn unknown_id_is_reported_and_does_not_suppress() {
     assert_eq!(r.code, 1, "unknown id doesn't suppress; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("error[suppress.unknown-id]"), "got:\n{}", r.stdout);
     assert!(r.stdout.contains("unknown diagnostic id 'type.bogus'"), "got:\n{}", r.stdout);
-    // The original finding still fires (bogus never matched it).
+    // The finding still fires — "bogus" never matched it.
     assert!(r.stdout.contains("error[type.argument-mismatch]"), "got:\n{}", r.stdout);
     assert!(!r.stdout.contains("suppressed by inline"), "nothing suppressed, got:\n{}", r.stdout);
 }
 
-// ---------------------------------------------------------------- baseline ---
+// Baseline tests
 
 /// The base file with exactly one `type.argument-mismatch` finding.
 fn one_finding() -> String {
@@ -163,9 +158,8 @@ fn one_finding() -> String {
 #[test]
 fn set_baseline_writes_header_and_sorted_forward_slash_entries() {
     let dir = workdir("set");
-    // Two files so path sorting and forward slashes are observable. Distinct
-    // function names — a duplicated definition across files would be ambiguous
-    // project-wide and produce no finding.
+    // Two files so path sorting and forward slashes are observable; distinct
+    // function names avoid an ambiguous duplicate definition across files.
     std::fs::create_dir_all(dir.join("sub")).unwrap();
     write(&dir, "sub/z.php", "<?php\nfunction height(int $h): int { return $h; }\nheight(\"abc\");\n");
     write(&dir, "a.php", &one_finding());
@@ -177,7 +171,6 @@ fn set_baseline_writes_header_and_sorted_forward_slash_entries() {
     assert!(lines[0].contains(r#""steins-baseline":1"#), "header first, got:\n{text}");
     assert!(lines[0].contains(r#""note""#), "header carries note, got:\n{text}");
     assert_eq!(lines.len(), 3, "header + 2 entries, got:\n{text}");
-    // Sorted by path: a.php before sub/z.php; forward slashes on the nested one.
     assert!(lines[1].contains(r#""path":"a.php""#), "got:\n{text}");
     assert!(lines[2].contains(r#""path":"sub/z.php""#), "forward slash + sorted, got:\n{text}");
     assert!(lines[1].contains(r#""id":"type.argument-mismatch""#), "got:\n{text}");
@@ -202,8 +195,8 @@ fn inserting_lines_above_keeps_the_finding_baselined() {
     write(&dir, "a.php", &one_finding());
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
 
-    // Insert unrelated lines ABOVE the finding's neighborhood — the line number
-    // shifts but the flagged line's text and its neighbors do not.
+    // Insert unrelated lines above; the line number shifts but the flagged
+    // line and its neighbors do not — the hash stays stable.
     write(&dir, "a.php", "<?php\n\n// an unrelated note added later\n\nfunction width(int $w): int { return $w; }\nwidth(\"abc\");\n");
     let r = run_in(&dir, &["check", "a.php"]);
     assert_eq!(r.code, 0, "line-shift immunity — still baselined; stdout:\n{}", r.stdout);
@@ -216,8 +209,7 @@ fn editing_the_flagged_line_resurfaces_and_marks_stale() {
     write(&dir, "a.php", &one_finding());
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
 
-    // Change the flagged line itself: still a finding, but a new neighborhood → a
-    // new hash, so the baseline entry does not match.
+    // Changing the flagged line gives a new neighborhood → new hash → no match.
     write(&dir, "a.php", &format!("{WIDTH_DEF}width(\"xyz\");\n"));
     let r = run_in(&dir, &["check", "a.php"]);
     assert_eq!(r.code, 1, "resurfaced; stdout:\n{}", r.stdout);
@@ -228,10 +220,9 @@ fn editing_the_flagged_line_resurfaces_and_marks_stale() {
 #[test]
 fn duplicate_findings_and_entries_match_one_for_one() {
     let dir = workdir("dup");
-    // Two `width("abc")` calls with identical neighborhoods (a silent builtin filler
-    // `strlen("x");` above and below each) → identical (id, path, hash) → two
-    // identical baseline lines. A bare undefined-call filler would itself emit
-    // `call.undefined-function`, so use a resident builtin.
+    // Two `width("abc")` calls with identical neighborhoods (`strlen("x");`
+    // filler each side) hash identically → two identical baseline lines.
+    // Filler must be a resident builtin, not undefined (self-emits `call.undefined-function`).
     let src = "<?php\nfunction width(int $w): int { return $w; }\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\n";
     write(&dir, "a.php", src);
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
@@ -246,8 +237,8 @@ fn duplicate_findings_and_entries_match_one_for_one() {
     assert_eq!(r.code, 0, "both baselined; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("2 findings in baseline"), "got:\n{}", r.stdout);
 
-    // Drop ONE duplicate baseline line → one finding consumes it, the other
-    // reports (one-for-one). No stale (the surviving entry is consumed).
+    // Drop one duplicate entry → one finding consumes it, the other reports
+    // (one-for-one, no stale — the surviving entry is consumed).
     let trimmed = format!("{}\n{}\n", text.lines().next().unwrap(), entry_lines[0]);
     std::fs::write(dir.join(".steins-baseline.jsonl"), trimmed).unwrap();
     let r = run_in(&dir, &["check", "a.php"]);
@@ -262,19 +253,13 @@ fn duplicate_findings_and_entries_match_one_for_one() {
     assert!(!r.stdout.contains("stale"), "consumed entry is not stale, got:\n{}", r.stdout);
 }
 
-// ------------------------------------------------ debug lane exemption (#108) ---
-//
-// ADR-0053 §4/§8: the debug lane is exempt from the baseline on BOTH sides —
-// never captured (`write_baseline`) and never matched (`match_baseline`).
-// Capturing a `debug.type` entry would let a rerun baseline it, silently
-// downgrading a guaranteed runtime fatal to "N findings in baseline" at exit 0
-// (issue #108).
+// Debug lane exemption (issue #108): ADR-0053 §4/§8 keeps it off the baseline
+// on both sides — never captured, never matched — so a rerun can't silently
+// downgrade a guaranteed runtime fatal to "N findings in baseline" at exit 0.
 
 #[test]
 fn set_baseline_never_captures_a_debug_dump_entry() {
     let dir = workdir("debug-no-capture");
-    // One ordinary finding plus one dumpType() call: only the ordinary finding
-    // may reach the baseline.
     write(&dir, "a.php", &format!("{WIDTH_DEF}width(\"abc\");\n$y = 1; \\PHPStan\\dumpType($y);\n"));
     let r = run_in(&dir, &["check", "--set-baseline", "a.php"]);
     assert_eq!(r.code, 0, "set-baseline exits 0; stderr:\n{}", r.stderr);
@@ -291,8 +276,7 @@ fn set_baseline_never_captures_a_debug_dump_entry() {
 
 #[test]
 fn debug_dump_still_fails_after_set_baseline_rerun() {
-    // A dump-only fixture: `--set-baseline` has nothing to capture, and the dump
-    // must keep reporting — and keep failing — on the very next run.
+    // Dump-only fixture: `--set-baseline` has nothing to capture here.
     let dir = workdir("debug-still-fails");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     let set = run_in(&dir, &["check", "--set-baseline", "a.php"]);
@@ -307,13 +291,10 @@ fn debug_dump_still_fails_after_set_baseline_rerun() {
 
 #[test]
 fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
-    // A legacy or hand-edited baseline may carry a `debug.*` entry. ADR-0053's
-    // exemption is symmetric: `match_baseline` refuses it just as
-    // `write_baseline` refuses to create one. A debug finding bypasses the matcher
-    // unconditionally (main.rs), so the arbitrary hash pins that it is irrelevant.
-    //
-    // A leftover debug entry is stale, not dormant (ADR-0050 §8): it can never
-    // become valid, so the next capture cleans it out.
+    // ADR-0053's exemption is symmetric: `match_baseline` refuses a hand-edited
+    // `debug.*` entry too (debug findings bypass the matcher unconditionally,
+    // so the hash below is arbitrary). Per ADR-0050 §8 it's stale, not
+    // dormant, so the next capture cleans it out.
     let dir = workdir("debug-leftover-entry");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
@@ -338,11 +319,9 @@ fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
 
 #[test]
 fn a_strict_captured_debug_entry_is_stale_on_a_default_run_too() {
-    // Review finding on issue #108 (PR #133): a `debug.type` entry tagged
-    // `"surface":"strict"`, consulted on a `default` run, must not be silently
-    // kept by ADR-0062 A-G10's `captured <= rung` gate. A debug entry is dead
-    // weight at every rung (checked on every profile, never matchable — see the
-    // leftover-entry test above), so its capture rung must not matter.
+    // Issue #108 (PR #133): a `debug.type` entry tagged `"surface":"strict"`,
+    // consulted on a `default` run, must not survive via ADR-0062 A-G10's
+    // `captured <= rung` gate — a debug entry is dead weight at every rung.
     let dir = workdir("debug-leftover-entry-strict-rung");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "--profile", "strict", "a.php"]).code, 0);
@@ -354,7 +333,6 @@ fn a_strict_captured_debug_entry_is_stale_on_a_default_run_too() {
     );
     std::fs::write(dir.join(".steins-baseline.jsonl"), forged).unwrap();
 
-    // Run under the DEFAULT profile — lower rung than the entry's own capture tag.
     let r = run_in(&dir, &["check", "a.php"]);
     assert_eq!(r.code, 1, "the dump still fails on a lower-rung run; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("error[debug.type]"), "not suppressed, got:\n{}", r.stdout);
@@ -383,7 +361,6 @@ fn custom_baseline_path_round_trips() {
     write(&dir, "a.php", &one_finding());
     assert_eq!(run_in(&dir, &["check", "--baseline", "custom.jsonl", "--set-baseline", "a.php"]).code, 0);
     assert!(dir.join("custom.jsonl").exists(), "custom file written");
-    // The default file was NOT created.
     assert!(!dir.join(".steins-baseline.jsonl").exists(), "default untouched");
 
     let r = run_in(&dir, &["check", "--baseline", "custom.jsonl", "a.php"]);
@@ -410,7 +387,7 @@ fn json_carries_suppressed_and_baselined_fields() {
     assert_eq!(v["findings"].as_array().unwrap().len(), 0);
 }
 
-// -------------------------------------------- return-mismatch integration ---
+// return-mismatch integration tests
 
 /// A file whose only finding is a `type.return-mismatch` on line 3.
 const RETURN_FINDING: &str =
@@ -418,8 +395,8 @@ const RETURN_FINDING: &str =
 
 #[test]
 fn return_mismatch_is_inline_ignorable() {
-    // The new `type.return-mismatch` id flows through the inline-ignore channel
-    // exactly like `type.argument-mismatch` (registry-governed, ADR-0022/0023).
+    // `type.return-mismatch` flows through inline-ignore like
+    // `type.argument-mismatch` (registry-governed, ADR-0022/0023).
     let dir = workdir("return-inline");
     write(
         &dir,

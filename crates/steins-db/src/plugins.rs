@@ -1,9 +1,8 @@
 //! The plugin channel (ADR-0012 / ADR-0039 / ADR-0068): Composer-distributed
 //! packages that register effect labels and color functions with them.
 //!
-//! # What is read
-//!
-//! A **manifest**, directly from Rust — `vendor/<vendor>/<package>/steins-plugin.json`:
+//! **What is read:** a **manifest**, directly from Rust —
+//! `vendor/<vendor>/<package>/steins-plugin.json`:
 //!
 //! ```json
 //! { "steins-plugin-api": 1,
@@ -12,34 +11,26 @@
 //! ```
 //!
 //! No PHP runs. ADR-0039's design has the sidecar boot the project's own autoload
-//! and answer `plugin(id, "declare", …)` on demand, and that remains the plan for
-//! synthetic declarations and for facts only the live framework knows. But the two
-//! facts read here — *which labels exist* and *which plain functions carry them* —
-//! are static per installed version, so reading them out of a JSON file keeps
-//! discovery deterministic, keeps `steins check --no-php` a complete answer, and
-//! keeps the tracer testable without a PHP toolchain.
+//! and answer `plugin(id, "declare", …)` on demand, still the plan for synthetic
+//! declarations and facts only the live framework knows — but the two facts read
+//! here (*which labels exist*, *which plain functions carry them*) are static
+//! per installed version, so a JSON file keeps discovery deterministic, keeps
+//! `steins check --no-php` a complete answer, and keeps the tracer testable
+//! without a PHP toolchain.
 //!
-//! # Discovery
+//! **Discovery:** `vendor/composer/installed.json` names installed packages;
+//! those of `type: steins-plugin` are candidates. A `steins.toml` `[plugins]
+//! allow = […]` list, when present, **replaces** discovery with exactly those
+//! package names (ADR-0039), and per ADR-0068 §2 an explicitly listed plugin is
+//! exempt from the vendor-root rule — the owner's listing is the vouching act.
 //!
-//! `vendor/composer/installed.json` names the installed packages; those of `type:
-//! steins-plugin` are the candidates. A `steins.toml` `[plugins] allow = […]` list,
-//! when present, **replaces** discovery with exactly those package names (ADR-0039:
-//! the explicit listing wins) — and, per ADR-0068 §2, an explicitly listed plugin
-//! is exempt from the vendor-root rule, because the owner's listing is the vouching
-//! act.
-//!
-//! # What is refused, and loudly
-//!
-//! - An unrecognized `steins-plugin-api` → the whole plugin is skipped.
-//! - A label outside the plugin's own vendor root and outside the core taxonomy
-//!   (ADR-0068 §2) → that registration is skipped; the rest of the plugin loads.
-//! - A coloring naming a label the plugin never registered → that coloring is
-//!   skipped.
-//!
-//! Every refusal becomes a [`PluginFacts::notices`] line the CLI prints to stderr
-//! — never a diagnostic. Plugin-supplied facts must not be able to create or
-//! influence a finding (ADR-0068 §1), and that includes a finding about the plugin
-//! itself: silence names itself, on the error stream.
+//! **What is refused, and loudly:** an unrecognized `steins-plugin-api` skips
+//! the whole plugin; a label outside the plugin's own vendor root and the core
+//! taxonomy (ADR-0068 §2) skips that registration (rest of the plugin loads); a
+//! coloring naming an unregistered label is skipped. Every refusal becomes a
+//! [`PluginFacts::notices`] stderr line, never a diagnostic — plugin-supplied
+//! facts must not create or influence a finding (ADR-0068 §1), including a
+//! finding about the plugin itself.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -59,14 +50,13 @@ pub const PLUGIN_TYPE: &str = "steins-plugin";
 /// one is not loaded and is reported by name.
 pub const SUPPORTED_API: u64 = 1;
 
-/// Everything the plugin channel contributed to one project — carried as a
-/// [`crate::Project`] input beside the layout, for the same reason the layout is:
-/// it is resolved once at the IO boundary, and a replay from the same inputs must
-/// reach the same verdict (ADR-0048).
+/// Everything the plugin channel contributed to one project — a
+/// [`crate::Project`] input for the same reason the layout is: resolved once
+/// at the IO boundary, and a replay from the same inputs must reach the same
+/// verdict (ADR-0048).
 ///
-/// [`PluginFacts::none`] is the empty channel, and it is the default: a project
-/// with no plugin loads no registrations and infers exactly as if the channel
-/// were absent.
+/// [`PluginFacts::none`] is the empty channel and the default: a project with
+/// no plugin infers exactly as if the channel were absent.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PluginFacts {
     /// The label registry this project's inference asks — builtin labels plus the
@@ -119,10 +109,8 @@ impl PluginFacts {
     ///
     /// `allow`, when `Some`, is the `steins.toml` `[plugins] allow` list: it
     /// **replaces** `installed.json` discovery with exactly those package names,
-    /// and marks each of them explicitly vouched (ADR-0068 §2 exemption).
-    ///
-    /// Runs once, at the boundary, before any salsa input is set. Anything it
-    /// cannot read is skipped and reported; nothing here is fatal.
+    /// marking each explicitly vouched (ADR-0068 §2 exemption). Runs once, at
+    /// the boundary; anything unreadable is skipped and reported, never fatal.
     #[must_use]
     pub fn discover(layout: &ProjectLayout, allow: Option<&[String]>) -> Self {
         let mut loaded: Vec<String> = Vec::new();
@@ -170,9 +158,8 @@ impl Candidate {
 /// the notice order (and every derived answer) is deterministic.
 fn candidates(vendor_dir: &Path, allow: Option<&[String]>) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = match allow {
-        // The explicit listing replaces discovery entirely: a package of type
-        // `steins-plugin` that is not listed is not loaded, which is what makes
-        // the list a control rather than an addition.
+        // The explicit listing replaces discovery entirely: unlisted packages
+        // don't load, making the list a control rather than an addition.
         Some(names) => names
             .iter()
             .map(|n| Candidate {
@@ -193,10 +180,9 @@ fn candidates(vendor_dir: &Path, allow: Option<&[String]>) -> Vec<Candidate> {
 
 /// The `type: steins-plugin` package names in `vendor/composer/installed.json`.
 ///
-/// Both shapes are read: Composer 2's `{"packages": [...]}` object and Composer 1's
-/// bare array. An unreadable or unparseable file yields no candidates — a project
-/// whose vendor tree cannot be introspected has no plugins, which is the pre-plugin
-/// behavior.
+/// Both shapes are read: Composer 2's `{"packages": [...]}` object and Composer
+/// 1's bare array. An unreadable/unparseable file yields no candidates — the
+/// pre-plugin behavior.
 fn installed_plugins(vendor_dir: &Path) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(vendor_dir.join("composer").join("installed.json"))
     else {
@@ -265,9 +251,9 @@ fn load(
         accepted.push(label.to_owned());
     }
 
-    // Function colorings. A coloring may only name a label this plugin actually
-    // registered (or refined from it), or a core taxonomy label — otherwise the
-    // declared lane would carry a label no registry knows.
+    // A coloring may only name a label this plugin registered (or refined from
+    // it), or a core taxonomy label — else the declared lane carries an unknown
+    // label.
     for (name, value) in json.get("effects").and_then(Value::as_object).into_iter().flatten() {
         let mut colors: Vec<String> = Vec::new();
         for label in value.as_array().into_iter().flatten() {
@@ -435,7 +421,6 @@ mod tests {
     #[test]
     fn an_explicit_allow_list_replaces_discovery_and_vouches() {
         let t = Tree::new("allow");
-        // Installed and of the right type, but the list does not name it.
         t.write(
             "vendor/composer/installed.json",
             r#"{"packages":[{"name":"acme/steins-plugin","type":"steins-plugin"},

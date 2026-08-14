@@ -1,31 +1,25 @@
-//! `steins-phpdoc` — a PHPDoc type-expression parser whose grammar is normatively
-//! **phpstan/phpdoc-parser-compatible** (ADR-0029), with the type-operation
-//! semantics governed by ADR-0030.
-//!
-//! Because a PHPDoc type becomes an authoritative envelope (ADR-0001), a
-//! misparsed docblock is a wrong contract — a false-positive vector. So the
-//! grammar here is a faithful, hand-written port of the de-facto standard parser,
-//! and compatibility is enforced mechanically by the oracle harness
-//! (`harness/phpdoc-oracle`, `cargo xtask phpdoc-oracle`): the same inputs run
-//! through the *real* phpstan/phpdoc-parser and are diffed against this crate.
+//! `steins-phpdoc` — a PHPDoc type-expression parser, normatively
+//! **phpstan/phpdoc-parser-compatible** (ADR-0029), with type-operation
+//! semantics governed by ADR-0030. A PHPDoc type is an authoritative envelope
+//! (ADR-0001), so a misparse is a wrong contract — a false-positive vector.
+//! Compatibility is enforced mechanically by the oracle harness
+//! (`harness/phpdoc-oracle`, `cargo xtask phpdoc-oracle`), which diffs this
+//! crate's output against the real phpstan/phpdoc-parser on the same inputs.
 //!
 //! # Design
 //!
-//! - A hand-written [`lexer`] reproducing the reference token stream, and a
-//!   recursive-descent [`parser`] reproducing its algorithm (including the
-//!   whitespace-sensitive and save-point/backtrack subtleties that decide
-//!   compatibility). See those modules for the port notes.
-//! - An own, spanned [`ast`]. [`std::fmt::Display`] renders the **canonical
-//!   form** matching phpdoc-parser's node `__toString()` — the string the oracle
-//!   compares against.
-//! - A thin [`docblock`] scanner that extracts typed tags with positions.
+//! - [`lexer`]: hand-written, reproduces the reference token stream.
+//! - [`parser`]: recursive-descent, reproduces the reference algorithm
+//!   including its whitespace-sensitive and save-point/backtrack subtleties.
+//! - [`ast`]: own spanned AST; [`std::fmt::Display`] renders the canonical form
+//!   matching phpdoc-parser's `__toString()` — what the oracle compares.
+//! - [`docblock`]: thin scanner extracting typed tags with positions.
 //!
 //! # Subset & safety
 //!
-//! Constructs are implemented in envelope-checking priority order. Anything the
-//! parser cannot accept yields a [`ParseError`]; a construct we deliberately keep
-//! opaque yields a [`TypeKind::Unsupported`] node. Callers treat **both** as "no
-//! envelope" — silence, always the safe side. The parser never panics on input.
+//! An unaccepted construct yields [`ParseError`]; a deliberately-opaque one
+//! yields [`TypeKind::Unsupported`]. Callers treat both as "no envelope" —
+//! silence, the safe default. The parser never panics.
 //!
 //! ```
 //! use steins_phpdoc::{parse_type, ast::TypeKind};
@@ -61,15 +55,13 @@ pub use parser::{ParseError, TypeParse, parse_type};
 mod tests {
     use super::*;
 
-    /// Round-trip a handful of representative types through parse + canonical
-    /// render. The exhaustive check is the ported reference corpus in
-    /// `tests/reference_corpus.rs`; these guard the headline grammar features.
+    /// Round-trips representative types through parse + canonical render; guards
+    /// the headline grammar features. Exhaustive check: `tests/reference_corpus.rs`.
     #[test]
     fn canonical_forms() {
         let cases = [
             ("int", "int"),
-            // The open keyword table: these scalars are plain identifiers to the
-            // grammar (no special node), so unknown-but-valid names just work.
+            // These scalars are plain identifiers to the grammar (no special node).
             ("numeric-string", "numeric-string"),
             ("non-empty-string", "non-empty-string"),
             ("non-falsy-string", "non-falsy-string"),

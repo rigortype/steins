@@ -1,18 +1,17 @@
-//! The unified trinary judgment (ADR-0031): PHPStan's TrinaryLogic and
-//! Rigor's Certainty are the same lattice; Steins has exactly one.
+//! The unified trinary judgment (ADR-0031): PHPStan's TrinaryLogic and Rigor's Certainty are
+//! the same lattice; Steins has exactly one.
 
 /// A trinary judgment: `Yes` / `No` / `Maybe`.
 ///
-/// `Maybe` never promotes: combining evidence can only move *toward* `Maybe`
-/// (via [`Certainty::and`]/[`Certainty::or`] mixing), never conjure a `Yes`
-/// from repetition — the discipline imported from Rigor.
+/// `Maybe` never promotes: [`Certainty::and`]/[`Certainty::or`] only move evidence toward
+/// `Maybe`, never conjure `Yes` from repetition (Rigor's discipline).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Certainty {
     /// Provably true.
     Yes,
     /// Provably false.
     No,
-    /// Not decided; the honest middle. Silence-producing in the proof layer.
+    /// Not decided; silence-producing in the proof layer.
     Maybe,
 }
 
@@ -74,13 +73,12 @@ impl Certainty {
         matches!(self, Certainty::No)
     }
 
-    /// Fold a collection of judgments about *every* member: all `Yes` → `Yes`,
-    /// all `No` → `No`, anything mixed or `Maybe` → `Maybe`.
+    /// Fold judgments about every member: all `Yes` → `Yes`, all `No` → `No`, anything mixed
+    /// or `Maybe` → `Maybe`. Empty input is `Maybe` (vacuous truth is a trap).
     #[must_use]
     pub fn all_of<I: IntoIterator<Item = Certainty>>(items: I) -> Self {
         let mut iter = items.into_iter();
         let Some(first) = iter.next() else {
-            // Vacuous truth is a trap: an empty set decides nothing.
             return Certainty::Maybe;
         };
         if matches!(first, Certainty::Maybe) {

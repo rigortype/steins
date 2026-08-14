@@ -1,13 +1,11 @@
 //! Native object acceptance against scalar/union/object parameter and return
 //! types via the trinary is-a oracle (ADR-0043). Only a **definite No** (every
-//! union member rejects the value's exact class) fires; any `Unknown` stays
-//! silent.
+//! union member rejects the value's exact class) fires; `Unknown` stays silent.
 //!
-//! Object↔scalar coercion cells verified against PHP 8.5.8:
-//! - a `__toString` object coerces to `string` in coercive mode but `TypeError`s
-//!   in strict mode; a plain object errors in both.
-//! - no object (even `__toString`) coerces to `int`/`float`/`bool`.
-//! - an enum case is an object, never its backing scalar.
+//! Object↔scalar coercion cells verified against PHP 8.5.8: a `__toString`
+//! object coerces to `string` in coercive mode but `TypeError`s in strict
+//! mode (a plain object errors in both); no object coerces to `int`/`float`/
+//! `bool`; an enum case is an object, never its backing scalar.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -15,9 +13,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // `untyped.*` (ADR-0078, #200) reports on the fixtures' own deliberately-untyped
+    // declarations, not the behaviour under test; dropped so counts below stay stable.
     check(&tree, &functions, "test.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -229,8 +226,8 @@ f(C::FOO);";
 
 #[test]
 fn class_class_constant_is_a_string() {
-    // Foo::class is the FQN string — accepted by a string param (silent), rejected
-    // by an int param (a class-string is never numeric).
+    // Foo::class is the FQN string: accepted by string (silent), rejected by int
+    // (a class-string is never numeric).
     let ok = "<?php declare(strict_types=1);
 final class Foo {}
 function f(string $v): void {}
@@ -258,8 +255,7 @@ f(new B());";
 
 #[test]
 fn null_vs_object_type_silent() {
-    // null against a non-nullable object type stays silent this stage (out of scope
-    // + sidesteps has_null_default implicit-nullable interplay).
+    // Out of scope this stage; sidesteps has_null_default implicit-nullable interplay.
     let src = "<?php declare(strict_types=1);
 final class A {}
 function f(A $v): void {}
@@ -320,8 +316,7 @@ f(new \\Vendor\\Unknown());";
 
 #[test]
 fn trait_use_adds_no_type_so_hierarchy_stays_closed() {
-    // A `use`d trait adds methods, never *types* (a trait cannot `implements`), so
-    // the is-a oracle keeps the hierarchy fully enumerated and still proves `No`.
+    // A `use`d trait adds methods, never *types* — hierarchy stays fully enumerated.
     let src = "<?php declare(strict_types=1);
 interface I {}
 trait T {}
@@ -365,8 +360,7 @@ f(new Robot());";
 
 #[test]
 fn message_renders_namespaced_object_with_declared_casing() {
-    // An unqualified name in a namespace renders as the resolved, source-cased
-    // FQN (`App\Logger`), matching how the FQN was declared/written.
+    // Unqualified name in a namespace renders as the resolved, source-cased FQN.
     let src = "<?php declare(strict_types=1);
 namespace App;
 final class Logger {}
@@ -384,9 +378,8 @@ f(new Robot());";
 
 #[test]
 fn message_casing_does_not_change_matching() {
-    // Casing is display-only: a hint written in a different case than the
-    // declaration still matches (resolution stays case-insensitive) and the
-    // message shows the casing as written at the hint site.
+    // Casing is display-only: resolution stays case-insensitive; the message
+    // shows the casing as written at the hint site.
     let src = "<?php declare(strict_types=1);
 final class LogicBox {}
 final class Robot {}
@@ -432,11 +425,9 @@ f('active');";
     );
 }
 
-// 11. Native intersection types (`A&B&…`, ADR-0043 conjunctive member).
-//     An object satisfies the intersection only when it is-a EVERY conjunct;
-//     it is a definite No the moment the oracle proves `IsA::No` against ANY
-//     one conjunct. Any conjunct that stays Unknown (with no proven No) keeps
-//     the whole intersection silent.
+// 11. Native intersection types (`A&B&…`, ADR-0043 conjunctive member): an object
+//     satisfies it only by is-a on EVERY conjunct; No fires the moment any one
+//     conjunct proves `IsA::No`, and an Unknown conjunct (no proven No) stays silent.
 
 #[test]
 fn intersection_missing_one_conjunct_rejected() {
@@ -470,10 +461,9 @@ f(new User());";
 
 #[test]
 fn intersection_unknown_conjunct_stays_silent() {
-    // The object's own hierarchy is open (it extends an uncatalogued external),
-    // so its is-a against the second conjunct (`HasName`) is Unknown — the
-    // external base might supply it — while it provenly is-a the first (`HasId`).
-    // No conjunct yields a proven `No`, so the whole intersection stays silent.
+    // Open hierarchy (extends an uncatalogued external): is-a `HasId` is proven,
+    // but `HasName` is Unknown (the external base might supply it) — no proven
+    // `No` on any conjunct, so the intersection stays silent.
     let src = "<?php declare(strict_types=1);
 interface HasId {}
 interface HasName {}
@@ -496,8 +486,7 @@ f('nope');";
 
 #[test]
 fn intersection_dnf_union_of_intersection_and_class() {
-    // `(A&B)|C`: a C is accepted via the C arm; an object that is neither the
-    // A&B intersection nor C is rejected by every union member.
+    // `(A&B)|C`: C is accepted via the C arm; an object satisfying neither arm is rejected.
     let src = "<?php declare(strict_types=1);
 interface A {}
 interface B {}

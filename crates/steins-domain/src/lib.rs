@@ -7,35 +7,25 @@
 //! 4. General     — the bare base type
 //! ```
 //!
-//! Arrays get their own stratum rather than a scalar layer: [`Fact::Shape`]
-//! carries one canonical [`ShapeFact`] (ADR-0062), and the *degenerate* shape —
-//! no fields, an untyped unsealed tail — is plain `array`, so there is no
-//! array-`General` form. Layer descent is total for arrays too: an over-`CAP`
-//! set of arrays widens to a **computed** shape summary instead of being
-//! dropped.
+//! Arrays are a separate stratum ([`Fact::Shape`]/[`ShapeFact`], ADR-0062): the degenerate
+//! shape (no fields, untyped unsealed tail) is plain `array`, so there's no array-`General`,
+//! and an over-`CAP` array set widens to a computed shape summary rather than being dropped.
+//! The crate's algebra: joins with computed layer descent (precision loss is measured, never
+//! guessed), extensional membership (`admits`), and trinary queries via the unified
+//! [`Certainty`].
 //!
-//! The crate owns the *algebra*: joins with **computed** layer descent
-//! (widening a finite set derives the predicate summary its members satisfy —
-//! precision loss is measured, never guessed), extensional membership
-//! (`admits`), and trinary queries in the unified [`Certainty`].
+//! Invariants are enforced by constructors, checked by property tests, and proved for every
+//! value by the Lean 4 spec in `spike/lean-domain` (ADR-0059, differentially checked against
+//! `tests/lean_vectors.rs`):
+//! - **Soundness of join**: `γ(a) ∪ γ(b) ⊆ γ(join(a, b))`; may widen, never lose members.
+//!   `None` means "not representable", so the caller drops it.
+//! - **Canonical forms**: `OneOf` is sorted/deduped, `2..=CAP` members; a `Refined` always
+//!   carries real knowledge, or it *is* `General`.
+//! - **Trinary discipline**: queries return [`Certainty`]; `Maybe` is honest wherever the
+//!   set admits both outcomes (ADR-0031).
 //!
-//! Design invariants, enforced by constructors, checked by property tests, and
-//! **proved for every value** by the Lean 4 specification in
-//! `spike/lean-domain` (ADR-0059) — which this crate is differentially checked
-//! against by `tests/lean_vectors.rs`:
-//!
-//! - **Soundness of join**: `γ(a) ∪ γ(b) ⊆ γ(join(a, b))` — a join may lose
-//!   precision (widen), never members. `join` returning `None` means "not
-//!   representable" (e.g. mixed scalar bases); the caller drops the fact,
-//!   which is the safe side (γ = everything).
-//! - **Canonical forms**: `OneOf` is sorted/deduped with `2..=CAP` members;
-//!   a `Refined` always carries real knowledge (non-empty predicate set /
-//!   non-full interval) — otherwise it *is* the `General` form.
-//! - **Trinary discipline**: queries return [`Certainty`]; `Maybe` is the
-//!   honest answer wherever the set admits both outcomes (ADR-0031).
-//!
-//! `steins-infer` re-exports this crate's [`Certainty`] as the one trinary
-//! project-wide (ADR-0031) and builds its environment on [`Fact`].
+//! `steins-infer` re-exports [`Certainty`] project-wide (ADR-0031) and builds its
+//! environment on [`Fact`].
 
 mod certainty;
 mod fact;

@@ -1,17 +1,14 @@
-//! Interop envelopes in the **declared lane** (ADR-0082 role A, issue #303): a
-//! call through an abstraction whose method carries one of upstream's purity tags
-//! — `@phpstan-impure io.db`, `@phpstan-pure`, `@phpstan-all-methods-impure` —
-//! contributes that bound to the caller's declared lane.
+//! Interop envelopes in the **declared lane** (ADR-0082 role A, issue #303): a call
+//! through an abstraction carrying an upstream purity tag — `@phpstan-impure io.db`,
+//! `@phpstan-pure`, `@phpstan-all-methods-impure` — contributes that bound to the
+//! caller's declared lane.
 //!
-//! The whole point of these tests is the **stratum asymmetry**. A checked
-//! `#[\Steins\Effect]` envelope answers its call site: bound imported, taint
-//! discharged. An interop envelope is a docblock nobody has verified here, so it
-//! follows ADR-0068's plugin discipline instead: bound imported, taint kept. Every
-//! case below pins one or the other, and the contrast pair pins both at once.
+//! The point is the **stratum asymmetry**: a checked `#[\Steins\Effect]` envelope
+//! answers its call site (bound imported, taint discharged); an unverified interop
+//! docblock follows ADR-0068's plugin discipline instead (bound imported, taint kept).
 //!
-//! Contract-checking the *declaring* function against its own interop envelope
-//! (role B, `effect.envelope-exceeded`) is a later slice; nothing here emits
-//! a diagnostic.
+//! Contract-checking the *declaring* function against its own envelope (role B,
+//! `effect.envelope-exceeded`) is a later slice; nothing here emits a diagnostic.
 
 use steins_infer::{EffectSummary, FactKind, NoFold, annotate_facts, effect_summary};
 use steins_syntax::SourceTree;
@@ -38,7 +35,7 @@ fn effect_margins(src: &str) -> Vec<String> {
         .collect()
 }
 
-// ---- THE HEADLINE: the same shape, two strata, two answers -------------------
+// THE HEADLINE: the same shape, two strata, two answers
 
 #[test]
 fn an_interop_impure_tag_contributes_its_bound_without_discharging_the_taint() {
@@ -58,8 +55,8 @@ fn an_interop_impure_tag_contributes_its_bound_without_discharging_the_taint() {
 
 #[test]
 fn the_attribute_spelling_of_the_same_bound_does_discharge_the_taint() {
-    // The contrast control for the case above, byte-identical but for the
-    // spelling. This asymmetry IS the trust stratification (ADR-0082 §1).
+    // Contrast control, byte-identical but for spelling — this IS the trust
+    // stratification (ADR-0082 §1).
     let src = concat!(
         "<?php\n",
         "interface Repo {\n",
@@ -73,7 +70,7 @@ fn the_attribute_spelling_of_the_same_bound_does_discharge_the_taint() {
     assert!(s.exhaustive, "a checked envelope answers its call site");
 }
 
-// ---- Class-level tags (ADR-0082 §5, upstream semantics verbatim) -------------
+// Class-level tags (ADR-0082 §5, upstream semantics verbatim)
 
 #[test]
 fn a_class_level_all_methods_impure_tag_bounds_a_method_that_says_nothing() {
@@ -92,9 +89,8 @@ fn a_class_level_all_methods_impure_tag_bounds_a_method_that_says_nothing() {
 
 #[test]
 fn a_method_level_tag_replaces_the_class_level_one_rather_than_joining_it() {
-    // Upstream's nearest-wins rule, which is where the interop stratum
-    // deliberately parts ways with the checked stratum's Liskov conjunction:
-    // `io.net` from the class tag is GONE, not conjoined.
+    // Upstream's nearest-wins rule: the interop stratum parts ways with the checked
+    // stratum's Liskov conjunction — `io.net` from the class tag is GONE, not conjoined.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-all-methods-impure io.net */\n",
@@ -109,13 +105,11 @@ fn a_method_level_tag_replaces_the_class_level_one_rather_than_joining_it() {
     assert!(!s.exhaustive);
 }
 
-// ---- The ADR-0083 vocabulary migration -----------------------------------------
+// The ADR-0083 vocabulary migration
 
-/// A docblock still spelling the retired `output` root is *unreadable*, not
-/// wrong: the ADR-0082 amendment makes one unknown label unspecify the whole tag,
-/// so the bound simply does not arrive and no finding is invented. That is what
-/// makes a mixed-vocabulary transition period safe on the interop side, in
-/// contrast with the attribute spelling, which earns `effect.unknown-label`.
+/// A docblock spelling the retired `output` root is *unreadable*, not wrong: one
+/// unknown label unspecifies the whole tag (ADR-0082), so nothing arrives and no
+/// finding fires — unlike the attribute spelling, which earns `effect.unknown-label`.
 #[test]
 fn a_retired_output_bound_in_an_interop_tag_is_inert() {
     let src = concat!(
@@ -148,13 +142,12 @@ fn the_migrated_output_bound_in_an_interop_tag_is_read() {
     assert!(!s.exhaustive);
 }
 
-// ---- The empty bound ---------------------------------------------------------
+// The empty bound
 
 #[test]
 fn a_bare_pure_tag_is_the_empty_bound_and_still_taints() {
-    // `@phpstan-pure` is a real claim (the empty envelope), not a missing one —
-    // but it is still a claim nobody checked here, so the taint stands and the
-    // declared lane gains nothing to show for it.
+    // `@phpstan-pure` is a real claim (the empty envelope), not a missing one — but
+    // nobody checked it here, so the taint stands and the declared lane gains nothing.
     let src = concat!(
         "<?php\n",
         "interface Calc {\n",
@@ -169,14 +162,12 @@ fn a_bare_pure_tag_is_the_empty_bound_and_still_taints() {
     assert!(!s.exhaustive);
 }
 
-// ---- `all-methods-pure`'s void quirk ----------------------------------------
+// `all-methods-pure`'s void quirk
 
-/// A two-level hierarchy that makes the void quirk *observable*: `Base` bounds
-/// both members at `io.db` with method-level tags, and `Child` claims
-/// `all-methods-pure` over its own redeclarations. Wherever the class tag covers a
-/// method, the walk stops at `Child` with the empty bound; wherever it does not,
-/// the walk falls through to `Base`'s `io.db`. Without the second level the two
-/// outcomes would render identically (`{…?}`).
+/// Two-level hierarchy making the void quirk *observable*: `Base` bounds both
+/// members at `io.db`; `Child` claims `all-methods-pure` over its redeclarations.
+/// Where the class tag covers a method, the walk stops at `Child`'s empty bound;
+/// otherwise it falls to `Base`'s `io.db` — else both outcomes render identically.
 const VOID_QUIRK: &str = concat!(
     "<?php\n",
     "interface Base {\n",
@@ -191,9 +182,8 @@ const VOID_QUIRK: &str = concat!(
     "interface Child extends Base {\n",
     "    public function log(string $m): void;\n",
     "    public function get(string $k): string;\n",
-    // PHP forbids a native return hint on a constructor, so the only way to make
-    // it *look* void to the return-type test — and thereby pin the constructor
-    // carve-out rather than the void test's fallback — is the docblock.
+    // PHP forbids a native return hint on a constructor, so the docblock `@return
+    // void` is the only way to make it *look* void and pin the constructor carve-out.
     "    /** @return void */\n",
     "    public function __construct();\n",
     "}\n",
@@ -229,12 +219,11 @@ fn all_methods_pure_covers_the_constructor_even_though_it_returns_nothing() {
     assert!(!s.exhaustive);
 }
 
-// ---- Stratum precedence ------------------------------------------------------
+// Stratum precedence
 
 #[test]
 fn an_attribute_envelope_beats_an_interop_tag_on_the_same_declaration() {
-    // Checked beats unchecked (ADR-0082 §1): the attribute's labels, and the
-    // attribute's taint discharge.
+    // Checked beats unchecked (ADR-0082 §1): the attribute's labels and taint discharge win.
     let src = concat!(
         "<?php\n",
         "interface Repo {\n",
@@ -249,12 +238,12 @@ fn an_attribute_envelope_beats_an_interop_tag_on_the_same_declaration() {
     assert!(s.exhaustive);
 }
 
-// ---- Rendering rides the existing declared lane, unchanged -------------------
+// Rendering rides the existing declared lane, unchanged
 
 #[test]
 fn the_margin_renders_an_interop_bound_with_the_declared_lanes_own_prefix() {
-    // No rendering code knows this bound came from a docblock: `≤` and the `…?`
-    // taint marker are the declared lane's existing vocabulary (ADR-0067).
+    // No rendering code knows this bound came from a docblock: `≤` and `…?` are
+    // the declared lane's existing vocabulary (ADR-0067).
     let src = concat!(
         "<?php\n",
         "interface Repo {\n",

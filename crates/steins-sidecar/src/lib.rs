@@ -23,16 +23,15 @@
 //! # Zero-FP contract (ADR-0024, binding)
 //!
 //! Sidecar misbehavior must NEVER become a wrong diagnostic. Every failure mode
-//! — spawn failure, IO error, per-request timeout, malformed response, a child
-//! that died outright — maps to [`FoldResult::Widen`], never a value. On any such
-//! failure the child is killed and the instance is **poisoned**: the request in
-//! flight is lost, and no half-dead process is ever trusted for an answer.
+//! — spawn failure, IO error, per-request timeout, malformed response, a dead
+//! child — maps to [`FoldResult::Widen`], never a value. On any failure the
+//! child is killed and the instance is **poisoned**: the in-flight request is
+//! lost, and no half-dead process is ever trusted for an answer.
 //!
-//! Poison is a lost *answer*, not a lost run. A child can die uncatchably — an
-//! allocation past `memory_limit` is a fatal no PHP `catch` can see — so the
-//! *next* request replaces it with a fresh one, a bounded number of times per
-//! instance ([`Sidecar`]). The request that killed the child is never retried on
-//! the replacement.
+//! Poison is a lost *answer*, not a lost run: an allocation past `memory_limit`
+//! is a fatal no PHP `catch` can see, so the *next* request replaces the child
+//! with a fresh one, a bounded number of times per instance ([`Sidecar`]). The
+//! request that killed the child is never retried on the replacement.
 //!
 //! # Concurrency model
 //!

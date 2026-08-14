@@ -1,27 +1,23 @@
 //! Contract checking a declaration against its **interop envelope** (ADR-0082
-//! role B, issue #303): a function or method whose operative envelope is one of
+//! role B, issue #303): a function/method whose operative envelope is one of
 //! upstream's purity tags is held to it exactly as an attribute-declared one is.
+//! Role A (the declared lane at *call sites*, `interop_envelope_lane.rs`) trusts
+//! nothing; this file takes the tag as a checkable claim instead, reusing
+//! `effect.envelope-exceeded` (no new id) and reading the **proven** lane only
+//! (ADR-0067 §5).
 //!
-//! Role A (the declared lane at *call sites*) lives in `interop_envelope_lane.rs`
-//! and is the half that trusts nothing. This file is the other half: reading the
-//! tag is not believing it, it is taking it as a checkable claim. So the
-//! diagnostic is the existing `effect.envelope-exceeded`, no new id, and every
-//! judgment reads the **proven** lane only (ADR-0067 §5).
+//! Wording is not contract (ADR-0023 — the ids are): a finding quotes the
+//! declaration back in the syntax its author wrote, so an interop bound is named
+//! `@phpstan-impure io.db`, never the `#[\Steins\Effect('io.db')]` the reader
+//! would search their file for in vain. Every message below is asserted in full.
 //!
-//! What *does* vary with the source is the wording, which is not contract
-//! (ADR-0023 — the ids are): a finding quotes the declaration back in the syntax
-//! its author wrote, so an interop bound is named `@phpstan-impure io.db`, never
-//! the `#[\Steins\Effect('io.db')]` the reader would search their file for in
-//! vain. Every message below is asserted in full for that reason.
-//!
-//! Three exclusions are pinned as hard as the inclusions, because they are where a
-//! plausible implementation would over-reach: an attribute envelope **shadows**
-//! the interop one outright (the checked stratum wins, ADR-0082 §1); interop
-//! envelopes never participate in `effect.liskov-widened` (within that stratum
-//! upstream's nearest-wins override is the whole contract, ADR-0082 §5); and a tag
-//! naming any label the registry does not know is **inert** rather than
-//! diagnosed or narrowed (owner ruling 2026-08-12), because upstream discards the
-//! text after `@phpstan-impure` and wild docblocks put prose there.
+//! Three exclusions, pinned as hard as the inclusions: an attribute envelope
+//! **shadows** the interop one outright (checked stratum wins, ADR-0082 §1);
+//! interop envelopes never participate in `effect.liskov-widened` (upstream's
+//! nearest-wins override is the whole contract within that stratum, ADR-0082
+//! §5); a tag naming an unknown label is **inert** rather than diagnosed or
+//! narrowed (owner ruling 2026-08-12), since upstream discards the text after
+//! `@phpstan-impure` and wild docblocks put prose there.
 
 use steins_infer::{
     Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, UNKNOWN_LABEL_ID, check, effect_summary,
@@ -51,7 +47,7 @@ fn silent(src: &str) {
     assert!(f.is_empty(), "expected silence, got: {f:#?}");
 }
 
-// ---- THE HEADLINE: a docblock bound is a checked bound -----------------------
+// The headline: a docblock bound is a checked bound.
 
 #[test]
 fn a_labeled_impure_tag_is_exceeded_by_a_proven_label_outside_it() {
@@ -62,8 +58,7 @@ fn a_labeled_impure_tag_is_exceeded_by_a_proven_label_outside_it() {
     );
     let d = one_exceeded(src);
     assert_eq!(d.id, EFFECT_ID, "the existing id — an interop bound earns no id of its own");
-    // The clause is the tag as written, label list in the tag's own grammar
-    // (comma-space separated dot-paths, unquoted — ADR-0082 §4).
+    // The clause is the tag as written: comma-space dot-paths, unquoted (ADR-0082 §4).
     assert_eq!(
         d.message,
         "time() has effect nondet.time, but refresh() is declared @phpstan-impure io.db — nondet.time exceeds the envelope"
@@ -73,8 +68,7 @@ fn a_labeled_impure_tag_is_exceeded_by_a_proven_label_outside_it() {
 
 #[test]
 fn a_docblock_sourced_finding_never_names_the_attribute_syntax() {
-    // A reader who wrote a docblock tag must not be told about an attribute they
-    // never wrote and cannot find in their file.
+    // A docblock reader must not be told about an attribute they never wrote.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure io.db, nondet.random */\n",
@@ -95,7 +89,6 @@ fn a_docblock_sourced_finding_never_names_the_attribute_syntax() {
 
 #[test]
 fn a_labeled_impure_tag_admits_the_label_it_names() {
-    // The control for the case above: same body, a bound that covers it.
     silent(concat!(
         "<?php\n",
         "/** @phpstan-impure nondet.time */\n",
@@ -105,8 +98,7 @@ fn a_labeled_impure_tag_admits_the_label_it_names() {
 
 #[test]
 fn an_interop_bound_subsumes_by_prefix() {
-    // `io` admits `io.fs.read` — segment-aware prefix subsumption, the substance
-    // of the upstream proposal (ADR-0082 §4).
+    // `io` admits `io.fs.read`: segment-aware prefix subsumption (ADR-0082 §4).
     silent(concat!(
         "<?php\n",
         "/** @phpstan-impure io */\n",
@@ -128,11 +120,9 @@ fn an_interop_bound_does_not_subsume_a_sibling() {
     );
 }
 
-/// Issue #318, in the stratum the upper-bound contract is *written* for: the
-/// review's finding was that `@phpstan-impure io.fs.read` admitted a network
-/// read, because the catalog row was `io.fs.read` whatever the argument said.
-/// Both halves are asserted here — the call site that proves a URL, and the one
-/// that proves a local path and must stay as silent as it always was.
+/// Issue #318: `@phpstan-impure io.fs.read` used to admit a network read because
+/// the catalog row was `io.fs.read` regardless of argument. Both halves are
+/// asserted: the proven URL, and the proven local path that stays silent.
 #[test]
 fn an_interop_bound_is_exceeded_by_a_proven_wrapper_target() {
     let d = one_exceeded(concat!(
@@ -151,9 +141,8 @@ fn an_interop_bound_is_exceeded_by_a_proven_wrapper_target() {
     ));
 }
 
-/// The same bound over a call whose target is *not* provable. This is the
-/// honest cost of the fix, and the reason it is a behavior change rather than a
-/// pure win: an envelope written against the old precise row now reports.
+/// The same bound over an unprovable target: the honest cost of the fix — an
+/// envelope written against the old precise row now reports.
 #[test]
 fn an_interop_bound_is_exceeded_by_an_unprovable_stream_resource() {
     let d = one_exceeded(concat!(
@@ -167,7 +156,7 @@ fn an_interop_bound_is_exceeded_by_an_unprovable_stream_resource() {
     );
 }
 
-// ---- `@phpstan-pure`: the empty envelope, and its one tolerance --------------
+// `@phpstan-pure`: the empty envelope, and its one tolerance.
 
 #[test]
 fn a_bare_pure_tag_is_the_empty_envelope() {
@@ -184,16 +173,14 @@ fn a_bare_pure_tag_is_the_empty_envelope() {
 
 #[test]
 fn a_pure_tag_tolerates_a_frame_local_by_ref_write() {
-    // ADR-0063 §2.3 / ADR-0082 §3: pure is the `{mutate.local}` envelope. Nothing
-    // special happens here — `exceeds` tolerates the label under *every* envelope,
-    // and the interop bound goes through the same `exceeds`.
+    // ADR-0063 §2.3 / ADR-0082 §3: pure is the `{mutate.local}` envelope, and
+    // `exceeds` tolerates that label under every envelope, interop included.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-pure */\n",
         "function sorted(array $rows): array { sort($rows); return $rows; }\n",
     );
-    // The silence below is a *tolerance*, not an absence: the by-ref write really
-    // is proven, and the empty bound really does admit it.
+    // Silence below is a *tolerance*, not an absence: the write is proven.
     let tree = SourceTree::parse(src);
     let s = effect_summary(&tree, tree.functions(), tree.classes())
         .into_iter()
@@ -203,12 +190,11 @@ fn a_pure_tag_tolerates_a_frame_local_by_ref_write() {
     silent(src);
 }
 
-// ---- The proven lane, and only it --------------------------------------------
+// The proven lane, and only it.
 
 #[test]
 fn a_non_exhaustive_body_still_reports_its_proven_label() {
-    // An uncatalogued callee taints exhaustiveness; it cannot un-prove `time()`.
-    // Non-exhaustiveness hides effects, it never invents or excuses one.
+    // An uncatalogued callee taints exhaustiveness but cannot un-prove `time()`.
     let d = one_exceeded(concat!(
         "<?php\n",
         "/** @phpstan-pure */\n",
@@ -217,13 +203,12 @@ fn a_non_exhaustive_body_still_reports_its_proven_label() {
     assert_eq!(d.message, "time() has effect nondet.time, but f() is declared @phpstan-pure");
 }
 
-// ---- The attribute shadows the interop envelope (ADR-0082 §1) ----------------
+// The attribute shadows the interop envelope (ADR-0082 §1).
 
 #[test]
 fn an_attribute_envelope_shadows_the_interop_bound_for_checking() {
-    // The docblock bound (empty) would flag `time()`; the attribute bound admits
-    // it. The checked stratum wins, so there is no finding at all — the interop
-    // envelope is not a second, stricter contract layered underneath.
+    // The docblock (empty) would flag time(); the attribute admits it, and the
+    // checked stratum wins outright — interop is not a stricter layer beneath it.
     silent(concat!(
         "<?php\n",
         "/** @phpstan-pure */\n",
@@ -234,10 +219,8 @@ fn an_attribute_envelope_shadows_the_interop_bound_for_checking() {
 
 #[test]
 fn a_docblock_tag_changes_nothing_about_the_attribute_path() {
-    // The attribute here is *wrong* (`io.netw` is no label) and the docblock bound
-    // beside it would have been satisfied by this body. Both findings still come
-    // out of the attribute, in the attribute's wording: the checked stratum is
-    // judged, quoted and typo-checked exactly as it is with no docblock present.
+    // The attribute is wrong (`io.netw` is no label); the docblock beside it would
+    // have been satisfied. Both findings still come from the attribute alone.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure io */\n",
@@ -257,7 +240,7 @@ fn a_docblock_tag_changes_nothing_about_the_attribute_path() {
     );
 }
 
-// ---- Class-level tags: upstream semantics, verbatim (ADR-0082 §5) ------------
+// Class-level tags: upstream semantics, verbatim (ADR-0082 §5).
 
 #[test]
 fn a_class_level_impure_bound_checks_a_method_that_says_nothing() {
@@ -299,10 +282,9 @@ fn all_methods_pure_skips_a_void_method_and_checks_the_rest() {
 
 #[test]
 fn a_bare_all_methods_impure_tag_constrains_nothing() {
-    // The ⊤ bound (ADR-0082 §3). Its label list is empty, but an empty list means
-    // *pure* everywhere else in this pass, so reading it as a bound would turn
-    // upstream's widest claim into its narrowest and flag every method in the
-    // class. It builds no bound at all.
+    // The ⊤ bound (ADR-0082 §3): an empty label list means *pure* everywhere else
+    // in this pass, so reading it as a bound would invert upstream's widest claim
+    // into its narrowest. It builds no bound at all.
     silent(concat!(
         "<?php\n",
         "/** @phpstan-all-methods-impure */\n",
@@ -312,12 +294,9 @@ fn a_bare_all_methods_impure_tag_constrains_nothing() {
     ));
 }
 
-// ---- Unknown labels make the tag inert (owner ruling, 2026-08-12) ------------
-//
-// Current PHPStan discards everything after `@phpstan-impure`, so wild code
-// legitimately carries one-word prose there. An unrecognized label is therefore
-// read as *unspecified*, and the whole tag with it — never as a diagnostic, and
-// never as the bound its known labels alone would spell.
+// Unknown labels make the tag inert (owner ruling, 2026-08-12): PHPStan discards
+// everything after `@phpstan-impure`, so an unrecognized label reads as
+// *unspecified*, and the whole tag with it — never a diagnostic, never a bound.
 
 #[test]
 fn an_unknown_label_makes_the_whole_tag_inert() {
@@ -328,8 +307,7 @@ fn an_unknown_label_makes_the_whole_tag_inert() {
     );
     assert!(of_id(src, UNKNOWN_LABEL_ID).is_empty(), "typo reporting is not this rule's job");
     silent(src);
-    // And nothing reaches the declared lane either (role A's half of the ruling):
-    // no bound imported, and the taint an unchecked claim never discharges stays.
+    // Role A's half of the ruling: no bound imported, the taint stays.
     let iface = concat!(
         "<?php\n",
         "interface Repo {\n",
@@ -349,9 +327,8 @@ fn an_unknown_label_makes_the_whole_tag_inert() {
 
 #[test]
 fn a_one_word_description_after_impure_is_harmless() {
-    // The motivating shape: `@phpstan-impure database` is prose under current
-    // PHPStan, which reads the tag name and throws the rest away. It must not
-    // fail a run on any surface.
+    // Motivating shape: PHPStan reads the tag name and throws the rest away, so
+    // this prose must not fail a run on any surface.
     let src = concat!(
         "<?php\n",
         "/** @phpstan-impure database */\n",
@@ -368,9 +345,8 @@ fn a_one_word_description_after_impure_is_harmless() {
 
 #[test]
 fn a_typoed_label_disables_the_whole_bound_not_part_of_it() {
-    // `io.db, io.netw` is NOT a claim of `io.db`. Checking the body against the
-    // known subset would hold the author to a narrower bound than they wrote and
-    // manufacture the finding below; the tag goes ⊤ instead.
+    // `io.db, io.netw` is NOT a claim of `io.db`: checking the known subset would
+    // hold the author to a narrower bound than they wrote, so the tag goes ⊤.
     silent(concat!(
         "<?php\n",
         "/** @phpstan-impure io.db, io.netw */\n",
@@ -380,10 +356,9 @@ fn a_typoed_label_disables_the_whole_bound_not_part_of_it() {
 
 #[test]
 fn an_inert_method_tag_does_not_fall_back_to_the_class_tag() {
-    // "As if nothing was written" stops at the bound, not at the precedence: the
-    // method-level tag still WON (upstream's nearest-wins, ADR-0082 §5), so the
-    // class's claim does not get to speak for a method whose author explicitly
-    // declared it impure.
+    // "As if nothing was written" stops at the bound, not the precedence: the
+    // method-level tag still won (nearest-wins, ADR-0082 §5), so the class can't
+    // speak for a method its author explicitly declared impure.
     silent(concat!(
         "<?php\n",
         "/** @phpstan-all-methods-pure */\n",
@@ -407,14 +382,12 @@ fn the_attribute_spelling_still_names_the_attribute_in_its_unknown_label() {
     );
 }
 
-// ---- No Liskov participation (ADR-0082 §5) -----------------------------------
+// No Liskov participation (ADR-0082 §5).
 
 #[test]
 fn an_interop_envelope_on_an_abstraction_never_widens_liskov() {
-    // The implementation's proven `io.fs.read` blows through the interface's
-    // docblock claim of purity — and stays silent. Within the interop stratum
-    // there is no conjunction rule to violate: upstream's tags do not propagate
-    // from an interface to its implementations at all.
+    // The proven `io.fs.read` blows through the interface's docblock purity claim
+    // and stays silent: upstream's tags don't propagate interface to implementation.
     let src = concat!(
         "<?php\n",
         "interface Reader {\n",

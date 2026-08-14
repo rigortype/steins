@@ -1,7 +1,6 @@
-//! Integration tests for Transform #3 — `@throws` envelope seeding (issue #115
-//! / ADR-0040). Each test builds a real salsa project and asserts on the plan's
-//! edits AND the named refusal reasons. The applied output is compared as exact
-//! bytes where the lossless guarantee (ADR-0003) is what matters.
+//! Integration tests for Transform #3 — `@throws` envelope seeding (issue #115 /
+//! ADR-0040). Each test asserts on the plan's edits and the named refusal
+//! reasons; output is compared byte-exact where ADR-0003's lossless guarantee matters.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::TransformReport;
@@ -35,7 +34,7 @@ fn only_reason(report: &TransformReport) -> &str {
     &report.refusals[0].reason
 }
 
-// ---- 1. The flagship seed: no docblock → created --------------------------
+// 1. The flagship seed: no docblock → created
 
 #[test]
 fn no_docblock_seeds_a_created_envelope() {
@@ -70,7 +69,6 @@ fn method_seed_creates_an_indented_docblock() {
 
 #[test]
 fn propagated_escape_seeds_the_caller_too() {
-    // g throws directly; f only calls g. Both have proven escapes, both seed.
     let lib = "<?php\nfunction g(): void { throw new \\RuntimeException(\"x\"); }\nfunction f(): void { g(); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -94,7 +92,7 @@ fn multiple_proven_classes_get_one_tag_each_in_source_order() {
     assert!(r < j, "source order of the proven set must be preserved:\n{out}");
 }
 
-// ---- 2. Lossless extension of an existing docblock ------------------------
+// 2. Lossless extension of an existing docblock
 
 #[test]
 fn existing_docblock_is_extended_losslessly() {
@@ -103,8 +101,7 @@ fn existing_docblock_is_extended_losslessly() {
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
 
-    // Byte-exact: every pre-existing line preserved, the new tag line inserted
-    // directly before the closing `*/` (ADR-0003 lossless-CST guarantee).
+    // New tag line inserted before the closing `*/` (ADR-0003 lossless-CST).
     let out = report.plan.apply_file("lib.php", lib);
     assert_eq!(
         out,
@@ -112,9 +109,8 @@ fn existing_docblock_is_extended_losslessly() {
     );
 }
 
-/// A CRLF file stays a CRLF file: the seeded lines carry the terminator the
-/// file already uses, in both the create and the extend path. Existing bytes are
-/// preserved either way — this is about not leaving mixed endings behind.
+/// A CRLF file stays a CRLF file: seeded lines carry the file's own terminator
+/// in both the create and extend paths (no mixed endings).
 #[test]
 fn seeded_lines_match_the_files_own_line_terminator() {
     let created = "<?php\r\nfunction f(): void { throw new \\RuntimeException(\"boom\"); }\r\n";
@@ -146,8 +142,7 @@ fn partially_declared_envelope_gains_only_the_missing_class() {
 
 #[test]
 fn declared_parent_class_covers_the_subclass() {
-    // OutOfBoundsException <: RuntimeException — the declared parent covers it,
-    // so nothing is written and the run refuses `already-declared`.
+    // OutOfBoundsException <: RuntimeException — the declared parent covers it.
     let lib = "<?php\n/**\n * @throws \\RuntimeException\n */\nfunction f(): void { throw new \\OutOfBoundsException(\"x\"); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -156,13 +151,12 @@ fn declared_parent_class_covers_the_subclass() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 3. Only proven escapes are written (ADR-0037/0040) --------------------
+// 3. Only proven escapes are written (ADR-0037/0040)
 
 #[test]
 fn maybe_escape_refuses_and_never_annotates() {
-    // MyExc extends an external \Vendor\Base, so its ancestry leaves known
-    // territory; the catch of \Vendor\Other MIGHT absorb it → Maybe escape.
-    // A Maybe never becomes a declared envelope: refuse with a named reason.
+    // MyExc's ancestry leaves known territory; catch of \Vendor\Other MIGHT
+    // absorb it → Maybe escape, which never becomes a declared envelope.
     let lib = "<?php\nclass MyExc extends \\Vendor\\Base {}\nfunction f(): void { try { throw new MyExc(); } catch (\\Vendor\\Other $e) {} }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -173,8 +167,7 @@ fn maybe_escape_refuses_and_never_annotates() {
 
 #[test]
 fn mixed_proven_and_maybe_writes_only_the_proven_class() {
-    // RuntimeException provably escapes; MyExc (unknown ancestry) only maybe
-    // does. The seeded envelope carries the proven class alone.
+    // MyExc's ancestry only maybe escapes; the envelope carries the proven class alone.
     let lib = "<?php\nclass MyExc extends \\Vendor\\Base {}\nfunction f(): void {\n    try { throw new MyExc(); } catch (\\Vendor\\Other $e) {}\n    throw new \\RuntimeException(\"r\");\n}\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -187,8 +180,7 @@ fn mixed_proven_and_maybe_writes_only_the_proven_class() {
 
 #[test]
 fn unchecked_families_are_not_candidates() {
-    // Error/LogicException families never count against envelopes (ADR-0007):
-    // a declaration whose only escapes are unchecked is not even enumerated.
+    // Error/LogicException families never count against envelopes (ADR-0007).
     let lib = "<?php\nfunction f(): void { throw new \\TypeError(\"t\"); }\nfunction g(): void { throw new \\InvalidArgumentException(\"l\"); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -196,7 +188,7 @@ fn unchecked_families_are_not_candidates() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 4. Idempotence: the second run is a no-op -----------------------------
+// 4. Idempotence: the second run is a no-op
 
 #[test]
 fn second_run_refuses_already_declared_and_writes_nothing() {
@@ -214,7 +206,7 @@ fn second_run_refuses_already_declared_and_writes_nothing() {
     assert_eq!(second.plan.apply_file("lib.php", &seeded), seeded);
 }
 
-// ---- 5. Docblocks the parser cannot round-trip -----------------------------
+// 5. Docblocks the parser cannot round-trip
 
 #[test]
 fn single_line_docblock_refuses_round_trip() {
@@ -237,7 +229,7 @@ fn closing_delimiter_sharing_a_line_refuses_round_trip() {
 
 #[test]
 fn mid_line_declaration_refuses() {
-    // The whole file on one line: no line of its own to hold a docblock.
+    // Whole file on one line: no line of its own to hold a docblock.
     let lib = "<?php function f(): void { throw new \\RuntimeException(\"x\"); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -245,7 +237,7 @@ fn mid_line_declaration_refuses() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 6. The seeded spelling is the machinery's FQN -------------------------
+// 6. The seeded spelling is the machinery's FQN
 
 #[test]
 fn namespaced_project_exception_is_seeded_fully_qualified() {

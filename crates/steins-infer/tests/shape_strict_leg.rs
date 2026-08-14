@@ -1,19 +1,14 @@
 //! ADR-0062 S6 — the offset family's **strict leg**: `offset.undeclared` and
 //! `offset.maybe-missing` (A-G10, issue #51).
 //!
-//! Three disciplines are pinned here, and each is a separate way the leg could go
-//! wrong:
-//!
-//! * **It fires.** An unguarded read of a declared-optional key, and a read of a key
-//!   the declaration excludes, each produce exactly one finding at the whitelisted
-//!   read positions.
-//! * **It stays quiet where a proof exists.** Guarded code is clean *by proof, not by
-//!   skip* — the S4 guard promotion and the S5 cover discharge are what delete the
-//!   finding, so the guarded fixtures below would fire if either regressed. This is
-//!   the property that makes the leg usable at all (issue #51 §3: a strict tier that
-//!   cannot see guards cries wolf).
-//! * **It stays quiet where PHP protects the read.** Every non-final `??` arm, and
-//!   every non-whitelisted position, is silent on every surface.
+//! Three disciplines pinned here, each a separate way the leg could go wrong:
+//! **it fires** (an unguarded read of a declared-optional/excluded key produces
+//! exactly one finding at the whitelisted read positions); **it stays quiet where a
+//! proof exists** (guarded code is clean *by proof, not by skip* — S4 guard
+//! promotion / S5 cover discharge delete the finding, so the guarded fixtures below
+//! would fire if either regressed; issue #51 §3: a strict tier blind to guards
+//! cries wolf); **it stays quiet where PHP protects the read** (every non-final
+//! `??` arm, and every non-whitelisted position, is silent everywhere).
 
 use steins_domain::Fact;
 use steins_infer::{
@@ -22,9 +17,8 @@ use steins_infer::{
 };
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The absence-family boot surface (there is no PHP in a unit test). The strict leg
-/// itself is not gated on it — its evidence is the docblock — but the proof leg in
-/// the same walk is, and these fixtures must exercise both.
+/// The absence-family boot surface (no real PHP in a unit test). The strict leg is
+/// not gated on it, but the proof leg in the same walk is, so fixtures exercise both.
 #[derive(Default)]
 struct Mock;
 
@@ -67,17 +61,14 @@ fn fixture(decl: &str, body: &str) -> String {
 /// The `array{a?: string, b?: string}` shape issue #51's examples are written over.
 const AB: &str = "array{a?: string, b?: string}";
 
-// ---- Registry wiring (A-G10) -----------------------------------------------
+// Registry wiring (A-G10).
 
 #[test]
 fn the_strict_leg_floors_pin_the_post_triage_ruling() {
-    // The 2026-07-29 corpus sweep measured `offset.undeclared` at zero findings
-    // across 99,522 files, and the orchestrator took A-G10's END-state promotion
-    // to `contracts`. `offset.maybe-missing` (3 sweep findings, all one
-    // assertion-helper discharge gap) stayed at `strict` pending that discharge.
-    //
-    // The assertion-helper discharge does not itself move the floor: promotion
-    // requires a fresh measurement and deliberate ruling.
+    // 2026-07-29 corpus sweep: `offset.undeclared` measured zero findings across
+    // 99,522 files, promoted to `contracts`. `offset.maybe-missing` (3 findings, one
+    // assertion-helper discharge gap) stayed at `strict` pending that discharge —
+    // the discharge landing later does not itself move the floor.
     for (id, floor) in
         [(OFFSET_UNDECLARED_ID, Floor::Contracts), (OFFSET_MAYBE_MISSING_ID, Floor::Strict)]
     {
@@ -86,7 +77,7 @@ fn the_strict_leg_floors_pin_the_post_triage_ruling() {
     }
 }
 
-// ---- It fires --------------------------------------------------------------
+// It fires.
 
 #[test]
 fn an_unguarded_optional_read_fires_once() {
@@ -120,8 +111,8 @@ fn a_key_outside_a_sealed_shape_fires_undeclared() {
 
 #[test]
 fn a_key_the_unsealed_tails_key_class_rejects_fires_undeclared() {
-    // `array<string, int>` cannot hold the int key 3 — declared absence through the
-    // tail's own key class, not through a field.
+    // `array<string, int>` can't hold int key 3 — declared absence through the
+    // tail's key class, not a field.
     assert_eq!(ids(&fixture("array<string, int>", "$x = $d[3];")), [OFFSET_UNDECLARED_ID]);
 }
 
@@ -132,7 +123,7 @@ fn the_return_operand_is_judged_like_the_assignment_rhs() {
     assert_eq!(ids(src), [OFFSET_MAYBE_MISSING_ID]);
 }
 
-// ---- It stays quiet where a proof exists (the discharge ladder) -------------
+// It stays quiet where a proof exists (the discharge ladder).
 
 #[test]
 fn a_required_key_is_clean() {
@@ -141,8 +132,7 @@ fn a_required_key_is_clean() {
 
 #[test]
 fn an_isset_if_guard_discharges_the_read() {
-    // L3: the guard promotes the key to Required on the true branch, so the read is
-    // `Present`. Clean by proof.
+    // L3: the guard promotes the key to Required on the true branch — clean by proof.
     let src = fixture("array{a?: string}", "if (isset($d['a'])) { $x = $d['a']; }");
     assert!(ids(&src).is_empty(), "isset-guarded read must be clean: {:?}", strict(&src));
 }
@@ -155,26 +145,25 @@ fn an_array_key_exists_guard_discharges_the_read() {
 
 #[test]
 fn a_not_empty_guard_discharges_the_read() {
-    // `empty(e)` is `!isset(e) || !e` (PHP's own definition, lowered), so its
-    // false branch is `isset(e) && e` and the presence promotion is the `isset`
-    // half's. The full polarity table is pinned in `tests/shape_guards.rs`.
+    // `empty(e)` lowers to `!isset(e) || !e`, so its false branch is `isset(e) && e`
+    // and the presence promotion is the `isset` half's (full polarity table in
+    // `tests/shape_guards.rs`).
     let src = fixture("array{a?: string}", "if (!empty($d['a'])) { $x = $d['a']; }");
     assert!(ids(&src).is_empty(), "!empty-guarded read must be clean: {:?}", strict(&src));
 }
 
 #[test]
 fn an_empty_guarded_read_still_fires_on_the_true_branch() {
-    // `empty($d['a'])` true leaves "absent" and "present-falsy" both open, so it
-    // discharges nothing — the honest reading, and the one the corpus needs.
+    // `empty($d['a'])` true leaves "absent" and "present-falsy" both open — discharges
+    // nothing, the honest reading the corpus needs.
     let src = fixture("array{a?: string}", "if (empty($d['a'])) { $x = $d['a']; }");
     assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
 }
 
 #[test]
 fn a_tagged_assertion_helper_discharges_the_read() {
-    // The 2026-07-29 sweep's entire `offset.maybe-missing` residue was this one
-    // shape. The rung's own suite is `tests/assert_helper_discharge.rs`; this is
-    // the ladder-level pin, next to `assert()`'s.
+    // The entire 2026-07-29-sweep `offset.maybe-missing` residue was this shape
+    // (own suite: `tests/assert_helper_discharge.rs`; this is the ladder-level pin).
     let src = format!(
         "<?php\nfinal class H {{\n\
          /** @phpstan-assert true $c */\n\
@@ -188,24 +177,23 @@ fn a_tagged_assertion_helper_discharges_the_read() {
 
 #[test]
 fn a_read_outside_the_guarded_branch_still_fires() {
-    // The guard's proof is branch-scoped: the same key read after the `if` is not
-    // covered by it. (Silence here would mean the narrowing leaked.)
+    // The guard's proof is branch-scoped; silence here would mean the narrowing leaked.
     let src = fixture("array{a?: string}", "if (isset($d['a'])) { $x = $d['a']; } $y = $d['a'];");
     assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
 }
 
-// ---- The `??` split (issue #51 §2) -----------------------------------------
+// The `??` split (issue #51 §2).
 
 #[test]
 fn a_non_final_coalesce_arm_never_fires() {
-    // PHP protects exactly the arms it may fall through. `$d['a']` is one of them.
+    // PHP protects exactly the arms it may fall through; `$d['a']` is one of them.
     let src = fixture(AB, "$x = $d['a'] ?? 'fallback';");
     assert!(ids(&src).is_empty(), "a protected arm must be silent: {:?}", strict(&src));
 }
 
 #[test]
 fn the_final_coalesce_arm_is_a_plain_read_and_fires() {
-    // issue #51's opening example without the assert: nothing proves `$d['b']`.
+    // issue #51's opening example without the assert — nothing proves `$d['b']`.
     let src = fixture(AB, "$x = $d['a'] ?? $d['b'];");
     assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
     let (_, msg) = strict(&src).into_iter().next().expect("one finding");
@@ -225,26 +213,24 @@ fn exactly_one_finding_on_a_three_arm_chain() {
 
 #[test]
 fn the_disjunctive_assert_pattern_proves_the_final_arm_clean() {
-    // L4 + L5, issue #51's headline: `assert(isset($d['a']) || isset($d['b']))`
-    // records the cover, the `??` supplies `¬isset($d['a'])`, and the two together
-    // prove `$d['b']` present. Clean by PROOF — the tiers Steins is imported from
-    // cannot do this.
+    // L4 + L5, issue #51's headline: the assert records the cover, `??` supplies
+    // `¬isset($d['a'])`, together proving `$d['b']` present — clean by PROOF, which
+    // the tiers Steins is imported from cannot do.
     let src = fixture(AB, "assert(isset($d['a']) || isset($d['b'])); $x = $d['a'] ?? $d['b'];");
     assert!(ids(&src).is_empty(), "the discharged pattern must be clean: {:?}", strict(&src));
 }
 
 #[test]
 fn an_opaque_premise_leaves_the_final_arm_undischarged() {
-    // By design (issue #51's closing note): no cover was recorded, so one honest
-    // warning on the right-most arm.
+    // By design (issue #51's closing note): no cover recorded, one honest warning.
     let src = fixture(AB, "$x = $d['a'] ?? $d['b'];");
     assert_eq!(ids(&src), [OFFSET_MAYBE_MISSING_ID]);
 }
 
 #[test]
 fn a_call_arm_invalidates_the_ladder_and_the_final_arm_fires() {
-    // A-G11's conservatism: a call may write through a reference, so the accumulated
-    // `¬isset` goes stale and the cover can no longer discharge.
+    // A-G11 conservatism: a call may write through a reference, so the accumulated
+    // `¬isset` goes stale and the cover no longer discharges.
     let src = fixture(
         AB,
         "assert(isset($d['a']) || isset($d['b'])); $x = $d['a'] ?? g() ?? $d['b'];",
@@ -254,8 +240,8 @@ fn a_call_arm_invalidates_the_ladder_and_the_final_arm_fires() {
 
 #[test]
 fn a_settled_earlier_arm_makes_the_final_arm_dead_and_silent() {
-    // `$d['a']` is declared Required and non-null, so `??` never evaluates anything
-    // to its right. Judging the dead arm would be a wolf cry.
+    // `$d['a']` is Required and non-null, so `??` never evaluates its right side —
+    // judging the dead arm would be a wolf cry.
     let src = fixture("array{a: string, b?: string}", "$x = $d['a'] ?? $d['b'];");
     assert!(ids(&src).is_empty(), "an unreachable arm must be silent: {:?}", strict(&src));
 }
@@ -266,12 +252,12 @@ fn a_declared_absence_on_the_final_arm_fires_undeclared() {
     assert_eq!(ids(&src), [OFFSET_UNDECLARED_ID]);
 }
 
-// ---- v1 scope and the silence contexts -------------------------------------
+// v1 scope and the silence contexts.
 
 #[test]
 fn a_general_map_read_does_not_fire() {
-    // A-G10's v1 emission scope: the `ShapeRead::Tail` path is silent. A general
-    // map/list leg is a separate future id (PHPStan's own two-flag split).
+    // A-G10's v1 emission scope: `ShapeRead::Tail` is silent — a general map/list
+    // leg is a separate future id.
     assert!(ids(&fixture("array<string, int>", "$x = $d['k'];")).is_empty());
     assert!(ids(&fixture("array", "$x = $d['k'];")).is_empty());
     assert!(ids(&fixture("list<string>", "$x = $d[0];")).is_empty());
@@ -279,8 +265,8 @@ fn a_general_map_read_does_not_fire() {
 
 #[test]
 fn the_silence_contexts_stay_silent() {
-    // None of these lower into a whitelisted value slot, so none is judged — the
-    // same A7 whitelist the proof leg rides.
+    // None lowers into a whitelisted value slot, so none is judged (same A7
+    // whitelist the proof leg rides).
     for body in [
         "if (isset($d['a'])) { return; }",
         "$b = array_key_exists('a', $d);",
@@ -309,11 +295,10 @@ fn a_dynamic_key_declines_the_judgment() {
     assert!(ids(src).is_empty(), "an unproven key must decline: {:?}", strict(src));
 }
 
-// ---- The four issue-motivating patterns, end to end ------------------------
+// The four issue-motivating patterns, end to end.
 
-/// issue #51's own worked example and its neighbours, in the naming the S6 fixture
-/// uses. `works` is the discharged disjunctive assert; `fail1`/`fail2` are guarded
-/// by a single `isset`; `fail3` is the undischarged chain.
+/// issue #51's worked example: `works` is the discharged disjunctive assert;
+/// `fail1`/`fail2` are guarded by a single `isset`; `fail3` is the undischarged chain.
 #[test]
 fn the_four_issue_patterns_land_as_specified() {
     let works = fixture(AB, "assert(isset($d['a']) || isset($d['b'])); $x = $d['a'] ?? $d['b'];");
@@ -327,12 +312,12 @@ fn the_four_issue_patterns_land_as_specified() {
     assert_eq!(ids(&fail3), [OFFSET_MAYBE_MISSING_ID], "fail3 fires exactly once, on the final arm");
 }
 
-// ---- One finding per site --------------------------------------------------
+// One finding per site.
 
 #[test]
 fn the_two_legs_never_double_report_one_site() {
-    // The proof leg takes `Verified` operands, the strict leg an `Asserted` shape:
-    // disjoint by construction. A concrete array still gets exactly the proof id.
+    // Proof leg takes `Verified` operands, strict leg an `Asserted` shape — disjoint
+    // by construction.
     let concrete = "<?php\nfunction g(): void { $a = ['a' => 1]; $x = $a['nope']; }\n";
     let ds: Vec<&str> = diagnostics(concrete)
         .iter()

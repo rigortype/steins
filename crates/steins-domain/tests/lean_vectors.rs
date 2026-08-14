@@ -1,53 +1,32 @@
-//! Differential check against the Lean 4 specification of this crate (ADR-0059).
-//!
-//! `spike/lean-domain` proves the domain's soundness contract and then prints a
-//! deterministic vector file (`lake exe vectors`, committed as
-//! `fixtures/lean-vectors.expected`). This test walks the *same* universe in the
-//! *same* order through the real Rust implementation and compares the rendered
-//! results line by line.
-//!
-//! What a failure means, in order of likelihood:
-//!
-//! 1. the Rust implementation changed behaviour (the interesting case — the
-//!    fixture is what the proofs are about);
-//! 2. the universe or a renderer drifted on one side only (fix the mismatch,
-//!    then regenerate with `cargo xtask lean-check --bless`);
-//! 3. the spec was edited and the fixture regenerated without re-running this
-//!    test.
-//!
-//! Comment lines in the fixture are documentation; the contract is the data
-//! lines, which is what this test compares.
+//! Differential check against the Lean 4 spec of this crate (ADR-0059): walks the
+//! same universe/order as `spike/lean-domain`'s `lake exe vectors` output
+//! (`fixtures/lean-vectors.expected`) through Rust and compares line by line (data
+//! lines are the contract; fixture comments are docs). A failure usually means
+//! Rust's behaviour changed, or the universe/renderer drifted, or the fixture
+//! wasn't regenerated — fix via `cargo xtask lean-check --bless`.
 
 use steins_domain::{
     Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, PhpStr, Presence,
     Refinement, ShapeFact, StrPreds, Tail, Val, array_is_list, php_is_falsy,
 };
 
-/// The string atoms of the spec, in rank order — which is `str::cmp` order,
-/// because the spec models a string value as its position in the total order.
-/// The trailing field of each `atom` line is `StrPreds::of` applied to these:
-/// the classifier check. `"ABC"` is the atom that separates the two casing
-/// predicates (`'A' < 'a'`, hence its rank); `"00"` and `" 5 "` are the atoms
-/// that separate `decimal-int-string` from `numeric-string` — numeric, but not
-/// how PHP writes an integer back, so they keep their string identity as an
-/// array key.
+/// String atoms, `str::cmp` rank order (a string's position in the total order);
+/// trailing `atom`-line field is `StrPreds::of`. `"ABC"` separates casing (`'A' < 'a'`);
+/// `"00"`/`" 5 "` separate `decimal-int-string` from `numeric-string` (non-canonical).
 const STR_ATOMS: [&str; 7] = ["", " 5 ", "0", "00", "5", "ABC", "abc"];
 
 /// The float atoms, with the literal text the spec prints for each.
 const FLOAT_ATOMS: [(f64, &str); 3] = [(-1.5, "-1.5"), (0.0, "0.0"), (2.5, "2.5")];
 
-/// The string-key atoms of the shape section, in rank order — `str::cmp`
-/// order, for the same reason `STR_ATOMS` is.
+/// String-key atoms of the shape section, `str::cmp` rank order (see `STR_ATOMS`).
 const KEY_ATOMS: [&str; 3] = ["a", "b", "c"];
 
-/// The keys the S4 narrowing operators are exercised over: exactly the keys the
-/// array atoms use, so every operator sees both a hit and a miss.
+/// S4 narrowing-operator keys: the array atoms' own keys, so each op sees a hit and a miss.
 fn op_keys() -> Vec<Key> {
     vec![Key::Int(0), Key::Int(1), Key::Str("a".into()), Key::Str("b".into())]
 }
 
-/// Every two-element subset of [`op_keys`], in that order — so each seed sees
-/// covers whose members it declares, half-declares and does not declare at all.
+/// Every 2-element subset of [`op_keys`]: exercises full, half, and no declaration per seed.
 fn cover_pairs() -> Vec<(Key, Key)> {
     let ks = op_keys();
     let mut out = Vec::new();
@@ -74,10 +53,8 @@ fn sk(rank: usize) -> Key {
     Key::Str(KEY_ATOMS[rank].into())
 }
 
-/// Every array atom, in the domain's total order on `Val` — which is what
-/// `Val::arr rank` means on the Lean side, so the ranks are load-bearing.
-/// Ranks 0 and 1 are the pre-shape universe (`values()` uses only those); the
-/// rest exist for the shape section.
+/// Every array atom, in `Val`'s total order (= `Val::arr rank` on the Lean side —
+/// ranks are load-bearing). Ranks 0–1 are the pre-shape universe; the rest are shape-only.
 fn shape_arr_atoms() -> Vec<(Val, &'static str)> {
     let a = |entries: Vec<(Key, Val)>| Val::Array(entries);
     vec![
@@ -116,9 +93,7 @@ fn arr_entries(rank: usize) -> Vec<(Key, Val)> {
     }
 }
 
-// ----------------------------------------------------------------------------
 // Rendering — must agree with `SteinsDomain.Vectors` byte for byte.
-// ----------------------------------------------------------------------------
 
 fn render_int(n: i64) -> String {
     if n == i64::MIN {
@@ -228,8 +203,7 @@ fn render_fact(f: &Fact) -> String {
         Fact::General { base, nullable } => {
             format!("G({},{})", render_base(*base), render_nullable(*nullable))
         }
-        // The abstract union (issue #339): its arms, in the canonical base order
-        // the constructor established, so the Lean side can compare textually.
+        // Union arms (issue #339), canonical base order — for textual comparison.
         Fact::Union { arms, nullable } => {
             let rendered: Vec<String> = arms
                 .iter()
@@ -246,9 +220,7 @@ fn render_fact(f: &Fact) -> String {
     }
 }
 
-// ----------------------------------------------------------------------------
 // Shape rendering (ADR-0062 S2)
-// ----------------------------------------------------------------------------
 
 fn key_rank(s: &PhpStr) -> usize {
     KEY_ATOMS
@@ -340,9 +312,7 @@ fn render_cert(c: Certainty) -> &'static str {
     }
 }
 
-// ----------------------------------------------------------------------------
-// The universe — same construction and same order as `SteinsDomain.Vectors`.
-// ----------------------------------------------------------------------------
+// The universe — same construction and order as `SteinsDomain.Vectors`.
 
 fn values() -> Vec<Val> {
     let mut out = vec![Val::Null, Val::Bool(false), Val::Bool(true)];
@@ -361,16 +331,10 @@ fn values() -> Vec<Val> {
     out
 }
 
-/// The predicate sets a caller can build through `StrPreds`. The casing-free
-/// seven come first; the eighth casing-free subset — `{NonFalsy, Numeric}`
-/// without `NonEmpty` — is unreachable, because `union` closes and `intersect`
-/// cannot add bits.
-///
-/// The casing tail is a spanning subset rather than the 4× cross product the two
-/// orthogonal bits allow: each casing alone, both at once (an uncased string),
-/// each against the length half, and casing against the falsy/numeric axes. See
-/// `SteinsDomain.Vectors.predsUniverse`, which must list exactly these, in this
-/// order.
+/// Predicate sets buildable through `StrPreds`: casing-free seven, plus an eighth
+/// (`{NonFalsy, Numeric}` w/o `NonEmpty`) unreachable — `union` closes, `intersect`
+/// can't add bits. Casing tail spans (not cross-products): each casing alone/together,
+/// vs length, vs falsy/numeric — matches `SteinsDomain.Vectors.predsUniverse` order.
 fn preds_universe() -> Vec<StrPreds> {
     vec![
         StrPreds::empty(),
@@ -388,17 +352,13 @@ fn preds_universe() -> Vec<StrPreds> {
         StrPreds::NON_EMPTY.union(StrPreds::LOWERCASE).union(StrPreds::UPPERCASE),
         // `of("abc")` — non-falsy and lowercase.
         StrPreds::of("abc"),
-        // numeric and cased, without non-falsy: the `'0'`-in-the-set class,
-        // reachable as `of("0") ⊓ of("1e5")` (resp. `of("1E5")`).
+        // Numeric+cased w/o non-falsy (`'0'`-in-the-set class); via `of("0") ⊓ of("1e5")`.
         StrPreds::NUMERIC.close().union(StrPreds::LOWERCASE),
         StrPreds::NUMERIC.close().union(StrPreds::UPPERCASE),
-        // `of("5")` — every predicate but the complement bit, the
-        // joint-satisfiability witness.
+        // `of("5")` — every predicate but the complement bit, joint-satisfiability witness.
         StrPreds::of("5"),
-        // The array-key-cast pair. `of("0")` is the falsy decimal-int-string;
-        // `of("00")` is the near miss the whole fixture family turns on
-        // (numeric, NOT canonical); and the last is the ⊥ set carrying both
-        // complementary bits — reachable through `union`, denoting ∅.
+        // Array-key-cast pair: `of("0")` is falsy decimal-int-string; `of("00")` is the
+        // numeric-but-non-canonical near miss; last is ⊥ (both bits via `union`).
         StrPreds::DECIMAL_INT.close(),
         StrPreds::NON_DECIMAL_INT,
         StrPreds::of("00"),
@@ -473,9 +433,7 @@ fn facts() -> Vec<Fact> {
         out.push(Fact::General { base, nullable: false });
         out.push(Fact::General { base, nullable: true });
     }
-    // `List.eraseDups`: keep the first occurrence, preserve order. The
-    // normalising `Fact::refined` collapses the empty predicate set and the full
-    // interval to General, which is where the duplicates come from.
+    // `List.eraseDups`: first wins; dupes come from `Fact::refined` normalising to General.
     let mut deduped: Vec<Fact> = Vec::with_capacity(out.len());
     for f in out {
         if !deduped.contains(&f) {
@@ -485,14 +443,11 @@ fn facts() -> Vec<Fact> {
     deduped
 }
 
-/// The shape seeds, in the order the `shape` lines number them. Each is the
-/// *raw* input to `ShapeFact::normalize`, so the rendered result shows what
-/// normalization did: sorting, the singleton-cover promotion, the sealed-Absent
-/// drop, the cover antichain, and the denotational `is_list` recomputation.
-///
-/// Rows 0–8 are the ADR-0062 §3 / RFC #14939 `is_list` table; 9–11 are the
-/// A-G1 lowerings (`list<T>`, a typed tail, the §5 tail-key fixture); 12–18
-/// exercise A-G8's cover laws and the remaining normalization invariants.
+/// Shape seeds, in `shape`-line order. Each is *raw* input to `ShapeFact::normalize`,
+/// showing normalization's work: sorting, singleton-cover promotion, sealed-Absent
+/// drop, cover antichain, `is_list` recomputation. Rows 0–8: ADR-0062 §3 / RFC #14939
+/// `is_list` table. 9–11: A-G1 lowerings (`list<T>`, typed tail, §5 tail-key fixture).
+/// 12–18: A-G8 cover laws + remaining invariants.
 fn shape_seeds() -> Vec<ShapeFact> {
     let req = Presence::Required { witnessed: true };
     let sint = |i: i64| Some(Box::new(Fact::Singleton(Val::Int(i))));
@@ -538,8 +493,7 @@ fn shape_seeds() -> Vec<ShapeFact> {
             false,
             Vec::new(),
         ),
-        // 12 array{1: 2, ...<string, mixed>}  — No: a string tail cannot fill
-        //    the gap at key 0
+        // 12 array{1: 2, ...<string, mixed>}  — No: string tail can't fill gap at key 0
         ShapeFact::normalize(
             vec![(ik(1), req, sint(2))],
             Tail::Unsealed { key: KeyClass::Str, value: none() },
@@ -547,7 +501,7 @@ fn shape_seeds() -> Vec<ShapeFact> {
             false,
             Vec::new(),
         ),
-        // 13 an Isset cover over {a, b}
+        // 13/14: Isset cover over {a, b}, then the same keys with a KeyExists cover
         ShapeFact::normalize(
             vec![(sk(0), Presence::Optional, none()), (sk(1), Presence::Optional, none())],
             Tail::Sealed,
@@ -555,7 +509,6 @@ fn shape_seeds() -> Vec<ShapeFact> {
             false,
             vec![Cover::new(vec![sk(1), sk(0)], CoverFlavor::Isset)],
         ),
-        // 14 the same keys with a KeyExists cover
         ShapeFact::normalize(
             vec![(sk(0), Presence::Optional, none()), (sk(1), Presence::Optional, none())],
             Tail::Sealed,
@@ -605,8 +558,7 @@ fn shape_seeds() -> Vec<ShapeFact> {
     ]
 }
 
-/// The `Fact`-level universe of the shape section: four shape facts (one of
-/// them nullable) and the neighbours the mixed-base discipline must reject.
+/// Shape section's `Fact` universe: four facts (one nullable) plus rejected neighbours.
 fn shape_facts() -> Vec<Fact> {
     let seeds = shape_seeds();
     let sh = |i: usize, nullable: bool| Fact::Shape {
@@ -655,8 +607,7 @@ fn descent_seeds() -> Vec<(&'static str, Vec<Val>)> {
     ]
 }
 
-/// `None` is ⊤ and absorbs — the reading `join_envs` implements when it drops a
-/// binding.
+/// `None` is ⊤ and absorbs — what `join_envs` does when it drops a binding.
 fn join_opt(a: Option<&Fact>, b: Option<&Fact>) -> Option<Fact> {
     match (a, b) {
         (Some(x), Some(y)) => x.join(y),
@@ -664,9 +615,7 @@ fn join_opt(a: Option<&Fact>, b: Option<&Fact>) -> Option<Fact> {
     }
 }
 
-// ----------------------------------------------------------------------------
 // Generation
-// ----------------------------------------------------------------------------
 
 fn generate() -> Vec<String> {
     let vals = values();
@@ -758,10 +707,7 @@ fn generate() -> Vec<String> {
     }
     out.push(format!("assoc {total} {mismatches}"));
 
-    // ------------------------------------------------------------------
-    // The shape section (ADR-0062 S2). Appended, so every line above is
-    // untouched by the array stratum landing.
-    // ------------------------------------------------------------------
+    // Shape section (ADR-0062 S2), appended so earlier lines stay untouched.
     let atoms = shape_arr_atoms();
     for (rank, (v, lit)) in atoms.iter().enumerate() {
         let entries = match v {
@@ -825,10 +771,7 @@ fn generate() -> Vec<String> {
         ));
     }
 
-    // ------------------------------------------------------------------
-    // ADR-0062 S4: `count_range` (the S3 Lean debt) and the four narrowing
-    // operators, rendered per seed and then checked exhaustively.
-    // ------------------------------------------------------------------
+    // ADR-0062 S4: `count_range` (S3 Lean debt) + four narrowing operators, per seed.
     for (i, s) in seeds.iter().enumerate() {
         out.push(format!("shapecount {i} => {}", render_range(s.count_range())));
     }
@@ -868,9 +811,7 @@ fn generate() -> Vec<String> {
         }
     }
 
-    // ------------------------------------------------------------------
     // ADR-0062 S5: cover recording (A-G8) and the discharge query (A-G11).
-    // ------------------------------------------------------------------
     for (i, s) in seeds.iter().enumerate() {
         for (k1, k2) in cover_pairs() {
             for fl in [CoverFlavor::Isset, CoverFlavor::KeyExists] {
@@ -902,11 +843,8 @@ fn generate() -> Vec<String> {
     }
 
 
-    // Soundness tallies for the array stratum: `γ(a) ∪ γ(b) ⊆ γ(a ⊔ b)`, the
-    // lift admitting what it lifted, and the descent admitting every member.
-    // These are *checked exhaustively*, on both sides, exactly as `assoc` is —
-    // see the spec's REPORT.md for why the array stratum is checked here rather
-    // than proved in `SteinsDomain.Soundness`.
+    // Array-stratum soundness: `γ(a) ∪ γ(b) ⊆ γ(a ⊔ b)`, lift admits what it lifted,
+    // descent admits every member — checked exhaustively, like `assoc` (spec's REPORT.md).
     let mut total = 0usize;
     let mut violations = 0usize;
     for a in &seeds {
@@ -959,7 +897,6 @@ fn generate() -> Vec<String> {
             let joined = a.join(b);
             for v in &probe {
                 total += 1;
-                // `None` is ⊤ and admits everything — the `denotes` reading.
                 if (a.admits(v) || b.admits(v))
                     && !joined.as_ref().is_none_or(|g| g.admits(v))
                 {
@@ -970,8 +907,7 @@ fn generate() -> Vec<String> {
     }
     out.push(format!("shapefactjoinsound {total} {violations}"));
 
-    // The S4 narrowing law: everything the receiver admits that satisfies the
-    // guard survives the operator.
+    // S4 narrowing law: everything the receiver admits and satisfies the guard survives.
     let mut total = 0usize;
     let mut violations = 0usize;
     for s in &seeds {
@@ -1016,8 +952,7 @@ fn generate() -> Vec<String> {
     }
     out.push(format!("shapenarrowsound {total} {violations}"));
 
-    // `mark_absent`'s second law, the one `unset($x[k])` needs: the result
-    // admits `v \ {k}` for every `v` the receiver admits.
+    // `mark_absent`'s 2nd law (`unset($x[k])`): admits `v \ {k}` for every admitted `v`.
     let mut total = 0usize;
     let mut violations = 0usize;
     for s in &seeds {
@@ -1055,8 +990,7 @@ fn generate() -> Vec<String> {
     }
     out.push(format!("shapecountsound {total} {violations}"));
 
-    // The S5 recording law: an array satisfying the disjunction survives the
-    // recording (a cover narrows, and a narrowing may not lose a member).
+    // S5 recording law: satisfying disjunction survives recording (can't lose a member).
     let mut total = 0usize;
     let mut violations = 0usize;
     for s in &seeds {
@@ -1085,8 +1019,7 @@ fn generate() -> Vec<String> {
     }
     out.push(format!("shapecoversound {total} {violations}"));
 
-    // The A-G11 discharge law: when `cover_proves` answers, the key really IS
-    // present in every admitted array whose other member fell through.
+    // A-G11 law: `cover_proves` answering means the key is present after fallthrough.
     let mut total = 0usize;
     let mut violations = 0usize;
     for s in &seeds {
@@ -1133,9 +1066,7 @@ fn expected() -> Vec<String> {
         .collect()
 }
 
-// ----------------------------------------------------------------------------
 // The check
-// ----------------------------------------------------------------------------
 
 #[test]
 fn rust_agrees_with_the_lean_specification() {
@@ -1160,9 +1091,7 @@ fn rust_agrees_with_the_lean_specification() {
     );
 }
 
-/// The associativity tally is data in the vector file, so a regression would
-/// merely change a committed number. Assert the value the spike established
-/// separately: `join` is associative over the whole vector universe.
+/// Fixture-data tally; assert directly: `join` is associative over the vector universe.
 #[test]
 fn join_is_associative_over_the_vector_universe() {
     let line = generate()
@@ -1176,12 +1105,8 @@ fn join_is_associative_over_the_vector_universe() {
     assert_eq!(mismatches, 0, "join is not associative over the vector universe");
 }
 
-/// The array stratum's soundness is *checked* over the shape vector universe
-/// rather than proved in Lean (see `spike/lean-domain/REPORT.md`). The tallies
-/// are data in the vector file — which means a regression would merely change a
-/// committed number — so pin zero failures: the join never loses a member, the
-/// lift admits what it lifted, and the computed descent admits every member it
-/// summarized.
+/// Array-stratum soundness is *checked*, not proved in Lean (`spike/lean-domain/REPORT.md`).
+/// Fixture-data tallies; pin zero failures — join loses no member, lift and descent admit.
 #[test]
 fn the_array_stratum_loses_no_member_over_the_vector_universe() {
     let lines = generate();

@@ -8,46 +8,36 @@
 //! *declares*, not from a directory-name guess.
 //!
 //! The guess is [`fallback_is_vendor`]: a path is vendor when any component is
-//! literally `vendor`. It is right for the common Composer install and wrong in
-//! both directions elsewhere — a tree vendoring into `3rdparty/` is disowned by
-//! nobody, and a first-party `src/vendor/` is disowned by us.
+//! literally `vendor`. Right for the common Composer install, wrong in both
+//! directions elsewhere — a `3rdparty/` tree is disowned by nobody, a
+//! first-party `src/vendor/` is disowned by us.
 //!
-//! # Layering
+//! **Layering:** [`ProjectLayout`] is pure — no IO, no syscalls, no ambient
+//! state. Everything it compares against, including the working directory, is
+//! captured at construction, so a replay with the same inputs gives the same
+//! answer (ADR-0048). [`crate::composer::discover`] is the boundary that reads
+//! the filesystem, once per run, before any salsa input is set.
 //!
-//! [`ProjectLayout`] is pure: no IO, no syscalls, no ambient state. Everything it
-//! compares against is captured at construction, including the working directory,
-//! so a replay with the same inputs gives the same answer (ADR-0048's canonical
-//! entry state). [`crate::composer::discover`] is the boundary that reads the
-//! filesystem; it runs once per run, before any salsa input is set.
+//! **The rule:** each `composer.json` under the analyzed paths declares a
+//! *governing root* — its directory, vendor directory (`config.vendor-dir`,
+//! default `vendor`), and first-party roots (`autoload`/`autoload-dev` PSR-4,
+//! PSR-0, classmap directories). A path is governed by the **nearest** such
+//! root above it, then longest component-prefix wins: a declared vendor root
+//! beats a first-party root → vendor; a first-party root at least as specific →
+//! not vendor (stops `src/vendor/` from being disowned); neither →
+//! [`fallback_is_vendor`]. The fallback survives as the floor deliberately: a
+//! monorepo carries vendor trees under subprojects whose manifests aren't
+//! checked in, and honoring only declarations would hand those back as
+//! first-party code.
 //!
-//! # The rule
-//!
-//! Each `composer.json` found under the analyzed paths declares a *governing
-//! root*: its own directory, its vendor directory (`config.vendor-dir`, default
-//! `vendor`), and its first-party roots (the `autoload` / `autoload-dev` PSR-4,
-//! PSR-0 and classmap directories). A path is governed by the **nearest** such
-//! root above it. Then, longest component-prefix wins:
-//!
-//! - a declared vendor root beats a first-party root → vendor;
-//! - a first-party root that is at least as specific → not vendor (this is what
-//!   stops a first-party `src/vendor/` from being disowned);
-//! - neither matches → [`fallback_is_vendor`].
-//!
-//! The fallback survives as the floor deliberately. A monorepo carries vendor
-//! trees under subprojects whose manifests are not checked in, and a rule that
-//! *only* honoured declarations would hand every one of them back to the project
-//! as first-party code.
-//!
-//! # The no-manifest config channel (issue #181)
-//!
-//! A project that predates or ignores Composer has no `composer.json` to read a
-//! `vendor-dir` from, so its own third-party tree (`3rdparty/`, `lib/vendor/`, …)
-//! never gets to be anything but first-party code. `steins.toml`'s `[paths]
-//! vendor-dirs` names extra whole-path-component sequences to treat as the floor
-//! alongside the `vendor` literal ([`ProjectLayout::with_extra_vendor_dirs`]).
-//! It is consulted in exactly the situations [`fallback_is_vendor`] already was
-//! — never where a governing root's own declared vendor dir already answered —
-//! so a project with a `composer.json` needs it not at all.
+//! **The no-manifest config channel (issue #181):** a project with no
+//! `composer.json` has no `vendor-dir` to read, so its own third-party tree
+//! (`3rdparty/`, `lib/vendor/`, …) never gets to be anything but first-party.
+//! `steins.toml`'s `[paths] vendor-dirs` names extra whole-path-component
+//! sequences to treat as the floor alongside `vendor`
+//! ([`ProjectLayout::with_extra_vendor_dirs`]) — consulted only where
+//! [`fallback_is_vendor`] already was, never where a declared vendor dir
+//! answered, so a project with a `composer.json` needs it not at all.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -74,13 +64,13 @@ impl PhpTargetSource {
 }
 
 /// The **target PHP version range** a project declares (issue #28), in
-/// `(major, minor)` space — the version the analysis is *about*, as distinct
-/// from the version the sidecar happens to run.
+/// `(major, minor)` space — the version the analysis is *about*, distinct from
+/// the version the sidecar happens to run.
 ///
-/// A ceiling of `Some((8, u16::MAX))` spells "any minor of major 8" (what
-/// `^8.1` means); `None` spells an open upper bound (`>=8.1`). Patch levels are
-/// deliberately dropped: every version-sensitive decision Steins makes keys on
-/// the minor (ADR-0049 A12, ADR-0052 A11, ADR-0056 §2).
+/// A ceiling of `Some((8, u16::MAX))` spells "any minor of major 8" (`^8.1`);
+/// `None` spells an open upper bound (`>=8.1`). Patch levels are dropped: every
+/// version-sensitive decision keys on the minor (ADR-0049 A12, ADR-0052 A11,
+/// ADR-0056 §2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PhpTarget {
     /// The lowest `(major, minor)` the project declares support for.
@@ -106,11 +96,9 @@ impl PhpTarget {
         self.floor == m && self.ceiling == Some(m)
     }
 
-    /// Whether the range spans versions on both sides of `boundary` — i.e. some
-    /// declared minor is below it and some declared (or open-bound) minor is at
-    /// or above it. This is what generalizes ADR-0049 A12's per-literal unknown
-    /// leg to a range: a rule keyed on `boundary` has no single answer for a
-    /// straddling target, so a boundary-sensitive question must decline.
+    /// Whether the range spans versions on both sides of `boundary`. Generalizes
+    /// ADR-0049 A12's per-literal unknown leg to a range: a boundary-sensitive
+    /// question has no single answer for a straddling target and must decline.
     #[must_use]
     pub fn straddles(&self, boundary: (u16, u16)) -> bool {
         self.floor < boundary && self.ceiling.is_none_or(|c| c >= boundary)
@@ -214,9 +202,9 @@ pub struct ProjectLayout {
     /// first match.
     roots: Vec<GoverningRoot>,
     /// `steins.toml [paths] vendor-dirs` (issue #181), pre-split into component
-    /// sequences at construction so matching is a pure component comparison —
-    /// see [`ProjectLayout::with_extra_vendor_dirs`]. Empty unless the caller set
-    /// it, so a project with no such config answers exactly as before.
+    /// sequences at construction — see [`ProjectLayout::with_extra_vendor_dirs`].
+    /// Empty unless the caller set it, so a project with no such config answers
+    /// exactly as before.
     extra_vendor_dirs: Vec<Vec<String>>,
 }
 
@@ -249,11 +237,10 @@ impl ProjectLayout {
     /// Attach `steins.toml [paths] vendor-dirs` (issue #181): extra directory-name
     /// sequences to treat as vendor at the floor, alongside the `vendor` literal.
     /// Each entry is a `/`-separated component sequence (`"3rdparty"`,
-    /// `"lib/vendor"`) matched as a contiguous whole-component run anywhere in the
-    /// path — the same component-wise discipline [`fallback_is_vendor`] uses, so
-    /// `vendor_proj/` and `vendor.php` never match and an empty entry matches
-    /// nothing. A caller that never sets this gets the pre-#181 floor back
-    /// exactly, which is how a Composer project stays zero-config.
+    /// `"lib/vendor"`) matched as a contiguous whole-component run, the same
+    /// discipline [`fallback_is_vendor`] uses (so `vendor_proj/` never matches
+    /// and an empty entry matches nothing). Unset, a Composer project stays
+    /// zero-config.
     #[must_use]
     pub fn with_extra_vendor_dirs(mut self, dirs: Vec<String>) -> Self {
         self.extra_vendor_dirs = dirs
@@ -278,25 +265,21 @@ impl ProjectLayout {
         self.roots.is_empty()
     }
 
-    /// The analysis's **target PHP range** (issue #28): the declaration of the
-    /// *outermost* governing root — the top-level project, whose
-    /// `config.platform.php` / `require.php` describes what the whole tree
+    /// The analysis's **target PHP range** (issue #28): the *outermost*
+    /// governing root's declaration — the top-level project, whose
+    /// `config.platform.php`/`require.php` describes what the whole tree
     /// deploys on. Nested manifests (monorepo subprojects, vendored packages)
-    /// deliberately do not override it: a library's `^7.4` support claim does
-    /// not change what the application ships on. Roots are kept deepest-first,
-    /// so the outermost is the last; ties (sibling projects analyzed together)
-    /// resolve to the sort order's last, and `doctor` names the manifest.
+    /// deliberately do not override it. Roots are kept deepest-first, so the
+    /// outermost is last; ties (sibling projects) resolve to the sort order's
+    /// last, and `doctor` names the manifest.
     #[must_use]
     pub fn php_target(&self) -> Option<&PhpTarget> {
         self.roots.last().and_then(GoverningRoot::php_target)
     }
 
     /// Whether `path` — an analyzed file's path, absolute or relative to the
-    /// captured working directory — belongs to a vendor tree.
-    ///
-    /// See the module docs for the rule. A path governed by no root falls through
-    /// to [`fallback_is_vendor`], and so does every path when the layout is the
-    /// fallback one.
+    /// captured working directory — belongs to a vendor tree. See the module
+    /// docs for the rule.
     #[must_use]
     pub fn is_vendor(&self, path: &str) -> bool {
         if self.roots.is_empty() {
@@ -308,15 +291,14 @@ impl ProjectLayout {
         };
         let declared = longest_prefix(&root.vendor, &abs);
         let first = longest_prefix(&root.first_party, &abs);
-        // `Option`'s own ordering does the work: `None` is less than every
-        // `Some`, so an unmatched side always loses to a matched one.
+        // `Option`'s ordering: `None` < every `Some`, so an unmatched side
+        // always loses to a matched one.
         if declared.is_some() && declared > first {
             return true;
         }
-        // A first-party root defends a path from the floor only when it names
-        // something *narrower than the project itself*. `autoload: {"": "./"}`
-        // claims the whole tree, and honouring that claim would hand every
-        // undeclared nested vendor tree back to the project as its own code.
+        // A first-party root defends a path only when narrower than the project
+        // itself — `autoload: {"": "./"}` must not hand an undeclared nested
+        // vendor tree back as first-party code.
         if first.is_some_and(|n| n > root.depth()) && first >= declared {
             return false;
         }
@@ -324,18 +306,15 @@ impl ProjectLayout {
     }
 
     /// The floor every unanswered question falls to: the `vendor` literal
-    /// ([`fallback_is_vendor`]) or, when `steins.toml [paths] vendor-dirs`
-    /// declared any, a whole-component match against one of those sequences
-    /// (issue #181). A layout with no declared extra dirs answers identically to
-    /// [`fallback_is_vendor`] alone.
+    /// ([`fallback_is_vendor`]) or a whole-component match against a declared
+    /// `steins.toml [paths] vendor-dirs` sequence (issue #181).
     fn floor(&self, path: &str) -> bool {
         fallback_is_vendor(path) || self.matches_extra_vendor_dir(path)
     }
 
     /// Whether `path` contains, as a contiguous run, every component of any
-    /// declared `[paths] vendor-dirs` entry. Component-wise like
-    /// [`fallback_is_vendor`]: `vendor_proj/other` does not satisfy a `vendor`
-    /// entry, and `lib/vendored/x` does not satisfy `lib/vendor`.
+    /// declared `[paths] vendor-dirs` entry (component-wise, like
+    /// [`fallback_is_vendor`]).
     fn matches_extra_vendor_dir(&self, path: &str) -> bool {
         if self.extra_vendor_dirs.is_empty() {
             return false;
@@ -432,11 +411,9 @@ mod tests {
         assert!(fallback_is_vendor("src/vendor/foo/Bar.php"));
         assert!(fallback_is_vendor("/abs/mono/vendor/pkg/lib.php"));
         assert!(!fallback_is_vendor("src/App/Bar.php"));
-        // Whole-component matching: a name that merely CONTAINS `vendor` is not
-        // the `vendor` component itself (issue #181's negative controls).
+        // Whole-component matching, not substring (issue #181).
         assert!(!fallback_is_vendor("vendor_proj/Bar.php"));
         assert!(!fallback_is_vendor("src/vendor.php"));
-        // A layout with no roots answers every question with it.
         let l = ProjectLayout::fallback();
         assert!(l.is_vendor("vendor/foo/Bar.php"));
         assert!(!l.is_vendor("src/App/Bar.php"));
@@ -447,7 +424,6 @@ mod tests {
 
     #[test]
     fn a_declared_vendor_dir_that_is_not_named_vendor_is_vendor() {
-        // The nextcloud shape: `config.vendor-dir: 3rdparty`.
         let l = layout(vec![root("/proj", &["3rdparty"], &["lib"])]);
         assert!(l.is_vendor("/proj/3rdparty/pkg/Lib.php"));
         assert!(!l.is_vendor("/proj/lib/App.php"));
@@ -455,8 +431,6 @@ mod tests {
 
     #[test]
     fn a_first_party_root_is_not_disowned_by_the_fallback() {
-        // `src/vendor/` is ours: the autoload root covers it and no declared
-        // vendor root is more specific.
         let l = layout(vec![root("/proj", &["vendor"], &["src"])]);
         assert!(!l.is_vendor("/proj/src/vendor/Money.php"));
         assert!(l.is_vendor("/proj/vendor/pkg/Lib.php"));
@@ -464,8 +438,6 @@ mod tests {
 
     #[test]
     fn a_vendor_root_beats_a_less_specific_first_party_root() {
-        // `autoload: {"": "./"}` maps the whole project; the vendor dir is still
-        // vendor because it is the longer prefix.
         let l = layout(vec![root("/proj", &["vendor"], &[""])]);
         assert!(l.is_vendor("/proj/vendor/pkg/Lib.php"));
         assert!(!l.is_vendor("/proj/src/App.php"));
@@ -473,8 +445,6 @@ mod tests {
 
     #[test]
     fn a_whole_tree_autoload_root_does_not_defend_an_undeclared_vendor_tree() {
-        // `autoload: {"psr-4": {"": "./"}}` claims everything. It must not turn an
-        // undeclared nested vendor tree into first-party code.
         let l = layout(vec![root("/proj", &["vendor"], &[""])]);
         assert!(l.is_vendor("/proj/other/vendor/pkg/Lib.php"));
         assert!(l.is_vendor("/proj/vendor/pkg/Lib.php"));
@@ -483,9 +453,7 @@ mod tests {
 
     #[test]
     fn an_undeclared_vendor_tree_still_falls_back() {
-        // The monorepo shape: a subproject whose manifest is not checked in. The
-        // governing root declares nothing about it, so the floor decides — which
-        // is why the floor is kept.
+        // Monorepo shape: subproject manifest not checked in, so the floor decides.
         let l = layout(vec![root("/proj", &["vendor"], &["src"])]);
         assert!(l.is_vendor("/proj/other/vendor/pkg/Lib.php"));
     }
@@ -498,7 +466,6 @@ mod tests {
         ]);
         assert!(l.is_vendor("/proj/sub/deps/pkg/Lib.php"));
         assert!(!l.is_vendor("/proj/sub/lib/App.php"));
-        // The outer root's vendor dir does not reach into the inner project.
         assert!(!l.is_vendor("/proj/sub/lib/vendor_helpers/Money.php"));
     }
 
@@ -525,11 +492,9 @@ mod tests {
 
     #[test]
     fn extra_vendor_dirs_extend_the_no_manifest_floor() {
-        // Issue #181: `[paths] vendor-dirs` for a project with no composer.json.
         let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
         assert!(l.is_vendor("3rdparty/pkg/Lib.php"));
         assert!(l.is_vendor("app/3rdparty/pkg/Lib.php"));
-        // The `vendor` literal still matches unconditionally alongside it.
         assert!(l.is_vendor("vendor/pkg/Lib.php"));
         assert!(!l.is_vendor("src/App.php"));
     }
@@ -538,15 +503,12 @@ mod tests {
     fn extra_vendor_dirs_are_whole_component_sequences() {
         let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["lib/deps".to_owned()]);
         assert!(l.is_vendor("lib/deps/pkg/Lib.php"));
-        // A single matching component is not the whole declared sequence.
         assert!(!l.is_vendor("lib/other/deps/pkg/Lib.php"));
         assert!(!l.is_vendor("other/lib/App.php"));
     }
 
     #[test]
     fn extra_vendor_dirs_never_match_a_component_prefix_or_suffix() {
-        // Whole-component matching stays: `vendor_proj/` and `vendor.php` are not
-        // vendor, exactly like the `vendor` literal itself.
         let l = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
         assert!(!l.is_vendor("3rdparty_extra/Lib.php"));
         assert!(!l.is_vendor("my3rdparty/Lib.php"));
@@ -555,8 +517,6 @@ mod tests {
 
     #[test]
     fn extra_vendor_dirs_only_reach_paths_no_declared_root_answers() {
-        // A declared composer vendor root still wins the longest-prefix contest;
-        // the config channel only ever supplies the floor.
         let l =
             layout(vec![root("/proj", &["vendor"], &["src"])]).with_extra_vendor_dirs(vec!["src".to_owned()]);
         assert!(!l.is_vendor("/proj/src/App.php"));

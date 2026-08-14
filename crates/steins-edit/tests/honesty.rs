@@ -1,8 +1,5 @@
 //! Integration tests for Transform #2 — phpdoc-honesty repair (ADR-0037 /
-//! ADR-0041). Each test builds a real multi-file salsa project and asserts on the
-//! plan's edits AND the named refusal reasons, plus the applied rewrite where the
-//! new tag text is what matters. Every rendered type is round-tripped through the
-//! phpdoc parser as a self-check.
+//! ADR-0041). Every rendered type round-trips through the phpdoc parser as a self-check.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::{TransformReport, VouchSet};
@@ -37,9 +34,7 @@ fn only_reason(report: &TransformReport) -> &str {
     &report.refusals[0].reason
 }
 
-/// Every rewritten tag type in the applied output must parse as a phpdoc type
-/// (the round-trip self-check). We scan the applied file's `@param`/`@return`
-/// lines and re-parse their type prefix.
+/// Round-trip self-check: every rewritten `@param`/`@return` type must re-parse.
 fn assert_docblock_types_parse(applied: &str) {
     for line in applied.lines() {
         let trimmed = line.trim_start_matches([' ', '\t', '*']);
@@ -53,12 +48,11 @@ fn assert_docblock_types_parse(applied: &str) {
     }
 }
 
-// ---- 1. `@param` widening: the canonical ADR-0037 case ---------------------
+// 1. `@param` widening: the canonical ADR-0037 case
 
 #[test]
 fn canonical_int_plus_numeric_string_widens_to_union() {
-    // `@param int $id` but callers pass both an int and numeric strings (the PDO
-    // illusion). The honest type is `int|numeric-string`.
+    // The PDO illusion: callers pass int and numeric strings, honest type unions both.
     let lib = "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n";
     let main = "<?php\nf(1);\nf(\"12\");\nf(\"34\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -73,9 +67,7 @@ fn canonical_int_plus_numeric_string_widens_to_union() {
 
 #[test]
 fn no_int_caller_widens_to_proven_type_alone_not_unioned_with_declared() {
-    // `@param int $x` but NO caller passes an int — only numeric strings. The
-    // honest type is the proven type ALONE (`numeric-string`), never `int|…`
-    // (proven beats declared; the declared type is not gratuitously unioned in).
+    // No caller passes an int — proven beats declared, never gratuitously unioned in.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"12\");\nf(\"34\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -89,8 +81,7 @@ fn no_int_caller_widens_to_proven_type_alone_not_unioned_with_declared() {
 
 #[test]
 fn join_includes_every_observed_value_not_only_the_violating_ones() {
-    // Callers pass an int (admitted by `int`) and a non-numeric string (violates).
-    // The honest type must admit BOTH: `int|'nope'`.
+    // int is admitted, 'nope' violates — honest type must admit both: `int|'nope'`.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(1);\nf(\"nope\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
@@ -106,12 +97,11 @@ fn dedup_collapses_repeated_literals() {
     assert!(out.contains("@param 'a' $x"), "got:\n{out}");
 }
 
-// ---- 2. `@param` refusals --------------------------------------------------
+// 2. `@param` refusals
 
 #[test]
 fn refuses_argument_not_proven_when_a_caller_is_non_literal() {
-    // A literal violation makes the site a candidate; a non-literal sibling caller
-    // then blocks the join.
+    // A literal violation makes the site a candidate; a non-literal sibling blocks the join.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"nope\");\nfunction caller($y) { f($y); }\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -146,9 +136,7 @@ fn refuses_when_function_referenced_as_value() {
 
 #[test]
 fn refuses_ambiguous_when_simple_name_also_calls_unresolved() {
-    // `A\f` is called (and its lie observed) inside namespace A; a bare `f(1)` in
-    // the global namespace does not resolve, so the simple name `f` is ambiguous —
-    // its callers can't all be proven (PHP's global-fallback could target A\f).
+    // A bare `f(1)` doesn't resolve, so simple name `f` is ambiguous (global-fallback).
     let a = "<?php\nnamespace A;\n/** @param int $x */\nfunction f($x) { return $x; }\nf(\"nope\");\n";
     let b = "<?php\nf(1);\n";
     let report = plan(&[("a.php", a), ("b.php", b)]);
@@ -159,8 +147,7 @@ fn refuses_ambiguous_when_simple_name_also_calls_unresolved() {
 
 #[test]
 fn refuses_type_not_renderable_for_array_argument() {
-    // An array argument violates `@param int` and is "proven", but a value set with
-    // an array has no faithful scalar phpdoc spelling.
+    // The array argument is proven, but has no faithful scalar phpdoc spelling.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf([1, 2]);\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -171,9 +158,7 @@ fn refuses_type_not_renderable_for_array_argument() {
 
 #[test]
 fn refuses_native_contradicts_proven() {
-    // Native `int $x` but `@param string $x`; a caller passes an int (violates the
-    // phpdoc `string` → lie) and another passes a string the native `int` rejects.
-    // The join isn't admitted by the native hint — a different disease.
+    // One caller violates the lie, another violates native `int` — a different disease.
     let lib = "<?php\n/** @param string $x */\nfunction f(int $x) { return $x; }\n";
     let main = "<?php\nf(1);\nf(\"y\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -184,8 +169,7 @@ fn refuses_native_contradicts_proven() {
 
 #[test]
 fn rewrites_param_when_native_hint_admits_the_join() {
-    // Native `int $x`, lying `@param string $x`, all callers pass ints. The proven
-    // join `int` IS admitted by the native hint → rewrite the phpdoc to match.
+    // The proven join `int` IS admitted by the native hint → rewrite the phpdoc.
     let lib = "<?php\n/** @param string $x */\nfunction f(int $x) { return $x; }\n";
     let main = "<?php\nf(1);\nf(2);\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -194,7 +178,7 @@ fn rewrites_param_when_native_hint_admits_the_join() {
     assert!(out.contains("@param int $x"), "got:\n{out}");
 }
 
-// ---- 3. Out-of-domain (honest tags are not enumerated) ---------------------
+// 3. Out-of-domain (honest tags are not enumerated)
 
 #[test]
 fn honest_param_is_not_enumerated() {
@@ -205,12 +189,8 @@ fn honest_param_is_not_enumerated() {
     assert!(report.plan.is_empty());
 }
 
-/// ADR-0047 §4 scope note, verified rather than assumed: honesty's "lie"
-/// detection requires an *observed* value that violates the declared tag
-/// (`admits_val(&gov_contract, &v) == Certainty::No`), so a candidate with zero
-/// callers never has a violating observation to find — it is never enumerated,
-/// by construction, with no `no-observed-callers` gate needed. A lying
-/// `@param int $x` on a function nobody calls stays untouched.
+/// ADR-0047 §4: "lie" detection needs an *observed* violating value, so zero
+/// callers means never enumerated — a lying tag on an uncalled fn stays untouched.
 #[test]
 fn zero_caller_lying_param_is_never_enumerated() {
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
@@ -222,20 +202,18 @@ fn zero_caller_lying_param_is_never_enumerated() {
 
 #[test]
 fn assertion_helper_param_is_exempt() {
-    // A `@phpstan-assert` makes `@param` a post-condition — no mismatch fires.
+    // `@phpstan-assert` makes `@param` a post-condition — no mismatch fires.
     let lib = "<?php\n/**\n * @param int $x\n * @phpstan-assert int $x\n */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"nope\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
     assert_eq!(report.oracle.enumerated, 0, "{:#?}", report);
 }
 
-// ---- 4. Prefixed / plain tag precedence ------------------------------------
+// 4. Prefixed / plain tag precedence
 
 #[test]
 fn both_prefixed_and_plain_rewritten_when_plain_also_lies() {
-    // Governing `@phpstan-param int` and a plain `@param int`; callers pass numeric
-    // strings. The prefixed governs and is rewritten; the plain `int` also fails to
-    // admit the join, so it is rewritten too (two edits, one site).
+    // The prefixed tag governs; plain `int` also fails to admit the join, so both rewrite.
     let lib = "<?php\n/**\n * @param int $x\n * @phpstan-param int $x\n */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"12\");\nf(\"34\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -249,8 +227,7 @@ fn both_prefixed_and_plain_rewritten_when_plain_also_lies() {
 
 #[test]
 fn plain_left_untouched_when_it_still_admits_the_join() {
-    // Governing `@phpstan-param int` lies; plain `@param string` still admits the
-    // numeric-string join, so only the prefixed governing tag is rewritten.
+    // Plain `@param string` still admits the join, so only the governing tag is rewritten.
     let lib = "<?php\n/**\n * @param string $x\n * @phpstan-param int $x\n */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"12\");\nf(\"34\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -261,7 +238,7 @@ fn plain_left_untouched_when_it_still_admits_the_join() {
     assert!(out.contains("@phpstan-param numeric-string $x"), "prefixed rewritten:\n{out}");
 }
 
-// ---- 5. `@return` widening -------------------------------------------------
+// 5. `@return` widening
 
 #[test]
 fn return_widens_to_proven_union() {
@@ -293,8 +270,7 @@ fn refuses_return_not_proven_for_non_literal_return() {
 
 #[test]
 fn refuses_return_not_proven_on_possible_fallthrough_null() {
-    // A single `if` with no `else` may fall through and implicitly return `null`;
-    // widening from the one explicit return would omit it.
+    // A fallthrough `if` implicitly returns `null`; widening would omit it.
     let lib = "<?php\n/** @return int */\nfunction f($c) { if ($c) { return \"x\"; } }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -316,15 +292,12 @@ fn honest_return_is_not_enumerated() {
     assert_eq!(report.oracle.enumerated, 0);
 }
 
-// ---- 5b. Docblock-unsafe string literals must not corrupt the docblock -----
+// 5b. Docblock-unsafe string literals must not corrupt the docblock
 
 #[test]
 fn star_slash_string_widens_to_keyword_not_a_broken_literal() {
-    // A caller passes a string containing the block-comment terminator `*/`.
-    // Rendering it as a literal (`'a*/b'`) would close the enclosing `/** … */`
-    // early — a hard PHP parse error. The honest, valid repair widens to a keyword.
-    // (The keyword is the grid cell the value names — `'a*/b'` is lowercase too,
-    // issue #240 — and `assert_docblock_types_parse` still re-reads it.)
+    // Rendering `'a*/b'` as a literal would close the enclosing `/** … */` early
+    // (a hard parse error); the valid repair widens to a keyword (issue #240).
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"a*/b\");\n";
     let report = plan(&[("lib.php", lib), ("main.php", main)]);
@@ -338,8 +311,7 @@ fn star_slash_string_widens_to_keyword_not_a_broken_literal() {
 
 #[test]
 fn star_slash_in_a_literal_union_widens_to_keyword() {
-    // The literal-union path (multiple distinct values ≤ CAP) is equally unsafe:
-    // one `*/`-bearing member forces the whole group to a keyword.
+    // The literal-union path: one `*/`-bearing member forces the whole group.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf(\"ok\");\nf(\"a*/b\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
@@ -350,9 +322,7 @@ fn star_slash_in_a_literal_union_widens_to_keyword() {
 
 #[test]
 fn newline_bearing_string_widens_to_keyword_not_a_split_literal() {
-    // A single-quoted PHP literal carrying a raw newline is a valid argument, but a
-    // phpdoc quoted literal cannot hold a newline — a literal render would split the
-    // tag across physical lines. It must widen to a keyword instead.
+    // A phpdoc quoted literal can't hold a raw newline — widens to a keyword instead.
     let lib = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n";
     let main = "<?php\nf('line1\nline2');\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
@@ -362,12 +332,11 @@ fn newline_bearing_string_widens_to_keyword_not_a_split_literal() {
     assert_docblock_types_parse(&out);
 }
 
-// ---- 6. Edit mechanics -----------------------------------------------------
+// 6. Edit mechanics
 
 #[test]
 fn multibyte_docblock_and_body_are_edited_on_byte_offsets() {
-    // A multibyte description in the docblock plus a multibyte body: the type span
-    // is a byte offset, so the splice must land on char boundaries.
+    // The type span is a byte offset, so the splice must land on char boundaries.
     let lib = "<?php\n/** @param int $s café */\nfunction greet($s) { return \"caf\u{e9}\"; }\n";
     let main = "<?php\ngreet(\"x\");\n";
     let out = apply_first(&[("lib.php", lib), ("main.php", main)]);
@@ -387,12 +356,11 @@ fn multiline_docblock_only_type_span_replaced() {
     assert_docblock_types_parse(&out);
 }
 
-// ---- ADR-0046 §2: dynamic-code obstacles ----------------------------------
+// ADR-0046 §2: dynamic-code obstacles
 
 use steins_edit::honesty::{REASON_DYNAMIC_INCLUDE, REASON_EVAL_PRESENT};
 
-/// An eval in the project blocks honesty widening too: a lying tag still refuses
-/// `eval-present` rather than being rewritten from partial (unenumerable) evidence.
+/// Eval blocks widening too: a lying tag refuses `eval-present`, not partial evidence.
 #[test]
 fn eval_blocks_honesty_widening() {
     let lib = "<?php\n/** @param int $id */\nfunction f($id) { return $id; }\n";

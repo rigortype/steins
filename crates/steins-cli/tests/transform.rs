@@ -1,8 +1,7 @@
 //! End-to-end CLI tests for `steins transform` (ADR-0020/0034) — every
 //! docblock-writing transform (`loop-to-array-map` has its own file). Dry-run
-//! prints a diff + refusal report and never writes;
-//! `--apply` writes only after the dual-verification post-check passes, which is
-//! measured on the default display surface (issue #115).
+//! prints a diff + refusal report and never writes; `--apply` writes only after
+//! the dual-verification post-check passes, on the default display surface (issue #115).
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -11,12 +10,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
+/// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
+/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -155,7 +151,7 @@ fn unknown_transform_name_is_usage_error() {
     assert!(r.stderr.contains("unknown transform"), "stderr:\n{}", r.stderr);
 }
 
-// ---- phpdoc-honesty (Transform #2) ----------------------------------------
+// phpdoc-honesty (Transform #2)
 
 #[test]
 fn honesty_dry_run_prints_diff_and_does_not_write() {
@@ -174,7 +170,6 @@ fn honesty_dry_run_prints_diff_and_does_not_write() {
     );
     assert!(r.stdout.contains("1 enumerated: 1 rewritten"), "oracle line:\n{}", r.stdout);
     assert!(r.stdout.contains("Post-check OK"), "postcheck:\n{}", r.stdout);
-    // The dry run does not touch disk.
     assert_eq!(proj.read("lib.php"), lib_before);
 }
 
@@ -221,10 +216,9 @@ fn honesty_json_format_emits_report_and_postcheck() {
     assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
 }
 
-// ---- ADR-0046 §2: dynamic-code obstacles + the vouching valve --------------
+// ADR-0046 §2: dynamic-code obstacles + the vouching valve
 
-/// An `eval` in a project file raises the `eval-present` obstacle (recorded once)
-/// and blocks every promotion — the canonical `'foo(42)'` invisible-caller gap.
+/// `eval` in a project file raises `eval-present` (once) and blocks every promotion.
 #[test]
 fn eval_obstacle_fires_and_blocks_promotion() {
     let proj = TempProject::new("eval-obstacle");
@@ -237,7 +231,7 @@ fn eval_obstacle_fires_and_blocks_promotion() {
     assert!(r.stdout.contains("Dynamic-code obstacles"), "obstacle block missing:\n{}", r.stdout);
     assert!(r.stdout.contains("eval-present"), "reason missing:\n{}", r.stdout);
     assert!(r.stdout.contains("0 promoted"), "promotion must be blocked:\n{}", r.stdout);
-    // The source is untouched (dry run, and nothing promotable anyway).
+    // Untouched: dry run, and nothing promotable anyway.
     assert!(proj.read("lib.php").contains("@param"));
 }
 
@@ -254,8 +248,8 @@ fn dynamic_include_obstacle_fires() {
     assert!(r.stdout.contains("0 promoted"), "{}", r.stdout);
 }
 
-/// The vouching valve: a vouched eval site does not raise its obstacle, so the
-/// promotion proceeds — but the report carries the prominent downgrade note.
+/// Vouching valve: a vouched eval site doesn't raise its obstacle; promotion
+/// proceeds, with a downgrade note.
 #[test]
 fn vouched_eval_proceeds_with_downgrade_note() {
     let proj = TempProject::new("vouch-text");
@@ -277,8 +271,7 @@ fn vouched_eval_proceeds_with_downgrade_note() {
     assert!(r.stdout.contains("1 user-vouched dynamic-code exemption"), "{}", r.stdout);
 }
 
-/// The obstacle and downgrade note both appear in JSON (ADR-0046 §2: the claim
-/// downgrade must be machine-visible).
+/// Obstacle + downgrade note both appear in JSON (ADR-0046 §2: must be machine-visible).
 #[test]
 fn json_carries_obstacles_and_downgrade_note() {
     let proj = TempProject::new("vouch-json");
@@ -316,8 +309,7 @@ fn json_carries_obstacles_and_downgrade_note() {
     );
 }
 
-/// A proven literal include resolving inside the analyzed universe is benign — no
-/// obstacle, and the promotion proceeds normally.
+/// A literal include resolving inside the analyzed universe is benign — no obstacle.
 #[test]
 fn in_universe_include_does_not_obstruct() {
     let proj = TempProject::new("in-universe");
@@ -330,11 +322,10 @@ fn in_universe_include_does_not_obstruct() {
     assert!(r.stdout.contains("1 promoted"), "{}", r.stdout);
 }
 
-// ---- [transform.partitions] parsing (ADR-0047) --
+// `[transform.partitions]` parsing (ADR-0047)
 
-/// A well-formed `[transform.partitions]` section parses and threads through to
-/// the planner without changing the promotion result (ADR-0047 §6). Round-trips
-/// the config surface from ADR-0047 §7 (observers + `[transform.partitions.sets]`).
+/// A well-formed `[transform.partitions]` section parses and threads through
+/// to the planner without changing the result (ADR-0047 §6/§7: observers + sets).
 #[test]
 fn partitions_config_parses_and_changes_nothing() {
     let proj = TempProject::new("partitions-ok");
@@ -360,8 +351,7 @@ fn partitions_config_parses_and_changes_nothing() {
     assert!(with_cfg.stdout.contains("1 promoted"), "should still promote:\n{}", with_cfg.stdout);
     assert!(!with_cfg.stderr.contains("partitions"), "no error expected:\n{}", with_cfg.stderr);
 
-    // With no partition config: identical oracle line. Point --config at a file
-    // that has no [transform.partitions].
+    // No partition config: --config points at a file lacking [transform.partitions].
     let plain = proj.write("plain.toml", "[transform.vouch]\nsites = []\n");
     let without = run(&[
         "transform",
@@ -374,9 +364,8 @@ fn partitions_config_parses_and_changes_nothing() {
     assert_eq!(with_cfg.stdout, without.stdout, "partition config must not change output");
 }
 
-/// Overlapping partition path-sets are a hard config error (ADR-0047 §7): the run
-/// exits 2 with a message naming the conflict, rather than proceeding on an
-/// ambiguous assignment.
+/// Overlapping partition path-sets are a hard config error (ADR-0047 §7): exits
+/// 2 naming the conflict, rather than proceeding on an ambiguous assignment.
 #[test]
 fn overlapping_partitions_are_a_config_error() {
     let proj = TempProject::new("partitions-overlap");
@@ -404,7 +393,7 @@ fn overlapping_partitions_are_a_config_error() {
     );
 }
 
-// ---- throws-envelope (Transform #3, issue #115) ----------------------------
+// throws-envelope (Transform #3, issue #115)
 
 #[test]
 fn throws_envelope_dry_run_prints_diff_and_does_not_write() {
@@ -421,7 +410,6 @@ fn throws_envelope_dry_run_prints_diff_and_does_not_write() {
     );
     assert!(r.stdout.contains("1 enumerated: 1 seeded, 0 refused"), "oracle line:\n{}", r.stdout);
     assert!(r.stdout.contains("Post-check OK"), "postcheck:\n{}", r.stdout);
-    // The file on disk is unchanged by a dry run.
     assert_eq!(proj.read("lib.php"), lib_before);
 }
 
@@ -435,8 +423,7 @@ fn throws_envelope_apply_writes_and_a_second_run_is_a_noop() {
     let seeded = proj.read("lib.php");
     assert!(seeded.contains(" * @throws \\RuntimeException"), "not seeded on disk:\n{seeded}");
 
-    // Idempotence (issue #115 acceptance): the second run enumerates the same
-    // candidate and refuses `already-declared` — never a rewrite.
+    // Idempotence (issue #115): the second run refuses `already-declared`, never a rewrite.
     let second = run(&["transform", "throws-envelope", "--apply", proj.path()]);
     assert_eq!(second.code, 0, "stderr:\n{}", second.stderr);
     assert!(
@@ -451,8 +438,8 @@ fn throws_envelope_apply_writes_and_a_second_run_is_a_noop() {
 #[test]
 fn throws_envelope_maybe_escape_refuses_and_writes_nothing() {
     let proj = TempProject::new("envelope-maybe");
-    // MyExc's ancestry leaves known territory; the catch MIGHT absorb it. A
-    // Maybe escape never becomes a declared envelope (ADR-0037/0040).
+    // MyExc's ancestry leaves known territory; the catch MIGHT absorb it — a Maybe
+    // escape never becomes declared (ADR-0037/0040).
     let before = "<?php\nclass MyExc extends \\Vendor\\Base {}\nfunction f(): void { try { throw new MyExc(); } catch (\\Vendor\\Other $e) {} }\n";
     proj.write("lib.php", before);
 
@@ -463,10 +450,8 @@ fn throws_envelope_maybe_escape_refuses_and_writes_nothing() {
     assert_eq!(proj.read("lib.php"), before);
 }
 
-/// The adoption arc the issue names: a partial envelope plus a proven direct
-/// escape fails `check --profile throws-direct`; one `transform throws-envelope
-/// --apply` later the same check is clean — no `throw.undeclared` with
-/// `origin = direct` remains for the seeded declaration.
+/// Adoption arc: a partial envelope + proven direct escape fails `check
+/// --profile throws-direct`; one seed later, the same check is clean.
 #[test]
 fn throws_envelope_seeding_clears_throws_direct() {
     let proj = TempProject::new("envelope-adoption");
@@ -491,17 +476,11 @@ fn throws_envelope_seeding_clears_throws_direct() {
     assert!(!after.stdout.contains("throw.undeclared"), "{}", after.stdout);
 }
 
-/// The post-check surface pin (issue #115 decision), end to end: this transform
-/// — and only this transform — is measured on the DEFAULT surface. Seeding an
-/// override whose ancestor declares a narrower envelope surfaces
-/// `throw.liskov-widened` under an opt-up profile: debt made visible, not a
-/// regression, so the transform must still pass its post-check and write.
-///
-/// The unit test `the_broad_surface_would_veto_a_legitimate_throws_seed` in
-/// `main.rs` is the forcing half — it runs this same shape through BOTH
-/// surfaces and shows the broad one refusing the write. This one shows the
-/// user-visible consequence: the seed lands, and the debt is now visible to
-/// `check --profile contracts`.
+/// Post-check surface pin (issue #115): only this transform is measured on the
+/// DEFAULT surface. An override narrowing an inherited envelope surfaces
+/// `throw.liskov-widened` under an opt-up profile — debt made visible, not a
+/// regression — so post-check still passes and writes; the forcing half lives in
+/// `the_broad_surface_would_veto_a_legitimate_throws_seed` (main.rs).
 #[test]
 fn throws_envelope_postcheck_runs_on_the_default_surface() {
     let proj = TempProject::new("envelope-surface-pin");
@@ -521,9 +500,8 @@ fn throws_envelope_postcheck_runs_on_the_default_surface() {
     let seeded = proj.read("lib.php");
     assert!(seeded.contains("@throws \\RuntimeException"), "seeded:\n{seeded}");
 
-    // The interaction is real: the seeded envelope now surfaces the Liskov
-    // widening under the contract layer — exactly what the default-surface
-    // post-check is pinned NOT to veto.
+    // The interaction is real: the seeded envelope surfaces the Liskov widening
+    // under the contract layer — exactly what the default-surface post-check must not veto.
     let contracts = run(&["check", "--no-php", "--profile", "contracts", proj.path()]);
     assert_eq!(contracts.code, 1, "the widened override must fail contracts:\n{}", contracts.stdout);
     assert!(contracts.stdout.contains("throw.liskov-widened"), "{}", contracts.stdout);
@@ -544,7 +522,7 @@ fn throws_envelope_json_format_emits_report_and_postcheck() {
     assert_eq!(v["report"]["plan"]["edits"].as_array().unwrap().len(), 1);
 }
 
-// ---- effects-envelope (Transform #5, issue #303 / ADR-0082 §7) -------------
+// effects-envelope (Transform #5, issue #303 / ADR-0082 §7)
 
 #[test]
 fn effects_envelope_dry_run_prints_diff_and_does_not_write() {
@@ -574,8 +552,7 @@ fn effects_envelope_apply_writes_and_a_second_run_is_a_noop() {
     let written = proj.read("lib.php");
     assert!(written.contains(" * @phpstan-impure io.fs.write"), "not written on disk:\n{written}");
 
-    // Idempotence (ADR-0082 §7): the second run enumerates the same candidate
-    // and refuses `already-declared` — never a rewrite.
+    // Idempotence (ADR-0082 §7): the second run refuses `already-declared`, never a rewrite.
     let second = run(&["transform", "effects-envelope", "--apply", proj.path()]);
     assert_eq!(second.code, 0, "stderr:\n{}", second.stderr);
     assert!(
@@ -587,8 +564,8 @@ fn effects_envelope_apply_writes_and_a_second_run_is_a_noop() {
     assert_eq!(proj.read("lib.php"), written, "the second run must not touch the file");
 }
 
-/// The written envelope is a contract the analyzer then *checks*: a repo can
-/// adopt the effect layer with one command and have the tags be real bounds.
+/// The written envelope is a contract the analyzer then *checks*: adopt the
+/// effect layer with one command and have the tags be real bounds.
 #[test]
 fn effects_envelope_writes_a_bound_the_checker_reads_back() {
     let proj = TempProject::new("effects-adoption");

@@ -1,10 +1,9 @@
 //! Issue #288 — the **destructure source** as a read context, and the declared
 //! **return shape** reaching the caller's value lane.
 //!
-//! `[$a, $b] = $m;` reads `$m[0]` and `$m[1]`, exactly as `$x = $m[0];` reads
-//! `$m[0]`; PHP warns per absent key. The ADR-0049 §7 A7 whitelist had never named
-//! that position — an omission, not a recorded deferral — so the identical facts
-//! that fire at an assignment-RHS were silent through a destructure.
+//! `[$a, $b] = $m;` reads `$m[0]` and `$m[1]`, exactly as `$x = $m[0];` reads `$m[0]`;
+//! PHP warns per absent key. ADR-0049 §7 A7 never named that position (an omission,
+//! not a deferral), so the assignment-RHS facts were silent through a destructure.
 //!
 //! # Behavioral witnesses at PHP 8.5.9 (`php -r`)
 //!
@@ -15,8 +14,8 @@
 //! $m = []; [&$r] = $m;              → no warning                       (an alias)
 //! ```
 //!
-//! The pattern's **targets** are write positions and stay silent — the
-//! ADR-0049/0052 soundness audit note's G7(e), unchanged by this file.
+//! The pattern's **targets** are write positions and stay silent — ADR-0049/0052's
+//! soundness audit note G7(e), unchanged here.
 
 use steins_domain::Fact;
 use steins_infer::{
@@ -24,9 +23,8 @@ use steins_infer::{
 };
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The absence-family boot surface (there is no PHP in a unit test), as in
-/// `shape_strict_leg.rs`: the strict leg is not gated on it, the proof leg in the
-/// same walk is, and these fixtures exercise both.
+/// Absence-family boot surface (no PHP in a unit test) — as in `shape_strict_leg.rs`,
+/// the strict leg isn't gated on it, but the proof leg in the same walk is.
 #[derive(Default)]
 struct Mock;
 
@@ -69,7 +67,7 @@ fn fixture(decl: &str, body: &str) -> String {
 /// is a declared absence — issue #288's own reproducer.
 const MAP: &str = "array<string, int>";
 
-// ---- It fires --------------------------------------------------------------
+// It fires
 
 #[test]
 fn a_positional_destructure_reads_every_index_it_binds() {
@@ -108,20 +106,20 @@ fn a_hole_consumes_its_index_without_reading_it() {
 
 #[test]
 fn a_nested_pattern_judges_the_outer_key_it_reads() {
-    // The outer read `$d[0]` is judged; the inner `$d[0][0]` names an intermediate
-    // base no leg resolves, and is silent exactly as a chained `$d[0][0]` read is.
+    // The outer `$d[0]` read is judged; the inner base is unresolved, silent as any
+    // chained read.
     let src = fixture(MAP, "[[$p]] = $d;");
     assert_eq!(ids(&src), [OFFSET_UNDECLARED_ID]);
     let (_, msg) = strict(&src).into_iter().next().expect("one finding");
     assert!(msg.contains("offset 0"), "the outer key is the one judged: {msg}");
 }
 
-// ---- The return lane -------------------------------------------------------
+// The return lane
 
 #[test]
 fn a_declared_return_shape_reaches_the_callers_read() {
-    // The scalar return lane always carried into the caller; the array lane did not,
-    // because the declared arms seeded no value-lane shape fact.
+    // The scalar return lane always reached the caller; the array lane didn't, since
+    // declared arms seeded no value-lane shape fact.
     let src = "<?php\n/** @return array<string, int> */\n\
                function g(): array { return ['a' => 1]; }\n\
                function f(): void { $m = g(); $x = $m[0]; }\n";
@@ -139,19 +137,19 @@ fn a_call_is_judged_as_a_destructure_source_in_its_own_right() {
     assert!(msg.contains("g() is array<string, int>"), "the message names the source: {msg}");
 }
 
-// ---- It stays quiet --------------------------------------------------------
+// It stays quiet
 
 #[test]
 fn a_by_reference_target_is_an_alias_not_a_read() {
-    // `[&$p] = $d;` autovivifies `$d[0]` with no warning — the whole pattern is
-    // refused rather than read as something PHP does not do.
+    // `[&$p] = $d;` autovivifies `$d[0]` with no warning; the whole pattern is
+    // refused rather than misread as something PHP doesn't do.
     assert!(strict(&fixture(MAP, "[&$p, &$q] = $d;")).is_empty());
 }
 
 #[test]
 fn the_targets_themselves_are_write_positions() {
-    // G7(e): `[$d['zzz']] = $src;` writes the key, and a write is not this family's
-    // accusation. The source `$src` carries no shape, so nothing fires at all.
+    // G7(e): `[$d['zzz']] = $src;` writes the key, not this family's accusation; and
+    // `$src` carries no shape either, so nothing fires.
     let src = fixture("array{a: int}", "[$d['zzz']] = $src;");
     assert!(strict(&src).is_empty(), "a destructure target stays silent: {:?}", strict(&src));
 }
@@ -164,7 +162,7 @@ fn a_declared_key_destructures_cleanly() {
 #[test]
 fn a_list_source_is_silent_at_its_declared_tail() {
     // `list<int>`'s unsealed tail admits every int key — out of the strict leg's v1
-    // scope (A-G10), so a positional destructure of one is clean.
+    // scope (A-G10), so this destructure is clean.
     assert!(strict(&fixture("list<int>", "[$p, $q] = $d;")).is_empty());
 }
 

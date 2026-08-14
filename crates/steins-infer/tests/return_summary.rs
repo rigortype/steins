@@ -5,11 +5,9 @@
 //! expression's value-domain fact is joined over every returning exit and bound as
 //! the call-result's VALUE fact (the value floor above the declared arms, A1).
 //!
-//! Zero-arg factories do not descend in T0. The main fixture's precision is
-//! arg-independent (the owner's `f(): int` takes
-//! no parameters), so the shape here forces the SAME proof through a positional
-//! descent — an unresolved second argument leaves that parameter on its native-int
-//! seed, the assert narrows it, and the proof crosses.
+//! Zero-arg factories do not descend in T0, so most fixtures here add an unused
+//! first `int $trigger` parameter — an unresolved argument leaves it on its
+//! native-int seed, forcing the SAME proof through a positional descent.
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, RETURN_ID, RETURN_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -38,9 +36,8 @@ fn count(src: &str, id: &str) -> usize {
 
 #[test]
 fn flagship_positive_int_crosses_verified() {
-    // `$n` keeps its native int seed (the `rand()` argument does not resolve, so the
-    // parameter is never bound to a concrete value); `assert($n > 0)` narrows it to
-    // positive-int at the Verified stratum; the return crosses that fact.
+    // `$n` keeps its native int seed (`rand()` doesn't resolve); `assert($n > 0)`
+    // narrows it to positive-int at Verified; the return crosses that fact.
     let src = "<?php\n\
         function f(int $trigger, int $n): int {\n\
             assert($n > 0);\n\
@@ -56,9 +53,9 @@ fn flagship_positive_int_crosses_verified() {
 #[test]
 fn mixed_strata_join_renders_asserted() {
     // Exit 1 narrows a native-int param via `assert` → positive-int VERIFIED. Exit 2
-    // narrows an untyped param via a `@phpstan-assert positive-int` helper → positive-int
-    // ASSERTED (a docblock claim; it cannot overwrite a Verified fact, hence the untyped
-    // param with no prior seed). The join is positive-int at the min stratum (Asserted).
+    // narrows an untyped param via a docblock `@phpstan-assert` helper → positive-int
+    // ASSERTED (untyped since a docblock claim can't overwrite a Verified fact). The
+    // join is positive-int at the min stratum (Asserted).
     let src = "<?php\n\
         /** @phpstan-assert positive-int $v */\n\
         function assertPos($v): void {}\n\
@@ -108,10 +105,9 @@ fn factless_exit_degrades_to_arm_floor() {
 
 #[test]
 fn native_return_mismatch_drops_exit() {
-    // The `return "oops"` violates the native `: int` — a proven boundary TypeError.
-    // The callee's `type.return-mismatch` fires; the exit contributes nothing, so the
-    // caller's summary joins only the conforming exit(s). Here the only other exit is
-    // the opaque `rand()` (factless int) → arm floor `int`.
+    // `return "oops"` violates native `: int` (a proven boundary TypeError): the
+    // callee's `type.return-mismatch` fires and the exit contributes nothing, so the
+    // summary joins only the other exit — opaque `rand()` (factless) → arm floor `int`.
     let src = "<?php\n\
         function f(int $trigger, int $n, bool $b): int {\n\
             if ($b) {\n\
@@ -144,8 +140,8 @@ fn native_return_mismatch_only_exit_no_summary() {
 #[test]
 fn phpdoc_return_mismatch_crosses_walk_truth() {
     // Native `: int` (satisfied), `@return positive-int` (violated by the proven
-    // `negative-int`). `phpdoc.return-mismatch` fires on the callee; the walk truth
-    // (`negative-int`) crosses to the caller — claims do not edit proofs (A2).
+    // `negative-int`): `phpdoc.return-mismatch` fires on the callee, but the walk
+    // truth (`negative-int`) crosses to the caller — claims don't edit proofs (A2).
     let src = "<?php\n\
         /** @return positive-int */\n\
         function f(int $trigger, int $n): int {\n\
@@ -301,8 +297,7 @@ fn zero_arg_factory_keeps_arm_floor() {
         }\n\
         $x = make();\n\
         \\PHPStan\\dumpType($x);\n";
-    // `make()` has a literal-ish body but `$v++` blocks `resolve_const_fn`; being
-    // zero-arg it does not descend — the declared `int` arm is the floor.
+    // `$v++` blocks `resolve_const_fn`; being zero-arg it doesn't descend either.
     assert_eq!(one_type(src), "dumped type: int");
 }
 
@@ -323,9 +318,8 @@ fn summary_value_premises_no_false_finding() {
     assert_eq!(findings(src).len(), 0, "a sound summary premises no finding: {:?}", findings(src));
 }
 
-// Argument position (issue #60): a call's summary crosses WITHOUT the
-// assignment detour. Every fixture here pins the argument form against the
-// assignment form — the two must stay observably identical.
+// Argument position (issue #60): a call's summary crosses WITHOUT the assignment
+// detour. Every fixture here pins the argument form against the assignment form.
 
 #[test]
 fn flagship_crosses_in_argument_position() {
@@ -349,9 +343,8 @@ fn flagship_crosses_in_argument_position() {
 
 #[test]
 fn mixed_strata_render_asserted_in_argument_position() {
-    // The (ii) fixture's shape, argument form: the Asserted exit's marker survives
-    // the position change — a docblock claim must not launder by being dumped
-    // directly instead of through a variable.
+    // The (ii) shape, argument form: the Asserted marker survives the position
+    // change — a docblock claim must not launder by being dumped directly.
     let src = "<?php\n\
         /** @phpstan-assert positive-int $v */\n\
         function assertPos($v): void {}\n\
@@ -369,9 +362,8 @@ fn mixed_strata_render_asserted_in_argument_position() {
 
 #[test]
 fn factless_exit_degrades_to_declared_floor_in_argument_position() {
-    // The (iii) degrade, argument form. The floor here is the issue-#60 declared
-    // arm list rendered at the dump — observably the same `int` the assignment
-    // form reads back off the contract store.
+    // The (iii) degrade, argument form: the issue-#60 declared arm list, rendered
+    // at the dump — observably the same `int` the assignment form reads back.
     let arg_form = "<?php\n\
         function f(int $trigger, int $n, bool $b): int {\n\
             if ($b) {\n\
@@ -398,9 +390,8 @@ fn declared_floor_spells_nullable_in_argument_position() {
 
 #[test]
 fn no_declared_type_stays_unknown_in_argument_position() {
-    // No summary (the body returns opaque `rand()`), no declared return type — the
-    // floor has nothing to spell, and the dump stays honestly unknown rather than
-    // inventing `mixed`.
+    // No summary and no declared return type: the floor has nothing to spell, so
+    // the dump stays honestly unknown rather than inventing `mixed`.
     let src = "<?php\n\
         function f($t) { return rand(); }\n\
         \\PHPStan\\dumpType(f(1));\n";
@@ -409,9 +400,8 @@ fn no_declared_type_stays_unknown_in_argument_position() {
 
 #[test]
 fn nested_call_boundary_finding_fires() {
-    // Issue #60's argument-checking criterion: `takesInt(g(1))` sees `g`'s proven
-    // return value and fires the boundary TypeError — previously invisible without
-    // an intermediate variable.
+    // Issue #60: `takesInt(g(1))` sees `g`'s proven return value and fires the
+    // boundary TypeError — previously invisible without an intermediate variable.
     let src = "<?php\n\
         function g(int $t): string { return \"hi\"; }\n\
         function takesInt(int $n): int { return $n; }\n\
@@ -429,9 +419,8 @@ fn nested_call_boundary_finding_fires() {
 #[test]
 fn nested_call_binds_one_level_deep() {
     // `$x = f(g(1))`: `g`'s Singleton summary binds `f`'s parameter, and `f`'s own
-    // summary then crosses — one level of expression nesting, the issue-#60
-    // acceptance bound. (The body concatenation is the #59 lane: proven operands,
-    // no folder needed.)
+    // summary then crosses — one level of nesting, the issue-#60 acceptance bound
+    // (the body concatenation is the #59 lane: proven operands, no folder needed).
     let src = "<?php\n\
         function g(int $t): string { return \"hi\"; }\n\
         function f(string $s): string { return $s . \"!\"; }\n\
@@ -442,9 +431,9 @@ fn nested_call_binds_one_level_deep() {
 
 #[test]
 fn recursion_in_argument_position_terminates_to_floor() {
-    // Self-recursion and mutual recursion through argument position: the on-stack
-    // guard (threaded descents) and the plain-pass-only gate (fresh trees) keep
-    // both bounded; each degrades to the declared arm floor.
+    // Self- and mutual recursion through argument position: the on-stack guard
+    // (threaded descents) and the plain-pass-only gate (fresh trees) keep both
+    // bounded; each degrades to the declared arm floor.
     let self_rec = "<?php\n\
         function r(int $n): int { return r($n); }\n\
         \\PHPStan\\dumpType(r(1));\n";
@@ -458,11 +447,11 @@ fn recursion_in_argument_position_terminates_to_floor() {
 
 #[test]
 fn ambiguous_simple_name_declines_in_argument_position() {
-    // The value IR carries the call's simple name only, so value-position
-    // resolution is unique-by-simple (the `resolve_const_fn` precedent). Two
-    // same-named functions decline — the documented ceiling, pinned so widening it
-    // is a decision rather than an accident. (The ASSIGNED form still resolves via
-    // the statement's `NameRef` — the forms are NOT identical in this corner.)
+    // The value IR carries only the call's simple name, so value-position
+    // resolution is unique-by-simple (the `resolve_const_fn` precedent): two
+    // same-named functions decline — a documented ceiling, pinned so widening it
+    // is a decision, not an accident. (The ASSIGNED form still resolves via the
+    // statement's `NameRef` — the forms are NOT identical in this corner.)
     let src = "<?php\n\
         namespace A { function d(int $x): string { return \"a\"; } }\n\
         namespace B { function d(int $x): string { return \"b\"; } }\n\
@@ -492,8 +481,7 @@ fn phpdoc_type_dump_reaches_argument_position() {
 #[test]
 fn conditional_polyfill_declines_in_value_position() {
     // A `function_exists`-guarded polyfill: which body binds is a load-order fact
-    // (ADR-0049 A2i), so neither the summary nor the declared floor may speak for
-    // it — the same re-damming instinct the arity check applies.
+    // (ADR-0049 A2i), so neither the summary nor the floor may speak for it.
     let src = "<?php\n\
         if (!function_exists('poly')) { function poly(int $x): string { return \"p\"; } }\n\
         \\PHPStan\\dumpType(poly(1));\n";
@@ -502,11 +490,11 @@ fn conditional_polyfill_declines_in_value_position() {
 
 #[test]
 fn namespaced_builtin_homonym_declines_in_value_position() {
-    // A namespaced project function shadowing a builtin's simple name: the value IR
-    // cannot see the caller's qualification, and an unqualified call outside the
-    // namespace targets the BUILTIN — so the value lane declines (here via the
-    // static catalog, this test running folderless). Conservative on purpose: even
-    // this same-namespace call, which really does target the shadow, is declined.
+    // A namespaced project function shadowing a builtin: the value IR can't see the
+    // caller's qualification, and an unqualified call outside the namespace targets
+    // the BUILTIN, so the value lane declines (static catalog, folderless). Even
+    // this same-namespace call, which really does target the shadow, is declined —
+    // conservative on purpose.
     let src = "<?php\n\
         namespace Util;\n\
         function strtoupper(int $x): string { return \"shadow\"; }\n\
@@ -517,9 +505,8 @@ fn namespaced_builtin_homonym_declines_in_value_position() {
 #[test]
 fn nested_descent_emits_callee_finding_exactly_once() {
     // A caller-bound proof INSIDE the nested callee: binding `$t = 1` into `g`
-    // makes `needsString($t)` a proven strict-mode TypeError. The threaded nested
-    // descent emits it exactly once — the value-lane scratch walks (the dump and
-    // argument-check entries) must never add a second copy.
+    // makes `needsString($t)` a proven strict-mode TypeError. The threaded descent
+    // emits it exactly once — the value-lane scratch walks must never double it.
     let src = "<?php\n\
         declare(strict_types=1);\n\
         function needsString(string $s): void {}\n\

@@ -1,31 +1,27 @@
 //! ADR-0064 seam (v): the `is_*` type-predicate guard vocabulary and strict
 //! literal-haystack `in_array` narrowing through the ADR-0052 arm and value-fact lanes.
 //!
-//! **Both polarities are pinned for every implemented predicate**, because they
-//! answer different questions: the TRUE branch deletes the arms the predicate
-//! *refutes*, the FALSE branch the arms it *proves*, and `Maybe` keeps the arm on
-//! both (ADR-0052 §2's "an arm dies only on a definite verdict").
+//! **Both polarities are pinned for every implemented predicate**: the TRUE
+//! branch deletes the arms the predicate *refutes*, the FALSE branch the arms
+//! it *proves*, and `Maybe` keeps the arm on both (ADR-0052 §2's "an arm dies
+//! only on a definite verdict").
 //!
-//! Three disciplines beyond the spellings:
+//! Three disciplines beyond the spellings: **recognition** — a namespaced
+//! (`Foo\is_string`), namespace-relative (`namespace\is_string`), aliased-import
+//! or userland-shadowed twin is a DIFFERENT function and narrows nothing, while
+//! fully-qualified `\is_string` IS the global builtin; one helper answers this
+//! for every recognizer (issue #153), so [`existence_predicate`],
+//! `array_guard_predicate` and the out-parameter seed agree by construction
+//! (PHP claims measured on php 8.5.9). **`assert()` inherits for free** —
+//! `assert(is_int($x))` narrows through the identical walk with no
+//! assert-specific plumbing. **The verdict owns death** — a guard its own
+//! binding's fact refutes describes an unreachable branch, so the fact DROPS to
+//! nothing there rather than being rewritten into the predicate's base or
+//! carried in unchanged (the measured FP class).
 //!
-//! * **Recognition discipline.** A namespaced (`Foo\is_string`), namespace-
-//!   relative (`namespace\is_string`), aliased-import or userland-shadowed twin
-//!   is a DIFFERENT function and narrows nothing, while the fully-qualified
-//!   `\is_string` IS the global builtin and narrows exactly as the bare spelling
-//!   does. One helper answers that for every recognizer (issue #153), so
-//!   [`existence_predicate`], `array_guard_predicate` and the out-parameter seed
-//!   all agree by construction; the PHP claims are measured on php 8.5.9.
-//! * **`assert()` inherits for free.** `assert(is_int($x))` narrows through the
-//!   identical walk; no assert-specific plumbing exists, and these tests are what
-//!   keeps that true.
-//! * **The verdict owns death.** A guard its own binding's fact refutes describes
-//!   an unreachable branch: the fact DROPS to nothing there — it is neither
-//!   rewritten into the predicate's base (a claim about a path the runtime never
-//!   takes) nor carried in unchanged (the measured FP class).
-//!
-//! NB: a variable handed to a call is invalidated after that statement
-//! (pre-existing by-ref conservatism), so each fixture dumps a binding once per
-//! branch and never before the guard.
+//! NB: a call invalidates its argument after the statement (by-ref
+//! conservatism), so each fixture dumps a binding once per branch, never before
+//! the guard.
 
 use steins_infer::{DEBUG_TYPE_ID, check};
 use steins_syntax::SourceTree;
@@ -40,8 +36,8 @@ fn dumps(src: &str) -> Vec<String> {
         .collect()
 }
 
-/// The `(true-branch, false-branch)` rendering of `guard` over a binding declared
-/// `decl` — the polarity pin shape every predicate test below uses.
+/// The `(true-branch, false-branch)` dump of `guard` over `decl` — the polarity
+/// pin shape every predicate test below uses.
 fn polarity(decl: &str, guard: &str) -> (String, String) {
     let src = format!(
         "<?php\n/** @param {decl} $v */\nfunction f($v): void {{\n\
@@ -60,8 +56,7 @@ const SIX: &str = "int|string|bool|float|array{a: int}|null";
 
 #[test]
 fn is_string_both_polarities() {
-    // True: every non-string arm is refuted. False: the string arm is proven, so
-    // it — and only it — dies.
+    // True refutes every non-string arm; false proves (and kills) exactly the string arm.
     let (t, f) = polarity(SIX, "is_string($v)");
     assert_eq!(t, "string");
     assert_eq!(f, "int|float|bool|null|array{a: int} (asserted)");
@@ -76,8 +71,8 @@ fn is_int_both_polarities() {
 
 #[test]
 fn is_array_both_polarities() {
-    // The surviving single array arm mints its shape fact through the SAME gated
-    // helper the S4 presence guards use — no second minting path.
+    // The surviving array arm mints its shape fact through the SAME gated helper
+    // S4's presence guards use — no second minting path.
     let (t, f) = polarity(SIX, "is_array($v)");
     assert_eq!(t, "array{a: int} (asserted)");
     assert_eq!(f, "int|float|string|bool|null (asserted)");
@@ -92,9 +87,8 @@ fn is_bool_both_polarities() {
 
 #[test]
 fn is_float_both_polarities() {
-    // `float` is read as a RUNTIME type here: `is_float(5)` is false, so the int
-    // arms die on the true branch even though the contract crate's acceptance
-    // relation lets an int satisfy a declared `float` (PHPStan's widening rule).
+    // `float` is a RUNTIME type here: `is_float(5)` is false, so int arms die on
+    // the true branch even though the contract crate's acceptance widens int→float.
     let (t, f) = polarity(SIX, "is_float($v)");
     assert_eq!(t, "float");
     assert_eq!(f, "int|string|bool|null|array{a: int} (asserted)");
@@ -104,8 +98,8 @@ fn is_float_both_polarities() {
 
 #[test]
 fn is_null_both_polarities() {
-    // The cheap near-duplicate of `=== null` — except the TRUE branch also kills
-    // every non-null arm, which `Refine::NotNull` never had a polarity for.
+    // Near-duplicate of `=== null`, except TRUE also kills every non-null arm —
+    // a polarity `Refine::NotNull` never had.
     let (t, f) = polarity(SIX, "is_null($v)");
     assert_eq!(t, "null");
     assert_eq!(f, "int|float|string|bool|array{a: int} (asserted)");
@@ -141,9 +135,8 @@ fn is_iterable_both_polarities() {
 
 #[test]
 fn is_callable_both_polarities() {
-    // No *kind* is outright callable — a string may name a function, an array may
-    // be a `['C', 'm']` pair — so the true branch only kills the four kinds that
-    // can never be callable, and the false branch kills nothing here.
+    // No *kind* is outright callable (a string may name a function, an array may
+    // be `['C', 'm']`), so true only kills the four kinds that never can be.
     let (t, f) = polarity(SIX, "is_callable($v)");
     assert_eq!(t, "string|array{a: int} (asserted)");
     assert_eq!(f, "int|float|string|bool|null|array{a: int} (asserted)");
@@ -151,9 +144,8 @@ fn is_callable_both_polarities() {
 
 #[test]
 fn is_numeric_both_polarities() {
-    // `is_numeric(true)` is FALSE — bools are not numeric — so the bool arm dies
-    // on the true branch; int and float are proven, so they die on the false one.
-    // The bare `string` arm is undecided and survives both.
+    // `is_numeric(true)` is FALSE, so the bool arm dies on the true branch; int
+    // and float are proven so die on the false one; bare `string` survives both.
     let (t, f) = polarity("int|string|bool", "is_numeric($v)");
     assert_eq!(t, "int|string (asserted)");
     assert_eq!(f, "string|bool (asserted)");
@@ -161,10 +153,9 @@ fn is_numeric_both_polarities() {
 
 #[test]
 fn is_numeric_wires_the_modeled_numeric_string_predicate() {
-    // ADR-0064 §1 names this: the true branch is the first guard to intersect the
-    // already-modeled `StrPreds::NUMERIC` into a string-based fact. The false
-    // branch cannot subtract it — the abstract layers carry no negative predicate
-    // vocabulary (ADR-0052 §2) — so it stays plain `string`.
+    // ADR-0064 §1: the true branch is the first guard to intersect the modeled
+    // `StrPreds::NUMERIC` into a string-based fact; false can't subtract it (no
+    // negative predicate vocabulary, ADR-0052 §2), so it stays plain `string`.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (is_numeric($s)) { \\PHPStan\\dumpType($s); } else { \\PHPStan\\dumpType($s); }\n}\n";
     assert_eq!(dumps(src), vec!["numeric-string", "string"]);
@@ -181,13 +172,12 @@ fn is_numeric_decides_string_arms_by_their_predicate_set() {
 
 #[test]
 fn is_iterable_keeps_object_arms_on_both_branches() {
-    // An arbitrary class may implement `Traversable`, so neither polarity may
-    // delete a class arm — the FP-safe `Maybe` the kind table encodes.
-    // TRUE branch: the `int` arm is refuted and dies, `C` survives as `Maybe`.
+    // A class may implement `Traversable`, so neither polarity deletes a class
+    // arm — the FP-safe `Maybe` the kind table encodes. TRUE: `int` refuted, `C` survives.
     let t = "<?php\nclass C {}\n/** @param C|int $v */\nfunction f($v): void {\n\
              if (is_iterable($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(t), vec!["C (asserted)"]);
-    // FALSE branch: the `array` arm is proven and dies, `C` survives as `Maybe`.
+    // FALSE: `array` proven, `C` survives.
     let f = "<?php\nclass C {}\n/** @param C|array{a: int} $v */\nfunction f($v): void {\n\
              if (is_iterable($v)) { } else { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(f), vec!["C (asserted)"]);
@@ -197,8 +187,8 @@ fn is_iterable_keeps_object_arms_on_both_branches() {
 
 #[test]
 fn a_base_naming_predicate_mints_a_fact_over_an_unfacted_binding() {
-    // The common real-world subject: a `mixed`/undeclared binding, where the arm
-    // lane can subtract nothing and the whole payoff is the minted base fact.
+    // The common real case: a `mixed`/undeclared binding where the arm lane can
+    // subtract nothing, so the minted base fact is the whole payoff.
     for (guard, want) in [
         ("is_string($v)", "string"),
         ("is_int($v)", "int"),
@@ -217,10 +207,8 @@ fn a_base_naming_predicate_mints_a_fact_over_an_unfacted_binding() {
 #[test]
 fn a_union_naming_predicate_mints_nothing() {
     // `is_scalar`/`is_numeric` name a union of bases and `is_array` the array
-    // stratum; none is a single `Fact`, so an unfacted binding stays unfacted
-    // rather than being given a guessed one.
-    // The unguarded baseline for an unfacted `mixed` binding is `unknown`; each
-    // guard below must leave it exactly there.
+    // stratum; none is a single `Fact`, so a `mixed` binding stays `unknown`
+    // (the unguarded baseline) rather than being given a guessed one.
     let base = "<?php\n/** @param mixed $v */\nfunction f($v): void { \\PHPStan\\dumpType($v); }\n";
     assert_eq!(dumps(base), vec!["unknown".to_owned()]);
     for guard in ["is_scalar($v)", "is_numeric($v)", "is_array($v)", "is_object($v)", "is_callable($v)"] {
@@ -265,12 +253,11 @@ fn finite_facts_narrow_by_exact_member_retention_on_both_polarities() {
 
 #[test]
 fn a_refuted_guard_drops_the_fact_because_the_verdict_owns_death() {
-    // `is_int($s)` on a proven-string binding describes an unreachable branch. It
-    // must neither rewrite the fact into `int` nor carry the refuting fact in; the
-    // latter is the
-    // measured FP class: a call-site descent binding `$name` to `1` made
-    // `new Identifier($name)` inside `if (is_string($name))` a "proven TypeError"
-    // in nikic/PHP-Parser. The refuting fact therefore drops to nothing.
+    // `is_int($s)` on a proven-string binding describes an unreachable branch: it
+    // must neither rewrite the fact to `int` nor carry the refuting fact in — the
+    // latter is the measured FP class (a call-site descent binding `$name` to `1`
+    // made `if (is_string($name))` around `new Identifier($name)` a "proven
+    // TypeError" in nikic/PHP-Parser), so the fact drops to nothing instead.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (is_int($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_eq!(dumps(src), vec!["unknown"]);
@@ -326,10 +313,10 @@ fn in_array_intersects_with_what_is_already_known() {
 
 #[test]
 fn in_array_declines_the_loose_form() {
-    // PHP's loose `==` membership is neither type-reflexive nor transitive
+    // Loose `==` membership is neither type-reflexive nor transitive
     // (`in_array(0, ['a'])` was true before PHP 8; `in_array('1e2', ['100'])` is
-    // true today), so there is no sound identity set to mint. Declining leaves the
-    // pre-existing retained-guard-call forgetting in place.
+    // true today), so no sound identity set exists to mint — decline and keep
+    // the pre-existing retained-guard-call forgetting.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (in_array($s, ['a', 'b'])) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_eq!(dumps(src), vec!["unknown"]);
@@ -369,7 +356,7 @@ fn assert_inherits_in_array_narrowing() {
     assert_eq!(dumps(src), vec!["'a'|'b'"]);
 }
 
-// ---- Recognition discipline -------------------------------------------------
+// ---- Recognition discipline (one helper, see module doc; each leg's witness below) ------
 
 #[test]
 fn a_namespaced_twin_is_a_different_function() {
@@ -388,10 +375,8 @@ fn a_userland_shadow_is_a_different_function() {
 
 #[test]
 fn a_fully_qualified_spelling_is_the_global_builtin() {
-    // `\is_string($v)` inside a namespace IS the global function — that is what
-    // the leading `\` is for, and what a style guide mandating it relies on.
-    // Measured (php 8.5.9): with an `App\is_string` returning false declared
-    // alongside, `\is_string("x")` still answers `true`.
+    // Witness (php 8.5.9): with an `App\is_string` returning false declared
+    // alongside, `\is_string("x")` still answers `true` — `\` reaches global.
     let src = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
                if (\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(src), vec!["string".to_owned()]);
@@ -399,9 +384,8 @@ fn a_fully_qualified_spelling_is_the_global_builtin() {
 
 #[test]
 fn a_fully_qualified_spelling_survives_a_same_namespace_homonym() {
-    // The shadowing check is about the function the call actually reaches, and a
-    // fully-qualified name reaches past `App\is_string` to the global one
-    // (measured, php 8.5.9).
+    // Witness (php 8.5.9): a fully-qualified name reaches past `App\is_string` to
+    // the global one.
     let src = "<?php\nnamespace App;\nfunction is_string($v): bool { return false; }\n\
                /** @param int|string $v */\nfunction f($v): void {\n\
                if (\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
@@ -410,11 +394,10 @@ fn a_fully_qualified_spelling_survives_a_same_namespace_homonym() {
 
 #[test]
 fn a_namespace_relative_spelling_is_a_different_function() {
-    // `namespace\is_string` resolves against the enclosing namespace ONLY, with
-    // no global fallback: measured on php 8.5.9 it is a fatal "Call to undefined
-    // function App\is_string()". It can never be the builtin, so it narrows
-    // nothing — the `namespace\` prefix is stripped from the stored raw name, so
-    // a textual backslash test would wrongly let it through.
+    // Witness (php 8.5.9): `namespace\is_string` resolves against the enclosing
+    // namespace ONLY, fataling "Call to undefined function App\is_string()" — the
+    // stored raw name strips the `namespace\` prefix, so a textual test would
+    // wrongly let it through.
     let src = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
                if (namespace\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_ne!(dumps(src), vec!["string".to_owned()]);
@@ -422,9 +405,8 @@ fn a_namespace_relative_spelling_is_a_different_function() {
 
 #[test]
 fn a_namespace_relative_spelling_in_the_root_namespace_is_the_builtin() {
-    // In the root namespace the enclosing namespace IS global, so the same
-    // spelling does denote the builtin (measured: `namespace\is_string("x")`
-    // answers `true` in a file with no `namespace` declaration).
+    // Witness: `namespace\is_string("x")` answers `true` with no `namespace`
+    // declaration — the enclosing namespace there IS global.
     let src = "<?php\n/** @param int|string $v */\nfunction f($v): void {\n\
                if (namespace\\is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(src), vec!["string".to_owned()]);
@@ -432,9 +414,8 @@ fn a_namespace_relative_spelling_in_the_root_namespace_is_the_builtin() {
 
 #[test]
 fn an_aliased_import_binds_the_spelling_elsewhere() {
-    // `use function Other\thing as is_string;` sends the unqualified call to
-    // `Other\thing` with no fallback (measured: a fatal naming `Other\thing()`),
-    // so the spelling is not the builtin however unqualified it looks.
+    // Witness: the import sends the unqualified call to `Other\thing` with no
+    // fallback (a fatal naming `Other\thing()`) however builtin-like it looks.
     let src = "<?php\nnamespace App;\nuse function Other\\thing as is_string;\n\
                /** @param int|string $v */\nfunction f($v): void {\n\
                if (is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
@@ -443,9 +424,7 @@ fn an_aliased_import_binds_the_spelling_elsewhere() {
 
 #[test]
 fn importing_the_global_name_itself_is_still_the_builtin() {
-    // `use function is_string;` names the global function, so the call reaches it
-    // (measured: `true`). The import leg rejects a *different* target, not the
-    // presence of an import.
+    // The import leg rejects a *different* target, not an import's mere presence.
     let src = "<?php\nnamespace App;\nuse function is_string;\n\
                /** @param int|string $v */\nfunction f($v): void {\n\
                if (is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
@@ -454,9 +433,7 @@ fn importing_the_global_name_itself_is_still_the_builtin() {
 
 #[test]
 fn the_in_array_recognizer_carries_the_same_rule() {
-    // The rule is one helper, so `in_array` answers exactly as `is_string` does:
-    // the fully-qualified spelling is the builtin, the namespace-relative one is
-    // not.
+    // One helper: `in_array` answers exactly as `is_string` did above.
     let fq = "<?php\nnamespace App;\n/** @param int|string $v */\nfunction f($v): void {\n\
               if (\\in_array($v, [1, 2], true)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(fq), vec!["1|2".to_owned()]);
@@ -486,9 +463,8 @@ fn the_de_morgan_walk_reaches_nested_guards() {
     let or = "<?php\n/** @param int|string $v */\nfunction f($v, bool $c): void {\n\
               if ($c || is_string($v)) { } else { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(or), vec!["int (asserted)"]);
-    // The negated form narrows the ARM lane only — `!is_string($v)` proves "not a
-    // string", which is not the same claim as "int", so no fact is minted and the
-    // surviving declared arm (Asserted) is what renders.
+    // Negated narrows the ARM lane only — "not a string" ≠ "int", so no fact is
+    // minted and the surviving declared arm (Asserted) renders instead.
     let not = "<?php\n/** @param int|string $v */\nfunction f($v): void {\n\
                if (!is_string($v)) { \\PHPStan\\dumpType($v); }\n}\n";
     assert_eq!(dumps(not), vec!["int (asserted)"]);
@@ -507,10 +483,9 @@ fn the_guard_threads_into_the_right_operand() {
 
 #[test]
 fn ctype_functions_are_declined_in_this_slice() {
-    // `ctype_digit` and kin look like a `StrPreds::DECIMAL_INT` mapping but are
-    // locale-sensitive AND (before PHP 8.1) reinterpreted int arguments in
-    // `-128..=255` as byte values, so the mapping is not the one the name
-    // suggests. They therefore remain declined pending dedicated measurement.
+    // `ctype_digit` and kin look like `StrPreds::DECIMAL_INT` but are
+    // locale-sensitive AND (before PHP 8.1) reinterpreted int args in
+    // `-128..=255` as byte values — declined pending dedicated measurement.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (ctype_digit($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_ne!(dumps(src), vec!["numeric-string".to_owned()]);

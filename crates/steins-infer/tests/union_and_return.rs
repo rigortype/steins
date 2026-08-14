@@ -14,9 +14,8 @@ use steins_syntax::{ArgValue, SourceTree};
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // Drop `untyped.*` (ADR-0078, #200): it flags the fixtures' own deliberately
+    // untyped signatures, not the behavior under test.
     check(&tree, &functions, "test.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -31,48 +30,46 @@ fn n(src: &str) -> usize {
 
 #[test]
 fn union_param_coercive_cells() {
-    // 1.5 -> int|string: the string sink accepts (becomes int 1) → silent.
+    // Empirical PHP 8.5.8 coercion table (module doc); each comment gives the
+    // mechanism the assert message's verdict doesn't spell out.
     let f = "<?php function f(int|string $v): void {}\n";
+    // string sink: 1.5 becomes int 1
     assert_eq!(n(&format!("{f}f(1.5);")), 0, "1.5 -> int|string coercive silent");
-    // "abc" -> int|float: no string sink, non-numeric string → flagged.
     let g = "<?php function g(int|float $v): void {}\n";
+    // no string sink for a non-numeric string
     assert_eq!(n(&format!("{g}g(\"abc\");")), 1, "abc -> int|float coercive flagged");
-    // "5" -> int|float: numeric string coerces → silent.
+    // numeric string coerces
     assert_eq!(n(&format!("{g}g(\"5\");")), 0, "5 -> int|float coercive silent");
-    // false -> string|false: matches the `false` literal member → silent.
     let h = "<?php function h(string|false $v): void {}\n";
+    // matches the `false` literal member
     assert_eq!(n(&format!("{h}h(false);")), 0, "false -> string|false silent");
-    // true -> string|false: coerces to '1' via the string member → silent.
+    // coerces to '1' via the string member
     assert_eq!(n(&format!("{h}h(true);")), 0, "true -> string|false coercive silent");
-    // null -> int|string (non-nullable) → flagged.
     assert_eq!(n(&format!("{f}f(null);")), 1, "null -> int|string flagged");
-    // null -> int|null: nullable → silent.
     let k = "<?php function k(int|null $v): void {}\n";
     assert_eq!(n(&format!("{k}k(null);")), 0, "null -> int|null silent");
-    // "abc" -> int|false: the `false` literal does not sink strings → flagged.
     let m = "<?php function m(int|false $v): void {}\n";
+    // the `false` literal member does not sink strings
     assert_eq!(n(&format!("{m}m(\"abc\");")), 1, "abc -> int|false coercive flagged");
-    // true -> int|false: bool coerces via the int member → silent.
+    // bool coerces via the int member
     assert_eq!(n(&format!("{m}m(true);")), 0, "true -> int|false coercive silent");
 }
 
 #[test]
 fn union_param_strict_cells() {
-    // The conformance near-win: 1.5 (float) into int|string strict is a TypeError.
+    // Conformance near-win: 1.5 (float) into int|string strict is a TypeError.
+    // bool has no member and no matching bool-literal → also flagged.
     let f = "<?php\ndeclare(strict_types=1);\nfunction f(int|string $v): void {}\n";
     assert_eq!(n(&format!("{f}f(1.5);")), 1, "1.5 -> int|string strict flagged");
     assert_eq!(n(&format!("{f}f(5);")), 0, "int matches member");
     assert_eq!(n(&format!("{f}f(\"x\");")), 0, "string matches member");
-    // bool has no member (and no matching bool-literal) → flagged.
     assert_eq!(n(&format!("{f}f(true);")), 1, "true -> int|string strict flagged");
 
-    // int|float strict: int OK, float OK, numeric string still flagged.
     let g = "<?php\ndeclare(strict_types=1);\nfunction g(int|float $v): void {}\n";
     assert_eq!(n(&format!("{g}g(5);")), 0, "int -> int|float strict OK");
     assert_eq!(n(&format!("{g}g(5.0);")), 0, "float -> int|float strict OK");
     assert_eq!(n(&format!("{g}g(\"5\");")), 1, "numeric string -> int|float strict flagged");
 
-    // string|false strict: false matches literal; true/int do not.
     let h = "<?php\ndeclare(strict_types=1);\nfunction h(string|false $v): void {}\n";
     assert_eq!(n(&format!("{h}h(false);")), 0, "false matches literal member");
     assert_eq!(n(&format!("{h}h(true);")), 1, "true not a member strict");
@@ -118,26 +115,24 @@ fn union_message_renders_all_members() {
 
 #[test]
 fn unmodeled_union_member_silences_whole_type() {
-    // A union containing an `array` / `mixed` / `callable` / `iterable` member (none
-    // of which lower to a `TypeMember`) still lowers the WHOLE type to `None` →
-    // silence (zero-FP): no finding even for an obvious mismatch.
+    // A member that doesn't lower to a `TypeMember` (`array`/`mixed`/`callable`/
+    // `iterable`) lowers the WHOLE type to `None` → silence (zero-FP), even for an
+    // obvious mismatch.
     for ty in ["int|array", "int|mixed", "int|callable", "iterable"] {
         let src = format!("<?php\ndeclare(strict_types=1);\nfunction f({ty} $v): void {{}}\nf(1.5);\n");
         assert_eq!(n(&src), 0, "type `{ty}` must lower to silence");
     }
-    // A DNF hint whose intersection conjunct is a non-class type (`int&B` is not a
-    // valid object intersection) still collapses to silence via the conjunct guard.
+    // Same for a DNF hint whose intersection conjunct is a non-class type (`int&B`
+    // is not a valid object intersection): the conjunct guard silences it too.
     let src = "<?php\ndeclare(strict_types=1);\nfunction f(int|(iterable&Countable) $v): void {}\nf(1.5);\n";
     assert_eq!(n(src), 0, "non-class conjunct silences the whole type");
 }
 
 #[test]
 fn intersection_union_member_is_now_modeled_adr0043() {
-    // ADR-0043: an object intersection (`A&B`) is a modeled conjunctive member, so
-    // `int|(A&B)` lowers to `[Int, InstanceInter([A, B])]` — no longer silenced. A
-    // `1.5` (float) matches neither `int` (no float→int in strict) nor the object
-    // intersection (a scalar is never an object) → a proven TypeError. Verified
-    // against php 8.5.8: `f(int|(A&B) $v); f(1.5)` strict → TypeError `(A&B)|int`.
+    // ADR-0043: `A&B` is now a modeled conjunctive member, no longer silenced. `1.5`
+    // matches neither `int` nor the intersection (a scalar is never an object) — a
+    // proven TypeError, verified at PHP 8.5.8.
     let src = "<?php\ndeclare(strict_types=1);\ninterface A {}\ninterface B {}\nfunction f(int|(A&B) $v): void {}\nf(1.5);\n";
     let d = findings(src);
     assert_eq!(d.len(), 1, "1.5 vs int|(A&B) strict is a proven TypeError");
@@ -146,10 +141,9 @@ fn intersection_union_member_is_now_modeled_adr0043() {
 
 #[test]
 fn object_union_member_is_now_modeled_adr0043_stage3() {
-    // ADR-0043 stage 3: an `int|\Foo` union lowers to `[Int, Instance(foo)]` — no
-    // longer silenced. A `1.5` (float) matches neither `int` (no float→int in
-    // strict) nor `\Foo` (a scalar is never an object) → a proven TypeError.
-    // Verified against php 8.5.8: `f(int|Foo $v); f(1.5)` strict → TypeError.
+    // ADR-0043 stage 3: `int|\Foo` is no longer silenced. `1.5` matches neither
+    // `int` nor `\Foo` (a scalar is never an object) — a proven TypeError,
+    // verified at PHP 8.5.8.
     let src = "<?php\ndeclare(strict_types=1);\nfinal class Foo {}\nfunction f(int|\\Foo $v): void {}\nf(1.5);\n";
     let d = findings(src);
     assert_eq!(d.len(), 1, "1.5 vs int|Foo strict is a proven TypeError");
@@ -172,15 +166,13 @@ fn return_strict_abc_into_int_flagged() {
 
 #[test]
 fn return_coercive_numeric_vs_nonnumeric() {
-    // "5" -> int coercive: coerces → silent.
     assert_eq!(n("<?php function f(): int { return \"5\"; }\n"), 0, "coercive 5 silent");
-    // "abc" -> int coercive: non-numeric → flagged.
     assert_eq!(n("<?php function f(): int { return \"abc\"; }\n"), 1, "coercive abc flagged");
 }
 
 #[test]
 fn return_strict_numeric_string_flagged() {
-    // strict "5" -> int: the string is not an int → flagged (per empirical table).
+    // A numeric string is still not an `int` in strict mode (module doc's table).
     assert_eq!(
         n("<?php\ndeclare(strict_types=1);\nfunction f(): int { return \"5\"; }\n"),
         1,
@@ -230,11 +222,9 @@ fn return_folded_builtin_value_checked() {
 
 #[test]
 fn return_inside_structured_if_is_now_checked() {
-    // ADR-0031: an `if` is a structured trace, so a branch return is walked and
-    // proof-checked like a top-level return. With `$c` unknown the guard is Maybe,
-    // the then-branch is walked, and `return "abc"` into `int` (strict) is FLAGGED.
-    // (The former "only top-of-trace returns are checked" limitation is lifted for
-    // `if`; loops/switch/try returns remain inside `Opaque` and are still unseen.)
+    // ADR-0031: an `if` is a structured trace, so a Maybe-guarded branch return is
+    // walked and proof-checked like a top-level return — lifting the former
+    // "only top-of-trace returns" limit. Loops/switch/try stay `Opaque`, still unseen.
     let src =
         "<?php\ndeclare(strict_types=1);\nfunction f($c): int { if ($c) { return \"abc\"; } return 1; }\n";
     let d = findings(src);
@@ -244,11 +234,9 @@ fn return_inside_structured_if_is_now_checked() {
 
 #[test]
 fn return_into_union_type() {
-    // "abc" -> int|float return, coercive → flagged (no string sink).
+    // No string sink in int|float, so "abc" flags; int|string's string sink accepts it.
     assert_eq!(n("<?php function f(): int|float { return \"abc\"; }\n"), 1, "abc -> int|float");
-    // "abc" -> int|string return → silent (string sink accepts).
     assert_eq!(n("<?php function f(): int|string { return \"abc\"; }\n"), 0, "abc -> int|string");
-    // strict 1.5 -> int|string return → flagged.
     assert_eq!(
         n("<?php\ndeclare(strict_types=1);\nfunction f(): int|string { return 1.5; }\n"),
         1,
@@ -267,13 +255,11 @@ fn method_return_checked() {
 
 #[test]
 fn void_never_untyped_and_nonscalar_returns_skipped() {
-    // void: `return;` and even a value return are out of scope.
+    // void is out of scope even for a value return; untyped has no type to check
+    // against; never/array are not a scalar or union — all four skip the check.
     assert_eq!(n("<?php function f(): void { return; }\n"), 0, "void skipped");
-    // untyped: no return type to check against.
     assert_eq!(n("<?php function f() { return \"abc\"; }\n"), 0, "untyped skipped");
-    // never: not a scalar/union → skipped.
     assert_eq!(n("<?php function f(): never { throw new \\Exception(); }\n"), 0, "never skipped");
-    // non-scalar (array): skipped.
     assert_eq!(n("<?php function f(): array { return \"abc\"; }\n"), 0, "array skipped");
 }
 

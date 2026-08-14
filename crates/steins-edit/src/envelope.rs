@@ -1,60 +1,35 @@
 //! Transform #3 — `@throws` envelope seeding (issue #115 / ADR-0040).
 //!
-//! For a declaration the engine **proves** throws — the same proven-escape
-//! machinery behind `throw.undeclared` — this transform writes the missing
-//! `@throws` tags: creating the docblock when absent, appending to it when
-//! present. One command turns proven escapes into declared envelopes, so a repo
-//! can adopt the `throws-direct` / `contracts` stages without hand-writing tags
-//! or baselining the debt.
+//! For a declaration the engine **proves** throws — via
+//! [`steins_infer::escapes::sweep_escapes`] — this transform writes the
+//! missing `@throws` tags, creating or extending the docblock.
 //!
 //! ## Enumeration domain
-//! Every annotatable declaration (free function or method, project files only —
-//! vendor is outside the write contract, ADR-0015) with at least one
-//! **envelope-relevant** escaping throw class, as reported by
-//! [`steins_infer::escapes::sweep_escapes`]: a class not provably unchecked
-//! (the `Error`/`LogicException` families never count, ADR-0007). Each
-//! candidate is transformed or refused with a named reason — the ADR-0034
-//! completeness oracle.
-//!
-//! ## Only proven escapes are written (ADR-0037)
-//! A written tag is a contract the repo then owns — written-by-tool is
-//! *declared*, not proven — so the write set is exactly the classes for which
-//! `throw.undeclared` fires (or would fire once an envelope exists): escape
-//! `Yes`, checked `Yes`, not covered by a declared `@throws`. A `Maybe` escape
-//! (or a class whose hierarchy leaves known territory) never becomes a tag; a
-//! declaration with nothing proven refuses `escape-not-proven`.
-//!
-//! ## Idempotence
-//! The second run enumerates the same candidates and refuses each with
-//! `already-declared`: every proven escape is covered by the envelope the first
-//! run wrote (the tag spells the exact FQN the machinery reports, fully
-//! qualified, so coverage resolves context-free). Running twice is a no-op.
+//! Every annotatable declaration (free function or method, project files only
+//! — vendor is outside the write contract, ADR-0015) with at least one
+//! **envelope-relevant** escaping throw class (not provably unchecked; the
+//! `Error`/`LogicException` families never count, ADR-0007) is a candidate,
+//! transformed or refused with a named reason (ADR-0034 completeness oracle).
+//! The write set is exactly the classes for which `throw.undeclared` fires
+//! (escape `Yes`, checked `Yes`, uncovered — ADR-0037): a `Maybe` escape
+//! refuses `escape-not-proven`; an already-covered escape refuses
+//! `already-declared` (why a second run is a no-op).
 //!
 //! ## Lossless extension (ADR-0003)
-//! An existing docblock is extended by inserting whole `* @throws \FQN` lines
-//! before its closing `*/` line — a pure byte insertion; every existing line is
-//! byte-preserved. A docblock with no such insertion point (a single-line
-//! `/** … */`, or content sharing the closing line), or one whose seeded tag
-//! the scanner cannot see again after the splice, refuses
-//! `docblock-not-round-trippable`. The round-trip is *verified*, not assumed:
-//! the planner re-parses each edited file and confirms every seeded class is
-//! now declared on its declaration before the edit enters the plan. Seeded lines
-//! carry the file's own terminator (`\r\n` in a CRLF file), so a seeded file
-//! never acquires mixed endings.
+//! An existing docblock gets `* @throws \FQN` lines inserted before its
+//! closing `*/` — a pure byte insertion, byte-preserving every existing line.
+//! No insertion point, or a seeded tag that fails the re-parse round-trip,
+//! refuses `docblock-not-round-trippable`; the planner verifies every seeded
+//! class is declared before the edit enters the plan. Seeded lines match the
+//! file's own terminator, so endings never mix.
 //!
 //! ## Post-check surface (issue #115 decision)
-//! The CLI's zero-new-diagnostics post-check measures this transform on the
-//! **default surface** (proof + mechanics) — and this transform *only*. The two
-//! phpdoc transforms stay measured against every layer, contract included.
-//!
-//! The asymmetry is the point, not an inconsistency: seeding an envelope is
-//! supposed to move the contract surface. Writing `@throws` onto an override is
-//! precisely what gives its ancestor's narrower envelope something to be widened
-//! against, so `throw.liskov-widened` appears where there was none; measured
-//! against the contract layer, a correct seed would veto its own success. A
-//! promotion or an honesty repair has no such property, so their broader net
-//! stays. See `PostCheckSurface` in the CLI for the per-transform choice and the
-//! test that pins it.
+//! The CLI's post-check measures this transform on the **default surface**
+//! only (proof + mechanics), unlike the phpdoc transforms (every layer,
+//! contract included): writing `@throws` onto an override gives its
+//! ancestor's envelope something to widen against, so `throw.liskov-widened`
+//! would fire where there was none — a contract-layer check would veto a
+//! correct seed's own success. See `PostCheckSurface` in the CLI.
 
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_infer::escapes::{DeclEscapes, EscapeSweep, sweep_escapes};
@@ -64,23 +39,16 @@ use steins_syntax::{Span, SourceTree};
 use crate::plan::{ByteSpan, Edit, EditPlan};
 use crate::transform::{CompletenessOracle, Refusal, SiteRef, Transform, TransformReport};
 
-// ---- Stable refusal reason names (ADR-0034 point 2, seeding-specific) ------
+// Stable refusal reason names (ADR-0034 point 2, seeding-specific).
 
-/// No escape of the candidate is proven: every envelope-relevant class is on the
-/// Maybe side (a `Maybe` escape, or a hierarchy that leaves known territory). A
-/// Maybe never becomes a declared envelope (ADR-0037/0040).
+/// Every envelope-relevant class is on the Maybe side (see module doc).
 pub const REASON_ESCAPE_NOT_PROVEN: &str = "escape-not-proven";
-/// Every proven escape is already covered by the declared `@throws` envelope —
-/// nothing to seed. The second run of the transform lands here (idempotence).
+/// Every proven escape is already covered by the declared `@throws` envelope.
 pub const REASON_ALREADY_DECLARED: &str = "already-declared";
-/// The existing docblock offers no lossless insertion point (single-line, or
-/// content sharing the closing `*/` line), or the seeded tag did not survive the
-/// re-parse round-trip (e.g. the spliced docblock is not the one the parser
-/// associates with the declaration).
+/// No lossless insertion point, or the seeded tag failed the round-trip check
+/// (see "Lossless extension" in the module doc).
 pub const REASON_DOCBLOCK_NOT_ROUND_TRIPPABLE: &str = "docblock-not-round-trippable";
-/// The declaration head does not start its own line (a one-line `<?php function
-/// …` file, two declarations sharing a line), so a docblock cannot be inserted
-/// above it without rewriting foreign bytes.
+/// The declaration head does not start its own line.
 pub const REASON_DECLARATION_MID_LINE: &str = "declaration-mid-line";
 
 /// The `@throws`-envelope seeding transform (issue #115).
@@ -93,19 +61,12 @@ impl Transform for ThrowsEnvelope {
     }
 }
 
-/// The bytes one file's seeding decisions splice into: its source text, its
-/// diagnostic path, and the line terminator to write. Bundled because every edit
-/// builder needs all three and none of them varies per candidate.
-///
-/// Shared with the sister transform (`effects-envelope`, ADR-0082 §7), which
-/// writes different tags into docblocks by the same mechanics.
+/// One file's source text, diagnostic path, and line terminator (matched to
+/// the file's own, so CRLF files never acquire lone-LF lines). Shared with
+/// the sister transform (`effects-envelope`, ADR-0082 §7).
 pub(crate) struct FileCtx<'a> {
     pub(crate) path: &'a str,
     pub(crate) text: &'a str,
-    /// The terminator a seeded line ends with, matched to the file's own. Every
-    /// *existing* line is byte-preserved either way (the seeded lines are new
-    /// bytes); matching it keeps a CRLF file from acquiring lone-LF lines, which
-    /// would be a gratuitous diff for every later reader of that file.
     pub(crate) nl: &'static str,
 }
 
@@ -116,16 +77,15 @@ impl<'a> FileCtx<'a> {
     }
 }
 
-/// Which declaration a staged edit seeds, for the post-splice re-parse lookup.
+/// Which declaration a staged edit seeds, for the post-splice re-parse
+/// lookup: free function by lowercase FQN, or method by ASCII-lowercased
+/// `(class_fqn, method)`.
 enum DeclKey {
-    /// Free function, by lowercase-normalized FQN.
     Func(String),
-    /// Method, by `(class_fqn, method)` — both ASCII-lowercased.
     Method(String, String),
 }
 
-/// A candidate that produced an edit, held back until the whole file's splice is
-/// re-parsed and each seeded class is verified declared (the round-trip check).
+/// A candidate that produced an edit, held for the round-trip check.
 struct Staged {
     site: SiteRef,
     edit: Edit,
@@ -134,26 +94,20 @@ struct Staged {
 }
 
 /// Plan the `@throws` envelope seeding over `project`. Pure planning: no files
-/// are written and no diagnostics are re-checked here — the caller (CLI) drives
-/// the dry-run diff, the default-surface post-check, and any `--apply` write
-/// (ADR-0034 point 3).
-///
-/// Unlike promotion/honesty this transform takes no vouch set: proven escapes
-/// are forward facts of the declaration's own body and callees, so the
-/// dynamic-code obstacles that make "all callers proven" unknowable (ADR-0046
-/// §2) have no bearing here — an `eval` can add *more* throwers, never
-/// un-prove a proven escape.
-///
-/// `partitions` is the region map (ADR-0047 §6), `None` for the single-region
-/// identity. No seeding decision reads the map; the parameter reserves the seam
-/// for scoped enumeration without changing any verdict.
+/// are written and no diagnostics are re-checked — the caller (CLI) drives the
+/// dry-run diff, post-check, and any `--apply` write (ADR-0034 point 3).
+/// Unlike promotion/honesty, takes no vouch set: proven escapes are forward
+/// facts, so the dynamic-code "all callers proven" unknowability (ADR-0046
+/// §2) doesn't apply — `eval` can only add *more* throwers, never un-prove
+/// one. `partitions` is the region map (ADR-0047 §6), unread here (reserves
+/// the seam for scoped enumeration).
 #[must_use]
 pub fn plan_throws_envelope(
     db: &dyn Db,
     project: Project,
     partitions: Option<&crate::regions::PartitionMap>,
 ) -> TransformReport {
-    // The region map is accepted but not consumed: no seeding verdict reads it.
+    // Accepted but not consumed (see doc above).
     let _ = partitions;
     let sweep: EscapeSweep = sweep_escapes(db, project);
     let files: Vec<SourceFile> = project.files(db).to_vec();
@@ -165,9 +119,7 @@ pub fn plan_throws_envelope(
 
     for &file in &files {
         let path = file.path(db);
-        // Vendor declarations are never candidates: a docblock write into
-        // `vendor/` is outside the tool's write contract (ADR-0015). The escape
-        // sweep still spans vendor, so propagation through vendor callees works.
+        // Excluded here (ADR-0015), but the sweep still spans vendor callees.
         if layout.is_vendor(path) {
             continue;
         }
@@ -220,8 +172,7 @@ pub fn plan_throws_envelope(
     }
 }
 
-/// Decide one candidate: refuse (`escape-not-proven` / `already-declared` / an
-/// edit-mechanics reason), or stage its edit for the file's round-trip check.
+/// Decide one candidate: refuse, or stage its edit for the round-trip check.
 #[allow(clippy::too_many_arguments)]
 fn decide(
     esc: &DeclEscapes,
@@ -259,8 +210,6 @@ fn decide(
         return;
     }
 
-    // The written spelling is fully qualified, so coverage resolves context-free
-    // (and the round-trip check below compares it byte-for-byte).
     let tags: Vec<String> = writable.iter().map(|class| format!("@throws \\{class}")).collect();
     let built = match docblock_span {
         Some(ds) => extend_docblock(fcx, ds, &tags),
@@ -275,14 +224,11 @@ fn decide(
     }
 }
 
-/// Extend an existing docblock losslessly: insert one `* <tag>` line per entry of
-/// `tags` before the closing `*/` line (a pure byte insertion — every existing
-/// line is byte-preserved). Refuses when the docblock has no closing line of its
-/// own to insert before.
-///
-/// `tags` are whole rendered tags without the gutter (`@throws \RuntimeException`,
-/// `@phpstan-impure io.db`): the mechanics are the same for every tag family, so
-/// the sister transform (ADR-0082 §7) writes its envelopes through this one.
+/// Extend an existing docblock losslessly: insert one `* <tag>` line per entry
+/// of `tags` before the closing `*/` line. `tags` are whole rendered tags
+/// without the gutter (`@throws \RuntimeException`, `@phpstan-impure io.db`);
+/// the sister transform (ADR-0082 §7) writes its envelopes through this same
+/// function.
 pub(crate) fn extend_docblock(
     fcx: &FileCtx,
     ds: Span,
@@ -304,8 +250,7 @@ pub(crate) fn extend_docblock(
                 .to_owned(),
         ));
     }
-    // The closing line's gutter (` */` → one space): body lines align their `*`
-    // with the closing `*`, so the inserted line is gutter + `* @throws …`.
+    // Body lines align their `*` with the closing `*`: gutter + `* @throws …`.
     let gutter = &closing[..closing.len() - 2];
     let mut insertion = String::new();
     for tag in tags {
@@ -319,9 +264,8 @@ pub(crate) fn extend_docblock(
 }
 
 /// Create a fresh docblock above the declaration's head line, matching its
-/// indentation, carrying one `* <tag>` line per entry of `tags`. Refuses when the
-/// head does not start its own line (nothing but whitespace and declaration-head
-/// keywords may precede the name).
+/// indentation, carrying one `* <tag>` line per entry of `tags`. Refuses when
+/// the head does not start its own line.
 pub(crate) fn create_docblock(
     fcx: &FileCtx,
     name_span: Span,
@@ -359,23 +303,19 @@ pub(crate) fn create_docblock(
     })
 }
 
-/// Which declaration head a created docblock is going above — the two have
-/// disjoint keyword sets, and conflating them would let a docblock land between a
-/// `class` head and a method sharing its line.
+/// Which declaration head a created docblock goes above (disjoint keyword
+/// sets, else a docblock could land between a `class` head and a method
+/// sharing its line): `Function` is `public static function f(`; `Class` is
+/// `final class C` / `interface I` (ADR-0082 §7's class-level tag).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum HeadKind {
-    /// `public static function f(` — the free-function and method head.
     Function,
-    /// `final class C` / `interface I` — the class-like head (ADR-0082 §7's
-    /// class-level tag).
     Class,
 }
 
-/// Whether the bytes between a head line's start and the declaration name are
-/// nothing but whitespace and declaration-head tokens (`public static function
-/// `, `function &`, `final class `, …) — the guard that keeps a docblock
-/// insertion from landing mid-statement (`<?php function f() {}`, two
-/// declarations on one line).
+/// Whether the bytes before the declaration name are nothing but whitespace
+/// and declaration-head tokens — guards against a docblock landing
+/// mid-statement (`<?php function f() {}`, two declarations on one line).
 fn head_prefix_ok(prefix: &str, head: HeadKind) -> bool {
     const FUNCTION_ALLOWED: &[&str] =
         &["abstract", "final", "public", "protected", "private", "static", "function", "&"];
@@ -397,11 +337,10 @@ fn head_prefix_ok(prefix: &str, head: HeadKind) -> bool {
     saw_keyword
 }
 
-/// The round-trip gate (ADR-0003 applied to seeding): apply the file's staged
-/// edits to a scratch copy, re-parse it, and admit each staged edit into the
-/// real plan only if its declaration's docblock now declares every seeded class
-/// — proving the tag creation/extension is one the parser reads back exactly as
-/// intended (and hence that a second run sees the envelope: idempotence).
+/// The round-trip gate (ADR-0003 applied to seeding, see module doc): apply
+/// the file's staged edits to a scratch copy, re-parse, and admit each staged
+/// edit into the real plan only if its docblock now declares every seeded
+/// class.
 fn verify_and_commit(
     fcx: &FileCtx,
     staged: Vec<Staged>,
@@ -412,9 +351,9 @@ fn verify_and_commit(
     if staged.is_empty() {
         return;
     }
-    // A scratch plan for the splice. An overlap here (two candidates claiming
-    // the same insertion point) is an internal invariant break surfaced as a
-    // refusal, never a panic — mirroring the honesty transform's `account`.
+    // An overlap (two candidates claiming the same insertion point) is an
+    // invariant break surfaced as a refusal, never a panic (mirrors `account`
+    // in the honesty transform).
     let mut trial = EditPlan::new();
     let mut kept: Vec<Staged> = Vec::new();
     for s in staged {
@@ -470,9 +409,8 @@ fn verify_and_commit(
     }
 }
 
-/// Whether `doc` carries a `@throws` tag spelling exactly `\{class}` for every
-/// seeded class — the fully-qualified spelling the transform writes, compared
-/// byte-for-byte (the seeded tag is ours; nothing about it should have changed).
+/// Whether `doc` carries a `@throws` tag spelling `\{class}` for every seeded
+/// class, byte-for-byte.
 fn declares_all(doc: &str, classes: &[String]) -> bool {
     let tags = scan_docblock(doc);
     classes.iter().all(|class| {

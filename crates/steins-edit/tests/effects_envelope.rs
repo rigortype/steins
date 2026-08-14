@@ -1,7 +1,5 @@
 //! Integration tests for Transform #5 — interop-envelope emission (issue #303 /
-//! ADR-0082 §7). Each test builds a real salsa project and asserts on the plan's
-//! edits AND the named refusal reasons; the applied output is compared as exact
-//! bytes where the lossless guarantee (ADR-0003) is what matters.
+//! ADR-0082 §7). Asserts plan edits and refusal reasons; output is byte-exact (ADR-0003).
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::TransformReport;
@@ -41,7 +39,7 @@ fn applied(path: &str, src: &str) -> String {
     plan(&[(path, src)]).plan.apply_file(path, src)
 }
 
-// ---- 1. The flagship emission: an exhaustive impure bound ------------------
+// 1. The flagship emission: an exhaustive impure bound
 
 #[test]
 fn no_docblock_creates_one_with_the_impure_bound() {
@@ -64,16 +62,14 @@ fn existing_docblock_is_extended_losslessly() {
     assert_oracle_complete(&report);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
 
-    // Byte-exact: every pre-existing line preserved, the tag line inserted
-    // directly before the closing `*/` (ADR-0003 lossless-CST guarantee).
+    // Byte-exact, tag line inserted directly before the closing `*/` (ADR-0003).
     assert_eq!(
         report.plan.apply_file("lib.php", lib),
         "<?php\n/**\n * Summary line.\n *\n * @param int $x  the count\n * @phpstan-impure io.fs.write\n */\nfunction f($x): void { file_put_contents(\"/x\", \"y\"); }\n"
     );
 }
 
-/// Several labels are one comma-space list on one tag line, in the lexicographic
-/// order `annotate` prints an effect set in.
+/// Sort order matches what `annotate` prints.
 #[test]
 fn several_labels_are_one_comma_space_list_sorted() {
     let lib = "<?php\nfunction f(): void {\n    file_put_contents(\"/x\", \"y\");\n    echo \"hi\";\n    $t = time();\n}\n";
@@ -89,8 +85,7 @@ fn method_emission_creates_an_indented_docblock() {
     let lib = "<?php\nclass W {\n    public function run(): void { file_put_contents(\"/x\", \"y\"); }\n    public function pure(): int { return 1; }\n}\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
-    // Only the impure method is a candidate: a pure sibling gets nothing at all
-    // (ADR-0082 §7 never writes a per-declaration pure tag).
+    // Pure siblings get nothing (ADR-0082 §7 never writes a per-declaration pure tag).
     assert_eq!(report.oracle.enumerated, 1, "{:#?}", report.refusals);
     assert_eq!(report.oracle.transformed, 1, "{:#?}", report.refusals);
 
@@ -102,7 +97,7 @@ fn method_emission_creates_an_indented_docblock() {
     assert_eq!(out.matches("@phpstan-").count(), 1, "the pure sibling stays untagged:\n{out}");
 }
 
-/// A CRLF file stays a CRLF file, in both the create and the extend path.
+/// Covers both the create and the extend path.
 #[test]
 fn written_lines_match_the_files_own_line_terminator() {
     let created = "<?php\r\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\r\n";
@@ -118,12 +113,11 @@ fn written_lines_match_the_files_own_line_terminator() {
     );
 }
 
-// ---- 2. Silence: non-exhaustive, and pure ---------------------------------
+// 2. Silence: non-exhaustive, and pure
 
 #[test]
 fn non_exhaustive_inference_is_refused_and_writes_nothing() {
-    // An uncatalogued builtin leaves the effect set unknowable: no label list is
-    // an upper bound, and a bare ⊤ tag is never written (ADR-0082 §3/§7).
+    // Uncatalogued builtin: no upper bound; bare ⊤ never written (ADR-0082 §3/§7).
     let lib = "<?php\nfunction f(): void { file_put_contents(\"/x\", \"y\"); some_unknown_fn(); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -134,8 +128,7 @@ fn non_exhaustive_inference_is_refused_and_writes_nothing() {
 
 #[test]
 fn a_pure_free_function_is_not_even_a_candidate() {
-    // No per-declaration `@phpstan-pure` is ever written, and no class-level tag
-    // can reach a free function — so there is nothing to decide.
+    // No per-declaration `@phpstan-pure`, and no class-level tag reaches a free function.
     let lib = "<?php\nfunction f(string $s): string { return strtolower($s); }\n";
     let report = plan(&[("lib.php", lib)]);
     assert_oracle_complete(&report);
@@ -143,10 +136,9 @@ fn a_pure_free_function_is_not_even_a_candidate() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 3. Normalization: the two lanes, and prefix subsumption ---------------
+// 3. Normalization: the two lanes, and prefix subsumption
 
-/// The bound is proven ∪ declared, reduced by subsumption: a proven `io.fs.read`
-/// beside a declared `io.fs` writes `io.fs` alone.
+/// Concretely: `io.fs` subsumes `io.fs.read`.
 #[test]
 fn declared_lane_joins_the_proven_one_and_subsumption_dedupes() {
     let lib = concat!(
@@ -165,8 +157,6 @@ fn declared_lane_joins_the_proven_one_and_subsumption_dedupes() {
     assert!(!out.contains("io.fs.read"), "the subsumed proven label drops out:\n{out}");
 }
 
-/// Two labels from two different lanes that do not subsume each other both make
-/// it into the one written list.
 #[test]
 fn both_lanes_show_up_when_neither_subsumes_the_other() {
     let lib = concat!(
@@ -187,10 +177,9 @@ fn both_lanes_show_up_when_neither_subsumes_the_other() {
     );
 }
 
-// ---- 4. The class-level tag (ADR-0082 §5/§7) -------------------------------
+// 4. The class-level tag (ADR-0082 §5/§7)
 
-/// Every declared method pure — the constructor and a void-returning method
-/// included — earns the class tag, and no method tag is written.
+/// A constructor and a void-returning method both count as "pure" here.
 #[test]
 fn all_pure_class_gets_the_class_tag_and_no_method_tags() {
     let lib = concat!(
@@ -243,8 +232,7 @@ fn class_docblock_is_extended_when_present() {
     );
 }
 
-/// One impure method disqualifies the class; that method gets its own bound and
-/// its pure siblings still get nothing.
+/// It gets its own bound; pure siblings get nothing.
 #[test]
 fn one_impure_method_disqualifies_the_class() {
     let lib = concat!(
@@ -283,8 +271,7 @@ fn a_non_exhaustive_method_refuses_the_class_tag() {
     assert!(report.plan.is_empty(), "an unproven class-wide claim is never written");
 }
 
-/// An interface has no bodies, so nothing about an implementation is proven: it
-/// is not a class-tag candidate at all.
+/// No bodies means nothing is proven; not a class-tag candidate.
 #[test]
 fn an_interface_is_never_a_class_tag_candidate() {
     let lib = "<?php\ninterface I {\n    public function get(): int;\n}\n";
@@ -294,7 +281,7 @@ fn an_interface_is_never_a_class_tag_candidate() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 5. The checked spelling shadows this whole stratum (ADR-0082 §1) ------
+// 5. The checked spelling shadows this whole stratum (ADR-0082 §1)
 
 #[test]
 fn an_attribute_bearing_declaration_is_skipped() {
@@ -327,7 +314,7 @@ fn an_attribute_bearing_method_disqualifies_its_class() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 6. Idempotence and stale bounds ---------------------------------------
+// 6. Idempotence and stale bounds
 
 #[test]
 fn the_same_bound_already_declared_refuses_and_writes_nothing() {
@@ -339,8 +326,7 @@ fn the_same_bound_already_declared_refuses_and_writes_nothing() {
     assert!(report.plan.is_empty());
 }
 
-/// The acceptance property: running the transform on its own output is a no-op,
-/// for the per-declaration tag and the class-level one alike.
+/// Acceptance property: idempotent on its own output.
 #[test]
 fn running_twice_is_a_no_op() {
     for src in [
@@ -362,8 +348,7 @@ fn running_twice_is_a_no_op() {
     }
 }
 
-/// A stale bound is corrected in place — the honesty repair applied to an
-/// envelope. Every other byte of the line and of the docblock is preserved.
+/// A stale bound is corrected in place; every other byte is preserved.
 #[test]
 fn a_stale_bound_is_replaced_in_place() {
     let lib = "<?php\n/**\n * Writes the cache.\n * @phpstan-impure nondet.time (why it is not pure)\n * @return void\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -376,8 +361,7 @@ fn a_stale_bound_is_replaced_in_place() {
     );
 }
 
-/// A `@phpstan-pure` on a declaration the engine proves impure is a *false*
-/// claim, and gets the same in-place correction (the tag name included).
+/// A false `@phpstan-pure` claim is corrected in place, tag name included.
 #[test]
 fn a_false_pure_claim_is_corrected_to_the_proven_bound() {
     let lib = "<?php\n/**\n * @phpstan-pure\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -387,9 +371,8 @@ fn a_false_pure_claim_is_corrected_to_the_proven_bound() {
     );
 }
 
-/// A class already carrying a class-level envelope is left alone: a standing
-/// claim wider than the truth is not false, and this transform does not narrow
-/// one.
+/// A class-level envelope already present is left alone: wider-than-true isn't
+/// false, and this transform never narrows.
 #[test]
 fn an_existing_class_level_envelope_is_left_alone() {
     let lib = concat!(
@@ -407,10 +390,9 @@ fn an_existing_class_level_envelope_is_left_alone() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 7. Edit mechanics: the round-trip gate --------------------------------
+// 7. Edit mechanics: the round-trip gate
 
-/// A single-line docblock has no lossless insertion point, and the refusal is
-/// the `@throws` sister's — same mechanics, same reason name.
+/// No lossless insertion point (same mechanics/reason as the `@throws` sister).
 #[test]
 fn single_line_docblock_refuses_round_trip() {
     let lib = "<?php\n/** Writes a file. */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -439,11 +421,8 @@ fn mid_line_declaration_refuses() {
     assert!(report.plan.is_empty());
 }
 
-/// The round-trip is *verified*, not assumed. A class carrying an attribute has
-/// a legal-looking insertion point above its `class` line — but the docblock
-/// would land *between* the attribute and the head, where the parser no longer
-/// associates it with the declaration. The post-splice re-parse catches that and
-/// the edit never enters the plan.
+/// Round-trip is *verified*, not assumed: an attributed class looks insertable
+/// but lands unassociated — caught by re-parse.
 #[test]
 fn a_docblock_the_reparse_cannot_see_is_refused() {
     let lib = concat!(
@@ -460,7 +439,7 @@ fn a_docblock_the_reparse_cannot_see_is_refused() {
     assert!(report.plan.is_empty(), "an unverifiable write never enters the plan");
 }
 
-// ---- 8. Vendor is outside the write contract (ADR-0015) --------------------
+// 8. Vendor is outside the write contract (ADR-0015)
 
 #[test]
 fn vendor_declarations_are_never_written() {
@@ -473,12 +452,10 @@ fn vendor_declarations_are_never_written() {
     assert!(report.plan.is_empty());
 }
 
-// ---- 9. An unreadable existing tag is prose, not a stale bound -------------
+// 9. An unreadable existing tag is prose, not a stale bound
 //
-// The owner's 2026-08-12 ruling: a tag carrying any label the live registry does
-// not know is *unspecified*, whole. Current PHPStan discards everything after
-// `@phpstan-impure`, so wild code legitimately carries one-word prose — and the
-// transform must never overwrite a human's note.
+// Owner ruling 2026-08-12: any unknown label makes the tag *unspecified*, whole
+// (PHPStan discards everything after `@phpstan-impure`) — never overwrite a human's note.
 
 #[test]
 fn an_existing_prose_tag_is_never_overwritten() {
@@ -491,9 +468,7 @@ fn an_existing_prose_tag_is_never_overwritten() {
     assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
 }
 
-/// The one-line spelling of the same docblock: the unreadable-tag refusal is
-/// reported ahead of the mechanics one, because "those bytes are not ours to
-/// move" settles the site whatever its insertion points look like.
+/// One-line spelling: unreadable-tag wins over mechanics — bytes aren't ours to move.
 #[test]
 fn a_one_line_prose_tag_is_refused_as_prose() {
     let lib = "<?php\n/** @phpstan-impure database */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -503,9 +478,7 @@ fn a_one_line_prose_tag_is_refused_as_prose() {
     assert!(report.plan.is_empty());
 }
 
-/// Before the ruling this was "a stale bound → replace it" material. A typo is
-/// indistinguishable from prose to a registry, and the safe reading of both is
-/// the same: leave it alone.
+/// A typo is indistinguishable from prose to a registry: leave it alone either way.
 #[test]
 fn a_typoed_existing_bound_is_prose_not_a_stale_bound() {
     let lib = "<?php\n/**\n * @phpstan-impure io.netw\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -515,11 +488,7 @@ fn a_typoed_existing_bound_is_prose_not_a_stale_bound() {
     assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
 }
 
-/// ADR-0083 retired the `output` root, so a docblock still carrying the old
-/// spelling reads as prose to the live registry: the transform refuses it and
-/// leaves the bytes alone rather than "upgrading" a tag it cannot parse. This is
-/// the migration path working as designed — the existing refusal discipline
-/// needed no new rule.
+/// ADR-0083 retired `output`; the old spelling reads as prose, refused rather than "upgraded".
 #[test]
 fn a_retired_output_bound_is_prose_and_stays_byte_untouched() {
     let lib = "<?php\n/**\n * @phpstan-impure output\n */\nfunction f(): void { echo \"hi\"; }\n";
@@ -531,9 +500,7 @@ fn a_retired_output_bound_is_prose_and_stays_byte_untouched() {
     assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
 }
 
-/// And the writing side of the same migration: emission spells the new
-/// vocabulary. An echoing exhaustive function gets `io.output.buffer`, never the
-/// retired root.
+/// Writing side of the same migration: never the retired root.
 #[test]
 fn emission_writes_the_new_output_vocabulary() {
     let lib = "<?php\nfunction f(): void { echo \"hi\"; }\n";
@@ -546,8 +513,7 @@ fn emission_writes_the_new_output_vocabulary() {
     );
 }
 
-/// One unreadable label makes the **whole** tag unspecified — the known label
-/// beside it is not a bound the transform may keep, correct, or write over.
+/// One unreadable label makes the **whole** tag unspecified, known labels included.
 #[test]
 fn one_unknown_label_makes_the_whole_tag_unreadable() {
     let lib = "<?php\n/**\n * @phpstan-impure io.fs.write, database\n */\nfunction f(): void { file_put_contents(\"/x\", \"y\"); }\n";
@@ -557,9 +523,7 @@ fn one_unknown_label_makes_the_whole_tag_unreadable() {
     assert!(report.plan.is_empty());
 }
 
-/// A pure declaration is normally not a candidate at all — but one carrying a tag
-/// the registry cannot read is enumerated and refused, because "we left your
-/// docblock alone" is an answer the report owes.
+/// Not normally a candidate, but still enumerated and refused: "left alone" is owed.
 #[test]
 fn a_pure_declaration_with_a_prose_tag_is_reported_not_silently_skipped() {
     let lib = "<?php\n/**\n * @phpstan-impure database\n */\nfunction f(string $s): string { return strtolower($s); }\n";
@@ -570,7 +534,6 @@ fn a_pure_declaration_with_a_prose_tag_is_reported_not_silently_skipped() {
     assert!(report.plan.is_empty());
 }
 
-/// The class-level families go through the same registry.
 #[test]
 fn an_unreadable_class_level_tag_is_never_overwritten() {
     let lib = concat!(
@@ -588,10 +551,8 @@ fn an_unreadable_class_level_tag_is_never_overwritten() {
     assert_eq!(report.plan.apply_file("lib.php", lib), lib, "the file must be byte-identical");
 }
 
-/// Rule 3: provenness governs the class claim. An inert method-level tag does not
-/// block the class-level write — read-side nearest-wins keeps that method's own
-/// story truthful for PHPStan (bare impure) and for Steins (⊤) alike — but the
-/// method site itself is still refused, because its docblock is not ours to touch.
+/// Rule 3: an inert method tag doesn't block the class write (nearest-wins on
+/// read keeps it truthful); the method site is still refused.
 #[test]
 fn an_inert_method_tag_does_not_block_the_class_tag() {
     let lib = concat!(
@@ -624,12 +585,9 @@ fn an_inert_method_tag_does_not_block_the_class_tag() {
     assert_eq!(out.matches("@phpstan-").count(), 2, "no third tag appears:\n{out}");
 }
 
-/// The emission invariant: the transform never writes a bound its own next run
-/// would read as prose. Proven labels come from the catalog and declared ones from
-/// the plugin channel, both registry-known by construction — with one hole, and
-/// this is it: an unknown label written in a **checked** attribute envelope rides
-/// the declared lane into a caller. `effect.unknown-label` already reports it on
-/// the attribute; the transform refuses rather than propagating it into a docblock.
+/// Emission invariant: never write a bound the next run would read as prose.
+/// One hole: an unknown label in a **checked** attribute rides the declared
+/// lane into a caller (already reported by `effect.unknown-label`); refuse.
 #[test]
 fn an_unknown_label_in_the_bound_is_never_written() {
     let lib = concat!(

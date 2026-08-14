@@ -2,20 +2,18 @@
 //! `string.array-conversion`.
 //!
 //! Putting a value where PHP wants a string — `"x $v"`, `echo $v`, `print $v`,
-//! `(string) $v`, `'a' . $v` — is total and silent for every scalar and for `null`.
-//! Two values break it, and the two consequences are two ids because the ADR-0049
-//! §7 warning-handler gate cuts between them (ADR-0078 §1.4):
+//! `(string) $v`, `'a' . $v` — is total and silent for every scalar and `null`.
+//! Two values break it, split into two ids because the ADR-0049 §7
+//! warning-handler gate cuts between them (ADR-0078 §1.4): an **object with no
+//! reachable `__toString`** is a fatal, witnessed on PHP 8.5.9 as `Error: Object
+//! of class A could not be converted to string` in all five contexts; an
+//! **array** is `Warning: Array to string conversion` plus the literal string
+//! `"Array"` (`(string) [1,2,3]` is `"Array"`, `'x' . [1,2,3]` is `"xArray"`).
 //!
-//! * an **object with no reachable `__toString`** is a fatal, witnessed on PHP
-//!   8.5.9 as `Error: Object of class A could not be converted to string` in all
-//!   five contexts;
-//! * an **array** is `Warning: Array to string conversion` plus the literal string
-//!   `"Array"` — `(string) [1,2,3]` is `"Array"`, `'x' . [1,2,3]` is `"xArray"`.
-//!
-//! The object leg is an absence proof and rides the whole ADR-0049 ladder, so it
-//! needs a boot-surface mock exactly as `call.undefined-method` does; the array leg
-//! is a value-domain fact alone and needs nothing. Every ladder leg ships with a
-//! silence fixture (the §10 silence-matrix discipline).
+//! The object leg is an absence proof riding the whole ADR-0049 ladder (needs a
+//! boot-surface mock, as `call.undefined-method` does); the array leg is a
+//! value-domain fact alone and needs nothing. Every ladder leg ships a silence
+//! fixture (the §10 discipline).
 
 use steins_infer::{
     Diagnostic, Folder, STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID, check_full,
@@ -23,9 +21,9 @@ use steins_infer::{
 };
 use steins_syntax::{ArgValue, SourceTree};
 
-/// The boot-surface mock `call.undefined-method`'s tests use: `available` is the A9
-/// family gate, `builtins` are the names the runtime reports as resident
-/// class-likes (the A2ii homonyms).
+/// The boot-surface mock `call.undefined-method`'s tests use (`available`: A9
+/// family gate; `builtins`: names the runtime reports as resident class-likes,
+/// the A2ii homonyms).
 struct Boot {
     available: bool,
     builtins: Vec<String>,
@@ -68,9 +66,7 @@ fn arrays(src: &str) -> Vec<Diagnostic> {
 /// A plain class with no `__toString` and no ancestors — the fully enumerable case.
 const PLAIN: &str = "<?php\nclass A {}\n";
 
-// ---------------------------------------------------------------------------
 // `string.non-stringable`: one firing fixture per context.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn non_stringable_in_interpolation_fires() {
@@ -162,9 +158,7 @@ fn the_other_casts_are_not_this_id() {
     assert!(d.is_empty(), "only `(string)` is a string context: {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
 // `string.non-stringable`: the silence matrix.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_class_with_tostring_is_silent() {
@@ -186,9 +180,8 @@ fn tostring_inherited_from_a_parent_is_silent() {
 
 #[test]
 fn an_unenumerable_chain_is_silent() {
-    // `Vendor` is not in the project index: `__toString` could be declared out of
-    // view, so the chain never closes. This is the leg that also covers the case
-    // PHPStan allows via a `__toString` inherited from an unresolvable parent.
+    // `Vendor` is out of the project index, so `__toString` could be declared out
+    // of view and the chain never closes (also PHPStan's own unresolvable-parent leg).
     let src = "<?php\nclass A extends \\Vendor\\Base {}\n$a = new A();\necho $a;\n";
     assert!(findings(src).is_empty(), "an unresolvable ancestor is silence");
 }
@@ -196,25 +189,22 @@ fn an_unenumerable_chain_is_silent() {
 #[test]
 fn a_trait_in_the_chain_is_silent() {
     // Trait members are not flattened into the class (object-model), so a `use`d
-    // trait is an obstacle to the absence proof — even though it is the trait that
-    // would supply `__toString` at runtime.
+    // trait obstructs the absence proof even though it would supply `__toString`.
     let src = "<?php\ntrait T { public function __toString(): string { return 't'; } }\nclass A { use T; }\n$a = new A();\necho $a;\n";
     assert!(findings(src).is_empty(), "a trait anywhere in the chain is silence");
 }
 
 #[test]
 fn a_trait_without_tostring_is_still_silent() {
-    // The obstacle is the trait, not what it happens to declare — the object model
-    // does not read trait members either way.
+    // The obstacle is the trait itself, not what it declares.
     let src = "<?php\ntrait T { public function x(): int { return 1; } }\nclass A { use T; }\n$a = new A();\necho $a;\n";
     assert!(findings(src).is_empty(), "the trait obstacle does not depend on its members");
 }
 
 #[test]
 fn a_magic_tag_carrying_class_is_silent() {
-    // The A14 obstacle records from issue #195, reused verbatim: a `@method` tag
-    // anywhere in the class-like's resolved reach means members live where the index
-    // cannot enumerate them.
+    // The A14 obstacle record (issue #195): a `@method` tag anywhere in the
+    // resolved reach means members live where the index cannot enumerate them.
     let src = "<?php\n/**\n * @method string __toString()\n */\nclass A {}\n$a = new A();\necho $a;\n";
     assert!(findings(src).is_empty(), "a `@method` tag is an enumerability obstacle");
 }
@@ -294,9 +284,7 @@ fn a_boot_surface_homonym_is_silent() {
     assert!(d.is_empty(), "a resident builtin of the same name shadows the claim (A2ii): {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
 // `string.array-conversion`: one firing fixture per context.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn array_in_interpolation_fires() {
@@ -349,9 +337,7 @@ fn compound_concat_judges_its_target() {
     assert_eq!(d.len(), 1, "`$a .= 'x'` reads `$a` in string context: {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
 // `string.array-conversion`: the silence matrix and both gate postures.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn scalars_and_null_are_silent() {
@@ -370,10 +356,8 @@ fn a_maybe_array_is_silent() {
 
 #[test]
 fn a_declared_array_parameter_is_recorded_silence() {
-    // `array $a` IS runtime-enforced, and this is the commonest shape of the finding
-    // in other analyzers — but `TypeMember` has no array member, so an `array` hint
-    // lowers the whole native type away and there is no Verified evidence to read.
-    // Pinned as silence so the gap is a known IR limitation, not a surprise.
+    // `array $a` IS runtime-enforced, but `TypeMember` has no array member, so an
+    // `array` hint lowers the native type away — pinned as a known IR gap, not a surprise.
     let d = findings("<?php\nfunction f(array $a): void { echo $a; }\n");
     assert!(d.is_empty(), "a bare native `array` declaration is not in the IR yet: {d:#?}");
 }
@@ -423,15 +407,12 @@ fn the_fatal_id_does_not_demote() {
     assert_eq!(d.len(), 1, "the fatal id survives a \"null\" warning-handler posture: {d:#?}");
 }
 
-// ---------------------------------------------------------------------------
 // Positions: what is collected, and the recorded boundary.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_site_is_reported_once() {
-    // `echo (string) $a;` is an echo operand AND a cast; the echo operand lowers to
-    // an unprovable value, so only the cast — the innermost construct that names the
-    // value — reports.
+    // `echo (string) $a;` is both an echo operand and a cast; only the innermost
+    // construct naming the value — the cast — reports.
     let d = objects(&format!("{PLAIN}$a = new A();\necho (string) $a;\n"));
     assert_eq!(d.len(), 1, "one conversion, one finding: {d:#?}");
 }
@@ -450,17 +431,16 @@ fn each_echo_operand_is_judged() {
 
 #[test]
 fn a_branch_condition_is_the_recorded_omission() {
-    // Conditions, loop headers and `match` subjects are evaluated in an env the
-    // statement-position pass does not hold, so they carry no sites. Recorded here
-    // so the boundary is a pinned decision rather than an accident.
+    // Conditions/loop headers/`match` subjects are evaluated in an env the
+    // statement-position pass doesn't hold, so they carry no sites — pinned, not an accident.
     let d = findings("<?php\n$a = [1];\nif ((string) $a) { $x = 1; }\nwhile ((string) $a) { break; }\n");
     assert!(d.is_empty(), "guard and loop-header positions are silence: {d:#?}");
 }
 
 #[test]
 fn an_arrow_function_body_is_judged() {
-    // An arrow body is a `return` position and is lowered as its own one-statement
-    // trace, so it is collected there rather than by `lower_stmt`.
+    // An arrow body is a `return` position lowered as its own one-statement trace,
+    // collected there rather than by `lower_stmt`.
     let d = arrays("<?php\n$f = fn() => 'x' . [1, 2];\n");
     assert_eq!(d.len(), 1, "an arrow body carries its own sites: {d:#?}");
 }

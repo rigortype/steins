@@ -1,21 +1,19 @@
 //! `lean-check`: verify the committed differential vectors are still what the
 //! Lean 4 specification produces (ADR-0059).
 //!
-//! The loop has three legs, mirroring the phpdoc oracle's shape (ADR-0029):
-//!
+//! Three legs, mirroring the phpdoc oracle's shape (ADR-0029):
 //!   1. the Lean spec proves the domain's soundness contract (`lake build`);
 //!   2. it prints the vector file (`lake exe vectors`) — this command checks the
 //!      committed fixture is byte-identical to that output;
 //!   3. `cargo test -p steins-domain --test lean_vectors` regenerates the same
 //!      vectors from the Rust implementation and diffs them.
 //!
-//! Leg 3 runs in the ordinary test suite and needs no Lean. Only this command
-//! does, which is why it *skips* — never fails — when no toolchain is present:
-//! the fixture is committed, so a machine without Lean still gets the full
-//! Rust-side check.
+//! Leg 3 needs no Lean and runs in the ordinary test suite. Only this command
+//! does, so it *skips* — never fails — when no toolchain is present: the fixture
+//! is committed, so a Lean-less machine still gets the full Rust-side check.
 //!
-//! With `--bless`, the fixture is overwritten instead of compared. Use it after
-//! deliberately changing the spec, and re-run the Rust test afterwards.
+//! With `--bless`, the fixture is overwritten instead of compared — use after
+//! deliberately changing the spec, then re-run the Rust test.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -50,8 +48,7 @@ pub fn run(bless: bool) -> Result<(), String> {
     };
     println!("lean-check: spec = {}, runner = {}\n", spike.display(), runner.describe());
 
-    // Leg 1: the proofs must still compile. `lake build` is the whole point —
-    // a spec that does not build proves nothing.
+    // Leg 1: `lake build` — a spec that does not compile proves nothing.
     let build = runner.run(&spike, &["build"])?;
     if !build.status.success() {
         return Err(format!(
@@ -129,8 +126,7 @@ fn first_difference(committed: &str, produced: &str, fixture: &Path) -> String {
                 );
             }
             (None, None) => {
-                // Byte-inequality with equal lines means a trailing-newline
-                // difference; say so rather than reporting no difference.
+                // Equal lines but byte-unequal: a trailing-newline difference.
                 return format!(
                     "{} differs from the spec's output only in trailing whitespace.\n\
                      Re-run with `--bless`.",
@@ -149,8 +145,8 @@ enum Runner {
 
 impl Runner {
     fn detect() -> Option<Runner> {
-        // A `lake` already on PATH wins: it is what an editor session uses, so
-        // checking through it is checking what the author sees.
+        // PATH `lake` wins: it's what an editor session uses, so this checks
+        // what the author sees.
         if let Some(lake) = which("lake") {
             return Some(Runner::Lake(lake));
         }

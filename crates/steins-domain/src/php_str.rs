@@ -1,37 +1,27 @@
 //! [`PhpStr`] — a PHP string value (ADR-0080).
 //!
-//! A PHP string is a **byte string**: it carries no encoding, `"\xC0"` is the
-//! one-byte value `0xC0`, and `"\xC0" === "\xD0"` is `false`. Steins used to
-//! lower string literals through `String::from_utf8_lossy`, which turns every
-//! invalid-UTF-8 byte into one U+FFFD and therefore makes distinct PHP values
-//! compare **equal** in the value lane. Because equality on lowered strings is
-//! a proof premise — array-key identity (ADR-0062), constant folds, `===` value
-//! facts, offset absence, match-arm reachability — that collapse manufactured
-//! wrong answers in both directions (issue #208: a `call.on-null` false
-//! positive, a suppressed `offset.missing`, and wrong `strlen`/`count` folds).
+//! A PHP string is a **byte string**: it carries no encoding, `"\xC0"` is the one-byte value
+//! `0xC0`, and `"\xC0" === "\xD0"` is `false`. Lossy UTF-8 decoding collapses distinct
+//! invalid-byte values into the same string and silently corrupts array-key identity
+//! (ADR-0062), constant folds, `===` facts, offset absence, and match-arm reachability
+//! (issue #208).
 //!
-//! This type is the fix by construction: every carrier of a lowered PHP string
-//! holds a `PhpStr`, and equality is byte equality, so no consumer has to
-//! remember a guard.
+//! This type is the fix by construction: every carrier of a lowered PHP string holds a
+//! `PhpStr`, with byte equality, so no consumer needs a guard.
 
 /// A PHP string value: an arbitrary byte string.
 ///
 /// # Canonical form
 ///
-/// The inner representation has two arms: one holds bytes that are **not**
-/// valid UTF-8, the other holds bytes that are. The constructors maintain that
-/// split, so there is exactly one representation per value and the common ASCII
-/// path keeps a plain `String` with no extra allocation.
+/// The inner representation has two arms — valid UTF-8 and not — kept to exactly one per
+/// value by the constructors; the common ASCII path stays a plain `String` with no extra
+/// allocation.
 ///
-/// Equality, ordering and hashing nonetheless go through [`PhpStr::as_bytes`]
-/// rather than deriving over the arms. Two reasons: a derived `Ord` would sort
-/// every `Utf8` before every `Bytes` instead of byte-lexicographically, and
-/// routing through the bytes keeps equality correct even if some future
-/// constructor forgets to canonicalize.
-///
-/// The order is *representational* — it gives `Fact` its set semantics, exactly
-/// as [`crate::Val`]'s does. PHP-level `==` / `===` live in the condition
-/// evaluator, never on this type.
+/// Equality, ordering and hashing go through [`PhpStr::as_bytes`] rather than deriving over
+/// the arms — a derived `Ord` would sort every `Utf8` before every `Bytes`, and routing
+/// through bytes stays correct even if a future constructor forgets to canonicalize. Order
+/// is *representational*, giving `Fact` set semantics like [`crate::Val`]; PHP-level
+/// `==`/`===` live in the condition evaluator, never here.
 #[derive(Debug, Clone)]
 pub struct PhpStr(Repr);
 
@@ -52,9 +42,8 @@ impl PhpStr {
 
     /// Lower raw literal bytes, as the parser delivers them.
     ///
-    /// This is the constructor the syntax layer's `Literal::String` arm uses;
-    /// it is the one place the UTF-8 question is asked, and it never loses a
-    /// byte.
+    /// The syntax layer's `Literal::String` arm uses this — the one place the UTF-8 question
+    /// is asked, and it never loses a byte.
     #[must_use]
     pub fn from_bytes(bytes: &[u8]) -> Self {
         match std::str::from_utf8(bytes) {
@@ -83,10 +72,9 @@ impl PhpStr {
 
     /// The value as `&str`, or `None` when it is not valid UTF-8.
     ///
-    /// The name lanes (class / function / method names, effect labels, include
-    /// paths, every `String`-keyed index) read through this and answer *silence*
-    /// on `None`: a byte-string name resolves to nothing, which is both the
-    /// sound direction and what PHP would do with it in practice.
+    /// Name lanes (class/function/method names, effect labels, include paths, `String`-keyed
+    /// indices) read through this and answer *silence* on `None` — the sound direction, and
+    /// what PHP does with it anyway.
     #[must_use]
     pub fn as_str(&self) -> Option<&str> {
         match &self.0 {
@@ -119,13 +107,12 @@ impl PhpStr {
         self.render_with('\'')
     }
 
-    /// Spell the value as PHP source would, using `quote` for the ordinary
-    /// UTF-8 case so each diagnostic keeps the quoting style it already used.
+    /// Spell the value as PHP source would, using `quote` for the ordinary UTF-8 case so
+    /// each diagnostic keeps its existing quoting style.
     ///
-    /// A value that is **not** valid UTF-8 is always double-quoted with `\xNN`
-    /// escapes, because that is the only PHP spelling that can carry those
-    /// bytes — and because a message printing the lossy `'�'` where the source
-    /// says `"\xC0"` names something the reader cannot act on.
+    /// Non-UTF-8 values are always double-quoted with `\xNN` escapes — the only PHP spelling
+    /// that can carry those bytes (vs. an unactionable lossy `'�'` where the source says
+    /// `"\xC0"`).
     #[must_use]
     pub fn render_with(&self, quote: char) -> String {
         if let Some(s) = self.as_str() {
@@ -145,8 +132,8 @@ impl PhpStr {
     }
 }
 
-/// Lets every byte-oriented PHP predicate (`php_is_numeric`, `StrPreds::of`, …)
-/// take a `PhpStr` and a `&str` through one signature.
+/// Lets byte-oriented predicates (`php_is_numeric`, `StrPreds::of`, …) take a `PhpStr` and a
+/// `&str` through one signature.
 impl AsRef<[u8]> for PhpStr {
     fn as_ref(&self) -> &[u8] {
         self.as_bytes()
@@ -197,9 +184,8 @@ impl std::hash::Hash for PhpStr {
     }
 }
 
-/// Compare against a Rust string slice by bytes — the ergonomic form for the
-/// many sites testing a value against a fixed ASCII spelling (`"0"`, `""`,
-/// a builtin's name).
+/// Compare against a Rust string slice by bytes — for the many sites testing a value against
+/// a fixed ASCII spelling (`"0"`, `""`, a builtin's name).
 impl PartialEq<str> for PhpStr {
     fn eq(&self, other: &str) -> bool {
         self.as_bytes() == other.as_bytes()
@@ -224,8 +210,8 @@ mod tests {
         h.finish()
     }
 
-    /// The defect this type exists to kill: two distinct single invalid bytes
-    /// used to decode to the same U+FFFD-bearing `String` (issue #187/#208).
+    // The defect this type kills: distinct invalid bytes decoding to the same U+FFFD
+    // `String` (issue #187/#208).
     #[test]
     fn distinct_invalid_bytes_are_distinct_values() {
         let c0 = PhpStr::from_bytes(&[0xC0]);
@@ -236,8 +222,7 @@ mod tests {
         assert_eq!(c0.len(), 1, "PHP strlen(\"\\xC0\") is 1, not U+FFFD's 3");
     }
 
-    /// A genuine U+FFFD in the source is its own value, distinct from any
-    /// invalid byte — the case the #187 guard had to punish and no longer does.
+    // A genuine U+FFFD is distinct from any invalid byte (#187 guard case).
     #[test]
     fn a_real_replacement_char_is_not_an_invalid_byte() {
         let real = PhpStr::from("\u{FFFD}");
@@ -280,9 +265,6 @@ mod tests {
         assert_eq!(PhpStr::from_bytes(&[b'a', 0xD0]).to_php_literal(), r#""a\xD0""#);
     }
 
-    /// The quote choice belongs to the caller for the ordinary case, so each
-    /// diagnostic keeps its existing spelling; a byte string ignores it,
-    /// because only a double-quoted PHP literal can carry `\xNN`.
     #[test]
     fn the_quote_is_the_callers_for_utf8_only() {
         assert_eq!(PhpStr::from("ok").render_with('"'), r#""ok""#);

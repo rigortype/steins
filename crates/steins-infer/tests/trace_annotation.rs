@@ -4,41 +4,19 @@
 //! list (one diagnostic per named variable, in source order, each rendered
 //! independently), the placement-matrix remainder, and the replay edges.
 //!
-//! The annotation is a second SPELLING of the question `PHPStan\dumpType($x)`
-//! asks (§5): same fact source (the trust-ordered lookup), same renderer (the
-//! one honesty renderer, `(asserted)` marker included), same descent gating
-//! (a site emits once). Only the trigger and the message label differ — and the
-//! position semantics are Psalm's: the answer is the adopted statement's
-//! **EXIT facts**, what `dumpType($x)` would report were it the *following*
-//! statement. The matrix here covers:
+//! Second SPELLING of the question `PHPStan\dumpType($x)` asks (§5): same fact
+//! source, same renderer (`(asserted)` marker included), same once-per-site
+//! descent gating. Only the trigger and message label differ; position
+//! semantics are Psalm's — the adopted statement's **EXIT facts**, what
+//! `dumpType($x)` would report were it the *following* statement.
 //!
-//! * recognition (§2): `@psalm-trace` canonical (Psalm's own doc example is the
-//!   headline test), `@phpstan-trace` via the uniform strip, bare `@trace` not
-//!   a tag;
-//! * answer semantics (§5): the post-assignment state, guard-narrowed facts,
-//!   diverging statements (`return $x;` still answers), the `(asserted)`
-//!   stratum marker, honest `unknown`, byte-parity with the dump surface and
-//!   with the `annotate` margin;
-//! * placement (§6, the SHARED statement-adoption rule — `stmt_docblock`,
-//!   identical for the inline `@var` cast): a blank line does not break
-//!   adoption, a trailing docblock adopts forward, an intervening line comment
-//!   silences, of consecutive docblocks only the nearest adopts, the same-line
-//!   inline form adopts; statements at any nesting depth (branch arms, lowered
-//!   switch cases, closure bodies) adopt; declaration docblocks — nested ones
-//!   included — are inert at the emitter;
-//! * the comma list (§7, the #95 breadth): one diagnostic per named variable,
-//!   in source order, all at the tag's position; one variable's `unknown` does
-//!   not perturb its neighbors; a malformed list item silences the whole tag;
-//! * emission discipline (§5/§9): once per site (never per caller, the list
-//!   form included), the last statement of a scope included, reported at the
-//!   TAG's own position, and transparent — the non-debug diagnostic set of a
-//!   file is identical with and without the annotation (the ADR-0053 §10
-//!   dump-transparency fixture, transposed);
-//! * replay parity at the walk's own coverage (§5/§9 — dump-parity is the
-//!   governing principle): wherever the walk does not model a construct (a
-//!   loop/`try` body is `Opaque`; a statement after a terminator is proven
-//!   dead), the trace is exactly as silent as `dumpType` at the mirror
-//!   position — never chattier, never quieter.
+//! Matrix covered here: recognition (§2), answer semantics (§5), placement
+//! (§6, the shared `stmt_docblock` adoption rule, identical for the inline
+//! `@var` cast), the comma list (§7, the #95 breadth), emission discipline
+//! (§5/§9, including transparency per the ADR-0053 §10 fixture transposed),
+//! and replay parity at the walk's own coverage (§5/§9 — wherever a construct
+//! is unmodeled or a statement is proven dead, the trace is exactly as silent
+//! as `dumpType` at the mirror position).
 //!
 //! The rendered fact after the final ": " is the pinned part of the message;
 //! the frame wording (`traced type of $x: …`) is not a contract (ADR-0023).
@@ -81,15 +59,12 @@ fn rendered_facts(src: &str, id: &str) -> Vec<String> {
         .collect()
 }
 
-// ---- Recognition + the canonical example (ADR-0074 §2/§5) -------------------
+// Recognition + the canonical example (ADR-0074 §2/§5)
 
 #[test]
 fn the_canonical_psalm_example_reports_the_post_statement_type() {
-    // Psalm's own documentation example — `/** @psalm-trace $username */`
-    // above `$username = $_GET['username'];` prints what `$username` BECAME —
-    // pins the exit-facts semantics (§5): the annotation is "applied to the
-    // next statement" and reports the type that statement leaves behind. The
-    // compat spelling carries the compat semantics.
+    // Psalm's own doc example: pins the exit-facts semantics (§5) — the
+    // annotation reports what the adopted statement leaves behind, not its input.
     let src = "<?php\n/** @psalm-trace $x */\n$x = 5;\n";
     assert_eq!(one_trace(src).message, "traced type of $x: 5");
 }

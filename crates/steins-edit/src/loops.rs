@@ -1,71 +1,54 @@
 //! Transform #3 — loop→`array_map` under a **proven-purity** precondition
-//! (ADR-0076, issue #116).
-//!
-//! The flagship transform of ADR-0010: the rewrite
+//! (ADR-0076, issue #116). The flagship transform of ADR-0010:
 //!
 //! ```php
 //! $out = [];
-//! foreach ($xs as $x) {
-//!     $out[] = f($x);
-//! }
+//! foreach ($xs as $x) { $out[] = f($x); }
 //! // becomes
 //! $out = array_map(fn ($x) => f($x), $xs);
 //! ```
 //!
-//! is trivial to *spell* and impossible for a rule-driven codemod to *justify*:
-//! its precondition is a whole-project effect judgment. This module asks the
-//! engine for that judgment and refuses, by name, everywhere it is not answered.
+//! Trivial to *spell*, impossible for a rule-driven codemod to *justify*: the
+//! precondition is a whole-project effect judgment. This module asks the engine
+//! for it and refuses, by name, everywhere it is not answered.
 //!
-//! ## The bar: proven, and strictly stronger than ADR-0006 `Pure`
+//! ## The bar: proven, strictly stronger than ADR-0006 `Pure`
 //!
-//! 1. The body's **proven** effect lane must be empty on every label, and the
-//!    exhaustiveness bit intact — an unresolved call refuses
-//!    [`REASON_BODY_CALL_UNRESOLVED`] rather than being assumed harmless.
-//! 2. **Declared bounds never qualify** (ADR-0067). The probe
-//!    ([`steins_infer::region_purity_project`]) keeps the two lanes apart, and
-//!    this transform reads a non-empty **declared** lane as *unproven*: a `≤`
-//!    envelope imported at an interface-typed receiver, a plugin coloring, or a
-//!    conditional-purity contract refuses [`REASON_BODY_CALL_UNRESOLVED`]. This
-//!    is not decoration — the effect pass deliberately *discharges* the
-//!    exhaustiveness taint at a call a declared receiver answered, so a gate
-//!    reading exhaustiveness alone would admit exactly the bounds ADR-0067 built
-//!    the lane wall to keep out.
-//! 3. The **proven throw set must be empty**, which `Pure` does not require. A
-//!    body that throws on element `k` leaves `$out` holding the first `k`
-//!    results — observable in every enclosing `catch` — while the rewrite's
-//!    all-or-nothing assignment leaves `$out` unassigned. The probe therefore
-//!    evaluates the region's throw origins with the **enclosing** guards
-//!    stripped: an enclosing `catch` is precisely the observer that tells the
-//!    two spellings apart.
+//! 1. Body's **proven** effect lane empty on every label, exhaustiveness
+//!    intact — an unresolved call refuses [`REASON_BODY_CALL_UNRESOLVED`],
+//!    never assumed harmless.
+//! 2. **Declared bounds never qualify** (ADR-0067): a non-empty **declared**
+//!    lane also refuses [`REASON_BODY_CALL_UNRESOLVED`] — the effect pass
+//!    discharges the exhaustiveness taint at a declared-answered call, so
+//!    reading exhaustiveness alone would admit exactly what the lane wall
+//!    exists to block.
+//! 3. **Proven throw set empty**, stricter than `Pure`: a throw on element `k`
+//!    leaves `$out` holding the first `k` results (observable in an enclosing
+//!    `catch`, evaluated with guards stripped), while the rewrite's
+//!    all-or-nothing assignment leaves it unassigned.
 //!
 //! ## Parity gates beyond purity
 //!
-//! - The subject must prove `array` **and** `is_list = Yes` at the loop head, at
-//!   the `Verified` stratum: `array_map` over a single array *preserves keys*
-//!   while `$out[] = …` renumbers `0..n-1`. A docblock-asserted shape is a claim,
-//!   not a proof, and refuses — unless the run passes the explicit
-//!   [`LoopToArrayMapOptions::asserted_subjects`] opt-in (the ADR-0076
-//!   issue-#175 amendment), under which a declaration establishing BOTH halves
-//!   at the Asserted stratum (a docblock `list<T>`) admits the site, counted
-//!   and labeled separately; a declared `array` alone still refuses at the
-//!   list gate, and a bare native `array $xs` (no represented evidence at all)
-//!   still refuses at the array gate.
-//! - The iteration variable must not occur after the loop (`foreach` leaks it,
-//!   the arrow function does not). v1 scans the remainder of the enclosing scope
-//!   textually — sound in the refusing direction.
-//! - The accumulator may occur **only** as the append target, anywhere in the
-//!   whole `foreach` statement, and its `$out = [];` initializer must be the
-//!   immediately preceding statement with a whitespace-only gap. The rewrite
-//!   consumes both statements, so a comment in that gap refuses rather than
-//!   being eaten.
+//! - Subject must prove `array` **and** `is_list = Yes` at `Verified`:
+//!   `array_map` preserves keys, `$out[] = …` renumbers `0..n-1`. A
+//!   docblock-asserted shape refuses unless
+//!   [`LoopToArrayMapOptions::asserted_subjects`] (issue #175) admits a
+//!   declaration proving both halves at the Asserted stratum (`list<T>`),
+//!   counted and labeled separately; `array` alone refuses at the list gate, a
+//!   bare `array $xs` at the array gate.
+//! - Iteration variable must not occur after the loop (`foreach` leaks it, the
+//!   arrow function does not); v1 scans the remainder textually — sound in the
+//!   refusing direction.
+//! - Accumulator may occur **only** as the append target anywhere in the
+//!   `foreach`, and its `$out = [];` initializer must immediately precede the
+//!   loop with a whitespace-only gap (the rewrite consumes both statements, so
+//!   a comment there refuses rather than being eaten).
 //!
 //! ## Enumeration domain
 //!
-//! **Every** `foreach` statement in the analyzed set is a candidate
-//! ([`steins_syntax::SourceTree::foreach_sites`]). Enumerating only
-//! append-shaped loops would hide exactly the narrowness the completeness oracle
-//! exists to expose; the refusal distribution over the whole construct family is
-//! the roadmap for v2 (ADR-0076 §6).
+//! **Every** `foreach` is a candidate ([`steins_syntax::SourceTree::foreach_sites`]) —
+//! narrowing to append-shaped loops would hide the narrowness the completeness
+//! oracle exists to expose; the refusal distribution is the v2 roadmap (ADR-0076 §6).
 
 use steins_db::{Db, Project, SourceFile, parse};
 use steins_infer::{RegionPurity, SubjectFact, probe_subjects, region_purity_project};
@@ -79,71 +62,57 @@ use crate::transform::{
 
 // ---- Stable refusal reason names (ADR-0034 point 2 / ADR-0076 §4) ----------
 
-/// `foreach ($xs as $k => $v)` — `array_map` over a single array passes only the
-/// value to the callback, so the key form has no equivalent v1 spelling.
+/// `foreach ($xs as $k => $v)`: `array_map` passes only the value, so the key
+/// form has no v1 spelling.
 pub const REASON_KEY_BINDING: &str = "key-binding";
-/// `foreach ($xs as &$v)` — a by-reference binding writes back through the
-/// subject; `array_map` builds a new array and writes nothing.
+/// `foreach ($xs as &$v)`: writes back through the subject; `array_map` builds
+/// a new array and writes nothing.
 pub const REASON_REFERENCE_BINDING: &str = "reference-binding";
-/// `foreach ($xs as [$a, $b])` / `as list($a, $b)` — a destructuring binding.
-/// A real PHP shape the ADR-0076 §4 list does not name, added rather than
-/// mislabeled: arrow functions cannot spell a destructuring parameter, and since
-/// every `foreach` is a candidate the shape needs exactly one honest reason.
+/// `foreach ($xs as [$a, $b])` / `list(...)`: a destructuring binding — an
+/// arrow function cannot spell a destructuring parameter.
 pub const REASON_VALUE_BINDING_NOT_VARIABLE: &str = "value-binding-not-variable";
-/// The iterated expression is not a plain variable (a call, a property read, an
-/// offset read). v1 moves the subject verbatim into the `array_map` argument, so
-/// only a bare variable is guaranteed to evaluate the same once as it did once.
+/// The iterated expression is not a plain variable; v1 moves it verbatim into
+/// `array_map`, so only a bare variable is guaranteed to evaluate once.
 pub const REASON_SUBJECT_NOT_VARIABLE: &str = "subject-not-variable";
-/// The subject's value fact does not prove a plain `array` at the loop head, at
-/// the `Verified` stratum. `foreach` iterates any `Traversable`; `array_map`
-/// `TypeError`s on one.
+/// Subject not proven a plain `array` at the `Verified` stratum: `foreach`
+/// iterates any `Traversable`, `array_map` `TypeError`s on one.
 pub const REASON_SUBJECT_NOT_PROVEN_ARRAY: &str = "subject-not-proven-array";
-/// The subject proves `array` but not `is_list = Yes`. `array_map` with a single
-/// array preserves keys while the append renumbers `0..n-1`, so a non-list
-/// subject changes the result's keys. Wrapping in `array_values(...)` is
-/// rejected by ADR-0076 §6: a non-list subject is a refusal v1 reports, not a
-/// shape it quietly launders.
+/// Subject proves `array` but not `is_list = Yes`: `array_map` preserves keys,
+/// the append renumbers `0..n-1`. Laundering via `array_values(...)` is
+/// rejected (ADR-0076 §6) — a non-list subject is a refusal, not a shape v1
+/// quietly fixes.
 pub const REASON_SUBJECT_NOT_PROVEN_LIST: &str = "subject-not-proven-list";
 /// The accumulator's `$out = [];` initializer is not the statement immediately
-/// preceding the loop (or the gap between them holds more than whitespace).
+/// preceding the loop, or the gap between them holds more than whitespace.
 pub const REASON_ACCUMULATOR_INIT_NOT_ADJACENT: &str = "accumulator-init-not-adjacent";
-/// The adjacent initializer assigns something other than an empty array literal.
-/// `array_merge($out, array_map(...))` is a compound rewrite with a compound
-/// proof obligation — a later slice, not a v1 shape (ADR-0076 §6).
+/// The adjacent initializer assigns something other than an empty array
+/// literal; a compound rewrite (`array_merge($out, array_map(...))`) is a
+/// later slice, not a v1 shape (ADR-0076 §6).
 pub const REASON_ACCUMULATOR_NOT_EMPTY: &str = "accumulator-not-empty";
-/// The accumulator occurs somewhere in the loop other than as the append target
-/// — read inside the appended expression, or bound as the iteration variable.
-/// Either way the loop observes its own partial state, which an all-at-once
-/// assignment cannot reproduce.
+/// The accumulator occurs somewhere other than the append target (read in the
+/// expression, or bound as the iteration variable), so the loop observes its
+/// own partial state, which an all-at-once assignment cannot reproduce.
 pub const REASON_ACCUMULATOR_READ_IN_BODY: &str = "accumulator-read-in-body";
-/// The iteration variable occurs after the loop. `foreach` leaves it bound to
-/// the last element; an arrow function's parameter does not escape.
+/// The iteration variable occurs after the loop; `foreach` leaves it bound to
+/// the last element, an arrow-function parameter does not escape.
 pub const REASON_ITERATION_VAR_LIVE_AFTER: &str = "iteration-var-live-after";
-/// The body carries a `break` / `continue` / `return` / `goto`: the loop can end
-/// early, and a whole-array map cannot.
+/// The body carries `break` / `continue` / `return` / `goto`: the loop can end
+/// early, a whole-array map cannot.
 pub const REASON_EARLY_EXIT: &str = "early-exit";
-/// The body is not exactly one `$out[] = <expr>;` statement — it is empty, holds
-/// several statements, or its single statement is not a plain append.
-///
-/// It also covers an append expression that **writes** a variable (an embedded
-/// assignment, `++`, `--`). Function-local mutation carries no effect-lane label,
-/// but `fn` captures by value, so `$out[] = $i++ . $x` is not equivalence-
-/// preserving: ADR-0076 §1's shape lets the expression *read* freely, and a write
-/// is outside it.
+/// Body is not exactly one `$out[] = <expr>;` statement, or the append
+/// expression **writes** a variable (assignment / `++` / `--`) — `fn`
+/// captures by value, so such a write would not carry.
 pub const REASON_BODY_NOT_SINGLE_APPEND: &str = "body-not-single-append";
-/// The body's **proven** effect lane is non-empty. The detail names the labels.
+/// The body's **proven** effect lane is non-empty (detail names the labels).
 pub const REASON_BODY_EFFECTS: &str = "body-effects";
-/// The body's **proven** throw set is non-empty. The detail names the classes.
-/// Stricter than ADR-0006 `Pure`, which admits `throw` — see the module docs.
+/// The body's **proven** throw set is non-empty (detail names the classes) —
+/// stricter than ADR-0006 `Pure`, which admits `throw` (see module docs).
 pub const REASON_BODY_THROWS: &str = "body-throws";
-/// A call in the body did not resolve, so its effects and throws are unknown: a
-/// dynamic callee, an opaque receiver, an unanalyzable target — or a construct
-/// the effect scan does not model at all (`new`, `clone`, `yield`, a backtick
-/// shell execute, an ADR-0001 poison construct, or a frame-sensitive builtin such
-/// as `compact` / `get_defined_vars` / `func_get_args` / `func_num_args`, whose
-/// meaning changes inside the arrow function's scope). A call answered only by a
-/// **declared** bound lands here too (ADR-0067: a cap is not an occurrence
-/// proof).
+/// A call in the body did not resolve: a dynamic callee, an opaque receiver, a
+/// construct the effect scan does not model (`new` / `clone` / `yield` /
+/// backticks / an ADR-0001 poison construct / a frame-sensitive builtin like
+/// `compact`), or a call answered only by a **declared** bound (ADR-0067: a
+/// cap is not an occurrence proof).
 pub const REASON_BODY_CALL_UNRESOLVED: &str = "body-call-unresolved";
 
 /// The loop→`array_map` transform (ADR-0076).
@@ -156,18 +125,16 @@ impl Transform for LoopToArrayMap {
     }
 }
 
-/// Per-run options for [`plan_loop_to_array_map`] (the ADR-0076 issue-#175
-/// amendment). `Default` is the proven-only v1 gate, byte-identical to a run
-/// before the options existed.
+/// Per-run options for [`plan_loop_to_array_map`] (issue #175). `Default` is
+/// the proven-only v1 gate, byte-identical to a run before the options existed.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct LoopToArrayMapOptions {
-    /// The explicit opt-in: admit a subject whose `array` AND list evidence
-    /// both hold at the **Asserted** stratum (a docblock `list<T>`), counting
-    /// it in [`CompletenessOracle::transformed_asserted`] and labeling the
-    /// site in [`TransformReport::asserted_admissions`]. Off, the subject gate
-    /// consumes the proven lane only, exactly as before. Declared evidence
-    /// that proves the array half alone (`array`, `array<K, V>`) still
-    /// refuses — at the list gate, with a detail that says which half failed.
+    /// Admit a subject whose `array` AND list evidence both hold at the
+    /// **Asserted** stratum (a docblock `list<T>`), counted in
+    /// [`CompletenessOracle::transformed_asserted`] and labeled in
+    /// [`TransformReport::asserted_admissions`]. Off, the gate consumes the
+    /// proven lane only. Declared evidence proving `array` alone still refuses
+    /// at the list gate.
     pub asserted_subjects: bool,
 }
 
@@ -180,28 +147,21 @@ enum SubjectLane {
     Asserted,
 }
 
-/// The trust label an admitted-under-opt-in site carries in its own report
-/// entry (ADR-0076 amendment condition 3). The wording is the contract: it
-/// must say the list-ness is declared rather than proven, name the concrete
-/// behavioral risk (`array_map` preserves keys where the append renumbered
-/// them), and not pretend the post-check could catch a wrong claim.
+/// The trust label an admitted-under-opt-in site carries in its report entry
+/// (amendment condition 3): must say list-ness is declared not proven, name the
+/// concrete behavioral risk, and not pretend the post-check could catch it.
 fn asserted_label(subject: &str) -> String {
     format!(
         "subject `${subject}` admitted on declared evidence: its array-ness and list-ness are asserted by a declaration, not proven. If the claim is wrong — the value is actually string-keyed or gapped — this rewrite changes behavior, because array_map preserves keys where the append renumbered them 0..n-1. The post-check cannot catch a wrong list claim; reviewing this diff is the gate."
     )
 }
 
-/// Plan the loop→`array_map` rewrite over `project`. Pure planning: no files are
-/// written and no diagnostics are re-checked here — the caller (CLI) drives the
-/// dry-run diff, ADR-0034's dual-verification post-check, and any `--apply`
-/// write.
-///
-/// `vouches` and `partitions` are accepted for signature parity with the other
-/// transforms and are **not consumed**: this transform enumerates no callers, so
-/// ADR-0046 §2's caller-enumeration obstacles (`eval`, dynamic `include`) decide
-/// nothing here, and ADR-0047's region map decides nothing in any planner yet.
-/// The plan is identical whatever either argument holds. `options` IS consumed:
-/// it carries the ADR-0076 issue-#175 Asserted-subject opt-in, and its
+/// Plan the loop→`array_map` rewrite over `project`. Pure planning — the caller
+/// (CLI) drives the dry-run diff, ADR-0034's dual-verification post-check, and
+/// any `--apply` write. `vouches` and `partitions` are accepted for signature
+/// parity but **not consumed**: this transform enumerates no callers, so
+/// ADR-0046 §2's obstacles decide nothing here, and no planner yet reads the
+/// ADR-0047 region map. `options` IS consumed (the issue-#175 opt-in); its
 /// `Default` reproduces the proven-only gate byte for byte.
 #[must_use]
 pub fn plan_loop_to_array_map(
@@ -225,8 +185,7 @@ pub fn plan_loop_to_array_map(
         }
     }
 
-    // 2. Batch the two engine queries so their whole-project passes run once for
-    //    the whole run rather than once per loop.
+    // 2. Batch the two engine queries: one whole-project pass each, not one per loop.
     let probe_sites: Vec<(String, u32, String)> = candidates
         .iter()
         .filter_map(|c| {
@@ -257,15 +216,10 @@ pub fn plan_loop_to_array_map(
             Ok((replacement, lane)) => {
                 let span = ByteSpan::new(c.edit_start(), c.site.span.end);
                 let edit = Edit { path: c.path.clone(), span, replacement };
-                // Overlap rejection is the plan's job; a rejection here is an
-                // internal invariant break, surfaced as a refusal (never a panic).
+                // Overlap is an invariant break, surfaced as a refusal (never a panic).
                 if plan.add_edit(edit).is_ok() {
                     oracle.transformed += 1;
                     if lane == SubjectLane::Asserted {
-                        // The lane split survives into the report: the count and
-                        // the per-site label are how an Asserted admission stays
-                        // distinguishable from a proven rewrite (amendment
-                        // conditions 3 and the oracle clause).
                         oracle.transformed_asserted += 1;
                         let subj = c.site.subject.as_deref().unwrap_or_default();
                         asserted_admissions
@@ -312,18 +266,16 @@ impl Candidate<'_> {
         SiteRef::new(self.path.clone(), p.line, p.column, "foreach".to_owned())
     }
 
-    /// Where the rewrite's replacement span begins: the accumulator initializer,
-    /// which the rewrite consumes together with the loop. Only ever called on a
-    /// candidate whose adjacency gate passed, so the initializer is present.
+    /// Where the rewrite's replacement span begins: the accumulator
+    /// initializer, consumed together with the loop. Only called once the
+    /// adjacency gate has passed, so the initializer is present.
     fn edit_start(&self) -> u32 {
         self.site.prev_stmt.as_ref().map_or(self.site.span.start, |p| p.span.start)
     }
 
-    /// The whole gate sequence, in a fixed order: the shape gates first (a
-    /// judgment about what is *written*), then the parity gates, then the purity
-    /// bar (a judgment about what the code *does*). Returns the replacement text
-    /// plus which trust lane admitted the subject, or the one named reason this
-    /// loop is refused for.
+    /// The gate sequence, fixed order: shape gates first, then parity, then
+    /// purity. Returns the replacement text plus the admitting trust lane, or
+    /// the one named reason this loop is refused for.
     fn decide(
         &self,
         subject_fact: &SubjectFact,
@@ -411,9 +363,8 @@ impl Candidate<'_> {
                 ),
             ));
         }
-        // The accumulator may occur ONLY as the append target — not read in the
-        // appended expression, and not bound as the loop's own iteration
-        // variable (which would make each element clobber the accumulator).
+        // Accumulator may occur ONLY as the append target, else each element
+        // clobbers it (read in the expression, or bound as iteration var).
         if append.value_vars.iter().any(|v| v == acc) || iter_var == acc || subject == acc {
             return Err((
                 REASON_ACCUMULATOR_READ_IN_BODY,
@@ -434,11 +385,8 @@ impl Candidate<'_> {
         }
 
         // ---- Subject value facts (ADR-0076 §3, amended by issue #175) ------
-        // The probe's `verified` bit is the lane wall: `true` is the proven
-        // lane, `false` with `array`/`list` set is the Asserted (declared)
-        // answer. The proven path below is byte-identical with the opt-in off
-        // AND on — the opt-in only adds an admission where the proven gate
-        // would have refused, it never re-routes a proven site.
+        // `verified` is the lane wall: true = proven, false + array/list set =
+        // Asserted (declared). Proven path is byte-identical opt-in on or off.
         let lane = if subject_fact.array && subject_fact.verified {
             if !subject_fact.list {
                 return Err((
@@ -450,9 +398,8 @@ impl Candidate<'_> {
             }
             SubjectLane::Proven
         } else if !options.asserted_subjects {
-            // The v1 reading, unchanged: anything short of a Verified array
-            // fact refuses at the array gate, list unexamined (the #145
-            // check-order artifact the amendment records).
+            // v1 reading unchanged: short of Verified array refuses at the
+            // array gate, list unexamined (#145 check-order artifact).
             return Err((
                 REASON_SUBJECT_NOT_PROVEN_ARRAY,
                 format!(
@@ -460,9 +407,8 @@ impl Candidate<'_> {
                 ),
             ));
         } else if subject_fact.array {
-            // Asserted array evidence under the opt-in: admission still needs
-            // the list half at the same stratum (amendment condition 2 — a
-            // declared `array`/`array<K, V>` proves the array half only).
+            // Asserted evidence still needs the list half at the same stratum
+            // (condition 2 — `array`/`array<K, V>` proves the array half only).
             if !subject_fact.list {
                 return Err((
                     REASON_SUBJECT_NOT_PROVEN_LIST,
@@ -473,9 +419,8 @@ impl Candidate<'_> {
             }
             SubjectLane::Asserted
         } else {
-            // No array evidence at either stratum — a bare native `array $xs`
-            // lands here too, since the native lowering represents no `array`
-            // member at all (ADR-0002 silence).
+            // No array evidence at either stratum — a bare `array $xs` lands
+            // here too (native lowering has no `array` member, ADR-0002).
             return Err((
                 REASON_SUBJECT_NOT_PROVEN_ARRAY,
                 format!(
@@ -508,11 +453,8 @@ impl Candidate<'_> {
             ));
         }
         if !purity.declared.is_empty() {
-            // ADR-0067's lane wall, enforced at its first transform consumer. The
-            // effect pass *discharges* the exhaustiveness taint at a call a
-            // declared receiver answered, so reading `exhaustive` alone would let
-            // a `≤` bound through as if it were proof. A cap cannot witness the
-            // equivalence of two evaluation orders, so it refuses.
+            // ADR-0067's lane wall: a `≤` bound is a cap, not an occurrence
+            // proof, so it cannot witness the equivalence of two orders.
             return Err((
                 REASON_BODY_CALL_UNRESOLVED,
                 format!(
@@ -531,9 +473,8 @@ impl Candidate<'_> {
         Ok((self.rewrite(acc, iter_var, subject, append.value_span), lane))
     }
 
-    /// The replacement text for `[initializer, loop]` — one statement.
-    ///
-    /// No parameter type is written on the arrow function: inventing one could
+    /// The replacement text for `[initializer, loop]` — one statement. No
+    /// parameter type is written on the arrow function: inventing one could
     /// fail at runtime on inputs the engine never saw (ADR-0076 §3).
     fn rewrite(&self, acc: &str, iter_var: &str, subject: &str, value: Span) -> String {
         let expr = &self.source[value.start as usize..value.end as usize];
@@ -541,24 +482,21 @@ impl Candidate<'_> {
     }
 }
 
-/// Whether the bytes between two statements are whitespace only. A comment there
-/// makes the two statements non-adjacent for the rewrite's purposes: consuming
-/// both spans would delete it.
+/// Whether the bytes between two statements are whitespace only — a comment
+/// there makes the statements non-adjacent, since consuming both spans would
+/// delete it.
 fn gap_is_whitespace(source: &str, from: u32, to: u32) -> bool {
     source
         .get(from as usize..to as usize)
         .is_some_and(|gap| gap.chars().all(char::is_whitespace))
 }
 
-/// Whether `text` mentions `$name` as a whole variable name. The v1 iteration-
-/// variable liveness check (ADR-0076 §3) — textual, and deliberately so: it can
-/// only over-report, and over-reporting refuses.
-///
-/// Whole-name matching keeps `$xs` from answering for `$x`. The interpolated
-/// forms (`"$x"`, `"{$x}"`) match; the indirect ones (`$$v`, `${'x'}`,
-/// `compact('x')`) do not — but every one of those is an ADR-0001 poison
-/// construct, which leaves the scope's values unknown and so refuses at the
-/// subject gate instead.
+/// Whether `text` mentions `$name` as a whole variable name (ADR-0076 §3
+/// liveness check) — textual, and deliberately so: it can only over-report,
+/// and over-reporting refuses. Whole-name matching keeps `$xs` from answering
+/// for `$x`; interpolated forms (`"$x"`, `"{$x}"`) match, but indirect ones
+/// (`$$v`, `${'x'}`, `compact('x')`) are each an ADR-0001 poison construct,
+/// refusing at the subject gate instead.
 fn mentions_var(text: &str, name: &str) -> bool {
     let bytes = text.as_bytes();
     let mut from = 0usize;

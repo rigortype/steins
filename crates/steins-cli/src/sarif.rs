@@ -3,48 +3,36 @@
 //!
 //! # What is committed
 //!
-//! One `run`, `version: "2.1.0"`, the standard `$schema` URI, and the minimal
-//! shape ADR-0054 §2 fixes:
+//! One `run`, `version: "2.1.0"`, the standard `$schema` URI:
 //!
-//! * `tool.driver` — `name`, `semanticVersion`, `informationUri`, and `rules`.
-//! * `tool.driver.rules` — one `reportingDescriptor` **per id present in the
-//!   displayed results**, deduped and sorted. Not the full registry, and not the
-//!   surface's capture set: that set already has exactly one carrier (the
-//!   baseline capture header, ADR-0050 §8), duplicating it into every SARIF
-//!   invites divergence, and ingestion needs only the referenced rules.
+//! * `tool.driver` — `name`, `semanticVersion`, `informationUri`, `rules`.
+//! * `tool.driver.rules` — one `reportingDescriptor` per id in the displayed
+//!   results (deduped, sorted), not the full registry.
 //! * `results[]` — `ruleId`, `ruleIndex`, `level`, `message.text`, one physical
-//!   location, the registry-declared facets under `properties`, and
-//!   `partialFingerprints`.
+//!   location, registry-declared facets under `properties`, `partialFingerprints`.
 //! * `run.automationDetails.id` — `steins/{profile}`, so parallel uploads under
-//!   different profiles (a `default` gate beside a `contracts` debt dashboard)
-//!   do not clobber each other's alert categories.
-//! * `run.properties` — the same accounting envelope `json` carries. **Counts
-//!   only, never entries.**
+//!   different profiles don't clobber each other's alert categories.
+//! * `run.properties` — the same accounting envelope `json` carries. Counts
+//!   only, never entries.
 //!
 //! # What is deliberately absent
 //!
-//! * **`suppressions`.** SARIF's suppression machinery is unused (ADR-0054
-//!   §7/§13). Re-emitting baselined or inline-ignored findings as suppressed
-//!   results would make the format a second suppression UI beside the three
-//!   channels ADR-0023 fixes as the whole surface, and would leak the baseline's
-//!   contents into every upload. Suppressed findings appear as counts in
-//!   `run.properties`, exactly as `json`/`text` do, and no further.
-//! * **Any level knob.** The mapping is [`crate::render::ci_level`] and nothing
-//!   configures it (§13 keeps per-layer overrides deferred; a severity knob
-//!   re-imports the numeric ladder through the side door).
-//! * **Omission of the debug lane.** §13 refuses it outright: a fail-level dump
-//!   reds the run in every format, and a SARIF log that dropped the result would
-//!   show a red run with nothing explaining it.
+//! * **`suppressions`** — unused (ADR-0054 §7/§13): re-emitting baselined or
+//!   ignored findings as suppressed results would open a second suppression UI
+//!   beside the three channels ADR-0023 already fixes, and would leak baseline
+//!   contents into every upload. Suppressed findings appear only as counts.
+//! * **Any level knob** — the mapping is [`crate::render::ci_level`]; §13 keeps
+//!   per-layer overrides deferred, so nothing configures it here.
+//! * **The debug lane** — §13 refuses it: a SARIF log that dropped the
+//!   fail-level result would show a red run with nothing explaining it.
 //!
-//! # The path contract, stated honestly
+//! # The path contract
 //!
-//! Paths pass through as given — relative stays relative, absolute stays
-//! absolute — with backslashes normalized to forward slashes as SARIF's
-//! `artifactLocation.uri` requires. GitHub's upload wants repo-root-relative
-//! paths, so the documented idiom is "invoke from the repo root with relative
-//! paths"; Steins does not guess a repo root it was not shown. Output goes to
-//! stdout like every format; there is no `--output` flag (redirection is the
-//! shell's job).
+//! Paths pass through as given, backslashes normalized to forward slashes
+//! (SARIF's `artifactLocation.uri`). GitHub wants repo-root-relative paths, so
+//! the documented idiom is "invoke from the repo root"; Steins does not guess a
+//! repo root it wasn't shown. Output goes to stdout like every format — no
+//! `--output` flag.
 
 use std::collections::BTreeMap;
 
@@ -53,22 +41,18 @@ use steins_infer::Diagnostic;
 use crate::baseline;
 use crate::render::{CheckReport, ci_level};
 
-/// The OASIS-published schema for SARIF 2.1.0 (errata 01), which is the URI the
-/// SARIF SDK itself emits and GitHub's code-scanning upload accepts. ADR-0054 §2
-/// says "the standard `$schema` URI" without picking among the several mirrors
-/// in circulation; this is the normative one.
+/// The normative SARIF 2.1.0 (errata 01) `$schema` URI (ADR-0054 §2), among
+/// several mirrors in circulation — the one the SARIF SDK and GitHub emit/accept.
 const SCHEMA: &str = "https://docs.oasis-open.org/sarif/sarif/v2.1.0/errata01/os/schemas/sarif-schema-2.1.0.json";
 
-/// The `partialFingerprints` key. Versioned in the name, per SARIF convention,
-/// so a future hash revision can ship beside this one rather than silently
-/// changing what alert tracking matches on.
+/// The `partialFingerprints` key, versioned in the name so a future hash
+/// revision can ship beside this one without silently changing alert matching.
 const FINGERPRINT_KEY: &str = "steinsFindingHash/v1";
 
 /// Render `report` as a SARIF 2.1.0 log.
 pub fn render(report: &CheckReport<'_>) -> String {
-    // The rule table: the ids actually present in the displayed results, deduped
-    // and sorted. `BTreeMap` gives both at once and hands back the index each
-    // result's `ruleIndex` needs.
+    // Ids present in the displayed results, deduped/sorted; BTreeMap also hands
+    // back each result's `ruleIndex`.
     let ids: BTreeMap<&str, usize> = {
         let mut sorted: Vec<&str> = report.displayed.iter().map(|d| d.id).collect();
         sorted.sort_unstable();
@@ -79,14 +63,12 @@ pub fn render(report: &CheckReport<'_>) -> String {
     for &id in ids.keys() {
         rules.push(serde_json::json!({
             "id": id,
-            // The registry carries no prose descriptions today, so the id is
-            // the description. Enrichment (`fullDescription`, `helpUri`) is
-            // deferred-with-design to a docs site; the shape already carries it.
+            // No prose descriptions in the registry today, so id doubles as one;
+            // `fullDescription`/`helpUri` enrichment is deferred to a docs site.
             "shortDescription": { "text": id },
             "defaultConfiguration": { "level": ci_level(id, report.surface).sarif() },
-            // ADR-0050 §2's promise: the layer travels with the rule. It is
-            // semantic identity, not severity — which is why it rides in
-            // `properties` and never in `level`.
+            // ADR-0050 §2: layer travels with the rule as identity, not severity —
+            // hence `properties`, never `level`.
             "properties": { "layer": steins_infer::layer(id).map(steins_infer::Layer::as_str) },
         }));
     }
@@ -106,8 +88,6 @@ pub fn render(report: &CheckReport<'_>) -> String {
                     "rules": rules,
                 }
             },
-            // Parallel uploads under different profiles must not clobber each
-            // other's alert categories (ADR-0054 §2).
             "automationDetails": { "id": format!("steins/{}", report.surface.name) },
             "results": results,
             // Counts only — never entries (§7).
@@ -144,34 +124,23 @@ fn result(
         "locations": [{
             "physicalLocation": {
                 "artifactLocation": { "uri": uri },
-                // The same 1-based numbers `text` and `json` print. `columnKind`
-                // is left at the SARIF default: if ingestion ever renders a
-                // divergence that gets a recorded fix, not a preemptive guess.
+                // Same 1-based numbers as `text`/`json`. `columnKind` stays at
+                // the SARIF default until a real divergence forces a decision.
                 "region": { "startLine": d.line, "startColumn": d.column },
             }
         }],
     });
-    // Registry-declared facets ride `properties` (`"origin": "direct"`),
-    // mirroring `json` (ADR-0050 §4).
+    // Registry-declared facets ride `properties`, mirroring `json` (ADR-0050 §4).
     if let Some(facet) = d.facet {
         obj["properties"] = serde_json::json!({ facet.key(): facet.value() });
     }
     // `partialFingerprints`: the ADR-0022 baseline hash of the flagged line's
-    // neighborhood. The hash exists precisely so identity survives unrelated
-    // edits; handing it to code scanning gives alert tracking the same stability
-    // the baseline already has — one identity function, two consumers, zero new
-    // machinery.
-    //
-    // It is computed over the path this document *shows* (the diagnostic path,
-    // normalized), not over a baseline-relative path: the baseline's own
-    // relativization is a function of where the baseline file sits, and a
-    // fingerprint that moved because `--baseline` pointed elsewhere would defeat
-    // the stability it exists for. Under the documented CI idiom — invoke from
-    // the repo root with relative paths — the two coincide anyway.
-    //
-    // Omitted rather than faked when the source text is unavailable: a hash over
-    // an empty neighborhood is the same value for every such finding, which is a
-    // collision, not a fingerprint.
+    // neighborhood, reused so code-scanning alert tracking gets the baseline's
+    // stability for free. Hashed over the diagnostic's own (normalized) path,
+    // not a baseline-relative one, so a fingerprint doesn't move just because
+    // `--baseline` pointed elsewhere — under the documented "run from repo root"
+    // idiom the two paths coincide anyway. Omitted (not faked) when source text
+    // is unavailable, since a hash of an empty neighborhood would just collide.
     if let Some(text) = report.texts.get(&d.path) {
         let hash = baseline::entry_hash(d.id, &uri, text, d.line);
         obj["partialFingerprints"] = serde_json::json!({ FINGERPRINT_KEY: hash });

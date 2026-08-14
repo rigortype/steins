@@ -1,10 +1,9 @@
 //! The `foreach` lowering the loop→`array_map` transform enumerates (ADR-0076).
 //!
 //! The transform's own tests measure verdicts; these measure the *shape facts*
-//! those verdicts are built from — especially the two that no verdict test can
-//! isolate: that **every** `foreach` is enumerated (including nested ones, and
-//! ones inside closures), and that each carries the right preceding sibling and
-//! enclosing-scope end.
+//! those verdicts are built from — especially that **every** `foreach` is
+//! enumerated (nested, or inside closures) and each carries the right
+//! preceding sibling and enclosing-scope end.
 
 use steins_syntax::SourceTree;
 
@@ -31,8 +30,7 @@ fn the_binding_shape_is_reported_faithfully() {
 
     let by_ref = &sites("<?php\nforeach ($a as &$x) {}\n")[0];
     assert!(by_ref.by_ref_binding);
-    // The bound name is still readable behind the `&` — the by-ref flag is the
-    // refusal-bearing fact, not an inability to see the variable.
+    // The bound name is still readable behind the `&`; the flag, not blindness, is the fact.
     assert_eq!(by_ref.value_var.as_deref(), Some("x"));
 
     let destructured = &sites("<?php\nforeach ($a as [$p, $q]) {}\n")[0];
@@ -44,8 +42,8 @@ fn the_binding_shape_is_reported_faithfully() {
 
 #[test]
 fn a_braced_single_append_is_a_one_statement_body() {
-    // The braced form arrives as one `Statement::Block`; unwrapping it is what
-    // makes `{ $out[] = $x; }` a one-statement body rather than a one-block one.
+    // The braced form arrives as one `Statement::Block`; unwrapped it's one
+    // statement, not one block.
     let site = &sites("<?php\nforeach ($a as $x) {\n    $out[] = $x * 2;\n}\n")[0];
     assert_eq!(site.body.stmt_count, 1);
     let append = site.body.append.as_ref().expect("append not recognized");

@@ -2,19 +2,18 @@
 //!
 //! `str_repeat("x", 2000000000)` is an ordinary literal call on the folding
 //! allowlist, and its result does not fit the runner's `memory_limit`. Memory
-//! exhaustion is a PHP *fatal*, not a `Throwable`, so no `catch` in the runner can
-//! turn it into a widen — the child dies mid-NDJSON. The transport recovers by
-//! replacing it (`Sidecar`'s respawn discipline); what this file pins is that the
-//! recovery survives the layers above, which is where a run-long disable would
-//! actually be introduced: `ProcessEngine` latches "no engine" for a *spawn*
-//! failure and for `--no-php`, and neither must be reached by a dead child.
+//! exhaustion is a PHP *fatal*, not a `Throwable`, so no `catch` in the runner
+//! can turn it into a widen — the child dies mid-NDJSON. The transport recovers
+//! by replacing it (`Sidecar`'s respawn discipline); this file pins that the
+//! recovery survives the layers above — `ProcessEngine` latches "no engine" for
+//! a *spawn* failure and for `--no-php`, and neither must be reached by a dead
+//! child.
 //!
-//! Since issue #245 the same file also pins what the run is allowed to SAY about
-//! that recovery. The death is not hypothetical on a real corpus — phpstan-src
-//! ships `str_repeat('abcdefghij', 1000000000)` as its own regression fixture for
-//! this hazard — and a harness that prints an absolute number after one has
-//! happened owes the reader the posture behind it (ADR-0004: incompleteness is
-//! never silent, and a posture that changes partway is still a posture).
+//! Since issue #245 this file also pins what the run is allowed to SAY about
+//! that recovery (phpstan-src ships `str_repeat('abcdefghij', 1000000000)` as
+//! its own regression fixture, so the death is not hypothetical): ADR-0004
+//! says incompleteness is never silent, and a posture that changes partway is
+//! still a posture.
 //!
 //! Requires `php` on `PATH`; without it the test skips with an explicit marker.
 
@@ -44,11 +43,9 @@ fn dumps(src: &str, folder: &mut dyn Folder) -> Vec<String> {
 #[test]
 fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     let mut folder = SidecarFolder::enabled();
-    // A folder that cannot reach `php` folds nothing at all, which would make the
-    // assertion below vacuous. Probe first and skip loudly instead — with an
-    // argument the snippet does not use, because `EngineFolder` memoizes answers
-    // and a probe of `strtoupper("ab")` would answer the snippet's second fold
-    // from cache, hiding the very death this test is about.
+    // Probe with an unused argument first and skip loudly if `php` is unreachable
+    // — `EngineFolder` memoizes, so probing `strtoupper("ab")` would answer the
+    // snippet's second fold from cache and hide the death this test is about.
     if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
         eprintln!(
             "SKIP a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run: \
@@ -56,25 +53,17 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
         );
         return;
     }
-    // The bomb's dump is the rung BELOW the fold, not a folded value: since issue
-    // #77 that rung is the string-predicate transfer, which reads `str_repeat`'s
-    // literal subject `"x"` and its multiplier `>= 1` and answers non-falsy — and,
-    // since issue #240, says the casing half of the same transfer's answer out
-    // loud (`"x"` is lowercase), which is the one grid cell for that set. A folded
-    // answer would be the two-billion-character literal itself, so this spelling is
-    // still exactly the evidence the test wants — the fold did NOT happen, and the
-    // analysis carried on.
+    // The bomb's dump is the rung BELOW the fold (issue #77's string-predicate
+    // transfer, casing spelled since #240), not the two-billion-character
+    // literal — proof the fold did NOT happen and the analysis carried on.
     assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["non-falsy-lowercase-string", "'AB'"]);
 }
 
 /// The same run, read as a coverage posture (issue #245): recovering from the
-/// death must not make it *unsayable*.
-///
-/// The transport's recovery is exactly what made this failure hard to see — the
-/// sidecar answers, dies, is replaced, and answers again, so a run that lost an
-/// answer looks from the outside like one that lost nothing. The posture is the
-/// only place that difference survives to the end of the run, so it is asserted
-/// here in the one test that reliably produces a mid-run death.
+/// death must not make it *unsayable*. The transport's recovery is exactly what
+/// makes this hard to see — a sidecar that answers, dies, is replaced, and
+/// answers again looks from the outside like one that lost nothing; the posture
+/// is the only place the difference survives to the end of the run.
 #[test]
 fn a_recovered_death_still_shows_in_the_run_posture() {
     let mut folder = SidecarFolder::enabled();
@@ -105,21 +94,15 @@ fn a_recovered_death_still_shows_in_the_run_posture() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // The whole-run `env` answers, across a restart (issue #245). No `php` needed:
-// the transport's recovery is modeled directly, which is the only way to hold
-// the decline window open on purpose.
-// ---------------------------------------------------------------------------
+// the transport's recovery is modeled directly, the only way to hold the
+// decline window open on purpose.
 
 /// A [`FoldEngine`] that declines everything until it has been "restarted" —
-/// the mid-run recovery in miniature.
-///
-/// A real transport revives itself on the request *after* the one that killed
-/// it, so the window in which a whole-run answer can be taken from a corpse is
-/// genuinely hard to open by hand (a transient `fork` failure right after a
-/// multi-gigabyte allocation attempt is the measured way in). Modeling the
-/// engine keeps this test about the policy the window exposes — a decline
-/// memoized for the whole run — rather than about how to reproduce the window.
+/// the mid-run recovery in miniature. A real transport revives itself on the
+/// request *after* the one that killed it, so this window is genuinely hard to
+/// open by hand; modeling it keeps the test about the policy it exposes (a
+/// decline memoized for the whole run), not about reproducing the window.
 #[derive(Default)]
 struct RestartableEngine {
     /// The generation the folder reads through [`steins_infer::FoldEngine::restarts`].
@@ -162,12 +145,10 @@ impl steins_infer::FoldEngine for RestartableEngine {
 }
 
 /// A decline taken from a child that has since been replaced is asked again.
-///
 /// `php_minor` and its three `env`-derived siblings are memoized for the WHOLE
-/// run. Taken while the transport is down they memoize "unanswerable", and the
-/// families they gate stay off long after the transport recovered — one badly
-/// timed request turning a failure the transport survives into a run-long,
-/// silent narrowing of what the checker even asks.
+/// run, so a decline taken while the transport is down must not stay memoized
+/// after it recovers — otherwise one badly timed request silently narrows what
+/// the checker even asks, for the rest of the run.
 #[test]
 fn a_whole_run_env_answer_is_retaken_after_the_transport_restarts() {
     let mut folder = steins_infer::EngineFolder::with_engine(RestartableEngine::default());
@@ -184,13 +165,11 @@ fn a_whole_run_env_answer_is_retaken_after_the_transport_restarts() {
     assert!(folder.boot_surface_label().is_some(), "every env-derived memo, not just one");
 }
 
-/// …and only then. Within one generation the memo still does its job.
-///
-/// The bound matters as much as the refresh: re-asking on "the memo holds a
-/// decline" would pay the ADR-0024 timeout at every call site against a sidecar
-/// that is merely hung, which is the failure mode issue #110's own test fixture
-/// models. Re-asking on "the engine that declined has been replaced" costs one
-/// `env` per respawn, and the respawn cap bounds those.
+/// …and only then: within one generation the memo still does its job. Re-asking
+/// on "the memo holds a decline" would pay the ADR-0024 timeout at every call
+/// site against a merely-hung sidecar (issue #110's failure mode); re-asking on
+/// "the engine has been replaced" costs one `env` per respawn instead, bounded
+/// by the respawn cap.
 #[test]
 fn a_decline_is_asked_once_per_transport_generation_not_once_per_call_site() {
     let mut folder = steins_infer::EngineFolder::with_engine(RestartableEngine::default());

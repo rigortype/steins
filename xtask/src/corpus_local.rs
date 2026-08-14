@@ -9,26 +9,21 @@
 //! [[project]]
 //! name = "monorepo"
 //! path = "/absolute/path"
-//! # optional:
-//! exclude = ["cache/**", "assets-origin/**"]
+//! exclude = ["cache/**", "assets-origin/**"]  # optional
 //!
-//! # optional: collect only these subdirectories of `path` instead of the whole
-//! # tree. Absent (the default) walks everything, which is what every entry did
-//! # before this key existed. It exists for a project whose repository contains a
-//! # deliberately-invalid fixture tree — code written to be broken, which is not
-//! # code that works and so is outside the gate's own bar.
+//! # optional: collect only these subdirectories instead of the whole tree.
+//! # Absent (default) walks everything. Exists for a project whose repo also
+//! # ships a deliberately-invalid fixture tree, outside the gate's zero-FP bar.
 //! paths = ["src"]
 //!
-//! # optional: the checkout revision the gate's seeded baseline was measured at.
-//! # Recording it is what lets a tripwire distinguish "the analyzer regressed"
-//! # from "the corpus moved" (see `gate::classify_revision`). It lives HERE, in
-//! # the gitignored file, precisely because a private repo's commit sha must
-//! # never enter this repository.
+//! # optional: checkout revision the seeded baseline was measured at. Lets a
+//! # tripwire tell "the analyzer regressed" from "the corpus moved" (see
+//! # `gate::classify_revision`). Lives here, gitignored, since a private sha
+//! # must never enter this repository.
 //! revision = "<the sha the baseline was seeded at>"
 //!
-//! # optional per-project partition declaration (ADR-0047 §7); shape-validated
-//! # and IGNORED this slice (Slice A) — Slice E consumes it for the scoped
-//! # measurement:
+//! # optional partition declaration (ADR-0047 §7); shape-validated and IGNORED
+//! # this slice (Slice A) — Slice E consumes it for scoped measurement.
 //! [project.partitions]
 //! observers = ["tests/**"]
 //! [project.partitions.sets]
@@ -36,16 +31,14 @@
 //! batch = ["batch/**"]
 //! ```
 //!
-//! Local projects are **unmanaged** (they are live working trees — no sync, no
-//! lock, nothing this repo can check out) and are consumed only by `fp-gate`.
-//! `freq` ignores them entirely so the committed frequency report never contains
-//! private-code measurements.
+//! Local projects are **unmanaged** (live working trees — no sync, no lock,
+//! nothing this repo can check out) and consumed only by `fp-gate`. `freq`
+//! ignores them entirely so the committed frequency report stays private-free.
 //!
-//! The optional `revision` above does not *pin* such a tree the way
-//! `corpus.lock.toml` pins a public package — nothing here moves the checkout. It
-//! records which state a measurement was taken at, so the gate can say whether a
-//! count moved under a constant corpus (a regression) or under a moving one
-//! (drift). That distinction previously cost a session's archaeology.
+//! `revision` does not *pin* the tree the way `corpus.lock.toml` pins a public
+//! package — nothing here moves the checkout. It records what state a
+//! measurement was taken at, so the gate can tell a regression (count moved
+//! under a constant corpus) from drift (corpus moved).
 
 use std::path::{Path, PathBuf};
 
@@ -63,45 +56,36 @@ pub struct LocalProject {
     /// Glob patterns (see [`glob_match`]) pruning subtrees/files from the walk.
     #[serde(default)]
     pub exclude: Vec<String>,
-    /// Optional: the subdirectories of [`Self::path`] to collect, instead of the
-    /// whole tree. **Absent is the default and means "everything"** — every entry
-    /// written before this key existed behaves byte-identically.
+    /// Optional: subdirectories of [`Self::path`] to collect instead of the whole
+    /// tree. **Absent means "everything"**. Coarser than [`Self::exclude`] on
+    /// purpose: `exclude` prunes noise from an in-scope corpus, `paths` says
+    /// which part *is* the corpus — needed when a project ships a
+    /// deliberately-invalid fixture tree beside its real source (same
+    /// presumption as ADR-0079 §2.3's parser fixtures; otherwise violates the
+    /// fp-gate's zero-FP-on-working-code bar).
     ///
-    /// This is a coarser instrument than [`Self::exclude`] on purpose. `exclude`
-    /// prunes noise out of a corpus that is otherwise in scope; `paths` says which
-    /// part of a repository *is* the corpus. The case that needs it is a project
-    /// shipping a deliberately-invalid fixture tree beside its real source: those
-    /// files are broken by construction, and the fp-gate's bar is zero false
-    /// positives on **code that works**, so measuring them measures the wrong
-    /// thing (the same presumption ADR-0079 §2.3 records for parser fixtures).
-    ///
-    /// Entries are project-relative directory names, joined onto `path`; a name
-    /// that does not resolve to a directory simply contributes nothing. `exclude`
-    /// still applies, and its globs stay relative to `path`, not to the subtree —
-    /// one coordinate system for both keys.
+    /// Entries are project-relative directory names joined onto `path`; a
+    /// missing one contributes nothing. `exclude` globs stay relative to `path`,
+    /// not the subtree.
     #[serde(default)]
     pub paths: Vec<String>,
-    /// Optional: the checkout revision the gate's seeded baseline for this project
-    /// was measured at. **Absent is legal** and stays legal — an entry without it
-    /// behaves exactly as before, except the gate now says out loud that the
-    /// baseline is unpinned. The value is PRIVATE data: it may be printed to the
-    /// operator's terminal, never written into a tracked file.
+    /// Optional: checkout revision the gate's seeded baseline was measured at.
+    /// **Absent is legal** — the gate then says the baseline is unpinned. PRIVATE
+    /// data: print to the operator's terminal, never write into a tracked file.
     #[serde(default)]
     pub revision: Option<String>,
-    /// Optional per-project partition declaration (ADR-0047 §7), mapped onto the
-    /// same shape as `steins.toml [transform.partitions]`. **Parsed and validated
-    /// for shape only this slice (ADR-0047 Slice A) — it is NOT consumed by the
-    /// gate.** Slice E wires the measurement passthrough that reads it; until then
-    /// the fp-gate remains one-universe-per-package (ADR-0047 §7).
-    // Deliberately unread this slice — shape-validated passthrough only (Slice E).
-    #[allow(dead_code)]
+    /// Optional per-project partition declaration (ADR-0047 §7), mirroring
+    /// `steins.toml [transform.partitions]`. Shape-validated only this slice
+    /// (Slice A) — NOT consumed until Slice E; until then fp-gate stays
+    /// one-universe-per-package.
+    #[allow(dead_code)] // shape-validated passthrough only (Slice E)
     #[serde(default)]
     pub partitions: Option<PartitionsSpec>,
 }
 
 /// The `[project.partitions]` shape on a `corpus.local.toml` entry (ADR-0047 §7):
-/// observer globs and a `[project.partitions.sets]` name→glob-list table. This
-/// mirrors `steins.toml [transform.partitions]` but is only shape-validated here;
+/// observer globs plus a `[project.partitions.sets]` name→glob-list table.
+/// Mirrors `steins.toml [transform.partitions]`; shape-validated only here —
 /// Slice E builds the region map from it.
 #[derive(Debug, Clone, Default, Deserialize)]
 #[allow(dead_code)] // fields consumed by Slice E; shape-validated only for now.
@@ -143,18 +127,15 @@ fn read_local_at(path: &Path) -> Result<Vec<LocalProject>, String> {
     }
 }
 
-/// The revision a local project's working tree is actually sitting on, read by
-/// asking git itself (`git -C <path> rev-parse HEAD`).
+/// The revision a local project's working tree is actually sitting on
+/// (`git -C <path> rev-parse HEAD`).
 ///
-/// Everything that can go wrong degrades to `None` — "unknown" — and nothing here
-/// can fail the run: a path that is not a git checkout (git exits nonzero), a
-/// missing `git` binary or a spawn failure (`output()` is an `Err`), a detached
-/// empty repo with no commit yet, or output that is not a plain hex object name.
-/// git's stderr is captured rather than inherited, so a non-checkout does not
-/// spray noise into the gate report.
+/// Everything that can go wrong degrades to `None` — non-checkout, missing `git`
+/// binary, spawn failure, empty repo, non-hex output — nothing fails the run.
+/// stderr is captured, not inherited, so a non-checkout stays quiet.
 ///
-/// The returned sha is private data (it names a commit in a private repository):
-/// print it to the operator, never persist it into a tracked file.
+/// The returned sha is PRIVATE data: print to the operator, never persist into a
+/// tracked file.
 pub fn checkout_revision(path: &Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -173,22 +154,15 @@ pub fn checkout_revision(path: &Path) -> Option<String> {
 /// [`checkout_revision`] reports: `Some(true)` dirty, `Some(false)` clean, `None`
 /// unknown.
 ///
-/// A recorded revision matching the measured one does NOT establish that the files
-/// just measured are that revision — and on a private corpus, which is somebody's
-/// working checkout, a dirty tree is the normal state rather than an edge case.
-/// Without this, the one message whose job is to say "stop looking at the corpus,
-/// this is a regression" would be issued against a tree that is not exactly the
-/// recorded commit.
+/// A matching recorded revision does not prove the measured files ARE that
+/// revision — a dirty tree is normal on a private working checkout, not an edge
+/// case. Without this check, the "this is a regression, stop looking at the
+/// corpus" message could fire against an uncommitted tree.
 ///
-/// Asked as `git -C <path> status --porcelain`, and **any** non-empty output means
-/// dirty. Untracked content counts exactly as much as a modification: the gate
-/// walks the FILESYSTEM, not the index, so an untracked `.php` file is measured
-/// like any other. No attempt is made to be clever about which porcelain status
-/// codes matter.
-///
-/// Degrades exactly as [`checkout_revision`] does — spawn failure, missing `git`,
-/// non-zero exit all yield `None` ("unknown"), never a panic and never a changed
-/// verdict.
+/// Asked as `git -C <path> status --porcelain`; any non-empty output is dirty.
+/// Untracked content counts as much as a modification (the gate walks the
+/// filesystem, not the index). Degrades like [`checkout_revision`] — spawn
+/// failure, missing `git`, non-zero exit all yield `None`, never a panic.
 pub fn checkout_is_dirty(path: &Path) -> Option<bool> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -203,15 +177,13 @@ pub fn checkout_is_dirty(path: &Path) -> Option<bool> {
 }
 
 /// Collect every `.php` file under `root`, skipping `.git` and any path matched
-/// by an `exclude` glob. Directory subtrees whose whole contents are excluded
-/// (patterns of the form `<prefix>/**` or `**`) are pruned without descent.
+/// by an `exclude` glob. Subtrees wholly excluded (`<prefix>/**` or `**`) are
+/// pruned without descent.
 ///
-/// `subdirs` ([`LocalProject::paths`]) restricts the walk to those directories of
-/// `root` when non-empty; an **empty list walks the whole tree**, which is the
-/// behaviour every entry had before the key existed.
-///
-/// The walk carries `root` as its glob origin whichever subtree it is in, so an
-/// `exclude` pattern means the same thing under both settings.
+/// `subdirs` ([`LocalProject::paths`]) restricts the walk when non-empty; an
+/// **empty list walks the whole tree** (the pre-existing behaviour). The walk
+/// keeps `root` as glob origin either way, so `exclude` means the same thing
+/// under both settings.
 pub fn collect_php_files_in(root: &Path, subdirs: &[String], excludes: &[String]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if subdirs.is_empty() {
@@ -251,10 +223,10 @@ fn walk(root: &Path, dir: &Path, excludes: &[String], out: &mut Vec<PathBuf>) {
     }
 }
 
-/// Whether a directory subtree can be pruned wholesale: a pattern `<prefix>/**`
-/// (or the bare `**`) excludes everything beneath `<prefix>`, so if this dir *is*
-/// that prefix we skip it without walking in. Non-`**` patterns that happen to
-/// match the dir path itself also prune.
+/// Whether a directory subtree can be pruned wholesale: `<prefix>/**` (or bare
+/// `**`) excludes everything beneath `<prefix>`, so a dir matching that prefix
+/// is skipped without descent. A non-`**` pattern matching the dir itself also
+/// prunes.
 fn dir_excluded(rel: &str, excludes: &[String]) -> bool {
     excludes.iter().any(|g| {
         if g == "**" {
@@ -357,7 +329,6 @@ mod tests {
         assert_eq!(cfg.projects[0].name, "monorepo");
         assert_eq!(cfg.projects[0].path, "/abs/mono");
         assert_eq!(cfg.projects[0].exclude, vec!["cache/**", "assets-origin/**"]);
-        // Missing `exclude` defaults to empty.
         assert_eq!(cfg.projects[1].name, "plugin");
         assert!(cfg.projects[1].exclude.is_empty());
     }
@@ -378,9 +349,7 @@ mod tests {
         )
         .expect("parses");
         assert_eq!(cfg.projects[0].paths, vec!["src"]);
-        // Absent must stay legal and mean "the whole tree" — every entry written
-        // before the key existed depends on it.
-        assert!(cfg.projects[1].paths.is_empty());
+        assert!(cfg.projects[1].paths.is_empty()); // absent = whole tree
     }
 
     #[test]
@@ -400,8 +369,7 @@ mod tests {
         assert_eq!(scoped.len(), 2, "the scope drops the fixture tree: {scoped:?}");
         assert!(scoped.iter().all(|p| p.starts_with(root.join("src"))));
 
-        // A named directory that does not exist contributes nothing rather than
-        // failing the run.
+        // A directory that does not exist contributes nothing, not a failure.
         let missing = collect_php_files_in(&root, &["nope".to_owned()], &[]);
         assert!(missing.is_empty());
 
@@ -414,8 +382,8 @@ mod tests {
 
     #[test]
     fn parses_projects_with_and_without_revision() {
-        // Synthetic shas only: a real private-corpus revision must never appear in
-        // a tracked file, fixtures included.
+        // Synthetic sha only: a real private-corpus revision must never appear
+        // in a tracked file, fixtures included.
         let cfg: LocalConfig = toml::from_str(
             r#"
             [[project]]
@@ -433,14 +401,12 @@ mod tests {
             cfg.projects[0].revision.as_deref(),
             Some("0123456789abcdef0123456789abcdef01234567")
         );
-        // Absent is legal and must stay legal — an unrevisioned entry is not an error.
-        assert!(cfg.projects[1].revision.is_none());
+        assert!(cfg.projects[1].revision.is_none()); // absent is legal
     }
 
     #[test]
     fn parses_optional_partitions_passthrough_shape() {
-        // ADR-0047 Slice A: the `[project.partitions]` table is shape-validated and
-        // carried on the entry, but not consumed by the gate yet (Slice E).
+        // ADR-0047 Slice A: shape-validated and carried, not consumed until Slice E.
         let cfg: LocalConfig = toml::from_str(
             r#"
             [[project]]
@@ -484,17 +450,15 @@ mod tests {
 
     #[test]
     fn checkout_revision_of_a_non_git_path_is_unknown_not_a_failure() {
-        // The degradation contract: anything unreadable is `None` — never a panic,
-        // never a failed run. A path that does not exist is the cheapest instance.
+        // Degradation contract: unreadable is `None`, never a panic.
         let path = std::env::temp_dir().join("steins-xtask-test-no-such-checkout");
         assert!(checkout_revision(&path).is_none());
     }
 
     #[test]
     fn dirtiness_of_a_non_git_path_is_unknown_not_assumed_clean() {
-        // Same degradation contract as `checkout_revision`, and the direction
-        // matters: an unreadable tree must not read as `Some(false)`, which would
-        // let the gate assert a regression on a tree it never inspected.
+        // Direction matters: unreadable must not read as `Some(false)`, or the
+        // gate could assert a regression on a tree it never inspected.
         let path = std::env::temp_dir().join("steins-xtask-test-no-such-checkout");
         assert_eq!(checkout_is_dirty(&path), None);
     }

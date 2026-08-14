@@ -1,18 +1,11 @@
-//! The binding-presence pass (ADR-0081, issue #267): the some-paths-only reads
-//! behind `variable.maybe-undefined`.
+//! The binding-presence pass (ADR-0081, issue #267): some-paths-only reads
+//! behind `variable.maybe-undefined`. Every case is a **pair** — the firing
+//! shape and its non-firing neighbour — since the pass's whole risk is on the
+//! silent side (zero-FP: over-shield, treat unmodelled constructs as
+//! unconditional bindings, dam on `goto`; all cost recall, never a finding).
 //!
-//! Every case here is a **pair** — the shape that fires and the neighbouring
-//! spelling that must not — because this pass's whole risk is on the silent side.
-//! A claim that "some path reaching this read carries no binding" is a possibly
-//! grade finding at the `strict` floor, and the zero-FP policy is what decides
-//! every conservative choice below: over-shielding, treating an unmodelled
-//! construct as an unconditional binding, and damming outright on a `goto` all
-//! cost recall and never manufacture a finding.
-//!
-//! `crates/steins-syntax/tests/smoke.rs` pins the *definite* pass on the same
-//! scopes; the two firing sets are disjoint by construction (a name the scope
-//! binds nowhere is `variable.undefined`'s), and `disjoint_from_the_definite_leg`
-//! is where that is asserted rather than assumed.
+//! `smoke.rs` pins the *definite* pass on the same scopes; the two firing sets
+//! are disjoint by construction, asserted in `disjoint_from_the_definite_leg`.
 
 use steins_syntax::{Scope, ScopeOwner, SourceTree};
 
@@ -46,9 +39,7 @@ fn one(name: &str) -> Vec<String> {
     vec![name.to_owned()]
 }
 
-// ---------------------------------------------------------------------------
 // The some-paths shape — the id's reason to exist.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn some_paths_bind_and_some_do_not() {
@@ -79,14 +70,11 @@ fn a_literal_condition_is_not_a_branch() {
     assert_eq!(maybe("$x = 0; if (false) { $y = 1; } echo $x;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // Use before assignment — all paths unbound, yet bound later in the text.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_read_before_its_only_assignment_fires_on_the_maybe_leg() {
-    // The definite id is ordering-blind by contract, so this shape is this id's
-    // and promoting it would break that contract (ADR-0081, non-goal 1).
+    // The definite id is ordering-blind by contract; promoting this breaks that (non-goal 1).
     assert_eq!(maybe("$y = $x; $x = 1; return $y;"), one("x"));
     assert_eq!(definite("$y = $x; $x = 1; return $y;"), none());
     // Bound first: silence on both legs.
@@ -95,16 +83,13 @@ fn a_read_before_its_only_assignment_fires_on_the_maybe_leg() {
 
 #[test]
 fn within_one_statement_the_definite_pass_ordering_blindness_is_kept() {
-    // An intra-expression evaluation order this pass does not model must never
-    // manufacture a finding.
+    // An evaluation order this pass does not model must never manufacture a finding.
     assert_eq!(maybe("$a = ($b = 1) + $b; return $a;"), none());
     assert_eq!(maybe("$x = 1; $x .= 'a'; return $x;"), none());
     assert_eq!(maybe("if ($c) { $x = ''; } $x .= 'a'; return $x;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // Termination subtraction — `provably_terminates()`'s first production consumer.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_terminating_arm_drops_out_of_the_join() {
@@ -124,9 +109,7 @@ fn a_statement_after_a_terminator_is_not_judged() {
     assert_eq!(maybe("$x = 1; return $x; echo $y;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // Guard polarity — the defaulting idiom (ADR-0081 §5).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_defaulting_idiom_is_silent() {
@@ -154,9 +137,8 @@ fn a_conjunction_guards_its_right_operand() {
 
 #[test]
 fn a_statement_position_assert_refines_everything_after_it() {
-    // `assert()` is Verified evidence (ADR-0052 slice I0) and a failed enabled
-    // assertion throws, so the next statement is reached exactly when the condition
-    // held — the true-polarity continuation, and the only one.
+    // `assert()` is Verified evidence (ADR-0052 slice I0); a failed enabled
+    // assertion throws, so the next statement is reached only on the true polarity.
     assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x)); echo $x;"), none());
     assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x) && $x > 0); echo $x;"), none());
     assert_eq!(maybe("if ($c) { $x = 1; } assert(!empty($x)); echo $x;"), none());
@@ -164,8 +146,7 @@ fn a_statement_position_assert_refines_everything_after_it() {
     // A description argument asserts nothing of its own and does not disturb it.
     assert_eq!(maybe("if ($c) { $x = 1; } assert(isset($x), 'why'); echo $x;"), none());
 
-    // The other direction: `assert(!isset($x))` proves the name ABSENT on its
-    // continuation, and no polarity of this pass ever refines that way.
+    // `assert(!isset($x))` proves the name ABSENT; no polarity here refines that way.
     assert_eq!(maybe("if ($c) { $x = 1; } assert(!isset($x)); echo $x;"), one("x"));
     assert_eq!(maybe("if ($c) { $x = 1; } assert(empty($x)); echo $x;"), one("x"));
     // A different name, and an assertion about something else entirely.
@@ -177,8 +158,7 @@ fn a_statement_position_assert_refines_everything_after_it() {
 
 #[test]
 fn a_guard_over_an_offset_chain_refines_its_root() {
-    // `isset($info['subject']['commonName'])` cannot be true unless `$info` is
-    // bound, so the early-return prologue leaves the reads after it on a bound path.
+    // `isset($info[..][..])` cannot be true unless `$info` is bound, so later reads are bound.
     assert_eq!(
         maybe(
             "if ($c) { $info = [1]; } if (!isset($info['a']['b'])) { return 0; } echo $info['a']['b'];"
@@ -193,14 +173,11 @@ fn a_guard_over_an_offset_chain_refines_its_root() {
 
 #[test]
 fn no_polarity_ever_refines_toward_absence() {
-    // `isset($x)` is FALSE on a bound null, so the else-arm proves nothing — and
-    // the then-arm binding is what makes the join bound.
+    // `isset($x)` is FALSE on a bound null; only the then-arm binding makes the join bound.
     assert_eq!(maybe("if (isset($x)) { $x = 1; } else { $x = 2; } echo $x;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // Loops — the fixpoint (ADR-0081 §4).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_binding_inside_a_loop_reaches_the_exit_as_maybe() {
@@ -223,8 +200,7 @@ fn a_do_while_body_runs_at_least_once() {
 
 #[test]
 fn the_back_edge_makes_an_earlier_read_maybe_rather_than_unbound() {
-    // A prior iteration may have bound `$x`, so the read is `Maybe` — reported,
-    // but as this id and never as the definite one.
+    // A prior iteration may have bound `$x`, so the read is `Maybe`, never the definite id.
     assert_eq!(maybe("foreach ([1, 2] as $v) { echo $x; $x = 1; }"), one("x"));
     assert_eq!(definite("foreach ([1, 2] as $v) { echo $x; $x = 1; }"), none());
     // Bound before the loop: the back edge has nothing to add.
@@ -233,9 +209,8 @@ fn the_back_edge_makes_an_earlier_read_maybe_rather_than_unbound() {
 
 #[test]
 fn a_jumping_arm_does_not_reach_the_ifs_successor() {
-    // The corpus's most common shape by a wide margin: the classify-or-skip loop.
-    // The `continue` arm never reaches `use($p)`, so the join is over the two
-    // binding arms alone.
+    // The corpus's most common shape: the classify-or-skip loop. The `continue`
+    // arm never reaches `use($p)`, so the join is over the two binding arms alone.
     assert_eq!(
         maybe(
             "foreach ([1, 2] as $op) { if ($c) { $p = 1; } elseif ($d) { $p = 2; } else { continue; } echo $p; }"
@@ -246,8 +221,7 @@ fn a_jumping_arm_does_not_reach_the_ifs_successor() {
         maybe("foreach ([1, 2] as $op) { if ($c) { $p = 1; } else { break; } echo $p; }"),
         none()
     );
-    // The negative control: the same shape whose third arm falls through does
-    // reach the read, on a path that binds nothing.
+    // Negative control: the third-arm-falls-through shape reaches the read, binding nothing.
     assert_eq!(
         maybe(
             "foreach ([1, 2] as $op) { if ($c) { $p = 1; } elseif ($d) { $p = 2; } else { echo 'skip'; } echo $p; }"
@@ -258,8 +232,7 @@ fn a_jumping_arm_does_not_reach_the_ifs_successor() {
 
 #[test]
 fn a_break_state_reaches_the_loop_successor() {
-    // The only way out of a `while (true)` is the `break`, and it binds — so the
-    // read after the loop is on a bound path.
+    // The only way out of `while (true)` is `break`, and it binds, so the read after is bound.
     assert_eq!(maybe("while (true) { if ($c) { $x = 1; break; } } echo $x;"), none());
     assert_eq!(maybe("for (;;) { if ($c) { $x = 1; break; } } echo $x;"), none());
     // A second break that does NOT bind puts an unbound path back on the exit.
@@ -272,24 +245,19 @@ fn a_break_state_reaches_the_loop_successor() {
 #[test]
 fn a_continue_reaches_the_back_edge_rather_than_the_successor() {
     // The `continue` state re-enters the body, so a read before the binding is
-    // `Maybe` on the second iteration — and the loop's own exit still sees the
-    // zero-iteration path.
+    // `Maybe` on the second iteration; the loop's exit still sees zero iterations.
     assert_eq!(maybe("while ($c) { if ($d) { continue; } $x = 1; } echo $x;"), one("x"));
     // Bound before the loop, so neither edge has anything to add.
     assert_eq!(maybe("$x = 0; while ($c) { if ($d) { continue; } $x = 1; } echo $x;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // `try`/`catch`/`finally` — conservative in one direction only (ADR-0081 §4).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_catch_arm_enters_with_the_try_block_weakened() {
-    // The block may throw before `$x = f()`, so the read after an empty catch is
-    // reached on a path that carries no binding.
+    // The block may throw before `$x = f()`, so the read after an empty catch is unbound.
     assert_eq!(maybe("try { $x = g(); } catch (Throwable $e) { } echo $x;"), one("x"));
-    // The catch binds too, so every path does: silence. Weakening the
-    // normal-completion path as well would report this, which is why it is not.
+    // The catch binds too, so every path does; weakening normal completion too misreports.
     assert_eq!(maybe("try { $x = g(); } catch (Throwable $e) { $x = 0; } echo $x;"), none());
     // A terminating catch drops out of the join like any other arm.
     assert_eq!(maybe("try { $x = g(); } catch (Throwable $e) { return 0; } echo $x;"), none());
@@ -299,15 +267,13 @@ fn a_catch_arm_enters_with_the_try_block_weakened() {
 
 #[test]
 fn a_try_block_prologue_that_cannot_throw_runs_for_certain() {
-    // `$count = 0;` at the head of a `try` runs before anything can go wrong, so
-    // every path reaching the read after the construct carries the binding.
+    // `$count = 0;` heads the `try` and cannot fail, so every path after carries the binding.
     assert_eq!(
         maybe("try { $count = 0; g(); } catch (Throwable $e) { } echo $count;"),
         none()
     );
     assert_eq!(maybe("try { $out = []; g(); } catch (Throwable $e) { } echo $out;"), none());
-    // The negative control: a binding that can throw on its right-hand side is back
-    // on the "may have thrown before this" side.
+    // Negative control: a binding that can throw on its RHS is "may have thrown before this".
     assert_eq!(maybe("try { $count = g(); } catch (Throwable $e) { } echo $count;"), one("count"));
     // …and so is one that follows a statement that can throw.
     assert_eq!(
@@ -326,9 +292,7 @@ fn a_finally_binding_applies_unconditionally() {
     assert_eq!(maybe("try { g(); } catch (Throwable $e) { echo $e; } $e = 1;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // `switch` — the arm that ends in `break` still reaches the successor.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_switch_arm_ending_in_break_stays_in_the_join() {
@@ -351,15 +315,12 @@ fn a_switch_case_is_entered_directly_rather_than_fallen_into() {
     assert_eq!(maybe("switch ($c) { case 1: $x = 1; case 2: echo $x; }"), one("x"));
 }
 
-// ---------------------------------------------------------------------------
 // Unmodelled constructs read as unconditional bindings — the silent side.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn an_expression_level_branch_is_read_as_an_unconditional_binding() {
-    // `?:` and `match` are judged as leaf units in this slice, which makes a
-    // binding inside an arm unconditional. That costs recall on the line below and
-    // can never manufacture a finding — the only direction this pass may err in.
+    // `?:` and `match` are judged as leaf units here, so a binding inside an arm
+    // is unconditional — costs recall, never manufactures a finding (only that direction).
     assert_eq!(maybe("$c ? $x = 1 : null; echo $x;"), none());
     assert_eq!(maybe("match ($c) { 1 => $x = 1, default => null }; echo $x;"), none());
 }
@@ -370,9 +331,7 @@ fn a_goto_dams_the_scope() {
     assert_eq!(maybe("if ($c) { goto done; } $x = 1; done: echo $x;"), none());
 }
 
-// ---------------------------------------------------------------------------
 // Every premise inherited from the definite pass.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn disjoint_from_the_definite_leg() {
@@ -427,8 +386,7 @@ fn a_top_level_scope_and_an_arrow_body_report_nothing() {
 
 #[test]
 fn the_binding_forms_are_inherited_verbatim() {
-    // Each of these is a binding form the definite pass recognizes, and each must
-    // bind on this leg too — from the point it stands at.
+    // Each binding form the definite pass recognizes must bind on this leg too.
     for bind in [
         "global $x;",
         "static $x;",
@@ -474,9 +432,8 @@ fn a_closure_body_is_judged_as_its_own_scope() {
 
 #[test]
 fn a_function_call_argument_is_left_for_the_checker() {
-    // `preg_match($p, $s, $m)` BINDS `$m`; whether an argument is by-reference is
-    // the callee's property, so the read is recorded here and the subtraction is
-    // the checker's (ADR-0077). The candidate list must carry it.
+    // `preg_match($p, $s, $m)` BINDS `$m`; whether an arg is by-reference is the
+    // callee's property, so the read is recorded here, subtracted by the checker (ADR-0077).
     let scope = scope_of("if ($c) { $m = []; } preg_match('/a/', 'b', $m); echo $m;");
     assert!(
         scope.ref_arg_candidates.iter().any(|r| r.name == "m"),

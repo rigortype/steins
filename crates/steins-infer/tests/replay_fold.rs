@@ -1,21 +1,17 @@
 //! The replay transport (ADR-0066, issue #64): a [`TableFolder`] answers from a
-//! supplied table and records what it could not answer, so the sidecar surface is
-//! reachable where no process can be spawned.
+//! supplied table and records what it can't answer as `pending`, deduped and in
+//! first-occurrence order, so the sidecar surface is reachable where no process
+//! can be spawned. A miss never fabricates — it's exactly a dead sidecar's widen.
 //!
-//! Three things are pinned here.
+//! `EngineFolder` holds the SHARED ADR-0056 admission policy over any transport,
+//! so these tests drive the real gate sequence through a fake engine (version pin
+//! §2, issue-#64 integer-width pin) and get the same verdicts the native folder
+//! would give.
 //!
-//! 1. **Table semantics** — a hit parses through the shared wire parsers; a miss
-//!    declines and lands on `pending`, deduped and in first-occurrence order. A
-//!    miss never fabricates: an unanswered fold is exactly a dead sidecar's widen.
-//! 2. **The gates are the SHARED gates.** `EngineFolder` holds the policy once,
-//!    over any transport, so these tests drive the real ADR-0056 admission
-//!    sequence through a fake engine — the version pin (§2) and the issue-#64
-//!    integer-width pin — and get the same verdicts the native folder would give.
-//! 3. **The differential oracle.** A replay run driven to its fixpoint by a REAL
-//!    [`Sidecar`] answering each pending request verbatim produces the same
-//!    findings as a direct `SidecarFolder` run. That is the acceptance property:
-//!    fold answers come from one dispatch core, and the replay path is a transport
-//!    change, not a semantics change.
+//! The differential oracle: a replay run driven to fixpoint by a REAL [`Sidecar`]
+//! answering each pending request verbatim produces the same findings as a direct
+//! `SidecarFolder` run — fold answers come from one dispatch core, and replay is a
+//! transport change, not a semantics change.
 
 use std::collections::HashMap;
 
@@ -94,13 +90,9 @@ fn a_table_hit_answers_the_fold() {
 }
 
 /// An array answer rides the replay transport unchanged (ADR-0028's 2026-08-14
-/// amendment, issue #330): the browser runs the same `runner.php` text through
-/// php-wasm and its reply lands in the answer table verbatim, so the envelope this
-/// table spells is the envelope that transport produces.
-///
-/// The amendment's §6 is what makes that safe to assume — the runner is embedded
-/// via `include_str!` and the table is built live in the session, so there is no
-/// pairing of an old encoder with a new decoder anywhere in the system.
+/// amendment §6, issue #330): the runner is embedded via `include_str!` and the
+/// table is built live in-session, so there is no pairing of an old encoder with a
+/// new decoder anywhere in the system.
 #[test]
 fn a_table_hit_answers_a_fold_with_an_array() {
     let mut t = pinned_env_table();
@@ -131,10 +123,9 @@ fn a_table_hit_answers_a_fold_with_an_array() {
     assert!(folder.pending().is_empty(), "a fully-answered run has nothing pending");
 }
 
-/// A malformed array answer is a **widen**, not a panic. The `null` key is the
-/// argument direction's absent-key spelling, which a materialized result cannot
-/// have; the replay transport is exactly where a stale or hand-edited answer table
-/// could put one, so the decline is pinned on this transport specifically.
+/// A malformed array answer is a WIDEN, not a panic: `null` is the argument
+/// direction's absent-key spelling, which a materialized result can't have — a
+/// stale or hand-edited answer table is exactly where this could show up.
 #[test]
 fn a_malformed_array_answer_widens_rather_than_panicking() {
     let mut t = pinned_env_table();
@@ -156,8 +147,7 @@ fn a_malformed_array_answer_widens_rather_than_panicking() {
         ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str("aa".into()))]),
     ];
     assert_eq!(folder.fold("str_replace", &args), None, "a malformed answer widens");
-    // Answered-with-garbage is settled, not pending: re-asking would replay the
-    // same malformed reply forever.
+    // Settled, not pending: re-asking would replay the same malformed reply forever.
     assert!(folder.pending().is_empty(), "the question was answered, badly");
 }
 
@@ -167,8 +157,8 @@ fn a_table_miss_declines_and_records_the_request() {
     assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())]), None);
     let pending = folder.take_pending();
     assert_eq!(pending.len(), 1, "one miss: {pending:?}");
-    // The pending key IS the request, minus its framing id — everything the
-    // answering side needs, and byte-identical to what the table wants back.
+    // The pending key IS the request minus its framing id — byte-identical to
+    // what the table wants back.
     let req: serde_json::Value = serde_json::from_str(&pending[0]).expect("key parses as JSON");
     assert_eq!(req["method"], "fold");
     assert_eq!(req["params"]["function"], "strtoupper");
@@ -178,10 +168,9 @@ fn a_table_miss_declines_and_records_the_request() {
 
 #[test]
 fn an_empty_table_asks_about_the_engine_before_it_asks_for_a_fold() {
-    // The integer-width gate (issue #64) is consulted first, so the very first
-    // iteration of a replay loop reports the `env` question and nothing else.
-    // This is not a wasted round trip: it is the gate refusing to dispatch a
-    // value question to an engine whose arithmetic it has not established.
+    // The integer-width gate (issue #64) is consulted first: the very first replay
+    // iteration reports only the `env` question — not a wasted round trip, but the
+    // gate refusing to dispatch before arithmetic is established.
     let mut folder = TableFolder::with_table(Table::new());
     assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())]), None);
     assert_eq!(folder.take_pending(), vec![request_key("env", &env_params())]);
@@ -239,9 +228,8 @@ fn reflect_drives_the_builtin_return_fact() {
     assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
 }
 
-/// Issue #76: the arity second leg reaches the **replay** transport through the
-/// same `reflect` table entry the declaration comes from — no new wire method, so
-/// the browser lane needs nothing beyond the runner it already ships.
+/// Issue #76: the arity leg reaches the REPLAY transport through the same
+/// `reflect` entry the declaration comes from — no new wire method needed.
 #[test]
 fn reflect_drives_the_parameter_counts_over_the_replay_transport() {
     let mut t = pinned_env_table();
@@ -258,8 +246,7 @@ fn reflect_drives_the_parameter_counts_over_the_replay_transport() {
             "params_required": 2,
         }),
     );
-    // A legacy row with no arity still answers the declaration, but withholds
-    // arity-pinned rules.
+    // A legacy row with no arity still answers the declaration but withholds arity rules.
     with_reflect(&mut t, "strlen", fn_reflection("strlen", "int"));
     let mut folder = TableFolder::with_table(t);
     assert_eq!(folder.builtin_param_counts("substr"), Some((3, 2)));
@@ -271,14 +258,14 @@ fn reflect_drives_the_parameter_counts_over_the_replay_transport() {
     assert!(folder.pending().is_empty());
 }
 
-/// The gate the arity surface inherits: without a live engine (`env` unanswered)
-/// nothing is reflected at all, so the counts are silent too.
+/// The gate the arity surface inherits: without a live `env`, nothing reflects,
+/// so counts are silent too.
 #[test]
 fn the_parameter_counts_are_withheld_without_a_live_engine() {
     let engine = FakeEngine::new("8.5.8", Some(8)).with_arity("substr", "string", 3, 2);
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(folder.builtin_param_counts("substr"), Some((3, 2)));
-    // A monkey-patch extension voids the whole surface (ADR-0049 A9) — a redefined
+    // A monkey-patch extension voids the whole surface too (ADR-0049 A9): a redefined
     // builtin disowns its signature exactly as it disowns its declared type.
     let mut engine = FakeEngine::new("8.5.8", Some(8)).with_arity("substr", "string", 3, 2);
     engine.env.as_mut().expect("env").extensions.push("uopz".to_owned());
@@ -295,8 +282,7 @@ struct FakeEngine {
     env: Option<EnvInfo>,
     reflections: HashMap<String, Reflection>,
     folds: HashMap<String, FoldResult>,
-    /// Every fold the policy actually dispatched — the observable for the gate
-    /// that must refuse *before* the engine is touched.
+    /// Every fold the policy dispatched — proves a gate refused *before* the engine.
     dispatched: Vec<String>,
 }
 
@@ -324,9 +310,8 @@ impl FakeEngine {
                 class_like_exists: false,
                 return_type: Some(return_type.to_owned()),
                 return_type_tentative: false,
-                // No arity: an engine that answers a declaration but no parameter
-                // counts is exactly the old-runner case, and the mixed-pinned rules
-                // must withhold on it.
+                // No arity: a declaration with no parameter counts is the old-runner
+                // case, on which the arity-pinned rules must withhold.
                 params_total: None,
                 params_required: None,
             },
@@ -360,18 +345,16 @@ impl FoldEngine for FakeEngine {
         self.dispatched.push(name.to_owned());
         self.folds.get(name).cloned().unwrap_or_else(|| FoldResult::widen("unknown"))
     }
-    /// The fake models no PCRE (ADR-0078): declining is the sound answer for a
-    /// transport that cannot answer, and this file's subject is the replay loop.
+    /// The fake models no PCRE (ADR-0078); out of scope — this file's subject is the
+    /// replay loop, not `preg_compile`.
     fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {
         None
     }
-    /// Likewise the constant-existence oracle (issue #198): declining is the sound
-    /// answer for a transport whose subject is the replay loop, not constants.
+    /// Likewise out of scope (issue #198): this file's subject is the replay loop.
     fn constant_defined(&mut self, _name: &str) -> Option<steins_sidecar::ConstantDefined> {
         None
     }
-    /// And the class world (issue #269): the replay loop is this file's subject, and
-    /// the `TableEngine` — not this fake — is what carries `reflect_class` through it.
+    /// And the class world (issue #269): `TableEngine`, not this fake, carries `reflect_class`.
     fn reflect_class(&mut self, _target: &str) -> Option<steins_sidecar::ClassReflection> {
         None
     }
@@ -385,34 +368,31 @@ fn fact_base_of(f: &Fact) -> Option<Base> {
 }
 
 /// ADR-0056 Gate 2, version leg: a non-pinned minor declines the CURATED row and
-/// still seeds the reflected envelope. The engine's own declaration is
-/// version-correct by construction; only the curated refinement is pinned.
+/// still seeds the reflected envelope (the engine's own declaration is
+/// version-correct by construction; only the curated refinement is pinned).
 #[test]
 fn a_non_pinned_minor_declines_the_curated_row_and_still_seeds_the_envelope() {
     let engine = FakeEngine::new("8.3.7", Some(8)).with_function("strlen", "int");
     let mut folder = EngineFolder::with_engine(engine);
     let fact = folder.builtin_return_fact("strlen").expect("the envelope still seeds");
     assert_eq!(fact, Fact::General { base: Base::Int, nullable: false }, "envelope alone: {fact:?}");
-    // And the pin admits at the pinned minor, so this is a real gate, not a
-    // fact that never refines.
+    // The pin admits at the pinned minor, so this is a real gate, not a fact that never refines.
     let engine = FakeEngine::new("8.5.2", Some(8)).with_function("strlen", "int");
     let mut folder = EngineFolder::with_engine(engine);
     let pinned = folder.builtin_return_fact("strlen").expect("a seeded fact");
     assert!(matches!(pinned, Fact::Refined { .. }), "refined at the pin: {pinned:?}");
 }
 
-/// ADR-0056 Gate 2, machine leg (issue #64): php-wasm 0.1.0 is PHP **8.5.2** —
-/// the pinned minor, which the version leg above admits — built **32-bit**. The
-/// curated rows are verified against the 64-bit engine at that minor, and a
-/// narrow one can violate them (`hexdec` promoting to float where the row says
-/// int), so the width declines the refinement. The envelope still seeds: a
-/// declared return type is a platform-independent claim.
+/// ADR-0056 Gate 2, machine leg (issue #64): php-wasm 0.1.0 is PHP **8.5.2** (the
+/// pinned minor) built **32-bit**. Curated rows are verified against the 64-bit
+/// engine at that minor and a narrow one can violate them (`hexdec` promoting to
+/// float where the row says int), so width declines the refinement while the
+/// envelope still seeds (a declared return type is platform-independent).
 ///
-/// S1.5 deliberately does NOT relax this leg. The fold lane gained a width-safe
-/// subset because a fold is a claim about one argument tuple, which a range guard
-/// can bound; a curated row is a claim about a builtin's whole return domain, and
-/// there is no per-call tuple to bound it with. `strlen` is on the width-safe fold
-/// subset and its curated row still declines here — that contrast IS the pin.
+/// S1.5 deliberately does NOT relax this leg: a fold is a claim about one argument
+/// tuple, which a range guard can bound, but a curated row claims a builtin's
+/// WHOLE return domain with no per-call tuple to bound it. `strlen` is width-safe
+/// for the fold lane yet its curated row still declines here — that contrast IS the pin.
 #[test]
 fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds() {
     let engine = FakeEngine::new("8.5.2", Some(4)).with_function("strlen", "int");
@@ -421,14 +401,13 @@ fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds(
     assert_eq!(fact, Fact::General { base: Base::Int, nullable: false }, "envelope alone: {fact:?}");
     // The raw reflected declaration is unaffected by the width, too.
     assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
-    // …and `strlen` IS width-safe for the fold lane, on the same folder, at the
-    // same width. The two gates are genuinely independent.
+    // …and `strlen` IS width-safe for the fold lane, same folder, same width — the
+    // two gates are genuinely independent.
     assert!(steins_catalog::width_safe("strlen"));
 }
 
 /// The width-safe subset over the REPLAY transport, end to end: a 32-bit table
-/// answers a `strtoupper` fold, and the browser's engine is the one that answered
-/// it. This is what S2 will see in the playground.
+/// answers a `strtoupper` fold — this is what S2 will see in the playground.
 #[test]
 fn the_replay_transport_folds_the_width_safe_subset_on_a_32_bit_table() {
     let mut t = Table::new();
@@ -450,25 +429,22 @@ fn the_replay_transport_folds_the_width_safe_subset_on_a_32_bit_table() {
         folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
         Some(ArgValue::Str("AB".into()))
     );
-    // The refused name declines even though the table HAS the (wrong) answer —
-    // the gate is upstream of the table, so a saturated 32-bit literal cannot
-    // reach a proof by being pre-answered.
+    // The refused name declines even though the table HAS the (wrong) answer — the
+    // gate is upstream of the table, so a pre-answered saturated literal can't win.
     assert_eq!(folder.fold("intval", &[ArgValue::Str("3000000000".into())]), None);
     assert!(folder.pending().is_empty(), "a refused fold asks nothing: {:?}", folder.pending());
 }
 
-/// The fold lane's width gate, refused leg (issue #64 S1.5): a builtin the
-/// catalog does NOT certify width-safe folds nothing on a 32-bit engine, and is
-/// not even dispatched to — not even with innocent arguments. `intval` is the
-/// refusal's own worst case: `intval("3000000000")` is `3000000000` on a 64-bit
-/// engine and the saturated `2147483647` on a 32-bit one, silently.
+/// The fold lane's width gate, refused leg (issue #64 S1.5): a builtin the catalog
+/// does NOT certify width-safe folds nothing on a 32-bit engine and isn't even
+/// dispatched to. `intval` is the refusal's worst case: `intval("3000000000")` is
+/// `3000000000` on 64-bit but the silently-saturated `2147483647` on 32-bit.
 #[test]
 fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
     let engine = FakeEngine::new("8.5.2", Some(4))
         .with_fold("intval", FoldResult::Value(steins_sidecar::FoldValue::Int(7)));
     let mut folder = EngineFolder::with_engine(engine);
-    // Innocent arguments — every integer in range, nothing suspicious about the
-    // call. The refusal is per-NAME and the arguments cannot buy it back.
+    // Innocent, in-range arguments: the refusal is per-NAME, arguments can't buy it back.
     assert_eq!(folder.fold("intval", &[ArgValue::Str("7".into())]), None);
     assert!(
         folder.engine_mut().dispatched.is_empty(),
@@ -480,21 +456,16 @@ fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
 }
 
 /// The **unverified** leg of the same gate (ADR-0028's 2026-08-14 amendment §4,
-/// issue #330): a name whose width nobody has measured declines on a 32-bit
-/// engine exactly as a refused one does, and folds at width 8.
-///
-/// This is the browser-parity pin, and it needs no php-wasm to state: php-wasm
-/// 0.1.0 reports `PHP_INT_SIZE = 4`, so the first half below IS what the
-/// playground does with an all-literal `explode`. The point of the fixture is
-/// that no code was added to make it happen — the gate asks
-/// `steins_catalog::width_safe`, `explode` is not certified, and a third catalog
-/// class that changes only the *evidence* changes nothing here. If the gate ever
-/// grows a case per class, this pair is what catches it.
+/// issue #330): a name whose width nobody has measured declines on a 32-bit engine
+/// exactly as a refused one does, and folds at width 8. This is the browser-parity
+/// pin (php-wasm 0.1.0 reports `PHP_INT_SIZE = 4`, so the first half below IS what
+/// the playground does with an all-literal `explode`) — no code was added to make
+/// it happen, the gate just asks `steins_catalog::width_safe` and `explode` isn't
+/// certified. If the gate ever grows a case per class, this pair catches it.
 #[test]
 fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
     use steins_sidecar::{FoldKey, FoldValue};
-    /// `explode(',', 'a,b')` — the engine's answer, spelled once for both widths
-    /// so the two halves differ only in the reported machine.
+    /// `explode(',', 'a,b')`, spelled once so the two halves differ only by machine.
     fn pieces() -> FoldResult {
         FoldResult::Value(FoldValue::Array(vec![
             (FoldKey::Int(0), FoldValue::Str("a".to_owned())),
@@ -508,9 +479,8 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
         "the fixture is about the unverified class, not the refused one",
     );
 
-    // php-wasm's machine. Every argument is a string — the range guard has no
-    // integer to reject — so the decline is the NAME's, and it is refused before
-    // the engine is touched.
+    // php-wasm's machine: every argument is a string (no integer for the range
+    // guard to reject), so the decline is the NAME's, refused before the engine is touched.
     let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(folder.fold("explode", &args), None);
@@ -520,9 +490,8 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
         folder.engine_mut().dispatched
     );
 
-    // The same call, the same table, on a proven 64-bit engine: it folds, and the
-    // array result comes back. So the decline above is the width and not a
-    // missing answer or a broken array path.
+    // The same call and table on a proven 64-bit engine folds: the decline above
+    // is the width, not a missing answer or a broken array path.
     let engine = FakeEngine::new("8.5.8", Some(8)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
@@ -535,10 +504,9 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
     assert_eq!(folder.engine_mut().dispatched, vec!["explode".to_owned()]);
 }
 
-/// The same pair over the REPLAY transport, which is the one the browser
-/// actually runs (ADR-0066): a 32-bit table holding the *right* answer still
-/// folds nothing, and asks nothing — the gate is upstream of the table, so an
-/// unverified name cannot be talked into folding by pre-answering it.
+/// The same pair over the REPLAY transport, the one the browser actually runs
+/// (ADR-0066): a 32-bit table holding the *right* answer still folds and asks
+/// nothing — the gate is upstream, so an unverified name can't be pre-answered into folding.
 #[test]
 fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     let fold_answer = serde_json::json!({
@@ -558,8 +526,7 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     );
     assert!(folder.pending().is_empty(), "a declined fold asks nothing: {:?}", folder.pending());
 
-    // …and the identical table with `int_size: 8` folds it, so the table is not
-    // the thing that was wrong.
+    // …and the identical table with `int_size: 8` folds it — the table wasn't the problem.
     let mut t = Table::new();
     with_env(&mut t, "8.5.8", 8);
     with_fold(&mut t, "explode", &args, fold_answer);
@@ -574,20 +541,17 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
 }
 
 /// **The rung survives as the floor**, end to end, on the machine the browser
-/// actually has (ADR-0028's 2026-08-14 amendment §5).
+/// actually has (ADR-0028's 2026-08-14 amendment §5) — the case no local sidecar
+/// can produce, deciding whether admitting `explode` cost anything. On a 32-bit
+/// engine the fold declines (unverified row), but reflection isn't width-gated, so
+/// the type-level rung `explode_transfer` still runs and answers
+/// `non-empty-list<string>`; the fold shadows it on the all-literal 64-bit path
+/// and removes it nowhere.
 ///
-/// This is the case no local sidecar can produce, and the one that decides whether
-/// admitting `explode` cost anything. On a 32-bit engine the fold declines — the
-/// row is unverified — but reflection is not width-gated, so the type-level rung
-/// `explode_transfer` has always had still runs and still answers
-/// `non-empty-list<string>`. The fold shadows that rung on the all-literal 64-bit
-/// path and removes it nowhere.
-///
-/// The reflect answer is load-bearing rather than decoration: the rung is admitted
-/// only when the engine's declaration matches the one it was written against
-/// (`array`, ADR-0061's independent-implementation cross-check), so a table without
-/// it would fall to the ADR-0069 declared floor and this fixture would be pinning
-/// the wrong rung.
+/// The reflect answer is load-bearing, not decoration: the rung is admitted only
+/// when the engine's declaration matches the one it was written against (`array`,
+/// ADR-0061's cross-check), else it falls to the ADR-0069 declared floor and this
+/// fixture would pin the wrong rung.
 #[test]
 fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
     const SRC: &str = "<?php\n\\PHPStan\\dumpType(explode(\",\", \"a,b,c\"));\n";
@@ -631,8 +595,8 @@ fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
 
 /// The fold lane's width gate, ADMITTED leg (issue #64 S1.5): a verified
 /// width-safe builtin over in-range arguments folds on a 32-bit engine and IS
-/// dispatched to. Without this the width tests would all be satisfied by a lane
-/// that folds nothing at all.
+/// dispatched to — without this, the width tests would all pass on a lane that
+/// folds nothing at all.
 #[test]
 fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
     let engine = FakeEngine::new("8.5.2", Some(4))
@@ -645,10 +609,9 @@ fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
 }
 
-/// The range guard reaches array KEYS, recursively. `count` is width-safe, every
-/// *value* here is in range, and the one out-of-range integer is a key two levels
-/// down — which is exactly where it matters, because the key is what PHP's
-/// next-int rule reads to decide whether the sibling is a new element.
+/// The range guard reaches array KEYS, recursively: every *value* here is in
+/// range, and the one out-of-range integer is a key two levels down — where it
+/// matters, since the key is what PHP's next-int rule reads.
 #[test]
 fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
     use steins_syntax::ArrayKey;
@@ -667,8 +630,7 @@ fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
         "an out-of-range key is refused before dispatch: {:?}",
         folder.engine_mut().dispatched
     );
-    // The SAME shape one below the boundary folds, so the guard is a boundary and
-    // not a blanket refusal of nested arrays.
+    // The SAME shape one below the boundary folds: a boundary, not a blanket refusal.
     let ok_nested = ArgValue::Array(vec![
         (ArrayKey::Auto, ArgValue::Int(1)),
         (ArrayKey::Int(2_147_483_647), ArgValue::Str("a".into())),
@@ -683,9 +645,9 @@ fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
     assert_eq!(folder.engine_mut().dispatched, vec!["count".to_owned()]);
 }
 
-/// `-2^31` is excluded even though it is a legal 32-bit integer: it is the one
-/// value whose magnitude the machine cannot represent, and excluding it is what
-/// makes the `abs`-shaped boundary flip unreachable rather than merely unobserved.
+/// `-2^31` is excluded despite being a legal 32-bit integer: its magnitude is
+/// unrepresentable, which makes the `abs`-shaped boundary flip unreachable, not
+/// merely unobserved.
 #[test]
 fn the_range_guard_excludes_php_int_min_on_a_32_bit_machine() {
     for (arg, expected) in [(-2_147_483_648_i64, None), (-2_147_483_647_i64, Some(0_usize))] {
@@ -698,10 +660,9 @@ fn the_range_guard_excludes_php_int_min_on_a_32_bit_machine() {
     }
 }
 
-/// An engine that does not report its width is not provably 64-bit, so the fold
-/// lane declines — INCLUDING the width-safe subset. Default-deny: an old or
-/// foreign runner is unknown, not assumed, and the subset is verified against a
-/// specific machine rather than against "not 64-bit".
+/// An engine that doesn't report its width isn't provably 64-bit, so the fold lane
+/// declines — INCLUDING the width-safe subset (default-deny: an old or foreign
+/// runner is unknown, not assumed; the subset is verified against a specific machine).
 #[test]
 fn an_unreported_width_declines_even_the_width_safe_subset() {
     let engine = FakeEngine::new("8.5.2", None)
@@ -711,9 +672,8 @@ fn an_unreported_width_declines_even_the_width_safe_subset() {
     assert!(folder.engine_mut().dispatched.is_empty());
 }
 
-/// The 64-bit control for the tests above: same fake engine, width 8, and
-/// everything flows. Without this the width tests could be passing for the wrong
-/// reason.
+/// The 64-bit control for the tests above: same fake engine, width 8, everything
+/// flows — without this the width tests could pass for the wrong reason.
 #[test]
 fn a_64_bit_engine_folds_normally() {
     let engine = FakeEngine::new("8.5.2", Some(8))
@@ -726,10 +686,10 @@ fn a_64_bit_engine_folds_normally() {
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
 }
 
-/// The 64-bit control for S1.5 specifically: at width 8 NEITHER new leg applies —
-/// a width-refused name folds, and so does an argument far outside the 32-bit
-/// range. The subset is a relaxation of the 32-bit decline, not a new restriction
-/// on the machine every native run and every corpus gate uses.
+/// The 64-bit control for S1.5: at width 8 NEITHER new leg applies — a
+/// width-refused name folds, and so does an argument far outside 32-bit range.
+/// The subset relaxes the 32-bit decline; it's not a new restriction on the
+/// machine every native run and corpus gate uses.
 #[test]
 fn a_64_bit_engine_is_untouched_by_the_width_safe_subset() {
     let engine = FakeEngine::new("8.5.2", Some(8))
@@ -763,11 +723,10 @@ const FLAGSHIP: &str = "<?php\n\
 const STRTOUPPER: &str = "<?php\n$x = strtoupper(\"ab\");\n\\PHPStan\\dumpType($x);\n";
 
 /// The replay loop, in test form — the native twin of the JS loop S2 will write.
-///
 /// Each iteration builds a FRESH folder over the accumulated table, runs the
-/// analysis, and answers every pending request by handing it VERBATIM to a real
-/// sidecar. The answered set strictly grows, so this terminates; the cap is
-/// defensive and its exhaustion is a failure, not a degradation.
+/// analysis, and answers every pending request VERBATIM via a real sidecar. The
+/// answered set strictly grows, so this terminates; the cap is defensive, and its
+/// exhaustion is a failure, not a degradation.
 fn replay<T>(
     sidecar: &mut Sidecar,
     mut run: impl FnMut(&mut TableFolder) -> T,
@@ -808,10 +767,10 @@ fn findings_with(src: &str, folder: &mut dyn Folder) -> Vec<Diagnostic> {
     check_with(&tree, &functions, "test.php", folder)
 }
 
-/// The acceptance pin: a replay run driven to its fixpoint by a real sidecar
-/// answering each pending request verbatim produces EXACTLY the findings a direct
-/// `SidecarFolder` run produces. Fold answers come from the same `steins_handle`
-/// dispatch — the replay path is a transport, not a second semantics.
+/// The acceptance pin: a replay run driven to fixpoint by a real sidecar answering
+/// each pending request verbatim produces EXACTLY the findings a direct
+/// `SidecarFolder` run does — fold answers share one `steins_handle` dispatch, so
+/// replay is a transport, not a second semantics.
 #[test]
 fn replay_and_direct_runs_agree_on_the_findings() {
     let Some(mut sidecar) = spawn_or_skip("replay_and_direct_runs_agree_on_the_findings") else {
@@ -827,8 +786,8 @@ fn replay_and_direct_runs_agree_on_the_findings() {
 }
 
 /// The flagship VALUE, not merely agreement: `dumpType(greet(2, "World"))`
-/// inlines to `'Hello, World! Hello, World! '` through the replay transport.
-/// (Agreement alone would also be satisfied by both paths folding nothing.)
+/// inlines to `'Hello, World! Hello, World! '` (agreement alone would also be
+/// satisfied by both paths folding nothing).
 #[test]
 fn the_flagship_inlines_through_the_replay_transport() {
     let Some(mut sidecar) = spawn_or_skip("the_flagship_inlines_through_the_replay_transport") else {
@@ -871,8 +830,7 @@ fn replay_and_direct_runs_agree_on_the_annotations() {
 }
 
 /// The native runner reports a 64-bit engine, so the width gate is a no-op on the
-/// path every existing test and gate runs — the addition cannot have quietly
-/// silenced the native fold lane.
+/// path every existing test runs — it can't have quietly silenced the native fold lane.
 #[test]
 fn the_native_engine_reports_a_64_bit_machine() {
     let Some(mut sidecar) = spawn_or_skip("the_native_engine_reports_a_64_bit_machine") else {

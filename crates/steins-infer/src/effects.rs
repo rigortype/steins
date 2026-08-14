@@ -1,42 +1,33 @@
 //! The per-declaration effect sweep the `effects-envelope` transform consumes
-//! (issue #303 / ADR-0082 §7): the narrow seam the transform engine
-//! (`steins-edit`) reaches into for the effect system's per-declaration verdicts,
-//! exactly as [`crate::escapes`] exposes the throw system's.
-//!
-//! The sweep reuses the checker's own effect fixpoint rather than forking it, runs
-//! it **once** for the whole project, and returns plain data keyed the way the
-//! transform enumerates declarations. Candidate enumeration, refusal assembly and
-//! the edit mechanics stay in the transform crate.
+//! (issue #303 / ADR-0082 §7): the seam `steins-edit` reaches into for the effect
+//! system's per-declaration verdicts, as [`crate::escapes`] exposes the throw
+//! system's. Reuses the checker's own effect fixpoint, runs it **once** for the
+//! whole project, and returns plain data; the transform crate owns candidate
+//! enumeration, refusal assembly, and edit mechanics.
 //!
 //! ## What a declaration's entry means
 //!
 //! [`DeclEffects`] is the two-lane ADR-0067 answer, unflattened:
 //! [`labels`](DeclEffects::labels) is what inference **proved**,
-//! [`declared`](DeclEffects::declared) is what a declaration merely **bounds** (an
-//! envelope imported at an interface-typed receiver, a plugin coloring), and
-//! [`exhaustive`](DeclEffects::exhaustive) says whether every call resolved. A writer
-//! of declarations needs all three: the union of the two lanes is the bound it may
-//! claim, and a non-exhaustive summary is not a bound at all — there may be
-//! effects nothing proved, so ADR-0082 §7 writes **nothing** for it.
+//! [`declared`](DeclEffects::declared) is what a declaration merely **bounds**
+//! (an imported envelope, a plugin coloring), and
+//! [`exhaustive`](DeclEffects::exhaustive) says whether every call resolved. A
+//! writer needs all three: the union of the two lanes is the claimable bound,
+//! and a non-exhaustive summary is not a bound at all, so ADR-0082 §7 writes
+//! **nothing** for it. Unlike [`crate::EffectSummary`], the declared lane here
+//! is *raw* (a writer normalizes the two lanes together — [`DeclEffects::bound`]).
 //!
-//! Unlike [`crate::EffectSummary`], the declared lane here is *raw*: the summary
-//! drops a declared label the proven lane already covers because that is a display
-//! rule for a margin, while a writer normalizes the two lanes together — see
-//! [`DeclEffects::bound`].
-//!
-//! Every non-abstract declaration in the project gets an entry, including the ones
-//! with nothing to say (`{}`, exhaustive). The transform decides what is a
-//! candidate; a *missing* entry would make "proven pure" and "never analyzed"
-//! indistinguishable, and the class-level tag of ADR-0082 §7 turns on exactly that
-//! distinction.
+//! Every non-abstract declaration gets an entry, including `{}` exhaustive ones —
+//! a *missing* entry would make "proven pure" and "never analyzed"
+//! indistinguishable, which the class-level tag of ADR-0082 §7 turns on.
 //!
 //! ## Reading what is already written
 //!
-//! A writer also has to read: it must not touch a docblock whose tag it cannot
-//! interpret. [`existing_envelope`] is that reader, and it is the **checker's own**
-//! classification — the private `interop_tag` behind ADR-0082's read path, exposed
-//! here rather than re-implemented, so the transform and the analyzer agree on
-//! what a tag says down to the owner's unknown-label ruling.
+//! A writer must not touch a docblock whose tag it cannot interpret.
+//! [`existing_envelope`] is that reader: the checker's own classification (the
+//! private `interop_tag` behind ADR-0082's read path), exposed rather than
+//! re-implemented, so transform and analyzer agree to the owner's unknown-label
+//! ruling.
 
 use std::collections::HashMap;
 
@@ -51,8 +42,8 @@ pub struct DeclEffects {
     /// The **proven** effect labels (ADR-0018 dot-paths), sorted and deduped.
     pub labels: Vec<String>,
     /// The **declared** effect labels bounding calls the body makes (ADR-0067),
-    /// sorted and deduped. Never a proof: a non-empty set means some call was
-    /// answered by a contract rather than by inference.
+    /// sorted and deduped. Never a proof: non-empty means some call was answered
+    /// by a contract rather than by inference.
     pub declared: Vec<String>,
     /// Whether every call the body makes resolved. `false` means some callee is
     /// unanalyzable — the declaration *may* have effects nothing proved.
@@ -61,26 +52,20 @@ pub struct DeclEffects {
 
 impl DeclEffects {
     /// The declaration's **normalized bound**: the two lanes unioned, then reduced
-    /// by prefix subsumption ([`normalize_labels`]).
-    ///
-    /// This is the upper bound a written envelope claims. Unioning is what makes it
-    /// an upper bound rather than a description: a call answered only by a declared
-    /// `io` may perform any `io`, so the writer must claim `io` too.
+    /// by prefix subsumption ([`normalize_labels`]) — the upper bound a written
+    /// envelope claims. Unioning makes it a bound, not a description: a call
+    /// answered only by a declared `io` may perform any `io`.
     #[must_use]
     pub fn bound(&self) -> Vec<String> {
         normalize_labels(self.labels.iter().chain(self.declared.iter()).cloned())
     }
 }
 
-/// Reduce a label multiset to its **normal form**: sorted, deduplicated, and with
-/// every label some *other* member already subsumes dropped (ADR-0018 segment-aware
-/// prefix subsumption, [`steins_catalog::subsumes`]).
-///
-/// `{io.fs.read, io.fs}` normalizes to `{io.fs}` — the bound is the same set of
-/// admissible effects either way, and the shorter spelling is the one a reader can
-/// check at a glance. Sorting is lexicographic, matching the order `annotate`
-/// prints an effect set in, so one vocabulary reads the same in the margin and in a
-/// written tag.
+/// Reduce a label multiset to its **normal form**: sorted, deduplicated, with
+/// every label some *other* member already subsumes dropped (ADR-0018
+/// segment-aware prefix subsumption, [`steins_catalog::subsumes`]). E.g.
+/// `{io.fs.read, io.fs}` → `{io.fs}`. Sorting is lexicographic, matching
+/// `annotate`'s print order, so margin and written tag share one vocabulary.
 #[must_use]
 pub fn normalize_labels(labels: impl IntoIterator<Item = String>) -> Vec<String> {
     let mut out: Vec<String> = labels.into_iter().collect();
@@ -94,10 +79,9 @@ pub fn normalize_labels(labels: impl IntoIterator<Item = String>) -> Vec<String>
 }
 
 /// The whole-project effect sweep the `effects-envelope` planner consumes. Free
-/// functions key by their lowercase-normalized FQN
-/// ([`steins_syntax::FunctionDecl::fqn`]); methods by the `(class_fqn, method)`
-/// pair, both ASCII-lowercased (the [`crate::promote::MethodKey`] convention, and
-/// [`crate::escapes::EscapeSweep`]'s).
+/// functions key by lowercase-normalized FQN ([`steins_syntax::FunctionDecl::fqn`]);
+/// methods by `(class_fqn, method)`, both ASCII-lowercased (the
+/// [`crate::promote::MethodKey`] convention, and [`crate::escapes::EscapeSweep`]'s).
 #[derive(Debug, Clone, Default)]
 pub struct EffectSweep {
     pub functions: HashMap<String, DeclEffects>,
@@ -149,38 +133,33 @@ fn decl_effects(effects: &HashMap<Sym, EffectSet>, sym: &Sym) -> DeclEffects {
     DeclEffects { labels, declared, exhaustive: set.exhaustive }
 }
 
-/// What a docblock **already** says about a declaration's interop envelope, as the
-/// checker itself reads it — the public face of the private `InteropTag`.
-///
-/// Three answers, not two, and the middle one is the owner's unknown-label ruling
-/// (2026-08-12): a tag carrying any label the run's registry does not know is
-/// *unspecified*, whole. Current PHPStan discards everything after
-/// `@phpstan-impure`, so wild code legitimately carries one-word prose
-/// (`@phpstan-impure database`), and a writer must recognize it as prose rather
-/// than as a bound it may correct.
+/// What a docblock **already** says about a declaration's interop envelope, as
+/// the checker itself reads it — public face of the private `InteropTag`. Three
+/// answers, not two: the middle is the owner's unknown-label ruling (2026-08-12)
+/// — a tag with any label the registry doesn't know is *unspecified*, whole.
+/// Current PHPStan discards everything after `@phpstan-impure`, so wild code
+/// legitimately carries one-word prose (`@phpstan-impure database`), which a
+/// writer must recognize as prose, not a bound it may correct.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExistingEnvelope {
     /// No tag of the consulted families is written here.
     Absent,
-    /// A tag is written and it bounds nothing: either an unknown label collapsed
-    /// it to ⊤, or it is a spelling whose bare form means ⊤. Nothing machine-
-    /// readable is claimed — and for a *writer*, nothing is safe to rewrite: those
-    /// bytes may be a human's note.
+    /// A tag is written and bounds nothing: an unknown label collapsed it to ⊤,
+    /// or its bare form means ⊤. Nothing safe to rewrite — those bytes may be a
+    /// human's note.
     Unreadable,
-    /// A usable bound: the tag family as written (so a report can quote the
-    /// declaration back in its author's spelling) and its labels, every one of them
-    /// known to the registry.
+    /// A usable bound: the tag family as written (a report can quote the
+    /// declaration back in its author's spelling) and its labels, all known to
+    /// the registry.
     Bound(EnvelopeTag, Vec<String>),
 }
 
 /// Classify the interop envelope written on `docblock`, restricted to the tag
-/// families `accept` admits (the method-level `@phpstan-pure`/`@phpstan-impure`
-/// pair, or the class-level `all-methods-*` one — ADR-0082 §5 keeps them apart).
-///
-/// `plugins` supplies the **live** registry — builtin labels plus this project's
-/// plugin registrations (ADR-0068) — so a consumer classifies exactly as the
-/// analyzer running beside it does. Pass [`PluginFacts::none`] for the builtin-only
-/// view.
+/// families `accept` admits (method-level `@phpstan-pure`/`@phpstan-impure`, or
+/// class-level `all-methods-*` — ADR-0082 §5 keeps them apart). `plugins`
+/// supplies the **live** registry — builtin labels plus this project's plugin
+/// registrations (ADR-0068), so a consumer classifies exactly as the analyzer
+/// beside it does. Pass [`PluginFacts::none`] for builtin-only.
 #[must_use]
 pub fn existing_envelope(
     plugins: &PluginFacts,
@@ -196,9 +175,9 @@ pub fn existing_envelope(
 
 /// The members of `labels` the run's registry does not know, in the order given.
 ///
-/// The emission counterpart of [`existing_envelope`]: a writer asks this before it
-/// spells a bound, because a tag carrying an unknown label is read back as prose
-/// (⊤) rather than as the bound it meant to write.
+/// The emission counterpart of [`existing_envelope`]: a writer asks this before
+/// spelling a bound, since a tag with an unknown label reads back as prose (⊤)
+/// rather than the bound it meant to write.
 #[must_use]
 pub fn unknown_labels(plugins: &PluginFacts, labels: &[String]) -> Vec<String> {
     let registry = plugins.registry();

@@ -1,29 +1,25 @@
 //! Project-global dynamic-code obstacle detection (ADR-0046 §2).
 //!
 //! The reverse call-site sweep proves "every caller is accounted for" from the
-//! CST. Two dynamic-code constructs defeat that enumeration invisibly:
-//!
-//! - `eval('foo(42)')` calls `foo` with **no CST call site** — the string-value
-//!   reference scan (exact-name match) cannot see it.
-//! - a dynamic or out-of-universe `include`/`require` pulls in code the project
-//!   never indexed (a compiled-template cache), which can define or call anything.
-//!
-//! Either makes "all callers proven" false project-wide, so — while one stands —
-//! *every* candidate refuses. The obstacles are recorded ONCE per run (with the
-//! full offending-site list) rather than duplicated onto each refusal.
+//! CST. Two constructs defeat that invisibly: `eval('foo(42)')` calls `foo`
+//! with no CST call site, and a dynamic or out-of-universe `include`/`require`
+//! pulls in code the project never indexed (e.g. a compiled-template cache).
+//! Either makes "all callers proven" false project-wide, so while one stands,
+//! *every* candidate refuses. Obstacles are recorded ONCE per run (with the
+//! full offending-site list), not duplicated onto each refusal.
 //!
 //! ## Vendor presumption (ADR-0046)
-//! `eval`/dynamic-include inside a `vendor/` path is composer autoload plumbing,
-//! presumed universe-internal — a documented, rebuttable soundness trade. Without
-//! it every composer project would refuse everything. Non-vendor sites are
-//! obstacles.
+//! `eval`/dynamic-include under `vendor/` is presumed composer autoload
+//! plumbing — a rebuttable soundness trade; without it every composer project
+//! would refuse everything. Non-vendor sites are obstacles.
 //!
 //! ## The vouching valve
-//! A user may vouch specific sites (`steins.toml`, [`VouchSet`]); a vouched site
-//! does not raise its obstacle. Vouching does not silently pass: the vouched sites
-//! flow to [`TransformReport::vouched_exemptions`], downgrading the completeness
-//! claim to "conditional on N user-vouched dynamic-code exemptions" (ADR-0037: a
-//! user assertion is a trust stratum, and the proof says so).
+//! A user may vouch specific sites (`steins.toml`, [`VouchSet`]) to suppress
+//! an obstacle. Vouched sites flow to
+//! [`TransformReport::vouched_exemptions`] instead, downgrading the
+//! completeness claim to "conditional on N user-vouched dynamic-code
+//! exemptions" (ADR-0037: a user assertion is a trust stratum, and the proof
+//! says so).
 //!
 //! [`TransformReport::vouched_exemptions`]: crate::TransformReport::vouched_exemptions
 
@@ -49,13 +45,12 @@ pub struct VouchSet {
 struct VouchEntry {
     file: String,
     line: u32,
-    /// Set once the entry matches at least one *raised* obstacle site — an
-    /// unmatched entry is a no-op the CLI warns about.
+    /// Set once matched by a raised obstacle site; unmatched is a no-op the CLI warns about.
     matched: std::cell::Cell<bool>,
 }
 
 impl VouchSet {
-    /// An empty vouch set (no exemptions) — the default for a run with no config.
+    /// No exemptions — the default for a run with no config.
     #[must_use]
     pub fn empty() -> Self {
         Self::default()
@@ -91,8 +86,7 @@ impl VouchSet {
         hit
     }
 
-    /// The `file:line` spellings of vouch entries that matched no raised obstacle
-    /// site — vouching an already-benign (or nonexistent) site is a no-op warning.
+    /// `file:line` spellings of entries that matched nothing (a no-op vouch).
     #[must_use]
     pub fn unused(&self) -> Vec<String> {
         self.entries
@@ -147,13 +141,12 @@ impl DynamismObstacles {
     }
 }
 
-/// Scan `project` for the ADR-0046 §2 dynamic-code obstacles, applying the vendor
-/// presumption and the vouching valve. A proven-literal include resolving inside
-/// the analyzed universe is enumeration-benign (no obstacle).
+/// Scan `project` for the ADR-0046 §2 obstacles (vendor presumption and
+/// vouching valve apply — see module doc). A proven-literal include resolving
+/// inside the analyzed universe is enumeration-benign (no obstacle).
 #[must_use]
 pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObstacles {
-    // The analyzed universe: every project + vendor file the salsa Project knows,
-    // normalized for path comparison.
+    // Every project + vendor file the salsa Project knows, normalized for comparison.
     let universe: HashSet<String> =
         project.files(db).iter().map(|f| normalize_path(f.path(db))).collect();
 
@@ -164,7 +157,7 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
 
     for &file in project.files(db).iter() {
         let path = file.path(db);
-        // Vendor presumption: eval/dynamic-include in vendor/ is autoload plumbing.
+        // Vendor presumption (see module doc).
         if layout.is_vendor(path) {
             continue;
         }
@@ -181,9 +174,8 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
                     }
                 }
                 DynamismKind::Include(ip) => {
-                    // A proven literal resolving inside the universe is benign — its
-                    // file's calls are already enumerated (call-site enumeration is
-                    // per-file, ADR-0046 §2). Everything else is an obstacle.
+                    // A proven literal resolving inside the universe is benign: its
+                    // file's calls are already enumerated (ADR-0046 §2, per-file).
                     if include_is_benign(ip, path, &universe) {
                         continue;
                     }
@@ -195,13 +187,11 @@ pub fn detect(db: &dyn Db, project: Project, vouches: &VouchSet) -> DynamismObst
                         include_sites.push(sref);
                     }
                 }
-                // Non-literal `class_alias` is a checker-side dam site (ADR-0049
-                // §2), but not a transform caller-enumeration obstacle. The
-                // transform scanner therefore ignores it; only `eval` and an
-                // out-of-universe include can hide call sites from this sweep.
+                // Non-literal `class_alias` is a checker-side dam site (ADR-0049 §2),
+                // not a caller-enumeration obstacle: it hides no call site.
                 DynamismKind::ClassAlias => {}
                 // Likewise a computed `define(...)` (ADR-0078, issue #198): it mints
-                // a constant name, which hides no call site from this sweep.
+                // a constant name, hiding no call site.
                 DynamismKind::DefineDynamic => {}
             }
         }
@@ -260,7 +250,7 @@ fn render_include_path(ip: &IncludePath) -> String {
     }
 }
 
-// ---- Path helpers (POSIX-style, `/`-separated) -----------------------------
+// Path helpers (POSIX-style, `/`-separated).
 
 fn is_absolute(p: &str) -> bool {
     p.starts_with('/') || p.starts_with('\\')
@@ -282,8 +272,8 @@ fn join(dir: &str, rel: &str) -> String {
 }
 
 /// Normalize a `/`-separated path: fold `\` to `/`, drop `.` components, resolve
-/// `..` against the preceding component, and preserve a leading `/` for absolute
-/// paths. Purely lexical (no filesystem access) — the universe is a known set.
+/// `..` against the preceding component, preserve a leading `/`. Purely
+/// lexical (no filesystem access) — the universe is a known set.
 fn normalize_path(path: &str) -> String {
     let absolute = is_absolute(path);
     let mut out: Vec<&str> = Vec::new();

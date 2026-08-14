@@ -1,13 +1,10 @@
-//! End-to-end tests for `steins mcp` (ADR-0010/0020, issue #117): a scripted
-//! MCP client drives the real binary over real stdio — no mocked transport, no
-//! in-process shortcut — and walks the interaction model it is meant to serve:
-//! list the tools, plan a transform, read the diff and the oracle, approve by
-//! applying the handle.
+//! End-to-end tests for `steins mcp` (ADR-0010/0020, issue #117): a scripted client drives
+//! the real binary over stdio: list tools, plan a transform, read the diff and oracle,
+//! approve by applying the handle.
 //!
-//! What each test pins is the model, not the plumbing: planning never writes,
-//! apply is a second call, a handle from anywhere but this process is a named
-//! error rather than a stale write, and the read-only tools leave the tree
-//! exactly as they found it.
+//! Pins the model, not the plumbing: planning never writes, apply is a separate call, a
+//! foreign handle is a named error rather than a stale write, and read-only tools leave the
+//! tree exactly as found.
 
 use std::io::{BufRead, BufReader, Write};
 use std::path::PathBuf;
@@ -19,12 +16,9 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test in this file spawns the binary with `GITHUB_ACTIONS` scrubbed.
-/// `check`'s format auto-detection (ADR-0054 §6) reads that variable, so a test
-/// run *on* GitHub Actions would otherwise get workflow commands where it
-/// asserted text. No test's expected output may depend on the ambient CI
-/// environment; detection itself is tested in `tests/format_github.rs`, which
-/// sets the variable deliberately.
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection (ADR-0054 §6) reads
+/// it, and a run *on* GitHub Actions would else emit workflow commands instead of the
+/// asserted text (detection itself is tested in `tests/format_github.rs`).
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -69,8 +63,7 @@ impl Drop for TempProject {
     }
 }
 
-/// The scripted client: a real child process, newline-delimited JSON-RPC over
-/// its stdin/stdout, exactly as an MCP host would speak to it.
+/// The scripted client: a real child process speaking JSON-RPC over stdio like an MCP host.
 struct Client {
     child: Child,
     stdin: ChildStdin,
@@ -79,8 +72,8 @@ struct Client {
 }
 
 impl Client {
-    /// Start a server with `cwd` as its working directory (where a `steins.toml`
-    /// would be looked up) and complete the MCP handshake.
+    /// Start a server rooted at `cwd` (where `steins.toml` is looked up) and complete the
+    /// MCP handshake.
     fn start(cwd: &str) -> Self {
         let mut child = steins_cmd()
             .arg("mcp")
@@ -129,8 +122,8 @@ impl Client {
         response
     }
 
-    /// A notification is one-way: nothing may come back, and the server must
-    /// stay live afterwards.
+    /// A notification is one-way: nothing may come back, and the server must stay live
+    /// afterwards.
     fn notify(&mut self, method: &str) {
         self.send(&json!({ "jsonrpc": "2.0", "method": method }));
     }
@@ -169,8 +162,8 @@ impl Drop for Client {
     }
 }
 
-/// A promotable function beside one that must be refused: the plan carries both
-/// halves of the completeness oracle.
+/// A promotable function beside one that must be refused: the completeness oracle's two
+/// halves.
 const LIB: &str = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n/** @param int $y */\nfunction g($y) { return $y; }\n";
 const MAIN: &str = "<?php\nf(1);\ng(\"nope\");\n";
 
@@ -181,7 +174,7 @@ fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
     proj.write("main.php", MAIN);
     let mut client = Client::start(proj.path());
 
-    // --- list ------------------------------------------------------------
+    // list
     let listed = client.request("tools/list", json!({}));
     let tools = listed["result"]["tools"].as_array().expect("tools array");
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
@@ -210,7 +203,7 @@ fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
         .expect("throws-envelope listed");
     assert_eq!(envelope["post_check_surface"], "default-only");
 
-    // --- plan (dry run) --------------------------------------------------
+    // plan (dry run)
     let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
     let plan = client.call_ok("plan_transform", args);
 
@@ -218,7 +211,6 @@ fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
     assert_eq!(plan["report"]["oracle"]["enumerated"], 2, "oracle: {plan}");
     assert_eq!(plan["report"]["oracle"]["transformed"], 1, "oracle: {plan}");
     assert_eq!(plan["report"]["oracle"]["refused"], 1, "oracle: {plan}");
-    // The refusal is named, not merely counted.
     let refusals = plan["report"]["refusals"].as_array().expect("refusals array");
     assert_eq!(refusals.len(), 1, "refusals: {plan}");
     assert_eq!(refusals[0]["reason"], "argument-not-proven");
@@ -229,12 +221,11 @@ fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
     assert!(diffs[0]["diff"].as_str().unwrap().contains("+function f(int $x)"), "diff: {plan}");
     assert_eq!(plan["postcheck"]["ok"], true, "postcheck: {plan}");
     assert_eq!(plan["applied"], false, "planning never writes: {plan}");
-    // Planning wrote nothing.
     assert_eq!(proj.read("lib.php"), LIB, "the dry run must not touch the tree");
 
     let handle = plan["plan_handle"].as_str().expect("a plan handle").to_owned();
 
-    // --- apply (the approve step, a separate call) -----------------------
+    // apply (the approve step, a separate call)
     let applied = client.call_ok("apply_plan", json!({ "plan_handle": handle }));
     assert_eq!(applied["applied"], true, "apply: {applied}");
     assert_eq!(applied["transform"], "phpdoc-to-native");
@@ -259,8 +250,8 @@ fn a_handle_from_another_process_is_refused_and_nothing_is_written() {
     proj.write("main.php", MAIN);
     let mut client = Client::start(proj.path());
 
-    // Shaped exactly like a handle, minted by nobody here — which is what a
-    // handle from a previous server run looks like after a restart.
+    // Shaped like a real handle but minted by nobody — as from a server run before a
+    // restart.
     let err = client.call_err("apply_plan", json!({ "plan_handle": "steins-plan-1-1-1" }));
     assert_eq!(err["reason"], "plan-handle-foreign-process", "error: {err}");
     let detail = err["detail"].as_str().unwrap();
@@ -301,14 +292,12 @@ fn the_read_only_tools_leave_the_tree_untouched() {
     let checked = client.call_ok("check", json!({ "paths": [proj.path()], "no_php": true }));
     let findings = checked["findings"].as_array().expect("findings array");
     let dump = findings.iter().find(|f| f["id"] == "debug.type").expect("the dump reports");
-    // The fix rides along as a payload an agent can apply itself.
     assert_eq!(dump["fix"]["title"], "remove the dump statement");
     let edits = dump["fix"]["edits"].as_array().expect("fix edits");
     assert_eq!(edits.len(), 1, "one deletion: {dump}");
     assert_eq!(edits[0]["replacement"], "");
     assert_eq!(checked["profile"], "default");
 
-    // Planning and listing are read-only too — three tools, no writes.
     client.call_ok("list_transforms", json!({}));
     let args = json!({ "transform": "phpdoc-to-native", "paths": [proj.path()] });
     client.call_ok("plan_transform", args);
@@ -342,9 +331,8 @@ fn a_plan_whose_targets_moved_is_refused_rather_than_spliced() {
 
 #[test]
 fn the_asserted_subjects_opt_in_rides_the_plan_tool_and_is_fenced_to_its_transform() {
-    // The ADR-0076 issue-#175 amendment on the agent surface: the same code
-    // path as the command line, so the label and the split count arrive in the
-    // same document the diff does.
+    // ADR-0076 issue #175: the asserted-subjects opt-in follows the same code path as the
+    // CLI, so the label and split count land in the same document as the diff.
     let proj = TempProject::new("asserted");
     proj.write(
         "loop.php",
@@ -379,7 +367,6 @@ fn the_asserted_subjects_opt_in_rides_the_plan_tool_and_is_fenced_to_its_transfo
     assert!(detail.contains("preserves keys"), "label: {detail}");
     assert!(detail.contains("post-check cannot catch"), "label: {detail}");
     assert!(plan["plan_handle"].is_string(), "an admitted site is applyable: {plan}");
-    // Planning wrote nothing; the approve step stays a separate call.
     assert!(proj.read("loop.php").contains("foreach"), "the dry run must not touch the tree");
 }
 

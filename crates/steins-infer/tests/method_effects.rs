@@ -2,11 +2,10 @@
 //! class-world twin of `effect_labels`, and `io.db`'s producer. `PDO::query` is
 //! a row keyed by a class rather than a function name.
 //!
-//! The tracer is deliberately narrow, and the tests focus on the *edges* of that
-//! narrowness, where a zero-FP claim is kept or lost: a receiver the analyzer
-//! cannot name is silent and tainted, a namespaced `PDO` is somebody else's
-//! class, and a project class named `PDO` shadows the catalog — its body is the
-//! truth, not a hand-written row.
+//! The tracer is deliberately narrow; tests focus on the *edges* where a
+//! zero-FP claim is kept or lost: an unnameable receiver is silent and
+//! tainted, a namespaced `PDO` is somebody else's class, and a project class
+//! named `PDO` shadows the catalog — its body is the truth, not a hand-written row.
 
 use steins_infer::{Diagnostic, EFFECT_ID, EffectSummary, check, effect_summary};
 use steins_syntax::SourceTree;
@@ -84,8 +83,8 @@ fn sibling_io_fs_envelope_does_not_admit_io_db() {
 
 #[test]
 fn all_six_rows_reach_a_pure_envelope() {
-    // `PDOStatement` has a private constructor, but a direct `new` is the only
-    // receiver form that exercises its rows until `->prepare()` return types flow.
+    // `PDOStatement` has a private constructor; direct `new` is the only receiver
+    // form that exercises its rows until `->prepare()` return types flow.
     for (class, method) in [
         ("PDO", "query"),
         ("PDO", "exec"),
@@ -131,9 +130,8 @@ fn io_db_propagates_through_a_helper_with_via_provenance() {
 
 #[test]
 fn variable_receiver_stays_silent_and_taints() {
-    // `$pdo->query()` is not covered: the tracer adds no value tracking, so the
-    // receiver's class is not proven, and an unproven effect is silence plus
-    // taint — never a guess.
+    // `$pdo->query()`: the tracer adds no value tracking, so the receiver's class
+    // is unproven — silence plus taint, never a guess.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(\\PDO $pdo): void { $pdo->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "unproven receiver → no finding");
     let s = summary(src, "f");
@@ -151,8 +149,8 @@ fn local_binding_of_a_new_pdo_is_not_tracked_either() {
 
 #[test]
 fn a_chained_statement_receiver_is_unproven() {
-    // `->prepare()` return types do not flow, so the `->execute()` receiver has
-    // no proven class and the PDOStatement rows stay dormant.
+    // `->prepare()` return types don't flow, so `->execute()`'s receiver has no
+    // proven class and the PDOStatement rows stay dormant.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { (new \\PDO(\"x\"))->prepare(\"SELECT 1\")->execute(); }\n";
     let f = effects(src);
     assert_eq!(f.len(), 1, "only the prepare() row fires: {f:#?}");
@@ -162,8 +160,7 @@ fn a_chained_statement_receiver_is_unproven() {
 
 #[test]
 fn an_uncatalogued_pdo_method_taints_rather_than_going_pure() {
-    // `Some(&[])` would mean catalogued-pure; the table says `None`, which must
-    // widen exactly like an uncatalogued builtin function does.
+    // `Some(&[])` would mean catalogued-pure; `None` widens like an uncatalogued builtin.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { (new \\PDO(\"x\"))->beginTransaction(); }\n";
     assert_eq!(effects(src).len(), 0, "no row → no finding");
     assert!(!summary(src, "f").exhaustive, "no row → taint");
@@ -173,8 +170,8 @@ fn an_uncatalogued_pdo_method_taints_rather_than_going_pure() {
 
 #[test]
 fn a_project_class_named_pdo_shadows_the_catalog() {
-    // The project's own `PDO::query` is the truth here, not the catalog: its
-    // body's real effect (nondet.random) surfaces, not io.db.
+    // The project's `PDO::query` is the truth, not the catalog: its real effect
+    // (nondet.random) surfaces, not io.db.
     let src = "<?php\nfinal class PDO {\n  public function query(string $q): int { return rand(); }\n}\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO())->query(\"SELECT 1\"); }\n";
     let d = one(src);
     assert_eq!(
@@ -185,8 +182,7 @@ fn a_project_class_named_pdo_shadows_the_catalog() {
 
 #[test]
 fn a_pure_project_pdo_is_silent_under_pure() {
-    // A genuinely pure shadowing class is silent — the catalog row would have
-    // made this a false positive.
+    // A genuinely pure shadowing class is silent — the catalog row would be a false positive.
     let src = "<?php\nfinal class PDO {\n  public function query(string $q): string { return strtolower($q); }\n}\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO())->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "the project class decides, and it is pure");
     assert!(summary(src, "f").exhaustive, "a resolved project edge is exhaustive");
@@ -196,9 +192,8 @@ fn a_pure_project_pdo_is_silent_under_pure() {
 
 #[test]
 fn a_namespaced_pdo_is_not_the_engines_pdo() {
-    // `namespace App; new PDO()` is `App\PDO` — PHP does not fall back to the
-    // global namespace for class names. Some class Steins has not indexed, so:
-    // silence and taint.
+    // `namespace App; new PDO()` is `App\PDO` — PHP never falls back to the global
+    // namespace for class names; an unindexed class means silence and taint.
     let src = "<?php\nnamespace App;\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO(\"x\"))->query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "App\\PDO is not PDO");
     assert!(!summary(src, "f").exhaustive, "unknown external class → taint");
@@ -206,8 +201,7 @@ fn a_namespaced_pdo_is_not_the_engines_pdo() {
 
 #[test]
 fn an_imported_pdo_inside_a_namespace_is_the_engines_pdo() {
-    // `use PDO;` resolves back to the global name, so the row applies — the
-    // lookup keys the resolved FQN, not the spelling.
+    // `use PDO;` resolves to the global name — the lookup keys the resolved FQN, not the spelling.
     let src = "<?php\nnamespace App;\nuse PDO;\n#[\\Steins\\Pure]\nfunction f(): void { (new PDO(\"x\"))->query(\"SELECT 1\"); }\n";
     let d = one(src);
     assert!(d.message.contains("PDO::query() has effect io.db"), "got: {}", d.message);
@@ -217,8 +211,7 @@ fn an_imported_pdo_inside_a_namespace_is_the_engines_pdo() {
 
 #[test]
 fn no_plain_function_is_colored_io_db() {
-    // `io.db`'s only producer is the method table. A same-named free function is
-    // uncatalogued, and stays that way.
+    // `io.db`'s only producer is the method table; a same-named free function stays uncatalogued.
     assert_eq!(steins_catalog::effect_labels("query"), None);
     assert_eq!(steins_catalog::effect_labels("pdo_query"), None);
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { query(\"SELECT 1\"); }\n";

@@ -1,8 +1,5 @@
-//! Ask-the-real-thing at the unit level: our `php_is_numeric` must agree
-//! with the engine's `is_numeric()` cell for cell, our casing predicates
-//! with `strtolower()`/`strtoupper()` identity, and `php_str_is_decimal_int`
-//! with the engine's own array-key cast. Skips (loudly) when no `php`
-//! binary is available.
+//! Oracle tests: `php_is_numeric`, casing predicates, and `php_str_is_decimal_int` agree
+//! with the engine's `is_numeric()`, case-identity, and array-key cast. Skips without `php`.
 
 use std::process::Command;
 
@@ -21,7 +18,6 @@ fn is_numeric_matches_the_engine() {
         return;
     }
 
-    // One process for all cases: read JSON list on stdin, print 0/1 per line.
     let script = r#"
         $cases = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
         foreach ($cases as $c) { echo is_numeric($c) ? "1\n" : "0\n"; }
@@ -56,16 +52,14 @@ fn is_numeric_matches_the_engine() {
     }
 }
 
-/// The casing cases, including the multibyte ones the byte-oriented rule makes
-/// a claim about: a UTF-8 `"Ä"` has no `A-Z` byte, so the engine's
-/// `strtolower()` leaves it alone and it *is* a `lowercase-string`.
+/// Includes multibyte cases: UTF-8 `"Ä"` has no `A-Z` byte, so `strtolower()`
+/// leaves it alone — it *is* a `lowercase-string` under the byte-oriented rule.
 const CASING_CASES: &[&str] = &[
     "", "abc", "ABC", "abC", "ABc", "123", "1e5", "1E5", "snake_case", "SCREAMING_CASE",
     "camelCase", "-", " ", "a1", "A1", "0", "Ä", "ä", "Ärger", "ärger", "日本語", "ABCä",
 ];
 
-/// Escape one PHP string as a JSON string literal — `char::escape_default` is
-/// Rust syntax, not JSON, and the multibyte cases need real `\uXXXX`.
+/// JSON-escape a PHP string (Rust's `char::escape_default` isn't JSON; need `\uXXXX`).
 fn json_string(s: &str) -> String {
     let mut out = String::from("\"");
     for c in s.chars() {
@@ -93,8 +87,6 @@ fn casing_predicates_match_the_engine() {
         return;
     }
 
-    // `lowercase-string` / `uppercase-string` are *identity* under the case
-    // functions, which is exactly what this asks the engine.
     let script = r#"
         $cases = json_decode(stream_get_contents(STDIN), true, 512, JSON_THROW_ON_ERROR);
         foreach ($cases as $c) {
@@ -134,10 +126,9 @@ fn casing_predicates_match_the_engine() {
     }
 }
 
-/// The `decimal-int-string` cases. The interesting ones are all *numeric*
-/// strings that are nevertheless not canonical (`"007"`, `"+1"`, `"00"`,
-/// `"-0"`), plus both int-range edges — `PHP_INT_MAX` casts, one past it does
-/// not, and `PHP_INT_MIN` does.
+/// `decimal-int-string` cases: numeric strings that aren't canonical (`"007"`,
+/// `"+1"`, `"00"`, `"-0"`), plus int-range edges — `PHP_INT_MAX` casts, one past
+/// it doesn't, `PHP_INT_MIN` does.
 const DECIMAL_INT_CASES: &[&str] = &[
     "", "0", "-0", "1", "-1", "007", "-007", "00", "+1", "+0", "1234", "-1234", "1.2", "0.0",
     "18E+3", "1e5", "1E5", " 1", "1 ", " 1 ", "\t1", "1,3", "foo", "abc", "-", "--1", "0x1A",
@@ -145,9 +136,8 @@ const DECIMAL_INT_CASES: &[&str] = &[
     "-9223372036854775809", "10000000000000000000", "01", "0777",
 ];
 
-/// The engine's own answer to "does this string keep its identity as an array
-/// key": insert it and ask whether the key came back an `int`. That *is*
-/// `decimal-int-string`, so this is the definition, not a proxy for it.
+/// Definition, not a proxy: insert as an array key and check whether it came
+/// back an `int` — that *is* `decimal-int-string`.
 #[test]
 fn decimal_int_string_matches_the_array_key_cast() {
     let probe = Command::new("php").arg("--version").output();

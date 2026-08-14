@@ -363,9 +363,7 @@ proptest! {
     }
 }
 
-// ==========================================================================
 // Conformance vocabulary in the identifier/generic table.
-// ==========================================================================
 
 #[test]
 fn number_is_int_or_float_but_not_a_numeric_string() {
@@ -437,9 +435,7 @@ fn non_positive_int_covers_zero() {
     assert_eq!(admits_val(&ty("negative-int"), &Val::Int(0)), No);
 }
 
-// ---------------------------------------------------------------------------
 // C5 — the array-key-cast pair.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn decimal_int_string_is_the_array_key_cast_not_is_numeric() {
@@ -499,9 +495,7 @@ fn the_complementary_pair_cannot_be_refuted_abstractly() {
     assert_eq!(admits_val(&ty("non-decimal-int-string"), &s("123")), No);
 }
 
-// ---------------------------------------------------------------------------
 // C6 — the subtraction spellings.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn non_null_mixed_removes_exactly_null() {
@@ -591,11 +585,9 @@ fn non_empty_scalar_is_the_cut_intersected_with_scalar() {
     assert_eq!(admits_val(&t, &Val::Null), No, "null is not a scalar");
 }
 
-// ---------------------------------------------------------------------------
 // C9 — the refined callable spellings (ADR-0063 P3). The vocabulary lowers to
 // `CallableTy` plus an obligation triple, the obligation round-trips through the
 // speller, and the closure-only half is decided in the value domain.
-// ---------------------------------------------------------------------------
 
 /// The obligation triple a spelling lowers to, as `(pure, is_static, closure_only)`.
 fn obl(spelling: &str) -> (bool, bool, bool) {

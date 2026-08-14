@@ -2,9 +2,9 @@
 //! replacement)` edits plus new-file creations (ADR-0034 point 1).
 //!
 //! Built on span+splice (ADR-0003): untouched regions stay byte-identical by
-//! construction, and overlapping edits are rejected at *planning* time (an
-//! error, never a panic). The plan is JSON-serializable — it is the currency of
-//! the dry-run → diff → approve loop.
+//! construction; overlapping edits are rejected at *planning* time (an error,
+//! never a panic). JSON-serializable — the currency of the dry-run → diff →
+//! approve loop.
 
 use serde::{Deserialize, Serialize};
 
@@ -65,12 +65,11 @@ pub struct NewFile {
 /// Why a plan rejected an edit at planning time.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
-    /// Two edits on the same file overlap. Carries the offending path and the
-    /// two spans (in insertion order).
+    /// Two edits on the same file overlap (path plus both spans, insertion order).
     Overlap { path: String, a: ByteSpan, b: ByteSpan },
     /// An edit's span is inverted (`start > end`).
     InvertedSpan { path: String, span: ByteSpan },
-    /// A new file's path collides with an already-registered new file.
+    /// Duplicate new-file path.
     DuplicateNewFile { path: String },
 }
 
@@ -94,9 +93,9 @@ impl std::fmt::Display for PlanError {
 
 impl std::error::Error for PlanError {}
 
-/// An atomic transaction of non-overlapping edits plus new-file creations
-/// (ADR-0034 point 1). Overlap is rejected as edits are added, so a built plan
-/// always splices cleanly.
+/// An atomic transaction of non-overlapping edits plus new-file creations.
+/// Overlap is rejected as edits are added, so a built plan always splices
+/// cleanly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EditPlan {
     pub edits: Vec<Edit>,
@@ -128,9 +127,7 @@ impl EditPlan {
         seen
     }
 
-    /// Add an edit, rejecting an inverted span or an overlap with an
-    /// already-registered edit on the same file (ADR-0034: overlaps are rejected
-    /// at planning time, not at apply time).
+    /// Add an edit, rejecting an inverted span or an overlap on the same file.
     pub fn add_edit(&mut self, edit: Edit) -> Result<(), PlanError> {
         if edit.span.start > edit.span.end {
             return Err(PlanError::InvertedSpan { path: edit.path, span: edit.span });
@@ -158,15 +155,14 @@ impl EditPlan {
     }
 
     /// Apply this plan's edits for a single file to its `source`, returning the
-    /// rewritten text. Untouched byte regions are copied verbatim, so anything
-    /// outside an edit span is preserved exactly (ADR-0003). Edits for other
-    /// paths are ignored.
+    /// rewritten text. Untouched byte regions are copied verbatim (ADR-0003).
+    /// Edits for other paths are ignored.
     ///
     /// # Panics
-    /// Never in normal use: spans come from the parser at token boundaries, so
-    /// they fall on UTF-8 char boundaries. A span past the end of `source`, or a
-    /// mid-codepoint boundary, would panic on the slice — callers build plans
-    /// from real spans, so this is a contract, not a runtime path.
+    /// Never in normal use: spans come from the parser at token boundaries
+    /// (UTF-8 char boundaries). A span past the end of `source`, or a
+    /// mid-codepoint boundary, would panic — callers build plans from real
+    /// spans, so this is a contract, not a runtime path.
     #[must_use]
     pub fn apply_file(&self, path: &str, source: &str) -> String {
         let mut spans: Vec<&Edit> = self.edits.iter().filter(|e| e.path == path).collect();
@@ -177,7 +173,6 @@ impl EditPlan {
         for e in spans {
             let start = e.span.start as usize;
             let end = e.span.end as usize;
-            // Copy the untouched run before this edit, then the replacement.
             out.push_str(&source[cursor..start]);
             out.push_str(&e.replacement);
             cursor = end;

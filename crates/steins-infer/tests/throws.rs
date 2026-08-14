@@ -29,7 +29,7 @@ fn n_undeclared(src: &str) -> usize {
     undeclared(src).len()
 }
 
-// ---- Envelope: proven escape fires, with provenance ----------------------
+// Envelope: proven escape fires, with provenance
 
 #[test]
 fn uncaught_checked_escape_fires_with_message() {
@@ -50,14 +50,14 @@ fn declared_exact_covers() {
     assert_eq!(n_undeclared(src), 0);
 }
 
+/// `OutOfBoundsException <: RuntimeException` through the SPL builtin table.
 #[test]
 fn declared_parent_covers_subclass_via_builtin_hierarchy() {
-    // OutOfBoundsException <: RuntimeException through the SPL builtin table.
     let src = "<?php\n/** @throws \\RuntimeException */\nfunction f(): void { throw new \\OutOfBoundsException(); }\n";
     assert_eq!(n_undeclared(src), 0, "subclass of a declared class is covered");
 }
 
-// ---- Checked accounting (ADR-0007) ---------------------------------------
+// Checked accounting (ADR-0007)
 
 #[test]
 fn error_family_never_counts() {
@@ -77,7 +77,7 @@ fn runtime_exception_is_checked() {
     assert_eq!(n_undeclared(src), 1, "RuntimeException is checked");
 }
 
-// ---- Damming: absorption through catch clauses ---------------------------
+// Damming: absorption through catch clauses
 
 #[test]
 fn caught_exact_absorbs() {
@@ -85,17 +85,16 @@ fn caught_exact_absorbs() {
     assert_eq!(n_undeclared(src), 0, "caught exactly → absorbed");
 }
 
+/// `MyErr extends \RuntimeException`; `catch (\RuntimeException)` absorbs it
+/// through the project chain into the builtin table.
 #[test]
 fn caught_via_project_subclass_chain() {
-    // Project class MyErr extends \RuntimeException; catch (\RuntimeException)
-    // absorbs a thrown MyErr through the project chain into the builtin table.
     let src = "<?php\nclass MyErr extends \\RuntimeException {}\n/** @throws \\JsonException */\nfunction f(): void { try { throw new MyErr(); } catch (\\RuntimeException $e) {} }\n";
     assert_eq!(n_undeclared(src), 0, "project subclass caught by builtin supertype");
 }
 
 #[test]
 fn caught_via_builtin_exception_hierarchy() {
-    // JsonException is a \Exception; catch (\Exception) absorbs it.
     let src = "<?php\n/** @throws \\RuntimeException */\nfunction f(): void { try { throw new \\JsonException(); } catch (\\Exception $e) {} }\n";
     assert_eq!(n_undeclared(src), 0, "JsonException caught via \\Exception");
 }
@@ -129,17 +128,14 @@ fn catch_body_throw_escapes() {
 
 #[test]
 fn rethrow_precise_reemits_caught_set() {
-    // Rethrow re-emits exactly RuntimeException; declaring it covers the rethrow.
     let covered = "<?php\n/** @throws \\RuntimeException */\nfunction f(): void { try { throw new \\RuntimeException(); } catch (\\RuntimeException $e) { throw $e; } }\n";
     assert_eq!(n_undeclared(covered), 0, "rethrow of a declared class is covered");
-    // Same rethrow, undeclared → fires (proving the rethrow re-emits it).
     let bare = "<?php\n/** @throws \\JsonException */\nfunction f(): void { try { throw new \\RuntimeException(); } catch (\\RuntimeException $e) { throw $e; } }\n";
     assert_eq!(n_undeclared(bare), 1, "rethrow re-emits the caught class");
 }
 
 #[test]
 fn wrap_and_throw_emits_new_class() {
-    // Original absorbed; the wrapper (RangeException) is what propagates.
     let src = "<?php\n/** @throws \\RangeException */\nfunction f(): void { try { throw new \\RuntimeException(); } catch (\\RuntimeException $e) { throw new \\RangeException(); } }\n";
     assert_eq!(n_undeclared(src), 0, "wrapper is declared; original absorbed");
 }
@@ -156,37 +152,33 @@ fn nested_trys_compose() {
     assert_eq!(n_undeclared(src), 0, "outer try absorbs what the inner misses");
 }
 
-// ---- Adversarial: Maybe-absorption must stay silent (zero-FP) ------------
+// Adversarial: Maybe-absorption must stay silent (zero-FP)
 
+/// `MyExc extends` an external, unresolvable `\Vendor\Base`, so `catch
+/// (\Vendor\Other)` MIGHT be a supertype → Maybe absorption → silent. Resolving
+/// the unknown catch to a hard `No` would false-positively report the escape;
+/// ADR-0040's consumer-inverted Maybe is what prevents that.
 #[test]
 fn maybe_absorption_by_unknown_external_stays_silent() {
-    // MyExc extends an external \Vendor\Base (not in the project), so MyExc's
-    // ancestry leaves known territory. A `catch (\Vendor\Other)` MIGHT be a
-    // supertype (we cannot see Other's relation to Base) → Maybe absorption →
-    // escape Maybe → silent. An analyzer that resolved the unknown catch to a
-    // hard `No` (and MyExc to checked) would false-positively report the escape;
-    // the ADR-0040 consumer-inverted Maybe is exactly what prevents that.
     let src = "<?php\nclass MyExc extends \\Vendor\\Base {}\n/** @throws \\JsonException */\nfunction f(): void { try { throw new MyExc(); } catch (\\Vendor\\Other $e) {} }\n";
     assert_eq!(n_undeclared(src), 0, "Maybe-absorption reported would be a false positive");
 }
 
+/// Contrast: a KNOWN builtin throw has a fully-enumerated ancestry, so `catch
+/// (\App\Weird)` provably cannot absorb it — reporting the escape is correct.
 #[test]
 fn unknown_external_catch_of_known_throw_is_a_real_escape() {
-    // Contrast: a KNOWN builtin throw (RuntimeException) has a fully-enumerated
-    // ancestry, so `catch (\App\Weird)` provably cannot absorb it — reporting the
-    // escape is correct, not a false positive.
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(): void { try { throw new \\RuntimeException(); } catch (\\App\\Weird $e) {} }\n";
     assert_eq!(n_undeclared(src), 1, "an unrelated catch of a known throw is a real escape");
 }
 
 #[test]
 fn throw_of_unknown_variable_is_silent() {
-    // `throw $e` where $e is not a catch parameter → unknown class → taint only.
     let src = "<?php\n/** @throws \\JsonException */\nfunction f(\\Throwable $e): void { throw $e; }\n";
     assert_eq!(n_undeclared(src), 0, "opaque throw taints, never reports");
 }
 
-// ---- Propagation through the call graph ----------------------------------
+// Propagation through the call graph
 
 #[test]
 fn propagated_callee_throw_escapes_caller() {
@@ -202,7 +194,7 @@ fn propagated_callee_throw_dammed_at_caller() {
     assert_eq!(n_undeclared(src), 0, "caller's try/catch dams the propagated throw");
 }
 
-// ---- Liskov widening (ADR-0033/0040 rule 4) ------------------------------
+// Liskov widening (ADR-0033/0040 rule 4)
 
 #[test]
 fn liskov_widened_override_fires() {
@@ -224,7 +216,7 @@ fn liskov_one_side_undeclared_silent() {
     assert_eq!(liskov(src).len(), 0, "no check unless both sides declare @throws");
 }
 
-// ---- Unannotated functions are never envelope-checked --------------------
+// Unannotated functions are never envelope-checked
 
 #[test]
 fn unannotated_function_is_never_checked() {
@@ -246,8 +238,6 @@ function fp(): void {
 }
 "#;
     assert_eq!(n_undeclared(fp), 0, "reassigned rethrow must not report the caught class");
-    // Control: without the reassignment the genuine rethrow of an undeclared
-    // checked class still fires.
     let control = r#"<?php
 /** @throws \JsonException */
 function ctl(): void {
@@ -256,7 +246,6 @@ function ctl(): void {
 }
 "#;
     assert_eq!(n_undeclared(control), 1, "genuine rethrow of undeclared class must fire");
-    // Passing $e to any call (possible by-ref rebinding) also voids precision.
     let passed = r#"<?php
 function mutate(\Throwable &$t): void {}
 /** @throws \JsonException */
@@ -268,13 +257,12 @@ function pass(): void {
     assert_eq!(n_undeclared(passed), 0, "param handed to a call voids rethrow precision");
 }
 
-// ---- The `origin` facet (ADR-0050 §4) ------------------------------------
+// The `origin` facet (ADR-0050 §4)
 //
-// `throw.undeclared` findings carry a registry-declared `origin` facet, computed
-// at emit time from walk-local data: DIRECT when the escaping throw originates in
-// the annotated declaration's OWN body, PROPAGATED when it arrives up a call edge.
-// This productionizes the measurement note's rule (158 direct vs 43,805 propagated
-// on the legacy monorepo), the split the `throws-direct` profile selects on.
+// `throw.undeclared` findings carry a registry-declared `origin` facet: DIRECT
+// when the escaping throw originates in the annotated declaration's OWN body,
+// PROPAGATED when it arrives up a call edge — the split the `throws-direct`
+// profile selects on (158 direct vs 43,805 propagated on the legacy monorepo).
 
 #[test]
 fn own_body_throw_is_direct() {
@@ -284,11 +272,10 @@ fn own_body_throw_is_direct() {
     assert_eq!(ds[0].facet, Some(Facet::Origin(Origin::Direct)));
 }
 
+/// The escape's origin is g()'s body, reached up a call edge → propagated,
+/// even though g lives in the same file as f.
 #[test]
 fn escape_through_a_callee_is_propagated() {
-    // f() declares @throws JsonException but calls g(), which throws
-    // RuntimeException. The escape's origin is g()'s body, reached up a call edge
-    // → propagated (even though g lives in the same file as f).
     let src = "<?php\n\
         function g(): void { throw new \\RuntimeException(); }\n\
         /** @throws \\JsonException */\n\
@@ -298,11 +285,11 @@ fn escape_through_a_callee_is_propagated() {
     assert_eq!(ds[0].facet, Some(Facet::Origin(Origin::Propagated)));
 }
 
+/// f() throws directly AND calls g() which throws: both escape f()'s envelope,
+/// the own-body one direct and the callee one propagated — the facet is
+/// per-finding, not per-declaration.
 #[test]
 fn direct_and_propagated_coexist_on_one_declaration() {
-    // f() throws RuntimeException directly AND calls g() which throws RangeException.
-    // Both escape f()'s JsonException envelope: the own-body one is direct, the
-    // callee one propagated — the facet is per-finding, not per-declaration.
     let src = "<?php\n\
         function g(): void { throw new \\RangeException(); }\n\
         /** @throws \\JsonException */\n\
@@ -322,10 +309,10 @@ fn only_throw_undeclared_declares_the_origin_facet() {
     assert_eq!(declared_facet("nope"), None);
 }
 
+/// A liskov-widened finding is not a throw.undeclared finding, so it declares
+/// no facet (ADR-0050 §4).
 #[test]
 fn liskov_findings_carry_no_facet() {
-    // A liskov-widened finding is not a throw.undeclared finding; it declares no
-    // facet (ADR-0050 §4: only throw.undeclared does).
     let src = r#"<?php
 class Base { /** @throws \JsonException */ public function m(): void {} }
 class Child extends Base { /** @throws \RuntimeException */ public function m(): void {} }

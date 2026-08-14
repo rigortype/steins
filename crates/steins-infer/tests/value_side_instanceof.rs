@@ -1,18 +1,17 @@
 //! Value-side `instanceof` verdicts (field survey FP class 14): a value that is
 //! not an object is never an instance of anything.
 //!
-//! When a binding descent imports a call-site `null` argument as a parameter's
-//! fact (`Singleton(null)`), an `instanceof` guard on that parameter must REFUTE
-//! it: `null instanceof T` is `false` for every `T` in PHP, so the then-branch is
-//! dead on that path. Otherwise the then branch retains the null fact and can
-//! emit `call.on-null` inside a guard that proves the opposite: three measured
-//! field false positives (kimai ×2, firefly-iii ×1).
+//! When a binding descent imports a call-site `null` argument as a parameter's fact
+//! (`Singleton(null)`), an `instanceof` guard on that parameter must REFUTE it:
+//! `null instanceof T` is `false` for every `T` in PHP, so the then-branch is dead.
+//! Otherwise the then branch retains the null fact and can emit `call.on-null`
+//! inside a guard that proves the opposite — three measured field false positives
+//! (kimai ×2, firefly-iii ×1).
 //!
-//! The rule is a **value-side** verdict that precedes all class reasoning: if the
+//! The rule is a **value-side** verdict preceding all class reasoning: if the
 //! operand's value-domain fact proves a non-object value (`null`/int/float/string/
-//! bool/array), answer `No`. Sound unconditionally — it needs no class resolution
-//! and no exactness (the G1 exactness discipline is scoped to object-class `No`
-//! verdicts on the heap path and is untouched).
+//! bool/array), answer `No`. Sound unconditionally, needing no class resolution and
+//! no exactness (the G1 exactness discipline stays scoped to the heap path).
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -31,14 +30,12 @@ fn ids(src: &str) -> Vec<String> {
     findings(src).into_iter().map(|d| d.id.to_owned()).collect()
 }
 
-// 1. Isolated FP regressions (case4/case5): descent imports the caller's `null`;
-//    the `instanceof`
-//    guard refutes it → then-branch dead → no `call.on-null`. Class resolution
-//    is NOT required (case4 uses an unresolvable class, case5 a defined one).
+// 1. Isolated FP regressions: descent imports the caller's `null`, the `instanceof`
+//    guard refutes it, then-branch dead, no `call.on-null`. Class resolution is NOT
+//    required (case4 uses an unresolvable class, case5 a defined one).
 
 #[test]
 fn case4_descent_null_unresolvable_class_is_silent() {
-    // `instanceof UndefCarbon4` against an UNRESOLVABLE class; caller passes null.
     let src = "<?php
 class Enrich4 {
     public function setDate(?UndefCarbon4 $date): void
@@ -58,7 +55,6 @@ function caller4(): void {
 
 #[test]
 fn case5_descent_null_defined_class_is_silent() {
-    // `instanceof DefCarbon5` against a DEFINED class; caller passes null.
     let src = "<?php
 class DefCarbon5 { public function endOfDay(): void {} }
 class Enrich5 {
@@ -77,11 +73,10 @@ function caller5(): void {
     assert_eq!(n(src), 0, "null instanceof (defined) → No → then-branch dead → no call.on-null");
 }
 
-// 2. The kimai field shape: `mixed $value`, `instanceof \DateTimeInterface`
-//    (a BUILTIN interface), a separate caller passing null. Plus the
-//    non-monotonicity pin: the same class WITHOUT the null-passing caller must
-//    produce identical (zero) findings — adding the caller must not flip a
-//    verdict on the guarded line.
+// 2. The kimai field shape: `mixed $value`, `instanceof \DateTimeInterface` (a
+//    BUILTIN interface), a separate caller passing null. Plus the non-monotonicity
+//    pin: the same class WITHOUT the null-passing caller must produce identical
+//    (zero) findings.
 
 #[test]
 fn kimai_shape_mixed_builtin_interface_null_caller_is_silent() {
@@ -105,9 +100,8 @@ function kimai_caller(): void {
 
 #[test]
 fn kimai_shape_without_null_caller_is_identical_zero() {
-    // Non-monotonicity pin: the class alone, no caller feeding null. The guarded
-    // line must be equally silent — adding the null-passing caller (test above)
-    // must not FLIP any verdict on the guarded line.
+    // Non-monotonicity pin: adding the null-passing caller (test above) must not
+    // FLIP the verdict on this guarded line.
     let src = "<?php
 class DateStringFormatter {
     public function formatValue(mixed $value): string
@@ -122,10 +116,9 @@ class DateStringFormatter {
     assert_eq!(n(src), 0, "class alone → zero; identical to the with-null-caller shape");
 }
 
-// 3. The firefly-iii field shape: `?Carbon`-style nullable class param.
-//    (a) caller passes null → guarded call silent.
-//    (b) caller passes a REAL instance → the guarded call still resolves/checks
-//        (no lost precision — the heap-object path is untouched).
+// 3. The firefly-iii field shape: `?Carbon`-style nullable class param. (a) caller
+//    passes null → guarded call silent. (b) caller passes a REAL instance → the
+//    guarded call still resolves/checks (no lost precision).
 
 #[test]
 fn firefly_shape_nullable_class_null_caller_is_silent() {
@@ -149,11 +142,9 @@ function firefly_caller(): void {
 
 #[test]
 fn firefly_shape_real_instance_caller_keeps_branch_live() {
-    // A REAL instance is NOT a proven non-object value — the value-side rule never
-    // fires; the then-branch stays LIVE (no lost precision). A wrong-typed free
-    // call placed inside the guard is therefore reached and flagged, proving the
-    // branch was not silenced. (Contrast the null caller, where the same branch is
-    // dead and this call would be pruned.)
+    // A REAL instance is NOT a proven non-object value, so the then-branch stays
+    // LIVE; a wrong-typed call placed inside the guard is reached and flagged,
+    // proving the branch was not silenced (contrast the null caller, where it is).
     let src = "<?php declare(strict_types=1);
 function width3(int $w): int { return $w; }
 class Carbon3b { public function endOfDay(): void {} }
@@ -181,8 +172,8 @@ function firefly_caller2(): void {
 
 #[test]
 fn boundary_eq_null_first_guard_stays_clean() {
-    // The `=== null`-first lane already refuted the premise (early return) — the
-    // instanceof site is never reached with null. Must stay clean.
+    // The `=== null`-first lane already refuted the premise (early return): the
+    // instanceof site is never reached with null.
     let src = "<?php
 class Carbon4 { public function endOfDay(): void {} }
 class Enrich6 {
@@ -204,8 +195,7 @@ function caller6(): void {
 
 #[test]
 fn boundary_no_null_check_sibling_stays_clean() {
-    // `instanceof` with NO `=== null` sibling at all — still clean (the value-side
-    // No does not depend on the presence of any sibling null check).
+    // Value-side No does not depend on the presence of any sibling null check.
     let src = "<?php
 class Carbon5 { public function endOfDay(): void {} }
 class Enrich7 {
@@ -225,8 +215,7 @@ function caller7(): void {
 }
 
 // 5. Value-side matrix: every proven non-object operand → instanceof No (dead
-//    then-branch, no finding, ELSE branch stays live); a genuine could-be-object
-//    operand → Maybe (both branches live). `width(int)` fires on a bad arg.
+//    then-branch, ELSE stays live); a could-be-object operand → Maybe (both live).
 
 const HDR: &str = "<?php declare(strict_types=1);
 function width(int $w): int { return $w; }
@@ -235,7 +224,6 @@ class Thing { public function m(): void {} }
 
 #[test]
 fn matrix_singleton_int_operand_is_no_else_lives() {
-    // $x is int 5 → instanceof No → then dead; the else runs and a bad arg fires.
     let src = format!(
         "{HDR}$x = 5;\nif ($x instanceof Thing) {{ $x->m(); }} else {{ width(\"bad\"); }}"
     );
@@ -262,18 +250,15 @@ fn matrix_singleton_array_operand_is_no() {
 
 #[test]
 fn matrix_oneof_all_non_object_operand_is_no() {
-    // An undecided OneOf of two non-object values (int | string) → every member
-    // non-object → No.
+    // Undecided OneOf of two non-object values: every member non-object → No.
     let src = format!("{HDR}$x = $c ? 1 : \"s\";\nif ($x instanceof Thing) {{ $x->m(); }}");
     assert_eq!(n(&src), 0, "OneOf(int,string) → all non-object → No → then dead → silent");
 }
 
 #[test]
 fn matrix_could_be_object_or_null_is_maybe_both_live() {
-    // A `?Thing` param with NO descent binding it — the analyzer holds no value
-    // fact (an object never lives in the value domain; the un-narrowed param could
-    // be a Thing or null). `instanceof` stays Maybe: both branches live, and no
-    // proof finding is manufactured on either.
+    // A `?Thing` param with NO descent binding it: the analyzer holds no value fact
+    // (an object never lives in the value domain), so `instanceof` stays Maybe.
     let src = "<?php declare(strict_types=1);
 class Thing2 { public function m(): void {} }
 function handle(?Thing2 $x): void {
@@ -300,10 +285,8 @@ function f10(): void {
 
 #[test]
 fn retention_negated_instanceof_reaches_null_deref_fires() {
-    // `!($x instanceof T)` with $x null from the caller: `!(null instanceof T)` =
-    // `!(false)` = true → the guarded call IS reached WITH null → a TRUE
-    // `call.on-null` must fire on that live path. (eval_instanceof No → Not → Yes
-    // → then-branch live, null fact intact.)
+    // `!(null instanceof T)` = `!(false)` = true, so the guarded call IS reached
+    // WITH null — a TRUE `call.on-null` on that live path.
     let src = "<?php
 class Carbon11 { public function endOfDay(): void {} }
 class Enrich11 {

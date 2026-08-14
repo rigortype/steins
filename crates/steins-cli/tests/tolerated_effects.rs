@@ -3,8 +3,7 @@
 //!
 //! Each test runs the real binary in a private temp dir that is both the project
 //! root and the CWD, so the `[effects]` table under test is the only one loaded.
-//! `--no-php` keeps the run independent of a `php` on PATH; it drops folded
-//! values and touches no effect fact.
+//! `--no-php` keeps the run independent of a `php` on PATH and touches no effect fact.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -56,8 +55,7 @@ const SRC: &str = "<?php\nclass Logger {\n    public static function debug(strin
 
 const POLICY: &str = "[effects]\ntolerated = [\"telemetry\"]\n\n[effects.attribution]\n\"Logger\" = [\"telemetry\"]\n";
 
-/// The project the two policy tests share: the source, and a `steins.toml` that
-/// attributes the facade and tolerates what it is for.
+/// The project the two policy tests share: source plus a `steins.toml` attributing the facade.
 fn project(tag: &str) -> PathBuf {
     let dir = workdir(tag);
     write(&dir, "app.php", SRC);
@@ -93,8 +91,7 @@ fn the_json_document_lists_the_tolerated_subset_beside_the_unchanged_effects() {
         functions.iter().find(|f| f["name"] == name).unwrap_or_else(|| panic!("no `{name}` entry"))
     };
 
-    // The proven lane is byte-for-byte what it was; `tolerated` names a subset of
-    // it, never a removal (ADR-0084 §4).
+    // Proven lane is unchanged; `tolerated` names a subset, never a removal (ADR-0084 §4).
     let f = by_name("f");
     assert_eq!(f["effects"], serde_json::json!(["io.output.stderr", "nondet.time"]));
     assert_eq!(f["tolerated"], serde_json::json!(["io.output.stderr", "nondet.time"]));
@@ -105,8 +102,7 @@ fn the_json_document_lists_the_tolerated_subset_beside_the_unchanged_effects() {
     assert_eq!(g["effects"], serde_json::json!(["io.output.stderr", "nondet.time"]));
     assert_eq!(g["tolerated"], serde_json::json!(["io.output.stderr"]));
 
-    // The facade's own set is judged where it stands: nothing crossed an
-    // attributed edge to get there, so nothing is discharged for it.
+    // The facade's own set is judged where it stands: no attributed edge crossed to get there.
     assert_eq!(by_name("Logger::debug").get("tolerated"), None);
 }
 

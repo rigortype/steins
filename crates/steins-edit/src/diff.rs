@@ -1,13 +1,11 @@
 //! A minimal, dependency-free unified-diff renderer for dry-run output.
 //!
-//! Line-based LCS (no third-party diff crate — the workspace carries none, and
-//! ADR-0034 wants the dry-run diff cheap and self-contained). Good enough for
-//! the small, localized EditPlans this engine produces; it is a *display*
-//! artifact, never the source of truth (the [`crate::EditPlan`] is).
+//! Line-based LCS (no third-party diff crate; ADR-0034 wants the dry-run diff
+//! cheap and self-contained). A *display* artifact, never the source of truth
+//! (the [`crate::EditPlan`] is).
 
 /// Render a unified diff of `old` → `new` for a file named `path`, with
-/// `context` unchanged lines around each change. Returns an empty string when
-/// the two texts are identical.
+/// `context` unchanged lines around each change. Empty string if identical.
 #[must_use]
 pub fn unified_diff(path: &str, old: &str, new: &str, context: usize) -> String {
     if old == new {
@@ -30,29 +28,25 @@ pub fn unified_diff(path: &str, old: &str, new: &str, context: usize) -> String 
     out
 }
 
-/// Split into lines *without* the trailing newline, treating a final newline as
-/// a line terminator (so "a\nb\n" is two lines, "a\nb" is two lines too). This
-/// keeps hunk line counts intuitive for the common newline-terminated file.
+/// Split into lines without the trailing newline; a final newline is a
+/// terminator ("a\nb\n" and "a\nb" both give two lines), not a third empty line.
 fn split_lines(text: &str) -> Vec<&str> {
     if text.is_empty() {
         return Vec::new();
     }
     let mut lines: Vec<&str> = text.split('\n').collect();
-    // A trailing '\n' yields a spurious empty final element; drop it.
     if text.ends_with('\n') {
         lines.pop();
     }
     lines
 }
 
-/// One line-level edit operation.
+/// One line-level edit operation: equal (indices into old, new), delete
+/// (index into old), or insert (index into new).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Op {
-    /// A line present in both (indices into old, new).
     Equal(usize, usize),
-    /// A line only in old.
     Delete(usize),
-    /// A line only in new.
     Insert(usize),
 }
 
@@ -127,8 +121,7 @@ impl Hunk {
 }
 
 /// Group the flat op stream into hunks, keeping `context` equal lines on each
-/// side of a change and merging changes that fall within `2 * context` of each
-/// other into one hunk.
+/// side of a change and merging changes within `2 * context` into one hunk.
 fn group_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
     let change_positions: Vec<usize> = ops
         .iter()
@@ -140,7 +133,6 @@ fn group_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
         return Vec::new();
     }
 
-    // Build [lo, hi) op-index windows around change clusters, merging overlaps.
     let mut windows: Vec<(usize, usize)> = Vec::new();
     for &p in &change_positions {
         let lo = p.saturating_sub(context);
@@ -157,8 +149,8 @@ fn group_hunks(ops: &[Op], context: usize) -> Vec<Hunk> {
         .collect()
 }
 
-/// Materialize one hunk from a contiguous op slice, computing its old/new line
-/// ranges from the first/last real line indices the slice touches.
+/// Materialize one hunk from a contiguous op slice; its line ranges come from
+/// the first/last real line indices the slice touches.
 fn build_hunk(slice: &[Op]) -> Hunk {
     let mut old_start = None;
     let mut new_start = None;

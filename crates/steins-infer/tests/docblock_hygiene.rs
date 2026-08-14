@@ -2,22 +2,17 @@
 //!
 //! Six ids about annotations that drifted from the code they annotate:
 //! `phpdoc.unparsable`, `phpdoc.stale-param`, `phpdoc.stale-var`,
-//! `phpdoc.misplaced-var`, `phpdoc.throws-not-throwable` and
-//! `closure.unused-use`. Every premise is textual — the tag's subject either
-//! exists or it does not — so each id is pinned here by a **pair**: one minimal
-//! fixture that fires, and its legal counterpart that must stay silent.
+//! `phpdoc.misplaced-var`, `phpdoc.throws-not-throwable`, `closure.unused-use`.
+//! Every premise is textual, so each id is pinned by a **pair**: a minimal
+//! firing fixture and its legal, silent counterpart.
 //!
-//! Two silences bind the whole family and are tested on their own:
+//! Two silences bind the whole family: a tag **outside the read set** is
+//! never a finding however malformed (`steins_phpdoc` drops it first), and a
+//! `@throws` naming a class the index cannot enumerate is silence, not a
+//! finding (the absence-family condition).
 //!
-//! * A tag **outside the read set** (an unknown/vendor tag) is never a finding,
-//!   however malformed — `steins_phpdoc` drops it before any check sees it.
-//! * A `@throws` naming a class the index cannot enumerate is silence, not a
-//!   finding (the absence-family condition).
-//!
-//! The `@var` legs reuse the ADR-0073/0074 statement-adoption rule verbatim
-//! (`SourceTree::stmt_docblock`), so their fixtures follow the style of
-//! `tests/inline_var_casts.rs`: an inline source string, the pure single-file
-//! `check`, and an assertion on the ids that came back.
+//! The `@var` legs reuse ADR-0073/0074's statement-adoption rule verbatim
+//! (`SourceTree::stmt_docblock`), styled like `tests/inline_var_casts.rs`.
 
 use steins_infer::{
     CLOSURE_UNUSED_USE_ID, Diagnostic, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID,
@@ -44,9 +39,7 @@ fn silent(src: &str, id: &str) {
     assert!(ds.is_empty(), "`{id}` must stay silent on {src:?}, got {ds:?}");
 }
 
-// ---------------------------------------------------------------------------
 // phpdoc.unparsable — a read-set tag whose payload the parser rejects.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_trailing_union_bar_does_not_parse() {
@@ -60,9 +53,7 @@ fn a_well_formed_type_parses() {
     silent("<?php\n/** @return array<int, string>|null */\nfunction f() {}\n", PHPDOC_UNPARSABLE_ID);
 }
 
-/// The docblock scanner cuts the type region at the first `$name`, so a by-ref
-/// parameter leaves a stray `&` behind (`"int &"`). That is signature spelling,
-/// not a broken type — trimmed before the parse, never a finding.
+/// Type region is cut at first `$name`; by-ref's stray `&` is spelling, not rot.
 #[test]
 fn a_by_ref_param_spelling_is_not_unparsable() {
     silent("<?php\n/** @param int &$x */\nfunction f(int &$x): void {}\n", PHPDOC_UNPARSABLE_ID);
@@ -74,9 +65,7 @@ fn a_variadic_param_spelling_is_not_unparsable() {
     silent("<?php\n/** @param int ...$xs */\nfunction f(int ...$xs): void {}\n", PHPDOC_UNPARSABLE_ID);
 }
 
-/// A callable type carrying its own parameter names parses whole — the payload,
-/// not the scanner's `$`-truncated type region, is what the parser is handed
-/// (sebastianbergmann/phpunit `Framework/Constraint/Callback.php`).
+/// Full callable type is parsed whole, not the scanner's truncated region.
 #[test]
 fn a_callable_type_with_named_parameters_parses() {
     silent(
@@ -85,9 +74,8 @@ fn a_callable_type_with_named_parameters_parses() {
     );
 }
 
-/// The scanner reads one physical line, so a wrapped array shape arrives
-/// truncated (`"array{"`). An unbalanced payload is a parser limitation, never
-/// rot — documented silence, not an omitted check.
+/// Wrapped array shape truncates to `array{` at one physical line — parser
+/// limit, not rot.
 #[test]
 fn a_line_wrapped_array_shape_is_not_rot() {
     silent(
@@ -96,8 +84,7 @@ fn a_line_wrapped_array_shape_is_not_rot() {
     );
 }
 
-/// The bounded-tag-set discipline: Steins reads a bounded vocabulary and drops
-/// everything else, so an unknown/vendor tag is never a finding however malformed.
+/// Pins the read-set rule from the module doc directly.
 #[test]
 fn an_unknown_vendor_tag_never_reports() {
     let src = "<?php\n/**\n * @deprecated array{ <<< nonsense |\n * @psalm-param-out int|string| $x\n * @mycompany-thing }{\n */\nfunction f(int $x): void {}\n";
@@ -105,9 +92,7 @@ fn an_unknown_vendor_tag_never_reports() {
     silent(src, PHPDOC_STALE_PARAM_ID);
 }
 
-// ---------------------------------------------------------------------------
 // phpdoc.stale-param — a `@param` naming a parameter the signature lacks.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_param_tag_naming_no_parameter_is_stale() {
@@ -121,24 +106,19 @@ fn a_param_tag_naming_a_real_parameter_is_silent() {
     silent("<?php\n/** @param int $n */\nfunction f(int $n): void {}\n", PHPDOC_STALE_PARAM_ID);
 }
 
-/// Variadic and by-ref spellings name a real parameter — both count as existing.
 #[test]
 fn variadic_and_by_ref_parameters_exist() {
     silent("<?php\n/** @param int ...$xs */\nfunction f(int ...$xs): void {}\n", PHPDOC_STALE_PARAM_ID);
     silent("<?php\n/** @param int &$out */\nfunction f(int &$out): void {}\n", PHPDOC_STALE_PARAM_ID);
 }
 
-/// A `@param` with no name token names nothing — not this finding.
 #[test]
 fn a_param_tag_without_a_name_is_not_stale() {
     silent("<?php\n/** @param int */\nfunction f(int $n): void {}\n", PHPDOC_STALE_PARAM_ID);
 }
 
-/// **The subject is the `$name` after the TYPE, not the first `$name` in the
-/// payload.** A `callable(...)` type carries its own parameter names, and the
-/// docblock scanner's type region stops at the first of them — reading that as the
-/// subject reported `$input` as a missing parameter of a signature that never had
-/// one (sebastianbergmann/phpunit `Framework/Constraint/Callback.php`).
+/// Subject is the `$name` after TYPE, not inside a `callable(...)` payload —
+/// misreading that false-flagged `$input` as missing (witness: phpunit Callback.php).
 #[test]
 fn a_parameter_name_inside_a_callable_type_is_not_the_subject() {
     silent(
@@ -161,39 +141,30 @@ fn a_parameter_name_inside_a_callable_type_is_not_the_subject() {
     assert_eq!(msg, "`@param $gone` names no parameter of f()");
 }
 
-/// A payload the parser rejects has no locatable subject, so staleness is not
-/// asked — that case is `phpdoc.unparsable`'s alone.
+/// Unparsable payload has no locatable subject — that's phpdoc.unparsable's case alone.
 #[test]
 fn an_unparsable_payload_is_not_also_stale() {
     silent("<?php\n/** @param int|string| $gone */\nfunction f(int $n): void {}\n", PHPDOC_STALE_PARAM_ID);
 }
 
-/// **A multiline type can never convict.** The docblock scanner reads one physical
-/// line, so a `callable(…): array{…}` whose shape continues below arrives cut at
-/// `array{`. Worse, `parse_type` does not reject that: the `callable(…)` signature
-/// form is all-or-nothing, so a truncated return type makes it BACKTRACK to the
-/// bare identifier and report `consumed = 8` with the whole parameter list
-/// unconsumed — which read the type's own `$params` as the tag's subject.
-///
-/// Both guards are pinned here: the payload is bracket-unbalanced (guard 1), and
-/// even balanced-but-backtracked forms leave no subject at bracket depth 0
-/// (guard 2). `phpdoc.unparsable` stays silent too, by the same wrap rule.
+/// **A multiline type never convicts.** Scanner cuts a wrapped `callable(…):
+/// array{…}` at `array{`; `parse_type` BACKTRACKs the all-or-nothing
+/// `callable(…)` form to the bare identifier, `consumed = 8`, param list
+/// unconsumed — would misread `$params` as subject. Two guards pinned here:
+/// bracket-unbalanced, and balanced-but-backtracked with no subject at depth 0.
 #[test]
 fn a_multiline_callable_type_convicts_nothing() {
     let src = "<?php\n/**\n * @phpstan-param callable(array<string,string> $params): array{\n *   subject:string,\n *   body:string\n * } $render\n */\nfunction f(callable $render): void {}\n";
     silent(src, PHPDOC_STALE_PARAM_ID);
     silent(src, PHPDOC_UNPARSABLE_ID);
 
-    // Guard 2 on its own: a BALANCED callable with no return type still backtracks
-    // to `consumed = 8`, and its `$a` sits inside the parens.
+    // Guard 2 alone: balanced callable, no return type, still backtracks to consumed=8.
     silent(
         "<?php\n/** @param callable(int $a) */\nfunction f(callable $cb): void {}\n",
         PHPDOC_STALE_PARAM_ID,
     );
 }
 
-/// The firing control beside it: the same callable spelled on ONE line, with a
-/// subject the signature genuinely lacks.
 #[test]
 fn a_single_line_callable_with_a_stale_subject_still_fires() {
     let msg = one(
@@ -221,15 +192,10 @@ fn a_closure_param_tag_is_checked_too() {
     assert_eq!(msg, "`@param $gone` names no parameter of the closure");
 }
 
-// ---------------------------------------------------------------------------
 // phpdoc.stale-var — an adopted `@var` naming a variable that exists NOWHERE.
 //
-// The claim is ADR-0073's, not PHPStan's: §2 makes the cast re-declare the
-// variable the tag NAMES, whatever the statement below it binds, and §4 defers the
-// assignment form as a silence. So "the tag names a different variable than the
-// statement assigns" — PHPStan's `varTag.differentVariable` — is legal here, and
-// only a name with no referent at all is rot.
-// ---------------------------------------------------------------------------
+// ADR-0073 §2/§4 (not PHPStan's `varTag.differentVariable`): only a
+// referent-less name is rot; a mismatched-but-real name is legal.
 
 #[test]
 fn a_var_tag_naming_a_variable_that_exists_nowhere_is_stale() {
@@ -243,7 +209,6 @@ fn a_var_tag_naming_a_variable_that_exists_nowhere_is_stale() {
     );
 }
 
-/// The typo shape the narrowed check exists for.
 #[test]
 fn a_misspelled_variable_name_is_stale() {
     let src = "<?php\nfunction f(\\PhpParser\\Node\\Stmt\\Echo_ $echo): void {\n  /** @var \\PhpParser\\Node\\Stmt\\Echo_ $ecoh */\n  $dnumber = $echo->exprs[0];\n}\n";
@@ -256,9 +221,7 @@ fn a_var_tag_naming_the_bound_variable_is_silent() {
     silent("<?php\nfunction f(): void {\n  /** @var int $x */\n  $x = 1;\n}\n", PHPDOC_STALE_VAR_ID);
 }
 
-/// **ADR-0073 §2's own shape**: the cast re-declares an already-bound variable the
-/// statement merely *reads*. `nikic/PHP-Parser`'s test suite spells it this way,
-/// and PHPStan calls it `varTag.differentVariable` — we do not.
+/// ADR-0073 §2's own shape (witness: nikic/PHP-Parser test suite) — legal here.
 #[test]
 fn a_cast_of_a_variable_the_statement_reads_is_legal() {
     silent(
@@ -267,8 +230,7 @@ fn a_cast_of_a_variable_the_statement_reads_is_legal() {
     );
 }
 
-/// A multi-`@var` docblock naming several in-scope variables at once
-/// (`composer/composer`'s `AutoloadGenerator`). Every name exists; nothing is rot.
+/// Several in-scope names in one docblock (witness: composer's AutoloadGenerator).
 #[test]
 fn a_multi_var_docblock_over_one_statement_is_legal() {
     silent(
@@ -277,8 +239,7 @@ fn a_multi_var_docblock_over_one_statement_is_legal() {
     );
 }
 
-/// A name bound anywhere earlier in the scope — by an assignment, a `foreach`, a
-/// closure capture — is a real variable, whatever the statement below the tag does.
+/// A name bound anywhere earlier in scope (assignment/foreach/closure use) is real.
 #[test]
 fn a_name_bound_earlier_in_the_scope_is_never_stale() {
     for prelude in [
@@ -293,8 +254,7 @@ fn a_name_bound_earlier_in_the_scope_is_never_stale() {
     }
 }
 
-/// A scope that can mint names is silent throughout — the same dam
-/// `closure.unused-use` applies.
+/// Name-minting scope is silent throughout — same dam as `closure.unused-use`.
 #[test]
 fn a_name_minting_scope_dams_stale_var() {
     for prelude in ["extract($data);", "$k = 'a'; $$k = 1;", "eval('$q = 1;');"] {
@@ -305,14 +265,12 @@ fn a_name_minting_scope_dams_stale_var() {
     }
 }
 
-/// A bare `@var T` speaks about the statement's own binding — never stale.
 #[test]
 fn a_bare_var_tag_is_never_stale() {
     silent("<?php\nfunction f(): void {\n  /** @var int */\n  $x = 1;\n}\n", PHPDOC_STALE_VAR_ID);
 }
 
-/// The property-target spelling speaks about a property, not the receiver — the
-/// ADR-0073 §3 guard, honored here exactly as the cast lane honors it.
+/// Property-target spelling names a property, not the receiver (ADR-0073 §3 guard).
 #[test]
 fn a_property_target_var_tag_is_not_stale() {
     silent(
@@ -321,8 +279,7 @@ fn a_property_target_var_tag_is_not_stale() {
     );
 }
 
-/// A comment in the gap breaks the adjacency (ADR-0073 §3), so no statement
-/// adopts the tag and the different-variable question is never asked.
+/// A comment in the gap breaks adjacency (ADR-0073 §3) — nothing adopts the tag.
 #[test]
 fn a_comment_in_the_gap_breaks_the_adoption() {
     silent(
@@ -331,9 +288,7 @@ fn a_comment_in_the_gap_breaks_the_adoption() {
     );
 }
 
-/// `foreach` binds its value variable through a construct the trace keeps opaque,
-/// so the statement's bound name is not a syntactic fact — silence, the common
-/// and entirely legal `@var` over a loop.
+/// `foreach`'s bound name is opaque to the trace — legal `@var`-over-loop, silent.
 #[test]
 fn a_var_tag_over_a_foreach_is_silent() {
     silent(
@@ -351,9 +306,7 @@ fn a_stale_var_inside_a_branch_still_reports() {
     assert!(msg.contains("`@var $nowhere`"), "{msg}");
 }
 
-// ---------------------------------------------------------------------------
 // phpdoc.misplaced-var — a `@var` nothing can adopt.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_var_tag_with_nothing_following_is_misplaced() {
@@ -370,15 +323,13 @@ fn a_var_tag_a_statement_adopts_is_placed() {
     );
 }
 
-/// The property-`@var` position is legal and consumed elsewhere (the property
-/// declaration follows it) — never misplaced.
+/// Property-`@var` position is legal, consumed by the declaration that follows.
 #[test]
 fn a_property_var_docblock_is_not_misplaced() {
     silent("<?php\nclass C {\n  /** @var int */\n  public $p = 0;\n}\n", PHPDOC_MISPLACED_VAR_ID);
 }
 
-/// A second docblock takes over as the nearest preceding trivium, so the first
-/// one adopts nothing at all.
+/// A second docblock becomes the nearest trivium — the first adopts nothing.
 #[test]
 fn a_var_tag_shadowed_by_a_following_docblock_is_misplaced() {
     let ds = findings(
@@ -388,9 +339,7 @@ fn a_var_tag_shadowed_by_a_following_docblock_is_misplaced() {
     assert_eq!(ds.len(), 1, "only the shadowed docblock is misplaced: {ds:?}");
 }
 
-// ---------------------------------------------------------------------------
 // phpdoc.throws-not-throwable — a `@throws` naming a proven non-Throwable.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_throws_naming_a_plain_class_reports() {
@@ -414,8 +363,7 @@ fn a_throws_naming_a_real_exception_is_silent() {
     );
 }
 
-/// The absence-family condition: a class the index cannot enumerate has no
-/// verdict, so `@throws` on it is silence — never a finding.
+/// The absence-family condition from the module doc, pinned directly.
 #[test]
 fn a_throws_on_an_unresolvable_class_is_silent() {
     silent(
@@ -424,8 +372,7 @@ fn a_throws_on_an_unresolvable_class_is_silent() {
     );
 }
 
-/// A class whose ancestry leaves the known world is `Maybe`, and `Maybe` is
-/// silence — non-membership is provable only under a closed hierarchy.
+/// Ancestry leaving the known world is `Maybe`, and `Maybe` is silence.
 #[test]
 fn a_class_with_an_unknown_ancestor_is_silent() {
     silent(
@@ -434,9 +381,7 @@ fn a_class_with_an_unknown_ancestor_is_silent() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // closure.unused-use — a by-value `use ($x)` the body never mentions.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_use_the_body_never_reads_reports() {
@@ -449,15 +394,13 @@ fn a_use_the_body_reads_is_silent() {
     silent("<?php\n$f = function () use ($x) { return $x; };\n", CLOSURE_UNUSED_USE_ID);
 }
 
-/// A by-ref `use (&$x)` is an out-channel: the closure writes through it, so
-/// "never read" says nothing about it. Never a finding.
+/// By-ref `use (&$x)` is an out-channel — "never read" says nothing about it.
 #[test]
 fn a_by_ref_use_is_never_a_finding() {
     silent("<?php\n$f = function () use (&$x) { return 1; };\n", CLOSURE_UNUSED_USE_ID);
 }
 
-/// A name mentioned only by a nested closure — in its body *or* in its own `use`
-/// clause — is used by the outer capture's lights.
+/// A name mentioned only inside a nested closure (body or its own `use`) counts.
 #[test]
 fn a_nested_closure_mention_counts_as_a_use() {
     silent(
@@ -467,9 +410,8 @@ fn a_nested_closure_mention_counts_as_a_use() {
     silent("<?php\n$f = function () use ($x) { return fn () => $x; };\n", CLOSURE_UNUSED_USE_ID);
 }
 
-/// The scope-local dam: a body that can consume a name without spelling it
-/// (`compact`/`extract`/`get_defined_vars`/`$$x`/`eval`/`include`) silences the
-/// whole closure.
+/// A body that can consume a name without spelling it (`compact`/`extract`/
+/// `get_defined_vars`/`$$x`/`eval`/`include`) silences the whole closure.
 #[test]
 fn a_name_minting_body_dams_the_closure() {
     for body in [
@@ -484,7 +426,6 @@ fn a_name_minting_body_dams_the_closure() {
     }
 }
 
-/// A string-interpolated or heredoc mention is a mention.
 #[test]
 fn an_interpolated_mention_counts() {
     silent("<?php\n$f = function () use ($x) { return \"a $x b\"; };\n", CLOSURE_UNUSED_USE_ID);

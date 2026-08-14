@@ -1,7 +1,6 @@
 //! Integration tests for ADR-0043 §6 — phpdoc-honesty repair extended to
-//! **methods**. A lying `@param`/`@return` on an *eligible* method is widened to
-//! the proven truth from the method-call reverse sweep / the method's own return
-//! sites; a non-eligible method refuses through the same ADR-0041 §1 split.
+//! **methods**: a lying `@param`/`@return` on an eligible method widens to the
+//! proven truth; a non-eligible method refuses through the ADR-0041 §1 split.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_edit::honesty::{REASON_AMBIGUOUS, REASON_MAGIC_METHOD, REASON_METHOD_INHERITANCE};
@@ -27,7 +26,7 @@ fn only_reason(report: &TransformReport) -> &str {
     &report.refusals[0].reason
 }
 
-// ---- 1. Method `@param` honesty --------------------------------------------
+// 1. Method `@param` honesty
 
 #[test]
 fn method_param_widens_to_proven_union() {
@@ -41,9 +40,8 @@ fn method_param_widens_to_proven_union() {
 
 #[test]
 fn method_param_honesty_refuses_inheritance() {
-    // An overridable public method that lies: an exact-receiver caller makes the
-    // lie observable, then the eligibility split refuses the widening (honesty
-    // applies the split too).
+    // Exact-receiver caller makes the lie observable, then the eligibility
+    // split refuses the widening (honesty applies the split too).
     let c = "<?php\nclass C {\n/** @param int $id */\npublic function m($id) { return $id; }\n}\n";
     let main = "<?php\n(new C())->m('x');\n";
     let report = plan(&[("c.php", c), ("main.php", main)]);
@@ -64,15 +62,14 @@ fn method_param_honesty_refuses_magic() {
 
 #[test]
 fn method_param_honesty_refuses_on_unresolved_receiver() {
-    // A `$o->m(...)` unknown-receiver call taints `m`; the lie widening cannot
-    // claim all callers are enumerable.
+    // An unknown-receiver `$o->m(...)` taints `m`: not all callers are enumerable.
     let c = "<?php\nfinal class C {\n/** @param int $id */\npublic function m($id) { return $id; }\npublic function a() { return $this->m('x'); }\n}\n";
     let f = "<?php\nfunction f($o) { $o->m(1); }\n";
     let report = plan(&[("c.php", c), ("f.php", f)]);
     assert_eq!(only_reason(&report), REASON_AMBIGUOUS);
 }
 
-// ---- 2. Method `@return` honesty -------------------------------------------
+// 2. Method `@return` honesty
 
 #[test]
 fn method_return_widens_to_proven_union() {
@@ -92,15 +89,12 @@ fn method_return_honesty_refuses_inheritance() {
     assert_eq!(only_reason(&report), REASON_METHOD_INHERITANCE);
 }
 
-/// ADR-0043 amendment pin: the LSB return-position lowering synthesizes a native
-/// `Instance` return for a `: static`/`: self`/`: parent` method, but the phpdoc
-/// honesty transform must stay **unmoved** on such methods. `decide_return`'s
-/// `has_instance` filter skips `Instance`-bearing native rets before the native
-/// guard, so the transform sees exactly the pre-amendment `None` behavior — this
-/// `: static` method (native ret now `Instance` of `C`) still widens its lying
-/// `@return int` to the proven `int|'zero'` union, identical to the
-/// no-native-type case above. Without the filter the synthesized object ret would
-/// interfere with the scalar-literal widening.
+/// ADR-0043 amendment pin: LSB return-position lowering synthesizes a native
+/// `Instance` return for `: static`/`: self`/`: parent`, but honesty must stay
+/// **unmoved** — `decide_return`'s `has_instance` filter skips `Instance`-bearing
+/// native rets before the native guard, so a `: static` method still widens its
+/// lying `@return int` exactly as the no-native-type case does. Without the
+/// filter the synthesized object ret would interfere with scalar-literal widening.
 #[test]
 fn static_return_method_honesty_unmoved() {
     let c = "<?php\nfinal class C {\n/** @return int */\npublic function m($flag): static {\nif ($flag) { return 1; }\nreturn 'zero';\n}\n}\n";
@@ -119,11 +113,9 @@ fn honest_method_is_not_enumerated() {
     assert!(report.refusals.is_empty());
 }
 
-/// ADR-0047 §4 scope note, method side: a zero-caller lying `@param` on a
-/// method (the PHPUnit-shaped counterexample's own doc, if it lied) is never
-/// enumerated either — the "lie" flag requires an *observed* violating value,
-/// so an empty target (no call resolved to this method at all) never sets it.
-/// No `no-observed-callers` gate is needed on the honesty side by construction.
+/// ADR-0047 §4, method side: a zero-caller lying `@param` is never enumerated
+/// either — the "lie" flag requires an *observed* violating value, so an empty
+/// target never sets it. No `no-observed-callers` gate needed on honesty's side.
 #[test]
 fn zero_caller_lying_method_param_is_never_enumerated() {
     let c = "<?php\nfinal class C {\n/** @param int $x */\npublic function m($x) { return $x; }\n}\n";

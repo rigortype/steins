@@ -1,13 +1,11 @@
-//! The reachability foundation itself (ADR-0078 §5, issue #199): `Stmt::end` and
-//! the [`body_end`] fold, pinned as the **three-valued** judgment they are.
+//! The reachability foundation itself (ADR-0078 §5, issue #199): `Stmt::end`
+//! and the [`body_end`] fold, pinned as the **three-valued** judgment they are.
 //!
 //! `crates/steins-infer/tests/return_missing.rs` exercises the same foundation
-//! through `type.return-missing`, but that consumer collapses `Terminates` and
-//! `Unknown` into one observable outcome — silence. This file is where the two
-//! are told apart, because the deferred dead-code consumer reads them the
-//! opposite way round: it may report only on `Terminates`, so a construct that
-//! answers `Terminates` when it should answer `Unknown` is a false "this code is
-//! unreachable" waiting to happen, and no test on the tracer would ever see it.
+//! but collapses `Terminates` and `Unknown` into one outcome (silence). This
+//! file tells the two apart: a future dead-code consumer may report only on
+//! `Terminates`, so `Terminates` where the truth is `Unknown` is a false
+//! "unreachable" that no test on that consumer would catch.
 
 use steins_syntax::{BodyEnd, Scope, ScopeOwner, SourceTree, body_end, body_has_terminator};
 
@@ -33,9 +31,7 @@ fn exits_of(body: &str) -> bool {
     body_has_terminator(&scope_of(body).stmts)
 }
 
-// ---------------------------------------------------------------------------
 // Terminates — proven to have no edge to the successor.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn terminators_terminate() {
@@ -60,9 +56,8 @@ fn an_if_terminates_only_when_every_arm_does() {
 
 #[test]
 fn a_literal_condition_is_not_a_branch() {
-    // `if (true)` has no no-branch path to add, so the arm alone decides — this is
-    // the one place a condition is read, and it exists to keep the tracer off a
-    // function that demonstrably returns.
+    // `if (true)` has no no-branch path, so the arm alone decides — the one
+    // place a condition is read, to keep the tracer off a demonstrably-returning function.
     assert_eq!(end_of("if (true) { return 1; }"), BodyEnd::Terminates);
     assert_eq!(end_of("if (1) { return 1; }"), BodyEnd::Terminates);
     // A literal-false arm contributes no path at all.

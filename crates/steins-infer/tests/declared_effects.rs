@@ -1,12 +1,10 @@
-//! The declared effect lane (ADR-0067, issue #70): a call through a receiver
-//! whose declared type is a project **interface** carries that interface's effect
-//! envelope into the caller's summary — as a *declared* bound, never a proven
-//! effect. This is what keeps effect information alive across dependency
-//! injection, where the concrete call graph is deliberately unknowable.
+//! The declared effect lane (ADR-0067, issue #70): a call through a receiver whose
+//! declared type is a project **interface** carries that interface's effect envelope
+//! into the caller's summary as a *declared* bound, never a proven effect — this is
+//! what keeps effect information alive across dependency injection.
 //!
-//! The two lanes are kept apart on purpose: `effect.envelope-exceeded` and
-//! `effect.liskov-widened` read the proven lane only, so no declaration can ever
-//! manufacture a finding.
+//! The two lanes stay apart: `effect.envelope-exceeded` and `effect.liskov-widened`
+//! read the proven lane only, so no declaration can manufacture a finding.
 
 use steins_infer::{
     Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, EffectSummary, FactKind, NoFold, annotate_facts, check,
@@ -53,7 +51,7 @@ const REPO: &str = concat!(
     "}\n",
 );
 
-// ---- THE HEADLINE: an injected interface keeps its effect --------------------
+// THE HEADLINE: an injected interface keeps its effect
 
 #[test]
 fn interface_typed_parameter_receiver_contributes_declared_label() {
@@ -95,7 +93,7 @@ fn plain_typed_property_receiver_contributes_declared_label() {
     assert!(s.exhaustive);
 }
 
-// ---- The gates: anything less than certain falls back to today's taint -------
+// The gates: anything less than certain falls back to today's taint
 
 #[test]
 fn reassigned_parameter_receiver_falls_back_to_taint() {
@@ -132,12 +130,11 @@ fn written_property_receiver_falls_back_to_taint() {
     assert!(!s.exhaustive);
 }
 
-// ---- The escape hatches a purely local write-scan would miss ---------------
+// The escape hatches a purely local write-scan would miss
 
 #[test]
 fn by_ref_closure_capture_of_the_receiver_falls_back_to_taint() {
-    // The closure aliases `$r` and rebinds it, from a scope the write-scan
-    // otherwise stops at. A by-ref capture is a write, whatever the body does.
+    // A by-ref closure capture aliases and rebinds `$r` — a write regardless of body.
     let src = format!(
         "<?php\n{REPO}function f(Repo $r): string {{\n\
              $g = function () use (&$r) {{ $r = new Wild(); }};\n\
@@ -154,8 +151,7 @@ fn by_ref_closure_capture_of_the_receiver_falls_back_to_taint() {
 
 #[test]
 fn by_value_closure_capture_of_the_receiver_keeps_the_bound() {
-    // The positive control. `use ($r)` is a copy: writing it inside the closure
-    // cannot touch the caller's binding, so the declaration still holds.
+    // Positive control: `use ($r)` copies, so an inner write can't touch the caller's binding.
     let src = format!(
         "<?php\n{REPO}function f(Repo $r): string {{\n\
              $g = function () use ($r) {{ $r = new Wild(); }};\n\
@@ -165,16 +161,15 @@ fn by_value_closure_capture_of_the_receiver_keeps_the_bound() {
     );
     let s = summary(&src, "f");
     assert_eq!(s.declared, vec!["io.db"], "a copy rebinds nothing");
-    // `$g()` resolves to the body-local closure (ADR-0033), whose body is
-    // effect-free — so nothing in this frame taints, and the bound is the whole
-    // summary. Overcorrecting on by-value captures would have cost exactly this.
+    // `$g()` resolves to the body-local closure (ADR-0033), whose effect-free body
+    // taints nothing here — overcorrecting on by-value captures would cost exactly this.
     assert!(s.exhaustive);
 }
 
 #[test]
 fn a_closure_writing_the_property_falls_back_to_taint() {
-    // A non-static closure declared in a method binds the *same* `$this`, so
-    // this is a write to this frame's property from inside a nested scope.
+    // A non-static closure shares the method's `$this`, so an inner write hits
+    // this frame's own property.
     let src = format!(
         "<?php\n{REPO}final class Controller {{\n\
              private Repo $repo;\n\
@@ -192,8 +187,8 @@ fn a_closure_writing_the_property_falls_back_to_taint() {
 
 #[test]
 fn a_global_statement_rebinding_the_parameter_falls_back_to_taint() {
-    // `global $r;` over a parameter name is legal PHP and rebinds the name to
-    // the interpreter's global — the signature's type no longer describes it.
+    // `global $r;` over a param name is legal and rebinds it to the interpreter's
+    // global — the signature's type no longer describes it.
     let src = format!(
         "<?php\n{REPO}function f(Repo $r): string {{ global $r; return $r->find(1); }}\n"
     );
@@ -218,7 +213,7 @@ fn interface_method_without_an_envelope_still_taints() {
 #[test]
 fn class_typed_receiver_is_out_of_scope_and_taints() {
     // A non-final class is an abstraction carrier too, but out of scope for this
-    // tracer, so it falls back to the plain taint rather than guessing.
+    // tracer — falls back to taint rather than guessing.
     let src = concat!(
         "<?php\n",
         "class Repo {\n",
@@ -243,7 +238,7 @@ fn union_typed_receiver_taints() {
     assert!(!s.exhaustive);
 }
 
-// ---- An inherited envelope: nearest carrier wins -----------------------------
+// An inherited envelope: nearest carrier wins
 
 #[test]
 fn envelope_inherited_from_an_extended_interface_binds() {
@@ -256,12 +251,11 @@ fn envelope_inherited_from_an_extended_interface_binds() {
     assert!(s.exhaustive);
 }
 
-// ---- The lanes never mix: no declared label may make a finding ---------------
+// The lanes never mix: no declared label may make a finding
 
 #[test]
 fn declared_label_never_triggers_envelope_exceeded() {
-    // A `Pure` function whose body calls an `io.db`-declared interface method.
-    // The proven lane is empty, so the envelope check has nothing to say.
+    // A `Pure` function's empty proven lane gives the envelope check nothing to say.
     let src = format!(
         "<?php\n{REPO}#[\\Steins\\Pure]\nfunction f(Repo $r): string {{ return $r->find(1); }}\n"
     );
@@ -289,7 +283,7 @@ fn declared_label_never_triggers_liskov_widening() {
     assert_eq!(s.declared, vec!["io.db"]);
 }
 
-// ---- Propagation: a declared label travels call edges ------------------------
+// Propagation: a declared label travels call edges
 
 #[test]
 fn declared_label_propagates_one_hop_to_a_caller() {
@@ -303,12 +297,12 @@ fn declared_label_propagates_one_hop_to_a_caller() {
     assert!(s.exhaustive, "an exhaustive callee taints nobody");
 }
 
-// ---- Rendering normalization and the per-site taint discharge ----------------
+// Rendering normalization and the per-site taint discharge
 
 #[test]
 fn declared_label_covered_by_a_proven_one_renders_once() {
     // The body both PROVES io.fs.write (file_put_contents) and imports it as a
-    // bound. The proven lane already says everything the declared one would.
+    // bound; the proven lane already covers it.
     let src = concat!(
         "<?php\n",
         "interface Writer {\n",
@@ -358,8 +352,8 @@ fn the_margin_renders_a_declared_label_with_a_less_than_or_equal_prefix() {
 
 #[test]
 fn the_taint_discharge_is_per_call_site() {
-    // One covered call, one genuinely dynamic one: the bound is imported AND the
-    // summary stays non-exhaustive. A declaration answers its own call site only.
+    // One covered call, one dynamic one: the bound imports but the summary stays
+    // non-exhaustive — a declaration answers only its own call site.
     let src = format!(
         "<?php\n{REPO}function f(Repo $r, callable $cb): string {{ $cb(); return $r->find(1); }}\n"
     );
