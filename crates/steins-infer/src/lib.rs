@@ -1964,8 +1964,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             fold_lane: fold_lane_at_width(int_size),
             curated_rows: self.absence_family_available() && self.curated_rows_admitted(),
             absence_family: self.absence_family_available(),
-            fold_total: steins_catalog::width_safe_names().len()
-                + steins_catalog::width_refused_names().len(),
+            fold_total: steins_catalog::foldable_entry_count(),
             fold_safe: steins_catalog::width_safe_names().len(),
             refused_folds: steins_catalog::width_refused_names(),
         }
@@ -2300,7 +2299,11 @@ impl<E: FoldEngine> EngineFolder<E> {
 ///   certifies it ([`steins_catalog::width_safe`]) *and* every integer occurring
 ///   anywhere in the arguments is inside [`I32_SAFE`]. Both legs are required:
 ///   the catalog verdict is stated for exactly the tuples this range guard admits,
-///   so neither leg means anything alone.
+///   so neither leg means anything alone. The catalog's classification became
+///   three-valued in ADR-0028's 2026-08-14 amendment §4 and this gate did not
+///   move: a `Refused` row and an `Unverified` one are both "not certified", and
+///   the single `width_safe` question is what makes them mechanically identical
+///   here while staying distinguishable where the *evidence* is reported.
 /// * anything else (`None`, or a width nobody has verified) — **default-deny**.
 ///   An old or foreign runner is unknown, not assumed; and there is no verified
 ///   subset for a 16-bit or 128-bit machine because nobody has probed one.
@@ -2387,8 +2390,19 @@ pub struct SurfaceSummary {
     pub fold_total: usize,
     /// See [`Self::fold_total`].
     pub fold_safe: usize,
-    /// The folds a [`FoldLane::WidthSafeSubset`] engine does **not** get, by name:
-    /// the catalog complement (`foldable ∧ !width_safe`), never a second list.
+    /// The [`steins_catalog::WidthClass::Refused`] rows, by name — the folds a
+    /// [`FoldLane::WidthSafeSubset`] engine does not get **and can say why**, read
+    /// from the catalog rather than restated here.
+    ///
+    /// Since ADR-0028's 2026-08-14 amendment this is no longer the whole
+    /// `foldable ∧ !width_safe` complement: the unverified rows decline on the
+    /// very same gate with nothing on record. They are deliberately not merged in.
+    /// A renderer states these as "a divergence was measured, here it is", which
+    /// is a sentence an unverified row cannot be given — and §4 of that amendment
+    /// exists to stop the two being conflated, since the refused list's
+    /// one-divergence-per-row discipline is the only thing that makes it
+    /// auditable. Naming the unverified rows to a reader wants its own field and
+    /// its own sentence.
     pub refused_folds: &'static [&'static str],
 }
 
