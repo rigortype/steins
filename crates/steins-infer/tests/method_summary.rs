@@ -1,12 +1,10 @@
 //! ADR-0075 — a method/static call's return summary rebinds on the T0 rungs.
 //!
-//! The function leg is covered by `return_summary.rs` and `concat.rs`. This file
-//! pins the method twin: the summary from a resolved method body is consumed at
-//! `apply_assign` and return composition exactly as a function's is.
-//! Value/argument-position method calls and constructors are out of scope.
-//!
-//! Shared return-coverage soundness (opaque `may_return`, untyped fallthrough) is
-//! regression-tested on both function and method twins (Composer `findPackage`).
+//! The function leg is covered by `return_summary.rs` and `concat.rs`; this file pins the
+//! method twin — a resolved method body's summary is consumed at `apply_assign` and return
+//! composition exactly as a function's is. Value/argument-position method calls and
+//! constructors are out of scope. Shared return-coverage soundness (opaque `may_return`,
+//! untyped fallthrough) is regression-tested on both twins (Composer `findPackage`).
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, ID as ARG_MISMATCH_ID, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
@@ -66,8 +64,7 @@ fn count(src: &str, id: &str) -> usize {
 
 #[test]
 fn flagship_method_greet_inlines_to_its_value() {
-    // `$g = new Greeter(); $x = $g->greet(2, "World")` — the method body walks,
-    // proves the string, and the summary rebinds at the assignment (ADR-0075).
+    // The method body walks, proves the string, and the summary rebinds at assignment (ADR-0075).
     let src = "<?php\n\
         final class Greeter {\n\
             public function greet(int $times, string $name): string {\n\
@@ -95,8 +92,7 @@ fn flagship_static_greet_inlines_to_its_value() {
 
 #[test]
 fn method_literal_return_agrees_with_function_twin() {
-    // A one-arg method with a literal return: the T0 summary produces `Singleton`,
-    // matching the free-function path in `return_summary.rs`.
+    // A one-arg method with a literal return: T0 produces `Singleton`, matching `return_summary.rs`.
     let via_method = "<?php\n\
         final class C {\n\
             public function pick(int $x): int { return 42; }\n\
@@ -131,10 +127,8 @@ fn method_positive_int_crosses_verified() {
 
 #[test]
 fn inherited_body_does_not_replay_across_receivers_in_shared_memo() {
-    // Top-level independent descents each mint a fresh memo, so they cannot show
-    // a collision. Force both calls into one outer descent's memo (`outer` binds
-    // its trigger arg and descends). Without `this:` on the key, Sub1's summary
-    // would replay for Sub2 and `$x` would be `'A'` instead of `'B'`.
+    // Top-level descents each mint a fresh memo, so `outer` forces both calls into one memo.
+    // Without `this:` on the key, Sub1's summary would replay for Sub2 (`$x` would be `'A'`).
     let src = "<?php\n\
         class Base {\n\
             public function m(int $x): string {\n\
@@ -161,8 +155,7 @@ fn inherited_body_does_not_replay_across_receivers_in_shared_memo() {
 
 #[test]
 fn exact_receiver_dispatches_inherited_override() {
-    // `(new Sub())->call(1)` resolves `Base::call` with `this_exact = Sub`, so the
-    // inner `$this->m` hits `Sub::m` and rebinds 99.
+    // `(new Sub())->call(1)` resolves `Base::call` with `this_exact = Sub`, so `$this->m` hits `Sub::m`.
     let src = "<?php\n\
         class Base {\n\
             public function m(int $x): int { return $x; }\n\
@@ -194,8 +187,7 @@ fn unknown_receiver_assignment_is_unknown() {
 
 #[test]
 fn constructor_assignment_stays_on_exactness_lane() {
-    // `$x = new C(1)` is the ADR-0036 object lane, not a value summary of
-    // `__construct`. The dump reports the class, never a constructor return pin.
+    // `$x = new C(1)` is the ADR-0036 object lane, not `__construct`'s value summary.
     let src = "<?php\n\
         final class C {\n\
             public function __construct(int $n) {}\n\
@@ -245,8 +237,7 @@ fn static_summary_composes_through_function_return() {
 
 #[test]
 fn method_factless_summary_falls_to_declared_int_floor() {
-    // `return rand()` is factless int → arm floor. Free-function twin dumps `int`;
-    // method must too (ADR-0075 same-rung promise), not `unknown`.
+    // `return rand()` is factless int → arm floor; method must dump `int` too (ADR-0075), not `unknown`.
     let via_method = "<?php\n\
         final class C {\n\
             public function m(int $x): int { return rand(); }\n\
@@ -265,10 +256,9 @@ fn method_factless_summary_falls_to_declared_int_floor() {
 
 #[test]
 fn foreach_hidden_return_does_not_pin_null_on_method() {
-    // The Composer shape: a loop body returns a package, then `return null`. The
-    // foreach is Opaque — without may_return→Floor the summary was Singleton(null)
-    // and `$pkg->name()` fired call.on-null. With the floor join the object return
-    // has no representable value floor → no summary → no false null pin.
+    // Composer shape: a loop returns a package, then `return null`. Opaque foreach without
+    // may_return→Floor gave Singleton(null) (false call.on-null); the floor join now gives no
+    // representable value floor, so no false pin.
     let src = "<?php\n\
         final class Pkg { public function name(): string { return \"p\"; } }\n\
         final class Repo {\n\
@@ -295,8 +285,7 @@ fn foreach_hidden_return_does_not_pin_null_on_method() {
 
 #[test]
 fn foreach_hidden_return_does_not_pin_null_on_function_twin() {
-    // Same hole, free-function form — the fix is shared summary machinery, not a
-    // method-only special case. Master already had this latent for functions.
+    // Same hole, free-function form — shared summary machinery, not a method-only special case.
     let src = "<?php\n\
         final class Pkg { public function name(): string { return \"p\"; } }\n\
         /** @param list<Pkg> $packages */\n\
@@ -317,11 +306,9 @@ fn foreach_hidden_return_does_not_pin_null_on_function_twin() {
 
 #[test]
 fn asserted_method_summary_does_not_premise_proof_finding() {
-    // Body-side Asserted (phpstan-assert helper) crosses as Asserted summary —
-    // same shape as `return_summary::mixed_strata_join_renders_asserted`, method
-    // twin. The proof layer's all-Verified premise rule keeps findings off it.
-    // (Inline `@var` on an assignment to the same name is erased by rebind —
-    // `inline_var_casts`; a bare `@var int` seeds arms, not a bindable Singleton.)
+    // Body-side Asserted (phpstan-assert helper) crosses as Asserted summary — method twin of
+    // `return_summary::mixed_strata_join_renders_asserted`. The proof layer's all-Verified
+    // premise rule keeps findings off it.
     let src = "<?php\n\
         /** @phpstan-assert positive-int $v */\n\
         function assertPos($v): void {}\n\
@@ -347,8 +334,7 @@ fn asserted_method_summary_does_not_premise_proof_finding() {
 
 #[test]
 fn method_self_assign_keeps_declared_int_floor() {
-    // `$o = $o->m(1)` unbinds `$o` before the floor would re-resolve the receiver;
-    // arms must be captured at the method resolution that still sees `$o`.
+    // `$o = $o->m(1)` unbinds `$o`; arms must be captured at method resolution, while `$o` is still visible.
     let src = "<?php\n\
         final class C {\n\
             public function m(int $x): int { return rand(); }\n\
@@ -363,8 +349,7 @@ fn method_self_assign_keeps_declared_int_floor() {
 
 #[test]
 fn generator_method_does_not_rebind_return_value() {
-    // `$x = (new C())->g(1)` is a Generator, not 7. A summary that rebinds 7 would
-    // premise false argument mismatches on object sinks.
+    // `$x = (new C())->g(1)` is a Generator, not 7 — rebinding 7 would premise false mismatches.
     let src = "<?php\n\
         final class C {\n\
             public function g(int $trigger) {\n\
@@ -403,8 +388,7 @@ fn generator_function_twin_does_not_rebind_return_value() {
 
 #[test]
 fn never_return_fallthrough_does_not_pin_null() {
-    // `: never` leaves scope_return as None (unrepresentable), but is not untyped.
-    // Fallthrough must not contribute Singleton(null) as a call-result premise.
+    // `: never` leaves scope_return None (unrepresentable, not untyped); fallthrough mustn't contribute Singleton(null).
     let src = "<?php\n\
         function f(int $trigger): never {}\n\
         $x = f(1);\n\
@@ -418,8 +402,7 @@ fn never_return_fallthrough_does_not_pin_null() {
 
 #[test]
 fn object_return_hint_fallthrough_does_not_pin_null() {
-    // `: object` also leaves scope_return as None (no scalar floor) but is a written
-    // hint — fallthrough is TypeError, not null.
+    // `: object` also leaves scope_return None but is a written hint — fallthrough is TypeError, not null.
     let src = "<?php\n\
         function f(int $trigger): object {}\n\
         $x = f(1);\n\
@@ -431,9 +414,9 @@ fn object_return_hint_fallthrough_does_not_pin_null() {
 
 #[test]
 fn object_return_null_does_not_rebind_on_method() {
-    // `: object` is a written hint Steins does not lower, so the A2 native oracle
-    // is empty. Without a refuse, `return null` would rebind Singleton(null) and
-    // premise call.on-null — a boundary TypeError that never reaches the caller.
+    // `: object` is a written hint Steins doesn't lower, so the A2 native oracle is empty;
+    // without a refuse, `return null` would rebind Singleton(null) and premise call.on-null
+    // — a boundary TypeError that never reaches the caller.
     let src = "<?php\n\
         final class C {\n\
             public function m(int $trigger): object {\n\

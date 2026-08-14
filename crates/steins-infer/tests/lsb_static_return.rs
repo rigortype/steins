@@ -42,8 +42,7 @@ final class BrokenBuilder {
 #[test]
 fn static_return_message_names_the_bound() {
     // PHPStan message parity: the diagnostic renders the source-cased bound
-    // ("should return BrokenBuilder" — the enclosing class the `static` resolves
-    // to as its minimum bound).
+    // ("should return BrokenBuilder" — the class `static` resolves to as its minimum bound).
     let src = "<?php declare(strict_types=1);
 final class Builder {}
 final class BrokenBuilder {
@@ -110,8 +109,7 @@ final class C {
 fn new_self_in_open_class_is_silent() {
     // The point-4 refusal: `new self()` under `: static` in an OPEN class runs
     // clean on the declaring class and breaks only on proper-descendant
-    // receivers (a works-but-worst-case shape). Silent by construction:
-    // is_a(C, C) = Yes, and the check tests only the necessary bound.
+    // receivers — silent by construction: is_a(C, C) = Yes, necessary-bound only.
     let src = "<?php declare(strict_types=1);
 class C {
     public function m(): static { return new self(); }
@@ -190,9 +188,8 @@ final class C {
 
 #[test]
 fn parent_without_parent_is_silent() {
-    // `: parent` on a class with no `extends`: the bound is unresolvable, the
-    // hint stays unlowered → silent (illegal PHP at runtime, but not this
-    // check's concern; zero-FP).
+    // `: parent` on a class with no `extends`: bound unresolvable, hint stays
+    // unlowered → silent (illegal PHP at runtime, not this check's concern; zero-FP).
     let src = "<?php declare(strict_types=1);
 final class Other {}
 final class C {

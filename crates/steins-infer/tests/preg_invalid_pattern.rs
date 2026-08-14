@@ -2,15 +2,15 @@
 //! a proven literal that the project's OWN PCRE refuses to compile.
 //!
 //! The refusal is never Steins' own reading of the pattern: the pattern reader
-//! (`steins_catalog::preg`, #148/#149/#156/#168/#177) decides only that the pattern
-//! IS a proven literal worth asking about, and the answer comes from the engine
-//! through the sidecar (ADR-0004). So this file has two halves:
+//! (`steins_catalog::preg`, #148/#149/#156/#168/#177) only decides the pattern IS
+//! a proven literal worth asking about; the answer comes from the engine through
+//! the sidecar (ADR-0004). Two halves:
 //!
-//! * **live** — a real `php` on `PATH` answering a real `preg_compile`, which is the
-//!   only thing that proves the id fires at all (skipped with a marker when `php` is
+//! * **live** — a real `php` on `PATH` answering a real `preg_compile`, the only
+//!   thing that proves the id fires at all (skipped with a marker when `php` is
 //!   absent, the convention `sidecar_recovery.rs` set);
-//! * **mocked** — a [`Pcre`] folder standing in for the engine, for the postures and
-//!   entry-point coverage that must be pinned deterministically (the way
+//! * **mocked** — a [`Pcre`] folder standing in for the engine, for postures and
+//!   entry-point coverage that must be pinned deterministically (as
 //!   `offset_family.rs` mocks the boot surface).
 
 use std::cell::RefCell;
@@ -24,8 +24,8 @@ use steins_syntax::{ArgValue, SourceTree};
 
 /// A boot surface that is live and monkey-patch-free, with a stand-in PCRE: any
 /// pattern containing an unbalanced `(` is "refused", everything else compiles.
-/// Deliberately crude — the real PCRE's verdicts are the live half's business; what
-/// this pins is the plumbing between the fold gate, the gates, and the emitter.
+/// Deliberately crude — real PCRE's verdicts are the live half's business; this
+/// pins the plumbing between the fold gate, the gates, and the emitter.
 #[derive(Default)]
 struct Pcre {
     /// Every pattern the check actually asked about, in order — the dedupe witness.
@@ -158,17 +158,16 @@ fn silent_under_no_php() {
 // Gates.
 
 /// The sound subset via the availability lever itself (ADR-0049 A9 / ADR-0004): a
-/// folder that WOULD name a refusal still reports nothing while the boot surface is
-/// unavailable or monkey-patched.
+/// folder that WOULD name a refusal still reports nothing while the boot surface
+/// is unavailable or monkey-patched.
 #[test]
 fn silent_without_a_live_boot_surface() {
     let d = findings("<?php\npreg_match('/(unclosed/', $s);\n", &mut NoBootSurface);
     assert!(d.is_empty(), "no legitimate boot surface ⇒ silence: {d:#?}");
 }
 
-/// Under `warning-handler = "null"` the application tolerates the warning, so the
-/// warning-grade finding leaves the proof surface — wired exactly as
-/// `offset.missing` is (ADR-0049 §7).
+/// Under `warning-handler = "null"` the application tolerates the warning, so
+/// the finding leaves the proof surface — wired as `offset.missing` is (ADR-0049 §7).
 #[test]
 fn warning_handler_null_silences_the_finding() {
     let tree = SourceTree::parse("<?php\npreg_match('/(unclosed/', $s);\n");
@@ -296,9 +295,8 @@ fn the_array_form_fires_on_the_bad_element_only() {
     assert!(d[0].message.contains("'/(bad/'"), "{}", d[0].message);
 }
 
-/// The partial array: `resolve_literal` is all-or-nothing over an array, so this
-/// whole argument resolves to nothing — yet the literal element is still refused no
-/// matter what the variable holds, and the unproven sibling stays silent.
+/// The partial array: `resolve_literal` is all-or-nothing, so the whole argument
+/// resolves to nothing — yet the literal element is still refused, unproven sibling silent.
 #[test]
 fn the_array_form_reports_the_literal_beside_an_unproven_element() {
     let d = mocked("<?php\nfunction f($dyn, $s) {\n    return preg_replace(['/(bad/', $dyn], 'z', $s);\n}\n");
@@ -320,9 +318,8 @@ fn two_bad_elements_report_twice() {
     assert!(d.iter().any(|d| d.message.contains("'/(two/'")), "{d:#?}");
 }
 
-/// A `preg_replace_callback_array` key that is not a string key cannot be a pattern
-/// (a PCRE pattern opens with a non-alphanumeric delimiter, so it is never
-/// integer-like) — nothing to ask about, nothing to claim.
+/// A `preg_replace_callback_array` key that isn't a string key can't be a pattern
+/// (opens with a non-alphanumeric delimiter, never integer-like) — nothing to claim.
 #[test]
 fn callback_array_ignores_non_string_keys() {
     assert!(mocked("<?php\npreg_replace_callback_array([$cb], $s);\n").is_empty());

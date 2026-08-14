@@ -1,10 +1,8 @@
-//! The `mutate.local` color, conditional by-ref out-parameter rows, and Pure
-//! tolerance (ADR-0063 P2).
+//! The `mutate.local` color, conditional by-ref out-params, and Pure tolerance (ADR-0063 P2).
 //!
 //! An out-parameter write is a property of the *call*, not the function. Fixtures
-//! distinguish supplied from omitted arguments and frame locals from properties
-//! or superglobals (php-src #11884). A Pure function may tolerate writes into its
-//! own frame locals, such as `preg_match` output.
+//! distinguish supplied from omitted args, and frame locals from properties or
+//! superglobals (php-src #11884); Pure may tolerate writes into its own frame locals.
 
 use steins_infer::{check, effect_summary, Diagnostic, EffectSummary, EFFECT_ID, PARAM_MISMATCH_ID};
 use steins_syntax::SourceTree;
@@ -43,8 +41,7 @@ fn mutate_local_is_a_registered_label_under_mutate() {
 
 #[test]
 fn declaring_mutate_local_is_accepted_by_the_registry() {
-    // The whole point of registering it: `#[\Steins\Effect('mutate.local')]` must
-    // not earn an unknown-label diagnostic.
+    // The point: declaring `mutate.local` mustn't earn an unknown-label diagnostic.
     let src = "<?php\n#[\\Steins\\Effect('mutate.local')]\nfunction f(string $s): void { preg_match('/a/', $s, $m); }\n";
     assert_eq!(effects(src).len(), 0, "declared mutate.local is clean");
 }
@@ -66,18 +63,15 @@ fn the_out_param_color_attaches_only_when_the_argument_is_supplied() {
 
 #[test]
 fn a_named_argument_list_withholds_the_conditional_row() {
-    // `preg_match(matches: $m, …)` supplies the out-parameter at no position at
-    // all. Positional mapping is defeated, so the judgment is withheld rather
-    // than guessed in either direction — the honest silence, not a false color.
+    // `preg_match(matches: $m, …)`: no position at all, so judgment is withheld, not guessed.
     let src = "<?php\nfunction f(string $s): void { preg_match(pattern: '/a/', subject: $s, matches: $m); }\n";
     assert!(summary(src, "f").labels.is_empty(), "withheld, not guessed");
 }
 
 #[test]
 fn the_always_by_ref_sort_family_always_attaches() {
-    // `sort(array &$array)` has no arity condition to satisfy: argument 0 is
-    // mandatory, so the color is unconditional in practice while still being
-    // derived from the call.
+    // `sort(array &$array)` has no arity condition: arg 0 is mandatory, so the color
+    // is unconditional in practice while still being derived from the call.
     for f in ["sort", "rsort", "asort", "ksort", "array_pop", "array_shift", "reset"] {
         let src = format!("<?php\nfunction f(array $rows): void {{ {f}($rows); }}\n");
         assert_eq!(
@@ -90,9 +84,8 @@ fn the_always_by_ref_sort_family_always_attaches() {
 
 #[test]
 fn preg_replace_counts_at_position_four_not_three() {
-    // `preg_replace($pattern, $replacement, $subject, $limit, &$count)` — the
-    // optional `$limit` sits between subject and count. A four-argument call
-    // writes nothing; the five-argument one writes `$count`.
+    // `preg_replace($pattern, $replacement, $subject, $limit, &$count)`: optional
+    // `$limit` sits between subject and count — 4 args write nothing, 5 writes `$count`.
     let four = "<?php\nfunction f(string $s): string { return preg_replace('/a/', 'b', $s, 1); }\n";
     let five = "<?php\nfunction f(string $s): string { return preg_replace('/a/', 'b', $s, 1, $n); }\n";
     assert!(summary(four, "f").labels.is_empty(), "no count argument, no write");
@@ -111,9 +104,8 @@ fn str_replace_count_sits_at_position_three() {
 
 #[test]
 fn a_property_target_is_not_local_and_is_not_tolerated() {
-    // The honesty case: the SAME builtin, the same arity, a different target.
-    // Steins distinguishes them — a property-rooted by-ref write never claims
-    // `mutate.local`, so the Pure tolerance cannot launder it.
+    // Honesty case: SAME builtin, same arity, different target — a property-rooted
+    // by-ref write never claims `mutate.local`, so Pure tolerance can't launder it.
     let src = "<?php\nclass C {\n    private array $m = [];\n    #[\\Steins\\Pure]\n    public function f(string $s): void { preg_match('/a/', $s, $this->m); }\n}\n";
     let d = one(src);
     assert!(d.message.contains("preg_match() has effect mutate"), "{}", d.message);
@@ -130,16 +122,14 @@ fn a_superglobal_target_is_a_global_write() {
 
 #[test]
 fn an_offset_under_a_local_is_still_local() {
-    // `sort($rows['a'])` writes into `$rows`, a frame binding — offsets are
-    // transparent to the root classification.
+    // `sort($rows['a'])` writes `$rows`; offsets are transparent to root classification.
     let src = "<?php\nfunction f(array $rows): void { sort($rows['a']); }\n";
     assert_eq!(summary(src, "f").labels, vec!["mutate.local".to_owned()]);
 }
 
 #[test]
 fn a_by_ref_parameter_target_escapes_the_frame() {
-    // `$rows` is an alias of the *caller's* binding, so writing it is
-    // caller-observable — the one case that looks local and is not.
+    // `$rows` aliases the caller's binding — the case that looks local but isn't.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array &$rows): void { sort($rows); }\n";
     let d = one(src);
     assert!(d.message.contains("has effect mutate,"), "{}", d.message);
@@ -148,8 +138,7 @@ fn a_by_ref_parameter_target_escapes_the_frame() {
 
 #[test]
 fn an_aliased_frame_cannot_claim_locality() {
-    // `global $rows;` makes the name the interpreter's. The give-up-list scan
-    // (ADR-0001) is frame-wide, so any aliasing construct downgrades the claim.
+    // `global $rows;` claims the name; ADR-0001's give-up scan is frame-wide.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { global $rows; sort($rows); }\n";
     let d = one(src);
     assert!(d.message.contains("has effect mutate,"), "{}", d.message);
@@ -170,8 +159,7 @@ fn pure_tolerates_preg_match_into_a_local() {
 
 #[test]
 fn a_narrower_declaration_is_not_stricter_than_pure() {
-    // Tolerance is monotone: `Pure` is the tightest envelope, so a label it
-    // tolerates cannot exceed a wider declaration either.
+    // Tolerance is monotone: `Pure` is tightest, so what it tolerates a wider label must too.
     let src = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(string $s): void { preg_match('/a/', $s, $m); echo $s; }\n";
     assert_eq!(effects(src).len(), 0, "io.output envelope also tolerates mutate.local");
 }
@@ -187,8 +175,7 @@ fn tolerance_does_not_extend_to_the_parent_label() {
 
 #[test]
 fn shuffle_carries_both_its_own_color_and_the_by_ref_color() {
-    // Two independent catalog axes on one call: `nondet.random` (unconditional)
-    // and `mutate.local` (conditional on the argument).
+    // Two independent axes: `nondet.random` (unconditional), `mutate.local` (conditional).
     let src = "<?php\nfunction f(array $rows): void { shuffle($rows); }\n";
     let mut labels = summary(src, "f").labels;
     labels.sort();
@@ -204,8 +191,7 @@ fn shuffle_carries_both_its_own_color_and_the_by_ref_color() {
 
 #[test]
 fn pure_accepts_usort_over_a_local_with_a_pure_comparator() {
-    // `usort` contributes `mutate.local` on its own array; the pure tolerance for
-    // a local-only mutation is what keeps this clean.
+    // `usort` contributes `mutate.local`; Pure's local-only tolerance keeps this clean.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $rows): array {\n    usort($rows, function ($a, $b) { return $a <=> $b; });\n    return $rows;\n}\n";
     assert_eq!(effects(src).len(), 0, "pure comparator over a local array is clean");
     assert_eq!(summary(src, "f").labels, vec!["mutate.local".to_owned()]);
@@ -213,8 +199,7 @@ fn pure_accepts_usort_over_a_local_with_a_pure_comparator() {
 
 #[test]
 fn usort_with_an_echoing_comparator_is_exceeded_by_echo_not_by_mutation() {
-    // The join is real: the comparator's own color arrives, and it is the *only*
-    // thing reported — the sort's own `mutate.local` stays tolerated.
+    // Join is real: comparator's color is the *only* one reported; sort's own stays tolerated.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $rows): array {\n    usort($rows, function ($a, $b) { echo $a; return $a <=> $b; });\n    return $rows;\n}\n";
     let d = one(src);
     assert!(d.message.contains("io.output.buffer"), "named by the echo: {}", d.message);
@@ -227,8 +212,7 @@ fn usort_with_an_echoing_comparator_is_exceeded_by_echo_not_by_mutation() {
 
 #[test]
 fn array_walk_over_a_property_reports_the_escaping_write() {
-    // `array_walk` is both an invoker and an out-param writer; over a property
-    // its own color is the un-tolerated `mutate`.
+    // `array_walk` is invoker + writer; over a property its color is un-tolerated `mutate`.
     let src = "<?php\nclass C {\n    private array $rows = [];\n    #[\\Steins\\Pure]\n    public function f(): void { array_walk($this->rows, function ($v) { return $v; }); }\n}\n";
     let d = one(src);
     assert!(d.message.contains("array_walk() has effect mutate"), "{}", d.message);
@@ -244,8 +228,7 @@ fn param_mismatches(src: &str) -> Vec<Diagnostic> {
 
 #[test]
 fn a_closure_that_preg_matches_into_a_local_satisfies_pure_callable() {
-    // One purity relation, two consumers: what `#[\Steins\Pure]` tolerates,
-    // `pure-callable` must accept.
+    // One purity relation, two consumers: what `Pure` tolerates, `pure-callable` must accept.
     const TAKES: &str = "<?php /** @param pure-callable $cb */ function takes($cb): void {}\n";
     let ok = format!(
         "{TAKES}takes(static function (string $s): bool {{ return (bool) preg_match('/a/', $s, $m); }});"

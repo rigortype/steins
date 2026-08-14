@@ -2,10 +2,9 @@
 //! enum cases, `::class` strings, and scalar facts, via the trinary is-a oracle
 //! (ADR-0043; see `tests/object_acceptance.rs`).
 //!
-//! The phpdoc relation is pure set membership with no coercion (ADR-0030): a
-//! proven scalar is never a member of a class type, in either mode. A definite
-//! `No` reports; any `Unknown` (incomplete hierarchy) or unresolved identifier (a
-//! `@template`/`@phpstan-type` alias that may denote a scalar) stays silent.
+//! The phpdoc relation is pure set membership with no coercion (ADR-0030): a proven
+//! scalar is never a class-type member, in either mode. A definite `No` reports;
+//! `Unknown` (incomplete hierarchy) or an unresolved `@template`/`@phpstan-type` stays silent.
 
 use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, RETURN_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -65,8 +64,7 @@ fn object_vs_class_unknown_stays_silent() {
 
 #[test]
 fn object_vs_unresolved_name_stays_silent() {
-    // The target name is undefined (could be a @template / type-alias the object
-    // satisfies) — even though the object's own hierarchy is closed, gate on known.
+    // Target undefined (could be @template/alias) — gate on known even though closed.
     let src = "<?php final class Bar {}\n\
         /** @param Foo $a */ function f($a): void {}\n\
         f(new Bar());";
@@ -85,8 +83,7 @@ fn scalar_vs_known_class_is_no() {
 
 #[test]
 fn scalar_vs_unknown_class_stays_silent() {
-    // `Foo` is undefined — it may be a @template param or @phpstan-type alias that
-    // denotes a scalar, so a scalar-vs-`Foo` verdict must stay silent (FP-safe).
+    // `Foo` undefined — may be @template/@phpstan-type denoting a scalar, so silent (FP-safe).
     let f = "<?php /** @param Foo $x */ function f($x): void {}\n";
     assert_eq!(param_count(&format!("{f}f(5);")), 0, "unknown class → silent");
 }
@@ -103,8 +100,7 @@ fn scalar_vs_class_or_null() {
 
 #[test]
 fn abstract_scalar_fact_opens_pure_class_valve() {
-    // A native-`string` param carries an abstract fact (not a proven value); passed
-    // to a pure known-class contract it is a definite mismatch (the valve opens).
+    // Abstract fact (not a proven value) vs a class contract: definite mismatch, valve opens.
     let src = "<?php class Foo {}\n\
         /** @param Foo $x */ function f($x): void {}\n\
         function g(string $s): void { f($s); }";
@@ -113,8 +109,7 @@ fn abstract_scalar_fact_opens_pure_class_valve() {
 
 #[test]
 fn abstract_scalar_fact_vs_template_stays_closed() {
-    // `@template T` lowers to a class node, but T is not a known class — the valve
-    // stays shut, so an int fact against T is NOT reported (the critical FP guard).
+    // `@template T` lowers to a class node but isn't known — valve stays shut (FP guard).
     let src = "<?php /** @template T @param T $x */ function f($x): void {}\n\
         function g(int $i): void { f($i); }";
     assert_eq!(param_count(src), 0, "template T → valve closed → silent");
@@ -153,10 +148,9 @@ fn enum_case_rejected_by_unrelated_class() {
 
 #[test]
 fn class_string_literal_vs_class_string_stays_maybe() {
-    // `class-string` is a string refinement now (issue #236) but a CONTEXTUAL one:
-    // whether `'Foo'` names a declared class is the class table's answer, not the
-    // characters'. So a proven `::class` string is still never forced to decide
-    // membership — it stays silent, exactly as it did under `StrOpaque`.
+    // `class-string` is a refinement (issue #236) but CONTEXTUAL: whether `'Foo'`
+    // names a class is the class table's answer, not the characters' — `::class`
+    // stays silent, exactly as under `StrOpaque`.
     let src = "<?php class Foo {}\n\
         /** @param class-string $c */ function f($c): void {}\n\
         f(Foo::class);";
@@ -165,9 +159,8 @@ fn class_string_literal_vs_class_string_stays_maybe() {
 
 #[test]
 fn class_string_refutes_the_strings_no_class_like_can_be() {
-    // The extensional half of the refinement (issue #236) IS decidable, and it is
-    // the identifier grammar: a class-like is never `''` and never `'0'`. Both
-    // were `Maybe` — silence — while the spelling had no predicate at all.
+    // Extensional half of the refinement (issue #236) IS decidable — identifier
+    // grammar: a class-like is never `''` or `'0'`; both were `Maybe` before.
     let base = "<?php /** @param class-string $c */ function f($c): void {}\n";
     assert_eq!(param_count(&format!("{base}f('');")), 1, "'' names no class-like");
     assert_eq!(param_count(&format!("{base}f('0');")), 1, "'0' names no class-like");
@@ -178,9 +171,8 @@ fn class_string_refutes_the_strings_no_class_like_can_be() {
 
 #[test]
 fn class_string_satisfies_the_refinements_it_entails() {
-    // `class-string ⇒ non-falsy-string ⇒ non-empty-string` is the identifier
-    // grammar read as implication, so a class-string argument is accepted by the
-    // weaker string contracts without a word from the class table.
+    // `class-string ⇒ non-falsy-string ⇒ non-empty-string` (identifier grammar as
+    // implication): accepted by weaker string contracts, no word from the class table.
     for weaker in ["non-empty-string", "non-falsy-string", "string"] {
         let src = format!(
             "<?php /** @param class-string $c */ function g($c): void {{ h($c); }}\n\
@@ -193,9 +185,8 @@ fn class_string_satisfies_the_refinements_it_entails() {
 #[test]
 fn relative_class_const_is_a_class_string() {
     // `self`/`parent`/`static::class` resolve to a class-like the index knows but
-    // cannot spell (ADR-0043's casing deferral) — which is exactly the claim the
-    // refinement carries (issue #236). Passing one to a `@param class-string`
-    // is silent; passing it where a class-like name cannot go is not.
+    // can't spell (ADR-0043 casing deferral) — the claim the refinement carries
+    // (issue #236): silent vs `@param class-string`, not where a name can't go.
     let src = "<?php class Base {} class Child extends Base {\n\
         /** @param class-string $c */ function f($c): void {}\n\
         function go(): void { $this->f(self::class); $this->f(parent::class); $this->f(static::class); }\n\
@@ -205,8 +196,7 @@ fn relative_class_const_is_a_class_string() {
 
 #[test]
 fn class_string_literal_vs_real_class_is_no() {
-    // A `::class` value is a *string*; against an actual class-typed contract it is
-    // a scalar, hence a definite non-member.
+    // A `::class` value is a *string*; vs a class-typed contract it's a scalar non-member.
     let src = "<?php class Foo {} class Bar {}\n\
         /** @param Bar $x */ function f($x): void {}\n\
         f(Foo::class);";
@@ -242,8 +232,7 @@ fn return_template_stays_silent() {
     assert_eq!(return_count(src), 0, "template @return T → no FP");
 }
 
-// 6. Descent guard-blindness — a class-touching verdict is suppressed inside a
-//    binding descent (mirror of the native object_world_guard_blind).
+// 6. Descent guard-blindness: suppressed in descent (mirror: object_world_guard_blind).
 
 #[test]
 fn direct_class_verdict_fires_but_descent_is_blind() {
@@ -253,9 +242,8 @@ fn direct_class_verdict_fires_but_descent_is_blind() {
         inner(5);";
     assert_eq!(param_count(direct), 1, "direct scalar-vs-class fires");
 
-    // Through a descent: `outer(5)` rebinds $y=5 and re-checks `inner($y)` with the
-    // hypothetical value. The callee's in-body guards are unmodeled, so a class-
-    // touching verdict on the rebound value is guard-blind → suppressed.
+    // Through a descent: `outer(5)` rebinds $y=5, re-checking `inner($y)`; callee
+    // guards are unmodeled, so a rebound class-touching verdict is guard-blind → suppressed.
     let descent = "<?php final class S1 {}\n\
         /** @param S1 $x */ function inner($x): void {}\n\
         function outer($y): void { inner($y); }\n\
@@ -263,15 +251,13 @@ fn direct_class_verdict_fires_but_descent_is_blind() {
     assert_eq!(param_count(descent), 0, "descent-bound class verdict is guard-blind");
 }
 
-// 5b. Const-fetch phpdoc types (`self::CONST`, `Enum::Case` as a type) are
-//     unresolved — they must stay silent, never manufacture a No against the very
-//     value they name (regression: pxxxx `@return self::CONST { return self::CONST; }`
-//     and enum-case returns against enum-case-typed unions).
+// 5b. Const-fetch phpdoc types (`self::CONST`, `Enum::Case`) are unresolved — must
+//     stay silent, never manufacture a No against the value they name (regression:
+//     pxxxx `@return self::CONST`, and enum-case returns vs enum-case-typed unions).
 
 #[test]
 fn return_of_named_class_const_against_its_own_const_type_is_silent() {
-    // The array constant is returned against `@return self::C` — tautologically
-    // correct; the const-fetch type is unresolved, so no finding.
+    // Tautologically correct vs `@return self::C`; const-fetch type unresolved, no finding.
     let src = "<?php class K {\n\
         const C = [1, 2, 3];\n\
         /** @return self::C */ public static function f(): array { return self::C; }\n\
@@ -288,9 +274,8 @@ fn enum_case_return_against_enum_case_typed_union_is_silent() {
     assert_eq!(return_count(src), 0, "enum case vs enum-case-typed union → silent (unresolved const type)");
 }
 
-// 6b. Implicit `Stringable` — a class with `__toString` (but no explicit
-//     `implements \Stringable`) IS a Stringable in PHP 8+; the is-a oracle must
-//     not manufacture a `No` against it (regression: symfony ChoiceQuestionTest).
+// 6b. Implicit `Stringable`: a class with `__toString` (no `implements \Stringable`)
+//     IS Stringable in PHP 8+; oracle mustn't say No (regression: symfony ChoiceQuestionTest).
 
 #[test]
 fn class_with_to_string_is_implicitly_stringable() {
@@ -310,8 +295,7 @@ fn class_without_to_string_rejects_stringable() {
 
 #[test]
 fn trait_using_class_vs_stringable_is_unknown() {
-    // A trait may supply `__toString`; the merged methods are unmodeled, so the
-    // verdict must be Unknown (silent), never an unsound No.
+    // A trait may supply `__toString`; merged methods unmodeled, verdict is Unknown, not No.
     let src = "<?php trait T {} class TU { use T; }\n\
         /** @param \\Stringable $x */ function f($x): void {}\n\
         f(new TU());";
@@ -320,8 +304,7 @@ fn trait_using_class_vs_stringable_is_unknown() {
 
 #[test]
 fn stringable_in_array_union_accepts_to_string_object() {
-    // Mirror of symfony's `array<string|bool|int|float|\Stringable>` — a __toString
-    // object element is accepted; a null element is not.
+    // Mirror of symfony's array<string|bool|int|float|\Stringable>: __toString ok, null not.
     let ok = "<?php class SC { public function __toString(): string { return 'x'; } }\n\
         /** @param array<string|bool|int|float|\\Stringable> $a */ function f($a): void {}\n\
         f(['a', new SC()]);";
@@ -331,8 +314,7 @@ fn stringable_in_array_union_accepts_to_string_object() {
     assert_eq!(param_count(bad), 1, "null is not a member of the union");
 }
 
-// 7. Liskov interplay — an overridden method carrying a class @param must not
-//    double-fire between the override's and the parent's envelopes (ADR-0033).
+// 7. Liskov interplay: override + parent class @param must not double-fire (ADR-0033).
 
 #[test]
 fn overridden_method_class_param_reports_once() {
@@ -343,17 +325,14 @@ fn overridden_method_class_param_reports_once() {
     assert_eq!(param_count(src), 1, "exactly one finding — no envelope double-fire");
 }
 
-// 8. @template name shadowing a real class (issue #5). A `@template X` in scope
-//    makes X a template parameter — opaque, never the class — inside that
-//    declaration's docblock types, so a same-named real class no longer
-//    manufactures a param/return-mismatch FP. The shadow is a per-declaration
-//    fact (function/method own docblock + enclosing class-like docblock);
-//    qualified references opt out.
+// 8. @template name shadowing a real class (issue #5): a `@template X` in scope
+//    makes X opaque, never the class, inside that declaration's docblock types, so a
+//    same-named real class no longer manufactures a param/return-mismatch FP. Shadow
+//    is per-declaration (own + enclosing class-like docblock); qualified refs opt out.
 
 #[test]
 fn template_shadows_real_class_param_proven() {
-    // The issue's exact reproduction: real class + function-level `@template` of the
-    // same name + `@param` of that name, called with a non-member scalar.
+    // Issue's exact repro: real class + same-name `@template`/`@param`, called non-member.
     let src = "<?php class Foo {}\n\
         /** @template Foo\n * @param Foo $x */ function f($x): void {}\n\
         f(5);";
@@ -367,8 +346,7 @@ fn template_shadows_real_class_param_proven() {
 
 #[test]
 fn template_shadows_real_class_param_abstract_fact() {
-    // The abstract-fact arm (native-`int` param → int fact): the template shadow must
-    // also keep the `contract_touches_class` valve shut for a real-class-named template.
+    // Abstract-fact arm (int param → int fact): shadow must keep the valve shut too.
     let src = "<?php class Model {}\n\
         /** @template Model\n * @param Model $x */ function f($x): void {}\n\
         function g(int $i): void { f($i); }";
@@ -377,8 +355,7 @@ fn template_shadows_real_class_param_abstract_fact() {
 
 #[test]
 fn class_level_template_shadows_method_param() {
-    // A class-level `@template Model` shadows Model in every member docblock — here a
-    // method `@param Model`, even though the method's own docblock has no template.
+    // Class-level `@template Model` shadows every member docblock, even a bare method.
     let src = "<?php class Model {}\n\
         /** @template Model */\n\
         class Repo { /** @param Model $m */ public function set($m): void {} }\n\
@@ -393,8 +370,7 @@ fn class_level_template_shadows_method_param() {
 
 #[test]
 fn qualified_reference_is_never_shadowed() {
-    // A `\`-qualified reference opts out of the template namespace, so `\Foo` still
-    // resolves to the real class and a genuine violation still fires.
+    // A `\`-qualified ref opts out of the template namespace; `\Foo` resolves and still fires.
     let src = "<?php class Foo {}\n\
         /** @template Foo\n * @param \\Foo $x */ function f($x): void {}\n\
         f(5);";
@@ -403,8 +379,7 @@ fn qualified_reference_is_never_shadowed() {
 
 #[test]
 fn template_shadowing_nothing_is_unchanged() {
-    // A template whose name collides with no class: behavior is identical to today
-    // (the name was already unresolved → silent). The fix must not change this.
+    // Template colliding with no class: unchanged behavior (was already unresolved → silent).
     let src = "<?php /** @template TValue\n * @param TValue $x */ function f($x): void {}\n\
         f(5);";
     assert_eq!(param_count(src), 0, "template naming no class → silent (unchanged)");
@@ -431,8 +406,7 @@ fn prefixed_template_variant_shadows() {
 
 #[test]
 fn template_shadows_real_class_return() {
-    // The `@return` path: a `@template Foo` shadows the return contract too, so
-    // returning a scalar against `@return Foo` no longer fires.
+    // `@return` path: `@template Foo` shadows the return contract too; scalar no longer fires.
     let src = "<?php class Foo {}\n\
         /** @template Foo\n * @return Foo */ function f() { return 5; }";
     assert_eq!(return_count(src), 0, "@template Foo shadows @return Foo → silent");

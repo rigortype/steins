@@ -67,13 +67,12 @@ impl Channel {
     ///
     /// # Why argv, not a file or stdin
     ///
-    /// stdin is already the NDJSON request stream this `Channel` writes to
-    /// below; `php < script.php` would consume it as program text first,
-    /// eating the protocol stream. argv has no such conflict, and
-    /// `runner.php` qualifies: no `__FILE__`/`__DIR__`/`$argv`, no closing
-    /// `?>`, so it means the same thing from a file or from `-r`. At ~16 KB it
-    /// sits far under `ARG_MAX` (~1 MB macOS) and Linux's `MAX_ARG_STRLEN`
-    /// (128 KB) — see `runner_size_stays_under_the_argv_limit`.
+    /// stdin is already the NDJSON request stream `Channel` writes to below;
+    /// `php < script.php` would consume it as program text first. argv has no
+    /// such conflict, and `runner.php` qualifies: no `__FILE__`/`__DIR__`/
+    /// `$argv`, no closing `?>`. At ~16 KB it sits far under `ARG_MAX` (~1 MB
+    /// macOS) and Linux's `MAX_ARG_STRLEN` (128 KB) — see
+    /// `runner_size_stays_under_the_argv_limit`.
     ///
     /// Trade-offs: source is visible in `ps`/`/proc` (not a secret), and a
     /// parse error reports against "Command line code" (moot: stderr discarded).

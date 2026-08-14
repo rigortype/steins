@@ -2,9 +2,8 @@
 //!
 //! `Opaque` read-set invalidation drops a read variable because the construct may
 //! branch and early-return, excluding the known value on fall-through (ADR-0027).
-//! Structured `if`/`elseif`/`else` instead uses branch analysis (ADR-0031). The
-//! read-set rule still applies to opaque constructs and opaque conditions, such as
-//! a by-ref call in a guard.
+//! Structured `if`/`elseif`/`else` uses branch analysis instead (ADR-0031); the
+//! read-set rule still applies to opaque constructs/conditions, e.g. a by-ref call in a guard.
 
 use steins_infer::{Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -12,9 +11,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // `untyped.*` (ADR-0078, #200) reports on the fixtures' own deliberately-untyped
+    // declarations, not the behaviour under test — dropped to keep counts stable.
     check(&tree, &functions, "test.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -29,13 +27,10 @@ fn n(src: &str) -> usize {
 
 #[test]
 fn null_guard_in_descended_callee_is_silent() {
-    // The exact anonymized field shape. `getRole(null)` descends into getRole
-    // binding `$user_id = null`; the `if ($user_id == null) { return 'guest'; }`
-    // guard FILTERS null out, so `check($user_id)` on the fall-through can never
-    // see null. Before the fix, the binding survived the guard (it only writes,
-    // and the guard writes nothing) and `check(int $user_id)` was flagged for a
-    // null that is provably unreachable — a false positive. The guard now READS
-    // `$user_id`, dropping the binding → silent.
+    // Field shape: `getRole(null)` binds `$user_id = null`; the `if ($user_id == null)
+    // { return 'guest'; }` guard FILTERS null, so `check($user_id)` on fall-through
+    // can't see it. Before the fix, the guard (write-only) let the binding survive and
+    // flagged a provably-unreachable null (FP); the guard now READS `$user_id`, dropping it.
     let src = "<?php
 declare(strict_types=1);
 function check(int $user_id): bool { return $user_id > 0; }

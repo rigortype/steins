@@ -68,9 +68,8 @@ fn of(files: &[(&str, &str)], id: &str) -> Vec<Diagnostic> {
 }
 
 /// [`findings`] with a caller-supplied layout — issue #181: the vendor presumption
-/// (§2.3) follows the SAME [`ProjectLayout::is_vendor`] answer as every other
-/// consumer (declared `composer.json` vendor-dir or `steins.toml` vendor-dirs),
-/// not a second, independently-literal `vendor` check.
+/// (§2.3) follows the SAME [`ProjectLayout::is_vendor`] answer as every consumer
+/// (composer.json vendor-dir or steins.toml vendor-dirs), not a second literal check.
 fn findings_with_layout(files: &[(&str, &str)], layout: ProjectLayout) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> = files
@@ -245,9 +244,8 @@ fn a_sound_class_beside_a_broken_file_keeps_its_method_absence() {
 #[test]
 fn the_broken_file_emits_nothing_but_the_parse_finding() {
     // Carries a duplicate array key (mechanics, purely syntactic) and a call to an
-    // undefined function — both would fire from a file that parses; from this one,
-    // neither may: a finding built on a misparse is the manufactured-FP shape
-    // ADR-0002 forbids.
+    // undefined function; both fire from a sound file but neither may here — a finding
+    // built on a misparse is the manufactured-FP shape ADR-0002 forbids.
     let rot = "$a = [1 => 'x', 1 => 'y'];\ntyop();\n";
     let sound_file = format!("<?php\n{rot}");
     let broken_file = format!("{BROKEN}{rot}");
@@ -265,10 +263,9 @@ fn the_broken_file_emits_nothing_but_the_parse_finding() {
 
 #[test]
 fn a_class_half_recovered_from_a_broken_file_still_answers_a_new_elsewhere() {
-    // Presence can only silence an absence claim, never fire one, so a
-    // half-recovered declaration is safe and cross-file resolution keeps working.
-    // Measured through a VENDOR break (no dam masks the answer): the silence here
-    // is the index doing its job, not the dam.
+    // Presence can only silence an absence claim, never fire one, so a half-recovered
+    // declaration is safe and cross-file resolution keeps working — measured through a
+    // VENDOR break (no dam masks the answer): silence here is the index doing its job.
     let caller = ("src/main.php", "<?php\nnew Q();\n");
     assert_eq!(
         of(&[caller], CLASS_UNDEFINED_ID).len(),

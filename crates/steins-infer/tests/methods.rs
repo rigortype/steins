@@ -58,8 +58,7 @@ fn inherited_constructor_via_same_file_parent_flagged() {
 
 #[test]
 fn default_constructor_ignores_extra_args() {
-    // No __construct in the complete in-file chain → PHP default ctor accepts
-    // nothing, and `new Foo(1)` silently discards the extra arg (not an error).
+    // No __construct anywhere → default ctor accepts nothing; `new Foo(1)` discards extras.
     assert_eq!(n("<?php\nclass Foo {}\nnew Foo(1);\n"), 0);
 }
 
@@ -126,8 +125,7 @@ fn this_call_in_final_class_flagged() {
 
 #[test]
 fn this_call_to_nonfinal_public_is_silent() {
-    // The FP guard: a subclass in another file could override m with a wider
-    // signature, so a non-final public `$this->m()` is NOT resolved.
+    // FP guard: a subclass elsewhere could override m with a wider signature, so it's unresolved.
     let src = "<?php\nclass Foo { public function m(int $w): void {} public function go(): void { $this->m(\"abc\"); } }\n";
     assert_eq!(n(src), 0, "non-final public $this->m → silent (may be overridden)");
 }
@@ -172,14 +170,10 @@ fn static_call_lsb_is_silent() {
 
 #[test]
 fn private_method_from_outside_is_skipped() {
-    // Calling a private method from outside its class is a PHP fatal — a
-    // different error, so the ARG check is skipped entirely: resolution returns no
-    // target, exactly as it always did.
-    //
-    // The site is not silent overall any more, and should not be: since issue #185
-    // the fatal itself is reported under `call.inaccessible-method`
-    // (`php -r`-witnessed: `Call to private method Foo::m() from global scope`). So
-    // this counts per id rather than in total.
+    // A private method called from outside is a PHP fatal, so the ARG check is skipped
+    // (resolution returns no target). Since issue #185 the fatal itself is reported under
+    // `call.inaccessible-method` (witnessed: "Call to private method Foo::m() from global
+    // scope"), so this counts per id rather than in total.
     let src = "<?php\nclass Foo { private function m(int $w): void {} }\n(new Foo())->m(\"abc\");\n";
     let arg_findings = findings(src).into_iter().filter(|d| d.id == ID).count();
     assert_eq!(arg_findings, 0, "private method from outside → skip (not our error)");
@@ -205,9 +199,8 @@ fn chain_leaving_file_is_silent() {
 
 #[test]
 fn binding_descent_two_hop_this_private() {
-    // (new Foo())->go("abc") binds $s="abc" and descends into go(); inside, the
-    // exact `$this` (Foo) makes `$this->inner($s)` resolve to the private inner,
-    // where "abc" is a proven int mismatch. Provenance names the first site.
+    // (new Foo())->go("abc") binds $s="abc" and descends into go(); the exact `$this` (Foo)
+    // makes `$this->inner($s)` resolve to private inner, proving "abc" an int mismatch.
     let src = "<?php\nclass Foo { private function inner(int $w): void {} public function go(string $s): void { $this->inner($s); } }\n(new Foo())->go(\"abc\");\n";
     let d = only(src);
     assert!(d.message.contains("to Foo::inner()"), "{}", d.message);
@@ -223,11 +216,9 @@ fn binding_descent_two_hop_this_private() {
 
 #[test]
 fn exact_class_fact_survives_method_call_while_literal_dies() {
-    // An intervening *method call* on `$x` (`$x->other()`) cannot rebind the
-    // caller's `$x`, so its exact-class fact survives and `$x->m("abc")` still
-    // resolves. `$n` is handed to `touch($z)` — a BY-VALUE parameter, which
-    // under ADR-0070 cannot reach the caller's binding either, so the literal
-    // survives too and `width($n)` is a second proven TypeError.
+    // An intervening *method call* (`$x->other()`) can't rebind $x, so `$x->m("abc")` still
+    // resolves; `$n` passed to `touch($z)` by value likewise can't rebind (ADR-0070), so
+    // `width($n)` is a second proven TypeError.
     let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch($z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
     let f = findings(src);
     assert_eq!(f.len(), 2, "the class fact AND the by-value literal survive: {f:#?}");
@@ -236,8 +227,8 @@ fn exact_class_fact_survives_method_call_while_literal_dies() {
     assert!(f[1].message.contains("to Foo::m()"), "{}", f[1].message);
     assert_eq!(f[1].line, 10);
 
-    // …and the literal DOES die when the same call takes it by reference, which
-    // is the half of this pin the by-value reading must never launder.
+    // …and the literal DOES die by reference — the half this pin's by-value reading must
+    // never launder.
     let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch(&$z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
     let f = findings(by_ref);
     assert_eq!(f.len(), 1, "a by-ref touch() still kills the literal fact: {f:#?}");
@@ -247,37 +238,29 @@ fn exact_class_fact_survives_method_call_while_literal_dies() {
 
 #[test]
 fn by_ref_rebinding_of_object_var_is_silent() {
-    // ZERO-FP regression (ADR-0002). A by-ref parameter rebinds the *variable* to
-    // a different object of a different class: at runtime `$x->m("abc")` calls
-    // Bar::m(string), which is fine. An exact-class fact must therefore die when
-    // `$x` is passed to any call — a call may take it by reference. Silent.
+    // ZERO-FP regression (ADR-0002): a by-ref param rebinds $x to a different class
+    // (Bar::m(string) is fine at runtime), so the fact must die on any call $x is passed to.
     let src = "<?php\nclass Foo { public function m(int $w): void {} }\nclass Bar { public function m(string $s): void {} }\nfunction swap(&$x): void { $x = new Bar(); }\n$x = new Foo();\nswap($x);\n$x->m(\"abc\");\n";
     assert_eq!(n(src), 0, "by-ref call may rebind $x's class → must be silent");
 }
 
 #[test]
 fn by_value_pass_of_object_var_keeps_the_class_fact() {
-    // The precision-loss twin, recovered (ADR-0070 amendment, issue #295).
-    // `log_it($x)` takes `$x` by value and cannot rebind it, so `$x->m("abc")` is a
-    // real error — and the deferral this test used to pin ("proving the resolved
-    // callee's parameter at that position is not by-ref") is exactly what
-    // `arg_is_by_value` now proves. The object's mutable *state* still dies, swept
-    // by the ADR-0036 escape earlier in the same statement; its identity does not.
+    // The precision-loss twin, recovered (ADR-0070 amendment, issue #295): `log_it($x)` takes
+    // `$x` by value and can't rebind it, so `$x->m("abc")` is a real error — what
+    // `arg_is_by_value` now proves. Mutable *state* still dies via the ADR-0036 escape
+    // earlier in the statement; identity does not.
     let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction log_it($o): void {}\n$x = new Foo();\nlog_it($x);\n$x->m(\"abc\");\n";
     assert_eq!(n(src), 1, "a by-value pass cannot rebind $x → the class fact survives");
-    // The by-ref twin above is unaffected: `swap(&$x)` refuses at condition 2, so
-    // the fact still dies there. (`by_ref_rebinding_of_object_var_is_silent`.)
+    // The by-ref twin (`swap(&$x)`) is unaffected — it refuses at condition 2, so the fact dies.
 }
 
 #[test]
 fn reassigned_object_var_loses_its_class_fact() {
-    // `$x` is reassigned to an unknown value before the method call, so its
-    // exact-class fact is dropped and `$x->m()` no longer resolves.
-    //
-    // Counted per id rather than in total (issue #190): `mk()` provably returns `1`,
-    // so the very same site is a real `call.on-non-object` — `php -r 'function mk() {
-    // return 1; } $x = mk(); $x->m("abc");'` is `Uncaught Error: Call to a member
-    // function m() on int`. What this test pins is that the *dispatch* fact died.
+    // `$x` reassigned to an unknown value before the call drops its exact-class fact, so
+    // `$x->m()` no longer resolves. Counted per id, not in total (issue #190): `mk()` provably
+    // returns `1`, so the site is also a real `call.on-non-object` (witnessed: "Uncaught
+    // Error: Call to a member function m() on int"). This pins that the *dispatch* fact died.
     let src = "<?php\nclass Foo { public function m(int $w): void {} }\nfunction mk() { return 1; }\n$x = new Foo();\n$x = mk();\n$x->m(\"abc\");\n";
     let mismatches = findings(src).into_iter().filter(|d| d.id == ID).count();
     assert_eq!(mismatches, 0, "reassigned $x loses its class fact → no argument mismatch");
@@ -287,9 +270,7 @@ fn reassigned_object_var_loses_its_class_fact() {
 
 #[test]
 fn pure_method_flagged_via_method_edge_with_via_provenance() {
-    // Pure f() calls $this->helper() (resolvable: helper is final+private), which
-    // writes to the filesystem → a transitive envelope violation naming the
-    // ultimate origin.
+    // Pure f() calls resolvable $this->helper() (final+private); disk write → transitive envelope violation.
     let src = "<?php\nclass Foo { #[\\Steins\\Pure] final public function f(): void { $this->helper(); } final private function helper(): void { file_put_contents(\"/x\", \"y\"); } }\n";
     let f: Vec<_> = findings(src).into_iter().filter(|d| d.id == EFFECT_ID).collect();
     assert_eq!(f.len(), 1, "one effect finding, got: {f:#?}");
@@ -310,8 +291,7 @@ fn pure_method_calling_rand_directly_flagged() {
 
 #[test]
 fn pure_method_calling_nonfinal_helper_is_silent() {
-    // The helper method-edge does not resolve (non-final public `$this->`), so no
-    // effect propagates — silent, not a false positive.
+    // Helper edge unresolved (non-final public `$this->`) → no effect propagates. Not an FP.
     let src = "<?php\nclass Foo { #[\\Steins\\Pure] public function f(): void { $this->helper(); } public function helper(): void { echo \"x\"; } }\n";
     let f: Vec<_> = findings(src).into_iter().filter(|d| d.id == EFFECT_ID).collect();
     assert_eq!(f.len(), 0, "unresolved method edge → silent");
@@ -321,8 +301,7 @@ fn pure_method_calling_nonfinal_helper_is_silent() {
 
 #[test]
 fn method_call_argument_that_is_a_function_call_still_direct_checks() {
-    // A plain function call nested in a method body is still checked by the
-    // function-world direct pass; the class extension does not disturb it.
+    // A plain function call nested in a method body is still checked by the function-world pass.
     let src = "<?php\nfunction width(int $w): int { return $w; }\nclass Foo { public function go(): void { width(\"abc\"); } }\nfunction run(): void { (new Foo())->go(); }\n";
     let d = only(src);
     assert!(d.message.contains("to width()"), "{}", d.message);

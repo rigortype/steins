@@ -75,10 +75,10 @@ function f(object $x): void {
 
 #[test]
 fn member_fact_is_not_exactness_no_undefined_method() {
-    // NOT-fed enforcement (§3): narrowing by `instanceof Order` gains a
-    // `Member{yes:[Order]}` fact but no exactness. `call.undefined-method`
-    // requires a proven-exact receiver (ADR-0049 §4a), so `$x->tyop()` stays
-    // silent even though `Order` is final and defines no `tyop`.
+    // NOT-fed enforcement (§3): `instanceof Order` gains a `Member{yes:[Order]}`
+    // fact but no exactness; `call.undefined-method` requires a proven-exact
+    // receiver (ADR-0049 §4a), so `$x->tyop()` stays silent even though `Order`
+    // is final and defines no `tyop`.
     let src = "<?php
 final class Order {}
 function f(object $x): void {
@@ -93,8 +93,7 @@ function f(object $x): void {
 
 #[test]
 fn exact_receiver_still_fires_control() {
-    // The same missing call on an exact receiver fires, distinguishing the
-    // Member/exactness rule from a broken harness.
+    // Same missing call fires on an exact receiver — distinguishes the rule from a broken harness.
     let src = "<?php
 final class Order {}
 (new Order())->tyop();
@@ -104,8 +103,7 @@ final class Order {}
 
 #[test]
 fn contract_seed_does_not_disturb_scalar_findings() {
-    // Seeding a contract lane for a scalar-union param must not perturb the existing
-    // value-domain checks — a well-typed body stays silent.
+    // Seeding a contract lane for a scalar-union param must not perturb existing value-domain checks.
     let src = "<?php
 /** @param int|string $x */
 function f(int|string $x): void {

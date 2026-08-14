@@ -83,7 +83,8 @@ fn the_pair_shares_a_layer_and_splits_on_the_floor() {
     // One `TypeError` consequence, so the layer cannot differ by path-conditionality.
     assert_eq!(layer(TYPE_RETURN_MISSING_ID), Some(Layer::Proof));
     assert_eq!(layer(TYPE_RETURN_MAYBE_MISSING_ID), Some(Layer::Proof));
-    // Floor is where the measurement lands: unconditional by default, strict-only if conditional.
+    // Floor is where the measurement lands: unconditional by default, strict-only
+    // if conditional.
     assert_eq!(surface_floor(TYPE_RETURN_MISSING_ID), Some(Floor::Default));
     assert_eq!(surface_floor(TYPE_RETURN_MAYBE_MISSING_ID), Some(Floor::Strict));
 }
@@ -111,7 +112,7 @@ function f(): int {
 
 #[test]
 fn fires_on_empty_body() {
-    // The corpus's own dominant shape: a test double / stub `function (): bool {}`.
+    // Corpus's own dominant shape: a stub `function (): bool {}`.
     definite("<?php\nfunction f(): int {\n}\n");
 }
 
@@ -188,7 +189,6 @@ class A {
 
 #[test]
 fn fires_on_a_closure() {
-    // Witnessed: a closure body falls off the same fatal, named `{closure:…}()`.
     let d = definite(
         "<?php
 $f = function (): int {
@@ -248,7 +248,6 @@ function f(): int {
 
 #[test]
 fn a_conditional_finding_is_absent_below_strict_and_present_at_strict() {
-    // The floor's whole purpose, asserted through the surface rather than argued.
     let src = "<?php
 function f(): int {
     if ($c) {
@@ -358,7 +357,8 @@ function f(): int {
 fn fires_on_the_phpstan_src_no_default_switch_shape() {
     // `TypeNodeResolver.php:697` / `ClassNameUsageLocation.php:128`, reduced: a
     // `switch` with no `default`, every case returns; the no-match edge exists in
-    // the CFG but not in the program's data — phpstan-src passes its own `MissingReturnRule`.
+    // the CFG but not in the program's data — phpstan-src passes its own
+    // `MissingReturnRule`.
     maybe(
         "<?php
 function resolve(string $name): string {
@@ -723,7 +723,8 @@ fn silent_on_void_and_never() {
         "no premise: `void` demands no value",
     );
     // `never` falling through IS a fatal, but a different one — different sentence
-    // (`never-returning function must not implicitly return`); ADR-0022: one id, one consequence.
+    // (`never-returning function must not implicitly return`); ADR-0022: one id,
+    // one consequence.
     assert_silent(
         "<?php\nfunction f(): never {\n    $x = 1;\n}\n",
         "no premise: `never`'s fall-through is a different id's consequence",
@@ -781,7 +782,7 @@ class A {
 
 #[test]
 fn silent_on_an_arrow_function() {
-    // Excluded by construction a third way: an arrow body lowers to a `return`.
+    // Excluded by construction: an arrow body lowers to a `return`.
     assert_silent(
         "<?php\n$f = fn (): int => 1;\n",
         "no premise: an arrow body IS a return, so the trace always terminates",

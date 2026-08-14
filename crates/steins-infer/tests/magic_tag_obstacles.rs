@@ -1,13 +1,11 @@
-//! ADR-0049 A14 / issue #195: `@method` / `@property*` / `@mixin` and the
-//! `@phpstan-type` pair are read as **silence obstacles**, never as member
-//! sources.
+//! ADR-0049 A14 / issue #195: `@method` / `@property*` / `@mixin` and the `@phpstan-type`
+//! pair are read as **silence obstacles**, never as member sources.
 //!
-//! A class-like carrying one of these anywhere in its resolved reach — parents,
-//! interfaces, `@mixin` targets followed transitively — is not enumerable for an
-//! absence proof, so both method-absence ladders (S2 `call.undefined-method` and
-//! S6 `phpdoc.undefined-method`) go silent on it exactly as they do for `__call`.
-//! This can only *remove* findings, so every fixture below is paired against the
-//! negative control: the same shape with the tag removed still fires.
+//! A class-like carrying one anywhere in its resolved reach — parents, interfaces, `@mixin`
+//! targets followed transitively — is not enumerable for an absence proof, so both
+//! method-absence ladders (S2 `call.undefined-method`, S6 `phpdoc.undefined-method`) go
+//! silent exactly as for `__call`. This can only *remove* findings, so every fixture below
+//! is paired against the negative control: the same shape with the tag removed still fires.
 
 use steins_infer::{
     CALL_UNDEFINED_METHOD_ID, Diagnostic, FileUnit, Folder, MagicObstacle,
@@ -16,9 +14,8 @@ use steins_infer::{
 use steins_phpdoc::MagicTagKind;
 use steins_syntax::SourceTree;
 
-/// The boot-surface mock the S2/S6 suites use: the absence family is available and
-/// no project class is a boot-surface homonym, so every other ladder leg holds and
-/// what these fixtures measure is the A14 leg alone.
+/// The boot-surface mock the S2/S6 suites use: the absence family is available and no
+/// project class is a boot-surface homonym, so these fixtures measure the A14 leg alone.
 struct Boot;
 
 impl Folder for Boot {
@@ -47,9 +44,9 @@ fn s2(src: &str) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// The S6 findings (declared receiver), on EITHER id ADR-0049 A13 may route them
-/// to — the fixtures below use native declarations, so they take the promoted
-/// proof-layer id, and the obstacle leg has to hold there too.
+/// The S6 findings (declared receiver), on whichever id A13 routes them to — these fixtures
+/// use native declarations, so it's the promoted proof-layer id, and the obstacle leg must
+/// hold there too.
 fn s6(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     check_with(&tree, &[], "test.php", &mut Boot)
@@ -67,15 +64,12 @@ fn reach(src: &str, fqn: &str) -> Vec<MagicObstacle> {
     magic_obstacles_reaching(&units, fqn)
 }
 
-// ---------------------------------------------------------------------------
 // The negative control comes first: without a tag, every fixture below fires.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_tagless_class_still_fires() {
-    // The exact shape every silence fixture uses, minus the docblock. If this ever
-    // stops firing, the obstacle leg has over-silenced and the rest of this file
-    // proves nothing.
+    // The exact shape every silence fixture uses, minus the docblock — if this ever stops
+    // firing, the obstacle leg has over-silenced and the rest of this file proves nothing.
     let d = s2("<?php\nclass Order {}\n(new Order())->anything();\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(d[0].message.contains("undefined method Order::anything()"), "{}", d[0].message);
@@ -86,30 +80,25 @@ fn a_tagless_class_still_fires() {
 
 #[test]
 fn the_fired_evidence_string_names_the_leg() {
-    // A fired sibling asserts the obstacle leg held, so it must say so — otherwise
-    // the evidence string claims a closure it never checked.
+    // A fired sibling asserts the obstacle leg held, so the evidence string must say so.
     let d = s2("<?php\nclass Order {}\n(new Order())->anything();\n");
     assert!(d[0].message.contains("no __call"), "{}", d[0].message);
     assert!(d[0].message.contains("no @method/@property/@mixin"), "{}", d[0].message);
 }
 
-// ---------------------------------------------------------------------------
 // One fixture per tag kind, on the S2 ladder.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn method_tag_silences_the_ladder() {
-    // `@method` names ONE method; the obstacle is the whole class-like, because
-    // enumerating members is exactly what the tag defeats. Subject-granular
-    // discharge is the plugin lane's job (A14), not this slice's.
+    // `@method` names ONE method, but the obstacle is the whole class-like since enumerating
+    // members is what it defeats; subject-granular discharge is the plugin lane's job (A14).
     let d = s2("<?php\n/** @method int foo() */\nclass Order {}\n(new Order())->anything();\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn method_tag_with_a_complex_signature_silences_the_ladder() {
-    // The tail is never parsed, so generics and a parenthesized callable type must
-    // not make the tag unreadable — silence must not depend on the signature.
+    // The tail is never parsed, so a generic/parenthesized-callable signature must not affect silence.
     let d = s2(
         "<?php\n/** @method Collection<int, string> map(callable(int): string $cb) */\nclass Order {}\n(new Order())->anything();\n",
     );
@@ -140,9 +129,7 @@ fn the_type_alias_pair_silences_the_ladder() {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Reach: parents, interfaces, and `@mixin` targets.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn a_parent_property_tag_silences_the_child_ladder() {
@@ -158,9 +145,8 @@ fn a_parent_property_tag_silences_the_child_ladder() {
 
 #[test]
 fn an_interface_method_tag_silences_the_implementor_ladder() {
-    // The method-chain walk does not enumerate interfaces (an interface defines
-    // nothing), but a `@method` tag on one still says the implementors answer
-    // names the index cannot list — so the obstacle reach does walk them.
+    // The method-chain walk doesn't enumerate interfaces (they define nothing), but a
+    // `@method` tag on one still names calls the index can't list, so obstacle reach walks them.
     let d = s2(
         "<?php\n/** @method int foo() */\ninterface Sugared {}\nclass Order implements Sugared {}\n(new Order())->anything();\n",
     );
@@ -169,8 +155,8 @@ fn an_interface_method_tag_silences_the_implementor_ladder() {
 
 #[test]
 fn mixin_reach_is_transitive() {
-    // A `@mixin` target that is itself a `@mixin` chains further: the record set
-    // reaching `a` includes the `@method` declared two hops away on `C`.
+    // A `@mixin` target that is itself a `@mixin` chains further, reaching the `@method` on
+    // `C` two hops away.
     let src = "<?php\n/** @mixin B */\nclass A {}\n/** @mixin C */\nclass B {}\n/** @method int zap() */\nclass C {}\n";
     let recs = reach(src, "A");
     assert!(
@@ -186,8 +172,8 @@ fn mixin_reach_is_transitive() {
 
 #[test]
 fn a_mixin_cycle_terminates_and_silences() {
-    // `A` mixes in `B`, `B` mixes back into `A`. The visited set is the guard: the
-    // walk must terminate, record both, and silence the ladder.
+    // `A` mixes into `B` and back — the visited set guards termination, records both, and
+    // silences the ladder.
     let src = "<?php\n/** @mixin B */\nclass A {}\n/** @mixin A */\nclass B {}\n";
     let recs = reach(src, "A");
     assert_eq!(recs.len(), 2, "each class-like is visited exactly once: {recs:?}");
@@ -202,8 +188,7 @@ fn a_mixin_cycle_terminates_and_silences() {
 
 #[test]
 fn an_unresolvable_mixin_target_is_an_obstacle_not_a_finding() {
-    // `@mixin` naming a class the project does not declare is the *most* obstructed
-    // case, not the least: nothing can be enumerated about where those members are.
+    // `@mixin` naming an undeclared class is the *most* obstructed case — nothing enumerable.
     let d = s2("<?php\n/** @mixin \\Vendor\\Absent\\Builder */\nclass Order {}\n(new Order())->anything();\n");
     assert!(d.is_empty(), "{d:?}");
     let recs = reach("<?php\n/** @mixin \\Vendor\\Absent\\Builder */\nclass Order {}\n", "Order");
@@ -211,9 +196,7 @@ fn an_unresolvable_mixin_target_is_an_obstacle_not_a_finding() {
     assert_eq!(recs[0].mixin_target.as_deref(), Some("Vendor\\Absent\\Builder"));
 }
 
-// ---------------------------------------------------------------------------
 // The declared-receiver lane (ADR-0049 §8 / S6) honours the same obstacle.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn the_declared_receiver_lane_honours_the_obstacle() {
@@ -226,8 +209,8 @@ fn the_declared_receiver_lane_honours_the_obstacle() {
 
 #[test]
 fn a_descendant_carrying_a_tag_silences_the_declared_arm() {
-    // §8's descendant closure: the arm itself is clean, but a subclass the runtime
-    // value may actually be carries `@mixin` — the object may answer the call.
+    // §8 descendant closure: the arm is clean, but a subclass the runtime value may be
+    // carries `@mixin` — the object may answer the call.
     let tagged = "<?php\nclass Guest { public function guestId(): int { return 1; } }\n/** @mixin Sugar */\nclass Sugared extends Guest {}\nclass Sugar { public function name(): string { return 'x'; } }\nfunction f(Guest $g): void { $g->name(); }\n";
     assert!(s6(tagged).is_empty(), "{:?}", s6(tagged));
     // Control: the same hierarchy with a tag-free descendant fires.
@@ -235,9 +218,7 @@ fn a_descendant_carrying_a_tag_silences_the_declared_arm() {
     assert_eq!(s6(plain).len(), 1, "{:?}", s6(plain));
 }
 
-// ---------------------------------------------------------------------------
 // The record shape itself (A14: per site, with its subject — never a boolean).
-// ---------------------------------------------------------------------------
 
 #[test]
 fn records_are_per_site_and_carry_their_subject() {
@@ -259,7 +240,6 @@ fn records_are_per_site_and_carry_their_subject() {
             (&MagicTagKind::Mixin, "Builder"),
         ]
     );
-    // The `@mixin` subject resolves through the file's `use` imports, exactly as a
-    // written `extends` would.
+    // The `@mixin` subject resolves through the file's `use` imports, exactly like `extends`.
     assert_eq!(recs[3].mixin_target.as_deref(), Some("Vendor\\Query\\Builder"));
 }

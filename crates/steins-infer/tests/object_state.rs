@@ -1,11 +1,9 @@
-//! Object state (ADR-0036): the allocation-keyed heap, aliasing, `clone`
-//! isolation, escape sets and sweeps, `readonly` immunity, and the property
-//! checks (`type.property-mismatch`, `phpdoc.property-mismatch`,
-//! `readonly.reassigned`).
+//! Object state (ADR-0036): the allocation-keyed heap, aliasing, `clone` isolation,
+//! escape sets and sweeps, `readonly` immunity, and the property checks
+//! (`type.property-mismatch`, `phpdoc.property-mismatch`, `readonly.reassigned`).
 //!
-//! Property facts are observed through diagnostics: a bad property value read into
-//! a native-typed argument (`needInt($o->p)`) fires `type.argument-mismatch`, so
-//! its presence witnesses whether the heap kept the fact.
+//! Property facts are observed via diagnostics: a bad value read into a native-typed
+//! arg (`needInt($o->p)`) fires `type.argument-mismatch`, witnessing the heap kept it.
 
 use steins_db::{Project, SourceFile, SteinsDatabase};
 use steins_infer::{
@@ -17,9 +15,8 @@ fn findings(src: &str) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let input = SourceFile::new(&db, "main.php".to_owned(), src.to_owned());
     let project = Project::new(&db, vec![input], steins_db::ProjectLayout::fallback(), steins_db::PluginFacts::none());
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every assertion below keeps meaning what it meant before it landed.
+    // `untyped.*` (ADR-0078, #200) reports on the fixtures' own deliberately-untyped
+    // declarations, not the behaviour under test — dropped to keep assertions stable.
     check_project(&db, project, &mut NoFold)
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -53,9 +50,8 @@ fn alias_write_visible_via_alias() {
 
 #[test]
 fn clone_isolates_both_directions() {
-    // `$a->p = 5` (good int); clone; corrupt only the clone. The original stays a
-    // clean int (no finding for `$a->p`); the clone carries the bad value (one
-    // finding for `$c->p`). A naive id-sharing model would misfire on both.
+    // Corrupt only the clone: original stays clean (no finding for `$a->p`), clone
+    // carries bad value (one for `$c->p`) — naive id-sharing would misfire on both.
     let src = format!(
         "{PRELUDE}$a = new Box();\n$a->p = 5;\n$c = clone $a;\n$c->p = \"abc\";\nneedInt($a->p);\nneedInt($c->p);\n"
     );
@@ -75,21 +71,17 @@ fn clone_write_does_not_leak_to_original() {
 
 #[test]
 fn self_clone_does_not_panic_and_preserves_props() {
-    // `$a = clone $a` (self-clone, `var == src`): the rvalue `clone $a` is
-    // evaluated against the current object, then assigned back to `$a`. This
-    // panicked (`bound var has an id`) when the clone arm unbound `$a` before
-    // reading its source id (survey: mautic `$dateFrom = clone $dateFrom`).
-    // The sound result: `$a` holds a fresh copy carrying the source props, so a
-    // clean `int` prop stays clean (no finding), witnessing the copy survived.
+    // Self-clone (`var == src`): `clone $a` evaluates against the object, then assigns
+    // back to `$a`. Panicked (`bound var has an id`) when the clone arm unbound `$a`
+    // first (mautic `$dateFrom = clone $dateFrom`); sound: fresh copy, clean stays clean.
     let src = format!("{PRELUDE}$a = new Box();\n$a->p = 5;\n$a = clone $a;\nneedInt($a->p);\n");
     assert_eq!(count(&src), 0, "self-clone must preserve the good prop fact");
 }
 
 #[test]
 fn self_clone_yields_writable_isolated_copy() {
-    // The self-clone result is a live, writable object: corrupting its prop
-    // after the self-clone is observed (one finding), proving the assignment
-    // rebound `$a` to the fresh copy rather than degrading to Opaque.
+    // Self-clone result is live and writable: corrupting its prop after fires (one
+    // finding), proving the assignment rebound `$a` rather than degrading to Opaque.
     let src = format!(
         "{PRELUDE}$a = new Box();\n$a->p = 5;\n$a = clone $a;\n$a->p = \"abc\";\nneedInt($a->p);\n"
     );
@@ -100,9 +92,7 @@ fn self_clone_yields_writable_isolated_copy() {
 
 #[test]
 fn escape_sweep_on_pass_to_unknown() {
-    // `$a` (aliased by `$b`) is passed to an unknown call: its props are swept —
-    // observed through the surviving alias `$b`, so this is a real heap sweep, not
-    // merely the passed variable losing its binding.
+    // `$a`/`$b` alias passed to unknown: props swept — a real sweep, not just binding loss.
     let src = format!(
         "{PRELUDE}$a = new Box();\n$a->p = \"abc\";\n$b = $a;\nsink($a);\nneedInt($b->p);\n"
     );
@@ -111,8 +101,7 @@ fn escape_sweep_on_pass_to_unknown() {
 
 #[test]
 fn non_escaped_survives_unknown_call() {
-    // The payoff: a purely-local object never passed anywhere keeps its facts across
-    // an unrelated unknown call.
+    // Payoff: a purely-local object keeps its facts across an unrelated unknown call.
     let src = format!("{PRELUDE}$a = new Box();\n$a->p = \"abc\";\nunknownFn();\nneedInt($a->p);\n");
     assert_eq!(count(&src), 1, "non-escaped object's props must survive");
 }
@@ -148,8 +137,7 @@ class Widget {\n\
   public function run2(): void { $this->p = \"abc\"; $this->pub(); needInt($this->p); }\n\
 }\n";
     let f = findings(src);
-    // run(): private call leaves $this->p intact → one finding.
-    // run2(): overridable call sweeps $this->p → no finding.
+    // run(): private call leaves $this->p intact → finding; run2(): overridable sweeps → none.
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].id, ID);
 }
@@ -161,8 +149,7 @@ fn readonly_persists_through_escape_and_unknown_call() {
     let src = "<?php\nfunction needInt(int $x): int { return $x; }\n\
 class Ro { public function __construct(public readonly string $name) {} }\n\
 $r = new Ro(\"abc\");\n$alias = $r;\nsink($r);\nunknownFn();\nneedInt($alias->name);\n";
-    // The readonly `$name` survives the escape + sweep, so the bad string still
-    // flows into needInt() → one finding.
+    // Readonly `$name` survives the escape+sweep, so the bad string flows into needInt().
     let f = findings(src);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].id, ID);
@@ -238,8 +225,7 @@ fn phpdoc_property_mismatch_proven_value() {
 
 #[test]
 fn phpdoc_property_mismatch_abstract_fact() {
-    // `$s` is only known to be a string (abstract fact from its native param type);
-    // the property's `@var int` contract definitely rejects it.
+    // `$s` is only known to be a string (abstract fact); `@var int` definitely rejects it.
     let src = "<?php\nclass P2 {\n  /** @var int */\n  public $num = 0;\n}\n\
 function set(string $s): void { $p = new P2(); $p->num = $s; }\n";
     let f = findings(src);
@@ -272,10 +258,8 @@ fn promoted_param_no_double_report() {
 
 #[test]
 fn hooked_promoted_binds_no_fact() {
-    // A promoted param carrying a `set` hook routes the write through arbitrary code —
-    // the stored value is the hook's result, not the raw argument. Reading it must
-    // yield Unknown, so the sink check is silent (before the fix the raw "abc" bound
-    // and fired a false `type.argument-mismatch`).
+    // A `set` hook routes the write through arbitrary code, so reading must yield
+    // Unknown (before the fix, raw "abc" bound and fired a false `type.argument-mismatch`).
     let src = format!(
         "{PRELUDE}class Hk {{ public function __construct(public $n {{ set {{ $this->n = $value; }} }}) {{}} }}\n$h = new Hk(\"abc\");\nneedInt($h->n);\n"
     );
@@ -284,8 +268,7 @@ fn hooked_promoted_binds_no_fact() {
 
 #[test]
 fn hooked_promoted_later_assign_binds_no_fact() {
-    // A later `$h->n = "abc"` on a hooked prop also runs the `set` hook — still no
-    // fact bound, so no property-mismatch and no downstream sink finding.
+    // Later `$h->n = "abc"` on a hooked prop also runs `set` — still no fact bound.
     let src = format!(
         "{PRELUDE}class Hk {{ public function __construct(public $n {{ set {{ $this->n = $value; }} }}) {{}} }}\n$h = new Hk(1);\n$h->n = \"abc\";\nneedInt($h->n);\n"
     );
@@ -294,9 +277,8 @@ fn hooked_promoted_later_assign_binds_no_fact() {
 
 #[test]
 fn unhooked_promoted_still_binds_positional_and_named() {
-    // Regression guard: an ordinary (unhooked) promoted prop still binds its value,
-    // via both a positional and a named `new` argument (per commit 3c7461e). Two
-    // proven-bad reads → two `type.argument-mismatch` findings.
+    // Regression guard: an unhooked promoted prop still binds via both positional
+    // and named `new` args (commit 3c7461e); two proven-bad reads → two findings.
     let src = format!(
         "{PRELUDE}class Pl {{ public function __construct(public $n) {{}} }}\n$a = new Pl(\"abc\");\nneedInt($a->n);\n$b = new Pl(n: \"abc\");\nneedInt($b->n);\n"
     );
@@ -309,10 +291,8 @@ fn unhooked_promoted_still_binds_positional_and_named() {
 
 #[test]
 fn by_ref_property_alias_poisons_and_avoids_stale_fact() {
-    // `$r = &$b->p` aliases the property by reference; `changeIt($r)` may rewrite it
-    // invisibly. If the analyzer kept the stale `"abc"` fact it would wrongly flag
-    // `needInt($b->p)`. Poison (the reference-assignment family) drops all facts →
-    // no false positive.
+    // `$r = &$b->p` aliases the property; `changeIt($r)` may rewrite it invisibly, so
+    // poison (reference-assignment family) drops all facts, avoiding a false flag.
     let src = format!(
         "{PRELUDE}function changeIt(&$x): void {{ $x = 1; }}\n$b = new Box();\n$b->p = \"abc\";\n$r = &$b->p;\nchangeIt($r);\nneedInt($b->p);\n"
     );
