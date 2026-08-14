@@ -168,15 +168,38 @@ deferral.
    exercises the conditional shapes (the fixture class is `final`), so
    this entry no longer records a suite divergence — only the
    PHPStan-behavior delta on the refused shapes.
-4. **No `resource` type nor resource-value tracking**
-   (`native_types_resource_argument`). `resource` is not a native type — a
-   `resource $x` hint is a reference to a non-existent class `…\resource`
-   (PHPStan reports `class.notFound`), and the call-site rejections require
-   modeling `fopen()`-style resource **values** through a `=== false`
-   narrowing and rejecting them against scalar params. Neither an
-   undefined-class-in-type-position finding nor a `resource` value domain
-   exists yet: an honest **deferral** in the non-scalar / object-world
-   value-modeling cluster, not a refusal.
+4. **`resource` — deferral discharged (2026-08-14, ADR-0056 §8)**
+   (`native_types_resource_argument`). Registered as an honest deferral in
+   the non-scalar value-modeling cluster: neither an
+   undefined-class-in-type-position finding nor any notion of a resource
+   existed, so the call-site rejections were silent. Both halves have
+   since landed, by different routes and worth distinguishing.
+
+   The **type-position** half was never the resource question at all.
+   `resource` is not a native type — PHP reads `resource $x` as a class
+   name and warns about it — so the hint is a reference to a non-existent
+   class `…\resource`, and the absence family's `class.undefined` has
+   reported it since S4. No `resource`-specific finding was added and none
+   is wanted: PHPStan reaches the same place through `class.notFound`.
+
+   The **value** half is ADR-0056 §8. What blocked it was not the value
+   domain but the *grade*: `fopen` declares no return type, so §1's
+   reflected envelope — the anchor every other builtin return fact hangs
+   from — is structurally unavailable, and ADR-0069's Asserted floor can
+   never premise a proof finding. §8 supplies the missing authority with a
+   tripwire rather than an envelope (the engine must still declare
+   nothing for the name, which is exactly what a resource-to-object
+   migration would end), and the carrier is a contract **arm lane**, not a
+   value: `resource|false` narrows to `resource` through the ordinary
+   `=== false` subtraction, and the argument families read the lane under
+   a one-arm/`Verified` predicate (§8.6).
+
+   The value domain gained nothing and is still object-free and
+   resource-free (ADR-0035/0038) — the standing refusal there is
+   untouched. What remains deferred is named in §8.7: arrays *of*
+   resources (`stream_socket_pair`), resource-consuming *parameters*
+   (`fwrite($notAResource, …)`), and open/closed state, which is a
+   dataflow analysis wearing a type question's clothes.
 
 The remaining non-registered gaps stay the prioritized unimplemented queue:
 generic type-argument carry (ADR-0032), callable signatures beyond the

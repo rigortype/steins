@@ -431,7 +431,17 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // is silence), while the extra key fires with the slot proven or not.
     ("composer/composer", 21),
     ("sebastianbergmann/phpunit", 8),
-    ("Seldaek/monolog", 4),
+    // 4 → 5 (+1), 2026-08-14, with ADR-0056 §8: `resource` stopped being an
+    // unmodeled spelling and became a relation. `StreamHandlerTest`'s
+    // `testWriteMissingResource` constructs `new StreamHandler(null)` against
+    // `@param resource|string $stream` and wraps it in
+    // `expectException(\LogicException::class)` — the test exists precisely
+    // because the value is invalid. `null` inhabits neither arm, so it is a TRUE
+    // no-coercion violation; it was silent only because `resource` lowered to an
+    // opaque `Maybe` that swallowed the union's verdict. The exact shape the
+    // flysystem and symfony/console entries below already record: a deliberate
+    // negative-test call site the contract layer can now read.
+    ("Seldaek/monolog", 5),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
     // finding is a class-value contract: `new MountManager(['valid' => 'something
     // else'])` — a plain string in the `array<string, FilesystemOperator>` value
@@ -445,7 +455,20 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // a TRUE no-coercion contract violation (the docblock omits null). The sibling
     // `StringChoice` (a `__toString` object, implicit `\Stringable`) is correctly
     // *accepted*, not a finding — the is-a oracle honors the implicit interface.
-    ("symfony/console", 1),
+    // 1 → 2 (+1), 2026-08-14, with ADR-0056 §8 — the monolog entry above's twin,
+    // and the pair is the point: `StreamOutputTest` line 45 passes the literal
+    // `"foo"` to `StreamOutput::__construct(@param resource $stream)` in a test
+    // whose whole purpose is to assert the constructor rejects a non-resource.
+    // A string is not a resource in any PHP mode, so TRUE.
+    //
+    // Two packages, two findings, and NOTHING else across 100,530 files: the
+    // resource-VALUE half of the slice (a narrowed `fopen()` handle reaching a
+    // typed parameter) fires nowhere in the corpus at all. That is the expected
+    // shape rather than a disappointment — legacy PHP that still uses resources
+    // is legacy PHP that does not type its parameters — and it is the soundness
+    // signal too, since a wrong producer row would have lit up the well-typed
+    // OSS packages first.
+    ("symfony/console", 2),
     // 0 → 15 (+15) with ADR-0043 stage 4. Every finding is a deliberate
     // negative-test call site (`expectException(\LogicException::class)` /
     // `\PhpParser\...`) passing a wrong-typed argument to a class-typed `@param`:

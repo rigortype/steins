@@ -121,11 +121,20 @@ no worst-case reasoning. What stays out: `new self()` under `: static` in an ope
 class (breaks only on proper-descendant receivers — PHPStan reports it by
 worst-casing) and sibling-subclass returns.
 
-**4. No `resource` type nor resource-value tracking — honest deferral.**
+**4. `resource` — deferral discharged (2026-08-14, ADR-0056 §8).**
 `resource` is not a native type; a `resource $x` hint references a non-existent
-class. Rejecting call sites would need `fopen()`-style resource *values* modeled
-through `=== false` narrowing. Neither exists yet. This sits in the non-scalar /
-object-world value-modeling cluster.
+class, and `class.undefined` has reported that since S4. The *value* half is now
+modeled: 19 php-src-mined producers seed a `resource`/`resource|false` contract
+arm, `=== false` discharges the failure arm through the ordinary subtraction, and
+a proven resource handed to a scalar or class parameter is a `type.argument-mismatch`
+— mode-independent, since a resource coerces to nothing. The blocker was never
+the narrowing but the *grade*: `fopen` declares no return type (PHP has no syntax
+for one), so the reflected envelope every builtin return fact anchors to was
+unavailable. §8 substitutes a tripwire — a curated row stands only while the
+engine still declares nothing for the name, which is exactly what the PHP 8
+resource-to-object migration ends. The value domain is unchanged and still
+object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
+resources, resource-consuming *parameters*, and open/closed state.
 
 ## Not registered — just unimplemented
 
