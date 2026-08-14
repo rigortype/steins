@@ -892,6 +892,10 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
         off.push(`${names} <strong>do not fold.</strong> Their job is to produce or render an integer in the machine's own word, and this build's word is ${bitsOf(b)}: <code>sprintf("%x", -1)</code> is <code>"ffffffff"</code> here and <code>"ffffffffffffffff"</code> on the 64-bit PHP you deploy on. They widen instead of answering.`)
         off.push(`<strong>Integers outside ±2147483647 decline</strong> — counted through array literals, and over integer keys as well as values.`)
       }
+      if (b.unverified_folds && b.unverified_folds.length) {
+        const names = b.unverified_folds.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")
+        off.push(`${names} <strong>do not fold either, for a different reason:</strong> their ${bitsOf(b)} behaviour is not measured, so they fold only on a provably 64-bit engine.`)
+      }
       if (!b.curated_rows) {
         off.push(`<strong>Curated refinements are off.</strong> A curated row is verified against the 64-bit engine at the pinned version, and a narrower machine at the same version can violate it — so <code>strlen()</code> is <code>int</code> here, not <code>int&lt;0, max&gt;</code>.`)
       }
