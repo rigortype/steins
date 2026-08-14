@@ -57,13 +57,78 @@ An expression folds only when three things hold:
    set, no `nondet` on the concrete path). See [catalog.md](catalog.md).
 2. The callee is **not a user function** — user functions are propagation edges,
    not folds.
-3. Every argument is a **literal the trace IR carries** — `int`, `float`,
-   `string`, `bool`, `null`.
+3. Every argument resolves to a **concrete value**: a scalar literal (`int`,
+   `float`, `string`, `bool`, `null`), an **array literal** every element of
+   which — key and value, at every depth — is itself concrete (ADR-0028's
+   2026-07-26 amendment, issue #39), or a bounded `OneOf` union of such values,
+   which folds member-wise (the 2026-08-01 amendment, issue #74). One unproven
+   element anywhere widens the whole array — `count([1, $x])` is not `2`,
+   because `$x` is not known to be one entry.
 
-An allowlist entry is *permission* to fold, not a promise that a call folds.
-Several allowlisted functions (`sprintf`, `implode`, `in_array`, `count`) commonly
-take array arguments, which the fold protocol cannot yet carry; those calls
-simply do not qualify, and light up automatically when array arguments arrive.
+An allowlist entry is *permission* to fold, not a promise that a call folds —
+the gates below still apply per call.
+
+### Arrays cross the seam in both directions
+
+One envelope serves both directions: an ordered entry list
+(`{"__steins_array": [[key, value], …]}`, nested recursively), with **PHP
+owning array semantics on the wire** (ADR-0004 — no array rule is
+reimplemented in Rust to be wrong about later). The *argument* direction
+spells an absent key as `null`, so the engine assigns its own next-int and its
+own last-wins on duplicates. A *result* is an array PHP has already finished
+building — every key materialized, duplicates resolved, `"5"` cast to `5` —
+so the result decoder **rejects** those spellings as malformed rather than
+re-deriving in Rust a choice the engine already made; a runner bug of that
+class becomes a widen. The folded array lands on the concrete path
+(`Val::Array` → `Fact::Singleton`), never a synthesized shape (ADR-0028's
+2026-08-14 amendment, issue #330).
+
+Both directions are charged against the same **array budget**: at most 256
+entries counted recursively, at most 8 levels of nesting; over either bound
+the call widens. An argument is charged before the memo key is built, so a
+generated lookup table is never cloned, hashed, serialized, or executed. A
+result is charged on **both sides of the wire** — in the runner before
+encoding, so an oversized answer never becomes a megabyte of JSON, and again
+on arrival, through the argument side's own gate, so the two verdicts are the
+same computation and cannot drift. The invariant is symmetry: a shape
+admissible as an argument is admissible as a result.
+
+### The integer-width gate
+
+Behind the allowlist sits the width gate (issue #64). The catalog's primitive
+is `width_class(name)` — `foldable` is derived from it, so "on the allowlist"
+is exactly "has a width verdict at all". Three classes, split by *evidence*:
+
+- **`Safe`** — verified by differential probes, 32-bit against 64-bit.
+- **`Refused`** — one recorded divergence per row (`sprintf("%x", -1)`).
+- **`Unverified`** — no evidence, and zero probes is the correct number:
+  nobody looked (ADR-0028's 2026-08-14 amendment §4). This is where
+  array-returning names (`array_merge`, `explode`) sit today; the promotion
+  path is php-wasm differential probes, then `Safe`.
+
+What the class buys depends on the engine. On a **provably 64-bit** engine
+(`PHP_INT_SIZE = 8`, read from `env` and memoized) all three classes fold. On
+a provably 32-bit engine (the browser's php-wasm), only `Safe` names fold, and
+only for argument tuples whose every integer the range guard admits — both
+legs are required, because the probe verdict is stated for exactly those
+tuples. Anything else — an unreported width, a machine nobody has probed —
+folds nothing. Default-deny throughout. `Refused` and `Unverified` are
+mechanically identical here; they are kept apart because mixing unevidenced
+rows into the refused list would erase its one-witness-per-row discipline
+(see [catalog.md](catalog.md)).
+
+### Admission: strictly stronger than the rung it shadows
+
+A name joins the allowlist only when the fold is **strictly stronger** than
+the Rust rung it would shadow. `explode`'s rung is type-level
+(`non-empty-list<string>`), so the fold upgrades a type to a value on the
+all-literal path — and the rung survives beneath it as the no-sidecar floor.
+`array_slice`'s rung is already exact and covers non-literal elements a fold
+never can, so it stays off the list: a fold there would buy a second
+implementation of the same answer and a fixture to keep them agreeing
+(`array_combine` and `array_fill_keys` are excluded the same way). The rule
+cuts both ways — a name whose rung later becomes exact should *leave* the
+allowlist.
 
 ## The protocol
 
@@ -104,7 +169,7 @@ lets the pre-existing replay tables stay valid.
 `fold` returns one of three outcomes, and the middle one is the interesting one:
 
 ```text
-Value(FoldValue)          // Int | Float | Str | Bool | Null
+Value(FoldValue)          // Int | Float | Str | Bool | Null | Array
 Throw { class }           // an exception is a RESULT, not an error: 1/0 → DivisionByZeroError
 Widen { reason }          // anything we cannot turn into type information
 ```
@@ -178,6 +243,5 @@ so. Naming the guarantee rather than the deficiency is deliberate vocabulary.
 - **`reflect` in class resolution.** It answers the absence family's homonym
   question; classes from unloaded extensions are still `Unknown`-silent in
   ordinary type resolution.
-- **Array-valued fold arguments and results.**
 - **The pseudo-constant settings opt-in** that would let locale- and
   timezone-sensitive functions fold (ADR-0008).
