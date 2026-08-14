@@ -189,11 +189,28 @@ pub fn width_unverified_names() -> &'static [&'static str] {
 ///   (same `precision` ini on both), `in_array` (php-src's
 ///   `zendi_smart_strcmp` compares oversized numeric strings as strings on
 ///   both machines), `str_starts_with`/`str_contains`/`str_ends_with`/`gettype`.
+/// * **array results the width cannot reach** (issue #354): `str_split` and
+///   `array_fill` take an `int` parameter but never coerce a *value* by it —
+///   an oversized argument is a `TypeError` on the narrow engine, which is a
+///   decline; and `array_unique` compares string casts without retyping what
+///   it keeps. None of the three declares a `string|int|float` parameter,
+///   which is the one place the engine's own width picks a numeric string's
+///   type, and is why `range` is refused while these three are not.
 ///
 /// `substr_replace` above is scalar-subject only; handed an array it returns
 /// an array, which **folds** since ADR-0028's 2026-08-14 amendment (issue
 /// #330) with no re-verification, since the array form is identical on both
-/// engines.
+/// engines. Issue #354 re-probed both array-returning rows *bytewise* — array
+/// elements cross the seam with no per-element type tag, so an `int`/`float`
+/// flip inside a result is legible only in the response bytes — and found
+/// them unchanged.
+///
+/// `array_unique` carries one exposure worth naming: its default `SORT_STRING`
+/// compares string casts, so `precision` decides how many elements survive.
+/// That is the same ini `strval` and `implode` already fold under (both engines
+/// report `precision = 14`), escalated from *how a float is spelled* to *how
+/// long the array is*. Closing that seam is a decision about all three names at
+/// once, not about this one.
 const WIDTH_SAFE: &[&str] = &[
     "strtolower",
     "strtoupper",
@@ -236,6 +253,10 @@ const WIDTH_SAFE: &[&str] = &[
     "str_contains",
     "str_ends_with",
     "gettype",
+    // issue #354 — array results with no width-sensitive path to a value
+    "str_split",
+    "array_fill",
+    "array_unique",
 ];
 
 /// The **refused rows** of the width classification, with the divergence that
@@ -260,6 +281,25 @@ const WIDTH_SAFE: &[&str] = &[
 ///   numeric run through a C `long`, so two oversized runs both saturate and
 ///   compare **equal** on 32-bit. The three-argument (bool) form is refused
 ///   with it.
+/// * `range` — the *surprise* of issue #354, and the only one of that slice's
+///   five: its bounds are declared `string|int|float`, so an oversized numeric
+///   string is typed by the engine's own width and the **element type tag**
+///   flips inside the result. `range("3000000000", "3000000000")` is
+///   `[int(3000000000)]` / `[float(3000000000.0)]`, and the flip starts one
+///   past the narrow `PHP_INT_MAX` (`"2147483648"`). Reachable from strings
+///   only — 52 probes found no int- or float-argument route.
+/// * `preg_split` — refused on a divergence that is **not** the integer width,
+///   the one row here where that is true. The two builds differ in their PCRE:
+///   64-bit `php` has `pcre.jit = 1`, php-wasm 0.1.0 has none, and PCRE2's JIT
+///   does not honour the inline limit verbs the interpreter does.
+///   `preg_split('/(*LIMIT_MATCH=1)a/', "aaa")` splits on one engine and is
+///   `false` on the other; adding `(*NO_JIT)` makes them agree, which is what
+///   identifies the cause. `LIMIT_RECURSION`/`LIMIT_DEPTH` repeat it. Refusing
+///   the narrow engine also keeps this seam and ADR-0078's pattern lane
+///   (`preg_refusal_memo`) from answering the same question separately in the
+///   browser; on a native run both ride the project's own PCRE, where a folded
+///   `false` is that engine's own answer and the lane's diagnostic is about the
+///   pattern, not the value.
 const WIDTH_REFUSED: &[&str] = &[
     "abs",
     "intval",
@@ -272,6 +312,9 @@ const WIDTH_REFUSED: &[&str] = &[
     "hexdec",
     // issue #78 — a `long` hiding inside string work
     "version_compare",
+    // issue #354 — a width-typed numeric string, and a PCRE build option
+    "range",
+    "preg_split",
 ];
 
 /// The **unverified rows** of the width classification (ADR-0028's 2026-08-14
@@ -292,10 +335,11 @@ const WIDTH_REFUSED: &[&str] = &[
 ///   last-wins and integer keys **renumber** from zero, so result keys are a
 ///   function of the engine's own construction, not the arguments as written.
 ///
-/// Deferred, admissible by §5 but not admitted here: `range`, `preg_split`,
-/// `str_split`, `array_unique`, `array_fill`. `range` and `str_split` are also
-/// the runner's own budget probes in
-/// `crates/steins-sidecar/tests/protocol.rs`, which rely on staying ungated.
+/// The five names this class deferred — `range`, `preg_split`, `str_split`,
+/// `array_unique`, `array_fill` — were probed in issue #354 and left it: three
+/// to `WIDTH_SAFE`, two to `WIDTH_REFUSED`. Nothing was promoted *into* here,
+/// which is the class working as defined: a probe moves a row out, and a row
+/// only enters by being admitted unmeasured.
 const WIDTH_UNVERIFIED: &[&str] = &["array_merge", "explode"];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
@@ -1614,8 +1658,8 @@ mod tests {
         foldable_entry_count, width_class, width_safe,
     };
 
-    /// Classes are pairwise DISJOINT, no name listed twice, size is 48
-    /// (ADR-0066 plus ADR-0028's 2026-08-14 wave 1).
+    /// Classes are pairwise DISJOINT, no name listed twice, size is 53
+    /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, plus issue #354).
     #[test]
     fn the_width_classes_partition_the_allowlist() {
         for (list, class, label) in [
@@ -1649,13 +1693,13 @@ mod tests {
                 }
             }
         }
-        assert_eq!(WIDTH_SAFE.len(), 37, "the verified width-safe subset");
-        assert_eq!(WIDTH_REFUSED.len(), 9, "the refused rows");
+        assert_eq!(WIDTH_SAFE.len(), 40, "the verified width-safe subset");
+        assert_eq!(WIDTH_REFUSED.len(), 11, "the refused rows");
         assert_eq!(WIDTH_UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
             foldable_entry_count(),
-            48,
-            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1"
+            53,
+            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1 and issue #354"
         );
         assert_eq!(
             WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len(),
@@ -1676,13 +1720,22 @@ mod tests {
         }
         assert!(!WIDTH_REFUSED.contains(&"explode"));
         assert!(!WIDTH_REFUSED.contains(&"array_merge"));
-        // Stay ungated for the runner's own budget probes in protocol.rs.
-        for name in ["range", "preg_split", "str_split", "array_unique", "array_fill"] {
-            assert_eq!(width_class(name), None, "{name} is deferred, not admitted");
+        // The five this class deferred are no longer deferred: issue #354
+        // probed each and landed it in the class its evidence chose. None of
+        // them passed through here, and the class did not grow.
+        for name in ["str_split", "array_unique", "array_fill"] {
+            assert_eq!(width_class(name), Some(WidthClass::Safe), "{name} probed clean");
+        }
+        for name in ["range", "preg_split"] {
+            assert_eq!(
+                width_class(name),
+                Some(WidthClass::Refused),
+                "{name} has a recorded divergence"
+            );
         }
     }
 
-    /// The nine refused rows, named; see `WIDTH_REFUSED` for probes.
+    /// The eleven refused rows, named; see `WIDTH_REFUSED` for probes.
     #[test]
     fn the_width_sensitive_builtins_are_refused() {
         for name in [
@@ -1695,11 +1748,15 @@ mod tests {
             "bindec",
             "hexdec",
             "version_compare",
+            "range",
+            "preg_split",
             "ABS",
             "IntVal",
             "SPRINTF",
             "DecHex",
             "Version_Compare",
+            "Range",
+            "PREG_SPLIT",
         ] {
             assert!(!width_safe(name), "{name} must not be certified width-safe");
             assert!(foldable(name), "{name} is refused on width, not off the allowlist");
@@ -1717,8 +1774,28 @@ mod tests {
             "substr_replace",
             "str_increment",
             "GetType",
+            "str_split",
+            "array_fill",
+            "array_UNIQUE",
         ] {
             assert!(width_safe(name), "{name} is a verified width-safe fold");
+        }
+    }
+
+    /// The issue #354 slice: three names probed clean and three declines that
+    /// are declines, not divergences. The two refusals are pinned beside their
+    /// causes in `the_width_sensitive_builtins_are_refused`.
+    #[test]
+    fn the_deferred_fold_names_landed_where_their_evidence_put_them() {
+        for name in ["str_split", "array_fill", "array_unique"] {
+            assert!(width_safe(name), "{name} folds on a 32-bit engine too");
+            assert!(foldable(name), "{name} is on the folding allowlist");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
+        }
+        for name in ["range", "preg_split"] {
+            assert!(foldable(name), "{name} folds on a 64-bit engine");
+            assert!(!width_safe(name), "{name} is refused on a 32-bit engine");
+            assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
     }
 
@@ -1785,8 +1862,8 @@ mod tests {
             foldable_entry_count() - width_safe_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(width_safe_names().len(), 37);
-        assert_eq!(width_refused_names().len(), 9);
+        assert_eq!(width_safe_names().len(), 40);
+        assert_eq!(width_refused_names().len(), 11);
         assert_eq!(width_unverified_names().len(), 2);
     }
 

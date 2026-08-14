@@ -623,7 +623,10 @@ fn an_array_result_keeps_its_key_kinds() {
     );
 }
 
-/// Budget (256 entries, 8 levels) charged before the envelope; not fold-allowlisted.
+/// Budget (256 entries, 8 levels) charged before the envelope. The runner does
+/// not consult the allowlist at all, so these probes are unaffected by issue
+/// #354 putting `range` on it; the analyzer-level twin is
+/// `an_over_budget_array_fill_widens_rather_than_truncating`.
 #[test]
 fn an_over_budget_array_result_widens_at_the_runner() {
     let Some(mut sc) = spawn_or_skip("an_over_budget_array_result_widens_at_the_runner") else {

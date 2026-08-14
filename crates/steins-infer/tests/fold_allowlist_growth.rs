@@ -298,3 +298,140 @@ fn an_empty_explode_separator_throws_and_falls_to_the_floor() {
         vec!["list{'x'}"]
     );
 }
+
+// issue #354: the five names ADR-0028's wave 1 deferred, each landed in the
+// class its differential probes chose. Evidence is in the ADR-0066 amendment.
+
+/// The three that probed clean. `array_fill` and `str_split` take an `int`
+/// parameter without ever coercing a *value* by it, and `array_unique` compares
+/// string casts without retyping what it keeps — so all three are `WIDTH_SAFE`,
+/// and `replay_fold.rs` pins that they fold on a 32-bit table too. Each also
+/// exercises a rule Rust declines to re-derive (ADR-0004): `array_fill`'s
+/// negative `$start_index` key sequence (PHP 8.3 changed it), `str_split`'s
+/// empty-string return (8.2 changed it), `array_unique`'s `SORT_STRING`
+/// comparison of unlike scalars.
+#[test]
+fn the_probed_clean_names_fold_to_the_engines_own_arrays() {
+    let Some(mut folder) = live("the_probed_clean_names_fold_to_the_engines_own_arrays") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(array_fill(0, 3, \"x\"));\n\
+         \\PHPStan\\dumpType(array_fill(-5, 3, \"x\"));\n\
+         \\PHPStan\\dumpType(str_split(\"abcdef\", 2));\n\
+         \\PHPStan\\dumpType(str_split(\"\"));\n\
+         \\PHPStan\\dumpType(array_unique([1, \"1\", 2]));\n\
+         \\PHPStan\\dumpType(array_unique([\"a\" => 1, \"b\" => 1, \"c\" => 2]));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "list{'x', 'x', 'x'}",
+            // 8.3+ counts up from the negative start; before it the third key was 1.
+            "array{-5: 'x', -4: 'x', -3: 'x'}",
+            "list{'ab', 'cd', 'ef'}",
+            // 8.2+ returns the empty array; before it, `['']`.
+            "array{}",
+            // SORT_STRING: `1` and `"1"` cast alike, so the string goes.
+            "array{0: 1, 2: 2}",
+            "array{a: 1, c: 2}",
+        ]
+    );
+    for name in ["array_fill", "str_split", "array_unique"] {
+        assert_eq!(
+            steins_catalog::width_class(name),
+            Some(steins_catalog::WidthClass::Safe),
+            "{name} probed clean, so it folds in the browser too"
+        );
+    }
+}
+
+/// `array_fill(0, 1000000, 'x')` is the legitimate call with an illegitimate
+/// reply: nothing about it is wrong except the size of the answer. The runner
+/// charges the 256-entry budget before encoding, so the call is *made* and the
+/// result declined — the dump falls to a type, never to a truncated array.
+/// This is the `explode` sibling one step further along: `explode` needs a
+/// 257-piece literal to get there, `array_fill` needs one integer.
+#[test]
+fn an_over_budget_array_fill_widens_rather_than_truncating() {
+    let Some(mut folder) = live("an_over_budget_array_fill_widens_rather_than_truncating") else {
+        return;
+    };
+    let over = dumps("<?php\n\\PHPStan\\dumpType(array_fill(0, 257, \"x\"));\n", &mut folder);
+    assert_eq!(over.len(), 1);
+    assert!(
+        !over[0].starts_with("list{") && !over[0].starts_with("array{"),
+        "an over-budget result must not come back as a value, got: {}",
+        over[0]
+    );
+    // The size the runner declines is the reply's, not the argument's: one entry
+    // under the same bound folds whole.
+    let under = dumps("<?php\n\\PHPStan\\dumpType(array_fill(0, 256, \"x\"));\n", &mut folder);
+    assert_eq!(under.len(), 1);
+    assert!(under[0].starts_with("list{'x', 'x', "), "the boundary case folds: {}", &under[0][..40]);
+    assert_eq!(under[0].matches("'x'").count(), 256, "every entry survived the seam");
+}
+
+/// `range` folds here and is refused in the browser, and the fold below is the
+/// refusal's own witness: `range("3000000000", "3000000000")` is a
+/// `list{3000000000}` of **int** on this engine and of **float** on a 32-bit
+/// one. `range`'s bounds are declared `string|int|float`, so the engine's own
+/// width types the numeric string — the same route that refused `bindec` and
+/// `hexdec`, reached through an argument no range guard can reject, since the
+/// guard bounds integers and this argument is a string.
+#[test]
+fn range_folds_on_a_64_bit_engine_including_its_own_refusal_witness() {
+    let Some(mut folder) = live("range_folds_on_a_64_bit_engine_including_its_own_refusal_witness")
+    else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(range(1, 5));\n\
+         \\PHPStan\\dumpType(range(\"a\", \"e\", 2));\n\
+         \\PHPStan\\dumpType(range(0, 1, 0.5));\n\
+         \\PHPStan\\dumpType(range(\"3000000000\", \"3000000000\"));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "list{1, 2, 3, 4, 5}",
+            "list{'a', 'c', 'e'}",
+            "list{0.0, 0.5, 1.0}",
+            "list{3000000000}",
+        ]
+    );
+    assert_eq!(
+        steins_catalog::width_class("range"),
+        Some(steins_catalog::WidthClass::Refused),
+        "the last dump carries a float, not an int, on a 32-bit engine"
+    );
+}
+
+/// `preg_split` is the one refused row whose divergence is not the integer
+/// width: the two engines run different PCRE builds, and PCRE2's JIT does not
+/// honour the inline `(*LIMIT_MATCH=…)` verbs its interpreter does. It still
+/// folds here, on the project's own PCRE, which is the only engine whose answer
+/// is the right one for the project's own runtime. ADR-0078's pattern lane
+/// (`preg_refusal_memo`) is not consulted and does not need to be: an
+/// uncompilable pattern makes `preg_split` return `false`, which is this
+/// engine's own answer to the value question, while the lane answers the
+/// separate question of whether the pattern is broken at all.
+#[test]
+fn preg_split_folds_on_the_projects_own_pcre() {
+    let Some(mut folder) = live("preg_split_folds_on_the_projects_own_pcre") else { return };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(preg_split(\"/,/\", \"a,b,c\"));\n\
+         \\PHPStan\\dumpType(preg_split(\"/,/\", \"a,b,c\", 2));\n\
+         \\PHPStan\\dumpType(preg_split(\"/[/\", \"abc\"));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "list{'a', 'b', 'c'}",
+            "list{'a', 'b,c'}",
+            // The uncompilable pattern: the engine's own `false`, not the lane's verdict.
+            "false",
+        ]
+    );
+    assert_eq!(
+        steins_catalog::width_class("preg_split"),
+        Some(steins_catalog::WidthClass::Refused)
+    );
+}

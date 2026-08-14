@@ -234,3 +234,33 @@ extra input. The stratum is §5's derivation clause unchanged: an all-literal
 argument list is `Verified`, so a folded array is a `Verified` `Singleton`,
 with the same consequence #327 measured — a `Verified` array fact is strong
 enough to move the contract lanes, and that movement is a true positive.
+
+### Follow-up (2026-08-15, issue #354): the five deferred names, measured
+
+The wave order above stopped after wave 1 and deferred five names §5 had
+already admitted in principle: `array_unique`, `range`, `preg_split`,
+`str_split`, `array_fill`. All five are now probed, and the ADR-0066 amendment
+of 2026-08-15 carries the tuples, the counts and the two divergence witnesses.
+Three land in `WIDTH_SAFE` (`array_unique`, `str_split`, `array_fill`) and two
+in `WIDTH_REFUSED` (`range`, `preg_split`).
+
+Two of the clauses above are worth reading against that outcome:
+
+- **§4 held.** `WIDTH_UNVERIFIED` did not grow by a single row. Each probed
+  name went to the class its evidence chose, which is what the class was
+  defined to make possible; its two rows still have zero probes behind them.
+- **§5's admission of `range` stands, and the fold is still strictly stronger**
+  — `range_transfer` answers a type, the fold a value. A width refusal does not
+  contradict §5: a `WIDTH_REFUSED` name is still `foldable`, so the rung it
+  shadows is shadowed on the CLI and stands beneath it in the browser, exactly
+  as the clause describes.
+
+One prediction in this amendment was wrong in a way worth recording. Wave 0
+admitted `str_replace` and `substr_replace`'s array results "with no width
+verdict needed", reasoning that the array form of an already-`WIDTH_SAFE` name
+cannot introduce one. The reasoning holds, but the *check* behind it could not
+have caught a counterexample: array elements cross the seam with no per-element
+type tag, so an `int`/`float` flip inside a result is visible only in the
+response bytes, and the probe harness of the day compared parsed JSON. Both
+names were re-probed bytewise in #354 and are unchanged — the conclusion was
+right, the evidence for it was not, and that distinction is the reusable part.

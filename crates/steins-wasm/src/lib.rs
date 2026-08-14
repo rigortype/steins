@@ -719,6 +719,13 @@ mod replay {
     /// `fold_safe` unchanged, and the two new names land in `unverified_folds`
     /// (no divergence to report), not `refused_folds` — see `boot_json` for why
     /// those are separate fields.
+    ///
+    /// Issue #354 moved 48 → 53 and, unlike wave 1, moved the boundary in both
+    /// directions at once: `fold_safe` 37 → 40 (`str_split`, `array_fill`,
+    /// `array_unique` probed clean, so the browser folds them), and
+    /// `refused_folds` gained `range` and `preg_split`, which the page now
+    /// names. `unverified_folds` is untouched — a probed name never passes
+    /// through that class.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -732,8 +739,8 @@ mod replay {
         assert_eq!(boot["fold_lane"], "width_safe_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 48);
-        assert_eq!(boot["fold_safe"], 37, "wave 1 grew the allowlist, not this engine's share");
+        assert_eq!(boot["fold_total"], 53);
+        assert_eq!(boot["fold_safe"], 40, "issue #354 grew this engine's share by three");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::width_refused_names()),
@@ -750,7 +757,9 @@ mod replay {
                 "decoct",
                 "bindec",
                 "hexdec",
-                "version_compare"
+                "version_compare",
+                "range",
+                "preg_split"
             ])
         );
         assert_eq!(

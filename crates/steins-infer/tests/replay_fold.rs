@@ -609,6 +609,60 @@ fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
 }
 
+/// Issue #354's admitted leg, and the first time the browser folds a builtin
+/// whose result is an ARRAY: `array_fill` is `WIDTH_SAFE`, so a 32-bit engine
+/// is dispatched to and the array comes back whole. Before this slice every
+/// name that returned an array was refused or unverified here, so the width
+/// gate and the array result path had never met on a narrow machine.
+///
+/// The refused half of the same slice sits beside it: `range` and `preg_split`
+/// decline before dispatch, on arguments the range guard cannot reject — every
+/// one is a string. That is the point of both refusals: `range`'s divergence
+/// arrives through a `string|int|float` parameter and `preg_split`'s through
+/// the engine's PCRE build, and neither is something a bound on integers can see.
+#[test]
+fn the_issue_354_verdicts_split_the_lane_on_a_32_bit_engine() {
+    use steins_sidecar::{FoldKey, FoldValue};
+    fn filled() -> FoldResult {
+        FoldResult::Value(FoldValue::Array(vec![
+            (FoldKey::Int(0), FoldValue::Str("x".to_owned())),
+            (FoldKey::Int(1), FoldValue::Str("x".to_owned())),
+        ]))
+    }
+    let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("array_fill", filled());
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(
+        folder.fold("array_fill", &[ArgValue::Int(0), ArgValue::Int(2), ArgValue::Str("x".into())]),
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("x".into())),
+            (ArrayKey::Int(1), ArgValue::Str("x".into())),
+        ]))
+    );
+    assert_eq!(folder.engine_mut().dispatched, vec!["array_fill".to_owned()]);
+
+    // The refusals, each handed the answer its 64-bit engine would have given.
+    let engine = FakeEngine::new("8.5.2", Some(4))
+        .with_fold("range", filled())
+        .with_fold("preg_split", filled());
+    let mut folder = EngineFolder::with_engine(engine);
+    assert_eq!(
+        folder.fold(
+            "range",
+            &[ArgValue::Str("3000000000".into()), ArgValue::Str("3000000000".into())]
+        ),
+        None
+    );
+    assert_eq!(
+        folder.fold("preg_split", &[ArgValue::Str("/,/".into()), ArgValue::Str("a,b".into())]),
+        None
+    );
+    assert!(
+        folder.engine_mut().dispatched.is_empty(),
+        "both refusals are per-name, upstream of the engine: {:?}",
+        folder.engine_mut().dispatched
+    );
+}
+
 /// The range guard reaches array KEYS, recursively: every *value* here is in
 /// range, and the one out-of-range integer is a key two levels down — where it
 /// matters, since the key is what PHP's next-int rule reads.
