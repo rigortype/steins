@@ -172,6 +172,36 @@ fn doctor_without_no_php_still_renders_runtime_and_exits_zero() {
     );
 }
 
+/// The integer width, reported as the consequence it has (issue #64, and ADR-0028's
+/// 2026-08-14 amendment for why the declining set grew). `env` already carried
+/// `int_size`, so the line costs no extra sidecar traffic — which is the reason it
+/// is here at all and not deferred.
+///
+/// A local run is 64-bit (the repo's own `php`), so that is the branch this pins;
+/// the 32-bit branch is the browser's and is pinned in `steins-infer`'s replay
+/// tests, where a width can be supplied rather than found.
+#[test]
+fn doctor_reports_the_engines_integer_width_and_its_fold_consequence() {
+    let dir = workdir("int-width");
+    write(&dir, "a.php", "<?php\n$x = 1;\n");
+    let r = run_in(&dir, &["doctor", "."]);
+    assert_eq!(r.code, 0, "stdout:\n{}", r.stdout);
+    if !r.stdout.contains("PHP version:") {
+        eprintln!("SKIP doctor_reports_the_engines_integer_width…: no `php` on PATH");
+        return;
+    }
+    assert!(r.stdout.contains("integer width:"), "stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("integer width: 8 bytes — the whole foldable allowlist is admitted"),
+        "a native run is 64-bit and says so; stdout:\n{}",
+        r.stdout
+    );
+    // …and `--no-php` reports no width at all rather than guessing one: there is no
+    // engine to have a machine.
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert!(!r.stdout.contains("integer width:"), "stdout:\n{}", r.stdout);
+}
+
 // ---------------------------------------------------- reflected class world ---
 
 /// A class ext-random provides (`Random\Randomizer`, always built in since PHP 8.2)
@@ -795,6 +825,22 @@ fn doctor_catalog_reports_the_pin_and_freshness_context() {
         r.stdout.contains("hierarchy table:") && r.stdout.contains("foldable allowlist:"),
         "stdout:\n{}",
         r.stdout
+    );
+    // The width breakdown (ADR-0028's 2026-08-14 amendment §4, issue #330). The
+    // numbers come from the catalog's own accessors, so they are spelled here from
+    // the same source rather than hard-coded: what the assertion pins is that the
+    // clause reports all three classes and keeps refused apart from unverified,
+    // which is the distinction the amendment exists to protect.
+    let expected = format!(
+        "(width: {} safe / {} refused / {} unverified)",
+        steins_catalog::width_safe_names().len(),
+        steins_catalog::width_refused_names().len(),
+        steins_catalog::width_unverified_names().len()
+    );
+    assert!(r.stdout.contains(&expected), "expected `{expected}`; stdout:\n{}", r.stdout);
+    assert!(
+        !steins_catalog::width_unverified_names().is_empty(),
+        "an empty unverified list would make the assertion above vacuous"
     );
 }
 

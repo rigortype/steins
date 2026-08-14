@@ -341,6 +341,34 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                 line!(sec, "  PHP version: {}", env.php_version);
                 line!(sec, "  SAPI: {}", env.sapi);
                 line!(sec, "  loaded extensions: {}", env.extensions.len());
+                // The fold lane's integer-width gate (issue #64), stated as its
+                // CONSEQUENCE rather than as a number nobody can act on. `env`
+                // already carried `int_size` — this costs no extra traffic — and
+                // the width is the one runtime fact that silently decides how much
+                // of the folding allowlist a run gets. Refused and unverified rows
+                // decline together here because the gate makes no distinction
+                // between them; the Catalog section is where their counts differ.
+                match env.int_size {
+                    Some(8) => line!(
+                        sec,
+                        "  integer width: 8 bytes — the whole foldable allowlist is admitted"
+                    ),
+                    Some(4) => line!(
+                        sec,
+                        "  integer width: 4 bytes — only the {} width-safe name(s) of the foldable allowlist fold; the other {} decline (issue #64)",
+                        steins_catalog::width_safe_names().len(),
+                        steins_catalog::foldable_entry_count()
+                            - steins_catalog::width_safe_names().len()
+                    ),
+                    Some(n) => line!(
+                        sec,
+                        "  integer width: {n} bytes — no fold lane is verified against this machine, so nothing folds (default-deny)"
+                    ),
+                    None => line!(
+                        sec,
+                        "  integer width: unreported — not provably 64-bit, so nothing folds (default-deny; a runner predating the field)"
+                    ),
+                }
                 // Monkey-patch presence (ADR-0049 A9): a loaded `uopz`/`runkit7`/
                 // `Componere` silently voids the entire absence-proof family — the
                 // exact incompleteness ADR-0004 forbids leaving unsaid, so name it.
@@ -1225,11 +1253,21 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
             "  A11 consequence: catalog-backed is-a demoted to Unknown for arm deletion and descendant closure (ADR-0052 amendment A11)"
         );
     }
+    // The foldable allowlist's integer-width classification is three-valued since
+    // ADR-0028's 2026-08-14 amendment, and the breakdown is freshness context in
+    // the same sense the totals are: it describes the CATALOG, not this project or
+    // this run. Refused and unverified decline on the same gate and are reported
+    // apart anyway, because they differ in what the project can do about them — a
+    // refused row has a divergence on record and is not coming back; an unverified
+    // one is waiting on probes nobody has run.
     line!(
         sec,
-        "  hierarchy table: {} row(s); foldable allowlist: {} name(s) (freshness context, not a per-project fact)",
+        "  hierarchy table: {} row(s); foldable allowlist: {} name(s) (width: {} safe / {} refused / {} unverified) (freshness context, not a per-project fact)",
         steins_catalog::hierarchy_entry_count(),
-        steins_catalog::foldable_entry_count()
+        steins_catalog::foldable_entry_count(),
+        steins_catalog::width_safe_names().len(),
+        steins_catalog::width_refused_names().len(),
+        steins_catalog::width_unverified_names().len()
     );
     (sec, skew)
 }

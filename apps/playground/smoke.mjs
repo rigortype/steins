@@ -187,7 +187,9 @@ assert(boot.php_version === "8.5.8" && boot.int_size === 8, `boot reports the en
 assert(boot.fold_lane === "full", `a 64-bit engine folds the whole allowlist (got ${boot.fold_lane})`);
 assert(boot.curated_rows === true && boot.absence_family === true, "every lane is live at the pin");
 assert(boot.refused_folds === undefined, "nothing is refused on the full lane");
-assert(boot.fold_total === 46 && boot.fold_safe === 37, "the catalog's own counts travel");
+// 48 = 37 safe + 9 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1). On the
+// full lane every one of the 48 folds, which is why only the total moved.
+assert(boot.fold_total === 48 && boot.fold_safe === 37, "the catalog's own counts travel");
 assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
 
 // annotate rides the same loop.

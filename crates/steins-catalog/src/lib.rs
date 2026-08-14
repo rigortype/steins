@@ -197,13 +197,12 @@ pub fn width_safe(name: &str) -> bool {
     WIDTH_SAFE.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
-/// A name that is foldable and whose 32-bit behaviour is **refused on recorded
-/// evidence**. Not the same as `!width_safe(name)`, which is also true of every
-/// unverified name and of every name that is not foldable at all; see
-/// `WIDTH_REFUSED` for the refusals and their probes.
-fn width_refused(name: &str) -> bool {
-    width_class(name) == Some(WidthClass::Refused)
-}
+// A private `width_refused` predicate used to live here, as the complement of
+// `width_safe` within the allowlist. It was the second spelling of a two-valued
+// classification, and `width_class` — the primitive since ADR-0028's 2026-08-14
+// amendment — says the same thing without inviting the reading that "not safe"
+// and "refused" are the same question. `width_class(name) == Some(Refused)` is
+// the replacement, and it cannot quietly absorb the unverified rows.
 
 /// The verified width-safe names, in catalog order — the *extension* of
 /// [`width_safe`], for a caller that must **name** the subset rather than test a
@@ -2301,8 +2300,8 @@ mod tests {
         // The class is evidence, not behaviour: nothing here may leak into the
         // refused rows, whose one-divergence-per-row discipline is auditable only
         // because the list contains nothing unevidenced.
-        assert!(!super::width_refused("explode"));
-        assert!(!super::width_refused("array_merge"));
+        assert!(!WIDTH_REFUSED.contains(&"explode"));
+        assert!(!WIDTH_REFUSED.contains(&"array_merge"));
         // …and the deferred names of `WIDTH_UNVERIFIED`'s doc block are genuinely
         // still off the allowlist, so the runner's own budget probes (`range`,
         // `str_split` in `steins-sidecar/tests/protocol.rs`) stay ungated.
@@ -2393,7 +2392,7 @@ mod tests {
     /// displayed subsets cannot drift from the gate (issue #64).
     #[test]
     fn the_name_accessors_agree_with_the_predicates() {
-        use super::{width_refused, width_refused_names, width_safe_names, width_unverified_names};
+        use super::{width_refused_names, width_safe_names, width_unverified_names};
         assert_eq!(width_safe_names(), WIDTH_SAFE);
         assert_eq!(width_refused_names(), WIDTH_REFUSED);
         assert_eq!(width_unverified_names(), WIDTH_UNVERIFIED);
@@ -2402,12 +2401,16 @@ mod tests {
         }
         for name in width_refused_names() {
             assert!(!width_safe(name), "{name} is listed refused but the predicate admits it");
-            assert!(width_refused(name), "{name} is listed refused but the predicate disagrees");
+            assert_eq!(width_class(name), Some(WidthClass::Refused), "{name} classifies elsewhere");
             assert!(foldable(name), "a refused name is still on the folding allowlist");
         }
         for name in width_unverified_names() {
             assert!(!width_safe(name), "{name} is listed unverified but the predicate admits it");
-            assert!(!width_refused(name), "{name} is unverified, which is not refused");
+            assert_eq!(
+                width_class(name),
+                Some(WidthClass::Unverified),
+                "{name} is unverified, which is not refused"
+            );
             assert!(foldable(name), "an unverified name is still on the folding allowlist");
         }
         // The two non-safe lists together ARE the complement of the safe one — the
