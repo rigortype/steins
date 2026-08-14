@@ -16,9 +16,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection (ADR-0054 §6) reads
-/// it, and a run *on* GitHub Actions would else emit workflow commands instead of the
-/// asserted text (detection itself is tested in `tests/format_github.rs`).
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection
+/// (ADR-0054 §6) reads it and would else emit workflow commands instead of text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -250,8 +249,7 @@ fn a_handle_from_another_process_is_refused_and_nothing_is_written() {
     proj.write("main.php", MAIN);
     let mut client = Client::start(proj.path());
 
-    // Shaped like a real handle but minted by nobody — as from a server run before a
-    // restart.
+    // Shaped like a real handle but minted by nobody — as from a server before a restart.
     let err = client.call_err("apply_plan", json!({ "plan_handle": "steins-plan-1-1-1" }));
     assert_eq!(err["reason"], "plan-handle-foreign-process", "error: {err}");
     let detail = err["detail"].as_str().unwrap();
@@ -331,8 +329,8 @@ fn a_plan_whose_targets_moved_is_refused_rather_than_spliced() {
 
 #[test]
 fn the_asserted_subjects_opt_in_rides_the_plan_tool_and_is_fenced_to_its_transform() {
-    // ADR-0076 issue #175: the asserted-subjects opt-in follows the same code path as the
-    // CLI, so the label and split count land in the same document as the diff.
+    // ADR-0076 issue #175: opt-in follows the same code path as the CLI, so the
+    // label and split count land in the same document as the diff.
     let proj = TempProject::new("asserted");
     proj.write(
         "loop.php",

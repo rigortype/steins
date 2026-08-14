@@ -254,8 +254,7 @@ fn duplicate_findings_and_entries_match_one_for_one() {
 }
 
 // Debug lane exemption (issue #108): ADR-0053 §4/§8 keeps it off the baseline
-// on both sides — never captured, never matched — so a rerun can't silently
-// downgrade a guaranteed runtime fatal to "N findings in baseline" at exit 0.
+// on both sides, so a rerun can't downgrade a guaranteed fatal to "N findings in baseline".
 
 #[test]
 fn set_baseline_never_captures_a_debug_dump_entry() {
@@ -292,9 +291,8 @@ fn debug_dump_still_fails_after_set_baseline_rerun() {
 #[test]
 fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
     // ADR-0053's exemption is symmetric: `match_baseline` refuses a hand-edited
-    // `debug.*` entry too (debug findings bypass the matcher unconditionally,
-    // so the hash below is arbitrary). Per ADR-0050 §8 it's stale, not
-    // dormant, so the next capture cleans it out.
+    // `debug.*` entry too (bypasses the matcher unconditionally, hash below is
+    // arbitrary). Per ADR-0050 §8 it's stale, not dormant, so capture cleans it out.
     let dir = workdir("debug-leftover-entry");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
@@ -319,9 +317,9 @@ fn a_leftover_debug_baseline_entry_never_suppresses_and_is_reported_stale() {
 
 #[test]
 fn a_strict_captured_debug_entry_is_stale_on_a_default_run_too() {
-    // Issue #108 (PR #133): a `debug.type` entry tagged `"surface":"strict"`,
-    // consulted on a `default` run, must not survive via ADR-0062 A-G10's
-    // `captured <= rung` gate — a debug entry is dead weight at every rung.
+    // Issue #108 (PR #133): a `debug.type` entry tagged `"surface":"strict"`
+    // must not survive on a `default` run via ADR-0062 A-G10's `captured <=
+    // rung` gate — a debug entry is dead weight at every rung.
     let dir = workdir("debug-leftover-entry-strict-rung");
     write(&dir, "a.php", "<?php\n$x = 1;\n\\PHPStan\\dumpType($x);\n");
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "--profile", "strict", "a.php"]).code, 0);

@@ -76,9 +76,9 @@ fn next_int_follows_largest_explicit_int_key() {
     assert_eq!(norm[1].0, NormKey::Int(6));
 }
 
-// Negative keys: the PHP 8.3 next-auto-index change (ADR-0049 A12)
-// Every expectation below is a `php -r 'var_export(...)'` witness on PHP 8.5.8,
-// never recall; the pre-8.3 column is what PHP < 8.3 documents (floor at 0;
+// Negative keys: the PHP 8.3 next-auto-index change (ADR-0049 A12). Every
+// expectation below is a `php -r 'var_export(...)'` witness on PHP 8.5.8,
+// never recall; pre-8.3 column is what PHP < 8.3 documents (floor at 0;
 // Steins's floor is 8.1, ADR-0011).
 
 #[test]

@@ -1,109 +1,86 @@
-//! A **headroom** guard for the lowering walkers (issue #264).
+//! Headroom guard for the lowering walkers (issue #264).
 //!
-//! `SourceTree::parse` runs three dozen walkers of the same shape — a function
-//! that recurses once per CST node — so a deeply nested expression (`$a->b->c->…`,
-//! `$a[0][0][…]`, `'a' . 'a' . …`) costs one stack frame per nesting level. Where
-//! headroom can be bought, issue #246 bought it: the CLI analyzes on a 256 MiB
-//! worker thread and answers the whole question, because a depth cutoff over a
-//! finite input manufactures a silence nothing calls for.
+//! `SourceTree::parse` recurses once per CST node across dozens of walkers, so
+//! deeply nested expressions cost one stack frame per nesting level. Native
+//! entry points buy headroom instead (issue #246: `steins-cli`'s 256 MiB
+//! worker thread), because a depth cutoff over a finite input is an
+//! unforced silence.
 //!
-//! **The wasm playground cannot buy it.** Its shadow stack is fixed at link time,
-//! raising it moves the ceiling by about 2× before the host VM's own call stack
-//! binds instead, and both failures are unrecoverable traps that name neither PHP
-//! nor a line. There the alternative to a cutoff is not a complete answer, it is a
-//! dead module. This is the guard for that case.
+//! The wasm playground cannot buy headroom: its shadow stack is fixed at
+//! link time, raising it only moves the ceiling ~2x before the host VM's own
+//! call stack binds, and both failures are unrecoverable traps naming
+//! neither PHP nor a line. This guard exists so the playground fails by
+//! name instead of by trap.
 //!
 //! # Why headroom and not a depth count
 //!
-//! One nesting level costs roughly 16 KiB of stack in a debug build and roughly
-//! 2.7 KiB in a release one — a 6× difference in frame size, measured in
-//! `docs/notes/20260808-deep-nesting-stack-budget.md`. A node-count constant
-//! calibrated against release frames therefore overflows a debug build before it
-//! can fire; Mago's own `MAX_RECURSION_DEPTH = 512` demonstrably does (a
-//! 480-level parenthesis nest, *below* its limit, overflows debug). So this guard
-//! counts **bytes of stack actually consumed**, not levels: the same budget is
-//! correct under debug frames, release frames and wasm's shadow stack, and it
-//! fires only on inputs the process genuinely cannot walk. Every input the
-//! machine can answer is still answered in full.
+//! One nesting level costs ~16 KiB of stack in debug and ~2.7 KiB in
+//! release (6x difference, measured in
+//! `docs/notes/20260808-deep-nesting-stack-budget.md`). A node-count constant
+//! calibrated for release overflows debug first: Mago's own
+//! `MAX_RECURSION_DEPTH = 512` does (a 480-level parenthesis nest, below its
+//! limit, overflows debug). So this guard counts bytes of stack consumed,
+//! not levels, and fires only on inputs the process genuinely cannot walk.
 //!
 //! # Contract
 //!
-//! - The budget is **per thread** and, on every target except wasm, **off by
-//!   default**: a library may not assume headroom it has not been given, and it
-//!   may not refuse to answer on a stack that could have answered. Native entry
-//!   points buy stack instead (`steins-cli`'s 256 MiB worker); an embedder that
-//!   cannot should call [`set_budget`].
-//! - On `wasm32` the default is [`WASM_BUDGET`], because there is no bigger stack
-//!   to buy at any price and the module is otherwise one paste away from a trap.
-//! - Tripping the guard is **not** a finding. It is recorded as a recovered parse
-//!   error, which the checker names once as `syntax.unparsable` — the same
-//!   vocabulary Mago's own recursion limit already surfaces through, and a named
-//!   silence in the sense of ADR-0009.
+//! - Budget is per-thread, off by default on every non-wasm target — native
+//!   entry points buy stack instead; an embedder that cannot should call
+//!   [`set_budget`].
+//! - On `wasm32` the default is [`WASM_BUDGET`]: there is no bigger stack to
+//!   buy at any price.
+//! - Tripping the guard is recorded as a recovered parse error, surfaced as
+//!   `syntax.unparsable` (same vocabulary as Mago's own recursion limit), a
+//!   named silence per ADR-0009.
 //!
 //! # What this does not fix, measured
 //!
-//! The guard bounds *Steins'* recursion. One recursion below it belongs to the
-//! parser fork: `HasSpan::span` on a Mago CST node walks the node's spine, so
-//! asking a 6,000-level chain's statement for its span pushes 6,000 frames —
-//! from `lower_stmt` at walker depth 1, where no headroom guard can be standing,
-//! and from inside the parser itself while it builds the chain. Those frames use
-//! the host VM's call stack rather than the module's shadow stack (the trap they
-//! produce is V8's `RangeError`, not an out-of-bounds linear-memory access), so
-//! no shadow-stack budget preempts them.
+//! `HasSpan::span` on a Mago CST node walks the node's spine, so a
+//! 6,000-level chain's statement pushes 6,000 frames from `lower_stmt` at
+//! walker depth 1 and from inside the parser itself — on the host VM's call
+//! stack (V8's `RangeError`), not the module's shadow stack, so no budget
+//! here preempts it.
 //!
-//! Measured in Node against the release module: the playground's ceiling moves
-//! from between 300 and 600 levels (a trap) to about 1,700 (a trap), with
-//! everything below it — including phpstan-src's real 1,000-level fixture — now
-//! answered or refused by name. Raising it further means making the fork's span
-//! accessors iterative, which is a change to the parser, not to this crate.
+//! Measured in Node against the release module: the playground's ceiling
+//! moves from 300-600 levels (trap) to ~1,700 (trap), covering
+//! phpstan-src's real 1,000-level fixture. Raising it further requires
+//! making the fork's span accessors iterative — a parser change, not this
+//! crate's.
 //!
-//! `cargo test` is worth a word: libtest runs each test on a 2 MiB thread, which
-//! is *smaller* than the 8 MiB stack issue #246 already found fatal at 520
-//! levels. A test that parses a deep fixture in process must therefore set a
-//! budget (as this module's own tests do) or drive the binary as a subprocess (as
+//! `cargo test` runs each test on a 2 MiB thread, smaller than the 8 MiB
+//! stack issue #246 found fatal at 520 levels. A test parsing a deep
+//! fixture in-process must set a budget (as this module's own tests do) or
+//! drive the binary as a subprocess (as
 //! `crates/steins-cli/tests/deep_nesting.rs` does).
 
 use std::cell::Cell;
 
-/// The default budget on `wasm32`, in bytes: half of wasm-ld's 1 MiB shadow
-/// stack, which is the stack the playground module actually ships with.
+/// Default `wasm32` budget, in bytes: half of wasm-ld's 1 MiB shadow stack.
 ///
-/// **Half, not nearly all, and the other half is a reserve the guard needs.** The
-/// budget bounds the *walk*; work the walker does below the check is not bounded
-/// by it, and one piece of that work is itself proportional to the nesting depth:
-/// `HasSpan::span` on a Mago expression recurses down the node's left spine, so a
-/// walker that records a span at the depth where the guard fires still pushes one
-/// (small) frame per remaining level. Spending the whole stack on the walk would
-/// leave nothing for that and trade one trap for another. Measured at ~2.7 KiB
-/// per level in release, this yields roughly 190 levels of nesting before the
-/// refusal, against a hard ceiling between 300 and 600 where the module traps
-/// instead — and leaves 512 KiB, thousands of span frames, underneath.
+/// Half, not nearly all: the budget bounds the walk, but `HasSpan::span`
+/// below the check costs one frame per remaining level, proportional to
+/// nesting depth, so the other half is reserve for that. At ~2.7 KiB/level
+/// in release this yields ~190 levels before refusal, against a 300-600
+/// level hard ceiling where the module traps — leaving 512 KiB, thousands
+/// of span frames, underneath.
 ///
-/// Raising `-z stack-size` is **deliberately not** the answer here, and the
-/// reason is recorded rather than left to rediscovery: at 16 MiB the measured
-/// ceiling only doubles and the failure mode changes from a shadow-stack
-/// overrun — which this guard can preempt, because it is a linear-memory
-/// address this module can read — to the host VM's `RangeError`, which it
-/// cannot. A bigger shadow stack would trade a preemptible failure for an
-/// unpreemptible one, and pay for it in the module's initial linear memory,
-/// which `-z stack-size` adds outright.
+/// Raising `-z stack-size` is deliberately not the answer: at 16 MiB the
+/// measured ceiling only doubles, and the failure mode changes from a
+/// preemptible shadow-stack overrun to the host VM's unpreemptible
+/// `RangeError`, while paying for the larger stack in the module's initial
+/// linear memory.
 pub const WASM_BUDGET: usize = 512 * 1024;
 
-/// The default budget on every other target: none. See the module contract.
+/// Default budget on every other target: none. See the module contract.
 const NATIVE_BUDGET: usize = 0;
 
 const DEFAULT_BUDGET: usize = if cfg!(target_family = "wasm") { WASM_BUDGET } else { NATIVE_BUDGET };
 
-/// The message the refusal carries into `parse_errors`, and from there into the
-/// one `syntax.unparsable` finding the file earns. It names the silence: what was
-/// not walked, and why.
+/// Refusal message surfaced into `parse_errors` as the one `syntax.unparsable`
+/// finding: names what was not walked and why.
 ///
-/// It names the *file*, not a line, and that is not laziness: asking Mago for the
-/// span of the node where the guard fires means recursing down that node's spine,
-/// which is the very depth the guard just refused to walk. A position bought that
-/// way would cost more stack than the walk it is reporting on. What the reader
-/// needs is here anyway — which file, what happened, and that the file's other
-/// findings were withheld rather than computed from half a tree.
+/// Names the file, not a line: getting a span for the node where the guard
+/// fires means recursing down that node's spine — the depth just refused.
 pub(crate) const REFUSAL: &str =
     "Maximum expression nesting exceeded: an expression in this file nests deeper than the \
      analyzer can walk on this stack, so the file was analyzed only in part";
@@ -111,19 +88,17 @@ pub(crate) const REFUSAL: &str =
 thread_local! {
     /// Bytes of stack the lowering pass may consume, or 0 for "unbounded".
     static BUDGET: Cell<usize> = const { Cell::new(DEFAULT_BUDGET) };
-    /// The stack address the walkers must not descend past, or 0 when no guard is
-    /// installed on this thread (either unbounded, or outside a parse).
+    /// Stack address the walkers must not descend past, or 0 when unguarded.
     static FLOOR: Cell<usize> = const { Cell::new(0) };
     /// Whether the guard fired during the current parse.
     static TRIPPED: Cell<bool> = const { Cell::new(false) };
 }
 
-/// Set this thread's lowering budget, in bytes; `0` disables the guard.
+/// Sets this thread's lowering budget, in bytes; `0` disables the guard.
 ///
-/// For an embedder that parses on a stack it cannot grow. Pass comfortably less
-/// than the thread's real stack — what remains *below* the parse, minus room for
-/// whatever the walkers call — since the guard measures consumption from the
-/// parse entry, not from the thread's base.
+/// For an embedder that parses on a stack it cannot grow. Pass comfortably
+/// less than what remains below the parse, minus room for the walkers'
+/// own calls — the guard measures consumption from the parse entry.
 pub fn set_budget(bytes: usize) {
     BUDGET.set(bytes);
 }
@@ -134,21 +109,19 @@ pub fn budget() -> usize {
     BUDGET.get()
 }
 
-/// An approximation of the current stack pointer: the address of a local this
-/// function forces into memory. Stacks grow downwards on every target Steins
-/// builds for, wasm's shadow stack included, so a *smaller* value is a *deeper*
-/// frame.
+/// Approximates the current stack pointer via a local forced into memory.
+/// Stacks grow downwards on every Steins target, wasm included, so a
+/// smaller value is a deeper frame.
 #[inline]
 fn stack_probe() -> usize {
     let probe = 0_u8;
     std::ptr::addr_of!(probe) as usize
 }
 
-/// Installs the guard for one parse, and removes it again on drop.
+/// Installs the guard for one parse, removes it on drop.
 ///
-/// Nested parses (a parse reached from inside a walker — nothing does this today)
-/// keep the outer floor, which is the conservative reading: the inner parse is
-/// running on stack the outer one already spent.
+/// A nested parse (nothing does this today) keeps the outer floor: it is
+/// running on stack the outer parse already spent.
 pub(crate) struct Scope {
     previous_floor: usize,
     previous_trip: bool,
@@ -174,18 +147,13 @@ impl Scope {
 impl Drop for Scope {
     fn drop(&mut self) {
         FLOOR.set(self.previous_floor);
-        // An inner scope's trip belongs to the inner parse; restore what the outer
-        // one had recorded, so its own refusal is not attributed to a nested run.
+        // Restore the outer scope's trip so a nested run's refusal isn't misattributed.
         TRIPPED.set(self.previous_trip);
     }
 }
 
-/// Whether the walkers must stop descending.
-///
-/// This is the whole guard as the walkers see it: one thread-local read on the
-/// common path, and — since a walker that stops descending simply returns — no
-/// change to any walker's control flow beyond the descent it does not take. It
-/// takes no span and asks for none, for the reason [`REFUSAL`] records.
+/// Whether the walkers must stop descending: one thread-local read on the
+/// common path, no control-flow change beyond the descent not taken.
 #[inline]
 pub(crate) fn exhausted() -> bool {
     let floor = FLOOR.get();
@@ -221,8 +189,7 @@ mod tests {
     #[test]
     fn a_deep_enough_descent_trips_the_guard() {
         fn descend(depth: u32) -> u32 {
-            // 4 KiB per frame, so a 64 KiB budget is spent in ~16 levels however
-            // the profile sizes the rest of the frame.
+            // 4 KiB per frame, so a 64 KiB budget is spent in ~16 levels.
             let ballast = [0_u8; 4096];
             if exhausted() {
                 return depth;

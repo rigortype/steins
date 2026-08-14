@@ -12,7 +12,6 @@ fn bin() -> &'static str {
 
 /// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
 /// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
-/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -479,7 +478,7 @@ fn throws_envelope_seeding_clears_throws_direct() {
 /// Post-check surface pin (issue #115): only this transform is measured on the
 /// DEFAULT surface. An override narrowing an inherited envelope surfaces
 /// `throw.liskov-widened` under an opt-up profile — debt made visible, not a
-/// regression — so post-check still passes and writes; the forcing half lives in
+/// regression — so post-check still passes; forcing half lives in
 /// `the_broad_surface_would_veto_a_legitimate_throws_seed` (main.rs).
 #[test]
 fn throws_envelope_postcheck_runs_on_the_default_surface() {

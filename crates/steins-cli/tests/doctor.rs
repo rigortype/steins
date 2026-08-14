@@ -15,7 +15,6 @@ fn bin() -> &'static str {
 
 /// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
 /// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
-/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -523,9 +522,9 @@ fn doctor_rejects_unknown_flag() {
     assert_eq!(r.code, 2, "unknown flag → usage error exit 2; stderr:\n{}", r.stderr);
 }
 
-/// ADR-0054 §10 amendment: a path naming nothing is doctor's own usage error (2) —
-/// completing ADR-0050 §7 (check/transform/effect-diff). Timeout-guarded: the bug
-/// closed here was a *hang* (`composer::discover` walked all of `/`), not a wrong code.
+/// ADR-0054 §10 amendment: a path naming nothing is doctor's own usage error
+/// (2), completing ADR-0050 §7. Timeout-guarded: the bug closed here was a
+/// hang (`composer::discover` walked all of `/`), not a wrong code.
 #[test]
 fn doctor_rejects_a_path_that_names_nothing() {
     let dir = workdir("missing-path");

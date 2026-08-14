@@ -1,19 +1,18 @@
 //! The headroom guard over real deep sources (issue #264).
 //!
-//! These run **in process** on libtest's 2 MiB thread, smaller than the 8 MiB
-//! stack issue #246 found fatal at ~520 `->` levels — deliberate, so the guard,
-//! not the OS, stops the walk with a named refusal. A fixture parsed *without* a
-//! budget belongs in `crates/steins-cli/tests/deep_nesting.rs` (subprocess) instead.
+//! Runs in-process on libtest's 2 MiB thread, smaller than the 8 MiB stack
+//! issue #246 found fatal at ~520 `->` levels — deliberate, so the guard, not
+//! the OS, stops the walk with a named refusal. A fixture parsed without a
+//! budget belongs in `crates/steins-cli/tests/deep_nesting.rs` (subprocess).
 //!
-//! The budget is small and byte-sized on purpose: a stack overflow isn't a
-//! catchable panic, so the margin must hold under both profiles' frame sizes —
-//! ~16 KiB/level in debug, ~2.7 KiB in release — which a depth constant provably
-//! cannot (see `docs/notes/20260808-deep-nesting-stack-budget.md`).
+//! Budget is small and byte-sized because the margin must hold under both
+//! profiles' frame sizes — ~16 KiB/level debug, ~2.7 KiB release — which a
+//! depth constant provably cannot (`docs/notes/20260808-deep-nesting-stack-budget.md`).
 
 use steins_syntax::{SourceTree, stack_guard};
 
-/// A small slice of libtest's 2 MiB, leaving the rest as reserve for the work
-/// *below* the check — chiefly Mago's `HasSpan::span`, recursing once per level.
+/// A small slice of libtest's 2 MiB; the rest is reserve for the work below the
+/// check — chiefly Mago's `HasSpan::span`, recursing once per level.
 const BUDGET: usize = 128 * 1024;
 
 /// phpstan-src's own `tests/bench/data/nullsafe-chain-walk.php` is 1,000 levels
@@ -54,8 +53,8 @@ fn an_index_chain_and_a_concat_chain_are_refused_too() {
 
 #[test]
 fn the_refusal_is_the_files_first_error_and_resolves_to_a_position() {
-    // Names the file, not the offending line (see `stack_guard::REFUSAL` for why a
-    // position can't be bought here) and sorts first — the site ADR-0079's dam keys on.
+    // Names the file, not the line (`stack_guard::REFUSAL`), and sorts first —
+    // the site ADR-0079's dam keys on.
     let src = format!("<?php\n$x = $n{};\n", "->next".repeat(DEEP));
     let tree = parse_with_budget(&src);
     let first = tree.parse_errors().first().expect("a refusal");
@@ -75,10 +74,9 @@ fn a_shallow_file_under_the_same_budget_is_untouched() {
 
 #[test]
 fn bought_headroom_answers_the_whole_question() {
-    // The native contract (issue #246): where stack can be bought, nothing is
-    // refused. Miniature of the CLI's arrangement (worker thread, real headroom,
-    // no budget) over every 8 MiB ceiling in the note's table — its own thread
-    // since libtest's 2 MiB can't survive ~4,000 debug frames of ~16 KiB each.
+    // Native contract (issue #246): where stack can be bought, nothing is
+    // refused — the CLI's arrangement in miniature. Own thread because
+    // libtest's 2 MiB can't survive ~4,000 debug frames at ~16 KiB each.
     assert_eq!(stack_guard::budget(), 0, "no budget on a fresh thread");
     let worker = std::thread::Builder::new()
         .stack_size(256 * 1024 * 1024)

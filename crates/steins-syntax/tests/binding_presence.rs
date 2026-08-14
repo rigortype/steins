@@ -1,10 +1,10 @@
 //! The binding-presence pass (ADR-0081, issue #267): some-paths-only reads
-//! behind `variable.maybe-undefined`. Every case is a **pair** — the firing
-//! shape and its non-firing neighbour — since the pass's whole risk is on the
-//! silent side (zero-FP: over-shield, treat unmodelled constructs as
-//! unconditional bindings, dam on `goto`; all cost recall, never a finding).
+//! behind `variable.maybe-undefined`. Every case is a pair — the firing shape
+//! and its non-firing neighbour — since the pass's whole risk is on the silent
+//! side (zero-FP: over-shield, unmodelled constructs bind unconditionally,
+//! `goto` dams; all cost recall, never a finding).
 //!
-//! `smoke.rs` pins the *definite* pass on the same scopes; the two firing sets
+//! `smoke.rs` pins the definite pass on the same scopes; the two firing sets
 //! are disjoint by construction, asserted in `disjoint_from_the_definite_leg`.
 
 use steins_syntax::{Scope, ScopeOwner, SourceTree};

@@ -1,16 +1,15 @@
 //! ADR-0070 — a fact survives a call that takes its variable **by value**.
 //!
-//! The walk's call-argument invalidation was blanket: every variable handed to
-//! any call was forgotten at the statement's end. Sound, and far coarser than
-//! PHP needs. Scalars, strings and arrays are value-semantic (copy-on-write), so
-//! a callee handed one by value receives a copy and cannot reach the caller's
-//! binding at all — `array_first($a)` leaves `$a` exactly as it was.
+//! The walk's invalidation was blanket: every variable handed to a call was
+//! forgotten at the statement's end — sound, but coarser than PHP needs.
+//! Scalars, strings and arrays are value-semantic (copy-on-write): a callee
+//! handed one by value gets a copy and can't reach the caller's binding —
+//! `array_first($a)` leaves `$a` unchanged.
 //!
-//! This file is the gate's behavior from both sides. The positive half is the
-//! three measured blockers in miniature (issues #76/#77/#74); the negative half
-//! is every reason the gate refuses, and it is the larger half on purpose — a
-//! kept fact is a new premise for everything downstream, so each refusal is
-//! pinned rather than assumed.
+//! This file pins the gate's behavior from both sides: the positive half is
+//! the three measured blockers in miniature (issues #76/#77/#74); the negative
+//! half — deliberately the larger one — is every reason the gate refuses,
+//! since a kept fact is a premise for everything downstream.
 //!
 //! # Behavioral witnesses at `PINNED_PHP` (8.5.8, `php -r`)
 //!
@@ -46,8 +45,8 @@ fn one_type(src: &str) -> String {
     ds[0].clone()
 }
 
-/// A statement body wrapped in a function scope, dumping `$s` at the end. The
-/// scope wrapper matters: a top-level script and a function body are different
+/// A statement body wrapped in a function scope, dumping `$s` at the end.
+/// Scope matters: a script and a function body are different
 /// [`steins_syntax::ScopeOwner`]s, and the blockers all live in function bodies.
 fn dump_after(body: &str) -> String {
     one_type(&format!("<?php\nfunction f(bool $b): void {{ {body} \\PHPStan\\dumpType($s); }}\n"))
@@ -57,9 +56,8 @@ fn dump_after(body: &str) -> String {
 
 #[test]
 fn a_string_fact_survives_a_by_value_builtin() {
-    // Issue #77's `lowercase-string-trim.php` shape: the same binding read
-    // through `trim`, then again, then again. Under the blanket rule only the
-    // first line could see anything.
+    // Issue #77's `lowercase-string-trim.php` shape: the same binding read via
+    // `trim` repeatedly; under the blanket rule only the first read survived.
     assert_eq!(dump_after("$s = 'abc'; trim($s);"), "dumped type: 'abc'");
     assert_eq!(dump_after("$s = 'abc'; trim($s); ltrim($s); rtrim($s);"), "dumped type: 'abc'");
     // `chop` is `rtrim` under a second name and is certified as such.
@@ -68,9 +66,8 @@ fn a_string_fact_survives_a_by_value_builtin() {
 
 #[test]
 fn a_bounded_union_survives_a_by_value_builtin() {
-    // Issue #74's `lowercase-string-sprintf.php` shape: `$constant` is a two-value
-    // union consumed by one `sprintf` per line, and every line after the first
-    // needs it still to be a union.
+    // Issue #74's `lowercase-string-sprintf.php` shape: a two-value union
+    // consumed by `sprintf` per line must still be a union past the first.
     assert_eq!(dump_after("$s = $b ? 'A' : 'B'; sprintf('%s', $s);"), "dumped type: 'A'|'B'");
     assert_eq!(
         dump_after("$s = $b ? 'A' : 'B'; sprintf('%s', $s); sprintf('%d', $s);"),
@@ -80,15 +77,14 @@ fn a_bounded_union_survives_a_by_value_builtin() {
 
 #[test]
 fn an_array_shape_survives_the_non_mutating_read_position_family() {
-    // Issue #76's `array_first_last.php:21-23`, at the shape lane: `array_first`
-    // does not touch its argument, so `array_last` four lines later still has a
-    // shape to read.
+    // Issue #76's `array_first_last.php:21-23`: `array_first` doesn't touch
+    // its argument, so `array_last` four lines later still has a shape to read.
     assert_eq!(
         dump_after("$s = [1, 2]; array_first($s); array_last($s);"),
         "dumped type: list{1, 2}"
     );
-    // The projection family and the two `array|object $array` pointer *readers*
-    // (`current`/`key` — their pointer-*moving* siblings are by-ref, below).
+    // Projection family plus the two pointer *readers* (`current`/`key`) —
+    // their pointer-*moving* siblings are by-ref, below.
     for f in ["array_values", "array_keys", "array_flip", "array_reverse", "current", "key",
               "array_key_first", "array_key_last", "count", "in_array"] {
         assert_eq!(
@@ -99,9 +95,9 @@ fn an_array_shape_survives_the_non_mutating_read_position_family() {
     }
 }
 
-/// A mock PHP answering the two reflection surfaces the ADR-0064 Amendment B
-/// read-position rung consults — the same shape `array_read_position.rs` uses,
-/// so this file's end-to-end blocker fixture runs the real rule.
+/// A mock PHP answering the two reflection surfaces ADR-0064 Amendment B's
+/// read-position rung consults (same shape as `array_read_position.rs`), so
+/// this fixture runs the real rule.
 struct Mock;
 
 impl Folder for Mock {
@@ -129,9 +125,8 @@ impl Folder for Mock {
 
 #[test]
 fn the_issue_76_blocker_reproduced_end_to_end() {
-    // `array_first_last.php` lines 15 and 21 verbatim in miniature: the same
-    // declared shape read by `array_first` and then by `array_last`. Line 21 is
-    // exactly the row the blanket drop cost.
+    // `array_first_last.php` lines 15 & 21 in miniature: declared shape read
+    // by `array_first` then `array_last` — line 21 is what the blanket drop cost.
     let src = "<?php\n/** @param array{a: 'bar', b: 'foo'} $v */\n\
                function f(array $v): void {\n\
                \\PHPStan\\dumpType(array_first($v));\n\
@@ -154,13 +149,10 @@ fn the_issue_76_blocker_reproduced_end_to_end() {
 
 #[test]
 fn the_array_slice_stack_reproduced_end_to_end() {
-    // phpstan-src's `array-slice.php` shape in miniature: several consecutive
-    // reads of ONE declared variable, each through `array_slice` — the variable's
-    // occurrence is a *nested* call position under the dump, so the dump-read
-    // exception never sees it and survival rides entirely on `array_slice`'s
-    // certification (the ADR-0062 Amendment B member of the certified set).
-    // Before that certification the second row answered the bare `array` floor
-    // and the variable itself was gone.
+    // phpstan-src's `array-slice.php` shape: consecutive reads of ONE declared
+    // var via `array_slice`, nested under the dump so the dump-read exception
+    // never sees it — survival rides entirely on `array_slice`'s ADR-0062
+    // Amendment B certification (before it: bare `array` floor, variable gone).
     let src = "<?php\n/** @param array<int, bool> $arr */\n\
                function f(array $arr): void {\n\
                \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n\
@@ -186,10 +178,9 @@ fn the_array_slice_stack_reproduced_end_to_end() {
 
 #[test]
 fn an_inline_var_cast_outlives_the_slice_like_a_param_would() {
-    // The same stack seeded by ADR-0073's inline `@var` cast instead of a
-    // `@param` — phpstan-src's `array-slice.php` spelling verbatim. The cast
-    // seeds the same contract lane, so the survival gate must not distinguish
-    // the two seedings.
+    // Same stack, seeded by ADR-0073's inline `@var` cast instead of `@param`
+    // (phpstan-src's `array-slice.php` verbatim) — same contract lane, so the
+    // gate must not distinguish the two seedings.
     let src = "<?php\nfunction f(array $arr): void {\n\
                /** @var array<int, bool> $arr */\n\
                \\PHPStan\\dumpType(array_slice($arr, 1, 2));\n\
@@ -214,9 +205,9 @@ fn an_inline_var_cast_outlives_the_slice_like_a_param_would() {
 
 #[test]
 fn a_by_ref_builtin_position_still_invalidates() {
-    // The issue #76 pin, kept: six of the ten read-position names take argument 0
-    // by reference and move or shorten it. `steins_catalog::out_params` carries
-    // all six and the gate reads the row positionally.
+    // Issue #76 pin, kept: 6 of the 10 read-position names take argument 0 by
+    // reference and move/shorten it; `steins_catalog::out_params` carries all
+    // six, read positionally.
     for f in ["array_pop", "array_shift", "next", "prev", "reset", "end", "sort", "shuffle"] {
         assert_eq!(
             dump_after(&format!("$s = [1, 2]; {f}($s);")),
@@ -230,10 +221,9 @@ fn a_by_ref_builtin_position_still_invalidates() {
 
 #[test]
 fn preg_match_keeps_its_subject_and_drops_its_matches() {
-    // The sharpest single pin of the design: ONE call, two opposite verdicts.
+    // Sharpest single pin of the design: ONE call, two opposite verdicts.
     // `preg_match(string $pattern, string $subject, array &$matches = null)` —
-    // `$subject` is by value and survives, `$matches` is the out-parameter and
-    // cannot.
+    // `$subject` is by value and survives; `$matches` is the out-param and can't.
     let src = "<?php\nfunction f(): void { $s = 'aaa'; $m = [1]; preg_match('/a/', $s, $m);\n\
                \\PHPStan\\dumpType($s); \\PHPStan\\dumpType($m); }\n";
     assert_eq!(
@@ -244,21 +234,20 @@ fn preg_match_keeps_its_subject_and_drops_its_matches() {
 
 #[test]
 fn one_by_ref_occurrence_condemns_the_name_for_the_whole_statement() {
-    // `str_replace(…, …, $subject, int &$count = null)`: the same variable at a
-    // by-value position AND at the out-parameter position. The by-value reading
-    // of position 2 must not launder the write at position 3.
+    // `str_replace(…, …, $subject, int &$count = null)`: same variable at a
+    // by-value position AND the out-param position — position 2's read must
+    // not launder position 3's write.
     assert_eq!(dump_after("$s = 'abc'; str_replace('a', 'b', $s, $s);"), "dumped type: unknown");
-    // …and the same across two different callees in one statement: one known and
-    // by value, one nobody knows.
+    // Same across two callees in one statement: one known by value, one unknown.
     assert_eq!(dump_after("$s = 'abc'; $x = trim($s) . my_helper($s);"), "dumped type: unknown");
 }
 
 #[test]
 fn an_unknown_callee_invalidates() {
-    // A name the catalog cannot describe and the index does not hold is not a
-    // by-value promise — it is silence, and silence keeps the blanket drop.
+    // A name the catalog can't describe and the index doesn't hold is silence,
+    // not a by-value promise — the blanket drop stays.
     assert_eq!(dump_after("$s = 'abc'; my_helper($s);"), "dumped type: unknown");
-    // Including the variadic-by-ref family, which is deliberately absent from the
+    // Includes the variadic-by-ref family, deliberately absent from the
     // out-parameter table (its reference positions are open-ended).
     for f in ["sscanf", "array_multisort", "parse_str", "exec"] {
         assert_eq!(
@@ -273,8 +262,8 @@ fn an_unknown_callee_invalidates() {
 /// must read the catalog through the import exactly as it does through `\trim`.
 ///
 /// This was the string family's second measured blocker: an imported call
-/// resolved to *nothing*, so every argument's fact was condemned, and a file that
-/// imports its string functions (phpstan-src's own nsrt fixtures do) lost every
+/// resolved to *nothing*, condemning every argument's fact — a file that
+/// imports its string functions (phpstan-src's nsrt fixtures do) lost every
 /// refinement at the first such call.
 #[test]
 fn an_imported_builtin_resolves_through_the_import() {
@@ -290,34 +279,30 @@ fn an_imported_builtin_resolves_through_the_import() {
         one_type(&src("use function \\strtolower;", "strtolower($s)")),
         "dumped type: 'abc'"
     );
-    // The **aliased** form (issue #279): `FnResolution::Builtin` now carries the
-    // resolved catalog name (`trim`) alongside the import target, so every
-    // catalog-keyed consumer reads that instead of the call's own spelling
-    // (`t`). Generalizes the unaliased leg fixed just above.
+    // Aliased form (issue #279): `FnResolution::Builtin` carries the resolved
+    // catalog name (`trim`) beside the import target, so catalog-keyed
+    // consumers read that, not the call's own spelling (`t`).
     assert_eq!(one_type(&src("use function trim as t;", "t($s)")), "dumped type: 'abc'");
-    // An import of a NAMESPACED name is not the builtin, whatever it is spelled:
-    // no project function defines it, so the call stays unresolved and condemns.
+    // A namespaced import isn't the builtin: no project function defines it,
+    // so the call stays unresolved and condemns.
     assert_eq!(one_type(&src("use function Other\\trim;", "trim($s)")), "dumped type: unknown");
-    // …and the same holds through an ALIAS of a namespaced import: the resolved
-    // target is still not a project function and not the global builtin, so the
-    // aliased name gains no more than the unaliased one did.
+    // Same through an ALIAS of a namespaced import: target is neither project
+    // function nor global builtin, so aliasing gains nothing.
     assert_eq!(
         one_type(&src("use function Other\\trim as t;", "t($s)")),
         "dumped type: unknown"
     );
     // An import of an uncertified builtin is still not a promise.
     assert_eq!(one_type(&src("use function sscanf;", "sscanf($s)")), "dumped type: unknown");
-    // …and an import that a project function DOES define answers from that
-    // declaration, not from the same-named builtin.
+    // An import a project function DOES define answers from that declaration,
+    // not the same-named builtin.
     let shadowed = "<?php\nnamespace Other;\nfunction trim(string &$x): void {}\n\
                     namespace App;\nuse function Other\\trim;\n\
                     function f(): void { $s = 'abc'; trim($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(shadowed), "dumped type: unknown");
-    // The same shadowing holds through an ALIAS: an aliased import that resolves
-    // to a project function (not a builtin) keeps today's behavior — the
-    // by-ref parameter condemns the argument, exactly as the unaliased call
-    // above does. Aliasing must not manufacture a builtin promise the target
-    // never had.
+    // Same shadowing through an ALIAS: resolving to a project fn (not a
+    // builtin) keeps today's behavior — the by-ref param condemns, same as
+    // unaliased; aliasing can't manufacture a builtin promise the target never had.
     let shadowed_aliased = "<?php\nnamespace Other;\nfunction trim(string &$x): void {}\n\
                     namespace App;\nuse function Other\\trim as t;\n\
                     function f(): void { $s = 'abc'; t($s); \\PHPStan\\dumpType($s); }\n";
@@ -348,9 +333,9 @@ fn a_project_function_answers_from_its_declared_parameter() {
 
 #[test]
 fn a_callee_that_defeats_value_tracking_invalidates() {
-    // A by-value parameter is not the only route into the caller's frame: a
-    // callee doing `global $s` writes the top-level binding of that name, which
-    // argument passing never described. The callee's own poison flag is the veto.
+    // A by-value param isn't the only route into the caller's frame: a callee
+    // doing `global $s` writes the top-level binding — the callee's own
+    // poison flag is the veto.
     for body in ["global $z;", "extract(['a' => 1]);", "eval('1;');", "$$x = 1;"] {
         let src = format!(
             "<?php\nfunction g(string $x): void {{ {body} }}\n\
@@ -362,8 +347,8 @@ fn a_callee_that_defeats_value_tracking_invalidates() {
 
 #[test]
 fn an_object_binding_always_invalidates() {
-    // Handle semantics: the callee gets a copy of the *handle*, and the object
-    // behind it is shared. Its heap facts cannot survive a call, by value or not.
+    // Handle semantics: the callee copies the *handle*, shares the object —
+    // its heap facts never survive a call, by value or not.
     let src = "<?php\nclass C { public int $p = 1; }\n\
                function f(): void { $o = new C(); $o->p = 5; \\PHPStan\\dumpType($o->p); }\n";
     assert_eq!(one_type(src), "dumped type: 5", "the baseline the next case moves");
@@ -376,10 +361,9 @@ fn an_object_binding_always_invalidates() {
 
 #[test]
 fn a_reference_binding_in_the_scope_invalidates_everything() {
-    // `$r = &$s` is on the ADR-0001 give-up list and poisons the WHOLE scope, so
-    // a live reference into a local can never coexist with a surviving fact.
-    // (This is condition 4's scope half, and it is why the gate needs no separate
-    // reference-liveness analysis of its own.)
+    // `$r = &$s` is on the ADR-0001 give-up list and poisons the WHOLE scope
+    // (condition 4's scope half) — a live reference can never coexist with a
+    // surviving fact, so no separate reference-liveness analysis is needed.
     assert_eq!(dump_after("$s = 'abc'; $r = &$s; trim($s);"), "dumped type: unknown");
     for poison in ["global $g;", "static $t;", "$$k = 1;", "extract([]);", "compact('s');"] {
         assert_eq!(
@@ -397,8 +381,8 @@ fn a_reference_binding_in_the_scope_invalidates_everything() {
 
 #[test]
 fn the_v1_exclusions_keep_the_blanket_drop() {
-    // A method / static / constructor call: the receiver's own mutability is a
-    // separate question and no name resolves the target here.
+    // Method/static/constructor call: receiver mutability is a separate
+    // question and no name resolves the target here.
     let method = "<?php\nclass C { public function m(string $x): void {} }\n\
                   function f(): void { $s = 'abc'; $c = new C(); $c->m($s);\n\
                   \\PHPStan\\dumpType($s); }\n";
@@ -411,8 +395,8 @@ fn the_v1_exclusions_keep_the_blanket_drop() {
     // A dynamic callee resolves to nothing.
     assert_eq!(dump_after("$s = 'abc'; $fn = 'trim'; $fn($s);"), "dumped type: unknown");
 
-    // Named arguments and spread defeat positional mapping, so the whole list is
-    // withheld rather than indexed by guess.
+    // Named arguments and spread defeat positional mapping, so the whole list
+    // is withheld rather than indexed by guess.
     let named = "<?php\nfunction g(string $x, string $y): void {}\n\
                  function f(): void { $s = 'abc'; g(y: 'b', x: $s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(named), "dumped type: unknown");
@@ -424,10 +408,9 @@ fn the_v1_exclusions_keep_the_blanket_drop() {
 
 #[test]
 fn a_closure_body_occurrence_keeps_the_blanket_drop() {
-    // A bare `$s` inside a closure or arrow body is a DIFFERENT scope's
-    // variable — attributing its call site to the enclosing statement's `$s`
-    // would be manufactured evidence, so the entry is opaque (issue #135) and
-    // the blanket drop holds even though `trim` itself is certified by value.
+    // A bare `$s` inside a closure/arrow body is a DIFFERENT scope's variable;
+    // attributing it to the enclosing `$s` would be manufactured evidence, so
+    // the entry is opaque (issue #135) even though `trim` is certified by value.
     assert_eq!(
         dump_after("$s = 'abc'; $c = function () use ($s) { trim($s); };"),
         "dumped type: unknown"
@@ -439,9 +422,8 @@ fn a_closure_body_occurrence_keeps_the_blanket_drop() {
 
 #[test]
 fn language_constructs_are_untouched_by_this_path() {
-    // `isset`/`empty`/`unset`/`list` are constructs, not calls, so neither the
-    // blanket collector nor the site collector ever sees them — and `unset($s)`
-    // must keep erasing the binding.
+    // `isset`/`empty`/`unset`/`list` are constructs, not calls — neither
+    // collector ever sees them, and `unset($s)` must still erase the binding.
     assert_eq!(dump_after("$s = 'abc'; $q = isset($s);"), "dumped type: 'abc'");
     assert_eq!(dump_after("$s = 'abc'; $q = empty($s);"), "dumped type: 'abc'");
     assert_eq!(dump_after("$s = 'abc'; unset($s);"), "dumped type: unknown");
@@ -449,9 +431,9 @@ fn language_constructs_are_untouched_by_this_path() {
 
 #[test]
 fn the_site_list_is_complete_or_absent_per_name() {
-    // The syntax layer's invariant, observed through behavior: a name with even
-    // one indescribable occurrence in the statement is absent from the precise
-    // list entirely, so the blanket drop applies to ALL of its occurrences.
+    // Syntax layer's invariant, observed through behavior: a name with even
+    // one indescribable occurrence is absent from the precise list entirely —
+    // the blanket drop applies to ALL its occurrences.
     let mixed = "<?php\nclass C { public function m(string $x): void {} }\n\
                  function f(): void { $s = 'abc'; $c = new C(); trim($s); $c->m($s);\n\
                  \\PHPStan\\dumpType($s); }\n";

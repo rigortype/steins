@@ -1,13 +1,11 @@
-//! Issue #77 — the **string-predicate transfers** at the argument-dependent rung.
+//! Issue #77 — the string-predicate transfers at the argument-dependent rung.
 //!
 //! 25 names declared `string` (`strlen`: `int`): which [`StrPreds`] bits survive
-//! the call, or get established by it. Residual half of what the fold lane owns
-//! for constant subjects — here the subject is only *predicates*.
+//! the call, or get established by it. Every row below was probed, not
+//! reasoned about — each is a decline the rule takes because the real answer
+//! contradicts the tidy version.
 //!
 //! # Behavioral witnesses at `PINNED_PHP` (8.5.8, `php -r`)
-//!
-//! Every row was probed, not reasoned about; each is a decline the rule takes
-//! because the real answer contradicts the tidy version:
 //!
 //! ```text
 //! trim(' A ') === 'A'; ltrim('0abc','0') === 'abc'; trim('  ') === ''

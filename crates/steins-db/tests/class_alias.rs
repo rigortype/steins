@@ -87,21 +87,21 @@ fn alias_to_an_absent_target_mints_no_edge() {
     assert_eq!(kind(resolve(files, "B")), Kind::Absent);
 }
 
-// ---- issue #36: `X::class` arguments resolve like any other class reference ----
+// Issue #36: `X::class` arguments resolve like any other class reference.
 
 #[test]
 fn class_const_alias_resolves_to_its_target() {
-    // The issue's repro shape, end to end: the vendored `class_alias(Thing::class,
-    // 'Legacy_Thing')` idiom makes `Legacy_Thing` resolve to `Thing`'s decl site.
+    // The issue's repro shape end to end: `class_alias(Thing::class, 'Legacy_Thing')`
+    // makes `Legacy_Thing` resolve to `Thing`'s decl site.
     let files = &[("a.php", "<?php\nclass Thing {}\nclass_alias(Thing::class, 'Legacy_Thing');\n")];
     assert!(same_unique(resolve(files, "Legacy_Thing"), resolve(files, "Thing")));
 }
 
 #[test]
 fn class_const_alias_resolves_through_use_imports_not_the_raw_spelling() {
-    // The target is `Vendor\Pkg\Thing`; the call writes the imported short name. The
-    // edge must key on the RESOLVED FQN — keying on the raw `thing` would either miss
-    // or, worse, collide with an unrelated global `Thing`.
+    // Target is `Vendor\Pkg\Thing`, call writes the imported short name. Edge
+    // must key on the RESOLVED FQN — raw `thing` would miss or collide with an
+    // unrelated global `Thing`.
     let files = &[
         ("lib.php", "<?php\nnamespace Vendor\\Pkg;\nclass Thing {}\n"),
         ("boot.php", "<?php\nuse Vendor\\Pkg\\Thing;\nclass_alias(Thing::class, 'Legacy_Thing');\n"),
@@ -117,18 +117,16 @@ fn class_const_alias_resolves_through_use_imports_not_the_raw_spelling() {
 
 #[test]
 fn class_const_alias_to_an_absent_target_mints_no_edge() {
-    // `X::class` never requires `X` to exist. An edge whose target the index cannot
-    // resolve backs no existence claim — same discipline as the literal form, so an
-    // unresolvable `::class` costs a dam site and gains nothing false.
+    // `X::class` never requires `X` to exist; an unresolvable target backs no
+    // existence claim — same discipline as the literal form.
     let files = &[("a.php", "<?php\nclass_alias(NeverDeclared::class, 'Legacy');\n")];
     assert_eq!(kind(resolve(files, "Legacy")), Kind::Absent);
 }
 
 #[test]
 fn class_const_alias_under_a_class_exists_guard_still_mints_its_edge() {
-    // A conditionally-*executed* alias call still mints the edge, exactly as the
-    // literal form does: over-approximating which names exist is the FP-safe
-    // direction for absence claims (more names resolve ⇒ fewer "undefined" claims).
+    // A conditionally-executed alias call still mints the edge, like the literal
+    // form: over-approximating existence is the FP-safe direction.
     let files = &[(
         "a.php",
         "<?php\nclass Thing {}\nif (!class_exists('Legacy')) { class_alias(Thing::class, 'Legacy'); }\n",
@@ -138,9 +136,8 @@ fn class_const_alias_under_a_class_exists_guard_still_mints_its_edge() {
 
 #[test]
 fn class_const_alias_to_a_conditionally_declared_target_resolves() {
-    // The TARGET is conditionally declared (inside a function body). It is in the
-    // index as a decl site — its conditionality is carried on the decl, where each
-    // id's ladder consults it — so the alias resolves to it like any other target.
+    // The TARGET is conditionally declared (inside a function body); it's still
+    // in the index as a decl site, so the alias resolves to it like any other target.
     let files = &[(
         "a.php",
         "<?php\nfunction boot(): void { class Thing {} }\nclass_alias(Thing::class, 'Legacy');\n",

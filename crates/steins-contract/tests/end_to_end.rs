@@ -56,8 +56,8 @@ fn provenance_strings_never_decide_yes() {
     // ADR-0038: `literal-string` is provenance, so no value decides it.
     assert_eq!(admits_val(&ty("literal-string"), &s("abc")), Maybe);
     assert_eq!(admits_val(&ty("literal-string"), &Val::Int(1)), No);
-    // `class-string` is a *contextual* predicate (issue #236), not provenance:
-    // no `Yes` without the class table, but the identifier grammar refutes.
+    // `class-string` is contextual (issue #236), not provenance: no `Yes` without
+    // the class table, but the identifier grammar refutes.
     assert_eq!(admits_val(&ty("class-string"), &s("App\\User")), Maybe);
     assert_eq!(admits_val(&ty("class-string"), &Val::Int(1)), No);
     assert_eq!(admits_val(&ty("class-string"), &s("")), No);

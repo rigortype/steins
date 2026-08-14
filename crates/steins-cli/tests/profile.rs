@@ -14,9 +14,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s format
-/// auto-detection (ADR-0054 §6) reads it, so a run on CI would otherwise emit workflow
-/// commands instead of the asserted text (detection is tested in `tests/format_github.rs`).
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection
+/// (ADR-0054 §6) reads it and would else emit workflow commands instead of text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -143,7 +142,7 @@ fn reserved_profile_name_is_a_config_error() {
 
 #[test]
 fn user_profile_facet_token_is_rejected() {
-    // Deferred-with-design decision (§4/§11): user profiles reject facet selectors.
+    // Deferred-with-design (§4/§11): user profiles reject facet selectors.
     let dir = workdir("facet-token");
     write(&dir, "a.php", THROW_ONLY);
     write(
@@ -160,8 +159,8 @@ fn user_profile_facet_token_is_rejected() {
 
 #[test]
 fn unknown_runtime_key_is_a_hard_config_error() {
-    // ADR-0050 §7 / ADR-0052 §5 N2: `[runtime]`'s `deny_unknown_fields` makes a
-    // misspelled key a HARD config error (exit 2), never a silent warn-and-proceed.
+    // ADR-0050 §7 / ADR-0052 §5 N2: `deny_unknown_fields` makes a misspelled key
+    // a HARD error (exit 2), never a silent warn-and-proceed.
     let dir = workdir("runtime-typo");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nwarning-hadler = \"abort\"\n");
@@ -172,8 +171,8 @@ fn unknown_runtime_key_is_a_hard_config_error() {
 
 #[test]
 fn abolished_zend_assertions_key_is_a_hard_config_error() {
-    // ADR-0052 amendment: `zend-assertions` is abolished from `[runtime]` (assert()
-    // is now an unconditional throw-guard) — same `deny_unknown_fields` exit-2 path.
+    // ADR-0052 amendment: `zend-assertions` abolished from `[runtime]` (assert()
+    // is now an unconditional throw-guard) — same exit-2 path.
     let dir = workdir("runtime-zend-abolished");
     write(&dir, "a.php", THROW_ONLY);
     write(&dir, "steins.toml", "[runtime]\nzend-assertions = \"enabled\"\n");
@@ -285,15 +284,14 @@ const VAR_DUMP_ONLY: &str = "<?php\n$x = 5;\nvar_dump($x);\n";
 
 #[test]
 fn var_dump_dumps_by_default_and_is_exit_neutral() {
-    // ADR-0053 §3/§4: `var_dump` reports default-ON at warn level in every profile,
-    // so a var_dump-only run stays exit-neutral forever — warn, never a lint red.
+    // ADR-0053 §3/§4: `var_dump` is default-ON at warn in every profile, so this
+    // run stays exit-neutral forever — warn, never a lint red.
     let dir = workdir("vardump");
     write(&dir, "a.php", VAR_DUMP_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
     assert!(r.stdout.contains("warning[debug.var-dump]"), "var_dump dumps by default:\n{}", r.stdout);
-    // The dump surface renders the value-domain fact value-precisely: `$x = 5` is
-    // the constant `5`, not collapsed base `int` (ADR-0053 §9's collapse is reversed
-    // here — value-precision matches PHPStan's constant types).
+    // Value-precise, not collapsed: `$x = 5` renders as the constant `5`, not
+    // base `int` (ADR-0053 §9's collapse reversed, matching PHPStan's constant types).
     assert!(r.stdout.contains("dumped type: 5"), "renders the fact value-precisely:\n{}", r.stdout);
     assert_eq!(r.code, 0, "a var_dump-only run is exit-neutral; stdout:\n{}", r.stdout);
 }
@@ -312,15 +310,13 @@ fn var_dump_json_carries_debug_layer_and_warn_level() {
 // ADR-0074: trace-annotation lane
 
 /// A fixture whose ONLY finding is a `@psalm-trace` annotation report (#94) —
-/// the canonical Psalm placement: the annotation above the assignment reports
-/// the type that statement leaves behind (ADR-0074 §5 exit facts).
+/// the annotation above the assignment reports the type it leaves behind (ADR-0074 §5).
 const TRACE_ANNOTATION_ONLY: &str = "<?php\n/** @psalm-trace $x */\n$x = 5;\n";
 
 #[test]
 fn trace_annotation_warns_by_default_and_is_exit_neutral() {
     // ADR-0074 §8: `debug.trace` is born and fixed at warn — a runtime-inert,
-    // committable docblock, so the fail-forcing "explicit pair" argument doesn't
-    // apply; layer/level flow from the registry, and this test pins the surface.
+    // committable docblock, so the fail-forcing "explicit pair" argument doesn't apply.
     let dir = workdir("trace-annotation");
     write(&dir, "a.php", TRACE_ANNOTATION_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -346,8 +342,8 @@ fn var_dump_is_profile_disableable() {
 
 #[test]
 fn an_inline_ignore_never_suppresses_a_dump() {
-    // ADR-0053 §4: the debug lane is exempt from all three suppression channels —
-    // `@steins-ignore debug.var-dump` does NOT mute the dump but earns `suppress.unmatched`.
+    // ADR-0053 §4: the debug lane is exempt from all three suppression channels;
+    // `@steins-ignore debug.var-dump` does NOT mute it but earns `suppress.unmatched`.
     let dir = workdir("vardump-ignore");
     write(&dir, "a.php", "<?php\n$x = 5;\nvar_dump($x); // @steins-ignore debug.var-dump\n");
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -363,9 +359,9 @@ fn an_inline_ignore_never_suppresses_a_dump() {
 
 // strict (ADR-0062 A-G10 / #51)
 
-/// The strict leg's own fixture: an unguarded read of a declared-optional key
-/// (`offset.maybe-missing`) and one the sealed shape excludes (`offset.undeclared`).
-/// No proof/contract finding, so each profile's output is its own rung's contribution.
+/// An unguarded read of a declared-optional key (`offset.maybe-missing`) and
+/// one the sealed shape excludes (`offset.undeclared`); no proof/contract
+/// finding, so each profile's output is its own rung's contribution.
 const STRICT_ONLY: &str = "<?php\n\
     /** @param array{a?: string, b: string} $d */\n\
     function f(array $d): void { $x = $d['a']; $y = $d['zzz']; }\n";
@@ -373,8 +369,8 @@ const STRICT_ONLY: &str = "<?php\n\
 #[test]
 fn strict_leg_ids_respect_their_post_triage_floors() {
     // Post-triage floors (2026-07-29 sweep ruling): default shows neither id;
-    // contracts shows `offset.undeclared` (promoted after zero corpus findings)
-    // but never `offset.maybe-missing` (held at strict pending assertion-helper discharge).
+    // contracts shows `offset.undeclared` (promoted, zero corpus findings) but
+    // never `offset.maybe-missing` (held at strict, pending assertion-helper discharge).
     let dir = workdir("strict-hidden");
     write(&dir, "a.php", STRICT_ONLY);
     let r = run_in(&dir, &["check", "--no-php", "a.php"]);
@@ -410,8 +406,8 @@ fn strict_profile_keeps_everything_contracts_shows() {
 
 #[test]
 fn a_guarded_read_is_clean_at_strict() {
-    // The discharge ladder, through the real binary: guarded code must be clean by
-    // PROOF at the strictest surface, or the leg is unusable (issue #51 §3).
+    // The discharge ladder through the real binary: guarded code must be clean
+    // by PROOF at the strictest surface, or the leg is unusable (issue #51 §3).
     let dir = workdir("strict-guarded");
     write(
         &dir,
@@ -431,8 +427,8 @@ fn a_guarded_read_is_clean_at_strict() {
 
 #[test]
 fn a_strict_baseline_entry_is_dormant_on_a_default_run() {
-    // The per-entry capture surface (A-G10): captured-at-strict entries go dormant
-    // on a default run (no `suppress.unmatched`), not stale-complained-about.
+    // Per-entry capture surface (A-G10): captured-at-strict entries go dormant on
+    // a default run (no `suppress.unmatched`), not stale-complained-about.
     let dir = workdir("strict-baseline");
     write(&dir, "a.php", STRICT_ONLY);
     let set = run_in(&dir, &["check", "--no-php", "--profile", "strict", "--set-baseline", "a.php"]);

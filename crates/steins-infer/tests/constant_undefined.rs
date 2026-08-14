@@ -4,17 +4,15 @@
 //! Fetching a constant nothing defines is a fatal since PHP 8.0. Measured on 8.5.9:
 //!
 //! ```text
-//! $ php -r 'echo TOTALLY_UNDEFINED_XYZ;'
-//! PHP Fatal error:  Uncaught Error: Undefined constant "TOTALLY_UNDEFINED_XYZ"
+//! php -r 'echo TOTALLY_UNDEFINED_XYZ;' → Undefined constant "TOTALLY_UNDEFINED_XYZ" (fatal)
 //! ```
 //!
-//! There is no hierarchy to enumerate here, which makes the ladder shorter than the
-//! method one but not weaker: every candidate name must be undeclared in the whole
-//! universe (`const` statements and literal `define()` calls alike), the dam must be
-//! clear — and for this id *any* dam site closes the valve, including the computed
-//! `define()` that only this id reads — and the project's own PHP must answer
-//! not-defined for every candidate. The builtin catalog is never consulted, because
-//! it is never an absence oracle (ADR-0049 §1).
+//! There's no hierarchy to enumerate, so the ladder is shorter than the method
+//! one but not weaker: every candidate name must be undeclared in the whole
+//! universe (`const` and literal `define()` alike), the dam must be clear (*any*
+//! dam site closes the valve, including a computed `define()` only this id
+//! reads), and the project's own PHP must answer not-defined for every candidate.
+//! The builtin catalog is never consulted — never an absence oracle (ADR-0049 §1).
 //!
 //! Two halves, the arrangement `preg_invalid_pattern.rs` set:
 //!
@@ -89,9 +87,7 @@ fn fires(src: &str) -> Vec<Diagnostic> {
     run(src, &mut Boot::ready())
 }
 
-// ---------------------------------------------------------------------------
 // Firing fixtures.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn fires_on_a_bare_undefined_global_constant() {
@@ -146,9 +142,8 @@ fn fires_on_a_use_const_import_whose_target_nothing_declares() {
 #[test]
 fn fires_on_a_case_mismatched_spelling_of_a_declared_constant() {
     // Constants are case-sensitive: `define('Foo', 1); var_dump(defined('FOO'));`
-    // prints `bool(false)` on 8.5.9. The case-insensitive third argument to
-    // `define()` died in PHP 8.0 and the workspace floor is 8.1 (ADR-0011), so
-    // there is no version fork to make here.
+    // prints `bool(false)` on 8.5.9. The case-insensitive third `define()` arg
+    // died in PHP 8.0, and the workspace floor is 8.1 (ADR-0011) — no version fork needed.
     let d = fires("<?php\nconst Widget = 1;\necho WIDGET;\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(d[0].message.contains("undefined constant WIDGET"), "{}", d[0].message);
@@ -160,9 +155,7 @@ fn fires_once_per_fetch() {
     assert_eq!(d.len(), 2, "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Silence matrix — one fixture per ladder leg.
-// ---------------------------------------------------------------------------
 
 #[test]
 fn silent_when_the_family_is_unavailable() {
@@ -172,9 +165,9 @@ fn silent_when_the_family_is_unavailable() {
 
 #[test]
 fn silent_under_no_php() {
-    // `--no-php` / the sound subset: `check` folds with `NoFold`, whose
-    // `absence_family_available` is the trait default `false`, so the whole family
-    // is silent (A9's honest consequence — ADR-0004).
+    // `--no-php` / sound subset: `check` folds with `NoFold`, whose
+    // `absence_family_available` defaults to `false` — the whole family is
+    // silent (A9's honest consequence — ADR-0004).
     let tree = SourceTree::parse("<?php\necho TYPO_CONST;\n");
     let d: Vec<_> = check(&tree, &[], "test.php")
         .into_iter()
@@ -201,10 +194,9 @@ fn silent_on_a_literal_define() {
 
 #[test]
 fn silent_on_the_conditional_define_idiom() {
-    // The common shape, and the acceptance criterion: the `define` is inside a
-    // branch precisely because the constant may already exist, and it declares the
-    // name for absence purposes either way. Conditionality is deliberately not
-    // recorded on a constant declaration.
+    // The common shape and the acceptance criterion: the `define` sits inside a
+    // branch precisely because the constant may already exist, but it declares
+    // the name for absence purposes either way — conditionality isn't recorded.
     let d = fires(
         "<?php\nif (!defined('TYPO_CONST')) {\n    define('TYPO_CONST', 1);\n}\necho TYPO_CONST;\n",
     );
@@ -213,11 +205,10 @@ fn silent_on_the_conditional_define_idiom() {
 
 #[test]
 fn silent_on_a_defined_guarded_fetch() {
-    // The guard leg, and it costs no second mechanism: `defined('X')` folds to
-    // `false` under the SAME closure this ladder rests on (undeclared + dam clear +
-    // boot surface says no), so the guarded branch is proven dead and the fetch
-    // inside it is never judged — exactly how `class.undefined` handles
-    // `class_exists`.
+    // The guard leg costs no second mechanism: `defined('X')` folds to `false`
+    // under the SAME closure this ladder rests on (undeclared + dam clear + boot
+    // surface says no), so the guarded branch is proven dead and the fetch inside
+    // it is never judged — exactly how `class.undefined` handles `class_exists`.
     let d = fires("<?php\nif (defined('TYPO_CONST')) {\n    echo TYPO_CONST;\n}\n");
     assert!(d.is_empty(), "{d:?}");
 }
@@ -230,26 +221,23 @@ fn silent_on_a_namespaced_const_declaration_reached_from_its_own_namespace() {
 
 #[test]
 fn silent_when_the_global_fallback_finds_the_declaration() {
-    // The acceptance criterion for the fallback: `App\TYPO_CONST` is absent, but an
-    // unqualified fetch falls back to the global namespace exactly as a function
-    // call does. Witnessed on 8.5.9 — `namespace App; define('G', 'g'); echo G;`
-    // prints `g`. Note the `define` writes the GLOBAL name even inside `App`.
+    // Acceptance criterion for the fallback: `App\TYPO_CONST` is absent, but an
+    // unqualified fetch falls back to global, as a function call does — witnessed
+    // on 8.5.9: `define('G','g')` in `App` writes the GLOBAL name; `echo G` prints `g`.
     let d = fires("<?php\nnamespace App;\ndefine('TYPO_CONST', 1);\necho TYPO_CONST;\n");
     assert!(d.is_empty(), "{d:?}");
 }
 
 #[test]
 fn a_fully_qualified_fetch_does_not_see_a_namespaced_declaration() {
-    // The converse of the fallback, and the reason the candidate list is not just
-    // "any spelling": `\TYPO_CONST` is the global name and a `App\TYPO_CONST`
-    // declaration does not answer it.
+    // Converse of the fallback, and why the candidate list isn't just "any
+    // spelling": `\TYPO_CONST` is the global name; `App\TYPO_CONST` doesn't answer it.
     let d = fires("<?php\nnamespace App;\nconst TYPO_CONST = 1;\necho \\TYPO_CONST;\n");
     assert_eq!(d.len(), 1, "{d:?}");
 }
 
-/// Build a real multi-file salsa project and return the findings carrying `id` —
-/// the whole-universe half of the evidence, which a single-file `check_with` cannot
-/// exercise.
+/// Build a real multi-file salsa project and return findings carrying `id` — the
+/// whole-universe evidence a single-file `check_with` cannot exercise.
 fn project_of(files: &[(&str, &str)], id: &str) -> Vec<Diagnostic> {
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> = files
@@ -265,9 +253,8 @@ fn project_of(files: &[(&str, &str)], id: &str) -> Vec<Diagnostic> {
 
 #[test]
 fn silent_on_a_declaration_in_another_file_of_the_universe() {
-    // Absence is a whole-universe claim, so the evidence is too — and this is the
-    // path that also proves `Index::from_db` carries the constant table, not just
-    // the single-file `from_units`.
+    // Absence is a whole-universe claim, so the evidence is too — this path also
+    // proves `Index::from_db` carries the constant table, not just `from_units`.
     let user = ("src/user.php", "<?php\necho TYPO_CONST;\n");
     // Control: alone, the fetch is a proven fatal.
     assert_eq!(project_of(&[user], CONSTANT_UNDEFINED_ID).len(), 1);
@@ -277,9 +264,8 @@ fn silent_on_a_declaration_in_another_file_of_the_universe() {
 
 #[test]
 fn silent_on_a_vendor_package_declaration() {
-    // A constant a package declares is as real as one the project declares: the
-    // ADR-0046 §2 vendor presumption is about unproven dynamism, not about ignoring
-    // plain declarations.
+    // A package's constant is as real as the project's own: ADR-0046 §2's vendor
+    // presumption is about unproven dynamism, not ignoring plain declarations.
     let user = ("src/user.php", "<?php\necho TYPO_CONST;\n");
     let d = project_of(
         &[user, ("vendor/pkg/c.php", "<?php\nconst TYPO_CONST = 1;\n")],
@@ -373,10 +359,8 @@ fn silent_in_a_dead_branch() {
     assert!(d.is_empty(), "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
-// Verified NON-findings: shapes that are not this id's namespace at all, and are
-// excluded at COLLECTION rather than by a ladder leg.
-// ---------------------------------------------------------------------------
+// Verified NON-findings: shapes outside this id's namespace entirely, excluded
+// at COLLECTION rather than by a ladder leg.
 
 #[test]
 fn a_class_constant_is_not_collected() {
@@ -412,9 +396,7 @@ fn the_magic_constant_family_is_not_collected() {
     assert!(d.is_empty(), "{d:?}");
 }
 
-// ---------------------------------------------------------------------------
 // Live: the project's own PHP answers.
-// ---------------------------------------------------------------------------
 
 /// Spawn a real folder, or print a skip marker. The probe name is one no snippet
 /// below uses, so the per-run memo cannot answer a later question from it.

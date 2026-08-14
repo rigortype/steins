@@ -91,10 +91,9 @@ fn method_return_honesty_refuses_inheritance() {
 
 /// ADR-0043 amendment pin: LSB return-position lowering synthesizes a native
 /// `Instance` return for `: static`/`: self`/`: parent`, but honesty must stay
-/// **unmoved** — `decide_return`'s `has_instance` filter skips `Instance`-bearing
-/// native rets before the native guard, so a `: static` method still widens its
-/// lying `@return int` exactly as the no-native-type case does. Without the
-/// filter the synthesized object ret would interfere with scalar-literal widening.
+/// unmoved — `decide_return`'s `has_instance` filter skips `Instance`-bearing
+/// native rets before the native guard, so `: static` still widens its lying
+/// `@return int` like the no-native-type case (else it'd block scalar-literal widening).
 #[test]
 fn static_return_method_honesty_unmoved() {
     let c = "<?php\nfinal class C {\n/** @return int */\npublic function m($flag): static {\nif ($flag) { return 1; }\nreturn 'zero';\n}\n}\n";

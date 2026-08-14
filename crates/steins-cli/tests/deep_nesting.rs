@@ -1,18 +1,16 @@
 //! Regression test for issue #246 at the binary's own entry point.
 //!
-//! `SourceTree::parse`'s lowering walkers (`scan_effect_origins` and siblings in
-//! `crates/steins-syntax/src/lib.rs`) recurse one frame per CST node: on the OS
-//! default ~8 MiB stack, `steins check` aborted with `fatal runtime error: stack
-//! overflow` at ~520 `->next` levels in debug, ~2,700 in release. phpstan-src's
-//! own 1,000-level fixture is past the first ceiling, 40% of the way to the second.
+//! `SourceTree::parse`'s lowering walkers recurse one frame per CST node: on the
+//! OS default ~8 MiB stack, `steins check` aborted with `fatal runtime error:
+//! stack overflow` at ~520 `->next` levels in debug, ~2,700 in release.
+//! phpstan-src's own 1,000-level fixture is past the first ceiling.
 //!
 //! PR #253 gave the nsrt harness a sized worker thread; `main` now does the same
 //! for every subcommand (`WORKER_STACK_SIZE` in `crates/steins-cli/src/main.rs`),
-//! so this drives the real binary past both ceilings in either build profile.
+//! driving the real binary past both ceilings in either build profile.
 //!
-//! A stack overflow isn't a catchable panic, so there's no in-process assertion
-//! for the failure side; running as a subprocess makes it observable instead —
-//! an overflow kills by signal (no exit code) after printing to stderr, both asserted below.
+//! A stack overflow isn't a catchable panic, so failure is asserted as a
+//! subprocess signal death (no exit code) with the stderr message, below.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -21,9 +19,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Spawns the binary with `GITHUB_ACTIONS` scrubbed, since `check`'s format
-/// auto-detection (ADR-0054 §6) reads it and would otherwise emit workflow
-/// commands instead of plain text (detection is tested in `tests/format_github.rs`).
+/// Scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection (ADR-0054 §6)
+/// reads it and would otherwise emit workflow commands instead of plain text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");

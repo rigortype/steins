@@ -452,10 +452,9 @@ fn vendor_declarations_are_never_written() {
     assert!(report.plan.is_empty());
 }
 
-// 9. An unreadable existing tag is prose, not a stale bound
-//
-// Owner ruling 2026-08-12: any unknown label makes the tag *unspecified*, whole
-// (PHPStan discards everything after `@phpstan-impure`) — never overwrite a human's note.
+// 9. An unreadable existing tag is prose, not a stale bound. Owner ruling
+// 2026-08-12: any unknown label makes the tag unspecified, whole (PHPStan
+// discards everything after `@phpstan-impure`) — never overwrite a human's note.
 
 #[test]
 fn an_existing_prose_tag_is_never_overwritten() {

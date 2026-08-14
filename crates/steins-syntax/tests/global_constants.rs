@@ -50,9 +50,9 @@ fn a_multi_item_const_statement_declares_each_item() {
 
 #[test]
 fn a_literal_define_declares_an_absolute_name() {
-    // `define()` ignores the current namespace: inside `namespace App;`,
-    // `define('FOO', 1)` declares the GLOBAL `FOO` (witnessed: `namespace App;
-    // define('G','g'); echo G;` prints `g`, and `defined('App\G')` is false).
+    // `define()` ignores the current namespace: `define('FOO', 1)` inside
+    // `namespace App;` declares the global `FOO` (witnessed: `namespace App;
+    // define('G','g'); echo G;` prints `g`, `defined('App\G')` is false).
     assert_eq!(decls("<?php\nnamespace App;\ndefine('FOO', 1);\n"), ["FOO"]);
     assert_eq!(decls("<?php\ndefine('Ns\\\\FOO', 1);\n"), ["ns\\FOO"]);
 }

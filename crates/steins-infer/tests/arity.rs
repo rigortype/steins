@@ -1,18 +1,17 @@
 //! ADR-0049 §6 / S5: the userland arity arms — `call.too-few-arguments` and
 //! `call.unknown-named-argument`.
 //!
-//! The verified PHP 8.5 table is asymmetric (every row `php -r`-checked): too few
-//! arguments to a userland target is always a fatal `ArgumentCountError`; too many
-//! to a non-variadic runs clean and is NEVER a finding; an unknown named argument
-//! to a non-variadic is a fatal `Error`, a variadic silently collects it; a named
-//! argument overwriting a positional is a fatal (DEFERRED) `Error`, and the runtime
+//! The verified PHP 8.5 table is asymmetric (every row `php -r`-checked): too
+//! few args to a userland target is always a fatal `ArgumentCountError`; too
+//! many to a non-variadic runs clean, NEVER a finding; an unknown named arg to
+//! a non-variadic is a fatal `Error`, a variadic silently collects it; a named
+//! arg overwriting a positional is a fatal (DEFERRED) `Error` — runtime
 //! precedence overwrite ≻ unknown-named ≻ too-few is honored here.
 //!
-//! Like the absence family, arity is silent under the pure `NoFold` subset (no sidecar
-//! to answer the A2ii homonym leg), so these tests drive a [`Boot`] mock that
-//! stands in for the runtime boot surface. Every ladder/leg ships with a **silence
-//! fixture** proving the id stays quiet when a precondition fails (the §10 silence
-//! matrix), alongside the firing fixtures.
+//! Arity is silent under the pure `NoFold` subset (no sidecar for the A2ii
+//! homonym leg), so tests drive a [`Boot`] mock standing in for the runtime
+//! boot surface. Every ladder/leg ships a **silence fixture** proving the id
+//! stays quiet when a precondition fails (the §10 silence matrix).
 
 use steins_infer::{
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, Diagnostic, Folder, check_with,
@@ -20,9 +19,8 @@ use steins_infer::{
 use steins_syntax::SourceTree;
 
 /// A boot-surface mock. `available` is the A9 family gate; `fn_homonyms` /
-/// `class_homonyms` are the lowercased names the boot surface reports as resident
-/// functions / class-likes (the A2ii homonyms); `reflect_fails` simulates a mid-run
-/// sidecar failure (every existence query returns Unknown).
+/// `class_homonyms` are lowercased names the boot surface reports resident
+/// (the A2ii homonyms); `reflect_fails` simulates a mid-run sidecar failure.
 struct Boot {
     available: bool,
     fn_homonyms: Vec<String>,
@@ -225,9 +223,8 @@ fn silent_ambiguous_function() {
 
 #[test]
 fn fires_top_level_function_despite_dam() {
-    // A2i scoping: a top-level (unconditional) function is immune to the dam — an
-    // extension cannot silently redefine it (a redeclare would fatal at load), so
-    // its indexed signature is authoritative even with a dam site present.
+    // A2i scoping: a top-level function is immune to the dam — a redeclare
+    // would fatal at load, so its indexed signature is authoritative regardless.
     let d = fires("<?php\nfunction f($a, $b) {}\neval('');\nf(1);\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));
@@ -276,9 +273,8 @@ fn silent_trait_bearing_chain() {
 #[test]
 fn silent_non_exact_receiver_refused_lane() {
     // The REFUSED declared-receiver lane: `$c` is a param (a lower bound, not
-    // `class_exact`). Firing here would be a false positive — an override of `m`
-    // may ADD optional parameters (`class D extends C { function m($a = 0) {} }`),
-    // so `$c->m()` on a `D` runs. Arity refuses it outright (never deferred).
+    // `class_exact`) — an override of `m` may ADD optional params (`class D
+    // extends C { function m($a = 0) {} }`), so arity refuses outright.
     let d = fires(
         "<?php\nclass C { public function m($a, $b) {} }\nfunction h(C $c) { $c->m(1); }\n",
     );
@@ -414,8 +410,7 @@ fn silent_static_call_to_instance_method() {
 
 #[test]
 fn fires_instance_syntax_call_to_static_method() {
-    // The reverse is legal: a static method invoked via `->` still arity-checks
-    // (verified `ArgumentCountError`).
+    // The reverse is legal: a static method invoked via `->` still arity-checks (verified).
     let d = fires("<?php\nclass C { public static function m($a, $b) {} }\n$o = new C();\n$o->m(1);\n");
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(too_few(&d[0]));

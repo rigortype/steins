@@ -35,9 +35,8 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
 
 #[test]
 fn php84_search_predicates_join_an_impure_callback() {
-    // array_find/array_find_key/array_any/array_all run their predicate during the
-    // call: an echoing predicate exceeds a Pure envelope, named by its own color
-    // (`io.output.buffer`), not a generic maybe.
+    // PHP 8.4's array_find/array_find_key/array_any/array_all run their predicate
+    // during the call: an echoing predicate exceeds Pure, named by its own color.
     for f in ["array_find", "array_find_key", "array_any", "array_all"] {
         let src = format!(
             "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): mixed {{\n    return {f}($xs, function ($x) {{ echo $x; return true; }});\n}}\n"
@@ -86,9 +85,8 @@ fn a_new_row_carries_a_named_user_callback_too() {
 
 #[test]
 fn opaque_callback_at_a_cataloged_position_keeps_the_builtins_own_color() {
-    // An unresolvable `callable` argument proves nothing about the callback, so no
-    // finding is manufactured — but the builtin's own color is untouched (today
-    // these invokers are uncolored, so the observable floor is: silent + `…?`).
+    // An unresolvable `callable` proves nothing about the callback, so no finding
+    // is manufactured — the observable floor is silent + `…?`.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(callable $cb, array $xs): mixed {\n    return array_find($xs, $cb);\n}\n";
     assert_eq!(effects(src).len(), 0, "unknown callback → no proven finding");
     assert!(!summary(src, "f").exhaustive, "unknown callback taints exhaustiveness (…?)");
@@ -116,8 +114,7 @@ fn deferred_invokers_contribute_nothing_new() {
 #[test]
 fn register_shutdown_function_is_unchanged_by_p1() {
     // The one grandfathered Deferred row still propagates its callback's effects
-    // (ADR-0033: Deferred claims nothing about WHEN, not whether) — P1 neither
-    // widens nor narrows it.
+    // (ADR-0033: Deferred claims nothing about WHEN, not whether) — P1 is neutral.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    register_shutdown_function(function () { echo \"bye\"; });\n}\n";
     let d = one(src);
     assert!(d.message.contains("io.output.buffer"), "{}", d.message);
@@ -125,9 +122,8 @@ fn register_shutdown_function_is_unchanged_by_p1() {
 
 #[test]
 fn preg_replace_callback_array_is_excluded() {
-    // The callables live as values inside the array at position 0 — not a
-    // positional callback argument, so the catalog cannot name them and the call
-    // contributes only preg_replace_callback_array's own (uncolored) base.
+    // The callables live as values inside the array at position 0, not a positional
+    // argument, so the catalog cannot name them; the call contributes only its own base.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(string $s): string {\n    return preg_replace_callback_array(['/a/' => function ($m) { echo $m[0]; return \"\"; }], $s);\n}\n";
     assert_eq!(effects(src).len(), 0, "unexpressible callback position stays silent");
 }
@@ -136,9 +132,8 @@ fn preg_replace_callback_array_is_excluded() {
 
 #[test]
 fn a_declared_envelope_admits_the_matching_callback_color() {
-    // #[\Steins\Effect('io.output')] admits the echoing callback; the join is checked
-    // against the envelope with ADR-0018 prefix subsumption, and the nondet.random
-    // sibling still exceeds.
+    // #[\Steins\Effect('io.output')] admits the echoing callback via ADR-0018 prefix
+    // subsumption; the nondet.random sibling still exceeds.
     let admitted = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { echo $x; return $x; }, $xs);\n}\n";
     assert_eq!(effects(admitted).len(), 0, "declared io.output admits the callback's output");
     let exceeded = "<?php\n#[\\Steins\\Effect('io.output')]\nfunction f(array $xs): array {\n    return array_map(function ($x) { return $x + rand(); }, $xs);\n}\n";
@@ -156,9 +151,8 @@ fn param_mismatches(src: &str) -> Vec<Diagnostic> {
 
 #[test]
 fn pure_callable_obligation_reads_the_higher_order_join() {
-    // C9's PurityOracle runs on the same fixpoint, so a closure whose only impurity
-    // arrives *through* a cataloged invoker's callback is judged impure — no extra
-    // wiring, and the pure counterpart stays silent.
+    // C9's PurityOracle runs on the same fixpoint, so impurity arriving *through* a
+    // cataloged invoker's callback is judged impure with no extra wiring.
     const TAKES: &str = "<?php /** @param pure-callable $cb */ function takes($cb): void {}\n";
     let impure = format!(
         "{TAKES}takes(static function (array $xs): mixed {{ return array_find($xs, function ($x) {{ echo $x; return true; }}); }});"

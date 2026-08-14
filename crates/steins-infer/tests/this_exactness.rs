@@ -32,9 +32,8 @@ fn ids(src: &str) -> Vec<String> {
 
 #[test]
 fn fp_shape1_this_argument_lower_bound_is_silent() {
-    // Regression: `$this` typed only as Node2 made `add_leaf(Leaf)` appear invalid:
-    // is_a(Node2, Leaf) = No under complete enumeration → definite-No FP.
-    // Runtime `(new Leaf())->register()` is fine — `$this` IS a Leaf.
+    // Regression: naive enumeration read $this's Node2 typing as exact and flagged
+    // is_a(Node2, Leaf) = No, but runtime `(new Leaf())->register()` is fine.
     let src = "<?php declare(strict_types=1);
 class Node2 {
     public int $depth = 0;
@@ -48,9 +47,8 @@ function add_leaf(Leaf $l): void {}
 
 #[test]
 fn fp_shape2_this_instanceof_subclass_branch_not_dead() {
-    // Regression: `$this instanceof Sub2` answered a definite No, so the then branch
-    // was treated dead, so `$v` stayed Singleton(1) and `takes_string($v)` fired a
-    // definite `type.argument-mismatch`. Runtime `(new Sub2())->m()` sets $v="hello".
+    // Regression: `$this instanceof Sub2` answered a definite No, pruning the then
+    // branch as dead and flagging `takes_string($v)` — but the runtime call sets $v.
     let src = "<?php declare(strict_types=1);
 class Base2 {
     public int $x = 0;
@@ -69,10 +67,9 @@ function takes_string(string $s): void {}
 #[test]
 fn fp_shape3_laundered_alias_dispatch_is_guarded() {
     // Regression: `$u = $this` laundered the enclosing class into an "exact"
-    // `Receiver::Var`, so `$u->m("abc")` resolved EXACTLY to Base3::m and checked
-    // "abc" against its int param → FP. A subclass may override `m` with a widened
-    // (string-accepting) signature — the runtime is not bound to Base3::m — so an
-    // overridable method on a lower bound must route through the final/private guard.
+    // `Receiver::Var`, resolving `$u->m("abc")` EXACTLY to Base3::m — but an
+    // overridable `m` may be overridden with a widened signature, so dispatch on a
+    // lower bound must route through the final/private guard.
     let src = "<?php declare(strict_types=1);
 class Base3 {
     public int $x = 0;
@@ -115,8 +112,7 @@ function takes_gadget(Gadget $g): void {}
 #[test]
 fn retention_this_instanceof_yes_side_kills_else_branch() {
     // (c) `is_a(Base4, Iface) = Yes` holds for a lower bound too (every descendant
-    // implements Iface), so the else-branch is dead and the wrong-typed literal
-    // call inside it stays silent — the Yes-side branch-death precision is retained.
+    // implements Iface), so the else-branch is dead and stays silent.
     let live = "<?php declare(strict_types=1);
 interface Iface {}
 class Base4 implements Iface {
@@ -129,10 +125,8 @@ function takes_string(string $s): void {}
 (new Base4())->go();";
     assert_eq!(n(live), 0, "instanceof Yes on a lower bound retained → else dead → silent");
 
-    // Control: drop the `implements` so is_a(Base4, Iface) is a *No* — but Base4 is
-    // a lower bound, so the No is demoted to Maybe → the else-branch stays LIVE and
-    // the wrong-typed call fires. (This is exactly the FP the No-side gate prevents
-    // when the else is the *reported* side; here it proves the branch is not killed.)
+    // Control: drop `implements` so is_a(Base4, Iface) is a *No*, demoted to Maybe
+    // (Base4 is a lower bound) — the else-branch stays LIVE and the call fires.
     let control = "<?php declare(strict_types=1);
 interface Iface {}
 class Base4 {

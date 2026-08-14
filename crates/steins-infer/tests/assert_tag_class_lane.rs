@@ -1,18 +1,16 @@
 //! Assert-tag consumption for **class-typed** specs (ADR-0052 §5 + §3(d), issue
 //! #266 slice 2).
 //!
-//! The gap this closes: `@phpstan-assert Guest $v` established *nothing*. The
-//! value lane is object-free by construction (ADR-0035), so the lowering declined
-//! every `Class` arm and the whole tag family was a silent no-op on object
-//! subjects — while the same claim written as `if ($v instanceof Guest)` narrowed
-//! the declared arm lane and fed `phpdoc.undefined-method`.
+//! Closes the gap where `@phpstan-assert Guest $v` established *nothing*: the
+//! value lane is object-free by construction (ADR-0035), so every `Class` arm
+//! was declined and the tag family was a silent no-op on object subjects, unlike
+//! the equivalent `instanceof` guard.
 //!
 //! What lands: a class-typed spec narrows the **contract arm lane**, arm-wise,
 //! through the same judgment the `instanceof` guard uses, at the `Asserted`
-//! stratum. Direction of movement: this **adds** contract-layer findings
-//! (`phpdoc.*`) where a docblock claim narrows a declared union. It adds no
-//! proof-layer finding anywhere — the two stratum pins at the bottom are the
-//! fixtures that would catch a violation.
+//! stratum. It **adds** contract-layer findings (`phpdoc.*`) where a docblock
+//! claim narrows a declared union, and no proof-layer finding — the two stratum
+//! pins at the bottom are the fixtures that would catch a violation.
 
 use steins_infer::{
     CALL_ON_NULL_ID, CALL_UNDEFINED_METHOD_ID, Diagnostic, Folder, ID, check, check_with,
@@ -190,11 +188,9 @@ function f(object $value): void {{
 
 #[test]
 fn an_asserted_class_claim_never_premises_the_proof_layer_absence_id() {
-    // `call.undefined-method` (ADR-0049 §4a) requires receiver EXACTNESS. An assert
-    // tag supplies membership at best, and this slice deliberately keeps it out of
-    // the `Member` carrier entirely. Under a boot surface that makes the id
-    // available, the site must stay silent: the tag bought the contract-layer
-    // finding above and nothing on the proof layer.
+    // `call.undefined-method` (ADR-0049 §4a) requires receiver EXACTNESS; an assert
+    // tag supplies membership at best and is kept out of the `Member` carrier. Under
+    // a boot surface that makes the id available, the site must stay silent.
     let src = format!(
         "{PRELUDE}
 /** @param User|Guest $value */
@@ -214,9 +210,8 @@ function f(object $value): void {{
 #[test]
 fn an_asserted_class_claim_does_not_overwrite_a_proven_null() {
     // Replace-if-weaker's second half, on the class road: the value lane holds a
-    // Verified `null`, and the tag's claim does not touch it. The proof stands on
-    // the proven fact, not on the docblock — so the finding is premised entirely on
-    // Verified evidence and is correct to fire.
+    // Verified `null` the tag's claim does not touch, so the finding is premised
+    // entirely on Verified evidence and is correct to fire.
     let src = format!(
         "{PRELUDE}
 function f(): void {{
@@ -235,10 +230,9 @@ function f(): void {{
 
 #[test]
 fn a_class_assert_mints_no_value_fact() {
-    // The carrier boundary, stated as a test: a class claim writes the arm lane and
-    // nothing else. If it leaked into the value lane it would be a `Fact` an
-    // acceptance check could read, and `takesInt($v)` — a definite-No against an
-    // object fact — would fire on an Asserted premise.
+    // The carrier boundary: a class claim writes the arm lane and nothing else. If it
+    // leaked into the value lane, `takesInt($v)` — a definite-No against an object
+    // fact — would fire on an Asserted premise.
     let src = format!(
         "{PRELUDE}
 function takesInt(int $n): void {{}}

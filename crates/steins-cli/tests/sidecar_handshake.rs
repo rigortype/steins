@@ -2,17 +2,17 @@
 //! unanswered — at the opening handshake, or mid-run.
 //!
 //! Three sidecar outcomes exist (ADR-0004/0024): `--no-php` and "no `php` on
-//! PATH" print a stderr notice and stay exit-neutral ("incompleteness is
-//! never silent"); the third — `php` starts but never replies (dead wrapper,
-//! hanging `php.ini`/`auto_prepend_file`, or answers then hangs/dies) — must
-//! not degrade in silence: `check` names both the handshake and mid-run cases.
+//! PATH" print a stderr notice and stay exit-neutral; the third — `php` starts
+//! but never replies (dead wrapper, hanging `php.ini`/`auto_prepend_file`, or
+//! answers then hangs/dies) — must not degrade in silence: `check` names both
+//! the handshake and mid-run cases.
 //!
-//! Two stub `php` scripts below run on a PRIVATE `PATH` given only to the
-//! child `steins` process (`Command::env`, never `std::env::set_var`, which
-//! would race other tests in the binary). [`stub_php_dir`] never speaks the
-//! wire format; [`stub_php_dir_mid_run`] passes the handshake and only then
-//! goes silent (see each stub's doc, PR #134 review). Neither needs a real
-//! `php`, unlike `crates/steins-sidecar/tests/protocol.rs`.
+//! Two stub `php` scripts run on a PRIVATE `PATH` given only to the child
+//! `steins` process (`Command::env`, never `std::env::set_var`, which would
+//! race other tests in the binary). [`stub_php_dir`] never speaks the wire
+//! format; [`stub_php_dir_mid_run`] passes the handshake and only then goes
+//! silent (PR #134 review). Neither needs a real `php`, unlike
+//! `crates/steins-sidecar/tests/protocol.rs`.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -22,9 +22,8 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_steins")
 }
 
-/// Every test spawns the binary with `GITHUB_ACTIONS` scrubbed: `check`'s format
-/// auto-detection (ADR-0054 §6) reads it, so a run on CI would otherwise emit workflow
-/// commands instead of the asserted text (detection is tested in `tests/format_github.rs`).
+/// Every test scrubs `GITHUB_ACTIONS`: `check`'s format auto-detection (ADR-0054
+/// §6) reads it, so CI would otherwise emit workflow commands instead of text.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -41,9 +40,8 @@ struct Run {
     stderr: String,
 }
 
-/// Write `script` as an executable `php` in a fresh, uniquely-named directory,
-/// and return the directory (suitable as a private `PATH`). Shared by both
-/// stub variants below so only the script body differs.
+/// Writes `script` as an executable `php` in a fresh directory and returns it
+/// (a private `PATH`); shared by both stub variants so only the body differs.
 fn write_stub_php(tag: &str, script: &str) -> PathBuf {
     static COUNTER: AtomicU32 = AtomicU32::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
@@ -60,12 +58,11 @@ fn write_stub_php(tag: &str, script: &str) -> PathBuf {
     dir
 }
 
-/// A private `PATH` directory with only a `php` that spawns fine and then never
-/// answers: it reads one line at a time forever using POSIX builtins (`read`,
-/// `:`) alone, needing no external `PATH` entries (unlike `sleep`/`cat`, which
-/// fail once `PATH` is pinned here). `read` blocks exactly like a hung
-/// `php.ini`/`auto_prepend_file` — alive and silent, what ADR-0024's timeout
-/// exists to catch. Models a dead-from-the-start opening handshake.
+/// A `php` that spawns fine and never answers: reads one line at a time
+/// forever with POSIX builtins alone (`read`, `:`), needing no external `PATH`
+/// entries (`sleep`/`cat` would fail once `PATH` is pinned here). Blocks like a
+/// hung `php.ini`/`auto_prepend_file` — what ADR-0024's timeout catches.
+/// Models a dead-from-the-start opening handshake.
 fn stub_php_dir() -> PathBuf {
     write_stub_php(
         "opening",
@@ -77,19 +74,17 @@ fn stub_php_dir() -> PathBuf {
     )
 }
 
-/// A private `PATH` directory with a `php` that answers every `env()` request
-/// FOR REAL (extracting the request's `id`, replying with a well-formed
-/// `EnvInfo` — the handshake genuinely succeeds) and silently drops every
-/// other method (`fold`, `reflect`), forever. Models a wrapper that passes the
-/// handshake and then goes quiet on the request that drives analysis — missed
-/// by a first cut of the issue #110 fix (PR #134 review) that latched on "one
-/// success ever" instead of "one failure this run".
+/// A `php` that answers every `env()` request for real (well-formed `EnvInfo`
+/// reply — the handshake genuinely succeeds) and silently drops every other
+/// method (`fold`, `reflect`), forever. Models a wrapper that passes the
+/// handshake then goes quiet on the request that drives analysis — missed by a
+/// first cut of the issue #110 fix, which latched on "one success ever"
+/// instead of "one failure this run" (PR #134 review).
 ///
-/// The `id` extraction is POSIX parameter expansion, not `sed`: `PATH` is
-/// narrowed to this directory ALONE, so an external command would silently
-/// fail (`Sidecar` discards the child's stderr) into a malformed reply that
-/// poisons the first request — a false pass for the wrong reason (PR #134
-/// review, round 2).
+/// `id` extraction is POSIX parameter expansion, not `sed`: `PATH` is narrowed
+/// to this directory alone, so an external command would silently fail
+/// (`Sidecar` discards the child's stderr) into a malformed reply that poisons
+/// the first request — a false pass for the wrong reason (PR #134 review round 2).
 fn stub_php_dir_mid_run() -> PathBuf {
     write_stub_php(
         "midrun",
@@ -112,11 +107,10 @@ fn stub_php_dir_mid_run() -> PathBuf {
     )
 }
 
-/// Run `steins` with `args`, `PATH` narrowed to `stub_dir` so the sidecar spawns
-/// the stub instead of whatever real `php` the host has. The per-request
-/// ADR-0024 timeouts a `check` run on one foldable argument pays (`env()` plus
-/// one fold attempt, each with its own respawn) stay comfortably under ten
-/// seconds; the 30-second bound below only guards against an actual hang.
+/// Runs `steins` with `PATH` narrowed to `stub_dir` so the sidecar spawns the
+/// stub, not the host's real `php`. Per-request ADR-0024 timeouts for one
+/// foldable argument (`env()` plus one fold attempt, each its own respawn) stay
+/// under ten seconds; the 30-second bound below only guards an actual hang.
 fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
     let out = steins_cmd().args(args).env("PATH", stub_dir).output().expect("run steins");
     let _ = std::fs::remove_dir_all(stub_dir);
@@ -127,8 +121,7 @@ fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
     }
 }
 
-/// [`run_against_stub`] against the opening-handshake stub — the shape the
-/// pre-existing tests below exercise.
+/// [`run_against_stub`] against the opening-handshake stub.
 fn run_against_hung_sidecar(args: &[&str]) -> Run {
     run_against_stub(&stub_php_dir(), args)
 }
@@ -144,9 +137,8 @@ fn check_surfaces_the_handshake_notice_when_php_never_answers() {
         start.elapsed()
     );
 
-    // The sound-subset shape as `--no-php` on the same fixture (cli.rs's
-    // no_php_omits_folded_but_keeps_direct_and_notes_posture): the folded finding
-    // is silently omitted (legitimate widen), the direct one still exits 1.
+    // Same sound-subset shape as `--no-php` on this fixture (cli.rs's
+    // no_php_omits_folded_but_keeps_direct_and_notes_posture): folded omitted, direct fires.
     assert_eq!(r.code, 1, "the direct (unfolded) finding still fires, got:\n{}", r.stdout);
     assert_eq!(
         r.stdout.lines().count(),
@@ -160,8 +152,7 @@ fn check_surfaces_the_handshake_notice_when_php_never_answers() {
         r.stdout
     );
 
-    // The issue #110 notice: printed exactly once even though the run makes
-    // more than one sidecar request — the latch, not the request count, decides.
+    // Issue #110 notice: prints once even though the run makes >1 sidecar request.
     let hits = r.stderr.matches("sound subset (degraded)").count();
     assert_eq!(
         hits, 1,
@@ -173,8 +164,7 @@ fn check_surfaces_the_handshake_notice_when_php_never_answers() {
         "the notice should point the reader at doctor for detail, got:\n{}",
         r.stderr
     );
-    // Distinct from the --no-php / spawn-failure wording: `php` genuinely
-    // started here, so "no PHP sidecar" would misdiagnose the cause.
+    // Distinct from --no-php / spawn-failure wording: `php` genuinely started here.
     assert!(
         !r.stderr.contains("no PHP sidecar"),
         "a spawned-but-silent php must not be reported as absent, got:\n{}",
@@ -184,8 +174,7 @@ fn check_surfaces_the_handshake_notice_when_php_never_answers() {
 
 #[test]
 fn annotate_surfaces_the_same_handshake_notice() {
-    // annotate shares SidecarFolder::enabled() with check (main.rs), so the
-    // same ProcessEngine latch should fire here too.
+    // annotate shares SidecarFolder::enabled() with check (main.rs) — same latch.
     let path = fixture("fold_mixed.php");
     let r = run_against_hung_sidecar(&["annotate", path.to_str().unwrap()]);
     let hits = r.stderr.matches("sound subset (degraded)").count();
@@ -194,9 +183,8 @@ fn annotate_surfaces_the_same_handshake_notice() {
 
 #[test]
 fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
-    // PR #134 review finding: a fix latching on "any success ever" must still
-    // notice a mid-run failure after a genuinely successful handshake, exactly
-    // as loudly as the opening-handshake case (see stub_php_dir_mid_run's docs).
+    // PR #134 review: a fix latching on "any success ever" must still notice a
+    // mid-run failure after a genuinely successful handshake (stub_php_dir_mid_run).
     let path = fixture("fold_mixed.php");
     let start = std::time::Instant::now();
     let r = run_against_stub(&stub_php_dir_mid_run(), &["check", path.to_str().unwrap()]);
@@ -205,8 +193,8 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
         elapsed < std::time::Duration::from_secs(30),
         "a hung sidecar must still bound the run — this is not a real hang, got {elapsed:?}"
     );
-    // Regression guard (PR #134 review, round 2): a broken stub would corrupt
-    // env() and pass near-instantly for the wrong reason — see stub_php_dir_mid_run.
+    // Regression guard (PR #134 review round 2): a broken stub corrupts env()
+    // and passes near-instantly for the wrong reason (stub_php_dir_mid_run).
     assert!(
         elapsed >= std::time::Duration::from_secs(1),
         "a near-instant run means env() itself failed (e.g. the stub's id \
@@ -214,8 +202,7 @@ fn check_surfaces_the_notice_when_the_sidecar_stops_answering_mid_run() {
          after a real handshake, got {elapsed:?}"
     );
 
-    // Same sound-subset shape as the opening-handshake case: the direct
-    // finding fires, the finding needing a live fold is silently omitted.
+    // Same sound-subset shape as the opening-handshake case: direct fires, fold omitted.
     assert_eq!(r.code, 1, "the direct (unfolded) finding still fires, got:\n{}", r.stdout);
     assert_eq!(
         r.stdout.lines().count(),

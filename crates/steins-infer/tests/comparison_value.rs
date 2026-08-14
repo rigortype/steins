@@ -1,31 +1,30 @@
 //! A comparison as a **value** (issue #260, the operator-value node).
 //!
 //! Before this, `ArgValue` carried exactly one binary operator (`Concat`), so
-//! `1 === 1` in value position lowered to `ArgValue::Other` and rendered `unknown`
-//! while `'a' . 'b'` rendered `'ab'`. The gap was never in the semantics: `eval_cmp`
-//! has decided `=== !== == != < <= > >=` over candidate value sets since ADR-0031 —
-//! it was only ever reachable from *condition* position.
+//! `1 === 1` in value position lowered to `ArgValue::Other` and rendered
+//! `unknown` while `'a' . 'b'` rendered `'ab'`. The gap was never in the
+//! semantics: `eval_cmp` has decided `=== !== == != < <= > >=` over candidate
+//! value sets since ADR-0031 — it was only ever reachable from *condition*
+//! position.
 //!
 //! So these fixtures pin two things, and deliberately nothing else:
 //!
-//! 1. **The same decision procedure answers in both positions.** No comparison
-//!    semantics are restated here; a verdict this file asserts is one `if (…)`
-//!    would already have reached.
-//! 2. **The `bool` floor is total.** A PHP comparison evaluates to a `bool`
+//! 1. **The same decision procedure answers in both positions.** No
+//!    comparison semantics are restated here; a verdict this file asserts is
+//!    one `if (…)` would already have reached.
+//! 2. **The `bool` floor is total.** A PHP comparison evaluates to `bool`
 //!    whatever its operands are, so an *undecided* comparison is `bool` — an
-//!    honest fact about the operator, not a guess about the operands. This is the
-//!    one claim the node makes that the condition path never had to make, and it
-//!    is why an unknown operand renders `bool` rather than `unknown`.
-//! 3. **The stratum split** (owner ruling 2026-08-09, ADR-0052 note). The three
-//!    verdicts do not carry the same trust, because they do not make the same kind
-//!    of claim. `Maybe → bool` is the *operator's* guarantee and consumed no
-//!    operand refinement, so it is **Verified always**; `Yes → true` / `No → false`
-//!    say **which** bool, which does rest on the operands, so they keep the
-//!    operands' `min` stratum. Both halves are pinned, from both sides, so a later
-//!    refactor cannot collapse them onto one stratum in either direction.
+//!    honest fact about the operator, not a guess about the operands. This is
+//!    why an unknown operand renders `bool` rather than `unknown`.
+//! 3. **The stratum split** (owner ruling 2026-08-09, ADR-0052 note): the
+//!    three verdicts don't carry the same trust. `Maybe → bool` is the
+//!    *operator's* guarantee, consuming no operand refinement, so it is
+//!    **Verified always**; `Yes → true` / `No → false` say **which** bool,
+//!    resting on the operands, so they keep the operands' `min` stratum. Both
+//!    halves are pinned so a later refactor cannot collapse them together.
 //!
-//! Arithmetic, bitwise and logical operators still widen to `ArgValue::Other`:
-//! the node carries only what an evaluator answers (`unimplemented_operators_still_decline`).
+//! Arithmetic, bitwise and logical operators still widen to `ArgValue::Other`
+//! (`unimplemented_operators_still_decline`).
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -81,18 +80,17 @@ fn loose_equality_keeps_its_php_8_table() {
 
 #[test]
 fn an_env_bound_operand_decides() {
-    // The reason the node lowers structurally instead of folding at lowering time:
-    // `$n`'s value is an env fact, known only during the walk.
+    // Lowers structurally rather than folding at lowering time: `$n` is an
+    // env fact, known only during the walk.
     let src = "<?php\n$n = 5;\n\\PHPStan\\dumpType($n > 3);\n\\PHPStan\\dumpType($n === 6);\n";
     assert_eq!(types(src), vec!["true", "false"]);
 }
 
 #[test]
 fn a_declared_literal_operand_decides_and_stays_asserted() {
-    // Where the corpus's finite operands actually live: a `@param 1 $one` carries
-    // no fact, only a declared arm. Reading that lane is what makes
-    // `loose-comparisons.php` move — and the verdict inherits the declaration's
-    // trust rather than laundering it (ADR-0052 §5), which the marker records.
+    // Where the corpus's finite operands live: `@param 1 $one` carries no
+    // fact, only a declared arm — reading it inherits the declaration's trust
+    // rather than laundering it (ADR-0052 §5), which the marker records.
     let src = "<?php\n\
         /**\n\
          * @param 1 $one\n\
@@ -107,12 +105,10 @@ fn a_declared_literal_operand_decides_and_stays_asserted() {
 
 #[test]
 fn a_union_operand_decides_only_when_every_pair_agrees() {
-    // The ADR-0031 OneOf rule, unchanged: all member pairs agree → that verdict.
-    // The stratum split is the load-bearing half here (owner ruling 2026-08-09,
-    // ADR-0052 note): the *decided* verdict is a claim about WHICH bool, and that
-    // rests on the declared arms, so it stays `asserted`. The *undecided* one is a
-    // claim about the operator only — no operand refinement survived into it — so
-    // it is Verified, and carries no marker even though both operands are declared.
+    // ADR-0031 OneOf rule, unchanged: all member pairs agree → that verdict.
+    // Stratum split (see module doc): the decided verdict rests on the
+    // declared arms (`asserted`); the undecided one is the operator's own
+    // guarantee (`Verified`), even though both operands are declared.
     let src = "<?php\n\
         /** @param 1|2 $i */\n\
         function f($i): void {\n\
@@ -124,10 +120,8 @@ fn a_union_operand_decides_only_when_every_pair_agrees() {
 
 #[test]
 fn the_undecided_bool_is_verified_even_from_declared_operands() {
-    // The split pinned from the other side, so a refactor cannot collapse the two
-    // arms onto one stratum in either direction. Same two declared operands, one
-    // pair of dumps: the decided comparison keeps the declaration's trust, the
-    // undecided one does not inherit it.
+    // The split pinned from the other side: same declared operands, but the
+    // decided comparison keeps the declaration's trust and the undecided one does not.
     let src = "<?php\n\
         /**\n\
          * @param 1 $one\n\
@@ -154,10 +148,9 @@ fn mismatches(src: &str) -> Vec<String> {
 
 #[test]
 fn a_decided_comparison_over_declared_operands_stays_out_of_the_proof_lane() {
-    // The half of the ruling that protects the zero-FP bar. `$b` is `true` —
-    // decided — but decided *from* a declared arm, so it is Asserted, and the
-    // all-Verified premise rule (ADR-0052 §5) keeps it out of the native
-    // definite-No. A lying `@param 1 $one` must not be able to premise a finding.
+    // The half of the ruling that protects the zero-FP bar: `$b` is decided
+    // but from a declared arm, so it's Asserted, and the all-Verified premise
+    // rule (ADR-0052 §5) keeps a lying `@param 1 $one` from premising a finding.
     let asserted = "<?php\n\
         function f(\\DateTime $p): void {}\n\
         /** @param 1 $one */\n\
@@ -211,8 +204,7 @@ fn an_undecided_comparison_is_bool_not_unknown() {
 
 #[test]
 fn an_unrepresentable_operand_still_yields_bool() {
-    // Neither operand is a value this crate can see; the operator's own guarantee
-    // survives that, and nothing more is claimed.
+    // Neither operand is a value this crate can see; the operator's own guarantee survives.
     let src = "<?php\n\
         function f(object $o): void {\n\
             \\PHPStan\\dumpType($o->a === $o->b->c);\n\
@@ -222,9 +214,8 @@ fn an_unrepresentable_operand_still_yields_bool() {
 
 #[test]
 fn unimplemented_operators_still_decline() {
-    // The Certainty discipline: an operator with no value-position evaluation is
-    // NOT carried by the node, so it declines rather than claiming a type it has
-    // not computed. These are the next slice's, not this one's.
+    // Certainty discipline: an operator with no value-position evaluation is
+    // NOT carried, so it declines rather than claiming an uncomputed type.
     assert_eq!(dumped("1 + 1"), "unknown");
     assert_eq!(dumped("5 & 3"), "unknown");
     assert_eq!(dumped("true && false"), "unknown");

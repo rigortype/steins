@@ -1,9 +1,9 @@
-//! Differential check against the Lean 4 spec of this crate (ADR-0059): walks the
-//! same universe/order as `spike/lean-domain`'s `lake exe vectors` output
-//! (`fixtures/lean-vectors.expected`) through Rust and compares line by line (data
-//! lines are the contract; fixture comments are docs). A failure usually means
-//! Rust's behaviour changed, or the universe/renderer drifted, or the fixture
-//! wasn't regenerated — fix via `cargo xtask lean-check --bless`.
+//! Differential check against the Lean 4 spec of this crate (ADR-0059): walks
+//! the same universe/order as `spike/lean-domain`'s `lake exe vectors` output
+//! (`fixtures/lean-vectors.expected`) through Rust, comparing line by line
+//! (data lines are the contract; fixture comments are docs). A failure usually
+//! means Rust's behaviour changed, the universe/renderer drifted, or the
+//! fixture wasn't regenerated — fix via `cargo xtask lean-check --bless`.
 
 use steins_domain::{
     Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, PhpStr, Presence,

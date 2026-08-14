@@ -12,7 +12,6 @@ fn bin() -> &'static str {
 
 /// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
 /// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
-/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -109,12 +108,11 @@ fn fix_removes_the_dump_statement_and_a_rerun_is_clean() {
 
 #[test]
 fn the_gate_passes_a_removal_beside_an_unrelated_error() {
-    // This family goes first because a recognized dump is transparent (ADR-0053
-    // point 10 — reads facts, binds nothing), so removing it can't change what the
-    // rest of the file proves; the unrelated `$x->m()` error already reports before
-    // the edit, so the post-check's per-id count is unchanged and the gate passes.
-    // The refusal side is exercised in `post_check_gate_refuses_a_regressing_fix`
-    // (`crates/steins-cli/src/main.rs`), via a synthetic regressing payload.
+    // A recognized dump is transparent (ADR-0053 point 10 — reads facts, binds
+    // nothing), so removing it can't change what the rest of the file proves;
+    // the unrelated `$x->m()` error already reports before the edit, so the
+    // post-check's per-id count is unchanged. Refusal side is exercised in
+    // `post_check_gate_refuses_a_regressing_fix` (`crates/steins-cli/src/main.rs`).
     let proj = TempProject::new("gatepass");
     let src = "<?php\n$x = null;\n\\PHPStan\\dumpType($x);\n$x->m();\n";
     proj.write("app.php", src);

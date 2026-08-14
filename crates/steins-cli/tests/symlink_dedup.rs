@@ -19,7 +19,6 @@ fn bin() -> &'static str {
 
 /// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
 /// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
-/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -158,8 +157,7 @@ fn reported_path_is_the_first_spelling_in_argument_order() {
     );
     assert!(!src_first.stdout.contains("mirror/src/a.php"), "got:\n{}", src_first.stdout);
 
-    // Argument order decides, not alphabetical/canonical order: `mirror/src/a.php`
-    // sorts and canonicalizes the same regardless of which way the args were given.
+    // Argument order decides, not sort/canonical order — same either way given.
     let mirror_first = run_in(&dir, &["check", "mirror", "src"]);
     assert_eq!(mirror_first.code, 1, "got:\n{}", mirror_first.stdout);
     assert!(

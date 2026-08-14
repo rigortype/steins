@@ -2,16 +2,16 @@
 //!
 //! `.` is the one binary operator lowered to an [`ArgValue`], because for the
 //! operand types admitted it is *total and environment-independent* — byte
-//! concatenation consults no locale, encoding or ini setting. That is what lets the
-//! result be derived in Rust rather than asked of the sidecar, and it is why these
-//! fixtures run on the pure `check` path (== `NoFold`): concatenation is proven in
-//! the browser too, unlike anything on the `foldable` allowlist.
+//! concatenation consults no locale, encoding or ini setting. That lets the
+//! result be derived in Rust rather than asked of the sidecar, and is why
+//! these fixtures run on the pure `check` path (== `NoFold`): concatenation
+//! is proven in the browser too, unlike anything on the `foldable` allowlist.
 //!
-//! The float exclusion is the load-bearing negative. PHP's float-to-string follows
-//! the `precision` ini directive, so a folded `"" . 0.1` would be a value that
-//! depends on the runtime's configuration — exactly what this crate must not
-//! invent. `oracle_agrees_on_every_admitted_cast` pins the admitted cells against
-//! the real engine, and `float_operand_widens` pins the refusal.
+//! The float exclusion is the load-bearing negative: PHP's float-to-string
+//! follows the `precision` ini directive, so a folded `"" . 0.1` would depend
+//! on runtime configuration — exactly what this crate must not invent.
+//! `oracle_agrees_on_every_admitted_cast` pins the admitted cells against the
+//! real engine; `float_operand_widens` pins the refusal.
 
 use std::process::Command;
 
@@ -77,10 +77,9 @@ fn dumped(expr: &str) -> String {
 
 #[test]
 fn flagship_greet_inlines_to_its_value() {
-    // The reported snippet. Every link in the chain participates: the literal
-    // arguments seed `greet`'s parameters, `"Hello, " . $name . "! "` resolves
-    // against that env, the resolved string passes the fold gate as `str_repeat`'s
-    // subject, and the folded result crosses the return boundary.
+    // The reported snippet: every link participates — literal args seed
+    // `greet`'s params, the concat resolves against that env, the result
+    // passes the fold gate as `str_repeat`'s subject, and crosses the return.
     let src = "<?php\n\
         function greet(int $times, string $name): string {\n\
             return str_repeat(\"Hello, \" . $name . \"! \", $times);\n\
@@ -92,9 +91,8 @@ fn flagship_greet_inlines_to_its_value() {
 
 #[test]
 fn a_concat_argument_reaches_the_fold_gate() {
-    // The gate's admission is `is_concrete_value` over the RESOLVED argument, so a
-    // concatenation qualifies exactly when it resolves. This is the link that was
-    // missing: before, `"ab" . "cd"` was `Other` and closed the gate.
+    // The gate admits via `is_concrete_value` over the RESOLVED argument — the
+    // missing link: before, `"ab" . "cd"` was `Other` and closed the gate.
     let src = "<?php\n$x = strtoupper(\"ab\" . \"cd\");\n\\PHPStan\\dumpType($x);\n";
     assert_eq!(one_folded(src), "'ABCD'");
 }
@@ -110,8 +108,7 @@ fn literal_chain_folds_left_associatively() {
 
 #[test]
 fn an_env_bound_operand_resolves() {
-    // The whole reason `.` lowers structurally instead of folding at lowering time:
-    // `$n`'s value is an env fact, known only during the walk.
+    // The whole reason `.` lowers structurally: $n is an env fact, known only during the walk.
     let src = "<?php\n\
         $n = \"World\";\n\
         $b = \"Hello, \" . $n . \"!\";\n\
@@ -158,8 +155,7 @@ fn array_operand_widens() {
 
 #[test]
 fn compound_concat_assign_is_still_unproven() {
-    // `.=` lowers its rvalue to `Other` (see `StmtKind`); this negative pin keeps
-    // unsupported compound assignment from being treated as plain concatenation.
+    // `.=` lowers its rvalue to `Other` (see `StmtKind`) — kept distinct from plain concat.
     let src = "<?php\n$s = \"a\";\n$s .= \"b\";\n\\PHPStan\\dumpType($s);\n";
     assert_eq!(types(src), vec!["unknown"]);
 }
@@ -226,9 +222,8 @@ fn oracle_agrees_on_every_admitted_cast() {
 
 #[test]
 fn flagship_greet_inlines_in_argument_position() {
-    // The report's LITERAL form (issue #60 closing the loop #59 opened): the call
-    // dumped directly, no assignment detour. Identical to
-    // `flagship_greet_inlines_to_its_value` in every way but the position.
+    // The report's LITERAL form (issue #60 closing the loop #59 opened): the
+    // call dumped directly — identical to the other flagship but for position.
     let src = "<?php\n\
         function greet(int $times, string $name): string {\n\
             return str_repeat(\"Hello, \" . $name . \"! \", $times);\n\

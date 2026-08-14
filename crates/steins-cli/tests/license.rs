@@ -14,7 +14,6 @@ fn bin() -> &'static str {
 
 /// Spawns with `GITHUB_ACTIONS` scrubbed so `check`'s CI auto-detection
 /// (ADR-0054 §6) doesn't emit workflow commands where a test expects text.
-/// Detection itself is tested in `tests/format_github.rs`.
 fn steins_cmd() -> Command {
     let mut cmd = Command::new(bin());
     cmd.env_remove("GITHUB_ACTIONS");
@@ -61,7 +60,7 @@ fn license_carries_our_terms_and_the_bundled_notices() {
 fn license_carries_phpstans_notice() {
     // PHPStan is Steins' direct model (README "Acknowledgments") but isn't a Rust
     // dependency `cargo xtask licenses` can discover, so it's embedded directly
-    // (`LICENSE_PHPSTAN` in `main.rs`) rather than relying on THIRD-PARTY-LICENSES.md.
+    // (`LICENSE_PHPSTAN` in `main.rs`).
     let (code, out) = run(&["license"]);
     assert_eq!(code, 0);
     assert!(out.contains("PHPStan"), "must credit PHPStan as the direct model");
@@ -77,8 +76,7 @@ fn license_carries_phpstans_notice() {
 
 #[test]
 fn the_embedded_notices_are_generated_not_a_stub() {
-    // Guards the failure this surface exists to prevent: a placeholder/truncated
-    // notices file that looks compliant while carrying nothing.
+    // Guards against a placeholder/truncated notices file that looks compliant.
     let (_, out) = run(&["license"]);
     assert!(out.matches("\n## ").count() >= 30, "expected the licence sections");
     assert!(out.contains("Used by:"));
@@ -92,10 +90,9 @@ fn the_embedded_notices_are_generated_not_a_stub() {
 
 #[test]
 fn typographic_variants_stay_in_their_own_sections() {
-    // cargo-about groups on exact license text, so Apache-2.0 shipped centred by one
-    // crate and flush-left by another produces two sections of the same name — left
-    // that way deliberately (matches rigortype/lisplens's about.toml/about.hbs, no
-    // merge pass): one block per crate keeps each copyright line paired with its body.
+    // cargo-about groups on exact license text: Apache-2.0 centred by one crate,
+    // flush-left by another, produces two sections of the same name — left that
+    // way deliberately, one block per crate keeping each copyright line paired with its body.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
     assert_eq!(
@@ -107,8 +104,7 @@ fn typographic_variants_stay_in_their_own_sections() {
 
 #[test]
 fn mit_is_one_section_per_crates_license_text() {
-    // No permission-notice merge collapses distinct copyright holders into one
-    // block; checked on the command's output (what `brew install` users read).
+    // No permission-notice merge collapses distinct copyright holders into one block.
     let (_, out) = run(&["license"]);
     let third_party = out.split("Third-Party Licenses").nth(1).expect("third-party section");
     let mit_sections = third_party.matches("\n## MIT License").count();
@@ -125,8 +121,8 @@ fn mit_is_one_section_per_crates_license_text() {
 
 #[test]
 fn a_closed_pipe_is_not_a_crash() {
-    // `steins license` emits thousands of lines, so `| head`/early-quit `less` are
-    // normal; `println!` panics on EPIPE — this pins that the command does not.
+    // `steins license` emits thousands of lines, so `| head`/early-quit `less`
+    // is normal; `println!` panics on EPIPE — pins that the command does not.
     let mut child = steins_cmd()
         .arg("license")
         .stdout(Stdio::piped())

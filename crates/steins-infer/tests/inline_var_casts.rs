@@ -57,9 +57,8 @@ impl Folder for Mock {
 
 fn diagnostics(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every assertion below keeps meaning what it meant before it landed.
+    // `untyped.*` (ADR-0078, #200) reports on the fixtures' own deliberately-untyped
+    // declarations, not the behaviour under test; dropped to keep assertions meaningful.
     check_with(&tree, &[], "t.php", &mut Mock::sidecar())
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -96,8 +95,7 @@ fn cast_dump(decl: &str, expr: &str) -> String {
 
 #[test]
 fn a_cast_shape_feeds_the_projection_family() {
-    // The issue's own two probes: before ADR-0073 these were `int<0, max>` and
-    // `list<mixed> (asserted)` — the tag seeded nothing.
+    // The issue's own two probes — before ADR-0073 the tag seeded nothing here.
     assert_eq!(cast_dump("array{a: int, b: int}", "count($arr)"), "dumped type: 2 (asserted)");
     assert_eq!(
         cast_dump("array{a: int, b: int}", "array_values($arr)"),
@@ -151,9 +149,8 @@ fn the_cast_is_in_force_from_its_statement_on_and_a_re_cast_replaces_it() {
 
 #[test]
 fn an_assignment_to_the_variable_erases_the_cast() {
-    // Assignment-form `@var` (PHPStan casts the RHS there) is unsupported: the
-    // rebind forgets the lane, so the tail sees plain `array` again — never a
-    // stale claim about the prior value.
+    // Assignment-form `@var` (PHPStan casts the RHS there) is unsupported: the rebind
+    // forgets the lane, so the tail sees plain `array` again, never a stale claim.
     let src = "<?php\nfunction f(array $arr, $u): void {\n  /** @var array{a: int} $arr */\n  $arr = $u;\n  \\PHPStan\\dumpType(count($arr));\n}\n";
     assert_eq!(one_type(src), "dumped type: int<0, max>");
 }

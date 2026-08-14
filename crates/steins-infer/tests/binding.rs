@@ -28,13 +28,11 @@ fn only(src: &str) -> Diagnostic {
 
 const WIDTH: &str = "function width(int $w): int { return $w; }\n";
 
-// ---- The headline case: bind a literal into a callee, flag the inner call ----
+// The headline case: bind a literal into a callee, flag the inner call
 
 #[test]
 fn binds_literal_and_flags_inner_call_with_chain_provenance() {
-    // outer("abc") binds $s = "abc"; inside outer, width($s) is a proven
-    // coercive TypeError. Reported at the inner width($s) site, provenance names
-    // the outer binding call.
+    // outer("abc") binds $s = "abc"; inside outer, width($s) is a proven coercive TypeError.
     let src = format!(
         "<?php\n{WIDTH}function outer(string $s): void {{ width($s); }}\nouter(\"abc\");\n"
     );
@@ -46,7 +44,7 @@ fn binds_literal_and_flags_inner_call_with_chain_provenance() {
     );
 }
 
-// ---- Numeric-string coercion on the descend value ------------------------
+// Numeric-string coercion on the descend value
 
 #[test]
 fn numeric_string_coerces_then_flows_silently() {
@@ -70,13 +68,12 @@ fn coercion_produces_value_that_proves_later_mismatch() {
     );
 }
 
-// ---- Entry check fires at the outer site instead of descending -----------
+// Entry check fires at the outer site instead of descending
 
 #[test]
 fn strict_entry_check_fires_at_outer_site_not_inner() {
     // Strict file. outer("5") already violates outer's own int parameter, so the
-    // real call fatals at entry. The existing direct check reports at the OUTER
-    // site; we do not also descend (no double report, no inner finding).
+    // direct check reports at the OUTER site; we do not also descend.
     let src = format!(
         "<?php\ndeclare(strict_types=1);\n{WIDTH}function outer(int $n): void {{ width($n); }}\nouter(\"5\");\n"
     );
@@ -86,7 +83,7 @@ fn strict_entry_check_fires_at_outer_site_not_inner() {
     assert!(d.message.contains("to outer()"), "{}", d.message);
 }
 
-// ---- By-ref callee parameter → skip the whole binding --------------------
+// By-ref callee parameter → skip the whole binding
 
 #[test]
 fn by_ref_bound_param_skips_binding() {
@@ -99,7 +96,7 @@ fn by_ref_bound_param_skips_binding() {
     assert_eq!(n(&src), 0, "by-ref bound parameter → no descent, no finding");
 }
 
-// ---- Recursion and depth budget ------------------------------------------
+// Recursion and depth budget
 
 #[test]
 fn self_recursion_terminates_without_finding() {
@@ -126,7 +123,7 @@ fn depth_chain_of_three_flags_with_first_site_named() {
     );
 }
 
-// ---- Multiple call sites and dedup ---------------------------------------
+// Multiple call sites and dedup
 
 #[test]
 fn two_call_sites_with_different_values_give_two_findings() {
@@ -141,8 +138,7 @@ fn two_call_sites_with_different_values_give_two_findings() {
 
 #[test]
 fn same_value_two_sites_gives_one_finding_per_binding_site() {
-    // Identical bound value at two distinct call sites → one finding per site,
-    // kept because the provenance (line number) differs.
+    // Identical bound value, two sites → kept separately since provenance (line) differs.
     let src = format!(
         "<?php\n{WIDTH}function outer(string $s): void {{ width($s); }}\nouter(\"abc\");\nouter(\"abc\");\n"
     );
@@ -154,10 +150,8 @@ fn same_value_two_sites_gives_one_finding_per_binding_site() {
 
 #[test]
 fn binding_independent_inner_finding_is_deduped() {
-    // outer has a binding-independent local finding (width($bad)) and a
-    // binding-dependent one (width($s)). The local finding is reachable from
-    // both the empty-env walk and the descent, but is emitted once (dedup); the
-    // binding-dependent one is distinct. Two findings total.
+    // width($bad) is reachable from both the empty-env walk and the descent, but
+    // emitted once (dedup); width($s) is binding-dependent and distinct.
     let src = format!(
         "<?php\n{WIDTH}function outer(string $s): void {{ $bad = \"zzz\"; width($bad); width($s); }}\nouter(\"abc\");\n"
     );
@@ -173,18 +167,17 @@ fn binding_independent_inner_finding_is_deduped() {
     );
 }
 
-// ---- A clean same-file call does not fire --------------------------------
+// A clean same-file call does not fire
 
 #[test]
 fn well_typed_binding_is_silent() {
-    // outer(5) binds $n = 5, width($n) is int→int — no mismatch anywhere.
     let src = format!(
         "<?php\n{WIDTH}function outer(int $n): void {{ width($n); }}\nouter(5);\n"
     );
     assert_eq!(n(&src), 0, "well-typed propagation is silent");
 }
 
-// ---- Calls in RETURN / assignment-RHS / echo positions -------------------
+// Calls in RETURN / assignment-RHS / echo positions
 
 #[test]
 fn return_position_call_flagged_via_binding() {
@@ -228,7 +221,6 @@ fn assignment_rhs_call_flagged_via_binding() {
 
 #[test]
 fn echo_position_call_flagged_via_binding() {
-    // `echo width($s);` in outer's body — a common template shape.
     let src = format!(
         "<?php\n{WIDTH}function outer(string $s): void {{ echo width($s); }}\nouter(\"abc\");\n"
     );
@@ -239,9 +231,8 @@ fn echo_position_call_flagged_via_binding() {
 
 #[test]
 fn const_fn_return_literal_still_qualifies() {
-    // The `Return { value, .. }` IR reshape must not break constant-function
-    // recognition: `price()` returning a bad literal into width() still flags,
-    // with the const-fn provenance.
+    // Regression guard: the `Return { value, .. }` IR reshape must not break
+    // constant-function recognition.
     let src = "<?php\nfunction width(int $w): int { return $w; }\nfunction price(): string { return \"abc\"; }\nwidth(price());\n";
     let d = only(src);
     assert!(d.message.contains("from price(), defined at line 3"), "{}", d.message);

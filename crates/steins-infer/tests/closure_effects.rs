@@ -28,13 +28,12 @@ fn summary(src: &str, symbol: &str) -> EffectSummary {
         .unwrap_or_else(|| panic!("no summary for {symbol}"))
 }
 
-// ---- THE HEADLINE: Pure + array_map(inline impure closure) ------------------
+// THE HEADLINE: Pure + array_map(inline impure closure)
 
 #[test]
 fn pure_array_map_inline_impure_closure_fires_with_callback_provenance() {
-    // The final Steins answer to the PHPStan conditional-purity saga: array_map's
-    // own base is pure, but the inline callback echoes → the Pure envelope is
-    // exceeded, reported with the callback's own origin (echo) in the provenance.
+    // array_map's own base is pure, but the inline callback echoes → the Pure
+    // envelope is exceeded, reported with the callback's own origin in provenance.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(array $xs): array {\n    return array_map(function ($x) { echo $x; return $x; }, $xs);\n}\n";
     let d = one(src);
     assert_eq!(d.id, EFFECT_ID);
@@ -58,7 +57,7 @@ fn pure_array_map_unknown_callable_is_silent_but_taints() {
     assert!(!summary(src, "f").exhaustive, "unknown callback taints exhaustiveness (…?)");
 }
 
-// ---- Reversed-argument shape: array_filter ---------------------------------
+// Reversed-argument shape: array_filter
 
 #[test]
 fn array_filter_reversed_args_finds_callback_at_position_1() {
@@ -73,7 +72,7 @@ fn array_filter_one_arg_form_has_no_callback() {
     assert_eq!(effects(src).len(), 0);
 }
 
-// ---- Deferred invoker still propagates effects -----------------------------
+// Deferred invoker still propagates effects
 
 #[test]
 fn register_shutdown_function_deferred_effects_propagate() {
@@ -84,7 +83,7 @@ fn register_shutdown_function_deferred_effects_propagate() {
     assert!(d.message.contains("io.output.buffer"), "deferred callback effect propagates: {}", d.message);
 }
 
-// ---- Named / string callables ----------------------------------------------
+// Named / string callables
 
 #[test]
 fn array_map_string_builtin_callback_is_pure() {
@@ -106,7 +105,7 @@ fn array_map_first_class_callable_callback_fires() {
     assert!(d.message.contains("io.output.buffer"), "{}", d.message);
 }
 
-// ---- Direct $fn() closure effect feeding -----------------------------------
+// Direct $fn() closure effect feeding
 
 #[test]
 fn direct_fn_call_on_local_closure_feeds_effects_with_provenance() {
@@ -127,7 +126,7 @@ fn direct_fn_call_reassigned_is_opaque_not_resolved() {
     assert!(!summary(src, "f").exhaustive, "ambiguous $fn() taints (…?)");
 }
 
-// ---- Throws through higher-order builtins ----------------------------------
+// Throws through higher-order builtins
 
 #[test]
 fn array_map_callback_throws_propagate_to_summary() {
@@ -142,13 +141,9 @@ fn array_map_callback_throws_propagate_to_summary() {
     );
 }
 
-// ---- Issue #279: HigherOrder dispatch through an aliased builtin import ---
-//
-// `invocation_shape` used to be asked by the call's own spelling
-// (`callee.simple()`), so `use function usort as u; u(...)` missed the entire
-// invoker treatment — both `usort`'s own by-ref color and the comparator
-// callback's effects. `Cx::resolve_invoker_function` now routes the resolved
-// catalog name through, generalizing the fix to this third consumer.
+// Issue #279: HigherOrder dispatch through an aliased builtin import. Fixed by
+// routing the call through `Cx::resolve_invoker_function`'s resolved catalog name
+// instead of the call's own spelling, so an alias no longer misses invoker treatment.
 
 #[test]
 fn an_aliased_usort_import_dispatches_and_colors_like_the_spelled_call() {
@@ -171,9 +166,8 @@ fn an_aliased_usort_import_dispatches_and_colors_like_the_spelled_call() {
 
 #[test]
 fn an_aliased_usort_import_propagates_callback_throws_like_the_spelled_call() {
-    // The throws-pass twin of the effects test above: `add_callback_throws`
-    // is only reached at all if `resolve_invoker_function` finds the
-    // comparator's callback slot through the alias.
+    // Throws-pass twin of the effects test above: only reached if
+    // `resolve_invoker_function` finds the comparator's callback slot through the alias.
     let aliased = "<?php\nuse function usort as u;\n\
                    function f(array $xs): array {\n    \
                    u($xs, function ($a, $b) { return intdiv($a, $b); });\n    \
@@ -193,12 +187,9 @@ fn an_aliased_usort_import_propagates_callback_throws_like_the_spelled_call() {
 
 #[test]
 fn an_aliased_import_of_a_shape_named_project_function_is_unaffected() {
-    // The negative twin: a project function that merely shares a name with a
-    // catalog invocation shape (`usort`) is never a catalog invoker — it is
-    // resolved through the ordinary `use function` import machinery (a
-    // `Site`, not a spelling), so an aliased import of it must behave exactly
-    // like the unaliased import, both joining the shadowing function's OWN
-    // effects and never consulting `usort`'s shape table.
+    // Negative twin: a project function sharing a name with a catalog invocation
+    // shape (`usort`) is never a catalog invoker (a `Site`, not a spelling), so an
+    // aliased import must join the shadowing function's OWN effects, never `usort`'s.
     let unaliased = "<?php\nnamespace App\\Sorting;\n\
                       function usort(array $a, callable $cmp): array { echo \"shadow\"; return $a; }\n\
                       namespace App;\nuse function App\\Sorting\\usort;\n\

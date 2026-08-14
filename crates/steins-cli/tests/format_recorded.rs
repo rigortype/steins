@@ -1,8 +1,7 @@
 //! Recorded-output regression for the render seam (ADR-0054 slice C1): a
-//! format is a *serialization of the displayed surface*, so moving where
-//! serialization lives (into [`render`](../src/render.rs)) must not move a byte
-//! of it — recorded here rather than argued, since drift (a stray newline, a
-//! lost separator) is cheap to introduce and easy to miss.
+//! format is a serialization of the displayed surface, so moving where that
+//! lives (into [`render`](../src/render.rs)) must not move a byte — recorded
+//! here since drift (a stray newline, a lost separator) is easy to miss.
 //!
 //! The fixture mixes a fail-level proof finding and a warn-level debug dump, so
 //! both level spellings, `layer`/`level` JSON fields, and the exit code are
@@ -84,8 +83,8 @@ fn recorded(tag: &str, format: &str, expected: &str) {
     std::fs::write(dir.join("a.php"), FIXTURE).expect("write fixture");
     let (code, stdout) = run_in(&dir, &["check", "--no-php", "--format", format, "a.php"]);
     assert_eq!(stdout, expected, "`--format {format}` output drifted");
-    // ADR-0050 §7 is identity, not per-format (ADR-0054 §13 refuses `--exit-zero`
-    // and other format-dependent exits): one fail-level finding → every format exits 1.
+    // ADR-0050 §7 identity, not per-format (ADR-0054 §13 refuses `--exit-zero`):
+    // one fail-level finding → every format exits 1.
     assert_eq!(code, 1, "`--format {format}` exit code");
 }
 

@@ -14,9 +14,8 @@ use steins_syntax::SourceTree;
 fn findings(src: &str) -> Vec<Diagnostic> {
     let tree = SourceTree::parse(src);
     let functions = tree.functions().to_vec();
-    // The `untyped.*` family (ADR-0078, issue #200) reports on the FIXTURES' own
-    // declarations — deliberately untyped here — not on the behaviour under test.
-    // Dropped so every count below keeps meaning what it meant before the family landed.
+    // `untyped.*` (ADR-0078, #200) reports on the fixtures' own deliberately-untyped
+    // declarations, not the behaviour under test; dropped to keep counts meaningful.
     check(&tree, &functions, "demo.php")
         .into_iter()
         .filter(|d| !d.id.starts_with("untyped."))
@@ -30,7 +29,7 @@ fn n(src: &str) -> usize {
 /// `function width(int $w)` header + a bad string local `$bad = "abc"`.
 const HDR: &str = "<?php\nfunction width(int $w): int { return $w; }\n$bad = \"abc\";\n";
 
-// ---- cond-decided pruning, both directions --------------------------------
+// cond-decided pruning, both directions
 
 #[test]
 fn cond_true_walks_then_branch() {
@@ -46,8 +45,6 @@ fn cond_false_prunes_then_branch() {
 
 #[test]
 fn unreachable_after_terminating_then_emits_nothing() {
-    // A decided-true guard whose then-branch terminates makes the remainder
-    // unreachable: `width($bad)` after the `if` is not walked.
     let src = "<?php
 function width(int $w): int { return $w; }
 function f(): void {
@@ -68,7 +65,7 @@ function f(): void {
     assert_eq!(n(live), 1, "reachable tail → flagged (proves the pruning is real)");
 }
 
-// ---- fall-through joins ----------------------------------------------------
+// fall-through joins
 
 #[test]
 fn join_agree_keeps_fact() {
@@ -92,7 +89,7 @@ fn join_absent_in_one_branch_drops_fact() {
     assert_eq!(n(&src), 0, "fact absent on the else path → dropped → silent");
 }
 
-// ---- positive refinement ---------------------------------------------------
+// positive refinement
 
 #[test]
 fn positive_refinement_binds_then_branch() {
@@ -115,17 +112,14 @@ function f($x): void {
 }
 f(\"anything\");
 ";
-    // Direct pass: $x is a variable, unchanged in the reachable tail after the
-    // negated guard is filtered → $x === "abc" holds → width($x) flagged.
+    // Direct pass (variable, not descent): guard filtering narrows $x to the literal.
     assert_eq!(n(src), 1, "else of !== narrows to the literal on the fall-through → flagged");
 }
 
-// ---- early-exit pruning ----------------------------------------------------
+// early-exit pruning
 
 #[test]
 fn early_exit_unknown_stays_silent_no_negative_facts() {
-    // `if ($x === null) return;` with $x UNKNOWN: the fall-through carries no
-    // negative fact (stage 1), so $x stays unknown → silent.
     let src = "<?php
 function width(int $w): int { return $w; }
 function f($x): void {
@@ -138,8 +132,7 @@ function f($x): void {
 
 #[test]
 fn early_exit_bound_null_makes_tail_dead() {
-    // The same guard when $x is BOUND null (via descent): the guard is Yes, the
-    // then-branch returns, and the tail is dead → silent (dead-path proof).
+    // Contrast with the UNKNOWN case above: $x here is BOUND null (via descent).
     let src = "<?php
 declare(strict_types=1);
 function width(int $w): int { return $w; }
@@ -152,7 +145,7 @@ f(null);
     assert_eq!(n(src), 0, "bound-null guard → then returns → tail unreachable → silent");
 }
 
-// ---- elseif chains + nested ifs -------------------------------------------
+// elseif chains + nested ifs
 
 #[test]
 fn elseif_chain_selects_matching_arm() {
@@ -168,20 +161,18 @@ fn nested_ifs_preserve_untouched_fact() {
     assert_eq!(n(&src), 1, "nested ifs not writing $bad → fact survives → flagged");
 }
 
-// ---- loop inside if stays conservative ------------------------------------
+// loop inside if stays conservative
 
 #[test]
 fn loop_inside_if_still_opaque() {
-    // A loop nested in a then-branch stays `Opaque`: it writes `$bad`, so on the
-    // then path the fact is dropped; the join with the else path then drops it
-    // entirely → silent (the ratchet: loops are still conservative).
+    // The ratchet: a loop nested in a then-branch stays `Opaque`, so it drops $bad.
     let src = format!(
         "{HDR}if ($cond) {{ while ($x) {{ $bad = 5; }} }}\nwidth($bad);"
     );
     assert_eq!(n(&src), 0, "loop-in-if writes $bad → dropped on that path → join drops it → silent");
 }
 
-// ---- ternary values --------------------------------------------------------
+// ternary values
 
 #[test]
 fn ternary_decided_true_picks_then_arm() {
@@ -207,7 +198,7 @@ fn ternary_undecided_agreeing_arms_is_singleton() {
     assert_eq!(n(&src), 1, "undecided ternary with equal arms → Singleton → flagged");
 }
 
-// ---- call.on-null ----------------------------------------------------------
+// call.on-null
 
 #[test]
 fn call_on_null_fires_inside_null_guard() {
@@ -250,12 +241,10 @@ function f($c): void {
     assert_eq!(n(src), 0, "OneOf of null and a string receiver → not proven null → silent");
 }
 
-// ---- call.on-null on a depth-1 property-fetch receiver (ADR-0052 §7, Gap B) --
+// call.on-null on a depth-1 property-fetch receiver (ADR-0052 §7, Gap B)
 
 #[test]
 fn call_on_null_fires_on_proven_null_prop_receiver() {
-    // `$h->p` is proven null on this path (explicit write); the direct receiver
-    // `$h->p->m()` is a guaranteed Error — previously silent (receiver was `Dynamic`).
     let src = "<?php
 class A { public function m(): void {} }
 class H { public ?A $p = null; }
@@ -274,9 +263,8 @@ $h->p->m();
 
 #[test]
 fn call_on_null_prop_receiver_silent_after_escape() {
-    // The object escapes to an unknown call, sweeping its non-readonly props, so the
-    // null fact is gone by the receiver deref (read through the surviving alias, which
-    // isolates the sweep from the pass-to-call unbinding of `$h`) — silence.
+    // Escape to an unknown call sweeps non-readonly props; read via the surviving
+    // alias `$a` (not `$h`) to isolate the sweep from call-arg unbinding.
     let src = "<?php
 class A { public function m(): void {} }
 class H { public ?A $p = null; }
@@ -292,7 +280,6 @@ $a->p->m();
 
 #[test]
 fn call_on_null_prop_receiver_silent_for_nullsafe() {
-    // `$h->p?->m()` on a null prop is defined (short-circuits) → never fires.
     let src = "<?php
 class A { public function m(): void {} }
 class H { public ?A $p = null; }
@@ -324,7 +311,7 @@ function f($x): void {
 
 #[test]
 fn call_on_null_depth_2_chain_stays_silent() {
-    // Depth stays exactly 1: `$h->p->q->m()` receiver is a chain → `Dynamic` → silent.
+    // Depth stays exactly 1: a chained receiver is `Dynamic`, not represented.
     let src = "<?php
 class H { public ?H $p = null; }
 $h = new H();
@@ -334,11 +321,10 @@ $h->p->q->m();
     assert_eq!(n(src), 0, "depth-2 receiver chain → not represented → silent");
 }
 
-// ---- empirical `==` cells (PHP 8.5.8; see php_loose_eq rustdoc) ------------
+// empirical `==` cells (PHP 8.5.8; see php_loose_eq rustdoc)
 
-/// Whether the then-branch of `if ($x <op> <rhs>)` is LIVE, observed by whether a
-/// bad propagated value inside it is flagged. A *decided* guard (both operands
-/// known literals) is Yes → 1 or No → 0, so this reads off the `==` verdict.
+/// Whether the then-branch of `if ($x <op> <rhs>)` is LIVE: a decided guard
+/// reads Yes → 1 or No → 0, so this reads off the `==` verdict.
 fn cell_live(x_lit: &str, cmp: &str) -> bool {
     let src = format!("{HDR}$x = {x_lit};\nif ($x {cmp}) {{ width($bad); }}\n");
     n(&src) == 1
@@ -346,7 +332,6 @@ fn cell_live(x_lit: &str, cmp: &str) -> bool {
 
 #[test]
 fn empirical_loose_eq_cells_decide_branches() {
-    // Each cell was measured against PHP 8.5.8 (see the `php_loose_eq` table).
     assert!(cell_live("null", "== null"), "null == null → T");
     assert!(cell_live("null", "== 0"), "null == 0 → T");
     assert!(cell_live("null", "== \"\""), "null == \"\" → T");
@@ -367,9 +352,8 @@ fn empirical_loose_eq_cells_decide_branches() {
     assert!(!cell_live("[]", "== 0"), "[] == 0 → F");
 }
 
-/// Review counterexample (ADR-0002 live-path discipline): the env-free direct
-/// pass must not report inside proven-dead regions — a decided guard's skipped
-/// side and the tail after a terminating decided branch are not live paths.
+/// Review counterexample (ADR-0002 live-path discipline): the direct pass must
+/// not report inside proven-dead regions.
 #[test]
 fn direct_pass_respects_proven_dead_regions() {
     // Tail after `if (<decided-true>) { return; }` is dead in three spellings.

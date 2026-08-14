@@ -3,17 +3,15 @@
 //!
 //! The three contract-layer consumers turn a definite `No` from
 //! `admits_fact(ty, Fact::Shape { … })` into a `phpdoc.*-mismatch`, so the
-//! hazard here is **inverted** relative to the rest of the analyzer: a
-//! wrong `No` is a user-facing false positive, not a missed finding. Each
-//! firing test therefore names the witness that makes every value the fact
-//! admits a contract violation, and the silent ones are the FP-killer pins.
+//! hazard here is **inverted**: a wrong `No` is a user-facing false positive,
+//! not a missed finding. Firing tests name the witness that makes every
+//! admitted value a contract violation; silent tests are the FP-killer pins.
 //!
-//! Where the facts come from: a declared `@param array{…}`/`array<K, V>`
-//! seeds the contract-arm shape (ADR-0062 S3), a builtin return seeds one
-//! through the functionMap (`explode`), and the #81 floor seeds one for a
-//! single-array-arm row (`imagecolorsforindex`). All three arrive at the
-//! **`Asserted`** stratum, which the phpdoc contract checks accept by design —
-//! only the *native* `type.return-mismatch` demands `Verified`.
+//! Facts arrive via: a declared `@param array{…}`/`array<K, V>` (ADR-0062 S3),
+//! a builtin return (`explode`), or the #81 floor for a single-array-arm row
+//! (`imagecolorsforindex`) — all at the **`Asserted`** stratum, which the
+//! phpdoc contract checks accept by design (only the *native*
+//! `type.return-mismatch` demands `Verified`).
 
 use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, RETURN_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -45,8 +43,7 @@ fn param_case(declared: &str, ty: &str) -> String {
 // (a) An array-bearing argument against an array-*incapable* contract.
 
 /// The witness is any member at all: every value the fact admits is an array,
-/// and no array is a string. `explode()` seeds `list<string>` through the
-/// functionMap, so this is the abstract-fact path, not the proven-value one.
+/// and no array is a string (`explode()` seeds `list<string>` via functionMap).
 #[test]
 fn a_list_fact_violates_a_string_param() {
     let src = "<?php
@@ -125,9 +122,8 @@ function f(string $x): void { $a = explode(',', $x); g($a); }
 
 // (d) The FP-killer: unknown slots and unknown list-ness refute nothing.
 
-/// Plain `array` knows nothing — no field, an untyped unsealed tail,
-/// `is_list == Maybe`. It must refute no array-shaped contract whatsoever, or
-/// every `array`-typed parameter in the corpus becomes a finding.
+/// Plain `array` knows nothing — no field, unsealed tail, `is_list == Maybe`.
+/// It must refute no array-shaped contract, or every `array` param becomes a finding.
 #[test]
 fn the_degenerate_shape_fires_nothing() {
     for ty in [
@@ -149,8 +145,7 @@ fn the_degenerate_shape_fires_nothing() {
 }
 
 /// A shape whose *value* slots the fact domain cannot express (`mixed` lowers
-/// to no fact, A-G1a) must not refute through them: only the parts the fact
-/// actually knows may.
+/// to no fact, A-G1a) must not refute through them — only known parts may.
 #[test]
 fn unknown_value_slots_fire_nothing() {
     for ty in [
@@ -189,9 +184,9 @@ fn a_may_have_key_fires_nothing() {
     assert_eq!(param_count(&param_case("array<string, int>", "array{}")), 0);
 }
 
-/// A `non-empty-array` fact forces every member to carry *some* entry, but the
-/// contract may declare the key it lands on — `['a' => 1]` satisfies
-/// `array{a: int}`. Only a contract with no field for it to land in refutes.
+/// A `non-empty-array` fact forces every member to carry some entry, but the
+/// contract may declare that key (`['a' => 1]` satisfies `array{a: int}`) —
+/// only a fieldless contract refutes.
 #[test]
 fn a_forced_entry_does_not_refute_a_contract_that_declares_its_key() {
     assert_eq!(param_count(&param_case("non-empty-array", "array{a: int}")), 0);
@@ -200,17 +195,14 @@ fn a_forced_entry_does_not_refute_a_contract_that_declares_its_key() {
 }
 
 /// Union verdicts are member-wise exact for disjointness (ADR-0072 as-built
-/// amendment — this relation takes NO ADR-0071 haircut): a union fires iff
-/// every member is provably disjoint from the fact, and stays silent the
-/// moment one member merely *might* admit it.
+/// amendment — no ADR-0071 haircut): a union fires iff every member is
+/// provably disjoint, and stays silent if one member merely *might* admit it.
 #[test]
 fn a_union_fires_iff_every_member_refutes() {
-    // `array{a: int}` is definitely keyed (required string key ⇒ not a list),
-    // so `string` AND `list<int>` are each disjoint — the union genuinely
-    // refutes, the true positive a haircut would have cost.
+    // `array{a: int}` is definitely keyed (not a list), so both `string` and
+    // `list<int>` are disjoint — the union genuinely refutes.
     assert_eq!(param_count(&param_case("array{a: int}", "string|list<int>")), 1);
-    // `non-empty-array` may admit the fact's members → Maybe survives the
-    // fold → silent, with no haircut needed to say so.
+    // `non-empty-array` may admit the fact's members → Maybe survives → silent.
     assert_eq!(param_count(&param_case("array{a: int}", "list<int>|non-empty-array")), 0);
     // Every member array-incapable → disjoint outright.
     assert_eq!(param_count(&param_case("array{a: int}", "string|int")), 1);
@@ -231,11 +223,8 @@ fn a_nullable_shape_fact_splits_its_two_halves() {
 
 // (e) The #81 floor's shape at the return check — the `Asserted` stratum.
 
-/// `imagecolorsforindex` has a single array arm, so the ADR-0069 floor seeds a
-/// `Fact::Shape` for `$r`. The phpdoc return check consumes facts at the
-/// `Asserted` stratum by design (the `Verified` gate above it belongs to the
-/// *native* `type.return-mismatch`), so the shape reaches the contract layer
-/// and the string contract refutes every member of it.
+/// `imagecolorsforindex`'s floor-seeded shape reaches the return check at the
+/// `Asserted` stratum (see module doc) and the string contract refutes it.
 #[test]
 fn the_floor_seeded_shape_violates_a_string_return() {
     let src = "<?php
