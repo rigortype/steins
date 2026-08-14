@@ -12,7 +12,8 @@
 //! `corpus/symfony__console/Helper/QuestionHelper.php:356`.
 
 use steins_infer::{
-    CALL_ON_NULL_ID, DEBUG_TYPE_ID, Diagnostic, Folder, OFFSET_MISSING_ID, check, check_with,
+    CALL_ON_NULL_ID, DEBUG_TYPE_ID, Diagnostic, Folder, OFFSET_MISSING_ID, SidecarFolder, check,
+    check_with,
 };
 use steins_syntax::{ArgValue, SourceTree};
 
@@ -158,4 +159,80 @@ fn a_byte_string_is_not_sent_to_the_fold_wire() {
         got.starts_with("int<"),
         "an int envelope, not a constant: {got}"
     );
+}
+
+/// The `dumpType` body for `$x = <expr>;` against a **live** sidecar, or `None`
+/// when `php` cannot be reached.
+///
+/// The two pins below need the real engine, not [`dumped`]'s `NoFold`: their
+/// subject is what the *runner* does when a call whose arguments are perfectly
+/// sendable returns bytes JSON cannot carry. Only a request that actually reaches
+/// PHP exercises that branch.
+fn live_dumped(test: &str, expr: &str) -> Option<String> {
+    let mut folder = SidecarFolder::enabled();
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+        eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
+        return None;
+    }
+    let src = format!("<?php\n$x = {expr};\n\\PHPStan\\dumpType($x);\n");
+    let tree = SourceTree::parse(&src);
+    let functions = tree.functions().to_vec();
+    let ds: Vec<Diagnostic> = check_with(&tree, &functions, "test.php", &mut folder)
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .collect();
+    assert_eq!(ds.len(), 1, "expected one dump for `{expr}`, got {ds:?}");
+    Some(ds[0].message.replace("dumped type: ", ""))
+}
+
+/// The mirror of the test above, on the **result** side: the argument here is
+/// plain ASCII and is sent, and it is the *answer* that JSON cannot carry.
+/// `base64_decode('wA==')` is the single byte `\xC0`, so the runner widens rather
+/// than reporting a lossy U+FFFD, and the call falls back to its declared envelope.
+///
+/// This branch existed in the runner from the start and was pinned nowhere, in
+/// either result form. Restoring the exact fold is ADR-0080 §3.1's tagged bytes.
+#[test]
+fn a_scalar_byte_string_result_widens_rather_than_folding_lossily() {
+    let Some(got) = live_dumped(
+        "a_scalar_byte_string_result_widens_rather_than_folding_lossily",
+        r#"base64_decode("wA==")"#,
+    ) else {
+        return;
+    };
+    // `unknown` is this harness's envelope: a declined fold leaves the call with
+    // whatever the surface declares, and a one-file check with no project
+    // reflection declares nothing for `base64_decode`. The pin that matters is
+    // negative — no lossy value appears where PHP produced a byte.
+    assert_eq!(got, "unknown", "the envelope, not a lossy value");
+    // The sibling that IS representable folds, so the widen above is the value's
+    // bytes and not a disabled folder.
+    let ascii = live_dumped("a_scalar_byte_string_result_widens_rather_than_folding_lossily", r#"base64_decode("YWJj")"#);
+    assert_eq!(ascii.as_deref(), Some("'abc'"));
+}
+
+/// And the array form, now that array results cross the seam (ADR-0028's
+/// 2026-08-14 amendment, issue #330): one byte string **anywhere** inside widens
+/// the whole result, because a partial array would be a wrong value rather than a
+/// wider one.
+///
+/// `substr_replace` slices **bytes**, so cutting one byte off `"À"` (`C3 80`)
+/// leaves a lone `\x80` — an array result that no argument had to be binary to
+/// produce. The wave-0 name reaching its own new result path is the point.
+#[test]
+fn a_byte_string_inside_an_array_result_widens_the_whole_array() {
+    let Some(got) = live_dumped(
+        "a_byte_string_inside_an_array_result_widens_the_whole_array",
+        r#"substr_replace(["Àb"], "", 0, 1)"#,
+    ) else {
+        return;
+    };
+    assert!(!got.starts_with("list{"), "no array value survives a binary element: {got}");
+    // The same call over a subject whose bytes DO survive JSON folds, so the widen
+    // above is the encoding and not the array path.
+    let clean = live_dumped(
+        "a_byte_string_inside_an_array_result_widens_the_whole_array",
+        r#"substr_replace(["ab"], "", 0, 1)"#,
+    );
+    assert_eq!(clean.as_deref(), Some("list{'b'}"));
 }

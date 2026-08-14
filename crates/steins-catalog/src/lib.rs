@@ -85,9 +85,10 @@ pub mod preg;
 /// This permits array-taking entries such as `sprintf`, `str_replace`, `in_array`,
 /// `count`, and `implode` (issue #39).
 ///
-/// A folded *result* is still scalar-only: a builtin that returns an array (say
-/// `str_replace` over an array subject) widens, because carrying an array back
-/// would seed synthesized array facts rather than read written ones (#41/#42).
+/// A folded *result* may likewise be a scalar or an array (ADR-0028's 2026-08-14
+/// amendment, issue #330): `str_replace` over an array subject comes back as the
+/// array the engine built. It lands on the concrete value path, so it reads a
+/// value PHP produced rather than synthesizing an array shape.
 ///
 /// # Where the list lives
 ///
@@ -220,11 +221,13 @@ pub fn width_refused_names() -> &'static [&'static str] {
 ///   `str_ends_with` return a bool from a byte comparison, and `gettype` returns
 ///   one word from a fixed vocabulary.
 ///
-/// `substr_replace` is listed for its **scalar** subject. Handed an array subject
-/// it returns an array, and an array *result* widens on the Rust side exactly as
-/// `str_replace`'s does — the same documented #41/#42 boundary, reached by the same
-/// path, and identical on both engines (`substr_replace(["aa","bb"], "X", 0)` is
-/// `["X","X"]` on each, so there is nothing for the width classification to catch).
+/// `substr_replace` is classified above for its **scalar** subject. Handed an array
+/// subject it returns an array, which **folds** since ADR-0028's 2026-08-14
+/// amendment (issue #330) — exactly as `str_replace`'s array result does, reached
+/// by the same path. The row needed no re-verification for it: the array form is
+/// identical on both engines (`substr_replace(["aa","bb"], "X", 0)` is `["X","X"]`
+/// on each), so there is nothing for the width classification to catch, which is
+/// precisely why these two names were the amendment's first wave.
 const WIDTH_SAFE: &[&str] = &[
     "strtolower",
     "strtoupper",
