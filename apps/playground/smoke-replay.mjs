@@ -222,6 +222,32 @@ assert(
   "the value a 64-bit engine would have folded never appears on a 32-bit one",
 );
 
+// 5b. Issue #354, both verdicts against the REAL engine rather than a table.
+//     `str_split` probed clean, so the browser folds it — and this is the first
+//     time it folds a builtin whose result is an ARRAY, since every array-
+//     returning name before this slice was refused or unverified here. `range`
+//     probed dirty and must not fold: `range("3000000000", "3000000000")` is a
+//     list of int on a 64-bit engine and of float on this one, which is exactly
+//     the argument below, so a regression admitting the name would show up as a
+//     value rather than as a type.
+const SAFE_354 = '<?php\n\\PHPStan\\dumpType(str_split("abcdef", 2));\n';
+const safe354 = await driveReplay({ analyze: analyzer(SAFE_354), answer, table });
+const safeDump = safe354.value.findings.find((f) => f.id === "debug.type");
+console.log(`str_split dump: ${safeDump && safeDump.message}`);
+assert(
+  safeDump !== undefined && safeDump.message === "dumped type: list{'ab', 'cd', 'ef'}",
+  `a newly width-safe array result folds in the browser (got: ${safeDump && safeDump.message})`,
+);
+
+const REFUSED_354 = '<?php\n\\PHPStan\\dumpType(range("3000000000", "3000000000"));\n';
+const refused354 = await driveReplay({ analyze: analyzer(REFUSED_354), answer, table });
+const refused354Dump = refused354.value.findings.find((f) => f.id === "debug.type");
+console.log(`range dump: ${refused354Dump && refused354Dump.message}`);
+assert(
+  refused354Dump !== undefined && !refused354Dump.message.startsWith("dumped type: list{"),
+  `the width-refused \`range\` widens to a type here (got: ${refused354Dump && refused354Dump.message})`,
+);
+
 // 6. `env` is asked exactly once, on the first iteration, and never again — the
 //    property the whole memo table exists for. The flagship takes TWO batches:
 //    one to learn the machine (and reflect `greet`), one to fold `str_repeat`
