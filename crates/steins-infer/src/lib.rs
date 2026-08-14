@@ -1494,6 +1494,23 @@ pub trait Folder {
         None
     }
 
+    /// Whether the builtin `name` returns a legacy PHP **resource**, and whether
+    /// that return carries a `false` failure arm (ADR-0056 §8). `Some(true)` is
+    /// `resource|false`, `Some(false)` a bare `resource`.
+    ///
+    /// The one return fact that cannot ride the reflected envelope, because PHP
+    /// has no syntax to declare it: `fopen` reports no return type and never will.
+    /// §7's gate replaces the envelope's authority with three conditions, and this
+    /// method is where all three meet — the catalog row (the php-src stub reading
+    /// at the pin), the engine declaring NO return type for the name (the
+    /// resource-to-object migration tripwire: an engine that answers
+    /// `CurlHandle|false` has disowned the row), and the project minor equalling
+    /// the catalog pin. The default is `None`, the sound subset as everywhere else.
+    fn builtin_resource_return(&mut self, name: &str) -> Option<bool> {
+        let _ = name;
+        None
+    }
+
     /// The **reflected parameter counts** of a uniquely-resolved builtin `name` —
     /// `(getNumberOfParameters(), getNumberOfRequiredParameters())` off the running
     /// engine's own signature.
@@ -1661,6 +1678,10 @@ pub struct EngineFolder<E: FoldEngine> {
     /// Per-name memo of the raw reflected return-type declaration (ADR-0062 S7's
     /// projection gate), the string sibling of [`Self::return_fact_memo`].
     return_type_memo: HashMap<String, Option<String>>,
+    /// Per-name memo of the ADR-0056 §8 resource-return answer. Rides the same
+    /// `reflect` reply as the two memos above — §7's tripwire is a question about
+    /// that reply, not a second round trip.
+    resource_return_memo: HashMap<String, Option<bool>>,
     /// Per-name memo of the reflected `(total, required)` parameter counts —
     /// ADR-0064's mixed-pin second leg, riding the same `reflect` reply as the two
     /// memos above and following the same per-name pattern.
@@ -1741,6 +1762,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             boot_surface_label: None,
             return_fact_memo: HashMap::new(),
             return_type_memo: HashMap::new(),
+            resource_return_memo: HashMap::new(),
             param_counts_memo: HashMap::new(),
             preg_refusal_memo: HashMap::new(),
             boot_surface_const_memo: HashMap::new(),
@@ -2001,6 +2023,44 @@ impl<E: FoldEngine> EngineFolder<E> {
         refl.function_exists.then_some(refl.return_type).flatten()
     }
 
+    /// Compute the resource-return answer for `key` (already lowercased) — the
+    /// ADR-0056 §8 gate, whose three conditions are checked here in the order that
+    /// makes the reasoning readable. Called once per name; memoized by
+    /// [`Folder::builtin_resource_return`].
+    fn compute_builtin_resource_return(&mut self, key: &str) -> Option<bool> {
+        // Gate 1 — the same live-engine / no-monkey-patching posture every other
+        // return rung takes (ADR-0049 A9). Without an engine there is no tripwire
+        // to check, and a row admitted without its tripwire is the whole thing §7
+        // is designed to prevent.
+        if !self.absence_family_available() {
+            return None;
+        }
+        // Gate 2 — the minor pin. The stub was read at `PINNED_PHP` and says
+        // nothing about any other minor (ADR-0056 §2).
+        if !self.curated_rows_admitted() {
+            return None;
+        }
+        let refl = self.engine.reflect(key)?;
+        // A name this engine does not have is not this engine's resource producer,
+        // whatever the pinned stubs said — an unloaded extension, or a function
+        // removed since the pin.
+        if !refl.function_exists {
+            return None;
+        }
+        // Gate 3 — THE TRIPWIRE. Silence is the evidence: PHP cannot spell a
+        // `resource` return, so a genuine resource producer declares nothing. An
+        // engine that DOES declare something has migrated the function to an
+        // object (`curl_init` → `CurlHandle|false`) — it has spoken, and §1's
+        // precedence rule says curation yields to the engine without exception.
+        // This is what refuses the 89 rotted `functionMap` names (ADR-0069 §5)
+        // with no denylist, and what will switch `fopen` off by itself on the day
+        // some future PHP migrates it.
+        if refl.return_type.is_some() {
+            return None;
+        }
+        steins_catalog::resource_return(key)
+    }
+
     /// The reflected `(total, required)` parameter counts for `key` (already
     /// lowercased), under the same gate the two computations above apply. Called
     /// once per name; [`Folder::builtin_param_counts`] memoizes.
@@ -2161,6 +2221,16 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         }
         let answer = self.compute_builtin_return_type(&key);
         self.return_type_memo.insert(key, answer.clone());
+        answer
+    }
+
+    fn builtin_resource_return(&mut self, name: &str) -> Option<bool> {
+        let key = name.to_ascii_lowercase();
+        if let Some(cached) = self.resource_return_memo.get(&key) {
+            return *cached;
+        }
+        let answer = self.compute_builtin_resource_return(&key);
+        self.resource_return_memo.insert(key, answer);
         answer
     }
 
@@ -10026,6 +10096,41 @@ impl<'a> Cx<'a> {
         Diagnostic { id: ID, path: self.path().to_owned(), line: pos.line, column: pos.column, message, facet: None, fix: None }
     }
 
+    /// Build the resource flavour of a `type.argument-mismatch` diagnostic
+    /// (ADR-0056 §8) — same id, same shape, one deliberate difference in the tail.
+    ///
+    /// [`Self::diagnostic`] closes with the file's coercion mode because for every
+    /// other value it is load-bearing: a `__toString` object into a `string`
+    /// parameter is an error in strict mode and fine in coercive, so naming the
+    /// mode tells the reader which half of the world they are in. A resource has
+    /// no coercion path into anything, so naming the mode here would invite exactly
+    /// the wrong fix — dropping `declare(strict_types=1)` changes nothing, and the
+    /// tail says so instead of implying the opposite.
+    fn resource_diagnostic(
+        &self,
+        offset: u32,
+        var: &str,
+        callee: &str,
+        param_name: &str,
+        ty: &NativeType,
+    ) -> Diagnostic {
+        let pos = self.tree().position(offset);
+        let tail = "proven TypeError (a resource coerces to nothing, in either mode)";
+        let message = format!(
+            "argument ${var} (holds a resource) to {callee}() cannot become {} ${param_name} — {tail}",
+            ty.render(),
+        );
+        Diagnostic {
+            id: ID,
+            path: self.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message,
+            facet: None,
+            fix: None,
+        }
+    }
+
     /// Build a `type.return-mismatch` diagnostic. `display` is the owning
     /// function/method name (`f`, `Foo::bar`); `mode` is governed by the owning
     /// file's `declare(strict_types=1)` — the file this `Cx` points at.
@@ -13676,6 +13781,30 @@ fn apply_assign(
                     env.insert(var.to_owned(), Known::value(fact, line, None));
                     store.unbind(var);
                 }
+                // The RESOURCE rung (ADR-0056 §8). It sits here, below the
+                // reflected envelope and above the declared floor, and the position
+                // is the argument: the envelope always wins where it exists, and
+                // this rung fires only where it structurally cannot — PHP has no
+                // syntax for a `resource` return type, so `fopen` declares nothing
+                // and the rung above returned `None` for a reason that is not
+                // ignorance. The gate (`builtin_resource_return`) has already
+                // checked that this engine still declares nothing for the name,
+                // which is what separates "cannot say it" from "no longer true".
+                //
+                // ARM LANE ONLY, and `Verified`. There is no value-lane fact to
+                // seed: no `Val` is a resource and none is coming (ADR-0035/0038),
+                // so `env` is cleared rather than left holding a stale binding.
+                // The `false` arm is an ordinary literal arm, subtracted by the
+                // ordinary `=== false` guard machinery — which is the entire
+                // narrowing story, no resource-specific branch anywhere.
+                ArgValue::Call(name, _)
+                    if !w.scope.poisoned
+                        && let Some(arms) = builtin_resource_arms(cx, folder, name) =>
+                {
+                    store.unbind(var);
+                    env.remove(var);
+                    store.contract.insert(var.to_owned(), arms);
+                }
                 // The DECLARED-RETURN FLOOR (ADR-0069): strictly below the rung
                 // above, reached only where the engine said nothing about this name.
                 // Enters `Asserted` — a catalog declaration, not a runtime answer —
@@ -17127,6 +17256,12 @@ enum RtKind {
     String,
     Array,
     Object,
+    /// `gettype()` reports `resource` (or `resource (closed)` for a closed one —
+    /// one kind here, since no `is_*` predicate separates them and Steins does
+    /// not model the state). No [`Val`] maps here: the kind exists for the
+    /// [`ContractTy::Resource`] arm alone (ADR-0056 §8), which is exactly why
+    /// every predicate below rejects it.
+    Resource,
 }
 
 /// The **exhaustive** set of runtime kinds an arm's values can have, or `None`
@@ -17134,7 +17269,7 @@ enum RtKind {
 /// Unknown keeps the arm on both polarities.
 fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
     use ContractTy as C;
-    use RtKind::{Array, Bool, Float, Int, Null, Object, String as Str};
+    use RtKind::{Array, Bool, Float, Int, Null, Object, Resource, String as Str};
     Some(match arm {
         C::Null => &[Null],
         C::Base(Base::Int) | C::IntIn(_) | C::LitInt(_) => &[Int],
@@ -17146,6 +17281,7 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
         C::Base(Base::Bool) | C::LitBool(_) => &[Bool],
         C::ArrayAny { .. } | C::ListOf { .. } | C::MapOf { .. } | C::Shape { .. } => &[Array],
         C::Class(_) | C::ObjectAny => &[Object],
+        C::Resource => &[Resource],
         // `iterable` is `array|Traversable`; `callable` is a callable-string, a
         // `[obj, 'm']`/`['C', 'm']` pair-array, a Closure or an `__invoke`able.
         C::IterableOf { .. } => &[Array, Object],
@@ -17159,30 +17295,38 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
 /// `(kinds the predicate definitely accepts, kinds it definitely rejects)`. A kind
 /// in neither set is undecidable for that predicate (`is_callable` on a string, on
 /// an array, or on an object; `is_iterable` on an object).
+///
+/// Every predicate here **rejects** [`RtKind::Resource`], with no exception to
+/// write down: PHP's `is_*` family answers `false` for a resource across the
+/// board — `is_scalar`, `is_callable` and `is_iterable` included (probed at
+/// 8.5.9). `is_resource` itself is the one predicate that would answer `true`,
+/// and it is deliberately not a [`TypePred`] yet (ADR-0056 §8 deferral): it would
+/// need the *positive* branch to bind a resource fact, which is a producer
+/// question, not an arm-filtering one.
 fn pred_kind_sets(pred: TypePred) -> (&'static [RtKind], &'static [RtKind]) {
-    use RtKind::{Array, Bool, Float, Int, Null, Object, String as Str};
+    use RtKind::{Array, Bool, Float, Int, Null, Object, Resource, String as Str};
     match pred {
-        TypePred::Str => (&[Str], &[Null, Bool, Int, Float, Array, Object]),
-        TypePred::Int => (&[Int], &[Null, Bool, Float, Str, Array, Object]),
-        TypePred::Float => (&[Float], &[Null, Bool, Int, Str, Array, Object]),
-        TypePred::Bool => (&[Bool], &[Null, Int, Float, Str, Array, Object]),
-        TypePred::Array => (&[Array], &[Null, Bool, Int, Float, Str, Object]),
-        TypePred::Null => (&[Null], &[Bool, Int, Float, Str, Array, Object]),
-        TypePred::Object => (&[Object], &[Null, Bool, Int, Float, Str, Array]),
+        TypePred::Str => (&[Str], &[Null, Bool, Int, Float, Array, Object, Resource]),
+        TypePred::Int => (&[Int], &[Null, Bool, Float, Str, Array, Object, Resource]),
+        TypePred::Float => (&[Float], &[Null, Bool, Int, Str, Array, Object, Resource]),
+        TypePred::Bool => (&[Bool], &[Null, Int, Float, Str, Array, Object, Resource]),
+        TypePred::Array => (&[Array], &[Null, Bool, Int, Float, Str, Object, Resource]),
+        TypePred::Null => (&[Null], &[Bool, Int, Float, Str, Array, Object, Resource]),
+        TypePred::Object => (&[Object], &[Null, Bool, Int, Float, Str, Array, Resource]),
         // `is_scalar(null)` and `is_scalar([])` are both false — PHP's "scalar"
         // is exactly int|float|string|bool.
-        TypePred::Scalar => (&[Bool, Int, Float, Str], &[Null, Array, Object]),
+        TypePred::Scalar => (&[Bool, Int, Float, Str], &[Null, Array, Object, Resource]),
         // `is_iterable` is `is_array($x) || $x instanceof Traversable`; an object
         // arm is therefore undecided without the is-a oracle, and stays `Maybe`.
-        TypePred::Iterable => (&[Array], &[Null, Bool, Int, Float, Str]),
+        TypePred::Iterable => (&[Array], &[Null, Bool, Int, Float, Str, Resource]),
         // `is_callable` accepts no *kind* outright (a string may name a function,
         // an array may be a `[obj, 'm']` pair, an object may be `__invoke`able),
         // and rejects the four kinds that can never be callable.
-        TypePred::Callable => (&[], &[Null, Bool, Int, Float]),
+        TypePred::Callable => (&[], &[Null, Bool, Int, Float, Resource]),
         // `is_numeric(true)` is FALSE — bools are not numeric. The string kind is
         // decided by the arm's own predicate set, not by its kind, so it appears
         // in neither list here (see `pred_holds_on_arm`).
-        TypePred::Numeric => (&[Int, Float], &[Null, Bool, Array, Object]),
+        TypePred::Numeric => (&[Int, Float], &[Null, Bool, Array, Object, Resource]),
     }
 }
 
@@ -21013,6 +21157,31 @@ fn check_propagated_call(
                     arg.span.start,
                     &ArgValue::Var(name.clone()),
                     Some(&format!("holds a {}", simple_class(class))),
+                    &decl.name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
+            }
+            // A variable whose contract lane is a bare `Verified` resource
+            // (ADR-0056 §8) — the resource sibling of the object branch above,
+            // and the same shape of claim: a non-scalar the value lattice has no
+            // inhabitant for, proven for this variable on this branch, judged
+            // against the native parameter type.
+            //
+            // Not guard-blind, unlike the object branches: `object_world_guard_blind`
+            // exists because a callee's in-body `instanceof` can narrow a rebound
+            // object, and there is no guard in PHP that narrows a value INTO being
+            // a resource — `is_resource` only confirms what the lane already says.
+            if !native_fired
+                && !poisoned
+                && let ArgValue::Var(name) = &arg.value
+                && store_holds_resource(store, name)
+                && cx.resource_is_type_error(ty)
+            {
+                out.push(cx.resource_diagnostic(
+                    arg.span.start,
+                    name,
                     &decl.name,
                     &param.name,
                     ty,
@@ -28009,6 +28178,23 @@ fn check_method_args(
                 ));
                 native_fired = true;
             }
+            // The resource sibling of the branch above (ADR-0056 §8); see the
+            // twin in the propagation pass for why it is not guard-blind.
+            if !native_fired
+                && !poisoned
+                && let ArgValue::Var(name) = &arg.value
+                && store_holds_resource(store, name)
+                && cx.resource_is_type_error(ty)
+            {
+                out.push(cx.resource_diagnostic(
+                    arg.span.start,
+                    name,
+                    callee_name,
+                    &param.name,
+                    ty,
+                ));
+                native_fired = true;
+            }
         }
 
         if !native_fired
@@ -28494,6 +28680,11 @@ enum CVal {
     Scalar(ArgValue),
     Array(Vec<(NormKey, CVal)>),
     Object(String, Vec<GenericCarry>),
+    /// A legacy PHP **resource** handle (ADR-0056 §8). Carries nothing: there is
+    /// no resource hierarchy to name and the open/closed state is not modeled, so
+    /// the kind IS the whole fact — which is also why it needs no exactness flag
+    /// where [`CVal::Object`] does. Being a resource is never a lower bound.
+    Resource,
 }
 
 /// One class-level generic parameterization an object carries: the FQN of the class
@@ -28922,6 +29113,8 @@ impl<'a> Cx<'a> {
                     // A `OneOf` fact is not one proven value → not a `CVal`.
                     let v = k.singleton()?;
                     self.resolve_cval(&v, env, store, poisoned, folder)
+                } else if store_holds_resource(store, name) {
+                    Some(CVal::Resource)
                 } else if store.is_exact(name) {
                     // Only an EXACT object becomes a `CVal::Object` (audit G1): the
                     // phpdoc-acceptance consumer draws a No-side `is_a` conclusion from
@@ -29009,6 +29202,41 @@ impl<'a> Cx<'a> {
     /// irrelevant to an object value — an object is never `null`.
     fn object_is_type_error(&self, ty: &NativeType, class_fqn: &str) -> bool {
         ty.members.iter().all(|m| self.member_rejects_object(m, class_fqn))
+    }
+
+    /// Whether the native type `ty` **definitively rejects** a resource
+    /// (ADR-0056 §8) — every union member does, and `ty.nullable` is irrelevant
+    /// because no resource is null.
+    ///
+    /// Stronger than [`Self::object_is_type_error`] in one specific way, and the
+    /// difference is the point: the object version has to demote `string` to a
+    /// strict-mode-only reject, because a `__toString` object really does coerce
+    /// into a `string` parameter in coercive mode. **There is no `__toResource`.**
+    /// PHP offers a resource no coercion path into any scalar at a parameter
+    /// boundary, in either mode — probed at 8.5.9:
+    ///
+    /// ```text
+    /// function b(bool $x){} … b($h);  → must be of type bool, resource given
+    /// function i(int $x){}  … i($h);  → must be of type int, resource given
+    /// function s(string $x){} … s($h);→ must be of type string, resource given
+    /// ```
+    ///
+    /// (all three from a file with NO `declare(strict_types=1)`), so this predicate
+    /// never consults [`Self::strict`] and the finding is mode-independent.
+    ///
+    /// An object member rejects too — a resource is not an instance of anything.
+    /// That is the opposite direction from the `Maybe` the resource *contract*
+    /// gives an object value (`unrepresentable_verdict`), and the asymmetry is
+    /// deliberate rather than an oversight: there the docblock is the suspect
+    /// (PHP 8 left a decade of `@param resource $ch` behind on parameters that now
+    /// take a `CurlHandle`), here the *value* is proven — by a row this engine
+    /// corroborated through §7's tripwire — and a native `\CurlHandle` parameter
+    /// handed a real `fopen()` stream is a genuine TypeError, not stale prose.
+    fn resource_is_type_error(&self, ty: &NativeType) -> bool {
+        ty.members.iter().all(|m| match m {
+            TypeMember::Scalar(_) | TypeMember::BoolLiteral(_) => true,
+            TypeMember::Instance { .. } | TypeMember::InstanceInter(_) => true,
+        })
     }
 
     /// Whether a single union `member` **definitively rejects** an object of exact
@@ -29416,7 +29644,7 @@ fn cval_as_val(v: &CVal) -> Option<Val> {
             .map(|(k, cv)| cval_as_val(cv).map(|val| (domain_key(k), val)))
             .collect::<Option<Vec<_>>>()
             .map(Val::Array),
-        CVal::Object(..) => None,
+        CVal::Object(..) | CVal::Resource => None,
     }
 }
 
@@ -29445,6 +29673,19 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             // provenance-flavored string type is non-extensional (ADR-0038) — none
             // of it provable from the class name alone.
             C::Opaque | C::IterableOf { .. } | C::CallableTy { .. } | C::StrOpaque => Tri::Maybe,
+            // `@param resource $ch` handed an object — ADR-0056 §8.5's named FP
+            // channel, and the one verdict the resource leaf declines to reach.
+            // An object is genuinely not a resource, so a definite `No` is
+            // *true*; it is also, overwhelmingly, a report against a docblock PHP
+            // 8's own migration made stale, on code that works. `curl_init()`
+            // returned a resource for twenty years and returns a `CurlHandle` now,
+            // and the `@param resource $ch` above the function that consumes it
+            // did not move. Convicting there calls the programmer a liar about rot
+            // they inherited. The other direction — a proven RESOURCE against a
+            // native class parameter — is not this case and does convict
+            // (`resource_is_type_error`): there the value is proven and the
+            // docblock is not involved.
+            C::Resource => Tri::Maybe,
             // Every other lowered form denotes scalars, null, or arrays, of which no
             // object is a member (pure set membership, no coercion — ADR-0030).
             _ => Tri::No,
@@ -29467,6 +29708,36 @@ fn unrepresentable_verdict(cty: &steins_contract::ContractTy, v: &CVal) -> Tri {
             | C::Shape { .. }
             | C::CallableTy { .. }
             | C::Opaque => Tri::Maybe,
+            _ => Tri::No,
+        },
+        // A resource (ADR-0056 §8). Exact almost everywhere, because a resource is
+        // a leaf with no hierarchy: the only `Maybe`s below are the two honest
+        // ones, and the object arm — which is the FP channel worth spelling out.
+        CVal::Resource => match cty {
+            C::Mixed | C::Resource => Tri::Yes,
+            // Both cuts keep every resource: none is null, and every resource is
+            // truthy — a CLOSED one included (`fclose($h); (bool) $h === true` at
+            // 8.5.9), which is the case a "surely a closed handle is falsy" guess
+            // would get wrong.
+            C::MixedMinus(_) => Tri::Yes,
+            // `object` and a named class are where PHP 8's migration left its
+            // wreckage. A resource is *not* an object, so the honest answer looks
+            // like `No` — but the code this would fire on is overwhelmingly a
+            // stale `@param resource $ch` / `@return CurlHandle` pair straddling
+            // the migration, where the docblock is wrong and the value is fine.
+            // Convicting there calls the programmer a liar about rot they
+            // inherited. `Maybe` (ADR-0056 §8's named FP channel).
+            C::ObjectAny | C::Class(_) => Tri::Maybe,
+            // A resource may be `Traversable`-adjacent in nobody's imagination,
+            // but `Opaque` is unknown by definition and `callable` admits a
+            // resource in no PHP (`is_callable($h) === false`) — the first stays
+            // `Maybe` because it says nothing, the second decides.
+            C::Opaque => Tri::Maybe,
+            // Every other lowered form denotes scalars, null, arrays or callables,
+            // and no resource is a member of any of them. Pure set membership, no
+            // coercion — and unlike the scalar-to-scalar cases there is not even a
+            // weak-mode path: PHP rejects a resource at a `string`/`int`/`float`/
+            // `bool` boundary in both modes (probed at 8.5.9).
             _ => Tri::No,
         },
         // Unreachable in practice: `resolve_cval` yields only literal scalars here.
@@ -29496,7 +29767,14 @@ fn accepts_class_name(cx: &Cx, cfile: usize, coff: u32, name: &str, v: &CVal) ->
             IsA::No if cx.is_known_class(&target) => Tri::No,
             IsA::No | IsA::Unknown => Tri::Maybe,
         },
-        CVal::Scalar(_) if cx.is_known_class(&target) => Tri::No,
+        // A resource is a non-instance for exactly the reason a scalar is, and
+        // gated the same way (ADR-0056 §8.5): only a KNOWN target may make it a
+        // definite `No`, since an unresolved bare identifier may be a
+        // `@template` param or a `@phpstan-type` alias. Without this arm the
+        // contract layer would be quieter than the proof layer about the very
+        // same pairing (`resource_is_type_error` convicts on a native
+        // `\CurlHandle` parameter), which is backwards.
+        CVal::Scalar(_) | CVal::Resource if cx.is_known_class(&target) => Tri::No,
         // An array is likewise never a class instance, but it is left
         // intentionally undecided here (out of the stage-4 scope).
         _ => Tri::Maybe,
@@ -30710,6 +30988,70 @@ const CATALOG_FLOOR: &str = "declared in the builtin catalog, unverified";
 /// keeps the fact out of every finding by construction. The absence family never
 /// comes here at all — existence is a boot-surface fact, and this table answers only
 /// about return types.
+/// The **resource-return arms** of a builtin call (ADR-0056 §8): `resource` plus,
+/// where the stub declares one, the `false` failure arm — both `Verified`.
+///
+/// # Why these arms are `Verified` when the declared floor's are not
+///
+/// ADR-0069's floor is `Asserted` because a `functionMap` row is a *claim about a
+/// PHP* that the analyzing PHP was never asked to confirm; the row and the engine
+/// can silently disagree. These rows cannot disagree with the engine in that way,
+/// because the disagreement is checkable and is checked: [`Folder::builtin_resource_return`]
+/// admits the row only while this engine declares NO return type for the name. A
+/// migrated function (`curl_init` → `CurlHandle|false`) declares one and is
+/// refused; a genuine resource producer declares none *because the language has no
+/// syntax for it*, not because anyone forgot. What is left after the tripwire is a
+/// claim the engine corroborates in the only way it is able to.
+///
+/// The project-shadowing check comes first, as it does for the floor: a project
+/// function named `fopen` is not this `fopen`.
+/// Whether `var`'s contract lane says it holds a **resource and nothing else**
+/// (ADR-0056 §8) — the single condition under which the argument families may
+/// read that lane.
+///
+/// Three requirements, and each rules out a specific way of being wrong:
+///
+/// * **exactly one arm.** `resource|false` straight out of `fopen()` is not a
+///   proven resource — the call may have failed, and `false` IS accepted by a
+///   `bool` parameter. Only after the `=== false` guard has killed that arm is
+///   there one value class left to judge.
+/// * **that arm is [`ContractTy::Resource`].** Not a supertype of it, not an
+///   `Opaque` that might contain one.
+/// * **`Verified`.** ADR-0052 §3 keeps the contract lane away from the proof
+///   layer, and rightly: most of what seeds it is a docblock. This is the narrow
+///   opening §7 argues for and no wider — a lane arm that reached `Asserted` by
+///   any route, including a `@return resource` docblock on a project function,
+///   does not qualify. The stratum check is what makes "read the contract lane"
+///   safe here without being safe in general.
+fn store_holds_resource(store: &Store, var: &str) -> bool {
+    matches!(
+        store.contract_arms(var),
+        Some([ContractArm { ty: steins_contract::ContractTy::Resource, stratum: Stratum::Verified }])
+    )
+}
+
+fn builtin_resource_arms(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+) -> Option<Vec<ContractArm>> {
+    if cx.index.has_simple_function(name) {
+        return None;
+    }
+    let may_be_false = folder.builtin_resource_return(name)?;
+    let mut arms = vec![ContractArm {
+        ty: steins_contract::ContractTy::Resource,
+        stratum: Stratum::Verified,
+    }];
+    if may_be_false {
+        arms.push(ContractArm {
+            ty: steins_contract::ContractTy::LitBool(false),
+            stratum: Stratum::Verified,
+        });
+    }
+    Some(arms)
+}
+
 fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractArm>> {
     if cx.index.has_simple_function(name) {
         return None;
@@ -33927,6 +34269,7 @@ fn rendered_cval(v: &CVal) -> String {
     match v {
         CVal::Scalar(s) => s.render(),
         CVal::Object(class, _) => format!("new {}()", class.rsplit('\\').next().unwrap_or(class)),
+        CVal::Resource => "a resource".to_owned(),
         CVal::Array(entries) => {
             // Rebuild an `ArgValue::Array` with explicit keys so the shared compact
             // renderer applies (it re-normalizes; explicit keys round-trip).
@@ -33949,7 +34292,7 @@ fn rendered_cval(v: &CVal) -> String {
 fn cval_to_argvalue(v: &CVal) -> ArgValue {
     match v {
         CVal::Scalar(s) => s.clone(),
-        CVal::Object(..) => ArgValue::Other,
+        CVal::Object(..) | CVal::Resource => ArgValue::Other,
         CVal::Array(entries) => ArgValue::Array(
             entries
                 .iter()

@@ -102,6 +102,13 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             _ => No,
         },
         ContractTy::Class(_) | ContractTy::ObjectAny => No,
+        // No inhabitant of this domain is a resource handle, and PHP agrees at
+        // every boundary: a string, int, float, bool, null or array handed where a
+        // resource is required is a TypeError in weak mode exactly as in strict
+        // (probed at 8.5.9 — `f(resource $x)` has no weak-mode coercion path,
+        // because there is nothing to coerce *to*). A definite `No`, not the
+        // `Maybe` the old `KNOWN_UNENFORCED` floor gave (ADR-0056 §8).
+        ContractTy::Resource => No,
         // The signature (if any) is not consulted here: a runtime string/array
         // value cannot be judged against a call shape, so acceptance is the same
         // as for a bare callable — a string may name a function, a pair-array a
@@ -275,7 +282,11 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. }
         | ContractTy::Class(_)
-        | ContractTy::ObjectAny => No,
+        | ContractTy::ObjectAny
+        // The base part of a scalar fact holds scalars only, and no scalar is a
+        // resource — the same disjointness `admits_val` states pointwise, lifted
+        // to the whole base.
+        | ContractTy::Resource => No,
         // As in [`admits_val`]: a definitely-string fact is a callable-string
         // candidate (`Maybe`) for the `callable` spellings, but never a `Closure`
         // instance, so `closure_only` decides it `No`.
@@ -631,7 +642,9 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
-        | ContractTy::ObjectAny => No,
+        | ContractTy::ObjectAny
+        // An array is never a resource, in either direction of the question.
+        | ContractTy::Resource => No,
         // A `callable` *value* may be a two-element method array, so the
         // question stays open; a `*-closure` spelling (ADR-0063 P3) demands a
         // `Closure` instance, which no array ever is. ADR-0072 §5 refuses the

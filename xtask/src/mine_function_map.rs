@@ -337,6 +337,14 @@ impl Dropped {
             ContractTy::Class(_)
             | ContractTy::ObjectAny
             | ContractTy::CallableTy { .. }
+            // `resource` was already charged here while it lowered to `Opaque`
+            // (ADR-0069 §5's "objects / class names / callable / resource"), and
+            // it stays here now that ADR-0056 §8 gave it a leaf of its own — the
+            // bucket is a comparison series, so the row must not migrate. What
+            // keeps these rows OUT of the admitted table is unchanged and is the
+            // countersign, not the lowering: the engine declares no return type
+            // for a genuine resource producer, so there is nothing to agree with.
+            | ContractTy::Resource
             | ContractTy::Opaque => &mut self.objects,
             ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::Never => &mut self.voidish,
             // A bare scalar base would have been admitted by `canonical_envelope`.

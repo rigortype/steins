@@ -1,0 +1,207 @@
+# resource_returns.toml — builtins whose return is a legacy PHP RESOURCE
+# (ADR-0056 §8, the engine-inexpressible-type clause).
+# php-src commit: 2c7c630e2873cbe4abc70d538c47521611cbd83f (Mon Jul 13 2026, PHP-8.5)
+# Stub types read at that pin; behavioral probes run vs PHP 8.5.9 (cli),
+# /opt/homebrew/bin/php. Source of record for `cargo xtask gen-catalog`, which
+# emits crates/steins-catalog/src/resource_returns_generated.rs.
+#
+# ─────────────────── Why this table exists at all ───────────────────
+# Every other builtin return fact in Steins is anchored to the REFLECTED envelope
+# — the running engine's own `getReturnType()` — and curation may only refine
+# strictly within it (ADR-0056 §1/§2). That rule has one structural hole, and it
+# is not staleness: PHP has **no syntax for a `resource` return type**, so the
+# engine cannot declare one however much it would like to. `fopen` reports no
+# return type at all, and never will. Reflection silence there is not "the engine
+# disowns this claim"; it is "the engine has no way to make it".
+#
+# ADR-0056 §8 closes that hole with a THREE-CONDITION gate, all three checked at
+# the call site, none of them by this file:
+#
+#   1. the php-src stub at the pin says `resource` (this table IS that reading);
+#   2. the analyzing engine declares NO return type for the name (the tripwire);
+#   3. the project PHP minor equals `steins_catalog::PINNED_PHP` (the same
+#      version gate every curated row already passes through).
+#
+# ─────────────────── Condition 2 is the load-bearing one ───────────────────
+# PHP 8.0–8.4 migrated most of the resource world to real objects, and the
+# docblocks did not keep up: PHPStan's `functionMap` still says `resource` for
+# 110 names this engine knows, of which **89 now return an object**
+# (`curl_init` → `CurlHandle`, every `imagecreatefrom*` → `GdImage`, `ldap_*` →
+# `LDAP\Result`, `odbc_*` → `Odbc\Result`, `finfo_open` → `finfo`, …). That is
+# the rot ADR-0069 §5 counted and refused to carry.
+#
+# Condition 2 refuses all 89 of them mechanically and for the right reason: the
+# engine SPEAKS for a migrated function, so curation must yield. It is also the
+# forward-looking half — the day a future PHP turns `fopen` into an object, that
+# release starts declaring a return type and the row switches itself off. No
+# re-mining, no staleness window.
+#
+# Mining php-src stubs rather than functionMap gives a second, independent belt:
+# the stubs are the migration's own source of record, so all 89 rotted names are
+# ALREADY absent from this table. The two sources disagreeing by 89 rows and the
+# gate landing on the same 19 is the cross-check, and it is recorded here rather
+# than asserted.
+#
+# ─────────────────── What a row IS ───────────────────
+# `arms` is the stub's `@return`, verbatim: `resource` or `resource|false`. The
+# consumer seeds it as a CONTRACT ARM LANE (`resource` + `false`), never a value
+# fact — the value domain has no resource inhabitant and is not getting one
+# (ADR-0035/0038). The `false` arm is subtracted by the ordinary `=== false`
+# guard machinery, which is what makes the post-check variable a bare `resource`.
+#
+# `probe` is a verbatim `get_debug_type()` transcript at 8.5.9 — the behavioral
+# witness that the stub is telling the truth on THIS engine. Nothing is recalled
+# from memory. One row (`pg_socket`) cannot be probed without a live PostgreSQL
+# connection and says so; it carries stub + reflection evidence only, and its
+# `confidence` records the difference.
+#
+# ─────────────────── What is deliberately NOT here ───────────────────
+# * `stream_socket_pair` — returns `array` of two resources. The arms are an
+#   array, not a resource, and the element type has no carrier (a `ShapeFact`
+#   holds `Fact`s, and no `Fact` is a resource). Silent, as before.
+# * `get_resources` — same shape (`array<int, resource>`), same refusal.
+# * Every name whose stub already declares a class. They are not resource rows,
+#   they are object rows, and the object-return carrier is a separate slice.
+# * `zend_test_create_throwing_resource` — the stub scan finds it; it exists only
+#   in the `zend_test` debug extension, which no analyzed project loads. Left out
+#   rather than carried as an unreachable row.
+
+[meta]
+php_src_commit = "2c7c630e2873cbe4abc70d538c47521611cbd83f"
+php_src_branch = "PHP-8.5"
+probe_php = "8.5.9"
+stub_scan = "docblock `@return` naming `resource`, on a global function with no native return type"
+functionmap_crosscheck = "phpstan-src resources/functionMap.php: 110 resource-returning names known to this engine, 89 of which the engine now declares as objects — all 89 absent from this table"
+
+[[function]]
+name = "fopen"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(fopen('php://memory','r')) === 'resource (stream)'"
+
+[[function]]
+name = "tmpfile"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(tmpfile()) === 'resource (stream)'"
+
+[[function]]
+name = "opendir"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(opendir(sys_get_temp_dir())) === 'resource (stream)'"
+
+[[function]]
+name = "popen"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(popen('true','r')) === 'resource (stream)'"
+
+[[function]]
+name = "proc_open"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(proc_open('true', [], $pipes)) === 'resource (process)'"
+
+[[function]]
+name = "fsockopen"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "against a local stream_socket_server('tcp://127.0.0.1:0'): get_debug_type(fsockopen($host, $port)) === 'resource (stream)'"
+
+[[function]]
+name = "pfsockopen"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "same local server: get_debug_type(pfsockopen($host, $port)) === 'resource (persistent stream)' — a persistent stream is still a resource, and `is_resource` says so"
+
+[[function]]
+name = "stream_socket_server"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(stream_socket_server('tcp://127.0.0.1:0')) === 'resource (stream)'"
+
+[[function]]
+name = "stream_socket_client"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "against a local server: get_debug_type(stream_socket_client('tcp://'.$addr)) === 'resource (stream)'"
+
+[[function]]
+name = "stream_socket_accept"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "against a local server with one pending client: get_debug_type(stream_socket_accept($srv, 1)) === 'resource (stream)'"
+
+[[function]]
+name = "stream_filter_append"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(stream_filter_append(fopen('php://memory','w'), 'string.toupper', STREAM_FILTER_WRITE)) === 'resource (closed)' — the probe drops the underlying stream, so the filter comes back already closed. A CLOSED resource is still a resource (gettype 'resource'), which is exactly why the leaf does not model the open/closed state."
+
+[[function]]
+name = "stream_filter_prepend"
+arms = "resource|false"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "same construction as stream_filter_append: 'resource (closed)'"
+
+[[function]]
+name = "stream_context_create"
+arms = "resource"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(stream_context_create([])) === 'resource (stream-context)' — no false arm in the stub, and none observed"
+
+[[function]]
+name = "stream_context_get_default"
+arms = "resource"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(stream_context_get_default()) === 'resource (stream-context)'"
+
+[[function]]
+name = "stream_context_set_default"
+arms = "resource"
+stub = "ext/standard/basic_functions.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(stream_context_set_default(['http' => []])) === 'resource (stream-context)'"
+
+[[function]]
+name = "gzopen"
+arms = "resource|false"
+stub = "ext/zlib/zlib.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(gzopen(sys_get_temp_dir().'/steins_probe.gz','w')) === 'resource (stream)'"
+
+[[function]]
+name = "bzopen"
+arms = "resource|false"
+stub = "ext/bz2/bz2.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(bzopen(sys_get_temp_dir().'/steins_probe.bz2','w')) === 'resource (stream)'"
+
+[[function]]
+name = "socket_export_stream"
+arms = "resource|false"
+stub = "ext/sockets/sockets.stub.php"
+confidence = "verified-probe"
+probe = "get_debug_type(socket_export_stream(socket_create(AF_INET, SOCK_STREAM, SOL_TCP))) === 'resource (stream)' — note the ARGUMENT is a Socket object since 8.0 while the RETURN is still a resource, which is the migration's asymmetry in one call"
+
+[[function]]
+name = "pg_socket"
+arms = "resource|false"
+stub = "ext/pgsql/pgsql.stub.php"
+confidence = "stub-and-reflection"
+probe = "NOT behaviorally probed: needs a live PostgreSQL connection. Evidence is the stub `@return resource|false` at the pin plus ReflectionFunction('pg_socket')->getReturnType() === null on 8.5.9 with ext-pgsql loaded. Its sibling pg_connect DID migrate (PgSql\\Connection), so this row is exactly the case condition 2 exists to keep honest — and condition 2 passes it."

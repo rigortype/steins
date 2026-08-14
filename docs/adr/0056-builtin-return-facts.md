@@ -200,13 +200,177 @@ the fix).
 
 ## 7. Open questions
 
-- Whether a reflected-existent but typeless builtin (no return type,
+- ~~Whether a reflected-existent but typeless builtin (no return type,
   no tentative type — rare on 8.5) may consume a curated row with no
   envelope to bound it: v1 says no (nothing to refine within);
-  revisit with a measured case in hand.
+  revisit with a measured case in hand.~~ **Resolved by §8** (owner
+  decision, 2026-08-14): the measured case arrived — `resource`, where
+  typelessness is structural rather than incidental — and the answer
+  is a bounded yes, gated on the engine's continued silence.
 - How the runner renders tentative return types and by-ref out-param
   interactions on the reflect wire — a protocol note on ADR-0024's
   surface when R1 lands.
 - Whether admitted refinements should also feed contract-acceptance
   display (the PHPStan-vocabulary speller already renders Refined;
   expected to fall out, verify at R3's int-range rendering).
+
+## 8. Amendment (2026-08-14): the engine-inexpressible type
+
+§7's first open question asked whether a builtin the engine knows but
+declares no return type for may consume a curated row with no envelope
+to bound it. v1 said no, and asked for a measured case. The case is
+`resource`, and it is not the incidental typelessness §7 imagined.
+
+### 8.1 Why the envelope rule has a hole, and why it is exactly one hole
+
+`resource` is **the one PHP type PHP cannot write down**. There is no
+`function fopen(...): resource` because the language has no such type
+declaration; `resource` in a hint position is read as a class name, and
+PHP warns about it (probed at 8.5.9: `"resource" is not a supported
+builtin type and will be interpreted as a class name`). So
+`ReflectionFunction('fopen')->getReturnType()` is `null`, and it will
+stay `null` for as long as the type exists.
+
+§1's precedence rule reads reflection silence as *the engine having no
+opinion*, and for every other type that reading is right — a builtin
+with no declared return really is one nobody got round to annotating.
+Here it is wrong in a specific, bounded way: the engine has an opinion
+and no vocabulary. The hole is not "some types are hard to reflect", it
+is one type, nameable in advance, and the amendment is scoped to it and
+closes behind it.
+
+### 8.2 The gate: three conditions, one of which is a tripwire
+
+A curated resource row is admitted at a call site only when all three
+hold. The first is data; the second and third are checked live.
+
+1. **The php-src stub at the pin says `resource`.** Mined into
+   `docs/research/phpsrc-mining/resource_returns.toml`, per-row, with a
+   `get_debug_type()` transcript beside it.
+2. **The analyzing engine declares NO return type for the name.**
+3. **The project PHP minor equals `PINNED_PHP`** — the same version
+   gate §2 already applies to every curated refinement.
+
+Condition 2 is what replaces the envelope's authority, and it is worth
+being precise about what it proves. It does not prove the function
+returns a resource. It proves the engine has **not disowned** the claim
+— because the one way this claim goes stale is the one PHP has actually
+been doing for four minor versions: migrating a resource to an object.
+A migrated function declares its new class, and a declaration is exactly
+§1's "the engine speaks, curation yields". So the row switches itself
+off, at the moment the migration lands, with no re-mining and no
+staleness window.
+
+The measurement says how much work condition 2 does. PHPStan's
+`functionMap` names 110 resource-returning functions this engine knows;
+**89 of them now return an object** (`curl_init` → `CurlHandle`, the
+`imagecreatefrom*` family → `GdImage`, `ldap_*` → `LDAP\Result`,
+`odbc_*` → `Odbc\Result`). That is the rot ADR-0069 §5 counted and
+declined to carry. Condition 2 refuses all 89 without a denylist and
+admits the remaining 19 — and mining php-src's stubs rather than
+functionMap means those 89 were never candidates in the first place, so
+the gate and the source agree independently. Two belts, and the
+disagreement between the two sources is itself the cross-check.
+
+### 8.3 Grade: Verified, and why that is not a widening of §1
+
+A row admitted through §8.2 seeds at **Verified**, unlike ADR-0069's
+declared floor. The difference is not confidence, it is checkability. A
+`functionMap` row is Asserted because the row and the engine can
+disagree silently and nothing asks. A resource row cannot fail that way:
+the disagreement has one shape, the shape is observable through
+reflection, and condition 2 observes it on every run. What survives is a
+claim the engine corroborates in the only way the language leaves it.
+
+Two consequences follow and are deliberate:
+
+- The rows are the **only** thing this amendment lets past. No other
+  typeless builtin gains anything; the gate names `resource` and the
+  catalog table has nineteen entries.
+- Without a live engine (`--no-php`) there is no tripwire, so nothing is
+  admitted. The sound subset (ADR-0004) is unchanged.
+
+### 8.4 The carrier: an arm lane, never a value
+
+`resource` becomes `ContractTy::Resource` — a **leaf** in the contract
+crate, with `open-resource` and `closed-resource` lowering to it. It
+does not become a value-domain inhabitant, and the value domain stays
+object-free and resource-free (ADR-0035/0038): a resource has no
+extension to enumerate, no join to compute, and nothing the Lean vector
+universe could check.
+
+So a resource-returning call seeds the **contract arm lane** —
+`resource` plus, where the stub declares one, `false` — and seeds no
+value fact at all. The narrowing then costs nothing new: `if ($h ===
+false) { throw; }` is the ordinary `Refine::Exclude` subtraction the arm
+lane already performs, and what it leaves behind is a one-arm lane. No
+resource-specific guard code exists anywhere.
+
+`is_resource()` is deliberately **not** wired as a `TypePred` in this
+slice. Arm *filtering* is done — a `Resource` arm is a
+`RtKind::Resource`, which every existing `is_*` predicate rejects, all
+of them correctly (`is_scalar`, `is_callable` and `is_iterable` on a
+resource are all `false` at 8.5.9). What `is_resource` would add is the
+*positive* branch binding a resource where none was proven, and that is
+a producer question, not a filtering one. Deferred with its reason
+recorded rather than half-built.
+
+### 8.5 Where the definite `No` is claimed, and where it is refused
+
+Acceptance is exact almost everywhere, because a resource is a leaf:
+there is no hierarchy for an oracle to be unsure about.
+
+- **Scalars, literals, `null`, arrays, `callable`** reject a resource,
+  in **both** coercion modes. This is stronger than the object case and
+  the difference is real: a `__toString` object coerces into a `string`
+  parameter in coercive mode, so `member_rejects_object` demotes
+  `string` to a strict-mode-only reject. There is no `__toResource`.
+  Probed at 8.5.9 with no `declare(strict_types=1)`: `bool`, `int` and
+  `string` parameters all `TypeError` on a resource argument. The
+  finding therefore never consults the file's mode, and says so in its
+  own message rather than naming a mode the reader might try to change.
+- **`mixed` and both of its cuts** accept. No resource is null, and
+  every resource is truthy — *including a closed one*
+  (`fclose($h); (bool) $h === true`), which is the case a guess would
+  get wrong.
+- **`object` and a named class**, asked of a resource **value**, is a
+  definite `No`: the value is proven and no class has resource
+  instances.
+- **The `resource` contract asked of an object value** is `Maybe`, and
+  this is the one place the amendment declines a verdict it could
+  technically justify. PHP 8 left a decade of `@param resource $ch`
+  docblocks attached to parameters that now receive a `CurlHandle`.
+  The docblock is wrong and the value is fine; convicting there would
+  call the programmer a liar about rot they inherited. Named FP
+  channel, refused on purpose.
+
+### 8.6 The one lane-reading opening, and its three locks
+
+ADR-0052 §3 keeps the contract arm lane away from the proof layer, for
+the good reason that most of what seeds it is a docblock. The argument
+families now read it, under a predicate narrow enough to state in one
+line: **exactly one arm, that arm is `Resource`, and its stratum is
+`Verified`**.
+
+Each clause blocks a specific mistake. One arm, because `resource|false`
+straight out of `fopen()` is not a proven resource and `false` genuinely
+*is* accepted by a `bool` parameter. `Resource` exactly, not a supertype
+and not an `Opaque` that might contain one. `Verified`, because that is
+what excludes every docblock-seeded arm — a project function's
+`@return resource` reaches the lane at `Asserted` and does not qualify.
+The opening is this predicate and nothing wider; ADR-0052 §3's list is
+otherwise unchanged.
+
+### 8.7 What stays out
+
+- **`stream_socket_pair`, `get_resources`** — arrays *of* resources. A
+  `ShapeFact` holds `Fact`s and no `Fact` is a resource, so the element
+  type has no carrier. Silent, as before.
+- **Resource-consuming parameters.** `fwrite($notAResource, …)` is a
+  separate direction and needs the builtin *parameter* surface, which
+  this slice does not touch.
+- **Open/closed state.** `fclose($h); fread($h, 1)` is a real bug and a
+  real analysis, and it is a dataflow one, not a type one. The leaf
+  models the kind; the state would need a different mechanism.
+- **A `resource` value in the value domain.** Standing refusal, per
+  ADR-0035/0038.
