@@ -51,6 +51,24 @@ ini_set('error_log', 'php://stderr');
 // that would only succeed above it now fatals, which widens — sound.
 ini_set('memory_limit', '256M');
 
+// The fold seam's array budget, mirrored from the Rust constants
+// `FOLD_ARRAY_MAX_ENTRIES` / `FOLD_ARRAY_MAX_DEPTH` (ADR-0028's issue-#39
+// amendment §4). The result direction charges the SAME numbers — here before
+// encoding, and again on arrival — so the gate's verdict and the decoder's are
+// one verdict computed twice: a shape admissible as an argument is admissible
+// as a result.
+//
+// This is deliberately NOT the `memory_limit` above. That one prices "the child
+// will die allocating this"; this one prices how much value the analysis will
+// absorb once it returns. `range(1, 1000000)` passes the first and fails this,
+// so a single constant would have to be wrong for one of them.
+//
+// Declared here rather than beside `steins_charge_array_result` because a
+// top-level `const` is executed where it is written, not hoisted like a
+// function — one placed after the read loop would never be defined.
+const STEINS_FOLD_ARRAY_MAX_ENTRIES = 256;
+const STEINS_FOLD_ARRAY_MAX_DEPTH = 8;
+
 $in = fopen('php://stdin', 'r');
 $out = fopen('php://stdout', 'w');
 
@@ -700,17 +718,116 @@ function steins_encode_value($v)
         return ['kind' => 'value', 'value' => null, 'type' => 'null'];
     }
     if (is_array($v)) {
-        // Arrays are OK if they round-trip cleanly (no objects/resources/binary
-        // strings inside). Array *arguments* exist (issue #39); an array *result*
-        // is still widened by the Rust side, a deliberate boundary (#41/#42) —
-        // but reporting it faithfully keeps the protocol honest.
-        $encoded = json_encode($v, JSON_PRESERVE_ZERO_FRACTION);
-        if ($encoded === false) {
-            return ['kind' => 'widen', 'reason' => 'unencodable array'];
+        // An array *result* crosses the seam since the ADR-0028 amendment of
+        // 2026-08-14 (issue #330), in the same `__steins_array` envelope the
+        // argument direction uses — see `steins_decode_arg`. The budget is
+        // charged and every leaf validated BEFORE the envelope is built, so an
+        // oversized or unencodable answer never becomes a megabyte of JSON.
+        $budget = STEINS_FOLD_ARRAY_MAX_ENTRIES;
+        $reason = steins_charge_array_result($v, STEINS_FOLD_ARRAY_MAX_DEPTH, $budget);
+        if ($reason !== null) {
+            return ['kind' => 'widen', 'reason' => $reason];
         }
-        return ['kind' => 'value', 'value' => $v, 'type' => 'array'];
+        return ['kind' => 'value', 'value' => steins_encode_array($v), 'type' => 'array'];
     }
 
     // Objects, resources, closures: not a literal we carry.
     return ['kind' => 'widen', 'reason' => 'unencodable type'];
+}
+
+/**
+ * Charge an array result against the budget and validate every key and leaf in
+ * the same recursive pass, returning a widen reason or null when it fits.
+ *
+ * One bad leaf anywhere widens the WHOLE result: a partial array is a *wrong*
+ * value, not a wider one, and widening is the only safe direction (ADR-0002).
+ * The depth bound is checked on entry, so this function's own recursion is
+ * bounded by it — the same property that keeps the two encoders off an
+ * unbounded stack.
+ *
+ * `$budget` is by-reference because entries are counted **recursively**: a
+ * nested array's entries spend the same allowance its parent's do.
+ *
+ * @param array<mixed> $v
+ * @param int $depth
+ * @param int $budget
+ * @return string|null the widen reason, or null when the result may be encoded
+ */
+function steins_charge_array_result(array $v, $depth, &$budget)
+{
+    if ($depth === 0) {
+        return 'array result over depth budget';
+    }
+    foreach ($v as $key => $item) {
+        if ($budget === 0) {
+            return 'array result over entry budget';
+        }
+        $budget--;
+        // A binary string KEY would fail the response encode just as a binary
+        // string value would, so it is validated on the same footing.
+        if (is_string($key) && json_encode($key) === false) {
+            return 'non-utf8 string';
+        }
+        if (is_array($item)) {
+            $nested = steins_charge_array_result($item, $depth - 1, $budget);
+            if ($nested !== null) {
+                return $nested;
+            }
+            continue;
+        }
+        $leaf = steins_charge_leaf($item);
+        if ($leaf !== null) {
+            return $leaf;
+        }
+    }
+    return null;
+}
+
+/**
+ * Validate one non-array leaf of an array result, returning a widen reason or
+ * null. The reasons are the scalar encoder's own, so a `"\xC0"` inside an array
+ * widens for the same stated cause as a `"\xC0"` returned bare — which is what
+ * lets ADR-0080 §3.1 lift both with one tagged-bytes variant later.
+ *
+ * @param mixed $v
+ * @return string|null
+ */
+function steins_charge_leaf($v)
+{
+    if (is_string($v)) {
+        return json_encode($v) === false ? 'non-utf8 string' : null;
+    }
+    if (is_float($v)) {
+        return is_finite($v) ? null : 'non-finite float';
+    }
+    if (is_int($v) || is_bool($v) || $v === null) {
+        return null;
+    }
+    // Objects, resources, closures inside the array: no literal in the IR.
+    return 'unencodable type';
+}
+
+/**
+ * Encode an already-charged array as the `__steins_array` envelope: an ordered
+ * entry list `[[key, value], ...]` whose keys are the MATERIALIZED int/string
+ * keys PHP has already assigned.
+ *
+ * A result therefore never spells an absent key — PHP finished building this
+ * array, so next-int assignment and last-wins have already happened here, in
+ * the engine, where ADR-0004 wants them. The decoder rejects a `null` key for
+ * exactly that reason rather than re-deriving a next-int Rust did not choose.
+ *
+ * Scalars encode bare (float-ness survives via the response's
+ * `JSON_PRESERVE_ZERO_FRACTION`); nested arrays nest their own envelopes.
+ *
+ * @param array<mixed> $v
+ * @return array<string, mixed>
+ */
+function steins_encode_array(array $v)
+{
+    $entries = [];
+    foreach ($v as $key => $item) {
+        $entries[] = [$key, is_array($item) ? steins_encode_array($item) : $item];
+    }
+    return ['__steins_array' => $entries];
 }
