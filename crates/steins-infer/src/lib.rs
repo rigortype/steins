@@ -70,7 +70,9 @@ use steins_syntax::RetHintKind;
 // end return missing (ADR-0078, issue #199)
 
 use steins_phpdoc::Variance;
-use steins_phpdoc::ast::{ArrayShapeKind, ConstExpr, StringLit, TypeKind as PKind};
+use steins_phpdoc::ast::{
+    ArrayShapeKind, ConditionalSubject, ConstExpr, StringLit, TypeKind as PKind,
+};
 use steins_phpdoc::{
     AssertKind, DocTag, EnvelopeTag, MagicTagKind, TagKind, Type as PType, parse_type,
     scan_docblock, scan_magic_member_tags,
@@ -8388,16 +8390,15 @@ fn leaves_value_type_unstated(ty: &PType) -> bool {
 ///
 /// The one exception is a **class-reference position**, where a name without
 /// type arguments is the spelling and not an omission — see
-/// [`template_type_owner_arg`].
+/// [`template_type_owner_arg`]. That exemption is why a generic node is
+/// enumerated by hand here rather than through [`for_each_child_type`]: the
+/// position is skipped by *index*, which a child walk that hands out types has no
+/// way to say. Every other node descends through the shared walk, so a bare
+/// generic class named inside a callable signature, a conditional branch or a
+/// shape value is collected exactly as one named at the top level is (issue #374).
 fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
     match &ty.kind {
         PKind::Identifier(name) => out.push(name.clone()),
-        PKind::Nullable(inner) | PKind::Array(inner) => collect_bare_identifiers(inner, out),
-        PKind::Union { types, .. } | PKind::Intersection(types) => {
-            for t in types {
-                collect_bare_identifiers(t, out);
-            }
-        }
         PKind::Generic { base, args } => {
             let skip = template_type_owner_arg(base, args.len());
             for (i, a) in args.iter().enumerate() {
@@ -8407,7 +8408,7 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
                 collect_bare_identifiers(&a.ty, out);
             }
         }
-        _ => {}
+        _ => for_each_child_type(ty, &mut |child| collect_bare_identifiers(child, out)),
     }
 }
 
@@ -16490,12 +16491,14 @@ fn contest_mentions(
 
 /// Every mention of one of `shadow`'s template names anywhere inside `ty`.
 ///
-/// **Two spellings count, because the shadow does not reach everywhere.**
-/// [`neutralize_templates`] rewrites a template identifier to
-/// [`PKind::Unsupported`] through the composites it recurses into, but it stops at
-/// a `Callable` and a `Conditional` — so the `T` in `\Closure():T` is still an
-/// ordinary [`PKind::Identifier`] when this runs, and a walk looking only for the
-/// neutralized form would miss precisely the occurrence that matters most. A
+/// **Two spellings still count, though no longer for the original reason.** This
+/// walk was written to match both the neutralized [`PKind::Unsupported`] form and
+/// the raw [`PKind::Identifier`] because [`neutralize_templates`] stopped at a
+/// `Callable` and a `Conditional`, leaving the `T` in `\Closure():T` unshadowed.
+/// Issue #374 closed that gap — the shadow now reaches every position this walk
+/// does — but the identifier arm stays, for two positions no rewrite covers: a
+/// template carrying a **bound** is substituted rather than neutralized, and this
+/// walk is also run over types that never passed through the shadow at all. A
 /// `\`-qualified name is never a template, matching the shadow's own rule.
 ///
 /// A `Generic`'s **base** counts too (`T<int>`): nothing neutralizes a base string,
@@ -16507,55 +16510,12 @@ fn mentioned_templates(ty: &PType, shadow: &TemplateShadow, out: &mut Vec<String
         }
     };
     match &ty.kind {
-        PKind::Identifier(name) | PKind::Unsupported(name) => note(name, out),
-        PKind::Nullable(inner) | PKind::Array(inner) => mentioned_templates(inner, shadow, out),
-        PKind::Union { types, .. } | PKind::Intersection(types) => {
-            for t in types {
-                mentioned_templates(t, shadow, out);
-            }
+        PKind::Identifier(name) | PKind::Unsupported(name) | PKind::Generic { base: name, .. } => {
+            note(name, out);
         }
-        PKind::Generic { base, args } => {
-            note(base, out);
-            for a in args {
-                mentioned_templates(&a.ty, shadow, out);
-            }
-        }
-        PKind::OffsetAccess { base, offset } => {
-            mentioned_templates(base, shadow, out);
-            mentioned_templates(offset, shadow, out);
-        }
-        PKind::ArrayShape(s) => {
-            for it in &s.items {
-                mentioned_templates(&it.value, shadow, out);
-            }
-            if let Some(tail) = &s.unsealed {
-                mentioned_templates(&tail.value, shadow, out);
-                if let Some(k) = &tail.key {
-                    mentioned_templates(k, shadow, out);
-                }
-            }
-        }
-        PKind::ObjectShape(items) => {
-            for it in items {
-                mentioned_templates(&it.value, shadow, out);
-            }
-        }
-        PKind::Callable(c) => {
-            for p in &c.params {
-                mentioned_templates(&p.ty, shadow, out);
-            }
-            mentioned_templates(&c.return_type, shadow, out);
-        }
-        PKind::Conditional(c) => {
-            if let steins_phpdoc::ast::ConditionalSubject::Type(t) = &c.subject {
-                mentioned_templates(t, shadow, out);
-            }
-            mentioned_templates(&c.target, shadow, out);
-            mentioned_templates(&c.if_type, shadow, out);
-            mentioned_templates(&c.else_type, shadow, out);
-        }
-        PKind::This | PKind::Const(_) => {}
+        _ => {}
     }
+    for_each_child_type(ty, &mut |child| mentioned_templates(child, shadow, out));
 }
 
 /// The class-level `@template` names `class_fqn` declares, in declaration order —
@@ -28361,6 +28321,138 @@ fn vocabulary_bound(text: &str) -> Option<PType> {
     Some(parsed.ty)
 }
 
+/// Hand every **child type** of one phpdoc node to `f`, once — the single place
+/// the set of positions a phpdoc-type walk descends into is decided (issue #374).
+///
+/// Six walks over a [`PType`] live in this crate: the `@template` shadow
+/// ([`neutralize_templates`]), the bare-identifier collection
+/// ([`collect_bare_identifiers`]), the opaque-node test
+/// ([`type_has_unsupported`]), the `template-type` rewrite
+/// ([`Cx::resolve_template_types`]), the edge-argument qualification
+/// ([`Cx::qualify_class_names`]) and the template-mention scan
+/// ([`mentioned_templates`]). Written out by hand they disagreed about where they
+/// went — the shadow stopped at a `Callable` and a `Conditional`, so a template
+/// name written inside `\Closure(): T` was never shadowed and lowered as a class
+/// named `T`, the issue #5 false positive one level down. Each walk now does its
+/// own work at the node and recurses through here, so a position is either
+/// descended into by all of them or by none.
+///
+/// **Every position holding a type**, and nothing else: the nullable/array
+/// element, the union and intersection members, the generic arguments, an
+/// offset access's base and offset, an array shape's values and its unsealed
+/// tail's value and key, an object shape's values, a callable's parameter and
+/// return types, and a conditional's subject (when the subject is a type rather
+/// than a `$param` name), target and both branches.
+///
+/// **Not** the strings that merely *name* something: a [`PKind::Generic`]'s base
+/// and a callable's identifier are class references, not child nodes, and each
+/// walk decides about them itself (the shadow leaves them alone, the mention scan
+/// counts them). Nor a callable's own `<T>` template list, which *declares* names
+/// instead of using them.
+fn for_each_child_type(ty: &PType, f: &mut dyn FnMut(&PType)) {
+    match &ty.kind {
+        PKind::Nullable(inner) | PKind::Array(inner) => f(inner),
+        PKind::Union { types, .. } | PKind::Intersection(types) => {
+            for t in types {
+                f(t);
+            }
+        }
+        PKind::Generic { args, .. } => {
+            for a in args {
+                f(&a.ty);
+            }
+        }
+        PKind::OffsetAccess { base, offset } => {
+            f(base);
+            f(offset);
+        }
+        PKind::ArrayShape(s) => {
+            for it in &s.items {
+                f(&it.value);
+            }
+            if let Some(tail) = &s.unsealed {
+                f(&tail.value);
+                if let Some(k) = &tail.key {
+                    f(k);
+                }
+            }
+        }
+        PKind::ObjectShape(items) => {
+            for it in items {
+                f(&it.value);
+            }
+        }
+        PKind::Callable(c) => {
+            for p in &c.params {
+                f(&p.ty);
+            }
+            f(&c.return_type);
+        }
+        PKind::Conditional(c) => {
+            if let ConditionalSubject::Type(t) = &c.subject {
+                f(t);
+            }
+            f(&c.target);
+            f(&c.if_type);
+            f(&c.else_type);
+        }
+        PKind::Identifier(_) | PKind::This | PKind::Const(_) | PKind::Unsupported(_) => {}
+    }
+}
+
+/// [`for_each_child_type`] for the walks that rewrite. The two enumerate the same
+/// positions in the same order, and are written adjacently so they stay that way.
+fn for_each_child_type_mut(ty: &mut PType, f: &mut dyn FnMut(&mut PType)) {
+    match &mut ty.kind {
+        PKind::Nullable(inner) | PKind::Array(inner) => f(inner),
+        PKind::Union { types, .. } | PKind::Intersection(types) => {
+            for t in types {
+                f(t);
+            }
+        }
+        PKind::Generic { args, .. } => {
+            for a in args {
+                f(&mut a.ty);
+            }
+        }
+        PKind::OffsetAccess { base, offset } => {
+            f(base);
+            f(offset);
+        }
+        PKind::ArrayShape(s) => {
+            for it in &mut s.items {
+                f(&mut it.value);
+            }
+            if let Some(tail) = &mut s.unsealed {
+                f(&mut tail.value);
+                if let Some(k) = &mut tail.key {
+                    f(k);
+                }
+            }
+        }
+        PKind::ObjectShape(items) => {
+            for it in items {
+                f(&mut it.value);
+            }
+        }
+        PKind::Callable(c) => {
+            for p in &mut c.params {
+                f(&mut p.ty);
+            }
+            f(&mut c.return_type);
+        }
+        PKind::Conditional(c) => {
+            if let ConditionalSubject::Type(t) = &mut c.subject {
+                f(t);
+            }
+            f(&mut c.target);
+            f(&mut c.if_type);
+            f(&mut c.else_type);
+        }
+        PKind::Identifier(_) | PKind::This | PKind::Const(_) | PKind::Unsupported(_) => {}
+    }
+}
+
 /// Rewrite every **bare, unqualified** identifier naming a template from `shadow`
 /// to its declared bound, or to an opaque node when it has none (issue #5,
 /// extended by #293). The neutral node is [`PKind::Unsupported`], which lowers
@@ -28369,49 +28461,27 @@ fn vocabulary_bound(text: &str) -> Option<PType> {
 /// becomes its bound instead (`T` under `@template T of array` reads as
 /// `array`), keeping the template's own span so a diagnostic still points at
 /// the `@param`. A `\`-qualified or namespaced reference is **never** shadowed.
-/// Idempotent; recurses through every composite (nested `list<Model>` too).
+/// Idempotent; recurses through every composite [`for_each_child_type_mut`]
+/// enumerates — a callable's signature and a conditional's branches included
+/// (issue #374), which is where the shadow used to stop and leak.
+///
+/// A substituted bound is **not** re-walked: it is a type this docblock did not
+/// write at this position, and the shadow's subject is what the author wrote.
 fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
-    match &mut ty.kind {
-        PKind::Identifier(name) => {
-            if name.contains('\\') {
-                return;
-            }
-            let key = name.to_ascii_lowercase();
-            if let Some(bound) = shadow.bounds.get(&key) {
-                ty.kind = bound.kind.clone();
-            } else if shadow.contains(&key) {
-                let raw = std::mem::take(name);
-                ty.kind = PKind::Unsupported(raw);
-            }
+    if let PKind::Identifier(name) = &mut ty.kind {
+        if name.contains('\\') {
+            return;
         }
-        PKind::Nullable(inner) | PKind::Array(inner) => neutralize_templates(inner, shadow),
-        PKind::Union { types, .. } | PKind::Intersection(types) => {
-            for t in types {
-                neutralize_templates(t, shadow);
-            }
+        let key = name.to_ascii_lowercase();
+        if let Some(bound) = shadow.bounds.get(&key) {
+            ty.kind = bound.kind.clone();
+        } else if shadow.contains(&key) {
+            let raw = std::mem::take(name);
+            ty.kind = PKind::Unsupported(raw);
         }
-        PKind::Generic { args, .. } => {
-            for a in args {
-                neutralize_templates(&mut a.ty, shadow);
-            }
-        }
-        PKind::OffsetAccess { base, offset } => {
-            neutralize_templates(base, shadow);
-            neutralize_templates(offset, shadow);
-        }
-        PKind::ArrayShape(s) => {
-            for it in &mut s.items {
-                neutralize_templates(&mut it.value, shadow);
-            }
-        }
-        PKind::ObjectShape(items) => {
-            for it in items {
-                neutralize_templates(&mut it.value, shadow);
-            }
-        }
-        PKind::This | PKind::Callable(_) | PKind::Const(_) | PKind::Conditional(_)
-        | PKind::Unsupported(_) => {}
+        return;
     }
+    for_each_child_type_mut(ty, &mut |child| neutralize_templates(child, shadow));
 }
 
 /// Parse the `@param`/`@return` envelopes from a raw docblock, or `None` when the
@@ -28501,27 +28571,28 @@ fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
 
 /// Parse one tag's type text into a phpdoc [`PType`], or `None` on a parse error
 /// or an `Unsupported` node (no envelope — silence is safe).
+///
+/// **Order matters, and it is fixed by [`parse_envelopes`]:** this runs on the tag
+/// text as written, *before* the `@template` shadow rewrites anything. The opaque
+/// nodes the shadow (and the `template-type` rewrite) plant are therefore never
+/// seen here — were the order the other way round, extending the shadow into a
+/// callable signature (issue #374) would have started dropping every
+/// `\Closure(): T` envelope instead of merely silencing the class named `T`.
 fn parse_tag_type(text: &str) -> Option<PType> {
     let parsed = parse_type(text).ok()?;
-    (!kind_has_unsupported(&parsed.ty.kind)).then_some(parsed.ty)
+    (!type_has_unsupported(&parsed.ty)).then_some(parsed.ty)
 }
 
-/// Whether a phpdoc type subtree contains an `Unsupported` node anywhere.
-fn kind_has_unsupported(kind: &PKind) -> bool {
-    match kind {
-        PKind::Unsupported(_) => true,
-        PKind::Nullable(t) | PKind::Array(t) => kind_has_unsupported(&t.kind),
-        PKind::Union { types, .. } | PKind::Intersection(types) => {
-            types.iter().any(|t| kind_has_unsupported(&t.kind))
-        }
-        PKind::Generic { args, .. } => args.iter().any(|a| kind_has_unsupported(&a.ty.kind)),
-        PKind::OffsetAccess { base, offset } => {
-            kind_has_unsupported(&base.kind) || kind_has_unsupported(&offset.kind)
-        }
-        PKind::ArrayShape(s) => s.items.iter().any(|i| kind_has_unsupported(&i.value.kind)),
-        PKind::ObjectShape(items) => items.iter().any(|i| kind_has_unsupported(&i.value.kind)),
-        _ => false,
+/// Whether a phpdoc type subtree contains an `Unsupported` node anywhere — the
+/// grammar constructs the parser retains as raw text, in any position
+/// [`for_each_child_type`] reaches.
+fn type_has_unsupported(ty: &PType) -> bool {
+    if matches!(ty.kind, PKind::Unsupported(_)) {
+        return true;
     }
+    let mut found = false;
+    for_each_child_type(ty, &mut |child| found = found || type_has_unsupported(child));
+    found
 }
 
 /// What the declared-side rewrite concluded about one `template-type<…>` node
@@ -28587,37 +28658,7 @@ impl<'a> Cx<'a> {
     /// it; reading an argument out by position asks nothing about substitution at
     /// all.
     fn resolve_template_types(&self, ty: &mut PType, file: usize, off: u32) {
-        match &mut ty.kind {
-            PKind::Nullable(inner) | PKind::Array(inner) => {
-                self.resolve_template_types(inner, file, off);
-            }
-            PKind::Union { types, .. } | PKind::Intersection(types) => {
-                for t in types {
-                    self.resolve_template_types(t, file, off);
-                }
-            }
-            PKind::Generic { args, .. } => {
-                for a in args {
-                    self.resolve_template_types(&mut a.ty, file, off);
-                }
-            }
-            PKind::OffsetAccess { base, offset } => {
-                self.resolve_template_types(base, file, off);
-                self.resolve_template_types(offset, file, off);
-            }
-            PKind::ArrayShape(s) => {
-                for it in &mut s.items {
-                    self.resolve_template_types(&mut it.value, file, off);
-                }
-            }
-            PKind::ObjectShape(items) => {
-                for it in items {
-                    self.resolve_template_types(&mut it.value, file, off);
-                }
-            }
-            PKind::Identifier(_) | PKind::This | PKind::Callable(_) | PKind::Const(_)
-            | PKind::Conditional(_) | PKind::Unsupported(_) => {}
-        }
+        for_each_child_type_mut(ty, &mut |child| self.resolve_template_types(child, file, off));
         // The node itself, after its arguments (inside-out).
         let PKind::Generic { base, args } = &ty.kind else { return };
         if !is_template_type(base, args.len()) {
@@ -28753,39 +28794,16 @@ impl<'a> Cx<'a> {
                 *name = format!("\\{}", fqn.trim_start_matches('\\'));
             }
         };
+        // The names this node itself carries: an identifier, and a generic's base.
+        // A callable's identifier (`Closure`) is deliberately left alone — it names
+        // the callable vocabulary the contract lane matches on, not a class the
+        // edge's file could re-spell.
         match &mut ty.kind {
             PKind::Identifier(name) => qualify(name),
-            PKind::Generic { base, args } => {
-                qualify(base);
-                for a in args {
-                    self.qualify_class_names(&mut a.ty, efile, eoff);
-                }
-            }
-            PKind::Nullable(inner) | PKind::Array(inner) => {
-                self.qualify_class_names(inner, efile, eoff);
-            }
-            PKind::Union { types, .. } | PKind::Intersection(types) => {
-                for t in types {
-                    self.qualify_class_names(t, efile, eoff);
-                }
-            }
-            PKind::OffsetAccess { base, offset } => {
-                self.qualify_class_names(base, efile, eoff);
-                self.qualify_class_names(offset, efile, eoff);
-            }
-            PKind::ArrayShape(s) => {
-                for it in &mut s.items {
-                    self.qualify_class_names(&mut it.value, efile, eoff);
-                }
-            }
-            PKind::ObjectShape(items) => {
-                for it in items {
-                    self.qualify_class_names(&mut it.value, efile, eoff);
-                }
-            }
-            PKind::This | PKind::Callable(_) | PKind::Const(_) | PKind::Conditional(_)
-            | PKind::Unsupported(_) => {}
+            PKind::Generic { base, .. } => qualify(base),
+            _ => {}
         }
+        for_each_child_type_mut(ty, &mut |child| self.qualify_class_names(child, efile, eoff));
     }
 
     /// Resolve a call/return value to a proven [`CVal`] (scalars, arrays of proven
@@ -34238,6 +34256,133 @@ mod template_type_rewrite_tests {
             "template-type<\\App\\DogBox, \\App\\Box, 'T'>",
         );
         assert_eq!(ty.to_string(), "\\App\\Dog");
+    }
+}
+
+#[cfg(test)]
+mod phpdoc_walk_tests {
+    //! Unit tests for the one traversal every phpdoc-type walk in this crate goes
+    //! through ([`for_each_child_type`] and its mutable twin, issue #374), pinned
+    //! through the walk whose reach is observable node by node: the `@template`
+    //! shadow ([`neutralize_templates`]).
+    //!
+    //! One test per node kind, and every one reads the position out of the AST **by
+    //! hand**. A test that recursed the way the subject recurses would agree with it
+    //! about a position neither reaches, and so would pass vacuously on exactly the
+    //! drift it exists to catch — which is how `\Closure(): T` stayed unshadowed
+    //! through four issues.
+    use super::*;
+
+    /// `spelling` after the shadow of a lone `@template T` has run over it.
+    fn shadowed(spelling: &str) -> PType {
+        let shadow = template_names_of(Some("/** @template T */"));
+        let mut ty = parse_type(spelling).expect("the spelling parses").ty;
+        neutralize_templates(&mut ty, &shadow);
+        ty
+    }
+
+    /// Whether the shadow reached this position: the template name has become the
+    /// opaque node that lowers to `Opaque` and judges nothing, keeping its spelling.
+    fn neutral(ty: &PType) -> bool {
+        matches!(&ty.kind, PKind::Unsupported(raw) if raw == "T")
+    }
+
+    #[test]
+    fn a_callables_parameters_and_return_are_shadowed() {
+        // The leak this walk was unified to close: `T` here lowered as a class
+        // named `T`, so a project declaring one judged closure arguments against it.
+        let ty = shadowed("callable(T, int): T");
+        let PKind::Callable(c) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&c.params[0].ty), "parameter: {}", c.params[0].ty);
+        assert!(neutral(&c.return_type), "return: {}", c.return_type);
+        // What the contract lane makes of it: the signature survives, and the two
+        // shadowed positions lower to the silent arm rather than to a class named
+        // `T`. The untouched `int` parameter is the control.
+        let lowered = steins_contract::lower(&ty);
+        let steins_contract::ContractTy::CallableTy { sig: Some(sig), .. } = lowered else {
+            panic!("lowered to {lowered:?}");
+        };
+        assert_eq!(sig.params[0].ty, steins_contract::ContractTy::Opaque);
+        assert_eq!(sig.ret, steins_contract::ContractTy::Opaque);
+        assert_ne!(sig.params[1].ty, steins_contract::ContractTy::Opaque, "int is untouched");
+    }
+
+    #[test]
+    fn a_conditionals_subject_target_and_branches_are_shadowed() {
+        let ty = shadowed("(T is T ? T : T)");
+        let PKind::Conditional(c) = &ty.kind else { panic!("parsed as {ty}") };
+        let ConditionalSubject::Type(subject) = &c.subject else { panic!("parsed as {ty}") };
+        assert!(neutral(subject), "subject: {subject}");
+        assert!(neutral(&c.target), "target: {}", c.target);
+        assert!(neutral(&c.if_type), "if branch: {}", c.if_type);
+        assert!(neutral(&c.else_type), "else branch: {}", c.else_type);
+    }
+
+    #[test]
+    fn an_offset_accesss_base_and_offset_are_shadowed() {
+        let ty = shadowed("T[T]");
+        let PKind::OffsetAccess { base, offset } = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(base), "base: {base}");
+        assert!(neutral(offset), "offset: {offset}");
+    }
+
+    #[test]
+    fn a_shape_value_and_its_unsealed_tail_are_shadowed() {
+        let ty = shadowed("array{a: T, ...<T, T>}");
+        let PKind::ArrayShape(s) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&s.items[0].value), "value: {}", s.items[0].value);
+        let tail = s.unsealed.as_ref().expect("the tail parsed");
+        assert!(neutral(&tail.value), "tail value: {}", tail.value);
+        assert!(neutral(tail.key.as_ref().expect("the tail key parsed")), "tail key");
+        // The object-shape twin of the value position.
+        let obj = shadowed("object{a: T}");
+        let PKind::ObjectShape(items) = &obj.kind else { panic!("parsed as {obj}") };
+        assert!(neutral(&items[0].value), "object value: {}", items[0].value);
+    }
+
+    #[test]
+    fn the_positions_that_were_never_in_doubt_still_are_shadowed() {
+        // The composites the hand-rolled walk already covered, kept under the pin so
+        // the unification is measurably behaviour-preserving where it should be.
+        let ty = shadowed("?list<T>");
+        let PKind::Nullable(inner) = &ty.kind else { panic!("parsed as {ty}") };
+        let PKind::Generic { args, .. } = &inner.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&args[0].ty), "generic argument: {}", args[0].ty);
+        let arr = shadowed("(T|int)[]");
+        let PKind::Array(elem) = &arr.kind else { panic!("parsed as {arr}") };
+        let PKind::Union { types, .. } = &elem.kind else { panic!("parsed as {arr}") };
+        assert!(neutral(&types[0]), "union member: {}", types[0]);
+    }
+
+    #[test]
+    fn the_names_a_node_carries_are_each_walks_own_business() {
+        // A `\`-qualified reference opts out of the template namespace (issue #5's
+        // own rule), and a generic *base* is a string no rewrite touches — the
+        // mention scan is what reads it, and it still does.
+        let ty = shadowed("list<\\T>");
+        let PKind::Generic { args, .. } = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(matches!(&args[0].ty.kind, PKind::Identifier(n) if n == "\\T"), "{ty}");
+        let base = shadowed("T<int>");
+        assert!(matches!(&base.kind, PKind::Generic { base, .. } if base == "T"), "{base}");
+        let shadow = template_names_of(Some("/** @template T */"));
+        let mut names = Vec::new();
+        mentioned_templates(&base, &shadow, &mut names);
+        assert_eq!(names, vec!["T".to_owned()], "the base is a mention the read cannot index");
+    }
+
+    #[test]
+    fn the_shadow_runs_after_the_opaque_test_and_the_envelope_survives() {
+        // The order inside `parse_envelopes` is load-bearing now that the shadow
+        // reaches inside a signature. `parse_tag_type` refuses a type carrying an
+        // opaque node; the shadow plants one. Were the two the other way round,
+        // every `\Closure(): T` envelope would vanish instead of merely going quiet
+        // about the class named `T`.
+        let env = parse_envelopes(Some("/** @template T\n * @param \\Closure(): T $f */"))
+            .expect("the docblock carries an envelope");
+        let ty = env.param("f").expect("the @param survived the shadow");
+        let PKind::Callable(c) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&c.return_type), "return: {}", c.return_type);
+        assert!(type_has_unsupported(ty), "the opaque test reaches inside a signature too");
     }
 }
 
