@@ -344,6 +344,19 @@ templates are transparent; where it does not, silence. The
 accepted cost is that some library-author generic lints Steins
 simply does not attempt.
 
+PHPStan's `template-type<Subject, Owner, 'TName'>` — "give me the
+`@template` argument called `TName` out of this type" — is read
+the same way: as a *lookup* in what the declarations already say,
+never as a solver. Where the subject spells the owner's arguments
+(`template-type<Box<int>, Box, 'T'>`), or reaches it through one
+`@extends Box<int>` edge, or parameterizes it by a template
+(`template-type<Box<T>, Box, 'T'>`), the whole thing simply *is*
+the type it names, and your `@param`/`@return` judges as if you
+had written that type out. Anywhere the declarations do not
+decide it — an owner nothing declares, a name it does not have, a
+union subject, a subject that is itself a template waiting on a
+call site — it stays opaque and constrains nothing.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return

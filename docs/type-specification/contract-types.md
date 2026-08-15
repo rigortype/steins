@@ -113,12 +113,22 @@ rules instead of a keyword zoo:
   direct-`new` argument position (ADR-0032 stage 1; see
   [object-model.md](object-model.md)).
 - `template-type<Subject, Owner, 'TName'>` → `Opaque`, at *every* arity: it is
-  known vocabulary this lane models no relation for yet (issue #360; resolution
-  is issue #361). The name is checked before the argument count, so PHPStan's
-  error-type arities floor here silently too (a registered divergence). Without
-  the entry it would read as a class named `template-type` — a nonexistent-class
-  reference, the same wrong-`No` hazard `key-of`/`value-of` solve — which is why
-  the floor is `Opaque` and not `Class`.
+  known vocabulary this lane models no relation for (issue #360). The name is
+  checked before the argument count, so PHPStan's error-type arities floor here
+  silently too (a registered divergence). Without the entry it would read as a
+  class named `template-type` — a nonexistent-class reference, the same wrong-`No`
+  hazard `key-of`/`value-of` solve — which is why the floor is `Opaque` and not
+  `Class`.
+
+  **What this lane sees is already the residue.** The utility is *resolved* one
+  layer earlier, where phpdoc envelopes are built (issue #361): a node whose
+  answer is decidable from declarations is rewritten into the type it names
+  before anything reaches here, so `template-type<Box<int>, Box, 'T'>` lowers as
+  `int` lowers and this entry never fires on it. It has to happen there, because
+  finding `'TName'`'s position needs the owner's `@template` list out of the
+  project index and this crate has no index — the same reason `Class(fqn)` hands
+  the class question back to each lane's own machinery. The floor is what remains
+  for everything the declarations do not decide.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own
