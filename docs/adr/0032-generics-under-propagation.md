@@ -257,3 +257,98 @@ which is order-independent because it is an intersection.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation, recorded ahead of the implementation.
+
+## Amendment (2026-08-15): `template-type` reads the carry as a type expression (issue #362)
+
+The two amendments above built the carry and made it survive a binding.
+Both were written for one consumer, acceptance: a declared `Box<int>` meets
+a carried argument and the answer is a `Tri`. PHPStan's
+`template-type<Subject, Owner, 'TName'>` asks the same state a different
+question — *what* is carried there, not whether something inhabits it — and
+that question has no answer in the text above. This amendment gives it one.
+
+**The utility is a reader, not a solver.** `getTemplateType(owner, name)`
+on the PHPStan side is a lookup: find the ancestor parameterization owned
+by `owner`, index the position `name` holds in that owner's own
+`@template` list, return what sits there. Steins already keeps exactly that
+shape — [`GenericCarry`] is an owner FQN plus one argument per declared
+template — so the reader is a projection out of tier-3 state and introduces
+no inference. Tier 1 is untouched: nothing about a call-site template
+solver changes, and the divergence ADR-0030 registers stands. What the
+declared side of the utility resolves from declarations alone (issue #361)
+this reads from the receiver's carry at the call site, which is the only
+place the answer exists when the subject is a class-level template.
+
+**A value carry holding an object contributes that object's own carries,
+one hop.** The discussion-9053 shape needs two lookups, not one:
+`template-type<T, ModelInterface, 'TChild'>` on `Helper<T>` first reads `T`
+off the receiver's `Helper` carry, and what sits there is a *value* — the
+`Model` object that flowed into the constructor. The second lookup is
+`ModelInterface`'s `TChild` on that object, and the carries to index are
+the object's own (`@implements ModelInterface<Child>`, minted by
+`infer_generic_carry` when the value was proven). A `CArg::Ty` naming a
+declared class resolves the same way, through the index rather than through
+a heap object. **Each hop is one level**, the same rule the inheritance-edge
+amendment already states and for the same reason: the moment following a
+second edge would mean substituting through a generic intermediate, the
+walk is wrong rather than incomplete. The subject asks for exactly two
+lookups and gets exactly two; nothing recurses.
+
+**The read is Asserted, and never anything stronger.** What the reader
+produces is a *docblock's claim about a return*, resolved against a carry
+that happens to be proven — the proof is about what flowed into a
+constructor, not about what this method returns. So the projected type
+enters the call site through the same refinement a hand-written
+`@return Child` goes through, at the same stratum, and a reader cannot tell
+which spelling produced it. That is the whole soundness argument: a proven
+carry may not launder a declared return into the proof layer, and routing
+the result through the ordinary declared-return refinement is what
+guarantees it does not.
+
+**Silence everywhere the lookup does not land.** An empty carry, a carry
+swept by an earlier receiver call (the previous amendment), a non-exact
+receiver, a `$this` receiver, no carry edge owned by the declaring class, a
+template name the owner does not declare, an arity that disagrees with that
+list, a hop whose object carries no edge owned by the owner, a carried
+argument the contract lane has no type for — every one of them declines and
+leaves today's floor (the class-level shadow, and `Opaque`). PHPStan
+substitutes an unresolved template's declared bound; Steins declines class
+bounds on tier 1's own terms (issue #293), so that path is opaque here too.
+
+**The sweep is visible through this reader, and that is correct.** A value
+carry does not survive a receiver method call, so `$helper->reset();
+$helper->getFirstChildren()` reads nothing where `$helper->getFirstChildren()`
+alone reads `Child` — and a *second* read on the same receiver declines,
+because the first call swept it. The alternative is carrying a stale
+parameterization past a method that may have rewritten it, which the
+previous amendment already rejected as a false-positive source. A declared
+edge carry is sweep-immune and reads identically before and after.
+
+### ADR-0048 obligations
+
+**§2 (replayable).** The reader is a pure function of the same inputs the
+carry is: the trace that proved the object, the project index (the owner's
+`@template` list, the hop class's inheritance edges), and the docblock being
+read. It asks the engine nothing and holds no state between call sites, so
+re-walking a scope alone reproduces it exactly.
+
+**§3 (entry-state contribution).** No new fact kind is introduced — the
+reader consumes `HeapObj::targs`, whose entry-state contribution the
+previous amendment already fixed. Its own call-site contributions are
+stated here because they are the same kind of commitment: a `$this`
+receiver contributes **empty** (a lower bound on the runtime class, and the
+enclosing method saw no constructor), a non-exact receiver contributes
+**empty** (no single class whose template list the arguments align to), a
+static call contributes **empty** (no receiver), and a direct
+`new Helper(…)->m()` receiver contributes **empty** in this slice — the
+allocation has no heap object yet at the point the target resolves, and
+minting a carry out of the `new` arguments here would be a second
+implementation of `infer_generic_carry` rather than a reading of it.
+
+**§4 (no global ordering).** The reader depends on statement order within
+one scope — which is what the sweep *is* — and on nothing across scopes or
+files. Statement order inside a scope is the walk's own semantics, not an
+iteration order of a whole-project pass.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, recorded ahead of the implementation.
