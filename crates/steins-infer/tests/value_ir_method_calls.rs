@@ -186,6 +186,24 @@ fn a_method_call_element_makes_its_array_a_shape_rather_than_nothing() {
     assert_ne!(d, "dumped type: unknown", "the array no longer collapses whole");
 }
 
+#[test]
+fn returning_a_method_call_still_composes_its_heap_summary() {
+    // `return $o->m()` is served by the statement's own summary through
+    // `return_heap_object`'s wildcard (ADR-0057 §2.3's composition arm). The new
+    // carrier must not shadow that arm with a value-lane read — an object has no
+    // value component, so a `MethodCall` arm there would have replaced a working
+    // crossing with `None`.
+    let src = "<?php\ndeclare(strict_types=1);\n\
+        function needString(string $s): void {}\n\
+        class Foo { public function __construct(public mixed $n) {} }\n\
+        final class Maker { public function make(mixed $n): Foo { return new Foo($n); } }\n\
+        function outer(mixed $n): Foo { $m = new Maker(); return $m->make($n); }\n\
+        $f = outer(1);\nneedString($f->n);\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 1, "the allocation crossed two boundaries: {f:#?}");
+    assert_eq!(f[0].id, ID);
+}
+
 // ---------------------------------------------------------------------------
 // One walk per body: the value position shares the statement position's memo.
 // ---------------------------------------------------------------------------
