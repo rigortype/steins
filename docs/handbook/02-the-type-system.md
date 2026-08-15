@@ -515,6 +515,62 @@ type — writing the call directly inside another expression is a
 carrier limit one layer below this, the same one that keeps
 `$box->unwrap()` from answering in argument position.
 
+## And `new` reads the constructor
+
+The oldest hole in all of this was the smallest to write down:
+Steins knew what a class *declared* and never read what its
+constructor *did*. A promoted parameter came through, because a
+promotion is a declaration. A body write did not:
+
+```php
+class B { public $value; public function __construct($v) { $this->value = $v; } }
+```
+
+`new B(1)` gave you a `B` with no `value` at all — although the
+one line of the constructor says exactly what `value` is.
+
+It reads it now. `new B(1)` walks `__construct` with `$this`
+already holding what the site mints — every declared default,
+every promoted parameter — and what the constructor *leaves
+behind* is the object you get:
+
+```php
+$b = new B(1);
+needString($b->value);
+// argument 1 (from $b->value) to needString() cannot become string $s
+```
+
+Everything the previous two sections promised about factories
+holds here too, because it is the same machinery one boundary
+earlier. The paths join: a constructor writing `1` on one branch
+and `2` on another gives you `1|2`, and a property only one branch
+sets is not carried. A `throw` is not a way out — a constructor
+that always throws yields nothing to describe, and a `throw` on
+one path leaves you the other path's object. A constructor that
+lets `$this` out — hands it to a call, stores it — gives you an
+object that arrives already escaped, and one that never does gives
+you an object *no one else holds*, whose properties survive an
+unrelated call. It works wherever you write the `new`: assigned,
+passed as an argument, or returned from a factory.
+
+**Where it stops, it stops honestly.** Two shapes are worth
+knowing because they are common:
+
+- **A delegating constructor.** `__construct() { $this->init(); }`
+  — Steins does not fold `init()`'s writes into the object, so
+  every property the constructor could have written through that
+  call comes back **unknown**. Not the declared default: the
+  default would be a claim the constructor may have replaced, and
+  a wrong proven value is worse than no value. The same goes for
+  `parent::__construct()`. Write the values in the constructor
+  itself and they come through.
+- **Anything Steins refuses to walk** — a constructor it cannot
+  resolve, an abstract one, one using `extract` or `$$name`, a
+  `new C(x: 1)` written with named arguments, a recursive pair —
+  falls back to the older, blunter rule: a declared default
+  survives only if the constructor's text never mentions the
+  slot at all.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return

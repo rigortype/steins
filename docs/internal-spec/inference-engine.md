@@ -124,10 +124,11 @@ zero-argument `$b->get()` descends. Every other receiver seeds through
 `seed_this_object` exactly as before, each for a stated reason: `Receiver::This`
 is pre-escaped by construction (its non-readonly props would not cross anyway),
 a non-exact `Receiver::Var` resolves through the override guard and proves no
-identity, `Receiver::New` and `Callee::Construct` have no allocation yet, and a
-static call has no receiver. The `this:` key component correspondingly carries
-the object's canonical rendering where a copy was seeded and the bare exact
-class FQN where none was (ADR-0075 §2.1, amended).
+identity, `Receiver::New` has no allocation yet, and a static call has no
+receiver. A **constructor** descent seeds `$this` from the fresh allocation
+instead (below). The `this:` key component correspondingly carries the object's
+canonical rendering where a copy was seeded and the bare exact class FQN where
+none was (ADR-0075 §2.1, amended).
 
 What the receiver leg does **not** reach is the value surface: a method call in
 argument or dump position never enters the value IR (`ArgValue::Call` carries a
@@ -164,9 +165,10 @@ callee's returning exits, of the returned expression's value-domain fact, carrie
 at the `min` trust stratum over those exits (an `Asserted` exit drags the whole
 summary to `Asserted`). It rides the same `BindingKey` memo — now a value map —
 and is consumed at the call-result binding as the value **floor** above the
-declared arms, for both free functions and resolved method/static calls.
-Constructors still descend for diagnostics but leave the summary unread (the
-construction rvalue is the ADR-0036 exactness lane). It is a pure function of
+declared arms, for both free functions and resolved method/static calls. A
+constructor has no value component to read — it evaluates to an object, and an
+object is not a value — and reads the heap one instead (below). It is a pure
+function of
 `(callee CST, bound entry state [, exact receiver])`, so it is a legitimate
 replayable query answer — and since ADR-0086 §2 the "bound entry state" includes
 the argument objects seeded onto the callee's heap, which is what lets
@@ -194,6 +196,45 @@ an object is not a value (ADR-0035) — the same carrier limit named above.
 
 The two components live and die independently, and a summary exists whenever
 either does.
+
+**`new C(args)` is the constructor descent's `$this` snapshot** (ADR-0057's
+2026-08-16 constructor-summary amendment, the successor to T1). The descent that
+already walked `__construct` for its diagnostics is now *read*. Its `$this` is
+seeded from the object the site mints — `new_heap_object` with **every** literal
+default (the ADR-0086 §4 lexical gate is bypassed, the walk being the body that
+gate approximated), every promoted parameter, `class_exact = true`, the readonly
+bookkeeping and the carries — under the same field table as a receiver copy with
+`escaped` decided the other way: **`false`**, the one copy that is not
+pre-escaped, because a `new` site has no caller-side object for the call to
+escape. Every exit contributes that `$this`: each `return;`, and the body's
+fall-through, which is a constructor's normal exit. A `throw` or `exit` yields no
+object and contributes nothing. `join_heap_exits` joins them unchanged, and the
+caller's fresh allocation **is** the join — class and exactness asserted rather
+than copied, everything else replaced. The replacement (rather than a widening)
+is licensed by the allocation having had no alias before the constructor ran.
+
+One walk per site, over two disjoint seams: wherever the lowering builds a
+`Callee::Construct` call (assignment, statement, property assignment, `return new
+C()`) the walk runs at the call rung and the object build later in the same
+statement consumes its snapshot; in **argument** position, where no such call is
+lowered at all, the walk runs inside ADR-0086 §2's mint. A receiver-position
+`new` is out on the value-IR limit of issue #374, not on anything this design
+owns.
+
+An unescaped `$this` still owes its sweeps. A call running with the **same**
+`$this` — `$this->m(…)`, `parent::m(…)`, `self::m(…)`, `static::m(…)` — sweeps
+the receiver's own non-readonly props and value carries in every walk, resolved
+or not, since a descent into it seeds its *own* `$this` copy and its writes are
+invisible here; that also closes the resolved-private-`$this->m()` hole the
+receiver leg had left. And inside a constructor walk the unescaped `$this` is
+swept by the same `object_passed || unknown` condition that sweeps escaped
+objects, a non-static closure being able to bind `$this` without naming it.
+
+Where the descent declines — no constructor, abstract, unresolvable, poisoned on
+either side, a named or spread argument list, the depth budget, a recursion pair,
+every path throwing, or an exit at which `$this` is gone — the site keeps the
+object `new_heap_object` builds under the ADR-0086 §4 lexical gate, unchanged.
+That gate is now the floor for undescended constructors and nothing else.
 
 ## The folding seam
 
