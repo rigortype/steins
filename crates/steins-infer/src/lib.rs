@@ -29927,22 +29927,26 @@ fn maybe_arg_witnesses(base: Base) -> Vec<ArgValue> {
     }
 }
 
+/// One abstract arm: a scalar base with the refinement (if any) carried with it.
+/// The `null` side-flag is never an arm — it rides beside the list, as in [`Fact`].
+type AbstractArm = (Base, Option<Refinement>);
+
 /// How much of an abstract fact's denotation a native parameter rejects.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum MaybeArgVerdict {
     /// Every arm rejected — the definite No of issue #291. Measured empty, and
     /// never emitted: see the module header above.
-    AllRejected,
+    Every,
     /// Some arm rejected, some accepted — the possibly-grade claim this pair of
     /// ids carries.
-    SomeRejected,
+    Partial,
     /// Nothing provably rejected, or a fact the judgment declines.
-    NoneRejected,
+    Nothing,
 }
 
 /// The abstract arms of `fact` — one entry for a single-base layer, several for a
 /// union — plus its `null` side-flag; `None` for a finite or array fact.
-fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<(Base, Option<Refinement>)>, bool)> {
+fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<AbstractArm>, bool)> {
     match fact {
         Fact::Refined { base, refinement, nullable } => {
             Some((vec![(*base, Some(*refinement))], *nullable))
@@ -29955,7 +29959,7 @@ fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<(Base, Option<Refinement>)>, bool)
 
 /// Spell one abstract union arm the way [`describe_fact`] spells a whole fact —
 /// used to name the rejected arms in the message.
-fn spell_arm(arm: &(Base, Option<Refinement>)) -> String {
+fn spell_arm(arm: &AbstractArm) -> String {
     let (base, refinement) = arm;
     let f = match refinement {
         Some(r) => Fact::refined(*base, *r, false),
@@ -29987,14 +29991,14 @@ fn maybe_arg_verdict(
     p: &Param,
     ty: &NativeType,
     fact: &Fact,
-) -> (MaybeArgVerdict, Vec<(Base, Option<Refinement>)>, bool) {
+) -> (MaybeArgVerdict, Vec<AbstractArm>, bool) {
     let Some((arms, nullable)) = maybe_arg_arms(fact) else {
-        return (MaybeArgVerdict::NoneRejected, Vec::new(), false);
+        return (MaybeArgVerdict::Nothing, Vec::new(), false);
     };
     if arms.is_empty() {
-        return (MaybeArgVerdict::NoneRejected, Vec::new(), false);
+        return (MaybeArgVerdict::Nothing, Vec::new(), false);
     }
-    let rejected: Vec<(Base, Option<Refinement>)> = arms
+    let rejected: Vec<AbstractArm> = arms
         .iter()
         .filter(|arm| maybe_arg_witnesses(arm.0).iter().all(|w| is_type_error(cx, ty, w)))
         .copied()
@@ -30007,11 +30011,11 @@ fn maybe_arg_verdict(
     let total = arms.len() + usize::from(nullable);
     let n = rejected.len() + usize::from(null_rejected);
     let verdict = if n == total {
-        MaybeArgVerdict::AllRejected
+        MaybeArgVerdict::Every
     } else if n == 0 {
-        MaybeArgVerdict::NoneRejected
+        MaybeArgVerdict::Nothing
     } else {
-        MaybeArgVerdict::SomeRejected
+        MaybeArgVerdict::Partial
     };
     (verdict, rejected, null_rejected)
 }
@@ -30046,7 +30050,7 @@ fn arm_base_set(ty: &ContractTy) -> Option<(Vec<Base>, bool)> {
 fn spell_rejected_arms(
     cx: &Cx,
     lane: Option<&[ContractArm]>,
-    rejected: &[(Base, Option<Refinement>)],
+    rejected: &[AbstractArm],
     null_rejected: bool,
 ) -> Vec<String> {
     if let Some(arms) = lane {
@@ -30145,7 +30149,7 @@ fn check_maybe_argument_mismatch(
         return;
     };
     let (verdict, rejected, null_rejected) = maybe_arg_verdict(cx, param, ty, &fact);
-    if verdict != MaybeArgVerdict::SomeRejected {
+    if verdict != MaybeArgVerdict::Partial {
         return;
     }
     let id = if stratum == Stratum::Verified {
