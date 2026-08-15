@@ -405,6 +405,23 @@ fn prefixed_template_variant_shadows() {
 }
 
 #[test]
+fn template_shadows_a_real_class_in_an_unsealed_shape_tail() {
+    // Issue #374: the shadow used to walk an array shape's *items* and stop, so a
+    // template named in the unsealed tail stayed a class reference and judged every
+    // extra key against it. One walk now decides where the shadow goes, and the tail
+    // is one of the positions it goes to.
+    let src = "<?php final class T {}\n\
+        /** @template T\n * @param array{a: int, ...<T>} $a */ function f($a): void {}\n\
+        f(['a' => 1, 'z' => 2]);";
+    assert_eq!(param_count(src), 0, "@template T shadows the tail → the extra key is silent");
+    // Control: without the template the tail names the real class and still fires.
+    let control = "<?php final class T {}\n\
+        /** @param array{a: int, ...<T>} $a */ function f($a): void {}\n\
+        f(['a' => 1, 'z' => 2]);";
+    assert_eq!(param_count(control), 1, "no template → the tail's class contract fires");
+}
+
+#[test]
 fn template_shadows_real_class_return() {
     // `@return` path: `@template Foo` shadows the return contract too; scalar no longer fires.
     let src = "<?php class Foo {}\n\
