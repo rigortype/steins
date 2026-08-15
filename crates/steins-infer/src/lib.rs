@@ -13933,6 +13933,7 @@ fn arg_value_fact(
 /// it. `None` — no walk, or a walk that agreed on nothing (C6) — builds the
 /// declaration-only object under the ADR-0086 §4 lexical gate, byte for byte as
 /// before the amendment.
+#[allow(clippy::too_many_arguments)]
 fn build_new_object(
     w: &WalkCx,
     folder: &mut dyn Folder,
