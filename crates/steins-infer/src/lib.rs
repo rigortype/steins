@@ -11387,7 +11387,24 @@ fn walk_trace(
                     }
                     stmt_summary =
                         try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
-                    stmt_return_arms = cx.resolve_user_fn_any(call).and_then(|site| fn_return_arms(cx, site));
+                    // The declared floor, resolved with this call's own arguments in
+                    // hand (issue #363): a function-level `@template T` bound from
+                    // an argument's carry lets the callee's `@return T` name a type
+                    // here. Read at the same point the receiver twin is — before the
+                    // statement's escape/sweep pass — so the carry the read wants is
+                    // still the one the call was made against.
+                    let bindable = bindable_args(call);
+                    stmt_return_arms = cx.resolve_user_fn_any(call).and_then(|site| {
+                        fn_return_arms_at_call(
+                            cx,
+                            folder,
+                            site,
+                            &bindable,
+                            env,
+                            store,
+                            scope.poisoned,
+                        )
+                    });
                 }
                 Callee::Method { .. } | Callee::Static { .. } | Callee::Construct { .. } => {
                     // Branch-sensitive null-dereference proof (ADR-0031): a `$v->m()`
@@ -12705,8 +12722,8 @@ fn best_dump_type(
     // callee's `: string` is a fact the caller should see even with no summary
     // crossed. Exactly the arm list the assignment form seeds into the contract
     // store; no declared return type still falls to honest unknown.
-    if let ArgValue::Call(name, _) = value
-        && let Some(arms) = call_return_arms_by_name(cx, folder, name)
+    if let ArgValue::Call(name, cargs) = value
+        && let Some(arms) = call_return_arms_by_name(cx, folder, name, cargs, env, store, poisoned)
         && let Some(text) = render_contract_arms(cx, &arms)
     {
         return DumpRendering {
@@ -12724,7 +12741,9 @@ fn best_dump_phpdoc_type(
     cx: &Cx,
     folder: &mut dyn Folder,
     value: &ArgValue,
+    env: &HashMap<String, Known>,
     store: &Store,
+    poisoned: bool,
 ) -> DumpRendering {
     if let ArgValue::Var(name) = value
         && let Some(arms) = store.contract_arms(name)
@@ -12738,8 +12757,8 @@ fn best_dump_phpdoc_type(
     // A project call in argument position (issue #60): its declared envelope is the
     // same arm list the assignment form seeds into the contract store — parity
     // between `dumpPhpDocType(f(…))` and `$x = f(…); dumpPhpDocType($x)`.
-    if let ArgValue::Call(name, _) = value
-        && let Some(arms) = call_return_arms_by_name(cx, folder, name)
+    if let ArgValue::Call(name, cargs) = value
+        && let Some(arms) = call_return_arms_by_name(cx, folder, name, cargs, env, store, poisoned)
         && let Some(text) = render_contract_arms(cx, &arms)
     {
         return DumpRendering {
@@ -12834,7 +12853,9 @@ fn emit_dumps(
         for arg in &call.args {
             let rendering = match family {
                 DumpFamily::Type => best_dump_type(w, folder, &arg.value, env, store, arg.span.start),
-                DumpFamily::PhpDocType => best_dump_phpdoc_type(cx, folder, &arg.value, store),
+                DumpFamily::PhpDocType => {
+                    best_dump_phpdoc_type(cx, folder, &arg.value, env, store, w.scope.poisoned)
+                }
             };
             let pos = cx.tree().position(arg.span.start);
             out.push(Diagnostic {
@@ -16048,8 +16069,23 @@ fn call_return_arms(
 /// exists. Resolution is [`value_lane_fn_site`], the same hardened rule as the
 /// value lane's [`project_call_summary`] — the two must agree on the target or the
 /// floor could name a different function than the summary descended into.
-fn call_return_arms_by_name(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Vec<ContractArm>> {
-    fn_return_arms(cx, value_lane_fn_site(cx, folder, name)?)
+///
+/// `args` is the lowered argument list [`ArgValue::Call`] carries, which the
+/// call-site template read binds from (issue #363). It needs no positional gate of
+/// its own: a named or spread call never lowers to an [`ArgValue::Call`] at all, so
+/// what arrives here is positional by construction.
+fn call_return_arms_by_name(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    let site = value_lane_fn_site(cx, folder, name)?;
+    let bindable: Vec<&ArgValue> = args.iter().collect();
+    fn_return_arms_at_call(cx, folder, site, &bindable, env, store, poisoned)
 }
 
 /// The declared-return contract arms of the project function at `site` — the shared
@@ -16068,6 +16104,347 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
         cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
     refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+}
+
+/// [`fn_return_arms`] with the call's own **arguments** in hand (ADR-0032's second
+/// 2026-08-15 amendment, issue #363): one rung above the argument-blind floor,
+/// where a function-level `@template T` bound from an argument's generics carry
+/// lets the callee's `@return T` name a type instead of flooring to `Opaque`.
+///
+/// Tried first, falling straight through: everything the binding rule does not
+/// reach — every non-binding parameter spelling, every argument that carries
+/// nothing, every disagreement between two occurrences — is exactly
+/// [`fn_return_arms`], which is also what a caller with no arguments in hand
+/// keeps calling.
+///
+/// The rung ABOVE this one is the body summary, and it stays above: this is the
+/// declared floor's seam, which the summary already outranks at both the
+/// assignment and the value position. That ordering is the amendment's answer to
+/// the dual-inference hazard tier 1 refuses a solver over.
+fn fn_return_arms_at_call(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    site: Site,
+    args: &[&ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    let decl = cx.fn_decl(site);
+    let native: Vec<ContractTy> = decl.ret.as_ref().map(native_arms).unwrap_or_default();
+    template_arg_return_arms(
+        cx,
+        folder,
+        TemplateReadSite {
+            docblock: decl.docblock.as_deref(),
+            params: &decl.params,
+            native: &native,
+            file: site.file,
+            off: decl.span.start,
+        },
+        args,
+        env,
+        store,
+        poisoned,
+    )
+    .or_else(|| fn_return_arms(cx, site))
+}
+
+/// [`method_return_arms`] with the call's own arguments in hand — the method twin
+/// of [`fn_return_arms_at_call`] (issue #363), binding a **method-level**
+/// `@template` name.
+///
+/// The two carry readers on a method are orthogonal and both run: this one indexes
+/// an *argument's* carry for a method-level subject, [`receiver_template_type_arms`]
+/// indexes the *receiver's* for a class-level one, and the two shadow stages keep
+/// their name spaces apart — a method-level name is already an opaque node when
+/// this runs, a class-level one is still an identifier. The receiver's carries are
+/// untouched here.
+fn method_return_arms_at_call(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    target: &CallTarget<'_>,
+    args: &[&ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    let method = target.method;
+    let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
+    template_arg_return_arms(
+        cx,
+        folder,
+        TemplateReadSite {
+            docblock: method.docblock.as_deref(),
+            params: &method.params,
+            native: &native,
+            file: target.class_file,
+            off: method.span.start,
+        },
+        args,
+        env,
+        store,
+        poisoned,
+    )
+    .or_else(|| method_return_arms(cx, target))
+}
+
+/// The declaration half of a call-site template read — the four things
+/// [`template_arg_return_arms`] needs about the callee, bundled so the free-function
+/// and method entries hand over the same shape (their declarations are different
+/// types; everything the read asks of them is not).
+struct TemplateReadSite<'a> {
+    docblock: Option<&'a str>,
+    params: &'a [Param],
+    /// The callee's native return arms — the envelope the read must refine within.
+    native: &'a [ContractTy],
+    /// The file and offset the callee's docblock was written at, which is what
+    /// resolves the class names inside it.
+    file: usize,
+    off: u32,
+}
+
+/// The positional argument values a call-site template read may bind from —
+/// **empty** for any call whose argument list breaks the position-to-parameter map.
+///
+/// A named or spread argument list declines the whole call rather than binding from
+/// the positional prefix, and it declines by carrying no arguments at all, so every
+/// caller gets the decline for free. Same list, same reason as the carry sweep's
+/// gate (issue #295): position is what the read is built on, and a call that does
+/// not have one has nothing to read.
+fn bindable_args(call: &CallExpr) -> Vec<&ArgValue> {
+    if !call.positional_only || call.has_spread {
+        return Vec::new();
+    }
+    call.args.iter().map(|a| &a.value).collect()
+}
+
+/// One binding of a function-/method-level `@template` name to what flowed in at a
+/// call site (issue #363) — a carry argument plus the context its class names were
+/// written in, the owned twin of [`CarriedArg`].
+///
+/// Equality is structural and includes the site, which is what makes the
+/// all-or-nothing rule safe for a [`CArg::Ty`]: the same spelling written in two
+/// files can name two classes, and two bindings that might not be the same thing
+/// are not treated as agreeing.
+#[derive(Clone, PartialEq)]
+struct BoundTemplate {
+    arg: CArg,
+    site: Option<(usize, u32)>,
+}
+
+/// The return arms of a callee whose `@return` names one of its **own**
+/// `@template`s, bound from the generics carry of the argument that flowed into a
+/// `@param Owner<…, T, …>` (ADR-0032's second 2026-08-15 amendment, issue #363).
+///
+/// A projection, not a solver: one positional read out of tier-3 state, no
+/// constraint generation, no unification, no reverse flow into the argument, no
+/// fixpoint. What it produces is what tier 1 already calls `T` — whatever flowed in
+/// — made legible at the call site because the carry recorded it.
+///
+/// The `@return` shapes that read, both as [`Cx::envelopes_of`] leaves them:
+///
+/// - `T` itself (an opaque node carrying the raw name, since the declaration's own
+///   shadow has run) — which covers `@return template-type<Box<T>, Box, 'T'>` too,
+///   because issue #361 rewrote that to exactly this node;
+/// - `template-type<T, Owner, 'TName'>` — the subject issue #361 deferred, whose
+///   answer is one hop past the binding: the carried argument's own carries,
+///   indexed by `'TName'` on `Owner`. The receiver-less twin of
+///   [`receiver_template_type_arms`].
+///
+/// The result enters through [`refine_declared_arms`], so it comes out `Asserted`
+/// for the same structural reason a hand-written `@return` does and no consumer can
+/// tell which spelling produced it. `None` everywhere the read does not land, and
+/// every `None` leaves the caller's existing floor exactly as it was.
+fn template_arg_return_arms(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    at: TemplateReadSite<'_>,
+    args: &[&ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    // The overwhelmingly common short-circuit: a declaration with no `@template` of
+    // its own has nothing here to bind, and pays one docblock scan to say so.
+    let shadow = template_names_of(at.docblock);
+    if shadow.is_empty() || args.is_empty() {
+        return None;
+    }
+    // A by-ref or variadic parameter list declines the whole call for the same
+    // reason a named or spread argument list does (already declined by an empty
+    // `args`): the read is positional, and these are the shapes where a position
+    // stops naming one parameter.
+    if args.len() > at.params.len() || at.params.iter().any(|p| p.variadic || p.by_ref) {
+        return None;
+    }
+    let envelopes = cx.envelopes_of(at.docblock, at.file, at.off)?;
+    let ret = envelopes.ret.as_ref()?;
+    let bound = bind_call_templates(cx, folder, &envelopes, &at, &shadow, args, env, store, poisoned);
+    read_bound_template(cx, &bound, ret, at.native, at.file, at.off)
+}
+
+/// Bind every one of the declaration's own `@template` names the call's arguments
+/// decide — the binding half of [`template_arg_return_arms`].
+///
+/// A name maps to `None` once it is **contested**: two occurrences whose bindings
+/// disagree, or one occurrence that carries nothing. That is the all-or-nothing
+/// rule, and it is stricter than "any occurrence wins" on purpose — two parameters
+/// spelled `Box<T>` handed `Box<1>` and `Box<'s'>` say the author's `T` is not one
+/// thing at this call, and so does one of them handed an object nobody proved.
+#[allow(clippy::too_many_arguments)]
+fn bind_call_templates(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    envelopes: &Envelopes,
+    at: &TemplateReadSite<'_>,
+    shadow: &TemplateShadow,
+    args: &[&ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> HashMap<String, Option<BoundTemplate>> {
+    let mut bound: HashMap<String, Option<BoundTemplate>> = HashMap::new();
+    for (param, value) in at.params.iter().zip(args) {
+        let Some(ty) = envelopes.param(&param.name) else { continue };
+        match &ty.kind {
+            // `@param T $p` — the whole parameter IS the template, so what binds is
+            // the argument's own proven value. A bounded template never reaches this
+            // arm: the shadow already replaced it with its bound, which is what the
+            // author promised and what `@return T` therefore reads.
+            PKind::Unsupported(name) if shadow.contains(&name.to_ascii_lowercase()) => {
+                let carried = cx
+                    .resolve_cval(value, env, store, poisoned, folder)
+                    .map(|cv| BoundTemplate { arg: CArg::Val(cv), site: None });
+                record_binding(&mut bound, name, carried);
+            }
+            // `@param Owner<…, T, …> $p` — TOP level only, and only where the
+            // spelling aligns with the owner's own `@template` list position for
+            // position. A nested (`list<Box<T>>`) or nullable (`Box<T>|null`)
+            // spelling is a different node kind and never arrives here, which is
+            // exactly the decline the amendment states.
+            PKind::Generic { base, args: spelled } => {
+                let owner = cx.resolve_pclass(at.file, at.off, base);
+                let names = class_template_names(cx, &owner);
+                if names.is_empty() || names.len() != spelled.len() {
+                    continue;
+                }
+                let mentions: Vec<(usize, &String)> = spelled
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, a)| match &a.ty.kind {
+                        PKind::Unsupported(n) if shadow.contains(&n.to_ascii_lowercase()) => {
+                            Some((j, n))
+                        }
+                        _ => None,
+                    })
+                    .collect();
+                if mentions.is_empty() {
+                    continue;
+                }
+                // The argument's carries, through the same resolution acceptance
+                // uses — so a direct `new` in argument position and a heap-bound
+                // variable (issue #295) both reach here, and a swept carry reaches
+                // here empty.
+                let carries = match cx.resolve_cval(value, env, store, poisoned, folder) {
+                    Some(CVal::Object(_, carries)) => carries,
+                    _ => Vec::new(),
+                };
+                for (j, name) in mentions {
+                    let carried = get_template_type(cx, &carries, &owner, &names[j])
+                        .map(|c| BoundTemplate { arg: c.arg.clone(), site: c.site });
+                    record_binding(&mut bound, name, carried);
+                }
+            }
+            _ => {}
+        }
+    }
+    bound
+}
+
+/// Record one occurrence's verdict about `name`, applying the all-or-nothing rule:
+/// a first binding stands, a second one that agrees changes nothing, and anything
+/// else — a disagreement, or an occurrence that carried nothing — contests the name
+/// permanently.
+fn record_binding(
+    bound: &mut HashMap<String, Option<BoundTemplate>>,
+    name: &str,
+    carried: Option<BoundTemplate>,
+) {
+    match bound.entry(name.to_ascii_lowercase()) {
+        std::collections::hash_map::Entry::Vacant(v) => {
+            v.insert(carried);
+        }
+        std::collections::hash_map::Entry::Occupied(mut o) => {
+            let agrees = matches!((o.get(), &carried), (Some(a), Some(b)) if a == b);
+            if !agrees {
+                o.insert(None);
+            }
+        }
+    }
+}
+
+/// The class-level `@template` names `class_fqn` declares, in declaration order —
+/// the positional list every carry aligns to.
+///
+/// Empty for an unresolvable class or one declaring none, which declines every
+/// read that would have indexed it.
+fn class_template_names(cx: &Cx, class_fqn: &str) -> Vec<String> {
+    cx.find_class(class_fqn)
+        .and_then(|(_, cd)| cd.docblock.as_deref())
+        .map(steins_phpdoc::scan_template_names)
+        .unwrap_or_default()
+}
+
+/// The arms a callee's `@return` denotes once its own `@template` names are bound —
+/// the reading half of [`template_arg_return_arms`].
+fn read_bound_template(
+    cx: &Cx,
+    bound: &HashMap<String, Option<BoundTemplate>>,
+    ret: &PType,
+    native: &[ContractTy],
+    file: usize,
+    off: u32,
+) -> Option<Vec<ContractArm>> {
+    let binding = |name: &str| bound.get(&name.to_ascii_lowercase())?.as_ref();
+    let (ty, site) = match &ret.kind {
+        // `@return T`, and — since issue #361 rewrote it to this very node —
+        // `@return template-type<Box<T>, Box, 'T'>` with it.
+        PKind::Unsupported(name) => {
+            let b = binding(name)?;
+            (carg_contract_ty(&b.arg)?, b.site)
+        }
+        // `@return template-type<T, Owner, 'TName'>` — the Deferred subject, one hop
+        // past the binding. `getTemplateType` on a function-level template.
+        PKind::Generic { base, args } if is_template_type(base, args.len()) => {
+            let PKind::Unsupported(name) = &args[0].ty.kind else { return None };
+            let b = binding(name)?;
+            let PKind::Identifier(owner_name) = &args[1].ty.kind else { return None };
+            let PKind::Const(ConstExpr::Str(StringLit::Single(want) | StringLit::Double(want))) =
+                &args[2].ty.kind
+            else {
+                return None;
+            };
+            let owner_fqn = cx.resolve_pclass(file, off, owner_name);
+            let hop = template_arg_carries(cx, &CarriedArg { arg: &b.arg, site: b.site });
+            let named = get_template_type(cx, &hop, &owner_fqn, want)?;
+            (carg_contract_ty(named.arg)?, named.site)
+        }
+        // Every other `@return` — a class, a scalar, a union mentioning `T`, a
+        // shape — is not this read. The argument-blind floor already says whatever
+        // there is to say about it.
+        _ => return None,
+    };
+    // Class names inside a carried type are resolved where they were WRITTEN
+    // (issue #294), and an unresolvable one stays silent — the same valve
+    // [`receiver_template_type_arms`] applies for the same reason.
+    let (rfile, roff) = site.unwrap_or((file, off));
+    if names_unknown_class(cx, rfile, roff, &ty) {
+        return None;
+    }
+    let resolve =
+        |n: &str| cx.resolve_pclass(rfile, roff, n).trim_start_matches('\\').to_ascii_lowercase();
+    refine_declared_arms(native, flatten_arms(ty), &resolve)
 }
 
 /// The declared-return contract arms of a resolved method/static target (ADR-0075
@@ -26882,7 +27259,19 @@ fn handle_method_call(
     let return_arms = if matches!(call.receiver, Callee::Construct { .. }) {
         None
     } else {
-        method_return_arms(cx, &target)
+        // With the call's arguments in hand, so a METHOD-level `@template` binds
+        // from them too (issue #363). The receiver's carries are untouched — the
+        // two readers index different state and neither sees the other's names.
+        let bindable = bindable_args(call);
+        method_return_arms_at_call(
+            cx,
+            folder,
+            &target,
+            &bindable,
+            env,
+            store,
+            scope.poisoned,
+        )
     };
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
@@ -29190,11 +29579,7 @@ fn get_template_type<'c>(
     template_name: &str,
 ) -> Option<CarriedArg<'c>> {
     let carry = carry_for_owner(carries, owner_fqn)?;
-    let names = cx
-        .find_class(owner_fqn)
-        .and_then(|(_, cd)| cd.docblock.as_deref())
-        .map(steins_phpdoc::scan_template_names)
-        .unwrap_or_default();
+    let names = class_template_names(cx, owner_fqn);
     if names.is_empty() || names.len() != carry.args.len() {
         return None;
     }
