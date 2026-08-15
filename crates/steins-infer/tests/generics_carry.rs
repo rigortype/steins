@@ -1097,15 +1097,28 @@ fn a_declared_receiver_declines_where_phpstan_resolves() {
     // The fixture's `Other::getFirstChildren(Helper $helper)` leg, and the
     // registered divergence with it: PHPStan reads the receiver's *declared*
     // generic type, Steins reads a *carry*, and a `@param Helper<TModel> $helper`
-    // seeds no heap object today — so there is nothing to read and the whole leg is
-    // silence. Its function-level half is issue #363.
-    let body = "final class Other {\n\
+    // seeds no heap object today — so inside the body there is nothing to read.
+    let inside = "final class Other {\n\
+        \x20 /**\n  * @template TModel of ModelInterface\n  * @param Helper<TModel> $helper\n\
+        \x20 * @return TModel\n  */\n\
+        \x20 public function take(Helper $helper) { $c = $helper->getFirstChildren(); \
+        \\PHPStan\\dumpType($c); return $c; }\n}\n";
+    assert_eq!(dumped(&shape(SPELLING, inside)), "dumped type: unknown");
+
+    // The CALL to that same method does resolve, and it is a different reader
+    // answering a different question (issue #363): `TModel` binds from the carry of
+    // the argument handed to `@param Helper<TModel>`, so `@return TModel` names what
+    // the caller passed. The declined read above is unchanged by it — the divergence
+    // is about the receiver's declared type, not about the argument's carry.
+    let outside = "final class Other {\n\
         \x20 /**\n  * @template TModel of ModelInterface\n  * @param Helper<TModel> $helper\n\
         \x20 * @return TModel\n  */\n\
         \x20 public function take(Helper $helper) { return $helper->getFirstChildren(); }\n}\n\
         function g() { $o = new Other(); $c = $o->take(new Helper(new Model())); \
         \\PHPStan\\dumpType($c); }\n";
-    assert_eq!(dumped(&shape(SPELLING, body)), "dumped type: unknown");
+    let spelled = outside.replace("@return TModel", "@return Model");
+    assert_eq!(dumped(&shape(SPELLING, outside)), dumped(&shape(SPELLING, &spelled)));
+    assert_eq!(dumped(&shape(SPELLING, outside)), "dumped type: Model (asserted)");
 }
 
 #[test]
