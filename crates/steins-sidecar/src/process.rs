@@ -293,13 +293,15 @@ impl Sidecar {
         parse_defined_result(value.get("result")?)
     }
 
-    /// Fold one builtin call: send `fold(name, args)` and interpret the reply.
-    /// Never panics; any failure widens and poisons.
-    pub fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
+    /// Fold one builtin call: send `fold(name, args, strict)` and interpret the
+    /// reply. `strict` is the CALL SITE's `declare(strict_types=1)`, not this
+    /// process's — see [`fold_params`]. Never panics; any failure widens and
+    /// poisons.
+    pub fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult {
         if !self.revive() {
             return FoldResult::widen("sidecar poisoned");
         }
-        let Some(value) = self.request("fold", fold_params(name, args)) else {
+        let Some(value) = self.request("fold", fold_params(name, args, strict)) else {
             return FoldResult::widen("sidecar failure");
         };
         let Some(result) = value.get("result") else {

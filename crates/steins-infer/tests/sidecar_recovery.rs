@@ -46,7 +46,7 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     // Probe with an unused argument first and skip loudly if `php` is unreachable
     // — `EngineFolder` memoizes, so probing `strtoupper("ab")` would answer the
     // snippet's second fold from cache and hide the death this test is about.
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!(
             "SKIP a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run: \
              no folding engine — is `php` on PATH?"
@@ -67,7 +67,7 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
 #[test]
 fn a_recovered_death_still_shows_in_the_run_posture() {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!(
             "SKIP a_recovered_death_still_shows_in_the_run_posture: \
              no folding engine — is `php` on PATH?"
@@ -127,7 +127,12 @@ impl steins_infer::FoldEngine for RestartableEngine {
     fn reflect(&mut self, _target: &str) -> Option<steins_sidecar::Reflection> {
         None
     }
-    fn fold(&mut self, _name: &str, _args: &[steins_sidecar::FoldArg]) -> steins_sidecar::FoldResult {
+    fn fold(
+        &mut self,
+        _name: &str,
+        _args: &[steins_sidecar::FoldArg],
+        _strict: bool,
+    ) -> steins_sidecar::FoldResult {
         steins_sidecar::FoldResult::widen("stub")
     }
     fn preg_compile(&mut self, _pattern: &str) -> Option<steins_sidecar::PregCompile> {

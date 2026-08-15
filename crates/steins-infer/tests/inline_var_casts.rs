@@ -41,7 +41,7 @@ impl Mock {
 impl Folder for Mock {
     /// No folding: the cast lane is order-declared, so no fixture here may ever
     /// reach the sidecar with a witnessed array.
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

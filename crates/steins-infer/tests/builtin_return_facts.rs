@@ -40,7 +40,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         if !args.iter().all(ArgValue::is_literal) {
             return None;
         }

@@ -16,7 +16,7 @@ use steins_syntax::{ArgValue, SourceTree};
 struct Mock;
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

@@ -119,7 +119,7 @@ const ANSWERS = {
     sapi: "cli",
     int_size: 8,
   },
-  '{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2]}}': {
+  '{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2],"strict":false}}': {
     kind: "value",
     value: "Hello, World! Hello, World! ",
     type: "string",

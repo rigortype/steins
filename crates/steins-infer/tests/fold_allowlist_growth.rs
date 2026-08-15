@@ -24,7 +24,7 @@ fn dumps(src: &str, folder: &mut dyn Folder) -> Vec<String> {
 /// the caller skips loudly rather than asserting something vacuous.
 fn live(test: &str) -> Option<SidecarFolder> {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
         return None;
     }
@@ -472,4 +472,52 @@ fn the_alias_rows_fold_exactly_as_the_names_they_alias() {
             "{name} folds in the browser too, on its target's probe family"
         );
     }
+}
+
+/// The call site's calling convention crosses the seam (#383).
+///
+/// `declare(strict_types=1)` binds to the file a call is *written* in, and the
+/// fold seam spans two files: the user's and the runner's. Before this, every
+/// fold ran in the runner's mode — so a strict file folded
+/// `substr("abcdef", "1")` to `'bcdef'` where its own program throws, and the
+/// value was `Verified`, the strongest thing the analysis has.
+///
+/// Both directions are asserted, because each has its own failure:
+///
+/// * a strict file must **decline** — folding there is unsound;
+/// * a weak file must still **fold** — PHP really does coerce, and answering
+///   `123` for `abs('123')` is the whole point of asking the engine.
+///
+/// The two runs share ONE folder, which is the third property: the memo is
+/// keyed by the convention, so the file analyzed first cannot answer for the
+/// other. With a `(name, args)` key this test passes or fails depending on the
+/// order the two sources are checked in.
+#[test]
+fn the_call_sites_calling_convention_reaches_the_engine() {
+    let Some(mut folder) = live("the_call_sites_calling_convention_reaches_the_engine") else {
+        return;
+    };
+    const BODY: &str = "function f(): void {\n\
+         \\PHPStan\\dumpType(abs(\"123\"));\n\
+         \\PHPStan\\dumpType(substr(\"abcdef\", \"1\"));\n\
+         \\PHPStan\\dumpType(substr(\"abcdef\", 1));\n\
+         }\n";
+    let strict = format!("<?php\ndeclare(strict_types=1);\n{BODY}");
+    let weak = format!("<?php\ndeclare(strict_types=0);\n{BODY}");
+
+    // Weak first, so a convention-blind memo would answer the strict file with
+    // these — the failure this ordering is chosen to catch.
+    let w = dumps(&weak, &mut folder);
+    assert_eq!(w[0], "123", "a weak file folds what PHP's coercion really returns");
+    assert_eq!(w[1], "'bcdef'", "…and the same for an oversized-looking offset");
+    assert_eq!(w[2], "'bcdef'", "a well-typed call is unaffected by any of this");
+
+    let s = dumps(&strict, &mut folder);
+    assert_ne!(s[0], "123", "a strict file must not be handed the weak answer");
+    assert!(
+        !s[1].starts_with('\''),
+        "a strict `substr(\"abcdef\", \"1\")` throws, so it widens rather than folding: {}",
+        s[1]
+    );
+    assert_eq!(s[2], "'bcdef'", "a well-typed call folds in either convention");
 }

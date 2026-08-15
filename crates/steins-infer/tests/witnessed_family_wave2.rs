@@ -67,7 +67,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -321,7 +321,7 @@ fn combine_will_not_read_a_declared_shape_positionally() {
 fn a_silent_engine_withholds_every_name_in_the_wave() {
     struct Silent;
     impl Folder for Silent {
-        fn fold(&mut self, _n: &str, _a: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _n: &str, _a: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

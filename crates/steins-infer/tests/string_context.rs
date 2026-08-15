@@ -36,7 +36,7 @@ impl Boot {
 }
 
 impl Folder for Boot {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -261,7 +261,7 @@ fn an_anonymous_class_is_silent() {
 fn without_a_boot_surface_the_object_leg_is_silent() {
     struct Unavailable;
     impl Folder for Unavailable {
-        fn fold(&mut self, _n: &str, _a: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _n: &str, _a: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

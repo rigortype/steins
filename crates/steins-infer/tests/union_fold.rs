@@ -85,7 +85,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         self.0.borrow_mut().push((name.to_owned(), args.to_vec()));
         match (name, args) {
             ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_uppercase().into())),
@@ -127,7 +127,7 @@ impl FoldEngine for Fake {
         None
     }
 
-    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
+    fn fold(&mut self, name: &str, args: &[FoldArg], _strict: bool) -> FoldResult {
         self.dispatched.push((name.to_owned(), args.to_vec()));
         match (name, args) {
             ("strval", [FoldArg::Int(i)]) => FoldResult::Value(FoldValue::Str(i.to_string())),
@@ -152,7 +152,7 @@ impl FoldEngine for Fake {
 /// A live sidecar folder, or `None` when `php` is unreachable (caller skips loudly).
 fn live(test: &str) -> Option<SidecarFolder> {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
         return None;
     }

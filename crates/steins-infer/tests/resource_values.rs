@@ -81,7 +81,7 @@ impl FoldEngine for Engine {
     fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {
         None
     }
-    fn fold(&mut self, _name: &str, _args: &[FoldArg]) -> FoldResult {
+    fn fold(&mut self, _name: &str, _args: &[FoldArg], _strict: bool) -> FoldResult {
         FoldResult::widen("stub")
     }
     fn preg_compile(&mut self, _pattern: &str) -> Option<PregCompile> {

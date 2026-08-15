@@ -37,7 +37,12 @@ impl Boot {
 }
 
 impl Folder for Boot {
-    fn fold(&mut self, _name: &str, _args: &[steins_syntax::ArgValue]) -> Option<steins_syntax::ArgValue> {
+    fn fold(
+        &mut self,
+        _name: &str,
+        _args: &[steins_syntax::ArgValue],
+        _strict: bool,
+    ) -> Option<steins_syntax::ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

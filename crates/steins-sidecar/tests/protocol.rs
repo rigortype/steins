@@ -78,11 +78,11 @@ fn a_warning_emitting_fold_does_not_corrupt_the_stream() {
     };
     // `str_repeat` with a negative count is a ValueError; must leave the stream usable.
     assert!(matches!(
-        sc.fold("str_repeat", &[s("x"), int(-1)]),
+        sc.fold("str_repeat", &[s("x"), int(-1)], true),
         FoldResult::Throw { .. } | FoldResult::Widen { .. }
     ));
     assert_eq!(
-        sc.fold("strtolower", &[s("ABC")]),
+        sc.fold("strtolower", &[s("ABC")], true),
         FoldResult::Value(FoldValue::Str("abc".to_owned()))
     );
     assert!(!sc.is_poisoned(), "the stream survived a diagnostic-emitting call");
@@ -230,7 +230,7 @@ fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
 
     for i in 0..3 {
         sc.set_timeout(quick);
-        let r = sc.fold("usleep", &[int(1_000_000)]); // 1s > 20ms
+        let r = sc.fold("usleep", &[int(1_000_000)], true); // 1s > 20ms
         assert!(matches!(r, FoldResult::Widen { .. }), "death {i} widens, got {r:?}");
         assert!(sc.is_poisoned(), "death {i} poisoned the instance");
         // The next request (a class query) revives the transport, as a fold's would.
@@ -240,7 +240,7 @@ fn a_dead_sidecar_declines_a_class_query_and_the_next_one_answers() {
     }
 
     sc.set_timeout(quick);
-    assert!(matches!(sc.fold("usleep", &[int(1_000_000)]), FoldResult::Widen { .. }));
+    assert!(matches!(sc.fold("usleep", &[int(1_000_000)], true), FoldResult::Widen { .. }));
     sc.set_timeout(generous);
     assert!(sc.is_poisoned(), "the respawn budget is spent");
     assert_eq!(
@@ -379,7 +379,7 @@ fn a_refusal_does_not_corrupt_the_stream_or_leak_into_the_next_query() {
     assert!(matches!(sc.preg_compile("/(unclosed/"), Some(PregCompile::Refuses { .. })));
     assert_eq!(sc.preg_compile("/ok/"), Some(PregCompile::Compiles), "no stale diagnostic");
     assert_eq!(
-        sc.fold("strtoupper", &[s("ab")]),
+        sc.fold("strtoupper", &[s("ab")], true),
         FoldResult::Value(FoldValue::Str("AB".to_owned())),
         "the NDJSON stream survives a provoked warning"
     );
@@ -437,7 +437,7 @@ fn env_extension_list_is_non_empty() {
 #[test]
 fn fold_strtolower_returns_value() {
     let Some(mut sc) = spawn_or_skip("fold_strtolower_returns_value") else { return };
-    let r = sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())]);
+    let r = sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())], true);
     assert_eq!(r, FoldResult::Value(FoldValue::Str("abc".to_owned())));
 }
 
@@ -445,21 +445,21 @@ fn fold_strtolower_returns_value() {
 fn fold_preserves_float_and_int_types() {
     let Some(mut sc) = spawn_or_skip("fold_preserves_float_and_int_types") else { return };
     assert_eq!(
-        sc.fold("strlen", &[FoldArg::Str("hello".to_owned())]),
+        sc.fold("strlen", &[FoldArg::Str("hello".to_owned())], true),
         FoldResult::Value(FoldValue::Int(5))
     );
     // abs(-3.5) → float 3.5 (stays a float, JSON_PRESERVE_ZERO_FRACTION path)
     assert_eq!(
-        sc.fold("abs", &[FoldArg::Float(-3.5)]),
+        sc.fold("abs", &[FoldArg::Float(-3.5)], true),
         FoldResult::Value(FoldValue::Float(3.5))
     );
-    assert_eq!(sc.fold("abs", &[FoldArg::Float(-2.0)]), FoldResult::Value(FoldValue::Float(2.0)));
+    assert_eq!(sc.fold("abs", &[FoldArg::Float(-2.0)], true), FoldResult::Value(FoldValue::Float(2.0)));
 }
 
 #[test]
 fn fold_divide_by_zero_is_a_throw() {
     let Some(mut sc) = spawn_or_skip("fold_divide_by_zero_is_a_throw") else { return };
-    let r = sc.fold("intdiv", &[FoldArg::Int(1), FoldArg::Int(0)]);
+    let r = sc.fold("intdiv", &[FoldArg::Int(1), FoldArg::Int(0)], true);
     assert_eq!(r, FoldResult::Throw { class: "DivisionByZeroError".to_owned() });
 }
 
@@ -472,13 +472,13 @@ fn fold_explode_with_an_empty_separator_is_a_throw() {
         return;
     };
     assert_eq!(
-        sc.fold("explode", &[s(""), s("x")]),
+        sc.fold("explode", &[s(""), s("x")], true),
         FoldResult::Throw { class: "ValueError".to_owned() }
     );
     // The same process answers the non-empty call next (array result via the
     // 2026-08-14 amendment) — the throw is the argument's, not the name's.
     assert_eq!(
-        sc.fold("explode", &[s(","), s("a,b")]),
+        sc.fold("explode", &[s(","), s("a,b")], true),
         FoldResult::Value(FoldValue::Array(vec![
             (FoldKey::Int(0), FoldValue::Str("a".to_owned())),
             (FoldKey::Int(1), FoldValue::Str("b".to_owned())),
@@ -490,7 +490,7 @@ fn fold_explode_with_an_empty_separator_is_a_throw() {
 #[test]
 fn fold_unknown_function_widens() {
     let Some(mut sc) = spawn_or_skip("fold_unknown_function_widens") else { return };
-    let r = sc.fold("steins_no_such_function_xyz", &[]);
+    let r = sc.fold("steins_no_such_function_xyz", &[], true);
     assert!(matches!(r, FoldResult::Widen { .. }), "unknown fn widens, got {r:?}");
 }
 
@@ -498,7 +498,7 @@ fn fold_unknown_function_widens() {
 fn fold_wrong_arity_widens() {
     let Some(mut sc) = spawn_or_skip("fold_wrong_arity_widens") else { return };
     // strlen() with no args → ArgumentCountError → widen (structural misuse).
-    let r = sc.fold("strlen", &[]);
+    let r = sc.fold("strlen", &[], true);
     assert!(matches!(r, FoldResult::Widen { .. }), "wrong arity widens, got {r:?}");
 }
 
@@ -507,19 +507,19 @@ fn fold_wrong_arity_widens() {
 #[test]
 fn fold_count_over_a_literal_array() {
     let Some(mut sc) = spawn_or_skip("fold_count_over_a_literal_array") else { return };
-    assert_eq!(sc.fold("count", &[list(vec![int(1), int(2), int(3)])]), FoldResult::Value(FoldValue::Int(3)));
+    assert_eq!(sc.fold("count", &[list(vec![int(1), int(2), int(3)])], true), FoldResult::Value(FoldValue::Int(3)));
     // The empty array is a value, and its count is 0 — not a widen.
-    assert_eq!(sc.fold("count", &[list(vec![])]), FoldResult::Value(FoldValue::Int(0)));
+    assert_eq!(sc.fold("count", &[list(vec![])], true), FoldResult::Value(FoldValue::Int(0)));
 }
 
 #[test]
 fn fold_in_array_and_implode_over_literal_arrays() {
     let Some(mut sc) = spawn_or_skip("fold_in_array_and_implode") else { return };
     let haystack = list(vec![int(1), int(2), int(3)]);
-    assert_eq!(sc.fold("in_array", &[int(2), haystack.clone()]), FoldResult::Value(FoldValue::Bool(true)));
-    assert_eq!(sc.fold("in_array", &[int(9), haystack]), FoldResult::Value(FoldValue::Bool(false)));
+    assert_eq!(sc.fold("in_array", &[int(2), haystack.clone()], true), FoldResult::Value(FoldValue::Bool(true)));
+    assert_eq!(sc.fold("in_array", &[int(9), haystack], true), FoldResult::Value(FoldValue::Bool(false)));
     assert_eq!(
-        sc.fold("implode", &[s(","), list(vec![s("a"), s("b")])]),
+        sc.fold("implode", &[s(","), list(vec![s("a"), s("b")])], true),
         FoldResult::Value(FoldValue::Str("a,b".to_owned()))
     );
 }
@@ -529,10 +529,10 @@ fn fold_nested_array_arguments_round_trip() {
     let Some(mut sc) = spawn_or_skip("fold_nested_array_arguments_round_trip") else { return };
     // count() is shallow: [[1,2],[3]] has two entries.
     let nested = list(vec![list(vec![int(1), int(2)]), list(vec![int(3)])]);
-    assert_eq!(sc.fold("count", std::slice::from_ref(&nested)), FoldResult::Value(FoldValue::Int(2)));
+    assert_eq!(sc.fold("count", std::slice::from_ref(&nested), true), FoldResult::Value(FoldValue::Int(2)));
     // in_array compares the inner array by value — proof nesting survived the wire intact.
     assert_eq!(
-        sc.fold("in_array", &[list(vec![int(1), int(2)]), nested]),
+        sc.fold("in_array", &[list(vec![int(1), int(2)]), nested], true),
         FoldResult::Value(FoldValue::Bool(true))
     );
 }
@@ -547,8 +547,8 @@ fn php_assigns_absent_keys_and_resolves_duplicates() {
         (Some(FoldKey::Int(1)), s("a")),
         (Some(FoldKey::Int(1)), s("b")),
     ]);
-    assert_eq!(sc.fold("count", std::slice::from_ref(&dup)), FoldResult::Value(FoldValue::Int(1)));
-    assert_eq!(sc.fold("implode", &[s(""), dup]), FoldResult::Value(FoldValue::Str("b".to_owned())));
+    assert_eq!(sc.fold("count", std::slice::from_ref(&dup), true), FoldResult::Value(FoldValue::Int(1)));
+    assert_eq!(sc.fold("implode", &[s(""), dup], true), FoldResult::Value(FoldValue::Str("b".to_owned())));
 
     // Mixed explicit and absent keys: the runtime's next-int rule places 'c'.
     let mixed = FoldArg::Array(vec![
@@ -556,9 +556,9 @@ fn php_assigns_absent_keys_and_resolves_duplicates() {
         (Some(FoldKey::Int(5)), s("b")),
         (None, s("c")),
     ]);
-    assert_eq!(sc.fold("count", std::slice::from_ref(&mixed)), FoldResult::Value(FoldValue::Int(3)));
+    assert_eq!(sc.fold("count", std::slice::from_ref(&mixed), true), FoldResult::Value(FoldValue::Int(3)));
     assert_eq!(
-        sc.fold("implode", &[s(","), mixed]),
+        sc.fold("implode", &[s(","), mixed], true),
         FoldResult::Value(FoldValue::Str("a,b,c".to_owned()))
     );
 }
@@ -575,17 +575,17 @@ fn an_overflowing_next_int_key_widens_and_leaves_the_runner_alive() {
     };
     let overflowing =
         FoldArg::Array(vec![(Some(FoldKey::Int(i64::MAX)), s("a")), (None, s("b"))]);
-    let r = sc.fold("count", std::slice::from_ref(&overflowing));
+    let r = sc.fold("count", std::slice::from_ref(&overflowing), true);
     assert!(matches!(r, FoldResult::Widen { .. }), "an unassignable next key widens, got {r:?}");
     assert!(!sc.is_poisoned(), "widening is not a protocol failure");
     // The same process answers the next question — the fatal is gone.
     assert_eq!(
-        sc.fold("strtoupper", &[s("still alive")]),
+        sc.fold("strtoupper", &[s("still alive")], true),
         FoldResult::Value(FoldValue::Str("STILL ALIVE".to_owned()))
     );
     // And the boundary below it is an ordinary, answerable array.
     let ok = FoldArg::Array(vec![(Some(FoldKey::Int(i64::MAX - 1)), s("a")), (None, s("b"))]);
-    assert_eq!(sc.fold("count", &[ok]), FoldResult::Value(FoldValue::Int(2)));
+    assert_eq!(sc.fold("count", &[ok], true), FoldResult::Value(FoldValue::Int(2)));
 }
 
 /// Array results cross the seam (ADR-0028, 2026-08-14, issue #330) — keys **materialized**.
@@ -594,7 +594,7 @@ fn an_array_returning_fold_comes_back_in_the_envelope() {
     let Some(mut sc) = spawn_or_skip("an_array_returning_fold_comes_back_in_the_envelope") else {
         return;
     };
-    let r = sc.fold("str_replace", &[s("a"), s("b"), list(vec![s("a"), s("aa")])]);
+    let r = sc.fold("str_replace", &[s("a"), s("b"), list(vec![s("a"), s("aa")])], true);
     assert_eq!(
         r,
         FoldResult::Value(FoldValue::Array(vec![
@@ -615,7 +615,7 @@ fn an_array_result_keeps_its_key_kinds() {
         (Some(FoldKey::Int(5)), s("boo")),
     ]);
     assert_eq!(
-        sc.fold("str_replace", &[s("o"), s("0"), subject]),
+        sc.fold("str_replace", &[s("o"), s("0"), subject], true),
         FoldResult::Value(FoldValue::Array(vec![
             (FoldKey::Str("a".to_owned()), FoldValue::Str("f00".to_owned())),
             (FoldKey::Int(5), FoldValue::Str("b00".to_owned())),
@@ -634,20 +634,20 @@ fn an_over_budget_array_result_widens_at_the_runner() {
     };
     // 256 entries admissible, 257 not.
     assert!(matches!(
-        sc.fold("range", &[int(1), int(256)]),
+        sc.fold("range", &[int(1), int(256)], true),
         FoldResult::Value(FoldValue::Array(_))
     ));
     assert_eq!(
-        sc.fold("range", &[int(1), int(257)]),
+        sc.fold("range", &[int(1), int(257)], true),
         FoldResult::widen("array result over entry budget")
     );
     // 8 levels admissible, 9 not.
     assert!(matches!(
-        sc.fold("json_decode", &[s("[[[[[[[[\"x\"]]]]]]]]"), FoldArg::Bool(true)]),
+        sc.fold("json_decode", &[s("[[[[[[[[\"x\"]]]]]]]]"), FoldArg::Bool(true)], true),
         FoldResult::Value(FoldValue::Array(_))
     ));
     assert_eq!(
-        sc.fold("json_decode", &[s("[[[[[[[[[\"x\"]]]]]]]]]"), FoldArg::Bool(true)]),
+        sc.fold("json_decode", &[s("[[[[[[[[[\"x\"]]]]]]]]]"), FoldArg::Bool(true)], true),
         FoldResult::widen("array result over depth budget")
     );
     assert!(!sc.is_poisoned(), "a widened result is not a protocol failure");
@@ -661,13 +661,13 @@ fn a_binary_string_inside_an_array_result_widens_the_whole_result() {
     else {
         return;
     };
-    assert_eq!(sc.fold("str_split", &[s("À")]), FoldResult::widen("non-utf8 string"));
+    assert_eq!(sc.fold("str_split", &[s("À")], true), FoldResult::widen("non-utf8 string"));
     // The *scalar* form of the same refusal, which had a runner branch and no test.
-    assert_eq!(sc.fold("base64_decode", &[s("wA==")]), FoldResult::widen("non-utf8 string"));
+    assert_eq!(sc.fold("base64_decode", &[s("wA==")], true), FoldResult::widen("non-utf8 string"));
     assert!(!sc.is_poisoned());
     // The same process answers an ordinary array next — the refusal is the value's.
     assert!(matches!(
-        sc.fold("str_split", &[s("ab")]),
+        sc.fold("str_split", &[s("ab")], true),
         FoldResult::Value(FoldValue::Array(_))
     ));
 }
@@ -678,7 +678,7 @@ fn process_is_reused_across_many_folds() {
     // Same resident process answers request after request (incremental ids).
     for i in 0..50 {
         let s = format!("VALUE{i}");
-        let r = sc.fold("strtolower", &[FoldArg::Str(s.clone())]);
+        let r = sc.fold("strtolower", &[FoldArg::Str(s.clone())], true);
         assert_eq!(r, FoldResult::Value(FoldValue::Str(s.to_lowercase())));
     }
     assert!(!sc.is_poisoned());
@@ -690,14 +690,14 @@ fn timeout_poisons_and_the_lost_request_widens() {
     // Tiny deadline against a slow call; `usleep` isn't on the fold allowlist, but
     // the runner doesn't gate (Rust does) — still exercises the protocol.
     sc.set_timeout(Duration::from_millis(20));
-    let r = sc.fold("usleep", &[FoldArg::Int(1_000_000)]); // 1s > 20ms
+    let r = sc.fold("usleep", &[FoldArg::Int(1_000_000)], true); // 1s > 20ms
     assert!(matches!(r, FoldResult::Widen { .. }), "timeout widens, got {r:?}");
     assert!(sc.is_poisoned(), "timeout poisons the instance");
     // Lost for good (never re-sent — it misbehaved); the next request revives
     // the instance via respawn (full PHP startup, tens of ms, past the 20ms forced).
     sc.set_timeout(Duration::from_secs(2));
     assert_eq!(
-        sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())]),
+        sc.fold("strtolower", &[FoldArg::Str("ABC".to_owned())], true),
         FoldResult::Value(FoldValue::Str("abc".to_owned())),
         "the next request respawns and answers"
     );
@@ -712,12 +712,12 @@ fn a_memory_exhausting_fold_widens_and_the_next_request_still_answers() {
     else {
         return;
     };
-    let r = sc.fold("str_repeat", &[s("x"), int(2_000_000_000)]);
+    let r = sc.fold("str_repeat", &[s("x"), int(2_000_000_000)], true);
     assert!(matches!(r, FoldResult::Widen { .. }), "a memory bomb widens, got {r:?}");
     assert!(sc.is_poisoned(), "the child died, so the transport is poisoned");
     // The lost answer costs one request, not the rest of the run.
     assert_eq!(
-        sc.fold("strtoupper", &[s("still alive")]),
+        sc.fold("strtoupper", &[s("still alive")], true),
         FoldResult::Value(FoldValue::Str("STILL ALIVE".to_owned()))
     );
     assert!(!sc.is_poisoned(), "the respawned child is healthy");
@@ -731,24 +731,67 @@ fn the_respawn_cap_bounds_recovery_and_then_poisons_permanently() {
     let bomb = [s("x"), int(2_000_000_000)];
 
     for i in 0..3 {
-        assert!(matches!(sc.fold("str_repeat", &bomb), FoldResult::Widen { .. }), "bomb {i} widens");
+        assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }), "bomb {i} widens");
         assert_eq!(
-            sc.fold("strtoupper", &[s("alive")]),
+            sc.fold("strtoupper", &[s("alive")], true),
             FoldResult::Value(FoldValue::Str("ALIVE".to_owned())),
             "respawn {i} answered"
         );
     }
 
     // The fourth bomb kills the third replacement, and there is no fourth.
-    assert!(matches!(sc.fold("str_repeat", &bomb), FoldResult::Widen { .. }), "the last bomb widens");
+    assert!(matches!(sc.fold("str_repeat", &bomb, true), FoldResult::Widen { .. }), "the last bomb widens");
     assert!(sc.is_poisoned());
     let start = std::time::Instant::now();
     for _ in 0..5 {
-        let r = sc.fold("strtoupper", &[s("alive")]);
+        let r = sc.fold("strtoupper", &[s("alive")], true);
         assert!(matches!(r, FoldResult::Widen { .. }), "past the cap every fold widens, got {r:?}");
     }
     // Widening past the cap touches no process, so it can't cost a timeout;
     // loose on purpose — asserts "no hang", not a performance figure.
     assert!(start.elapsed() < Duration::from_secs(1), "a capped sidecar widens without waiting");
     assert!(sc.is_poisoned(), "the poison is permanent now");
+}
+
+/// The runner evaluates every fold in **strict mode**, because it declares
+/// `strict_types=1` itself and `strict_types` binds to the file a call is
+/// written in.
+///
+/// Without that declaration the seam lost the call site's own calling
+/// convention: a call written inside `declare(strict_types=1)` was evaluated
+/// weakly, so `substr("abcdef", "1")` folded to `'bcdef'` where the program it
+/// came from throws. A folded value is `Verified`, the strongest stratum, so
+/// the analysis carried a value the runtime cannot produce.
+///
+/// Strict is the sound direction whichever mode the call site is in: where the
+/// argument types match the declaration both modes agree, and where they do not
+/// strict throws — which this seam reports as `kind: throw`, the fold declines,
+/// and the answer widens. The cost is precision in a *weak* file, never a wrong
+/// value in a strict one, and recovering that precision means carrying the call
+/// site's real strictness (issue #383).
+#[test]
+fn a_type_mismatched_argument_throws_rather_than_being_coerced() {
+    let Some(mut sc) = spawn_or_skip("a_type_mismatched_argument_throws_rather_than_being_coerced")
+    else {
+        return;
+    };
+    // Each pair is the same call twice: the declared type, then a literal PHP's
+    // weak mode would have coerced into it.
+    for (name, ok, coercible) in [
+        ("substr", vec![s("abcdef"), int(1)], vec![s("abcdef"), s("1")]),
+        ("str_repeat", vec![s("ab"), int(2)], vec![s("ab"), s("2")]),
+        ("intdiv", vec![int(6), int(2)], vec![s("6"), int(2)]),
+        ("str_pad", vec![s("a"), int(3)], vec![s("a"), s("3")]),
+    ] {
+        assert!(
+            matches!(sc.fold(name, &ok, true), FoldResult::Value(_)),
+            "{name} still folds when the argument types match"
+        );
+        assert_eq!(
+            sc.fold(name, &coercible, true),
+            FoldResult::Throw { class: "TypeError".to_owned() },
+            "{name} must not coerce: the call site may be strict, and this one answer serves both"
+        );
+    }
+    assert!(!sc.is_poisoned(), "a TypeError is a result, not a protocol failure");
 }

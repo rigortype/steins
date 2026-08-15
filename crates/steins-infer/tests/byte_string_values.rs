@@ -36,7 +36,7 @@ fn dumped(expr: &str) -> String {
 struct Ready;
 
 impl Folder for Ready {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -161,7 +161,7 @@ fn a_byte_string_is_not_sent_to_the_fold_wire() {
 /// — only a request that reaches PHP exercises that branch.
 fn live_dumped(test: &str, expr: &str) -> Option<String> {
     let mut folder = SidecarFolder::enabled();
-    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())]).is_none() {
+    if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!("SKIP {test}: no folding engine — is `php` on PATH?");
         return None;
     }

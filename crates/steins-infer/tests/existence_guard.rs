@@ -28,7 +28,7 @@ impl Boot {
 }
 
 impl Folder for Boot {
-    fn fold(&mut self, _: &str, _: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _: &str, _: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

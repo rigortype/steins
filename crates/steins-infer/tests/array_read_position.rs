@@ -101,7 +101,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -350,7 +350,7 @@ fn an_engine_silent_on_the_declaration_declines() {
     // this family inherits unchanged on top of its own second leg.
     struct NoPhp;
     impl Folder for NoPhp {
-        fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

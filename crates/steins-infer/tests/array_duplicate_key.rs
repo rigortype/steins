@@ -16,7 +16,7 @@ use steins_syntax::{ArgValue, SourceTree};
 struct FixedMinor(u16, u16);
 
 impl Folder for FixedMinor {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn php_minor(&mut self) -> Option<(u16, u16)> {

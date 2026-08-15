@@ -24,7 +24,7 @@ use steins_syntax::{ArgValue, SourceTree};
 struct Mock;
 
 impl Folder for Mock {
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         match (name, args) {
             ("strtoupper", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_uppercase().into())),
             ("str_repeat", [ArgValue::Str(s), ArgValue::Int(n)]) => {
