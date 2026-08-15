@@ -130,11 +130,29 @@ instead (below). The `this:` key component correspondingly carries the object's
 canonical rendering where a copy was seeded and the bare exact class FQN where
 none was (ADR-0075 §2.1, amended).
 
-What the receiver leg does **not** reach is the value surface: a method call in
-argument or dump position never enters the value IR (`ArgValue::Call` carries a
-simple function name — ADR-0075 §3), so `$v = $b->unwrap();` sees the proven
-summary and `takesString($b->unwrap())` does not. That is the carrier limit,
-one layer below the heap entry.
+The value surface reads the same summary (ADR-0075 §3 as amended 2026-08-16).
+`ArgValue::MethodCall { callee, args, named }` carries a method or static call
+in value position — `Callee::Function` stays `ArgValue::Call` — and
+`Receiver::New` carries the constructor's own arguments, so `(new C(1))->m()`
+dispatches on an object the constructor wrote. `project_method_summary` is the
+value-position entry: it resolves through `resolve_call_target` and only
+through it, so the `this:` key rendering is the statement walk's own and one
+body is walked once however many positions call it. `takesString($b->unwrap())`
+now agrees with `$v = $b->unwrap();`, and `dumpType($b->get())` with the dump of
+`$v`. Five things stay out, each named at its own layer: an **object** result
+(ADR-0057 B5 — the value consumers read `summary.value` and nothing else),
+`Receiver::Prop` (never a dispatch target, ADR-0052 §7), `nullsafe` (§3.1
+below), the **store-less** roads (`resolve_literal_under` answers `None`, so the
+fold and concat lanes see no methods), and `$this`/`self`/`parent` receivers at
+the two entries that hold no enclosing class (the nested-argument binding and
+`best_dump_phpdoc_type`, which pass `None` and let `resolve_call_target`'s own
+arms decline).
+
+A `?->` call rebinds nothing, in value **or** statement position (ADR-0075
+§3.1): `resolve_call_target` never read the flag, so `$x = $b?->m()` used to
+take `m`'s summary and declared arms as if the receiver were provably non-null.
+Both are declined now; the arguments are still checked and the body still
+descended.
 
 The caller-side escape-and-sweep after the call is untouched by any of this
 (ADR-0086 §2's stated refusal): the copy flows in and the sweep flows out,
@@ -192,7 +210,8 @@ bound to it. So `$f = createFoo(123);` gives `$f->n` the value `123`, S2 and the
 arity family their exactness premise, and `readonly.reassigned` its first write —
 and an `escaped = false` rebind survives a later unknown call exactly as a local
 `new` does. Value and argument position rebind nothing: they have no store, and
-an object is not a value (ADR-0035) — the same carrier limit named above.
+an object is not a value (ADR-0035) — ADR-0057 B5's fence, which is what keeps
+the method carrier above from reading the heap component too.
 
 The two components live and die independently, and a summary exists whenever
 either does.
@@ -213,13 +232,14 @@ caller's fresh allocation **is** the join — class and exactness asserted rathe
 than copied, everything else replaced. The replacement (rather than a widening)
 is licensed by the allocation having had no alias before the constructor ran.
 
-One walk per site, over two disjoint seams: wherever the lowering builds a
+One walk per site, over three disjoint seams: wherever the lowering builds a
 `Callee::Construct` call (assignment, statement, property assignment, `return new
 C()`) the walk runs at the call rung and the object build later in the same
 statement consumes its snapshot; in **argument** position, where no such call is
-lowered at all, the walk runs inside ADR-0086 §2's mint. A receiver-position
-`new` is out on the value-IR limit of issue #374, not on anything this design
-owns.
+lowered at all, the walk runs inside ADR-0086 §2's mint; and in **receiver**
+position (`(new C(1))->m()`), where the lowering likewise builds no constructor
+call, it runs where the receiver object is minted (issue #386 — the value-IR
+limit ADR-0057 C7 deferred this leg to). Each seam is the site's only site.
 
 An unescaped `$this` still owes its sweeps. A call running with the **same**
 `$this` — `$this->m(…)`, `parent::m(…)`, `self::m(…)`, `static::m(…)` — sweeps

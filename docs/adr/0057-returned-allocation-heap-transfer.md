@@ -657,6 +657,17 @@ value position and #377 re-pinned for the receiver leg: the limit is one
 layer below this ADR, and naming it here is what keeps it from being
 re-diagnosed as a heap-transfer gap.
 
+*Unchanged 2026-08-16 (#386), and now load-bearing rather than
+incidental.* That layer landed: a method call **is** a value-IR carrier
+now (`ArgValue::MethodCall`, ADR-0075 §3 as amended), and its summary is
+read in argument and dump position. This paragraph is what keeps the
+**heap** component out of that reading — `project_method_summary`'s
+consumers take `summary.value` and nothing else — so
+`needFoo($b->makeFoo())` and `dumpType($b->makeFoo())` are as silent as
+their free-function twins, for the reason stated here and not for a
+missing carrier. The fence used to have the carrier limit standing in
+front of it; it is now the only thing standing, and it holds.
+
 ### B6. An ADR-0086-seeded parameter copy is an ordinary snapshot source
 
 `function id(Box $b): Box { return $b; }` returns the callee-local copy
@@ -916,6 +927,17 @@ runs — the value-IR limit measured in issue #374 and already recorded on
 `CallTarget::receiver_carries`. When that limit lifts this leg follows
 it, with no design left to do.
 
+*Landed 2026-08-16 (#386), and it was indeed the whole of the work:
+`Receiver::New` carries its arguments now, so the receiver is minted by
+the same `constructed_object` argument position uses — the site's one
+walk, at the **third** disjoint seam, which is the receiver's own mint.
+`(new C(1))->m()` therefore dispatches on an object holding the
+constructor's writes, and its carries are what a class-level `@template`
+read reads. The receiver copy crosses under ADR-0086 §2's field table
+like every other receiver's (pre-escaped, non-readonly props crossing
+because a fresh allocation is unescaped): the C1 exemption is the
+constructor descent's own seed and travels no further.*
+
 Emission is unchanged: the descent emits what it emitted before, the memo
 suppresses a re-walk under an identical key, and identical findings
 collapse in the run-level dedupe. Two `new C(1)` sites report once;
@@ -991,4 +1013,5 @@ and the join is the walk's own.
 - **Trusting an unescaped `$this` across a same-`$this` or unresolved
   call** — the bit says what got out, not what may be written (C5).
 - **A receiver-position `new`** — the value-IR limit of issue #374, not a
-  heap-transfer gap (C7).
+  heap-transfer gap (C7). *No longer a refusal (#386): the limit lifted and
+  the leg followed it.*

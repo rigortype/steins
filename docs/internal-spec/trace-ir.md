@@ -112,6 +112,18 @@ The distinction is worth stating plainly: `stmts` is what the *checker* walks;
 `method_calls` is what the *transform* enumerates. They have different
 completeness requirements and are therefore different surfaces.
 
+**It stays a separate surface now that the value IR carries method calls too**
+(issue #386: `ArgValue::MethodCall`, and `Receiver::New` carrying the
+constructor's arguments). The two answer different questions and neither can
+stand in for the other. `method_calls` must be **comprehensive** — one call it
+misses is a rewrite that breaks a caller — so it is a structural scan that
+takes every call at every depth, resolvable or not, and it keeps the calls
+themselves. The value IR is **representational**: it carries the calls it can
+say something about, and a dynamic method name, a spread argument list or a
+deeper receiver chain still lowers to `ArgValue::Other` there. A carrier that
+declines is silence in the checker and would be a wrong rewrite in the
+transform.
+
 ## Effect and throw origins
 
 Effect and throw origins are **not** in the trace. They are produced by a

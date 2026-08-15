@@ -173,6 +173,20 @@ silent for a reason one layer below this ADR. That layer is where the
 remaining half of the parity lives; it is not a heap-entry gap and must not be
 re-diagnosed as one.
 
+*(c) closed 2026-08-16 (#386), one layer below, exactly as it said.* The value
+IR grew `ArgValue::MethodCall` and a `project_method_summary` that enters
+`descend` through the same `resolve_call_target` this leg does, so
+`takesString($box->unwrap())` and `dumpType($box->get())` now see the copy this
+section seeds — the same summary, the same memo entry, the same one walk. The
+receiver leg itself is unchanged by that slice: it still fills `receiver_var`
+for an exact `Receiver::Var` and for nothing else, and the value position
+simply became a second caller of it. Two of §3's stated non-seeders did move,
+and neither is this leg's rule changing: **`Receiver::New`** now seeds `$this`
+from the object the receiver's own `new` mints (its arguments having reached
+the IR at last — ADR-0057 C7's deferral, discharged), and a nested-argument or
+`best_dump_phpdoc_type` entry that holds no enclosing class declines
+`$this`/`self`/`parent` receivers outright rather than seeding a weaker copy.
+
 ## 4. What stays out (each one line, each anchored)
 
 - **Object-valued properties as return facts** — `return $b->inner` where
@@ -329,7 +343,9 @@ mints.
   (§3), sharing with argument copies; ADR-0075 §2.1 and §2.2 amended; the
   `$box->unwrap()` / `unwrap($box)` parity pin at the assignment rung, plus a
   pin on the value-IR limit that keeps the direct form out of reach. **Landed
-  2026-08-16 (#377).**
+  2026-08-16 (#377).** *The limit pin flipped 2026-08-16 (#386) when that
+  layer landed: the direct form is now in reach and the parity is observable
+  at every position, per §3(c).*
 - **H3 — ADR-0057 T1 outbound**: unchanged in content, sequenced after H1/H2,
   with `targs` added to the snapshot's field list by amendment (it postdates
   ADR-0057) and `HeapSummary` given its shape then. **Landed 2026-08-16
