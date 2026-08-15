@@ -1135,6 +1135,33 @@ fn a_this_receiver_contributes_no_carry() {
 }
 
 #[test]
+fn a_descent_this_carries_what_the_receiver_carried_but_no_reader_may_use_it() {
+    // ADR-0086 §3 put the receiver's `targs` on the descent's `$this` — the copy takes
+    // the field table verbatim — so the call-site read (#362) and the body see one
+    // state at last. What is NOT yet observable is a *finding* from it: the one reader
+    // a carry on `$this` could reach is the declared `@param Box<int>` judgment, and a
+    // class-touching phpdoc verdict is refused wholesale inside a binding descent
+    // (`phpdoc_object_guard_blind`, ADR-0043 stage 4 — the callee's in-body guards on
+    // the rebound value are unmodeled). Both rows below are therefore silent, and
+    // pinning them says which of the two rules to look at when one of them moves.
+    let src = "<?php\n\
+        /** @template T */\n\
+        class Box {\n\
+            /** @param T $value */\n\
+            public function __construct(public mixed $value) {}\n\
+            public function pass(): void { takesIntBox($this); }\n\
+        }\n\
+        /** @param Box<int> $box */\n\
+        function takesIntBox(Box $box): void {}\n";
+    // A disagreeing carry (`Box<string>` into `Box<int>`) — silent for the stage-4
+    // reason, not for want of a carry on `$this`.
+    assert_eq!(param_count(&format!("{src}$b = new Box('x');\n$b->pass();\n")), 0);
+    // The same shape written at the call site, where nothing blinds it, does report —
+    // which locates the silence above in the descent gate rather than in the carry.
+    assert_eq!(param_count(&format!("{src}takesIntBox(new Box('x'));\n")), 1);
+}
+
+#[test]
 fn a_declared_receiver_declines_where_phpstan_resolves() {
     // The fixture's `Other::getFirstChildren(Helper $helper)` leg, and the
     // registered divergence with it: PHPStan reads the receiver's *declared*
