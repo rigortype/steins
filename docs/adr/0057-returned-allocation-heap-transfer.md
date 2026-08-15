@@ -723,3 +723,272 @@ slice is about.
   verbatim; the bit is copied (B6).
 - **A `LineFact` for the rebound class** — T3's instrument, not T1's
   behaviour (B8).
+
+## Amendment (2026-08-16): the constructor summary — `new C(args)` is the constructor descent's `$this` snapshot
+
+**Status: PENDING ratification.** Issue #385, the successor to #378. §4
+above stated the unification as a semantic identity — "`new Foo(123)` is
+the degenerate factory whose summary is assembled inline at depth 0" —
+and then left `build_new_object` assembling it from the *declaration*
+alone: literal defaults plus promoted parameters, the constructor's body
+never read. ADR-0075 §3 recorded the descent that does walk that body as
+running "for diagnostics only", and dropped its `$this` on the floor.
+This amendment lifts that. The walk **is** the summary, and §4's identity
+stops being an aspiration about what `build_new_object` computes and
+becomes a statement about which walk computes it.
+
+### C1. The seed: the fresh allocation, and the one copy that is not pre-escaped
+
+The constructor descent's `$this` is a copy of the object
+`new_heap_object` builds for the site — every literal property default,
+every promoted parameter bound from its argument, `class_exact = true`,
+the readonly bookkeeping, the carries — under ADR-0086 §2's field table
+with **one field decided the other way**: `escaped` is `false`.
+
+Every other copy ADR-0086 makes is pre-escaped, for a reason that reads
+off the call: the caller's object is marked escaped by the very call that
+hands it over, so a copy claiming `false` would let an unknown call
+inside the callee skip the sweep it owes. **A `new` site has no
+caller-side object to escape.** The allocation is minted for this
+expression, no name outside the constructor's own `$this` refers to it,
+and the caller does not hold it until the constructor returns.
+`escaped = false` is therefore not an optimization — it is the honest
+bit, and it is what lets `$b = new B(1)` survive a later unrelated
+unknown call in the caller exactly as the same allocation survives one
+today.
+
+That bit says what **got out**, not what **may be written**, and the two
+must not be conflated: the walk still sweeps its own `$this` at every
+call that could reach the allocation without naming it (C5).
+
+The `ctor_touched_props` gate of ADR-0086 §4 is **bypassed for the
+seed**. The lexical scan exists because `build_new_object` could not read
+the body, and a walked body needs no over-approximation of itself. The
+gate stays exactly where the walk does not go — the decline path of C6.
+
+### C2. The snapshot: `$this` at every exit, and only at an exit
+
+`new` evaluates to the object the constructor body leaves behind, so the
+summary is taken from the callee's `$this`, never from a returned value
+(a constructor that returns one is a PHP fatal). Two exits contribute:
+
+* every `return;` in the body, snapshotted where §2.1 takes the
+  return-object snapshot — before the return statement's own effects; and
+* the **fall-through** at the end of the body, which is a constructor's
+  normal exit and carries the joined `$this` of the paths that reached
+  it.
+
+A `throw`, an `exit`, and every never-returning path contribute
+**nothing**: they do not yield the object, so there is nothing about them
+to summarize. A constructor every path of which throws therefore has no
+exit at all, no heap summary, and the site keeps C6's object — which is
+right, since the expression never evaluates to anything a caller reads.
+
+Where `$this` is not in the store at an exit — a `Barrier` cleared it
+(`$this->$k = …`, `$this->a->b = …`), or an `Opaque` construct that
+`may_return` hides an exit this walk cannot see — the exit contributes
+the value floor, which per §2.5 kills the heap summary and lands on C6.
+That is the all-paths-or-nothing rule the return channel already runs
+under, not a new refusal.
+
+Implementation note: the exit is `ExitContribution::Heap`, the T1 variant
+verbatim, filled from `$this` rather than from `return_heap_object`'s
+source list. The `this` flavour is a property **of the descent**, carried
+on the collection context — one classifier, two sources, no second
+variant.
+
+### C3. The join is `join_heap_exits`, unchanged
+
+§2.4 and the T1 amendment's B3 table apply as written. `class` and
+`class_exact` cannot disagree across one constructor's exits (the same
+allocation on every path), so the two fields that can end a *return*
+summary never end this one; what remains is the interesting half. A
+property survives only where every exit agrees on it — a slot written on
+one branch alone is dropped; `1` on one path and `2` on another joins.
+`escaped` ORs, so a leak on any path yields a pre-escaped object.
+`readonly`, `ro_written` and `targs` intersect.
+
+### C4. Copy-back, and why it is sound
+
+The caller's fresh allocation takes the snapshot's fields. `class` and
+`class_exact` are unchanged by construction — the seed named them, and no
+walk alters what class an allocation is — so the implementation asserts
+them rather than copying a value it already knows. `props`, `readonly`,
+`ro_written`, `escaped` and `targs` come from the snapshot.
+
+The soundness argument is one sentence: **the fresh allocation had no
+alias before the constructor ran**, so the constructor's `$this` is the
+only name through which anything could have happened to it, and the
+snapshot of that name at the exits is the whole of what happened.
+Whatever route the body took — writing a property, letting `$this` out
+(the callee's own escape-and-sweep ran on the copy, and the `escaped` bit
+crosses), delegating (C5) — the state the walk holds at the exit is the
+state the object has when `new` returns.
+
+This is why the constructor is the one call whose effect on an object may
+be **replaced** rather than widened. Every other crossing in ADR-0057 and
+ADR-0086 copies knowledge across a boundary an alias can reach around;
+this one cannot be reached around, because the object does not exist
+until the boundary is entered.
+
+### C5. What the walk must still sweep, and the older hole it closes
+
+`escaped = false` says no name outside the walk holds the allocation. It
+does not say the walk executes every write through the names *inside* it,
+and two routes write `$this` without this walk running the write:
+
+* **A call that runs with the same `$this`** — `$this->m(…)`,
+  `parent::m(…)`, `self::m(…)`, `static::m(…)`, and
+  `parent::__construct(…)` above all. A descent into such a call seeds
+  its own `$this` (ADR-0086 §3 fills `receiver_var` for an exact
+  `Receiver::Var` and for nothing else), so its property writes land in
+  *its* store and are invisible here; an unresolved one is a body never
+  read at all. Such a call therefore sweeps the receiver's own
+  non-readonly properties and value carries, **whether or not the target
+  resolved**.
+
+  This is not a constructor rule. It closes the same hole in every walk:
+  a *resolved* private or final `$this->m()` swept nothing before, so a
+  receiver seeded by ADR-0086 §3 could carry a property that method had
+  overwritten. It is written here because the constructor is where the
+  shape is common — `__construct() { $this->init(); }` and
+  `parent::__construct()` are the two idioms ADR-0086 §4's
+  `ThisReach::escapes` was built to over-approximate — and because C1's
+  unescaped seed is what makes it load-bearing rather than merely tidy.
+
+* **An unknown or overridable call while an implicit alias exists** — a
+  non-static closure created in the body binds `$this` without naming it,
+  and is invoked through a call the walk cannot resolve. So inside a
+  constructor walk the unescaped `$this` is swept by the same
+  `object_passed || unknown` condition that sweeps every *escaped*
+  object. The bit stays `false` (nothing got out that a caller can
+  observe); the sweeping is conservative independently of it.
+
+The consequence, stated plainly so it is not later re-diagnosed as a
+regression: a constructor that writes a property and then makes any
+unresolved call — a builtin, an overridable method — carries that
+property no further. Write and call within one statement are fine (the
+sweep runs before the statement's own effect); across statements the call
+wins. That is strictly more than the nothing this site carried before,
+and strictly less than an ADR-0055 Part II mutation inference would
+allow.
+
+### C6. The decline path, and its floor
+
+The site keeps the object `new_heap_object` builds under the ADR-0086 §4
+lexical gate — today's object, byte for byte — whenever no summary comes
+back: no `__construct` in the chain; an abstract or unresolvable one; a
+poisoned callee scope (`extract`, `$$v`, `eval`); a poisoned caller
+scope; a **named or spread argument list** (the descent is
+positional-only, §3 — `new C(x: 1)` declines exactly as `f(x: 1)` does);
+the budget (`> MAX_BINDING_DEPTH`); a recursion pair (the key already on
+the descent stack); a constructor every path of which throws; and any
+exit at which `$this` is not in the store (C2).
+
+The lexical gate is the floor **for undescended constructors only**, and
+that is now its whole job. Where the walk runs, the walk answers.
+
+### C7. One walk per `new` site
+
+The constructor descent is not duplicated to serve the summary — it is
+the descent that already ran, now seeded and read. Where the site sits
+decides which seam carries it, and the two seams are disjoint by
+construction:
+
+* Wherever the lowering builds a `Callee::Construct` call — an assignment
+  (`$x = new C()`), a statement (`new C();`), a property assignment, a
+  `return new C()` (the #378 factory shape, which composes: the
+  constructed state is what the factory's own heap summary carries) — the
+  walk runs at the call rung, in step 1 of the statement walk, and hands
+  its snapshot to the object build later in the same statement. The
+  object is still built where it was built; only its contents now come
+  from the walk.
+* In **argument** position (`f(new C(1))`) no `Callee::Construct` call is
+  lowered at all — the expression survives only as an `ArgValue::New`
+  inside the outer call's arguments — so the walk runs where the object
+  is minted, in ADR-0086 §2's call-site heap entry. That is the one
+  position whose minting site is also its only site.
+
+A **receiver**-position `new` (`(new C())->m()`) is out, and not for a
+reason this ADR owns: `Receiver::New` carries the class reference and
+nothing else, so the constructor's arguments are gone before any of this
+runs — the value-IR limit measured in issue #374 and already recorded on
+`CallTarget::receiver_carries`. When that limit lifts this leg follows
+it, with no design left to do.
+
+Emission is unchanged: the descent emits what it emitted before, the memo
+suppresses a re-walk under an identical key, and identical findings
+collapse in the run-level dedupe. Two `new C(1)` sites report once;
+`new C(1)` and `new C(2)` are two entry states and are each judged.
+
+### C8. The memo key names the seeded `$this`
+
+The constructor descent's key already carries the argument bindings and a
+`this:` pseudo-binding. Under this amendment that component is the
+**canonical rendering of the seeded object** (`object_binding_key`),
+exactly as ADR-0086 §3 made it for a seeded receiver, rather than the
+bare class FQN it carried while a constructor proved "an identity and no
+state". It has state now: two `new C(...)` sites whose promoted
+parameters or surviving defaults differ reach one body with different
+entry states, and the class alone would replay one's summary for the
+other and suppress the other's emission (ADR-0075 §2.1). Nothing crosses
+that the rendering does not name, so the memo stays a pure function of
+the key.
+
+### C9. ADR-0048 obligations
+
+**§2 (replayable).** The snapshot is a pure function of (the
+constructor's CST, the entry state the key names, query answers) — §1's
+argument verbatim — and the seed is itself a pure function of the `new`
+expression and the caller's walk state at it. No `AllocId` enters the
+seed, the key, or the snapshot.
+
+**§3 (entry-state contribution).** Two clauses, one old and one new. The
+constructed object is a **fresh allocation in the caller's own walk** —
+the T1 amendment's B7 clause verbatim, unchanged: this slice adds no
+contributor there, the object `new` yields being the same kind of thing
+it always was. What is new is on the callee's side: **a constructor
+descent contributes a copy of that fresh allocation as its `$this`** —
+the seed IS the object — declared here as ADR-0086 §3 declares the
+receiver leg's clause. At every other entry `$this` seeds as it did.
+
+**§4 (no global ordering).** The seed depends on the caller's statement
+order at the `new` and on nothing across scopes; the joins are the
+intersections and `min`s B3 already established.
+
+### C10. What this does to the proof layer
+
+A constructor-written property is a **new premise**, and the
+finding-adding shape is three lines of PHP:
+
+```php
+class B { private string $value; public function __construct(int $v) { $this->value = $v; } }
+$b = new B(1);
+needString($b->value);   // type.argument-mismatch, from the constructor's own write
+```
+
+Everything §6's soundness legs demand of a return summary is demanded
+here and satisfied by the same code: strata cross with their facts (an
+`Asserted` argument yields an `Asserted` property), exactness is copied
+and never promoted, hooked properties never enter the heap so they cannot
+enter the snapshot, readonly bookkeeping crosses and stays sweep-immune,
+and the join is the walk's own.
+
+### Constructor-summary refusals (each one line, each anchored)
+
+- **Keeping the lexical default gate over a walked constructor** — the
+  gate approximates a body the walk reads (C1); it stays the floor for
+  the bodies the walk does not reach (C6).
+- **A second walk for the summary** — the diagnostics descent IS the
+  summary descent, at whichever of the two disjoint seams the site has
+  (C7).
+- **A `this`-flavoured `ExitContribution` variant** — the flavour belongs
+  to the descent, not to the exit (C2).
+- **Treating a `throw` as an exit** — it yields no object (C2).
+- **Widening rather than replacing the caller's fresh allocation** — the
+  allocation had no alias before the constructor ran, which is precisely
+  what licenses replacement (C4).
+- **Trusting an unescaped `$this` across a same-`$this` or unresolved
+  call** — the bit says what got out, not what may be written (C5).
+- **A receiver-position `new`** — the value-IR limit of issue #374, not a
+  heap-transfer gap (C7).

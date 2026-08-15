@@ -158,6 +158,14 @@ gone by the time the floor is seeded.
 * **Constructors.** `new Foo(...)` is not a value-returning call on this
   surface — its descend keeps running for diagnostics, its summary stays
   unread. The construction rvalue's exactness lane (ADR-0036) is untouched.
+  *Superseded 2026-08-16 (#385): "for diagnostics only" is over. The
+  constructor descent is now seeded with the fresh allocation as its `$this`
+  and read for its **heap** component — the snapshot its exits agree on becomes
+  the object `new` yields (ADR-0057's constructor-summary amendment). The
+  **value** component stays unread, and for the reason this bullet gave: a
+  constructor evaluates to an object, and an object is not a value (ADR-0035).
+  The exactness lane is still untouched — the snapshot copies `class` and
+  `class_exact` from the seed and cannot alter either.*
 * **Heap transfer.** `ReturnSummary.heap` stays `None` — that is T1 proper
   (ADR-0057), and rebinding scalar/string/array facts neither needs it nor
   advances it. *No longer an exclusion as of 2026-08-16 (#378): T1 landed, and
