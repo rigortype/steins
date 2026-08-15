@@ -16080,6 +16080,17 @@ fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractAr
     let off = method.span.start;
     let file = target.class_file;
     let mut envelopes = cx.envelopes_of(method.docblock.as_deref(), file, off);
+    // The receiver-carry read runs HERE, between the two shadow stages (issue
+    // #362): `envelopes_of` has already resolved everything declarations decide
+    // and deliberately left a template subject as written (issue #361), while the
+    // class-level shadow below is about to neutralize that subject to an opaque
+    // node — after which there is no spelling left to intercept. Declining falls
+    // through to exactly the floor this function had before.
+    if let Some(ret) = envelopes.as_ref().and_then(|e| e.ret.as_ref())
+        && let Some(arms) = receiver_template_type_arms(cx, target, &native, ret)
+    {
+        return Some(arms);
+    }
     if let Some(e) = &mut envelopes {
         e.shadow_templates(&template_names_of(target.declaring_class.docblock.as_deref()));
     }
@@ -16088,6 +16099,88 @@ fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractAr
         cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
     refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+}
+
+/// The return arms of a `@return template-type<T, Owner, 'TName'>` whose subject
+/// `T` is a **class-level template of the receiver's class**, read off the
+/// receiver's generics carry (ADR-0032's 2026-08-15 amendment, issue #362) — the
+/// shape phpstan/phpstan#9053 was opened for.
+///
+/// Two lookups over the carry, each one level:
+///
+/// 1. `T`'s position in the declaring class's own `@template` list picks an
+///    argument out of the carry edge owned by that class — for
+///    `new Helper(new Model())`, the proven `Model` object.
+/// 2. That argument's own carries are indexed again, by `'TName'` on `Owner` —
+///    `Model`'s `@implements ModelInterface<Child>` edge gives `Child`.
+///
+/// The result enters through [`refine_declared_arms`], the same refinement a
+/// hand-written `@return Child` goes through, so it comes out at the same stratum
+/// and a reader cannot tell which spelling produced it. `Asserted`, never
+/// laundered: the carry is proven, but what it resolves is still the docblock's
+/// claim about a return.
+///
+/// `None` at every step that does not land, and each `None` is a floor rather
+/// than a gap: the subject is not one of the declaring class's templates (a
+/// **method**-level template subject is issue #363, and declines here); no carry
+/// edge is owned by the declaring class, because the receiver had none, because a
+/// `$this`/non-exact/static/`new` receiver contributes none, or because an
+/// earlier receiver call swept the value carry (issue #295); the owner declares
+/// no such template; the hop carries no edge owned by the owner; the argument is
+/// a value the contract lane cannot state. PHPStan falls back to an unresolved
+/// template's declared bound, which Steins declines on tier 1's own terms
+/// (issue #293), so that path floors here too.
+fn receiver_template_type_arms(
+    cx: &Cx,
+    target: &CallTarget<'_>,
+    native: &[ContractTy],
+    ret: &PType,
+) -> Option<Vec<ContractArm>> {
+    let PKind::Generic { base, args } = &ret.kind else { return None };
+    if !is_template_type(base, args.len()) {
+        return None;
+    }
+    // The subject: a bare name that must be one of the DECLARING class's own
+    // `@template`s. Anything else — a spelled parameterization (#361 already
+    // resolved it), a method-level template (#363), a union — is not this read.
+    let PKind::Identifier(subject) = &args[0].ty.kind else { return None };
+    let declaring = target.declaring_class;
+    let declares_subject = declaring
+        .docblock
+        .as_deref()
+        .map(steins_phpdoc::scan_template_names)
+        .unwrap_or_default()
+        .iter()
+        .any(|n| n == subject || n.eq_ignore_ascii_case(subject));
+    if !declares_subject {
+        return None;
+    }
+    let (file, off) = (target.class_file, target.method.span.start);
+    // The owner is a class *reference*, resolved in the file the `@return` was
+    // written in; the template name is a quoted literal, not a type.
+    let PKind::Identifier(owner_name) = &args[1].ty.kind else { return None };
+    let PKind::Const(ConstExpr::Str(StringLit::Single(want) | StringLit::Double(want))) =
+        &args[2].ty.kind
+    else {
+        return None;
+    };
+    let owner_fqn = cx.resolve_pclass(file, off, owner_name);
+
+    let subject_arg = get_template_type(cx, &target.receiver_carries, &declaring.fqn, subject)?;
+    let hop = template_arg_carries(cx, &subject_arg);
+    let named = get_template_type(cx, &hop, &owner_fqn, want)?;
+    let ty = carg_contract_ty(named.arg)?;
+    // Class names inside a carried type are resolved where they were WRITTEN, not
+    // where they are read — the carry keeps that context precisely so a lifted
+    // argument keeps naming the class it named (issue #294). An unresolvable name
+    // stays silent, the same safety valve `accepts_carried_ty` applies.
+    let (rfile, roff) = named.site.unwrap_or((file, off));
+    if names_unknown_class(cx, rfile, roff, &ty) {
+        return None;
+    }
+    let resolve =
+        |n: &str| cx.resolve_pclass(rfile, roff, n).trim_start_matches('\\').to_ascii_lowercase();
+    refine_declared_arms(native, flatten_arms(ty), &resolve)
 }
 
 /// Lower a native scalar/union type to contract arms (declaration order, then a
@@ -21253,6 +21346,17 @@ struct CallTarget<'a> {
     declaring_class: &'a ClassDecl,
     class_file: usize,
     this_exact: Option<String>,
+    /// The class-level generic carries the **receiver object** holds (ADR-0032's
+    /// 2026-08-15 amendment, issue #362) — what a `@return template-type<T, …>` on
+    /// the target reads `T` out of.
+    ///
+    /// Filled only by the exact `Receiver::Var` arm, which is the one arm with a
+    /// heap object in hand. **Empty everywhere else**, and each emptiness is a
+    /// stated §3 contribution rather than an omission: a `$this` or otherwise
+    /// non-exact receiver has no single class whose template list the arguments
+    /// align to, a static call has no receiver, and a `new Foo()->m()` receiver has
+    /// no heap object yet at the point the target resolves.
+    receiver_carries: Vec<GenericCarry>,
 }
 
 /// Resolve a method/static/constructor `receiver` to a project target.
@@ -21281,8 +21385,17 @@ fn resolve_call_target<'a>(
             let class = obj.class.clone();
             if obj.class_exact {
                 // An allocation-proven receiver (`$x = new Foo(); $x->m()`) dispatches
-                // exactly — the precise dispatch.
-                resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))
+                // exactly — the precise dispatch. It is also the one arm holding a
+                // heap object, so it is the one arm that can hand the target the
+                // receiver's generic carries (issue #362). Read here, before the
+                // statement's own escape/sweep pass runs: a receiver call sweeps the
+                // value carries it is about to read, and the read must see the state
+                // the call was made against.
+                let carries = obj.targs.clone();
+                let mut target =
+                    resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))?;
+                target.receiver_carries = carries;
+                Some(target)
             } else {
                 // A lower-bound receiver — a laundered `$this` alias (`$u = $this`) or
                 // `clone $this` — is NOT exact (audit G1): fall back to the same
@@ -21332,6 +21445,7 @@ fn resolve_exact<'a>(
             declaring_class: r.declaring_class,
             class_file: r.class_file,
             this_exact,
+            receiver_carries: Vec::new(),
         }),
         _ => None,
     }
@@ -21359,6 +21473,7 @@ fn resolve_guarded<'a>(
         declaring_class: r.declaring_class,
         class_file: r.class_file,
         this_exact: None,
+        receiver_carries: Vec::new(),
     })
 }
 
@@ -21381,6 +21496,7 @@ fn resolve_static_named<'a>(
         declaring_class: r.declaring_class,
         class_file: r.class_file,
         this_exact: None,
+        receiver_carries: Vec::new(),
     })
 }
 
@@ -28991,7 +29107,7 @@ fn accepts_class_generic(
         return Tri::Maybe;
     }
     // Argument half: the edge that speaks about THIS class's templates, if any.
-    let Some(carry) = carries.iter().find(|c| class_key(&c.owner) == class_key(&target)) else {
+    let Some(carry) = carry_for_owner(carries, &target) else {
         return Tri::Maybe;
     };
     if carry.args.len() != args.len() {
@@ -29021,6 +29137,116 @@ fn accepts_class_generic(
 /// leading `\` insignificant.
 fn class_key(fqn: &str) -> String {
     fqn.trim_start_matches('\\').to_ascii_lowercase()
+}
+
+// ---------------------------------------------------------------------------
+// Reading the generics carry as a type expression (ADR-0032's 2026-08-15
+// amendment, issue #362) — PHPStan's `getTemplateType(owner, name)`.
+//
+// Acceptance asks whether a value inhabits a declared argument; these ask what
+// is carried at a named position. Same state, opposite direction, so no verdict
+// and no variance gate lives here: reading an argument out by position asks
+// nothing about substitution (the same reason #361's declared-side projection
+// does not gate on it either).
+// ---------------------------------------------------------------------------
+
+/// The carry edge owned by `owner_fqn`, if any — the owner lookup shared by
+/// acceptance ([`accepts_class_generic`]) and the reader ([`get_template_type`]).
+fn carry_for_owner<'c>(carries: &'c [GenericCarry], owner_fqn: &str) -> Option<&'c GenericCarry> {
+    let want = class_key(owner_fqn);
+    carries.iter().find(|c| class_key(&c.owner) == want)
+}
+
+/// One carry argument together with the context its class names were written in
+/// — what [`get_template_type`] hands back.
+///
+/// The site travels with the argument for the same reason [`accepts_carried_ty`]
+/// takes one: a [`CArg::Ty`] holds names spelled against the *declaring* file's
+/// namespace scope, and reading them anywhere else would name a different class.
+/// `None` is a value carry, which needs no resolution context — its class is
+/// already an FQN.
+struct CarriedArg<'c> {
+    arg: &'c CArg,
+    site: Option<(usize, u32)>,
+}
+
+/// The argument `carries` holds for the `@template` named `template_name` on
+/// `owner_fqn` — PHPStan's `Type::getTemplateType`, over Steins' carry.
+///
+/// The owner's edge, then the position `template_name` holds in that owner's own
+/// `@template` list, then the argument sitting there. `None` — silence, never a
+/// guess — when no edge is owned by that class, when the owner declares no
+/// templates or not this one, or when the carry's arity disagrees with the
+/// declared list, which is the same all-or-nothing alignment rule the carry is
+/// built under.
+///
+/// The name is matched exactly first, then case-insensitively: the same
+/// concession [`Cx::project_template_type`] makes, and folding case can only ever
+/// pick the template the author plainly meant.
+fn get_template_type<'c>(
+    cx: &Cx,
+    carries: &'c [GenericCarry],
+    owner_fqn: &str,
+    template_name: &str,
+) -> Option<CarriedArg<'c>> {
+    let carry = carry_for_owner(carries, owner_fqn)?;
+    let names = cx
+        .find_class(owner_fqn)
+        .and_then(|(_, cd)| cd.docblock.as_deref())
+        .map(steins_phpdoc::scan_template_names)
+        .unwrap_or_default();
+    if names.is_empty() || names.len() != carry.args.len() {
+        return None;
+    }
+    let i = names
+        .iter()
+        .position(|n| n == template_name)
+        .or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(template_name)))?;
+    Some(CarriedArg { arg: carry.args.get(i)?, site: carry.site })
+}
+
+/// The carries a carry argument itself holds — the **second hop** of a
+/// `template-type<T, Owner, 'TName'>` read, and the only hop after the first.
+///
+/// A value carry holding an object contributes that object's *own* carries,
+/// whichever provenance [`Cx::infer_generic_carry`] chose for it when the value
+/// was proven. A declared class contributes its inheritance edges, read through
+/// the index. Anything else — a scalar, an array, a resource, a carried type
+/// that is not a plain class — carries nothing, so the read declines.
+///
+/// One level, per ADR-0032: the subject asks for one hop and gets one. Following
+/// a second edge would mean substituting through a generic intermediate, which is
+/// wrong rather than merely incomplete.
+fn template_arg_carries(cx: &Cx, arg: &CarriedArg<'_>) -> Vec<GenericCarry> {
+    match arg.arg {
+        CArg::Val(CVal::Object(_, carries)) => carries.clone(),
+        CArg::Ty(steins_contract::ContractTy::Class(name)) => {
+            let Some((file, off)) = arg.site else { return Vec::new() };
+            cx.inheritance_edges(&cx.resolve_pclass(file, off, name))
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// The declared type a carry argument denotes, for the lane that judges declared
+/// types — `None` when the contract lane has no way to say it.
+///
+/// A carried **type** is already one. A carried **object** becomes membership of
+/// its class, fully qualified so that resolving it again at the reading site is a
+/// no-op rather than a re-namespacing. A carried **scalar** becomes its literal
+/// arm, through the same [`literal_contract`] mapping every other declared-literal
+/// consumer uses. An array or a resource declines: the first has no `ContractTy`
+/// that states the carried value without inventing one, the second has no type at
+/// all.
+fn carg_contract_ty(arg: &CArg) -> Option<ContractTy> {
+    match arg {
+        CArg::Ty(t) => Some(t.clone()),
+        CArg::Val(CVal::Scalar(v)) => literal_contract(v),
+        CArg::Val(CVal::Object(class, _)) => {
+            Some(ContractTy::Class(format!("\\{}", class_key(class))))
+        }
+        CArg::Val(CVal::Array(_) | CVal::Resource) => None,
+    }
 }
 
 /// The declared variance of each class-level `@template` of `owner`, in declaration
