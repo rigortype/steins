@@ -90,6 +90,18 @@ member-by-member (keys-in-all required, keys-in-some optional, residue in
 the tail; ADR-0062 §3). The 256 constant survives only as the single-shape
 field-width bound (A-G6), deliberately imported rather than invented.
 
+**10. A mis-arity `template-type<…>` is silence, not an error type.** PHPStan
+resolves `template-type` at any arity but three to an error type and reports it.
+Steins checks the *name* before the argument count, so every arity lowers to
+`Opaque` and the declaration constrains nothing (issue #360). The reason is the
+floor's own discipline: the alternative reading — falling through to a class
+named `template-type` — is a nonexistent-class reference that would manufacture
+a definite `No` for every non-object value, and inventing a *new* finding for a
+malformed docblock is a claim about spelling rather than about a value break.
+When the utility gains a resolution (issue #361) the arity check becomes
+decidable from something other than the name, and the entry is worth revisiting
+then.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

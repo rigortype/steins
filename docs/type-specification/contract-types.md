@@ -112,6 +112,13 @@ rules instead of a keyword zoo:
   argument *values* ride the check-time value carrier and are judged at the
   direct-`new` argument position (ADR-0032 stage 1; see
   [object-model.md](object-model.md)).
+- `template-type<Subject, Owner, 'TName'>` → `Opaque`, at *every* arity: it is
+  known vocabulary this lane models no relation for yet (issue #360; resolution
+  is issue #361). The name is checked before the argument count, so PHPStan's
+  error-type arities floor here silently too (a registered divergence). Without
+  the entry it would read as a class named `template-type` — a nonexistent-class
+  reference, the same wrong-`No` hazard `key-of`/`value-of` solve — which is why
+  the floor is `Opaque` and not `Class`.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own
