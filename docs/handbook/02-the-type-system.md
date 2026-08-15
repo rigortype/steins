@@ -368,11 +368,17 @@ own class*, Steins reads it off the object you are calling on:
 that `Model`, asks the `Model` what its `@implements
 ModelInterface<Child>` says, and hands you a `Child` — the same
 answer, and the same trust, as a hand-written `@return Child`. It
-is a *lookup in what you already built*, so it holds exactly as
-long as that is still known: a receiver you were handed rather
-than constructed carries nothing, and a method call on the
-receiver clears what it carried, because that call may have
-replaced it.
+is a *lookup in what you already built* — or in what you wrote
+down. A parameter typed `Helper $h` and documented
+`@param Helper<Model> $h` reads the same `Child`, a declaration
+being as much a thing to look up as a construction is; and unlike
+a carry proved from a `new`, a declared one is **not** cleared by
+a method call on the receiver, because your docblock does not stop
+being true when the body calls something. A proved carry still is
+cleared, that call having possibly replaced what the object holds.
+What carries nothing at all is a receiver with no declaration to
+read: an untyped parameter only a `@param` describes, a property,
+a value taken out of an array.
 
 The same reading works from an **argument**. Write
 `@template T`, `@param Box<T> $box` and `@return T` on a
@@ -461,6 +467,43 @@ which properties come along. Only a receiver Steins can prove the
 identity of qualifies: `$this->helper()` inside another method, or
 a variable whose class is merely a lower bound, keeps the older
 behaviour of entering with no property values at all.
+
+## A typed parameter is an object too
+
+None of that applies when nobody called your function — the
+per-file pass that reads every function on its own. There, until
+recently, `function f(Box $b)` gave `$b` no object at all, so
+`$b->something()` resolved to nothing and was checked against
+nothing.
+
+Now the declaration itself is the object: `Box $b` means `$b`
+holds a `Box`, with no properties (a declaration says what a thing
+*is*, never what it holds) and no claim to be *exactly* a `Box` —
+a subclass may be what arrives. That last part decides what gets
+checked. Calls on it are dispatched only where a subclass could
+not change the answer — a `final` method, or a `final` class — so
+this reports:
+
+```php
+final class Box { public function three(int $a, int $b, int $c): void {} }
+function f(Box $b): void { $b->three(1, 2); }
+// too few arguments to Box::three(): 2 passed, 3 required
+```
+
+and the same call on an ordinary, overridable method stays silent,
+because the object you were actually handed may declare a
+different signature.
+
+`?Box`, `Box|null`, `Box $b = null`, `Box|Widget`, `A&B` and a
+class Steins cannot find give `$b` no object — each of them says
+something other than "one object of one class". And a `@param`
+that names a *different* class than the native hint gives none
+either: one of the two has drifted and nothing here can tell
+which. What a `@param` does add is the type arguments the native
+syntax cannot spell — `@param Box<int> $b` on a `Box $b` — which
+is why `takesStringBox($b)` is reported and `takesIntBox($b)` is
+not. Your `instanceof` guards keep working exactly as before, on
+top of this and never against it.
 
 ## And a factory's object comes back out
 
