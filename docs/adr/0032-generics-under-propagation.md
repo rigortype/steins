@@ -352,3 +352,125 @@ iteration order of a whole-project pass.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation, recorded ahead of the implementation.
+
+## Amendment (2026-08-15): a function-level `@template` binds from an argument's carry, and the read is a floor under the body summary (issue #363)
+
+Tier 1 says templates are transparent where propagation reaches: `T` *is*
+whatever flowed in. That sentence is about a **body** — the descent binds
+the parameter to the actual value and the return follows. It says nothing
+about the caller's own view of `f(...)` when the descent yields nothing,
+and that view is what the conformance case asks for: `unwrap(new Box(1))`
+declared `@template T`, `@param Box<T> $box`, `@return T`, over a body
+whose value the summary cannot prove. This amendment says what the caller
+reads there.
+
+**It is a carry read, not the solver tier 1 refuses.** The refusal in tier
+1 is of *constraint solving beside propagation* — collecting occurrences,
+unifying them, propagating a substitution back through the signature — and
+the refusal's reason is dual-inference disagreement, two engines answering
+the same question differently. What lands here does none of that. It
+performs one **projection**: for a parameter spelled `Owner<…, T, …>` at
+the top level, ask the argument's tier-3 carry what sits at `T`'s position
+in `Owner`'s own `@template` list, and let the callee's `@return T` name
+it. That is `getTemplateType` (the previous amendment's reader) applied to
+an *argument* instead of a receiver, and the state it reads is exactly
+tier 1's own "whatever flowed in", made legible at the call site because
+tier 3 recorded it. No constraint is generated, nothing is unified, no
+substitution flows back into the argument, and there is no fixpoint: a
+single positional read, once, per name.
+
+**The binding rule, exhaustively.** Against the callee's `@param`
+envelopes as the declaration's own `@template` shadow leaves them:
+
+- `@param Owner<…, T, …> $p` at the **top level** — `Owner` resolving to a
+  class that declares templates, spelled with exactly as many arguments as
+  that class declares, position `j` naming `T` — binds `T` to the argument
+  carry's `j`-th argument, taken from the edge whose owner **is** `Owner`.
+  No hierarchy walk, the same exact-owner rule acceptance uses.
+- `@param T $p` at the **top level** binds `T` to the argument's proven
+  value, when it has one.
+- **Nothing else binds.** Not `list<Box<T>>`, not `Box<T>|null`, not `?T`,
+  not `array<T>`, not any nested position; not a call with a named or
+  spread argument list (position no longer maps to a parameter, so the
+  whole call declines — the same list issue #295's sweep gate declines
+  on), not a by-ref or variadic parameter list, not an argument past the
+  declared arity.
+- **All-or-nothing per name.** Every occurrence of `T` in a binding
+  position must yield a binding and all of them must be equal; a
+  disagreement or a single occurrence that carries nothing leaves `T`
+  unbound and the read declines. Two `@param Box<T>` parameters handed
+  `Box<1>` and `Box<'s'>` say the author's `T` is not one thing here, and
+  the honest answer to that is silence, not a join.
+
+**A bounded template does not bind, and the bound is why.** `@template T
+of int` has already become `int` in every envelope by the time this runs
+(issue #293's vocabulary bounds, applied by the shadow), so there is no
+template spelling left to match and `@return T` reads `int`. That is the
+correct outcome rather than a limitation: the bound is what the author
+promised, tier 1 already reads it as an upper-bound contract, and reading
+the carried value *through* a bound would need the read to be checked
+against it — an inhabitation question, and a library-author lint of the
+kind this ADR keeps thin. A class bound declines the same way it declines
+everywhere else in tier 1.
+
+**Precedence — the dual-inference answer, pinned.** Where a body summary
+speaks, it wins; the declared read is the floor beneath it, one rung above
+`Opaque`. `function id(int $x): int { return 2; }` under `@template T
+@param T $x @return T` reads `2` at `id(1)`, not `1`, because the body
+proved `2` and the docblock only claimed `T`. Where the summary is absent
+— an opaque body, a return the descent cannot carry — the read supplies
+what flowed in. This ordering is what makes the two inferences unable to
+disagree: they are not two answers to one question but two rungs of one
+ladder, and the proven rung is always above the asserted one. Structurally
+it is guaranteed rather than maintained, because the read is installed at
+exactly the seam the argument-blind declared floor already occupied
+(`fn_return_arms`), which the summary already outranks.
+
+**The read is Asserted, and the conformance line stays unenforced.** What
+comes out is a docblock's claim about a return, resolved against a carry
+that happens to be proven — so it enters through the same refinement a
+hand-written `@return Box` goes through and comes out at the same stratum,
+exactly as the receiver reader does. The consequence is stated here rather
+than left to be discovered: **`takesString(unwrap(new Box(1)))` reports
+nothing**, and line 47 of the conformance case
+`phpdoc_advanced_phpstan_template_type` is therefore *not enforced* by
+this slice. An Asserted argument fact premises no `type.argument-mismatch`
+(a `@return int` flowing into `takesString(string)` is silent today for
+the same reason), and the body-proven route that would premise one needs
+heap properties to cross a binding descent — ADR-0057 T1's heap component,
+out of scope here. The dump surface and the contract store are this
+slice's consumers, and the divergence registry records the line.
+
+**Methods bind on the same rule.** A method's own `@template` names read
+from its arguments identically, at the same seam and with the receiver's
+carries untouched — the two readers are orthogonal, one indexing the
+receiver's carry for a class-level subject and one indexing an argument's
+for a method-level one, and a docblock may carry both without either
+seeing the other's names (the shadow stages separate them).
+
+### ADR-0048 obligations
+
+**§2 (replayable).** The read is a pure function of the call's own
+arguments as the walk already resolved them (`resolve_cval`, the same
+resolution acceptance uses), the project index (the owner's `@template`
+list), and the callee's docblock. It asks the engine nothing beyond the
+fold memo `resolve_cval` already consults, holds no state between call
+sites, and adds no cross-scope coupling: re-walking the scope alone
+reproduces it exactly.
+
+**§3 (entry-state contribution).** **Nothing new is seeded into any
+scope.** No fact kind is introduced, no parameter seeding changes, and the
+callee's entry state is untouched — the read produces *return arms at the
+caller*, which is a call-site consumer of `HeapObj::targs` and nothing
+else. The contributions it depends on are the previous amendments' and
+stand unchanged: an argument with no proven `CVal` contributes no carry, a
+swept value carry contributes none, and a declared edge carry (`CArg::Ty`)
+contributes and survives sweeps.
+
+**§4 (no global ordering).** The read depends on statement order within
+one scope — an argument's carry is swept by the statements before it,
+which is the sweep's own semantics — and on nothing across scopes or
+files.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, recorded ahead of the implementation.
