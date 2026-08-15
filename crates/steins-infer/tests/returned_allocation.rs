@@ -556,14 +556,16 @@ fn a_generator_hands_back_no_allocation() {
 
 #[test]
 fn the_constructors_own_writes_still_beat_a_literal_default() {
-    // The #377 rule rides along, because the snapshot for `return new Foo(...)` is
-    // minted through `new_heap_object` rather than assembled anew: a default the
-    // constructor overwrites is dropped there and so never reaches the caller. A
-    // stale `Verified` 0 on a factory's object would be a proof-layer false positive
-    // one boundary further from where it was written.
+    // A default the constructor overwrites never reaches the caller — a stale
+    // `Verified` 0 on a factory's object would be a proof-layer false positive one
+    // boundary further from where it was written. *Amended 2026-08-16 (#385): the
+    // `return new D($v)` snapshot is now the constructor summary itself, so the
+    // overwritten slot is not merely dropped but PROVEN — `5`, through two
+    // boundaries: the constructor's own write, and the factory's heap summary. The
+    // slot the constructor leaves alone keeps its default, as it always did.*
     let src = "<?php\nclass D { public $view = 0; public $kept = 3;\n\
         \x20 public function __construct(int $v) { $this->view = $v; } }\n\
         function mkD(int $v): D { return new D($v); }\n\
         $d = mkD(5);\n\\PHPStan\\dumpType($d->view);\n\\PHPStan\\dumpType($d->kept);\n";
-    assert_eq!(dumps(src), vec!["dumped type: unknown", "dumped type: 3"]);
+    assert_eq!(dumps(src), vec!["dumped type: 5", "dumped type: 3"]);
 }

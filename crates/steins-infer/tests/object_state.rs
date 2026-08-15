@@ -124,10 +124,16 @@ fn closure_capture_escapes() {
     assert_eq!(count(&src), 0, "a captured object escapes and is swept");
 }
 
-// $this: overridable-call sweep vs private/final descent survival
+// $this: every call that runs with the SAME `$this` sweeps it
 
 #[test]
-fn this_survives_private_call_but_swept_by_overridable() {
+fn this_is_swept_by_any_same_this_call_resolved_or_not() {
+    // Amended 2026-08-16 (ADR-0057 C5): a *resolved* private or final `$this->m()`
+    // used to sweep nothing, on the reasoning that the descent proves the target. It
+    // does not prove the target's property writes — a descent into it seeds its own
+    // `$this` copy (ADR-0086 §3), so `private function helper() { $this->p = 5; }`
+    // would leave the caller's `"abc"` standing and convict correct code. Both runs
+    // are silent now; the private call is no longer the precision payoff it read as.
     let src = "<?php\nfunction needInt(int $x): int { return $x; }\n\
 class Widget {\n\
   public $p;\n\
@@ -137,7 +143,17 @@ class Widget {\n\
   public function run2(): void { $this->p = \"abc\"; $this->pub(); needInt($this->p); }\n\
 }\n";
     let f = findings(src);
-    // run(): private call leaves $this->p intact → finding; run2(): overridable sweeps → none.
+    assert_eq!(f.len(), 0, "{f:#?}");
+
+    // The write still stands where nothing runs with the same `$this`: an unrelated
+    // *resolved* free function reaches no property of it.
+    let unrelated = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+function noop(): void {}\n\
+class W2 {\n\
+  public $p;\n\
+  public function run(): void { $this->p = \"abc\"; noop(); needInt($this->p); }\n\
+}\n";
+    let f = findings(unrelated);
     assert_eq!(f.len(), 1, "{f:#?}");
     assert_eq!(f[0].id, ID);
 }
@@ -373,16 +389,20 @@ fn a_default_the_constructor_leaves_alone_still_seeds() {
     let touched = src.replace("needInt($d->b)", "needInt($d->a)");
     assert_eq!(count(&touched), 0);
 
-    // A mention that is not a write drops the seed too — the scan asks whether the
-    // body can refer to the slot, not what it does with it (the same
-    // over-approximating spirit as the argument-pass carry gate).
+    // A mention that is not a write drops the seed at the FLOOR — the scan asks
+    // whether the body can refer to the slot, not what it does with it. Where the
+    // constructor is **walked** (ADR-0057's constructor-summary amendment, C1) the
+    // over-approximation is not needed and not used: the walk runs `echo $this->a;`,
+    // writes nothing, and the default is the constructed value.
     let read_only = format!(
         "{PRELUDE}class R {{\n\
          \x20 public $a = \"x\";\n\
          \x20 public function __construct() {{ echo $this->a; }}\n\
          }}\n$r = new R();\nneedInt($r->a);\n"
     );
-    assert_eq!(count(&read_only), 0, "a mere mention is enough to drop the seed");
+    let f = findings(&read_only);
+    assert_eq!(f.len(), 1, "a read is not a write, and the walk knows it: {f:#?}");
+    assert_eq!(f[0].id, ID);
 
     // And a longer name that merely starts with the property's is not the property:
     // `$this->ab` must not drop `$a`'s default (token boundaries, `mentions_variable`
@@ -537,12 +557,30 @@ fn a_constructor_that_lets_this_out_of_its_own_text_drops_every_default() {
     );
     assert_eq!(count(&passed), 0, "a bare `$this` hands out an alias");
 
-    // The same for `$that = $this;` and for a closure capturing it.
+    // Two shapes the FLOOR over-approximates and the WALK decides, each time in the
+    // direction the runtime agrees with (ADR-0057 C1 — a walked body needs no
+    // over-approximation of itself). An alias that never leaves the constructor, and
+    // a closure binding `$this` that is never invoked, both write nothing, so `$a`
+    // really IS `"abc"` when `new Pa()` returns.
     let aliased = passed.replace("register($this);", "$that = $this;");
-    assert_eq!(count(&aliased), 0);
-    let captured =
-        passed.replace("register($this);", "$f = function () { $this->a = 1; };");
-    assert_eq!(count(&captured), 0);
+    let f = findings(&aliased);
+    assert_eq!(f.len(), 1, "an alias that goes nowhere writes nothing: {f:#?}");
+    assert_eq!(f[0].id, ID);
+    let captured = passed.replace("register($this);", "$f = function () { $this->a = 1; };");
+    let f = findings(&captured);
+    assert_eq!(f.len(), 1, "an uninvoked closure writes nothing: {f:#?}");
+    assert_eq!(f[0].id, ID);
+
+    // Let either one actually go somewhere and the answer flips back: handing the
+    // alias to a call escapes the shared allocation, and invoking the closure is an
+    // unresolved call, which sweeps the constructor's own unescaped `$this` (C5).
+    let alias_passed =
+        passed.replace("register($this);", "$that = $this; register($that);");
+    assert_eq!(count(&alias_passed), 0, "the alias escapes the same allocation");
+    let invoked =
+        passed.replace("register($this);", "$f = function () { $this->a = 1; }; $f();");
+    let f = findings(&invoked);
+    assert_eq!(f.len(), 0, "an unresolved call sweeps the constructor's `$this`: {f:#?}");
 }
 
 #[test]
