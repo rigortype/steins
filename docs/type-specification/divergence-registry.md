@@ -224,21 +224,19 @@ resource-to-object migration ends. The value domain is unchanged and still
 object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
 resources, resource-consuming *parameters*, and open/closed state.
 
-**5. `phpdoc_advanced_phpstan_template_type` line 47 — standing silence, and a
-trust-order fact rather than a template gap.** `takesString(unwrap(new Box(1)))`
-reports nothing, and will not start reporting because of anything in the
-`template-type` family. `unwrap`'s `@return T` binds to the carried `1` and
-reads it (issue #363), but a `@return` envelope is an **Asserted** fact, and an
-Asserted argument fact premises no `type.argument-mismatch` on the proof layer
-and no contract-layer finding against a native parameter either — a plain
-`@return int` flowing into `takesString(string)` is silent today for exactly the
-same reason, and the dump surface shows `int (asserted)` there as it shows
-`1 (asserted)` here. The route that *would* premise a finding is the body-proven
-one (tier 1: `return $box->value` proving `1`), and it is blocked by heap
-properties not crossing a binding descent — ADR-0057 T1's heap component, on the
-roadmap and unrelated to this family. So the target for the case is *recognized,
-zero false positives, declared-side enforcement where a `@param` spells it*, and
-line 47 is not part of it.
+**5. `phpdoc_advanced_phpstan_template_type` line 47 — RETIRED (2026-08-15,
+ADR-0086 §2 / #376): the case is enforced.** The entry recorded a standing
+silence: `takesString(unwrap(new Box(1)))` reported nothing, because `unwrap`'s
+`@return T` binds to the carried `1` as an **Asserted** fact and an Asserted
+argument fact premises no `type.argument-mismatch`. That much is still true and
+was never the gap. The gap was the route beside it — the body-proven one, tier 1,
+`return $box->value` proving `1` — which needed heap properties to cross a
+binding descent. ADR-0086's argument leg is that crossing: an argument's object
+now enters the callee's store as a copy, so `$box->value` is `1` inside `unwrap`,
+the summary is `1` at the `Verified` stratum, and line 47 reports
+`type.argument-mismatch` under the case's own `strict_types`. Line 42's
+`unwrap(new Box('ok'))` stays silent, as it should. The divergence is gone rather
+than reclassified; entry 14 (the solver) is unaffected.
 
 ## Not registered — just unimplemented
 

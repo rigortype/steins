@@ -398,6 +398,60 @@ something, the body wins: `function id(int $x): int { return
 is the floor under your code's own evidence, never a rival to
 it.
 
+## Objects cross into a function you call
+
+Value propagation used to stop at the boundary for objects. Pass
+`new Box(1)` to `function unwrap(Box $b) { return $b->value; }`
+and the callee's `$b` was an object with nothing in it — not
+because anything refused to read it, but because the parameter
+had no object at all.
+
+It has one now. When you pass an object — a variable holding one,
+or a `new` written right there in the argument list — Steins hands
+the callee a **copy** of it: same class, same exactness, same
+`readonly` properties, same generic carry, and the property values
+you had proven. So `unwrap(new Box(1))` reads `1`, and a wrong
+value reaching a typed sink *inside* the callee is reported at the
+line inside the callee where it lands:
+
+```php
+<?php
+declare(strict_types=1);
+class Box { public function __construct(public mixed $value) {} }
+function takesString(string $s): void {}
+function h(Box $b): void { takesString($b->value); }
+h(new Box(1));
+// argument $b->value to takesString() cannot become string $s — proven TypeError
+```
+
+**A copy, not the object.** Nothing the callee writes comes back:
+`function mutate(Box $b) { $b->value = 's'; }` changes what
+`mutate` sees and nothing about your `$b`. That is not an
+approximation of PHP's by-handle semantics — it is the same
+refusal as everywhere else in Steins. After any call that could
+reach your object, its properties are forgotten (the call may have
+written them), and that stays true. The copy flows in; the
+forgetting flows out; neither pays for the other.
+
+Two rules decide what rides along, and both are about **aliases
+Steins cannot see**. If the same object is passed twice
+(`f($b, $b)`), the callee gets *one* copy under both names, so a
+write through the first is visible through the second — the
+aliasing you can see is preserved. But if the object has ever
+**escaped** — stored into a property, an array, a global, captured
+by a closure — some other name may reach it, and a write through
+that name would be invisible here. Such an object crosses with its
+class, its exactness and its `readonly` properties (which nothing
+may rewrite) but **not** its ordinary property values. Being
+precise about a local object and honest about an escaped one is
+the whole trade.
+
+Exactness is copied, never upgraded: an object you were handed
+stays a lower bound inside the callee, exactly as it was outside.
+And trust rides along with each value, so a property whose value
+you only *asserted* is still only asserted inside — it will not
+premise a proof-layer finding there any more than it would here.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return
