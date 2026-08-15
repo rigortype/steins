@@ -11210,8 +11210,12 @@ fn analyze_scope(
 
     // Seed the `$this` object in a method scope (ADR-0036): props/readonly from the
     // class surface, only when the class declares tracked properties (otherwise
-    // `$this` stays unbound). A descent that already bound `this` is left untouched
-    // (impossible today — descents pass an empty store).
+    // `$this` stays unbound). A descent that already bound `this` is left untouched —
+    // that is the receiver leg's seam (ADR-0086 §3): a method call on an exact
+    // `Receiver::Var` hands the callee a copy of the receiver's own object, props and
+    // carries included, and re-seeding the class shell over it would throw exactly the
+    // knowledge the crossing bought away. Every other receiver arrives here with `this`
+    // unbound and is seeded below, as before.
     if let Some(class) = enclosing_class
         && !store.is_bound("this")
     {
@@ -13890,6 +13894,13 @@ fn new_heap_object(
 /// model, so assuming the declared default would produce null-property false
 /// positives past `!== null` guards. Only facts written *in this method* flow;
 /// readonly bookkeeping stays since a readonly value can't change post-construction.
+///
+/// That reasoning is about an entry with **no caller in hand**, which is every entry
+/// this function still serves: the plain per-scope pass, and a descent whose receiver
+/// proved no object (ADR-0086 §3 lists them). Where a descent *did* prove one — an
+/// exact `Receiver::Var` — `$this` is seeded from that receiver's copy in [`descend`]
+/// instead, and the props are the caller's own proven facts rather than an assumption
+/// about what some other method stored.
 fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapObj> {
     let props = cx.class_props(class_fqn);
     if props.is_empty() {
@@ -21226,6 +21237,7 @@ fn try_descend_function(
         &decl.fqn,
         &decl.name,
         None,
+        None,
         &arg_values,
         call.span.start,
         &[],
@@ -21286,6 +21298,7 @@ fn project_call_summary(
         callee_scope,
         &decl.fqn,
         &decl.name,
+        None,
         None,
         &arg_values,
         span_start,
@@ -21433,6 +21446,7 @@ fn handle_var_call(
                     callee_scope,
                     &format!("closure@{def_offset}"),
                     &display,
+                    None,
                     None,
                     &arg_values,
                     call.span.start,
@@ -21620,6 +21634,12 @@ fn descend(
     key_name: &str,
     display_name: &str,
     body_this_exact: Option<String>,
+    // The caller variable holding the receiver object, for an exact `Receiver::Var`
+    // method call and nothing else (ADR-0086 §3 — [`CallTarget::receiver_var`] states
+    // each other receiver's `None` and why). The four non-method callers pass `None`:
+    // a free function, a closure and a nested call in argument position have no
+    // receiver at all.
+    receiver_var: Option<&str>,
     // The call's positional argument values + its span start (for the provenance
     // line). Taken apart rather than as a `&CallExpr` (issue #60): a nested call in
     // argument position exists only as an `ArgValue::Call` — no `CallExpr` is ever
@@ -21654,6 +21674,32 @@ fn descend(
     let mut seed_store = Store::default();
     let mut seed_keys: Vec<(String, String)> = Vec::new();
     let mut seeded: HashMap<AllocId, AllocId> = HashMap::new();
+    // The receiver is the **zeroth argument** (ADR-0086 §3), so it is seeded first and
+    // through the same two helpers: `copy_for_descent` for the field table, and the
+    // `seeded` map above for the aliasing rule — which is what makes `$b->m($b)` bind
+    // `$this` and the parameter to ONE callee object rather than two copies that would
+    // convict correct code. `analyze_scope`'s `$this` seed then finds `this` bound and
+    // leaves it alone; every receiver that seeds nothing here still goes through
+    // `seed_this_object` there, exactly as before.
+    let seeded_this: Option<AllocId> = match receiver_var.filter(|_| !poisoned) {
+        Some(v) => caller_store.id_of(v).and_then(|caller_id| {
+            let obj = caller_store.heap.get(&caller_id)?;
+            // The copy IS the receiver the dispatch resolved through, so its exactness
+            // cannot disagree with the one the callee walks under: `resolve_call_target`
+            // fills `receiver_var` only where it read `class_exact` and passed that same
+            // class on as `this_exact`.
+            debug_assert!(
+                obj.class_exact && body_this_exact.as_deref() == Some(obj.class.as_str()),
+                "a seeded `$this` must be the exact receiver `body_this_exact` names",
+            );
+            let id = seed_store.heap.len() as AllocId;
+            seed_store.heap.insert(id, copy_for_descent(obj));
+            seed_store.refs.insert("this".to_owned(), id);
+            seeded.insert(caller_id, id);
+            Some(id)
+        }),
+        None => None,
+    };
     for (i, arg_value) in args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
         if param.variadic {
@@ -21752,7 +21798,11 @@ fn descend(
     // list carries real entry state now, so `h(new Box(1))` walks `h` where it used
     // to return here. The memo and the emission dedupe then govern that walk exactly
     // as they govern a value binding's.
-    if bound.is_empty() && captures.is_empty() && seed_keys.is_empty() {
+    //
+    // A seeded `$this` counts the same way (§3, the receiver being the zeroth
+    // argument): `$b->get()` takes no arguments and still enters with the receiver's
+    // proven props, which is exactly what makes it agree with `get($b)`.
+    if bound.is_empty() && captures.is_empty() && seed_keys.is_empty() && seeded_this.is_none() {
         return None;
     }
 
@@ -21791,13 +21841,28 @@ fn descend(
             Stratum::Verified,
         ));
     }
-    if let Some(exact) = &body_this_exact {
-        // Exact receiver is a runtime-proven identity — Verified.
-        key_binding.push((
+    // The `this:` pseudo-binding, in its two spellings. A `$this` seeded from the
+    // receiver's copy (ADR-0086 §3) names its **whole entry state**, exactly as
+    // `obj:{param}` does for an argument's: the class string alone would let
+    // `$b1->m()` answer for `$b2->m()` on two boxes holding different values, replaying
+    // one receiver's summary and suppressing the other's emission (ADR-0075 §2.1).
+    // Where nothing was seeded the spelling is the exact class FQN, unchanged since
+    // ADR-0075 §2.1 — `Receiver::New` and `Callee::Construct` prove an identity and no
+    // state, and that is all the key has ever had to distinguish there.
+    match (&body_this_exact, seeded_this) {
+        // Exact receiver is a runtime-proven identity — Verified either way, and each
+        // seeded prop's own stratum travels inside the rendering.
+        (_, Some(id)) => key_binding.push((
+            "this:".to_owned(),
+            ArgValue::Str(PhpStr::from(object_binding_key(&seed_store.heap[&id]))),
+            Stratum::Verified,
+        )),
+        (Some(exact), None) => key_binding.push((
             "this:".to_owned(),
             ArgValue::Str(PhpStr::from(exact.clone())),
             Stratum::Verified,
-        ));
+        )),
+        (None, None) => {}
     }
     key_binding.sort_by(|a, b| a.0.cmp(&b.0));
     let key: BindingKey = (key_name.to_owned(), key_binding);
@@ -22128,6 +22193,26 @@ struct CallTarget<'a> {
     /// *argument* position keeps as `ArgValue::New(class, args, named)` — are
     /// already gone by the time any of this runs.
     receiver_carries: Vec<GenericCarry>,
+    /// The caller variable naming the receiver **object** whose copy seeds the
+    /// callee's `$this` (ADR-0086 §3, the receiver leg): the receiver is the zeroth
+    /// argument, and this is how [`descend`] finds it in the caller's store.
+    ///
+    /// Filled by the exact `Receiver::Var` arm and by nothing else — the same one
+    /// arm that fills [`CallTarget::receiver_carries`], for the same reason (it is
+    /// the one arm holding a heap object). Each other receiver is `None` on
+    /// purpose, and its `$this` keeps seeding through [`seed_this_object`]:
+    ///
+    /// * `Receiver::This` — a `$this`-origin receiver is pre-escaped by
+    ///   construction (ADR-0036), so [`copy_for_descent`] would drop its
+    ///   non-readonly props anyway; seeding nothing is the same entry state, minus
+    ///   a copy.
+    /// * a **non-exact** `Receiver::Var` (a laundered `$this` alias, `clone $this`)
+    ///   — it resolves through `resolve_guarded`, which proves no receiver identity
+    ///   at all, so there is no object the callee is entitled to (audit G1).
+    /// * `Receiver::New` and `Callee::Construct` — no heap object exists yet at the
+    ///   point the target resolves (the value-IR limit measured in issue #374).
+    /// * a static call — no receiver.
+    receiver_var: Option<String>,
 }
 
 /// Resolve a method/static/constructor `receiver` to a project target.
@@ -22166,6 +22251,10 @@ fn resolve_call_target<'a>(
                 let mut target =
                     resolve_exact(cx, &class, method, enclosing_class, Some(class.clone()))?;
                 target.receiver_carries = carries;
+                // And the object itself, for the descent's `$this` seed (ADR-0086
+                // §3): the receiver is the zeroth argument, so the same exactness
+                // that made the dispatch precise makes the copy admissible.
+                target.receiver_var = Some(v.clone());
                 Some(target)
             } else {
                 // A lower-bound receiver — a laundered `$this` alias (`$u = $this`) or
@@ -22217,6 +22306,7 @@ fn resolve_exact<'a>(
             class_file: r.class_file,
             this_exact,
             receiver_carries: Vec::new(),
+            receiver_var: None,
         }),
         _ => None,
     }
@@ -22245,6 +22335,7 @@ fn resolve_guarded<'a>(
         class_file: r.class_file,
         this_exact: None,
         receiver_carries: Vec::new(),
+        receiver_var: None,
     })
 }
 
@@ -22268,6 +22359,7 @@ fn resolve_static_named<'a>(
         class_file: r.class_file,
         this_exact: None,
         receiver_carries: Vec::new(),
+        receiver_var: None,
     })
 }
 
@@ -27712,6 +27804,7 @@ fn handle_method_call(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display,
         target.this_exact,
+        target.receiver_var.as_deref(),
         &arg_values,
         call.span.start,
         &[],
