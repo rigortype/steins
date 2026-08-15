@@ -182,9 +182,11 @@ current build.
 
 ### `type.*` — native declared types, proven
 
-Three ids, all proof layer, all on the default surface. Each fires only when
-a folded value provably raises a `TypeError` against a *native* declaration
-under that file's own coercion mode.
+Four ids. The first three are proof layer on the default surface: each fires
+only when a folded value provably raises a `TypeError` against a *native*
+declaration under that file's own coercion mode. The fourth
+(`type.maybe-argument-mismatch`) is the same question asked one notch weaker,
+about a type rather than a value, and reaches only `strict`.
 
 ```php
 <?php
@@ -220,6 +222,84 @@ src/Native.php:19:8: error[type.argument-mismatch]: argument "1200" to charge() 
 `type.property-mismatch` an assignment against a property type. The handbook's
 [type system chapter](../handbook/02-the-type-system.md) covers what "cannot
 become" means for each PHP type.
+
+**`type.maybe-argument-mismatch`** is the fourth, and the odd one out: proof
+layer, but reaching only `strict`. It fires where the *type* an argument
+carries has an arm the parameter rejects **and** an arm it accepts. Nothing
+here is proven to break — a type says what a value may be, not what it is —
+which is why it sits on the opt-in rung and not the default surface.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function shorten(string $path, int $max): string
+{
+    return substr($path, 0, $max);
+}
+
+function shortAbsolute(string $path, int $max): string
+{
+    $resolved = realpath($path);
+
+    return shorten($resolved, $max);
+}
+```
+
+```
+$ steins check --profile strict src/Paths.php
+src/Paths.php:14:20: error[phpdoc.maybe-argument-mismatch]: argument $resolved to shorten() may not become string $path — $resolved is non-empty-string|false, and its false arm raises a TypeError (strict mode)
+```
+
+`realpath()` returns `string|false`, and handing that straight on to a
+`string` parameter works until the day the path does not resolve. Guard it
+and the finding goes away:
+
+```php
+$resolved = realpath($path);
+if ($resolved === false) {
+    throw new \RuntimeException("cannot resolve {$path}");
+}
+```
+
+`assert($resolved !== false)` discharges it too, as does any `!== false` /
+`!== null` / `instanceof` guard the branch reaches through, and a
+`@phpstan-assert` tag that subtracts the arm.
+
+The id comes in two spellings, and which one you get says where the evidence
+came from — the same split `call.undefined-method` and
+`phpdoc.undefined-method` make. **`phpdoc.maybe-argument-mismatch`** (contract
+layer) means at least one arm came from a docblock or from a builtin's
+declared return, so the claim is conditional on that declaration being
+honest — the `realpath()` case above. **`type.maybe-argument-mismatch`**
+(proof layer) means every arm came from a native declaration PHP itself
+enforces:
+
+```php
+function shortHome(string|false $home, int $max): string
+{
+    return shorten($home, $max);
+}
+```
+
+```
+src/Paths.php:22:20: error[type.maybe-argument-mismatch]: argument $home to shorten() may not become string $path — $home is string|false, and its false arm raises a TypeError (strict mode)
+```
+
+Both reach `strict` and neither reaches `contracts`, because both make a
+*may* claim. Note the mode in the message: the judgment runs under the calling
+file's own `strict_types`. A `?string` into an `int` parameter fires in
+coercive mode — the `null` arm breaks, a numeric string does not — and says
+nothing in strict mode, where *every* arm breaks. That last silence is
+deliberate: "every arm breaks" is a claim about the declaration rather than
+about any value on any path, and it was measured to fire on nothing real.
+
+Two limits worth knowing. Arguments to **builtins** are not checked against
+builtin parameter types at all — Steins has no builtin parameter-type source
+— so `strlen($maybeFalse)` is silent. And only a plain `$variable` argument is
+read: `f($o->prop)`, `f(g($x))` and `f($a['k'])` carry the same risk and are
+not judged here.
 
 ### `call.*` — calls that cannot complete
 

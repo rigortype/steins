@@ -5,7 +5,7 @@
 //! Structured `if`/`elseif`/`else` uses branch analysis instead (ADR-0031); the
 //! read-set rule still applies to opaque constructs/conditions, e.g. a by-ref call in a guard.
 
-use steins_infer::{Diagnostic, check};
+use steins_infer::{Diagnostic, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
 
 fn findings(src: &str) -> Vec<Diagnostic> {
@@ -59,7 +59,22 @@ function make(string|bool $token): void
 }
 make(false);
 ";
-    assert_eq!(n(src), 0, "false guard filters false before use_token() → silent (no FP)");
+    let ds = findings(src);
+    // No **definite** finding: the guard filters the `false` the descent bound.
+    assert!(
+        ds.iter().all(|d| d.id == TYPE_MAYBE_ARGUMENT_MISMATCH_ID),
+        "false guard filters false before use_token() → no proven TypeError: {ds:?}"
+    );
+    // One possibly-grade finding, and correctly: `!== false` cannot delete a
+    // general `bool` arm (`true` is an interior point the guard says nothing
+    // about), so `use_token(true)` really is reachable from this declaration
+    // (issue #391). The definite id's silence and this id's claim are the two
+    // different questions the possibly grade exists to keep apart.
+    assert_eq!(
+        ds.iter().filter(|d| d.id == TYPE_MAYBE_ARGUMENT_MISMATCH_ID).count(),
+        1,
+        "{ds:?}"
+    );
 }
 
 // The top-level guard shape

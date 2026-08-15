@@ -25,6 +25,8 @@ use steins_infer::{
     // undefined variables (ADR-0078, issue #194)
     VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID,
 };
+// the argument side's possibly pair (ADR-0081 amendment, issue #391)
+use steins_infer::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID};
 // member absence (ADR-0078, issue #197)
 use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
 // global constants (ADR-0078, issue #198)
@@ -413,6 +415,16 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
         (TYPE_RETURN_MAYBE_MISSING_ID, Layer::Proof, Floor::Strict),
         (UNTYPED_CLASS_CONSTANT_ID, Layer::Contract, Floor::Pedantic),
+        // The argument side's possibly pair (ADR-0081's 2026-08-16 amendment,
+        // issue #391). Both `Strict`, for two different halves of one reason: the
+        // claim is partial-path on either premise (some arm of the argument's own
+        // type would not bind, never that this call breaks), and the `phpdoc.*`
+        // half additionally rides an `Asserted` premise. The contract half takes
+        // the `offset.maybe-missing` split rather than the `phpdoc.*` family's
+        // `Contracts` — its definite sibling `phpdoc.param-mismatch` keeps
+        // `Contracts`, so a `contracts` run keeps its meaning.
+        (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
+        (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =

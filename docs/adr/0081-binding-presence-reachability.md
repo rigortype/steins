@@ -423,11 +423,13 @@ conclude the shape is rare.
   possibly posture by its registered layer and floor changing, which is
   an ADR-visible act.
 
-### A6. Two narrowing repairs the measurement forced, each landed alone
+### A6. Four narrowing repairs the measurement forced, each landed alone
 
-Neither belongs to this id, and both are worth their own fix regardless;
-they are recorded here because the id's corpus count is only meaningful
-after them.
+None of them belongs to this id, and each is worth its own fix
+regardless; they are recorded here because the id's corpus count is only
+meaningful after them. The issue named the first two from the probe's
+triage; the last two the implementation found, one of them by this id
+firing on a shape the narrowing could not see.
 
 1. **`assert($expr)` reached the value lane and not the declared-arm
    lane.** The 2026-07-25 ruling reads `assert()` as `if (!$expr) throw`,
@@ -440,7 +442,25 @@ after them.
    the `null` its own default admits** at the argument position, though
    the declaration side has read the same bit all along. That was a
    *definite* proof-layer false positive, not a possibly-grade one, and
-   the corpus carried it.
+   the corpus carried it. (The issue predicted a *join* bug here, from
+   the shape of the corpus line. The join is correct: a local assigned a
+   string on every arm of a nested `if`/`else` is non-nullable at the
+   join, and a fixture now pins that it is. The line's real cause is the
+   parameter default.)
+3. **`if ($x == null) { return; }` left the fall-through nullable.** Only
+   the identity spellings reached the refinement table. One direction of
+   the loose pair is sound — `null == null` is true, so the branch where
+   the guard *fails* proves non-null — and the other stays refused,
+   since `0 == null` is true too. Found by this id firing on the shape.
+4. **`@phpstan-assert !int $x` subtracted nothing.** The negated class
+   spelling has narrowed since ADR-0052 §3(d); the scalar one fell
+   through to the `!null` special case. `Subtrahend::Base` and its
+   judgment already existed, so this was the missing wire. One carve-out:
+   `!float` is refused, because arm judgment is contract *acceptance*,
+   under which `int` is subsumed by `float` — reading that as identity
+   would delete a live `int` arm. This is the third instance of the class
+   the issue's conformance pair belongs to, so that pair is closed by a
+   fix rather than by a baseline entry.
 
 ### A7. Measurement owed
 
