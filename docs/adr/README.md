@@ -120,3 +120,6 @@ list in one place.
 | ADR-0081 | [Binding presence: a lowering-side reachability pass for the maybe-undefined pair](0081-binding-presence-reachability.md) |
 | ADR-0082 | [Interop envelopes: parameterized purity tags as the unchecked docblock spelling of effect envelopes](0082-interop-envelopes.md) |
 | ADR-0083 | [Output is an ambient channel under `io`, split by ob_start-capturability](0083-io-output-ambient-channel.md) |
+| ADR-0084 | [Tolerated effects: policy-declared discharge at judgment time](0084-tolerated-effects.md) |
+| ADR-0085 | [The abstract union layer: a Fact may span bases](0085-abstract-union-layer.md) |
+| ADR-0086 | [Call-site heap entry: an argument's object crosses the binding descent by copy](0086-call-site-heap-entry.md) |
