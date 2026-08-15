@@ -18066,6 +18066,18 @@ fn collect_cmp_refine(
             }
             return;
         }
+        // The loose null pair, **one direction only** (issue #391). `$x == null` is
+        // true for `0`, `''`, `'0'` and `[]` as well, so the branch where it holds
+        // proves nothing about nullness — but `null == null` is true, so the branch
+        // where it *fails* proves `$x` is not null. `if ($x == null) { return; }`
+        // is the idiom this exists for; it is a `NotNull` on the fall-through and
+        // nothing anywhere else, which is why it is not a `Refine::Exclude`.
+        if matches!((op, then), (CmpOp::Loose, false) | (CmpOp::NotLoose, true))
+            && matches!(val_of(&val, php_minor), Some(Val::Null))
+        {
+            out.push(Refine::NotNull(v));
+            return;
+        }
     }
     // Ordering guards over a (var, int-literal) pair → an interval intersection.
     if let Some((v, k, var_on_left)) = var_int_literal(lhs, rhs) {
