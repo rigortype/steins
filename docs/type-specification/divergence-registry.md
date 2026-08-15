@@ -98,9 +98,36 @@ floor's own discipline: the alternative reading — falling through to a class
 named `template-type` — is a nonexistent-class reference that would manufacture
 a definite `No` for every non-object value, and inventing a *new* finding for a
 malformed docblock is a claim about spelling rather than about a value break.
-When the utility gains a resolution (issue #361) the arity check becomes
-decidable from something other than the name, and the entry is worth revisiting
-then.
+The resolution (issue #361) did not change this: it runs *after* the name is
+recognized and only on the three-argument shape, so a mis-arity spelling never
+reaches a decision procedure that could report it. Revisiting the entry means
+deciding to emit a docblock-spelling finding, which is a separate call.
+
+**11. `template-type`'s ancestor lookup walks one level, not the chain.**
+PHPStan's `Type::getTemplateType(ancestor, name)` resolves the subject's
+ancestor *transitively*: any class in the hierarchy that leads to the owner
+contributes, with the intermediates' type arguments substituted along the way.
+Steins reads the subject's own `@extends`/`@implements` edges and stops there
+(issue #361), which is the same one-level rule the generics carry already
+follows for the same reason (ADR-0032's inheritance-edge amendment): the moment
+an intermediate class is generic, following the chain is *substitution*, and a
+one-level walk that pretended otherwise would be wrong rather than merely
+incomplete. So `IntBox` declaring `@extends Box<int>` resolves, and a subject
+reaching `Box` only through a `@template U`-declaring `Mid` declines. The
+reconsideration precondition is the same as the amendment's — a substitution
+mechanism, not a longer walk.
+
+**12. An unresolvable `template-type<…>` is `Opaque`, not an error type.**
+PHPStan yields an error type when the utility resolves to nothing — an unknown
+owner, a template name the owner does not declare, an unrelated subject — and
+also resolves an *unresolved template* to its declared bound. Steins floors all
+of it to `Opaque` (issue #361), which admits every value and constrains none.
+The two halves have one reason between them: an error type is a claim that a
+docblock is wrong, and this analyzer's proof layer speaks about values breaking,
+not about spellings. The bound half is not even a gap — Steins substitutes a
+*vocabulary* bound for the template before the utility is read (issue #293), so
+`@template T of int` already projects `int`; what stays opaque is the class
+bound, which #293 declines on its own terms.
 
 ## Conformance-suite divergences (intentional silences)
 

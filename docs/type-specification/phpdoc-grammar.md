@@ -52,26 +52,64 @@ contravariant, and the `*` bivariant wildcard).
 
 `TypeKind::Unsupported` exists for forward compatibility with upstream
 additions; the **parser never produces it** — it models the whole reference
-grammar. The one producer today is the template-shadow rewrite (issue #5): a
-bare identifier shadowed by an in-scope `@template` name is rewritten to
-`Unsupported`, which lowers `Opaque` — the same silence a template floor
-already gets.
+grammar. Two rewrites over a parsed type produce it: the template shadow (issue
+#5), where a bare identifier shadowed by an in-scope `@template` name becomes
+one, and the `template-type` resolution below, where a node nothing decides
+becomes one. Both lower `Opaque` — the same silence a template floor already
+gets.
 
-### Recognized vocabulary, no resolution yet
+### `template-type<Subject, Owner, 'TName'>`
 
-`template-type<Subject, Owner, 'TName'>` — PHPStan's "read a `@template`
-argument out of an object type" utility — is **recognized as vocabulary** and
-floors to `Opaque` (issue #360). Recognition alone is what it buys today: the
-spelling is no longer read as a class named `template-type`, and its second
-argument is a class-**reference** position, so the owner named there without
-type arguments is not an `untyped.generics` finding — that is exactly how
-PHPStan reads the utility, and writing `Box<T>` there would be the wrong
-docblock. Argument 1 is an ordinary type position and still reports; argument 3
-is a quoted template name and is not a type at all. Any arity but three floors
-the same way, silently, where PHPStan yields an error type — see
-[divergence-registry.md](divergence-registry.md). Resolving the utility to the
-template argument it names is issue #361;
-[not-implemented.md](not-implemented.md) carries the row.
+PHPStan's "read a `@template` argument out of an object type" utility is
+**recognized vocabulary** (issue #360) and is **resolved wherever declarations
+decide it** (issue #361). The resolution is one rewrite over the parsed type,
+run where envelopes are built and before anything is lowered, so a resolved node
+is judged, dumped and stored exactly as the type it names is — there is no
+second evaluator and no `ContractTy` variant (ADR-0030's one-relation
+discipline).
+
+Its arguments are read in three different ways, which is the thing to keep
+straight:
+
+- **Argument 1, the subject**, is an ordinary type position: it reports
+  `untyped.generics` like any other (`template-type<Box, Box, 'T'>` names `Box`
+  bare where a `Box<T>` belongs).
+- **Argument 2, the owner**, is a class **reference**. The class whose
+  `@template` list is being indexed is named without type arguments by design,
+  so it is exempt from `untyped.generics` — writing `Box<T>` there would be the
+  wrong docblock.
+- **Argument 3** is a quoted template name, not a type at all.
+
+Three subject shapes resolve:
+
+- **The owner, parameterized here.** `template-type<Box<int>, Box, 'T'>` is
+  `int`, indexed positionally by the owner's own `@template` order — so
+  `template-type<Pair<int, string>, Pair, 'V'>` is the `string`. A nested
+  argument carries through whole (`template-type<Box<list<int>>, Box, 'T'>` is
+  `list<int>`).
+- **A one-level inheritance edge to the owner.** `IntBox` declaring
+  `@extends Box<int>` makes `template-type<IntBox, Box, 'T'>` an `int`.
+- **The owner parameterized by a template.** `template-type<Box<T>, Box, 'T'>`
+  under `@template T` is `T` itself — opaque, or the vocabulary bound of
+  `@template T of int` (issue #293).
+
+Everything else keeps the `Opaque` floor and never manufactures a `No`: an
+unknown owner, a template name the owner does not declare, an arity
+disagreement between the spelled arguments and the owner's list, an unrelated
+subject, a non-class subject, a union or intersection subject, and a subject
+that reaches the owner only through a generic intermediate (one level, no
+walk — ADR-0032's amendment). Any arity but three is not this utility and floors
+the same way, silently, where PHPStan yields an error type. A subject that is
+itself a bare template name resolves at a *call site* rather than in a
+declaration and is left as written for the carry readers — see
+[not-implemented.md](not-implemented.md) for that row and
+[divergence-registry.md](divergence-registry.md) for the three registered
+differences from PHPStan.
+
+Variance markers do not gate a projection. `@template-covariant T` states what
+the author expects of *substitution*, which is why acceptance is gated on it
+(issue #294); reading an argument out by position asks nothing about
+substitution.
 
 ### Accepted syntactically, erased semantically
 
@@ -86,7 +124,7 @@ ADR-0042). See [divergence-registry.md](divergence-registry.md).
 
 - A construct the parser cannot accept yields a `ParseError`.
 - A construct deliberately kept opaque yields `TypeKind::Unsupported` (today
-  only the template-shadow rewrite above produces it).
+  the template-shadow rewrite and the declined `template-type` above).
 
 Callers treat **both** as "no envelope" — silence, always the safe side. The
 parser never panics on input.
