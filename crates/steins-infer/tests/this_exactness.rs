@@ -70,14 +70,38 @@ fn fp_shape3_laundered_alias_dispatch_is_guarded() {
     // `Receiver::Var`, resolving `$u->m("abc")` EXACTLY to Base3::m — but an
     // overridable `m` may be overridden with a widened signature, so dispatch on a
     // lower bound must route through the final/private guard.
+    //
+    // The lower bound is what the **plain per-scope pass** walks `go` under, which
+    // is where the FP lives: no caller is in hand, so `$this` is a membership claim
+    // and every subclass runs this body. (Written without a call site for that
+    // reason — see the true positive below, which is the same body walked under a
+    // caller that proved the exact class.)
     let src = "<?php declare(strict_types=1);
 class Base3 {
     public int $x = 0;
     public function go(): void { $u = $this; $u->m(\"abc\"); }
     public function m(int $w): void {}
-}
-(new Base3())->go();";
+}";
     assert_eq!(n(src), 0, "aliased $this is not exact → guarded dispatch → overridable m silent");
+}
+
+#[test]
+fn retention_a_caller_proven_exact_receiver_makes_the_alias_exact() {
+    // The other half of the shape above, and a true positive: at a call site that
+    // PROVES the receiver's class, the descent walks `go` with `$this` seeded from
+    // that object (ADR-0086 §3), so the alias is exact and `Base3::m` is what runs.
+    // Both receiver spellings agree — the `(new Base3())` one only since issue #386
+    // gave `Receiver::New` its arguments and with them its object.
+    let body = "<?php declare(strict_types=1);
+class Base3 {
+    public int $x = 0;
+    public function go(): void { $u = $this; $u->m(\"abc\"); }
+    public function m(int $w): void {}
+}\n";
+    let variable = format!("{body}$b = new Base3(); $b->go();");
+    let direct = format!("{body}(new Base3())->go();");
+    assert_eq!(ids(&variable), vec!["type.argument-mismatch"], "exact receiver → exact dispatch");
+    assert_eq!(ids(&direct), ids(&variable), "the two spellings are one call");
 }
 
 // 2. Retention — TRUE positives must still fire.

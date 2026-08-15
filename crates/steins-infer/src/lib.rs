@@ -22846,8 +22846,10 @@ fn descend(
     // entry states, and the class alone — all a constructor's key carried while it
     // proved "an identity and no state" — would replay one's summary for the other.
     // Where nothing was seeded the spelling is the exact class FQN, unchanged since
-    // ADR-0075 §2.1 — `Receiver::New` proves an identity and no state, and that is all
-    // the key has ever had to distinguish there.
+    // ADR-0075 §2.1 — a guarded resolution proves an identity and no state, and that
+    // is all the key has ever had to distinguish there. (A `Receiver::New` used to be
+    // in that company; since issue #386 it carries its constructor's arguments, mints
+    // its object here and renders like every other seeded receiver.)
     match (&body_this_exact, seeded_this) {
         // Exact receiver is a runtime-proven identity — Verified either way, and each
         // seeded prop's own stratum travels inside the rendering.
@@ -23360,28 +23362,31 @@ struct CallTarget<'a> {
     /// 2026-08-15 amendment, issue #362) — what a `@return template-type<T, …>` on
     /// the target reads `T` out of.
     ///
-    /// Filled only by the exact `Receiver::Var` arm, which is the one arm with a
-    /// heap object in hand. **Empty everywhere else**, and each emptiness is a
-    /// stated §3 contribution rather than an omission: a `$this` or otherwise
-    /// non-exact receiver has no single class whose template list the arguments
-    /// align to, a static call has no receiver, and a `new Foo()->m()` receiver has
-    /// no heap object yet at the point the target resolves.
+    /// Filled by the exact `Receiver::Var` arm, which is the one arm with a heap
+    /// object in hand at resolution, and — **after** resolution, by the caller that
+    /// mints it — for a `Receiver::New` (issue #386). **Empty everywhere else**, and
+    /// each emptiness is a stated §3 contribution rather than an omission: a `$this`
+    /// or otherwise non-exact receiver has no single class whose template list the
+    /// arguments align to, and a static call has no receiver.
     ///
-    /// The last of those is also a **value-IR** limit, measured in issue #374 and
-    /// recorded so the next attempt starts from it: [`Receiver::New`] carries the
-    /// class reference and nothing else, so the constructor's arguments — which
-    /// [`Cx::infer_generic_carry`] would need, and which the same expression in
-    /// *argument* position keeps as `ArgValue::New(class, args, named)` — are
-    /// already gone by the time any of this runs.
+    /// The `new` arm used to be empty for a **value-IR** reason, measured in issue
+    /// #374: [`Receiver::New`] carried the class reference and nothing else, so the
+    /// constructor's arguments — which [`Cx::infer_generic_carry`] needs, and which
+    /// the same expression in *argument* position kept as
+    /// `ArgValue::New(class, args, named)` — were gone before any of this ran. They
+    /// travel with the receiver now, so [`receiver_new_object`] can mint the object
+    /// and fill this from its carries.
     receiver_carries: Vec<GenericCarry>,
     /// The caller variable naming the receiver **object** whose copy seeds the
     /// callee's `$this` (ADR-0086 §3, the receiver leg): the receiver is the zeroth
     /// argument, and this is how [`descend`] finds it in the caller's store.
     ///
-    /// Filled by the exact `Receiver::Var` arm and by nothing else — the same one
-    /// arm that fills [`CallTarget::receiver_carries`], for the same reason (it is
-    /// the one arm holding a heap object). Each other receiver is `None` on
-    /// purpose, and its `$this` keeps seeding through [`seed_this_object`]:
+    /// Filled by the exact `Receiver::Var` arm and by nothing else, this being the
+    /// one receiver whose object is a **caller variable's** — which is all this
+    /// field names. A `Receiver::New`'s object exists too, but it is minted by the
+    /// caller ([`receiver_new_object`]) and handed to the descent as
+    /// [`ThisSeed::ReceiverNew`], no variable being involved. Each remaining
+    /// receiver seeds nothing and keeps its `$this` from [`seed_this_object`]:
     ///
     /// * `Receiver::This` — a `$this`-origin receiver is pre-escaped by
     ///   construction (ADR-0036), so [`copy_for_descent`] would drop its
