@@ -451,6 +451,50 @@ fn the_template_lookup_reaches_across_files() {
     assert_eq!(ds[0].path, "main.php");
 }
 
+/// The one class-**reference** position in the phpdoc vocabulary (issue #360).
+/// `template-type<Box<T>, Box, 'T'>` names the owner whose `@template` list is
+/// being indexed; PHPStan reads argument 2 as a class name, so the bare spelling
+/// there is the correct docblock and not a missing type argument.
+#[test]
+fn the_template_type_owner_argument_is_a_class_reference_and_never_reports() {
+    let src = "<?php\n/** @template T */\nclass Box {}\n\
+               /**\n * @template T\n * @return template-type<Box<T>, Box, 'T'>\n */\n\
+               function unwrap() {}\n";
+    assert_eq!(n(src, UNTYPED_GENERICS_ID), 0, "{:?}", untyped(src));
+}
+
+#[test]
+fn the_template_type_subject_argument_is_an_ordinary_type_position() {
+    // Argument 1 is the type the utility reads a template out of, so a bare
+    // generic class there is the omission this id exists for — reported once,
+    // for the subject occurrence and not for the owner beside it.
+    let src = "<?php\n/** @template T */\nclass Box {}\n\
+               /** @return template-type<Box, Box, 'T'> */\nfunction unwrap() {}\n";
+    let ds = of(src, UNTYPED_GENERICS_ID);
+    assert_eq!(ds.len(), 1, "{ds:?}");
+    assert!(ds[0].message.contains("Box"), "{}", ds[0].message);
+}
+
+#[test]
+fn the_exemption_reaches_exactly_the_owner_argument_and_nothing_else() {
+    // The regression pin: the exemption is positional inside one spelling, not a
+    // docblock-wide amnesty. A bare `Box` in a `@param` beside the exempted
+    // `@return` still reports.
+    let src = "<?php\n/** @template T */\nclass Box {}\n\
+               /**\n * @template T\n * @param Box $b\n\
+               \x20* @return template-type<Box<T>, Box, 'T'>\n */\n\
+               function unwrap($b) {}\n";
+    assert_eq!(n(src, UNTYPED_GENERICS_ID), 1, "{:?}", untyped(src));
+    // And an arity that is not the utility type keeps every argument in type
+    // position — PHPStan calls it an error type, Steins floors it to `Opaque`
+    // (a registered divergence), and neither reading exempts anything. Two
+    // distinct class names, because a repeated name at one anchor is one
+    // finding by the pipeline's own identity.
+    let two = "<?php\n/** @template T */\nclass Box {}\n/** @template U */\nclass Crate {}\n\
+               /** @return template-type<Box, Crate> */\nfunction unwrap() {}\n";
+    assert_eq!(n(two, UNTYPED_GENERICS_ID), 2, "{:?}", untyped(two));
+}
+
 #[test]
 fn the_return_and_property_positions_carry_the_generics_arm_too() {
     let ret = "<?php\n/** @template T */\nclass Collection {}\n\

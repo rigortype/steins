@@ -557,6 +557,20 @@ fn declared_return_phpdoc_refines_asserted() {
 }
 
 #[test]
+fn a_template_type_return_no_longer_dumps_as_a_class_name() {
+    // Issue #360. `template-type<…>` used to lower to `Class("template-type")`,
+    // which the speller printed straight back — `template-type (asserted)` read
+    // like a resolved class. It is vocabulary with no resolution yet (issue
+    // #361), so the dump says the floor instead. Pinned as the current output,
+    // not as a promise about the wording.
+    let src = "<?php\n/** @template T */\nclass Box { public function __construct(public mixed $v) {} }\n\
+               /**\n * @param Box<int> $b\n * @return template-type<Box<int>, Box, 'T'>\n */\n\
+               function unwrap(Box $b): mixed { return $b->v; }\n\
+               function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
 fn a_folded_return_value_beats_the_return_arm() {
     // Precedence (ADR-0052 §9): a proven value fact is the floor's ceiling. A
     // trivially foldable `: int` return resolves to `1`, beating the `int` arm.

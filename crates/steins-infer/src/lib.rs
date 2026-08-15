@@ -8351,6 +8351,10 @@ fn leaves_value_type_unstated(ty: &PType) -> bool {
 /// arguments is a [`PKind::Generic`], not an [`PKind::Identifier`], so it is not
 /// collected; its arguments are recursed into, because `array<Collection>` names
 /// `Collection` bare just as surely as a top-level occurrence does.
+///
+/// The one exception is a **class-reference position**, where a name without
+/// type arguments is the spelling and not an omission — see
+/// [`template_type_owner_arg`].
 fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
     match &ty.kind {
         PKind::Identifier(name) => out.push(name.clone()),
@@ -8360,13 +8364,37 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
                 collect_bare_identifiers(t, out);
             }
         }
-        PKind::Generic { args, .. } => {
-            for a in args {
+        PKind::Generic { base, args } => {
+            let skip = template_type_owner_arg(base, args.len());
+            for (i, a) in args.iter().enumerate() {
+                if Some(i) == skip {
+                    continue;
+                }
                 collect_bare_identifiers(&a.ty, out);
             }
         }
         _ => {}
     }
+}
+
+/// Which argument of a generic spelling is a class **reference** rather than a
+/// type — the position `untyped.generics` must not look into (issue #360).
+///
+/// One spelling has one today: `template-type<Subject, Owner, 'TName'>` names
+/// the owner whose `@template` list is being indexed, and PHPStan reads that
+/// argument as a class name, never as a parameterized type. Writing
+/// `template-type<Box<T>, Box<T>, 'T'>` there would be the wrong docblock, so
+/// asking for type arguments would be asking for a mistake.
+///
+/// The *subject* (argument 0) is an ordinary type position and keeps reporting:
+/// `template-type<Box, Box, 'T'>` names `Box` bare where a `Box<T>` belongs.
+/// The template name (argument 2) is a quoted literal, a [`PKind::Const`] that
+/// yields nothing anyway. Only the exact three-argument shape is exempt —
+/// any other arity is not this utility type, whatever it is spelled like.
+fn template_type_owner_arg(base: &str, arity: usize) -> Option<usize> {
+    let is_template_type =
+        arity == 3 && base.trim_start_matches('\\').eq_ignore_ascii_case("template-type");
+    is_template_type.then_some(1)
 }
 
 // ---------------------------------------------------------------------------
