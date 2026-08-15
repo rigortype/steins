@@ -198,6 +198,19 @@ cargo xtask nsrt [DIR]
 resolved from the workspace root — pass it explicitly whenever `cargo xtask` runs
 from anywhere else (a worktree, most obviously: its workspace root is not the
 repo root the default assumes, so the default path resolves to nothing there).
+**Run it on PHP 8.5.** Since the version gate below, the fixture set the harness
+measures depends on the sidecar's PHP minor, so the headline is only comparable
+between runs on the same one. 8.5 is the choice because the exclusion is monotonic
+— every newer minor skips a strict subset of what an older one skips, so 8.5
+measures the most fixtures anyone can (60 files skipped, against 71 at 8.4, 84 at
+8.3, 92 at 8.2). Record the minor next to any number quoted from a run; the harness
+prints it above the summary for that purpose.
+
+There is deliberately **no `--php-version` override**. Faking the gate would not
+move the sidecar: the folds still run on whatever `php` is on PATH, so an override
+would score one minor's fixture set with another minor's answers — a number that
+looks like a measurement and is not one. To measure another minor, install it.
+
 `DIR` need not be that exact subdirectory; the walk is recursive over whatever
 path it is given, so pointing it at the phpstan-src checkout root instead of the
 `nsrt/` fixture directory also works — it just measures a much larger, mostly
@@ -277,6 +290,61 @@ Two asymmetries are load-bearing and pinned by unit tests:
   `No`. So an `int` under an asserted `float` is a contradiction, not an open
   question — `bug-12393.php:40` is Steins missing a typed-property coercion — and the
   harness declines to ask the relation across that boundary.
+
+  Issue #356 extended that veto to **nested** positions. The original guard scanned
+  top-level `|`-split atoms, so a crossing buried inside an array read as one opaque
+  `array-shape` atom and reached the relation anyway: `array{2.0, 3.0, 4.0, 5.0}`
+  against `list{2, 3, 4, 5}` scored `subsumed`, because `admits_val` answers `Yes` for
+  a `LitFloat` against an int value by the same PHP value-equality rule. The veto is
+  now judged on the lowered types with *aligned* positions, so a genuine int arm
+  elsewhere in a shape cannot excuse a crossing at the position that has one, and an
+  undecidable alignment simply yields no pair.
+
+  Alignment gathers `expected`'s candidate contracts at a position across **union
+  arms**, which is load-bearing rather than incidental: `?list<float>` is a union
+  whose `null` arm answers nothing at the element position, so an arm-blind lookup
+  finds the whole expectation unalignable and never vetoes — the exact shape of the
+  original bug, one level up. Judging the arms *together* is also what keeps
+  `list<float>|list<int>` a membership question: an int arm among the candidates is
+  not a coercion. Arm-at-a-time would get both wrong, in opposite directions. The
+  relation itself is unchanged:
+  `subsumes` answering `Yes` there is correct for what it models (acceptance), and the
+  harness's job is to not read acceptance as precision.
+
+### Version-gated fixtures are not measured (issue #356)
+
+448 of the 1,617 nsrt fixtures open with a `// lint <op> <version>` marker written
+*on the `<?php` line itself*, not as a standalone comment. It names the PHP range
+under which PHPStan's assertions in that file hold. Steins folds through a sidecar
+running whatever `php` resolves off `PATH`, so outside that range those assertions
+are not an oracle at all — and the harness used to score them anyway.
+
+`range-function-php82.php:5` is the case that surfaced it: `range(2, 5, 1.0)` is
+asserted `array{2.0, 3.0, 4.0, 5.0}` behind `// lint < 8.3`, PHP 8.3 changed the
+function to return ints, and on an 8.5 sidecar the fold answers `list{2, 3, 4, 5}` —
+correct for the engine that ran. Scored against the 8.2 assertion it is a
+disagreement about *which PHP is running*, and the nested-crossing hole above then
+booked it as precision.
+
+The harness now asks the interpreter for `PHP_MAJOR_VERSION.PHP_MINOR_VERSION` — the
+same bare `php` that `steins-sidecar` spawns — and **skips an excluded fixture before
+analysis**, counting it on its own report line rather than folding it into any
+verdict. At PHP 8.5 that removes 59 files / 619 observations, among them 81 `match`
+and 20 `equal`/`subsumed`: the headline had been carrying 81 rows of luck, where an
+assertion in a gated file happened not to be version-sensitive. Agreement with a
+statement that is not being claimed for your engine is not confirmation.
+
+The gate is per *file* while only some assertions in it are version-sensitive, which
+makes whole-file exclusion look blunt. **Owner ruling (2026-08-15, #356): file-level
+exclusion stands — do not re-argue per slice.** It is the honest denominator: the
+marker is the only statement anyone makes about which rows are sensitive, so a
+finer-grained rule would be the harness inventing an oracle for itself. The 81 `match`
+rows this costs were never confirmations, and buying them back with a heuristic would
+trade a known-honest number for a guessed one.
+
+Because the exclusion moves the headline, **counts are only comparable between runs
+on the same PHP minor.** The sidecar version is printed above the summary for that
+reason, alongside the fold-surface posture.
 
 ### Does `subsumed` count toward the headline? No. (Settled; do not re-argue.)
 
