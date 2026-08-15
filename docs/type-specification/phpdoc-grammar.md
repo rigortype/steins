@@ -57,6 +57,22 @@ bare identifier shadowed by an in-scope `@template` name is rewritten to
 `Unsupported`, which lowers `Opaque` — the same silence a template floor
 already gets.
 
+### Recognized vocabulary, no resolution yet
+
+`template-type<Subject, Owner, 'TName'>` — PHPStan's "read a `@template`
+argument out of an object type" utility — is **recognized as vocabulary** and
+floors to `Opaque` (issue #360). Recognition alone is what it buys today: the
+spelling is no longer read as a class named `template-type`, and its second
+argument is a class-**reference** position, so the owner named there without
+type arguments is not an `untyped.generics` finding — that is exactly how
+PHPStan reads the utility, and writing `Box<T>` there would be the wrong
+docblock. Argument 1 is an ordinary type position and still reports; argument 3
+is a quoted template name and is not a type at all. Any arity but three floors
+the same way, silently, where PHPStan yields an error type — see
+[divergence-registry.md](divergence-registry.md). Resolving the utility to the
+template argument it names is issue #361;
+[not-implemented.md](not-implemented.md) carries the row.
+
 ### Accepted syntactically, erased semantically
 
 `__benevolent<A|B>` parses and is recorded as a union with a `benevolent`
