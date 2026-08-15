@@ -601,8 +601,16 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
     // Issue #362, the same equivalence claim one layer further out: the subject is a
     // class-level template of the receiver, so the answer comes off the carry
     // `new Helper(new Model())` proved — and the surface is the one a hand-written
-    // `@return Child` produces, down to the stratum. The carry read is where the
-    // type comes from; it is not what the type is trusted as.
+    // `@return Child` produces. The carry read is where the type comes from; it is
+    // not what the type is trusted as.
+    //
+    // Since ADR-0057 T1 the *stratum* comes from somewhere else entirely, on both
+    // spellings alike: `first()`'s body is `return new Child()`, so the outbound heap
+    // channel rebinds a proven exact allocation and the declared arm — which is what
+    // carried the `(asserted)` marker — is not the rung that answers. The equivalence
+    // is the claim here, and it is untouched; the marker's disappearance is the
+    // summary outranking the docblock (ADR-0057 §2.6, A1's ladder), not the utility
+    // resolving differently.
     let with = "<?php\n\
         /** @template TChild */\ninterface ModelInterface {}\n\
         /** @implements ModelInterface<Child> */\nclass Model implements ModelInterface {}\n\
@@ -615,7 +623,7 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
         function g() { $h = new Helper(new Model()); $c = $h->first(); \\PHPStan\\dumpType($c); }\n";
     let plain = with.replace("template-type<T, ModelInterface, 'TChild'>", "Child");
     assert_eq!(one_type(with), one_type(&plain));
-    assert_eq!(one_type(with), "dumped type: Child (asserted)");
+    assert_eq!(one_type(with), "dumped type: Child");
 }
 
 #[test]
