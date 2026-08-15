@@ -285,7 +285,16 @@ Two asymmetries are load-bearing and pinned by unit tests:
   a `LitFloat` against an int value by the same PHP value-equality rule. The veto is
   now judged on the lowered types with *aligned* positions, so a genuine int arm
   elsewhere in a shape cannot excuse a crossing at the position that has one, and an
-  undecidable alignment simply yields no pair. The relation itself is unchanged:
+  undecidable alignment simply yields no pair.
+
+  Alignment gathers `expected`'s candidate contracts at a position across **union
+  arms**, which is load-bearing rather than incidental: `?list<float>` is a union
+  whose `null` arm answers nothing at the element position, so an arm-blind lookup
+  finds the whole expectation unalignable and never vetoes — the exact shape of the
+  original bug, one level up. Judging the arms *together* is also what keeps
+  `list<float>|list<int>` a membership question: an int arm among the candidates is
+  not a coercion. Arm-at-a-time would get both wrong, in opposite directions. The
+  relation itself is unchanged:
   `subsumes` answering `Yes` there is correct for what it models (acceptance), and the
   harness's job is to not read acceptance as precision.
 

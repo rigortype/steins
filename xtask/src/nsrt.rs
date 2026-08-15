@@ -576,21 +576,53 @@ fn crosses_int_float(expected: &str, got: &str) -> bool {
 ///
 /// [`subsumes`]: steins_contract::normalize::subsumes
 fn crosses_int_float_nested(expected: &ContractTy, got: &ContractTy) -> bool {
-    if float_only(expected) && int_flavored_ty(got) {
-        return true;
-    }
-    aligned_value_positions(expected, got)
-        .iter()
-        .any(|(e, g)| crosses_int_float_nested(e, g))
+    crosses_at(&[expected], got)
 }
 
-/// Whether the contract is float-flavored with no int arm — the only shape
-/// `admits_val` widens an int into. A union carrying a real int arm admits the
-/// int as a *member*, so it is not a coercion and earns no veto.
-fn float_only(t: &ContractTy) -> bool {
+/// The veto at one position, against **all** of `expected`'s candidate contracts
+/// there.
+///
+/// A candidate *list* rather than a single type because `expected` may be a
+/// union: `?list<float>` offers `float` at the element position and `null`
+/// nothing, while `list<float>|list<int>` offers both. Judging the arms
+/// together is what keeps `int` a *member* in the second case and a coercion in
+/// the first — arm-at-a-time would veto both.
+fn crosses_at(expected: &[&ContractTy], got: &ContractTy) -> bool {
+    if float_only_over(expected) && int_flavored_ty(got) {
+        return true;
+    }
+    match got {
+        ContractTy::Shape { fields, .. } => fields.iter().any(|f| {
+            let cands = expected_value_candidates(expected, Some(&f.key));
+            !cands.is_empty() && crosses_at(&cands, &f.ty)
+        }),
+        ContractTy::ListOf { elem, .. } => {
+            let cands = expected_value_candidates(expected, None);
+            !cands.is_empty() && crosses_at(&cands, elem)
+        }
+        ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => {
+            let cands = expected_value_candidates(expected, None);
+            !cands.is_empty() && crosses_at(&cands, val)
+        }
+        // A `got` union crosses if any realization does.
+        ContractTy::Union(members) => members.iter().any(|m| crosses_at(expected, m)),
+        _ => false,
+    }
+}
+
+/// Whether the candidates are float-flavored with no int arm among them — the
+/// only shape `admits_val` widens an int into. An int arm anywhere in the
+/// expectation admits the int as a *member*, so it is not a coercion and earns
+/// no veto.
+fn float_only_over(cands: &[&ContractTy]) -> bool {
+    cands.iter().any(|c| float_flavored_ty(c)) && !cands.iter().any(|c| int_flavored_ty(c))
+}
+
+/// Whether the contract has a float arm.
+fn float_flavored_ty(t: &ContractTy) -> bool {
     match t {
         ContractTy::Base(Base::Float) | ContractTy::LitFloat(_) => true,
-        ContractTy::Union(m) => m.iter().any(float_only) && !m.iter().any(int_flavored_ty),
+        ContractTy::Union(m) => m.iter().any(float_flavored_ty),
         _ => false,
     }
 }
@@ -604,61 +636,39 @@ fn int_flavored_ty(t: &ContractTy) -> bool {
     }
 }
 
-/// The value-contract pairs `expected` and `got` align on, one level down.
+/// `expected`'s candidate value contracts at `key` (or its element contract,
+/// for `None`), with unions flattened.
 ///
-/// Keyed shapes pair by key; the generic forms contribute their single element
-/// contract. A position `expected` cannot answer for (an unkeyed field of a
-/// sealed shape, a vocabulary outside the array forms) contributes no pair —
-/// silence, not a guess.
-fn aligned_value_positions<'a>(
-    expected: &'a ContractTy,
-    got: &'a ContractTy,
-) -> Vec<(&'a ContractTy, &'a ContractTy)> {
+/// Flattening is the point: `?list<float>` is a union whose `null` arm answers
+/// nothing at the element position, so without it the whole expectation looked
+/// unalignable and the veto never fired. A position nothing can answer for
+/// yields an empty list — silence, not a guess.
+fn expected_value_candidates<'a>(
+    expected: &[&'a ContractTy],
+    key: Option<&CKey>,
+) -> Vec<&'a ContractTy> {
     let mut out = Vec::new();
-    match got {
-        ContractTy::Shape { fields, .. } => {
-            for f in fields {
-                if let Some(e) = expected_value_for(expected, Some(&f.key)) {
-                    out.push((e, &f.ty));
+    for e in expected {
+        match e {
+            ContractTy::Union(members) => {
+                let arms: Vec<&ContractTy> = members.iter().collect();
+                out.extend(expected_value_candidates(&arms, key));
+            }
+            ContractTy::Shape { fields, unsealed, .. } => {
+                if let Some(f) = key.and_then(|k| fields.iter().find(|f| &f.key == k)) {
+                    out.push(&f.ty);
+                } else if let Some((_, v)) = unsealed {
+                    out.push(v.as_ref());
                 }
             }
-        }
-        ContractTy::ListOf { elem, .. } => {
-            if let Some(e) = expected_value_for(expected, None) {
-                out.push((e, elem.as_ref()));
+            ContractTy::ListOf { elem, .. } => out.push(elem.as_ref()),
+            ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => {
+                out.push(val.as_ref());
             }
+            _ => {}
         }
-        ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => {
-            if let Some(e) = expected_value_for(expected, None) {
-                out.push((e, val.as_ref()));
-            }
-        }
-        // A `got` union crosses if any realization does (the FP-safe side: the
-        // veto costs a `subsumed`, never a `match`).
-        ContractTy::Union(members) => {
-            for m in members {
-                out.extend(aligned_value_positions(expected, m));
-            }
-        }
-        _ => {}
     }
     out
-}
-
-/// `expected`'s value contract at `key` (or its element contract, for `None`).
-fn expected_value_for<'a>(
-    expected: &'a ContractTy,
-    key: Option<&CKey>,
-) -> Option<&'a ContractTy> {
-    match expected {
-        ContractTy::Shape { fields, unsealed, .. } => key
-            .and_then(|k| fields.iter().find(|f| &f.key == k))
-            .map(|f| &f.ty)
-            .or_else(|| unsealed.as_ref().map(|(_, v)| v.as_ref())),
-        ContractTy::ListOf { elem, .. } => Some(elem.as_ref()),
-        ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => Some(val.as_ref()),
-        _ => None,
-    }
 }
 
 // ----------------------------------------------------------------------------
@@ -1527,6 +1537,34 @@ mod tests {
         assert_eq!(classify("array{int|float}", "array{1}").0, Verdict::Subsumed);
     }
 
+    /// A union on the **expected** side must not hide the crossing. `?list<float>`
+    /// is the spelling that matters: its `null` arm answers nothing at the element
+    /// position, so an arm-blind lookup finds the whole expectation unalignable and
+    /// never vetoes. Candidates are gathered across arms for exactly this reason.
+    #[test]
+    fn an_expected_union_does_not_hide_the_crossing() {
+        assert_eq!(classify("?list<float>", "list{1}").0, Verdict::Differ);
+        assert_eq!(classify("list<float>|null", "list{1}").0, Verdict::Differ);
+        assert_eq!(classify("array{float}|array{string}", "array{1}").0, Verdict::Differ);
+        // The unsealed tail answers for keys the field list does not.
+        assert_eq!(classify("array{0: float, ...}", "list{1, 2}").0, Verdict::Differ);
+
+        // …and an int arm *among the candidates* is still membership: judging the
+        // arms together is what separates these two from the four above.
+        assert_eq!(classify("list<float>|list<int>", "list{1}").0, Verdict::Subsumed);
+        assert_eq!(classify("?list<int>", "list{1}").0, Verdict::Subsumed);
+    }
+
+    /// The veto is not "an array expectation stops earning `subsumed`" — an
+    /// expectation with no float at the crossing position is left alone.
+    #[test]
+    fn the_nested_veto_does_not_swallow_ordinary_array_precision() {
+        assert_eq!(classify("array", "list{1}").0, Verdict::Subsumed);
+        assert_eq!(classify("list<mixed>", "list{1}").0, Verdict::Subsumed);
+        assert_eq!(classify("list<int>", "list{1}").0, Verdict::Subsumed);
+        assert_eq!(classify("array<string, int>", "array{'a': 1}").0, Verdict::Subsumed);
+    }
+
     // ---- version gating (issue #356) ----------------------------------------
 
     /// phpstan-src writes the gate on the open tag, not a standalone comment.
@@ -1848,4 +1886,6 @@ mod tests {
         assert!(result.is_ok(), "nsrt::run overflowed or errored on a deep-but-finite chain: {result:?}");
     }
 }
+
+
 
