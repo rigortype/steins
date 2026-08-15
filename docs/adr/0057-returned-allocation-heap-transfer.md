@@ -546,3 +546,180 @@ builds the shared infrastructure T1 then rides:
 - Rendering: whether the call site's dump spells the summary's
   provenance ("proven by f() body") — folds into the body ADR's T1
   provenance question, decided in T0/T1 together.
+
+## Amendment (2026-08-16): T1 lands — the heap component's shape, its join, and its one consumer
+
+**Status: PENDING ratification.** Issue #378, sequenced by ADR-0086 §7
+as slice H3 (the outbound twin of the inbound legs that landed in #376
+and #377). §1–§6 above are implemented as written; this amendment
+records the three things the ADR could not have said — a field that
+postdates it, a consumer surface that did not exist, and the shape the
+implementation gave `HeapSummary` — plus the ADR-0048 obligations the
+slice owes.
+
+### B1. `HeapSummary` is a `HeapObj`, and `escaped` reads differently
+
+The §1 field list — `{ class, class_exact, props (each fact with its
+stratum), readonly set, escaped-before-return }` — is `HeapObj` minus
+nothing and plus `targs`. Rather than declare a second struct with the
+same six fields and a conversion between them, `HeapSummary` **wraps a
+`HeapObj`**, and one field is re-read at the boundary: `escaped` means
+**escaped-before-return** (§2.1), i.e. the bit the callee's object
+carried one instant before the return's own escape-marking. The rebind
+copies it verbatim, so the re-reading costs no conversion either: a
+summary whose `escaped` is `false` rebinds an unescaped caller object
+(the return was the allocation's only exit), and one whose `escaped` is
+`true` rebinds pre-escaped (§2.2).
+
+The gain is not brevity. It is that the snapshot, the join and the
+rebind all operate on the *same* type the walk's heap holds, so
+`join_stores`' per-object join is a literal template for the summary
+join (below), and the rebind is an insert rather than a construction —
+no field can be added to `HeapObj` and silently forgotten by the
+crossing, which is exactly how `targs` came to be missing from the
+ADR's own list.
+
+### B2. `targs` joins the snapshot
+
+The class-level generic carries (ADR-0032 tier 3 + the #295 binding
+amendment) postdate this ADR. They cross **verbatim**, as ADR-0086 §2's
+field table already decided for the inbound direction, and for the same
+reason: a returned object's carry is what `Box<int>` acceptance and the
+#362/#363 readers consume, and dropping it at the return would make a
+factory's object weaker than the same `new` written inline — which the
+§4 equivalence forbids. In the join, a carry survives only when **every**
+object-returning path carries it identically (the `join_stores`
+intersection rule, ADR-0048 §4's order-independence note); a
+disagreement drops the carry and keeps the object.
+
+### B3. The join, stated per field (§2.4 made concrete)
+
+Over the object-returning exits, in walk order but order-independently:
+
+| field | rule |
+| --- | --- |
+| `class` | must agree on every path; differing classes ⇒ **no heap summary** (§2.4) |
+| `class_exact` | `true` only when every path is exact **and** the classes agree; copied, never promoted (§6.4) |
+| `props` | a prop survives only if present on every path; facts join by the existing value-domain join, strata by `min`; an unjoinable pair drops the prop |
+| `readonly` | **intersection**. The set is a function of the class, so agreement is the normal case; where it is not, the smaller set is the sound one — readonly is a *sweep-immunity* claim, and claiming immunity a path does not have is the unsound direction |
+| `ro_written` | **intersection** — a write proven on every path. A write recorded from one path only would let a caller's first assignment read as a `readonly.reassigned` second write |
+| `escaped` | OR (§2.4: "escaped-before-return ORs") |
+| `targs` | intersection by identity (B2) |
+
+Any **non**-object-returning exit kills the whole heap summary (§2.5),
+and that includes the two exits nothing is written for: an `Opaque`
+construct that `may_return` (its hidden exits contribute the value
+floor, which is not an allocation), and an untyped fall-through
+(`return null`). The value component is untouched in every one of these
+cases — the two components live and die independently, which is why the
+join is written beside `join_summary`'s value join and never inside it.
+
+### B4. §2.6 stands for the heap; A2's drop rule is the value's alone
+
+The T0 amendment's A2 gave the *value* component a native-envelope
+oracle: an exit whose fact every native return arm rejects is a proven
+boundary `TypeError`, so the exit is dropped. The heap component does
+**not** consult the declared return at all — §2.6 verbatim, and it is
+the older rule. Two consequences worth stating so neither reads as an
+oversight:
+
+- A factory declared `: Bar` that returns `new Foo()` rebinds `Foo`.
+  The declaration is a claim, the walk is a proof, and the conflict is
+  the callee's own `type.return-mismatch` — emitted where it belongs.
+- A written return hint Steins cannot lower (`: object`, `: array`)
+  refuses the *value* summary (ADR-0075 §2.4, because the empty oracle
+  might be hiding a drop) and does not refuse the heap one, there being
+  no oracle for it to hide anything from. `function make(): object {
+  return new Foo(); }` therefore rebinds `Foo`, exactly as an undeclared
+  return would.
+
+Generators refuse both components (§5), unchanged.
+
+### B5. The consumer, v1: the assignment form rebinds and nothing else
+
+The rebind lands at the **`apply_assign` ladder**, the rung ADR-0075 put
+a method's value summary on, and it lands there for free functions and
+methods alike — one seam, as §7 T1 requires. `$f = createFoo(123);`
+mints a fresh caller-walk `AllocId`, inserts the joined snapshot as a
+`HeapObj`, and binds `refs[f]` to it. The heap rung is read **before**
+the value rung: an object return has no value fact (ADR-0035 — the value
+domain has no object carrier), so the two are exclusive by construction,
+and the ordering only decides a case that cannot arise.
+
+**The direct forms stay silent, deliberately.** `dumpType(createFoo(1))`
+and `needFoo(createFoo(1))` have no store to rebind into — the value/
+argument-position consumers (`best_dump_type`, `check_propagated_call`)
+read facts, and an object is not a fact. Rendering an object there means
+a second, read-only crossing shape with no allocation behind it; that is
+a surface of its own, not a rung of this one. Pinned silent with the
+reason, which is the same exclusion ADR-0075 §3 took for method calls in
+value position and #377 re-pinned for the receiver leg: the limit is one
+layer below this ADR, and naming it here is what keeps it from being
+re-diagnosed as a heap-transfer gap.
+
+### B6. An ADR-0086-seeded parameter copy is an ordinary snapshot source
+
+`function id(Box $b): Box { return $b; }` returns the callee-local copy
+ADR-0086 §2 seeded. §2.3 answers it without a new clause — **origin does
+not matter**: the summary is a snapshot of what the walk holds, and the
+walk's knowledge of that copy is sound however it arrived. Exactness is
+whatever the copy carries (ADR-0086 copies it, never promotes; so does
+this), and the props are the ones the inbound field table let cross.
+Two corollaries, each a fixture:
+
+- The copy is seeded `escaped = true` (ADR-0086's field table: the
+  caller's object is escaped by this very call), so `$y = id($x)`
+  rebinds **pre-escaped** — the caller's next unknown call sweeps `$y`.
+  That is not a loss: `$x` and `$y` are two names for what the runtime
+  makes one object, and `$x` is swept by the call anyway (ADR-0086 leg
+  4, unchanged).
+- `return $this` is the same shape under another name: pre-escaped by
+  construction, membership-only unless the receiver leg proved
+  exactness, so a fluent chain gets class continuity and never forged
+  exactness (§6's probe).
+
+### B7. ADR-0048 obligations
+
+**§2 (replayable).** The heap component is a pure function of (callee
+CST, the entry state the `BindingKey` names, query answers) — the §1
+argument verbatim. It rides the *same* memo entry as the value
+component, so a memo hit replays both; no `AllocId` enters the summary
+or the key (ids are walk-local and counter-derived).
+
+**§3 (entry-state contribution) — nothing new.** The rebound object is a
+**fresh allocation in the caller's own walk**, indistinguishable in kind
+from one `new` mints (§4's identity). It contributes to no scope's entry
+state that `new` does not: a scope entered later with that object as an
+argument or receiver contributes through ADR-0086 §3's clause, already
+written. This slice adds no contributor.
+
+**§4 (no global ordering).** The snapshot depends on the callee's own
+statement order and the bound entry state; the fresh id comes from the
+caller walk's own counter. The joins that could have imported an order —
+props, readonly, `ro_written`, `targs` — are intersections and `min`s,
+both commutative and associative.
+
+### B8. Rendering: the annotate surface is not touched here
+
+The rebind writes no `LineFact::ExactClass`, so `annotate` spells a
+factory's result exactly as it spells a `clone`'s: not at all. This
+answers the §7 provenance open question for T1 in the narrow way — the
+diagnostics surface (dumps, sinks, S2/arity) reads the store and needs
+no line fact, so the equivalence pin of §4 holds where it is asserted
+(facts and findings), and the margins T3 was going to measure stay
+un-moved by T1 itself. T3 may add the line fact as its instrument; doing
+it here would move `annotate` output for a reason no fixture in this
+slice is about.
+
+### T1 refusals (each one line, each anchored)
+
+- **A second struct mirroring `HeapObj`** — the crossing must not be a
+  place a new field can be forgotten (B1).
+- **Intersecting the heap summary with the declared return** — §2.6; the
+  conflict is the callee's finding (B4).
+- **A read-only object rendering in value/argument position** — a
+  surface of its own, not a rung of this one (B5).
+- **Promoting exactness for a seeded-parameter or `$this` origin** — A1
+  verbatim; the bit is copied (B6).
+- **A `LineFact` for the rebound class** — T3's instrument, not T1's
+  behaviour (B8).
