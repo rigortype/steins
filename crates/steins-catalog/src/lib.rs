@@ -93,7 +93,7 @@ pub fn foldable_entry_count() -> usize {
 /// the fold gate admits; the other two are mechanically identical but kept
 /// apart to keep the refused rows' one-divergence-per-row discipline auditable.
 ///
-/// The class was called `PortabilityClass` while every row in it was about the
+/// The class was called `WidthClass` while every row in it was about the
 /// engine's integer width. `preg_split` ended that: it is refused because one
 /// build's PCRE has a JIT and the other's does not, which is a property of the
 /// engine and not of its word size. The question the gate actually asks has
@@ -146,6 +146,20 @@ pub enum RefusalAxis {
     BuildOption,
 }
 
+impl RefusalAxis {
+    /// The stable machine-readable spelling, for an envelope that carries the
+    /// axis as data (the playground's boot object). Owned by the type so no
+    /// consumer re-derives it — a second `match` at a crate boundary is how a
+    /// typed concept turns back into a string nobody checks.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IntegerWidth => "integer_width",
+            Self::BuildOption => "build_option",
+        }
+    }
+}
+
 /// The recorded divergence behind a [`PortabilityClass::Refused`] row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Refusal {
@@ -157,27 +171,53 @@ pub struct Refusal {
     pub witness: &'static str,
 }
 
-/// The refusal behind `name` (case-insensitive), or `None` when `name` is not a
-/// refused row — including when it is portable, unverified, or off the
-/// allowlist entirely.
-#[must_use]
-pub fn refusal(name: &str) -> Option<Refusal> {
-    use RefusalAxis::{BuildOption, IntegerWidth};
-    let r = |axis, witness| Some(Refusal { axis, witness });
-    match name.to_ascii_lowercase().as_str() {
-        "abs" => r(IntegerWidth, "abs(\"3000000000\") is int(3000000000) / float(3000000000) — the type tag flips on a numeric string"),
-        "intval" => r(IntegerWidth, "intval(\"3000000000\") is 3000000000 / the saturated 2147483647"),
-        "sprintf" => r(IntegerWidth, "sprintf(\"%x\", -1) is \"ffffffffffffffff\" / \"ffffffff\" — the format renders the machine word"),
-        "dechex" => r(IntegerWidth, "dechex(-1) is \"ffffffffffffffff\" / \"ffffffff\""),
-        "decbin" => r(IntegerWidth, "decbin(-1) is 64 ones / 32 ones"),
-        "decoct" => r(IntegerWidth, "decoct(-1) is \"1777777777777777777777\" / \"37777777777\""),
-        "bindec" => r(IntegerWidth, "bindec(\"11111111111111111111111111111111\") is int(4294967295) / float(4294967295)"),
-        "hexdec" => r(IntegerWidth, "hexdec(\"FFFFFFFF\") is int(4294967295) / float(4294967295)"),
-        "version_compare" => r(IntegerWidth, "version_compare(\"2147483647\", \"2147483648\") is -1 / 0 — both runs saturate a C long and compare equal"),
-        "range" => r(IntegerWidth, "range(\"3000000000\", \"3000000000\") is [int(3000000000)] / [float(3000000000.0)] — a `string|int|float` bound is typed by the machine"),
-        "preg_split" => r(BuildOption, "preg_split(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") splits / is false — PCRE2's JIT ignores the inline limit verbs its interpreter honours, and adding (*NO_JIT) makes both engines agree"),
-        _ => None,
-    }
+/// The refused rows, declared once: the name, the axis, and the witness.
+///
+/// The list and the lookup are generated from the SAME entries. They were two
+/// hand-maintained tables for one afternoon, and that is one afternoon too
+/// long — a refused row added to the names list without a witness would have
+/// compiled, and the test that catches it only runs after the fact.
+macro_rules! refused_rows {
+    ($($name:literal => ($axis:expr, $witness:literal)),* $(,)?) => {
+        /// The **refused rows** of the portability classification: a name folds
+        /// on a provably 64-bit engine and declines anywhere else, because a
+        /// divergence is on record. Every probe passes the range guard; only
+        /// refusing the name can exclude it. Each divergence is *silent* —
+        /// nothing throws, widens, or warns (ADR-0066 §4). Probes: 64-bit `php`
+        /// 8.5.x against 32-bit php-wasm 0.1.0. See [`refusal`] for each row's
+        /// axis and witness, which is where the reasons live now that they are
+        /// data rather than prose.
+        const REFUSED: &[&str] = &[$($name),*];
+
+        /// The refusal behind `name` (case-insensitive), or `None` when `name`
+        /// is not a refused row — including when it is portable, unverified, or
+        /// off the allowlist entirely.
+        #[must_use]
+        pub fn refusal(name: &str) -> Option<Refusal> {
+            match name.to_ascii_lowercase().as_str() {
+                $($name => Some(Refusal { axis: $axis, witness: $witness }),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+refused_rows! {
+    // issue #64 — the first arithmetic rows
+    "abs" => (RefusalAxis::IntegerWidth, "abs(\"3000000000\") is int(3000000000) / float(3000000000) — a numeric string is coerced by the engine's own width, and the type tag flips"),
+    "intval" => (RefusalAxis::IntegerWidth, "intval(\"3000000000\") is 3000000000 / the saturated 2147483647"),
+    "sprintf" => (RefusalAxis::IntegerWidth, "sprintf(\"%x\", -1) is \"ffffffffffffffff\" / \"ffffffff\" — %b/%x/%o/%u render the machine word, and %d re-imports intval's saturation"),
+    // issue #78 — machine-word rendering and its inverse
+    "dechex" => (RefusalAxis::IntegerWidth, "dechex(-1) is \"ffffffffffffffff\" / \"ffffffff\", and dechex(-2147483647) diverges too — an in-range argument suffices"),
+    "decbin" => (RefusalAxis::IntegerWidth, "decbin(-1) is 64 ones / 32 ones"),
+    "decoct" => (RefusalAxis::IntegerWidth, "decoct(-1) is \"1777777777777777777777\" / \"37777777777\""),
+    "bindec" => (RefusalAxis::IntegerWidth, "bindec(\"11111111111111111111111111111111\") is int(4294967295) / float(4294967295) — the type tag flips from a plain string"),
+    "hexdec" => (RefusalAxis::IntegerWidth, "hexdec(\"FFFFFFFF\") is int(4294967295) / float(4294967295)"),
+    // issue #78 — a `long` hiding inside string work
+    "version_compare" => (RefusalAxis::IntegerWidth, "version_compare(\"2147483647\", \"2147483648\") is -1 / 0 — php-src compares each numeric run through a C long, so two oversized runs both saturate and compare equal"),
+    // issue #354 — a width-typed numeric string, and a PCRE build option
+    "range" => (RefusalAxis::IntegerWidth, "range(\"3000000000\", \"3000000000\") is [int(3000000000)] / [float(3000000000.0)] — its bounds are declared string|int|float, so the machine types the numeric string"),
+    "preg_split" => (RefusalAxis::BuildOption, "preg_split(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") splits / is false — PCRE2's JIT ignores the inline limit verbs its interpreter honours, and adding (*NO_JIT) makes both engines agree"),
 }
 
 /// The portability class of `name` (case-insensitive), or `None` when not on
@@ -351,64 +391,6 @@ const PORTABLE: &[&str] = &[
     "chop",
     "sizeof",
     "doubleval",
-];
-
-/// The **refused rows** of the width classification, with the divergence that
-/// refused each (ADR-0061 refused-row discipline applied to the integer
-/// machine). Every probe passes the range guard; only refusing the name can
-/// exclude it. Each row is a *silent* divergence — nothing throws, widens, or
-/// warns (ADR-0066 §4). Probes: 64-bit `php` 8.5.8 vs 32-bit php-wasm 0.1.0.
-///
-/// * `abs` — **type tag** flips: a numeric string coerces to `int|float` by
-///   the engine's own width (`abs("3000000000")` = `int` / `float`).
-/// * `intval` — saturation and wraparound by definition of the cast (10/17
-///   probes diverged — the width-sensitive builtin).
-/// * `sprintf` — `%b`/`%x`/`%o`/`%u` render the machine word from an in-range
-///   argument; `%d` re-imports `intval`'s saturation. Format-aware
-///   sub-classification is deliberately not attempted (the line would live
-///   inside a string literal).
-/// * `dechex`/`decbin`/`decoct` — render the machine word for a negative,
-///   in-range argument.
-/// * `bindec`/`hexdec` — type tag flips at the width boundary from a plain
-///   string argument.
-/// * `version_compare` — the *surprise* of issue #78: php-src compares each
-///   numeric run through a C `long`, so two oversized runs both saturate and
-///   compare **equal** on 32-bit. The three-argument (bool) form is refused
-///   with it.
-/// * `range` — the *surprise* of issue #354, and the only one of that slice's
-///   five: its bounds are declared `string|int|float`, so an oversized numeric
-///   string is typed by the engine's own width and the **element type tag**
-///   flips inside the result. `range("3000000000", "3000000000")` is
-///   `[int(3000000000)]` / `[float(3000000000.0)]`, and the flip starts one
-///   past the narrow `PHP_INT_MAX` (`"2147483648"`). Reachable from strings
-///   only — 52 probes found no int- or float-argument route.
-/// * `preg_split` — refused on a divergence that is **not** the integer width,
-///   the one row here where that is true. The two builds differ in their PCRE:
-///   64-bit `php` has `pcre.jit = 1`, php-wasm 0.1.0 has none, and PCRE2's JIT
-///   does not honour the inline limit verbs the interpreter does.
-///   `preg_split('/(*LIMIT_MATCH=1)a/', "aaa")` splits on one engine and is
-///   `false` on the other; adding `(*NO_JIT)` makes them agree, which is what
-///   identifies the cause. `LIMIT_RECURSION`/`LIMIT_DEPTH` repeat it. Refusing
-///   the narrow engine also keeps this seam and ADR-0078's pattern lane
-///   (`preg_refusal_memo`) from answering the same question separately in the
-///   browser; on a native run both ride the project's own PCRE, where a folded
-///   `false` is that engine's own answer and the lane's diagnostic is about the
-///   pattern, not the value.
-const REFUSED: &[&str] = &[
-    "abs",
-    "intval",
-    "sprintf",
-    // issue #78 — machine-word rendering and its inverse
-    "dechex",
-    "decbin",
-    "decoct",
-    "bindec",
-    "hexdec",
-    // issue #78 — a `long` hiding inside string work
-    "version_compare",
-    // issue #354 — a width-typed numeric string, and a PCRE build option
-    "range",
-    "preg_split",
 ];
 
 /// The **unverified rows** of the width classification (ADR-0028's 2026-08-14

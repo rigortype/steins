@@ -364,19 +364,40 @@ Both replay envelopes gain a `boot` object beside `pending`:
   "int_size": 4,
   "fold_lane": "portable_subset",
   "fold_total": 22,
-  "fold_safe": 19,
+  "fold_portable": 19,
   "curated_rows": false,
   "absence_family": true,
-  "refused_folds": ["abs", "intval", "sprintf"]
+  "refused_folds": ["abs", "intval", "sprintf"],
+  "refusals": [
+    { "name": "abs", "axis": "integer_width", "witness": "abs(\"3000000000\") is int(3000000000) / float(3000000000) — …" }
+  ],
+  "unverified_folds": ["array_merge", "explode"]
 }
 ```
 
-`fold_lane` is `full` | `portable_subset` | `declined`. `refused_folds` is
-present only on the middle lane — on the other two the lane already says the
-whole story — and it is the **catalog complement** (`foldable ∧ !portable`),
-never a second list. The plain `sw_check` / `sw_annotate` envelopes are
-unchanged and carry no `boot` key at all: engine-off behaviour is byte-identical
-to ADR-0065's, which is an acceptance criterion and now an assertion.
+`fold_lane` is `full` | `portable_subset` | `declined`.
+
+The last three fields are present **only on the middle lane** — on the other two
+the lane already says the whole story. Together they are exactly the complement
+`foldable ∧ !portable`, split by evidence rather than merged: `refused_folds`
+are the rows with a divergence on record and `unverified_folds` the rows nobody
+has measured (the 2026-08-14 amendment §4 forbids merging them, since one list
+would erase the refused rows' one-witness-per-row discipline). Neither is a
+second list of names — both are the catalog's own accessors.
+
+`refusals` carries **why** each refused row is refused, one entry per
+`refused_folds` name and in the same order: `axis` is the wire spelling of
+`RefusalAxis` (`integer_width`, `build_option`) and `witness` is the recorded
+divergence in one line. It exists because the frontend was writing the reasons
+itself and one of them went false — see the 2026-08-15 amendment. A consumer
+that meets an `axis` it has no sentence for must say something neutral and keep
+showing the `witness`; the enum grows when a probe finds a new kind of
+divergence, and a page that guessed would state a falsehood about the first row
+of a new kind.
+
+The plain `sw_check` / `sw_annotate` envelopes are unchanged and carry no `boot`
+key at all: engine-off behaviour is byte-identical to ADR-0065's, which is an
+acceptance criterion and now an assertion.
 
 ### Why it is computed by the policy and not by the frontend
 
@@ -790,6 +811,12 @@ the project's own fold this name?* — so the vocabulary now says that:
 | `width_safe(name)` | `portable(name)` |
 | `width_safe_names()` / `width_refused_names()` / `width_unverified_names()` | `portable_names()` / `refused_names()` / `unverified_names()` |
 | `FoldLane::WidthSafeSubset`, wire `"width_safe_subset"` | `FoldLane::PortableSubset`, wire `"portable_subset"` |
+| boot field `fold_safe` | boot field `fold_portable` |
+
+The glossary moved with them: `CONTEXT.md` now defines **Portability class**
+and **Refusal axis**, and lists *width class* under what to avoid — the entry
+had explicitly forbidden *portability class* while the classification was still
+one-dimensional.
 
 **No gate moved.** The three classes admit and decline exactly what they did,
 the range guard is untouched (it is genuinely about the width, and remains the

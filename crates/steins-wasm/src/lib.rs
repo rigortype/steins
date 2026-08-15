@@ -282,7 +282,7 @@ fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
         "int_size": s.int_size,
         "fold_lane": s.fold_lane.as_str(),
         "fold_total": s.fold_total,
-        "fold_safe": s.fold_safe,
+        "fold_portable": s.fold_portable,
         "curated_rows": s.curated_rows,
         "absence_family": s.absence_family,
     });
@@ -298,7 +298,7 @@ fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
         obj["refusals"] = serde_json::json!(
             s.refusals
                 .iter()
-                .map(|r| serde_json::json!({ "name": r.name, "axis": r.axis, "witness": r.witness }))
+                .map(|r| serde_json::json!({ "name": r.name, "axis": r.axis.as_str(), "witness": r.witness }))
                 .collect::<Vec<_>>()
         );
         obj["unverified_folds"] = serde_json::json!(s.unverified_folds);
@@ -727,12 +727,12 @@ mod replay {
     ///
     /// `fold_total` moved 46 → 48 with ADR-0028's 2026-08-14 wave 1
     /// (`array_merge`, `explode`) — the count growing, not the boundary moving:
-    /// `fold_safe` unchanged, and the two new names land in `unverified_folds`
+    /// `fold_portable` unchanged, and the two new names land in `unverified_folds`
     /// (no divergence to report), not `refused_folds` — see `boot_json` for why
     /// those are separate fields.
     ///
     /// Issue #354 moved 48 → 53 and, unlike wave 1, moved the boundary in both
-    /// directions at once: `fold_safe` 37 → 40 (`str_split`, `array_fill`,
+    /// directions at once: `fold_portable` 37 → 40 (`str_split`, `array_fill`,
     /// `array_unique` probed clean, so the browser folds them), and
     /// `refused_folds` gained `range` and `preg_split`, which the page now
     /// names. `unverified_folds` is untouched — a probed name never passes
@@ -756,7 +756,7 @@ mod replay {
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
         assert_eq!(boot["fold_total"], 57);
-        assert_eq!(boot["fold_safe"], 44, "issue #354 and its aliases grew this engine's share by seven");
+        assert_eq!(boot["fold_portable"], 44, "issue #354 and its aliases grew this engine's share by seven");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::refused_names()),

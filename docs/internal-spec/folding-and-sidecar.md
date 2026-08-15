@@ -93,22 +93,35 @@ on arrival, through the argument side's own gate, so the two verdicts are the
 same computation and cannot drift. The invariant is symmetry: a shape
 admissible as an argument is admissible as a result.
 
-### The integer-width gate
+### The portability gate
 
-Behind the allowlist sits the width gate (issue #64). The catalog's primitive
-is `portability_class(name)` — `foldable` is derived from it, so "on the allowlist"
-is exactly "has a width verdict at all". Three classes, split by *evidence*:
+Behind the allowlist sits the portability gate (issue #64). The catalog's
+primitive is `portability_class(name)` — `foldable` is derived from it, so "on
+the allowlist" is exactly "has a portability verdict at all". Three classes,
+split by *evidence*:
 
-- **`Safe`** — verified by differential probes, 32-bit against 64-bit.
-- **`Refused`** — one recorded divergence per row (`sprintf("%x", -1)`).
+- **`Portable`** — verified by differential probes against a second engine
+  (php-wasm 0.1.0 at `PHP_INT_SIZE = 4`, against `php` 8.5.x at 8).
+- **`Refused`** — one recorded divergence per row, carried as data:
+  `refusal(name)` answers a `RefusalAxis` and the witness
+  (`sprintf("%x", -1)` is `"ffffffffffffffff"` on one machine and
+  `"ffffffff"` on the other).
 - **`Unverified`** — no evidence, and zero probes is the correct number:
   nobody looked (ADR-0028's 2026-08-14 amendment §4). This is where
-  array-returning names (`array_merge`, `explode`) sit today; the promotion
-  path is php-wasm differential probes, then `Safe`.
+  `array_merge` and `explode` sit today; the promotion path is php-wasm
+  differential probes, then `Portable`.
+
+The gate was called the *integer-width* gate while every refused row was about
+`PHP_INT_SIZE`. `preg_split` ended that — refused because one build's PCRE has
+a JIT and the other's does not, at the same version and the same ini — so the
+classification names the question it has always asked: may an engine other than
+the project's own compute this value? The **argument range guard** below is
+still exactly about the width, and is the precondition every portability verdict
+is stated under.
 
 What the class buys depends on the engine. On a **provably 64-bit** engine
 (`PHP_INT_SIZE = 8`, read from `env` and memoized) all three classes fold. On
-a provably 32-bit engine (the browser's php-wasm), only `Safe` names fold, and
+a provably 32-bit engine (the browser's php-wasm), only `Portable` names fold, and
 only for argument tuples whose every integer the range guard admits — both
 legs are required, because the probe verdict is stated for exactly those
 tuples. Anything else — an unreported width, a machine nobody has probed —

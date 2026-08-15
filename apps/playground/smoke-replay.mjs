@@ -19,6 +19,7 @@ import { PhpNode } from "./vendor/php-wasm/PhpNode.mjs";
 import { loadSteins } from "./steins.mjs";
 import { createEngine } from "./php-dispatch.mjs";
 import { driveReplay, ITERATION_CAP } from "./replay.mjs";
+import { renderBoundaryHtml } from "./boundary.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const wasmPath =
@@ -180,7 +181,7 @@ assert(boot.fold_lane === "portable_subset", `a 32-bit engine folds the portable
 // `array_unique` fold here now, `range` and `preg_split` are named below. The
 // alias slice then added `join`/`chop`/`sizeof`/`doubleval`, which are second
 // spellings of names already folding here, so only the safe count moved.
-assert(boot.fold_safe === 44 && boot.fold_total === 57, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+assert(boot.fold_portable === 44 && boot.fold_total === 57, `the counts come from the catalog (${boot.fold_portable}/${boot.fold_total})`);
 // `refused_folds` stays the eleven REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
@@ -207,6 +208,34 @@ assert(
   boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name).join(",") === "preg_split",
   `preg_split is the row that is not about the word size (got ${JSON.stringify(boot.refusals.filter((r) => r.axis === "build_option"))})`,
 );
+// …and the panel the visitor reads is composed from that, checked here rather
+// than only in a browser. The boot object carrying eleven reasons and the panel
+// showing two is exactly the shape of defect this catches: assert on the
+// RENDERED text, per row.
+const panel = renderBoundaryHtml(boot);
+for (const r of boot.refusals) {
+  assert(
+    panel.includes(r.name) && panel.includes(r.witness.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;")),
+    `the panel shows ${r.name}'s own witness, not a neighbour's`,
+  );
+}
+// An axis the page has no sentence for must fall back to a neutral one rather
+// than borrow another axis's explanation — the property that lets the catalog
+// grow `RefusalAxis` without the page going false.
+const invented = renderBoundaryHtml({
+  ...boot,
+  refused_folds: ["fictional_fn"],
+  refusals: [{ name: "fictional_fn", axis: "operating_system", witness: "fictional_fn() is A / B" }],
+});
+assert(
+  invented.includes("a divergence is on record for each") && invented.includes("fictional_fn() is A / B"),
+  "an unknown refusal axis renders neutrally, with its witness intact",
+);
+assert(
+  !invented.includes("how the engine was compiled"),
+  "…and does not borrow the build-option sentence",
+);
+
 assert(
   Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
   `the unverified folds are named apart from the refused ones (got ${JSON.stringify(boot.unverified_folds)})`,

@@ -1820,19 +1820,13 @@ impl<E: FoldEngine> EngineFolder<E> {
             curated_rows: self.absence_family_available() && self.curated_rows_admitted(),
             absence_family: self.absence_family_available(),
             fold_total: steins_catalog::foldable_entry_count(),
-            fold_safe: steins_catalog::portable_names().len(),
+            fold_portable: steins_catalog::portable_names().len(),
             refused_folds: steins_catalog::refused_names(),
             refusals: steins_catalog::refused_names()
                 .iter()
                 .filter_map(|&name| {
-                    steins_catalog::refusal(name).map(|r| RefusalNote {
-                        name,
-                        axis: match r.axis {
-                            steins_catalog::RefusalAxis::IntegerWidth => "integer_width",
-                            steins_catalog::RefusalAxis::BuildOption => "build_option",
-                        },
-                        witness: r.witness,
-                    })
+                    steins_catalog::refusal(name)
+                        .map(|r| RefusalNote { name, axis: r.axis, witness: r.witness })
                 })
                 .collect(),
             unverified_folds: steins_catalog::unverified_names(),
@@ -2221,13 +2215,17 @@ impl FoldLane {
     }
 }
 
+/// The catalog's refusal axis, re-exported: a consumer of [`SurfaceSummary`]
+/// reads the classification without naming `steins-catalog`.
+pub use steins_catalog::RefusalAxis;
+
 /// One refused row's reason, as [`SurfaceSummary`] carries it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RefusalNote {
     /// The builtin's name, as the catalog spells it.
     pub name: &'static str,
-    /// The wire spelling of [`steins_catalog::RefusalAxis`].
-    pub axis: &'static str,
+    /// What kind of engine difference refused it.
+    pub axis: RefusalAxis,
     /// The recorded divergence, in one line: the call and both answers.
     pub witness: &'static str,
 }
@@ -2257,9 +2255,10 @@ pub struct SurfaceSummary {
     /// refused name renders an integer in the machine's own word — went false
     /// the moment `preg_split` was refused for a PCRE build option.
     ///
-    /// `axis` is the wire spelling (`integer_width`, `build_option`), so a
-    /// consumer that must not name the catalog (the wasm module keeps it a
-    /// dev-dependency on purpose) still gets the classification.
+    /// The axis travels as the catalog's own [`RefusalAxis`], re-exported here
+    /// so a consumer that must not name the catalog (the wasm module keeps it a
+    /// dev-dependency on purpose) still gets the type rather than a string it
+    /// would have to re-parse. Its wire spelling is the enum's own `as_str`.
     pub refusals: Vec<RefusalNote>,
     /// Whether a curated return-fact row may refine a reflected envelope — both
     /// ADR-0056 gates, conjoined as the admission sequence conjoins them.
@@ -2272,7 +2271,7 @@ pub struct SurfaceSummary {
     /// renderer states the boundary without a number of its own.
     pub fold_total: usize,
     /// See [`Self::fold_total`].
-    pub fold_safe: usize,
+    pub fold_portable: usize,
     /// The [`steins_catalog::PortabilityClass::Refused`] rows, by name — the folds a
     /// [`FoldLane::PortableSubset`] engine does not get **and can say why**, read
     /// from the catalog rather than restated here.
