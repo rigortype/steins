@@ -18,12 +18,20 @@
 /// that assumed "not the word size" meant "compiled differently" would state a
 /// falsehood about an ini- or OS-shaped row the day one lands. The point of
 /// carrying the axis as data was that the page stops writing its own reasons.
-const AXIS_FRAMING = {
-  integer_width: (bits) =>
-    `produce or render an integer in the machine's own word, and this build's word is ${bits}`,
-  build_option: () =>
-    `depend on how the engine was compiled — same version, same ini, different build`,
-};
+/// A `Map`, not an object literal: `AXIS_FRAMING["__proto__"]` on a plain
+/// object answers `Object.prototype`, which is truthy and not callable, so an
+/// axis spelled that way threw instead of falling back. The axis is data from
+/// the envelope, and data must not be able to reach a prototype.
+const AXIS_FRAMING = new Map([
+  [
+    "integer_width",
+    (bits) => `produce or render an integer in the machine's own word, and this build's word is ${bits}`,
+  ],
+  [
+    "build_option",
+    () => `depend on how the engine was compiled — same version, same ini, different build`,
+  ],
+]);
 
 const escHtml = (s) =>
   String(s).replace(
@@ -46,7 +54,7 @@ function refusedItems(b) {
   }
   const items = [];
   for (const [axis, rs] of byAxis) {
-    const framing = AXIS_FRAMING[axis];
+    const framing = AXIS_FRAMING.get(axis);
     const names = rs.map((r) => `<code>${escHtml(r.name)}()</code>`).join(", ");
     const head = framing
       ? `${names} <strong>do not fold</strong> — they ${framing(bitsOf(b))}.`
@@ -79,11 +87,19 @@ export function composeBoundary(b) {
   if (!b || !b.php_version) return null;
 
   const live = [];
-  live.push(
-    b.fold_lane === "full"
-      ? `<strong>Folded values</strong> from the real engine — all ${b.fold_total} builtins on the folding allowlist.`
-      : `<strong>Folded values</strong> from the real engine — ${b.fold_portable} of the ${b.fold_total} builtins on the folding allowlist: the ones a ${bitsOf(b)} engine is verified to answer exactly as a 64-bit one does. <code>str_repeat("ab", 2)</code> is <code>'abab'</code> here, as on the CLI.`,
-  );
+  // Each lane by name, never "full or else". `declined` folds NOTHING — an
+  // engine that did not report a width the fold lane has been verified against
+  // — and a two-armed test gave it the portable-subset sentence, so the panel
+  // claimed 44 of 57 folded in its first list and nothing folded in its second.
+  if (b.fold_lane === "full") {
+    live.push(
+      `<strong>Folded values</strong> from the real engine — all ${b.fold_total} builtins on the folding allowlist.`,
+    );
+  } else if (b.fold_lane === "portable_subset") {
+    live.push(
+      `<strong>Folded values</strong> from the real engine — ${b.fold_portable} of the ${b.fold_total} builtins on the folding allowlist: the ones a ${bitsOf(b)} engine is verified to answer exactly as a 64-bit one does. <code>str_repeat("ab", 2)</code> is <code>'abab'</code> here, as on the CLI.`,
+    );
+  }
   live.push(
     `<strong>Reflected return envelopes</strong> — a builtin's declared return type, read back from this engine rather than guessed (<code>strtoupper($x)</code> is <code>uppercase-string</code> once the predicate transfers refine it).`,
   );

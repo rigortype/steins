@@ -79,7 +79,7 @@ pub fn foldable(name: &str) -> bool {
 
 /// The number of names on the folding allowlist (ADR-0054 §9.6 freshness
 /// context, the [`foldable`] twin of [`hierarchy_entry_count`]): the union of
-/// the three width classes, which are disjoint by construction.
+/// the three portability classes, which are disjoint by construction.
 #[must_use]
 pub fn foldable_entry_count() -> usize {
     PORTABLE.len() + REFUSED.len() + UNVERIFIED.len()
@@ -393,7 +393,7 @@ const PORTABLE: &[&str] = &[
     "doubleval",
 ];
 
-/// The **unverified rows** of the width classification (ADR-0028's 2026-08-14
+/// The **unverified rows** of the portability classification (ADR-0028's 2026-08-14
 /// amendment §4, issue #330) — the third class, which claims nothing. Unlike
 /// `PORTABLE`/`REFUSED`, the correct probe count behind a row here is
 /// **zero**: not measured, so the name folds only on a provably 64-bit engine.
@@ -1825,9 +1825,11 @@ mod tests {
         }
     }
 
-    /// The eleven refused rows, named; see `REFUSED` for probes.
+    /// The eleven refused rows, named; see [`refusal`] for each row's axis and
+    /// witness. Ten are width-sensitive and one — `preg_split` — is not, which
+    /// is why the test is named for the class and not for the axis.
     #[test]
-    fn the_width_sensitive_builtins_are_refused() {
+    fn the_refused_rows_fold_only_on_a_64_bit_engine() {
         for name in [
             "abs",
             "intval",
@@ -1849,7 +1851,11 @@ mod tests {
             "PREG_SPLIT",
         ] {
             assert!(!portable(name), "{name} must not be certified portable");
-            assert!(foldable(name), "{name} is refused on width, not off the allowlist");
+            assert!(foldable(name), "{name} is refused, not off the allowlist");
+            assert!(
+                refusal(name).is_some(),
+                "{name} is refused, so it owes an axis and a witness"
+            );
         }
         for name in [
             "strtoupper",

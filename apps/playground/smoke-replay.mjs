@@ -235,6 +235,32 @@ assert(
   !invented.includes("how the engine was compiled"),
   "…and does not borrow the build-option sentence",
 );
+// `__proto__` is a legal string and reaches an object literal's prototype, so
+// the axis lookup is a Map. Before it was, this threw instead of falling back.
+const proto = renderBoundaryHtml({
+  ...boot,
+  refused_folds: ["proto_fn"],
+  refusals: [{ name: "proto_fn", axis: "__proto__", witness: "proto_fn() is A / B" }],
+});
+assert(
+  proto.includes("a divergence is on record for each") && proto.includes("proto_fn() is A / B"),
+  "an axis spelled `__proto__` falls back like any other unknown one",
+);
+
+// The `declined` lane folds NOTHING. A two-armed "full or else" gave it the
+// portable-subset sentence, so the panel claimed a fold count in its first list
+// and "Nothing folds" in its second — both at once, about the same engine.
+const declined = renderBoundaryHtml({ ...boot, int_size: null, fold_lane: "declined" });
+assert(
+  !declined.includes(`of the ${boot.fold_total} builtins`),
+  "a declined lane claims no folded values",
+);
+assert(declined.includes("Nothing folds"), "…and says so once, in the second list");
+// The control: the lane that DOES fold a subset still says how many.
+assert(
+  renderBoundaryHtml(boot).includes(`${boot.fold_portable} of the ${boot.fold_total} builtins`),
+  "the portable-subset lane still reports its share",
+);
 
 assert(
   Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
