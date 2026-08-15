@@ -2947,6 +2947,10 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
         }
         ArgValue::Var(_)
         | ArgValue::Call(..)
+        // A method call (issue #386) is no more a wire value than a function
+        // call: the fold sends proven values, and this one is proven — if at
+        // all — by a descent the fold road has no store to run (ADR-0075 §3).
+        | ArgValue::MethodCall { .. }
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
         | ArgValue::Closure(_)
@@ -10319,6 +10323,9 @@ fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Val> {
         }
         ArgValue::Var(_)
         | ArgValue::Call(..)
+        // Like every other carrier: a method call becomes a `Val` only by way of
+        // its summary, which needs the walk this seam does not have (issue #386).
+        | ArgValue::MethodCall { .. }
         | ArgValue::New(..)
         | ArgValue::Ternary { .. }
         | ArgValue::Coalesce(..)
@@ -11545,7 +11552,16 @@ fn walk_trace(
             match &call.receiver {
                 Callee::Function(_) => {
                     check_propagated_call(
-                        cx, folder, scope.poisoned, descent.is_some(), call, env, store, out,
+                        cx,
+                        folder,
+                        scope.poisoned,
+                        descent.is_some(),
+                        call,
+                        env,
+                        store,
+                        w.this_exact,
+                        w.enclosing_class,
+                        out,
                     );
                     // Userland function arity (ADR-0049 §6 / S5): judged once in the
                     // plain per-scope pass, like the checks below.
@@ -12307,6 +12323,20 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
         ArgValue::Call(_, args) => {
             args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(v, env, store)))
         }
+        // A method call's own arguments, plus a receiver `new`'s (issue #386): every
+        // value the call consumes is a value its result derives from, and the
+        // receiver's construction arguments are consumed exactly as the call's are.
+        // The receiver *object*'s stratum is not read here — this seam sees no heap
+        // beyond a prop fetch, and the summary that does carries its own `min`.
+        ArgValue::MethodCall { callee, args, named } => {
+            let recv = match callee {
+                Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+                    value_stratum_of_args(args, named, env, store)
+                }
+                _ => Stratum::Verified,
+            };
+            recv.min(value_stratum_of_args(args, named, env, store))
+        }
         ArgValue::Ternary { then_val, else_val, .. } => {
             value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
         }
@@ -12322,6 +12352,20 @@ fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&
         }
         _ => Stratum::Verified,
     }
+}
+
+/// The `min` stratum over one call's positional and named argument values — the
+/// [`value_stratum`] derivation clause applied to an argument list.
+fn value_stratum_of_args(
+    args: &[ArgValue],
+    named: &[NamedArg],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Stratum {
+    args.iter()
+        .map(|v| value_stratum(v, env, store))
+        .chain(named.iter().map(|n| value_stratum(&n.value, env, store)))
+        .fold(Stratum::Verified, Stratum::min)
 }
 
 // ---------------------------------------------------------------------------
@@ -12914,6 +12958,36 @@ fn best_dump_type(
             };
         }
     }
+    // A method / static call in argument position (issue #386): the same rung, one
+    // resolver over, and the same `summary_binds` gate — so `dumpType($b->get())`
+    // and `$v = $b->get(); dumpType($v)` cannot disagree. `w` carries the frame, so
+    // `$this->m()` and `self::m()` resolve here where the frame-less seams decline.
+    // The **value** component only: an object result has no rendering in value
+    // position (ADR-0057 B5), which is why `dumpType($b->makeFoo())` stays unknown.
+    if let ArgValue::MethodCall { callee, args, named } = value {
+        let mut scratch: Vec<Diagnostic> = Vec::new();
+        if let Some(ReturnSummary { value: Some(sv), .. }) = project_method_summary(
+            cx,
+            folder,
+            callee,
+            args,
+            named,
+            env,
+            store,
+            w.this_exact,
+            w.enclosing_class,
+            poisoned,
+            span_start,
+            None,
+            &mut scratch,
+        ) && summary_binds(&sv.fact)
+        {
+            return DumpRendering {
+                text: render_dump_fact(&sv.fact),
+                asserted: sv.stratum == Stratum::Asserted,
+            };
+        }
+    }
     // Argument-dependent type rung (ADR-0061 §1) — `count`/`array_is_list` over an
     // abstract shape (ADR-0062 §4) — sits above the envelope, as at the assignment
     // seam, carrying the argument's stratum.
@@ -12958,6 +13032,28 @@ fn best_dump_type(
             asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
         };
     }
+    // The same floor for an unsummarized method/static call (issue #386): the
+    // declared `: string` of the resolved target, which the assignment form seeds
+    // into the contract store.
+    if let ArgValue::MethodCall { callee, args, .. } = value
+        && let Some(arms) = method_return_arms_by_callee(
+            cx,
+            folder,
+            callee,
+            args,
+            env,
+            store,
+            w.this_exact,
+            w.enclosing_class,
+            poisoned,
+        )
+        && let Some(text) = render_contract_arms(cx, &arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+        };
+    }
     DumpRendering { text: DUMP_UNKNOWN.to_owned(), asserted: false }
 }
 
@@ -12986,6 +13082,23 @@ fn best_dump_phpdoc_type(
     // between `dumpPhpDocType(f(…))` and `$x = f(…); dumpPhpDocType($x)`.
     if let ArgValue::Call(name, cargs) = value
         && let Some(arms) = call_return_arms_by_name(cx, folder, name, cargs, env, store, poisoned)
+        && let Some(text) = render_contract_arms(cx, &arms)
+    {
+        return DumpRendering {
+            text,
+            asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+        };
+    }
+    // A method / static call in argument position (issue #386): the same parity, the
+    // same speller. This surface has no `WalkCx`, so it holds no enclosing class —
+    // `$this->m()`, `self::m()` and `parent::m()` decline here (through
+    // `resolve_call_target`'s own arms) while `dumpType` next door resolves them.
+    // Widening the signature to close that would thread a frame through the
+    // declared-side dump for one receiver spelling; the declining direction is
+    // silence, and the value-side dump is where a receiver is observed.
+    if let ArgValue::MethodCall { callee, args, .. } = value
+        && let Some(arms) =
+            method_return_arms_by_callee(cx, folder, callee, args, env, store, None, None, poisoned)
         && let Some(text) = render_contract_arms(cx, &arms)
     {
         return DumpRendering {
@@ -14481,8 +14594,7 @@ fn ctor_heap_summary(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &format!("new {}", simple_class(class)),
         target.this_exact,
-        None,
-        Some(seed),
+        Some(ThisSeed::Ctor(seed)),
         args,
         span_start,
         &[],
@@ -15328,7 +15440,7 @@ fn call_receiver_fact<'a>(
             store.prop_stratum(var, prop),
             format!("${var}->{prop}"),
         )),
-        Receiver::This | Receiver::New(_) => None,
+        Receiver::This | Receiver::New { .. } => None,
     }
 }
 
@@ -16848,6 +16960,12 @@ fn call_return_arms(
     if matches!(call.receiver, Callee::Construct { .. }) {
         return None;
     }
+    // `$x = $b?->m()` may be `null` whatever `m` declares (ADR-0075 §3.1). Declined
+    // here as well as at the outcome, since this is `apply_assign`'s own fallback
+    // and would otherwise re-seed the floor the outcome just refused.
+    if nullsafe_call(&call.receiver) {
+        return None;
+    }
     let target = resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, poisoned)?;
     method_return_arms(cx, &target)
 }
@@ -16874,6 +16992,42 @@ fn call_return_arms_by_name(
     let site = value_lane_fn_site(cx, folder, name)?;
     let bindable: Vec<&ArgValue> = args.iter().collect();
     fn_return_arms_at_call(cx, folder, site, &bindable, env, store, poisoned)
+}
+
+/// [`call_return_arms_by_name`]'s **method** twin (issue #386): the declared-return
+/// floor of a method or static call in value position, resolved through the same
+/// `resolve_call_target` [`project_method_summary`] uses — the two must agree on the
+/// target, or the floor could name a different method than the summary descended
+/// into.
+///
+/// `this_exact`/`enclosing_class` are `None` at a frame-less entry
+/// ([`best_dump_phpdoc_type`]), which declines `$this->`/`self::`/`parent::` there
+/// by `resolve_call_target`'s own arms. A **nullsafe** call declines outright: the
+/// result may be `null` and the arms do not say so (ADR-0075 §3.1).
+///
+/// A `Receiver::New`'s **carries** are not read here, unlike at the summary rung:
+/// filling them means minting the receiver object, which means walking its
+/// constructor, and a declared floor is not worth a walk that the rung above it has
+/// already made when it could. Strictly less knowledge, at the rung that already is
+/// the floor.
+#[allow(clippy::too_many_arguments)]
+fn method_return_arms_by_callee(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    callee: &Callee,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    if nullsafe_call(callee) {
+        return None;
+    }
+    let target = resolve_call_target(cx, callee, store, this_exact, enclosing_class, poisoned)?;
+    let bindable: Vec<&ArgValue> = args.iter().collect();
+    method_return_arms_at_call(cx, folder, &target, &bindable, env, store, poisoned)
 }
 
 /// The declared-return contract arms of the project function at `site` — the shared
@@ -21389,6 +21543,12 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
             // receiver does not pin down.
             store.sweep_targs(v);
         }
+        // The receiver of a `(new C($b))->m()` passes `$b` into the constructor, at a
+        // position no top-level argument list names — the same nested case the
+        // argument loop below recurses for.
+        if let Callee::Method { receiver: Receiver::New { args, named, .. }, .. } = &call.receiver {
+            escape_nested_args(args, named, store, &mut object_passed);
+        }
         for (i, arg) in call.args.iter().enumerate() {
             if let ArgValue::Var(name) = &arg.value
                 && store.is_bound(name)
@@ -21405,6 +21565,10 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
                     store.sweep_targs(name);
                 }
             }
+            // …and whatever a NESTED call inside this argument hands on (ADR-0075
+            // §3.2): `f(g($b))` and `f($b->m())` pass `$b` just as plainly as
+            // `f($b)` does, and used to escape nothing at all.
+            escape_nested_calls(&arg.value, store, &mut object_passed);
         }
         if !call_is_resolved(w, call, store) {
             unknown = true;
@@ -21431,6 +21595,63 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     let same_this = calls.iter().any(|c| runs_with_same_this(&c.receiver));
     if same_this || ((object_passed || unknown) && w.ctor_walk()) {
         store.sweep_this();
+    }
+}
+
+/// Escape + sweep for the calls **nested inside** one argument value (ADR-0075 §3.2,
+/// issue #386). `escape_and_sweep_calls` walked a statement's top-level argument
+/// list and stopped, so `f(g($b))`, `f($b->m())` and `f(new C($b))` escaped nothing
+/// although the inner callee holds the object as plainly as an outer one would.
+///
+/// Three carriers nest a call: [`ArgValue::Call`], [`ArgValue::MethodCall`] (its
+/// **receiver** included — `$b` in `f($b->m())` is handed to `m` as its `$this`) and
+/// [`ArgValue::New`]. Each recurses, so depth costs nothing.
+///
+/// The #295 lexical gate is **not** applied at a nested position, unlike at the top
+/// level: it needs a resolved callee and a position-to-parameter map, and the value
+/// IR carries no resolution for a nested call. So the carry is swept
+/// unconditionally, which is the silent direction.
+fn escape_nested_calls(value: &ArgValue, store: &mut Store, object_passed: &mut bool) {
+    match value {
+        ArgValue::Call(_, args) => escape_nested_args(args, &[], store, object_passed),
+        ArgValue::MethodCall { callee, args, named } => {
+            match callee {
+                Callee::Method { receiver: Receiver::Var(v), .. } if store.is_bound(v) => {
+                    store.mark_escaped(v);
+                    store.sweep_targs(v);
+                    *object_passed = true;
+                }
+                Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
+                    escape_nested_args(args, named, store, object_passed);
+                }
+                _ => {}
+            }
+            escape_nested_args(args, named, store, object_passed);
+        }
+        ArgValue::New(_, args, named) => escape_nested_args(args, named, store, object_passed),
+        _ => {}
+    }
+}
+
+/// One nested call's argument list: each heap-bound variable escapes and loses its
+/// value carries, and each argument is itself recursed into. Named arguments count
+/// here — a nested call is walked whole, the position-indexed judgments the top
+/// level makes having no nested counterpart to skip them for.
+fn escape_nested_args(
+    args: &[ArgValue],
+    named: &[NamedArg],
+    store: &mut Store,
+    object_passed: &mut bool,
+) {
+    for value in args.iter().chain(named.iter().map(|n| &n.value)) {
+        if let ArgValue::Var(name) = value
+            && store.is_bound(name)
+        {
+            store.mark_escaped(name);
+            store.sweep_targs(name);
+            *object_passed = true;
+        }
+        escape_nested_calls(value, store, object_passed);
     }
 }
 
@@ -21580,6 +21801,13 @@ fn check_propagated_call(
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
+    // The caller's own frame, for a method-call ARGUMENT whose receiver is
+    // `$this`/`self::`/`parent::` (issue #386). The dump surface reads the same two
+    // off its `WalkCx`; this check is called from the same statement walk, so
+    // threading them costs one call site and buys the receiver spellings a
+    // frame-less seam has to decline.
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
     out: &mut Vec<Diagnostic>,
 ) {
     // Resolve non-positional calls too (Gap A): the positional prefix and the named
@@ -21654,6 +21882,40 @@ fn check_propagated_call(
                         }
                         let Fact::Singleton(v) = &sv.fact else { return None };
                         Some((arg_of_val(v), format!("returned from {name}()"), sv.stratum))
+                    })
+                }
+                // A nested method / static call (issue #386): its `Singleton` summary
+                // is the argument's proven value, on the same terms the function arm
+                // above states — plain per-scope pass only, `Verified` only, findings
+                // to the real `out`. The provenance names the call as it was written,
+                // since a method has no bare name to print.
+                ArgValue::MethodCall { callee, args, named } if !in_descent => {
+                    let summary = project_method_summary(
+                        cx,
+                        folder,
+                        callee,
+                        args,
+                        named,
+                        env,
+                        store,
+                        this_exact,
+                        enclosing_class,
+                        poisoned,
+                        arg.span.start,
+                        None,
+                        out,
+                    );
+                    summary.and_then(|s| {
+                        let sv = s.value?;
+                        if sv.stratum != Stratum::Verified {
+                            return None;
+                        }
+                        let Fact::Singleton(v) = &sv.fact else { return None };
+                        Some((
+                            arg_of_val(v),
+                            format!("returned from {}", arg.value.render()),
+                            sv.stratum,
+                        ))
                     })
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
@@ -21737,11 +21999,15 @@ fn check_propagated_call(
             }
         }
 
-        // Only the propagation-carrier arg kinds (`$var`/`call()`) are the
+        // Only the propagation-carrier arg kinds (`$var`/`call()`/`$o->m()`) are the
         // propagation pass's to phpdoc-check; literal/array/`new` args are owned
-        // by the direct pass (no double-report across the two passes).
+        // by the direct pass (no double-report across the two passes). A method call
+        // (issue #386) belongs on this side of that split for the reason the split
+        // exists — it is resolved against the walk, not read off the syntax — and
+        // naming it here is what keeps it from being checked by both passes or by
+        // neither.
         if !native_fired
-            && matches!(arg.value, ArgValue::Var(_) | ArgValue::Call(..))
+            && matches!(arg.value, ArgValue::Var(_) | ArgValue::Call(..) | ArgValue::MethodCall { .. })
             && let Some(env_e) = &envelopes
         {
             check_phpdoc_param(
@@ -21813,7 +22079,6 @@ fn try_descend_function(
         &decl.name,
         None,
         None,
-        None,
         &arg_values,
         call.span.start,
         &[],
@@ -21876,7 +22141,87 @@ fn project_call_summary(
         &decl.name,
         None,
         None,
-        None,
+        &arg_values,
+        span_start,
+        &[],
+        env,
+        store,
+        poisoned,
+        descent,
+        out,
+    )
+}
+
+/// [`project_call_summary`]'s **method** twin (issue #386): the return summary of a
+/// method or static call written in value position — `takesString($b->unwrap())`,
+/// `dumpType($b->get())`, `Foo::m(1)`, `(new C(1))->m()`.
+///
+/// **One resolver, one walk.** The target comes from `resolve_call_target` and from
+/// nothing else, and the descent is entered with that target's `this_exact` and its
+/// `$this` seed — exactly as [`handle_method_call`] enters it. So the `BindingKey`
+/// this site builds is byte-identical to the one the statement rung builds for the
+/// same call, and the memo therefore treats `$x = $b->m(); f($b->m());` as one
+/// entry: one body walk, one emission of whatever that body reports. A second
+/// resolver, or the same resolver entered with a different `$this`, would silently
+/// double both.
+///
+/// **Where the enclosing class is not in hand** the caller passes `None` for
+/// `this_exact`/`enclosing_class` and the three receivers that need it —
+/// `$this->`, `self::`, `parent::` — decline through `resolve_call_target`'s own
+/// arms rather than through a refusal of this function's. `Receiver::Prop` is never
+/// a target (ADR-0052 §7), also for free.
+///
+/// The two refusals that ARE this function's: a **nullsafe** call, whose result may
+/// be `null` for a reason no summary states (ADR-0075 §3.1), and a **named**
+/// argument list, which the positional binding descent cannot map — the same gate
+/// `handle_method_call` applies through `CallExpr::positional_only`.
+#[allow(clippy::too_many_arguments)]
+fn project_method_summary(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    callee: &Callee,
+    args: &[ArgValue],
+    named: &[NamedArg],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+    span_start: u32,
+    mut descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<ReturnSummary> {
+    if nullsafe_call(callee) || !named.is_empty() {
+        return None;
+    }
+    let mut target = resolve_call_target(cx, callee, store, this_exact, enclosing_class, poisoned)?;
+    let recv_new = receiver_new_object(
+        cx,
+        folder,
+        callee,
+        env,
+        store,
+        poisoned,
+        span_start,
+        descent.as_deref_mut(),
+        out,
+    );
+    if let Some(obj) = &recv_new {
+        target.receiver_carries = obj.targs.clone();
+    }
+    let callee_scope =
+        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)?;
+    let arg_values: Vec<&ArgValue> = args.iter().collect();
+    descend(
+        cx,
+        folder,
+        &target.method.params,
+        target.class_file,
+        callee_scope,
+        &format!("{}::{}", target.declaring_class.fqn, target.method.name),
+        &display_of_call(callee, &target.declaring_class.name, &target.method.name),
+        target.this_exact,
+        this_seed_of(None, recv_new.as_ref(), target.receiver_var.as_deref()),
         &arg_values,
         span_start,
         &[],
@@ -21922,7 +22267,8 @@ fn value_lane_fn_site(cx: &Cx, folder: &mut dyn Folder, name: &str) -> Option<Si
     Some(site)
 }
 
-/// [`project_call_summary`] narrowed to what a **binding** can consume (issue #60):
+/// [`project_call_summary`] and [`project_method_summary`] narrowed to what a
+/// **binding** can consume (issue #60, extended to methods by issue #386):
 /// a `Singleton` summary as the concrete [`ArgValue`] it names, with the summary's
 /// stratum. `None` for anything else — a non-call, a zero-argument call (that is
 /// `resolve_const_fn`'s lane, already tried by `resolve_literal`), an abstract or
@@ -21941,13 +22287,28 @@ fn nested_call_singleton(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> Option<(ArgValue, Stratum)> {
-    let ArgValue::Call(name, cargs) = value else { return None };
-    if cargs.is_empty() {
-        return None;
-    }
-    let summary = project_call_summary(
-        cx, folder, name, cargs, env, store, poisoned, span_start, descent, out,
-    )?;
+    let summary = match value {
+        ArgValue::Call(name, cargs) => {
+            if cargs.is_empty() {
+                return None;
+            }
+            project_call_summary(
+                cx, folder, name, cargs, env, store, poisoned, span_start, descent, out,
+            )?
+        }
+        // A method call binds like a function call (issue #386), with one difference
+        // it cannot help: this seam holds no caller **frame**, only the caller's env
+        // and store, so `$this->`/`self::`/`parent::` receivers decline here — the
+        // `None`s below are what makes `resolve_call_target` refuse them. A
+        // `$var`/`Foo::`/`(new C())` receiver needs no frame and resolves. There is
+        // no zero-argument decline either: a receiver IS an entry state, so
+        // `f($b->get())` binds where `f(g())` cannot.
+        ArgValue::MethodCall { callee, args, named } => project_method_summary(
+            cx, folder, callee, args, named, env, store, None, None, poisoned, span_start,
+            descent, out,
+        )?,
+        _ => return None,
+    };
     let sv = summary.value?;
     let Fact::Singleton(v) = &sv.fact else { return None };
     Some((arg_of_val(v), sv.stratum))
@@ -22023,7 +22384,6 @@ fn handle_var_call(
                     callee_scope,
                     &format!("closure@{def_offset}"),
                     &display,
-                    None,
                     None,
                     None,
                     &arg_values,
@@ -22197,6 +22557,31 @@ fn check_callable_args(
     }
 }
 
+/// What a descent's `$this` is seeded from — the receiver being the zeroth argument
+/// (ADR-0086 §3), and a constructor's own allocation being the degenerate case of
+/// that (ADR-0057 C1). Every variant crosses through [`copy_for_descent`]'s field
+/// table; what differs is where the object comes from, whether an argument can be
+/// an alias of it, and (for a constructor) whether the exits snapshot `$this`.
+#[derive(Clone, Copy)]
+enum ThisSeed<'a> {
+    /// The caller variable naming an exact `Receiver::Var`'s object
+    /// ([`CallTarget::receiver_var`], which states why every other receiver is
+    /// `None`). Its copy is **shared** with any argument naming the same caller
+    /// allocation, so `$b->m($b)` binds `$this` and the parameter to one object.
+    ReceiverVar(&'a str),
+    /// The object a **receiver-position** `new` mints — `(new C(1))->m()`, whose
+    /// constructor this site has already walked (ADR-0057 C7's third seam, issue
+    /// #386). Fresh, so no argument can alias it.
+    ReceiverNew(&'a HeapObj),
+    /// The fresh allocation a `new C(args)` site is minting, for the **constructor**
+    /// descent itself (ADR-0057 C1) — the ONE copy that is not pre-escaped, a `new`
+    /// site having no caller-side object for the call to escape, and the one descent
+    /// whose exits snapshot `$this` instead of a returned value (C2). The bit says
+    /// what got OUT, not what may be written: the walk still sweeps its own `$this`
+    /// at every call that could reach the allocation without naming it (C5).
+    Ctor(&'a HeapObj),
+}
+
 /// Interprocedural argument-binding descent into a resolved callee body. Returns the
 /// callee's [`ReturnSummary`] (ADR-0057 amendment T0) when one was computed — the
 /// join over its returning exits, memoized under the binding key — or `None` when no
@@ -22212,17 +22597,10 @@ fn descend(
     key_name: &str,
     display_name: &str,
     body_this_exact: Option<String>,
-    // The caller variable holding the receiver object, for an exact `Receiver::Var`
-    // method call and nothing else (ADR-0086 §3 — [`CallTarget::receiver_var`] states
-    // each other receiver's `None` and why). The four non-method callers pass `None`:
-    // a free function, a closure and a nested call in argument position have no
-    // receiver at all.
-    receiver_var: Option<&str>,
-    // The fresh allocation a `new C(args)` site is minting, for a **constructor**
-    // descent and nothing else (ADR-0057's constructor-summary amendment, C1): the
-    // callee's `$this` is seeded from it, and every exit snapshots `$this` instead
-    // of a returned value (C2). `None` at every other descent.
-    ctor_this: Option<&HeapObj>,
+    // What seeds the callee's `$this`, or `None` where nothing does — a free
+    // function, a closure, and every receiver [`CallTarget::receiver_var`] lists as
+    // proving no object.
+    this_seed: Option<ThisSeed<'_>>,
     // The call's positional argument values + its span start (for the provenance
     // line). Taken apart rather than as a `&CallExpr` (issue #60): a nested call in
     // argument position exists only as an `ArgValue::Call` — no `CallExpr` is ever
@@ -22274,33 +22652,40 @@ fn descend(
     // `$b = new B(1)` survive a later unrelated unknown call. It says what got OUT,
     // not what may be written: the walk still sweeps its own `$this` at every call
     // that could reach the allocation without naming it (C5, `escape_and_sweep_calls`).
-    let seeded_this: Option<AllocId> = match ctor_this {
-        Some(fresh) => {
-            let mut seed = copy_for_descent(fresh);
-            seed.escaped = false;
-            let id = seed_store.heap.len() as AllocId;
-            seed_store.heap.insert(id, seed);
-            seed_store.refs.insert("this".to_owned(), id);
-            Some(id)
-        }
-        None => receiver_var.filter(|_| !poisoned).and_then(|v| {
-            let caller_id = caller_store.id_of(v)?;
-            let obj = caller_store.heap.get(&caller_id)?;
-            // The copy IS the receiver the dispatch resolved through, so its exactness
-            // cannot disagree with the one the callee walks under: `resolve_call_target`
-            // fills `receiver_var` only where it read `class_exact` and passed that same
-            // class on as `this_exact`.
-            debug_assert!(
-                obj.class_exact && body_this_exact.as_deref() == Some(obj.class.as_str()),
-                "a seeded `$this` must be the exact receiver `body_this_exact` names",
-            );
-            let id = seed_store.heap.len() as AllocId;
-            seed_store.heap.insert(id, copy_for_descent(obj));
-            seed_store.refs.insert("this".to_owned(), id);
+    let ctor_walk = matches!(this_seed, Some(ThisSeed::Ctor(_)));
+    let seeded_this: Option<AllocId> = this_seed.filter(|_| !poisoned).and_then(|seed| {
+        // The caller allocation this copy stands for, for the aliasing rule — `None`
+        // where there is none to alias: a `new` in receiver position and the fresh
+        // allocation a constructor is handed are unique by construction, exactly as a
+        // direct `new` in argument position is.
+        let (obj, caller_id) = match seed {
+            ThisSeed::Ctor(fresh) => {
+                let mut copy = copy_for_descent(fresh);
+                copy.escaped = false;
+                (copy, None)
+            }
+            ThisSeed::ReceiverNew(fresh) => (copy_for_descent(fresh), None),
+            ThisSeed::ReceiverVar(v) => {
+                let caller_id = caller_store.id_of(v)?;
+                (copy_for_descent(caller_store.heap.get(&caller_id)?), Some(caller_id))
+            }
+        };
+        // The copy IS the receiver the dispatch resolved through, so its exactness
+        // cannot disagree with the one the callee walks under: every seeding receiver
+        // is one `resolve_call_target` proved an exact class for, and it passed that
+        // same class on as `this_exact` (a constructor's is the class it mints).
+        debug_assert!(
+            obj.class_exact && body_this_exact.as_deref() == Some(obj.class.as_str()),
+            "a seeded `$this` must be the exact receiver `body_this_exact` names",
+        );
+        let id = seed_store.heap.len() as AllocId;
+        seed_store.heap.insert(id, obj);
+        seed_store.refs.insert("this".to_owned(), id);
+        if let Some(caller_id) = caller_id {
             seeded.insert(caller_id, id);
-            Some(id)
-        }),
-    };
+        }
+        Some(id)
+    });
     for (i, arg_value) in args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
         if param.variadic {
@@ -22555,7 +22940,7 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
-                ctor_this.is_some(),
+                ctor_walk,
                 out,
             );
             d.stack.pop();
@@ -22579,7 +22964,7 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
-                ctor_this.is_some(),
+                ctor_walk,
                 out,
             );
             join_summary(&child_cx, callee_scope, &exits)
@@ -23025,7 +23410,7 @@ fn resolve_call_target<'a>(
             let fqn = cx.class_fqn(class);
             resolve_exact(cx, &fqn, "__construct", enclosing_class, Some(fqn.clone()))
         }
-        Callee::Method { receiver: Receiver::New(class), method, .. } => {
+        Callee::Method { receiver: Receiver::New { class, .. }, method, .. } => {
             let fqn = cx.class_fqn(class);
             resolve_exact(cx, &fqn, method, enclosing_class, Some(fqn.clone()))
         }
@@ -23431,7 +23816,7 @@ fn inaccessible_call_subject(
         }
         Callee::Method { receiver, method, .. } => {
             let class = match receiver {
-                Receiver::New(name) => cx.class_fqn(name),
+                Receiver::New { class, .. } => cx.class_fqn(class),
                 Receiver::Var(v) => {
                     if poisoned {
                         return None;
@@ -23778,7 +24163,7 @@ fn undefined_method_receiver(
                 // laundered alias). `class_exact` is set solely by Verified-origin
                 // allocation sites, so the N2 stratum requirement on the receiver
                 // identity holds by construction.
-                Receiver::New(name) => cx.class_fqn(name),
+                Receiver::New { class, .. } => cx.class_fqn(class),
                 Receiver::Var(v) => {
                     if poisoned {
                         return None;
@@ -25978,7 +26363,7 @@ fn arity_method_receiver(
                 return None; // `?->` excluded in v1 (S2 leg (l)).
             }
             let class = match receiver {
-                Receiver::New(name) => cx.class_fqn(name),
+                Receiver::New { class, .. } => cx.class_fqn(class),
                 Receiver::Var(v) => {
                     if poisoned {
                         return None;
@@ -28534,18 +28919,42 @@ fn handle_method_call(
     store: &Store,
     this_exact: Option<&str>,
     enclosing_class: Option<&str>,
-    descent: Option<&mut Descent<'_>>,
+    mut descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> MethodCallOutcome {
     let empty = MethodCallOutcome { summary: None, return_arms: None, ctor_heap: None };
-    let Some(target) =
+    let Some(mut target) =
         resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
         return empty;
     };
 
+    // The receiver's own object for `(new C(1))->m()` (issue #386): minted — and its
+    // constructor walked — right here, this being the receiver `new`'s only site
+    // (ADR-0057 C7's third seam). It is the one receiver form whose object did not
+    // exist when the target resolved, so both readers that wanted it are filled here:
+    // the class-level generic carries below, and the `$this` seed further down.
+    let recv_new = receiver_new_object(
+        cx,
+        folder,
+        &call.receiver,
+        env,
+        store,
+        scope.poisoned,
+        call.span.start,
+        descent.as_deref_mut(),
+        out,
+    );
+    if let Some(obj) = &recv_new {
+        target.receiver_carries = obj.targs.clone();
+    }
+
     // Capture arms at resolution — before any later store mutation at the assign site.
-    let return_arms = if matches!(call.receiver, Callee::Construct { .. }) {
+    // A `?->` call rebinds neither arms nor summary (ADR-0075 §3.1): its result is
+    // `null` whenever the receiver is, which neither of them says.
+    let return_arms = if matches!(call.receiver, Callee::Construct { .. })
+        || nullsafe_call(&call.receiver)
+    {
         None
     } else {
         // With the call's arguments in hand, so a METHOD-level `@template` binds
@@ -28578,6 +28987,8 @@ fn handle_method_call(
         call,
         env,
         store,
+        this_exact,
+        enclosing_class,
         scope.poisoned,
         descent.is_some(),
         out,
@@ -28628,8 +29039,7 @@ fn handle_method_call(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display,
         target.this_exact,
-        target.receiver_var.as_deref(),
-        ctor_seed.as_ref(),
+        this_seed_of(ctor_seed.as_ref(), recv_new.as_ref(), target.receiver_var.as_deref()),
         &arg_values,
         call.span.start,
         &[],
@@ -28647,8 +29057,65 @@ fn handle_method_call(
             return_arms,
             ctor_heap: summary.and_then(|s| s.heap),
         },
+        // The body was walked for its diagnostics either way; what a `?->` refuses is
+        // the rebind (ADR-0075 §3.1).
+        None if nullsafe_call(&call.receiver) => {
+            MethodCallOutcome { summary: None, return_arms, ctor_heap: None }
+        }
         None => MethodCallOutcome { summary, return_arms, ctor_heap: None },
     }
+}
+
+/// The `$this` seed of a method/constructor descent, from the three sources
+/// [`handle_method_call`] and [`project_method_summary`] may hold — mutually
+/// exclusive by construction (a call has one receiver), ordered here only so the
+/// exclusion is stated once rather than at each caller.
+fn this_seed_of<'a>(
+    ctor: Option<&'a HeapObj>,
+    recv_new: Option<&'a HeapObj>,
+    receiver_var: Option<&'a str>,
+) -> Option<ThisSeed<'a>> {
+    ctor.map(ThisSeed::Ctor)
+        .or_else(|| recv_new.map(ThisSeed::ReceiverNew))
+        .or_else(|| receiver_var.map(ThisSeed::ReceiverVar))
+}
+
+/// Whether a call short-circuits to `null` on a `null` receiver — the `?->` form
+/// (ADR-0075 §3.1). Neither the callee's summary nor its declared return arms
+/// describe such a result, so both are declined at every rung that would rebind
+/// them; everything else about the call is judged as usual.
+fn nullsafe_call(receiver: &Callee) -> bool {
+    matches!(receiver, Callee::Method { nullsafe: true, .. })
+}
+
+/// The object a **receiver-position** `new` mints — `(new C(1))->m()` — with its
+/// constructor walked (ADR-0057 C7's third seam, issue #386), or `None` for every
+/// other receiver.
+///
+/// The lowering builds no `Callee::Construct` call for a receiver `new`, exactly as
+/// it builds none for an argument-position one, so this is that site's only site and
+/// the `new` is still walked once. `constructed_object` is the shared body: the
+/// snapshot its exits agree on, or the ADR-0086 §4 lexical floor at every decline.
+#[allow(clippy::too_many_arguments)]
+fn receiver_new_object(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    receiver: &Callee,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    span_start: u32,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<HeapObj> {
+    let Callee::Method { receiver: Receiver::New { class, args, named }, .. } = receiver else {
+        return None;
+    };
+    if poisoned {
+        return None;
+    }
+    let class = cx.class_fqn(class);
+    Some(constructed_object(cx, folder, &class, args, named, env, store, span_start, descent, out))
 }
 
 /// The provenance render base for a bound method/constructor call.
@@ -28674,6 +29141,10 @@ fn check_method_args(
     call: &CallExpr,
     env: &HashMap<String, Known>,
     store: &Store,
+    // The CALLER's frame, for a method-call argument with a `$this`/`self::`/
+    // `parent::` receiver — the caller's own, never the callee's (issue #386).
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
     poisoned: bool,
     in_descent: bool,
     out: &mut Vec<Diagnostic>,
@@ -28726,6 +29197,35 @@ fn check_method_args(
                         cx.try_fold_emit(name, args, env, poisoned, folder, out)
                             .map(|(l, p, s)| (l, Some(p), s))
                     }
+                }
+                // A nested method / static call (issue #386), the twin of the
+                // function-call arm the propagated check runs — same rungs, same
+                // `Verified`-only gate, same plain-pass restriction.
+                ArgValue::MethodCall { callee, args, named } if !in_descent => {
+                    project_method_summary(
+                        cx,
+                        folder,
+                        callee,
+                        args,
+                        named,
+                        env,
+                        store,
+                        this_exact,
+                        enclosing_class,
+                        poisoned,
+                        arg.span.start,
+                        None,
+                        out,
+                    )
+                    .and_then(|s| {
+                        let sv = s.value?;
+                        let Fact::Singleton(v) = &sv.fact else { return None };
+                        Some((
+                            arg_of_val(v),
+                            Some(format!("returned from {}", arg.value.render())),
+                            sv.stratum,
+                        ))
+                    })
                 }
                 // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
                 ArgValue::PropFetch { var, prop } if !poisoned => {
@@ -28934,6 +29434,9 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // literal, so an unresolved one is genuinely unproven).
         ArgValue::Var(_)
         | ArgValue::Call(..)
+        // A method call reaching here did not resolve to a value — a resolved one
+        // arrives as the literal its summary proved (issue #386).
+        | ArgValue::MethodCall { .. }
         | ArgValue::Ternary { .. }
         | ArgValue::Coalesce(..)
         | ArgValue::OffsetRead { .. }

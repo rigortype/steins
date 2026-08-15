@@ -428,25 +428,26 @@ fn the_receiver_reads_exactly_as_the_argument_does() {
 }
 
 #[test]
-fn a_method_call_in_value_position_is_still_the_value_ir_limit() {
-    // The parity above is read at the assignment rung because the direct form is
-    // blocked one layer below this slice: `ArgValue::Call` carries a **simple function
-    // name** and a method call never reaches the value IR at all (ADR-0075 §3, v1
-    // exclusion; the same carrier limit issue #374 measured for `Receiver::New`). The
-    // summary the receiver leg now proves is therefore invisible in argument and dump
-    // position, and pinning that here says which layer to fix rather than leaving the
-    // gap to be re-diagnosed as a heap-entry one.
+fn a_method_call_in_value_position_reads_the_same_summary() {
+    // This pinned the value-IR limit: the parity above was read at the assignment
+    // rung only, because `ArgValue::Call` carried a **simple function name** and a
+    // method call never reached the value IR at all (ADR-0075 §3's v1 exclusion —
+    // the same carrier limit issue #374 measured for `Receiver::New`). Issue #386
+    // lifted it, so the pin flips: the summary this leg proves is now visible in
+    // argument and dump position too, through the same `resolve_call_target` and
+    // the same one walk. `value_ir_method_calls.rs` owns that layer's own fixtures;
+    // what is pinned here is that the receiver copy is what they read.
     assert_eq!(
         dumped(&format!("{BOXM}$b = new Box(1);\n\\PHPStan\\dumpType($b->get());")),
-        "dumped type: unknown",
+        "dumped type: 1",
     );
     assert_eq!(
         count(&format!("{BOXM}$b = new Box(1);\nneedString($b->unwrap());\n")),
-        0,
-        "a method call in argument position is not a value here",
+        1,
+        "a method call in argument position is a value now",
     );
-    // The function twin of the very same body does answer, which is what locates the
-    // limit in the carrier rather than in the descent.
+    // The function twin of the very same body answers identically, which is what
+    // makes the parity a property of the descent rather than of the position.
     assert_eq!(
         dumped(&format!(
             "{BOXM}function get(Box $b): mixed {{ return $b->value; }}\n\
