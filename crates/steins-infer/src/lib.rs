@@ -17990,9 +17990,11 @@ fn check_return_missing(cx: &Cx, never_returning: &HashSet<String>, out: &mut Ve
     for scope in cx.tree().scopes() {
         // Premise 1a: a written, non-void, non-never return hint. The RAW hint, not
         // the lowered `NativeType`: `: array` / `: mixed` / `: self` lower to `None`
-        // and fatal exactly as `: int` does.
+        // and fatal exactly as `: int` does. `RetHintKind::Mixed` is spelled out with
+        // `Other` on purpose — its summary exemption (issue #364) is about what the
+        // envelope ADMITS, and admitting everything still admits nothing at all.
         let Some(hint) = scope.ret_hint else { continue };
-        if hint.kind != RetHintKind::Other {
+        if matches!(hint.kind, RetHintKind::Void | RetHintKind::Never) {
             continue;
         }
         // Premise 1b: not a generator — a body with `yield` returns a `Generator`
@@ -21024,7 +21026,17 @@ fn join_summary(
     // are empty and `native_violates` cannot drop boundary TypeErrors (`return
     // null` under `: object`). Refuse rather than rebind an uncheckable exit as a
     // Singleton premise (ADR-0075 review).
-    if ret.is_none() && callee_scope.ret_hint.is_some() {
+    //
+    // `: mixed` is exempt (issue #364): it is the TOTAL envelope, so the empty
+    // oracle has nothing to drop — no value violates `mixed`, and no conversion
+    // happens at the boundary — and the exit that crosses is the exit the body
+    // proved. It reads as NO hint here and only here: `floor` stays `None` (a total
+    // envelope has no single-base value floor), so a factless exit still floors the
+    // whole summary out (A3), and everything outside this function keeps treating
+    // it as the written hint it is.
+    if ret.is_none()
+        && callee_scope.ret_hint.is_some_and(|h| h.kind != RetHintKind::Mixed)
+    {
         return None;
     }
     let floor = ret.and_then(native_value_floor);

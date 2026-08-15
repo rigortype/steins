@@ -502,6 +502,120 @@ fn namespaced_builtin_homonym_declines_in_value_position() {
     assert_eq!(one_type(src), "dumped type: unknown");
 }
 
+// `: mixed` is the total envelope — no hint at all, for the summary (issue #364).
+
+#[test]
+fn mixed_hint_summarizes_like_no_hint_at_all() {
+    // Three spellings of "this callee promises nothing": no hint, `: mixed`, and a
+    // `@return mixed` docblock. The body proves `1` under each, and the call site
+    // reads the same `1` — the native `: mixed` no longer kills the summary because
+    // there is no value it could have refused at the boundary.
+    let untyped = "<?php\n\
+        function f(int $x) { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    let native_mixed = "<?php\n\
+        function f(int $x): mixed { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    let phpdoc_mixed = "<?php\n\
+        /** @return mixed */\n\
+        function f(int $x) { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(native_mixed), "dumped type: 1");
+    assert_eq!(one_type(native_mixed), one_type(untyped), "`: mixed` reads as no hint");
+    assert_eq!(one_type(native_mixed), one_type(phpdoc_mixed), "native twins the docblock");
+}
+
+#[test]
+fn mixed_hint_premises_the_boundary_typeerror() {
+    // The acceptance case: the proven `1` crossing a `: mixed` boundary is the same
+    // premise the hint-less callee supplies, so `takesString()` reports the same
+    // strict-mode TypeError with the same provenance.
+    let native_mixed = "<?php\n\
+        declare(strict_types=1);\n\
+        function f(int $x): mixed { return $x; }\n\
+        function takesString(string $s): void {}\n\
+        takesString(f(1));\n";
+    let untyped = "<?php\n\
+        declare(strict_types=1);\n\
+        function f(int $x) { return $x; }\n\
+        function takesString(string $s): void {}\n\
+        takesString(f(1));\n";
+    let mismatches = |src: &str| -> Vec<String> {
+        findings(src)
+            .into_iter()
+            .filter(|d| d.id == "type.argument-mismatch")
+            .map(|d| d.message)
+            .collect()
+    };
+    let under_mixed = mismatches(native_mixed);
+    assert_eq!(under_mixed.len(), 1, "the `: mixed` callee premises the boundary: {under_mixed:?}");
+    assert!(under_mixed[0].contains("returned from f()"), "{}", under_mixed[0]);
+    assert_eq!(under_mixed, mismatches(untyped), "identical to the hint-less spelling");
+}
+
+#[test]
+fn phpdoc_refines_within_the_mixed_envelope() {
+    // `/** @return int */` under `: mixed`: the docblock is a claim ABOUT the proof,
+    // not a replacement for it. Before the exemption the refused summary left the
+    // caller reading the claim alone (`int (asserted)`); now the proof crosses and
+    // the claim covers it, exactly as it does with no native hint.
+    let under_mixed = "<?php\n\
+        /** @return int */\n\
+        function f(int $x): mixed { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    let untyped = "<?php\n\
+        /** @return int */\n\
+        function f(int $x) { return $x; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(under_mixed), "dumped type: 1");
+    assert_eq!(one_type(under_mixed), one_type(untyped), "the claim refines, never replaces");
+}
+
+#[test]
+fn other_unlowerable_hints_still_refuse_the_summary() {
+    // The rest of the refusal list is untouched: `: array` and `: object` lower to no
+    // `NativeType` and — unlike `mixed` — really can be violated, so the A2 oracle's
+    // silence still means "refuse". The dump stays honestly unknown, and no finding
+    // is manufactured out of an exit that would never reach the caller.
+    for hint in ["array", "object"] {
+        let src = format!(
+            "<?php\n\
+             declare(strict_types=1);\n\
+             function f(int $x): {hint} {{ return $x; }}\n\
+             function takesString(string $s): void {{}}\n\
+             takesString(f(1));\n\
+             \\PHPStan\\dumpType(f(1));\n"
+        );
+        assert_eq!(one_type(&src), "dumped type: unknown", ": {hint} refuses the summary");
+        assert_eq!(count(&src, "type.argument-mismatch"), 0, ": {hint} premises nothing");
+    }
+}
+
+#[test]
+fn void_and_never_hints_still_refuse_the_summary() {
+    // `: void` is the deliberate v1 refusal (ADR-0075 §2.4: PHP does hand the caller
+    // `NULL`, and the summary still declines to say so); `: never` has no caller-side
+    // value at all. Neither is a total envelope, so neither follows `mixed`.
+    let void = "<?php\n\
+        function f(int $x): void { return; }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    let never = "<?php\n\
+        function f(int $x): never { throw new \\RuntimeException(); }\n\
+        \\PHPStan\\dumpType(f(1));\n";
+    assert_eq!(one_type(void), "dumped type: unknown");
+    assert_eq!(one_type(never), "dumped type: unknown");
+}
+
+#[test]
+fn mixed_hint_keeps_the_missing_return_fatal() {
+    // The exemption is scoped to the summary: everywhere else `: mixed` is the written
+    // hint it is. A body that falls off its end is a runtime `TypeError` under
+    // `: mixed` exactly as under `: int`, and the return-missing pair still says so.
+    let src = "<?php\n\
+        function f(int $x): mixed { $y = $x; }\n";
+    assert_eq!(count(src, "type.return-missing"), 1, "{:?}", findings(src));
+}
+
 #[test]
 fn nested_descent_emits_callee_finding_exactly_once() {
     // A caller-bound proof INSIDE the nested callee: binding `$t = 1` into `g`
