@@ -157,9 +157,17 @@ falling back to `T`'s declared bound where nothing decides it. Steins performs
 one positional **read** instead (issue #363): a `@param Owner<…, T, …>` at the
 top level asks the argument's generics carry what sits at `T`'s position in
 `Owner`'s own `@template` list, `@param T $p` reads the argument's proven value,
-and nothing else binds. The consequences are all silences. A nested or nullable
-occurrence contributes nothing where PHPStan solves it. Two occurrences that
-disagree decline, where PHPStan joins or errors. A named or spread argument list
+and nothing else binds. Most consequences are silences: a nested or nullable
+occurrence contributes nothing where PHPStan solves it, and two occurrences that
+disagree decline where PHPStan joins or errors. One is not, and it is the entry's
+sharpest edge: a non-binding occurrence does not *contest* the name either, so
+where PHPStan unifies `@param \Closure():T $a` with `@param T $b` and joins the
+two into `A1|A2`, Steins reads the one position it can and answers `A2` — a
+**narrower** answer, not a wider one. That is admissible rather than alarming
+because of what the answer is: an Asserted return arm, which premises no
+proof-layer finding and no argument-mismatch, so a narrower read costs true
+positives at worst. Widening it would mean modelling the positions the rule
+declines, which is the solver. A named or spread argument list
 declines the whole call, because position stops naming a parameter. A **bounded**
 template reads its bound rather than the value carried at it — `@template T of
 int` under `@param Box<T>` handed `new Box(1)` reads `int`, where PHPStan reads
