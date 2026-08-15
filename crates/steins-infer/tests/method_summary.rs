@@ -443,6 +443,49 @@ fn object_return_null_does_not_rebind_on_function_twin() {
     assert_eq!(count(src, "call.on-null"), 0);
 }
 
+// `: mixed` is the one exemption: the total envelope reads as no hint (issue #364).
+
+#[test]
+fn mixed_return_hint_rebinds_on_method() {
+    // The method leg shares `join_summary` with functions, so the exemption arrives
+    // here for free — pinned because "for free" is exactly the kind of claim that
+    // stops being true. An exact receiver, a body that proves `3`, a `: mixed` hint
+    // that admits it: the call site reads the proof, not the envelope.
+    let src = "<?php\n\
+        final class C {\n\
+            public function m(int $x): mixed { return $x; }\n\
+        }\n\
+        $x = (new C())->m(3);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "3");
+}
+
+#[test]
+fn mixed_return_hint_twins_the_hint_less_method() {
+    // Same body, three spellings of "promises nothing" — the dumps agree.
+    let hint_less = "<?php\n\
+        final class C {\n\
+            public function m(int $x) { return $x; }\n\
+        }\n\
+        $x = (new C())->m(3);\n\
+        \\PHPStan\\dumpType($x);\n";
+    let native_mixed = "<?php\n\
+        final class C {\n\
+            public function m(int $x): mixed { return $x; }\n\
+        }\n\
+        $x = (new C())->m(3);\n\
+        \\PHPStan\\dumpType($x);\n";
+    let phpdoc_mixed = "<?php\n\
+        final class C {\n\
+            /** @return mixed */\n\
+            public function m(int $x) { return $x; }\n\
+        }\n\
+        $x = (new C())->m(3);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(native_mixed), one_type(hint_less));
+    assert_eq!(one_type(native_mixed), one_type(phpdoc_mixed));
+}
+
 #[test]
 fn array_return_null_does_not_rebind_on_method() {
     let src = "<?php\n\

@@ -1997,7 +1997,13 @@ pub enum RetHintKind {
     Void,
     /// `: never`
     Never,
-    /// Any non-void/never hint — scalar, class, `array`, union, …
+    /// `: mixed` — the TOTAL envelope. Lowers to no [`NativeType`] like `: array` and
+    /// `: object` do, but unlike them it admits every value, so the return summary reads
+    /// it as no hint at all (ADR-0075 §2.4, issue #364). Everywhere else it is an ordinary
+    /// written hint: a `: mixed` body that falls off its end is a runtime `TypeError`
+    /// exactly as `: int` is.
+    Mixed,
+    /// Any other hint — scalar, class, `array`, union, …
     Other,
 }
 
@@ -6393,6 +6399,9 @@ fn classify_ret_hint(hint: &Hint<'_>) -> RetHintKind {
     match hint {
         Hint::Void(_) => RetHintKind::Void,
         Hint::Never(_) => RetHintKind::Never,
+        // `mixed` cannot appear inside a union or behind `?` (PHP forbids both), so the
+        // bare — possibly parenthesized — spelling is the only one there is.
+        Hint::Mixed(_) => RetHintKind::Mixed,
         Hint::Parenthesized(p) => classify_ret_hint(p.hint),
         _ => RetHintKind::Other,
     }
