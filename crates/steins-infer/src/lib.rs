@@ -13795,6 +13795,9 @@ fn new_heap_object(
     // joins it (the carry is a function of the arguments only).
     obj.targs = cx.infer_generic_carry(class, args, env, store, poisoned, folder);
     let props = cx.class_props(class);
+    // Which literal defaults survive the constructor (ADR-0086 §4's stale-default
+    // half). `None` means "every default stands" — the no-constructor case.
+    let ctor_writes = ctor_touched_props(cx, class, &props);
 
     // readonly set + literal defaults.
     for p in &props {
@@ -13818,9 +13821,23 @@ fn new_heap_object(
         {
             // Skip null-admitting facts (unsound to flow past unmodeled guards). A
             // literal default is `Verified` (no env fact consumed).
-            if !fact_is_nullish(&fact) {
+            //
+            // And skip a default the running constructor **touches** (ADR-0086 §4's
+            // stale-default half): `build_new_object` never walks the constructor
+            // body, so `private $view = 0;` overwritten by `$this->view = $arg -
+            // $n;` would otherwise stand as a proven `0` on a freshly allocated
+            // object. Dropping the seed leaves the prop unknown — exactly the state
+            // a declaration without a default produces, and the state every reader
+            // already handles.
+            if !fact_is_nullish(&fact)
+                && ctor_writes.as_ref().is_none_or(|w| !w.contains(p.name.as_str()))
+            {
                 obj.props.insert(p.name.clone(), PropFact { fact, stratum: Stratum::Verified });
             }
+            // Readonly bookkeeping is untouched by the gate: it records that the slot
+            // *was written*, which is no less true when the constructor writes it
+            // again. (PHP forbids a default on a readonly property outright, so the
+            // two clauses cannot even meet on valid input.)
             if p.readonly {
                 obj.ro_written.insert(p.name.clone());
             }
@@ -13880,6 +13897,199 @@ fn new_heap_object(
     }
 
     obj
+}
+
+/// The property names the constructor that runs for `class` **mentions** as
+/// `$this->{prop}` — the gate on literal-default seeding (ADR-0086 §4).
+///
+/// `None` means "no constructor runs", the one case in which a declared default is
+/// the constructed value with nothing between them. `Some(set)` names the props whose
+/// default must be dropped; an **empty** set is the constructor that touches none of
+/// them, and is not the same answer as `None` only in spirit.
+///
+/// **Why a lexical scan.** [`build_new_object`] mints an object without walking the
+/// constructor (ADR-0086 §4 keeps that gap open — a constructor's writes still yield
+/// no props), so it cannot ask what the body *stores*. It can ask the weaker,
+/// decidable question the ADR-0032 argument-pass gate already asks about parameters:
+/// **can the body refer to this slot at all**. A mention is a mention — a write, a
+/// compound assign, `++`, `??=`, a by-ref pass, even one inside a string or a comment
+/// — and every one of them drops the seed. A false hit costs knowledge and nothing
+/// else; a miss would leave a wrong `Verified` fact on the heap, which is the failure
+/// direction this gate exists to close. The scan runs over the body's **source text**
+/// ([`MethodDecl::body_span`]) rather than the linear trace, for the same reason
+/// [`callee_cannot_reach_arg`] does: the trace drops nested sub-expressions, so a
+/// write inside one would be invisible to it.
+///
+/// **Every uncertainty seeds nothing.** A constructor whose body text is unreadable,
+/// or whose scope is poisoned (`extract`, `$$v`, `eval` — a slot can be written
+/// without being spelled), answers with a set containing every property, so no
+/// default survives. Unknown is never proof that a default stands.
+///
+/// So does every constructor that lets `$this` out of its own text — see
+/// [`ThisReach::escapes`]. The per-property rule stays fine-grained only where
+/// nothing delegates.
+///
+/// Promoted parameters are unaffected: their fact is the *argument*, proven at the
+/// call site, and the engine writes it before any body statement runs.
+fn ctor_touched_props(cx: &Cx, class: &str, props: &[&PropertyDecl]) -> Option<HashSet<String>> {
+    let (cfile, ctor) = cx.find_ctor(class)?;
+    let all = || props.iter().map(|p| p.name.clone()).collect::<HashSet<String>>();
+    // A poisoned constructor can reach a slot without spelling it.
+    if cx.method_scope(cfile, &ctor_owner_fqn(cx, class), &ctor.name).is_none_or(|s| s.poisoned) {
+        return Some(all());
+    }
+    let Some(span) = ctor.body_span else { return Some(all()) };
+    let Some(text) = cx.units[cfile].tree.text_at(span) else { return Some(all()) };
+    let reach = this_prop_mentions(text);
+    // `$this` reached somewhere this scan cannot follow: no slot is safe.
+    if reach.escapes {
+        return Some(all());
+    }
+    // Property names are case-SENSITIVE in PHP, so the spelled set is compared as
+    // written — `$this->View` is a different slot from `$this->view`.
+    Some(props.iter().map(|p| p.name.clone()).filter(|n| reach.named.contains(n)).collect())
+}
+
+/// The class whose declaration owns the constructor [`Cx::find_ctor`] resolved for
+/// `class` — an inherited constructor's scope is keyed by the declaring class, not by
+/// the subclass being allocated.
+fn ctor_owner_fqn(cx: &Cx, class: &str) -> String {
+    let mut cur = class.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return cur;
+        }
+        let Some((file, cd)) = cx.find_class(&cur) else { return cur };
+        if cd.methods.iter().any(|m| m.is_constructor) {
+            return cd.fqn.clone();
+        }
+        let Some(parent) = cd.parent.as_ref() else { return cur };
+        cur = cx.units[file].tree.resolve_class_fqn(parent);
+    }
+}
+
+/// What a constructor body's text reveals about the slots it can reach — the answer
+/// [`ctor_touched_props`] gates literal-default seeding on.
+struct ThisReach {
+    /// The property names the text spells directly: `$this->view`. Meaningful only
+    /// while [`Self::escapes`] is `false`.
+    named: HashSet<String>,
+    /// `$this` went somewhere this scan cannot follow, so **no** slot is safe and
+    /// every literal default is dropped. Four shapes set it, each one a route by
+    /// which a slot is written without this text spelling it:
+    ///
+    /// * **a bare `$this`** — not followed by `->`. Passed to a function, assigned to
+    ///   a variable, returned, captured by a closure, pushed into an array: every one
+    ///   of those hands out an alias that can write any property.
+    /// * **`$this->m(…)`** — the delegating shape (`__construct() { $this->init(); }`
+    ///   with `init()` writing `$this->view`). A method call runs a body this scan is
+    ///   not reading.
+    /// * **`parent::m(…)`, `self::m(…)`, `static::m(…)`** — `parent::__construct()`
+    ///   above all. These run with the *same* `$this`, so they are the delegating
+    ///   shape under a different spelling.
+    /// * **`$this->$name` / `$this->{…}`** — the slot is chosen at runtime, so the
+    ///   text names none.
+    ///
+    /// **Deliberately coarse, and the cost is unknown.** A constructor that calls one
+    /// `$this` method loses the defaults of properties that method could not possibly
+    /// touch. Nothing on the measured corpora moved either way, so the precision cost
+    /// is not merely small — it is *unmeasured*, and recorded as such (ADR-0086 §4).
+    /// Refining it needs a per-callee property-write summary: which slots can this
+    /// call write? That is the same ADR-0055 Part II mutation inference the
+    /// caller-side sweep refusal has been waiting on, and until it exists a wrong
+    /// `Verified` default (a proof-layer false positive) is strictly worse than a
+    /// dropped one (lost knowledge).
+    escapes: bool,
+}
+
+/// Scan a constructor body's **source text** for [`ThisReach`]. The property-world
+/// twin of [`mentions_variable`], and deliberately just as blunt.
+///
+/// Boundaries are what keep `$this->view` from matching `$this->viewCount`. Whitespace
+/// of any kind may sit around the arrow (a `$this` and its `->` on two lines is one
+/// access), and `$this?->p` is the same slot under a null guard. A match inside a
+/// string literal or a comment is *accepted* as a mention, which errs toward dropping
+/// the seed and so toward silence.
+fn this_prop_mentions(text: &str) -> ThisReach {
+    let bytes = text.as_bytes();
+    let is_name_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii();
+    let skip_ws = |mut j: usize| {
+        while bytes.get(j).copied().is_some_and(|b| b.is_ascii_whitespace()) {
+            j += 1;
+        }
+        j
+    };
+    // `parent::m(…)` / `self::m(…)` / `static::m(…)`: another body, the same `$this`.
+    // The keywords are case-insensitive in PHP; `to_ascii_lowercase` rewrites no
+    // multi-byte character, so offsets into it are offsets into `text`.
+    let lower = text.to_ascii_lowercase();
+    let same_this_static_call = |kw: &str| {
+        let mut i = 0usize;
+        while let Some(off) = lower[i..].find(kw) {
+            let start = i + off;
+            let mut j = start + kw.len();
+            i = j;
+            // A whole token: `myself::` is not `self::`.
+            if start > 0 && bytes.get(start - 1).copied().is_some_and(|b| is_name_byte(b) || b == b'$')
+            {
+                continue;
+            }
+            j = skip_ws(j);
+            let name_start = j;
+            while bytes.get(j).copied().is_some_and(is_name_byte) {
+                j += 1;
+            }
+            // A bare `self::CONST` reads a constant and runs nothing.
+            if j > name_start && bytes.get(skip_ws(j)).copied() == Some(b'(') {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut named: HashSet<String> = HashSet::new();
+    let mut escapes =
+        ["parent::", "self::", "static::"].iter().any(|kw| same_this_static_call(kw));
+    let mut i = 0usize;
+    while let Some(off) = text[i..].find("$this") {
+        let mut j = i + off + "$this".len();
+        i = j;
+        // A longer variable that merely starts with `this` (`$thisOne`) is not `$this`.
+        if bytes.get(j).copied().is_some_and(is_name_byte) {
+            continue;
+        }
+        j = skip_ws(j);
+        // `$this?->p` is a property access; a `?` that is not the nullsafe arrow's is
+        // a ternary on `$this`, which is the bare shape.
+        let arrow = if bytes.get(j).copied() == Some(b'?') { j + 1 } else { j };
+        if !bytes[arrow..].starts_with(b"->") {
+            escapes = true; // bare `$this`: an alias leaves this text
+            continue;
+        }
+        j = skip_ws(arrow + 2);
+        // `$this->$name` / `$this->{…}`: the slot is chosen at runtime.
+        if matches!(bytes.get(j).copied(), Some(b'$') | Some(b'{')) {
+            escapes = true;
+            continue;
+        }
+        let start = j;
+        while bytes.get(j).copied().is_some_and(is_name_byte) {
+            j += 1;
+        }
+        if j == start {
+            escapes = true; // an arrow followed by nothing this scan can read
+            continue;
+        }
+        // `$this->m(…)` is a call into a body this scan is not reading; `$this->p` is
+        // the slot itself.
+        if bytes.get(skip_ws(j)).copied() == Some(b'(') {
+            escapes = true;
+        } else if let Ok(name) = std::str::from_utf8(&bytes[start..j]) {
+            named.insert(name.to_owned());
+        }
+    }
+    ThisReach { named, escapes }
 }
 
 /// Seed the `$this` object shell for a method scope (ADR-0036): `class_fqn` (the

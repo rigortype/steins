@@ -577,6 +577,16 @@ pub struct MethodDecl {
     // end untyped surface (ADR-0078, issue #200)
     /// The span of the method name identifier (for diagnostic positions).
     pub span: Span,
+    /// File byte span of the method's **body block**, braces included — the
+    /// method-world twin of [`FunctionDecl::body_span`], and `None` exactly where
+    /// there is no body to span (an `abstract` method, an interface method).
+    ///
+    /// Exists for the same reason: a token scan over the body's source text is a
+    /// sound over-approximating oracle where the linear trace is not, because the
+    /// trace drops nested sub-expressions. Its heap-world reader is ADR-0086 §4's
+    /// stale-default gate — a literal property default only survives into a `new`
+    /// allocation when the constructor's own text never spells `$this->{prop}`.
+    pub body_span: Option<Span>,
     /// The recognized effect envelope, if declared (see [`FunctionDecl`]).
     pub effect_envelope: Option<EffectEnvelope>,
     /// Structural effect-origin candidates in the body (see [`EffectOrigin`]); empty for abstract methods.
@@ -4216,6 +4226,11 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         ret_bound_keyword: m.return_type_hint.as_ref().and_then(|r| ret_bound_keyword(&r.hint)),
         ret_span: m.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(m.name.span()),
+        body_span: match &m.body {
+            MethodBody::Concrete(block) => Some(to_span(block.span())),
+            // Abstract and interface methods have a `;` where a block would be.
+            MethodBody::Abstract(_) => None,
+        },
         effect_envelope: attrs_effect_envelope(&m.attribute_lists, aliases),
         effect_origins,
         throw_origins,
