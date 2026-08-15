@@ -4039,7 +4039,7 @@ fn check_units(
             // that keeps the binding descent positional-only lives on the descent path.
             let Some(site) = cx.resolve_user_fn_any(call) else { continue };
             let decl = cx.fn_decl(site);
-            let envelopes = parse_envelopes(decl.docblock.as_deref());
+            let envelopes = cx.envelopes_of(decl.docblock.as_deref(), site.file, decl.span.start);
             for (i, arg) in call.args.iter().enumerate() {
                 let Some(param) = decl.params.get(i) else { break };
                 if param.variadic {
@@ -8392,9 +8392,19 @@ fn collect_bare_identifiers(ty: &PType, out: &mut Vec<String>) {
 /// yields nothing anyway. Only the exact three-argument shape is exempt —
 /// any other arity is not this utility type, whatever it is spelled like.
 fn template_type_owner_arg(base: &str, arity: usize) -> Option<usize> {
-    let is_template_type =
-        arity == 3 && base.trim_start_matches('\\').eq_ignore_ascii_case("template-type");
-    is_template_type.then_some(1)
+    is_template_type(base, arity).then_some(1)
+}
+
+/// Whether a [`PKind::Generic`] node is PHPStan's `template-type<Subject, Owner,
+/// 'TName'>` utility written at the arity that means anything — the one spelling
+/// [`Cx::resolve_template_types`] rewrites and [`template_type_owner_arg`] exempts.
+///
+/// Case-insensitive and `\`-blind, matching how the contract lane's
+/// `KNOWN_UNENFORCED` floor recognizes the same name (issue #360). Any other arity
+/// is not this utility type, whatever it is spelled like: it keeps that floor and
+/// no rewrite touches it.
+fn is_template_type(base: &str, arity: usize) -> bool {
+    arity == 3 && base.trim_start_matches('\\').eq_ignore_ascii_case("template-type")
 }
 
 // ---------------------------------------------------------------------------
@@ -9097,6 +9107,14 @@ impl<'a> Cx<'a> {
         // The constructor's own `@param` envelopes, WITHOUT the class-level template
         // shadow applied: a bare `@param T` must stay readable as the template name
         // `T` here (the shadow that neutralizes it to opaque is a check-site concern).
+        //
+        // The one site that keeps [`parse_envelopes`] rather than
+        // [`Self::envelopes_of`] (issue #361): `find_ctor` walks the inheritance
+        // chain and hands back a `MethodDecl` without saying which file declared it,
+        // so there is no honest namespace context to resolve a `template-type`
+        // owner against — and resolving one in the *wrong* file's `use` scope would
+        // name a different class. A `template-type` in a constructor `@param` keeps
+        // the `Opaque` floor here, which binds no template and carries nothing.
         let Some(ctor_env) = parse_envelopes(ctor.docblock.as_deref()) else { return empty };
         let mut out = Vec::with_capacity(templates.len());
         for tmpl in &templates {
@@ -9175,6 +9193,28 @@ impl<'a> Cx<'a> {
     /// as owner-keyed carries (ADR-0032 amendment, issue #294). Empty for a class
     /// with no docblock, no such tag, or no tag that survives the checks above.
     fn inheritance_edges(&self, class_fqn: &str) -> Vec<GenericCarry> {
+        self.inheritance_edge_types(class_fqn)
+            .into_iter()
+            .map(|e| GenericCarry {
+                owner: e.owner,
+                args: e.args.iter().map(|t| CArg::Ty(steins_contract::lower(t))).collect(),
+                site: Some(e.site),
+            })
+            .collect()
+    }
+
+    /// The same edges [`Self::inheritance_edges`] returns, **before** lowering —
+    /// each argument still the phpdoc AST the author wrote.
+    ///
+    /// One parse serves two readers with different needs (issue #361). The carry
+    /// wants a `ContractTy`, because acceptance meets it with `subsumes`. The
+    /// declared-side `template-type` projection wants the AST, because it splices
+    /// one argument back into an envelope that has not been lowered yet — and a
+    /// `ContractTy` could not carry a template identifier through the shadow stages
+    /// that still have to run over it. Every gate (a real ancestor, an arity that
+    /// aligns with the owner's own `@template` list) is applied here, so both
+    /// readers see exactly the edges the amendment admits.
+    fn inheritance_edge_types(&self, class_fqn: &str) -> Vec<InheritanceEdge> {
         let Some((file, cd)) = self.find_class(class_fqn) else { return Vec::new() };
         let Some(doc) = cd.docblock.as_deref() else { return Vec::new() };
         let coff = cd.span.start;
@@ -9204,10 +9244,10 @@ impl<'a> Cx<'a> {
             if declared.len() != args.len() {
                 continue;
             }
-            out.push(GenericCarry {
+            out.push(InheritanceEdge {
                 owner,
-                args: args.iter().map(|a| CArg::Ty(steins_contract::lower(&a.ty))).collect(),
-                site: Some((file, coff)),
+                args: args.iter().map(|a| a.ty.clone()).collect(),
+                site: (file, coff),
             });
         }
         out
@@ -10012,12 +10052,12 @@ impl<'a> Cx<'a> {
             ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => None,
             ScopeOwner::Function(name) => {
                 let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
-                parse_envelopes(f.docblock.as_deref())
+                self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)
             }
             ScopeOwner::Method { class, method } => {
                 let cd = self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
-                let mut env = parse_envelopes(m.docblock.as_deref())?;
+                let mut env = self.envelopes_of(m.docblock.as_deref(), self.cur, m.span.start)?;
                 env.shadow_templates(&template_names_of(cd.docblock.as_deref()));
                 Some(env)
             }
@@ -10102,14 +10142,14 @@ impl<'a> Cx<'a> {
             ScopeOwner::Function(name) => {
                 let f =
                     self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
-                let ret = parse_envelopes(f.docblock.as_deref())?.ret?;
+                let ret = self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)?.ret?;
                 Some((ret, f.name.clone()))
             }
             ScopeOwner::Method { class, method } => {
                 let cd =
                     self.tree().classes().iter().find(|c| c.fqn.eq_ignore_ascii_case(class))?;
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
-                let mut env = parse_envelopes(m.docblock.as_deref())?;
+                let mut env = self.envelopes_of(m.docblock.as_deref(), self.cur, m.span.start)?;
                 // Class-level `@template` names shadow in this method's `@return` too
                 // (issue #5) — the idempotent class-level stage.
                 env.shadow_templates(&template_names_of(cd.docblock.as_deref()));
@@ -10121,8 +10161,9 @@ impl<'a> Cx<'a> {
             // functions. No enclosing-class `@template` shadowing here (known
             // limitation: a closure inside a templated class could misread a
             // template name as a class name).
-            ScopeOwner::Closure { .. } => {
-                let ret = parse_envelopes(scope.docblock.as_deref())?.ret?;
+            ScopeOwner::Closure { def_offset } => {
+                let ret =
+                    self.envelopes_of(scope.docblock.as_deref(), self.cur, *def_offset)?.ret?;
                 Some((ret, "closure".to_owned()))
             }
         }
@@ -16021,8 +16062,8 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     // already shadowed to `Opaque` by `parse_envelopes`, issue #5). Class arms resolve
     // in the CALLEE's file/namespace (where the return type is written), matching how
     // the native return member list's FQNs were resolved at lowering.
-    let phpdoc = parse_envelopes(decl.docblock.as_deref()).and_then(|e| e.ret);
     let off = decl.span.start;
+    let phpdoc = cx.envelopes_of(decl.docblock.as_deref(), site.file, off).and_then(|e| e.ret);
     let resolve = |n: &str| {
         cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
@@ -16036,13 +16077,13 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
 fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractArm>> {
     let method = target.method;
     let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
-    let mut envelopes = parse_envelopes(method.docblock.as_deref());
+    let off = method.span.start;
+    let file = target.class_file;
+    let mut envelopes = cx.envelopes_of(method.docblock.as_deref(), file, off);
     if let Some(e) = &mut envelopes {
         e.shadow_templates(&template_names_of(target.declaring_class.docblock.as_deref()));
     }
     let phpdoc = envelopes.and_then(|e| e.ret);
-    let off = method.span.start;
-    let file = target.class_file;
     let resolve = |n: &str| {
         cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
@@ -18922,7 +18963,7 @@ fn apply_call_asserts(
         return;
     };
     let (params, decl_at) = (callee.params, callee.decl_at);
-    let Some(envelopes) = parse_envelopes(callee.docblock) else { return };
+    let Some(envelopes) = cx.envelopes_of(callee.docblock, decl_at.0, decl_at.1) else { return };
     for spec in &envelopes.asserts {
         if spec.kind != kind {
             continue;
@@ -19032,7 +19073,8 @@ fn guard_assert_kept_lanes(
             continue;
         };
         let params = callee.params;
-        let Some(envelopes) = parse_envelopes(callee.docblock) else { continue };
+        let (cfile, coff) = callee.decl_at;
+        let Some(envelopes) = w.cx.envelopes_of(callee.docblock, cfile, coff) else { continue };
         for spec in &envelopes.asserts {
             if !matches!(steins_contract::lower(&spec.ty), steins_contract::ContractTy::Class(_)) {
                 continue;
@@ -20179,7 +20221,7 @@ fn check_propagated_call(
     // arguments are contract-checked here; only the binding descent stays positional.
     let Some(site) = cx.resolve_user_fn_any(call) else { return };
     let decl = cx.fn_decl(site);
-    let envelopes = parse_envelopes(decl.docblock.as_deref());
+    let envelopes = cx.envelopes_of(decl.docblock.as_deref(), site.file, decl.span.start);
 
     for (i, arg) in call.args.iter().enumerate() {
         let Some(param) = decl.params.get(i) else { break };
@@ -20646,11 +20688,12 @@ fn handle_var_call(
 fn closure_return_arms(cx: &Cx, callee_scope: &Scope) -> Option<Vec<ContractArm>> {
     let native: Vec<ContractTy> =
         callee_scope.ret_ty.as_ref().map(native_arms).unwrap_or_default();
-    let phpdoc = parse_envelopes(callee_scope.docblock.as_deref()).and_then(|e| e.ret);
     let off = match &callee_scope.owner {
         ScopeOwner::Closure { def_offset } => *def_offset,
         _ => 0,
     };
+    let phpdoc =
+        cx.envelopes_of(callee_scope.docblock.as_deref(), cx.cur, off).and_then(|e| e.ret);
     let resolve = |n: &str| {
         cx.resolve_pclass(cx.cur, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
@@ -26808,7 +26851,7 @@ fn check_method_args(
     in_descent: bool,
     out: &mut Vec<Diagnostic>,
 ) {
-    let mut envelopes = parse_envelopes(method.docblock.as_deref());
+    let mut envelopes = cx.envelopes_of(method.docblock.as_deref(), class_file, method.span.start);
     // Class-level `@template` names shadow same-named classes in every member
     // docblock of the class-like (issue #5) — the second, idempotent shadow stage.
     if let Some(e) = &mut envelopes {
@@ -27428,6 +27471,20 @@ struct GenericCarry {
     site: Option<(usize, u32)>,
 }
 
+/// One parameterized inheritance edge as written — [`Cx::inheritance_edge_types`]'s
+/// element, the pre-lowering half of a [`GenericCarry`] (issue #361).
+///
+/// Same gates, same owner keying; only the arguments differ, and they differ
+/// because the two readers ask different questions of them. `site` is the class
+/// docblock's own `(file, offset)`, which the arguments' class names were written
+/// against — carrying it is what lets a reader lift an argument out of this
+/// declaration without changing what its names mean.
+struct InheritanceEdge {
+    owner: String,
+    args: Vec<PType>,
+    site: (usize, u32),
+}
+
 /// One carried type argument. Two provenances: a `new` site proves a **value**
 /// flowed in (tier-1 propagation feeding tier 3), an inheritance edge states a
 /// **type** the author wrote.
@@ -27502,6 +27559,29 @@ impl Envelopes {
         }
         for s in &mut self.asserts {
             neutralize_templates(&mut s.ty, shadow);
+        }
+    }
+
+    /// Resolve every `template-type<…>` node in every envelope to the type it
+    /// denotes (issue #361) — the declaration-side half of [`Cx::envelopes_of`],
+    /// applied to the same three places [`Self::shadow_templates`] rewrites.
+    ///
+    /// Runs **after** this declaration's own `@template` shadow and **before** the
+    /// enclosing class-like's, which is what makes the two template levels come out
+    /// right without a second pass: a function-level `T` has already become its
+    /// bound or an opaque node, so `template-type<Box<T>, Box, 'T'>` projects
+    /// exactly what `@return T` would; a class-level `T` is still an identifier
+    /// here, so the projection yields the name and the member site's shadow
+    /// neutralizes it afterwards, as it does for any other class-level template.
+    fn resolve_template_types(&mut self, cx: &Cx, file: usize, off: u32) {
+        for (_, t) in &mut self.params {
+            cx.resolve_template_types(t, file, off);
+        }
+        if let Some(t) = &mut self.ret {
+            cx.resolve_template_types(t, file, off);
+        }
+        for s in &mut self.asserts {
+            cx.resolve_template_types(&mut s.ty, file, off);
         }
     }
 }
@@ -27765,7 +27845,263 @@ fn kind_has_unsupported(kind: &PKind) -> bool {
     }
 }
 
+/// What the declared-side rewrite concluded about one `template-type<…>` node
+/// (issue #361). Three outcomes, because two different things are *not* an answer
+/// and they must not be confused.
+enum Projection {
+    /// The named template argument, decided from declarations — the node becomes it.
+    Resolved(PKind),
+    /// Nothing here is decidable from declarations, and nothing later will decide
+    /// it either: the node becomes `Unsupported`, lowering to `Opaque` and legible
+    /// as declined.
+    Declined,
+    /// The subject is a **template name**, so the answer lives at a call site, not
+    /// in a declaration. The node is left exactly as written — it already floors to
+    /// `Opaque` (issue #360), and the carry readers (#362/#363) need to see the
+    /// spelling that a rewrite would have erased.
+    Deferred,
+}
+
 impl<'a> Cx<'a> {
+    /// [`parse_envelopes`] plus the declared-side `template-type` rewrite (issue
+    /// #361) — the one constructor every envelope consumer with a declaration
+    /// context in hand should use.
+    ///
+    /// `file`/`off` locate the docblock's namespace and `use` scope: the owner
+    /// argument is a class *reference*, and which class it names is exactly the
+    /// question those two answer. A site with no such context (an inherited
+    /// constructor reached through a chain that does not report the file it was
+    /// declared in) keeps calling [`parse_envelopes`] and gets the `Opaque` floor.
+    fn envelopes_of(&self, docblock: Option<&str>, file: usize, off: u32) -> Option<Envelopes> {
+        let mut env = parse_envelopes(docblock)?;
+        env.resolve_template_types(self, file, off);
+        Some(env)
+    }
+
+    /// Rewrite every `template-type<Subject, Owner, 'TName'>` node in one phpdoc
+    /// type to the type it denotes (issue #361), in place. Idempotent, and applied
+    /// where envelopes are built rather than where they are lowered: finding
+    /// `'TName'`'s position needs the owner's `@template` list out of the project
+    /// index, which the contract lane has no access to (ADR-0030's one-relation
+    /// discipline — this is a rewrite, not a second evaluator).
+    ///
+    /// Three subject shapes resolve, and each is a *declaration* reading:
+    ///
+    /// - **A spelled parameterization of the owner** — `template-type<Box<int>,
+    ///   Box, 'T'>` is `int`, positionally, by the owner's own template order.
+    /// - **A one-level inheritance edge to the owner** — `IntBox` declaring
+    ///   `@extends Box<int>` gives `int`. One level, no walk: a subject that
+    ///   reaches the owner through a generic intermediate is a *substitution*
+    ///   problem, and a class declaring its own `@template`s is the case ADR-0032's
+    ///   amendment already settles the other way ("own templates win").
+    /// - **The owner parameterized by a template name** — `template-type<Box<T>,
+    ///   Box, 'T'>` is `T`, whatever `T` has become by the time this runs.
+    ///
+    /// Everything else declines to `Unsupported`, never to a manufactured class:
+    /// an unknown owner, a template name the owner does not declare, an arity
+    /// disagreement between the spelled arguments and that list, an unrelated
+    /// subject, a union/shape/callable subject. Arguments are rewritten before the
+    /// node itself, so a nested utility resolves inside-out.
+    ///
+    /// Variance does **not** gate a projection. `@template-covariant T` states what
+    /// the author expects of *substitution*, which is why #294 gates acceptance on
+    /// it; reading an argument out by position asks nothing about substitution at
+    /// all.
+    fn resolve_template_types(&self, ty: &mut PType, file: usize, off: u32) {
+        match &mut ty.kind {
+            PKind::Nullable(inner) | PKind::Array(inner) => {
+                self.resolve_template_types(inner, file, off);
+            }
+            PKind::Union { types, .. } | PKind::Intersection(types) => {
+                for t in types {
+                    self.resolve_template_types(t, file, off);
+                }
+            }
+            PKind::Generic { args, .. } => {
+                for a in args {
+                    self.resolve_template_types(&mut a.ty, file, off);
+                }
+            }
+            PKind::OffsetAccess { base, offset } => {
+                self.resolve_template_types(base, file, off);
+                self.resolve_template_types(offset, file, off);
+            }
+            PKind::ArrayShape(s) => {
+                for it in &mut s.items {
+                    self.resolve_template_types(&mut it.value, file, off);
+                }
+            }
+            PKind::ObjectShape(items) => {
+                for it in items {
+                    self.resolve_template_types(&mut it.value, file, off);
+                }
+            }
+            PKind::Identifier(_) | PKind::This | PKind::Callable(_) | PKind::Const(_)
+            | PKind::Conditional(_) | PKind::Unsupported(_) => {}
+        }
+        // The node itself, after its arguments (inside-out).
+        let PKind::Generic { base, args } = &ty.kind else { return };
+        if !is_template_type(base, args.len()) {
+            return;
+        }
+        match self.project_template_type(args, file, off) {
+            Projection::Resolved(kind) => ty.kind = kind,
+            Projection::Declined => {
+                // The written spelling is kept as the opaque node's text, so the
+                // dump surface and every renderer still say what was declined.
+                let raw = ty.to_string();
+                ty.kind = PKind::Unsupported(raw);
+            }
+            Projection::Deferred => {}
+        }
+    }
+
+    /// The verdict for one `template-type<…>` node, given its three arguments —
+    /// the whole decision procedure of [`Self::resolve_template_types`].
+    fn project_template_type(
+        &self,
+        args: &[steins_phpdoc::ast::GenericArg],
+        file: usize,
+        off: u32,
+    ) -> Projection {
+        // The owner: a class reference, and one that must declare templates for a
+        // positional index into them to mean anything.
+        let PKind::Identifier(owner_name) = &args[1].ty.kind else { return Projection::Declined };
+        let owner_fqn = self.resolve_pclass(file, off, owner_name);
+        let Some((_, od)) = self.find_class(&owner_fqn) else { return Projection::Declined };
+        let names = od
+            .docblock
+            .as_deref()
+            .map(steins_phpdoc::scan_template_names)
+            .unwrap_or_default();
+        if names.is_empty() {
+            return Projection::Declined;
+        }
+        // The template name: a quoted literal, matched exactly first. The
+        // case-insensitive retry is the same concession `template_names_of` makes —
+        // PHPStan's names are case-sensitive, and folding case can only ever pick a
+        // template the author plainly meant.
+        let PKind::Const(ConstExpr::Str(StringLit::Single(want) | StringLit::Double(want))) =
+            &args[2].ty.kind
+        else {
+            return Projection::Declined;
+        };
+        let Some(i) = names
+            .iter()
+            .position(|n| n == want)
+            .or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(want)))
+        else {
+            return Projection::Declined;
+        };
+        match &args[0].ty.kind {
+            // (a) The owner, parameterized right here. Same docblock, same
+            // namespace scope — the argument needs no re-spelling to travel.
+            PKind::Generic { base, args: spelled } => {
+                if class_key(&self.resolve_pclass(file, off, base)) != class_key(&owner_fqn)
+                    || spelled.len() != names.len()
+                {
+                    return Projection::Declined;
+                }
+                Projection::Resolved(spelled[i].ty.kind.clone())
+            }
+            // (b) A bare class name, or (c) a template name.
+            PKind::Identifier(subject) => {
+                let subject_fqn = self.resolve_pclass(file, off, subject);
+                if !self.is_known_class(&subject_fqn) {
+                    // Not a class at all: a function- or class-level template, whose
+                    // argument is only known where a value flowed in. Left as
+                    // written for #362/#363.
+                    return Projection::Deferred;
+                }
+                if class_key(&subject_fqn) == class_key(&owner_fqn) {
+                    // The owner itself, unparameterized: it has no argument to give.
+                    return Projection::Declined;
+                }
+                if self.declares_templates(&subject_fqn) {
+                    // A generic subject reaching the owner through its own templates
+                    // is substitution, not lookup (ADR-0032: own templates win, and
+                    // the walk does not recurse).
+                    return Projection::Declined;
+                }
+                let mut matching = self
+                    .inheritance_edge_types(&subject_fqn)
+                    .into_iter()
+                    .filter(|e| class_key(&e.owner) == class_key(&owner_fqn));
+                let Some(edge) = matching.next() else { return Projection::Declined };
+                if matching.next().is_some() {
+                    return Projection::Declined; // two edges to one owner: say nothing.
+                }
+                let (efile, eoff) = edge.site;
+                let mut arg = edge.args[i].clone();
+                self.qualify_class_names(&mut arg, efile, eoff);
+                Projection::Resolved(arg.kind)
+            }
+            // (d) A union, an intersection, a shape, a callable, `$this`, a
+            // literal — no class whose templates could be indexed. PHPStan unions
+            // over a union subject's class names; Steins declines in this slice.
+            _ => Projection::Declined,
+        }
+    }
+
+    /// Re-spell every class name in a type lifted out of *another* declaration's
+    /// docblock so that it still names the same class where it lands (issue #361).
+    ///
+    /// An inheritance edge is written in the subclass's file, against that file's
+    /// namespace and `use` scope; the envelope receiving the projected argument may
+    /// be written anywhere. The carry solves this by remembering the edge's site
+    /// ([`GenericCarry::site`]) and resolving late — a spliced AST node has nowhere
+    /// to keep one, so the name is made fully qualified instead, which resolves the
+    /// same everywhere.
+    ///
+    /// Only identifiers that name a **known class** in the edge's own context are
+    /// touched: `int` and its kin must stay bare or they would stop being keywords,
+    /// and an unresolvable name is left alone because qualifying a guess would turn
+    /// a silence into a claim.
+    fn qualify_class_names(&self, ty: &mut PType, efile: usize, eoff: u32) {
+        let qualify = |name: &mut String| {
+            if name.starts_with('\\') {
+                return;
+            }
+            let fqn = self.resolve_pclass(efile, eoff, name);
+            if self.is_known_class(&fqn) {
+                *name = format!("\\{}", fqn.trim_start_matches('\\'));
+            }
+        };
+        match &mut ty.kind {
+            PKind::Identifier(name) => qualify(name),
+            PKind::Generic { base, args } => {
+                qualify(base);
+                for a in args {
+                    self.qualify_class_names(&mut a.ty, efile, eoff);
+                }
+            }
+            PKind::Nullable(inner) | PKind::Array(inner) => {
+                self.qualify_class_names(inner, efile, eoff);
+            }
+            PKind::Union { types, .. } | PKind::Intersection(types) => {
+                for t in types {
+                    self.qualify_class_names(t, efile, eoff);
+                }
+            }
+            PKind::OffsetAccess { base, offset } => {
+                self.qualify_class_names(base, efile, eoff);
+                self.qualify_class_names(offset, efile, eoff);
+            }
+            PKind::ArrayShape(s) => {
+                for it in &mut s.items {
+                    self.qualify_class_names(&mut it.value, efile, eoff);
+                }
+            }
+            PKind::ObjectShape(items) => {
+                for it in items {
+                    self.qualify_class_names(&mut it.value, efile, eoff);
+                }
+            }
+            PKind::This | PKind::Callable(_) | PKind::Const(_) | PKind::Conditional(_)
+            | PKind::Unsupported(_) => {}
+        }
+    }
+
     /// Resolve a call/return value to a proven [`CVal`] (scalars, arrays of proven
     /// values, or a `New` exact-class object), or `None` when not provable.
     fn resolve_cval(

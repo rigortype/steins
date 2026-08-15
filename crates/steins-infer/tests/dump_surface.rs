@@ -557,17 +557,22 @@ fn declared_return_phpdoc_refines_asserted() {
 }
 
 #[test]
-fn a_template_type_return_no_longer_dumps_as_a_class_name() {
-    // Issue #360. `template-type<…>` used to lower to `Class("template-type")`,
-    // which the speller printed straight back — `template-type (asserted)` read
-    // like a resolved class. It is vocabulary with no resolution yet (issue
-    // #361), so the dump says the floor instead. Pinned as the current output,
-    // not as a promise about the wording.
+fn a_template_type_return_dumps_the_template_argument_it_names() {
+    // Issues #360 and #361. `template-type<…>` used to lower to
+    // `Class("template-type")`, which the speller printed straight back —
+    // `template-type (asserted)` read like a resolved class. #360 made it
+    // vocabulary with an `Opaque` floor (`unknown`); #361 resolves the declared
+    // side, so a spelled `Box<int>` subject now seeds exactly the arms
+    // `@return int` seeds.
     let src = "<?php\n/** @template T */\nclass Box { public function __construct(public mixed $v) {} }\n\
                /**\n * @param Box<int> $b\n * @return template-type<Box<int>, Box, 'T'>\n */\n\
                function unwrap(Box $b): mixed { return $b->v; }\n\
                function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
-    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(one_type(src), "dumped type: int (asserted)");
+    // The same declaration with the type written out: identical surface, which is
+    // the whole claim the resolution makes.
+    let spelled = src.replace("template-type<Box<int>, Box, 'T'>", "int");
+    assert_eq!(one_type(&spelled), "dumped type: int (asserted)");
 }
 
 #[test]
