@@ -278,6 +278,49 @@ Two asymmetries are load-bearing and pinned by unit tests:
   question — `bug-12393.php:40` is Steins missing a typed-property coercion — and the
   harness declines to ask the relation across that boundary.
 
+  Issue #356 extended that veto to **nested** positions. The original guard scanned
+  top-level `|`-split atoms, so a crossing buried inside an array read as one opaque
+  `array-shape` atom and reached the relation anyway: `array{2.0, 3.0, 4.0, 5.0}`
+  against `list{2, 3, 4, 5}` scored `subsumed`, because `admits_val` answers `Yes` for
+  a `LitFloat` against an int value by the same PHP value-equality rule. The veto is
+  now judged on the lowered types with *aligned* positions, so a genuine int arm
+  elsewhere in a shape cannot excuse a crossing at the position that has one, and an
+  undecidable alignment simply yields no pair. The relation itself is unchanged:
+  `subsumes` answering `Yes` there is correct for what it models (acceptance), and the
+  harness's job is to not read acceptance as precision.
+
+### Version-gated fixtures are not measured (issue #356)
+
+448 of the 1,617 nsrt fixtures open with a `// lint <op> <version>` marker written
+*on the `<?php` line itself*, not as a standalone comment. It names the PHP range
+under which PHPStan's assertions in that file hold. Steins folds through a sidecar
+running whatever `php` resolves off `PATH`, so outside that range those assertions
+are not an oracle at all — and the harness used to score them anyway.
+
+`range-function-php82.php:5` is the case that surfaced it: `range(2, 5, 1.0)` is
+asserted `array{2.0, 3.0, 4.0, 5.0}` behind `// lint < 8.3`, PHP 8.3 changed the
+function to return ints, and on an 8.5 sidecar the fold answers `list{2, 3, 4, 5}` —
+correct for the engine that ran. Scored against the 8.2 assertion it is a
+disagreement about *which PHP is running*, and the nested-crossing hole above then
+booked it as precision.
+
+The harness now asks the interpreter for `PHP_MAJOR_VERSION.PHP_MINOR_VERSION` — the
+same bare `php` that `steins-sidecar` spawns — and **skips an excluded fixture before
+analysis**, counting it on its own report line rather than folding it into any
+verdict. At PHP 8.5 that removes 59 files / 619 observations, among them 81 `match`
+and 20 `equal`/`subsumed`: the headline had been carrying 81 rows of luck, where an
+assertion in a gated file happened not to be version-sensitive. Agreement with a
+statement that is not being claimed for your engine is not confirmation.
+
+The gate is per *file* while only some assertions in it are version-sensitive, which
+makes whole-file exclusion look blunt. It is the honest denominator regardless: the
+marker is the only statement anyone makes about which rows are sensitive, so a
+finer-grained rule would be the harness inventing an oracle for itself.
+
+Because the exclusion moves the headline, **counts are only comparable between runs
+on the same PHP minor.** The sidecar version is printed above the summary for that
+reason, alongside the fold-surface posture.
+
 ### Does `subsumed` count toward the headline? No. (Settled; do not re-argue.)
 
 The headline stays `match`: oracle-**confirmed** agreement. A `subsumed` row is only

@@ -74,6 +74,26 @@
 //! first. Pinned by `subtraction_is_gated_before_the_top_type_veto_is_reached`
 //! and `the_two_cuts_stay_spellable_and_judged`.
 //!
+//! ## Version-gated fixtures: not analyzed at all (issue #356)
+//!
+//! 448 of the 1,617 nsrt fixtures open with a `// lint <op> <version>` gate *on
+//! the `<?php` line*, naming the PHP range under which PHPStan's assertions in
+//! that file hold. Steins folds through a sidecar running whatever `php` is on
+//! `PATH`, so outside that range the assertions are not an oracle: agreement
+//! would be luck (an assertion that happens not to be version-sensitive), not
+//! confirmation. [`lint_gate`] reads the marker, [`running_php_version`] asks
+//! the interpreter, and an excluded fixture is **skipped before analysis** and
+//! counted on its own line — never folded into a verdict, so no bucket can
+//! absorb it silently. Measured at PHP 8.5 (phpstan-src `55a7732`): 59 files /
+//! 619 observations excluded, of which 81 were `match` and 20
+//! `equal`/`subsumed` — i.e. the pre-#356 headline was carrying 81 rows it had
+//! not earned. Pinned by `lint_gates_parse_off_the_open_tag` and
+//! `gates_admit_only_the_versions_they_name`.
+//!
+//! The gate is per *file* while only some assertions in it are
+//! version-sensitive; the honest denominator is still the file, because the
+//! marker is the only statement anyone makes about which rows those are.
+//!
 //! ## Headline decision (settled here; do not re-argue per slice)
 //!
 //! `subsumed` does NOT count toward headline `match`: `match` is oracle-confirmed
@@ -88,7 +108,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use steins_contract::{CKey, ContractTy};
 use steins_db::{Project, SourceFile, SteinsDatabase};
+use steins_domain::Base;
 use steins_infer::{AssertObservation, SidecarFolder, collect_assert_types};
 
 use crate::corpus::{collect_php_files, repo_root};
@@ -137,7 +159,22 @@ fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
     if files.is_empty() {
         return Err(format!("no .php files under {}", dir.display()));
     }
-    println!("nsrt: analyzing {} files under {}\n", files.len(), dir.display());
+    // What the sidecar will actually run: the fixtures' `// lint` gates are
+    // claims about *that* engine, not about Steins (issue #356).
+    let php = running_php_version();
+    match php {
+        Some((maj, min)) => {
+            println!("nsrt: analyzing {} files under {}", files.len(), dir.display());
+            println!("nsrt: sidecar PHP {maj}.{min}\n");
+        }
+        None => {
+            println!("nsrt: analyzing {} files under {}", files.len(), dir.display());
+            println!(
+                "nsrt: WARNING — could not determine the PHP version; `// lint` gates \
+                 not applied, so counts include fixtures asserting another engine's answers\n"
+            );
+        }
+    }
 
     let start = Instant::now();
 
@@ -146,12 +183,23 @@ fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
     let mut folder = SidecarFolder::enabled();
 
     let mut records: Vec<Record> = Vec::new();
+    let mut version_skipped = 0usize;
     for f in &files {
         let name = f.strip_prefix(&dir).unwrap_or(f).to_string_lossy().into_owned();
         let text = match std::fs::read(f) {
             Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
             Err(_) => continue, // unreadable → contributes nothing
         };
+
+        // A gated fixture's assertions are only PHPStan's answer *for that
+        // version range*. Run against another engine they are not an oracle at
+        // all, so agreement there would be luck, not confirmation (issue #356).
+        if let Some(v) = php
+            && lint_gate(&text).is_some_and(|g| !g.admits(v))
+        {
+            version_skipped += 1;
+            continue;
+        }
 
         // Each file is its own single-file project (a standalone universe).
         let db = SteinsDatabase::default();
@@ -165,9 +213,87 @@ fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
 
     let elapsed = start.elapsed();
 
-    report(&records, elapsed.as_secs_f64(), folder.posture());
+    report(&records, elapsed.as_secs_f64(), folder.posture(), version_skipped);
     write_json(&records)?;
     Ok(())
+}
+
+// ----------------------------------------------------------------------------
+// version gating (issue #356)
+// ----------------------------------------------------------------------------
+
+/// A `(major, minor)` PHP version. Patch is never gated on.
+type PhpVersion = (u32, u32);
+
+/// A fixture's `// lint <op> <version>` gate: the PHP range under which
+/// PHPStan's assertions in that file are claimed to hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LintGate {
+    op: GateOp,
+    version: PhpVersion,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GateOp {
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+impl LintGate {
+    /// Whether the running engine falls inside the gate.
+    fn admits(self, running: PhpVersion) -> bool {
+        match self.op {
+            GateOp::Lt => running < self.version,
+            GateOp::Le => running <= self.version,
+            GateOp::Gt => running > self.version,
+            GateOp::Ge => running >= self.version,
+        }
+    }
+}
+
+/// The gate on a fixture's first line, if any.
+///
+/// phpstan-src writes it *on the open tag* (`<?php // lint >= 8.1`), not as a
+/// standalone comment line — 448 of the 1,617 nsrt fixtures carry one. Only the
+/// first line is consulted, matching phpstan-src's own reader.
+fn lint_gate(text: &str) -> Option<LintGate> {
+    let first = text.lines().next()?;
+    let rest = first.split("// lint").nth(1).or_else(|| first.split("//lint").nth(1))?;
+    let rest = rest.trim_start();
+    // Longest operator first: `<=` must not read as `<`.
+    let (op, rest) = ["<=", ">=", "<", ">"]
+        .into_iter()
+        .find_map(|o| rest.strip_prefix(o).map(|r| (o, r)))?;
+    let op = match op {
+        "<=" => GateOp::Le,
+        ">=" => GateOp::Ge,
+        "<" => GateOp::Lt,
+        _ => GateOp::Gt,
+    };
+    let token: String =
+        rest.trim_start().chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+    let (maj, min) = token.split_once('.')?;
+    Some(LintGate { op, version: (maj.parse().ok()?, min.parse().ok()?) })
+}
+
+/// The PHP the sidecar will run, asked of the interpreter itself.
+///
+/// `steins-sidecar` spawns a bare `Command::new("php")`, so resolving the same
+/// way off `PATH` is what keeps this honest: a gate is only meaningful against
+/// the engine that actually answers the folds.
+fn running_php_version() -> Option<PhpVersion> {
+    let out = std::process::Command::new("php")
+        .args(["-r", "echo PHP_MAJOR_VERSION, '.', PHP_MINOR_VERSION;"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let (maj, min) = s.trim().split_once('.')?;
+    Some((maj.parse().ok()?, min.parse().ok()?))
 }
 
 // ----------------------------------------------------------------------------
@@ -369,6 +495,12 @@ fn subsumption_directions(expected: &str, got: &str) -> SubsumptionDirections {
     else {
         return NEITHER; // one side does not parse as a type — not a comparison at all
     };
+    // The same coercion veto, now at every *nested* position (issue #356): the
+    // string scan above only splits top-level `|`, so `array{2.0, …}` vs
+    // `list{2, …}` reads as two array atoms and slips past it.
+    if crosses_int_float_nested(&exp_ty, &got_ty) {
+        return NEITHER;
+    }
     use steins_contract::normalize::subsumes;
     SubsumptionDirections {
         covers: subsumes(&exp_ty, &got_ty).is_yes(),
@@ -422,6 +554,109 @@ fn crosses_int_float(expected: &str, got: &str) -> bool {
     // Only the widening direction is blocked: an int-flavored `got` needs an
     // int-flavored arm in `expected` to be a *member*, not merely coercible.
     int_flavored(got) && !int_flavored(expected)
+}
+
+/// [`crosses_int_float`]'s judgment carried to every **nested** position
+/// (issue #356).
+///
+/// The string scan splits only top-level `|`, so a crossing buried in an array
+/// element reads as one opaque `array-shape` atom and escapes the veto. The
+/// live case: `range(2, 5, 1.0)` is asserted `array{2.0, 3.0, 4.0, 5.0}` behind
+/// a `// lint < 8.3` gate, PHP ≥ 8.3 returns ints, and the fold answers
+/// `list{2, 3, 4, 5}`. `admits_val(LitFloat(2.0), Val::Int(2))` is `Yes` by
+/// design (PHP value equality, `admit.rs`), so `subsumes` covers it and the
+/// pair booked `subsumed` — a real disagreement laundered into *admissible*.
+///
+/// Judged on the lowered types with **aligned** positions, so a genuine int arm
+/// elsewhere in the shape cannot excuse a crossing at the position that has
+/// one. Undecidable alignments simply yield no pair: this only ever declines to
+/// ask [`subsumes`], never manufactures a verdict.
+///
+/// [`subsumes`]: steins_contract::normalize::subsumes
+fn crosses_int_float_nested(expected: &ContractTy, got: &ContractTy) -> bool {
+    if float_only(expected) && int_flavored_ty(got) {
+        return true;
+    }
+    aligned_value_positions(expected, got)
+        .iter()
+        .any(|(e, g)| crosses_int_float_nested(e, g))
+}
+
+/// Whether the contract is float-flavored with no int arm — the only shape
+/// `admits_val` widens an int into. A union carrying a real int arm admits the
+/// int as a *member*, so it is not a coercion and earns no veto.
+fn float_only(t: &ContractTy) -> bool {
+    match t {
+        ContractTy::Base(Base::Float) | ContractTy::LitFloat(_) => true,
+        ContractTy::Union(m) => m.iter().any(float_only) && !m.iter().any(int_flavored_ty),
+        _ => false,
+    }
+}
+
+/// Whether the contract has an int arm — the `got` side of the widening.
+fn int_flavored_ty(t: &ContractTy) -> bool {
+    match t {
+        ContractTy::Base(Base::Int) | ContractTy::LitInt(_) | ContractTy::IntIn(_) => true,
+        ContractTy::Union(m) => m.iter().any(int_flavored_ty),
+        _ => false,
+    }
+}
+
+/// The value-contract pairs `expected` and `got` align on, one level down.
+///
+/// Keyed shapes pair by key; the generic forms contribute their single element
+/// contract. A position `expected` cannot answer for (an unkeyed field of a
+/// sealed shape, a vocabulary outside the array forms) contributes no pair —
+/// silence, not a guess.
+fn aligned_value_positions<'a>(
+    expected: &'a ContractTy,
+    got: &'a ContractTy,
+) -> Vec<(&'a ContractTy, &'a ContractTy)> {
+    let mut out = Vec::new();
+    match got {
+        ContractTy::Shape { fields, .. } => {
+            for f in fields {
+                if let Some(e) = expected_value_for(expected, Some(&f.key)) {
+                    out.push((e, &f.ty));
+                }
+            }
+        }
+        ContractTy::ListOf { elem, .. } => {
+            if let Some(e) = expected_value_for(expected, None) {
+                out.push((e, elem.as_ref()));
+            }
+        }
+        ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => {
+            if let Some(e) = expected_value_for(expected, None) {
+                out.push((e, val.as_ref()));
+            }
+        }
+        // A `got` union crosses if any realization does (the FP-safe side: the
+        // veto costs a `subsumed`, never a `match`).
+        ContractTy::Union(members) => {
+            for m in members {
+                out.extend(aligned_value_positions(expected, m));
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// `expected`'s value contract at `key` (or its element contract, for `None`).
+fn expected_value_for<'a>(
+    expected: &'a ContractTy,
+    key: Option<&CKey>,
+) -> Option<&'a ContractTy> {
+    match expected {
+        ContractTy::Shape { fields, unsealed, .. } => key
+            .and_then(|k| fields.iter().find(|f| &f.key == k))
+            .map(|f| &f.ty)
+            .or_else(|| unsealed.as_ref().map(|(_, v)| v.as_ref())),
+        ContractTy::ListOf { elem, .. } => Some(elem.as_ref()),
+        ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => Some(val.as_ref()),
+        _ => None,
+    }
 }
 
 // ----------------------------------------------------------------------------
@@ -969,7 +1204,12 @@ fn is_scalarish(a: &str) -> bool {
 // reporting
 // ----------------------------------------------------------------------------
 
-fn report(records: &[Record], elapsed: f64, posture: steins_infer::FoldPosture) {
+fn report(
+    records: &[Record],
+    elapsed: f64,
+    posture: steins_infer::FoldPosture,
+    version_skipped: usize,
+) {
     let total = records.len();
     let count = |v: &str| records.iter().filter(|r| r.verdict == v).count();
     let (m, u, d, s) = (count("match"), count("unsupported"), count("differ"), count("skipped"));
@@ -982,6 +1222,9 @@ fn report(records: &[Record], elapsed: f64, posture: steins_infer::FoldPosture) 
     println!("=== nsrt assertType harness — verdict summary ===\n");
     println!("total assertType observations: {total}");
     println!("  skipped (expected unresolvable ::class/concat): {s}");
+    // Never folded into a verdict: these fixtures were not analyzed at all,
+    // because their assertions are not this engine's oracle (issue #356).
+    println!("  files skipped (`// lint` gate excludes the sidecar): {version_skipped}");
     println!("measured (match + unsupported + equal + subsumed + differ): {measured}\n");
     println!("  {:<13} {:>6}   {:>6}", "verdict", "count", "% meas");
     println!("  {}", "-".repeat(30));
@@ -1243,6 +1486,78 @@ mod tests {
         assert_eq!(classify("float|int|string", "int").0, Verdict::Subsumed);
         assert_eq!(classify("int|float", "1").0, Verdict::Subsumed);
         assert_eq!(classify("float|int|string", "string").0, Verdict::Subsumed); // float too
+    }
+
+    /// Issue #356: the same boundary **inside** the array vocabulary. The string
+    /// scan splits only top-level `|`, so these pairs read as two opaque
+    /// `array-shape` atoms and used to reach `subsumes` — which answers `Yes`,
+    /// because `admits_val(LitFloat(2.0), Val::Int(2))` is `Yes` by design. The
+    /// live row is `range-function-php82.php:5`: `range(2, 5, 1.0)` asserted
+    /// `array{2.0, 3.0, 4.0, 5.0}` under `// lint < 8.3`, folded to
+    /// `list{2, 3, 4, 5}` on a ≥ 8.3 engine. That is a disagreement about which
+    /// PHP is running, and booking it `subsumed` would launder it into
+    /// *admissible*.
+    #[test]
+    fn nested_int_where_float_is_asserted_is_not_precision() {
+        assert_eq!(
+            classify("array{2.0, 3.0, 4.0, 5.0}", "list{2, 3, 4, 5}").0,
+            Verdict::Differ
+        );
+        assert_eq!(classify("array<float>", "list{1, 2}").0, Verdict::Differ);
+        assert_eq!(classify("list<float>", "list<int>").0, Verdict::Differ);
+        assert_eq!(classify("array{1.0}", "array{1}").0, Verdict::Differ);
+        // Depth is not the trigger — the crossing is.
+        assert_eq!(classify("list<list<float>>", "list<list{1}>").0, Verdict::Differ);
+    }
+
+    /// The veto is *aligned*, so it neither over- nor under-fires: an int arm at
+    /// another position cannot excuse a crossing, and a non-float expectation is
+    /// left alone to be judged on the merits.
+    #[test]
+    fn the_nested_veto_is_positional() {
+        // Position 0 crosses even though position 1 is honestly int-flavored.
+        assert_eq!(classify("array{float, int}", "array{1, 2}").0, Verdict::Differ);
+        // No crossing anywhere: a genuine precision win survives.
+        assert_eq!(classify("array{float, int}", "array{1.0, 2}").0, Verdict::Subsumed);
+        assert_eq!(classify("list<mixed>", "list{1}").0, Verdict::Subsumed);
+        assert_eq!(classify("array{int}", "array{1}").0, Verdict::Subsumed);
+        // An int-flavored arm at the crossing position is membership, not coercion.
+        assert_eq!(classify("array{int|float}", "array{1}").0, Verdict::Subsumed);
+    }
+
+    // ---- version gating (issue #356) ----------------------------------------
+
+    /// phpstan-src writes the gate on the open tag, not a standalone comment.
+    #[test]
+    fn lint_gates_parse_off_the_open_tag() {
+        let g = |s: &str| lint_gate(s).expect("a gate");
+        assert_eq!(g("<?php // lint < 8.3").version, (8, 3));
+        assert_eq!(g("<?php // lint < 8.3").op, GateOp::Lt);
+        assert_eq!(g("<?php // lint >= 8.1\n\nfoo();").op, GateOp::Ge);
+        assert_eq!(g("<?php  // lint < 8.0").op, GateOp::Lt); // array-search-php7.php
+        assert_eq!(g("<?php // lint > 7.4").op, GateOp::Gt); // bug-2600-php-version-scope.php
+        // `<=` must not read as `<` — the ordering of the operator table.
+        assert_eq!(g("<?php // lint <= 8.0"), LintGate { op: GateOp::Le, version: (8, 0) });
+        // Only the first line carries a gate.
+        assert!(lint_gate("<?php\n// lint < 8.3").is_none());
+        assert!(lint_gate("<?php declare(strict_types=1);").is_none());
+    }
+
+    /// A gate excludes a run when the sidecar's minor falls outside it. The
+    /// motivating file is `range-function-php82.php` (`< 8.3`) on an 8.5 engine.
+    #[test]
+    fn gates_admit_only_the_versions_they_name() {
+        let lt83 = LintGate { op: GateOp::Lt, version: (8, 3) };
+        assert!(!lt83.admits((8, 5)));
+        assert!(!lt83.admits((8, 3))); // the boundary is exclusive
+        assert!(lt83.admits((8, 2)));
+
+        let ge81 = LintGate { op: GateOp::Ge, version: (8, 1) };
+        assert!(ge81.admits((8, 5)));
+        assert!(ge81.admits((8, 1)));
+        assert!(!ge81.admits((8, 0)));
+        // Minor is compared numerically, not lexically: 8.10 > 8.9.
+        assert!(LintGate { op: GateOp::Ge, version: (8, 9) }.admits((8, 10)));
     }
 
     #[test]
@@ -1531,3 +1846,4 @@ mod tests {
         assert!(result.is_ok(), "nsrt::run overflowed or errored on a deep-but-finite chain: {result:?}");
     }
 }
+
