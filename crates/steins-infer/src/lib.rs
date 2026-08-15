@@ -20970,6 +20970,30 @@ fn apply_assert_to_var(
         return assert_class_to_lane(cx, decl_at, store, var, name, !spec.negated);
     }
     if spec.negated {
+        // A negated **scalar base** subtracts on the arm lane, the road the negated
+        // class spec above already takes (issue #391): `@phpstan-assert !int $x`
+        // over a declared `int|string` leaves `{string}`. The judgment is ADR-0052
+        // §2's, unchanged — an arm dies iff the subtrahend covers it with `Yes`, so
+        // a `mixed`/`scalar` arm keeps its interior points and survives.
+        //
+        // Arm lane only. The value lane's operator for "this base is gone" is a
+        // union subtraction the refinement vocabulary does not have, and inventing
+        // one here would be a second narrowing relation for one tag.
+        //
+        // **`!float` is refused**, and the refusal is the interesting half. The
+        // arm judgment is contract *acceptance*, under which `int` is subsumed by
+        // `float` (a `float` parameter takes an int) — but `is_float(1)` is false,
+        // so reading that acceptance as "the value is a float" and deleting the
+        // `int` arm would narrow away a live value. No other base widens across
+        // bases this way, so the carve-out is exactly one row wide.
+        if let steins_contract::ContractTy::Base(b) = cty
+            && b != Base::Float
+            && store.contract.contains_key(var)
+        {
+            let oracle = ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() };
+            subtract_contract_lane(store, var, &normalize::Subtrahend::Base(b), &oracle);
+            return true;
+        }
         // Only `!null` is representable as a positive narrowing (clear nullable);
         // other negated forms establish nothing. The narrowing is `Asserted`, so
         // `refine_fact` mins the result to `Asserted`.
