@@ -524,7 +524,19 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //              `@param string`. Measured as a finding-level diff against the
     //              same-day baseline run: exactly these three rows are new, nothing
     //              moved elsewhere. Seeded at what the corpus says today.
-    ("pxxxx-monorepo", 539),
+    //   539 → 543  2026-08-16, the value IR carrying method calls (issue #386): an
+    //              array literal with a method-call element no longer collapses to
+    //              an unrepresentable `Other`, so four shape literals now meet the
+    //              sealed `array{…}` they are declared against — two `@return`
+    //              shapes and one `@param` shape at two call sites — and each
+    //              carries a key the declaration does not name. The same
+    //              undeclared-key-under-a-sealed-shape family the 526 → 536 row
+    //              triaged, and true positives by the same PHPStan reading (a
+    //              sealed shape admits no extra key). Finding-level diff against
+    //              the #385 run: exactly these four rows; one `throw.*` row on
+    //              phpstan-src (local) went away (21 → 20), a removal the tripwire
+    //              does not gate on.
+    ("pxxxx-monorepo", 543),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
