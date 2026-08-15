@@ -74,7 +74,7 @@ function analyzer(source, profile = "") {
 // 2. THE FLAGSHIP (issue #64 acceptance criterion 1). `dumpType(greet(2,
 //    "World"))` inlines through the real engine: a project call in argument
 //    position (#60) whose body concatenates (#59) and folds `str_repeat` — which
-//    is on the verified width-safe subset, so it folds on this 32-bit build.
+//    is on the verified portable subset, so it folds on this 32-bit build.
 const FLAGSHIP = `<?php
 function greet(int $times, string $name): string {
     return str_repeat("Hello, " . $name . "! ", $times);
@@ -166,15 +166,15 @@ assert(
 // 4. The boot object (issue #64 S3): the engine surface as the analysis' own
 //    gates see it, which is what the page renders its boundary from. On the
 //    machine the browser actually gets — php-wasm's 32-bit 8.5 — that is the
-//    width-safe fold subset, no curated rows, absence family live.
+//    portable fold subset, no curated rows, absence family live.
 const boot = flagship.value.boot;
 console.log(`boot: ${JSON.stringify(boot)}`);
 assert(boot !== undefined && boot !== null, "a replay envelope carries a boot object");
 assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
 assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
-assert(boot.fold_lane === "width_safe_subset", `a 32-bit engine folds the width-safe subset (got ${boot.fold_lane})`);
-// 57 = 44 width-safe + 11 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
-// added `array_merge` and `explode` as the first WIDTH_UNVERIFIED rows: the
+assert(boot.fold_lane === "portable_subset", `a 32-bit engine folds the portable subset (got ${boot.fold_lane})`);
+// 57 = 44 portable + 11 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
+// added `array_merge` and `explode` as the first UNVERIFIED rows: the
 // allowlist grew, this engine's share did not. Issue #354 then probed the five
 // names that wave deferred and moved BOTH counts — `str_split`, `array_fill` and
 // `array_unique` fold here now, `range` and `preg_split` are named below. The
@@ -191,6 +191,21 @@ assert(
     boot.refused_folds.join(",") ===
       "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
+);
+// …and beside the names, WHY. The panel groups by `axis` and quotes `witness`,
+// so a refused row added on a new axis changes the page without the page being
+// edited — the property the hand-written sentence did not have.
+assert(
+  Array.isArray(boot.refusals) && boot.refusals.length === boot.refused_folds.length,
+  `every refused row carries its reason (got ${JSON.stringify(boot.refusals)})`,
+);
+assert(
+  boot.refusals.every((r) => r.name && r.axis && r.witness.includes(" / ")),
+  "each reason names the row, its axis, and both engines' answers",
+);
+assert(
+  boot.refusals.filter((r) => r.axis === "build_option").map((r) => r.name).join(",") === "preg_split",
+  `preg_split is the row that is not about the word size (got ${JSON.stringify(boot.refusals.filter((r) => r.axis === "build_option"))})`,
 );
 assert(
   Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
@@ -238,7 +253,7 @@ const safeDump = safe354.value.findings.find((f) => f.id === "debug.type");
 console.log(`str_split dump: ${safeDump && safeDump.message}`);
 assert(
   safeDump !== undefined && safeDump.message === "dumped type: list{'ab', 'cd', 'ef'}",
-  `a newly width-safe array result folds in the browser (got: ${safeDump && safeDump.message})`,
+  `a newly portable array result folds in the browser (got: ${safeDump && safeDump.message})`,
 );
 
 const REFUSED_354 = '<?php\n\\PHPStan\\dumpType(range("3000000000", "3000000000"));\n';

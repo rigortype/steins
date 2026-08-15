@@ -809,7 +809,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     // that actually booted is the analysis' answer, not the page's opinion.
     //
     // What this buys: with php-wasm's 32-bit PHP 8.5 the page says "folding
-    // width-safe builtins" and names the refused set (both derived live from boot data),
+    // portable builtins" and names the refused set (both derived live from boot data),
     // and if a 64-bit engine ever answers instead the same code says "all 22"
     // and names nothing. The line and the panel cannot go stale the way
     // "no PHP sidecar — findings that require executing PHP are omitted" did.
@@ -835,8 +835,8 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 
     function foldPhrase(b) {
       if (b.fold_lane === "full") return `folding all ${b.fold_total} allowlisted builtins`
-      if (b.fold_lane === "width_safe_subset") {
-        return `folding ${b.fold_safe}/${b.fold_total} width-safe builtins`
+      if (b.fold_lane === "portable_subset") {
+        return `folding ${b.fold_safe}/${b.fold_total} portable builtins`
       }
       return "folding nothing"
     }
@@ -888,8 +888,31 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 
       const off = []
       if (b.refused_folds && b.refused_folds.length) {
-        const names = b.refused_folds.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")
-        off.push(`${names} <strong>do not fold.</strong> Their job is to produce or render an integer in the machine's own word, and this build's word is ${bitsOf(b)}: <code>sprintf("%x", -1)</code> is <code>"ffffffff"</code> here and <code>"ffffffffffffffff"</code> on the 64-bit PHP you deploy on. They widen instead of answering.`)
+        // Grouped by the reason the CATALOG gives, not by a sentence written
+        // here: this panel used to say every refused name renders an integer in
+        // the machine's own word, which went false when `preg_split` was refused
+        // for a PCRE build option. The axis and the witness travel in `boot`.
+        const byAxis = new Map()
+        for (const r of b.refusals ?? []) {
+          if (!byAxis.has(r.axis)) byAxis.set(r.axis, [])
+          byAxis.get(r.axis).push(r)
+        }
+        const list = (rs) => rs.map((r) => `<code>${escHtml(r.name)}()</code>`).join(", ")
+        const arith = byAxis.get("integer_width") ?? []
+        if (arith.length) {
+          off.push(`${list(arith)} <strong>do not fold.</strong> Each produces or renders an integer in the machine's own word, and this build's word is ${bitsOf(b)}: <code>${escHtml(arith[0].witness)}</code>. They widen instead of answering.`)
+        }
+        for (const [axis, rs] of byAxis) {
+          if (axis === "integer_width") continue
+          off.push(`${list(rs)} <strong>do not fold either, and not because of the word size.</strong> This build differs from the PHP you deploy on in how it was compiled: <code>${escHtml(rs[0].witness)}</code>.`)
+        }
+        // A refused row with no reason in `boot` would vanish from the panel, so
+        // name whatever the grouping missed rather than silently dropping it.
+        const shown = new Set((b.refusals ?? []).map((r) => r.name))
+        const rest = b.refused_folds.filter((n) => !shown.has(n))
+        if (rest.length) {
+          off.push(`${rest.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")} <strong>do not fold.</strong>`)
+        }
         off.push(`<strong>Integers outside ±2147483647 decline</strong> — counted through array literals, and over integer keys as well as values.`)
       }
       if (b.unverified_folds && b.unverified_folds.length) {

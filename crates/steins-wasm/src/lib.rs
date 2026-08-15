@@ -286,10 +286,21 @@ fn boot_json(s: &steins_infer::SurfaceSummary) -> serde_json::Value {
         "curated_rows": s.curated_rows,
         "absence_family": s.absence_family,
     });
-    // Named only where it's the boundary: width-safe subset refusals are exactly
+    // Named only where it's the boundary: portable subset refusals are exactly
     // what the visitor doesn't get; elsewhere the lane already says it all.
-    if s.fold_lane == steins_infer::FoldLane::WidthSafeSubset {
+    if s.fold_lane == steins_infer::FoldLane::PortableSubset {
         obj["refused_folds"] = serde_json::json!(s.refused_folds);
+        // …and, beside the names, WHY each is refused. The panel used to say
+        // every refused name renders an integer in the machine's own word,
+        // which stopped being true the moment `preg_split` was refused for a
+        // PCRE build option — a sentence that can go false as the table grows
+        // is a sentence the table should be supplying instead.
+        obj["refusals"] = serde_json::json!(
+            s.refusals
+                .iter()
+                .map(|r| serde_json::json!({ "name": r.name, "axis": r.axis, "witness": r.witness }))
+                .collect::<Vec<_>>()
+        );
         obj["unverified_folds"] = serde_json::json!(s.unverified_folds);
     }
     obj
@@ -622,7 +633,7 @@ mod replay {
 
     /// The issue-#64 acceptance criterion: php-wasm 0.1.0 is PHP **8.5.2** built
     /// **32-bit**, and the flagship still folds — `str_repeat` is on the verified
-    /// width-safe subset (ADR-0066 S1.5 amendment) and every integer in the call
+    /// portable subset (ADR-0066 S1.5 amendment) and every integer in the call
     /// is in range.
     #[test]
     fn the_flagship_folds_on_a_32_bit_engine() {
@@ -709,7 +720,7 @@ mod replay {
     /// The boot object on the machine the browser actually has (issue #64 S3):
     /// the boundary a visitor must be able to read, as data.
     ///
-    /// Each field is pinned against the gate it reports: width-safe lane,
+    /// Each field is pinned against the gate it reports: portable lane,
     /// curated rows DECLINED (ADR-0066's amendment keeps Gate 2's `int_size == 8`
     /// leg), absence family LIVE (existence is not arithmetic), refused names
     /// taken from the catalog so a new refusal appears without editing JS.
@@ -741,14 +752,14 @@ mod replay {
         assert_eq!(boot["php_version"], "8.5.2");
         assert_eq!(boot["int_size"], 4);
         assert_eq!(boot["label"], "PHP 8.5.2 (2 extensions)");
-        assert_eq!(boot["fold_lane"], "width_safe_subset");
+        assert_eq!(boot["fold_lane"], "portable_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
         assert_eq!(boot["fold_total"], 57);
         assert_eq!(boot["fold_safe"], 44, "issue #354 and its aliases grew this engine's share by seven");
         assert_eq!(
             boot["refused_folds"],
-            serde_json::json!(steins_catalog::width_refused_names()),
+            serde_json::json!(steins_catalog::refused_names()),
             "the refusals are the catalog's refused rows"
         );
         assert_eq!(
@@ -767,9 +778,32 @@ mod replay {
                 "preg_split"
             ])
         );
+        // Beside the names, the reason each row is refused — the field the
+        // boundary panel groups by, so its sentences cannot go false as the
+        // table grows the way the hand-written one did.
+        let refusals = boot["refusals"].as_array().expect("refusals is an array");
+        assert_eq!(refusals.len(), 11, "one entry per refused row");
+        assert_eq!(refusals[0]["name"], "abs");
+        assert_eq!(refusals[0]["axis"], "integer_width");
+        assert!(
+            refusals[0]["witness"].as_str().expect("witness").contains(" / "),
+            "a witness shows both engines' answers"
+        );
+        let preg = refusals.iter().find(|r| r["name"] == "preg_split").expect("preg_split");
+        assert_eq!(preg["axis"], "build_option", "the one row that is not about the word size");
+        assert_eq!(
+            refusals.iter().filter(|r| r["axis"] == "build_option").count(),
+            1,
+            "and it is the only one"
+        );
+        assert_eq!(
+            refusals.iter().map(|r| r["name"].clone()).collect::<Vec<_>>(),
+            boot["refused_folds"].as_array().expect("refused_folds").clone(),
+            "every refused row has a reason, in the same order"
+        );
         assert_eq!(
             boot["unverified_folds"],
-            serde_json::json!(steins_catalog::width_unverified_names()),
+            serde_json::json!(steins_catalog::unverified_names()),
             "the unverified rows are the catalog's own, in their own field"
         );
         assert_eq!(boot["unverified_folds"], serde_json::json!(["array_merge", "explode"]));

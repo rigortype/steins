@@ -37,25 +37,31 @@ Contents, in broad strokes: ASCII string transforms (`strtolower`, `trim`,
 `substr`, `str_replace`, `sprintf`, `strlen`, …) and pure numeric/conversion
 functions (`abs`, `intdiv`, …).
 
-### The three integer-width classes
+### The three portability classes
 
-`foldable` is **derived**, not primitive. The primitive is `width_class(name)`,
-which answers `None` off the allowlist and otherwise one of three classes — so
-"on the allowlist" is exactly "has a width verdict at all". The class decides
-what a *narrow* engine may fold; on a provably 64-bit engine all three fold, and
-on anything else (an unreported width, a machine nobody has probed) nothing
-folds at all. Default-deny throughout (ADR-0066 §4, ADR-0028's 2026-08-14
-amendment §4).
+`foldable` is **derived**, not primitive. The primitive is
+`portability_class(name)`, which answers `None` off the allowlist and otherwise
+one of three classes — so "on the allowlist" is exactly "has a portability
+verdict at all". The class decides what an engine *other than the project's own*
+may fold; on a provably 64-bit engine all three fold, and on anything else (an
+unreported width, a machine nobody has probed) nothing folds at all.
+Default-deny throughout (ADR-0066 §4, ADR-0028's 2026-08-14 amendment §4).
+
+The class was called `WidthClass` while every row in it was about the engine's
+integer width. `preg_split` ended that: it is refused because one build's PCRE
+has a JIT and the other's does not. The gate's real question has always been
+whether a *second* engine may fold the name, and the word size is one answer to
+it among several.
 
 | class | evidence behind a row | folds on 64-bit | folds in the browser (php-wasm, `PHP_INT_SIZE = 4`) |
 | --- | --- | --- | --- |
-| `Safe` | differential probes, 32-bit against 64-bit | yes | yes, for argument tuples the range guard admits |
-| `Refused` | **one recorded divergence per row**, written out beside the name | yes | no |
+| `Portable` | differential probes, 32-bit against 64-bit | yes | yes, for argument tuples the range guard admits |
+| `Refused` | **one recorded divergence per row**, carried as data by `refusal()` | yes | no |
 | `Unverified` | **none — and that is the correct amount** | yes | no |
 
 The evidence discipline differs per class and is the point of the split:
 
-- **`Safe`** is a positive claim, and it is earned by probing. The current
+- **`Portable`** is a positive claim, and it is earned by probing. The current
   subset was verified with 870 adversarial tuples through the same dispatch core
   both engines run. A probe of an *array*-returning name compares the response
   **bytes**: array elements travel with no per-element type tag, so an `int` on
@@ -65,27 +71,40 @@ The evidence discipline differs per class and is the point of the split:
   comparison had called clean).
 - **`Refused`** is also a positive claim — that the engines *disagree* — and the
   ADR-0061 refused-row discipline requires the divergence to be on record beside
-  the name (`sprintf("%x", -1)` is `"ffffffffffffffff"` on one machine and
-  `"ffffffff"` on the other). One row, one witness. That record is the only
-  reason the refused list is auditable at all. The witness need not be the
-  integer width: `preg_split` is refused because the two builds' PCRE differ over
-  the inline `(*LIMIT_MATCH=…)` verbs, which the JIT ignores and the interpreter
-  honours. The class's mechanism — folds on a provably 64-bit engine, declines
-  elsewhere — is the right one for that too, so the row states its own reason
-  rather than a fourth class being invented for it.
+  the name. It is now on record as **data**: `refusal(name)` answers a
+  `RefusalAxis` and a one-line witness, `every_refused_row_carries_its_witness`
+  makes the discipline mechanical, and the playground's boundary panel composes
+  its sentences from that instead of writing them itself.
 - **`Unverified`** claims nothing. It means nobody looked, and **the correct
   number of probes behind a row here today is zero** — evidence would move the
-  row out, to `Safe` if the engines agree and to `Refused` with its divergence
-  if they do not. Promotion path: php-wasm differential probes, then `Safe`.
+  row out, to `Portable` if the engines agree and to `Refused` with its
+  divergence if they do not.
 
 `Refused` and `Unverified` are *mechanically identical*: they ride the one
-`width_safe` question the fold gate asks, and neither folds on a narrow engine.
+`portable` question the fold gate asks, and neither folds on a narrow engine.
 They are kept apart because mixing unevidenced rows into the refused list would
-erase the one-witness-per-row discipline that makes it worth reading. Reporting
-follows the same line — doctor's Catalog section breaks the allowlist down by
-all three classes, while the playground's boundary panel names only the refused
-ones, because "here is the divergence we measured" is a sentence an unverified
-row cannot be given.
+erase the one-witness-per-row discipline that makes it worth reading.
+
+#### The axes, and the ones the instrument cannot see
+
+`RefusalAxis` has the kinds of divergence the differential has actually found:
+`IntegerWidth` (ten rows) and `BuildOption` (one, `preg_split`). It is not a
+taxonomy of everything that could go wrong, because the instrument has blind
+spots and they are worth stating:
+
+- **The operating system.** Both engines are POSIX. `DIRECTORY_SEPARATOR` and
+  `escapeshellarg("a b'c")` agree byte for byte, and `PHP_OS_FAMILY` differs
+  only as `Darwin` against `Unknown`. Windows is a third machine nobody probes,
+  so an OS-shaped value cannot be *refused by measurement*; a name like
+  `escapeshellarg` stays off the allowlist by argument, the way `strcmp` does
+  for promising only a sign.
+- **An ini both builds happen to share.** Both report `precision = 14` and
+  `serialize_precision = -1`, so a float-rendering name agrees here and would
+  not on a project that sets either differently. That exposure is named per row
+  (`strval`, `implode`, `array_unique`) rather than pretended away.
+- **An extension one build lacks.** Visible, but as a decline rather than a
+  divergence: php-wasm 0.1.0 loads 25 extensions to the native build's 70, so
+  `mb_*` answered `widen: unknown function` for all eleven probes.
 
 A name reaches `Unverified` only when the fold is **strictly stronger** than the
 Rust rung it would shadow (the amendment's §5): `explode`'s rung is type-level
@@ -97,13 +116,13 @@ never can.
 
 The five names that amendment deferred were probed in issue #354 and left the
 deferral in both directions: `str_split`, `array_fill` and `array_unique` to
-`Safe`, `range` and `preg_split` to `Refused`. None passed through `Unverified`,
-which is the class working as defined — evidence moves a row *out* of it, and a
-row only enters by being admitted unmeasured. `range`'s refusal is the one that
-generalizes: its bounds are declared `string|int|float`, so the engine's own
-width types a numeric string, and no bound on integer *arguments* can see it.
-The other four take plain `int` parameters, where the same oversized argument is
-a `TypeError` on the narrow engine — a decline, which is sound.
+`Portable`, `range` and `preg_split` to `Refused`. None passed through
+`Unverified`, which is the class working as defined — evidence moves a row *out*
+of it, and a row only enters by being admitted unmeasured. `range`'s refusal is
+the one that generalizes: its bounds are declared `string|int|float`, so the
+engine's own width types a numeric string, and no bound on integer *arguments*
+can see it. The other four take plain `int` parameters, where the same oversized
+argument is a `TypeError` on the narrow engine — a decline, which is sound.
 
 **Deliberate exclusions**, even where frequent:
 

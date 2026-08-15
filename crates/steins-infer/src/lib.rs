@@ -1769,7 +1769,7 @@ impl<E: FoldEngine> EngineFolder<E> {
     /// The CURATED-ROW leg, all-or-nothing on purpose: a curated row is a claim
     /// about a builtin's whole return domain, verified against the 64-bit engine
     /// at `PINNED_PHP`, with no per-call argument tuple to range-check it against
-    /// — so there is nothing for the fold lane's width-safe subset (below) to be
+    /// — so there is nothing for the fold lane's portable subset (below) to be
     /// the analogue of.
     fn engine_is_64_bit(&mut self) -> bool {
         self.engine_int_size() == Some(8)
@@ -1820,9 +1820,22 @@ impl<E: FoldEngine> EngineFolder<E> {
             curated_rows: self.absence_family_available() && self.curated_rows_admitted(),
             absence_family: self.absence_family_available(),
             fold_total: steins_catalog::foldable_entry_count(),
-            fold_safe: steins_catalog::width_safe_names().len(),
-            refused_folds: steins_catalog::width_refused_names(),
-            unverified_folds: steins_catalog::width_unverified_names(),
+            fold_safe: steins_catalog::portable_names().len(),
+            refused_folds: steins_catalog::refused_names(),
+            refusals: steins_catalog::refused_names()
+                .iter()
+                .filter_map(|&name| {
+                    steins_catalog::refusal(name).map(|r| RefusalNote {
+                        name,
+                        axis: match r.axis {
+                            steins_catalog::RefusalAxis::IntegerWidth => "integer_width",
+                            steins_catalog::RefusalAxis::BuildOption => "build_option",
+                        },
+                        witness: r.witness,
+                    })
+                })
+                .collect(),
+            unverified_folds: steins_catalog::unverified_names(),
         }
     }
 
@@ -2145,8 +2158,8 @@ impl<E: FoldEngine> EngineFolder<E> {
 ///
 /// * `Some(8)` — the machine every value rule here assumes. Admit everything, so
 ///   this is byte-identical to the pre-S1.5 behaviour on every native run.
-/// * `Some(4)` — the **width-safe subset**. Admit `name` only when the catalog
-///   certifies it ([`steins_catalog::width_safe`]) *and* every integer in the
+/// * `Some(4)` — the **portable subset**. Admit `name` only when the catalog
+///   certifies it ([`steins_catalog::portable`]) *and* every integer in the
 ///   arguments is inside [`I32_SAFE`] — both legs required, since the catalog
 ///   verdict is stated only for tuples the range guard admits. The catalog's
 ///   classification went three-valued in ADR-0028's 2026-08-14 amendment §4 and
@@ -2161,8 +2174,8 @@ impl<E: FoldEngine> EngineFolder<E> {
 fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -> bool {
     match fold_lane_at_width(int_size) {
         FoldLane::Full => true,
-        FoldLane::WidthSafeSubset => {
-            steins_catalog::width_safe(name) && args.iter().all(fold_arg_fits_i32)
+        FoldLane::PortableSubset => {
+            steins_catalog::portable(name) && args.iter().all(fold_arg_fits_i32)
         }
         FoldLane::Declined => false,
     }
@@ -2175,7 +2188,7 @@ fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -
 fn fold_lane_at_width(int_size: Option<u32>) -> FoldLane {
     match int_size {
         Some(8) => FoldLane::Full,
-        Some(4) => FoldLane::WidthSafeSubset,
+        Some(4) => FoldLane::PortableSubset,
         _ => FoldLane::Declined,
     }
 }
@@ -2187,9 +2200,9 @@ pub enum FoldLane {
     /// A provably 64-bit engine: the whole [`steins_catalog::foldable`] allowlist,
     /// which is the machine every value rule here assumes.
     Full,
-    /// A provably 32-bit engine: [`steins_catalog::width_safe_names`] only, and
+    /// A provably 32-bit engine: [`steins_catalog::portable_names`] only, and
     /// only for argument tuples the range guard admits.
-    WidthSafeSubset,
+    PortableSubset,
     /// An unreported or unprobed width: nothing folds. Default-deny — an old or
     /// foreign runner is unknown, not assumed.
     Declined,
@@ -2202,10 +2215,21 @@ impl FoldLane {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Full => "full",
-            Self::WidthSafeSubset => "width_safe_subset",
+            Self::PortableSubset => "portable_subset",
             Self::Declined => "declined",
         }
     }
+}
+
+/// One refused row's reason, as [`SurfaceSummary`] carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RefusalNote {
+    /// The builtin's name, as the catalog spells it.
+    pub name: &'static str,
+    /// The wire spelling of [`steins_catalog::RefusalAxis`].
+    pub axis: &'static str,
+    /// The recorded divergence, in one line: the call and both answers.
+    pub witness: &'static str,
 }
 
 /// The engine surface as the shared fold policy sees it — what
@@ -2226,6 +2250,17 @@ pub struct SurfaceSummary {
     pub int_size: Option<u32>,
     /// Which builtins may fold at that width.
     pub fold_lane: FoldLane,
+    /// Why each refused row is refused, joined here rather than in a renderer:
+    /// the catalog owns both the axis and the witness, and a surface that only
+    /// carried names forced its readers to write the reason themselves. The
+    /// playground's boundary panel did exactly that, and its sentence — every
+    /// refused name renders an integer in the machine's own word — went false
+    /// the moment `preg_split` was refused for a PCRE build option.
+    ///
+    /// `axis` is the wire spelling (`integer_width`, `build_option`), so a
+    /// consumer that must not name the catalog (the wasm module keeps it a
+    /// dev-dependency on purpose) still gets the classification.
+    pub refusals: Vec<RefusalNote>,
     /// Whether a curated return-fact row may refine a reflected envelope — both
     /// ADR-0056 gates, conjoined as the admission sequence conjoins them.
     pub curated_rows: bool,
@@ -2233,17 +2268,17 @@ pub struct SurfaceSummary {
     /// monkey-patch extension, and a runtime the declared target admits).
     pub absence_family: bool,
     /// The size of the folding allowlist, and how much of it
-    /// [`FoldLane::WidthSafeSubset`] keeps — the catalog's own counts, so a
+    /// [`FoldLane::PortableSubset`] keeps — the catalog's own counts, so a
     /// renderer states the boundary without a number of its own.
     pub fold_total: usize,
     /// See [`Self::fold_total`].
     pub fold_safe: usize,
-    /// The [`steins_catalog::WidthClass::Refused`] rows, by name — the folds a
-    /// [`FoldLane::WidthSafeSubset`] engine does not get **and can say why**, read
+    /// The [`steins_catalog::PortabilityClass::Refused`] rows, by name — the folds a
+    /// [`FoldLane::PortableSubset`] engine does not get **and can say why**, read
     /// from the catalog rather than restated here.
     ///
     /// Since ADR-0028's 2026-08-14 amendment this is no longer the whole
-    /// `foldable ∧ !width_safe` complement: the unverified rows decline on the
+    /// `foldable ∧ !portable` complement: the unverified rows decline on the
     /// very same gate with nothing on record. They are deliberately not merged in.
     /// A renderer states these as "a divergence was measured, here it is", which
     /// is a sentence an unverified row cannot be given — and §4 of that amendment
@@ -2252,8 +2287,8 @@ pub struct SurfaceSummary {
     /// auditable. Naming the unverified rows to a reader is
     /// [`Self::unverified_folds`]' job.
     pub refused_folds: &'static [&'static str],
-    /// The [`steins_catalog::WidthClass::Unverified`] rows, by name — the folds a
-    /// [`FoldLane::WidthSafeSubset`] engine also does not get, but for the other
+    /// The [`steins_catalog::PortabilityClass::Unverified`] rows, by name — the folds a
+    /// [`FoldLane::PortableSubset`] engine also does not get, but for the other
     /// reason: nothing was measured, so there is no divergence to cite. Kept
     /// apart from [`Self::refused_folds`] because ADR-0028's 2026-08-14
     /// amendment §4 forbids conflating the classes — a renderer owes these a

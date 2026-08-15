@@ -759,13 +759,13 @@ fn doctor_catalog_reports_the_pin_and_freshness_context() {
     // own accessors, so refused stays distinguished from unverified.
     let expected = format!(
         "(width: {} safe / {} refused / {} unverified)",
-        steins_catalog::width_safe_names().len(),
-        steins_catalog::width_refused_names().len(),
-        steins_catalog::width_unverified_names().len()
+        steins_catalog::portable_names().len(),
+        steins_catalog::refused_names().len(),
+        steins_catalog::unverified_names().len()
     );
     assert!(r.stdout.contains(&expected), "expected `{expected}`; stdout:\n{}", r.stdout);
     assert!(
-        !steins_catalog::width_unverified_names().is_empty(),
+        !steins_catalog::unverified_names().is_empty(),
         "an empty unverified list would make the assertion above vacuous"
     );
 }

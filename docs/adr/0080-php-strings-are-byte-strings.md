@@ -122,7 +122,7 @@ future consumer and this repo already demonstrated it does not generalize.
    variant carrying base64, with the PHP runner reconstructing exact bytes
    before it calls the function, and the answer travelling back the same way.
    That restores `strlen("\xC0") === 1` and every other byte-level builtin on
-   the `WIDTH_SAFE` allowlist (`substr`, `strrev`, `str_pad`, `md5`,
+   the `PORTABLE` allowlist (`substr`, `strrev`, `str_pad`, `md5`,
    `base64_encode`, `htmlspecialchars`). It changes the ADR-0024 protocol and
    the ADR-0066 replay transport, so it is its own change with its own
    version handshake. Until then, decision §2.6 holds and the lane is silent.

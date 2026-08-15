@@ -1,7 +1,7 @@
 //! Issue #78 allowlist admissions through the real sidecar.
 //!
 //! Each name has an ADR-0008 purity argument, a 32/64-bit differential verdict,
-//! and a `WIDTH_SAFE`/`WIDTH_REFUSED` row; fixtures assert the dump surface
+//! and a `PORTABLE`/`REFUSED` row; fixtures assert the dump surface
 //! renders the engine's answer. `replay_fold.rs` covers the 32-bit width gate;
 //! probe evidence is in the ADR-0066 amendment. Requires `php` on `PATH` — each
 //! test skips explicitly otherwise.
@@ -31,7 +31,7 @@ fn live(test: &str) -> Option<SidecarFolder> {
     Some(folder)
 }
 
-/// `version_compare` is `WIDTH_REFUSED`: folds on this 64-bit engine, declines
+/// `version_compare` is `REFUSED`: folds on this 64-bit engine, declines
 /// in the browser. Both arities are pinned — 2-arg is `-1|0|1`, 3-arg is bool —
 /// since the refusal covers them together (operator form runs the same comparison).
 #[test]
@@ -47,7 +47,7 @@ fn version_compare_folds_both_arities_on_a_64_bit_engine() {
          \\PHPStan\\dumpType(version_compare(\"1.0\", \"1.1\", \"ge\"));\n";
     assert_eq!(dumps(SRC, &mut folder), vec!["-1", "1", "0", "true", "false"]);
     assert!(steins_catalog::foldable("version_compare"));
-    assert!(!steins_catalog::width_safe("version_compare"), "refused on a 32-bit engine");
+    assert!(!steins_catalog::portable("version_compare"), "refused on a 32-bit engine");
 }
 
 /// String predicates fold to real booleans — a folded `false` is a value the
@@ -144,7 +144,7 @@ fn an_array_returning_fold_carries_the_engines_array_back() {
 }
 
 /// Wave-0 sibling: `str_replace` over an array subject. Both names were already
-/// `WIDTH_SAFE`, held back only by the old result boundary — no new width verdict
+/// `PORTABLE`, held back only by the old result boundary — no new width verdict
 /// needed. PHP preserves the subject's keys, so mixed string/int keys survive distinct.
 #[test]
 fn str_replace_folds_an_array_subject_keys_and_all() {
@@ -174,7 +174,7 @@ fn a_folded_array_is_verified_not_asserted() {
 
 /// `explode` folds to the engine's own pieces on the all-literal path — the
 /// Rust rung answers a *type* (`non-empty-list<string>`), the fold the *value*,
-/// strictly stronger. `WIDTH_UNVERIFIED`: folds here on 64-bit, declines in the
+/// strictly stronger. `UNVERIFIED`: folds here on 64-bit, declines in the
 /// browser with no probe on record; `replay_fold.rs` pins the decline.
 #[test]
 fn explode_folds_to_the_engines_own_pieces() {
@@ -195,8 +195,8 @@ fn explode_folds_to_the_engines_own_pieces() {
         ]
     );
     assert_eq!(
-        steins_catalog::width_class("explode"),
-        Some(steins_catalog::WidthClass::Unverified),
+        steins_catalog::portability_class("explode"),
+        Some(steins_catalog::PortabilityClass::Unverified),
         "folds here, declines in the browser, with no probe on record either way"
     );
 }
@@ -223,8 +223,8 @@ fn array_merge_folds_with_the_engines_own_key_resolution() {
         ]
     );
     assert_eq!(
-        steins_catalog::width_class("array_merge"),
-        Some(steins_catalog::WidthClass::Unverified)
+        steins_catalog::portability_class("array_merge"),
+        Some(steins_catalog::PortabilityClass::Unverified)
     );
 }
 
@@ -281,7 +281,7 @@ fn an_over_budget_explode_widens_to_the_rung_rather_than_losing_the_answer() {
 }
 
 /// `explode('', 'x')` is a `ValueError` at `PINNED_PHP` (PHP 8.0 replaced the
-/// old `false` return with a throw) — `WIDTH_UNVERIFIED`. Engine reports the
+/// old `false` return with a throw) — `UNVERIFIED`. Engine reports the
 /// throw, fold declines, dump falls to ADR-0069's declared floor: two
 /// independent refusals (the rung also declines — no return value to describe
 /// `non-empty` about). `steins-sidecar`'s protocol tests pin `FoldResult::Throw`.
@@ -304,7 +304,7 @@ fn an_empty_explode_separator_throws_and_falls_to_the_floor() {
 
 /// The three that probed clean. `array_fill` and `str_split` take an `int`
 /// parameter without ever coercing a *value* by it, and `array_unique` compares
-/// string casts without retyping what it keeps — so all three are `WIDTH_SAFE`,
+/// string casts without retyping what it keeps — so all three are `PORTABLE`,
 /// and `replay_fold.rs` pins that they fold on a 32-bit table too. Each also
 /// exercises a rule Rust declines to re-derive (ADR-0004): `array_fill`'s
 /// negative `$start_index` key sequence (PHP 8.3 changed it), `str_split`'s
@@ -338,8 +338,8 @@ fn the_probed_clean_names_fold_to_the_engines_own_arrays() {
     );
     for name in ["array_fill", "str_split", "array_unique"] {
         assert_eq!(
-            steins_catalog::width_class(name),
-            Some(steins_catalog::WidthClass::Safe),
+            steins_catalog::portability_class(name),
+            Some(steins_catalog::PortabilityClass::Portable),
             "{name} probed clean, so it folds in the browser too"
         );
     }
@@ -399,8 +399,8 @@ fn range_folds_on_a_64_bit_engine_including_its_own_refusal_witness() {
         ]
     );
     assert_eq!(
-        steins_catalog::width_class("range"),
-        Some(steins_catalog::WidthClass::Refused),
+        steins_catalog::portability_class("range"),
+        Some(steins_catalog::PortabilityClass::Refused),
         "the last dump carries a float, not an int, on a 32-bit engine"
     );
 }
@@ -431,8 +431,8 @@ fn preg_split_folds_on_the_projects_own_pcre() {
         ]
     );
     assert_eq!(
-        steins_catalog::width_class("preg_split"),
-        Some(steins_catalog::WidthClass::Refused)
+        steins_catalog::portability_class("preg_split"),
+        Some(steins_catalog::PortabilityClass::Refused)
     );
 }
 
@@ -467,8 +467,8 @@ fn the_alias_rows_fold_exactly_as_the_names_they_alias() {
     assert_eq!(d[6], "1.5");
     for name in ["join", "chop", "sizeof", "doubleval"] {
         assert_eq!(
-            steins_catalog::width_class(name),
-            Some(steins_catalog::WidthClass::Safe),
+            steins_catalog::portability_class(name),
+            Some(steins_catalog::PortabilityClass::Portable),
             "{name} folds in the browser too, on its target's probe family"
         );
     }

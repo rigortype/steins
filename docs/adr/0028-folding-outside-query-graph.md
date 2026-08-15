@@ -170,18 +170,18 @@ array result.
    first and fails the second, so a single constant would have to be wrong
    for one of them.
 
-4. **The integer-width classification becomes three-valued.** `WIDTH_SAFE`
-   is evidenced by differential probes and `WIDTH_REFUSED` by a recorded
+4. **The integer-width classification becomes three-valued.** `PORTABLE`
+   is evidenced by differential probes and `REFUSED` by a recorded
    divergence per row; a name with neither belonged to neither, which is why
-   the allowlist held no array-returning name. `WIDTH_UNVERIFIED` is that
+   the allowlist held no array-returning name. `UNVERIFIED` is that
    third place: *not measured*, so the name folds only on a provably 64-bit
    engine and declines in the browser — which is exactly what `foldable`'s
    default-deny sentence already described, now a row instead of a gap.
-   `foldable` becomes a predicate derived from `width_class`, so that
+   `foldable` becomes a predicate derived from `portability_class`, so that
    "refused (a divergence is on record)" and "unverified (nobody looked)"
    cannot be conflated: the refused rows' one-divergence-per-row discipline
    is what makes them auditable, and mixing in unevidenced rows would erase
-   it. Promotion to `WIDTH_SAFE` is a later slice with php-wasm probes; the
+   it. Promotion to `PORTABLE` is a later slice with php-wasm probes; the
    correct number of probes behind an `UNVERIFIED` row today is zero.
 
 5. **A name joins the allowlist only when the fold is strictly stronger than
@@ -222,7 +222,7 @@ array result.
 The whole change fires only when every argument is a literal, which is why it
 is last in its issue chain and why its wave order is by frequency against
 that condition: `str_replace` and `substr_replace` first, since they are
-already `WIDTH_SAFE` and only §5 held their array results back — so they need
+already `PORTABLE` and only §5 held their array results back — so they need
 no width verdict and work in the browser — then `array_merge` and `explode`
 behind the new class.
 
@@ -241,23 +241,23 @@ The wave order above stopped after wave 1 and deferred five names §5 had
 already admitted in principle: `array_unique`, `range`, `preg_split`,
 `str_split`, `array_fill`. All five are now probed, and the ADR-0066 amendment
 of 2026-08-15 carries the tuples, the counts and the two divergence witnesses.
-Three land in `WIDTH_SAFE` (`array_unique`, `str_split`, `array_fill`) and two
-in `WIDTH_REFUSED` (`range`, `preg_split`).
+Three land in `PORTABLE` (`array_unique`, `str_split`, `array_fill`) and two
+in `REFUSED` (`range`, `preg_split`).
 
 Two of the clauses above are worth reading against that outcome:
 
-- **§4 held.** `WIDTH_UNVERIFIED` did not grow by a single row. Each probed
+- **§4 held.** `UNVERIFIED` did not grow by a single row. Each probed
   name went to the class its evidence chose, which is what the class was
   defined to make possible; its two rows still have zero probes behind them.
 - **§5's admission of `range` stands, and the fold is still strictly stronger**
   — `range_transfer` answers a type, the fold a value. A width refusal does not
-  contradict §5: a `WIDTH_REFUSED` name is still `foldable`, so the rung it
+  contradict §5: a `REFUSED` name is still `foldable`, so the rung it
   shadows is shadowed on the CLI and stands beneath it in the browser, exactly
   as the clause describes.
 
 One prediction in this amendment was wrong in a way worth recording. Wave 0
 admitted `str_replace` and `substr_replace`'s array results "with no width
-verdict needed", reasoning that the array form of an already-`WIDTH_SAFE` name
+verdict needed", reasoning that the array form of an already-`PORTABLE` name
 cannot introduce one. The reasoning holds, but the *check* behind it could not
 have caught a counterexample: array elements cross the seam with no per-element
 type tag, so an `int`/`float` flip inside a result is visible only in the

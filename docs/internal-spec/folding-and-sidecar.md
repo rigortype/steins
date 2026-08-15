@@ -96,7 +96,7 @@ admissible as an argument is admissible as a result.
 ### The integer-width gate
 
 Behind the allowlist sits the width gate (issue #64). The catalog's primitive
-is `width_class(name)` — `foldable` is derived from it, so "on the allowlist"
+is `portability_class(name)` — `foldable` is derived from it, so "on the allowlist"
 is exactly "has a width verdict at all". Three classes, split by *evidence*:
 
 - **`Safe`** — verified by differential probes, 32-bit against 64-bit.
