@@ -9086,6 +9086,31 @@ impl<'a> Cx<'a> {
         out
     }
 
+    /// Whether `prop` is a **class-body hooked** property anywhere in `class_fqn`'s
+    /// chain (FP class 16). Those declarations are dropped at lowering — only their
+    /// names survive, in [`ClassDecl::hooked_properties`] — so [`Self::class_props`]
+    /// cannot answer this and a write to one would otherwise look like a write to an
+    /// undeclared slot and record a fact. A hook is arbitrary user code: the stored
+    /// value is whatever the `set` hook computes, never the written one. The promoted
+    /// spelling stays on the surface and carries `PropertyDecl::hooked` instead.
+    fn class_body_hooked(&self, class_fqn: &str, prop: &str) -> bool {
+        let mut cur = class_fqn.to_owned();
+        let mut seen: HashSet<String> = HashSet::new();
+        loop {
+            if !seen.insert(cur.to_ascii_lowercase()) {
+                return false;
+            }
+            let Some((file, cd)) = self.find_class(&cur) else { return false };
+            if cd.hooked_properties.iter().any(|h| h == prop) {
+                return true;
+            }
+            match &cd.parent {
+                Some(pref) => cur = self.units[file].tree.resolve_class_fqn(pref),
+                None => return false,
+            }
+        }
+    }
+
     /// The `__construct` method resolved through `class_fqn`'s chain (ADR-0036),
     /// for mapping `new` args to promoted-property positions — **with the file that
     /// declared it**, like every other class-member lookup in this crate.
@@ -14655,9 +14680,12 @@ fn apply_prop_assign(
     // A hooked property (PHP 8.4 `get`/`set`) routes this write through arbitrary
     // user code: the stored value is whatever the `set` hook computes, not `value`,
     // so neither property-mismatch id is sound and no fact may be recorded (FP
-    // class 16). Class-body hooked props are dropped at lowering (pdecl is `None`);
-    // this guards the promoted-param case, whose declaration survives.
-    let hooked = pdecl.is_some_and(|pd| pd.hooked);
+    // class 16). `pdecl` covers the promoted-param spelling, whose declaration
+    // survives lowering; a class-body hooked declaration does not, so its name is
+    // asked for separately — which matters now that a constructor's writes leave the
+    // walk (ADR-0057's constructor-summary amendment) and could carry an FP-16 fact
+    // to the caller.
+    let hooked = pdecl.is_some_and(|pd| pd.hooked) || cx.class_body_hooked(&class, prop);
 
     // 1. Native `type.property-mismatch` — a proven literal against a native prop
     // type. Skip promoted props (checked as constructor args; no double-report).
