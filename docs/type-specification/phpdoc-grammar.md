@@ -64,7 +64,9 @@ PHPStan's "read a `@template` argument out of an object type" utility is
 **recognized vocabulary** (issue #360), is **resolved wherever declarations
 decide it** (issue #361), and where the subject is a class-level template of the
 receiver, is **read off that receiver's generics carry at the call site** (issue
-#362). The declaration half is one rewrite over the parsed type, run where
+#362) — as is a subject naming a **function- or method-level `@template`**, off
+the carry of the *argument* that bound it (issue #363). The declaration half is
+one rewrite over the parsed type, run where
 envelopes are built and before anything is lowered, so a resolved node is judged,
 dumped and stored exactly as the type it names is — there is no second evaluator
 and no `ContractTy` variant (ADR-0030's one-relation discipline).
@@ -94,8 +96,8 @@ Three subject shapes resolve:
   under `@template T` is `T` itself — opaque, or the vocabulary bound of
   `@template T of int` (issue #293).
 
-A fourth shape resolves at a **call site** rather than in a declaration, because
-that is the only place its answer exists:
+Two more shapes resolve at a **call site** rather than in a declaration, because
+that is the only place their answer exists:
 
 - **A class-level template of the receiver's class**, on a `@return`.
   `@return template-type<T, ModelInterface, 'TChild'>` on a `Helper<T>` method is
@@ -105,6 +107,33 @@ that is the only place its answer exists:
   `(new Helper(new Model()))->getFirstChildren()` reads as `Child` — the same
   arms, at the same stratum, as if the docblock had said `@return Child`. Two
   lookups, one level each; nothing recurses.
+- **A function- or method-level template**, bound from an **argument's** carry
+  (issue #363). A declaration's own `@template T` binds where a `@param` spells
+  `Owner<…, T, …>` at the top level and the argument carries an edge owned by
+  exactly that `Owner`; `@param T $p` binds to the argument's proven value.
+  `@return T` then reads that binding, and
+  `@return template-type<T, Box, 'T'>` reads one hop past it — the binding's own
+  carry, indexed by `'T'` on `Box`. So under `@template T`, `@param Box<T> $box`
+  and either `@return` spelling, `unwrap(new Box(1))` reads `1`. Since #361
+  rewrites `template-type<Box<T>, Box, 'T'>` to `T` on the declared side, that
+  spelling and the bare `T` are the same read.
+
+The binding rule is deliberately narrow and states its own refusals: top-level
+positions only (not `list<Box<T>>`, `Box<T>|null`, `?T`, `array<T>` or any
+nested position), the owner's own `@template` list indexed positionally with no
+hierarchy walk, and **all-or-nothing per name** — every occurrence of `T` must
+yield a binding and all of them must agree, so two `@param Box<T>` parameters
+handed `Box<1>` and `Box<'s'>` decline. A named or spread argument list, a
+by-ref or variadic parameter, and an argument past the declared arity decline
+the whole call. A **bounded** template never binds, because the shadow already
+replaced it with its bound: under `@template T of int`, `@return T` reads `int`.
+No unification, no fixpoint, no flow back into the argument — this is a read of
+what tier 1 already calls "whatever flowed in", not the call-site solver
+ADR-0032 refuses.
+
+Where the callee's body proves a value, that **summary wins** and the read is
+only the floor beneath it: `function id(int $x): int { return 2; }` under
+`@template T @param T $x @return T` reads `2` at `id(1)`, not `1`.
 
 Everything else keeps the `Opaque` floor and never manufactures a `No`: an
 unknown owner, a template name the owner does not declare, an arity
@@ -113,13 +142,13 @@ subject, a non-class subject, a union or intersection subject, and a subject
 that reaches the owner only through a generic intermediate (one level, no
 walk — ADR-0032's amendment). Any arity but three is not this utility and floors
 the same way, silently, where PHPStan yields an error type. The call-site read
-floors the same way wherever the receiver carries nothing to read — a `$this`,
-static or non-exact receiver, a receiver whose value carry an earlier method call
-swept, a declared `@param Helper<Model> $h` receiver (which seeds no object
-today), or a subject naming a **method**-level template, which is a different
-binding problem. See [not-implemented.md](not-implemented.md) for the row and
-[divergence-registry.md](divergence-registry.md) for the registered differences
-from PHPStan.
+floors the same way wherever there is nothing to read — a `$this`, static or
+non-exact receiver, a receiver whose value carry an earlier method call swept, a
+declared `@param Helper<Model> $h` receiver (which seeds no object today), an
+argument that proves no value or carries no matching edge, and every spelling
+outside the binding rule above. See [not-implemented.md](not-implemented.md) for
+the row and [divergence-registry.md](divergence-registry.md) for the registered
+differences from PHPStan.
 
 Variance markers do not gate a projection. `@template-covariant T` states what
 the author expects of *substitution*, which is why acceptance is gated on it

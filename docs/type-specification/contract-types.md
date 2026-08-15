@@ -129,10 +129,12 @@ rules instead of a keyword zoo:
   project index and this crate has no index — the same reason `Class(fqn)` hands
   the class question back to each lane's own machinery. A `@return` whose subject
   is a class-level template of the receiver is decided one layer out again, at
-  the call site, where the receiver's generics carry exists (issue #362); it
-  produces contract *arms* directly rather than a node to lower, so this lane
-  never sees that spelling either. The floor is what remains for everything
-  neither the declarations nor a carry decide.
+  the call site, where the receiver's generics carry exists (issue #362); so is
+  one naming the declaration's own function- or method-level template, off the
+  carry of the argument that bound it (issue #363). Both produce contract *arms*
+  directly rather than a node to lower, so this lane never sees those spellings
+  either. The floor is what remains for everything neither the declarations nor a
+  carry decide.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own

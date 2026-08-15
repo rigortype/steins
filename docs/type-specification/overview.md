@@ -157,7 +157,8 @@ A specification is also a refusal list. Each of these is anchored in an ADR;
 - **Benevolent unions.** The grammar is accepted, the semantics erased;
   failure-arm labels replace the need (ADR-0030 reg. 3, ADR-0042).
 - **A call-site template solver.** Where propagation reaches, templates are
-  transparent (ADR-0032).
+  transparent (ADR-0032). Reading a carry at a call site is not solving; see
+  [not-implemented.md](not-implemented.md)'s "Deliberate refusals" for the line.
 - **Lint and format rules.** Boundary decision (ADR-0017).
 - **A PHP-version emulation matrix.** Steins asks the project's real PHP
   (ADR-0004, ADR-0024).

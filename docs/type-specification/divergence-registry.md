@@ -148,6 +148,29 @@ proven value and no `@var` was written. The reconsideration precondition for
 the first consequence is the parameter seed ADR-0032 §3 already specifies and
 has no site to fire at; for the second and third, a substitution mechanism.
 
+**14. PHPStan *solves* a call-site template by unification over every position;
+Steins *binds* it from a carry, at top-level positions only.** PHPStan collects
+every occurrence of `T` across a signature — nested inside `list<Box<T>>`, under
+a `Box<T>|null`, inside a callable's parameters — generates constraints from
+each, unifies them, and substitutes the solution back through the signature,
+falling back to `T`'s declared bound where nothing decides it. Steins performs
+one positional **read** instead (issue #363): a `@param Owner<…, T, …>` at the
+top level asks the argument's generics carry what sits at `T`'s position in
+`Owner`'s own `@template` list, `@param T $p` reads the argument's proven value,
+and nothing else binds. The consequences are all silences. A nested or nullable
+occurrence contributes nothing where PHPStan solves it. Two occurrences that
+disagree decline, where PHPStan joins or errors. A named or spread argument list
+declines the whole call, because position stops naming a parameter. A **bounded**
+template reads its bound rather than the value carried at it — `@template T of
+int` under `@param Box<T>` handed `new Box(1)` reads `int`, where PHPStan reads
+`1`; the bound is what the author promised, and reading through it would be an
+inhabitation check ADR-0032 keeps thin. And where a body summary exists it
+outranks the read entirely, which is the point: Steins' primary answer to "what
+is `T`" is the *value that flowed in* (ADR-0001 propagation, ADR-0032 tier 1),
+and the carry read is the floor under it rather than a rival inference.
+Reconsideration precondition: none — this is a standing refusal of the solver,
+not a deferral (ADR-0032, ADR-0030 reg. entry above).
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run
@@ -193,6 +216,22 @@ engine still declares nothing for the name, which is exactly what the PHP 8
 resource-to-object migration ends. The value domain is unchanged and still
 object- and resource-free (ADR-0035/0038). Still deferred (§8.7): arrays *of*
 resources, resource-consuming *parameters*, and open/closed state.
+
+**5. `phpdoc_advanced_phpstan_template_type` line 47 — standing silence, and a
+trust-order fact rather than a template gap.** `takesString(unwrap(new Box(1)))`
+reports nothing, and will not start reporting because of anything in the
+`template-type` family. `unwrap`'s `@return T` binds to the carried `1` and
+reads it (issue #363), but a `@return` envelope is an **Asserted** fact, and an
+Asserted argument fact premises no `type.argument-mismatch` on the proof layer
+and no contract-layer finding against a native parameter either — a plain
+`@return int` flowing into `takesString(string)` is silent today for exactly the
+same reason, and the dump surface shows `int (asserted)` there as it shows
+`1 (asserted)` here. The route that *would* premise a finding is the body-proven
+one (tier 1: `return $box->value` proving `1`), and it is blocked by heap
+properties not crossing a binding descent — ADR-0057 T1's heap component, on the
+roadmap and unrelated to this family. So the target for the case is *recognized,
+zero false positives, declared-side enforcement where a `@param` spells it*, and
+line 47 is not part of it.
 
 ## Not registered — just unimplemented
 

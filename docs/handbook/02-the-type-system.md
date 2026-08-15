@@ -374,6 +374,24 @@ than constructed carries nothing, and a method call on the
 receiver clears what it carried, because that call may have
 replaced it.
 
+The same reading works from an **argument**. Write
+`@template T`, `@param Box<T> $box` and `@return T` on a
+function, and `unwrap(new Box(1))` reads `1` — Steins asks the
+argument what it is carrying at `T`'s position and lets the
+`@return` name it, whether you spelled that return `T` or
+`template-type<Box<T>, Box, 'T'>`. This is where the "no
+call-site template solver" line needs care: nothing is being
+solved. There is one positional lookup, at the top level of a
+`@param` only — `list<Box<T>>` and `Box<T>|null` do not bind —
+and if two parameters both say `T` and were handed different
+things, Steins says nothing rather than picking one. A bounded
+`@template T of int` reads `int`, the bound you promised, not
+the value that arrived. And if the function's own body proves
+something, the body wins: `function id(int $x): int { return
+2; }` with those tags reads `2` at `id(1)`, not `1`. The read
+is the floor under your code's own evidence, never a rival to
+it.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return
