@@ -6,7 +6,9 @@ Extends ADR-0001's binding descent and ADR-0036's heap model; the inbound
 counterpart of ADR-0057 (which stays the outbound design: a *returned*
 allocation crossing back to the caller). **§2 (the argument leg, slice H1)
 landed 2026-08-15 (#376); §3 (the receiver leg, slice H2) landed 2026-08-16
-(#377), amending ADR-0075 §2.1 and §2.2.** §7's H3 is the remaining slice.
+(#377), amending ADR-0075 §2.1 and §2.2; §7's H3 — ADR-0057 T1 itself —
+landed 2026-08-16 (#378), amending ADR-0057 with the heap component's
+shape.** All three slices are in.
 
 ## 1. The gap, measured
 
@@ -177,9 +179,13 @@ re-diagnosed as one.
   `inner` holds an object: the value domain has no object carrier and
   `resolve_cval` has no `PropFetch` arm; the outbound heap channel (ADR-0057
   T1) is where an object crosses back, and a nested summary is depth. Out of
-  v1, as ADR-0057 §5 keeps objects-in-arrays out.
+  v1, as ADR-0057 §5 keeps objects-in-arrays out. *Still out after T1 landed
+  (#378): the heap holds a `Fact` per property, never an `ObjRef`, so there
+  is no object at `$b->inner` for the outbound channel to snapshot. The gap
+  is the object-in-carrier one, not the crossing.*
 - **The outbound leg itself** — `return new Foo()`, `return $b`: ADR-0057 T1,
-  designed, unchanged, sequenced after this ADR's slices (§7).
+  designed, unchanged, sequenced after this ADR's slices (§7). **Landed
+  2026-08-16 (#378).**
 - **A parameter seeded from a declared `@param Box<int> $b` at a non-descent
   entry** — the plain per-scope pass still gives a parameter no `HeapObj`;
   ADR-0032 §3's declared-seed clause keeps waiting for its own slice. This ADR
@@ -309,7 +315,11 @@ mints.
   2026-08-16 (#377).**
 - **H3 — ADR-0057 T1 outbound**: unchanged in content, sequenced after H1/H2,
   with `targs` added to the snapshot's field list by amendment (it postdates
-  ADR-0057) and `HeapSummary` given its shape then.
+  ADR-0057) and `HeapSummary` given its shape then. **Landed 2026-08-16
+  (#378)**: the shape is a wrapped `HeapObj` whose `escaped` reads as
+  escaped-before-return, the rebind is the `apply_assign` rung for functions
+  and methods alike, and the direct value/argument forms stay silent for the
+  reason §3(c) already gave — see ADR-0057's 2026-08-16 amendment.
 
 ## 8. Refusals (each one line, each anchored)
 
