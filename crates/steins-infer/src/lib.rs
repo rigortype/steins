@@ -33282,6 +33282,129 @@ enum Dir { case Up; }";
 }
 
 #[cfg(test)]
+mod template_type_rewrite_tests {
+    //! Unit tests for [`Cx::resolve_template_types`] (issue #361) at the level the
+    //! rewrite actually operates on: the phpdoc AST, before any lowering.
+    //!
+    //! The integration tests pin what the resolved envelopes *judge*; these pin
+    //! what the node *becomes*, which is a distinct claim in two places the
+    //! judgement cannot see. A declined node must be `Unsupported` and still read
+    //! back as what was written; a node whose subject is a template name must be
+    //! left byte-identical, because the carry readers (#362/#363) intercept exactly
+    //! that spelling and a rewrite would erase it.
+    use super::*;
+
+    /// `passes` applications of the rewrite to `spelling`, read in file `file` at
+    /// offset `off` of a project made of `srcs`.
+    fn rewritten_n(srcs: &[&str], file: usize, off: u32, spelling: &str, passes: usize) -> PType {
+        let trees: Vec<SourceTree> = srcs.iter().map(|s| SourceTree::parse(s)).collect();
+        let paths: Vec<String> = (0..srcs.len()).map(|i| format!("t{i}.php")).collect();
+        let units: Vec<FileUnit> = trees
+            .iter()
+            .zip(&paths)
+            .map(|(tree, path)| FileUnit { path: path.as_str(), tree })
+            .collect();
+        let index = Index::from_units(&units);
+        let cx = Cx::new(&units, &index, file);
+        let mut ty = parse_type(spelling).expect("the spelling parses").ty;
+        for _ in 0..passes {
+            cx.resolve_template_types(&mut ty, file, off);
+        }
+        ty
+    }
+
+    /// The rewrite of `spelling`, read in file `file` at offset `off`.
+    fn rewritten_in(srcs: &[&str], file: usize, off: u32, spelling: &str) -> PType {
+        rewritten_n(srcs, file, off, spelling, 1)
+    }
+
+    /// The rewrite of `spelling` against a single global-namespace file.
+    fn rewritten(src: &str, spelling: &str) -> PType {
+        rewritten_in(&[src], 0, 0, spelling)
+    }
+
+    const BOX: &str = "<?php\n/** @template T */\nclass Box {}\n";
+
+    #[test]
+    fn a_spelled_parameterization_becomes_the_argument_itself() {
+        let ty = rewritten(BOX, "template-type<Box<int>, Box, 'T'>");
+        assert!(matches!(&ty.kind, PKind::Identifier(n) if n == "int"), "{ty}");
+        // Inside-out: the outer `list` survives, the inner node resolves.
+        let nested = rewritten(BOX, "list<template-type<Box<int>, Box, 'T'>>");
+        assert_eq!(nested.to_string(), "list<int>");
+    }
+
+    #[test]
+    fn a_template_subject_is_left_exactly_as_written() {
+        // The orchestrating rule for the follow-ups: a subject that names a
+        // template is not this slice's to decide, and it must survive the rewrite
+        // as the node the carry readers will match on. `Opaque` either way today
+        // (issue #360), so nothing observable changes — which is the point.
+        for spelling in [
+            "template-type<T, Box, 'T'>",
+            // The same shape after a function-level `@template T` shadow has
+            // already turned `T` into an opaque node.
+            "template-type<Unresolvable, Box, 'T'>",
+        ] {
+            let ty = rewritten(BOX, spelling);
+            let PKind::Generic { base, args } = &ty.kind else {
+                panic!("{spelling} was rewritten to {ty}");
+            };
+            assert_eq!(base, "template-type");
+            assert_eq!(args.len(), 3);
+            assert_eq!(steins_contract::lower(&ty), steins_contract::ContractTy::Opaque);
+        }
+    }
+
+    #[test]
+    fn a_decline_becomes_an_opaque_node_that_still_says_what_it_was() {
+        // `Box` is the owner itself, unparameterized — nothing to project.
+        let ty = rewritten(BOX, "template-type<Box, Box, 'T'>");
+        assert!(
+            matches!(&ty.kind, PKind::Unsupported(raw) if raw == "template-type<Box, Box, 'T'>"),
+            "{ty}",
+        );
+        assert_eq!(steins_contract::lower(&ty), steins_contract::ContractTy::Opaque);
+    }
+
+    #[test]
+    fn the_rewrite_is_idempotent() {
+        // Load-bearing: the member sites apply a second shadow stage after
+        // `envelopes_of` has run, and every stage over an envelope is written to be
+        // safe to re-apply.
+        for spelling in [
+            "template-type<Box<int>, Box, 'T'>",
+            "template-type<Box, Box, 'T'>",
+            "template-type<T, Box, 'T'>",
+        ] {
+            assert_eq!(
+                rewritten_n(&[BOX], 0, 0, spelling, 1),
+                rewritten_n(&[BOX], 0, 0, spelling, 2),
+                "{spelling}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_edge_argument_keeps_naming_the_class_it_named_where_it_was_written() {
+        // The projection lifts `@extends Box<Dog>` out of `App`'s file into a
+        // declaration written in `Other`, where a bare `Dog` would name a
+        // different class. It arrives fully qualified instead.
+        let app = "<?php\nnamespace App;\n/** @template T */\nclass Box {}\nclass Dog {}\n\
+                   /** @extends Box<Dog> */\nfinal class DogBox extends Box {}\n";
+        let other = "<?php\nnamespace Other;\nclass Dog {}\n";
+        let off = other.len() as u32;
+        let ty = rewritten_in(
+            &[app, other],
+            1,
+            off,
+            "template-type<\\App\\DogBox, \\App\\Box, 'T'>",
+        );
+        assert_eq!(ty.to_string(), "\\App\\Dog");
+    }
+}
+
+#[cfg(test)]
 mod n4_carrier_tests {
     //! ADR-0052 N4 — contract facts, class facts, and instanceof subtraction at the
     //! carrier level (the walk-integration path is covered by the `narrowing_n4`

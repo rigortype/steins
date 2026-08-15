@@ -774,3 +774,156 @@ fn inheritance_edge_carry_survives_an_argument_pass() {
         takesStringBox($box);";
     assert_eq!(param_count(src), 1, "a declared edge survives an argument pass");
 }
+
+// 5. `template-type<Subject, Owner, 'TName'>` on the declared side (issue #361).
+//
+// The utility reads one `@template` argument out of a type. Wherever the answer
+// is decidable from declarations alone, the node is rewritten into the type it
+// names before anything is lowered, so the envelope judges exactly as the spelled
+// type would. Everything else keeps the `Opaque` floor issue #360 put under the
+// spelling: silence, never a manufactured `No`.
+
+/// A `Box<T>` whose element the fixtures below index by name.
+const BOX: &str = "<?php\n\
+    /** @template T */\n\
+    final class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n";
+
+#[test]
+fn a_spelled_parameterization_judges_as_the_argument_it_names() {
+    let f = format!(
+        "{BOX}/** @param template-type<Box<int>, Box, 'T'> $v */\nfunction f($v): void {{}}\n"
+    );
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "int inhabits the T of Box<int>");
+    assert_eq!(param_count(&format!("{f}f('s');")), 1, "'s' does not");
+    // The claim in full: identical to the type written out.
+    let spelled = f.replace("template-type<Box<int>, Box, 'T'>", "int");
+    assert_eq!(param_count(&format!("{spelled}f(1);")), 0);
+    assert_eq!(param_count(&format!("{spelled}f('s');")), 1);
+}
+
+#[test]
+fn a_nested_argument_carries_through_whole() {
+    let f = format!(
+        "{BOX}/** @param template-type<Box<list<int>>, Box, 'T'> $v */\nfunction f($v): void {{}}\n"
+    );
+    assert_eq!(param_count(&format!("{f}f([1, 2]);")), 0, "a list<int> inhabits it");
+    assert_eq!(param_count(&format!("{f}f(['x']);")), 1, "a list<string> does not");
+    assert_eq!(param_count(&format!("{f}f(1);")), 1, "nor does an int");
+}
+
+#[test]
+fn the_template_name_indexes_the_owners_list_by_position() {
+    // Not "the first argument": `'V'` is the owner's *second* template, so the
+    // projection must be `string`, and the spelled arity must align with `Pair`'s
+    // own list before any position means anything.
+    let base = "<?php\n/** @template K\n * @template V */\nfinal class Pair {}\n";
+    let f = format!(
+        "{base}/** @param template-type<Pair<int, string>, Pair, 'V'> $v */\n\
+         function f($v): void {{}}\n"
+    );
+    assert_eq!(param_count(&format!("{f}f('s');")), 0, "'V' is the string");
+    assert_eq!(param_count(&format!("{f}f(1);")), 1, "not the int at 'K'");
+}
+
+#[test]
+fn a_one_level_inheritance_edge_resolves_the_subject() {
+    let base = "<?php\n\
+        /** @template T */\n\
+        class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        /** @extends Box<int> */\n\
+        final class IntBox extends Box {}\n";
+    let f = format!(
+        "{base}/** @param template-type<IntBox, Box, 'T'> $v */\nfunction f($v): void {{}}\n"
+    );
+    assert_eq!(param_count(&format!("{f}f(1);")), 0, "@extends Box<int> gives int");
+    assert_eq!(param_count(&format!("{f}f('s');")), 1, "'s' does not inhabit it");
+}
+
+#[test]
+fn a_generic_intermediate_declines_rather_than_substituting() {
+    // ADR-0032's amendment: own templates win, and the walk does not recurse.
+    // `Mid` reaches `Box` only through its *own* `U`, which is a substitution
+    // problem — this slice says nothing rather than guessing.
+    let base = "<?php\n\
+        /** @template T */\n\
+        class Box { /** @param T $value */ public function __construct(public mixed $value) {} }\n\
+        /** @template U\n * @extends Box<U> */\n\
+        class Mid extends Box {}\n";
+    let f =
+        format!("{base}/** @param template-type<Mid, Box, 'T'> $v */\nfunction f($v): void {{}}\n");
+    assert_eq!(param_count(&format!("{f}f(1);")), 0);
+    assert_eq!(param_count(&format!("{f}f('s');")), 0, "silence, not a guess");
+}
+
+#[test]
+fn a_template_argument_behaves_as_that_template_would() {
+    // `template-type<Box<T>, Box, 'T'>` under a function-level `@template T` IS
+    // `T` — opaque, so both calls are silent, exactly as `@param T` is.
+    let f = format!(
+        "{BOX}/**\n * @template T\n * @param template-type<Box<T>, Box, 'T'> $v\n */\n\
+         function f($v): void {{}}\n"
+    );
+    assert_eq!(param_count(&format!("{f}f(1);")), 0);
+    assert_eq!(param_count(&format!("{f}f('s');")), 0, "an unbounded T decides nothing");
+
+    // With a vocabulary bound (issue #293) the template reads as its bound, so the
+    // projection does too — the bound is substituted before the rewrite runs.
+    let bounded = f.replace("@template T\n", "@template T of int\n");
+    assert_eq!(param_count(&format!("{bounded}f(1);")), 0);
+    assert_eq!(param_count(&format!("{bounded}f('s');")), 1, "T of int rejects a string");
+}
+
+#[test]
+fn a_class_level_template_argument_stays_shadowed_at_the_member_site() {
+    // The projection yields the identifier `T`; the class-level shadow the member
+    // check applies afterwards neutralizes it, as it does for any `@param T`.
+    let base = format!(
+        "{BOX}/** @template T */\n\
+         class C {{\n  /** @param template-type<Box<T>, Box, 'T'> $v */\n\
+         \x20 public function m($v): void {{}}\n}}\n"
+    );
+    assert_eq!(param_count(&format!("{base}(new C())->m(1);")), 0);
+    assert_eq!(param_count(&format!("{base}(new C())->m('s');")), 0, "a class-level T is opaque");
+}
+
+/// Every way the utility can fail to name something, pinned as silence. Each of
+/// these keeps the `Opaque` floor, which admits every value — so a *pair* of calls
+/// that would disagree under any real type is the evidence that nothing was decided.
+#[test]
+fn every_undecidable_spelling_stays_silent() {
+    let spellings = [
+        // An owner no class declares.
+        "template-type<Missing<int>, Missing, 'T'>",
+        // A template name `Box` does not declare.
+        "template-type<Box<int>, Box, 'Q'>",
+        // More spelled arguments than the owner has templates.
+        "template-type<Box<int, string>, Box, 'T'>",
+        // A subject parameterizing some *other* generic class.
+        "template-type<Other<int>, Box, 'T'>",
+        // The owner named bare: no argument to give.
+        "template-type<Box, Box, 'T'>",
+        // A union subject — PHPStan unions over its class names, Steins declines.
+        "template-type<Box<int>|Other<int>, Box, 'T'>",
+        // A subject that is a template name: the answer is at a call site, not in
+        // a declaration (issues #362/#363 read it off a carry).
+        "template-type<T, Box, 'T'>",
+        // A class that is no relative of the owner at all.
+        "template-type<Plain, Box, 'T'>",
+        // A non-class subject.
+        "template-type<list<int>, Box, 'T'>",
+        // Not this utility type at all: the wrong arity keeps the issue #360 floor.
+        "template-type<Box<int>, Box>",
+    ];
+    for spelling in spellings {
+        let f = format!(
+            "{BOX}/** @template U */\nfinal class Other {{}}\nfinal class Plain {{}}\n\
+             /**\n * @template T\n * @param {spelling} $v\n */\nfunction f($v): void {{}}\n"
+        );
+        assert_eq!(param_count(&format!("{f}f(1);")), 0, "{spelling} decided something about 1");
+        assert_eq!(
+            param_count(&format!("{f}f('s');")),
+            0,
+            "{spelling} decided something about 's'"
+        );
+    }
+}

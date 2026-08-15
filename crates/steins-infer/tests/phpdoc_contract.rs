@@ -259,6 +259,20 @@ fn return_contract_is_checked() {
     assert_eq!(return_count(ok), 0);
 }
 
+/// A resolved `template-type<…>` is checked in the callee body like any other
+/// `@return` (issue #361): the envelope constrains the body because it *is* the
+/// type it names, not because a second relation was taught to read the spelling.
+#[test]
+fn a_resolved_template_type_return_binds_the_body() {
+    let h = "<?php\n/** @template T */\nfinal class Box {}\n\
+             /** @return template-type<Box<int>, Box, 'T'> */\n";
+    assert_eq!(return_count(&format!("{h}function h() {{ return 's'; }}")), 1, "'s' is not int");
+    assert_eq!(return_count(&format!("{h}function h() {{ return 1; }}")), 0, "1 is");
+    // And a spelling nothing resolves constrains nothing — the `Opaque` floor.
+    let opaque = h.replace("Box<int>", "Missing<int>").replace(", Box, 'T'", ", Missing, 'T'");
+    assert_eq!(return_count(&format!("{opaque}function h() {{ return 's'; }}")), 0);
+}
+
 // 7. Registry / suppressibility.
 
 // 8. Effective-nullability and phpstan-tag precedence (FP avoidance, ADR-0029).
