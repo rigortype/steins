@@ -759,9 +759,20 @@ pub struct ClassDecl {
 
 /// A representable call argument or assignment right-hand side. The first five
 /// variants are *literals* — concrete, self-evident values.
-/// [`ArgValue::Var`]/[`ArgValue::Call`] are value-propagation carriers
-/// (ADR-0001), not proven on their own — resolved against a per-scope linear
-/// trace. Everything else lowers to [`ArgValue::Other`].
+/// [`ArgValue::Var`]/[`ArgValue::Call`]/[`ArgValue::MethodCall`] are
+/// value-propagation carriers (ADR-0001), not proven on their own — resolved
+/// against a per-scope linear trace. Everything else lowers to
+/// [`ArgValue::Other`].
+///
+/// What a **call** in value position still lowers to `Other` (issue #386, the
+/// list `docs/type-specification/not-implemented.md` states for users), each
+/// because this vocabulary has no way to say it: a dynamic receiver or method
+/// name ([`Callee::Dynamic`] — `$o->$m()`, `$obj[0]->m()`, `$var::m()`), a
+/// receiver deeper than one property hop (depth 1 is a [`Receiver::Prop`],
+/// carried here and declined as a dispatch target by ADR-0052 §7), an argument
+/// list carrying a **spread** (its positional prefix is not the call), and a
+/// method **first-class callable** (`$o->m(...)` is a value, not a call — see
+/// [`ClosureRef::FunctionName`], which carries the free-function form only).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ArgValue {
     Int(i64),
@@ -778,6 +789,17 @@ pub enum ArgValue {
     /// binding-descent summary (issue #60); a foldable builtin's own-call
     /// argument resolves the same way (issue #127: `strtoupper(g(1))` folds).
     Call(String, Vec<ArgValue>),
+    /// A **method or static** call in value position (issue #386): `$b->m(…)`,
+    /// `$b?->m(…)`, `Foo::m(…)`, `(new C(1))->m(…)`. Carries the statement
+    /// vocabulary verbatim — the same [`Callee`] the trace's [`CallExpr`] holds,
+    /// so the value lane and the statement lane resolve one target through one
+    /// `resolve_call_target` and walk one body once (ADR-0075 §3 as amended).
+    ///
+    /// [`Callee::Function`] never appears here — a free function stays
+    /// [`ArgValue::Call`], which carries a simple name and resolves by a rule of
+    /// its own. `named` holds the named arguments; the binding descent is
+    /// positional-only and declines on them, exactly as `f(x: 1)` is declined.
+    MethodCall { callee: Callee, args: Vec<ArgValue>, named: Vec<NamedArg> },
     /// `new ClassName(args...)` — construction rvalue. [`NameRef`] resolves to
     /// an FQN at use time, so `$x = new Foo(...)` records `$x`'s exact class.
     /// Third field is the ctor's **named** args (promoted-property seeding binds by name too).
@@ -1147,6 +1169,14 @@ impl std::hash::Hash for ArgValue {
                 name.hash(state);
                 args.hash(state);
             }
+            // The receiver, method and arguments all denote; the spans a nested
+            // `Ternary`/`Coalesce` argument carries do not, and the arm below
+            // excludes them by delegating to this very impl (issue #386).
+            ArgValue::MethodCall { callee, args, named } => {
+                callee.hash(state);
+                args.hash(state);
+                named.hash(state);
+            }
             ArgValue::New(name, args, named) => {
                 name.hash(state);
                 args.hash(state);
@@ -1239,6 +1269,17 @@ impl ArgValue {
             ArgValue::Null => "null".to_owned(),
             ArgValue::Var(v) => format!("${v}"),
             ArgValue::Call(name, _) => format!("{name}()"),
+            // `$b->m()` / `$b?->m()` / `(new C())->m()` / `Foo::m()`. Only the two
+            // callee forms the variant admits are spelled; the rest are
+            // unreachable by construction (the lowering builds no other).
+            ArgValue::MethodCall { callee, .. } => match callee {
+                Callee::Method { receiver, method, nullsafe } => {
+                    let arrow = if *nullsafe { "?->" } else { "->" };
+                    format!("{}{arrow}{method}()", receiver.render())
+                }
+                Callee::Static { class, method } => format!("{}::{method}()", class.render()),
+                _ => "<expr>".to_owned(),
+            },
             ArgValue::New(name, _, _) => format!("new {}()", name.simple()),
             ArgValue::Array(items) => render_array(items),
             ArgValue::Ternary { then_val, else_val, .. } => {
@@ -1354,8 +1395,12 @@ pub enum Receiver {
     /// class (`$var = new Foo();`).
     Var(String),
     /// `(new Foo(...))->m()` — an exact-class receiver (runtime class is the
-    /// referenced class, resolved to an FQN project-wide).
-    New(NameRef),
+    /// referenced class, resolved to an FQN project-wide), carrying the
+    /// constructor's own positional and named arguments (issue #386): the
+    /// receiver object is minted here, so the constructor summary and the
+    /// generic carry the arguments prove are readable at this call — the half
+    /// issue #374 measured missing and ADR-0057 C7 deferred to the value IR.
+    New { class: NameRef, args: Vec<ArgValue>, named: Vec<NamedArg> },
     /// `$var->prop->m()` — a **depth-1** property-fetch receiver (ADR-0052 §7).
     /// Receiver object is whatever the heap says `$var->prop` holds; only a bare
     /// variable object and static property identifier are represented (a deeper
@@ -1363,6 +1408,20 @@ pub enum Receiver {
     /// **not** resolved from it — every resolution path treats it like `Dynamic`,
     /// while `call.on-null` reads the heap property fact.
     Prop { var: String, prop: String },
+}
+
+impl Receiver {
+    /// Render the receiver for a diagnostic message — the source spelling as far
+    /// as the vocabulary keeps it (a `new`'s arguments are not re-rendered).
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            Receiver::This => "$this".to_owned(),
+            Receiver::Var(v) => format!("${v}"),
+            Receiver::New { class, .. } => format!("(new {}())", class.simple()),
+            Receiver::Prop { var, prop } => format!("${var}->{prop}"),
+        }
+    }
 }
 
 /// The class portion of a static `Class::m()` call, as written.
@@ -5625,7 +5684,21 @@ fn trace_recv_of_object(object: &Expression<'_>) -> Option<Receiver> {
             let name = strip_dollar(bytes_to_string(dv.name));
             Some(if name == "this" { Receiver::This } else { Receiver::Var(name) })
         }
-        Expression::Instantiation(inst) => instantiation_class(inst).map(Receiver::New),
+        // `(new Foo(args))->m()`: the constructor's arguments travel with the
+        // receiver (issue #386), because the receiver object is minted right here
+        // and its state is what the call dispatches against. Same lowering the
+        // `Instantiation` arm of [`lower_arg_value`] gives an argument-position
+        // `new`, so the two positions cannot disagree about what was written.
+        Expression::Instantiation(inst) => instantiation_class(inst).map(|class| {
+            let (args, named) = match &inst.argument_list {
+                Some(list) => {
+                    let LoweredArgs { args, named_args, .. } = lower_argument_list(list);
+                    (args.into_iter().map(|a| a.value).collect(), named_args)
+                }
+                None => (Vec::new(), Vec::new()),
+            };
+            Receiver::New { class, args, named }
+        }),
         // A depth-1 property-fetch receiver `$var->prop->m()` (ADR-0052 §7): the
         // object is read from the heap `$var->prop` fact. A chain or dynamic name
         // (`prop_fetch_of` returns `None`) falls through to `Dynamic`. The receiver
@@ -5717,13 +5790,31 @@ fn effect_recv_of_class(class: &Expression<'_>) -> Option<EffectRecv> {
     }
 }
 
+/// The [`Callee`] of an instance-method call — [`Callee::Dynamic`] when either
+/// half (receiver, method name) is one resolution cannot reason about. The ONE
+/// receiver lowering: the statement form, the first-class-callable reference and
+/// the value-position [`ArgValue::MethodCall`] all come through here, so a
+/// receiver can never be spelled two ways (issue #386).
+fn trace_method_callee(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, nullsafe: bool) -> Callee {
+    match (trace_recv_of_object(object), method_name_of(selector)) {
+        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe },
+        _ => Callee::Dynamic,
+    }
+}
+
+/// The [`Callee`] of a static call — the `::` twin of [`trace_method_callee`],
+/// shared by the same three lowerings.
+fn trace_static_callee(class: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>) -> Callee {
+    match (trace_static_class(class), method_name_of(selector)) {
+        (Some(class), Some(method)) => Callee::Static { class, method },
+        _ => Callee::Dynamic,
+    }
+}
+
 /// Lower a method call (`MethodCall` / `NullSafeMethodCall`) into a [`CallExpr`].
 /// `nullsafe` marks the `?->` form (see [`Callee::Method`]).
 fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span, nullsafe: bool) -> CallExpr {
-    let receiver = match (trace_recv_of_object(object), method_name_of(selector)) {
-        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe },
-        _ => Callee::Dynamic,
-    };
+    let receiver = trace_method_callee(object, selector, nullsafe);
     let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(list);
     CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
@@ -5731,13 +5822,30 @@ fn lower_method_call(object: &Expression<'_>, selector: &ClassLikeMemberSelector
 
 /// Lower a static method call into a [`CallExpr`].
 fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemberSelector<'_>, list: &mago_syntax::cst::ArgumentList<'_>, span: Span) -> CallExpr {
-    let receiver = match (trace_static_class(class), method_name_of(selector)) {
-        (Some(class), Some(method)) => Callee::Static { class, method },
-        _ => Callee::Dynamic,
-    };
+    let receiver = trace_static_callee(class, selector);
     let LoweredArgs { args, named_args, has_spread, positional_only, arg_conds } =
         lower_argument_list(list);
     CallExpr { callee: None, callee_ref: None, receiver, args, named_args, has_spread, positional_only, span, arg_conds }
+}
+
+/// Lower a method/static call written in **value** position to
+/// [`ArgValue::MethodCall`] (issue #386), or [`ArgValue::Other`] when the callee
+/// is one no resolution reaches ([`Callee::Dynamic`]) or the argument list
+/// carries a **spread** — whose positional prefix is not the call that was
+/// written, so claiming it would be claiming a different call.
+fn method_call_arg_value(callee: Callee, list: &mago_syntax::cst::ArgumentList<'_>) -> ArgValue {
+    if matches!(callee, Callee::Dynamic) {
+        return ArgValue::Other;
+    }
+    let LoweredArgs { args, named_args, has_spread, .. } = lower_argument_list(list);
+    if has_spread {
+        return ArgValue::Other;
+    }
+    ArgValue::MethodCall {
+        callee,
+        args: args.into_iter().map(|a| a.value).collect(),
+        named: named_args,
+    }
 }
 
 /// Lower a **method first-class callable** `$o->m(...)` into a reference-"call": a
@@ -5750,14 +5858,10 @@ fn first_class_method_ref(
     selector: &ClassLikeMemberSelector<'_>,
     span: Span,
 ) -> CallExpr {
-    let receiver = match (trace_recv_of_object(object), method_name_of(selector)) {
-        (Some(recv), Some(method)) => Callee::Method { receiver: recv, method, nullsafe: false },
-        _ => Callee::Dynamic,
-    };
     CallExpr {
         callee: None,
         callee_ref: None,
-        receiver,
+        receiver: trace_method_callee(object, selector, false),
         args: Vec::new(),
         named_args: Vec::new(),
         has_spread: false,
@@ -5774,14 +5878,10 @@ fn first_class_static_ref(
     selector: &ClassLikeMemberSelector<'_>,
     span: Span,
 ) -> CallExpr {
-    let receiver = match (trace_static_class(class), method_name_of(selector)) {
-        (Some(class), Some(method)) => Callee::Static { class, method },
-        _ => Callee::Dynamic,
-    };
     CallExpr {
         callee: None,
         callee_ref: None,
-        receiver,
+        receiver: trace_static_callee(class, selector),
         args: Vec::new(),
         named_args: Vec::new(),
         has_spread: false,
@@ -5881,6 +5981,20 @@ fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             }
             _ => ArgValue::Other,
         },
+        // A method / nullsafe-method / static call in value position (issue #386):
+        // the statement vocabulary, carried verbatim. Receiver and static-class
+        // lowering are the statement form's own (`trace_method_callee` /
+        // `trace_static_callee`), so `$b->m()` written as an argument denotes
+        // exactly what `$b->m();` written as a statement denotes.
+        Expression::Call(Call::Method(mc)) => {
+            method_call_arg_value(trace_method_callee(mc.object, &mc.method, false), &mc.argument_list)
+        }
+        Expression::Call(Call::NullSafeMethod(mc)) => {
+            method_call_arg_value(trace_method_callee(mc.object, &mc.method, true), &mc.argument_list)
+        }
+        Expression::Call(Call::StaticMethod(sc)) => {
+            method_call_arg_value(trace_static_callee(sc.class, &sc.method), &sc.argument_list)
+        }
         // `new Foo(...)` — a construction rvalue carrying its class (exact-class env
         // tracking) plus its positional and named arguments (both feed the
         // promoted-property seed). Spread arguments are not represented.

@@ -12,7 +12,7 @@ fn method_calls(tree: &SourceTree) -> impl Iterator<Item = &steins_syntax::CallE
 fn new_class_ref(tree: &SourceTree) -> steins_syntax::NameRef {
     method_calls(tree)
         .find_map(|c| match &c.receiver {
-            Callee::Method { receiver: Receiver::New(r), .. } => Some(r.clone()),
+            Callee::Method { receiver: Receiver::New { class, .. }, .. } => Some(class.clone()),
             _ => None,
         })
         .expect("a new-receiver method call")
