@@ -16505,11 +16505,13 @@ fn contest_mentions(
 /// walk was written to match both the neutralized [`PKind::Unsupported`] form and
 /// the raw [`PKind::Identifier`] because [`neutralize_templates`] stopped at a
 /// `Callable` and a `Conditional`, leaving the `T` in `\Closure():T` unshadowed.
-/// Issue #374 closed that gap — the shadow now reaches every position this walk
-/// does — but the identifier arm stays, for two positions no rewrite covers: a
-/// template carrying a **bound** is substituted rather than neutralized, and this
-/// walk is also run over types that never passed through the shadow at all. A
-/// `\`-qualified name is never a template, matching the shadow's own rule.
+/// Issue #374 closed that gap: its one caller reads envelopes the shadow has
+/// already rewritten everywhere, so the identifier arm no longer catches anything
+/// the opaque arm misses. It stays anyway, because the question asked here is
+/// about a *type* and not about a stage — a caller reading a docblock type before
+/// the shadow would otherwise silently under-count — and it costs one lookup on a
+/// name already in hand. A `\`-qualified name is never a template, matching the
+/// shadow's own rule.
 ///
 /// A `Generic`'s **base** counts too (`T<int>`): nothing neutralizes a base string,
 /// and a template used as a generic base is a mention the read cannot index.
