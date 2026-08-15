@@ -4,7 +4,7 @@
 //! through direct `@param T` ctor params, judged against `@param Class<A>` at call
 //! sites. No call-site template solver (ADR-0030); unknown stays `Maybe`.
 
-use steins_infer::{Diagnostic, PARAM_MISMATCH_ID, check};
+use steins_infer::{DEBUG_TYPE_ID, Diagnostic, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
 
 fn findings(src: &str) -> Vec<Diagnostic> {
@@ -926,4 +926,196 @@ fn every_undecidable_spelling_stays_silent() {
             "{spelling} decided something about 's'"
         );
     }
+}
+
+// 6. `template-type<T, Owner, 'TName'>` read off the RECEIVER's carry (issue #362)
+// — the phpstan/phpstan#9053 shape, where the subject is a class-level template of
+// the receiver's own class and the answer exists only at the call site.
+//
+// The read is a projection out of the carry the sections above build, and its whole
+// observable surface is the return arms it seeds: the dump, and the fact that they
+// are the arms a hand-written `@return Child` seeds. Everything the two lookups do
+// not land on stays at the `Opaque` floor.
+
+/// The one `debug.type` message a source with exactly one dump produces.
+fn dumped(src: &str) -> String {
+    let ds: Vec<Diagnostic> = findings(src).into_iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ds.len(), 1, "expected exactly one dump, got {ds:?}");
+    ds[0].message.clone()
+}
+
+/// The diagnostic ids a source produces, sorted — for the claims that are about
+/// *which* findings fire rather than about a type.
+fn ids(src: &str) -> Vec<String> {
+    let mut v: Vec<String> = findings(src).into_iter().map(|d| d.id.to_string()).collect();
+    v.sort();
+    v
+}
+
+/// `tests/PHPStan/Analyser/data/discussion-9053.php`'s shape, rebuilt minimally: a
+/// `Helper<T of ModelInterface>` whose `@return` reads the `TChild` its model
+/// carries. `Plain` is the same interface *without* the `@implements` edge — the
+/// hop that carries nothing.
+const NINE_OH_FIVE_THREE: &str = "<?php\n\
+    /** @template TChild of ChildInterface */\n\
+    interface ModelInterface { /** @return TChild[] */ public function getChildren(): array; }\n\
+    /** @implements ModelInterface<Child> */\n\
+    class Model implements ModelInterface { public function getChildren(): array { return []; } }\n\
+    /** @template T of ModelInterface */\n\
+    interface ChildInterface { /** @return T */ public function getModel(): ModelInterface; }\n\
+    /** @implements ChildInterface<Model> */\n\
+    class Child implements ChildInterface {\n\
+        public function getModel(): ModelInterface { return new Model(); }\n\
+    }\n\
+    class Plain implements ModelInterface { public function getChildren(): array { return []; } }\n\
+    /** @template T of ModelInterface */\n\
+    class Helper {\n\
+        /** @param T $model */\n\
+        public function __construct(private ModelInterface $model) {}\n\
+        /** @return template-type<T, ModelInterface, 'TChild'> */\n\
+        public function getFirstChildren(): ChildInterface { return new Child(); }\n\
+        public function reset(): void {}\n\
+    }\n\
+    function opaqueHelper(): Helper { return new Helper(new Model()); }\n";
+
+/// The utility's spelling in [`NINE_OH_FIVE_THREE`], for the substitutions below.
+const SPELLING: &str = "template-type<T, ModelInterface, 'TChild'>";
+
+/// [`NINE_OH_FIVE_THREE`] plus `body`, with `Helper::getFirstChildren()`'s
+/// `@return` spelled `doc`.
+fn shape(doc: &str, body: &str) -> String {
+    format!("{}{body}", NINE_OH_FIVE_THREE.replace(SPELLING, doc))
+}
+
+#[test]
+fn the_receivers_carry_answers_the_discussion_9053_shape() {
+    // Two lookups, one hop each: `T` off the `Helper` carry is the proven `Model`
+    // object, and `TChild` off *that* object's `@implements ModelInterface<Child>`
+    // edge is `Child`. The claim is equality with the type it names; the literal
+    // beside it records today's wording, which ADR-0053 §7 leaves unpinned.
+    let body = "function g() { $helper = new Helper(new Model()); \
+                $child = $helper->getFirstChildren(); \\PHPStan\\dumpType($child); }\n";
+    assert_eq!(dumped(&shape(SPELLING, body)), dumped(&shape("Child", body)));
+    assert_eq!(dumped(&shape(SPELLING, body)), "dumped type: Child (asserted)");
+}
+
+#[test]
+fn a_declared_edge_carry_reads_the_same_and_survives_the_sweep() {
+    // The other provenance. `ModelHelper` declares no templates of its own, so its
+    // carry is the `@extends Helper<Model>` edge — a `CArg::Ty` resolved through the
+    // index rather than a value proven at a `new` site. Being declared it is
+    // sweep-immune (issue #295), so the read repeats after a receiver call where a
+    // value carry's would not.
+    let body = "/** @extends Helper<Model> */\nfinal class ModelHelper extends Helper {}\n\
+                function g() { $h = new ModelHelper(new Model()); \
+                $c = $h->getFirstChildren(); \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(dumped(&shape(SPELLING, body)), dumped(&shape("Child", body)));
+
+    let after = body.replace("$c = $h->", "$h->reset(); $c = $h->");
+    assert_eq!(dumped(&shape(SPELLING, &after)), dumped(&shape("Child", &after)));
+}
+
+#[test]
+fn a_receiver_call_sweeps_the_value_carry_the_next_read_wanted() {
+    // The documented consequence of issue #295, visible through this reader for the
+    // first time: a value carry does not survive a receiver method call, and the
+    // very call being read is one. So the FIRST read lands — the target is resolved
+    // against the store before the statement's own escape/sweep pass runs — and a
+    // second read on the same receiver does not.
+    let twice = "function g() { $helper = new Helper(new Model()); \
+                 $a = $helper->getFirstChildren(); $b = $helper->getFirstChildren(); \
+                 \\PHPStan\\dumpType($b); }\n";
+    assert_eq!(dumped(&shape(SPELLING, twice)), "dumped type: unknown");
+    assert_eq!(dumped(&shape("Child", twice)), "dumped type: Child (asserted)");
+
+    // Any other receiver call does the same.
+    let reset = "function g() { $helper = new Helper(new Model()); $helper->reset(); \
+                 $c = $helper->getFirstChildren(); \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(dumped(&shape(SPELLING, reset)), "dumped type: unknown");
+}
+
+/// Every way the two lookups can fail to land, pinned as the `Opaque` floor — the
+/// surface issues #360/#361 left under the spelling, unchanged.
+#[test]
+fn every_receiver_read_that_does_not_land_stays_silent() {
+    let call = "function g() { $helper = new Helper(new Model()); \
+                $c = $helper->getFirstChildren(); \\PHPStan\\dumpType($c); }\n";
+    for doc in [
+        // A subject the declaring class does not declare as a `@template`.
+        "template-type<Q, ModelInterface, 'TChild'>",
+        // A template name the owner does not declare.
+        "template-type<T, ModelInterface, 'Nope'>",
+        // An owner no class answers to.
+        "template-type<T, Missing, 'TChild'>",
+        // PHPStan's bound fallback: `T of ModelInterface` unresolved against
+        // `ChildInterface` yields the declared bound there. Steins declines class
+        // bounds (issue #293), so this stays opaque.
+        "template-type<T, ChildInterface, 'T'>",
+    ] {
+        assert_eq!(dumped(&shape(doc, call)), "dumped type: unknown", "{doc} decided something");
+    }
+
+    // The hop object carries no edge owned by the owner: a `ModelInterface` written
+    // without the `@implements` tag that would say which `TChild` it has.
+    let plain = "function g() { $helper = new Helper(new Plain()); \
+                 $c = $helper->getFirstChildren(); \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(dumped(&shape(SPELLING, plain)), "dumped type: unknown");
+
+    // A receiver that is not an allocation-proven object carries nothing at all.
+    let opaque = "function g() { $helper = opaqueHelper(); \
+                  $c = $helper->getFirstChildren(); \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(dumped(&shape(SPELLING, opaque)), "dumped type: unknown");
+}
+
+#[test]
+fn a_this_receiver_contributes_no_carry() {
+    // ADR-0048 §3, restated by the amendment: a `$this` seed carries nothing — the
+    // enclosing method never saw the constructor that would have proven `T`. The
+    // class is `final` so that `$this->first()` resolves at all (the override
+    // guard), which is what makes the silence attributable to the empty carry
+    // rather than to a missing target.
+    let src = "<?php\n\
+        /** @template TChild of ChildInterface */\n\
+        interface ModelInterface { /** @return TChild[] */ public function getChildren(): array; }\n\
+        /** @implements ModelInterface<Child> */\n\
+        class Model implements ModelInterface { public function getChildren(): array { return []; } }\n\
+        interface ChildInterface {}\n\
+        class Child implements ChildInterface {}\n\
+        /** @template T of ModelInterface */\n\
+        final class FinalHelper {\n\
+            /** @param T $model */\n\
+            public function __construct(private ModelInterface $model) {}\n\
+            /** @return template-type<T, ModelInterface, 'TChild'> */\n\
+            public function first(): ChildInterface { return new Child(); }\n\
+            public function viaThis(): void { $c = $this->first(); \\PHPStan\\dumpType($c); }\n\
+        }\n";
+    assert_eq!(dumped(src), "dumped type: unknown");
+}
+
+#[test]
+fn a_declared_receiver_declines_where_phpstan_resolves() {
+    // The fixture's `Other::getFirstChildren(Helper $helper)` leg, and the
+    // registered divergence with it: PHPStan reads the receiver's *declared*
+    // generic type, Steins reads a *carry*, and a `@param Helper<TModel> $helper`
+    // seeds no heap object today — so there is nothing to read and the whole leg is
+    // silence. Its function-level half is issue #363.
+    let body = "final class Other {\n\
+        \x20 /**\n  * @template TModel of ModelInterface\n  * @param Helper<TModel> $helper\n\
+        \x20 * @return TModel\n  */\n\
+        \x20 public function take(Helper $helper) { return $helper->getFirstChildren(); }\n}\n\
+        function g() { $o = new Other(); $c = $o->take(new Helper(new Model())); \
+        \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(dumped(&shape(SPELLING, body)), "dumped type: unknown");
+}
+
+#[test]
+fn an_asserted_read_fires_no_method_absence_finding() {
+    // The S6 calibration boundary, unchanged by the read: an `Asserted` class arm
+    // never premises a `method`-absence finding, so a call to a member nothing in
+    // sight declares reports exactly what it reports under the hand-written type the
+    // utility resolves to — nothing.
+    let body = "function g() { $helper = new Helper(new Model()); \
+                $c = $helper->getFirstChildren(); $c->nonexistent(); }\n";
+    assert_eq!(ids(&shape(SPELLING, body)), ids(&shape("Child", body)));
+    assert!(!ids(&shape(SPELLING, body)).iter().any(|i| i.starts_with("method.")));
 }

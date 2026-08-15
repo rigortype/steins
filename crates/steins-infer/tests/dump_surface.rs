@@ -590,6 +590,28 @@ fn a_template_argument_return_dumps_what_that_template_dumps() {
 }
 
 #[test]
+fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
+    // Issue #362, the same equivalence claim one layer further out: the subject is a
+    // class-level template of the receiver, so the answer comes off the carry
+    // `new Helper(new Model())` proved — and the surface is the one a hand-written
+    // `@return Child` produces, down to the stratum. The carry read is where the
+    // type comes from; it is not what the type is trusted as.
+    let with = "<?php\n\
+        /** @template TChild */\ninterface ModelInterface {}\n\
+        /** @implements ModelInterface<Child> */\nclass Model implements ModelInterface {}\n\
+        interface ChildInterface {}\nclass Child implements ChildInterface {}\n\
+        /** @template T of ModelInterface */\n\
+        class Helper {\n\
+        \x20 /** @param T $model */\n  public function __construct(private ModelInterface $model) {}\n\
+        \x20 /** @return template-type<T, ModelInterface, 'TChild'> */\n\
+        \x20 public function first(): ChildInterface { return new Child(); }\n}\n\
+        function g() { $h = new Helper(new Model()); $c = $h->first(); \\PHPStan\\dumpType($c); }\n";
+    let plain = with.replace("template-type<T, ModelInterface, 'TChild'>", "Child");
+    assert_eq!(one_type(with), one_type(&plain));
+    assert_eq!(one_type(with), "dumped type: Child (asserted)");
+}
+
+#[test]
 fn a_folded_return_value_beats_the_return_arm() {
     // Precedence (ADR-0052 §9): a proven value fact is the floor's ceiling. A
     // trivially foldable `: int` return resolves to `1`, beating the `int` arm.
