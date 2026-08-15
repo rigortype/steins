@@ -9085,8 +9085,14 @@ impl<'a> Cx<'a> {
     }
 
     /// The `__construct` method resolved through `class_fqn`'s chain (ADR-0036),
-    /// for mapping `new` args to promoted-property positions.
-    fn find_ctor(&self, class_fqn: &str) -> Option<&'a MethodDecl> {
+    /// for mapping `new` args to promoted-property positions — **with the file that
+    /// declared it**, like every other class-member lookup in this crate.
+    ///
+    /// The file is what a docblock read needs to mean anything (issue #374): an
+    /// inherited constructor's `@param` is written against *its own* file's
+    /// namespace and `use` scope, and a class reference in it names a different
+    /// class — or no class — read anywhere else.
+    fn find_ctor(&self, class_fqn: &str) -> Option<(usize, &'a MethodDecl)> {
         let mut cur = class_fqn.to_owned();
         let mut seen: HashSet<String> = HashSet::new();
         loop {
@@ -9095,7 +9101,7 @@ impl<'a> Cx<'a> {
             }
             let (file, cd) = self.find_class(&cur)?;
             if let Some(m) = cd.methods.iter().find(|m| m.is_constructor) {
-                return Some(m);
+                return Some((file, m));
             }
             cur = self.units[file].tree.resolve_class_fqn(cd.parent.as_ref()?);
         }
@@ -9138,19 +9144,23 @@ impl<'a> Cx<'a> {
         if templates.is_empty() {
             return empty; // not a generic class — no carry.
         }
-        let Some(ctor) = self.find_ctor(class_fqn) else { return empty };
+        let Some((cfile, ctor)) = self.find_ctor(class_fqn) else { return empty };
         // The constructor's own `@param` envelopes, WITHOUT the class-level template
         // shadow applied: a bare `@param T` must stay readable as the template name
         // `T` here (the shadow that neutralizes it to opaque is a check-site concern).
         //
-        // The one site that keeps [`parse_envelopes`] rather than
-        // [`Self::envelopes_of`] (issue #361): `find_ctor` walks the inheritance
-        // chain and hands back a `MethodDecl` without saying which file declared it,
-        // so there is no honest namespace context to resolve a `template-type`
-        // owner against — and resolving one in the *wrong* file's `use` scope would
-        // name a different class. A `template-type` in a constructor `@param` keeps
-        // the `Opaque` floor here, which binds no template and carries nothing.
-        let Some(ctor_env) = parse_envelopes(ctor.docblock.as_deref()) else { return empty };
+        // Read in the constructor's **own** file (issue #374). This was the last site
+        // still on [`parse_envelopes`], for want of a namespace context: an inherited
+        // constructor's `template-type` owner resolved in the subclass's `use` scope
+        // would name a different class, so the node kept the `Opaque` floor and bound
+        // nothing. `find_ctor` reports the declaring file now, so a `@param
+        // template-type<Box<T>, Box, 'T'>` projects `T` — and a projected template
+        // name is exactly what the alignment below binds.
+        let Some(ctor_env) =
+            self.envelopes_of(ctor.docblock.as_deref(), cfile, ctor.span.start)
+        else {
+            return empty;
+        };
         let mut out = Vec::with_capacity(templates.len());
         for tmpl in &templates {
             // The single constructor parameter whose `@param` is exactly this
@@ -13788,7 +13798,7 @@ fn build_new_object(
     }
 
     // Promoted constructor params: bind each from its positional `new` argument.
-    if let Some(ctor) = cx.find_ctor(class) {
+    if let Some((_, ctor)) = cx.find_ctor(class) {
         // A hooked promoted param (`public int $n { set { … } }`) binds no fact — its
         // write runs arbitrary code, so the raw argument is not the stored value
         // (FP class 16). Excluded here; its value stays Unknown.
@@ -28488,6 +28498,9 @@ fn neutralize_templates(ty: &mut PType, shadow: &TemplateShadow) {
 /// declaration carries no docblock or no envelope-bearing tag. A tag whose type
 /// fails to parse (or carries an `Unsupported` node) contributes no envelope; the
 /// other tags are unaffected (ADR-0029). `@var`/`@throws` are out of scope.
+///
+/// The context-free half of [`Cx::envelopes_of`], and since issue #374 its only
+/// caller: every consumer now has a declaration context to read the docblock in.
 fn parse_envelopes(docblock: Option<&str>) -> Option<Envelopes> {
     let text = docblock?;
     // A `@phpstan-`/`@psalm-` prefixed tag overrides the plain one for the same
@@ -28619,9 +28632,9 @@ impl<'a> Cx<'a> {
     ///
     /// `file`/`off` locate the docblock's namespace and `use` scope: the owner
     /// argument is a class *reference*, and which class it names is exactly the
-    /// question those two answer. A site with no such context (an inherited
-    /// constructor reached through a chain that does not report the file it was
-    /// declared in) keeps calling [`parse_envelopes`] and gets the `Opaque` floor.
+    /// question those two answer. Every consumer supplies them — the last site that
+    /// could not, an inherited constructor's `@param`, was reached by teaching
+    /// [`Cx::find_ctor`] to report the file that declared it (issue #374).
     fn envelopes_of(&self, docblock: Option<&str>, file: usize, off: u32) -> Option<Envelopes> {
         let mut env = parse_envelopes(docblock)?;
         env.resolve_template_types(self, file, off);

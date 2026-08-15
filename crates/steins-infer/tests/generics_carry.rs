@@ -928,6 +928,48 @@ fn every_undecidable_spelling_stays_silent() {
     }
 }
 
+/// An **inherited** constructor's `@param` is written in the file that declared the
+/// constructor, and issue #374 is what taught `find_ctor` to say which file that is.
+/// Before it did, this site was the last one reading envelopes with no namespace
+/// context at all: the utility kept the `Opaque` floor, the alignment found no bare
+/// template name, and the `new` carried nothing.
+#[test]
+fn an_inherited_constructors_param_is_read_where_it_was_declared() {
+    // `Box` is spelled bare in `Vendor`, and names nothing in `App` — so the
+    // projection is only sound read in the constructor's own scope. The carry it
+    // yields is the ordinary one: `Bag<string>` refuses the int that flowed in.
+    let src = "<?php\n\
+        namespace Vendor {\n\
+        \x20   /** @template T */\n\
+        \x20   class Box {}\n\
+        \x20   /** @template T */\n\
+        \x20   class Holder {\n\
+        \x20     /** @param template-type<Box<T>, Box, 'T'> $v */\n\
+        \x20     public function __construct(public mixed $v) {}\n\
+        \x20   }\n\
+        }\n\
+        namespace App {\n\
+        \x20   /** @template T */\n\
+        \x20   final class Bag extends \\Vendor\\Holder {}\n\
+        \x20   /** @param Bag<string> $b */\n\
+        \x20   function takes($b): void {}\n";
+    assert_eq!(
+        param_count(&format!("{src}    takes(new Bag(1));\n}}\n")),
+        1,
+        "the projected `T` binds the constructor argument, and a string box refuses it",
+    );
+    assert_eq!(
+        param_count(&format!("{src}    takes(new Bag('s'));\n}}\n")),
+        0,
+        "the same carry accepts the string it promised",
+    );
+    // The claim in full: identical to the constructor spelling the utility reduces
+    // to. Nothing about the alignment changed — only that the node reduced at all.
+    let spelled = src.replace("template-type<Box<T>, Box, 'T'>", "T");
+    assert_eq!(param_count(&format!("{spelled}    takes(new Bag(1));\n}}\n")), 1);
+    assert_eq!(param_count(&format!("{spelled}    takes(new Bag('s'));\n}}\n")), 0);
+}
+
 // 6. `template-type<T, Owner, 'TName'>` read off the RECEIVER's carry (issue #362)
 // — the phpstan/phpstan#9053 shape, where the subject is a class-level template of
 // the receiver's own class and the answer exists only at the call site.
