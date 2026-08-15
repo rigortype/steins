@@ -109,6 +109,17 @@ return-summary collector:
   uncheckable exit. (Note on `: void`: PHP *does* yield `NULL` for
   `$x = f()` when `f(): void {}`, but v1 deliberately does not put that in a
   value summary — the same refuse path as other unrepresentable hints.)
+* **`: mixed` is exempt from that refusal** (issue #364). It lowers to `None`
+  like the others, but the refusal's premise is that the empty oracle might be
+  hiding a drop; `mixed` is the TOTAL envelope, so there is nothing to hide —
+  no value violates it, no conversion happens at the boundary, and the exit
+  that crosses is the exit the body proved. It therefore reads as **no hint**
+  in the summary and nowhere else: the declared value floor stays absent (a
+  total envelope has no single base to floor to, so a factless exit still
+  floors the whole summary out, A3), a `@return` docblock refines the proof
+  instead of replacing it, and a `: mixed` body that falls off its end remains
+  the runtime `TypeError` the return-missing pair reports. `RetHintKind::Mixed`
+  carries the distinction so no consumer has to re-read the source text.
 * Generators (`yield` / `yield from` in the body, `is_generator` on the scope)
   refuse the whole value summary (ADR-0057 §5): the call result is a
   `Generator`, not the value of a trailing `return`.
