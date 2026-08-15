@@ -11018,15 +11018,19 @@ type BindingKey = (String, Vec<(String, ArgValue, Stratum)>);
 /// legitimate query answer (ADR-0048 §2), a pure function of (callee CST, bound
 /// entry state). It rides the same descent, the same [`BindingKey`] memo (now a
 /// value map), and is consumed at the call-result binding as the value FLOOR above
-/// the declared arms (A1). The heap-object component (ADR-0057 §1) is reserved in
-/// the summary shape but currently always `None`.
+/// the declared arms (A1).
+///
+/// The two components are independent (ADR-0057 T1 amendment B3): a heap summary
+/// dies without touching the value summary and vice versa, and a summary exists
+/// whenever EITHER does. They are also exclusive in practice — an object return
+/// carries no value fact, the value domain having no object carrier (ADR-0035).
 #[derive(Clone)]
 struct ReturnSummary {
-    /// The value-domain component (this amendment): the joined returned-expression
+    /// The value-domain component (the T0 amendment): the joined returned-expression
     /// fact with its trust stratum.
     value: Option<SummaryValue>,
-    /// The heap-object component (ADR-0057 §1) — populated by T1; always `None` here.
-    #[allow(dead_code)] // T1 slot, present for the memo/value-map shape
+    /// The heap-object component (ADR-0057 §1, landed in T1): the joined snapshot of
+    /// the allocation every returning exit hands back.
     heap: Option<HeapSummary>,
 }
 
@@ -11038,11 +11042,26 @@ struct SummaryValue {
     stratum: Stratum,
 }
 
-/// The heap-object component of a [`ReturnSummary`] (ADR-0057 §1) — reserved for a
-/// later heap summary (class/exactness/props/readonly/escape); never constructed yet.
+/// The heap-object component of a [`ReturnSummary`] (ADR-0057 §1): the value-object
+/// snapshot every returning exit's allocation was taken as, joined per §2.4. The
+/// caller **rebinds** it as a fresh allocation in its own heap — a copy, never a
+/// shared identity ([`apply_assign`]'s heap rung).
+///
+/// The payload is a [`HeapObj`], not a parallel struct with the same six fields
+/// (T1 amendment B1): §1's field list IS `HeapObj`'s, so the snapshot, the join and
+/// the rebind all operate on the type the walk's heap already holds, and no field can
+/// be added to `HeapObj` and silently forgotten by the crossing — which is exactly how
+/// `targs` came to be missing from the ADR's own list.
 #[derive(Clone)]
-#[allow(dead_code)] // reserved heap-summary slot
-struct HeapSummary;
+struct HeapSummary {
+    /// The joined snapshot. Every field means what it means on the heap, with **one**
+    /// re-reading at the boundary: `escaped` is **escaped-before-return** (§2.1) — the
+    /// bit the callee's object carried one instant before the return's own
+    /// escape-marking, so `false` says the return was the allocation's only exit and
+    /// the caller holds the sole reference. The rebind copies it verbatim, so the
+    /// re-reading costs no conversion.
+    obj: HeapObj,
+}
 
 /// One returning exit's contribution to the summary join (A2/A3). A native-envelope
 /// violating exit is DROPPED (a proven boundary TypeError, its value never reaches
@@ -11054,6 +11073,14 @@ enum ExitContribution {
     /// A factless returning exit: it contributes the declared value FLOOR (A3), the
     /// sound top within the envelope — `General{base}` degrades, never lies.
     Floor,
+    /// An exit returning a **locally-held allocation** (ADR-0057 T1): the object's
+    /// snapshot at the return point, `escaped` still meaning escaped-before-return.
+    ///
+    /// For the value join this is a [`Self::Floor`] and nothing else — an object is
+    /// not a value (ADR-0035), so it degrades exactly as a factless exit does, which
+    /// is what it WAS before T1. For the heap join it is the only contributing
+    /// variant: any exit that is not one kills the heap summary (§2.5).
+    Heap(Box<HeapObj>),
 }
 
 /// The per-descent summary-collection context threaded through [`WalkCx`] while a
@@ -11717,11 +11744,13 @@ fn walk_trace(
             }
         }
 
-        // 1c. Return-fact summary (ADR-0057 T0): when a descent is building this
-        // callee's summary, snapshot each returning exit's value-domain fact. Read
-        // here — before the return's own escape/invalidation effect (step 2) — so
-        // the returned variable's env fact is still live. The join is deferred to
-        // `descend`; here we only classify the exit (A2 drop/cross, A3 floor).
+        // 1c. Return summary (ADR-0057 T0 value component, T1 heap component): when a
+        // descent is building this callee's summary, snapshot each returning exit.
+        // Read here — before the return's own escape/invalidation effect (step 2) —
+        // so the returned variable's env fact is still live and its object still
+        // carries the escape bit it had **before** the return marked it (§2.1's
+        // escaped-before-return). The join is deferred to `descend`; here we only
+        // classify the exit (A2 drop/cross, A3 floor, T1 allocation).
         if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
@@ -11748,8 +11777,18 @@ fn walk_trace(
                 // An informative exit within the envelope: it crosses with its stratum
                 // (a phpdoc-only violation crosses HERE — the walk truth, A2).
                 Some((fact, strat)) => Some(ExitContribution::Fact(fact, strat)),
-                // A3 — a factless returning exit degrades to the declared arm floor.
-                None => Some(ExitContribution::Floor),
+                // A factless returning exit. T1: when it returns a locally-held
+                // ALLOCATION, its snapshot is the heap component's contribution —
+                // read strictly under the value classification, so the value
+                // component's A3 semantics are what they were (a `Heap` exit joins
+                // as a `Floor` on that side, which is what an object exit always
+                // was). Otherwise A3 verbatim: degrade to the declared arm floor.
+                None => Some(
+                    match return_heap_object(w, folder, value, env, store, stmt_summary.as_ref()) {
+                        Some(obj) => ExitContribution::Heap(Box::new(obj)),
+                        None => ExitContribution::Floor,
+                    },
+                ),
             };
             if let Some(c) = contrib {
                 sc.exits.borrow_mut().push(c);
@@ -13486,16 +13525,38 @@ fn apply_assign(
                     }
                     store.contract.insert(var.to_owned(), arms);
                 }
-                // The return-fact summary, then the arm floor (ADR-0057 T0 /
-                // ADR-0052 §9). `unbind` first (voids any stale arm lane). The summary
-                // is the value floor above the declared arms (A1): a bindable value
-                // fact binds as `var`'s value fact at its joined stratum, sitting
-                // where a folded literal would. Otherwise the summary degraded to the
-                // floor and the declared arms stand.
+                // The return summary, then the arm floor (ADR-0057 T0/T1 /
+                // ADR-0052 §9). `unbind` first (voids any stale arm lane).
+                //
+                // The HEAP rung first (T1, §1's rebind): a summary carrying an
+                // allocation binds `var` to a **fresh object in this walk's own heap**
+                // — a copy, no shared identity, so no callee-side name survives and no
+                // aliasing question crosses the boundary. Ordering the two rungs is
+                // formality: an object return carries no value fact (ADR-0035), so
+                // they are exclusive by construction.
+                //
+                // Then the value rung: the summary is the value floor above the
+                // declared arms (A1): a bindable value fact binds as `var`'s value fact
+                // at its joined stratum, sitting where a folded literal would.
+                // Otherwise the summary degraded to the floor and the declared arms
+                // stand.
                 _ => {
                     env.remove(var);
                     store.unbind(var);
-                    if let Some(ReturnSummary { value: Some(sv), .. }) = summary
+                    if let Some(ReturnSummary { heap: Some(hs), .. }) = summary
+                        && !w.scope.poisoned
+                    {
+                        // The snapshot, verbatim (§1's field-by-field list): class and
+                        // exactness copied never promoted, props with their strata,
+                        // readonly bookkeeping transferred (sweep immunity does not
+                        // stop at a `return`), carries kept, and `escaped` = the
+                        // summary's escaped-BEFORE-return bit — `false` meaning the
+                        // caller now holds the sole reference, so the object survives
+                        // an unrelated unknown call exactly as a local `new` does.
+                        let id = w.fresh_id();
+                        store.heap.insert(id, hs.obj.clone());
+                        store.refs.insert(var.to_owned(), id);
+                    } else if let Some(ReturnSummary { value: Some(sv), .. }) = summary
                         && summary_binds(&sv.fact)
                     {
                         env.insert(
@@ -22181,20 +22242,40 @@ fn descend(
     }
 }
 
-/// Build the [`ReturnSummary`] from a callee's collected returning-exit contributions
-/// (ADR-0057 amendment T0): join the value facts (A1), a factless exit contributing
-/// the declared value floor (A3), the stratum `min` over exits (A4). The heap
-/// component (T1) is always `None` here. `None` when nothing summarizable remained.
+/// Build the [`ReturnSummary`] from a callee's collected returning-exit contributions:
+/// the value component (T0 — join the value facts (A1), a factless exit contributing
+/// the declared value floor (A3), the stratum `min` over exits (A4)) and, **beside**
+/// it and never inside it, the heap component (T1 — [`join_heap_exits`], §2.4).
+///
+/// The two are independent (T1 amendment B3): each refusal below is the value
+/// component's own, so a callee whose value summary dies for want of a representable
+/// floor — which is EVERY object-returning factory — still crosses its allocation.
+/// `None` only when neither component survived.
 fn join_summary(
     cx: &Cx,
     callee_scope: &Scope,
     exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
     // Generators: the call result is a Generator, not the value of `return` after
-    // `yield` (ADR-0057 §5) — refuse the whole value summary.
+    // `yield` (ADR-0057 §5) — refuse BOTH components. The one refusal the heap
+    // component shares, and for the heap the reason is even plainer: the returned
+    // allocation is not what the call evaluates to.
     if callee_scope.is_generator {
         return None;
     }
+    let heap = join_heap_exits(exits);
+    let value = join_value_component(cx, callee_scope, exits);
+    (value.is_some() || heap.is_some()).then_some(ReturnSummary { value, heap })
+}
+
+/// The value half of [`join_summary`] (ADR-0057 amendment T0), unchanged in content
+/// by T1 — lifted into its own function only so its several refusals stop being
+/// refusals of the whole summary.
+fn join_value_component(
+    cx: &Cx,
+    callee_scope: &Scope,
+    exits: &[ExitContribution],
+) -> Option<SummaryValue> {
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
     // A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
     // `: never`, …) leaves `scope_return` as `None`, so the A2 native-oracle arms
@@ -22231,11 +22312,99 @@ fn join_summary(
                 }
             }
             (ExitContribution::Fact(f, s), None) => ExitContribution::Fact(f.clone(), *s),
-            (ExitContribution::Floor, _) => ExitContribution::Floor,
+            // An object exit is a `Floor` on this side and always has been (T1's
+            // `Heap` variant only names what the OTHER side reads): a value floor is
+            // the widest thing the value domain can say about it, and for an object
+            // return that floor is `None`, which is what ends the value summary.
+            (ExitContribution::Floor | ExitContribution::Heap(_), _) => ExitContribution::Floor,
         })
         .collect();
     let (fact, stratum) = join_exits(&coerced, floor.as_ref())?;
-    Some(ReturnSummary { value: Some(SummaryValue { fact, stratum }), heap: None })
+    Some(SummaryValue { fact, stratum })
+}
+
+/// Join a callee's object-returning exits into the heap component (ADR-0057 §2.4,
+/// per field in the T1 amendment's B3 table). Written beside the value join and never
+/// inside it: the two components live and die independently.
+///
+/// `None` — no heap summary, the caller keeps the arm floor — whenever
+///
+/// * there are no exits at all, or
+/// * **any** exit is not an allocation (§2.5): a scalar, `null`, an unresolved
+///   expression, an untyped fall-through, or the declared floor an `Opaque`
+///   `may_return` subtree contributes for the exits it hides. There is no heap shape
+///   that truthfully covers such a path, so a partial summary would be a partial lie;
+/// * the classes disagree (§2.4): a joined "one of Foo or Bar" is the `Member`-fact
+///   shape, not the heap's, and the declared-return arms already carry that floor.
+///
+/// The declared return type is **not** consulted anywhere here (§2.6): a conflict
+/// between the walk's proof and the declaration is the callee's own return-mismatch
+/// finding, and claims do not edit proofs. The T0 amendment's A2 native oracle is the
+/// value component's alone (T1 amendment B4).
+fn join_heap_exits(exits: &[ExitContribution]) -> Option<HeapSummary> {
+    let mut objs = Vec::with_capacity(exits.len());
+    for e in exits {
+        match e {
+            ExitContribution::Heap(o) => objs.push(o.as_ref()),
+            // Any non-allocation exit kills the summary (§2.5).
+            ExitContribution::Fact(..) | ExitContribution::Floor => return None,
+        }
+    }
+    let (first, rest) = objs.split_first()?;
+    // Class agreement decides everything else: exactness is only meaningful under it,
+    // and a prop of a `Foo` is not a prop of a `Bar`.
+    if rest.iter().any(|o| o.class != first.class) {
+        return None;
+    }
+    let mut joined = HeapObj::new(first.class.clone());
+    // Copied, never promoted (§6.4 / A1): exact only where every path was.
+    joined.class_exact = first.class_exact && rest.iter().all(|o| o.class_exact);
+    // Escaped-before-return ORs (§2.4): a leak on any path means the caller must
+    // rebind pre-escaped and sweep it like an object it leaked itself.
+    joined.escaped = first.escaped || rest.iter().any(|o| o.escaped);
+    // readonly INTERSECTS. The set is a function of the class, so disagreement is a
+    // corner; where it happens the smaller set is the sound one, readonly being a
+    // sweep-IMMUNITY claim (B3).
+    joined.readonly =
+        first.readonly.iter().filter(|n| rest.iter().all(|o| o.readonly.contains(*n))).cloned().collect();
+    // ro_written likewise: a write proven on every path. Recording a one-path write
+    // would let the caller's first assignment read as a `readonly.reassigned` second.
+    joined.ro_written =
+        first.ro_written.iter().filter(|n| rest.iter().all(|o| o.ro_written.contains(*n))).cloned().collect();
+    // Carries survive only where every path carries them identically (B2) — the
+    // `join_stores` intersection rule, order-independent (ADR-0048 §4).
+    joined.targs =
+        first.targs.iter().filter(|c| rest.iter().all(|o| o.targs.contains(c))).cloned().collect();
+    // Props: present on EVERY object-returning path, joined by the existing
+    // value-domain join at `min` stratum (ADR-0052 amendment 1 — a Verified arm joined
+    // with an Asserted arm yields Asserted). An unjoinable pair drops the prop.
+    for (name, p0) in &first.props {
+        let mut fact = p0.fact.clone();
+        let mut stratum = p0.stratum;
+        let mut ok = true;
+        for o in rest {
+            match o.props.get(name) {
+                Some(p) => match fact.join(&p.fact) {
+                    Some(j) => {
+                        fact = j;
+                        stratum = stratum.min(p.stratum);
+                    }
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                },
+                None => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if ok {
+            joined.props.insert(name.clone(), PropFact { fact, stratum });
+        }
+    }
+    Some(HeapSummary { obj: joined })
 }
 
 /// Join a callee's returning-exit contributions into the value-domain summary fact
@@ -22254,7 +22423,11 @@ fn join_exits(exits: &[ExitContribution], floor: Option<&Fact>) -> Option<(Fact,
     for e in exits {
         let (fact, s) = match e {
             ExitContribution::Fact(f, s) => (f.clone(), *s),
-            ExitContribution::Floor => (floor?.clone(), Stratum::Verified),
+            // `Heap` never reaches here — `join_value_component` maps it to `Floor`
+            // before this join runs — but it degrades the same way if it ever did.
+            ExitContribution::Floor | ExitContribution::Heap(_) => {
+                (floor?.clone(), Stratum::Verified)
+            }
         };
         stratum = stratum.min(s);
         acc = Some(match acc {
@@ -22323,6 +22496,50 @@ fn return_value_fact(
         return Some((fact, store.prop_stratum(var, prop)));
     }
     None
+}
+
+/// The **allocation** a returning exit hands back, snapshotted at the return point
+/// (ADR-0057 T1, §2's source list). `None` for every other exit — a scalar, `null`, an
+/// unresolved expression — and a `None` on any path kills the whole heap summary
+/// (§2.5), there being no heap shape that truthfully covers a non-allocation exit.
+///
+/// The three sources, and the fourth by composition:
+///
+/// * **`return $local`** — the object the callee's store holds, verbatim. Its origin
+///   does not matter (§2.3): a local `new`, an alias, or the copy ADR-0086 seeded for
+///   a parameter are all just "what the walk knows about this value", and the walk's
+///   knowledge is sound however the value arrived. Exactness is whatever the object
+///   carries, never promoted (§6.4).
+/// * **`return $this`** — the same arm; `$this` is `refs["this"]`, pre-escaped by
+///   construction and membership-only unless the receiver leg proved exactness, so a
+///   fluent chain gets class continuity and no forged exactness (§6's probe).
+/// * **`return new Foo(...)`** — minted here through the SAME [`new_heap_object`] the
+///   assignment form uses, which is what makes §4's new-vs-factory equivalence a
+///   consequence rather than a coincidence (the hooked-prop exclusion, the promoted
+///   props, the readonly bookkeeping and the ADR-0086 §4 stale-default gate all come
+///   with it). It is minted, never stored, so it consumes no allocation id.
+/// * **`return g(...)` / `return $o->m(...)`** — the composition arm: the inner call's
+///   own heap summary is this exit's snapshot, which is how a chained factory keeps
+///   its exactness across two boundaries (§2.3's "chaining composes correctly").
+fn return_heap_object(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    stmt_summary: Option<&ReturnSummary>,
+) -> Option<HeapObj> {
+    if w.scope.poisoned {
+        return None;
+    }
+    match value {
+        ArgValue::Var(name) => store.obj_of(name).cloned(),
+        ArgValue::New(class_ref, args, named) => {
+            let class = w.cx.class_fqn(class_ref);
+            Some(new_heap_object(w.cx, folder, &class, args, named, env, store, false))
+        }
+        _ => stmt_summary.and_then(|s| s.heap.as_ref()).map(|h| h.obj.clone()),
+    }
 }
 
 /// Whether a summary value fact is precise enough to bind as the call-result's value
