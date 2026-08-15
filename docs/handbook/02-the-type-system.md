@@ -462,6 +462,59 @@ identity of qualifies: `$this->helper()` inside another method, or
 a variable whose class is merely a lower bound, keeps the older
 behaviour of entering with no property values at all.
 
+## And a factory's object comes back out
+
+The other direction is the one your DTO code lives in. A function
+that builds an object and returns it used to hand you the class
+name and nothing else: `createFoo(123)->n` was unknown, however
+plainly the factory wrote it.
+
+Now the object arrives with what the factory proved about it:
+
+```php
+<?php
+declare(strict_types=1);
+class Foo { public function __construct(public mixed $n) {} }
+function createFoo(int $n): Foo { return new Foo($n); }
+function needString(string $s): void {}
+
+$f = createFoo(123);
+needString($f->n);
+// argument 123 (from $f->n) to needString() cannot become string $s
+```
+
+The rule is one sentence: **`$f = createFoo(123);` gives you
+exactly what `$f = new Foo(123);` would have given you.** Same
+property values with the same trust, same exact class (so a
+misspelled method or a wrong argument count is reported on it),
+same `readonly` bookkeeping. A factory is not a wall you write
+around your own evidence.
+
+**It is your object, not the factory's.** What you get is a fresh
+object of your own — a copy, as in the inbound direction — so no
+name inside the factory can reach it and nothing you do to it is
+visible there. If the return was the object's only way out, it is
+*yours alone*: an unrelated call elsewhere cannot have written it,
+so its properties survive one. If the factory let it out first —
+stored it somewhere, captured it in a closure — it arrives already
+escaped, and the next call that could reach it forgets its
+properties, exactly as if you had let it out yourself.
+
+**Every path must return an object, and the same class.** A
+factory with a `return null` path, or one that returns an `A` here
+and a `B` there, hands back nothing but its declared type — there
+is no half-object to describe. Where several paths do return the
+same class, you keep the properties they agree on: two paths
+setting `n` to `1` and `2` give you `1|2`, and a property only one
+path sets is not carried at all.
+
+**Where it does not reach yet.** The object has to land in a
+variable. `dumpType(createFoo(123))` and
+`needFoo(createFoo(123))` still read only the declared return
+type — writing the call directly inside another expression is a
+carrier limit one layer below this, the same one that keeps
+`$box->unwrap()` from answering in argument position.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return
