@@ -77,6 +77,23 @@ own text keeps them, which is provable from the function's text alone. This
 costs true positives only — a live argument dropped early is a widen, never a
 wrong answer.
 
+**The value IR carries what it can spell, and a call it cannot spell is
+silence** (ADR-0027; ADR-0075 §3 as amended by issue #386). A method or static
+call in value position is an `ArgValue::MethodCall` and resolves as its
+assignment form does — `takesString($b->unwrap())`, `dumpType($b->get())`,
+`Foo::m(1)`, `(new C(1))->m()`. What still lowers to `ArgValue::Other` there,
+each because the carrier has no way to say it: a **dynamic** receiver or method
+name (`$o->$m()`, `$obj[0]->m()`, `$var::m()`), a receiver deeper than one
+property hop (`$a->b->c->m()` — depth 1 is a `Receiver::Prop`, which is
+carried and then declines as a dispatch target by ADR-0052 §7), a **spread**
+argument list at the call (`$o->m(...$args)`, and the same for a plain
+function call), a method **first-class callable** (`$o->m(...)`, which is a
+value and not a call), a `static::` static class (late static binding), and a
+`clone`/property/offset expression in receiver position. A **nullsafe** call is
+carried but never rebound, in any position (§3.1) — the receiver may be `null`
+and the summary does not say so. None of these costs a false positive: an
+un-carried call is a value nobody claims to know.
+
 **`class-string<T>` carries no bound** (issue #236 landed the bare form; the
 parameterized one is issue #10). `class-string`, `interface-string`,
 `trait-string` and `enum-string` are judged as a value refinement — they refute
