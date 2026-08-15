@@ -384,7 +384,13 @@ call-site template solver" line needs care: nothing is being
 solved. There is one positional lookup, at the top level of a
 `@param` only — `list<Box<T>>` and `Box<T>|null` do not bind —
 and if two parameters both say `T` and were handed different
-things, Steins says nothing rather than picking one. A bounded
+things, Steins says nothing rather than picking one. It says
+nothing in the other direction too: if `T` also appears somewhere
+the lookup cannot reach, like `@param \Closure():T $factory`, the
+whole read declines rather than answering from the parameter it
+could read. Your docblock said `T` stands in both places, and
+answering from one of them would be a narrower claim than you
+made. A bounded
 `@template T of int` reads `int`, the bound you promised, not
 the value that arrived. And if the function's own body proves
 something, the body wins: `function id(int $x): int { return

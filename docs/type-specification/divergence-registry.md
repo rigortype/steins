@@ -157,18 +157,17 @@ falling back to `T`'s declared bound where nothing decides it. Steins performs
 one positional **read** instead (issue #363): a `@param Owner<…, T, …>` at the
 top level asks the argument's generics carry what sits at `T`'s position in
 `Owner`'s own `@template` list, `@param T $p` reads the argument's proven value,
-and nothing else binds. Most consequences are silences: a nested or nullable
-occurrence contributes nothing where PHPStan solves it, and two occurrences that
-disagree decline where PHPStan joins or errors. One is not, and it is the entry's
-sharpest edge: a non-binding occurrence does not *contest* the name either, so
-where PHPStan unifies `@param \Closure():T $a` with `@param T $b` and joins the
-two into `A1|A2`, Steins reads the one position it can and answers `A2` — a
-**narrower** answer, not a wider one. That is admissible rather than alarming
-because of what the answer is: an Asserted return arm, which premises no
-proof-layer finding and no argument-mismatch, so a narrower read costs true
-positives at worst. Widening it would mean modelling the positions the rule
-declines, which is the solver. A named or spread argument list
-declines the whole call, because position stops naming a parameter. A **bounded**
+and nothing else binds. **Every consequence is a silence, deliberately.** A
+nested, nullable or callable occurrence is not merely unread — it *contests* the
+name, so the whole read declines rather than answering from the positions that
+happen to be legible. Where PHPStan unifies `@param \Closure():T $t1` with
+`@param T $t2` and joins the two into `A1|A2`, Steins says nothing: answering
+`A2` from the one readable position would be **narrower than the declaration
+supports**, and narrower-than-true is the direction this family refuses even at
+the Asserted grade, because contract arms feed narrowing and the dump surface.
+Two occurrences that disagree decline for the same reason, where PHPStan joins
+or errors. A named or spread argument list declines the whole call, because
+position stops naming a parameter. A **bounded**
 template reads its bound rather than the value carried at it — `@template T of
 int` under `@param Box<T>` handed `new Box(1)` reads `int`, where PHPStan reads
 `1`; the bound is what the author promised, and reading through it would be an

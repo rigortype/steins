@@ -119,15 +119,20 @@ that is the only place their answer exists:
   spelling and the bare `T` are the same read.
 
 The binding rule is deliberately narrow and states its own refusals: top-level
-positions only (not `list<Box<T>>`, `Box<T>|null`, `?T`, `array<T>` or any
-nested position), the owner's own `@template` list indexed positionally with no
-hierarchy walk, and **all-or-nothing per name** — every occurrence of `T` must
-yield a binding and all of them must agree, so two `@param Box<T>` parameters
-handed `Box<1>` and `Box<'s'>` decline. A named or spread argument list, a
-by-ref or variadic parameter, and an argument past the declared arity decline
-the whole call. A **bounded** template never binds, because the shadow already
-replaced it with its bound: under `@template T of int`, `@return T` reads `int`.
-No unification, no fixpoint, no flow back into the argument — this is a read of
+positions only (not `list<Box<T>>`, `Box<T>|null`, `?T`, `array<T>`,
+`\Closure():T` or any nested position), the owner's own `@template` list indexed
+positionally with no hierarchy walk, and **all-or-nothing per name, over every
+occurrence** — `T` binds only when every place the `@param` envelopes mention it
+is a binding position the read performed, and all of them agree. So two
+`@param Box<T>` parameters handed `Box<1>` and `Box<'s'>` decline, and so does a
+readable `@param T $t2` standing beside an unreadable `@param \Closure():T $t1`:
+an occurrence the rule cannot read **contests** the name rather than being
+skipped, because answering from the legible position alone would be narrower
+than the declaration supports. A named or spread argument list, a by-ref or
+variadic parameter, and an argument past the declared arity decline the whole
+call. A **bounded** template never binds, because the shadow already replaced it
+with its bound: under `@template T of int`, `@return T` reads `int`. No
+unification, no fixpoint, no flow back into the argument — this is a read of
 what tier 1 already calls "whatever flowed in", not the call-site solver
 ADR-0032 refuses.
 

@@ -16287,11 +16287,29 @@ fn template_arg_return_arms(
 /// Bind every one of the declaration's own `@template` names the call's arguments
 /// decide — the binding half of [`template_arg_return_arms`].
 ///
-/// A name maps to `None` once it is **contested**: two occurrences whose bindings
-/// disagree, or one occurrence that carries nothing. That is the all-or-nothing
-/// rule, and it is stricter than "any occurrence wins" on purpose — two parameters
-/// spelled `Box<T>` handed `Box<1>` and `Box<'s'>` say the author's `T` is not one
-/// thing at this call, and so does one of them handed an object nobody proved.
+/// **All-or-nothing, over every occurrence and not just the readable ones.** A
+/// name binds only when *every* place the parameter envelopes mention it is a
+/// binding position this function actually read, and all of those reads agree.
+/// Anything else maps it to `None` — contested — and the read declines.
+///
+/// The strictness is the whole soundness argument, and the direction of the error
+/// is why. A `@template T` witnessed at two parameters is the docblock stating
+/// that one type stands at both; reading the one position Steins understands and
+/// ignoring the other would answer **narrower than the declaration supports** —
+/// `@param \Closure():T $t1, @param T $t2, @return T` handed a `Closure(): A1` and
+/// an `A2` would come back `A2` where the truth is `A1|A2`. Narrower-than-true is
+/// the direction this family has refused everywhere else (a stale carry, a
+/// covariant position), and being `Asserted` does not excuse it: contract arms feed
+/// narrowing and the dump surface. Widening instead would mean *modelling* the
+/// positions the rule declines, which is the solver ADR-0032 refuses. So the read
+/// declines, and says why.
+///
+/// Contesting occurrences, exhaustively: a parameter whose declared type is
+/// neither of the two binding shapes; a `@param Owner<…>` whose owner is not a
+/// class declaring templates, or whose arity disagrees with that list; any slot of
+/// an otherwise-aligned `Owner<…>` that mentions the name below its top level; a
+/// `@param` on a parameter the call supplied no argument for; and a `@param` naming
+/// no declared parameter at all.
 #[allow(clippy::too_many_arguments)]
 fn bind_call_templates(
     cx: &Cx,
@@ -16305,13 +16323,21 @@ fn bind_call_templates(
     poisoned: bool,
 ) -> HashMap<String, Option<BoundTemplate>> {
     let mut bound: HashMap<String, Option<BoundTemplate>> = HashMap::new();
-    for (param, value) in at.params.iter().zip(args) {
-        let Some(ty) = envelopes.param(&param.name) else { continue };
+    // Every `@param` envelope, not every parameter: a tag naming no declared
+    // parameter still witnesses its templates, and no argument was ever matched to
+    // it, so it contests them.
+    for (pname, ty) in &envelopes.params {
+        let value = at.params.iter().position(|p| p.name == *pname).and_then(|i| args.get(i));
+        let Some(value) = value else {
+            contest_mentions(&mut bound, ty, shadow);
+            continue;
+        };
         match &ty.kind {
             // `@param T $p` — the whole parameter IS the template, so what binds is
-            // the argument's own proven value. A bounded template never reaches this
-            // arm: the shadow already replaced it with its bound, which is what the
-            // author promised and what `@return T` therefore reads.
+            // the argument's own proven value, and there is no sub-node left to
+            // contest. A bounded template never reaches this arm: the shadow already
+            // replaced it with its bound, which is what the author promised and what
+            // `@return T` therefore reads.
             PKind::Unsupported(name) if shadow.contains(&name.to_ascii_lowercase()) => {
                 let carried = cx
                     .resolve_cval(value, env, store, poisoned, folder)
@@ -16321,25 +16347,16 @@ fn bind_call_templates(
             // `@param Owner<…, T, …> $p` — TOP level only, and only where the
             // spelling aligns with the owner's own `@template` list position for
             // position. A nested (`list<Box<T>>`) or nullable (`Box<T>|null`)
-            // spelling is a different node kind and never arrives here, which is
-            // exactly the decline the amendment states.
+            // spelling is a different node kind and falls to the contesting arm
+            // below, which is the decline the amendment states.
             PKind::Generic { base, args: spelled } => {
                 let owner = cx.resolve_pclass(at.file, at.off, base);
                 let names = class_template_names(cx, &owner);
                 if names.is_empty() || names.len() != spelled.len() {
-                    continue;
-                }
-                let mentions: Vec<(usize, &String)> = spelled
-                    .iter()
-                    .enumerate()
-                    .filter_map(|(j, a)| match &a.ty.kind {
-                        PKind::Unsupported(n) if shadow.contains(&n.to_ascii_lowercase()) => {
-                            Some((j, n))
-                        }
-                        _ => None,
-                    })
-                    .collect();
-                if mentions.is_empty() {
+                    // The owner is not a class whose templates these arguments align
+                    // to, so no slot of it is a binding position — including the ones
+                    // that look like one.
+                    contest_mentions(&mut bound, ty, shadow);
                     continue;
                 }
                 // The argument's carries, through the same resolution acceptance
@@ -16350,13 +16367,22 @@ fn bind_call_templates(
                     Some(CVal::Object(_, carries)) => carries,
                     _ => Vec::new(),
                 };
-                for (j, name) in mentions {
-                    let carried = get_template_type(cx, &carries, &owner, &names[j])
-                        .map(|c| BoundTemplate { arg: c.arg.clone(), site: c.site });
-                    record_binding(&mut bound, name, carried);
+                for (j, slot) in spelled.iter().enumerate() {
+                    match &slot.ty.kind {
+                        PKind::Unsupported(name)
+                            if shadow.contains(&name.to_ascii_lowercase()) =>
+                        {
+                            let carried = get_template_type(cx, &carries, &owner, &names[j])
+                                .map(|c| BoundTemplate { arg: c.arg.clone(), site: c.site });
+                            record_binding(&mut bound, name, carried);
+                        }
+                        // A slot that is not itself the template — `Box<list<T>>` —
+                        // is a mention the read cannot index, so it contests.
+                        _ => contest_mentions(&mut bound, &slot.ty, shadow),
+                    }
                 }
             }
-            _ => {}
+            _ => contest_mentions(&mut bound, ty, shadow),
         }
     }
     bound
@@ -16381,6 +16407,90 @@ fn record_binding(
                 o.insert(None);
             }
         }
+    }
+}
+
+/// Contest every template name `ty` mentions anywhere — the non-binding half of
+/// [`bind_call_templates`]' all-or-nothing rule.
+fn contest_mentions(
+    bound: &mut HashMap<String, Option<BoundTemplate>>,
+    ty: &PType,
+    shadow: &TemplateShadow,
+) {
+    let mut names = Vec::new();
+    mentioned_templates(ty, shadow, &mut names);
+    for name in names {
+        record_binding(bound, &name, None);
+    }
+}
+
+/// Every mention of one of `shadow`'s template names anywhere inside `ty`.
+///
+/// **Two spellings count, because the shadow does not reach everywhere.**
+/// [`neutralize_templates`] rewrites a template identifier to
+/// [`PKind::Unsupported`] through the composites it recurses into, but it stops at
+/// a `Callable` and a `Conditional` — so the `T` in `\Closure():T` is still an
+/// ordinary [`PKind::Identifier`] when this runs, and a walk looking only for the
+/// neutralized form would miss precisely the occurrence that matters most. A
+/// `\`-qualified name is never a template, matching the shadow's own rule.
+///
+/// A `Generic`'s **base** counts too (`T<int>`): nothing neutralizes a base string,
+/// and a template used as a generic base is a mention the read cannot index.
+fn mentioned_templates(ty: &PType, shadow: &TemplateShadow, out: &mut Vec<String>) {
+    let note = |name: &String, out: &mut Vec<String>| {
+        if !name.contains('\\') && shadow.contains(&name.to_ascii_lowercase()) {
+            out.push(name.clone());
+        }
+    };
+    match &ty.kind {
+        PKind::Identifier(name) | PKind::Unsupported(name) => note(name, out),
+        PKind::Nullable(inner) | PKind::Array(inner) => mentioned_templates(inner, shadow, out),
+        PKind::Union { types, .. } | PKind::Intersection(types) => {
+            for t in types {
+                mentioned_templates(t, shadow, out);
+            }
+        }
+        PKind::Generic { base, args } => {
+            note(base, out);
+            for a in args {
+                mentioned_templates(&a.ty, shadow, out);
+            }
+        }
+        PKind::OffsetAccess { base, offset } => {
+            mentioned_templates(base, shadow, out);
+            mentioned_templates(offset, shadow, out);
+        }
+        PKind::ArrayShape(s) => {
+            for it in &s.items {
+                mentioned_templates(&it.value, shadow, out);
+            }
+            if let Some(tail) = &s.unsealed {
+                mentioned_templates(&tail.value, shadow, out);
+                if let Some(k) = &tail.key {
+                    mentioned_templates(k, shadow, out);
+                }
+            }
+        }
+        PKind::ObjectShape(items) => {
+            for it in items {
+                mentioned_templates(&it.value, shadow, out);
+            }
+        }
+        PKind::Callable(c) => {
+            for p in &c.params {
+                mentioned_templates(&p.ty, shadow, out);
+            }
+            mentioned_templates(&c.return_type, shadow, out);
+        }
+        PKind::Conditional(c) => {
+            if let steins_phpdoc::ast::ConditionalSubject::Type(t) = &c.subject {
+                mentioned_templates(t, shadow, out);
+            }
+            mentioned_templates(&c.target, shadow, out);
+            mentioned_templates(&c.if_type, shadow, out);
+            mentioned_templates(&c.else_type, shadow, out);
+        }
+        PKind::This | PKind::Const(_) => {}
     }
 }
 

@@ -186,6 +186,8 @@ propagate a solution back through the signature — no unification, no fixpoint,
 no reverse flow into an argument. What it **does** do (ADR-0032's 2026-08-15
 amendments, issues #362/#363): a single positional *read* of the generics carry
 a receiver or an argument already holds, one level, top-level positions only,
-all-or-nothing when two occurrences disagree — and always underneath the body
-summary, which wins wherever it speaks. That is tier 1's "T is whatever flowed
-in" made legible at the call site, not a second inference engine beside it.
+all-or-nothing across *every* occurrence of a name (an occurrence the read
+cannot perform contests it, rather than being skipped) — and always underneath
+the body summary, which wins wherever it speaks. That is tier 1's "T is whatever
+flowed in" made legible at the call site, not a second inference engine beside
+it.
