@@ -9268,12 +9268,36 @@ impl<'a> Cx<'a> {
     fn inheritance_edges(&self, class_fqn: &str) -> Vec<GenericCarry> {
         self.inheritance_edge_types(class_fqn)
             .into_iter()
-            .map(|e| GenericCarry {
-                owner: e.owner,
-                args: e.args.iter().map(|t| CArg::Ty(steins_contract::lower(t))).collect(),
-                site: Some(e.site),
-            })
+            .filter_map(|e| self.mint_declared_carry(&e.owner, &e.args, e.site))
             .collect()
+    }
+
+    /// Mint one owner-keyed [`GenericCarry`] out of a written parameterization
+    /// `Owner<A, …>` — the one minting rule every **declared** carry goes through
+    /// (an inheritance edge, ADR-0032's #294 amendment; a declared parameter, its
+    /// 2026-08-16 one).
+    ///
+    /// Positional alignment is sound only against the owner's own `@template` list,
+    /// so an arity disagreement mints nothing — the same all-or-nothing rule the
+    /// value carry follows, and a library-author lint ADR-0032 keeps thin. `site`
+    /// is the `(file, offset)` the argument names were written against, carried so
+    /// that a reader lifting one out of the declaration keeps it naming the class it
+    /// named.
+    fn mint_declared_carry(
+        &self,
+        owner_fqn: &str,
+        args: &[PType],
+        site: (usize, u32),
+    ) -> Option<GenericCarry> {
+        let declared = class_template_names(self, owner_fqn);
+        if declared.is_empty() || declared.len() != args.len() {
+            return None;
+        }
+        Some(GenericCarry {
+            owner: owner_fqn.to_owned(),
+            args: args.iter().map(|t| CArg::Ty(steins_contract::lower(t))).collect(),
+            site: Some(site),
+        })
     }
 
     /// The same edges [`Self::inheritance_edges`] returns, **before** lowering —
@@ -10745,14 +10769,20 @@ impl HeapObj {
     /// Sweep the **value** generic carries (ADR-0032 binding amendment, issue #295):
     /// a method call on this object as receiver may have written the values a
     /// `new`-site carry recorded (`@phpstan-self-out self<U>`), so a stale value
-    /// carry is a false positive, not a miss. Type carries (an inheritance edge's
-    /// `@extends Box<int>`) state what the author declared, which no call changes,
-    /// so they survive like a `readonly` prop.
-    ///
-    /// A mixed carry can't occur (all-`Val` from `new`, or all-`Ty` from an edge),
-    /// but the predicate is written over the args to stay correct if one ever does.
+    /// carry is a false positive, not a miss. Declared carries
+    /// ([`GenericCarry::is_declared`]) state what the author wrote, which no call
+    /// changes, so they survive like a `readonly` prop.
     fn sweep_targs(&mut self) {
-        self.targs.retain(|c| c.args.iter().all(|a| matches!(a, CArg::Ty(_))));
+        self.targs.retain(GenericCarry::is_declared);
+    }
+
+    /// The carries a **non-exact** object may still hand a reader (ADR-0032's
+    /// 2026-08-16 amendment, issue #388): the declared ones, which is all such an
+    /// object can hold — a value carry is minted only where an allocation proved
+    /// one, and an allocation is exact. Written as a filter rather than an
+    /// assertion so the rule reads the same as the sweep's.
+    fn declared_targs(&self) -> Vec<GenericCarry> {
+        self.targs.iter().filter(|c| c.is_declared()).cloned().collect()
     }
 }
 
@@ -11208,7 +11238,8 @@ fn analyze_scope(
     // modes since the engine coerces or throws at entry, so inside the body an
     // `int $x` param IS an int post-coercion. A descent already binds params the
     // caller supplied; only params still absent from the env get seeded here.
-    if let Some(params) = cx.scope_params(scope) {
+    let scope_params = cx.scope_params(scope);
+    if let Some(params) = scope_params {
         for p in params {
             if env.contains_key(&p.name) || store.is_bound(&p.name) {
                 continue;
@@ -11219,6 +11250,11 @@ fn analyze_scope(
         }
     }
 
+    // One parse of the owning declaration's docblock serves both parameter-seed
+    // lanes below — the arm lane and the declared object — so a documented scope is
+    // never read twice for the same envelopes.
+    let param_envelopes = scope_params.and_then(|_| cx.scope_envelopes(scope));
+
     // Contract-fact seeding (ADR-0052 §9), the canonical entry-state contribution
     // (ADR-0048 §3): per declared parameter, the native member list (`Verified`)
     // refined by the declared `@param` phpdoc envelope (`Asserted`, ADR-0037 trust
@@ -11226,14 +11262,14 @@ fn analyze_scope(
     // bound a param's value gets no lane. No other narrowing carrier (guard facts,
     // members, static-prop channels) contributes to entry state.
     if descent.is_none()
-        && let Some(params) = cx.scope_params(scope)
+        && let Some(params) = scope_params
     {
-        let envelopes = cx.scope_envelopes(scope);
+        let envelopes = param_envelopes.as_ref();
         for p in params {
             if store.contract.contains_key(&p.name) {
                 continue;
             }
-            let phpdoc = envelopes.as_ref().and_then(|e| {
+            let phpdoc = envelopes.and_then(|e| {
                 // An assertion-target `@param` states a post-condition, not the
                 // parameter's declared type — never seed a lane from it.
                 if e.is_assert_target(&p.name) { None } else { e.param(&p.name) }
@@ -11315,6 +11351,33 @@ fn analyze_scope(
             let id = store.heap.keys().copied().max().map_or(0, |m| m + 1);
             store.heap.insert(id, obj);
             store.refs.insert("this".to_owned(), id);
+        }
+    }
+
+    // Seed the **declared** parameter objects (ADR-0032's 2026-08-16 amendment,
+    // issue #388): a parameter that is an object by declaration enters its scope on
+    // the heap wherever no ADR-0086 copy landed — the plain per-scope pass, which
+    // has never given a parameter a `HeapObj` at all, and a descent whose argument
+    // resolved to no object. A parameter the caller already bound is left alone in
+    // both lanes: a copied object in `refs` and a proven value in `env` are each
+    // stronger than the declaration that would have stood in for them.
+    if let Some(params) = scope_params {
+        let shadow = cx.scope_template_shadow(scope);
+        for p in params {
+            if env.contains_key(&p.name) || store.is_bound(&p.name) {
+                continue;
+            }
+            // An assertion-target `@param` states a post-condition, not the
+            // parameter's declared type — read as absent here exactly as the arm
+            // lane reads it.
+            let phpdoc = param_envelopes.as_ref().and_then(|e| {
+                if e.is_assert_target(&p.name) { None } else { e.param(&p.name) }
+            });
+            if let Some(obj) = seed_declared_param_object(cx, p, phpdoc, &shadow) {
+                let id = store.heap.keys().copied().max().map_or(0, |m| m + 1);
+                store.heap.insert(id, obj);
+                store.refs.insert(p.name.clone(), id);
+            }
         }
     }
 
@@ -12819,20 +12882,35 @@ fn best_dump_type(
                 asserted: known.stratum == Stratum::Asserted,
             };
         }
-        // 2. An object holder: the heap's exact class (else the lower-bound class),
-        //    rendered source-cased and namespace-qualified (matching PHPStan).
-        if let Some(obj) = store.obj_of(name) {
+        // 2. An object holder whose class the heap proved EXACT — the allocation's
+        //    own class, rendered source-cased and namespace-qualified (matching
+        //    PHPStan).
+        if let Some(obj) = store.obj_of(name)
+            && obj.class_exact
+        {
             return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
         }
         // 2b. The N4 `Member{yes:[…]}` carrier (ADR-0052 §1): a var an `instanceof`
-        //     guard bound to a class but with no heap object — otherwise dumps as
-        //     its coarse declared supertype. A single-yes-member set renders that
-        //     class; a multi-member set falls through to the contract carrier.
-        //     Bound at `Verified` (a live-branch `instanceof`) => never `(asserted)`.
+        //     guard bound to a class. A single-yes-member set renders that class; a
+        //     multi-member set falls through. Bound at `Verified` (a live-branch
+        //     `instanceof`) => never `(asserted)`.
+        //
+        //     Above the lower-bound heap class, not below it: since a declared
+        //     parameter is a heap object (issue #388) the two co-occur, and a guard
+        //     the walk just executed is strictly stronger than the declaration it
+        //     narrowed — rendering `Box` inside `if ($b instanceof Sub)` would report
+        //     the declaration back at a reader who had already refuted it.
         if let Some(m) = store.member_of(name)
             && let [only] = m.yes.as_slice()
         {
             return DumpRendering { text: cx.class_display_fqn(only), asserted: false };
+        }
+        // 2c. An object holder whose class is only a lower bound — a `$this` seed, a
+        //     declared parameter, a returned non-exact object. Still the object's
+        //     own fact and still above the declared arms, which for such a variable
+        //     say the same thing one rung less directly.
+        if let Some(obj) = store.obj_of(name) {
+            return DumpRendering { text: cx.class_display_fqn(&obj.class), asserted: false };
         }
         // 3. The narrowed declared-arm list (contract carrier).
         if let Some(arms) = store.contract_arms(name)
@@ -14450,8 +14528,7 @@ fn this_prop_mentions(text: &str) -> ThisReach {
 /// instead, and the props are the caller's own proven facts rather than an assumption
 /// about what some other method stored.
 fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapObj> {
-    let props = cx.class_props(class_fqn);
-    if props.is_empty() {
+    if cx.class_props(class_fqn).is_empty() {
         return None;
     }
     let mut obj = HeapObj::new(class_fqn.to_owned());
@@ -14460,22 +14537,146 @@ fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapO
     // caller proved the exact receiver (a binding descent) or the enclosing class
     // has no subclass (`final`/enum). The No-side consumers gate on this bit.
     obj.class_exact = class_exact;
-    for p in &props {
-        // A hooked property (PHP 8.4) is never readonly (readonly + hook is a PHP
-        // fatal) and holds no tracked value — nothing to seed (FP class 16).
-        if p.hooked {
+    seed_readonly_bookkeeping(cx, &mut obj, class_fqn);
+    Some(obj)
+}
+
+/// The `readonly` bookkeeping a class's own property surface contributes to a
+/// **membership** seed (ADR-0036): the declared readonly set, plus the subset a
+/// construction provably wrote — a promoted readonly parameter, or a readonly
+/// property with a literal default — which is the first write `readonly.reassigned`
+/// counts from.
+///
+/// Shared by the two membership seeds, `$this` ([`seed_this_object`]) and a
+/// declared parameter ([`seed_declared_param_object`]), so the two can never
+/// disagree about what a class guarantees. A hooked property (PHP 8.4) is never
+/// readonly — readonly + hook is a PHP fatal — and holds no tracked value, so it
+/// contributes nothing (FP class 16).
+fn seed_readonly_bookkeeping(cx: &Cx, obj: &mut HeapObj, class_fqn: &str) {
+    for p in cx.class_props(class_fqn) {
+        if p.hooked || !p.readonly {
             continue;
         }
-        if p.readonly {
-            obj.readonly.insert(p.name.clone());
-            // A promoted readonly param or a readonly prop with a literal default is
-            // provably written by construction — the first write for reassign checks.
-            if p.promoted || p.default.is_some() {
-                obj.ro_written.insert(p.name.clone());
-            }
+        obj.readonly.insert(p.name.clone());
+        if p.promoted || p.default.is_some() {
+            obj.ro_written.insert(p.name.clone());
         }
     }
+}
+
+/// The heap object a parameter that is an **object by declaration** contributes to
+/// its scope's entry state (ADR-0032's 2026-08-16 amendment, issue #388) — the §3
+/// clause the 2026-08-09 binding amendment wrote down and ADR-0086 §4 carried
+/// forward as its one open entry.
+///
+/// **The declaration must state one class, and both halves must agree.** The native
+/// half is exactly one non-nullable [`TypeMember::Instance`]; a union, an
+/// intersection, a `?Box`, a `= null` default and a scalar each say something other
+/// than "this parameter is one object of one class", and each declines rather than
+/// seeding something weaker. The declared half is a `@param` spelled as a plain
+/// class or a plain parameterized class; **any other `@param` declines the whole
+/// seed**, because at an entry point the docblock is the strongest fact available
+/// (ADR-0037) and one this reader cannot read is not evidence that the native hint
+/// is the whole truth — `@param Box|null` and `@param T` both say the parameter is
+/// not simply a `Box`. Where both halves are written they must resolve to the same
+/// class; a disagreement declines, the two declarations contradicting each other in
+/// a direction no rule here can adjudicate.
+///
+/// **The class comes from the native hint and from nothing else.** A `@param`
+/// alone contributes no object, however plainly it names a class, and the reason is
+/// that [`HeapObj::class`] carries no stratum: the field feeds the proof-layer
+/// dispatch [`resolve_guarded`] performs (`type.argument-mismatch` on the
+/// resolved method's parameters) and the dump surface's un-`(asserted)` rung, and a
+/// docblock reaching either would be exactly the laundering ADR-0052 §3 keeps the
+/// arm lane out of. The native hint is PHP's own runtime guarantee, so it premises
+/// both honestly. What the `@param` contributes is the **type arguments**, which
+/// the native syntax cannot spell and which only contract-layer readers consume —
+/// which is the contribution ADR-0032 §3's clause actually names. Lifting the
+/// restriction has a stated precondition: a provenance bit on the heap class, the
+/// same field the ADR-0052 §3 final-`Member` unlock will want.
+///
+/// **The object is a lower bound and stays one**: `class_exact` is `false` (audit
+/// G1 — the runtime object may be any descendant), `escaped` is `true` (the caller
+/// holds it too), and there are **no props** — a declaration states that a
+/// parameter is a `Box`, never what that `Box` holds. Exactness is not promoted for
+/// a `final` declared class: that is the ADR-0052 §3 final-`Member` unlock, a
+/// different slice.
+fn seed_declared_param_object(
+    cx: &Cx,
+    p: &Param,
+    phpdoc: Option<&PType>,
+    shadow: &TemplateShadow,
+) -> Option<HeapObj> {
+    if p.by_ref || p.variadic || p.has_null_default {
+        return None;
+    }
+    // The native half, and the only source of the class. A hint that lowered to
+    // `None` — untyped, `mixed`, `object`, `iterable` — states no class; anything
+    // else that is not a single non-nullable class states something other than one
+    // object of one class. Both decline.
+    let ty = p.ty.as_ref()?;
+    let (false, [TypeMember::Instance { fqn: native, .. }]) = (ty.nullable, ty.members.as_slice())
+    else {
+        return None;
+    };
+    let native = class_key(native);
+    // The declared half, as written: `Box` or `Box<int>` and nothing else.
+    let declared: Option<(&str, &[steins_phpdoc::ast::GenericArg])> = match phpdoc.map(|t| &t.kind) {
+        None => None,
+        Some(PKind::Identifier(base)) => Some((base.as_str(), &[])),
+        Some(PKind::Generic { base, args }) => Some((base.as_str(), args.as_slice())),
+        Some(_) => return None,
+    };
+    // Where the `@param` also names a class the two must be the same one. A
+    // disagreement declines: `@param Sub $b` under `Box $b` may be a refinement the
+    // author knows or a docblock that drifted, and nothing here can tell which, so
+    // neither half is trusted to stand alone.
+    if declared
+        .is_some_and(|(base, _)| class_key(&cx.resolve_pclass(cx.cur, p.span.start, base)) != native)
+    {
+        return None;
+    }
+    let class = native;
+    if !cx.is_known_class(&class) {
+        return None;
+    }
+    let mut obj = HeapObj::new(class.clone());
+    obj.escaped = true;
+    seed_readonly_bookkeeping(cx, &mut obj, &class);
+    // The carries: the `@param`'s own type arguments, owner-keyed to the class that
+    // declares the templates and resolved where they were written. `CArg::Ty` by
+    // provenance, which is what makes them sweep-immune (issue #295): a declaration
+    // does not stop being true because the body called a method.
+    if let Some((_, args)) = declared
+        && !args.is_empty()
+        && args.iter().all(|a| declared_carry_arg_readable(&a.ty, shadow))
+    {
+        let written: Vec<PType> = args.iter().map(|a| a.ty.clone()).collect();
+        obj.targs = cx
+            .mint_declared_carry(&class, &written, (cx.cur, p.span.start))
+            .into_iter()
+            .collect();
+    }
     Some(obj)
+}
+
+/// Whether one written type argument of a declared parameterization can be carried
+/// (ADR-0032's 2026-08-16 amendment). All-or-nothing per carry, the same alignment
+/// rule every other carry is built under: one unreadable argument drops the whole
+/// edge rather than leaving a hole a positional read would index wrongly.
+///
+/// Two shapes are unreadable. A **template name** — `@param Box<T> $box` under the
+/// declaration's own `@template T`, or a class-level one in a method docblock — says
+/// the declaration does not know what sits there; lowering it would mint a class
+/// named `T` and manufacture a `No` against every spelling (the hazard the #294
+/// amendment names). And a spelling the contract vocabulary lowers to
+/// [`ContractTy::Opaque`] carries no more than the absence of a carry would, while
+/// costing a reader ([`carg_contract_ty`]) an `Opaque` arm it would splice into a
+/// declared return.
+fn declared_carry_arg_readable(ty: &PType, shadow: &TemplateShadow) -> bool {
+    let mut mentions = Vec::new();
+    mentioned_templates(ty, shadow, &mut mentions);
+    mentions.is_empty() && steins_contract::lower(ty) != ContractTy::Opaque
 }
 
 /// The caller-side heap object an argument denotes, for the binding descent's
@@ -16546,7 +16747,16 @@ fn eval_instanceof(
                         // `$this`, the runtime object may be a descendant that IS a
                         // `T`, so `No` here is not decisive.
                         IsA::No if store.is_exact(name) => Certainty::No,
-                        IsA::No | IsA::Unknown => Certainty::Maybe,
+                        // A lower-bound class decides nothing, so it must not
+                        // *shadow* the lane that can: a prior `instanceof` bound a
+                        // `Member` whose implication is a live-branch `Verified`
+                        // fact, strictly stronger than the declaration underneath it.
+                        // Only reachable since a declared parameter is a heap object
+                        // (issue #388) — before it, a variable with a `Member` had no
+                        // object — and monotone either way: `Maybe` in, decided out.
+                        IsA::No | IsA::Unknown => {
+                            member_instanceof(w.cx, store.member_of(name), &target)
+                        }
                     }
                 }
                 // No heap object. First the value side (survey FP class 14): if the
@@ -17307,7 +17517,12 @@ fn bind_call_templates(
                 // here empty.
                 let carries = match cx.resolve_cval(value, env, store, poisoned, folder) {
                     Some(CVal::Object(_, carries)) => carries,
-                    _ => Vec::new(),
+                    // A declared parameter's object is a lower bound and therefore
+                    // never a `CVal` (audit G1), but its declared carries index
+                    // positionally exactly as a proven object's do (issue #388).
+                    _ => declared_carrier(value, store, poisoned)
+                        .map(|(_, carries)| carries)
+                        .unwrap_or_default(),
                 };
                 for (j, slot) in spelled.iter().enumerate() {
                     match &slot.ty.kind {
@@ -23363,11 +23578,14 @@ struct CallTarget<'a> {
     /// the target reads `T` out of.
     ///
     /// Filled by the exact `Receiver::Var` arm, which is the one arm with a heap
-    /// object in hand at resolution, and — **after** resolution, by the caller that
-    /// mints it — for a `Receiver::New` (issue #386). **Empty everywhere else**, and
-    /// each emptiness is a stated §3 contribution rather than an omission: a `$this`
-    /// or otherwise non-exact receiver has no single class whose template list the
-    /// arguments align to, and a static call has no receiver.
+    /// object in hand at resolution; — **after** resolution, by the caller that
+    /// mints it — for a `Receiver::New` (issue #386); and by the **non-exact**
+    /// `Receiver::Var` arm with that object's *declared* carries only (issue #388),
+    /// a `@param Helper<Model> $h` saying as much about a descendant of `Helper` as
+    /// about a `Helper`. **Empty everywhere else**, and each emptiness is a stated
+    /// §3 contribution rather than an omission: a `$this` receiver saw no
+    /// constructor and its enclosing docblock states no parameterization of the
+    /// instance, and a static call has no receiver.
     ///
     /// The `new` arm used to be empty for a **value-IR** reason, measured in issue
     /// #374: [`Receiver::New`] carried the class reference and nothing else, so the
@@ -23392,9 +23610,11 @@ struct CallTarget<'a> {
     ///   construction (ADR-0036), so [`copy_for_descent`] would drop its
     ///   non-readonly props anyway; seeding nothing is the same entry state, minus
     ///   a copy.
-    /// * a **non-exact** `Receiver::Var` (a laundered `$this` alias, `clone $this`)
-    ///   — it resolves through `resolve_guarded`, which proves no receiver identity
-    ///   at all, so there is no object the callee is entitled to (audit G1).
+    /// * a **non-exact** `Receiver::Var` (a laundered `$this` alias, `clone $this`,
+    ///   a declared parameter's seed) — it resolves through `resolve_guarded`, which
+    ///   proves no receiver identity at all, so there is no object the callee is
+    ///   entitled to (audit G1). Its *declared* carries still travel, above: they
+    ///   are a fact about the class, not about the instance.
     /// * `Receiver::New` and `Callee::Construct` — no heap object exists yet at the
     ///   point the target resolves (the value-IR limit measured in issue #374).
     /// * a static call — no receiver.
@@ -23443,11 +23663,23 @@ fn resolve_call_target<'a>(
                 target.receiver_var = Some(v.clone());
                 Some(target)
             } else {
-                // A lower-bound receiver — a laundered `$this` alias (`$u = $this`) or
-                // `clone $this` — is NOT exact (audit G1): fall back to the same
-                // final/private override guard `Receiver::This` uses, so an overridable
-                // method on it never resolves to the enclosing declaration.
-                resolve_guarded(cx, &class, method, enclosing_class)
+                // A lower-bound receiver — a laundered `$this` alias (`$u = $this`),
+                // `clone $this`, or a declared parameter's seed (issue #388) — is NOT
+                // exact (audit G1): fall back to the same final/private override guard
+                // `Receiver::This` uses, so an overridable method on it never resolves
+                // to the enclosing declaration.
+                let mut target = resolve_guarded(cx, &class, method, enclosing_class)?;
+                // Its **declared** carries still read (issue #388). A carry names the
+                // class that declares the templates, not the runtime class, so a
+                // `@param Helper<Model> $h` says exactly as much about a descendant of
+                // `Helper` as about a `Helper` — which is why the exactness this arm
+                // lacks is not the exactness the read needs. Only declared carries can
+                // be here at all: a value carry is minted where an allocation proved
+                // one, and an allocation is exact.
+                target.receiver_carries = obj.declared_targs();
+                // `receiver_var` stays `None`: this arm proves no receiver identity,
+                // so the callee is entitled to no `$this` copy (ADR-0086 §3).
+                Some(target)
             }
         }
         Callee::Method { receiver: Receiver::This, method, .. } => {
@@ -26309,13 +26541,19 @@ fn check_override_family(cx: &Cx, cd: &ClassDecl, out: &mut Vec<Diagnostic>) {
 // Provability rests on the RESOLVED TARGET's ground-truth signature: functions —
 // a uniquely-indexed userland function (ADR-0049 A2 legs: not Ambiguous, not
 // builtin-shadowed; conditional declaration re-dams; boot-surface homonym cleared
-// via sidecar); methods/constructors/statics — ONLY under a proven-EXACT receiver.
-// The declared-receiver variant is UNSOUND: an override may ADD optional
+// via sidecar); methods/constructors/statics — under a proven-EXACT receiver, or
+// under a lower-bound one whose target no override can reach.
+// The general declared-receiver variant stays UNSOUND: an override may ADD optional
 // parameters (`P::m(int $a)` vs `Q::m($a = 0, $b = 0)`), so `$p->m()` on a
 // declared `P` holding a `Q` satisfies the runtime contract and runs — a finding
 // there is a false positive, REFUSED outright (never deferred, unlike
-// `phpdoc.undefined-method`). Exactness reuses S2's gate: `new`, a `class_exact`
-// heap object, or a textual `Class::` static; `$this` (membership, A1),
+// `phpdoc.undefined-method`). What issue #388 admits is the complement of that
+// reason, not an exception to it: a **final method** cannot be overridden and a
+// **final receiver class** has no descendant to hold, so no such `Q` exists and the
+// signature the walk finds is the one every instance runs. Exactness reuses S2's
+// gate: `new`, a `class_exact` heap object, or a textual `Class::` static; the
+// lower-bound lane is a `$var` bound to a non-exact heap object (a declared
+// parameter, above all) under the final guard; `$this` (membership, A1),
 // `self::`/`static::`/`parent::`, `?->`, and every dynamic form are silent.
 // Call-site conditions: no argument unpacking (`...` ⇒ count unproven; counting
 // proven Singleton arrays is deferred); `f(...)` is not a call; named binding
@@ -26347,48 +26585,70 @@ fn required_param_count(params: &[Param]) -> usize {
     required
 }
 
-/// Resolve the exact-receiver class + method name for an arity method/static/
-/// constructor call, or `None` when the receiver is not proven exact (S2's gate,
-/// plus constructors). Constructors and textual `Class::` statics are exact by
-/// construction; a `$var` receiver is exact only under a `class_exact` heap fact.
-/// The `bool` is whether this is a **static** (`Class::m()`) call — a static call
-/// to a NON-static method raises `Error: Non-static method … cannot be called
-/// statically` *before* any `ArgumentCountError` (`php -r`-verified), so the caller
-/// silences that shape rather than misnaming the consequence.
+/// The receiver an arity method/static/constructor call dispatches on.
+struct ArityReceiver {
+    /// The class the chain walk starts at.
+    class: String,
+    method: String,
+    /// A textual `Class::m()` spelling — a static call to a NON-static method
+    /// raises `Error: Non-static method … cannot be called statically` *before* any
+    /// `ArgumentCountError` (`php -r`-verified), so the caller silences that shape
+    /// rather than misnaming the consequence.
+    is_static_call: bool,
+    /// Whether `class` is the receiver's **exact** runtime class. A lower bound
+    /// (issue #388's declared parameter) reaches the signature only through the
+    /// override guard [`resolve_arity_method`] applies.
+    exact: bool,
+}
+
+/// Resolve the receiver class + method name for an arity method/static/constructor
+/// call, or `None` where no class is proven at all. Constructors and textual
+/// `Class::` statics are exact by construction; a `$var` receiver is exact under a
+/// `class_exact` heap fact and a **lower bound** without one.
 fn arity_method_receiver(
     cx: &Cx,
     call: &CallExpr,
     store: &Store,
     poisoned: bool,
-) -> Option<(String, String, bool)> {
+) -> Option<ArityReceiver> {
     match &call.receiver {
-        Callee::Construct { class } => Some((cx.class_fqn(class), "__construct".to_owned(), false)),
+        Callee::Construct { class } => Some(ArityReceiver {
+            class: cx.class_fqn(class),
+            method: "__construct".to_owned(),
+            is_static_call: false,
+            exact: true,
+        }),
         Callee::Method { receiver, method, nullsafe } => {
             if *nullsafe {
                 return None; // `?->` excluded in v1 (S2 leg (l)).
             }
-            let class = match receiver {
-                Receiver::New { class, .. } => cx.class_fqn(class),
+            let (class, exact) = match receiver {
+                Receiver::New { class, .. } => (cx.class_fqn(class), true),
                 Receiver::Var(v) => {
                     if poisoned {
                         return None;
                     }
                     let obj = store.obj_of(v)?;
-                    if !obj.class_exact {
-                        return None; // lower bound → the refused declared-receiver lane.
-                    }
-                    obj.class.clone()
+                    (obj.class.clone(), obj.class_exact)
                 }
-                // A1: `$this` is a membership fact, never exactness — silent.
+                // A1: `$this` is a membership fact, never exactness — silent. Unlike
+                // a declared parameter it also has no *declaration* behind it: the
+                // enclosing class is where the method is being written, not a
+                // contract some caller must satisfy.
                 Receiver::This => return None,
                 // A depth-1 property-fetch receiver carries no exact-class proof for
                 // arity dispatch (ADR-0052 §7) — silent.
                 Receiver::Prop { .. } => return None,
             };
-            Some((class, method.clone(), false))
+            Some(ArityReceiver { class, method: method.clone(), is_static_call: false, exact })
         }
         Callee::Static { class, method } => match class {
-            StaticClass::Named(name) => Some((cx.class_fqn(name), method.clone(), true)),
+            StaticClass::Named(name) => Some(ArityReceiver {
+                class: cx.class_fqn(name),
+                method: method.clone(),
+                is_static_call: true,
+                exact: true,
+            }),
             StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static => None,
         },
         Callee::Function(_) | Callee::DynamicVar(_) | Callee::Dynamic => None,
@@ -26470,8 +26730,8 @@ fn resolve_arity_function<'a>(
     Some(ArityTarget { params: &decl.params, display: decl.name.clone() })
 }
 
-/// Resolve a method/static/constructor arity target under a proven-exact receiver
-/// and S2's chain closure (ADR-0049 §6). Cheap textual legs first.
+/// Resolve a method/static/constructor arity target under S2's chain closure
+/// (ADR-0049 §6). Cheap textual legs first.
 fn resolve_arity_method<'a>(
     cx: &Cx<'a>,
     folder: &mut dyn Folder,
@@ -26479,7 +26739,9 @@ fn resolve_arity_method<'a>(
     store: &Store,
     poisoned: bool,
 ) -> Option<ArityTarget<'a>> {
-    let (start_fqn, method, is_static_call) = arity_method_receiver(cx, call, store, poisoned)?;
+    let recv = arity_method_receiver(cx, call, store, poisoned)?;
+    let start_fqn = recv.class;
+    let method = recv.method;
     // `new AbstractClass()` / `new SomeInterface()` raises `Error: Cannot
     // instantiate abstract class / interface` BEFORE any `ArgumentCountError`
     // (`php -r`-verified) — silence it (would misname the consequence).
@@ -26491,9 +26753,25 @@ fn resolve_arity_method<'a>(
     }
     let (mdecl, declaring_name, traversed, any_conditional) =
         walk_arity_chain(cx, &start_fqn, &method)?;
+    // The **override guard** on a lower-bound receiver (issue #388). The §6 refusal
+    // of the declared-receiver lane rests on one shape: an override may ADD optional
+    // parameters, so a declared `P` holding a `Q` satisfies a signature the walk from
+    // `P` never sees. `final` forecloses exactly that — a final method cannot be
+    // overridden at all (PHP rejects a subclass, and a trait use, that tries: "Cannot
+    // override final method"), and a final receiver class has no descendant to hold,
+    // which makes it exact in everything but the bit. So the refusal stands wherever
+    // its reason does, and the two shapes where the reason cannot arise are admitted:
+    // the same `final_or_private` road `resolve_guarded` takes, minus `private`,
+    // which `walk_arity_chain`'s public-only rule has already excluded.
+    if !recv.exact
+        && !mdecl.is_final
+        && !cx.find_class(&start_fqn).is_some_and(|(_, cd)| cd.is_final)
+    {
+        return None;
+    }
     // A static call (`Class::m()`) to a NON-static method raises the non-static
     // `Error` before any `ArgumentCountError` — silence it (would misname).
-    if is_static_call && !mdecl.is_static {
+    if recv.is_static_call && !mdecl.is_static {
         return None;
     }
     // A9 + the A2ii homonym leg both require a live sidecar.
@@ -29806,6 +30084,21 @@ struct GenericCarry {
     site: Option<(usize, u32)>,
 }
 
+impl GenericCarry {
+    /// Whether every argument is a **declared** type ([`CArg::Ty`]) — an
+    /// inheritance edge's `@extends Box<int>`, or a declared parameter's
+    /// `@param Box<int> $b` (issue #388). Such a carry states what the author wrote
+    /// about the class, which no method call changes and no lack of exactness
+    /// weakens, so it survives a sweep and reads off a lower-bound receiver.
+    ///
+    /// A mixed carry can't occur (all-`Val` from a `new` site, or all-`Ty` from a
+    /// declaration), but the predicate is written over the args to stay correct if
+    /// one ever does.
+    fn is_declared(&self) -> bool {
+        self.args.iter().all(|a| matches!(a, CArg::Ty(_)))
+    }
+}
+
 /// One parameterized inheritance edge as written — [`Cx::inheritance_edge_types`]'s
 /// element, the pre-lowering half of a [`GenericCarry`] (issue #361).
 ///
@@ -31415,6 +31708,42 @@ fn accepts_class_generic(
     r
 }
 
+/// The class and **declared** carries an argument denotes where it is bound to a
+/// NON-exact heap object — a declared parameter's seed above all (ADR-0032's
+/// 2026-08-16 amendment, issue #388).
+///
+/// [`Cx::resolve_cval`] declines such an object deliberately: its `CVal::Object`
+/// licenses the No-side `is_a` conclusion the bare-class acceptance path draws, and
+/// a lower bound would make that unsound (audit G1). That left the two readers which
+/// only ever index a carry **positionally** — declared-argument acceptance
+/// ([`accepts_class_generic`]) and the call-site template binder
+/// ([`bind_call_templates`]) — with nothing to read on a declared parameter, though
+/// neither needs the licence `resolve_cval` is withholding. Both read through here
+/// instead, and the class half stays silent.
+///
+/// `None` for an exact object (`resolve_cval` already speaks for it), for anything
+/// that is not a heap-bound variable, for a poisoned scope, and for an object
+/// carrying nothing declared — there being no position a reader could then index.
+fn declared_carrier(
+    value: &ArgValue,
+    store: &Store,
+    poisoned: bool,
+) -> Option<(String, Vec<GenericCarry>)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    let obj = store.obj_of(name)?;
+    if obj.class_exact {
+        return None;
+    }
+    let carries = obj.declared_targs();
+    if carries.is_empty() {
+        return None;
+    }
+    Some((obj.class.clone(), carries))
+}
+
 /// The FQN comparison key for a class name: case-insensitive (PHP class names are),
 /// leading `\` insignificant.
 fn class_key(fqn: &str) -> String {
@@ -31797,24 +32126,50 @@ fn check_phpdoc_param(
         // acceptance via `steins_contract::admits_fact`. Only a definite `No`
         // reports; `Maybe` is silent.
         None => {
-            let Some(fact) = arg_abstract_fact(value, env, poisoned) else { return };
-            let cty = steins_contract::lower(ty);
-            // ADR-0043 stage 4 — the class valve. A class-touching contract used to
-            // stay silent against every fact; it opens for exactly one sound case:
-            // a **pure class contract of known classes** against a definite scalar
-            // fact (the abstract-fact domain is scalar-only, ADR-0035/0038, and a
-            // scalar is never a class member — pure set membership, no coercion).
-            // Stays shut for an unknown identifier (may be a `@template`/
-            // `@phpstan-type` alias) and, like the proven path, inside a descent.
-            let open_class_valve = is_pure_class_contract(cx, cfile, coff, ty)
-                && !phpdoc_object_guard_blind(in_descent, ty, None);
-            if contract_touches_class(&cty) && !open_class_valve {
-                return;
+            // Before it, the **argument half** of a declared `Class<A, …>` for an
+            // argument bound to a NON-exact heap object — a declared parameter seed
+            // above all (ADR-0032's 2026-08-16 amendment, issue #388).
+            // `resolve_cval` answers `None` there on purpose: its `CVal::Object`
+            // licenses the bare-class path's No-side `is_a`, which a lower bound
+            // would make unsound (audit G1). The argument half needs no such
+            // licence — `accepts_class_generic` gates on the **Yes** side of is-a,
+            // which every descendant of the proven class satisfies, and its only
+            // `No` comes from a carried argument that provably violates a declared
+            // one. So the class half stays `Maybe`, exactly as tier 3 leaves it.
+            if let Some((class, carries)) = declared_carrier(value, store, poisoned)
+                && let PKind::Generic { base, args } = &ty.kind
+            {
+                let cv = CVal::Object(class, carries);
+                if accepts_class_generic(cx, cfile, coff, base, args, &cv) != Tri::No
+                    || phpdoc_object_guard_blind(in_descent, ty, Some(&cv))
+                {
+                    return;
+                }
+                // The variable's own spelling, not [`rendered_cval`]'s `new C()`:
+                // nothing here was constructed at this site, and the reader's next
+                // move is to look at where `$b` was declared.
+                value.render()
+            } else {
+                let Some(fact) = arg_abstract_fact(value, env, poisoned) else { return };
+                let cty = steins_contract::lower(ty);
+                // ADR-0043 stage 4 — the class valve. A class-touching contract used
+                // to stay silent against every fact; it opens for exactly one sound
+                // case: a **pure class contract of known classes** against a definite
+                // scalar fact (the abstract-fact domain is scalar-only,
+                // ADR-0035/0038, and a scalar is never a class member — pure set
+                // membership, no coercion). Stays shut for an unknown identifier (may
+                // be a `@template`/`@phpstan-type` alias) and, like the proven path,
+                // inside a descent.
+                let open_class_valve = is_pure_class_contract(cx, cfile, coff, ty)
+                    && !phpdoc_object_guard_blind(in_descent, ty, None);
+                if contract_touches_class(&cty) && !open_class_valve {
+                    return;
+                }
+                if steins_contract::admits_fact(&cty, fact) != Certainty::No {
+                    return;
+                }
+                describe_fact(fact)
             }
-            if steins_contract::admits_fact(&cty, fact) != Certainty::No {
-                return;
-            }
-            describe_fact(fact)
         }
     };
     let pos = cx.tree().position(arg_offset);
