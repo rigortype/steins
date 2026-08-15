@@ -4096,6 +4096,7 @@ fn check_units(
                 if let Some(ty) = param.ty.as_ref()
                     && let Some(checkable) = cx.resolve_static_value(&arg.value, None)
                     && is_type_error(&cx, ty, &checkable)
+                    && !implicit_null_accepted(param, &checkable)
                 {
                     out.push(cx.diagnostic(
                         arg.span.start,
@@ -22164,6 +22165,7 @@ fn check_propagated_call(
             if let Some((value, provenance, strat)) = resolved
                 && strat == Stratum::Verified
                 && is_type_error(cx, ty, &value)
+                && !implicit_null_accepted(param, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {
                 out.push(cx.diagnostic(
@@ -22769,6 +22771,7 @@ fn check_callable_args(
         if let Some((value, provenance, strat)) = resolved
             && strat == Stratum::Verified
             && is_type_error(cx, ty, &value)
+            && !implicit_null_accepted(param, &value)
             && !object_world_guard_blind(in_descent, ty, &value)
         {
             out.push(cx.diagnostic(
@@ -29544,6 +29547,7 @@ fn check_method_args(
             if let Some((value, prov, strat)) = resolved
                 && strat == Stratum::Verified
                 && is_type_error(cx, ty, &value)
+                && !implicit_null_accepted(param, &value)
                 && !object_world_guard_blind(in_descent, ty, &value)
             {
                 out.push(cx.diagnostic(
@@ -29697,6 +29701,25 @@ fn render_call(name: &str, args: &[ArgValue]) -> String {
 /// `member_accepts_*` tables' `Instance => false` arms encode). A `null` value
 /// against an object-bearing type stays silent (out of scope; sidesteps the
 /// `has_null_default` implicit-nullable interplay).
+/// Whether `p` is **implicitly nullable** and `arg` is the `null` its default
+/// admits — the argument-side half of a bit the callee side has read all along
+/// (issue #391).
+///
+/// `function f(string $s = null)` declares a non-nullable hint whose `= null`
+/// default makes PHP widen the parameter to `?string`: `f(null)` runs, emitting
+/// only the 8.4 "implicitly marking parameter as nullable" deprecation. Every
+/// argument-position native check therefore has to consult the default beside the
+/// hint, exactly as [`seed_fact`] does on the declaration side
+/// (`ty.nullable || p.has_null_default`). Without it a proven `null` — and, since
+/// issue #391, a fact whose `null` side-flag is set — convicted a parameter PHP
+/// accepts, a live proof-layer false positive on the pinned corpus.
+///
+/// A guard rather than a widened [`NativeType`] so the diagnostic keeps rendering
+/// the spelling the declaration actually carries.
+fn implicit_null_accepted(p: &Param, arg: &ArgValue) -> bool {
+    p.has_null_default && matches!(arg, ArgValue::Null)
+}
+
 fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
     let strict = cx.strict();
     match arg {
