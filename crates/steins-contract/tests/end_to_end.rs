@@ -36,6 +36,36 @@ fn scalar_contracts_have_no_coercion() {
     assert_eq!(admits_val(&ty("int|string"), &Val::Float(1.5)), No);
 }
 
+/// The int→float widening reaches `subsumes`, at every depth, **by design**
+/// (issue #356). This relation models *acceptance* — what PHP admits into a
+/// declared slot — so `float ⊇ int` is `Yes` here even though PHPStan's own
+/// type hierarchy answers `No` for the same pair. Both are right about
+/// different questions.
+///
+/// Pinned because the generosity is load-bearing for param contravariance and
+/// ADR-0056's envelope check: "fixing" it to match the hierarchy would start
+/// rejecting `f(1)` against `function f(float $x)`. A caller that needs the
+/// hierarchy's answer — the nsrt harness measuring precision, which must not
+/// read acceptance as agreement — is responsible for declining to ask across
+/// this boundary, and does so in `crosses_int_float{,_nested}`.
+#[test]
+fn subsumption_widens_int_into_float_at_every_depth() {
+    assert_eq!(subsumes(&ty("float"), &ty("int")), Yes);
+    assert_eq!(subsumes(&ty("2.0"), &ty("2")), Yes);
+    // …including inside the array vocabulary, which is what made the harness
+    // score `range(2, 5, 1.0)` a precision win rather than a disagreement.
+    assert_eq!(subsumes(&ty("array{2.0, 3.0}"), &ty("list{2, 3}")), Yes);
+    assert_eq!(subsumes(&ty("list<float>"), &ty("list<int>")), Yes);
+
+    // The reverse is not widening: a float is not admitted where an int is
+    // declared, so the generosity has exactly one direction.
+    assert_eq!(subsumes(&ty("int"), &ty("float")), No);
+    assert_eq!(subsumes(&ty("array{2}"), &ty("list{2.0}")), No);
+
+    // Value equality, not "int is a float": a non-integral float is untouched.
+    assert_eq!(subsumes(&ty("2.5"), &ty("2")), No);
+}
+
 #[test]
 fn refinement_keywords() {
     assert_eq!(admits_val(&ty("numeric-string"), &s("5.5e3")), Yes);
