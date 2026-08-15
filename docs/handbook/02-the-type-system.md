@@ -337,12 +337,16 @@ $b = new Box(42);   // inferred as Box<int> at the construction site
 ```
 
 This is a deliberately small slice: the type-argument *value* is
-inferred at a direct-`new` argument position. Carrying it through
-a later variable binding is not modeled, and there is **no
-call-site template solver** — where value propagation reaches,
-templates are transparent; where it does not, silence. The
-accepted cost is that some library-author generic lints Steins
-simply does not attempt.
+inferred at a direct-`new` argument position. The carry lives on
+the heap object, so it survives a plain variable binding —
+`$box = new Box(1); f($box);` judges both halves — but a method
+call on that receiver sweeps it, and so does passing it to a
+callee that can reach the parameter, because either may have
+replaced what the object holds. And there is **no call-site
+template solver** — where value propagation reaches, templates
+are transparent; where it does not, silence. The accepted cost is
+that some library-author generic lints Steins simply does not
+attempt.
 
 PHPStan's `template-type<Subject, Owner, 'TName'>` — "give me the
 `@template` argument called `TName` out of this type" — is read
