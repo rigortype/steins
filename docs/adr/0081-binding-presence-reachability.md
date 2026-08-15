@@ -287,3 +287,165 @@ PR leaves draft; default and contracts profiles pinned unmoved over the
 corpus (fp-gate); the defaulting idiom, the guard polarities, the loop
 fixpoint, the terminating-arm subtraction and the try-conservatism each get
 a fixture with both the firing and the silent spelling.
+
+## Amendment (2026-08-16): the argument side joins the possibly grade — a pair of ids, split by premise stratum (issue #391)
+
+**Status: PENDING ratification.** Issue #391, the answer issue #291's
+probe came back with. §8's membership rule is derivation, not a list, so
+this amendment adds no mechanism to the gate; what it decides is the
+shape of the first possibly-grade id whose premise is a *type* rather
+than a *binding*, and — because that premise can arrive at either
+stratum — why it is two ids and not one.
+
+### A1. The claim, and why it is possibly-grade rather than definite
+
+An argument's abstract fact (a `Fact::General`/`Refined`/`Union`, or the
+declared-arm lane lowered the same way) has one or more base arms plus a
+`null` side-flag. Against the callee's native parameter type, at the
+call-site file's own coercion mode, three verdicts are possible: every
+arm rejected, some rejected and some accepted, none rejected.
+
+Issue #291 asked for the **first** one. Measured, it is empty — 0
+firings on the pinned corpus, on phpstan-src's nsrt and on
+php-typing-conformance, against 2,333 judged abstract-premise argument
+positions on the corpus alone — and structurally so: a Verified
+`General{base}` comes from a native declaration, so it is exactly the
+runtime truth, and callers of a `string` parameter overwhelmingly hold a
+string. #291 closes with "don't build it", and nothing here does.
+
+The **second** is what the probe found instead, 12 times on the corpus,
+and it is a different kind of claim. "Some arm the parameter rejects" is
+not "this call breaks": an over-approximating type never proves an arm
+is inhabited on a live path. It is exactly §8's partial-path shape one
+carrier over — `variable.maybe-undefined` says *a* path reaches this
+read unbound, and this says *a* value this argument's own type admits
+would not bind. So it takes the possibly grade, by the same reasoning
+and through the same registry derivation: `Layer::Proof` +
+`Floor::Strict` puts it in the gate's tripwire bucket automatically, off
+every default run, held to non-increase rather than to zero.
+
+The corpus population says the same thing from the other side. Ten of
+the twelve are one shape: a builtin whose declared return is `T|false`
+(or `T|null`) handed straight into a native `T` with no check in
+between — `file_get_contents`, `realpath`, `inet_pton`, `json_encode`,
+`preg_replace`. That is PHPStan's `expects string, string|false given`
+at level 5, and it is real latent breakage in released code, which is
+the definition of a finding a clean corpus legitimately contains.
+
+### A2. Two ids, because the premise has two strata (ADR-0052 §5)
+
+The consumption rule is binding: a finding's premise stratum is the
+minimum over every fact it consumed, and proof-layer ids require
+all-Verified premises. This judgment consults **every** arm — it has to,
+since "some rejected and some accepted" is a statement about the whole
+arm list — so the minimum runs over all of them, not only over the
+rejected ones. The two cases are genuinely different claims and get
+genuinely different ids:
+
+- **`type.maybe-argument-mismatch`** — `Layer::Proof`, `Floor::Strict`.
+  Every arm Verified: a native declaration, or the reflected native
+  return of a callee. The arms are the runtime truth; only inhabitation
+  is unproven, which is what the possibly grade already declares.
+- **`phpdoc.maybe-argument-mismatch`** — `Layer::Contract`,
+  `Floor::Strict`. Some arm Asserted: a docblock claim, a curated
+  refinement over a native envelope, or an ADR-0069 declared-return
+  floor row. The claim is conditional on the contract being honest,
+  which is the contract layer's definition, and ADR-0052 §5 forbids
+  routing it anywhere else. An `Asserted` arm can never premise a
+  `type.*` id; that is pinned by a fixture, not only by review.
+
+**The `Strict` floor on the contract half is the `offset.maybe-missing`
+precedent, not a deviation from the `phpdoc.*` family floor.** The two
+legs of the offset family sit at exactly this split — `offset.undeclared`
+at `Contracts`, its possibly sibling at `Strict` — because the floor
+answers "how sure is this?" while the layer answers "whose claim is it?".
+`phpdoc.param-mismatch` is this id's own definite sibling and stays at
+`Contracts`. A partial-path claim over a declared type belongs one rung
+up, and a `contracts` run keeps meaning what it means today.
+
+The gate posture follows from the registry with no edit: `Layer::Proof` +
+`Floor::Strict` routes the proof half to §8's tripwire bucket, and any
+`phpdoc.*` contract id is already measurement-mode. Two ids, one
+judgment, two buckets — and no third posture invented for the pair.
+
+### A3. The judgment is `is_type_error`, asked once per equivalence class
+
+There is **no second coercion table**. The base-level verdict is built
+out of the existing concrete-value relation by handing it witnesses: an
+arm of base `B` is rejected iff `is_type_error` rejects *every* witness
+of `B`, and the `null` side-flag is judged with `ArgValue::Null`.
+
+The witness set is the whole addition, and it is not one per base,
+because acceptance is not uniform inside every base: `bool` needs `true`
+and `false` (a `string|false` parameter accepts exactly one of them),
+and `string` needs a numeric and a non-numeric one (coercive mode splits
+on `is_numeric`, which is the entire reason a `string` base is not a
+coercive-mode definite No against `int`). `int` and `float` need one
+each. The equivalence classes are measured, not asserted: PHP itself
+answers all 72 cells per mode in `harness/coercion-grid`, and a test
+pins Steins' grid against it cell for cell.
+
+A `Refined` fact decomposes to its **base**, dropping the refinement: a
+refined set is a subset of its base's set, so base-rejection implies
+refined-rejection. The converse — a `numeric-string` into a coercive
+`int` — is sharper and is *not* taken here; it is a second judgment with
+its own FP surface. `Singleton`/`OneOf` decline (the concrete lane
+already owns them, and owns them better) and `Shape` declines (an array
+against a scalar parameter is a real `TypeError`, but `is_type_error`
+answers `false` for an array by construction, so admitting it here would
+be that second table by another door).
+
+### A4. The premise lane, and what it costs to read
+
+The value lane is read where it has a fact; otherwise the declared-arm
+lane (`Store::contract_arms`) is, lowered through the same `to_fact` the
+scalar seeding uses. The arm lane is not an optional extra: 10 of the 12
+corpus hits arrive there and nowhere else, because the value lane has no
+carrier for a docblock-or-reflection `T|false` — `seed_refined_scalar_fact`
+mints a value-lane fact only when a native `General` is refined *within
+its own base*, and the inline-`@var` seeding only for array shapes. A
+judgment that read the value lane alone would measure two hits and
+conclude the shape is rare.
+
+### A5. What this slice does not reach, stated as a bound
+
+- The definite No of #291. Measured empty; not built.
+- **Builtin parameters.** Arguments to builtins are not param-type-checked
+  at all today — there is no builtin parameter-type source in the check;
+  the builtin catalog supplies arity only — so every argument-side finding
+  is capped at project-defined callees. A separate slice with its own
+  measurement, and recorded in the divergence registry rather than left
+  to be discovered.
+- **Non-`Var` argument carriers** (`$o->p`, `f(g($x))`, `$a['k']`): 74%
+  of the 39,754 argument positions the probe saw. The same judgment at a
+  different seam.
+- Any relaxation of §8's derivation rule. An id joins or leaves the
+  possibly posture by its registered layer and floor changing, which is
+  an ADR-visible act.
+
+### A6. Two narrowing repairs the measurement forced, each landed alone
+
+Neither belongs to this id, and both are worth their own fix regardless;
+they are recorded here because the id's corpus count is only meaningful
+after them.
+
+1. **`assert($expr)` reached the value lane and not the declared-arm
+   lane.** The 2026-07-25 ruling reads `assert()` as `if (!$expr) throw`,
+   but the statement arm applied only the value-lane refinements and the
+   type-predicate vocabulary, never the arm-lane subtraction — so
+   `assert($x !== false)` narrowed nothing on exactly the `T|false`
+   binding the guard exists for, while its `if` twin narrowed to
+   `string`. One narrowing, one code path, now.
+2. **An implicitly-nullable parameter (`f(string $s = null)`) rejected
+   the `null` its own default admits** at the argument position, though
+   the declaration side has read the same bit all along. That was a
+   *definite* proof-layer false positive, not a possibly-grade one, and
+   the corpus carried it.
+
+### A7. Measurement owed
+
+Corpus partial count at 10 after both repairs, every line triaged
+against its source in the PR body; nsrt headline non-decreasing;
+conformance and the fp-gate diffed with causes; the possibly-grade
+bucket's per-package baselines re-seeded for the proof half and the
+`phpdoc.*` baselines for the contract half.
