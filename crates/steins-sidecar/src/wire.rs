@@ -265,13 +265,22 @@ pub fn defined_params(name: &str) -> serde_json::Value {
     serde_json::json!({ "name": name })
 }
 
-/// The `params` of a `fold` request: the function's simple name plus its already
-/// budget-checked literal arguments, each encoded by [`fold_arg_to_json`].
+/// The `params` of a `fold` request: the function's simple name, its already
+/// budget-checked literal arguments (each encoded by [`fold_arg_to_json`]), and
+/// the **call site's** calling convention.
+///
+/// `strict` is `declare(strict_types=1)` at the file the call is *written* in,
+/// not a property of the runner or of the analysis. It belongs in the params
+/// because the params ARE the request key (ADR-0066 §2): a strict call site and
+/// a weak one ask different questions of the same name and arguments, so they
+/// must not share a replay-table entry or a memo slot, and putting the field
+/// here is what keeps them apart everywhere at once.
 #[must_use]
-pub fn fold_params(name: &str, args: &[FoldArg]) -> serde_json::Value {
+pub fn fold_params(name: &str, args: &[FoldArg], strict: bool) -> serde_json::Value {
     serde_json::json!({
         "function": name,
         "args": args.iter().map(fold_arg_to_json).collect::<Vec<_>>(),
+        "strict": strict,
     })
 }
 
@@ -706,10 +715,19 @@ mod tests {
 
     #[test]
     fn fold_params_encode_scalars_with_their_phpness() {
-        let p = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())]);
-        assert_eq!(p, serde_json::json!({ "function": "strtoupper", "args": ["ab"] }));
+        let p = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], true);
+        assert_eq!(
+            p,
+            serde_json::json!({ "function": "strtoupper", "args": ["ab"], "strict": true })
+        );
+        // The convention is part of the params, so the two call sites ask
+        // DIFFERENT questions — which is what keeps them out of one memo slot
+        // and one replay-table row.
+        let weak = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false);
+        assert_ne!(weak, p, "a weak call site is a different request");
+        assert_eq!(weak["strict"], serde_json::json!(false));
         // A float stays a float on the wire — `5.0`, not `5`.
-        let p = fold_params("strval", &[FoldArg::Float(5.0)]);
+        let p = fold_params("strval", &[FoldArg::Float(5.0)], true);
         assert_eq!(p["args"][0].as_f64(), Some(5.0));
         assert!(p["args"][0].is_f64(), "float-ness survives: {p}");
     }
@@ -721,7 +739,7 @@ mod tests {
             (Some(FoldKey::Str("k".into())), FoldArg::Bool(true)),
             (Some(FoldKey::Int(-3)), FoldArg::Null),
         ]);
-        let p = fold_params("count", &[arg]);
+        let p = fold_params("count", &[arg], true);
         assert_eq!(
             p["args"][0][ARRAY_TAG],
             serde_json::json!([[serde_json::Value::Null, 1], ["k", true], [-3, serde_json::Value::Null]])
@@ -732,7 +750,7 @@ mod tests {
     fn nested_array_arguments_nest_their_envelopes() {
         let inner = FoldArg::Array(vec![(None, FoldArg::Int(7))]);
         let outer = FoldArg::Array(vec![(None, inner)]);
-        let p = fold_params("count", &[outer]);
+        let p = fold_params("count", &[outer], true);
         assert_eq!(p["args"][0][ARRAY_TAG][0][1][ARRAY_TAG][0][1], serde_json::json!(7));
     }
 

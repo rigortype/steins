@@ -529,7 +529,7 @@ mod replay {
 
     const ENV_KEY: &str = r#"{"method":"env","params":{}}"#;
     const FOLD_KEY: &str =
-        r#"{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2]}}"#;
+        r#"{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2],"strict":false}}"#;
     const REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"greet"}}"#;
 
     fn answered_table() -> HashMap<String, serde_json::Value> {
@@ -660,7 +660,7 @@ mod replay {
     fn a_width_refused_builtin_stays_declined_on_a_32_bit_engine() {
         const SRC: &str = "<?php\n$x = intval(\"3000000000\");\n\\PHPStan\\dumpType($x);\n";
         const INTVAL_KEY: &str =
-            r#"{"method":"fold","params":{"function":"intval","args":["3000000000"]}}"#;
+            r#"{"method":"fold","params":{"function":"intval","args":["3000000000"],"strict":false}}"#;
         const INTVAL_REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"intval"}}"#;
         let mut table = HashMap::from([
             (ENV_KEY.to_owned(), php_wasm_env()),

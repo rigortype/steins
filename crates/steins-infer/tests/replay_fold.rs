@@ -59,8 +59,25 @@ fn with_reflect(table: &mut Table, target: &str, answer: serde_json::Value) {
     table.insert(request_key("reflect", &reflect_params(target)), answer);
 }
 
+/// A fold answer for a call written in a file with no `declare(strict_types=1)`
+/// — which every fixture below is, so this is the convention the analyzer will
+/// ask under. The mode is part of the request key, so a row filed under the
+/// other one is simply a different question and would be missed.
 fn with_fold(table: &mut Table, name: &str, args: &[FoldArg], answer: serde_json::Value) {
-    table.insert(request_key("fold", &fold_params(name, args)), answer);
+    with_fold_strict(table, name, args, false, answer);
+}
+
+/// The same, for a call site whose file's calling convention is `strict`. The
+/// mode is part of the request key, so a strict and a weak call site occupy
+/// different table rows — which is the property the strict-carrier test pins.
+fn with_fold_strict(
+    table: &mut Table,
+    name: &str,
+    args: &[FoldArg],
+    strict: bool,
+    answer: serde_json::Value,
+) {
+    table.insert(request_key("fold", &fold_params(name, args, strict)), answer);
 }
 
 /// A 64-bit engine at the pinned minor — the "everything admitted" baseline.
@@ -83,7 +100,7 @@ fn a_table_hit_answers_the_fold() {
     );
     let mut folder = TableFolder::with_table(t);
     assert_eq!(
-        folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
+        folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false),
         Some(ArgValue::Str("AB".into()))
     );
     assert!(folder.pending().is_empty(), "a fully-answered run has nothing pending");
@@ -114,7 +131,7 @@ fn a_table_hit_answers_a_fold_with_an_array() {
         ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str("aa".into()))]),
     ];
     assert_eq!(
-        folder.fold("str_replace", &args),
+        folder.fold("str_replace", &args, false),
         Some(ArgValue::Array(vec![
             (ArrayKey::Int(0), ArgValue::Str("bb".into())),
             (ArrayKey::Str("k".into()), ArgValue::Int(7)),
@@ -146,7 +163,7 @@ fn a_malformed_array_answer_widens_rather_than_panicking() {
         ArgValue::Str("b".into()),
         ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str("aa".into()))]),
     ];
-    assert_eq!(folder.fold("str_replace", &args), None, "a malformed answer widens");
+    assert_eq!(folder.fold("str_replace", &args, false), None, "a malformed answer widens");
     // Settled, not pending: re-asking would replay the same malformed reply forever.
     assert!(folder.pending().is_empty(), "the question was answered, badly");
 }
@@ -154,7 +171,7 @@ fn a_malformed_array_answer_widens_rather_than_panicking() {
 #[test]
 fn a_table_miss_declines_and_records_the_request() {
     let mut folder = TableFolder::with_table(pinned_env_table());
-    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())]), None);
+    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false), None);
     let pending = folder.take_pending();
     assert_eq!(pending.len(), 1, "one miss: {pending:?}");
     // The pending key IS the request minus its framing id — byte-identical to
@@ -163,7 +180,7 @@ fn a_table_miss_declines_and_records_the_request() {
     assert_eq!(req["method"], "fold");
     assert_eq!(req["params"]["function"], "strtoupper");
     assert_eq!(req["params"]["args"], serde_json::json!(["ab"]));
-    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())])));
+    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false)));
 }
 
 #[test]
@@ -172,7 +189,7 @@ fn an_empty_table_asks_about_the_engine_before_it_asks_for_a_fold() {
     // iteration reports only the `env` question — not a wasted round trip, but the
     // gate refusing to dispatch before arithmetic is established.
     let mut folder = TableFolder::with_table(Table::new());
-    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())]), None);
+    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false), None);
     assert_eq!(folder.take_pending(), vec![request_key("env", &env_params())]);
 }
 
@@ -181,14 +198,14 @@ fn repeated_misses_are_deduped_in_first_occurrence_order() {
     let mut folder = TableFolder::with_table(pinned_env_table());
     // A memoized folder would hide a duplicate anyway, so ask three DISTINCT
     // questions and one of them twice through a distinct-args call.
-    let _ = folder.fold("strtoupper", &[ArgValue::Str("ab".into())]);
-    let _ = folder.fold("strtolower", &[ArgValue::Str("AB".into())]);
+    let _ = folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false);
+    let _ = folder.fold("strtolower", &[ArgValue::Str("AB".into())], false);
     let _ = folder.boot_surface_function("strlen");
     let _ = folder.boot_surface_class_like("strlen"); // same `reflect` request
     let pending = folder.take_pending();
     assert_eq!(pending.len(), 3, "deduped: {pending:?}");
-    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())])));
-    assert_eq!(pending[1], request_key("fold", &fold_params("strtolower", &[FoldArg::Str("AB".to_owned())])));
+    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false)));
+    assert_eq!(pending[1], request_key("fold", &fold_params("strtolower", &[FoldArg::Str("AB".to_owned())], false)));
     assert_eq!(pending[2], request_key("reflect", &reflect_params("strlen")));
 }
 
@@ -202,7 +219,7 @@ fn a_widen_answer_is_an_answer_not_a_miss() {
         serde_json::json!({ "kind": "widen", "reason": "unknown function" }),
     );
     let mut folder = TableFolder::with_table(t);
-    assert_eq!(folder.fold("nope", &[]), None);
+    assert_eq!(folder.fold("nope", &[], false), None);
     assert!(folder.pending().is_empty(), "answered-with-widen is settled, not pending");
 }
 
@@ -341,7 +358,7 @@ impl FoldEngine for FakeEngine {
     fn reflect(&mut self, target: &str) -> Option<Reflection> {
         self.reflections.get(target).cloned()
     }
-    fn fold(&mut self, name: &str, _args: &[FoldArg]) -> FoldResult {
+    fn fold(&mut self, name: &str, _args: &[FoldArg], _strict: bool) -> FoldResult {
         self.dispatched.push(name.to_owned());
         self.folds.get(name).cloned().unwrap_or_else(|| FoldResult::widen("unknown"))
     }
@@ -426,12 +443,12 @@ fn the_replay_transport_folds_the_portable_subset_on_a_32_bit_table() {
     );
     let mut folder = TableFolder::with_table(t);
     assert_eq!(
-        folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
+        folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false),
         Some(ArgValue::Str("AB".into()))
     );
     // The refused name declines even though the table HAS the (wrong) answer — the
     // gate is upstream of the table, so a pre-answered saturated literal can't win.
-    assert_eq!(folder.fold("intval", &[ArgValue::Str("3000000000".into())]), None);
+    assert_eq!(folder.fold("intval", &[ArgValue::Str("3000000000".into())], false), None);
     assert!(folder.pending().is_empty(), "a refused fold asks nothing: {:?}", folder.pending());
 }
 
@@ -445,7 +462,7 @@ fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
         .with_fold("intval", FoldResult::Value(steins_sidecar::FoldValue::Int(7)));
     let mut folder = EngineFolder::with_engine(engine);
     // Innocent, in-range arguments: the refusal is per-NAME, arguments can't buy it back.
-    assert_eq!(folder.fold("intval", &[ArgValue::Str("7".into())]), None);
+    assert_eq!(folder.fold("intval", &[ArgValue::Str("7".into())], false), None);
     assert!(
         folder.engine_mut().dispatched.is_empty(),
         "the gate refuses before the engine is touched: {:?}",
@@ -483,7 +500,7 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
     // guard to reject), so the decline is the NAME's, refused before the engine is touched.
     let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
-    assert_eq!(folder.fold("explode", &args), None);
+    assert_eq!(folder.fold("explode", &args, false), None);
     assert!(
         folder.engine_mut().dispatched.is_empty(),
         "an unverified name is refused before dispatch: {:?}",
@@ -495,7 +512,7 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
     let engine = FakeEngine::new("8.5.8", Some(8)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
-        folder.fold("explode", &args),
+        folder.fold("explode", &args, false),
         Some(ArgValue::Array(vec![
             (ArrayKey::Int(0), ArgValue::Str("a".into())),
             (ArrayKey::Int(1), ArgValue::Str("b".into())),
@@ -521,7 +538,7 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     with_fold(&mut t, "explode", &args, fold_answer.clone());
     let mut folder = TableFolder::with_table(t);
     assert_eq!(
-        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())]),
+        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())], false),
         None
     );
     assert!(folder.pending().is_empty(), "a declined fold asks nothing: {:?}", folder.pending());
@@ -532,7 +549,7 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     with_fold(&mut t, "explode", &args, fold_answer);
     let mut folder = TableFolder::with_table(t);
     assert_eq!(
-        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())]),
+        folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())], false),
         Some(ArgValue::Array(vec![
             (ArrayKey::Int(0), ArgValue::Str("a".into())),
             (ArrayKey::Int(1), ArgValue::Str("b".into())),
@@ -603,7 +620,7 @@ fn a_32_bit_engine_folds_the_verified_portable_subset() {
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
-        folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
+        folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false),
         Some(ArgValue::Str("AB".into()))
     );
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
@@ -632,7 +649,7 @@ fn the_issue_354_verdicts_split_the_lane_on_a_32_bit_engine() {
     let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("array_fill", filled());
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
-        folder.fold("array_fill", &[ArgValue::Int(0), ArgValue::Int(2), ArgValue::Str("x".into())]),
+        folder.fold("array_fill", &[ArgValue::Int(0), ArgValue::Int(2), ArgValue::Str("x".into())], false),
         Some(ArgValue::Array(vec![
             (ArrayKey::Int(0), ArgValue::Str("x".into())),
             (ArrayKey::Int(1), ArgValue::Str("x".into())),
@@ -648,12 +665,13 @@ fn the_issue_354_verdicts_split_the_lane_on_a_32_bit_engine() {
     assert_eq!(
         folder.fold(
             "range",
-            &[ArgValue::Str("3000000000".into()), ArgValue::Str("3000000000".into())]
+            &[ArgValue::Str("3000000000".into()), ArgValue::Str("3000000000".into())],
+            true
         ),
         None
     );
     assert_eq!(
-        folder.fold("preg_split", &[ArgValue::Str("/,/".into()), ArgValue::Str("a,b".into())]),
+        folder.fold("preg_split", &[ArgValue::Str("/,/".into()), ArgValue::Str("a,b".into())], false),
         None
     );
     assert!(
@@ -678,7 +696,7 @@ fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
     let engine = FakeEngine::new("8.5.2", Some(4))
         .with_fold("count", FoldResult::Value(steins_sidecar::FoldValue::Int(1)));
     let mut folder = EngineFolder::with_engine(engine);
-    assert_eq!(folder.fold("count", std::slice::from_ref(&outer)), None);
+    assert_eq!(folder.fold("count", std::slice::from_ref(&outer), false), None);
     assert!(
         folder.engine_mut().dispatched.is_empty(),
         "an out-of-range key is refused before dispatch: {:?}",
@@ -693,7 +711,7 @@ fn an_out_of_range_key_buried_in_a_nested_array_declines_the_fold() {
         .with_fold("count", FoldResult::Value(steins_sidecar::FoldValue::Int(1)));
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
-        folder.fold("count", &[ArgValue::Array(vec![(ArrayKey::Auto, ok_nested)])]),
+        folder.fold("count", &[ArgValue::Array(vec![(ArrayKey::Auto, ok_nested)])], false),
         Some(ArgValue::Int(1))
     );
     assert_eq!(folder.engine_mut().dispatched, vec!["count".to_owned()]);
@@ -708,7 +726,7 @@ fn the_range_guard_excludes_php_int_min_on_a_32_bit_machine() {
         let engine = FakeEngine::new("8.5.2", Some(4))
             .with_fold("strval", FoldResult::Value(steins_sidecar::FoldValue::Str("x".to_owned())));
         let mut folder = EngineFolder::with_engine(engine);
-        let folded = folder.fold("strval", &[ArgValue::Int(arg)]);
+        let folded = folder.fold("strval", &[ArgValue::Int(arg)], false);
         assert_eq!(folded.is_some(), expected.is_some(), "arg {arg}");
         assert_eq!(folder.engine_mut().dispatched.is_empty(), expected.is_none(), "arg {arg}");
     }
@@ -722,7 +740,7 @@ fn an_unreported_width_declines_even_the_portable_subset() {
     let engine = FakeEngine::new("8.5.2", None)
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
-    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())]), None);
+    assert_eq!(folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false), None);
     assert!(folder.engine_mut().dispatched.is_empty());
 }
 
@@ -734,7 +752,7 @@ fn a_64_bit_engine_folds_normally() {
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
-        folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
+        folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false),
         Some(ArgValue::Str("AB".into()))
     );
     assert_eq!(folder.engine_mut().dispatched, vec!["strtoupper".to_owned()]);
@@ -752,12 +770,12 @@ fn a_64_bit_engine_is_untouched_by_the_portable_subset() {
     let mut folder = EngineFolder::with_engine(engine);
     // A width-REFUSED name, with an argument the 32-bit range guard would reject.
     assert_eq!(
-        folder.fold("intval", &[ArgValue::Str("3000000000".into())]),
+        folder.fold("intval", &[ArgValue::Str("3000000000".into())], false),
         Some(ArgValue::Int(3_000_000_000))
     );
     // A width-SAFE name, with an argument beyond 2^31.
     assert_eq!(
-        folder.fold("strval", &[ArgValue::Int(9_000_000_000_000_000_000)]),
+        folder.fold("strval", &[ArgValue::Int(9_000_000_000_000_000_000)], false),
         Some(ArgValue::Str("9e18".into()))
     );
     assert_eq!(folder.engine_mut().dispatched, vec!["intval".to_owned(), "strval".to_owned()]);
@@ -894,7 +912,7 @@ fn the_native_engine_reports_a_64_bit_machine() {
     // And a direct fold through the shared policy still folds.
     let mut folder = SidecarFolder::enabled();
     assert_eq!(
-        folder.fold("strtoupper", &[ArgValue::Str("ab".into())]),
+        folder.fold("strtoupper", &[ArgValue::Str("ab".into())], false),
         Some(ArgValue::Str("AB".into()))
     );
 }

@@ -58,7 +58,12 @@ impl Boot {
 }
 
 impl Folder for Boot {
-    fn fold(&mut self, _n: &str, _a: &[steins_syntax::ArgValue]) -> Option<steins_syntax::ArgValue> {
+    fn fold(
+        &mut self,
+        _n: &str,
+        _a: &[steins_syntax::ArgValue],
+        _strict: bool,
+    ) -> Option<steins_syntax::ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -326,7 +331,12 @@ fn a_computed_define_does_not_dam_the_function_and_class_ids() {
 struct FnBoot;
 
 impl Folder for FnBoot {
-    fn fold(&mut self, _n: &str, _a: &[steins_syntax::ArgValue]) -> Option<steins_syntax::ArgValue> {
+    fn fold(
+        &mut self,
+        _n: &str,
+        _a: &[steins_syntax::ArgValue],
+        _strict: bool,
+    ) -> Option<steins_syntax::ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

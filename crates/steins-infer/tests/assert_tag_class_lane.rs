@@ -23,7 +23,7 @@ use steins_syntax::{ArgValue, SourceTree};
 /// under it therefore proves the receiver was never treated as exact.
 struct Boot;
 impl Folder for Boot {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

@@ -101,7 +101,7 @@ fn an_array_shape_survives_the_non_mutating_read_position_family() {
 struct Mock;
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn builtin_return_fact(&mut self, _name: &str) -> Option<Fact> {

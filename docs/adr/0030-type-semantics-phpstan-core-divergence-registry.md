@@ -219,6 +219,33 @@ enum cases, class constants, and now `A&B` **intersections** (the
 conjunctive `InstanceInter` member, ADR-0043) — has landed; the
 `instanceof` / offset-access / undefined-method finding kinds exist.
 
+## Divergence registry, entry added 2026-08-15
+
+7. **A folded value obeys the call site's `declare(strict_types=1)`.** PHPStan
+   computes a call's type without consulting the analyzed file's strict-types
+   declaration — `abs('123')` is `123` in its `abs.php` fixture, which declares
+   `strict_types = 1`, and that is a legitimate reading: the question "what type
+   does this expression have" is separable from "does this call survive".
+
+   Steins cannot separate them, because its answer is stronger. A folded value
+   is `Verified` (ADR-0028 §5), the top stratum, obtained by *running the call*
+   on the project's own engine — and under that declaration the call throws, so
+   there is no value to have. Carrying `123` there would put a value the program
+   cannot produce into the top stratum, and every narrowing downstream would
+   inherit it. The fold seam therefore carries the call site's convention
+   (issue #383): a strict file declines and falls to the rung or the declared
+   floor, a weak file folds exactly what PHP's coercion returns.
+
+   The divergence is one-directional and small: it appears only where a literal
+   argument's type does not match the parameter declaration, which is a call the
+   strict file's own author cannot execute. Measured against phpstan-src's nsrt
+   corpus, five rows — all in `abs.php`, all of the `abs('123')` shape.
+
+   Nothing about the *type* question is disputed. Where the declaration and the
+   argument agree, both tools answer the same value; where they do not, PHPStan
+   describes the type the expression would have had and Steins declines to claim
+   a value the runtime never produces. Two questions, two right answers.
+
 ## Governing rule (amendment)
 
 Vocabulary and minor judgments track PHPStan's model (yes/no/maybe,

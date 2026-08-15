@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 // Steins PHP sidecar runner (ADR-0004 / ADR-0024).
 //
 // A single, dependency-free file embedded in the `steins` binary via
@@ -573,6 +575,10 @@ function steins_fold(array $params)
 {
     $fn = isset($params['function']) ? $params['function'] : null;
     $raw = isset($params['args']) && is_array($params['args']) ? $params['args'] : [];
+    // The CALL SITE's calling convention, not this file's. Absent means strict:
+    // an older or hand-written request gets the mode that can only decline,
+    // never the one that coerces (see `steins_call`).
+    $strict = !isset($params['strict']) || $params['strict'] !== false;
 
     if (!is_string($fn) || !function_exists($fn)) {
         return ['kind' => 'widen', 'reason' => 'unknown function'];
@@ -604,7 +610,7 @@ function steins_fold(array $params)
     $args = $decoded;
 
     try {
-        $ret = $fn(...$args);
+        $ret = steins_call($fn, $args, $strict);
     } catch (\ArgumentCountError $e) {
         // Arity mismatch is a structural misuse, not a value-domain result.
         return ['kind' => 'widen', 'reason' => 'wrong arity'];
@@ -615,6 +621,39 @@ function steins_fold(array $params)
     }
 
     return steins_encode_value($ret);
+}
+
+/**
+ * Call `$fn` under the CALL SITE's calling convention.
+ *
+ * `declare(strict_types=1)` binds to the file a call is *written* in, and the
+ * fold seam spans two files: the user's, and this one. This file declares
+ * strict, so the direct call below is strict — which is what a call written in
+ * a strict file needs. A call written in a weak file needs the other mode, and
+ * `eval()` supplies it: eval'd code is not this file, so it does not inherit
+ * this file's declaration and runs coercively. Measured, not assumed —
+ * `eval("return $fn(...$args);")` inside this very file answers
+ * `substr("abcdef", "1")` as `'bcdef'` where the direct call throws.
+ *
+ * The eval'd string is a FIXED program. Nothing from the request is
+ * interpolated into it: `$fn` and `$args` are ordinary locals that eval reads
+ * from the enclosing scope, exactly as the direct call does.
+ *
+ * Getting this wrong in the weak direction is unsound (a value the strict
+ * program cannot produce); getting it wrong in the strict direction only
+ * declines. That is why an absent `strict` field defaults to strict.
+ *
+ * @param string $fn
+ * @param array<int, mixed> $args
+ * @param bool $strict
+ * @return mixed
+ */
+function steins_call($fn, array $args, $strict)
+{
+    if ($strict) {
+        return $fn(...$args);
+    }
+    return eval('return $fn(...$args);');
 }
 
 /**

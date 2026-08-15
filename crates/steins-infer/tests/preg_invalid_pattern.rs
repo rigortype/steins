@@ -33,7 +33,7 @@ struct Pcre {
 }
 
 impl Folder for Pcre {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -55,7 +55,7 @@ impl Folder for Pcre {
 struct NoBootSurface;
 
 impl Folder for NoBootSurface {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {

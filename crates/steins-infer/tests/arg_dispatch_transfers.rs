@@ -58,7 +58,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -364,7 +364,7 @@ fn json_decode_declines_in_every_form() {
 fn without_the_reflected_declaration_every_transfer_is_withheld() {
     struct NoPhp;
     impl Folder for NoPhp {
-        fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

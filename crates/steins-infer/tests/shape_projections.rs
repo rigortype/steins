@@ -79,7 +79,7 @@ fn scalar_text(v: &ArgValue) -> Option<String> {
 impl Folder for Mock {
     /// A miniature PHP for the three array-taking allowlist entries: each reads
     /// the argument's **witnessed order**, what the fold seam must deliver.
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         match (name.to_ascii_lowercase().as_str(), args) {
             ("count", [a]) => Some(ArgValue::Int(i64::try_from(entries(a)?.len()).ok()?)),
             ("implode", [sep, a]) => {
@@ -646,7 +646,7 @@ fn without_the_reflected_declaration_the_rule_is_withheld() {
     // `list<mixed>` floor stands in for the withheld element-type transfer.
     struct NoPhp;
     impl Folder for NoPhp {
-        fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

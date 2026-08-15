@@ -61,7 +61,7 @@ fn text(v: &ArgValue) -> Option<String> {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         match (name.to_ascii_lowercase().as_str(), args) {
             ("count", [a]) => Some(ArgValue::Int(i64::try_from(entries(a)?.len()).ok()?)),
             ("implode", [sep, a]) => {
@@ -186,7 +186,7 @@ fn a_rung_answer_that_is_not_a_singleton_resolves_to_no_value() {
 fn a_silent_engine_composes_nothing() {
     struct Silent;
     impl Folder for Silent {
-        fn fold(&mut self, _n: &str, _a: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _n: &str, _a: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

@@ -204,7 +204,7 @@ fn return_const_fn_value_checked() {
 fn return_folded_builtin_value_checked() {
     struct Mock;
     impl Folder for Mock {
-        fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, name: &str, args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             match (name, args) {
                 ("strtolower", [ArgValue::Str(s)]) => Some(ArgValue::Str(s.as_str()?.to_lowercase().into())),
                 _ => None,

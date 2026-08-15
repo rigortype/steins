@@ -27,6 +27,7 @@ impl Folder for Boot {
         &mut self,
         _name: &str,
         _args: &[steins_syntax::ArgValue],
+        _strict: bool,
     ) -> Option<steins_syntax::ArgValue> {
         None
     }

@@ -53,7 +53,7 @@ impl Engine {
 }
 
 impl Folder for Engine {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn builtin_return_fact(&mut self, name: &str) -> Option<Fact> {

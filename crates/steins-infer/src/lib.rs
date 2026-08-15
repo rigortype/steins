@@ -1256,7 +1256,7 @@ impl FoldPosture {
 /// ADR-0049 S2) answer the runtime boot surface for the absence-proof family.
 pub trait Folder {
     /// Fold `name(args...)` to a literal, or `None` to widen.
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue>;
+    fn fold(&mut self, name: &str, args: &[ArgValue], strict: bool) -> Option<ArgValue>;
 
     /// Whether the absence-proof family (ADR-0049) may fire **at all** this run.
     /// `true` only when a live PHP sidecar is answering the boot surface *and* no
@@ -1466,7 +1466,7 @@ pub const MONKEY_PATCH_EXTENSIONS: &[&str] = &["uopz", "runkit7", "runkit", "com
 pub struct NoFold;
 
 impl Folder for NoFold {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
 }
@@ -1505,7 +1505,7 @@ pub trait FoldEngine {
     /// reply with no declaration is a definitive not-found.
     fn reflect_class(&mut self, target: &str) -> Option<ClassReflection>;
     /// Run `name(args)` on the engine and report the outcome.
-    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult;
+    fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult;
     /// Whether the engine's own PCRE accepts `pattern` (ADR-0078, issue #189).
     /// `None` declines — no engine, a failed request, or a `false` return the
     /// runner could not attribute to a compile refusal.
@@ -1547,7 +1547,10 @@ pub trait FoldEngine {
 /// for both transports at once, which is the property the split exists to buy.
 pub struct EngineFolder<E: FoldEngine> {
     engine: E,
-    memo: HashMap<(String, Vec<ArgValue>), Option<ArgValue>>,
+    /// Keyed by `(name, args, strict)`: the calling convention is part of the
+    /// question, not context around it — the same name and arguments answer
+    /// differently under `declare(strict_types=1)`.
+    memo: HashMap<(String, Vec<ArgValue>, bool), Option<ArgValue>>,
     /// Cached ADR-0049 A9 verdict: whether the absence family is available (a live
     /// engine and no monkey-patch extension). Computed once from `env` and then
     /// memoized — a whole-run property (ADR-0048 query answer).
@@ -1967,12 +1970,17 @@ impl<E: FoldEngine> EngineFolder<E> {
 }
 
 impl<E: FoldEngine> Folder for EngineFolder<E> {
-    fn fold(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
-        let key = (name.to_owned(), args.to_vec());
+    fn fold(&mut self, name: &str, args: &[ArgValue], strict: bool) -> Option<ArgValue> {
+        // `strict` is part of the KEY, not just of the request. A strict call
+        // site and a weak one ask different questions of the same name and
+        // arguments — `substr("abcdef", "1")` is `'bcdef'` in one and a
+        // `TypeError` in the other — so sharing a memo slot would let whichever
+        // file was analyzed first answer for both.
+        let key = (name.to_owned(), args.to_vec(), strict);
         if let Some(cached) = self.memo.get(&key) {
             return cached.clone();
         }
-        let folded = self.fold_uncached(name, args);
+        let folded = self.fold_uncached(name, args, strict);
         self.memo.insert(key, folded.clone());
         folded
     }
@@ -2152,7 +2160,7 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
 
 impl<E: FoldEngine> EngineFolder<E> {
     /// The uncached body of [`Folder::fold`].
-    fn fold_uncached(&mut self, name: &str, args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold_uncached(&mut self, name: &str, args: &[ArgValue], strict: bool) -> Option<ArgValue> {
         // The integer-width gate (issue #64): a fold is a VALUE, and a 32-bit
         // engine answers arithmetic questions differently while failing at
         // nothing. Asked before the engine is dispatched to, so a narrow engine
@@ -2169,7 +2177,7 @@ impl<E: FoldEngine> EngineFolder<E> {
         if !fold_admitted_at_width(width, name, &fargs) {
             return None;
         }
-        match self.engine.fold(name, &fargs) {
+        match self.engine.fold(name, &fargs, strict) {
             FoldResult::Value(v) => fold_value_to_arg(&v),
             FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
         }
@@ -2542,8 +2550,9 @@ impl FoldEngine for ProcessEngine {
         self.call(|sc| sc.reflect_class(target)).flatten()
     }
 
-    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
-        self.call(|sc| sc.fold(name, args)).unwrap_or_else(|| FoldResult::widen("no sidecar"))
+    fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult {
+        self.call(|sc| sc.fold(name, args, strict))
+            .unwrap_or_else(|| FoldResult::widen("no sidecar"))
     }
 
     fn preg_compile(&mut self, pattern: &str) -> Option<PregCompile> {
@@ -2684,8 +2693,8 @@ impl FoldEngine for TableEngine {
         steins_sidecar::parse_class_reflection_result(&answer, target)
     }
 
-    fn fold(&mut self, name: &str, args: &[FoldArg]) -> FoldResult {
-        match self.ask("fold", &steins_sidecar::fold_params(name, args)) {
+    fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult {
+        match self.ask("fold", &steins_sidecar::fold_params(name, args, strict)) {
             Some(answer) => steins_sidecar::parse_fold_result(&answer),
             // Unanswered: the same decline a dead sidecar gives.
             None => FoldResult::widen("pending"),
@@ -9939,7 +9948,11 @@ impl<'a> Cx<'a> {
         if !resolved.iter().all(is_fold_arg) {
             return None;
         }
-        let folded = folder.fold(name, &resolved)?;
+        // The CALL SITE's calling convention: `declare(strict_types=1)` binds to
+        // the file a call is written in, and `tree()` is the file being walked —
+        // including when the walk has descended into another file's body, which
+        // is PHP's rule exactly.
+        let folded = folder.fold(name, &resolved, self.tree().has_strict_types())?;
         Some((folded, format!("folded from {}", render_call(name, &resolved)), arg_strat))
     }
 

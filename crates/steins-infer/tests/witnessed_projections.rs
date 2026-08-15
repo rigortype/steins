@@ -47,7 +47,7 @@ impl Mock {
 }
 
 impl Folder for Mock {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
@@ -256,7 +256,7 @@ fn a_second_argument_is_a_different_function() {
 fn a_silent_engine_withholds_the_whole_family() {
     struct Silent;
     impl Folder for Silent {
-        fn fold(&mut self, _n: &str, _a: &[ArgValue]) -> Option<ArgValue> {
+        fn fold(&mut self, _n: &str, _a: &[ArgValue], _strict: bool) -> Option<ArgValue> {
             None
         }
     }

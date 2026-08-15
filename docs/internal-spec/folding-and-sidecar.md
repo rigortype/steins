@@ -130,6 +130,26 @@ mechanically identical here; they are kept apart because mixing unevidenced
 rows into the refused list would erase its one-witness-per-row discipline
 (see [catalog.md](catalog.md)).
 
+### The calling convention travels with the request
+
+`declare(strict_types=1)` binds to the file a call is **written** in, and the
+fold seam spans two files: the user's and the runner's. The convention is
+therefore part of the request — `fold_params(name, args, strict)` — which is
+also what keeps a strict call site and a weak one from sharing an answer: the
+params ARE the request key (ADR-0066 §2), so the replay table and the memo
+separate them without either being told to.
+
+The runner answers both from one file. It declares `strict_types=1`, so its
+direct `$fn(...$args)` is the strict call; the weak one goes through `eval`,
+whose code is not this file and so does not inherit the declaration. Measured,
+not assumed: inside the declaring file, `eval('return $fn(...$args);')` answers
+`substr("abcdef", "1")` as `'bcdef'` where the direct call throws. The eval'd
+string is a fixed program — nothing from the request is interpolated into it.
+
+An absent `strict` field means strict. Getting the mode wrong in the weak
+direction is unsound (a value the strict program cannot produce); getting it
+wrong in the strict direction only declines.
+
 ### Admission: strictly stronger than the rung it shadows
 
 A name joins the allowlist only when the fold is **strictly stronger** than

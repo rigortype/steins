@@ -19,7 +19,7 @@ fn n(src: &str) -> usize {
 /// proven-exact receiver, so silence here proves the receiver was NOT exact.
 struct Boot;
 impl Folder for Boot {
-    fn fold(&mut self, _name: &str, _args: &[ArgValue]) -> Option<ArgValue> {
+    fn fold(&mut self, _name: &str, _args: &[ArgValue], _strict: bool) -> Option<ArgValue> {
         None
     }
     fn absence_family_available(&mut self) -> bool {
