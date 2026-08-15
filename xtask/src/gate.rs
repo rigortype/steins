@@ -561,7 +561,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //              the #385 run: exactly these four rows; one `throw.*` row on
     //              phpstan-src (local) went away (21 → 20), a removal the tripwire
     //              does not gate on.
-    ("pxxxx-monorepo", 543),
+    //   543 → 551  2026-08-16, issue #391's `phpdoc.maybe-argument-mismatch` (the
+    //              Asserted-premise half of the possibly-grade argument pair,
+    //              strict floor, counted here because it is `Layer::Contract`).
+    //              Eight rows, one shape: a builtin's `string|false` /
+    //              `string|bool` / `int|null` (`file_get_contents`, `tempnam`,
+    //              `realpath`, a `T|false` return read through a docblock) handed
+    //              straight into a native `string`/`int` parameter under
+    //              `strict_types` — the same shape the public 9 carry. Finding-level
+    //              diff against the #388 run: exactly these eight rows plus the
+    //              possibly-grade rows below; no other id moved (repair A's
+    //              `assert(... instanceof)` widening added nothing here).
+    ("pxxxx-monorepo", 551),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
@@ -775,7 +786,11 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     ("nikic/PHP-Parser", 1),
     // 10 — 8 `variable.maybe-undefined` (classes 1 and 4) plus the 2
     // `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
-    ("phpstan/phpstan-src", 10),
+    // 10 → 11, 2026-08-16 with issue #391: one `type.maybe-argument-mismatch` —
+    // a `string|null` (a nullable native declaration) handed to a native `string`
+    // parameter; the null arm is real, its inhabitation is what the grade does
+    // not claim.
+    ("phpstan/phpstan-src", 11),
     // 120 (111 `variable.maybe-undefined` over 85,282 files + 9 absorbed
     // `type.return-maybe-missing`) → 121, 2026-08-14 with issue #330 PR2:
     // `array_merge` joined the fold allowlist, so it stopped being an uncatalogued
@@ -784,7 +799,13 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // provider returning `array_merge($a, $b)` where `$b` is bound only inside a
     // `foreach` — the third sibling of two already-baselined rows of that shape in
     // the same function, not a new class of claim. TRUE at the possibly grade.
-    ("pxxxx-monorepo", 121),
+    // 121 → 131, 2026-08-16 with issue #391: ten `type.maybe-argument-mismatch`
+    // rows on a Verified premise — a natively declared `string|null` / `int|null`
+    // / `string|false` handed to a native `string`/`int` parameter under
+    // `strict_types` (four sites are one helper called with the same nullable
+    // local four times). Every pre-existing `variable.maybe-undefined` and
+    // `type.return-maybe-missing` count is unchanged.
+    ("pxxxx-monorepo", 131),
 ];
 
 /// The expected possibly-grade count for a package/local-project name (0 if
