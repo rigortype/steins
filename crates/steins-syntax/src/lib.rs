@@ -802,7 +802,7 @@ pub enum ArgValue {
     ///
     /// The **constant-expression** lowerings (a parameter default, a property
     /// default, a class-constant or enum-case initializer) keep whatever
-    /// [`lower_arg_value`] returns that is not [`Self::Other`], and are given no
+    /// the value-lane lowering returns that is not [`Self::Other`], and are given no
     /// guard against this variant: PHP forbids a method call in a constant
     /// expression outright, so only unparseable-as-PHP source could put one there,
     /// and every consumer of those slots (`is_literal`, the domain conversion, the
