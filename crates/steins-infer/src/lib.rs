@@ -9331,6 +9331,34 @@ impl<'a> Cx<'a> {
         self.resolve_function_with(r, &|n| steins_catalog::invocation_shape(n).is_some())
     }
 
+    /// Resolution **as if the catalog knew nothing** — so a `User` answer is
+    /// exactly "a project declaration shadows this spelling", and nothing else.
+    ///
+    /// [`Self::resolve_function`] cannot answer that question. Its notion of a
+    /// known builtin is `effect_labels`, and its global-fallback arm turns a
+    /// user declaration that shadows a *known* name into `Unknown` rather than
+    /// `User` — the comment there calls it ambiguous, which it is. A caller
+    /// asking "is this shadowed?" by testing `!matches!(…, User(_))` therefore
+    /// gets `true` for a shadowed catalogued name and `false` for a shadowed
+    /// uncatalogued one: the answer depends on whether the catalog happens to
+    /// carry the name, which is not a property of the source at all.
+    ///
+    /// That coupling was live and reachable. On master a project
+    /// `function preg_split($p, $s) {}` beside a `preg_split('/(unclosed/', …)`
+    /// call reported `preg.invalid-pattern` against the *user's* function —
+    /// `preg_split` is foldable, so the catalog knows it — while the identical
+    /// shape around `preg_match` stayed silent only because that name was
+    /// uncatalogued. Admitting a name to the fold allowlist would have flipped
+    /// its recognizers from respecting a shadow to ignoring one, which is a
+    /// coupling no allowlist edit should have.
+    ///
+    /// Passing a `catalog_knows` that is always false keeps every other rule —
+    /// `use function` imports, the namespace-then-global fallback, ambiguity —
+    /// and leaves only the project declarations behind.
+    fn resolve_shadow(&self, r: &NameRef) -> FnResolution {
+        self.resolve_function_with(r, &|_| false)
+    }
+
     fn resolve_function_with(
         &self,
         r: &NameRef,
@@ -14971,8 +14999,10 @@ fn eval_cond(
 /// back, while a plain `use function is_string;` still is global.
 ///
 /// The rejected legs mirror [`name_reaches_global_var_dump`]. The shadowing leg
-/// is separate and unchanged: a project-defined function of the name is different
-/// whatever the spelling otherwise denotes.
+/// is separate: a project-defined function of the name is a different function
+/// whatever the spelling otherwise denotes, and it is asked through
+/// [`Cx::resolve_shadow`] rather than [`Cx::resolve_function`] — see there for
+/// why the difference is load-bearing.
 fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
     let spells_global = match r.kind {
         RefKind::FullyQualified => !r.raw.contains('\\'),
@@ -14987,7 +15017,7 @@ fn denotes_global_function(cx: &Cx, r: &NameRef) -> bool {
             }
         }
     };
-    spells_global && !matches!(cx.resolve_function(r), FnResolution::User(_))
+    spells_global && !matches!(cx.resolve_shadow(r), FnResolution::User(_))
 }
 
 /// The simple name a call's callee spells, when the reference denotes the

@@ -343,10 +343,27 @@ fn silent_on_a_first_class_callable() {
 
 /// A project function of the same simple name is a DIFFERENT function; asking PCRE
 /// about its first argument would be a claim about code we did not analyze.
+///
+/// **Both names below are load-bearing, and the second is the one that was
+/// broken.** The shadow question used to be asked through a resolution whose
+/// notion of a known builtin is the effect catalog, and its global-fallback arm
+/// answers `Unknown` — not `User` — when a project declaration shadows a name
+/// the catalog carries. A caller testing "not `User`" therefore respected the
+/// shadow only for names the catalog did *not* know. `preg_match` was
+/// uncatalogued and passed; `preg_split` is foldable and reported this finding
+/// against the user's own function. Whether a shadow is respected is a property
+/// of the source, never of how much the catalog happens to know about the name,
+/// so the pair is pinned rather than one of them.
 #[test]
 fn silent_when_a_project_function_shadows_the_builtin() {
-    let d = mocked(
-        "<?php\nfunction preg_match($p, $s) { return 0; }\npreg_match('/(unclosed/', $s);\n",
-    );
-    assert!(d.is_empty(), "a shadowed name is not the builtin: {d:#?}");
+    for name in ["preg_match", "preg_split"] {
+        let d = mocked(&format!(
+            "<?php\nfunction {name}($p, $s) {{ return 0; }}\n{name}('/(unclosed/', $s);\n"
+        ));
+        assert!(d.is_empty(), "a shadowed {name} is not the builtin: {d:#?}");
+        // …and the same call without the declaration still fires, so the
+        // assertion above cannot pass by the check being off altogether.
+        let live = mocked(&format!("<?php\n{name}('/(unclosed/', $s);\n"));
+        assert_eq!(live.len(), 1, "unshadowed {name} still reports: {live:#?}");
+    }
 }
