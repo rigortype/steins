@@ -3993,6 +3993,7 @@ fn check_units(
                 None,
                 Some(&mut dead_spans),
                 None,
+                false,
                 &mut out,
             );
         }
@@ -4438,6 +4439,7 @@ fn annotate_units(
             Some(&mut facts),
             None,
             None,
+            false,
             &mut sink,
         );
     }
@@ -10918,6 +10920,18 @@ impl Store {
         }
     }
 
+    /// Sweep the `$this` object's non-readonly props and value carries (ADR-0057 C5) —
+    /// what a call running with the same `$this` may have written behind this walk's
+    /// back. A no-op where `$this` is unbound.
+    fn sweep_this(&mut self) {
+        if let Some(id) = self.refs.get("this").copied()
+            && let Some(o) = self.heap.get_mut(&id)
+        {
+            o.sweep_nonreadonly();
+            o.sweep_targs();
+        }
+    }
+
     /// Sweep every escaped object's non-readonly props (an unknown call ran that may
     /// mutate any escaped object). Non-escaped objects survive (ADR-0036 payoff).
     fn sweep_escaped(&mut self) {
@@ -11093,6 +11107,13 @@ struct SummaryCtx {
     /// Each returning exit's contribution, in walk order (RefCell — pushed through
     /// the shared-immutable [`WalkCx`] as branches recurse).
     exits: std::cell::RefCell<Vec<ExitContribution>>,
+    /// Whether this walk is a **constructor** descent (ADR-0057's constructor-summary
+    /// amendment, C2). `new` evaluates to the object the body leaves behind, so every
+    /// exit snapshots the callee's `$this` instead of a returned value — a bare
+    /// `return;` and the body's fall-through alike, a `throw` never. The flavour lives
+    /// here, on the descent, rather than as a second [`ExitContribution`] variant: one
+    /// classifier, two sources.
+    ctor_this: bool,
 }
 
 impl SummaryCtx {
@@ -11132,6 +11153,10 @@ fn analyze_scope(
     mut facts: Option<&mut Vec<LineFact>>,
     dead_out: Option<&mut Vec<Span>>,
     ret_exits: Option<&mut Vec<ExitContribution>>,
+    // Whether this is a **constructor** descent, whose exits snapshot the callee's
+    // `$this` rather than a returned value (ADR-0057's constructor-summary amendment,
+    // C2). Meaningful only alongside `ret_exits`.
+    ctor_this: bool,
     out: &mut Vec<Diagnostic>,
 ) {
     let enclosing_class = scope_class(scope);
@@ -11269,6 +11294,7 @@ fn analyze_scope(
     let summary = ret_exits.as_ref().map(|_| SummaryCtx {
         native: cx.scope_return(scope).map(|(ty, _)| native_arms(ty)).unwrap_or_default(),
         exits: std::cell::RefCell::new(Vec::new()),
+        ctor_this,
     });
     let w = WalkCx {
         cx,
@@ -11294,13 +11320,33 @@ fn analyze_scope(
         // A written non-void hint that falls through is a boundary TypeError —
         // nothing is contributed (same as an A2-dropped exit). Generators refuse
         // summaries entirely (`join_summary`); they also skip fallthrough null.
-        if flow == Flow::FellThrough && scope.ret_hint.is_none() && !scope.is_generator {
-            exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
+        if flow == Flow::FellThrough {
+            if sc.ctor_this {
+                // A constructor's normal exit (ADR-0057 C2): the object `new` yields
+                // is the `$this` the joined paths reaching here left behind. Where
+                // `this` is no longer in the store — a `Barrier` cleared it — the exit
+                // contributes the value floor, which per §2.5 ends the heap summary
+                // and lands the site on the ADR-0086 §4 floor (C6).
+                exits.push(this_exit_contribution(&store));
+            } else if scope.ret_hint.is_none() && !scope.is_generator {
+                exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
+            }
         }
         *out = exits;
     }
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
+    }
+}
+
+/// One constructor-walk exit's contribution (ADR-0057 C2): the snapshot of the
+/// callee's `$this`, or the value floor where `$this` is no longer in the store —
+/// which per §2.5 ends the heap summary and drops the `new` site to the ADR-0086 §4
+/// lexical floor. Shared by the `return;` classifier and the fall-through.
+fn this_exit_contribution(store: &Store) -> ExitContribution {
+    match store.obj_of("this") {
+        Some(obj) => ExitContribution::Heap(Box::new(obj.clone())),
+        None => ExitContribution::Floor,
     }
 }
 
@@ -11340,6 +11386,12 @@ impl WalkCx<'_, '_> {
         let id = self.alloc.get();
         self.alloc.set(id + 1);
         id
+    }
+
+    /// Whether this walk is a **constructor** descent, whose `$this` is the fresh
+    /// allocation and is therefore not pre-escaped (ADR-0057 C1/C5).
+    fn ctor_walk(&self) -> bool {
+        self.summary.as_ref().is_some_and(|s| s.ctor_this)
     }
 }
 
@@ -11457,6 +11509,12 @@ fn walk_trace(
         // `$o = $o->m(1)` would otherwise drop the exact receiver first).
         let mut stmt_summary: Option<ReturnSummary> = None;
         let mut stmt_return_arms: Option<Vec<ContractArm>> = None;
+        // The constructor descent's `$this` snapshot for the `new` this statement
+        // carries (ADR-0057's constructor-summary amendment, C7): captured in step 1,
+        // where the `Callee::Construct` rung already walked the body, and consumed by
+        // the object build — `apply_assign`'s `New` arm in step 2, or the
+        // `return new C()` arm of step 1c's classifier. One walk, one site.
+        let mut stmt_ctor_heap: Option<HeapSummary> = None;
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -11552,9 +11610,13 @@ fn walk_trace(
                         out,
                     );
                     // ADR-0075: a resolved method/static summary rebinds on the same
-                    // rungs as a function's. Constructors keep their exactness lane
-                    // (ADR-0036) and skip this.
-                    if !matches!(call.receiver, Callee::Construct { .. }) {
+                    // rungs as a function's. A constructor keeps its exactness lane
+                    // (ADR-0036) and takes the other channel: its `$this` snapshot,
+                    // which the object build binds later in this statement (ADR-0057
+                    // C7).
+                    if matches!(call.receiver, Callee::Construct { .. }) {
+                        stmt_ctor_heap = outcome.ctor_heap;
+                    } else {
                         stmt_summary = outcome.summary;
                         stmt_return_arms = outcome.return_arms;
                     }
@@ -11751,7 +11813,17 @@ fn walk_trace(
         // carries the escape bit it had **before** the return marked it (§2.1's
         // escaped-before-return). The join is deferred to `descend`; here we only
         // classify the exit (A2 drop/cross, A3 floor, T1 allocation).
-        if let StmtKind::Return { value, .. } = &stmt.kind
+        if let StmtKind::Return { .. } = &stmt.kind
+            && let Some(sc) = &w.summary
+            && sc.ctor_this
+        {
+            // A constructor descent (ADR-0057 C2): `new` evaluates to the object the
+            // body leaves behind, so a `return;` snapshots `$this` — never a value,
+            // a constructor that returns one being a PHP fatal. Read here, before the
+            // return statement's own effects, exactly where §2.1 reads the
+            // return-object snapshot.
+            sc.exits.borrow_mut().push(this_exit_contribution(store));
+        } else if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
             // Composition (A1): when the returned expression IS a call whose
@@ -11784,7 +11856,15 @@ fn walk_trace(
                 // as a `Floor` on that side, which is what an object exit always
                 // was). Otherwise A3 verbatim: degrade to the declared arm floor.
                 None => Some(
-                    match return_heap_object(w, folder, value, env, store, stmt_summary.as_ref()) {
+                    match return_heap_object(
+                        w,
+                        folder,
+                        value,
+                        env,
+                        store,
+                        stmt_summary.as_ref(),
+                        stmt_ctor_heap.as_ref(),
+                    ) {
                         Some(obj) => ExitContribution::Heap(Box::new(obj)),
                         None => ExitContribution::Floor,
                     },
@@ -11901,6 +11981,7 @@ fn walk_trace(
                     store,
                     facts,
                     stmt_summary.as_ref(),
+                    stmt_ctor_heap.as_ref(),
                     stmt_return_arms.as_deref(),
                     out,
                 );
@@ -13195,6 +13276,10 @@ fn apply_assign(
     store: &mut Store,
     facts: &mut Option<&mut Vec<LineFact>>,
     summary: Option<&ReturnSummary>,
+    // The constructor descent's `$this` snapshot for a `new` right-hand side
+    // (ADR-0057 C4): the fresh allocation IS that snapshot, the allocation having had
+    // no alias before the constructor ran.
+    ctor_heap: Option<&HeapSummary>,
     return_arms: Option<&[ContractArm]>,
     out: &mut Vec<Diagnostic>,
 ) {
@@ -13293,7 +13378,7 @@ fn apply_assign(
             store.unbind(var);
             if !w.scope.poisoned {
                 let class = cx.class_fqn(class_ref);
-                let id = build_new_object(w, folder, &class, args, named, env, store);
+                let id = build_new_object(w, folder, &class, args, named, env, store, ctor_heap);
                 store.refs.insert(var.to_owned(), id);
                 if let Some(facts) = facts.as_deref_mut() {
                     facts.push(LineFact {
@@ -13815,6 +13900,14 @@ fn arg_value_fact(
 
 /// Allocate a fresh heap object for `new Class(args)` (ADR-0036) into the walk's
 /// store, under a fresh allocation id. Returns that id.
+///
+/// `ctor` is the constructor descent's `$this` snapshot for this very `new` site
+/// when one was taken (ADR-0057's constructor-summary amendment, C4): the fresh
+/// allocation then **is** that snapshot, because the allocation had no alias before
+/// the constructor ran and the snapshot is therefore the whole of what happened to
+/// it. `None` — no walk, or a walk that agreed on nothing (C6) — builds the
+/// declaration-only object under the ADR-0086 §4 lexical gate, byte for byte as
+/// before the amendment.
 fn build_new_object(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -13823,11 +13916,51 @@ fn build_new_object(
     named: &[NamedArg],
     env: &HashMap<String, Known>,
     store: &mut Store,
+    ctor: Option<&HeapSummary>,
 ) -> AllocId {
     let id = w.fresh_id();
-    let obj = new_heap_object(w.cx, folder, class, args, named, env, store, w.scope.poisoned);
+    let obj = match ctor {
+        Some(h) => {
+            // Class and exactness are unchanged by construction (C4): the seed named
+            // them and no walk alters what class an allocation is. Asserted rather
+            // than recomputed — a mismatch would mean the snapshot came from another
+            // site's walk.
+            debug_assert!(
+                h.obj.class == class && h.obj.class_exact,
+                "a constructor snapshot must be the exact allocation its `new` site minted",
+            );
+            h.obj.clone()
+        }
+        None => new_heap_object(
+            w.cx,
+            folder,
+            class,
+            args,
+            named,
+            env,
+            store,
+            w.scope.poisoned,
+            CtorDefaults::Lexical,
+        ),
+    };
     store.heap.insert(id, obj);
     id
+}
+
+/// Which literal property defaults a freshly minted `new` object keeps
+/// (ADR-0057's constructor-summary amendment, C1).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CtorDefaults {
+    /// The undescended floor (ADR-0086 §4): a default survives only where the
+    /// constructor that runs never **mentions** the slot in its own body text. The
+    /// answer for every site whose constructor no walk reaches (C6).
+    Lexical,
+    /// Every default stands — the seed of a constructor the descent is about to
+    /// **walk** (C1). The lexical scan exists because `build_new_object` could not
+    /// read the body; a walked body needs no over-approximation of itself, since
+    /// the walk executes the writes that overwrite the defaults and sweeps what it
+    /// hands to a body it does not read (C5).
+    All,
 }
 
 /// The object a `new Class(args)` expression allocates (ADR-0036): props populated
@@ -13847,6 +13980,7 @@ fn new_heap_object(
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
+    defaults: CtorDefaults,
 ) -> HeapObj {
     let mut obj = HeapObj::new(class.to_owned());
     obj.class_exact = true; // `new Class(...)` allocates exactly `Class` (audit G1)
@@ -13857,8 +13991,12 @@ fn new_heap_object(
     obj.targs = cx.infer_generic_carry(class, args, env, store, poisoned, folder);
     let props = cx.class_props(class);
     // Which literal defaults survive the constructor (ADR-0086 §4's stale-default
-    // half). `None` means "every default stands" — the no-constructor case.
-    let ctor_writes = ctor_touched_props(cx, class, &props);
+    // half). `None` means "every default stands" — the no-constructor case, and the
+    // seed of a constructor this site is about to walk (ADR-0057 C1).
+    let ctor_writes = match defaults {
+        CtorDefaults::Lexical => ctor_touched_props(cx, class, &props),
+        CtorDefaults::All => None,
+    };
 
     // readonly set + literal defaults.
     for p in &props {
@@ -14209,6 +14347,12 @@ fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapO
 /// assignment form `$x = new C(...)` would have minted, against the caller's own
 /// heap. Everything else — `clone`, an enum case, a property fetch, a nested call
 /// returning an object — is out of the argument leg (ADR-0086 §4).
+///
+/// The `new` arm runs the site's **constructor summary** (ADR-0057 C7): argument
+/// position is the one place where the lowering builds no `Callee::Construct` call,
+/// so the minting site here is also the only site the walk can ride, and running it
+/// here is what keeps `f(new C(1))` from being the one position that stays dark.
+#[allow(clippy::too_many_arguments)]
 fn argument_heap_object(
     cx: &Cx,
     folder: &mut dyn Folder,
@@ -14216,6 +14360,9 @@ fn argument_heap_object(
     env: &HashMap<String, Known>,
     store: &Store,
     poisoned: bool,
+    span_start: u32,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
 ) -> Option<HeapObj> {
     if poisoned {
         return None;
@@ -14224,10 +14371,102 @@ fn argument_heap_object(
         ArgValue::Var(name) => store.obj_of(name).cloned(),
         ArgValue::New(class_ref, args, named) => {
             let class = cx.class_fqn(class_ref);
-            Some(new_heap_object(cx, folder, &class, args, named, env, store, poisoned))
+            Some(constructed_object(
+                cx, folder, &class, args, named, env, store, span_start, descent, out,
+            ))
         }
         _ => None,
     }
+}
+
+/// The object a `new Class(args)` expression in **argument** position yields
+/// (ADR-0057's constructor-summary amendment): the fresh allocation, seeded into the
+/// constructor descent as `$this`, replaced by the snapshot that descent's exits
+/// agree on. Falls back to the declaration-only object under the ADR-0086 §4 lexical
+/// gate wherever the descent declines (C6) — including the named-argument list,
+/// which the positional-only descent refuses exactly as `f(x: 1)` is refused.
+#[allow(clippy::too_many_arguments)]
+fn constructed_object(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    class: &str,
+    args: &[ArgValue],
+    named: &[NamedArg],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    span_start: u32,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> HeapObj {
+    let floor =
+        |folder: &mut dyn Folder| {
+            new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::Lexical)
+        };
+    if !named.is_empty() {
+        return floor(folder);
+    }
+    let seed =
+        new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::All);
+    let arg_refs: Vec<&ArgValue> = args.iter().collect();
+    match ctor_heap_summary(cx, folder, class, &seed, &arg_refs, span_start, env, store, descent, out)
+    {
+        Some(h) => h.obj,
+        None => floor(folder),
+    }
+}
+
+/// Run the constructor descent for one `new Class(args)` site and return the
+/// snapshot its exits agree on (ADR-0057 C2/C3), or `None` on every decline of C6.
+///
+/// The shared half of the two seams C7 names: the `Callee::Construct` rung in the
+/// statement walk, and the argument-position mint above. Neither ever runs for the
+/// same site, so a `new` is walked exactly once.
+#[allow(clippy::too_many_arguments)]
+fn ctor_heap_summary(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    class: &str,
+    seed: &HeapObj,
+    args: &[&ArgValue],
+    span_start: u32,
+    env: &HashMap<String, Known>,
+    caller_store: &Store,
+    descent: Option<&mut Descent<'_>>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<HeapSummary> {
+    // `Callee::Construct`'s own resolution (`resolve_call_target`): the constructor
+    // the chain runs for this class, walked under `$this` proven exactly `class`.
+    // No constructor, an abstract one, or a chain that leaves the project — decline.
+    //
+    // `enclosing_class` is `None`: the argument-position mint runs inside `descend`,
+    // which knows the caller's file and not its class-like, so a **private**
+    // constructor declines here where the statement rung would resolve it. Losing a
+    // walk costs knowledge; the shape it loses (`f(new C())` on a private `C`) does
+    // not compile.
+    let target = resolve_exact(cx, class, "__construct", None, Some(class.to_owned()))?;
+    let callee_scope =
+        cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)?;
+    let summary = descend(
+        cx,
+        folder,
+        &target.method.params,
+        target.class_file,
+        callee_scope,
+        &format!("{}::{}", target.declaring_class.fqn, target.method.name),
+        &format!("new {}", simple_class(class)),
+        target.this_exact,
+        None,
+        Some(seed),
+        args,
+        span_start,
+        &[],
+        env,
+        caller_store,
+        false,
+        descent,
+        out,
+    )?;
+    summary.heap
 }
 
 /// The copy of a caller object that crosses the binding descent (ADR-0086 §2's
@@ -21145,6 +21384,42 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     if object_passed || unknown {
         store.sweep_escaped();
     }
+    // A call that runs with the SAME `$this` — `$this->m(…)`, `parent::m(…)`,
+    // `self::m(…)`, `static::m(…)`, `parent::__construct(…)` above all — writes
+    // properties this walk never executes: a descent into it seeds its own `$this`
+    // (ADR-0086 §3 fills `receiver_var` for an exact `Receiver::Var` and for nothing
+    // else), so its writes land in *its* store; an unresolved one is a body never read
+    // at all. So it sweeps the receiver's own non-readonly props and value carries,
+    // **whether or not the target resolved** — the resolved private/final case is
+    // exactly the one `sweep_escaped` above never covered (ADR-0057 C5).
+    //
+    // The constructor walk's `$this` is the one heap object that is not pre-escaped
+    // (C1), so `sweep_escaped` passes it by; inside such a walk it is swept by the
+    // same `object_passed || unknown` condition instead. A non-static closure created
+    // in the body binds `$this` without naming it and is invoked through exactly such
+    // an unresolved call, which is why the condition is the coarse one and not a leak
+    // test.
+    let same_this = calls.iter().any(|c| runs_with_same_this(&c.receiver));
+    if same_this || ((object_passed || unknown) && w.ctor_walk()) {
+        store.sweep_this();
+    }
+}
+
+/// Whether a call runs with the **same** `$this` as the walk making it (ADR-0057 C5):
+/// `$this->m(…)`, and the `self::`/`parent::`/`static::` spellings of the same thing —
+/// `parent::__construct(…)` is the shape that matters most. An explicitly named
+/// `Foo::m(…)` is a static call with no receiver and is not one of these, even where
+/// `Foo` happens to be the enclosing class (PHP would pass no `$this` unless the
+/// method is non-static and called from a compatible context — a shape the walk does
+/// not model and does not claim).
+fn runs_with_same_this(receiver: &Callee) -> bool {
+    match receiver {
+        Callee::Method { receiver: Receiver::This, .. } => true,
+        Callee::Static { class, .. } => {
+            matches!(class, StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static)
+        }
+        _ => false,
+    }
 }
 
 /// Whether the callee of `receiver`, taking an argument at `position`, **provably
@@ -21509,6 +21784,7 @@ fn try_descend_function(
         &decl.name,
         None,
         None,
+        None,
         &arg_values,
         call.span.start,
         &[],
@@ -21569,6 +21845,7 @@ fn project_call_summary(
         callee_scope,
         &decl.fqn,
         &decl.name,
+        None,
         None,
         None,
         &arg_values,
@@ -21717,6 +21994,7 @@ fn handle_var_call(
                     callee_scope,
                     &format!("closure@{def_offset}"),
                     &display,
+                    None,
                     None,
                     None,
                     &arg_values,
@@ -21911,6 +22189,11 @@ fn descend(
     // a free function, a closure and a nested call in argument position have no
     // receiver at all.
     receiver_var: Option<&str>,
+    // The fresh allocation a `new C(args)` site is minting, for a **constructor**
+    // descent and nothing else (ADR-0057's constructor-summary amendment, C1): the
+    // callee's `$this` is seeded from it, and every exit snapshots `$this` instead
+    // of a returned value (C2). `None` at every other descent.
+    ctor_this: Option<&HeapObj>,
     // The call's positional argument values + its span start (for the provenance
     // line). Taken apart rather than as a `&CallExpr` (issue #60): a nested call in
     // argument position exists only as an `ArgValue::Call` — no `CallExpr` is ever
@@ -21952,8 +22235,27 @@ fn descend(
     // convict correct code. `analyze_scope`'s `$this` seed then finds `this` bound and
     // leaves it alone; every receiver that seeds nothing here still goes through
     // `seed_this_object` there, exactly as before.
-    let seeded_this: Option<AllocId> = match receiver_var.filter(|_| !poisoned) {
-        Some(v) => caller_store.id_of(v).and_then(|caller_id| {
+    //
+    // A **constructor** descent seeds `$this` from the fresh allocation the `new`
+    // site is minting (ADR-0057 C1) — under the same field table, with `escaped`
+    // decided the other way: this is the ONE copy that is not pre-escaped, because a
+    // `new` site has no caller-side object for the call to escape. The allocation is
+    // minted for this expression and no name outside the constructor's own `$this`
+    // refers to it, so `false` is the honest bit, and it is what lets the caller's
+    // `$b = new B(1)` survive a later unrelated unknown call. It says what got OUT,
+    // not what may be written: the walk still sweeps its own `$this` at every call
+    // that could reach the allocation without naming it (C5, `escape_and_sweep_calls`).
+    let seeded_this: Option<AllocId> = match ctor_this {
+        Some(fresh) => {
+            let mut seed = copy_for_descent(fresh);
+            seed.escaped = false;
+            let id = seed_store.heap.len() as AllocId;
+            seed_store.heap.insert(id, seed);
+            seed_store.refs.insert("this".to_owned(), id);
+            Some(id)
+        }
+        None => receiver_var.filter(|_| !poisoned).and_then(|v| {
+            let caller_id = caller_store.id_of(v)?;
             let obj = caller_store.heap.get(&caller_id)?;
             // The copy IS the receiver the dispatch resolved through, so its exactness
             // cannot disagree with the one the callee walks under: `resolve_call_target`
@@ -21969,7 +22271,6 @@ fn descend(
             seeded.insert(caller_id, id);
             Some(id)
         }),
-        None => None,
     };
     for (i, arg_value) in args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
@@ -21979,8 +22280,17 @@ fn descend(
         // The object leg first: an argument denoting a heap object never resolves to
         // a literal (objects have no value-domain carrier — ADR-0035/0038), so the
         // two legs are disjoint by construction and this ordering costs nothing.
-        if let Some(obj) = argument_heap_object(cx, folder, arg_value, env, caller_store, poisoned)
-        {
+        if let Some(obj) = argument_heap_object(
+            cx,
+            folder,
+            arg_value,
+            env,
+            caller_store,
+            poisoned,
+            span_start,
+            descent.as_deref_mut(),
+            &mut *out,
+        ) {
             if param.by_ref {
                 return None;
             }
@@ -22117,9 +22427,13 @@ fn descend(
     // `obj:{param}` does for an argument's: the class string alone would let
     // `$b1->m()` answer for `$b2->m()` on two boxes holding different values, replaying
     // one receiver's summary and suppressing the other's emission (ADR-0075 §2.1).
+    // A **constructor** descent's seeded `$this` renders the same way and for the same
+    // reason (ADR-0057 C8): `new C(1)` and `new C(2)` reach one body with different
+    // entry states, and the class alone — all a constructor's key carried while it
+    // proved "an identity and no state" — would replay one's summary for the other.
     // Where nothing was seeded the spelling is the exact class FQN, unchanged since
-    // ADR-0075 §2.1 — `Receiver::New` and `Callee::Construct` prove an identity and no
-    // state, and that is all the key has ever had to distinguish there.
+    // ADR-0075 §2.1 — `Receiver::New` proves an identity and no state, and that is all
+    // the key has ever had to distinguish there.
     match (&body_this_exact, seeded_this) {
         // Exact receiver is a runtime-proven identity — Verified either way, and each
         // seeded prop's own stratum travels inside the rendering.
@@ -22212,6 +22526,7 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
+                ctor_this.is_some(),
                 out,
             );
             d.stack.pop();
@@ -22235,6 +22550,7 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
+                ctor_this.is_some(),
                 out,
             );
             join_summary(&child_cx, callee_scope, &exits)
@@ -22513,14 +22829,18 @@ fn return_value_fact(
 /// * **`return $this`** — the same arm; `$this` is `refs["this"]`, pre-escaped by
 ///   construction and membership-only unless the receiver leg proved exactness, so a
 ///   fluent chain gets class continuity and no forged exactness (§6's probe).
-/// * **`return new Foo(...)`** — minted here through the SAME [`new_heap_object`] the
-///   assignment form uses, which is what makes §4's new-vs-factory equivalence a
-///   consequence rather than a coincidence (the hooked-prop exclusion, the promoted
-///   props, the readonly bookkeeping and the ADR-0086 §4 stale-default gate all come
-///   with it). It is minted, never stored, so it consumes no allocation id.
+/// * **`return new Foo(...)`** — the SAME object the assignment form binds, which is
+///   what makes §4's new-vs-factory equivalence a consequence rather than a
+///   coincidence: the statement's own `Callee::Construct` rung already walked the
+///   constructor and left its snapshot in `ctor_heap` (ADR-0057 C7), so this arm
+///   consumes it exactly as `apply_assign`'s does and never walks a second time.
+///   Where the walk declined, the declaration-only object under the ADR-0086 §4
+///   lexical gate stands (C6). It is minted, never stored, so it consumes no
+///   allocation id.
 /// * **`return g(...)` / `return $o->m(...)`** — the composition arm: the inner call's
 ///   own heap summary is this exit's snapshot, which is how a chained factory keeps
 ///   its exactness across two boundaries (§2.3's "chaining composes correctly").
+#[allow(clippy::too_many_arguments)]
 fn return_heap_object(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -22528,6 +22848,7 @@ fn return_heap_object(
     env: &HashMap<String, Known>,
     store: &Store,
     stmt_summary: Option<&ReturnSummary>,
+    ctor_heap: Option<&HeapSummary>,
 ) -> Option<HeapObj> {
     if w.scope.poisoned {
         return None;
@@ -22536,7 +22857,26 @@ fn return_heap_object(
         ArgValue::Var(name) => store.obj_of(name).cloned(),
         ArgValue::New(class_ref, args, named) => {
             let class = w.cx.class_fqn(class_ref);
-            Some(new_heap_object(w.cx, folder, &class, args, named, env, store, false))
+            Some(match ctor_heap {
+                Some(h) => {
+                    debug_assert!(
+                        h.obj.class == class && h.obj.class_exact,
+                        "a constructor snapshot must be the exact allocation its `new` site minted",
+                    );
+                    h.obj.clone()
+                }
+                None => new_heap_object(
+                    w.cx,
+                    folder,
+                    &class,
+                    args,
+                    named,
+                    env,
+                    store,
+                    false,
+                    CtorDefaults::Lexical,
+                ),
+            })
         }
         _ => stmt_summary.and_then(|s| s.heap.as_ref()).map(|h| h.obj.clone()),
     }
@@ -28142,12 +28482,19 @@ fn emit_offset(
 struct MethodCallOutcome {
     summary: Option<ReturnSummary>,
     return_arms: Option<Vec<ContractArm>>,
+    /// A **constructor** call's `$this` snapshot (ADR-0057's constructor-summary
+    /// amendment, C2/C3): the object this `new` site yields, for the statement's own
+    /// object build to consume. Filled only for `Callee::Construct`, and `None`
+    /// wherever the descent declined (C6), which leaves the site on the ADR-0086 §4
+    /// lexical floor.
+    ctor_heap: Option<HeapSummary>,
 }
 
 /// Check + descend one method / static / constructor call. Returns the callee's
-/// summary and declared return arms when the target resolves (ADR-0075). Constructors
-/// still descend for diagnostics; the walk-trace leaves their outcome unread
-/// (ADR-0075 §3 — construction is the ADR-0036 exactness lane).
+/// summary and declared return arms when the target resolves (ADR-0075), and — for a
+/// constructor — the `$this` snapshot the object build consumes (ADR-0057 C7). A
+/// constructor's *value* summary stays unread, and for the reason ADR-0075 §3 gave:
+/// a constructor evaluates to an object, and an object is not a value.
 #[allow(clippy::too_many_arguments)]
 fn handle_method_call(
     cx: &Cx,
@@ -28161,7 +28508,7 @@ fn handle_method_call(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> MethodCallOutcome {
-    let empty = MethodCallOutcome { summary: None, return_arms: None };
+    let empty = MethodCallOutcome { summary: None, return_arms: None, ctor_heap: None };
     let Some(target) =
         resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
@@ -28211,17 +28558,38 @@ fn handle_method_call(
     // positional-only (named/spread parameter binding is not modeled here); the
     // contract check above already covered the arguments.
     if !call.positional_only {
-        return MethodCallOutcome { summary: None, return_arms };
+        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None };
     }
     let Some(callee_scope) =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
     else {
-        return MethodCallOutcome { summary: None, return_arms };
+        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None };
     };
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
-    // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
-    // summary for method/static calls and leaves constructors unread.
     let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
+    // A constructor descent's `$this` seed (ADR-0057 C1): the very object this `new`
+    // site is minting, with every literal default and every promoted parameter, built
+    // through the SAME `new_heap_object` the object build will fall back to. Skipped
+    // for a poisoned caller, whose `new` binds nothing anyway.
+    let ctor_seed: Option<HeapObj> = match &call.receiver {
+        Callee::Construct { class } if !scope.poisoned => {
+            let positional: Vec<ArgValue> = arg_values.iter().map(|v| (*v).clone()).collect();
+            Some(new_heap_object(
+                cx,
+                folder,
+                &cx.class_fqn(class),
+                &positional,
+                &call.named_args,
+                env,
+                store,
+                false,
+                CtorDefaults::All,
+            ))
+        }
+        _ => None,
+    };
+    // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
+    // value summary for method/static calls and the heap snapshot for constructors.
     let summary = descend(
         cx,
         folder,
@@ -28232,6 +28600,7 @@ fn handle_method_call(
         &display,
         target.this_exact,
         target.receiver_var.as_deref(),
+        ctor_seed.as_ref(),
         &arg_values,
         call.span.start,
         &[],
@@ -28241,7 +28610,16 @@ fn handle_method_call(
         descent,
         out,
     );
-    MethodCallOutcome { summary, return_arms }
+    match ctor_seed {
+        // A constructor's summary is its heap component and nothing else (ADR-0075 §3
+        // as superseded): the value component cannot exist, an object being no value.
+        Some(_) => MethodCallOutcome {
+            summary: None,
+            return_arms,
+            ctor_heap: summary.and_then(|s| s.heap),
+        },
+        None => MethodCallOutcome { summary, return_arms, ctor_heap: None },
+    }
 }
 
 /// The provenance render base for a bound method/constructor call.
