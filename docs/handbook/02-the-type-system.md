@@ -452,6 +452,16 @@ And trust rides along with each value, so a property whose value
 you only *asserted* is still only asserted inside — it will not
 premise a proof-layer finding there any more than it would here.
 
+**The receiver crosses the same way.** `$box->unwrap()` is
+`unwrap($box)` with the object written on the other side of the
+arrow, so `$this` inside the method you called is a copy of the
+receiver under exactly these rules — `$b = new Box(1); $b->m();`
+sees `$this->value` as `1`, with the same escape rule deciding
+which properties come along. Only a receiver Steins can prove the
+identity of qualifies: `$this->helper()` inside another method, or
+a variable whose class is merely a lower bound, keeps the older
+behaviour of entering with no property values at all.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return

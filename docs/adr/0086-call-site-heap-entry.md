@@ -4,7 +4,9 @@
 under the owner's standing delegation, recorded ahead of the implementation.
 Extends ADR-0001's binding descent and ADR-0036's heap model; the inbound
 counterpart of ADR-0057 (which stays the outbound design: a *returned*
-allocation crossing back to the caller).
+allocation crossing back to the caller). **§2 (the argument leg, slice H1)
+landed 2026-08-15 (#376); §3 (the receiver leg, slice H2) landed 2026-08-16
+(#377), amending ADR-0075 §2.1 and §2.2.** §7's H3 is the remaining slice.
 
 ## 1. The gap, measured
 
@@ -150,6 +152,25 @@ non-readonly props never cross — nothing changes for it. ADR-0075 §2.2's
 sentence becomes provisional-until-this-slice rather than a statement of
 intent, and is amended when the receiver slice lands.
 
+**Landed 2026-08-16 (#377), with three things the implementation had to
+decide.** *(a)* **A seeded `$this` counts as a binding**, the same trigger
+rule §2 gave a seeded parameter — otherwise `$b->get()` (no arguments at all)
+would not descend and could not be the parity's own witness. *(b)* **The
+`this:` key component carries the object's canonical rendering** wherever a
+copy was seeded, the bare class FQN wherever one was not: `$b1 = new Box(1)`
+and `$b2 = new Box('s')` reach one inherited body with different entry states,
+and the class alone would replay one summary for the other and suppress the
+other's emission (ADR-0075 §2.1). *(c)* **The parity is observable at the
+assignment rung only.** `$box->unwrap()` in argument or dump position is not a
+value at all — `ArgValue::Call` carries a simple *function* name and a method
+call never reaches the value IR (ADR-0075 §3's v1 exclusion, the same carrier
+limit issue #374 measured for `Receiver::New`). So `$v = $box->unwrap();`
+agrees with `$v = unwrap($box);`, a sink *inside* the method fires on the
+receiver's own props, and the direct `takesString($box->unwrap())` stays
+silent for a reason one layer below this ADR. That layer is where the
+remaining half of the parity lives; it is not a heap-entry gap and must not be
+re-diagnosed as one.
+
 ## 4. What stays out (each one line, each anchored)
 
 - **Object-valued properties as return facts** — `return $b->inner` where
@@ -169,6 +190,54 @@ intent, and is amended when the receiver slice lands.
   class whose constructor writes `$this->value = $v` (rather than promoting
   it) still yields no props. A real, separate gap, named here so it is not
   mistaken for this one.
+
+  *Amended 2026-08-16 (#377): that gap had a second, unsound half, and the half
+  is closed.* Not walking the constructor also meant the **literal property
+  defaults were seeded as if nothing ran between the allocation and the first
+  read**. `private $view = 0;` overwritten by `$this->view = $original_view -
+  $this->ad_count;` stood on the caller's object as a proven `0` — a wrong
+  `Verified` fact, not merely a missing one, and one the receiver leg then
+  carried into `getView()`'s summary where a declared `positive-int` parameter
+  convicted correct code. A default now survives only when the constructor that
+  runs for the class never **mentions** `$this->{prop}`, by a whole-token
+  lexical scan of that constructor's body text — the decidable, over-
+  approximating question the ADR-0032 argument-pass gate already asks about
+  parameters (`callee_cannot_reach_arg`), and for the same reason: the linear
+  trace drops nested sub-expressions, so only the source text can answer it.
+  Any mention drops the seed; no constructor keeps every default; an unreadable
+  body or a poisoned constructor keeps none. Promoted parameters are untouched
+  (their fact is the argument, proven at the call site), as is `readonly`
+  bookkeeping. The *other* half stands: a constructor's writes still yield no
+  props, so such a slot is simply unknown.
+
+  **The per-property rule only speaks about slots the text spells, so a
+  constructor that lets `$this` out of its own text drops every default.** A
+  delegating `__construct() { $this->init(); }` whose `init()` writes
+  `$this->view` spells no `$this->view`, and `view`'s default would have
+  survived and been wrong by the identical argument. Four shapes therefore set
+  the coarse answer, each a route by which a slot is written without this text
+  naming it: a **bare `$this`** (not followed by `->` — passed to a function,
+  assigned to a variable, returned, captured by a closure: an alias leaves, and
+  any holder can write any property); **`$this->m(…)`**, a call into a body
+  this scan is not reading; **`parent::m(…)` / `self::m(…)` / `static::m(…)`**,
+  which are that same call under a spelling that keeps the very same `$this`
+  (`parent::__construct()` above all, while a bare `self::CONST` runs nothing
+  and is not a call); and the **dynamic** access. Where none of them occurs the
+  per-property rule stays fine-grained: a constructor whose only `$this` uses
+  are `$this->a = 1; $this->b = $x;` keeps `$c`'s default.
+
+  **This is deliberately coarse and its precision cost is unknown**, not small:
+  a constructor calling one `$this` method loses the defaults of properties that
+  method could not possibly touch, and neither the conformance suite, nsrt, nor
+  the public fp-gate moved by a single line in either direction, so no instrument
+  available here can price it. Correctness decides instead — a wrong `Verified`
+  default is a proof-layer false positive, a dropped one is lost knowledge, and
+  the two are not comparable. **Refining it has a named precondition**: a
+  per-callee property-write summary (*which slots can this call write?*), which
+  is the same ADR-0055 Part II mutation inference the caller-side sweep refusal
+  in §2 has been waiting on. Until that inference exists, "the constructor is
+  trivially inspectable" is the whole of what makes a literal default
+  trustworthy.
 - **Weakening the caller-side sweep on descent evidence** — refused above;
   precondition ADR-0055 Part II.
 
@@ -234,8 +303,10 @@ mints.
   heap component" re-pointed to this ADR. Finding-adding on the proof layer:
   fp-gate movement triaged per site.
 - **H2 — the receiver leg**: `$this` seeded from the exact receiver's copy
-  (§3), sharing with argument copies; ADR-0075 §2.2 amended; the
-  `$box->unwrap()` / `unwrap($box)` parity pin.
+  (§3), sharing with argument copies; ADR-0075 §2.1 and §2.2 amended; the
+  `$box->unwrap()` / `unwrap($box)` parity pin at the assignment rung, plus a
+  pin on the value-IR limit that keeps the direct form out of reach. **Landed
+  2026-08-16 (#377).**
 - **H3 — ADR-0057 T1 outbound**: unchanged in content, sequenced after H1/H2,
   with `targs` added to the snapshot's field list by amendment (it postdates
   ADR-0057) and `HeapSummary` given its shape then.

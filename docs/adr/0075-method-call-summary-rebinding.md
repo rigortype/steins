@@ -61,12 +61,18 @@ lost.
 The key therefore gains a `this:` pseudo-binding carrying `body_this_exact`
 when it is `Some` — the exact **class FQN**, not an allocation id. Same-class
 allocations share a key (their entry state for `$this` dispatch is the same
-class). The spelling has precedent: closure capture snapshots already enter
-the key as `use:{name}` pseudo-bindings, and the `this:` component sorts
-among them under the existing normalization. Guarded resolutions
-(`this_exact = None`) key exactly as today — a final/private body's inner
-dispatch is a pure function of its declaring class, so the bare key is
-already sound there.
+class). *Amended 2026-08-16 (ADR-0086 §3): once `$this` is seeded from the
+receiver's copy, the class FQN is no longer all of its entry state, so the
+component carries the object's canonical rendering — class, exactness,
+readonly bookkeeping, crossing props with their strata, carries — wherever a
+copy was seeded, and the bare class FQN wherever one was not. Same-class
+allocations holding different props stop sharing a key, which is the whole
+point of the amendment.* The spelling has precedent: closure capture
+snapshots already enter the key as `use:{name}` pseudo-bindings, and the
+`this:` component sorts among them under the existing normalization. Guarded
+resolutions (`this_exact = None`) key exactly as today — a final/private
+body's inner dispatch is a pure function of its declaring class, so the bare
+key is already sound there.
 
 This component is a correctness sharpening that lands *with* the rebinding,
 not after it: today's discard hides the collision on the value surface, but
@@ -76,10 +82,18 @@ the memo also suppresses re-walk (and thus re-emission) on hit.
 
 Facts derived from bound parameters and literals, exactly as for functions.
 `$this`-property reads inside the callee seed from the canonical entry state
-(ADR-0048; contract-fact lane, ADR-0052 §9), so they contribute declared
-floors, never pins — a summary can only be as sharp as what the binding
-proved. Stratum flows by the existing min rule (ADR-0052 §5): an `Asserted`
-argument yields an `Asserted` summary, never laundered to `Verified`.
+(ADR-0048; contract-fact lane, ADR-0052 §9) — and **what that entry state
+holds depends on the receiver** (amended 2026-08-16, ADR-0086 §3): where the
+receiver is an exact `Receiver::Var` with a bound heap object, `$this` is
+seeded from a copy of that object, so a `$this`-property read contributes the
+**receiver's own proven props** and can reach `Singleton`; at every other
+receiver — a `$this`-origin one, a non-exact one, `Receiver::New`, a static
+call — nothing is seeded and the read contributes the declared floor, never a
+pin, exactly as this section originally stated for all of them. The rule
+underneath is unchanged: a summary can only be as sharp as what the binding
+proved, and the receiver leg is a binding the descent did not use to have.
+Stratum flows by the existing min rule (ADR-0052 §5): an `Asserted` argument
+yields an `Asserted` summary, never laundered to `Verified`.
 
 ### 2.3 Receivers that stay silent
 

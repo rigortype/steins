@@ -110,8 +110,30 @@ A seeded object counts as a binding, so an object-only argument list descends. T
 `obj:{param}` key component is the canonical rendering of that entry state (class,
 exactness, readonly bookkeeping, the sorted key-representable props with their
 strata, the carries); a prop the rendering cannot name does not cross, so the memo
-stays a pure function of the key (ADR-0048 §2). `$this` in a method descent is
-still seeded by `seed_this_object` — the receiver leg is ADR-0086 §3.
+stays a pure function of the key (ADR-0048 §2).
+
+**The receiver is the zeroth argument** (ADR-0086 §3, the receiver leg). A
+method call on an **exact `Receiver::Var`** — the one receiver form with a heap
+object in hand, and the same arm that fills `CallTarget::receiver_carries`
+(#362) — seeds the callee's `$this` from a copy of that object, under the field
+table above and **sharing the one-copy-per-caller-allocation map with the
+argument copies**, so `$b->m($b)` binds `$this` and the parameter to one callee
+object. `analyze_scope`'s `$this` seed is the seam: it finds `this` already
+bound and leaves it alone. A seeded `$this` counts as a binding, so a
+zero-argument `$b->get()` descends. Every other receiver seeds through
+`seed_this_object` exactly as before, each for a stated reason: `Receiver::This`
+is pre-escaped by construction (its non-readonly props would not cross anyway),
+a non-exact `Receiver::Var` resolves through the override guard and proves no
+identity, `Receiver::New` and `Callee::Construct` have no allocation yet, and a
+static call has no receiver. The `this:` key component correspondingly carries
+the object's canonical rendering where a copy was seeded and the bare exact
+class FQN where none was (ADR-0075 §2.1, amended).
+
+What the receiver leg does **not** reach is the value surface: a method call in
+argument or dump position never enters the value IR (`ArgValue::Call` carries a
+simple function name — ADR-0075 §3), so `$v = $b->unwrap();` sees the proven
+summary and `takesString($b->unwrap())` does not. That is the carrier limit,
+one layer below the heap entry.
 
 The caller-side escape-and-sweep after the call is untouched by any of this
 (ADR-0086 §2's stated refusal): the copy flows in and the sweep flows out,
