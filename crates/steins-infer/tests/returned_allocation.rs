@@ -433,6 +433,28 @@ fn a_factory_storing_into_a_static_ends_earlier_than_the_escape_rule() {
 }
 
 #[test]
+fn a_lying_return_docblock_does_not_edit_the_proof() {
+    // §6's last probe, and §2.6 in one line: the declaration is a claim, the walk is
+    // a proof, and the summary never intersects the two. A `@return` naming another
+    // class is simply not the rung that answers — the caller reads what the body
+    // allocated, at the `Verified` stratum a proof carries, and the inconsistency is
+    // the callee's own contract finding where it is written.
+    // (The factory takes an argument because a zero-binding call does not descend at
+    // all — ADR-0057 §3 defers that to T2 — so there would be no summary to read.)
+    let src = "<?php\nclass Foo { public function __construct(public $n) {} }\nclass Bar {}\n\
+        /** @return Bar */\nfunction mk($n) { return new Foo($n); }\n\
+        $x = mk(1);\n\\PHPStan\\dumpType($x->n);\n\\PHPStan\\dumpType($x);\n";
+    assert_eq!(dumps(src), vec!["dumped type: 1", "dumped type: Foo"]);
+
+    // The same shape without the lie, so the reading above is attributable to the
+    // proof rather than to the docblock being ignored generally: an HONEST `@return`
+    // renders identically, and loses the `(asserted)` marker it used to carry when
+    // the claim was the only rung there was.
+    let honest = src.replace("@return Bar", "@return Foo");
+    assert_eq!(dumps(&honest), vec!["dumped type: 1", "dumped type: Foo"]);
+}
+
+#[test]
 fn a_fluent_setter_chain_gets_class_continuity_and_no_forged_exactness() {
     // `return $this` (§6's probe): pre-escaped by construction, and exact only where
     // the receiver leg proved the receiver exact — which an allocation-proven

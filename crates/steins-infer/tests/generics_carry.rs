@@ -998,6 +998,12 @@ fn ids(src: &str) -> Vec<String> {
 /// `Helper<T of ModelInterface>` whose `@return` reads the `TChild` its model
 /// carries. `Plain` is the same interface *without* the `@implements` edge — the
 /// hop that carries nothing.
+///
+/// `getFirstChildren()`'s body returns a call nothing resolves, for the reason
+/// [`unwrapper_opaque`] gives at length: this family is about what the **declared**
+/// read decides, and since ADR-0057 T1 a body that allocates decides it instead —
+/// `return new Child()` would prove an exact `Child` and answer every fixture below,
+/// including the ones whose whole claim is that the read did not land.
 const NINE_OH_FIVE_THREE: &str = "<?php\n\
     /** @template TChild of ChildInterface */\n\
     interface ModelInterface { /** @return TChild[] */ public function getChildren(): array; }\n\
@@ -1015,7 +1021,7 @@ const NINE_OH_FIVE_THREE: &str = "<?php\n\
         /** @param T $model */\n\
         public function __construct(private ModelInterface $model) {}\n\
         /** @return template-type<T, ModelInterface, 'TChild'> */\n\
-        public function getFirstChildren(): ChildInterface { return new Child(); }\n\
+        public function getFirstChildren(): ChildInterface { return noSuchSource(); }\n\
         public function reset(): void {}\n\
     }\n\
     function opaqueHelper(): Helper { return new Helper(new Model()); }\n";
@@ -1232,15 +1238,20 @@ fn unwrapper(ret: &str) -> String {
     )
 }
 
-/// [`unwrapper`]'s twin over a body **no summary can prove**: `return $box` hands
-/// back the object itself, and the value domain has no object carrier
-/// (ADR-0035/0038; ADR-0086 §4 keeps object returns out of the argument leg), so
-/// the whole summary is refused and the declared read is the only rung left.
+/// [`unwrapper`]'s twin over a body **no summary can prove**: the returned
+/// expression is a call to a function that does not exist, so the walk has nothing
+/// to say about it at all and the declared read is the only rung left.
 ///
-/// Before ADR-0086 an object-only argument list refused the descent outright, so
-/// *any* body served here. The tests below that are about the **declared** side
-/// take this one, and the ones about the proven side take [`unwrapper`]; the pair
-/// is what keeps each claim observable at the rung it is a claim about.
+/// The body keeps moving away from the rungs the summary grows into, which is the
+/// point of having it. Before ADR-0086 an object-only argument list refused the
+/// descent outright, so *any* body served here; then `return $box` served, the value
+/// domain having no object carrier (ADR-0035/0038); then ADR-0057 T1 made a returned
+/// allocation cross as a heap object and `return $box` began proving a `Box`. What
+/// has to be true of this body is only that the walk proves nothing, and a call
+/// nothing resolves is the plainest way to say so. The tests below that are about
+/// the **declared** side take this one, and the ones about the proven side take
+/// [`unwrapper`]; the pair is what keeps each claim observable at the rung it is a
+/// claim about.
 /// A fixture under `declare(strict_types=1)` — the mode the conformance suite runs
 /// in, and the only one in which an `int` reaching a `string` parameter is an error
 /// at all (coercive mode converts it, so no engine reports it).
@@ -1251,7 +1262,7 @@ fn strict(src: &str) -> String {
 fn unwrapper_opaque(ret: &str) -> String {
     format!(
         "{BOXES}/**\n * @template T\n * @param Box<T> $box\n * @return {ret}\n */\n\
-         function unwrapT(Box $box): mixed {{ return $box; }}\n"
+         function unwrapT(Box $box): mixed {{ return noSuchSource(); }}\n"
     )
 }
 
@@ -1495,11 +1506,12 @@ fn a_method_binds_its_own_templates_from_its_arguments() {
     // Same rule, same seam, and the receiver's carries untouched: a method-level
     // `@template` is an opaque node by the time the binder runs, a class-level one is
     // still an identifier, so the two carry readers never see each other's names.
-    // The body returns the object, so the declared read is what is on show here.
+    // The body proves nothing (`unwrapper_opaque`'s reason, method-side), so the
+    // declared read is what is on show here.
     let m = format!(
         "{BOXES}final class Unwrapper {{\n\
          \x20 /**\n  * @template T\n  * @param Box<T> $box\n  * @return T\n  */\n\
-         \x20 public function un(Box $box): mixed {{ return $box; }}\n}}\n"
+         \x20 public function un(Box $box): mixed {{ return noSuchSource(); }}\n}}\n"
     );
     assert_eq!(
         dumped(&format!(
@@ -1511,7 +1523,7 @@ fn a_method_binds_its_own_templates_from_its_arguments() {
     // A method descent seeds its arguments' objects exactly as a function descent
     // does (ADR-0086 §2 — `descend` is one seam), so the property-reading body
     // proves the value here too.
-    let proven = m.replace("return $box; }", "return $box->value; }");
+    let proven = m.replace("return noSuchSource(); }", "return $box->value; }");
     assert_eq!(
         dumped(&format!(
             "{proven}$u = new Unwrapper(); $v = $u->un(new Box(1)); \\PHPStan\\dumpType($v);"

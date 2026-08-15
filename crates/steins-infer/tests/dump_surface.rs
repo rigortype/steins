@@ -601,16 +601,14 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
     // Issue #362, the same equivalence claim one layer further out: the subject is a
     // class-level template of the receiver, so the answer comes off the carry
     // `new Helper(new Model())` proved — and the surface is the one a hand-written
-    // `@return Child` produces. The carry read is where the type comes from; it is
-    // not what the type is trusted as.
+    // `@return Child` produces, down to the stratum. The carry read is where the
+    // type comes from; it is not what the type is trusted as.
     //
-    // Since ADR-0057 T1 the *stratum* comes from somewhere else entirely, on both
-    // spellings alike: `first()`'s body is `return new Child()`, so the outbound heap
-    // channel rebinds a proven exact allocation and the declared arm — which is what
-    // carried the `(asserted)` marker — is not the rung that answers. The equivalence
-    // is the claim here, and it is untouched; the marker's disappearance is the
-    // summary outranking the docblock (ADR-0057 §2.6, A1's ladder), not the utility
-    // resolving differently.
+    // `first()`'s body returns a call nothing resolves, because this claim is about
+    // what the DECLARED read renders: since ADR-0057 T1 a body that allocates crosses
+    // its object back and answers the call site itself, so `return new Child()` here
+    // would render the proof (`Child`, no marker) and the docblock would decide
+    // nothing. Same reason as `generics_carry`'s own copy of this shape.
     let with = "<?php\n\
         /** @template TChild */\ninterface ModelInterface {}\n\
         /** @implements ModelInterface<Child> */\nclass Model implements ModelInterface {}\n\
@@ -619,11 +617,11 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
         class Helper {\n\
         \x20 /** @param T $model */\n  public function __construct(private ModelInterface $model) {}\n\
         \x20 /** @return template-type<T, ModelInterface, 'TChild'> */\n\
-        \x20 public function first(): ChildInterface { return new Child(); }\n}\n\
+        \x20 public function first(): ChildInterface { return noSuchSource(); }\n}\n\
         function g() { $h = new Helper(new Model()); $c = $h->first(); \\PHPStan\\dumpType($c); }\n";
     let plain = with.replace("template-type<T, ModelInterface, 'TChild'>", "Child");
     assert_eq!(one_type(with), one_type(&plain));
-    assert_eq!(one_type(with), "dumped type: Child");
+    assert_eq!(one_type(with), "dumped type: Child (asserted)");
 }
 
 #[test]
