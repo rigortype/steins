@@ -435,3 +435,41 @@ fn preg_split_folds_on_the_projects_own_pcre() {
         Some(steins_catalog::WidthClass::Refused)
     );
 }
+
+/// The alias rows: PHP's own second spellings of four names already here. The
+/// pairs fold identically because they *are* the same function — one C handler
+/// reached by two names — and the test asserts that by folding both spellings
+/// of the same call and comparing, rather than by pinning four literals that
+/// would pass just as well if the aliases had drifted apart.
+#[test]
+fn the_alias_rows_fold_exactly_as_the_names_they_alias() {
+    let Some(mut folder) = live("the_alias_rows_fold_exactly_as_the_names_they_alias") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(implode(\",\", [\"a\", \"b\"]));\n\
+         \\PHPStan\\dumpType(join(\",\", [\"a\", \"b\"]));\n\
+         \\PHPStan\\dumpType(rtrim(\"ab   \"));\n\
+         \\PHPStan\\dumpType(chop(\"ab   \"));\n\
+         \\PHPStan\\dumpType(count([\"a\", \"b\", \"c\"]));\n\
+         \\PHPStan\\dumpType(sizeof([\"a\", \"b\", \"c\"]));\n\
+         \\PHPStan\\dumpType(floatval(\"1.5\"));\n\
+         \\PHPStan\\dumpType(doubleval(\"1.5\"));\n";
+    let d = dumps(SRC, &mut folder);
+    assert_eq!(d.len(), 8);
+    for pair in d.chunks(2) {
+        assert_eq!(pair[0], pair[1], "an alias must fold to what its target folds to");
+    }
+    // …and they are values, not the floor that would also compare equal.
+    assert_eq!(d[0], "'a,b'");
+    assert_eq!(d[2], "'ab'");
+    assert_eq!(d[4], "3");
+    assert_eq!(d[6], "1.5");
+    for name in ["join", "chop", "sizeof", "doubleval"] {
+        assert_eq!(
+            steins_catalog::width_class(name),
+            Some(steins_catalog::WidthClass::Safe),
+            "{name} folds in the browser too, on its target's probe family"
+        );
+    }
+}
