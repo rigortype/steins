@@ -249,6 +249,8 @@ than reclassified; entry 14 (the solver) is unaffected.
 These are gaps, not divergences, and they are tracked in
 [not-implemented.md](not-implemented.md):
 
+- **builtin parameter types** — no source for them exists in the check, so every
+  argument-side finding stops at project-defined callees (issue #391);
 - generic type-argument carry *through a variable binding* (the direct-`new`
   argument position landed as ADR-0032 stage 1; the heap carries no type
   arguments);

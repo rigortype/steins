@@ -81,6 +81,31 @@ use steins_phpdoc::{
 /// The registry id for the `type.argument-mismatch` proof-layer check (ADR-0022).
 pub const ID: &str = "type.argument-mismatch";
 
+/// The registry id for the **possibly-grade** argument check on an all-`Verified`
+/// premise (ADR-0081 §8's 2026-08-16 amendment, issue #391): the argument's
+/// abstract fact has at least one base arm (or a `null` side-flag) the native
+/// parameter type rejects **and** at least one it accepts, at the call-site file's
+/// coercion mode.
+///
+/// Not a definite No — an over-approximating type never proves the rejected arm is
+/// inhabited on a live path — which is exactly why it takes the `Strict` floor and
+/// the gate's non-increase posture rather than the zero bar [`ID`] carries. Its
+/// all-arms-rejected sibling was measured empty on every public source and is
+/// deliberately not built (issue #291).
+pub const TYPE_MAYBE_ARGUMENT_MISMATCH_ID: &str = "type.maybe-argument-mismatch";
+
+/// The contract-layer twin of [`TYPE_MAYBE_ARGUMENT_MISMATCH_ID`]: the same
+/// judgment where any arm of the premise is `Asserted` — a docblock claim, a
+/// curated refinement over a native envelope, or an ADR-0069 declared-return floor
+/// row. ADR-0052 §5's consumption rule forbids an `Asserted` premise from reaching
+/// a `type.*` id, so the pair is two registrations of one judgment.
+///
+/// `Floor::Strict` rather than the `phpdoc.*` family's `Contracts`, on the
+/// `offset.maybe-missing` precedent: the layer says whose claim it is, the floor
+/// says how sure it is, and the definite sibling ([`PARAM_MISMATCH_ID`]) keeps
+/// `Contracts` so a `contracts` run keeps its meaning.
+pub const PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID: &str = "phpdoc.maybe-argument-mismatch";
+
 /// The registry id for the `type.return-mismatch` proof-layer check (ADR-0022):
 /// a function/method whose return type is a native scalar/union and one of its
 /// (trace-visible) `return <literal>;` statements provably raises a `TypeError`.
@@ -1134,6 +1159,10 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // (ADR-0081, issue #267).
     VARIABLE_MAYBE_UNDEFINED_ID,
     // end undefined variables (ADR-0078, issue #194)
+    // the argument side's possibly grade (ADR-0081 amendment, issue #391): one
+    // judgment, two ids, routed by the premise's minimum stratum.
+    TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
+    PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -22261,6 +22290,24 @@ fn check_propagated_call(
                 ));
                 native_fired = true;
             }
+            // The possibly-grade sibling (ADR-0081's 2026-08-16 amendment, issue
+            // #391), placed where the phpdoc check runs: after every native proof
+            // had its chance, so a definite No is never shadowed by the weaker
+            // claim about the same argument.
+            if !native_fired {
+                check_maybe_argument_mismatch(
+                    cx,
+                    param,
+                    &decl.name,
+                    arg.span.start,
+                    &arg.value,
+                    env,
+                    store,
+                    poisoned,
+                    in_descent,
+                    out,
+                );
+            }
         }
 
         // Only the propagation-carrier arg kinds (`$var`/`call()`/`$o->m()`) are the
@@ -29634,6 +29681,21 @@ fn check_method_args(
                 ));
                 native_fired = true;
             }
+            // The possibly-grade sibling, method-call twin (issue #391).
+            if !native_fired {
+                check_maybe_argument_mismatch(
+                    cx,
+                    param,
+                    callee_name,
+                    arg.span.start,
+                    &arg.value,
+                    env,
+                    store,
+                    poisoned,
+                    in_descent,
+                    out,
+                );
+            }
         }
 
         if !native_fired
@@ -29824,6 +29886,300 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
 fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value: &ArgValue) -> bool {
     in_descent
         && (ty.has_instance() || matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)))
+}
+
+// ===========================================================================
+// The argument side's possibly grade (ADR-0081's 2026-08-16 amendment, issue
+// #391): SOME arm of the argument's abstract fact is rejected by the native
+// parameter type and some is accepted. Two ids, one judgment, split by the
+// premise's minimum stratum (ADR-0052 §5).
+//
+// The ALL-arms-rejected verdict is deliberately NOT emitted: issue #291
+// measured it empty on the pinned corpus, on phpstan-src's nsrt and on
+// php-typing-conformance, and closes with "don't build it".
+// ===========================================================================
+
+/// The witnesses that decide, for one [`Base`], whether a native type accepts
+/// **any** value of that base.
+///
+/// The base-level question is not "does a representative value pass" but "does
+/// *every* value of this base fail", so a base whose acceptance is not uniform
+/// across its own values needs one witness per equivalence class of PHP's
+/// coercion behaviour:
+///
+/// * `int` / `float` — uniform in both modes, one witness each.
+/// * `bool` — a `false` literal member (`string|false`) accepts exactly one of
+///   the two, so both are needed.
+/// * `string` — [`member_accepts_coercive`] splits on `php_is_numeric`, so a
+///   numeric and a non-numeric witness are both needed. That split is the entire
+///   reason a `string` base is not a coercive-mode definite No against `int`.
+///
+/// The classes are measured, not asserted: `harness/coercion-grid` runs all 72
+/// cells per mode on PHP itself, and `tests/coercion_witness_grid.rs` pins
+/// Steins against it. The witnesses go to [`is_type_error`] — there is **no
+/// second coercion table** anywhere in this judgment.
+fn maybe_arg_witnesses(base: Base) -> Vec<ArgValue> {
+    match base {
+        Base::Int => vec![ArgValue::Int(0)],
+        Base::Float => vec![ArgValue::Float(1.5)],
+        Base::Bool => vec![ArgValue::Bool(true), ArgValue::Bool(false)],
+        Base::String => vec![ArgValue::Str("5".into()), ArgValue::Str("abc".into())],
+    }
+}
+
+/// How much of an abstract fact's denotation a native parameter rejects.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MaybeArgVerdict {
+    /// Every arm rejected — the definite No of issue #291. Measured empty, and
+    /// never emitted: see the module header above.
+    AllRejected,
+    /// Some arm rejected, some accepted — the possibly-grade claim this pair of
+    /// ids carries.
+    SomeRejected,
+    /// Nothing provably rejected, or a fact the judgment declines.
+    NoneRejected,
+}
+
+/// The abstract arms of `fact` — one entry for a single-base layer, several for a
+/// union — plus its `null` side-flag; `None` for a finite or array fact.
+fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<(Base, Option<Refinement>)>, bool)> {
+    match fact {
+        Fact::Refined { base, refinement, nullable } => {
+            Some((vec![(*base, Some(*refinement))], *nullable))
+        }
+        Fact::General { base, nullable } => Some((vec![(*base, None)], *nullable)),
+        Fact::Union { arms, nullable } => Some((arms.clone(), *nullable)),
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
+    }
+}
+
+/// Spell one abstract union arm the way [`describe_fact`] spells a whole fact —
+/// used to name the rejected arms in the message.
+fn spell_arm(arm: &(Base, Option<Refinement>)) -> String {
+    let (base, refinement) = arm;
+    let f = match refinement {
+        Some(r) => Fact::refined(*base, *r, false),
+        None => Fact::General { base: *base, nullable: false },
+    };
+    describe_fact(&f).trim_start_matches("a value of type ").to_owned()
+}
+
+/// The base-level analogue of [`is_type_error`], built out of it rather than
+/// beside it: per arm of `fact` (plus the `null` side-flag), ask whether the
+/// native parameter rejects every witness of that arm's base.
+///
+/// A `Refined` arm decomposes to its **base**, dropping the refinement: a refined
+/// set is a subset of its base's set, so base-rejection implies refined-rejection.
+/// The converse (`numeric-string` into a coercive `int`) is sharper and is not
+/// taken here — that is a second judgment with its own FP surface.
+///
+/// `Singleton`/`OneOf` decline: those are the concrete lane [`is_type_error`]
+/// already owns, and owns more precisely. `Shape` declines: an array against a
+/// native scalar parameter is a real `TypeError`, but `is_type_error` answers
+/// `false` for an array by construction, so admitting it here would smuggle in
+/// the second table this judgment refuses.
+///
+/// Returns the verdict, the rejected bases, and whether the `null` side-flag is
+/// rejected. Spelling is the caller's, since the declared-arm lane can name an arm
+/// (`false`) more precisely than its base (`bool`).
+fn maybe_arg_verdict(
+    cx: &Cx,
+    p: &Param,
+    ty: &NativeType,
+    fact: &Fact,
+) -> (MaybeArgVerdict, Vec<(Base, Option<Refinement>)>, bool) {
+    let Some((arms, nullable)) = maybe_arg_arms(fact) else {
+        return (MaybeArgVerdict::NoneRejected, Vec::new(), false);
+    };
+    if arms.is_empty() {
+        return (MaybeArgVerdict::NoneRejected, Vec::new(), false);
+    }
+    let rejected: Vec<(Base, Option<Refinement>)> = arms
+        .iter()
+        .filter(|arm| maybe_arg_witnesses(arm.0).iter().all(|w| is_type_error(cx, ty, w)))
+        .copied()
+        .collect();
+    // The implicit-nullable default is part of the parameter's acceptance, exactly
+    // as it is for a proven `null` (issue #391's second repair).
+    let null_rejected = nullable
+        && is_type_error(cx, ty, &ArgValue::Null)
+        && !implicit_null_accepted(p, &ArgValue::Null);
+    let total = arms.len() + usize::from(nullable);
+    let n = rejected.len() + usize::from(null_rejected);
+    let verdict = if n == total {
+        MaybeArgVerdict::AllRejected
+    } else if n == 0 {
+        MaybeArgVerdict::NoneRejected
+    } else {
+        MaybeArgVerdict::SomeRejected
+    };
+    (verdict, rejected, null_rejected)
+}
+
+/// The bases (and the `null` flag) one declared-lane arm denotes, or `None` for an
+/// arm the value lattice has no scalar reading of (an array/callable/class arm).
+fn arm_base_set(ty: &ContractTy) -> Option<(Vec<Base>, bool)> {
+    if matches!(ty, ContractTy::Null) {
+        return Some((Vec::new(), true));
+    }
+    let f = steins_contract::to_fact(ty)?;
+    if let Some(vals) = f.finite_members() {
+        let mut bases = Vec::new();
+        let mut nullable = false;
+        for v in vals {
+            match v.base() {
+                Some(b) if !bases.contains(&b) => bases.push(b),
+                Some(_) => {}
+                None => nullable = true,
+            }
+        }
+        return Some((bases, nullable));
+    }
+    maybe_arg_arms(&f).map(|(arms, n)| (arms.into_iter().map(|a| a.0).collect(), n))
+}
+
+/// Name the rejected arms for the message, preferring the **declared** spelling
+/// where the premise came from the arm lane: a lane that says `string|false`
+/// should not have its rejected arm reported as `bool`, which is only what the
+/// lowering widened it to. Falls back to the base spelling for a value-lane
+/// premise, which has no finer spelling to offer.
+fn spell_rejected_arms(
+    cx: &Cx,
+    lane: Option<&[ContractArm]>,
+    rejected: &[(Base, Option<Refinement>)],
+    null_rejected: bool,
+) -> Vec<String> {
+    if let Some(arms) = lane {
+        let named: Vec<String> = arms
+            .iter()
+            .filter(|a| match arm_base_set(&a.ty) {
+                // An arm is named iff everything it denotes was rejected — the
+                // same all-or-nothing rule the base-level verdict applies.
+                Some((bases, nullable)) => {
+                    (!bases.is_empty() || nullable)
+                        && bases.iter().all(|b| rejected.iter().any(|r| r.0 == *b))
+                        && (!nullable || null_rejected)
+                }
+                None => false,
+            })
+            .filter_map(|a| render_contract_arms(cx, std::slice::from_ref(a)))
+            .collect();
+        if !named.is_empty() {
+            return named;
+        }
+    }
+    let mut out: Vec<String> = rejected.iter().map(spell_arm).collect();
+    if null_rejected {
+        out.push("null".to_owned());
+    }
+    out
+}
+
+/// The abstract premise available for `value` at an argument position: the
+/// value-lane fact where there is one, else the declared-arm lane lowered through
+/// the same `to_fact` the scalar seeding uses, carrying the arms' own stratum.
+///
+/// The arm lane is not an optional extra. The value lane has **no carrier** for a
+/// docblock-or-reflection `T|false`: [`seed_refined_scalar_fact`] mints a
+/// value-lane fact only when a native `General` is refined within its own base,
+/// and the inline-`@var` seeding only for array shapes. Ten of the twelve corpus
+/// hits issue #391 measured arrive on the arm lane and nowhere else.
+///
+/// A finite fact declines on both lanes: `Singleton`/`OneOf` are the concrete
+/// lane's, and [`is_type_error`] has already judged them exactly.
+fn maybe_arg_premise<'a>(
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &'a Store,
+    poisoned: bool,
+) -> Option<(Fact, Stratum, Option<&'a [ContractArm]>)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    if let Some(k) = env.get(name)
+        && let Some(f) = &k.fact
+    {
+        return f.finite_members().is_none().then(|| (f.clone(), k.stratum, None));
+    }
+    let arms = store.contract_arms(name)?;
+    if arms.is_empty() {
+        return None;
+    }
+    let lowered = steins_contract::to_fact(&steins_contract::ContractTy::Union(
+        arms.iter().map(|a| a.ty.clone()).collect(),
+    ))?;
+    if lowered.finite_members().is_some() {
+        return None;
+    }
+    // The consumption rule (ADR-0052 §5) over every arm the verdict consults:
+    // "some rejected and some accepted" is a claim about the whole arm list, so
+    // the minimum runs over all of them, not only over the rejected ones.
+    let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+    Some((lowered, stratum, Some(arms)))
+}
+
+/// Emit the possibly-grade argument finding for one argument position. Called from
+/// both propagated-call checks at the point the native proof did **not** fire, so
+/// a definite No is never shadowed by its own weaker sibling.
+#[allow(clippy::too_many_arguments)]
+fn check_maybe_argument_mismatch(
+    cx: &Cx,
+    param: &Param,
+    callee: &str,
+    arg_offset: u32,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    in_descent: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(ty) = param.ty.as_ref() else { return };
+    // The same guard-blindness the object-world proof carries (ADR-0043 stage 3):
+    // a rebound parameter's in-body `instanceof` guards are unmodeled in a descent.
+    if in_descent && ty.has_instance() {
+        return;
+    }
+    let Some((fact, stratum, lane)) = maybe_arg_premise(value, env, store, poisoned) else {
+        return;
+    };
+    let (verdict, rejected, null_rejected) = maybe_arg_verdict(cx, param, ty, &fact);
+    if verdict != MaybeArgVerdict::SomeRejected {
+        return;
+    }
+    let id = if stratum == Stratum::Verified {
+        TYPE_MAYBE_ARGUMENT_MISMATCH_ID
+    } else {
+        PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
+    };
+    let ArgValue::Var(name) = value else { return };
+    // Spell the subject the way `PHPStan\dumpType($x)` would, so the finding and
+    // the dump a reader reaches for cannot disagree.
+    let subject = lane
+        .and_then(|arms| render_contract_arms(cx, arms))
+        .unwrap_or_else(|| describe_fact(&fact).trim_start_matches("a value of type ").to_owned());
+    let named = spell_rejected_arms(cx, lane, &rejected, null_rejected);
+    let arms = if named.len() == 1 {
+        format!("its {} arm raises a TypeError", named[0])
+    } else {
+        format!("its {} arms raise a TypeError", named.join(" and "))
+    };
+    let pos = cx.tree().position(arg_offset);
+    out.push(Diagnostic {
+        id,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "argument ${name} to {callee}() may not become {} ${} — ${name} is {subject}, and {arms} ({} mode)",
+            ty.render(),
+            param.name,
+            if cx.strict() { "strict" } else { "coercive" },
+        ),
+        facet: None,
+        fix: None,
+    });
 }
 
 /// Strict mode: does a single union `member` accept the non-null literal `arg`

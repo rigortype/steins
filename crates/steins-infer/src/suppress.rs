@@ -29,7 +29,7 @@ use crate::{
     OFFSET_MAYBE_MISSING_ID,
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
-    PARAM_MISMATCH_ID,
+    PARAM_MISMATCH_ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
@@ -322,8 +322,20 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `strict`-floor some-paths-only sibling, registered ahead of its emitter
     // (#199): a weaker, deliberately-defensive claim, so opt-in.
     (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
+    // The argument side's possibly grade (ADR-0081's 2026-08-16 amendment, issue
+    // #391): some arm of the argument's abstract fact is rejected by the native
+    // parameter and some is accepted. `Layer::Proof` + `Floor::Strict` is the
+    // §8 derivation, so the fp-gate routes it to the tripwire bucket with no list
+    // to edit. Its ALL-arms-rejected sibling was measured empty and is not built.
+    (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // The same judgment on an `Asserted` premise (ADR-0052 §5 forbids it reaching
+    // a `type.*` id). `Strict`, not the family's `Contracts`, on the
+    // `offset.maybe-missing` precedent: layer answers whose claim, floor answers
+    // how sure, and `phpdoc.param-mismatch` above keeps `Contracts` for the
+    // definite question.
+    (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),

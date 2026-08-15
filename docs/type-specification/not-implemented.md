@@ -64,6 +64,21 @@ still read UTF-8-lossily, so a file that is not itself valid UTF-8 collapses
 before parsing (ADR-0080 §3.2), which also leaves the salsa backdating in §3.3
 open.
 
+**Builtin parameter types are not checked at all** (issue #391). Every
+argument-side finding — the definite `type.argument-mismatch` and the
+possibly-grade pair beside it — judges an argument against a **project-defined**
+callee's declared parameter. A builtin's parameters have no type source in the
+check: the builtin catalog supplies arity (that is what
+`call.too-few-arguments` runs on) and return facts (ADR-0056/ADR-0069), and
+nothing supplies parameter types. So `strlen($maybeFalse)` and
+`json_decode($maybeNull)` are silent where the same value into a project
+function is reported. This caps the reach of the whole argument side, and
+closing it is a slice with its own measurement rather than a patch. The
+argument *carrier* is a second cap in the same place: only a plain `$variable`
+argument is read, which was 26% of the 39,754 argument positions the issue #291
+probe saw — `f($o->prop)`, `f(g($x))` and `f($a['k'])` carry the same judgment
+at a seam that does not run it.
+
 **Generic type-argument carry drops conservatively past a variable binding**
 (issue #295, ADR-0032 stage 1). `$box = new MutableBox(1); f($box);` now
 judges the full `MutableBox<int>`, not just the class half — the direct-`new`
