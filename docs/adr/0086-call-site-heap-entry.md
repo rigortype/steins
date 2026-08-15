@@ -333,8 +333,15 @@ descent contributes a copy of the argument's heap object**, per the field
 table in §2, and `$this` in a method descent contributes a copy of the exact
 receiver's object (§3). At any *other* entry — the plain per-scope pass, a
 non-exact or `$this`-origin receiver, a parameter whose argument resolved to
-no object — the contribution is what it is today: nothing on the heap. The
-declared-`@param` seed remains an open clause with its own future slice.
+no object — the contribution is what it is today: nothing on the heap. ~~The
+declared-`@param` seed remains an open clause with its own future slice.~~
+*Amended 2026-08-16 (#388): it is no longer open, and the two contributions do
+not overlap. A parameter whose native hint is one known class contributes the
+declared object of ADR-0032's declared-parameter-seed amendment at exactly the
+entries this ADR leaves bare — the plain per-scope pass, and a descent whose
+argument resolved to no object. Its gate is `!store.is_bound(param)`, so a copy
+this ADR seeded is never overwritten, and the copy is the stronger of the two
+wherever both could speak.*
 
 **§4 (no global ordering).** The seed depends on the caller's statement order
 (the caller's heap at the call) and on nothing across scopes or files. Fresh
