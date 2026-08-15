@@ -148,7 +148,7 @@ Therefore:
    refinements.
 
 (2) is deliberately coarse and deliberately default-deny: `strtolower` cannot
-care about `PHP_INT_MAX`, and a later slice may admit a *curated width-safe
+care about `PHP_INT_MAX`, and a later slice may admit a *curated portable
 subset* of the foldable allowlist. Until such a subset is verified against a
 32-bit engine, the whole lane declines rather than guesses which builtins are
 width-blind. That relaxation is tracked separately; it is not this slice.
@@ -200,15 +200,15 @@ outlive the answer that fixes it.
   loop: reflected return envelopes, the absence family, the boot-surface label.
   Version and width gates degrade exactly as designed — a browser snippet has no
   composer.json, and php-wasm's 32-bit build declines the fold lane until the
-  width-safe subset exists.
+  portable subset exists.
 - The pending list is a public interchange format. Changing the key shape breaks
   a caller's table, so it is pinned by hardcoded key strings in the `steins-wasm`
   tests and in `apps/playground/smoke.mjs`.
 
-## Amendment (2026-07-31): the width-safe fold subset (issue #64 S1.5)
+## Amendment (2026-07-31): the portable fold subset (issue #64 S1.5)
 
 §4 declined the **whole** fold lane on any engine that is not provably 64-bit, and
-said so deliberately: "a later slice may admit a *curated width-safe subset* of the
+said so deliberately: "a later slice may admit a *curated portable subset* of the
 foldable allowlist… until such a subset is verified against a 32-bit engine, the
 whole lane declines rather than guesses which builtins are width-blind." This is
 that slice. The subset is now verified and the lane is relaxed to it. Nothing else
@@ -219,7 +219,7 @@ in §4 changes — in particular **ADR-0056 Gate 2 keeps its `int_size == 8` leg
 
 A fold is admitted on a `PHP_INT_SIZE == 4` engine when **both** legs hold:
 
-1. `steins_catalog::width_safe(name)` — the callee is on the verified subset.
+1. `steins_catalog::portable(name)` — the callee is on the verified subset.
 2. **The argument range guard**: every integer occurring anywhere in the arguments
    lies within `[-(2^31 - 1), 2^31 - 1]`, counted recursively through array
    literals and over explicit integer **keys** as well as values.
@@ -242,7 +242,7 @@ decide whether the array has one element or two.
 
 ### The classification criterion
 
-A name is width-safe iff, for every argument tuple the range guard admits, the
+A name is portable iff, for every argument tuple the range guard admits, the
 32-bit engine either returns the **identical value and type tag** the 64-bit engine
 returns, or **declines** (throws, or widens).
 
@@ -321,7 +321,7 @@ A fold is a claim about **one argument tuple**, and a range guard can bound a tu
 A curated return-fact row is a claim about a builtin's **whole return domain**,
 verified against the 64-bit engine at `PINNED_PHP`; there is no per-call tuple to
 bound it with, so there is nothing here for it to be the analogue of. `strlen` is on
-the width-safe fold subset and its curated `int<0, max>` row still declines at
+the portable fold subset and its curated `int<0, max>` row still declines at
 `int_size == 4` — that contrast is pinned by a test.
 
 ### A runner fatal found en route
@@ -362,21 +362,42 @@ Both replay envelopes gain a `boot` object beside `pending`:
   "label": "PHP 8.5.2 (25 extensions)",
   "php_version": "8.5.2",
   "int_size": 4,
-  "fold_lane": "width_safe_subset",
+  "fold_lane": "portable_subset",
   "fold_total": 22,
-  "fold_safe": 19,
+  "fold_portable": 19,
   "curated_rows": false,
   "absence_family": true,
-  "refused_folds": ["abs", "intval", "sprintf"]
+  "refused_folds": ["abs", "intval", "sprintf"],
+  "refusals": [
+    { "name": "abs", "axis": "integer_width", "witness": "abs(\"3000000000\") is int(3000000000) / float(3000000000) — …" }
+  ],
+  "unverified_folds": ["array_merge", "explode"]
 }
 ```
 
-`fold_lane` is `full` | `width_safe_subset` | `declined`. `refused_folds` is
-present only on the middle lane — on the other two the lane already says the
-whole story — and it is the **catalog complement** (`foldable ∧ !width_safe`),
-never a second list. The plain `sw_check` / `sw_annotate` envelopes are
-unchanged and carry no `boot` key at all: engine-off behaviour is byte-identical
-to ADR-0065's, which is an acceptance criterion and now an assertion.
+`fold_lane` is `full` | `portable_subset` | `declined`.
+
+The last three fields are present **only on the middle lane** — on the other two
+the lane already says the whole story. Together they are exactly the complement
+`foldable ∧ !portable`, split by evidence rather than merged: `refused_folds`
+are the rows with a divergence on record and `unverified_folds` the rows nobody
+has measured (the 2026-08-14 amendment §4 forbids merging them, since one list
+would erase the refused rows' one-witness-per-row discipline). Neither is a
+second list of names — both are the catalog's own accessors.
+
+`refusals` carries **why** each refused row is refused, one entry per
+`refused_folds` name and in the same order: `axis` is the wire spelling of
+`RefusalAxis` (`integer_width`, `build_option`) and `witness` is the recorded
+divergence in one line. It exists because the frontend was writing the reasons
+itself and one of them went false — see the 2026-08-15 amendment. A consumer
+that meets an `axis` it has no sentence for must say something neutral and keep
+showing the `witness`; the enum grows when a probe finds a new kind of
+divergence, and a page that guessed would state a falsehood about the first row
+of a new kind.
+
+The plain `sw_check` / `sw_annotate` envelopes are unchanged and carry no `boot`
+key at all: engine-off behaviour is byte-identical to ADR-0065's, which is an
+acceptance criterion and now an assertion.
 
 ### Why it is computed by the policy and not by the frontend
 
@@ -407,7 +428,7 @@ monotone).
 
 ### Consequences
 
-- The engine bar reads `PHP 8.5.2 (php-wasm, 32-bit) — folding 19/22 width-safe
+- The engine bar reads `PHP 8.5.2 (php-wasm, 32-bit) — folding 19/22 portable
   builtins, reflection & existence live`, and a `<details>` panel lists both
   sides of the line: what php-src answered, and what widens (the three refused
   names with the `sprintf("%x", -1)` divergence, the ±2147483647 argument guard
@@ -424,10 +445,10 @@ monotone).
 
 ## Amendment (2026-08-01): the allowlist grows by twenty-four names (issue #78)
 
-The S1.5 amendment above verified a width-safe subset of a **22-name** allowlist.
+The S1.5 amendment above verified a portable subset of a **22-name** allowlist.
 This is that allowlist's own growth path walked once: every candidate = an ADR-0008
 purity/determinism argument + a 32/64-bit differential probe verdict + a
-`WIDTH_SAFE`/`WIDTH_REFUSED` row. **No mechanism moved.** The fold lane, the range
+`PORTABLE`/`REFUSED` row. **No mechanism moved.** The fold lane, the range
 guard, the replay loop, the `#73` declared-return floor and the boot object picked
 the names up because the tables are what they read.
 
@@ -499,7 +520,7 @@ two-argument form rather than split.
 
 Both names probed **clean** — 36 tuples, zero silent, zero reverse, zero decline, the
 two engines agreeing to the byte. They are still not admitted, and the distinction
-matters enough to write down: a `WIDTH_REFUSED` row is still `foldable`, so a name that
+matters enough to write down: a `REFUSED` row is still `foldable`, so a name that
 fails ADR-0008's determinism bar cannot be parked there. It has to be absent from both
 tables.
 
@@ -535,9 +556,9 @@ are ADR-0008 refusals and therefore **off the allowlist entirely**, pinned absen
 
 ### The 46-name disposition, and what moved with it
 
-`WIDTH_SAFE` is now **37**, `WIDTH_REFUSED` **9**, the allowlist **46**. The counts in
+`PORTABLE` is now **37**, `REFUSED` **9**, the allowlist **46**. The counts in
 the playground's engine bar and boundary panel came from
-`width_safe_names()`/`width_refused_names()` before this slice and still do — the page
+`portable_names()`/`refused_names()` before this slice and still do — the page
 went from "19/22" to "37/46" and named six more refusals without a line of JS
 changing, which is the property issue #64 S3 built the boot object for. What did need
 editing is the places that *pin* the old numbers on purpose, and only those:
@@ -564,7 +585,7 @@ ADR-0028's 2026-08-14 amendment opened the seam to array *results* and shipped t
 waves behind it, deferring five names it had already argued were admissible:
 `array_unique` (37 corpus uses), `range` (24), `preg_split` (20), `str_split` (14),
 `array_fill` (8). The deferral was pinned, not implicit — `steins_catalog`'s partition
-test asserted `width_class(name) == None` for exactly those five. This slice moves
+test asserted `portability_class(name) == None` for exactly those five. This slice moves
 that pin, and no mechanism moves with it: the fold gate, the range guard, the replay
 loop and the boot object pick the names up because the tables are what they read.
 
@@ -687,14 +708,14 @@ folding whole beside 257 declining.
 
 ### The 53-name disposition, and what moved with it
 
-`WIDTH_SAFE` is now **40**, `WIDTH_REFUSED` **11**, `WIDTH_UNVERIFIED` unchanged at
+`PORTABLE` is now **40**, `REFUSED` **11**, `UNVERIFIED` unchanged at
 **2**, the allowlist **53**. Unlike wave 1, this slice moves the boundary in both
 directions at once: the browser folds three names it did not, and names two more
 refusals it did not. The pages that report those counts derive them, so only the
 places that *pin* the numbers on purpose were edited — `steins-catalog`'s partition
 test, `steins-wasm`'s boot-object test, and the two playground smokes.
 
-`WIDTH_UNVERIFIED` did not grow, which is the class working as defined: a probed name
+`UNVERIFIED` did not grow, which is the class working as defined: a probed name
 lands in the class its evidence chooses and never passes through the one that claims
 nothing. Its two rows, `array_merge` and `explode`, still have zero probes behind
 them, which remains the correct number until someone runs a probe **set** at them.
@@ -705,7 +726,7 @@ them, which remains the correct number until someone runs a probe **set** at the
   array-returning name is only as good as a comparison that can see element type tags,
   and the parsed-JSON comparison silently cannot. It is worth re-reading that
   paragraph before the next round rather than rediscovering it.
-- `preg_split` establishes that a `WIDTH_REFUSED` row can be refused for a build
+- `preg_split` establishes that a `REFUSED` row can be refused for a build
   option rather than the word size. The class's mechanism — folds on a provably
   64-bit engine, declines elsewhere — fits that case exactly, and the row carries its
   own reason, so nothing is lost by not inventing a fourth class for it.
@@ -725,7 +746,7 @@ so all four widened.
 
 ### Why they are listed rather than resolved
 
-An alias table (`alias(name) -> Option<&str>`, consulted by `width_class`) was
+An alias table (`alias(name) -> Option<&str>`, consulted by `portability_class`) was
 the obvious shape and is deliberately not what landed. A row on this list claims
 a width, and the discipline is that a claim is earned by probing; resolving one
 name's verdict onto another would make the *first* alias table entry a claim
@@ -743,7 +764,7 @@ come out of the same run, because each tuple produced four replies
 
 - **the pairing** — `alias@64 == target@64` and `alias@32 == target@32`,
   byte-identical. **Zero breaks in 45 tuples.**
-- **the width** — `alias@64 == alias@32`, the ordinary `WIDTH_SAFE` claim,
+- **the width** — `alias@64 == alias@32`, the ordinary `PORTABLE` claim,
   earned directly on the alias spelling rather than inherited.
 
 | alias | target | probes (silent/reverse/decline) | the target's recorded row |
@@ -768,6 +789,80 @@ pairs alias names that are **not** admitted (`key_exists`/`array_key_exists`,
 `is_integer`/`is_long`/`is_int`, `is_double`/`is_float`); they enter with their
 targets or not at all, which the catalog's alias test pins in the negative.
 
-`WIDTH_SAFE` is now **44**, `WIDTH_REFUSED` **11**, `WIDTH_UNVERIFIED` **2**, the
+`PORTABLE` is now **44**, `REFUSED` **11**, `UNVERIFIED` **2**, the
 allowlist **57**. The boundary moved in the safe direction only: the browser
 folds four more names and refuses nothing new.
+
+## Amendment (2026-08-15): the class is about the engine, not the word size
+
+`WidthClass` was an honest name while every row in it was about `PHP_INT_SIZE`.
+The 2026-08-15 slice ended that in the row it added: `preg_split` is refused
+because one build's PCRE has a JIT and the other's does not, at the same version
+and the same ini. Nothing about the word size is involved, and the amendment
+that added it had to say so in prose because the type could not.
+
+The gate's question has always been the broader one — *may an engine other than
+the project's own fold this name?* — so the vocabulary now says that:
+
+| was | is |
+| --- | --- |
+| `WidthClass::{Safe, Refused, Unverified}` | `PortabilityClass::{Portable, Refused, Unverified}` |
+| `width_class(name)` | `portability_class(name)` |
+| `width_safe(name)` | `portable(name)` |
+| `width_safe_names()` / `width_refused_names()` / `width_unverified_names()` | `portable_names()` / `refused_names()` / `unverified_names()` |
+| `FoldLane::WidthSafeSubset`, wire `"width_safe_subset"` | `FoldLane::PortableSubset`, wire `"portable_subset"` |
+| boot field `fold_safe` | boot field `fold_portable` |
+
+The glossary moved with them: `CONTEXT.md` now defines **Portability class**
+and **Refusal axis**, and lists *width class* under what to avoid — the entry
+had explicitly forbidden *portability class* while the classification was still
+one-dimensional.
+
+**No gate moved.** The three classes admit and decline exactly what they did,
+the range guard is untouched (it is genuinely about the width, and remains the
+precondition every portability claim is stated under), and the counts are the
+same 44 / 11 / 2.
+
+### The reason becomes data
+
+A refused row's divergence was prose in a `const`'s doc comment. It is now
+`refusal(name) -> Option<Refusal>`, carrying a `RefusalAxis` and a one-line
+witness, with two consequences worth the change:
+
+- **The discipline is mechanical.** `every_refused_row_carries_its_witness`
+  asserts that every refused row has one, that it names its own call, and that
+  it shows *both* engines' answers. ADR-0061's one-witness-per-row rule has been
+  an editorial promise since the first refused row; it is now a test.
+- **The playground stops writing its own reasons.** The boundary panel said
+  every refused name "produces or renders an integer in the machine's own word",
+  which went false the day `preg_split` was refused. It now groups the rows by
+  `axis` and quotes the `witness`, both carried in the `boot` object, so a row
+  refused on a new axis changes the page without the page being edited — the
+  same property issue #64 S3 built the boot object for, applied to the reasons
+  rather than only to the names.
+
+### The axes, and what this instrument cannot see
+
+`RefusalAxis` lists what a refusal *has been* about — `IntegerWidth` (ten rows)
+and `BuildOption` (one) — rather than everything that could go wrong, because
+the differential is two engines and they are alike in ways two user runtimes are
+not:
+
+- **The operating system is invisible.** Both are POSIX: `DIRECTORY_SEPARATOR`
+  and `escapeshellarg("a b'c")` agree byte for byte, and `PHP_OS_FAMILY` differs
+  only as `Darwin` against `Unknown`. Windows is a third machine nobody probes,
+  so an OS-shaped value cannot be refused by measurement at all. Such a name
+  stays off the allowlist by argument, exactly as `strcmp` does for promising
+  only a sign — and the distinction between *refused because measured* and
+  *excluded because argued* is the reason the two live in different places.
+- **An ini both builds share is invisible.** Both report `precision = 14` and
+  `serialize_precision = -1`. A float-rendering name agrees here and would not
+  on a project that sets either differently; that exposure is named per row
+  (`strval`, `implode`, `array_unique`) rather than covered by the probe.
+- **A missing extension is visible, as a decline.** php-wasm 0.1.0 loads 25
+  extensions to the native build's 70, which is how all eleven `mb_*` probes
+  answered `widen: unknown function`, and how an `iconv`-family name would.
+
+A missing variant is therefore not an oversight. The enum grows when a probe
+finds a new kind of divergence, and a hazard the instrument cannot see is
+handled by exclusion rather than by a class this table hands out.

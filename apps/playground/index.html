@@ -322,6 +322,7 @@
     import { tags as t } from "@lezer/highlight"
     import LZString from "https://esm.sh/lz-string@1.5.0"
     import { driveReplay } from "./replay.mjs"
+    import { renderBoundaryHtml } from "./boundary.mjs"
 
     // The seeded sample demonstrates the rung ladder (ADR-0062 A-G10):
     // findings APPEAR as the profile climbs — 1 at default, 2 at contracts,
@@ -809,7 +810,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     // that actually booted is the analysis' answer, not the page's opinion.
     //
     // What this buys: with php-wasm's 32-bit PHP 8.5 the page says "folding
-    // width-safe builtins" and names the refused set (both derived live from boot data),
+    // portable builtins" and names the refused set (both derived live from boot data),
     // and if a 64-bit engine ever answers instead the same code says "all 22"
     // and names nothing. The line and the panel cannot go stale the way
     // "no PHP sidecar — findings that require executing PHP are omitted" did.
@@ -835,8 +836,8 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 
     function foldPhrase(b) {
       if (b.fold_lane === "full") return `folding all ${b.fold_total} allowlisted builtins`
-      if (b.fold_lane === "width_safe_subset") {
-        return `folding ${b.fold_safe}/${b.fold_total} width-safe builtins`
+      if (b.fold_lane === "portable_subset") {
+        return `folding ${b.fold_portable}/${b.fold_total} portable builtins`
       }
       return "folding nothing"
     }
@@ -867,50 +868,14 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     }
 
     // The boundary panel: what this engine proves, and what it does not.
-    // Both lists come out of `boot`; the framing sentence is the only editorial
-    // line on the page, and it is the true one — a declined lane widens, so the
-    // page is less precise there and never wrong.
+    // Its content lives in `boundary.mjs` so the smoke suite can check what the
+    // page SAYS, not only what the envelope carries — the two came apart once
+    // already, when the panel quoted one witness per axis and dropped nine.
     function renderBoundary(b) {
-      if (!b || !b.php_version) { boundary.hidden = true; return }
+      const html = renderBoundaryHtml(b)
+      if (html === null) { boundary.hidden = true; return }
       boundary.hidden = false
-
-      const live = []
-      live.push(b.fold_lane === "full"
-        ? `<strong>Folded values</strong> from the real engine — all ${b.fold_total} builtins on the folding allowlist.`
-        : `<strong>Folded values</strong> from the real engine — ${b.fold_safe} of the ${b.fold_total} builtins on the folding allowlist: the ones a ${bitsOf(b)} engine is verified to answer exactly as a 64-bit one does. <code>str_repeat("ab", 2)</code> is <code>'abab'</code> here, as on the CLI.`)
-      live.push(`<strong>Reflected return envelopes</strong> — a builtin's declared return type, read back from this engine rather than guessed (<code>strtoupper($x)</code> is <code>uppercase-string</code> once the predicate transfers refine it).`)
-      if (b.absence_family) {
-        live.push(`<strong>The absence family</strong> — <code>call.undefined-function</code> and its siblings, witnessed against ${escHtml(b.label ?? "the running engine")}. Without an engine these are structurally silent.`)
-      }
-      if (b.curated_rows) {
-        live.push(`<strong>Curated refinements</strong> — the pinned-version rows that narrow inside a reflected envelope (<code>strlen()</code> as <code>int&lt;0, max&gt;</code>).`)
-      }
-
-      const off = []
-      if (b.refused_folds && b.refused_folds.length) {
-        const names = b.refused_folds.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")
-        off.push(`${names} <strong>do not fold.</strong> Their job is to produce or render an integer in the machine's own word, and this build's word is ${bitsOf(b)}: <code>sprintf("%x", -1)</code> is <code>"ffffffff"</code> here and <code>"ffffffffffffffff"</code> on the 64-bit PHP you deploy on. They widen instead of answering.`)
-        off.push(`<strong>Integers outside ±2147483647 decline</strong> — counted through array literals, and over integer keys as well as values.`)
-      }
-      if (b.unverified_folds && b.unverified_folds.length) {
-        const names = b.unverified_folds.map((n) => `<code>${escHtml(n)}()</code>`).join(", ")
-        off.push(`${names} <strong>do not fold either, for a different reason:</strong> their ${bitsOf(b)} behaviour is not measured, so they fold only on a provably 64-bit engine.`)
-      }
-      if (!b.curated_rows) {
-        off.push(`<strong>Curated refinements are off.</strong> A curated row is verified against the 64-bit engine at the pinned version, and a narrower machine at the same version can violate it — so <code>strlen()</code> is <code>int</code> here, not <code>int&lt;0, max&gt;</code>.`)
-      }
-      if (b.fold_lane === "declined") {
-        off.push(`<strong>Nothing folds.</strong> This engine did not report an integer width the fold lane has been verified against, and an unknown machine is not assumed.`)
-      }
-
-      const list = (items) => `<ul>${items.map((i) => `<li>${i}</li>`).join("")}</ul>`
-      const framing = off.length
-        ? `Everything in the second list <em>widens</em>: the analysis declines rather than guesses, so the browser is less precise than the CLI there and never wrong. Everything in the first list is a real php-src answer, not a re-implementation.`
-        : `This engine answers everything the analysis knows how to ask, so nothing is held back here. Every answer above is a real php-src answer, not a re-implementation.`
-      boundaryBody.innerHTML =
-        `<h4>Live — answered by php-src itself</h4>${list(live)}` +
-        (off.length ? `<h4>Not answered here</h4>${list(off)}` : "") +
-        `<p class="framing">${framing}</p>`
+      boundaryBody.innerHTML = html
     }
     function showEngineNote(reason) {
       engineNote.hidden = !reason

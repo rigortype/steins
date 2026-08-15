@@ -451,7 +451,7 @@ than assume the corpus stood still.
 
 ### The foldable-allowlist reseed (2026-08-01, issue #78)
 
-Eighteen builtins joined the width-safe fold subset and six more joined the
+Eighteen builtins joined the portable fold subset and six more joined the
 width-refused rows (which still fold on this 64-bit measuring machine). No
 analyzer code moved with them — the fold lane reads the catalog — and nsrt is
 where that shows up as precision.

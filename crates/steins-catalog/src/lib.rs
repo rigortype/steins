@@ -6,9 +6,9 @@
 //! and deterministic on the concrete path, else it widens (locale-, timezone-,
 //! encoding-, global-, nondeterminism-sensitive functions stay excluded).
 //!
-//! `WIDTH_REFUSED` and `WIDTH_UNVERIFIED` fold on a proven 64-bit engine but
+//! `REFUSED` and `UNVERIFIED` fold on a proven 64-bit engine but
 //! decline on 32-bit; a refused row has a recorded divergence, an unverified
-//! row has none (see [`WidthClass`]). Other exclusions and their evidence:
+//! row has none (see [`PortabilityClass`]). Other exclusions and their evidence:
 //!
 //! * `strtotime`/`date`/`idate` and their siblings `gmdate`/`gmmktime`/
 //!   `getdate`/`localtime` are `nondet.time`, timezone-coupled even with
@@ -68,56 +68,170 @@ pub mod preg;
 /// `in_array`/`count`/`implode`, issue #39). A folded result may likewise be
 /// an array (ADR-0028's 2026-08-14 amendment, issue #330).
 ///
-/// The allowlist is the union of `WIDTH_SAFE`, `WIDTH_REFUSED`,
-/// `WIDTH_UNVERIFIED` (issue #64; amendment §4 added the third), so
-/// [`foldable`] is a *derived* predicate and [`width_class`] the primitive.
+/// The allowlist is the union of `PORTABLE`, `REFUSED`,
+/// `UNVERIFIED` (issue #64; amendment §4 added the third), so
+/// [`foldable`] is a *derived* predicate and [`portability_class`] the primitive.
 /// `mb_*`, locale-sensitive, and `nondet` functions are excluded.
 #[must_use]
 pub fn foldable(name: &str) -> bool {
-    width_class(name).is_some()
+    portability_class(name).is_some()
 }
 
 /// The number of names on the folding allowlist (ADR-0054 §9.6 freshness
 /// context, the [`foldable`] twin of [`hierarchy_entry_count`]): the union of
-/// the three width classes, which are disjoint by construction.
+/// the three portability classes, which are disjoint by construction.
 #[must_use]
 pub fn foldable_entry_count() -> usize {
-    WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len()
+    PORTABLE.len() + REFUSED.len() + UNVERIFIED.len()
 }
 
-/// Which integer-width class a foldable name sits in — the **primitive** the
+/// Which **portability class** a foldable name sits in — the **primitive** the
 /// folding allowlist is derived from (ADR-0028's 2026-08-14 amendment §4).
 ///
 /// `None` means not on the allowlist. The three `Some` arms classify
-/// *evidence*, not behaviour: only [`WidthClass::Safe`] changes what the fold
-/// gate admits; the other two are mechanically identical but kept apart to
-/// keep the refused rows' one-divergence-per-row discipline auditable.
+/// *evidence*, not behaviour: only [`PortabilityClass::Portable`] changes what
+/// the fold gate admits; the other two are mechanically identical but kept
+/// apart to keep the refused rows' one-divergence-per-row discipline auditable.
+///
+/// The class was called `WidthClass` while every row in it was about the
+/// engine's integer width. `preg_split` ended that: it is refused because one
+/// build's PCRE has a JIT and the other's does not, which is a property of the
+/// engine and not of its word size. The question the gate actually asks has
+/// always been *may an engine other than the project's own fold this name* —
+/// see [`RefusalAxis`] for what a refusal can be about, and for the axes this
+/// instrument cannot see.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum WidthClass {
+pub enum PortabilityClass {
     /// **Measured, and it agrees.** Differential probes (php-wasm 0.1.0,
-    /// `PHP_INT_SIZE = 4`, vs `php` 8.5.8 at 8) found identical value and type
+    /// `PHP_INT_SIZE = 4`, vs `php` 8.5.x at 8) found identical value and type
     /// tag, or a decline, for every argument the range guard admits.
-    Safe,
+    Portable,
     /// **Measured, and it disagrees.** At least one probe found both engines
-    /// silently differing. Folds only on a provably 64-bit engine.
+    /// silently differing; [`refusal`] names the axis and the witness. Folds
+    /// only on a provably 64-bit engine.
     Refused,
     /// **Not measured.** Folds only on a provably 64-bit engine, the same gate
-    /// [`WidthClass::Refused`] rides. See `WIDTH_UNVERIFIED`.
+    /// [`PortabilityClass::Refused`] rides. See `UNVERIFIED`.
     Unverified,
 }
 
-/// The width class of `name` (case-insensitive), or `None` when not on the
-/// allowlist. The lists are disjoint, so the search order below is a cost
+/// What a [`PortabilityClass::Refused`] row is refused *about* — the typed half
+/// of the one-witness-per-row discipline, so a reader can tell an arithmetic
+/// hazard from a build-configuration one without parsing prose.
+///
+/// # The axes this instrument cannot see
+///
+/// The differential is two engines, and they are alike in more ways than a
+/// user's two runtimes are:
+///
+/// * **The operating system.** Both are POSIX — `DIRECTORY_SEPARATOR` and
+///   `escapeshellarg("a b'c")` agree byte for byte, and `PHP_OS_FAMILY` differs
+///   only as `Darwin` against `Unknown`. Windows is a third machine nobody
+///   probes, so a name whose value is OS-shaped cannot be *refused by
+///   measurement* — it is excluded from the allowlist by argument, the way
+///   `strcmp` is excluded for promising only a sign.
+/// * **An ini both builds happen to share.** Both report `precision = 14` and
+///   `serialize_precision = -1`, so a name that renders floats agrees here and
+///   would not on a project that sets either differently. The catalog names
+///   that exposure per row rather than pretending the probe covers it.
+///
+/// A missing variant is therefore not an oversight: this enum lists what a
+/// refusal *has been* about, and grows when a probe finds a new kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RefusalAxis {
+    /// The engine's `PHP_INT_SIZE`, directly or through a coercion it decides.
+    IntegerWidth,
+    /// A build option: something the two engines were *compiled* differently
+    /// for, at the same version and the same ini.
+    BuildOption,
+}
+
+impl RefusalAxis {
+    /// The stable machine-readable spelling, for an envelope that carries the
+    /// axis as data (the playground's boot object). Owned by the type so no
+    /// consumer re-derives it — a second `match` at a crate boundary is how a
+    /// typed concept turns back into a string nobody checks.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::IntegerWidth => "integer_width",
+            Self::BuildOption => "build_option",
+        }
+    }
+}
+
+/// The recorded divergence behind a [`PortabilityClass::Refused`] row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Refusal {
+    /// What kind of engine difference produced it.
+    pub axis: RefusalAxis,
+    /// The witness, in one line: the call, and what each engine answered. Every
+    /// refused row has one — `every_refused_row_carries_its_witness` is the
+    /// discipline made mechanical rather than editorial.
+    pub witness: &'static str,
+}
+
+/// The refused rows, declared once: the name, the axis, and the witness.
+///
+/// The list and the lookup are generated from the SAME entries. They were two
+/// hand-maintained tables for one afternoon, and that is one afternoon too
+/// long — a refused row added to the names list without a witness would have
+/// compiled, and the test that catches it only runs after the fact.
+macro_rules! refused_rows {
+    ($($name:literal => ($axis:expr, $witness:literal)),* $(,)?) => {
+        /// The **refused rows** of the portability classification: a name folds
+        /// on a provably 64-bit engine and declines anywhere else, because a
+        /// divergence is on record. Every probe passes the range guard; only
+        /// refusing the name can exclude it. Each divergence is *silent* —
+        /// nothing throws, widens, or warns (ADR-0066 §4). Probes: 64-bit `php`
+        /// 8.5.x against 32-bit php-wasm 0.1.0. See [`refusal`] for each row's
+        /// axis and witness, which is where the reasons live now that they are
+        /// data rather than prose.
+        const REFUSED: &[&str] = &[$($name),*];
+
+        /// The refusal behind `name` (case-insensitive), or `None` when `name`
+        /// is not a refused row — including when it is portable, unverified, or
+        /// off the allowlist entirely.
+        #[must_use]
+        pub fn refusal(name: &str) -> Option<Refusal> {
+            match name.to_ascii_lowercase().as_str() {
+                $($name => Some(Refusal { axis: $axis, witness: $witness }),)*
+                _ => None,
+            }
+        }
+    };
+}
+
+refused_rows! {
+    // issue #64 — the first arithmetic rows
+    "abs" => (RefusalAxis::IntegerWidth, "abs(\"3000000000\") is int(3000000000) / float(3000000000) — a numeric string is coerced by the engine's own width, and the type tag flips"),
+    "intval" => (RefusalAxis::IntegerWidth, "intval(\"3000000000\") is 3000000000 / the saturated 2147483647"),
+    "sprintf" => (RefusalAxis::IntegerWidth, "sprintf(\"%x\", -1) is \"ffffffffffffffff\" / \"ffffffff\" — %b/%x/%o/%u render the machine word, and %d re-imports intval's saturation"),
+    // issue #78 — machine-word rendering and its inverse
+    "dechex" => (RefusalAxis::IntegerWidth, "dechex(-1) is \"ffffffffffffffff\" / \"ffffffff\", and dechex(-2147483647) diverges too — an in-range argument suffices"),
+    "decbin" => (RefusalAxis::IntegerWidth, "decbin(-1) is 64 ones / 32 ones"),
+    "decoct" => (RefusalAxis::IntegerWidth, "decoct(-1) is \"1777777777777777777777\" / \"37777777777\""),
+    "bindec" => (RefusalAxis::IntegerWidth, "bindec(\"11111111111111111111111111111111\") is int(4294967295) / float(4294967295) — the type tag flips from a plain string"),
+    "hexdec" => (RefusalAxis::IntegerWidth, "hexdec(\"FFFFFFFF\") is int(4294967295) / float(4294967295)"),
+    // issue #78 — a `long` hiding inside string work
+    "version_compare" => (RefusalAxis::IntegerWidth, "version_compare(\"2147483647\", \"2147483648\") is -1 / 0 — php-src compares each numeric run through a C long, so two oversized runs both saturate and compare equal"),
+    // issue #354 — a width-typed numeric string, and a PCRE build option
+    "range" => (RefusalAxis::IntegerWidth, "range(\"3000000000\", \"3000000000\") is [int(3000000000)] / [float(3000000000.0)] — its bounds are declared string|int|float, so the machine types the numeric string"),
+    "preg_split" => (RefusalAxis::BuildOption, "preg_split(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") splits / is false — PCRE2's JIT ignores the inline limit verbs its interpreter honours, and adding (*NO_JIT) makes both engines agree"),
+}
+
+/// The portability class of `name` (case-insensitive), or `None` when not on
+/// the allowlist. The lists are disjoint, so the search order below is a cost
 /// decision, not a precedence rule.
 #[must_use]
-pub fn width_class(name: &str) -> Option<WidthClass> {
+pub fn portability_class(name: &str) -> Option<PortabilityClass> {
     let listed = |list: &[&str]| list.iter().any(|&f| name.eq_ignore_ascii_case(f));
-    if listed(WIDTH_SAFE) {
-        Some(WidthClass::Safe)
-    } else if listed(WIDTH_REFUSED) {
-        Some(WidthClass::Refused)
-    } else if listed(WIDTH_UNVERIFIED) {
-        Some(WidthClass::Unverified)
+    if listed(PORTABLE) {
+        Some(PortabilityClass::Portable)
+    } else if listed(REFUSED) {
+        Some(PortabilityClass::Refused)
+    } else if listed(UNVERIFIED) {
+        Some(PortabilityClass::Unverified)
     } else {
         None
     }
@@ -128,7 +242,7 @@ pub fn width_class(name: &str) -> Option<WidthClass> {
 ///
 /// # The rule
 ///
-/// Width-safe means: for every argument tuple where every integer (values and
+/// Portable means: for every argument tuple where every integer (values and
 /// array keys, recursively) lies within `[-(2^31 - 1), 2^31 - 1]`, a 32-bit
 /// engine returns the **identical value and type tag** a 64-bit engine
 /// returns, or **declines** (ADR-0066 §4). The lower bound is `-(2^31 - 1)`,
@@ -141,39 +255,39 @@ pub fn width_class(name: &str) -> Option<WidthClass> {
 /// A `false` here is a refusal to certify, not a claim of width-sensitivity.
 /// Default-deny: unclassified names fold only on a provably 64-bit engine.
 #[must_use]
-pub fn width_safe(name: &str) -> bool {
-    WIDTH_SAFE.iter().any(|&f| name.eq_ignore_ascii_case(f))
+pub fn portable(name: &str) -> bool {
+    PORTABLE.iter().any(|&f| name.eq_ignore_ascii_case(f))
 }
 
-// A private `width_refused` predicate (complement of `width_safe`) lived here;
-// `width_class(name) == Some(Refused)` replaced it since "not safe" and
-// "refused" stopped being the same question once unverified rows existed.
+// A private `width_refused` predicate (complement of `portable`) lived here;
+// `portability_class(name) == Some(Refused)` replaced it since "not portable"
+// and "refused" stopped being the same question once unverified rows existed.
 
-/// The verified width-safe names, in catalog order — the *extension* of
-/// [`width_safe`]. The playground boundary widget uses this so its displayed
+/// The verified portable names, in catalog order — the *extension* of
+/// [`portable`]. The playground boundary widget uses this so its displayed
 /// subset cannot drift from the folding gate (issue #64).
 #[must_use]
-pub fn width_safe_names() -> &'static [&'static str] {
-    WIDTH_SAFE
+pub fn portable_names() -> &'static [&'static str] {
+    PORTABLE
 }
 
-/// The refused names, in catalog order — [`WidthClass::Refused`] rows: folds a
+/// The refused names, in catalog order — [`PortabilityClass::Refused`] rows: folds a
 /// 32-bit engine loses **because a divergence is on record**. See
-/// `WIDTH_REFUSED` for each refusal's probe evidence.
+/// `REFUSED` for each refusal's probe evidence.
 #[must_use]
-pub fn width_refused_names() -> &'static [&'static str] {
-    WIDTH_REFUSED
+pub fn refused_names() -> &'static [&'static str] {
+    REFUSED
 }
 
-/// The unverified names, in catalog order — [`WidthClass::Unverified`] rows,
-/// sibling to [`width_refused_names`]. See `WIDTH_UNVERIFIED` for what
+/// The unverified names, in catalog order — [`PortabilityClass::Unverified`] rows,
+/// sibling to [`refused_names`]. See `UNVERIFIED` for what
 /// "unverified" commits the catalog to (deliberately nothing).
 #[must_use]
-pub fn width_unverified_names() -> &'static [&'static str] {
-    WIDTH_UNVERIFIED
+pub fn unverified_names() -> &'static [&'static str] {
+    UNVERIFIED
 }
 
-/// The verified width-safe half of the folding allowlist (issue #64), grouped
+/// The verified portable half of the folding allowlist (issue #64), grouped
 /// by *why* the width cannot reach the result:
 ///
 /// * **string in, string out**: byte transforms of the subject, plus
@@ -226,7 +340,7 @@ pub fn width_unverified_names() -> &'static [&'static str] {
 /// report `precision = 14`), escalated from *how a float is spelled* to *how
 /// long the array is*. Closing that seam is a decision about all three names at
 /// once, not about this one.
-const WIDTH_SAFE: &[&str] = &[
+const PORTABLE: &[&str] = &[
     "strtolower",
     "strtoupper",
     "ucfirst",
@@ -279,70 +393,12 @@ const WIDTH_SAFE: &[&str] = &[
     "doubleval",
 ];
 
-/// The **refused rows** of the width classification, with the divergence that
-/// refused each (ADR-0061 refused-row discipline applied to the integer
-/// machine). Every probe passes the range guard; only refusing the name can
-/// exclude it. Each row is a *silent* divergence — nothing throws, widens, or
-/// warns (ADR-0066 §4). Probes: 64-bit `php` 8.5.8 vs 32-bit php-wasm 0.1.0.
-///
-/// * `abs` — **type tag** flips: a numeric string coerces to `int|float` by
-///   the engine's own width (`abs("3000000000")` = `int` / `float`).
-/// * `intval` — saturation and wraparound by definition of the cast (10/17
-///   probes diverged — the width-sensitive builtin).
-/// * `sprintf` — `%b`/`%x`/`%o`/`%u` render the machine word from an in-range
-///   argument; `%d` re-imports `intval`'s saturation. Format-aware
-///   sub-classification is deliberately not attempted (the line would live
-///   inside a string literal).
-/// * `dechex`/`decbin`/`decoct` — render the machine word for a negative,
-///   in-range argument.
-/// * `bindec`/`hexdec` — type tag flips at the width boundary from a plain
-///   string argument.
-/// * `version_compare` — the *surprise* of issue #78: php-src compares each
-///   numeric run through a C `long`, so two oversized runs both saturate and
-///   compare **equal** on 32-bit. The three-argument (bool) form is refused
-///   with it.
-/// * `range` — the *surprise* of issue #354, and the only one of that slice's
-///   five: its bounds are declared `string|int|float`, so an oversized numeric
-///   string is typed by the engine's own width and the **element type tag**
-///   flips inside the result. `range("3000000000", "3000000000")` is
-///   `[int(3000000000)]` / `[float(3000000000.0)]`, and the flip starts one
-///   past the narrow `PHP_INT_MAX` (`"2147483648"`). Reachable from strings
-///   only — 52 probes found no int- or float-argument route.
-/// * `preg_split` — refused on a divergence that is **not** the integer width,
-///   the one row here where that is true. The two builds differ in their PCRE:
-///   64-bit `php` has `pcre.jit = 1`, php-wasm 0.1.0 has none, and PCRE2's JIT
-///   does not honour the inline limit verbs the interpreter does.
-///   `preg_split('/(*LIMIT_MATCH=1)a/', "aaa")` splits on one engine and is
-///   `false` on the other; adding `(*NO_JIT)` makes them agree, which is what
-///   identifies the cause. `LIMIT_RECURSION`/`LIMIT_DEPTH` repeat it. Refusing
-///   the narrow engine also keeps this seam and ADR-0078's pattern lane
-///   (`preg_refusal_memo`) from answering the same question separately in the
-///   browser; on a native run both ride the project's own PCRE, where a folded
-///   `false` is that engine's own answer and the lane's diagnostic is about the
-///   pattern, not the value.
-const WIDTH_REFUSED: &[&str] = &[
-    "abs",
-    "intval",
-    "sprintf",
-    // issue #78 — machine-word rendering and its inverse
-    "dechex",
-    "decbin",
-    "decoct",
-    "bindec",
-    "hexdec",
-    // issue #78 — a `long` hiding inside string work
-    "version_compare",
-    // issue #354 — a width-typed numeric string, and a PCRE build option
-    "range",
-    "preg_split",
-];
-
-/// The **unverified rows** of the width classification (ADR-0028's 2026-08-14
+/// The **unverified rows** of the portability classification (ADR-0028's 2026-08-14
 /// amendment §4, issue #330) — the third class, which claims nothing. Unlike
-/// `WIDTH_SAFE`/`WIDTH_REFUSED`, the correct probe count behind a row here is
+/// `PORTABLE`/`REFUSED`, the correct probe count behind a row here is
 /// **zero**: not measured, so the name folds only on a provably 64-bit engine.
-/// A probe finding agreement moves a row to `WIDTH_SAFE`, a divergence to
-/// `WIDTH_REFUSED`.
+/// A probe finding agreement moves a row to `PORTABLE`, a divergence to
+/// `REFUSED`.
 ///
 /// Both names are admitted by the amendment's §5 strictly-stronger rule (their
 /// Rust rungs are type-level only) rather than re-derived in Rust per ADR-0004:
@@ -357,10 +413,10 @@ const WIDTH_REFUSED: &[&str] = &[
 ///
 /// The five names this class deferred — `range`, `preg_split`, `str_split`,
 /// `array_unique`, `array_fill` — were probed in issue #354 and left it: three
-/// to `WIDTH_SAFE`, two to `WIDTH_REFUSED`. Nothing was promoted *into* here,
+/// to `PORTABLE`, two to `REFUSED`. Nothing was promoted *into* here,
 /// which is the class working as defined: a probe moves a row out, and a row
 /// only enters by being admitted unmeasured.
-const WIDTH_UNVERIFIED: &[&str] = &["array_merge", "explode"];
+const UNVERIFIED: &[&str] = &["array_merge", "explode"];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when **uncatalogued** (unknown effects, ADR-0005): `Some(&[])` is
@@ -1686,24 +1742,25 @@ fn levenshtein(a: &str, b: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::{
-        WIDTH_REFUSED, WIDTH_SAFE, WIDTH_UNVERIFIED, WidthClass, effect_labels, foldable,
-        foldable_entry_count, width_class, width_safe,
+        PORTABLE, PortabilityClass, REFUSED, RefusalAxis, UNVERIFIED, effect_labels, foldable,
+        foldable_entry_count, portability_class, portable, portable_names, refusal, refused_names,
+        unverified_names,
     };
 
     /// Classes are pairwise DISJOINT, no name listed twice, size is 57
     /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, issue #354, and the four
     /// aliases that slice's coverage survey turned up).
     #[test]
-    fn the_width_classes_partition_the_allowlist() {
+    fn the_portability_classes_partition_the_allowlist() {
         for (list, class, label) in [
-            (WIDTH_SAFE, WidthClass::Safe, "WIDTH_SAFE"),
-            (WIDTH_REFUSED, WidthClass::Refused, "WIDTH_REFUSED"),
-            (WIDTH_UNVERIFIED, WidthClass::Unverified, "WIDTH_UNVERIFIED"),
+            (PORTABLE, PortabilityClass::Portable, "PORTABLE"),
+            (REFUSED, PortabilityClass::Refused, "REFUSED"),
+            (UNVERIFIED, PortabilityClass::Unverified, "UNVERIFIED"),
         ] {
             for name in list {
                 assert!(foldable(name), "{name} is classified but not foldable");
                 assert_eq!(
-                    width_class(name),
+                    portability_class(name),
                     Some(class),
                     "{name} is listed in {label} but classifies elsewhere"
                 );
@@ -1713,9 +1770,9 @@ mod tests {
                     "{name} is listed twice in {label}"
                 );
                 for (other, other_label) in [
-                    (WIDTH_SAFE, "WIDTH_SAFE"),
-                    (WIDTH_REFUSED, "WIDTH_REFUSED"),
-                    (WIDTH_UNVERIFIED, "WIDTH_UNVERIFIED"),
+                    (PORTABLE, "PORTABLE"),
+                    (REFUSED, "REFUSED"),
+                    (UNVERIFIED, "UNVERIFIED"),
                 ] {
                     if other_label != label {
                         assert!(
@@ -1726,16 +1783,16 @@ mod tests {
                 }
             }
         }
-        assert_eq!(WIDTH_SAFE.len(), 44, "the verified width-safe subset");
-        assert_eq!(WIDTH_REFUSED.len(), 11, "the refused rows");
-        assert_eq!(WIDTH_UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
+        assert_eq!(PORTABLE.len(), 44, "the verified portable subset");
+        assert_eq!(REFUSED.len(), 11, "the refused rows");
+        assert_eq!(UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
             foldable_entry_count(),
             57,
             "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354 and its aliases"
         );
         assert_eq!(
-            WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len(),
+            PORTABLE.len() + REFUSED.len() + UNVERIFIED.len(),
             foldable_entry_count(),
             "the count is the three lists and nothing else"
         );
@@ -1746,31 +1803,33 @@ mod tests {
     #[test]
     fn the_unverified_rows_decline_like_refused_ones_without_being_them() {
         for name in ["array_merge", "explode", "Array_Merge", "EXPLODE"] {
-            assert_eq!(width_class(name), Some(WidthClass::Unverified));
+            assert_eq!(portability_class(name), Some(PortabilityClass::Unverified));
             assert!(foldable(name), "{name} folds on a 64-bit engine");
-            assert!(!width_safe(name), "{name} declines on anything narrower");
+            assert!(!portable(name), "{name} declines on anything narrower");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
-        assert!(!WIDTH_REFUSED.contains(&"explode"));
-        assert!(!WIDTH_REFUSED.contains(&"array_merge"));
+        assert!(!REFUSED.contains(&"explode"));
+        assert!(!REFUSED.contains(&"array_merge"));
         // The five this class deferred are no longer deferred: issue #354
         // probed each and landed it in the class its evidence chose. None of
         // them passed through here, and the class did not grow.
         for name in ["str_split", "array_unique", "array_fill"] {
-            assert_eq!(width_class(name), Some(WidthClass::Safe), "{name} probed clean");
+            assert_eq!(portability_class(name), Some(PortabilityClass::Portable), "{name} probed clean");
         }
         for name in ["range", "preg_split"] {
             assert_eq!(
-                width_class(name),
-                Some(WidthClass::Refused),
+                portability_class(name),
+                Some(PortabilityClass::Refused),
                 "{name} has a recorded divergence"
             );
         }
     }
 
-    /// The eleven refused rows, named; see `WIDTH_REFUSED` for probes.
+    /// The eleven refused rows, named; see [`refusal`] for each row's axis and
+    /// witness. Ten are width-sensitive and one — `preg_split` — is not, which
+    /// is why the test is named for the class and not for the axis.
     #[test]
-    fn the_width_sensitive_builtins_are_refused() {
+    fn the_refused_rows_fold_only_on_a_64_bit_engine() {
         for name in [
             "abs",
             "intval",
@@ -1791,8 +1850,12 @@ mod tests {
             "Range",
             "PREG_SPLIT",
         ] {
-            assert!(!width_safe(name), "{name} must not be certified width-safe");
-            assert!(foldable(name), "{name} is refused on width, not off the allowlist");
+            assert!(!portable(name), "{name} must not be certified portable");
+            assert!(foldable(name), "{name} is refused, not off the allowlist");
+            assert!(
+                refusal(name).is_some(),
+                "{name} is refused, so it owes an axis and a witness"
+            );
         }
         for name in [
             "strtoupper",
@@ -1811,8 +1874,56 @@ mod tests {
             "array_fill",
             "array_UNIQUE",
         ] {
-            assert!(width_safe(name), "{name} is a verified width-safe fold");
+            assert!(portable(name), "{name} is a verified portable fold");
         }
+    }
+
+    /// Every refused row carries a witness, and only refused rows do. The
+    /// ADR-0061 one-divergence-per-row discipline has been an editorial promise
+    /// since the first refused row; this is it made mechanical. A witness names
+    /// the call and what each engine answered, so `/` appears in every one.
+    #[test]
+    fn every_refused_row_carries_its_witness() {
+        for name in refused_names() {
+            let r = refusal(name).unwrap_or_else(|| panic!("{name} is refused with no witness"));
+            assert!(
+                r.witness.contains(name),
+                "{name}'s witness must show the call it is about: {}",
+                r.witness
+            );
+            assert!(
+                r.witness.contains(" / "),
+                "{name}'s witness must show BOTH engines' answers: {}",
+                r.witness
+            );
+            assert_eq!(refusal(&name.to_uppercase()), Some(r), "{name} matches case-insensitively");
+        }
+        // Only a refused row has one. A portable row has nothing to witness, and
+        // an unverified row's correct witness count is zero by definition.
+        for name in portable_names().iter().chain(unverified_names()) {
+            assert_eq!(refusal(name), None, "{name} is not a refused row");
+        }
+        assert_eq!(refusal("strtolower"), None);
+        assert_eq!(refusal("some_unknown_fn"), None);
+    }
+
+    /// The axes, and the count per axis. `preg_split` is the whole reason this
+    /// enum exists: one row that is not about the integer width at all.
+    #[test]
+    fn the_refusal_axes_partition_the_refused_rows() {
+        let axis_of = |n: &str| refusal(n).expect("refused").axis;
+        for name in
+            ["abs", "intval", "sprintf", "dechex", "decbin", "decoct", "bindec", "hexdec",
+             "version_compare", "range"]
+        {
+            assert_eq!(axis_of(name), RefusalAxis::IntegerWidth, "{name} is an arithmetic row");
+        }
+        assert_eq!(axis_of("preg_split"), RefusalAxis::BuildOption);
+        let build = refused_names()
+            .iter()
+            .filter(|n| refusal(n).expect("refused").axis == RefusalAxis::BuildOption)
+            .count();
+        assert_eq!(build, 1, "one row is about a build option, and it is preg_split");
     }
 
     /// The alias rows: a second spelling of a name already on the list, and the
@@ -1825,11 +1936,11 @@ mod tests {
         for (alias, target) in
             [("join", "implode"), ("chop", "rtrim"), ("sizeof", "count"), ("doubleval", "floatval")]
         {
-            assert!(width_safe(alias), "{alias} folds wherever {target} does");
-            assert!(width_safe(target), "{target} is the row {alias} was probed against");
+            assert!(portable(alias), "{alias} folds wherever {target} does");
+            assert!(portable(target), "{target} is the row {alias} was probed against");
             assert_eq!(
-                width_class(alias),
-                width_class(target),
+                portability_class(alias),
+                portability_class(target),
                 "{alias} and {target} are one function; their classes cannot differ"
             );
             assert_eq!(effect_labels(alias), effect_labels(target), "{alias} is {target}");
@@ -1850,13 +1961,13 @@ mod tests {
     #[test]
     fn the_deferred_fold_names_landed_where_their_evidence_put_them() {
         for name in ["str_split", "array_fill", "array_unique"] {
-            assert!(width_safe(name), "{name} folds on a 32-bit engine too");
+            assert!(portable(name), "{name} folds on a 32-bit engine too");
             assert!(foldable(name), "{name} is on the folding allowlist");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
         for name in ["range", "preg_split"] {
             assert!(foldable(name), "{name} folds on a 64-bit engine");
-            assert!(!width_safe(name), "{name} is refused on a 32-bit engine");
+            assert!(!portable(name), "{name} is refused on a 32-bit engine");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
     }
@@ -1884,13 +1995,13 @@ mod tests {
             "str_ends_with",
             "gettype",
         ] {
-            assert!(width_safe(name), "{name} is an admitted width-safe fold");
+            assert!(portable(name), "{name} is an admitted portable fold");
             assert!(foldable(name), "{name} is on the folding allowlist");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
         for name in ["dechex", "decbin", "decoct", "bindec", "hexdec", "version_compare"] {
             assert!(foldable(name), "{name} folds on a 64-bit engine");
-            assert!(!width_safe(name), "{name} is refused on a 32-bit engine");
+            assert!(!portable(name), "{name} is refused on a 32-bit engine");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
     }
@@ -1898,44 +2009,44 @@ mod tests {
     /// The name accessors equal the predicate extensions (issue #64).
     #[test]
     fn the_name_accessors_agree_with_the_predicates() {
-        use super::{width_refused_names, width_safe_names, width_unverified_names};
-        assert_eq!(width_safe_names(), WIDTH_SAFE);
-        assert_eq!(width_refused_names(), WIDTH_REFUSED);
-        assert_eq!(width_unverified_names(), WIDTH_UNVERIFIED);
-        for name in width_safe_names() {
-            assert!(width_safe(name), "{name} is listed safe but the predicate declines it");
+        use super::{refused_names, portable_names, unverified_names};
+        assert_eq!(portable_names(), PORTABLE);
+        assert_eq!(refused_names(), REFUSED);
+        assert_eq!(unverified_names(), UNVERIFIED);
+        for name in portable_names() {
+            assert!(portable(name), "{name} is listed safe but the predicate declines it");
         }
-        for name in width_refused_names() {
-            assert!(!width_safe(name), "{name} is listed refused but the predicate admits it");
-            assert_eq!(width_class(name), Some(WidthClass::Refused), "{name} classifies elsewhere");
+        for name in refused_names() {
+            assert!(!portable(name), "{name} is listed refused but the predicate admits it");
+            assert_eq!(portability_class(name), Some(PortabilityClass::Refused), "{name} classifies elsewhere");
             assert!(foldable(name), "a refused name is still on the folding allowlist");
         }
-        for name in width_unverified_names() {
-            assert!(!width_safe(name), "{name} is listed unverified but the predicate admits it");
+        for name in unverified_names() {
+            assert!(!portable(name), "{name} is listed unverified but the predicate admits it");
             assert_eq!(
-                width_class(name),
-                Some(WidthClass::Unverified),
+                portability_class(name),
+                Some(PortabilityClass::Unverified),
                 "{name} is unverified, which is not refused"
             );
             assert!(foldable(name), "an unverified name is still on the folding allowlist");
         }
         assert_eq!(
-            width_refused_names().len() + width_unverified_names().len(),
-            foldable_entry_count() - width_safe_names().len(),
+            refused_names().len() + unverified_names().len(),
+            foldable_entry_count() - portable_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(width_safe_names().len(), 44);
-        assert_eq!(width_refused_names().len(), 11);
-        assert_eq!(width_unverified_names().len(), 2);
+        assert_eq!(portable_names().len(), 44);
+        assert_eq!(refused_names().len(), 11);
+        assert_eq!(unverified_names().len(), 2);
     }
 
-    /// Default-deny: a name without a width classification is not width-safe.
+    /// Default-deny: a name without a portability classification is not portable.
     #[test]
-    fn an_unclassified_name_is_not_width_safe() {
+    fn an_unclassified_name_is_not_portable() {
         for name in
             ["some_unknown_fn", "ip2long", "crc32", "strtotime", "str_word_count", "strcmp"]
         {
-            assert!(!width_safe(name), "{name} must not be certified width-safe");
+            assert!(!portable(name), "{name} must not be certified portable");
             assert!(!foldable(name), "{name} is not on the allowlist at all");
         }
     }
@@ -1964,7 +2075,7 @@ mod tests {
             "strcasecmp", "number_format", "bin2hex",
         ] {
             assert!(!foldable(name), "{name} must not be foldable");
-            assert!(!width_safe(name), "{name} must not be certified width-safe");
+            assert!(!portable(name), "{name} must not be certified portable");
         }
     }
 

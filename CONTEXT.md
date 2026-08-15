@@ -106,12 +106,28 @@ in either direction, because JSON can express neither PHP's key normalization
 nor its last-wins duplicates.
 _Avoid_: array literal (that is the source construct), JSON array
 
-**Width class**:
-A foldable name's verdict on whether its answer depends on the engine's integer
-width: *safe* (probed on both widths, agreed), *refused* (a divergence is on
-record), or *unverified* (never measured, so the name folds only on a proven
-64-bit engine).
-_Avoid_: 32-bit safety, portability class
+**Portability class**:
+A foldable name's verdict on whether its answer survives being computed by an
+engine other than the project's own: *portable* (probed against a second engine,
+agreed), *refused* (a divergence is on record, carried as data by `refusal()`
+with the axis it is about), or *unverified* (never measured, so the name folds
+only on a proven 64-bit engine).
+_Avoid_: width class, 32-bit safety
+
+The entry said *width class* while every refused row was about `PHP_INT_SIZE`.
+`preg_split` ended that — it is refused because one build's PCRE has a JIT and
+the other's does not, at the same version and the same ini — so the term now
+names the question the gate has always asked. The integer width remains the axis
+most refusals are about, and the **argument range guard** is still exactly about
+it: a portability verdict is stated only for tuples whose integers fit ±(2³¹−1).
+
+**Refusal axis**:
+What a *refused* row is refused about — `IntegerWidth` or `BuildOption` today.
+It records what the differential has actually found, not everything that could
+go wrong: the two probe engines are both POSIX and share their `precision`, so
+an OS- or ini-shaped hazard cannot be refused by measurement at all and is
+excluded from the allowlist by argument instead.
+_Avoid_: refusal reason (the *witness* is the reason; the axis is its kind)
 
 **Sound subset**:
 The diagnostic set emitted WITHOUT the sidecar — sound (zero-FP holds) but

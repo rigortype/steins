@@ -47,7 +47,7 @@ corpus makes among these names.
 ## Two things this surfaced on the way
 
 1. **Four aliases of allowlisted names are not themselves allowlisted.**
-   *(Acted on: the four landed as `WIDTH_SAFE` rows the same day — see the
+   *(Acted on: the four landed as portable rows the same day — see the
    ADR-0066 amendment of 2026-08-15. The paragraph below is the finding as it
    stood when this note was measured.)*
    `join`/`implode`, `chop`/`rtrim`, `sizeof`/`count`, `doubleval`/`floatval` —

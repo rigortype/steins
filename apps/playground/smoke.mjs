@@ -191,7 +191,7 @@ assert(boot.unverified_folds === undefined, "…and nothing is unverified there 
 // 57 = 44 safe + 11 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1, then
 // issue #354's five, then its four aliases). On the full lane every one of the
 // 57 folds, so what a narrow engine would decline is invisible here.
-assert(boot.fold_total === 57 && boot.fold_safe === 44, "the catalog's own counts travel");
+assert(boot.fold_total === 57 && boot.fold_portable === 44, "the catalog's own counts travel");
 assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
 
 // annotate rides the same loop.

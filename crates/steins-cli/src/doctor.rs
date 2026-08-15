@@ -290,10 +290,10 @@ fn section_runtime(no_php: bool, layout: &ProjectLayout) -> (Section, RuntimeFac
                     ),
                     Some(4) => line!(
                         sec,
-                        "  integer width: 4 bytes — only the {} width-safe name(s) of the foldable allowlist fold; the other {} decline (issue #64)",
-                        steins_catalog::width_safe_names().len(),
+                        "  integer width: 4 bytes — only the {} portable name(s) of the foldable allowlist fold; the other {} decline (issue #64)",
+                        steins_catalog::portable_names().len(),
                         steins_catalog::foldable_entry_count()
-                            - steins_catalog::width_safe_names().len()
+                            - steins_catalog::portable_names().len()
                     ),
                     Some(n) => line!(
                         sec,
@@ -1065,16 +1065,20 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
             "  A11 consequence: catalog-backed is-a demoted to Unknown for arm deletion and descendant closure (ADR-0052 amendment A11)"
         );
     }
-    // Integer-width classification is three-valued (ADR-0028, 2026-08-14); describes
-    // the CATALOG, not the project. Refused (on record) vs unverified (awaiting probes).
+    // The portability classification is three-valued (ADR-0028, 2026-08-14);
+    // describes the CATALOG, not the project. Refused (a divergence on record,
+    // and `refusal()` says on which axis) vs unverified (awaiting probes).
+    // Reported as "portability", not "width": one refused row — `preg_split` —
+    // is refused for a PCRE build option, and calling that a width verdict would
+    // tell the reader something untrue about it.
     line!(
         sec,
-        "  hierarchy table: {} row(s); foldable allowlist: {} name(s) (width: {} safe / {} refused / {} unverified) (freshness context, not a per-project fact)",
+        "  hierarchy table: {} row(s); foldable allowlist: {} name(s) (portability: {} portable / {} refused / {} unverified) (freshness context, not a per-project fact)",
         steins_catalog::hierarchy_entry_count(),
         steins_catalog::foldable_entry_count(),
-        steins_catalog::width_safe_names().len(),
-        steins_catalog::width_refused_names().len(),
-        steins_catalog::width_unverified_names().len()
+        steins_catalog::portable_names().len(),
+        steins_catalog::refused_names().len(),
+        steins_catalog::unverified_names().len()
     );
     (sec, skew)
 }

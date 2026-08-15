@@ -53,7 +53,7 @@ Places where Steins is quieter than it could be.
 array-key identity and offset absence are exact for a literal like `"\xC0"`.
 What such a value does **not** do is fold: the sidecar wire is JSON and cannot
 carry arbitrary bytes, so a non-UTF-8 argument is not sent and every
-`WIDTH_SAFE` builtin over it (`strlen`, `substr`, `strrev`, `str_pad`, `md5`,
+`PORTABLE` builtin over it (`strlen`, `substr`, `strrev`, `str_pad`, `md5`,
 `base64_encode`, …) falls back to its declared return envelope instead of a
 constant. Restoring the exact fold needs a lossless encoding on the ADR-0024
 protocol and is ADR-0080 §3.1. The name lanes decline in the same direction —

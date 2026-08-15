@@ -391,7 +391,7 @@ fn a_non_pinned_minor_declines_the_curated_row_and_still_seeds_the_envelope() {
 ///
 /// S1.5 deliberately does NOT relax this leg: a fold is a claim about one argument
 /// tuple, which a range guard can bound, but a curated row claims a builtin's
-/// WHOLE return domain with no per-call tuple to bound it. `strlen` is width-safe
+/// WHOLE return domain with no per-call tuple to bound it. `strlen` is portable
 /// for the fold lane yet its curated row still declines here — that contrast IS the pin.
 #[test]
 fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds() {
@@ -401,15 +401,15 @@ fn a_32_bit_engine_at_the_pinned_minor_declines_the_curated_row_and_still_seeds(
     assert_eq!(fact, Fact::General { base: Base::Int, nullable: false }, "envelope alone: {fact:?}");
     // The raw reflected declaration is unaffected by the width, too.
     assert_eq!(folder.builtin_return_type("strlen").as_deref(), Some("int"));
-    // …and `strlen` IS width-safe for the fold lane, same folder, same width — the
+    // …and `strlen` IS portable for the fold lane, same folder, same width — the
     // two gates are genuinely independent.
-    assert!(steins_catalog::width_safe("strlen"));
+    assert!(steins_catalog::portable("strlen"));
 }
 
-/// The width-safe subset over the REPLAY transport, end to end: a 32-bit table
+/// The portable subset over the REPLAY transport, end to end: a 32-bit table
 /// answers a `strtoupper` fold — this is what S2 will see in the playground.
 #[test]
-fn the_replay_transport_folds_the_width_safe_subset_on_a_32_bit_table() {
+fn the_replay_transport_folds_the_portable_subset_on_a_32_bit_table() {
     let mut t = Table::new();
     with_env(&mut t, "8.5.2", 4); // php-wasm 0.1.0
     with_fold(
@@ -436,7 +436,7 @@ fn the_replay_transport_folds_the_width_safe_subset_on_a_32_bit_table() {
 }
 
 /// The fold lane's width gate, refused leg (issue #64 S1.5): a builtin the catalog
-/// does NOT certify width-safe folds nothing on a 32-bit engine and isn't even
+/// does NOT certify portable folds nothing on a 32-bit engine and isn't even
 /// dispatched to. `intval` is the refusal's worst case: `intval("3000000000")` is
 /// `3000000000` on 64-bit but the silently-saturated `2147483647` on 32-bit.
 #[test]
@@ -460,7 +460,7 @@ fn a_width_refused_name_folds_nothing_on_a_32_bit_engine() {
 /// exactly as a refused one does, and folds at width 8. This is the browser-parity
 /// pin (php-wasm 0.1.0 reports `PHP_INT_SIZE = 4`, so the first half below IS what
 /// the playground does with an all-literal `explode`) — no code was added to make
-/// it happen, the gate just asks `steins_catalog::width_safe` and `explode` isn't
+/// it happen, the gate just asks `steins_catalog::portable` and `explode` isn't
 /// certified. If the gate ever grows a case per class, this pair catches it.
 #[test]
 fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
@@ -474,8 +474,8 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
     }
     let args = [ArgValue::Str(",".into()), ArgValue::Str("a,b".into())];
     assert_eq!(
-        steins_catalog::width_class("explode"),
-        Some(steins_catalog::WidthClass::Unverified),
+        steins_catalog::portability_class("explode"),
+        Some(steins_catalog::PortabilityClass::Unverified),
         "the fixture is about the unverified class, not the refused one",
     );
 
@@ -594,11 +594,11 @@ fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
 }
 
 /// The fold lane's width gate, ADMITTED leg (issue #64 S1.5): a verified
-/// width-safe builtin over in-range arguments folds on a 32-bit engine and IS
+/// portable builtin over in-range arguments folds on a 32-bit engine and IS
 /// dispatched to — without this, the width tests would all pass on a lane that
 /// folds nothing at all.
 #[test]
-fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
+fn a_32_bit_engine_folds_the_verified_portable_subset() {
     let engine = FakeEngine::new("8.5.2", Some(4))
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
@@ -610,7 +610,7 @@ fn a_32_bit_engine_folds_the_verified_width_safe_subset() {
 }
 
 /// Issue #354's admitted leg, and the first time the browser folds a builtin
-/// whose result is an ARRAY: `array_fill` is `WIDTH_SAFE`, so a 32-bit engine
+/// whose result is an ARRAY: `array_fill` is `PORTABLE`, so a 32-bit engine
 /// is dispatched to and the array comes back whole. Before this slice every
 /// name that returned an array was refused or unverified here, so the width
 /// gate and the array result path had never met on a narrow machine.
@@ -715,10 +715,10 @@ fn the_range_guard_excludes_php_int_min_on_a_32_bit_machine() {
 }
 
 /// An engine that doesn't report its width isn't provably 64-bit, so the fold lane
-/// declines — INCLUDING the width-safe subset (default-deny: an old or foreign
+/// declines — INCLUDING the portable subset (default-deny: an old or foreign
 /// runner is unknown, not assumed; the subset is verified against a specific machine).
 #[test]
-fn an_unreported_width_declines_even_the_width_safe_subset() {
+fn an_unreported_width_declines_even_the_portable_subset() {
     let engine = FakeEngine::new("8.5.2", None)
         .with_fold("strtoupper", FoldResult::Value(steins_sidecar::FoldValue::Str("AB".to_owned())));
     let mut folder = EngineFolder::with_engine(engine);
@@ -745,7 +745,7 @@ fn a_64_bit_engine_folds_normally() {
 /// The subset relaxes the 32-bit decline; it's not a new restriction on the
 /// machine every native run and corpus gate uses.
 #[test]
-fn a_64_bit_engine_is_untouched_by_the_width_safe_subset() {
+fn a_64_bit_engine_is_untouched_by_the_portable_subset() {
     let engine = FakeEngine::new("8.5.2", Some(8))
         .with_fold("intval", FoldResult::Value(steins_sidecar::FoldValue::Int(3_000_000_000)))
         .with_fold("strval", FoldResult::Value(steins_sidecar::FoldValue::Str("9e18".to_owned())));
