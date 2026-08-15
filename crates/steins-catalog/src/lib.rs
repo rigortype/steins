@@ -205,6 +205,19 @@ pub fn width_unverified_names() -> &'static [&'static str] {
 /// flip inside a result is legible only in the response bytes — and found
 /// them unchanged.
 ///
+/// * **a second spelling of a name already here**: `join`, `chop`, `sizeof` and
+///   `doubleval` are PHP's own aliases for `implode`, `rtrim`, `count` and
+///   `floatval` — one C handler reached by two names, so an alias cannot
+///   diverge from its target on any machine. They are listed anyway rather than
+///   resolved through an alias table, because `foldable` matches a spelling and
+///   a row that claims a width owes probes; each earned its own, by running its
+///   target's recorded probe family against the alias spelling. The four
+///   reproduced their targets' ADR-0066 counts exactly, and replied
+///   byte-identically to the target on both engines across all 45 tuples. A
+///   scan of every internal function's arginfo against the allowlist found no
+///   fifth pair: `key_exists`, `is_integer`/`is_long` and `is_double` alias
+///   names that are not admitted, so they enter with their targets or not at all.
+///
 /// `array_unique` carries one exposure worth naming: its default `SORT_STRING`
 /// compares string casts, so `precision` decides how many elements survive.
 /// That is the same ini `strval` and `implode` already fold under (both engines
@@ -257,6 +270,11 @@ const WIDTH_SAFE: &[&str] = &[
     "str_split",
     "array_fill",
     "array_unique",
+    // the alias slice — one C handler under a second spelling
+    "join",
+    "chop",
+    "sizeof",
+    "doubleval",
 ];
 
 /// The **refused rows** of the width classification, with the divergence that
@@ -1658,8 +1676,9 @@ mod tests {
         foldable_entry_count, width_class, width_safe,
     };
 
-    /// Classes are pairwise DISJOINT, no name listed twice, size is 53
-    /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, plus issue #354).
+    /// Classes are pairwise DISJOINT, no name listed twice, size is 57
+    /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, issue #354, and the four
+    /// aliases that slice's coverage survey turned up).
     #[test]
     fn the_width_classes_partition_the_allowlist() {
         for (list, class, label) in [
@@ -1693,13 +1712,13 @@ mod tests {
                 }
             }
         }
-        assert_eq!(WIDTH_SAFE.len(), 40, "the verified width-safe subset");
+        assert_eq!(WIDTH_SAFE.len(), 44, "the verified width-safe subset");
         assert_eq!(WIDTH_REFUSED.len(), 11, "the refused rows");
         assert_eq!(WIDTH_UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
             foldable_entry_count(),
-            53,
-            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1 and issue #354"
+            57,
+            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354 and its aliases"
         );
         assert_eq!(
             WIDTH_SAFE.len() + WIDTH_REFUSED.len() + WIDTH_UNVERIFIED.len(),
@@ -1779,6 +1798,35 @@ mod tests {
             "array_UNIQUE",
         ] {
             assert!(width_safe(name), "{name} is a verified width-safe fold");
+        }
+    }
+
+    /// The alias rows: a second spelling of a name already on the list, and the
+    /// pairing itself is the claim being pinned. If PHP ever stopped aliasing
+    /// one of these the row would still be *sound* — it was probed on its own
+    /// spelling — but the reason written beside it would be wrong, so the pair
+    /// is asserted rather than assumed.
+    #[test]
+    fn the_alias_rows_sit_beside_the_names_they_alias() {
+        for (alias, target) in
+            [("join", "implode"), ("chop", "rtrim"), ("sizeof", "count"), ("doubleval", "floatval")]
+        {
+            assert!(width_safe(alias), "{alias} folds wherever {target} does");
+            assert!(width_safe(target), "{target} is the row {alias} was probed against");
+            assert_eq!(
+                width_class(alias),
+                width_class(target),
+                "{alias} and {target} are one function; their classes cannot differ"
+            );
+            assert_eq!(effect_labels(alias), effect_labels(target), "{alias} is {target}");
+        }
+        // The aliases whose TARGET is not admitted: they enter together or not
+        // at all, and until then neither is foldable.
+        for (alias, target) in
+            [("key_exists", "array_key_exists"), ("is_integer", "is_int"), ("is_double", "is_float")]
+        {
+            assert!(!foldable(alias), "{alias} is not admitted ahead of {target}");
+            assert!(!foldable(target), "{target} is not admitted");
         }
     }
 
@@ -1862,7 +1910,7 @@ mod tests {
             foldable_entry_count() - width_safe_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(width_safe_names().len(), 40);
+        assert_eq!(width_safe_names().len(), 44);
         assert_eq!(width_refused_names().len(), 11);
         assert_eq!(width_unverified_names().len(), 2);
     }

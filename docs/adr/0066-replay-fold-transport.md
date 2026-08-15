@@ -712,3 +712,62 @@ them, which remains the correct number until someone runs a probe **set** at the
 - Three of the five now fold in the browser, which is the first time the width gate
   and the array-result path meet on a narrow machine;
   `the_issue_354_verdicts_split_the_lane_on_a_32_bit_engine` is where that is pinned.
+
+## Amendment (2026-08-15): the alias rows (`join`, `chop`, `sizeof`, `doubleval`)
+
+The issue #354 coverage survey — 238 builtins taken from the extensions in
+phpstan-src's `src/Type/Php` that declare support for one, each measured against
+what Steins answers today (`docs/notes/20260815-phpstan-type-php-coverage.md`) —
+turned up four names that are **PHP's own second spellings** of names already on
+this list: `join`/`implode`, `chop`/`rtrim`, `sizeof`/`count`,
+`doubleval`/`floatval`. One C handler, two names. `foldable` matches a spelling,
+so all four widened.
+
+### Why they are listed rather than resolved
+
+An alias table (`alias(name) -> Option<&str>`, consulted by `width_class`) was
+the obvious shape and is deliberately not what landed. A row on this list claims
+a width, and the discipline is that a claim is earned by probing; resolving one
+name's verdict onto another would make the *first* alias table entry a claim
+nothing measured. Four literal rows cost four lines and keep every row's
+evidence its own. The table becomes worth building when the alias count is
+large enough that transcription is the greater risk — a threshold four names do
+not meet.
+
+### The evidence
+
+Each alias was probed with **its target's own recorded probe family**, run
+against the alias spelling, on both machines. 45 tuples. Two independent claims
+come out of the same run, because each tuple produced four replies
+(`{target, alias} × {64-bit, 32-bit}`):
+
+- **the pairing** — `alias@64 == target@64` and `alias@32 == target@32`,
+  byte-identical. **Zero breaks in 45 tuples.**
+- **the width** — `alias@64 == alias@32`, the ordinary `WIDTH_SAFE` claim,
+  earned directly on the alias spelling rather than inherited.
+
+| alias | target | probes (silent/reverse/decline) | the target's recorded row |
+| --- | --- | --- | --- |
+| `join` | `implode` | 13 (0/0/1) | 13 (0/0/1) |
+| `chop` | `rtrim` | 8 (0/0/0) | 8 (0/0/0) |
+| `sizeof` | `count` | 9 (0/0/1) | 9 (0/0/1) |
+| `doubleval` | `floatval` | 15 (0/0/0) | 15 (0/0/0) |
+
+The counts reproduce the targets' rows exactly, including both declines (the
+unassignable next-int key `implode` and `count` both refuse). That is what "one
+handler" predicts, and it is the reason these four needed no probe *design*:
+the family was already written.
+
+### No fifth pair
+
+Every internal function's arginfo was compared against the 53 allowlisted names,
+and the twins were read by hand. Signature identity alone is a weak filter —
+`string $string: string` matches 27 functions — but it is a complete *upper*
+bound, and the only true aliases among them are the four above. Three further
+pairs alias names that are **not** admitted (`key_exists`/`array_key_exists`,
+`is_integer`/`is_long`/`is_int`, `is_double`/`is_float`); they enter with their
+targets or not at all, which the catalog's alias test pins in the negative.
+
+`WIDTH_SAFE` is now **44**, `WIDTH_REFUSED` **11**, `WIDTH_UNVERIFIED` **2**, the
+allowlist **57**. The boundary moved in the safe direction only: the browser
+folds four more names and refuses nothing new.
