@@ -73,6 +73,14 @@ fn else_branch(decl: &str, cond: &str) -> String {
     ))
 }
 
+/// `@param <decl> $x`, dumped on the fall-through of `assert(<cond>)` — the
+/// throw-guard twin of [`then_branch`] (ADR-0052's 2026-07-25 amendment).
+fn after_assert(decl: &str, cond: &str) -> String {
+    one_type(&format!(
+        "<?php\n/** @param {decl} $x */\nfunction f($x): void {{ \\assert({cond}); \\PHPStan\\dumpType($x); }}\n"
+    ))
+}
+
 
 // The headline: the catalog floor's `T|false` row loses its `false` arm
 
@@ -184,6 +192,48 @@ fn the_opposite_branch_is_the_value_lanes_and_leaves_the_arms_alone() {
     // `apply_class_narrowing`'s doc comment, observed.
     assert_eq!(then_branch("string|false", "$x === false"), "dumped type: false");
     assert_eq!(else_branch("string|false", "$x !== false"), "dumped type: false");
+}
+
+// `assert($expr)` reaches the same lane as `if ($expr)` (issue #391)
+
+
+#[test]
+fn an_assert_subtracts_the_false_arm_exactly_as_its_if_twin_does() {
+    // The corpus shape this repair is named after: `realpath()`-grade `T|false`
+    // guarded by an assert chain. Before the fix the assert arm of `walk_trace`
+    // called only the VALUE-lane refinements, and a `T|false` binding has no
+    // value-lane carrier at all — so the lane came out untouched.
+    assert_eq!(after_assert("string|false", "$x !== false"), "dumped type: string (asserted)");
+    assert_eq!(
+        after_assert("string|false", "$x !== false && $x !== ''"),
+        "dumped type: string (asserted)",
+        "the `&&` chain's non-final conjunct subtracts too"
+    );
+    assert_eq!(
+        after_assert("non-empty-string|false", "$x !== false && $x !== ''"),
+        "dumped type: non-empty-string (asserted)"
+    );
+    // The `if` twin, re-pinned beside it: one behavior, two spellings.
+    assert_eq!(then_branch("non-empty-string|false", "$x !== false && $x !== ''"), "dumped type: non-empty-string (asserted)");
+}
+
+#[test]
+fn an_assert_reaches_the_null_subtrahend_too() {
+    // The repair is the missing `apply_class_narrowing` call, so every subtrahend it
+    // carries arrives at once — pinned so a later reader does not read the fix as
+    // `false`-specific. (Its `Class` subtrahend's observable is the declared-receiver
+    // lane, pinned in `phpdoc_undefined_method.rs`.)
+    assert_eq!(after_assert("string|null", "$x !== null"), "dumped type: string (asserted)");
+}
+
+#[test]
+fn an_assert_keeps_the_maybe_arm_like_every_other_guard() {
+    // The FP-safety direction is the guard's, not the statement form's: a general
+    // `bool` arm has an interior point `!== false` says nothing about.
+    assert_eq!(
+        after_assert("string|bool", "$x !== false"),
+        "dumped type: string|bool (asserted)"
+    );
 }
 
 #[test]

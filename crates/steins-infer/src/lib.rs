@@ -12041,6 +12041,17 @@ fn walk_trace(
                 apply_type_narrowing(w.cx, cond, true, env, store);
                 let refs = then_refinements(cond, w.cx.php_minor);
                 apply_refinements(&refs, env, store, Stratum::Verified);
+                // The declared-arm lane, in the same order `walk_if` applies it
+                // (issue #391): `apply_refinements` above reaches the VALUE lane
+                // only, and a `T|false` binding has no value-lane carrier at all
+                // (`seed_refined_scalar_fact` mints one only for a refinement
+                // *within* one base), so without this call `assert($x !== false)`
+                // narrowed nothing while its `if` twin narrowed to `string`. The
+                // arm lane is a subtraction carrier (ADR-0052 §2 / the 2026-08-01
+                // `Value`-subtrahend note): each surviving arm keeps its own
+                // stratum, so a `Verified` arm cannot launder and an `Asserted`
+                // one cannot be promoted by having been asserted about.
+                apply_class_narrowing(w, cond, true, store);
                 // The assert lowering models its argument as a `CondExpr`, so both
                 // `assert(isset(...))` and the DR2 type-predicate vocabulary
                 // (`assert(is_string($x))`) route through the same `if`-guard
