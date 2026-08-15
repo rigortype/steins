@@ -9156,11 +9156,8 @@ impl<'a> Cx<'a> {
         // nothing. `find_ctor` reports the declaring file now, so a `@param
         // template-type<Box<T>, Box, 'T'>` projects `T` — and a projected template
         // name is exactly what the alignment below binds.
-        let Some(ctor_env) =
-            self.envelopes_of(ctor.docblock.as_deref(), cfile, ctor.span.start)
-        else {
-            return empty;
-        };
+        let doc = ctor.docblock.as_deref();
+        let Some(ctor_env) = self.envelopes_of(doc, cfile, ctor.span.start) else { return empty };
         let mut out = Vec::with_capacity(templates.len());
         for tmpl in &templates {
             // The single constructor parameter whose `@param` is exactly this
@@ -28364,10 +28361,10 @@ fn vocabulary_bound(text: &str) -> Option<PType> {
 /// than a `$param` name), target and both branches.
 ///
 /// **Not** the strings that merely *name* something: a [`PKind::Generic`]'s base
-/// and a callable's identifier are class references, not child nodes, and each
-/// walk decides about them itself (the shadow leaves them alone, the mention scan
-/// counts them). Nor a callable's own `<T>` template list, which *declares* names
-/// instead of using them.
+/// and a callable's identifier are references written as text, not child nodes, so
+/// each walk decides about them itself — the mention scan counts a generic base,
+/// the qualification re-spells it, the shadow leaves both alone. Nor a callable's
+/// own `<T>` template list, which *declares* names instead of using them.
 fn for_each_child_type(ty: &PType, f: &mut dyn FnMut(&PType)) {
     match &ty.kind {
         PKind::Nullable(inner) | PKind::Array(inner) => f(inner),
@@ -28605,9 +28602,11 @@ fn parse_tag_type(text: &str) -> Option<PType> {
     (!type_has_unsupported(&parsed.ty)).then_some(parsed.ty)
 }
 
-/// Whether a phpdoc type subtree contains an `Unsupported` node anywhere — the
-/// grammar constructs the parser retains as raw text, in any position
-/// [`for_each_child_type`] reaches.
+/// Whether a phpdoc type subtree contains an `Unsupported` node anywhere — a
+/// grammar construct kept as raw text, in any position [`for_each_child_type`]
+/// reaches. The parser plants none today (it reports an error instead); the nodes
+/// this finds are the ones the shadow and the `template-type` decline write, both
+/// of which run after its one caller.
 fn type_has_unsupported(ty: &PType) -> bool {
     if matches!(ty.kind, PKind::Unsupported(_)) {
         return true;
