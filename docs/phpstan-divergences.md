@@ -87,8 +87,14 @@ positives across 14 held-out real applications, ~237k files
 
 PHPStan unifies template variables at call sites. Steins has no solver
 (ADR-0032): where value propagation reaches, templates are transparent;
-where it does not, silence. The accepted cost — thin library-author
-lints — is on the registry.
+where it does not, silence. What Steins does instead of solving is
+*read*: a `@param Owner<…, T, …>` at the top level asks the argument's
+generics carry what sits at `T`'s position, so `@return T` names it —
+one positional lookup, no unification, no fixpoint, all-or-nothing when
+two occurrences disagree, and always underneath the body summary, which
+wins wherever it speaks. The accepted cost — thin library-author lints,
+plus the nested and bounded positions PHPStan solves and Steins leaves
+silent — is on the registry.
 
 ## ImpurePoint vs Effect System
 
