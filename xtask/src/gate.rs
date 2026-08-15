@@ -513,7 +513,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //              gitignored, so the agent worktrees that landed #303, #327 and #341
     //              measured the public packages only — a hole in the workflow, not in
     //              the analyzer. See [`EFFECT_EXPECTED`]'s row.
-    ("pxxxx-monorepo", 536),
+    //   536 → 539  2026-08-16, ADR-0057 T1 (issue #378): a static factory now rebinds
+    //              an exact receiver, so three method calls that resolved to nothing
+    //              before are judged against their `@param`. All three are the same
+    //              shape and all three are true positives: a test deliberately hands
+    //              `false` to a `@param string` / `@param (int|string)` method to
+    //              exercise the callee's own assertion (the corpus marks each with a
+    //              `@phpstan-ignore-next-line`), and the third row is that `false`
+    //              flowing on inside the callee's descent to a private helper's
+    //              `@param string`. Measured as a finding-level diff against the
+    //              same-day baseline run: exactly these three rows are new, nothing
+    //              moved elsewhere. Seeded at what the corpus says today.
+    ("pxxxx-monorepo", 539),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
