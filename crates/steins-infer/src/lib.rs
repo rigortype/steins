@@ -21877,6 +21877,13 @@ struct CallTarget<'a> {
     /// non-exact receiver has no single class whose template list the arguments
     /// align to, a static call has no receiver, and a `new Foo()->m()` receiver has
     /// no heap object yet at the point the target resolves.
+    ///
+    /// The last of those is also a **value-IR** limit, measured in issue #374 and
+    /// recorded so the next attempt starts from it: [`Receiver::New`] carries the
+    /// class reference and nothing else, so the constructor's arguments — which
+    /// [`Cx::infer_generic_carry`] would need, and which the same expression in
+    /// *argument* position keeps as `ArgValue::New(class, args, named)` — are
+    /// already gone by the time any of this runs.
     receiver_carries: Vec<GenericCarry>,
 }
 
