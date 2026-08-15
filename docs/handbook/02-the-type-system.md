@@ -357,6 +357,19 @@ decide it — an owner nothing declares, a name it does not have, a
 union subject, a subject that is itself a template waiting on a
 call site — it stays opaque and constrains nothing.
 
+One kind of "waiting on a call site" does get answered. When a
+`@return template-type<T, …>` names a `@template` of the *method's
+own class*, Steins reads it off the object you are calling on:
+`(new Helper(new Model()))->getFirstChildren()` knows that `T` is
+that `Model`, asks the `Model` what its `@implements
+ModelInterface<Child>` says, and hands you a `Child` — the same
+answer, and the same trust, as a hand-written `@return Child`. It
+is a *lookup in what you already built*, so it holds exactly as
+long as that is still known: a receiver you were handed rather
+than constructed carries nothing, and a method call on the
+receiver clears what it carried, because that call may have
+replaced it.
+
 ## Callable signatures
 
 A declared `callable(P): R` carries a parameter and return
