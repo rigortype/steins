@@ -15,6 +15,15 @@ semantics becomes the design's input rather than its enemy.
 - **`$this` is a pre-escaped id**: `$this->p` facts survive own
   private/final method calls (descend), and are swept by any overridable
   call on `$this` — the dispatch guard rules reused.
+- **A class-typed parameter is a second pre-escaped, lower-bound id**
+  (2026-08-16, ADR-0032's declared-parameter-seed amendment, issue #388):
+  `class_exact` is `false` for it exactly as for `$this` — audit G1's rule, that
+  membership is not exactness, licenses only Yes-side conclusions — and it holds
+  no props, a declaration stating that a parameter is a `Box` and never what
+  that `Box` holds. Everything a lower bound cannot license (arity, member
+  absence, definite-No acceptance, the exact-receiver dispatch) keys on the
+  `class_exact` bit and stays silent, save where `final` forecloses the override
+  the refusal was written against.
 - **`readonly` is sweep-immune**: constructor-established readonly facts
   persist through escapes and unknown calls — the language guarantees the
   immutability, so the analyzer honors it permanently. Deliberate product
