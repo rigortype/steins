@@ -333,9 +333,25 @@ fn spread_collapses_whole_array_to_other() {
 
 #[test]
 fn unrepresentable_element_collapses_to_other() {
-    // A dynamic method call as an element value lowers to `Other` → whole array Other.
-    let v = first_arg("<?php f([$obj->m(), 2]);");
+    // A *dynamic* method call as an element value lowers to `Other` → whole array
+    // Other. The method name is a variable, so no `Callee` names it (issue #386
+    // gave the STATICALLY named form a carrier — see the test below).
+    let v = first_arg("<?php f([$obj->$m(), 2]);");
     assert_eq!(v, ArgValue::Other);
+}
+
+#[test]
+fn a_method_call_element_no_longer_collapses_the_array() {
+    // Issue #386: `[$obj->m(), 2]` used to drop the whole literal, so a
+    // `count()`/`foreach` over it knew nothing about the sibling `2` either. The
+    // element is a carrier now — unproven on its own, exactly like a `$x` element.
+    let v = first_arg("<?php f([$obj->m(), 2]);");
+    let it = items(&v);
+    assert_eq!(it.len(), 2);
+    assert!(matches!(&it[0].1, ArgValue::MethodCall { .. }), "the call is carried: {:?}", it[0].1);
+    assert_eq!(it[1].1, ArgValue::Int(2));
+    // Carried is not proven: the array is not a self-evident value (issue #39).
+    assert!(!v.is_concrete_value());
 }
 
 #[test]
@@ -354,8 +370,14 @@ fn a_non_literal_key_is_carried_rather_than_collapsing() {
 
 #[test]
 fn an_unrepresentable_key_expression_still_collapses() {
-    // Carrying needs a key to carry; an `Other`-lowering expression leaves nothing to carry.
-    assert_eq!(first_arg("<?php f([$obj->m() => 1]);"), ArgValue::Other);
+    // Carrying needs a key to carry; an `Other`-lowering expression leaves nothing
+    // to carry. A dynamic method name is such an expression — the statically named
+    // `$obj->m()` became a carrier in issue #386 and is carried as a key like any
+    // other unproven one.
+    assert_eq!(first_arg("<?php f([$obj->$m() => 1]);"), ArgValue::Other);
+    let carried = first_arg("<?php f([$obj->m() => 1]);");
+    let it = items(&carried);
+    assert!(matches!(&it[0].0, ArrayKey::Expr(k) if matches!(**k, ArgValue::MethodCall { .. })));
 }
 
 #[test]
