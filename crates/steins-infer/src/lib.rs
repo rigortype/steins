@@ -28036,6 +28036,13 @@ impl<'a> Cx<'a> {
                 self.qualify_class_names(&mut arg, efile, eoff);
                 Projection::Resolved(arg.kind)
             }
+            // (c) again, in the spelling the shadow leaves behind. By the time this
+            // runs, [`parse_envelopes`] has already neutralized the declaration's own
+            // `@template` names, so a function-level `T` subject is an `Unsupported`
+            // node rather than an identifier — the *same* case as a bare template
+            // name, and it must be left alone for the same reason. Declining here
+            // would rewrite the node and erase the spelling #363 matches on.
+            PKind::Unsupported(_) => Projection::Deferred,
             // (d) A union, an intersection, a shape, a callable, `$this`, a
             // literal — no class whose templates could be indexed. PHPStan unions
             // over a union subject's class names; Steins declines in this slice.
@@ -33323,6 +33330,21 @@ mod template_type_rewrite_tests {
         rewritten_in(&[src], 0, 0, spelling)
     }
 
+    /// The `@return` envelope of the **last** function declared in `src`, built the
+    /// way every consumer builds one — [`Cx::envelopes_of`], so the declaration's
+    /// own `@template` shadow has run before the rewrite, exactly as in production.
+    fn envelope_return(src: &str) -> PType {
+        let tree = SourceTree::parse(src);
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        let cx = Cx::new(&units, &index, 0);
+        let f = tree.functions().last().expect("a function is declared");
+        cx.envelopes_of(f.docblock.as_deref(), 0, f.span.start)
+            .expect("the docblock carries envelopes")
+            .ret
+            .expect("the docblock carries a @return")
+    }
+
     const BOX: &str = "<?php\n/** @template T */\nclass Box {}\n";
 
     #[test]
@@ -33340,12 +33362,9 @@ mod template_type_rewrite_tests {
         // template is not this slice's to decide, and it must survive the rewrite
         // as the node the carry readers will match on. `Opaque` either way today
         // (issue #360), so nothing observable changes — which is the point.
-        for spelling in [
-            "template-type<T, Box, 'T'>",
-            // The same shape after a function-level `@template T` shadow has
-            // already turned `T` into an opaque node.
-            "template-type<Unresolvable, Box, 'T'>",
-        ] {
+        // Both spellings that reach the rewrite as a bare identifier: a template
+        // name, and any other name no class answers to.
+        for spelling in ["template-type<T, Box, 'T'>", "template-type<Unresolvable, Box, 'T'>"] {
             let ty = rewritten(BOX, spelling);
             let PKind::Generic { base, args } = &ty.kind else {
                 panic!("{spelling} was rewritten to {ty}");
@@ -33354,6 +33373,39 @@ mod template_type_rewrite_tests {
             assert_eq!(args.len(), 3);
             assert_eq!(steins_contract::lower(&ty), steins_contract::ContractTy::Opaque);
         }
+    }
+
+    #[test]
+    fn the_shadowed_spelling_of_a_template_subject_survives_too() {
+        // The path production actually takes. `parse_envelopes` applies the
+        // declaration's own `@template` shadow *before* the rewrite, so a
+        // function-level `T` subject is no longer an identifier by the time the
+        // projection sees it — it is an `Unsupported` node, and the previous test's
+        // identifier arm never covers it. Declining here would rewrite the node and
+        // erase the spelling #363 intercepts.
+        let src = "<?php\n/** @template T */\nclass Box {}\n\
+                   /**\n * @template T\n * @param Box<T> $b\n\
+                   \x20* @return template-type<T, Box, 'T'>\n */\n\
+                   function f(Box $b) {}\n";
+        let ret = envelope_return(src);
+        let PKind::Generic { base, args } = &ret.kind else { panic!("rewritten to {ret}") };
+        assert_eq!(base, "template-type");
+        assert_eq!(args.len(), 3);
+        assert!(
+            matches!(&args[0].ty.kind, PKind::Unsupported(_)),
+            "the shadow left {}, not an opaque node",
+            args[0].ty,
+        );
+        assert_eq!(steins_contract::lower(&ret), steins_contract::ContractTy::Opaque);
+
+        // Its sibling through case (a): the owner parameterized by the same
+        // shadowed template resolves, and what it resolves *to* is that node — so
+        // the envelope reads as `@return T` reads, which is the acceptance
+        // criterion. One spelling defers, the other projects; neither invents.
+        let spelled = src.replace("template-type<T, Box, 'T'>", "template-type<Box<T>, Box, 'T'>");
+        let resolved = envelope_return(&spelled);
+        assert!(matches!(&resolved.kind, PKind::Unsupported(_)), "{resolved}");
+        assert_eq!(steins_contract::lower(&resolved), steins_contract::ContractTy::Opaque);
     }
 
     #[test]
