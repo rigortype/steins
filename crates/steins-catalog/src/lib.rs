@@ -10,8 +10,10 @@
 //! decline on 32-bit; a refused row has a recorded divergence, an unverified
 //! row has none (see [`WidthClass`]). Other exclusions and their evidence:
 //!
-//! * `strtotime`/`date`/`idate` are `nondet.time`, timezone-coupled even with
-//!   explicit timestamps.
+//! * `strtotime`/`date`/`idate` and their siblings `gmdate`/`gmmktime`/
+//!   `getdate`/`localtime` are `nondet.time`, timezone-coupled even with
+//!   explicit timestamps — and omitting the timestamp reads the clock, which is
+//!   the argument-blind upper bound the row states (ADR-0021).
 //! * `mb_*` depends on `mbstring.internal_encoding`; php-wasm 0.1.0 lacks it.
 //! * `strcmp`/`strcasecmp` promise only a sign, not `memcmp`'s
 //!   implementation-defined magnitude.
@@ -411,7 +413,19 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         "rand" | "mt_rand" | "random_int" | "random_bytes" | "uniqid" | "shuffle" => {
             Some(NONDET_RANDOM)
         }
+        // The time family, argument-blind (ADR-0021). `date("Y-m-d", 0)` with an
+        // explicit timestamp still reads the ambient timezone, and the same
+        // name with the timestamp omitted reads the clock, so the row is the
+        // upper bound over both — which is why `date` has carried this label
+        // since the first seeding pass. The names below are that row's
+        // siblings, added when a coverage survey found the module doc claiming
+        // `strtotime`/`idate` were `nondet.time` while `effect_labels` answered
+        // `None` for both. The `gm*` spellings read UTC rather than the ambient
+        // zone, but omitting their timestamp still reads the clock.
         "time" | "microtime" | "hrtime" | "date" | "mktime" => Some(NONDET_TIME),
+        "strtotime" | "idate" | "gmdate" | "gmmktime" | "getdate" | "localtime" => {
+            Some(NONDET_TIME)
+        }
         // The **wrapper-capable** family (issue #318): every filesystem row.
         // Each reaches whatever the stream layer resolves its target to, so the
         // argument-blind row can only be the `io` parent (a stricter row would
