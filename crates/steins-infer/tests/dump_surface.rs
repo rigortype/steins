@@ -587,6 +587,10 @@ fn a_template_argument_return_dumps_what_that_template_dumps() {
                 function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
     let plain = with.replace("template-type<Box<T>, Box, 'T'>", "T");
     assert_eq!(one_type(with), one_type(&plain));
+    // Still `unknown` on both sides after issue #363, and for a reason that has
+    // nothing to do with the utility: this `Box`'s constructor carries no
+    // `@param T $v`, so `new Box(1)` proves no carry for the argument read to index.
+    assert_eq!(one_type(with), "dumped type: unknown");
 }
 
 #[test]
@@ -609,6 +613,23 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
     let plain = with.replace("template-type<T, ModelInterface, 'TChild'>", "Child");
     assert_eq!(one_type(with), one_type(&plain));
     assert_eq!(one_type(with), "dumped type: Child (asserted)");
+}
+
+#[test]
+fn an_argument_carry_return_dumps_the_same_at_both_call_forms() {
+    // Issue #363, and the parity claim that matters to the surface: the value
+    // position and the assignment form read one seam, so `dumpType(unwrap($b))` and
+    // `$v = unwrap($b); dumpType($v)` cannot disagree. `Asserted` in both, because
+    // what resolved is still the docblock's claim about a return.
+    let base = "<?php\n/** @template T */\n\
+        class Box { /** @param T $v */ public function __construct(public mixed $v) {} }\n\
+        /**\n * @template T\n * @param Box<T> $b\n * @return T\n */\n\
+        function unwrap(Box $b): mixed { return $b->v; }\n";
+    let nested = format!("{base}function g() {{ $b = new Box(1); \\PHPStan\\dumpType(unwrap($b)); }}\n");
+    let assigned =
+        format!("{base}function g() {{ $b = new Box(1); $v = unwrap($b); \\PHPStan\\dumpType($v); }}\n");
+    assert_eq!(one_type(&nested), one_type(&assigned));
+    assert_eq!(one_type(&nested), "dumped type: 1 (asserted)");
 }
 
 #[test]
