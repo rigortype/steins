@@ -116,6 +116,27 @@ function f(object $value): void {
 
 
 #[test]
+fn an_assert_narrows_the_receiver_lane_like_its_if_twin() {
+    // Issue #391: `assert($expr)` reads as `if (!$expr) throw`, so the arm-lane
+    // subtraction the `if` applies has to apply here too. Before the repair the
+    // assert statement reached only the value lane, so `{Guest}` never formed and
+    // the call was silent.
+    let src = "<?php
+interface Named { public function name(): string; }
+final class User implements Named { public function name(): string { return 'u'; } }
+final class Guest { public function guestId(): int { return 1; } }
+/** @param User|Guest $value */
+function f(object $value): void {
+    \\assert(!($value instanceof User));
+    $value->name();
+}
+";
+    let d = fires(src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("Guest::name()"), "{}", d[0].message);
+}
+
+#[test]
 fn fires_on_the_conformance_narrowing_shape() {
     // The else branch narrows `@param User|Guest` to `{Guest}` (final, no `name()`); Asserted
     // premises are contract-coherent, so this fires correctly even if the runtime value is
