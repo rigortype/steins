@@ -411,6 +411,28 @@ fn a_generic_class_nested_inside_another_type_is_still_bare() {
 }
 
 #[test]
+fn every_position_that_holds_a_type_is_looked_into() {
+    // Issue #374: the collection walked a generic's arguments and a union's members
+    // and stopped, so the identical omission written one node deeper — inside a
+    // callable signature, a conditional branch, an offset access or an unsealed
+    // shape tail — went unreported. One walk decides the positions now, and this id
+    // says the same thing wherever the class is named bare.
+    for param in [
+        "callable(Collection): void",
+        "callable(): Collection",
+        "array{a: int, ...<Collection>}",
+        "object{c: Collection}",
+        "Collection[int]",
+    ] {
+        assert_eq!(
+            n(&generic_fixture(param), UNTYPED_GENERICS_ID),
+            1,
+            "{param} named Collection without type arguments",
+        );
+    }
+}
+
+#[test]
 fn a_template_name_of_the_declaration_itself_is_not_a_class() {
     // A bare `@param T` names the declaration's own template parameter (issue #5's
     // shadow set), not a class — so it is never a bare generic use.
