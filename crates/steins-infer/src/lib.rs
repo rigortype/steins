@@ -98,6 +98,67 @@ pub const PARAM_MISMATCH_ID: &str = "phpdoc.param-mismatch";
 /// under contract acceptance.
 pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 
+// ---------------------------------------------------------------------------
+// issue #291 probe — MEASUREMENT ONLY, not a shipping surface.
+//
+// Four scratch ids, all under `phpdoc.` so the fp-gate routes them to the
+// measurement bucket (`gate_bucket` keys on the registry layer, and a
+// `Layer::Contract` id can never red the public gate). They exist to count what
+// an abstract argument fact WOULD premise; nothing here is proposed for merge.
+// ---------------------------------------------------------------------------
+
+/// Cell A: a **Verified** abstract fact (`Fact::General`/`Refined`/`Union`, the
+/// value lane) carried into a native parameter type it is provably disjoint from
+/// under the call-site file's strict mode. This is exactly what #291 asks about.
+pub const PROBE291_A_ID: &str = "phpdoc.probe291-native-verified";
+
+/// Cell B(i): the same judgment on an **Asserted** premise — a docblock-derived
+/// fact (`@param`/`@return`/`@var`, the contract-arm lane) against the *native*
+/// parameter type. ADR-0069/ADR-0052 §5 forbid this on the proof layer; the id is
+/// here to size what a contracts-tier `phpdoc.*` sibling would buy.
+pub const PROBE291_B_NATIVE_ID: &str = "phpdoc.probe291-native-asserted";
+
+/// Cell B(ii): an **arm-lane** (docblock-derived) abstract fact judged against the
+/// callee's `@param` envelope — the existing `phpdoc.param-mismatch` relation with
+/// its premise widened from the value lane to the contract lane.
+pub const PROBE291_B_PARAM_ID: &str = "phpdoc.probe291-param-asserted";
+
+/// The control: a shadow of every `phpdoc.param-mismatch` that *already* fires
+/// from the abstract (value-lane) path. Not new recall — the number cell A's
+/// docblock half has been banking since Feature E landed.
+pub const PROBE291_A_PARAM_SHADOW_ID: &str = "phpdoc.probe291-param-verified";
+
+/// The **partial** verdict, measured because the definite one turned out empty: at
+/// least one arm of the abstract fact (a base arm, or the `null` side-flag) is
+/// rejected by the native parameter while at least one other is accepted. Not a
+/// definite No and never proof-layer material — the ADR-0081 §8 `maybe-` shape.
+pub const PROBE291_NATIVE_PARTIAL_ID: &str = "phpdoc.probe291-native-partial";
+
+/// The **denominator**: one finding per argument position that carries an abstract
+/// premise at all, whether or not it is disjoint. Without it a zero reads as
+/// "the probe is broken"; with it, a zero reads as "N positions were judged and
+/// none were disjoint". Emitted only under `STEINS_PROBE291_CENSUS=1`, since it
+/// fires on ordinary, correct code by design.
+pub const PROBE291_CENSUS_ID: &str = "phpdoc.probe291-census";
+
+/// Whether the census id is enabled for this process (see [`PROBE291_CENSUS_ID`]).
+fn probe291_census_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("STEINS_PROBE291_CENSUS").is_some())
+}
+
+/// Whether the probe emits at all this process. **Off by default**, so the probe
+/// is provably non-invasive: every existing test, the CLI, and the fp-gate see
+/// byte-identical output to master unless `STEINS_PROBE291=1` is set. `cargo xtask
+/// probe291` sets it; nothing else does.
+fn probe291_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("STEINS_PROBE291").is_some()
+            || std::env::var_os("STEINS_PROBE291_CENSUS").is_some()
+    })
+}
+
 /// The registry id for the branch-sensitive null-dereference proof (ADR-0031
 /// stage 1): a method call whose receiver variable is **proven `null`** on the
 /// current path (e.g. inside `if ($u === null) { $u->name(); }`) — a guaranteed
@@ -1031,6 +1092,15 @@ pub const VARIABLE_MAYBE_UNDEFINED_ID: &str = "variable.maybe-undefined";
 /// `SUPPRESS_UNMATCHED_ID` / `SUPPRESS_UNKNOWN_ID` are emitted from
 /// [`suppress`] and so are covered via the registry side of the test.
 pub const ALL_EMITTABLE_IDS: &[&str] = &[
+    // issue #291 probe (MEASUREMENT ONLY — this branch is not for merge). Listed so
+    // `doctor`'s registry-totality partition stays consistent while the probe rides
+    // along; every one of them does have a live emitter (`probe291_check`).
+    PROBE291_A_ID,
+    PROBE291_B_NATIVE_ID,
+    PROBE291_B_PARAM_ID,
+    PROBE291_A_PARAM_SHADOW_ID,
+    PROBE291_NATIVE_PARTIAL_ID,
+    PROBE291_CENSUS_ID,
     ID,
     RETURN_ID,
     CALL_ON_NULL_ID,
@@ -21999,6 +22069,24 @@ fn check_propagated_call(
             }
         }
 
+        // issue #291 probe (measurement only), placed where the phpdoc check runs:
+        // after the native proof had its chance, before the contract relation.
+        if !native_fired {
+            probe291_check(
+                cx,
+                envelopes.as_ref(),
+                param,
+                &decl.name,
+                arg.span.start,
+                &arg.value,
+                env,
+                store,
+                poisoned,
+                in_descent,
+                out,
+            );
+        }
+
         // Only the propagation-carrier arg kinds (`$var`/`call()`/`$o->m()`) are the
         // propagation pass's to phpdoc-check; literal/array/`new` args are owned
         // by the direct pass (no double-report across the two passes). A method call
@@ -29307,6 +29395,23 @@ fn check_method_args(
             }
         }
 
+        // issue #291 probe (measurement only), method-call twin.
+        if !native_fired {
+            probe291_check(
+                cx,
+                envelopes.as_ref(),
+                param,
+                callee_name,
+                arg.span.start,
+                &arg.value,
+                env,
+                store,
+                poisoned,
+                in_descent,
+                out,
+            );
+        }
+
         if !native_fired
             && let Some(env_e) = &envelopes
         {
@@ -29476,6 +29581,297 @@ fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
 fn object_world_guard_blind(in_descent: bool, ty: &NativeType, value: &ArgValue) -> bool {
     in_descent
         && (ty.has_instance() || matches!(value, ArgValue::New(..) | ArgValue::EnumCase(..)))
+}
+
+// ===========================================================================
+// issue #291 probe — measurement rung. See the id constants at the top of this
+// file. Nothing below is a shipping surface.
+// ===========================================================================
+
+/// The witness values that decide, for one [`Base`], whether a native type accepts
+/// **any** value of that base. The base-level question is not "does a
+/// representative value pass" but "does *every* value of this base fail" — so a
+/// base whose acceptance is not uniform across its values needs one witness per
+/// equivalence class of the coercion tables:
+///
+/// * `int` / `float` — uniform in both tables, one witness each.
+/// * `bool` — a `false`/`true` literal member (`string|false`) accepts exactly one
+///   of the two, so both are needed.
+/// * `string` — `member_accepts_coercive` splits on `php_is_numeric`, so a numeric
+///   and a non-numeric witness are both needed (this is the whole reason
+///   `General{String}` into `int` is NOT a coercive-mode definite No).
+///
+/// The witnesses are fed to [`is_type_error`] itself — the probe adds **no second
+/// coercion table**, which is #291's explicit instruction.
+fn probe291_base_witnesses(base: Base) -> Vec<ArgValue> {
+    match base {
+        Base::Int => vec![ArgValue::Int(0)],
+        Base::Float => vec![ArgValue::Float(1.5)],
+        Base::Bool => vec![ArgValue::Bool(true), ArgValue::Bool(false)],
+        Base::String => vec![ArgValue::Str("5".into()), ArgValue::Str("abc".into())],
+    }
+}
+
+/// The `(bases, nullable)` decomposition of an abstract fact, or `None` for a fact
+/// the base-level judgment cannot speak about.
+///
+/// `Refined` decomposes to its **base**, deliberately dropping the refinement: a
+/// refined set is a subset of its base's set, so base-disjointness implies
+/// refined-disjointness. The converse (`numeric-string` into a coercive `int`) is
+/// left on the table — sharper, but a second judgment with its own FP surface.
+///
+/// `Singleton`/`OneOf` decline: those are the concrete lane [`is_type_error`]
+/// already owns. `Shape` declines: an array against a native scalar/class param is
+/// a real `TypeError`, but `is_type_error` answers `false` for `ArgValue::Array`
+/// by construction, so admitting it here would be a second table.
+fn probe291_fact_bases(fact: &Fact) -> Option<(Vec<Base>, bool)> {
+    match fact {
+        Fact::General { base, nullable } | Fact::Refined { base, nullable, .. } => {
+            Some((vec![*base], *nullable))
+        }
+        Fact::Union { arms, nullable } => Some((arms.iter().map(|(b, _)| *b).collect(), *nullable)),
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
+    }
+}
+
+/// How much of an abstract `fact`'s denotation the native type `ty` rejects, at the
+/// call-site file's strict mode. The base-type analogue of [`is_type_error`], built
+/// out of it rather than beside it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe291Verdict {
+    /// Every value the fact admits is rejected — the definite No #291 asks about.
+    AllRejected,
+    /// Some arm is rejected and some is accepted — a partial-path claim.
+    SomeRejected,
+    /// Nothing is provably rejected, or the fact is one the judgment declines.
+    None,
+}
+
+fn probe291_native_verdict(cx: &Cx, ty: &NativeType, fact: &Fact) -> Probe291Verdict {
+    let Some((bases, nullable)) = probe291_fact_bases(fact) else { return Probe291Verdict::None };
+    if bases.is_empty() {
+        return Probe291Verdict::None;
+    }
+    // Each arm's own verdict: an arm is rejected iff EVERY witness of its base is.
+    let mut rejected = 0usize;
+    let mut total = 0usize;
+    for b in &bases {
+        total += 1;
+        if probe291_base_witnesses(*b).iter().all(|w| is_type_error(cx, ty, w)) {
+            rejected += 1;
+        }
+    }
+    if nullable {
+        total += 1;
+        if is_type_error(cx, ty, &ArgValue::Null) {
+            rejected += 1;
+        }
+    }
+    if rejected == total {
+        Probe291Verdict::AllRejected
+    } else if rejected > 0 {
+        Probe291Verdict::SomeRejected
+    } else {
+        Probe291Verdict::None
+    }
+}
+
+/// Which lane an abstract argument premise came from — reported in the probe
+/// message so the corpus lines can be triaged by provenance.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Probe291Lane {
+    /// `Known::fact` — the four-layer value domain (ADR-0035).
+    Value,
+    /// `Store::contract_arms` — the declared-arm lane (ADR-0052 §9). **This is
+    /// where every Asserted scalar lives**: `seed_refined_scalar_fact` only mints a
+    /// value-lane fact when a native `General` is refined *within its own base*, and
+    /// `apply_inline_var_casts` only mints one for array shapes. So a docblock's
+    /// `int` reaches the value lane never — measured, not assumed.
+    Arm,
+}
+
+impl Probe291Lane {
+    fn as_str(self) -> &'static str {
+        match self {
+            Probe291Lane::Value => "value",
+            Probe291Lane::Arm => "arm",
+        }
+    }
+}
+
+/// The abstract premise available for `value` at this argument position, if any:
+/// the value-lane fact when there is one, else the declared-arm lane lowered
+/// through `to_fact` (the same lowering `seed_refined_scalar_fact` uses).
+fn probe291_premise(
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<(Fact, Stratum, Probe291Lane)> {
+    if poisoned {
+        return None;
+    }
+    let ArgValue::Var(name) = value else { return None };
+    if let Some(k) = env.get(name) {
+        if let Some(f) = &k.fact {
+            return f
+                .finite_members()
+                .is_none()
+                .then(|| (f.clone(), k.stratum, Probe291Lane::Value));
+        }
+    }
+    let arms = store.contract_arms(name)?;
+    if arms.is_empty() {
+        return None;
+    }
+    let lowered = steins_contract::to_fact(&steins_contract::ContractTy::Union(
+        arms.iter().map(|a| a.ty.clone()).collect(),
+    ))?;
+    if lowered.finite_members().is_some() {
+        return None;
+    }
+    let stratum = if arms.iter().any(|a| a.stratum == Stratum::Asserted) {
+        Stratum::Asserted
+    } else {
+        Stratum::Verified
+    };
+    Some((lowered, stratum, Probe291Lane::Arm))
+}
+
+/// Emit the #291 probe findings for one argument position. Called from both the
+/// function-call and the method-call propagated checks, only where the native
+/// proof-layer check did **not** fire (no double count).
+#[allow(clippy::too_many_arguments)]
+fn probe291_check(
+    cx: &Cx,
+    envelopes: Option<&Envelopes>,
+    param: &Param,
+    callee: &str,
+    arg_offset: u32,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    in_descent: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    if !probe291_on() {
+        return;
+    }
+    let premise = probe291_premise(value, env, store, poisoned);
+    // The reach denominator: classify EVERY argument position the probe sees, so
+    // "the abstract population is small" is a measured claim about this corpus and
+    // not a guess about the probe's own wiring.
+    if probe291_census_on() {
+        let bucket = match (&premise, value) {
+            (Some(_), _) => None,
+            (None, ArgValue::Var(n)) if !poisoned => Some(
+                match env.get(n).and_then(|k| k.fact.as_ref()) {
+                    Some(f) if f.finite_members().is_some() => "reach=var-concrete",
+                    Some(_) => "reach=var-unlowerable-fact",
+                    None if store.contract_arms(n).is_some() => "reach=var-arms-unlowerable",
+                    None => "reach=var-no-fact",
+                },
+            ),
+            (None, _) => Some("reach=non-var-arg"),
+        };
+        if let Some(b) = bucket {
+            let pos = cx.tree().position(arg_offset);
+            out.push(Diagnostic {
+                id: PROBE291_CENSUS_ID,
+                path: cx.path().to_owned(),
+                line: pos.line,
+                column: pos.column,
+                message: format!(
+                    "census {b} native-typed={}",
+                    if param.ty.is_some() { "yes" } else { "no" },
+                ),
+                facet: None,
+                fix: None,
+            });
+        }
+    }
+    let Some((fact, stratum, lane)) = premise else {
+        return;
+    };
+    let mode = if cx.strict() { "strict" } else { "coercive" };
+    // The denominator (see `PROBE291_CENSUS_ID`): every judged position, disjoint
+    // or not, with the pair that was judged.
+    if probe291_census_on() {
+        let pos = cx.tree().position(arg_offset);
+        let native = param.ty.as_ref().map_or_else(|| "-".to_owned(), NativeType::render);
+        let doc = envelopes
+            .and_then(|e| e.param(&param.name))
+            .map_or_else(|| "-".to_owned(), ToString::to_string);
+        out.push(Diagnostic {
+            id: PROBE291_CENSUS_ID,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "census lane={} stratum={} mode={mode} fact={} native={native} doc={doc}",
+                lane.as_str(),
+                if stratum == Stratum::Verified { "verified" } else { "asserted" },
+                describe_fact(&fact),
+            ),
+            facet: None,
+            fix: None,
+        });
+    }
+    let described = describe_fact(&fact);
+    let mut emit = |id: &'static str, detail: String| {
+        let pos = cx.tree().position(arg_offset);
+        out.push(Diagnostic {
+            id,
+            path: cx.path().to_owned(),
+            line: pos.line,
+            column: pos.column,
+            message: format!(
+                "probe291 lane={} stratum={} mode={mode} fact={described} {detail} \
+                 callee={callee}() ${}",
+                lane.as_str(),
+                if stratum == Stratum::Verified { "verified" } else { "asserted" },
+                param.name,
+            ),
+            facet: None,
+            fix: None,
+        });
+    };
+
+    // Cells A / B(i): the abstract fact against the NATIVE parameter type.
+    if let Some(ty) = param.ty.as_ref()
+        // Same guard-blindness the object-world proof carries (ADR-0043 stage 3):
+        // a rebound param's in-body `instanceof` guards are unmodeled.
+        && !(in_descent && ty.has_instance())
+    {
+        match probe291_native_verdict(cx, ty, &fact) {
+            Probe291Verdict::AllRejected => {
+                let id =
+                    if stratum == Stratum::Verified { PROBE291_A_ID } else { PROBE291_B_NATIVE_ID };
+                emit(id, format!("native={}", ty.render()));
+            }
+            Probe291Verdict::SomeRejected => {
+                emit(PROBE291_NATIVE_PARTIAL_ID, format!("native={}", ty.render()));
+            }
+            Probe291Verdict::None => {}
+        }
+    }
+
+    // Cell B(ii): the ARM-lane fact against the callee's `@param` envelope. The
+    // value lane is already judged there by `check_phpdoc_param`, so restricting to
+    // the arm lane makes every hit here genuinely new recall.
+    if lane == Probe291Lane::Arm
+        && let Some(env_e) = envelopes
+        && !env_e.is_assert_target(&param.name)
+        && let Some(pty) = env_e.param(&param.name)
+    {
+        let cty = steins_contract::lower(pty);
+        if !contract_touches_class(&cty)
+            && steins_contract::admits_fact(&cty, &fact) == Certainty::No
+        {
+            emit(PROBE291_B_PARAM_ID, format!("param=@param {pty}"));
+        }
+    }
 }
 
 /// Strict mode: does a single union `member` accept the non-null literal `arg`
@@ -31813,6 +32209,25 @@ fn check_phpdoc_param(
             }
             if steins_contract::admits_fact(&cty, fact) != Certainty::No {
                 return;
+            }
+            // issue #291 probe (measurement only): shadow every abstract-path
+            // `phpdoc.param-mismatch` so the probe's counts can separate "new
+            // recall" from "recall Feature E already banks".
+            if probe291_on() {
+                let pos = cx.tree().position(arg_offset);
+                out.push(Diagnostic {
+                    id: PROBE291_A_PARAM_SHADOW_ID,
+                    path: cx.path().to_owned(),
+                    line: pos.line,
+                    column: pos.column,
+                    message: format!(
+                        "probe291 lane=value mode={} fact={} param=@param {ty} callee={callee}() ${param_name}",
+                        if cx.strict() { "strict" } else { "coercive" },
+                        describe_fact(fact),
+                    ),
+                    facet: None,
+                    fix: None,
+                });
             }
             describe_fact(fact)
         }

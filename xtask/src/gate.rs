@@ -287,7 +287,16 @@ fn is_possibly(d: &Diagnostic) -> bool {
 /// issue #186, `phpdoc.*` also carries docblock-hygiene mechanics ids, and a
 /// bare prefix test would double-count one.
 fn is_phpdoc(d: &Diagnostic) -> bool {
-    d.id.starts_with("phpdoc.") && is_contract(d)
+    d.id.starts_with("phpdoc.") && is_contract(d) && !is_probe291(d)
+}
+
+/// The issue #291 probe's scratch ids (MEASUREMENT ONLY — this branch is not for
+/// merge). They are registered `Layer::Contract` so they can never red the gate on
+/// sight, and excluded from the `phpdoc.*` count here so the seeded per-package
+/// expectations stay comparable to master's while the probe rides along.
+/// `cargo xtask probe291` is where they are counted.
+fn is_probe291(d: &Diagnostic) -> bool {
+    d.id.starts_with("phpdoc.probe291-")
 }
 
 /// Whether a diagnostic is a measurement-mode `throw.*` contract id

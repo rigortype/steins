@@ -27,6 +27,7 @@ mod gen_catalog;
 mod lean_check;
 mod nsrt;
 mod phpdoc_oracle;
+mod probe291;
 mod sync;
 
 use std::process::ExitCode;
@@ -99,6 +100,11 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        // issue #291 probe — MEASUREMENT ONLY, not a shipping surface.
+        Some("probe291") => match probe291::run(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        },
         Some("phpdoc-oracle") => {
             let check = args[1..].iter().any(|a| a == "--check");
             match phpdoc_oracle::run(check) {

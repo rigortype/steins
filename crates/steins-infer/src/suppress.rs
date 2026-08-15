@@ -30,6 +30,8 @@ use crate::{
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
     PARAM_MISMATCH_ID,
+    PROBE291_A_ID, PROBE291_A_PARAM_SHADOW_ID, PROBE291_B_NATIVE_ID, PROBE291_B_PARAM_ID,
+    PROBE291_CENSUS_ID, PROBE291_NATIVE_PARTIAL_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
@@ -324,6 +326,15 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (VARIABLE_MAYBE_UNDEFINED_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // issue #291 probe (MEASUREMENT ONLY — never merge): registered as
+    // `Layer::Contract` so `gate_bucket` routes them to the fp-gate's measurement
+    // bucket and the public gate cannot go red on them.
+    (PROBE291_A_ID, Layer::Contract, Floor::Contracts),
+    (PROBE291_B_NATIVE_ID, Layer::Contract, Floor::Contracts),
+    (PROBE291_B_PARAM_ID, Layer::Contract, Floor::Contracts),
+    (PROBE291_A_PARAM_SHADOW_ID, Layer::Contract, Floor::Contracts),
+    (PROBE291_CENSUS_ID, Layer::Contract, Floor::Contracts),
+    (PROBE291_NATIVE_PARTIAL_ID, Layer::Contract, Floor::Contracts),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
