@@ -576,6 +576,20 @@ fn a_template_type_return_dumps_the_template_argument_it_names() {
 }
 
 #[test]
+fn a_template_argument_return_dumps_what_that_template_dumps() {
+    // The other half of #361's equivalence claim: where the utility names a
+    // template rather than a spelled type, the surface is the template's own, and
+    // the reader cannot tell which spelling produced it.
+    let with = "<?php\n/** @template T */\nclass Box { public function __construct(public mixed $v) {} }\n\
+                /**\n * @template T\n * @param Box<T> $b\n\
+                \x20* @return template-type<Box<T>, Box, 'T'>\n */\n\
+                function unwrap(Box $b): mixed { return $b->v; }\n\
+                function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
+    let plain = with.replace("template-type<Box<T>, Box, 'T'>", "T");
+    assert_eq!(one_type(with), one_type(&plain));
+}
+
+#[test]
 fn a_folded_return_value_beats_the_return_arm() {
     // Precedence (ADR-0052 §9): a proven value fact is the floor's ceiling. A
     // trivially foldable `: int` return resolves to `1`, beating the `int` arm.
