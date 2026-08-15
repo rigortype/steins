@@ -198,6 +198,19 @@ cargo xtask nsrt [DIR]
 resolved from the workspace root — pass it explicitly whenever `cargo xtask` runs
 from anywhere else (a worktree, most obviously: its workspace root is not the
 repo root the default assumes, so the default path resolves to nothing there).
+**Run it on PHP 8.5.** Since the version gate below, the fixture set the harness
+measures depends on the sidecar's PHP minor, so the headline is only comparable
+between runs on the same one. 8.5 is the choice because the exclusion is monotonic
+— every newer minor skips a strict subset of what an older one skips, so 8.5
+measures the most fixtures anyone can (60 files skipped, against 71 at 8.4, 84 at
+8.3, 92 at 8.2). Record the minor next to any number quoted from a run; the harness
+prints it above the summary for that purpose.
+
+There is deliberately **no `--php-version` override**. Faking the gate would not
+move the sidecar: the folds still run on whatever `php` is on PATH, so an override
+would score one minor's fixture set with another minor's answers — a number that
+looks like a measurement and is not one. To measure another minor, install it.
+
 `DIR` need not be that exact subdirectory; the walk is recursive over whatever
 path it is given, so pointing it at the phpstan-src checkout root instead of the
 `nsrt/` fixture directory also works — it just measures a much larger, mostly

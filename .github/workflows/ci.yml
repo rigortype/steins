@@ -78,7 +78,7 @@ env:
 
 jobs:
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, php ${{ matrix.php }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -99,6 +99,13 @@ jobs:
         # IS available as an expression inside the matrix definition itself,
         # since only `github` (not `matrix`) is needed to compute it.
         os: ${{ github.event_name == 'pull_request' && fromJSON('["ubuntu-latest"]') || fromJSON('["ubuntu-latest", "macos-latest"]') }}
+        # Both PHP minors Steins supports. The sidecar folds through whatever
+        # `php` is on PATH, so the engine is a real input to the suite, not
+        # ambient setup: 8.5 changed enough builtin return types (`range()`
+        # returning ints, #356) that a fold correct on one minor can be wrong
+        # on the other. Cheap next to the OS axis — PHP setup is seconds and
+        # the Rust build cache is keyed on the OS, which is what actually costs.
+        php: ["8.4", "8.5"]
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -108,7 +115,7 @@ jobs:
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
-          php-version: "8.4"
+          php-version: ${{ matrix.php }}
           coverage: none
 
       - name: Install Rust toolchain (MSRV)
@@ -272,6 +279,11 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # Deliberately single-version while `test` runs a PHP matrix: this is a
+      # gate against a calibrated baseline, not a test. A false-positive count
+      # that moved with the engine would turn a PHP difference into a RED on
+      # whichever PR happened to be open, which is the misattribution failure
+      # this repo keeps re-learning. Pin one minor; move it on purpose.
       - name: Set up PHP
         uses: shivammathur/setup-php@v2
         with:
