@@ -145,6 +145,57 @@ f(null);
     assert_eq!(n(src), 0, "bound-null guard → then returns → tail unreachable → silent");
 }
 
+// the loose null guard, one direction (issue #391)
+
+#[test]
+fn a_loose_null_guard_proves_non_null_on_the_branch_where_it_fails() {
+    // `null == null` is true, so a branch reached only because `$x == null` was
+    // FALSE cannot be holding null. `if ($x == null) { return; }` is the idiom.
+    let src = "<?php
+declare(strict_types=1);
+function width(int $w): int { return $w; }
+function f(?int $x): void {
+    if ($x == null) { return; }
+    \\PHPStan\\dumpType($x);
+    width($x);
+}
+";
+    let ds = findings(src);
+    let dumps: Vec<&str> = ds.iter().filter(|d| d.id == "debug.type").map(|d| d.message.as_str()).collect();
+    assert_eq!(dumps, vec!["dumped type: int"], "{ds:?}");
+    assert!(ds.iter().all(|d| d.id == "debug.type"), "and nothing is reported: {ds:?}");
+}
+
+#[test]
+fn a_loose_null_guard_proves_nothing_on_the_branch_where_it_holds() {
+    // The other direction, refused: `0 == null` is true too, so the branch where
+    // the guard holds knows only that the value is falsy — not that it is null.
+    let src = "<?php
+declare(strict_types=1);
+function f(?int $x): void {
+    if ($x == null) { \\PHPStan\\dumpType($x); }
+}
+";
+    let ds = findings(src);
+    let dumps: Vec<&str> =
+        ds.iter().filter(|d| d.id == "debug.type").map(|d| d.message.as_str()).collect();
+    assert_eq!(dumps, vec!["dumped type: int|null"], "the true branch narrows nothing");
+}
+
+#[test]
+fn the_not_loose_spelling_is_the_same_rule_with_the_branches_swapped() {
+    let src = "<?php
+declare(strict_types=1);
+function f(?int $x): void {
+    if ($x != null) { \\PHPStan\\dumpType($x); }
+}
+";
+    let ds = findings(src);
+    let dumps: Vec<&str> =
+        ds.iter().filter(|d| d.id == "debug.type").map(|d| d.message.as_str()).collect();
+    assert_eq!(dumps, vec!["dumped type: int"]);
+}
+
 // elseif chains + nested ifs
 
 #[test]
