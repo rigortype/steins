@@ -160,7 +160,11 @@ gone by the time the floor is seeded.
   unread. The construction rvalue's exactness lane (ADR-0036) is untouched.
 * **Heap transfer.** `ReturnSummary.heap` stays `None` — that is T1 proper
   (ADR-0057), and rebinding scalar/string/array facts neither needs it nor
-  advances it.
+  advances it. *No longer an exclusion as of 2026-08-16 (#378): T1 landed, and
+  because a method's summary reaches the SAME `apply_assign` rung a function's
+  does, the heap component rebinds for methods and statics with no method-side
+  work at all — which is this ADR's whole point, restated by the slice that
+  needed nothing from it.*
 * **By-ref parameters refuse, variadics stop the binding prefix** — inherited
   from `descend` unchanged, restated here only so the slice review has the
   full refusal list in one place.

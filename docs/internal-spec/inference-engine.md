@@ -157,8 +157,9 @@ A budget cutoff **names itself as silence** and never manufactures a finding
 (ADR-0009). Closure bodies are descended the same way, using the scope's own
 `params`.
 
-The same descent also yields a **return-fact summary** (`ReturnSummary`,
-ADR-0057 amendment slice T0; ADR-0075 for methods/statics): the join, over a
+The same descent also yields a **return summary** (`ReturnSummary`, ADR-0057
+amendment slice T0; ADR-0075 for methods/statics) with two independent
+components. The **value component** is the join, over a
 callee's returning exits, of the returned expression's value-domain fact, carried
 at the `min` trust stratum over those exits (an `Asserted` exit drags the whole
 summary to `Asserted`). It rides the same `BindingKey` memo — now a value map —
@@ -169,10 +170,30 @@ construction rvalue is the ADR-0036 exactness lane). It is a pure function of
 `(callee CST, bound entry state [, exact receiver])`, so it is a legitimate
 replayable query answer — and since ADR-0086 §2 the "bound entry state" includes
 the argument objects seeded onto the callee's heap, which is what lets
-`return $box->value` summarize at all. The struct carries a heap-object component
-slot (ADR-0057 §1) for slice **T1**; in T0 that slot is present but always `None`
-— no returned allocation is transferred yet. That is the *outbound* half and is
-unrelated to the inbound seeding above.
+`return $box->value` summarize at all.
+
+The **heap component** (ADR-0057 §1, slice **T1**) is the outbound half: at every
+returning exit that hands back a locally-held allocation — `return new Foo(...)`
+(minted through the same `new_heap_object` an assignment runs), `return $local`,
+`return $this`, or an inner call's own heap summary — the walk snapshots the
+object, and `join_heap_exits` joins those snapshots per ADR-0057 §2.4. Classes
+must agree, exactness is copied and never promoted, props survive only where
+every path has them (facts joined, strata at `min`), `escaped` ORs, readonly and
+its write bookkeeping intersect, carries survive only where identical — and
+**any** non-allocation exit ends the whole component (a `null`, a scalar, an
+untyped fallthrough, an `Opaque` `may_return` floor). The declared return type is
+never consulted: A2's native oracle belongs to the value component alone.
+
+The caller **rebinds** the snapshot at the `apply_assign` rung (functions and
+methods alike): a fresh walk-local `AllocId`, the object verbatim, `refs[var]`
+bound to it. So `$f = createFoo(123);` gives `$f->n` the value `123`, S2 and the
+arity family their exactness premise, and `readonly.reassigned` its first write —
+and an `escaped = false` rebind survives a later unknown call exactly as a local
+`new` does. Value and argument position rebind nothing: they have no store, and
+an object is not a value (ADR-0035) — the same carrier limit named above.
+
+The two components live and die independently, and a summary exists whenever
+either does.
 
 ## The folding seam
 
