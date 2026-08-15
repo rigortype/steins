@@ -4,7 +4,7 @@
 //! through direct `@param T` ctor params, judged against `@param Class<A>` at call
 //! sites. No call-site template solver (ADR-0030); unknown stays `Maybe`.
 
-use steins_infer::{DEBUG_TYPE_ID, Diagnostic, PARAM_MISMATCH_ID, check};
+use steins_infer::{DEBUG_TYPE_ID, Diagnostic, ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
 
 fn findings(src: &str) -> Vec<Diagnostic> {
@@ -1196,7 +1196,8 @@ const BOXES: &str = "<?php\n\
     final class IntBox extends Box {}\n";
 
 /// [`BOXES`] plus an `unwrapT()` declaring `@template T`, `@param Box<T> $box` and
-/// the `@return` spelled `ret`, over a body whose value no summary proves.
+/// the `@return` spelled `ret`, over `return $box->value;` — a body the binding
+/// descent PROVES, now that the argument's object crosses into it (ADR-0086 §2).
 fn unwrapper(ret: &str) -> String {
     format!(
         "{BOXES}/**\n * @template T\n * @param Box<T> $box\n * @return {ret}\n */\n\
@@ -1204,29 +1205,64 @@ fn unwrapper(ret: &str) -> String {
     )
 }
 
+/// [`unwrapper`]'s twin over a body **no summary can prove**: `return $box` hands
+/// back the object itself, and the value domain has no object carrier
+/// (ADR-0035/0038; ADR-0086 §4 keeps object returns out of the argument leg), so
+/// the whole summary is refused and the declared read is the only rung left.
+///
+/// Before ADR-0086 an object-only argument list refused the descent outright, so
+/// *any* body served here. The tests below that are about the **declared** side
+/// take this one, and the ones about the proven side take [`unwrapper`]; the pair
+/// is what keeps each claim observable at the rung it is a claim about.
+/// A fixture under `declare(strict_types=1)` — the mode the conformance suite runs
+/// in, and the only one in which an `int` reaching a `string` parameter is an error
+/// at all (coercive mode converts it, so no engine reports it).
+fn strict(src: &str) -> String {
+    src.replacen("<?php\n", "<?php\ndeclare(strict_types=1);\n", 1)
+}
+
+fn unwrapper_opaque(ret: &str) -> String {
+    format!(
+        "{BOXES}/**\n * @template T\n * @param Box<T> $box\n * @return {ret}\n */\n\
+         function unwrapT(Box $box): mixed {{ return $box; }}\n"
+    )
+}
+
 #[test]
 fn the_argument_carry_answers_at_both_call_forms() {
-    // The value position and the assignment form read the same thing, because the
-    // read sits at the one seam both take once the summary has declined.
+    // The value position and the assignment form read the same thing, at whichever
+    // rung answers: both take one seam, so they cannot disagree. Declared rung first
+    // — a body no summary proves, which is the shape this claim was born on.
+    let o = unwrapper_opaque("T");
+    let o_value_pos = format!("{o}$b = new Box(1); \\PHPStan\\dumpType(unwrapT($b));");
+    let o_assigned = format!("{o}$b = new Box(1); $v = unwrapT($b); \\PHPStan\\dumpType($v);");
+    assert_eq!(dumped(&o_value_pos), "dumped type: 1 (asserted)");
+    assert_eq!(dumped(&o_assigned), dumped(&o_value_pos));
+
+    // And the proven rung, which ADR-0086 §2 put above it: `return $box->value`
+    // reads the property the argument's object carried INTO the descent, so the
+    // answer is the value itself — same at both forms, one stratum sharper.
     let f = unwrapper("T");
     let value_pos = format!("{f}$b = new Box(1); \\PHPStan\\dumpType(unwrapT($b));");
     let assigned = format!("{f}$b = new Box(1); $v = unwrapT($b); \\PHPStan\\dumpType($v);");
-    assert_eq!(dumped(&value_pos), "dumped type: 1 (asserted)");
+    assert_eq!(dumped(&value_pos), "dumped type: 1");
     assert_eq!(dumped(&assigned), dumped(&value_pos));
 
     // A direct `new` in argument position carries just as a heap-bound variable
-    // does — `resolve_cval` mints the carry at the allocation either way.
+    // does — the descent mints the same object the assignment form would have.
     let direct = format!("{f}\\PHPStan\\dumpType(unwrapT(new Box('ok')));");
-    assert_eq!(dumped(&direct), "dumped type: 'ok' (asserted)");
+    assert_eq!(dumped(&direct), "dumped type: 'ok'");
 }
 
 #[test]
 fn the_utility_spelling_reads_exactly_as_the_template_does() {
     // `template-type<Box<T>, Box, 'T'>` was rewritten to `T` on the declared side
     // (issue #361), so this slice never sees the difference — which is the claim,
-    // asserted as equality of the rendered surface rather than of two literals.
-    let plain = unwrapper("T");
-    let utility = unwrapper("template-type<Box<T>, Box, 'T'>");
+    // asserted as equality of the rendered surface rather than of two literals. The
+    // opaque body keeps the comparison at the declared rung, where the two spellings
+    // are the only thing that could differ.
+    let plain = unwrapper_opaque("T");
+    let utility = unwrapper_opaque("template-type<Box<T>, Box, 'T'>");
     for call in [
         "$b = new Box(1); \\PHPStan\\dumpType(unwrapT($b));",
         "\\PHPStan\\dumpType(unwrapT(new IntBox(1)));",
@@ -1246,8 +1282,10 @@ fn a_deferred_subject_reads_one_hop_past_the_binding() {
     // a function-level template, the receiver-less twin of issue #362's read.
     let hop = format!(
         "{BOXES}/**\n * @template T\n * @param T $b\n * @return template-type<T, Box, 'T'>\n */\n\
-         function hop($b): mixed {{ return null; }}\n"
+         function hop($b): mixed {{ return $b; }}\n"
     );
+    // `return $b` proves nothing (an object has no value-domain carrier, ADR-0086
+    // §4), so what these dumps show is the declared read — which is the claim.
     // A value carry: the `1` that flowed into the constructor.
     assert_eq!(
         dumped(&format!("{hop}\\PHPStan\\dumpType(hop(new Box(1)));")),
@@ -1267,8 +1305,10 @@ fn two_occurrences_must_agree_or_the_name_is_unbound() {
     // call, and the honest answer to that is silence rather than a join.
     let two = format!(
         "{BOXES}/**\n * @template T\n * @param Box<T> $a\n * @param Box<T> $b\n * @return T\n */\n\
-         function unwrap2(Box $a, Box $b): mixed {{ return $a->value; }}\n"
+         function unwrap2(Box $a, Box $b): mixed {{ return $a; }}\n"
     );
+    // Body returns the object, so no summary crosses (ADR-0086 §4) and every dump
+    // below is the declared read answering — the rung this rule lives on.
     assert_eq!(
         dumped(&format!("{two}\\PHPStan\\dumpType(unwrap2(new Box(1), new Box(1)));")),
         "dumped type: 1 (asserted)",
@@ -1317,7 +1357,7 @@ fn an_occurrence_the_rule_cannot_read_contests_the_name_too() {
     let nested = format!(
         "{BOXES}/**\n * @template T\n * @param list<Box<T>> $many\n * @param Box<T> $one\n\
          \x20* @return T\n */\n\
-         function fromEither(array $many, Box $one): mixed {{ return $one->value; }}\n"
+         function fromEither(array $many, Box $one): mixed {{ return $one; }}\n"
     );
     assert_eq!(
         dumped(&format!("{nested}\\PHPStan\\dumpType(fromEither([], new Box(1)));")),
@@ -1340,7 +1380,7 @@ fn every_spelling_outside_the_binding_rule_stays_at_the_floor() {
     for spelling in ["list<Box<T>>", "Box<T>|null", "?T", "array<T>", "Box<Box<T>>"] {
         let f = format!(
             "{BOXES}/**\n * @template T\n * @param {spelling} $box\n * @return T\n */\n\
-             function nb(mixed $box): mixed {{ return null; }}\n"
+             function nb(mixed $box): mixed {{ return $box; }}\n"
         );
         assert_eq!(
             dumped(&format!("{f}\\PHPStan\\dumpType(nb(new Box(1)));")),
@@ -1352,7 +1392,7 @@ fn every_spelling_outside_the_binding_rule_stays_at_the_floor() {
     // And the argument-list shapes where a position stops naming one parameter. A
     // named or spread call declines wholesale rather than binding from whatever
     // prefix happens to be positional.
-    let f = unwrapper("T");
+    let f = unwrapper_opaque("T");
     for call in [
         "$v = unwrapT(box: new Box(1)); \\PHPStan\\dumpType($v);",
         "$a = [new Box(1)]; $v = unwrapT(...$a); \\PHPStan\\dumpType($v);",
@@ -1372,7 +1412,7 @@ fn a_bounded_template_reads_its_bound_and_not_the_value() {
     // inhabitation question ADR-0032 keeps thin.
     let bounded = format!(
         "{BOXES}/**\n * @template T of int\n * @param Box<T> $box\n * @return T\n */\n\
-         function bounded(Box $box): mixed {{ return null; }}\n"
+         function bounded(Box $box): mixed {{ return $box; }}\n"
     );
     assert_eq!(
         dumped(&format!("{bounded}\\PHPStan\\dumpType(bounded(new Box(1)));")),
@@ -1389,14 +1429,21 @@ fn the_body_summary_outranks_the_declared_read() {
                function idf(int $x): int { return 2; }\n";
     assert_eq!(dumped(&format!("{idf}\\PHPStan\\dumpType(idf(1));")), "dumped type: 2");
 
-    // And where the summary says nothing — `return $box->value` is a heap property
-    // that does not cross a binding descent (ADR-0057 T1) — the read supplies what
-    // flowed in, one rung above `Opaque`.
-    let f = unwrapper("T");
+    // And where the summary says nothing — `return $box` hands back an object, which
+    // the value domain cannot carry (ADR-0086 §4) — the read supplies what flowed in,
+    // one rung above `Opaque`.
+    let o = unwrapper_opaque("T");
     assert_eq!(
-        dumped(&format!("{f}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
+        dumped(&format!("{o}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
         "dumped type: 1 (asserted)",
     );
+
+    // The same declaration over a body that reads the property the argument's object
+    // carried in (ADR-0086 §2): the summary now speaks, so the proven rung answers
+    // and the declared read stays underneath it. This is the pair the precedence is
+    // about — one declaration, two bodies, and the ladder decides which rung shows.
+    let f = unwrapper("T");
+    assert_eq!(dumped(&format!("{f}\\PHPStan\\dumpType(unwrapT(new Box(1)));")), "dumped type: 1");
 }
 
 #[test]
@@ -1421,10 +1468,11 @@ fn a_method_binds_its_own_templates_from_its_arguments() {
     // Same rule, same seam, and the receiver's carries untouched: a method-level
     // `@template` is an opaque node by the time the binder runs, a class-level one is
     // still an identifier, so the two carry readers never see each other's names.
+    // The body returns the object, so the declared read is what is on show here.
     let m = format!(
         "{BOXES}final class Unwrapper {{\n\
          \x20 /**\n  * @template T\n  * @param Box<T> $box\n  * @return T\n  */\n\
-         \x20 public function un(Box $box): mixed {{ return $box->value; }}\n}}\n"
+         \x20 public function un(Box $box): mixed {{ return $box; }}\n}}\n"
     );
     assert_eq!(
         dumped(&format!(
@@ -1432,22 +1480,56 @@ fn a_method_binds_its_own_templates_from_its_arguments() {
         )),
         "dumped type: 1 (asserted)",
     );
+
+    // A method descent seeds its arguments' objects exactly as a function descent
+    // does (ADR-0086 §2 — `descend` is one seam), so the property-reading body
+    // proves the value here too.
+    let proven = m.replace("return $box; }", "return $box->value; }");
+    assert_eq!(
+        dumped(&format!(
+            "{proven}$u = new Unwrapper(); $v = $u->un(new Box(1)); \\PHPStan\\dumpType($v);"
+        )),
+        "dumped type: 1",
+    );
 }
 
 #[test]
-fn the_conformance_shape_reads_but_does_not_enforce() {
-    // Conformance case `phpdoc_advanced_phpstan_template_type`. The dump surface
-    // shows what `T` bound to; line 47's `takesString(unwrap(new Box(1)))` reports
-    // NOTHING, and that is a trust-order fact rather than a template-type gap: the
-    // read is Asserted (the docblock's claim about a return), and an Asserted
-    // argument fact premises no `type.argument-mismatch`. The body-proven route
-    // needs heap properties to cross a binding descent (ADR-0057 T1).
+fn the_conformance_shape_reads_and_now_enforces() {
+    // Conformance case `phpdoc_advanced_phpstan_template_type`, line 47. The read
+    // itself is unchanged and still Asserted — a docblock's claim about a return —
+    // and an Asserted argument fact still premises no `type.argument-mismatch`. What
+    // ADR-0086 §2 added is the rung ABOVE it: `return $box->value` reads the property
+    // the argument's object carried into the descent, so the value is *proven*, and a
+    // proven `1` flowing into `takesString(string)` is a proof-layer finding.
+    //
+    // This is the registry's conformance entry 5 retired: the route it named as
+    // blocked ("heap properties not crossing a binding descent") is the route that
+    // now runs.
     let f = unwrapper("template-type<Box<T>, Box, 'T'>");
+    assert_eq!(dumped(&format!("{f}\\PHPStan\\dumpType(unwrapT(new Box(1)));")), "dumped type: 1");
+    // The conformance file declares `strict_types=1`, and so must this: in coercive
+    // mode `1` reaches a `string` parameter by conversion and no engine reports it.
+    let enforce = strict(&format!(
+        "{f}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box(1)));"
+    ));
+    assert_eq!(ids(&enforce), vec![ID.to_owned()]);
+    // The sibling line the case pairs it with — `new Box('ok')` — stays silent, which
+    // is what makes the finding above attributable to the value rather than the shape.
+    let ok = strict(&format!(
+        "{f}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box('ok')));"
+    ));
+    assert_eq!(ids(&ok), Vec::<String>::new());
+
+    // The declared rung is still exactly as silent as it was: with a body no summary
+    // proves, the same call reads `1 (asserted)` and enforces nothing even in strict
+    // mode. Nothing about the trust order moved — a second road opened beside it.
+    let o = unwrapper_opaque("template-type<Box<T>, Box, 'T'>");
     assert_eq!(
-        dumped(&format!("{f}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
+        dumped(&format!("{o}\\PHPStan\\dumpType(unwrapT(new Box(1)));")),
         "dumped type: 1 (asserted)",
     );
-    let enforce =
-        format!("{f}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box(1)));");
-    assert_eq!(ids(&enforce), Vec::<String>::new());
+    let quiet = strict(&format!(
+        "{o}function takesString(string $s): void {{}}\ntakesString(unwrapT(new Box(1)));"
+    ));
+    assert_eq!(ids(&quiet), Vec::<String>::new());
 }

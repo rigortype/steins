@@ -9821,11 +9821,17 @@ impl<'a> Cx<'a> {
                     Some(o) => o,
                     None => &mut scratch,
                 };
+                // No caller heap is in hand on the fold road (it resolves values, and
+                // a fold's arguments are scalars by construction), so the nested
+                // descent seeds from an empty one: a `new` written there still crosses
+                // — it needs no caller heap — and a heap-bound variable does not.
+                // Strictly less knowledge, never wrong knowledge (ADR-0086 §2).
                 nested_call_singleton(
                     self,
                     folder,
                     a,
                     env,
+                    &Store::default(),
                     poisoned,
                     0,
                     descent.as_deref_mut(),
@@ -11455,8 +11461,9 @@ fn walk_trace(
                         // a no-op in every normal check (sink absent).
                         emit_asserts(w, folder, call, env, store);
                     }
-                    stmt_summary =
-                        try_descend_function(cx, folder, call, env, scope.poisoned, descent.as_mut(), out);
+                    stmt_summary = try_descend_function(
+                        cx, folder, call, env, store, scope.poisoned, descent.as_mut(), out,
+                    );
                     // The declared floor, resolved with this call's own arguments in
                     // hand (issue #363): a function-level `@template T` bound from
                     // an argument's carry lets the callee's `@return T` name a type
@@ -11527,8 +11534,9 @@ fn walk_trace(
                 Callee::DynamicVar(name) => {
                     // Issue #128: a `$fn(...)` on a proven closure rebinds its
                     // return summary on the same rungs as free functions / methods.
-                    let outcome =
-                        handle_var_call(cx, folder, scope, name, call, env, descent.as_mut(), out);
+                    let outcome = handle_var_call(
+                        cx, folder, scope, name, call, env, store, descent.as_mut(), out,
+                    );
                     stmt_summary = outcome.summary;
                     if stmt_return_arms.is_none() {
                         stmt_return_arms = outcome.return_arms;
@@ -12748,7 +12756,7 @@ fn best_dump_type(
     {
         let mut scratch: Vec<Diagnostic> = Vec::new();
         if let Some(ReturnSummary { value: Some(sv), .. }) = project_call_summary(
-            cx, folder, name, cargs, env, poisoned, span_start, None, &mut scratch,
+            cx, folder, name, cargs, env, store, poisoned, span_start, None, &mut scratch,
         ) && summary_binds(&sv.fact)
         {
             return DumpRendering {
@@ -13740,9 +13748,8 @@ fn arg_value_fact(
     }
 }
 
-/// Allocate a fresh heap object for `new Class(args)` (ADR-0036), populating its
-/// props from literal property defaults and promoted constructor parameters, and
-/// its readonly set from `readonly`-declared properties. Returns the allocation id.
+/// Allocate a fresh heap object for `new Class(args)` (ADR-0036) into the walk's
+/// store, under a fresh allocation id. Returns that id.
 fn build_new_object(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -13752,15 +13759,37 @@ fn build_new_object(
     env: &HashMap<String, Known>,
     store: &mut Store,
 ) -> AllocId {
-    let cx = w.cx;
     let id = w.fresh_id();
+    let obj = new_heap_object(w.cx, folder, class, args, named, env, store, w.scope.poisoned);
+    store.heap.insert(id, obj);
+    id
+}
+
+/// The object a `new Class(args)` expression allocates (ADR-0036): props populated
+/// from literal property defaults and promoted constructor parameters, the readonly
+/// set from `readonly`-declared properties, and the class-level carries the
+/// arguments prove. Split out of [`build_new_object`] so the binding descent can
+/// mint the same object for a `new` written in **argument** position (ADR-0086 §2)
+/// without a second constructor of properties — `store` is read-only here (the
+/// arguments resolve against the *caller's* heap) and the id is the caller's job.
+#[allow(clippy::too_many_arguments)]
+fn new_heap_object(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    class: &str,
+    args: &[ArgValue],
+    named: &[NamedArg],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> HeapObj {
     let mut obj = HeapObj::new(class.to_owned());
     obj.class_exact = true; // `new Class(...)` allocates exactly `Class` (audit G1)
     // The class-level generic parameterizations this allocation proves (ADR-0032
     // tier 3 + binding amendment, issue #295), recorded on the allocation so they
     // survive `$box = new MutableBox(1);` — read off the store before this object
     // joins it (the carry is a function of the arguments only).
-    obj.targs = cx.infer_generic_carry(class, args, env, store, w.scope.poisoned, folder);
+    obj.targs = cx.infer_generic_carry(class, args, env, store, poisoned, folder);
     let props = cx.class_props(class);
 
     // readonly set + literal defaults.
@@ -13816,7 +13845,7 @@ fn build_new_object(
             // param's native-type seed (`Verified`).
             let (fact, stratum) = match bound {
                 Some(a) => match cx
-                    .resolve_literal_strat(a, env, w.scope.poisoned, folder)
+                    .resolve_literal_strat(a, env, poisoned, folder)
                     .and_then(|(lit, strat)| {
                         singleton_fact(&lit, cx.php_minor).map(|f| (f, strat))
                     })
@@ -13846,8 +13875,7 @@ fn build_new_object(
         }
     }
 
-    store.heap.insert(id, obj);
-    id
+    obj
 }
 
 /// Seed the `$this` object shell for a method scope (ADR-0036): `class_fqn` (the
@@ -13889,6 +13917,144 @@ fn seed_this_object(cx: &Cx, class_fqn: &str, class_exact: bool) -> Option<HeapO
         }
     }
     Some(obj)
+}
+
+/// The caller-side heap object an argument denotes, for the binding descent's
+/// call-site heap entry (ADR-0086 §2). Two argument forms carry an object across:
+/// a **variable** bound in the caller's [`Store::refs`] (objects live on the heap,
+/// never in `env` — which is exactly why `resolve_literal_under` declines them),
+/// and a **direct `new`** in argument position, which mints the object the
+/// assignment form `$x = new C(...)` would have minted, against the caller's own
+/// heap. Everything else — `clone`, an enum case, a property fetch, a nested call
+/// returning an object — is out of the argument leg (ADR-0086 §4).
+fn argument_heap_object(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    arg: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+) -> Option<HeapObj> {
+    if poisoned {
+        return None;
+    }
+    match arg {
+        ArgValue::Var(name) => store.obj_of(name).cloned(),
+        ArgValue::New(class_ref, args, named) => {
+            let class = cx.class_fqn(class_ref);
+            Some(new_heap_object(cx, folder, &class, args, named, env, store, poisoned))
+        }
+        _ => None,
+    }
+}
+
+/// The copy of a caller object that crosses the binding descent (ADR-0086 §2's
+/// field table). `class`, `class_exact`, `readonly`, `ro_written` and `targs` cross
+/// verbatim — a by-value call changes none of them, and exactness is **copied,
+/// never promoted** (audit G1). Two fields are decided here:
+///
+/// * `escaped` is always `true`. The caller's object is marked escaped by this very
+///   call (the statement walk's step 1a runs right after the descent), so a copy
+///   claiming `false` would let an unknown call *inside* the callee skip the sweep
+///   it owes.
+/// * a **non-readonly** prop crosses only from an object the caller alone can reach
+///   (`escaped == false`). Any other route — a static property, an array, a global,
+///   another object's property — marks the source escaped at the moment it is taken,
+///   and a write through that alias is invisible to the callee's copy. readonly props
+///   cross regardless: the language guarantees no one rewrites them.
+///
+/// A prop whose fact the binding key cannot name does not cross at all, so the key
+/// stays a faithful name for the entry state and the memo a pure function of it
+/// (ADR-0048 §2). Strata cross with their facts — an `Asserted` prop stays
+/// `Asserted` inside the callee (ADR-0052 amendment 1, no laundering).
+fn copy_for_descent(src: &HeapObj) -> HeapObj {
+    let mut copy = src.clone();
+    copy.escaped = true;
+    copy.props.retain(|name, p| {
+        (!src.escaped || src.readonly.contains(name)) && key_prop_value(&p.fact).is_some()
+    });
+    copy
+}
+
+/// A property fact reduced to the [`BindingKey`]'s vocabulary, or `None` when the
+/// key cannot name it (ADR-0086 §2). The `arg_of_fact_key` precedent, minus its
+/// `Other` fallback: a capture may collapse to `Other` because the *capture itself*
+/// still enters the callee's env, but a prop the key cannot spell must not cross at
+/// all, or the memo would replay one entry state's summary for another.
+fn key_prop_value(fact: &Fact) -> Option<ArgValue> {
+    match fact {
+        Fact::Singleton(v) => match arg_of_val(v) {
+            ArgValue::Other => None,
+            a => Some(a),
+        },
+        _ => None,
+    }
+}
+
+/// The canonical rendering of a seeded argument object for the [`BindingKey`]
+/// (ADR-0086 §2): class, exactness, the sorted readonly bookkeeping, the sorted
+/// `(prop, value, stratum)` list of the props that crossed, and the carries. The
+/// memo replays a cached summary — and suppresses the re-emission that would come
+/// with a re-walk (ADR-0075 §2.1) — only for an entry state this names exactly, so
+/// `h(new Box(1))` can never answer for `h(new Box('s'))`. No [`AllocId`] enters it:
+/// ids are walk-local and counter-derived (ADR-0048 §4).
+fn object_binding_key(obj: &HeapObj) -> String {
+    let mut readonly: Vec<&str> = obj.readonly.iter().map(String::as_str).collect();
+    readonly.sort_unstable();
+    let mut written: Vec<&str> = obj.ro_written.iter().map(String::as_str).collect();
+    written.sort_unstable();
+    let mut props: Vec<String> = obj
+        .props
+        .iter()
+        .filter_map(|(name, p)| {
+            key_prop_value(&p.fact).map(|v| format!("{name}={v:?}/{:?}", p.stratum))
+        })
+        .collect();
+    props.sort();
+    let carries: Vec<String> = obj.targs.iter().map(carry_binding_key).collect();
+    format!(
+        "{}{} ro[{}] rw[{}] p[{}] t[{}]",
+        obj.class,
+        if obj.class_exact { "!" } else { "" },
+        readonly.join(","),
+        written.join(","),
+        props.join(","),
+        carries.join(","),
+    )
+}
+
+/// One [`GenericCarry`] rendered for [`object_binding_key`]. The written `site` is
+/// part of what the carry *means* (it resolves a [`CArg::Ty`]'s class names), so it
+/// is named too — a finer key is never wrong, only less shared.
+fn carry_binding_key(c: &GenericCarry) -> String {
+    let args: Vec<String> = c
+        .args
+        .iter()
+        .map(|a| match a {
+            CArg::Val(v) => format!("v{}", cval_binding_key(v)),
+            CArg::Ty(t) => format!("t{t:?}"),
+        })
+        .collect();
+    format!("{}@{:?}<{}>", c.owner, c.site, args.join(","))
+}
+
+/// One [`CVal`] rendered for [`carry_binding_key`] — [`CVal`] carries no `Debug`
+/// (it holds [`GenericCarry`], which is deliberately structural), so the rendering
+/// walks it.
+fn cval_binding_key(v: &CVal) -> String {
+    match v {
+        CVal::Scalar(a) => format!("{a:?}"),
+        CVal::Array(items) => {
+            let parts: Vec<String> =
+                items.iter().map(|(k, v)| format!("{k:?}=>{}", cval_binding_key(v))).collect();
+            format!("[{}]", parts.join(","))
+        }
+        CVal::Object(class, carries) => {
+            let cs: Vec<String> = carries.iter().map(carry_binding_key).collect();
+            format!("{class}{{{}}}", cs.join(","))
+        }
+        CVal::Resource => "resource".to_owned(),
+    }
 }
 
 /// Whether a fact admits `null` — such a fact must never be *seeded* into a
@@ -20894,7 +21060,7 @@ fn check_propagated_call(
                             return None;
                         }
                         let summary = project_call_summary(
-                            cx, folder, name, args, env, poisoned, arg.span.start, None, out,
+                            cx, folder, name, args, env, store, poisoned, arg.span.start, None, out,
                         )?;
                         let sv = summary.value?;
                         if sv.stratum != Stratum::Verified {
@@ -21036,11 +21202,13 @@ fn check_propagated_call(
 
 /// Attempt an interprocedural binding descent into a same-project function. Returns
 /// the callee's return-fact summary (ADR-0057 amendment T0), if one was computed.
+#[allow(clippy::too_many_arguments)]
 fn try_descend_function(
     cx: &Cx,
     folder: &mut dyn Folder,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    store: &Store,
     poisoned: bool,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
@@ -21062,6 +21230,7 @@ fn try_descend_function(
         call.span.start,
         &[],
         env,
+        store,
         poisoned,
         descent,
         out,
@@ -21099,6 +21268,7 @@ fn project_call_summary(
     name: &str,
     args: &[ArgValue],
     env: &HashMap<String, Known>,
+    store: &Store,
     poisoned: bool,
     span_start: u32,
     descent: Option<&mut Descent<'_>>,
@@ -21121,6 +21291,7 @@ fn project_call_summary(
         span_start,
         &[],
         env,
+        store,
         poisoned,
         descent,
         out,
@@ -21174,6 +21345,7 @@ fn nested_call_singleton(
     folder: &mut dyn Folder,
     value: &ArgValue,
     env: &HashMap<String, Known>,
+    store: &Store,
     poisoned: bool,
     span_start: u32,
     descent: Option<&mut Descent<'_>>,
@@ -21183,8 +21355,9 @@ fn nested_call_singleton(
     if cargs.is_empty() {
         return None;
     }
-    let summary =
-        project_call_summary(cx, folder, name, cargs, env, poisoned, span_start, descent, out)?;
+    let summary = project_call_summary(
+        cx, folder, name, cargs, env, store, poisoned, span_start, descent, out,
+    )?;
     let sv = summary.value?;
     let Fact::Singleton(v) = &sv.fact else { return None };
     Some((arg_of_val(v), sv.stratum))
@@ -21213,6 +21386,7 @@ fn handle_var_call(
     name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    store: &Store,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> VarCallOutcome {
@@ -21264,6 +21438,7 @@ fn handle_var_call(
                     call.span.start,
                     &cv.captures,
                     env,
+                    store,
                     scope.poisoned,
                     descent,
                     out,
@@ -21271,7 +21446,9 @@ fn handle_var_call(
                 VarCallOutcome { summary, return_arms }
             }
             ClosureTarget::Named(nameref) => {
-                dispatch_named_callable(cx, folder, scope.poisoned, nameref, call, env, descent, out)
+                dispatch_named_callable(
+                    cx, folder, scope.poisoned, nameref, call, env, store, descent, out,
+                )
             }
         };
     }
@@ -21287,7 +21464,9 @@ fn handle_var_call(
     {
         let nameref =
             NameRef { raw: s.to_owned(), kind: RefKind::Unqualified, offset: call.span.start };
-        return dispatch_named_callable(cx, folder, scope.poisoned, &nameref, call, env, descent, out);
+        return dispatch_named_callable(
+            cx, folder, scope.poisoned, &nameref, call, env, store, descent, out,
+        );
     }
     empty
 }
@@ -21324,6 +21503,7 @@ fn dispatch_named_callable(
     nameref: &NameRef,
     call: &CallExpr,
     env: &HashMap<String, Known>,
+    store: &Store,
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> VarCallOutcome {
@@ -21335,7 +21515,7 @@ fn dispatch_named_callable(
             cx, folder, poisoned, descent.is_some(), &decl.params, &decl.name, call, env, out,
         );
     }
-    let summary = try_descend_function(cx, folder, &synth, env, poisoned, descent, out);
+    let summary = try_descend_function(cx, folder, &synth, env, store, poisoned, descent, out);
     VarCallOutcome { summary, return_arms }
 }
 
@@ -21448,6 +21628,10 @@ fn descend(
     span_start: u32,
     captures: &[(String, Fact, Stratum)],
     env: &HashMap<String, Known>,
+    // The caller's heap at the call (ADR-0086 §2): an argument's object crosses into
+    // the callee's store as a copy. Read-only — no callee-side write is ever visible
+    // through this channel, and no caller-side name survives into the callee.
+    caller_store: &Store,
     poisoned: bool,
     mut descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
@@ -21462,10 +21646,50 @@ fn descend(
     // `Asserted` argument narrows into the descent without laundering to `Verified`.
     let mut bound: Vec<(String, ArgValue, Stratum)> = Vec::new();
     let mut render_args: Vec<ArgValue> = Vec::new();
+    // Call-site heap entry (ADR-0086 §2): the callee's pre-populated store, the
+    // per-parameter key renderings of what it holds, and the caller-allocation →
+    // callee-allocation map that keeps **one copy per distinct caller object**, so
+    // `f($b, $b)` binds both parameters to one callee object and the aliasing
+    // structure among the arguments survives the crossing.
+    let mut seed_store = Store::default();
+    let mut seed_keys: Vec<(String, String)> = Vec::new();
+    let mut seeded: HashMap<AllocId, AllocId> = HashMap::new();
     for (i, arg_value) in args.iter().enumerate() {
         let Some(param) = params.get(i) else { break };
         if param.variadic {
             break;
+        }
+        // The object leg first: an argument denoting a heap object never resolves to
+        // a literal (objects have no value-domain carrier — ADR-0035/0038), so the
+        // two legs are disjoint by construction and this ordering costs nothing.
+        if let Some(obj) = argument_heap_object(cx, folder, arg_value, env, caller_store, poisoned)
+        {
+            if param.by_ref {
+                return None;
+            }
+            // A direct `new` has no caller allocation — it is unique by construction.
+            let caller_id = match arg_value {
+                ArgValue::Var(name) => caller_store.id_of(name),
+                _ => None,
+            };
+            let id = match caller_id.and_then(|c| seeded.get(&c).copied()) {
+                Some(id) => id,
+                None => {
+                    let id = seed_store.heap.len() as AllocId;
+                    seed_store.heap.insert(id, copy_for_descent(&obj));
+                    if let Some(c) = caller_id {
+                        seeded.insert(c, id);
+                    }
+                    id
+                }
+            };
+            seed_store.refs.insert(param.name.clone(), id);
+            seed_keys.push((
+                param.name.clone(),
+                object_binding_key(&seed_store.heap[&id]),
+            ));
+            render_args.push((*arg_value).clone());
+            continue;
         }
         // Direct resolution first; when it declines and the argument is itself a
         // project call, the T0 machinery answers for its own argument position
@@ -21496,6 +21720,7 @@ fn descend(
                     folder,
                     arg_value,
                     env,
+                    caller_store,
                     poisoned,
                     span_start,
                     descent.as_deref_mut(),
@@ -21522,7 +21747,12 @@ fn descend(
     // snapshot drives the body); a plain function needs at least one bound arg.
     // Zero-argument factories do NOT descend in T0 (ADR-0057 §3 / A5, deferred to
     // T2's emission-suppressed summary-only walk) — they take the arm floor.
-    if bound.is_empty() && captures.is_empty() {
+    //
+    // A **seeded object counts as a binding** (ADR-0086 §2): an object-only argument
+    // list carries real entry state now, so `h(new Box(1))` walks `h` where it used
+    // to return here. The memo and the emission dedupe then govern that walk exactly
+    // as they govern a value binding's.
+    if bound.is_empty() && captures.is_empty() && seed_keys.is_empty() {
         return None;
     }
 
@@ -21546,6 +21776,20 @@ fn descend(
         .collect();
     for (name, fact, strat) in captures {
         key_binding.push((format!("use:{name}"), arg_of_fact_key(fact), *strat));
+    }
+    // ADR-0086 §2: a seeded object names its whole entry state in the key, under the
+    // same pseudo-binding spelling captures and `this:` already use. Nothing crosses
+    // that this rendering does not state, so the memo stays a pure function of the
+    // key (ADR-0048 §2) and a summary is never replayed — nor an emission suppressed
+    // — for an object the callee would have seen differently. `Verified`: what the
+    // rendering names is the runtime shape of the object, and each prop's own
+    // stratum travels inside it.
+    for (name, render) in &seed_keys {
+        key_binding.push((
+            format!("obj:{name}"),
+            ArgValue::Str(PhpStr::from(render.clone())),
+            Stratum::Verified,
+        ));
     }
     if let Some(exact) = &body_this_exact {
         // Exact receiver is a runtime-proven identity — Verified.
@@ -21626,7 +21870,7 @@ fn descend(
                 folder,
                 callee_scope,
                 bound_env,
-                Store::default(),
+                seed_store,
                 body_this_exact,
                 Some(child),
                 None,
@@ -21649,7 +21893,7 @@ fn descend(
                 folder,
                 callee_scope,
                 bound_env,
-                Store::default(),
+                seed_store,
                 body_this_exact,
                 Some(child),
                 None,
@@ -27472,6 +27716,7 @@ fn handle_method_call(
         call.span.start,
         &[],
         env,
+        store,
         scope.poisoned,
         descent,
         out,

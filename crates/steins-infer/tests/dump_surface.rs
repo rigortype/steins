@@ -566,8 +566,11 @@ fn a_template_type_return_dumps_the_template_argument_it_names() {
     // `@return int` seeds.
     let src = "<?php\n/** @template T */\nclass Box { public function __construct(public mixed $v) {} }\n\
                /**\n * @param Box<int> $b\n * @return template-type<Box<int>, Box, 'T'>\n */\n\
-               function unwrap(Box $b): mixed { return $b->v; }\n\
+               function unwrap(Box $b): mixed { return $b; }\n\
                function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
+    // The body returns the object, which the value domain cannot carry (ADR-0086
+    // §4), so no summary crosses and the DECLARED read is what these dumps show —
+    // the rung the two spellings are a claim about.
     assert_eq!(one_type(src), "dumped type: int (asserted)");
     // The same declaration with the type written out: identical surface, which is
     // the whole claim the resolution makes.
@@ -583,7 +586,7 @@ fn a_template_argument_return_dumps_what_that_template_dumps() {
     let with = "<?php\n/** @template T */\nclass Box { public function __construct(public mixed $v) {} }\n\
                 /**\n * @template T\n * @param Box<T> $b\n\
                 \x20* @return template-type<Box<T>, Box, 'T'>\n */\n\
-                function unwrap(Box $b): mixed { return $b->v; }\n\
+                function unwrap(Box $b): mixed { return $b; }\n\
                 function g() { \\PHPStan\\dumpType(unwrap(new Box(1))); }\n";
     let plain = with.replace("template-type<Box<T>, Box, 'T'>", "T");
     assert_eq!(one_type(with), one_type(&plain));
@@ -619,8 +622,11 @@ fn a_receiver_carry_return_dumps_what_the_class_it_names_dumps() {
 fn an_argument_carry_return_dumps_the_same_at_both_call_forms() {
     // Issue #363, and the parity claim that matters to the surface: the value
     // position and the assignment form read one seam, so `dumpType(unwrap($b))` and
-    // `$v = unwrap($b); dumpType($v)` cannot disagree. `Asserted` in both, because
-    // what resolved is still the docblock's claim about a return.
+    // `$v = unwrap($b); dumpType($v)` cannot disagree. Since ADR-0086 §2 the seam
+    // that answers is the PROVEN one — `return $b->v` reads the property the
+    // argument's object carried into the descent — so both forms are `1`, not the
+    // docblock's Asserted claim about the return. Parity is the claim; the rung it
+    // holds at is whichever rung is highest.
     let base = "<?php\n/** @template T */\n\
         class Box { /** @param T $v */ public function __construct(public mixed $v) {} }\n\
         /**\n * @template T\n * @param Box<T> $b\n * @return T\n */\n\
@@ -629,7 +635,7 @@ fn an_argument_carry_return_dumps_the_same_at_both_call_forms() {
     let assigned =
         format!("{base}function g() {{ $b = new Box(1); $v = unwrap($b); \\PHPStan\\dumpType($v); }}\n");
     assert_eq!(one_type(&nested), one_type(&assigned));
-    assert_eq!(one_type(&nested), "dumped type: 1 (asserted)");
+    assert_eq!(one_type(&nested), "dumped type: 1");
 }
 
 #[test]
