@@ -693,3 +693,38 @@ fn the_closure_only_half_is_decided_in_the_value_domain() {
         assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: false }), Maybe, "{wide}");
     }
 }
+
+// `template-type<Subject, Owner, 'TName'>` — recognized vocabulary, no
+// resolution yet (issue #360; issue #361 is the resolution).
+
+#[test]
+fn template_type_is_recognized_vocabulary_and_never_a_class() {
+    // The written arity. `Opaque`, not `Class("template-type")` — the class
+    // reading is what made the dump surface print `template-type (asserted)`,
+    // and what would have let acceptance manufacture a `No` for every
+    // non-object value the utility actually stands for.
+    assert_eq!(ty("template-type<Box<T>, Box, 'T'>"), steins_contract::ContractTy::Opaque);
+    assert_eq!(ty("\\template-type<Box<T>, Box, 'T'>"), steins_contract::ContractTy::Opaque);
+    assert_eq!(ty("Template-Type<Box<T>, Box, 'T'>"), steins_contract::ContractTy::Opaque);
+}
+
+#[test]
+fn a_wrong_arity_template_type_floors_to_opaque_too() {
+    // PHPStan resolves any arity but three to an error type. Steins declines
+    // silently — a registered divergence, not a finding — so the name is
+    // checked before the argument count and every arity lands on the same
+    // honest floor.
+    assert_eq!(ty("template-type<Box<T>, Box>"), steins_contract::ContractTy::Opaque);
+    assert_eq!(ty("template-type<Box<T>, Box, 'T', int>"), steins_contract::ContractTy::Opaque);
+}
+
+#[test]
+fn the_floor_decides_nothing_rather_than_refuting_a_value() {
+    // What `Opaque` buys: `Maybe` against everything, so no value is convicted
+    // by a spelling nothing resolves yet.
+    let t = ty("template-type<Box<T>, Box, 'T'>");
+    assert_eq!(admits_val(&t, &Val::Int(1)), Maybe);
+    assert_eq!(admits_val(&t, &s("x")), Maybe);
+    assert_eq!(admits_val(&t, &Val::Null), Maybe);
+    assert_eq!(admits_fact(&t, &Fact::General { base: Base::String, nullable: false }), Maybe);
+}

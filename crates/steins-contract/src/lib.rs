@@ -359,6 +359,10 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// (`Maybe`), never a manufactured `No`. `resource` and its state spellings
 /// left this list with ADR-0056 §8 — see [`ContractTy::Resource`].
 ///
+/// The table is **arity-blind** — the name is checked before any argument
+/// count is — so a misspelled arity floors to `Opaque` too rather than
+/// falling through to the class catch-all it would otherwise reach.
+///
 /// Not "any unrecognized name": an unknown identifier still falls to
 /// `Class`, the signal both lanes' class machinery depends on.
 const KNOWN_UNENFORCED: &[&str] = &[
@@ -375,6 +379,12 @@ const KNOWN_UNENFORCED: &[&str] = &[
     "properties-of",
     "stringable-object",
     "class-string-map",
+    // PHPStan's `template-type<Subject, Owner, 'TName'>` (issue #360): known
+    // vocabulary with no resolution yet (issue #361). Without the entry the
+    // spelling reads as a class named `template-type` — which the dump surface
+    // printed back as one — and a wrong arity, which PHPStan resolves to an
+    // error type, floors here silently rather than reporting.
+    "template-type",
 ];
 
 /// **The one identifier table**: what every phpdoc *keyword* spelled as a bare
