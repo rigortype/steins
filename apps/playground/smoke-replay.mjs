@@ -173,19 +173,21 @@ assert(boot !== undefined && boot !== null, "a replay envelope carries a boot ob
 assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
 assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
 assert(boot.fold_lane === "width_safe_subset", `a 32-bit engine folds the width-safe subset (got ${boot.fold_lane})`);
-// 48 = 37 width-safe + 9 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
+// 53 = 40 width-safe + 11 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
 // added `array_merge` and `explode` as the first WIDTH_UNVERIFIED rows: the
-// allowlist grew, this engine's share did not, so `fold_safe` is unmoved and the
-// two new names are among the ones the browser does NOT fold.
-assert(boot.fold_safe === 37 && boot.fold_total === 48, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
-// `refused_folds` stays the nine REFUSED rows — the ones with a recorded
+// allowlist grew, this engine's share did not. Issue #354 then probed the five
+// names that wave deferred and moved BOTH counts — `str_split`, `array_fill` and
+// `array_unique` fold here now, `range` and `preg_split` are named below.
+assert(boot.fold_safe === 40 && boot.fold_total === 53, `the counts come from the catalog (${boot.fold_safe}/${boot.fold_total})`);
+// `refused_folds` stays the eleven REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
 // merged in here: ADR-0028's 2026-08-14 amendment §4 gives them their own field,
 // and the panel gives them their own sentence.
 assert(
   Array.isArray(boot.refused_folds) &&
-    boot.refused_folds.join(",") === "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare",
+    boot.refused_folds.join(",") ===
+      "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
 );
 assert(
@@ -218,6 +220,32 @@ assert(
 assert(
   refusedDump.message !== "dumped type: 3",
   "the value a 64-bit engine would have folded never appears on a 32-bit one",
+);
+
+// 5b. Issue #354, both verdicts against the REAL engine rather than a table.
+//     `str_split` probed clean, so the browser folds it — and this is the first
+//     time it folds a builtin whose result is an ARRAY, since every array-
+//     returning name before this slice was refused or unverified here. `range`
+//     probed dirty and must not fold: `range("3000000000", "3000000000")` is a
+//     list of int on a 64-bit engine and of float on this one, which is exactly
+//     the argument below, so a regression admitting the name would show up as a
+//     value rather than as a type.
+const SAFE_354 = '<?php\n\\PHPStan\\dumpType(str_split("abcdef", 2));\n';
+const safe354 = await driveReplay({ analyze: analyzer(SAFE_354), answer, table });
+const safeDump = safe354.value.findings.find((f) => f.id === "debug.type");
+console.log(`str_split dump: ${safeDump && safeDump.message}`);
+assert(
+  safeDump !== undefined && safeDump.message === "dumped type: list{'ab', 'cd', 'ef'}",
+  `a newly width-safe array result folds in the browser (got: ${safeDump && safeDump.message})`,
+);
+
+const REFUSED_354 = '<?php\n\\PHPStan\\dumpType(range("3000000000", "3000000000"));\n';
+const refused354 = await driveReplay({ analyze: analyzer(REFUSED_354), answer, table });
+const refused354Dump = refused354.value.findings.find((f) => f.id === "debug.type");
+console.log(`range dump: ${refused354Dump && refused354Dump.message}`);
+assert(
+  refused354Dump !== undefined && !refused354Dump.message.startsWith("dumped type: list{"),
+  `the width-refused \`range\` widens to a type here (got: ${refused354Dump && refused354Dump.message})`,
 );
 
 // 6. `env` is asked exactly once, on the first iteration, and never again — the

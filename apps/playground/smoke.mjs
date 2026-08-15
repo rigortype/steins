@@ -188,9 +188,10 @@ assert(boot.fold_lane === "full", `a 64-bit engine folds the whole allowlist (go
 assert(boot.curated_rows === true && boot.absence_family === true, "every lane is live at the pin");
 assert(boot.refused_folds === undefined, "nothing is refused on the full lane");
 assert(boot.unverified_folds === undefined, "…and nothing is unverified there either");
-// 48 = 37 safe + 9 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1). On the
-// full lane every one of the 48 folds, which is why only the total moved.
-assert(boot.fold_total === 48 && boot.fold_safe === 37, "the catalog's own counts travel");
+// 53 = 40 safe + 11 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1, then
+// issue #354's five). On the full lane every one of the 53 folds, so what a
+// narrow engine would decline is invisible here.
+assert(boot.fold_total === 53 && boot.fold_safe === 40, "the catalog's own counts travel");
 assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
 
 // annotate rides the same loop.

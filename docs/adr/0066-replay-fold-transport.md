@@ -557,3 +557,158 @@ playground smokes.
   (`replay_fold.rs`) and the real php-wasm smoke; the machine that runs the Rust suite
   is 64-bit, and the probe harness — not the test suite — is where the differential
   lives. That is unchanged from S1.5 and remains the standing cost of the arrangement.
+
+## Amendment (2026-08-15): the five deferred fold names are measured (issue #354)
+
+ADR-0028's 2026-08-14 amendment opened the seam to array *results* and shipped two
+waves behind it, deferring five names it had already argued were admissible:
+`array_unique` (37 corpus uses), `range` (24), `preg_split` (20), `str_split` (14),
+`array_fill` (8). The deferral was pinned, not implicit — `steins_catalog`'s partition
+test asserted `width_class(name) == None` for exactly those five. This slice moves
+that pin, and no mechanism moves with it: the fold gate, the range guard, the replay
+loop and the boot object pick the names up because the tables are what they read.
+
+### The same instrument, sharpened twice
+
+**209 adversarial `(name, args)` tuples**, every one passing the range guard, through
+the **same** `steins_handle` dispatch core on both machines — 64-bit `php` 8.5.9 over
+the runner's NDJSON protocol, 32-bit php-wasm 0.1.0 (PHP 8.5.2, `PHP_INT_SIZE = 4`)
+over the §5 patched prologue. Both builds report `precision = 14`,
+`serialize_precision = -1`, `pcre.backtrack_limit = 1000000`,
+`pcre.recursion_limit = 100000`. They differ in their PCRE: **10.47 with
+`pcre.jit = 1`** against **10.44 with no JIT**. That difference turns out to decide a
+row.
+
+Two properties of the harness had to change before any of it counted, and both are
+mistakes that produce a *false clean*:
+
+1. **Compare the response bytes, not parsed JSON.** Array elements cross the seam
+   bare — `steins_encode_array` carries no per-element type tag — so an `int` on one
+   engine and a `float` on the other are distinguished only by
+   `JSON_PRESERVE_ZERO_FRACTION`'s `3000000000` versus `3000000000.0`, which any JSON
+   parse erases. Every earlier round compared scalars, where the envelope's own `type`
+   field carries the tag; the array results ADR-0028 admitted are the first place this
+   could hide, and the first probe run under the byte comparison found a divergence
+   the parsed comparison had reported clean.
+2. **A float argument cannot be written as a JavaScript number.** `3000000000.0`
+   round-trips through `JSON.stringify` as `3000000000` and reaches the runner as an
+   **int** — an argument the range guard refuses, so the tuple is not a probe at all.
+   Float arguments travel as raw JSON tokens, and the harness now applies
+   `fold_arg_fits_i32`'s rule itself and refuses to count an inadmissible tuple. Ten
+   tuples were caught this way.
+
+`str_replace` and `substr_replace`'s array forms — the wave-0 rows ADR-0028 admitted
+with no re-verification, on the argument that the array form is identical on both
+engines — were re-probed **bytewise** for the same reason. Seven tuples, unchanged.
+
+### The five-name disposition (209 probed, 3 admitted safe, 2 refused)
+
+| name | verdict | probes (silent/reverse/decline) | one-line reason |
+| --- | --- | --- | --- |
+| `range` | **WIDTH-REFUSED** | 52 (7/0/0) | its bounds are declared `string|int|float`, so the engine's own width types a numeric string and the **element type tag** flips inside the result: `range("3000000000", "3000000000")` is `[int(3000000000)]` / `[float(3000000000.0)]` |
+| `preg_split` | **WIDTH-REFUSED** | 64 (5/0/2) | the two PCRE builds disagree, and it is the **JIT**, not the version: `preg_split('/(*LIMIT_MATCH=1)a/', "aaa")` splits on the JIT-enabled build and is `false` on the interpreter |
+| `array_unique` | safe | 39 (0/0/1) | compares string casts under `SORT_STRING` without retyping what it keeps; the one decline is the runner refusing an argument whose next-int key has nowhere to go at `PHP_INT_MAX` |
+| `str_split` | safe | 24 (0/0/3) | `int` `$length` in, strings and `0..n` keys out; the three declines are `TypeError` on an oversized numeric-string or float length |
+| `array_fill` | safe | 30 (0/0/4) | `int` parameters that never coerce a *value*; the four declines are the narrow engine having no key after its own `PHP_INT_MAX`, and a `TypeError` on an oversized `$start_index` |
+
+The dividing line is one sentence: **`range` is the only one of the five with a
+`string|int|float` parameter**, and a numeric string on such a parameter is typed by
+the machine, not by the argument. `str_split`, `array_fill` and `preg_split` take
+plain `int` parameters, where the same oversized argument is a `TypeError` on the
+narrow engine — a decline, which is sound. 52 probes found no int-argument and no
+float-argument route to `range`'s flip; it is reachable from strings only, and the
+flip starts exactly one past the narrow `PHP_INT_MAX` (`"2147483647"` agrees,
+`"2147483648"` does not).
+
+### `preg_split`: a refused row whose divergence is not the width
+
+This is the first row in either table refused for something other than the integer
+machine, and the honest thing is to say so in the row rather than let the class name
+imply otherwise. The witness family is the inline limit verbs, which PCRE2's
+interpreter honours and its JIT does not:
+
+| probe | 64-bit (PCRE 10.47, JIT on) | 32-bit (PCRE 10.44, no JIT) |
+| --- | --- | --- |
+| `preg_split('/(*LIMIT_MATCH=1)a/', "aaa")` | `['', '', '', '']` | `false` |
+| `preg_split('/(*LIMIT_MATCH=1),/', "a,b")` | `['a', 'b']` | `false` |
+| `preg_split('/(*LIMIT_RECURSION=1)(?:a)+/', "aaa")` | `['', '']` | `false` |
+| `preg_split('/(*LIMIT_DEPTH=1)(?:a)+/', "aaa")` | `['', '']` | `false` |
+| `preg_split('/(*LIMIT_MATCH=1)(*NO_JIT)a/', "aaa")` | `false` | `false` |
+
+The last row is what identifies the cause: disabling the JIT in the pattern makes the
+two engines agree. Everything else probed clean across 59 further tuples — Unicode
+property and script classes, `\R`, `\X`, lookbehind, recursion, catastrophic
+backtracking at seven lengths, UTF-8 mode on multibyte subjects, `PREG_SPLIT_*` flags
+including the integer offsets of `OFFSET_CAPTURE` — so this is not a claim that the
+two PCREs are broadly different. It is one recorded divergence, which is what a
+refused row needs.
+
+**The `preg_refusal_memo` question, decided.** ADR-0078's pattern lane asks the engine
+whether a literal pattern compiles and memoizes the refusal. A folded `preg_split`
+does not ride that memo, is not gated by it, and is not refused for it:
+
+- **In the browser** the two seams no longer meet, because the refusal above keeps
+  `preg_split` from folding there at all. That is the whole of the collision issue
+  #354 asked about, and it is closed by the width verdict rather than by new wiring.
+- **On a native run** both seams ride the *project's own* PCRE, which is the only
+  engine whose answer is right for the project's own runtime (ADR-0004). They answer
+  different questions: `preg_split('/[/', $s)` genuinely **is** `false` on that engine,
+  which is a value fact, while the lane's diagnostic is about the pattern being
+  broken. Gating the fold on the memo would make the value seam re-report the pattern
+  seam's finding as an absence, which is the "two seams answering the same question"
+  the issue warned against — in the other direction.
+
+### `array_unique` and `precision`: admitted, with the escalation named
+
+`array_unique`'s default `SORT_STRING` compares string casts, and a float's cast is
+`precision`-dependent, so the ini decides **how many elements survive**. Measured, not
+assumed: at `precision = 14` `array_unique([0.1, 0.1000000000000001])` keeps one
+element, at 17 it keeps two.
+
+That is the same ini `strval` and `implode` have folded under since the first round —
+`strval(0.1)` is `'0.1'` at 14 and `'0.10000000000000001'` at 17 — so refusing
+`array_unique` for it while those two fold would set the bar in two places at once.
+It is admitted, and what is new is written down rather than smoothed over: the
+exposure moves from *how a float is spelled* to *how long the array is*. Both engines
+report `precision = 14`, which is the condition every float-rendering row here already
+carries. Closing the seam properly is ADR-0008's opt-in pseudo-constant configuration,
+and it is a decision about `strval`, `implode` and `array_unique` together.
+
+### `array_fill` and the result budget, end to end
+
+`array_fill(0, 1000000, 'x')` is the legitimate call with an illegitimate reply, and
+the first name on the allowlist where a single integer literal reaches it — `explode`
+needs a 257-piece string. The runner charges the 256-entry budget **after** the call
+and **before** encoding, so the reply is declined, never truncated, and the dump falls
+to a type. Pinned at both levels: `steins-sidecar/tests/protocol.rs` for the runner's
+`'array result over entry budget'`, and
+`an_over_budget_array_fill_widens_rather_than_truncating` for the analyzer, with 256
+folding whole beside 257 declining.
+
+### The 53-name disposition, and what moved with it
+
+`WIDTH_SAFE` is now **40**, `WIDTH_REFUSED` **11**, `WIDTH_UNVERIFIED` unchanged at
+**2**, the allowlist **53**. Unlike wave 1, this slice moves the boundary in both
+directions at once: the browser folds three names it did not, and names two more
+refusals it did not. The pages that report those counts derive them, so only the
+places that *pin* the numbers on purpose were edited — `steins-catalog`'s partition
+test, `steins-wasm`'s boot-object test, and the two playground smokes.
+
+`WIDTH_UNVERIFIED` did not grow, which is the class working as defined: a probed name
+lands in the class its evidence chooses and never passes through the one that claims
+nothing. Its two rows, `array_merge` and `explode`, still have zero probes behind
+them, which remains the correct number until someone runs a probe **set** at them.
+
+### Consequences
+
+- The byte-comparison correction is the durable part. Any future width verdict on an
+  array-returning name is only as good as a comparison that can see element type tags,
+  and the parsed-JSON comparison silently cannot. It is worth re-reading that
+  paragraph before the next round rather than rediscovering it.
+- `preg_split` establishes that a `WIDTH_REFUSED` row can be refused for a build
+  option rather than the word size. The class's mechanism — folds on a provably
+  64-bit engine, declines elsewhere — fits that case exactly, and the row carries its
+  own reason, so nothing is lost by not inventing a fourth class for it.
+- Three of the five now fold in the browser, which is the first time the width gate
+  and the array-result path meet on a narrow machine;
+  `the_issue_354_verdicts_split_the_lane_on_a_32_bit_engine` is where that is pinned.

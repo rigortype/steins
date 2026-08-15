@@ -56,13 +56,23 @@ amendment §4).
 The evidence discipline differs per class and is the point of the split:
 
 - **`Safe`** is a positive claim, and it is earned by probing. The current
-  subset was verified with 661 adversarial tuples through the same dispatch core
-  both engines run.
+  subset was verified with 870 adversarial tuples through the same dispatch core
+  both engines run. A probe of an *array*-returning name compares the response
+  **bytes**: array elements travel with no per-element type tag, so an `int` on
+  one engine and a `float` on the other are legible only as
+  `JSON_PRESERVE_ZERO_FRACTION`'s `3000000000` versus `3000000000.0`, which any
+  JSON parse erases (issue #354 found a divergence this way that the parsed
+  comparison had called clean).
 - **`Refused`** is also a positive claim — that the engines *disagree* — and the
   ADR-0061 refused-row discipline requires the divergence to be on record beside
   the name (`sprintf("%x", -1)` is `"ffffffffffffffff"` on one machine and
   `"ffffffff"` on the other). One row, one witness. That record is the only
-  reason the refused list is auditable at all.
+  reason the refused list is auditable at all. The witness need not be the
+  integer width: `preg_split` is refused because the two builds' PCRE differ over
+  the inline `(*LIMIT_MATCH=…)` verbs, which the JIT ignores and the interpreter
+  honours. The class's mechanism — folds on a provably 64-bit engine, declines
+  elsewhere — is the right one for that too, so the row states its own reason
+  rather than a fourth class being invented for it.
 - **`Unverified`** claims nothing. It means nobody looked, and **the correct
   number of probes behind a row here today is zero** — evidence would move the
   row out, to `Safe` if the engines agree and to `Refused` with its divergence
@@ -85,6 +95,16 @@ all-literal path and the rung survives beneath it as the no-sidecar floor.
 rule — their rungs are already exact, and cover non-literal arguments a fold
 never can.
 
+The five names that amendment deferred were probed in issue #354 and left the
+deferral in both directions: `str_split`, `array_fill` and `array_unique` to
+`Safe`, `range` and `preg_split` to `Refused`. None passed through `Unverified`,
+which is the class working as defined — evidence moves a row *out* of it, and a
+row only enters by being admitted unmeasured. `range`'s refusal is the one that
+generalizes: its bounds are declared `string|int|float`, so the engine's own
+width types a numeric string, and no bound on integer *arguments* can see it.
+The other four take plain `int` parameters, where the same oversized argument is
+a `TypeError` on the narrow engine — a decline, which is sound.
+
 **Deliberate exclusions**, even where frequent:
 
 - `mb_*` — encoding-dependent.
@@ -92,6 +112,13 @@ never can.
   `mb_regex_encoding`-class settings — the value is not portable without
   ADR-0008's opt-in pseudo-constant configuration, which is not implemented.
 - `nondet` builtins (`time`, `rand`, `microtime`) — excluded by definition.
+
+One ini is **not** excluded and is worth knowing about: `precision` decides how
+a float renders, so `strval`, `implode` and `array_unique` all fold under it.
+`array_unique` is the one where it changes the array's *length* rather than a
+spelling, since its default `SORT_STRING` compares string casts. All three are
+admitted together or not at all; closing the seam is ADR-0008's opt-in
+pseudo-constant configuration, which is not implemented.
 
 ## `effect_labels(name)` — effect coloring
 
