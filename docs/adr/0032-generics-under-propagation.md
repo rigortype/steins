@@ -504,3 +504,157 @@ files.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation, recorded ahead of the implementation.
+
+## Amendment (2026-08-16): the declared parameter seed — a class-typed parameter is a heap object (issue #388)
+
+The 2026-08-09 binding amendment's §3 stated a contribution and then said it
+had nowhere to happen: "a parameter seeded from a declared `@param
+MutableBox<string> $box` contributes its declared arguments … Today this clause
+has no site to fire at — a parameter receives a `Store::contract` arm lane and
+**no `HeapObj` at all**." ADR-0086 §4 carried it forward as its one open entry,
+and ADR-0086 §6 §3 named the plain per-scope pass as contributing nothing on the
+heap. This amendment gives the clause its site: a parameter that is an **object
+by declaration** enters its scope on the heap, wherever no ADR-0086 copy landed
+— the plain per-scope pass, and a descent whose argument resolved to no object.
+A parameter the caller already bound is untouched in both lanes: a copied object
+and a proven value are each stronger than the declaration that would have stood
+in for them.
+
+**What seeds, exhaustively.** A parameter whose **native** hint is exactly one
+non-nullable class (`Box $b`). `?Box`, `Box|null`, a `= null` default, a union,
+an intersection, a scalar, a by-ref or variadic position, and a hint that lowers
+to nothing at all (`mixed`, `object`, `iterable`, untyped) each seed nothing —
+none of them states that this parameter is one object of one class, and every
+one is a decline rather than a weaker object. A class the index cannot answer
+for (`is_known_class`) seeds nothing either: there is no hierarchy to dispatch
+through and no template list to align to.
+
+**The class is the native hint and nothing else, and the reason is a missing
+field.** `HeapObj::class` carries no stratum. It premises the proof-layer
+dispatch the guarded arm performs below — a resolved method's parameter types,
+a resolved method's arity — and it premises the dump surface's un-`(asserted)`
+rung. A `@param Box $b` over an untyped parameter reaching either would be
+precisely the laundering ADR-0052 §3 keeps the arm lane out of, where PHP's own
+hint premises both honestly. So a `@param` naming a class contributes **no
+object**; what it contributes is the type arguments, which the native syntax
+cannot spell and which only contract-layer readers consume — and which is what
+§3's clause actually names ("contributes its declared *arguments*"). Where both
+halves are written they must resolve to the same class: `@param Sub $b` under
+`Box $b` may be a refinement the author knows or a docblock that drifted,
+nothing here can tell which, so neither half is trusted to stand alone.
+Reconsideration precondition, stated: a provenance bit on the heap class — the
+same field the ADR-0052 §3 final-`Member` unlock will want.
+
+**The object is a lower bound and stays one.** `class_exact` is `false` (audit
+G1, ADR-0036: the runtime object may be any descendant that inherited the
+method), `escaped` is `true` (the caller holds the object too, so an inner
+unknown call owes the sweep), and `props` is **empty** — a declaration states
+that a parameter is a `Box`, never what that `Box` holds. `readonly` and
+`ro_written` come from the class surface through the same derivation the `$this`
+seed uses, one function shared by both so the two can never disagree about what
+a class guarantees. Exactness is **not** promoted for a `final` declared class:
+that is the ADR-0052 §3 final-`Member` unlock, a different slice, and this one
+must not pre-empt it.
+
+**The carries are the `@param`'s own type arguments, as `CArg::Ty`.**
+Owner-keyed to the class that declares the templates, minted through the one
+rule every declared carry goes through (the same one the #294 inheritance edges
+use), arity-aligned all-or-nothing against that class's own `@template` list,
+and sited at the declaring file and offset so a reader lifting an argument out
+keeps it naming the class it named. Being `CArg::Ty` they are **sweep-immune**,
+which is the clause's own words: a declaration does not stop being true because
+the body called a method. Two written arguments are unreadable and drop the
+whole carry rather than leaving a hole: a **template name** (`@param Box<T>
+$box` under the declaration's own `@template T`, or a class-level one in a
+method docblock), which says the declaration does not know what sits there and
+would otherwise lower to a class named `T` and manufacture a `No` against every
+spelling; and a spelling the contract vocabulary lowers to `Opaque`, which
+carries no more than an absent carry while costing a reader an `Opaque` arm it
+would splice into a declared return.
+
+**The guarded arm carries types, and seeds no `$this`.** `resolve_call_target`'s
+`Receiver::Var` arm now finds an object for a typed parameter, and a non-exact
+one takes the road it already had: the final/private override guard, so an
+overridable method never resolves. What the arm adds is the receiver's
+**declared** carries — a carry names the class that declares the templates, not
+the runtime class, so `@param Helper<Model> $h` says exactly as much about a
+descendant of `Helper` as about a `Helper`, and the exactness this arm lacks is
+not the exactness the read needs. Only declared carries can be there at all: a
+value carry is minted where an allocation proved one, and an allocation is
+exact. `receiver_var` stays `None`, per ADR-0086 §3: this arm proves no receiver
+identity, so the callee is entitled to no `$this` copy.
+
+**Only the argument half judges.** `resolve_cval` declines a non-exact object
+deliberately — its `CVal::Object` licenses the No-side `is_a` the bare-class
+acceptance path draws, which a lower bound would make unsound — and that left
+the two readers which index a carry **positionally** with nothing to read on a
+declared parameter, though neither needs the licence being withheld.
+`accepts_class_generic` gates on the **Yes** side of is-a, which every
+descendant of the proven class satisfies, and its only `No` comes from a carried
+argument provably violating a declared one; the call-site template binder (#363)
+performs a positional lookup and no verdict at all. Both read the non-exact
+object's declared carries through one accessor. The **class half stays `Maybe`**
+exactly as tier 3 leaves it — generic class-half mismatch reporting is still
+deferred — so what opens is `takesStringBox($b)` on a `@param Box<int> $b`, and
+nothing about `Box` versus `Widget`.
+
+**Arity on a lower-bound receiver: the refusal's complement, not an exception to
+it.** ADR-0049 §6 refuses the declared-receiver arity lane for one stated reason
+— an override may ADD optional parameters, so a declared `P` holding a `Q`
+satisfies a signature the walk from `P` never sees. `final` forecloses exactly
+that: a final method cannot be overridden (PHP rejects a subclass, and a trait
+use, that tries), and a final receiver class has no descendant to hold. So the
+two shapes where the reason cannot arise are admitted and the refusal stands
+everywhere else. `private` needs no mention: the arity chain walk is public-only
+already. This is what makes `function f(Box $b) { $b->three(1, 2); }` report the
+`ArgumentCountError` it is.
+
+**The arm lane and the heap do not overlap, and the one place they met is
+fixed.** The `Store::contract` arms stay the source of scalar and shape truth
+and the only lane a guard narrows; the heap object carries class membership and
+carries, and a guard never touches its class. Where the two now co-occur on one
+variable — which they never did before, a parameter having had no object — two
+readers had to be told which is stronger. `instanceof` evaluation consulted the
+heap class first and stopped: a lower bound decides nothing there, so it now
+falls through to the `Member` implication the guard lane holds, monotone in the
+only direction that matters (`Maybe` in, decided out). The dump surface renders
+the guard's single-`yes` `Member` **above** the lower-bound heap class for the
+same reason — reporting `Box` inside `if ($b instanceof Sub)` would read the
+declaration back at someone who had just refuted it. Both changes leave every
+variable that had no heap object exactly as it was.
+
+**What stays out.** The declared class's own **inheritance edges** are not
+minted onto the seed: `function f(IntBox $b)` under `@extends Box<int>` carries
+nothing, though the edge would be sound over a lower bound (a descendant
+inherits the relationship). The clause this amendment implements is about the
+`@param`'s arguments, and a second minting site is a separate decision with its
+own measurement. And a `@param` this reader cannot read as a plain class or a
+plain parameterized class declines the whole seed rather than falling back to
+the native hint alone: at an entry point the docblock is the strongest fact
+available (ADR-0037), and one that says something else — `@param Box|null`,
+`@param T` — is not evidence that the native hint is the whole truth. Both are
+silences, and both are recoverable without moving anything already decided.
+
+### ADR-0048 obligations
+
+**§2 (replayable).** The seed is a pure function of the declaration — its
+parameter list, its docblock, and the project index the class names resolve
+through — and of nothing mid-walk. Re-walking the scope alone reproduces it
+exactly; no engine query, no fold, no per-name state and no descent history
+enters it.
+
+**§3 (entry-state contribution), the load-bearing one.** This closes the open
+clause rather than opening a new one. A parameter whose declaration states one
+known class contributes a `HeapObj` — lower bound, pre-escaped, no props,
+readonly bookkeeping from the class surface, and the `@param`'s type arguments
+as `CArg::Ty` — at every entry where ADR-0086's copy did not land. Where that
+copy did land it is untouched, and so is a parameter a descent bound to a value.
+Every other parameter contributes what it did before: an arm lane, and nothing
+on the heap.
+
+**§4 (no global ordering).** The seed depends on one declaration and the index,
+and on nothing across scopes or files. Allocation ids are minted walk-locally
+after the `$this` seed, exactly as every other allocation this walk mints.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation, recorded ahead of the implementation.

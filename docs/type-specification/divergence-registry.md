@@ -134,19 +134,25 @@ where PHPStan reads a declared type.** For `@return template-type<T, Owner,
 'TName'>` on a `Helper<T>` method, PHPStan asks the receiver's type what it is
 parameterized by — and a `@param Helper<Model> $h` answers, because the
 declaration is the type. Steins asks the receiver *object* what it carries
-(issue #362), which is a different question with three consequences worth
-stating rather than discovering. A **declared** receiver seeds no `HeapObj`
-today (ADR-0032's binding amendment names this exact gap), so it carries
-nothing and the read declines where PHPStan resolves. A receiver whose value
-carry an earlier method call **swept** (issue #295) declines for the same
-reason, including a *second* read on the same receiver — PHPStan re-reads the
-declaration and answers both times. And the hop out of a carried value walks
-**one level** of that value's own edges, entry 11's rule applied a second time.
-What Steins gets in exchange is the case the declaration cannot state: the
-receiver built from `new Helper(new Model())`, where the parameterization is a
-proven value and no `@var` was written. The reconsideration precondition for
-the first consequence is the parameter seed ADR-0032 §3 already specifies and
-has no site to fire at; for the second and third, a substitution mechanism.
+(issue #362), which is a different question. **Narrowed 2026-08-16 (#388): a
+declared receiver now answers too.** A parameter whose native hint is one known
+class is a heap object carrying its `@param`'s type arguments (ADR-0032's
+declared-parameter-seed amendment), and the non-exact receiver arm hands those
+carries to the read — so `@param Helper<Model> $h; $h->getFirstChildren()` reads
+`Child` where it used to decline. What is left of the divergence is narrower and
+still worth stating. A `@param` over an **untyped** parameter still seeds no
+object, the heap class having no stratum to keep a docblock out of the
+proof-layer dispatch it premises, so PHPStan resolves there and Steins declines.
+A receiver whose value carry an earlier method call **swept** (issue #295)
+declines — including a *second* read on the same receiver, where PHPStan
+re-reads the declaration and answers both times — while a **declared** carry is
+sweep-immune and reads identically before and after. And the hop out of a
+carried value walks **one level** of that value's own edges, entry 11's rule
+applied a second time. What Steins gets in exchange is the case the declaration
+cannot state: the receiver built from `new Helper(new Model())`, where the
+parameterization is a proven value and no `@var` was written. Reconsideration
+preconditions: for the untyped-parameter leg, a provenance bit on the heap
+class; for the sweep and the hop, a substitution mechanism.
 
 **14. PHPStan *solves* a call-site template by unification over every position;
 Steins *binds* it from a carry, at top-level positions only.** PHPStan collects

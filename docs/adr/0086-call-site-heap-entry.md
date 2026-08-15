@@ -204,6 +204,16 @@ the IR at last — ADR-0057 C7's deferral, discharged), and a nested-argument or
   entry** — the plain per-scope pass still gives a parameter no `HeapObj`;
   ADR-0032 §3's declared-seed clause keeps waiting for its own slice. This ADR
   defines the *descent* entry only.
+
+  *Closed 2026-08-16 (#388), by ADR-0032's declared-parameter-seed amendment: a
+  parameter whose **native** hint is one non-nullable known class enters its
+  scope as a lower-bound, pre-escaped, prop-free `HeapObj` carrying its `@param`'s
+  type arguments as `CArg::Ty` — at the plain per-scope entry, and inside a
+  descent wherever this ADR's copy did not land. The copy always wins where it
+  landed: the seed's own gate is `!store.is_bound(param)`. The class comes from
+  the native hint alone, `HeapObj::class` having no stratum to keep a docblock out
+  of the proof-layer dispatch it premises; the `@param` contributes the arguments,
+  which is what §3's clause names.*
 - **By-ref parameters, variadics, named/spread argument lists** — the descent
   already declines them; the object seed inherits the decline.
 - **Constructor bodies** — `build_new_object` never walks `__construct`, so a
