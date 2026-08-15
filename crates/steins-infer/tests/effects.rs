@@ -613,3 +613,45 @@ fn method_effect_envelope_admits_subsumed_helper_effect() {
     let src = "<?php\nfinal class Svc {\n  #[\\Steins\\Effect('io')]\n  public function run(): void { $this->helper(); }\n  private function helper(): void { file_put_contents(\"/x\", \"y\"); }\n}\n";
     assert_eq!(effects(src).len(), 0, "io.fs.write under io → silent");
 }
+
+/// The time family's siblings, added when a coverage survey found the catalog's
+/// own module doc claiming `strtotime`/`idate` were `nondet.time` while
+/// `effect_labels` answered `None` for both. Uncatalogued widens, so the gap was
+/// sound — it just meant a declared-pure function could read the clock or the
+/// ambient timezone and nothing said so.
+///
+/// The control matters as much as the cases: `strtoupper` in the same file, under
+/// the same envelope, stays silent. Without it a change that colored *everything*
+/// would pass.
+#[test]
+fn the_time_familys_siblings_exceed_a_pure_envelope() {
+    for (call, name) in [
+        ("strtotime($when)", "strtotime"),
+        ("idate('Y', 0)", "idate"),
+        ("gmdate('Y-m-d', 0)", "gmdate"),
+        ("gmmktime(0, 0, 0)", "gmmktime"),
+    ] {
+        let src = format!(
+            "<?php\n/** @phpstan-pure */\nfunction f(string $when): mixed {{ return {call}; }}\n"
+        );
+        let d = one(&src);
+        assert_eq!(
+            d.message,
+            format!("{name}() has effect nondet.time, but f() is declared @phpstan-pure"),
+            "{name} reads the clock or the ambient timezone"
+        );
+    }
+    // Array-returning siblings, same argument, separately spelled since their
+    // declared return type differs.
+    for (call, name) in [("getdate(0)", "getdate"), ("localtime(0)", "localtime")] {
+        let src =
+            format!("<?php\n/** @phpstan-pure */\nfunction f(): array {{ return {call}; }}\n");
+        assert_eq!(
+            one(&src).message,
+            format!("{name}() has effect nondet.time, but f() is declared @phpstan-pure")
+        );
+    }
+    // The control: a pure builtin under the same envelope says nothing.
+    let clean = "<?php\n/** @phpstan-pure */\nfunction f(string $s): string { return strtoupper($s); }\n";
+    assert_eq!(effects(clean).len(), 0, "coloring the time family colored nothing else");
+}
