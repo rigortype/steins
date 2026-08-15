@@ -799,6 +799,15 @@ pub enum ArgValue {
     /// [`ArgValue::Call`], which carries a simple name and resolves by a rule of
     /// its own. `named` holds the named arguments; the binding descent is
     /// positional-only and declines on them, exactly as `f(x: 1)` is declined.
+    ///
+    /// The **constant-expression** lowerings (a parameter default, a property
+    /// default, a class-constant or enum-case initializer) keep whatever
+    /// [`lower_arg_value`] returns that is not [`Self::Other`], and are given no
+    /// guard against this variant: PHP forbids a method call in a constant
+    /// expression outright, so only unparseable-as-PHP source could put one there,
+    /// and every consumer of those slots (`is_literal`, the domain conversion, the
+    /// literal resolution) declines it anyway. A guard would refuse what cannot
+    /// arrive.
     MethodCall { callee: Callee, args: Vec<ArgValue>, named: Vec<NamedArg> },
     /// `new ClassName(args...)` — construction rvalue. [`NameRef`] resolves to
     /// an FQN at use time, so `$x = new Foo(...)` records `$x`'s exact class.
