@@ -354,8 +354,25 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // fires. Measured on a fixture — `['url' => <unknown>]` against the same
     // `array{url: string}` stays SILENT (an unknown slot is `Maybe`, and Maybe
     // is silence), while the extra key fires with the slot proven or not.
-    ("composer/composer", 21),
-    ("sebastianbergmann/phpunit", 8),
+    // The issue #391 wave (2026-08-16), `phpdoc.maybe-argument-mismatch`: a
+    // builtin whose declared return is `T|false`/`T|null` handed straight into a
+    // native `T` with no check in between — the argument side's possibly grade on
+    // an `Asserted` premise (the declared-return floor is Asserted by ADR-0069, so
+    // this whole family lands on the contract id, never on `type.*`). Every one is
+    // TRUE against its source, and the shape is one line of PHP each. Counted here
+    // rather than in POSSIBLY_EXPECTED because the id is `Layer::Contract`, which
+    // is what routes it to this bucket (ADR-0081 §8: the layer decides the bucket,
+    // the floor decides the surface).
+    //   21 → 24 (+3): `file_get_contents()` into `new JsonManipulator(string
+    //   $contents)` (RequireCommand.php:597) and into `stripWhitespace(string
+    //   $source)` (Compiler.php:227); `inet_pton()` into `ipMapTo6(string
+    //   $binary)` (NoProxyPattern.php:246).
+    ("composer/composer", 24),
+    //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
+    //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
+    //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and
+    //   `ExcludeList::addDirectory($directory)` in `ExcludeListTest.php`.
+    ("sebastianbergmann/phpunit", 12),
     // 4 → 5 (+1), 2026-08-14, with ADR-0056 §8: `resource` stopped being an
     // unmodeled spelling and became a relation. `StreamHandlerTest`'s
     // `testWriteMissingResource` constructs `new StreamHandler(null)` against
@@ -373,7 +390,9 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // position — inside a `guarding_against_mounting_invalid_filesystems` test that
     // wraps it in `expectException(UnableToMountFilesystem::class)` and carries
     // `@phpstan-ignore-next-line`. A TRUE no-coercion violation the test documents.
-    ("thephpleague/flysystem", 2),
+    // 2 → 3 (+1), 2026-08-16, issue #391: `file_get_contents()` into
+    // `computeFingerPrint(string $publicKey)` (SftpConnectionProviderTest.php:189).
+    ("thephpleague/flysystem", 3),
     // 0 → 1 (+1) with ADR-0043 stage 4. `ChoiceQuestionTest` passes a literal array
     // `[..., null]` to `ChoiceQuestion::__construct(@param array<string|bool|int|
     // float|\Stringable> $choices)`; `null` is a member of none of the union arms —
@@ -402,7 +421,13 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // `\UnitEnum`-bearing union. All in `test/PhpParser/Builder*Test.php` and
     // `NodeDumperTest.php`; each asserts the runtime `LogicException` that the
     // phpdoc contract predicts — TRUE, released, working test code.
-    ("nikic/PHP-Parser", 15),
+    // 15 → 16 (+1), 2026-08-16, issue #391: `json_encode()` into
+    // `JsonDecoder::decode(string $json)` (JsonDecoderTest.php:21). Its sibling in
+    // this package — `preg_replace()`'s `string|null` into `indentString(string
+    // $str)` — carries an all-`Verified` premise and so lands on the proof id, in
+    // POSSIBLY_EXPECTED below, not here. One package, one judgment, two buckets:
+    // the stratum split, visible in the gate.
+    ("nikic/PHP-Parser", 16),
     // The private monorepo (corpus.local.toml); matched by its local project name.
     //
     // Ledger of every move, oldest first. Standing conditions unless a row says
@@ -720,6 +745,12 @@ fn effect_expected(name: &str) -> usize {
 /// 5. **A binding in an argument of a throwing call inside `try`** — FALSE. PHP
 ///    evaluates arguments before entering the callee, so the binding is done before
 ///    anything can throw; the pass weakens at statement granularity.
+/// 6. **A builtin's `T|false`/`T|null` into a native `T`**
+///    (`type.maybe-argument-mismatch`, issue #391) — TRUE, and the first class in
+///    this bucket that is not a binding claim: the argument's own declared type
+///    has an arm the parameter rejects. Only the all-`Verified` half lands here;
+///    an `Asserted` arm routes the same judgment to `phpdoc.maybe-argument-mismatch`
+///    and thus to [`PHPDOC_EXPECTED`].
 const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // 1 — `PluginManager.php:525`, class 1.
     ("composer/composer", 1),
@@ -732,6 +763,16 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     ("symfony/process", 6),
     // 2 — both class 4 (`markTestSkipped()` in the serialization tests).
     ("briannesbitt/Carbon", 2),
+    // 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
+    // a binding claim at all: `type.maybe-argument-mismatch` on
+    // `PrettyPrinter/Standard.php:1100`. `preg_replace()` declares `string|null`
+    // (natively, so the premise is all-`Verified` and the finding is proof-layer),
+    // and `$escaped` goes straight into `indentString(string $str)`. TRUE at the
+    // possibly grade: PCRE answers `null` only on a pattern/backtrack failure, so
+    // the arm is real and its inhabitation on a live path is exactly the part this
+    // grade does not claim. The package's other issue #391 finding rides an
+    // `Asserted` premise and is counted in PHPDOC_EXPECTED instead.
+    ("nikic/PHP-Parser", 1),
     // 10 — 8 `variable.maybe-undefined` (classes 1 and 4) plus the 2
     // `type.return-maybe-missing` rows absorbed from `EXPECTED_PROOF_FINDINGS`.
     ("phpstan/phpstan-src", 10),
