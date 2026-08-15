@@ -88,11 +88,34 @@ Descent { provenance, depth, stack, memo }
 ```
 
 The binding vector also admits pseudo-bindings: `use:{name}` for closure capture
-snapshots, and `this:` (carrying the exact receiver **class FQN**) for method
+snapshots, `this:` (carrying the exact receiver **class FQN**) for method
 descents under `resolve_exact` (ADR-0075 §2.1) so two subclasses sharing an
-inherited body never share a memo hit. A memo hit does not re-walk: the first
-receiver's summary answers for the key, and the second receiver's walk (and any
-emissions unique to it) are suppressed — hence the key component.
+inherited body never share a memo hit, and `obj:{param}` for a seeded argument
+object (below). A memo hit does not re-walk: the first receiver's summary answers
+for the key, and the second receiver's walk (and any emissions unique to it) are
+suppressed — hence the key components.
+
+**Entry state on the heap** (ADR-0086 §2, the argument leg). The callee is no
+longer walked with an empty `Store`. For every positional argument that denotes a
+caller heap object — a variable bound in `Store::refs`, or a direct `new` in
+argument position — the descent seeds the callee's store with a **copy** of that
+`HeapObj` under a fresh callee-local `AllocId` bound to the parameter's name.
+`class`, `class_exact` (copied, never promoted), `readonly`, `ro_written` and
+`targs` cross verbatim; `escaped` is always `true` on the copy; non-readonly props
+cross only from a caller object with `escaped == false`, readonly props always.
+There is **one copy per distinct caller allocation**, so aliasing among the
+arguments survives (`f($b, $b)` binds both parameters to one callee object) while
+aliasing with anything outside the argument list is excluded by the escape rule.
+A seeded object counts as a binding, so an object-only argument list descends. The
+`obj:{param}` key component is the canonical rendering of that entry state (class,
+exactness, readonly bookkeeping, the sorted key-representable props with their
+strata, the carries); a prop the rendering cannot name does not cross, so the memo
+stays a pure function of the key (ADR-0048 §2). `$this` in a method descent is
+still seeded by `seed_this_object` — the receiver leg is ADR-0086 §3.
+
+The caller-side escape-and-sweep after the call is untouched by any of this
+(ADR-0086 §2's stated refusal): the copy flows in and the sweep flows out,
+independently, until ADR-0055 Part II can prove non-mutation per parameter.
 
 An `Opaque` construct with `may_return` contributes the declared return floor to
 the summary join (hidden exits inside `foreach`/`try`/…); untyped fallthrough
@@ -122,9 +145,12 @@ declared arms, for both free functions and resolved method/static calls.
 Constructors still descend for diagnostics but leave the summary unread (the
 construction rvalue is the ADR-0036 exactness lane). It is a pure function of
 `(callee CST, bound entry state [, exact receiver])`, so it is a legitimate
-replayable query answer. The struct carries a heap-object component slot
-(ADR-0057 §1) for slice **T1**; in T0 that slot is present but always `None` —
-no returned allocation is transferred yet.
+replayable query answer — and since ADR-0086 §2 the "bound entry state" includes
+the argument objects seeded onto the callee's heap, which is what lets
+`return $box->value` summarize at all. The struct carries a heap-object component
+slot (ADR-0057 §1) for slice **T1**; in T0 that slot is present but always `None`
+— no returned allocation is transferred yet. That is the *outbound* half and is
+unrelated to the inbound seeding above.
 
 ## The folding seam
 

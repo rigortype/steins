@@ -457,9 +457,19 @@ nothing**, and line 47 of the conformance case
 this slice. An Asserted argument fact premises no `type.argument-mismatch`
 (a `@return int` flowing into `takesString(string)` is silent today for
 the same reason), and the body-proven route that would premise one needs
-heap properties to cross a binding descent — ADR-0057 T1's heap component,
-out of scope here. The dump surface and the contract store are this
-slice's consumers, and the divergence registry records the line.
+heap properties to cross a binding descent — out of scope here. The dump
+surface and the contract store are this slice's consumers, and the
+divergence registry records the line.
+
+> **Superseded for the conformance line (2026-08-15, ADR-0086 §2 / #376).**
+> The heap component named above is the **inbound** one, and it landed as
+> ADR-0086's argument leg, not as ADR-0057 T1 (which stays the outbound
+> design). An argument's object now crosses the binding descent by copy, so
+> `return $box->value` proves `1` and line 47 reports
+> `type.argument-mismatch`. Nothing in the paragraph's own claim moved: the
+> declared read is still Asserted and still premises nothing. A second road
+> opened above it, and the ladder's precedence — proven rung over asserted
+> rung — decides which one the call site sees.
 
 **Methods bind on the same rule.** A method's own `@template` names read
 from its arguments identically, at the same seam and with the receiver's

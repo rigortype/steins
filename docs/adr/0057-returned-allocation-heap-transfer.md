@@ -14,6 +14,13 @@ unknown at the first boundary. The modernization mission's flagship
 idiom — build-and-return DTOs, array-shape → DTO transforms — is exactly
 this flow. This ADR designs what crosses back.
 
+**Inbound counterpart.** The other direction — an *argument's* object
+crossing **into** a binding descent — is ADR-0086, which reuses this
+ADR's vocabulary verbatim (copy not identity, a fresh callee-local
+`AllocId`, the field-by-field table, the key naming the entry state).
+Neither ADR depends on the other; ADR-0086's slices are sequenced first
+(its §7), and T1 below is unchanged in content.
+
 ## 1. The mechanism: a return-object summary, rebound by copy
 
 Three candidates, one survivor:
