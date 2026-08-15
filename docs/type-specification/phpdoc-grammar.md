@@ -61,12 +61,13 @@ gets.
 ### `template-type<Subject, Owner, 'TName'>`
 
 PHPStan's "read a `@template` argument out of an object type" utility is
-**recognized vocabulary** (issue #360) and is **resolved wherever declarations
-decide it** (issue #361). The resolution is one rewrite over the parsed type,
-run where envelopes are built and before anything is lowered, so a resolved node
-is judged, dumped and stored exactly as the type it names is — there is no
-second evaluator and no `ContractTy` variant (ADR-0030's one-relation
-discipline).
+**recognized vocabulary** (issue #360), is **resolved wherever declarations
+decide it** (issue #361), and where the subject is a class-level template of the
+receiver, is **read off that receiver's generics carry at the call site** (issue
+#362). The declaration half is one rewrite over the parsed type, run where
+envelopes are built and before anything is lowered, so a resolved node is judged,
+dumped and stored exactly as the type it names is — there is no second evaluator
+and no `ContractTy` variant (ADR-0030's one-relation discipline).
 
 Its arguments are read in three different ways, which is the thing to keep
 straight:
@@ -93,18 +94,32 @@ Three subject shapes resolve:
   under `@template T` is `T` itself — opaque, or the vocabulary bound of
   `@template T of int` (issue #293).
 
+A fourth shape resolves at a **call site** rather than in a declaration, because
+that is the only place its answer exists:
+
+- **A class-level template of the receiver's class**, on a `@return`.
+  `@return template-type<T, ModelInterface, 'TChild'>` on a `Helper<T>` method is
+  read off the carry the *receiver object* holds: `T`'s position in `Helper`'s
+  own `@template` list picks what flowed into the constructor, and `'TChild'`
+  indexes that value's own `@implements ModelInterface<Child>` edge. So
+  `(new Helper(new Model()))->getFirstChildren()` reads as `Child` — the same
+  arms, at the same stratum, as if the docblock had said `@return Child`. Two
+  lookups, one level each; nothing recurses.
+
 Everything else keeps the `Opaque` floor and never manufactures a `No`: an
 unknown owner, a template name the owner does not declare, an arity
 disagreement between the spelled arguments and the owner's list, an unrelated
 subject, a non-class subject, a union or intersection subject, and a subject
 that reaches the owner only through a generic intermediate (one level, no
 walk — ADR-0032's amendment). Any arity but three is not this utility and floors
-the same way, silently, where PHPStan yields an error type. A subject that is
-itself a bare template name resolves at a *call site* rather than in a
-declaration and is left as written for the carry readers — see
-[not-implemented.md](not-implemented.md) for that row and
-[divergence-registry.md](divergence-registry.md) for the three registered
-differences from PHPStan.
+the same way, silently, where PHPStan yields an error type. The call-site read
+floors the same way wherever the receiver carries nothing to read — a `$this`,
+static or non-exact receiver, a receiver whose value carry an earlier method call
+swept, a declared `@param Helper<Model> $h` receiver (which seeds no object
+today), or a subject naming a **method**-level template, which is a different
+binding problem. See [not-implemented.md](not-implemented.md) for the row and
+[divergence-registry.md](divergence-registry.md) for the registered differences
+from PHPStan.
 
 Variance markers do not gate a projection. `@template-covariant T` states what
 the author expects of *substitution*, which is why acceptance is gated on it

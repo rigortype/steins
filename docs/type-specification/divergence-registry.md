@@ -129,6 +129,25 @@ not about spellings. The bound half is not even a gap — Steins substitutes a
 `@template T of int` already projects `int`; what stays opaque is the class
 bound, which #293 declines on its own terms.
 
+**13. A `template-type` subject naming the receiver's template reads a *carry*,
+where PHPStan reads a declared type.** For `@return template-type<T, Owner,
+'TName'>` on a `Helper<T>` method, PHPStan asks the receiver's type what it is
+parameterized by — and a `@param Helper<Model> $h` answers, because the
+declaration is the type. Steins asks the receiver *object* what it carries
+(issue #362), which is a different question with three consequences worth
+stating rather than discovering. A **declared** receiver seeds no `HeapObj`
+today (ADR-0032's binding amendment names this exact gap), so it carries
+nothing and the read declines where PHPStan resolves. A receiver whose value
+carry an earlier method call **swept** (issue #295) declines for the same
+reason, including a *second* read on the same receiver — PHPStan re-reads the
+declaration and answers both times. And the hop out of a carried value walks
+**one level** of that value's own edges, entry 11's rule applied a second time.
+What Steins gets in exchange is the case the declaration cannot state: the
+receiver built from `new Helper(new Model())`, where the parameterization is a
+proven value and no `@var` was written. The reconsideration precondition for
+the first consequence is the parameter seed ADR-0032 §3 already specifies and
+has no site to fire at; for the second and third, a substitution mechanism.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run
