@@ -93,6 +93,8 @@
 //! The gate is per *file* while only some assertions in it are
 //! version-sensitive; the honest denominator is still the file, because the
 //! marker is the only statement anyone makes about which rows those are.
+//! Owner ruling (2026-08-15, #356): file-level exclusion stands — settled, do
+//! not re-argue per slice.
 //!
 //! ## Headline decision (settled here; do not re-argue per slice)
 //!

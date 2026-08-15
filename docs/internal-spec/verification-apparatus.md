@@ -313,9 +313,12 @@ assertion in a gated file happened not to be version-sensitive. Agreement with a
 statement that is not being claimed for your engine is not confirmation.
 
 The gate is per *file* while only some assertions in it are version-sensitive, which
-makes whole-file exclusion look blunt. It is the honest denominator regardless: the
+makes whole-file exclusion look blunt. **Owner ruling (2026-08-15, #356): file-level
+exclusion stands — do not re-argue per slice.** It is the honest denominator: the
 marker is the only statement anyone makes about which rows are sensitive, so a
-finer-grained rule would be the harness inventing an oracle for itself.
+finer-grained rule would be the harness inventing an oracle for itself. The 81 `match`
+rows this costs were never confirmations, and buying them back with a heuristic would
+trade a known-honest number for a guessed one.
 
 Because the exclusion moves the headline, **counts are only comparable between runs
 on the same PHP minor.** The sidecar version is printed above the summary for that
