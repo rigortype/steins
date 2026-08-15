@@ -149,8 +149,8 @@ $ steins doctor --no-php .
   surface: layers [mechanics, proof], 47 checked id(s)
 ```
 
-Today that count runs 47 ids at `default`, 48 at `throws-direct`, 61 at
-`contracts`, 65 at `strict` and 62 at `pedantic`. The profiles, the baseline
+Today that count runs 47 ids at `default`, 48 at `throws-direct`, 62 at
+`contracts`, 68 at `strict` and 63 at `pedantic`. The profiles, the baseline
 ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
@@ -164,7 +164,7 @@ facets, and suppression are in
 
 ## The catalogue
 
-The registry holds **70 ids**, 67 of them with a live emitter. It is a closed
+The registry holds **73 ids**, 72 of them with a live emitter. It is a closed
 set bound by a totality test, so an id that reaches your terminal is in it
 and an id outside it cannot be emitted (ADR-0022). Each id below is shown
 with the PHP that triggers it and the transcript it produces.
