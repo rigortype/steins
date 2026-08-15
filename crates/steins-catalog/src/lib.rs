@@ -391,6 +391,14 @@ const PORTABLE: &[&str] = &[
     "chop",
     "sizeof",
     "doubleval",
+    // wave 2 — an `int` parameter whose oversized argument is a TypeError, not
+    // a value: the offset family and the float roundings
+    "strpos",
+    "stripos",
+    "strrpos",
+    "round",
+    "floor",
+    "ceil",
 ];
 
 /// The **unverified rows** of the portability classification (ADR-0028's 2026-08-14
@@ -1747,7 +1755,7 @@ mod tests {
         unverified_names,
     };
 
-    /// Classes are pairwise DISJOINT, no name listed twice, size is 57
+    /// Classes are pairwise DISJOINT, no name listed twice, size is 63
     /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, issue #354, and the four
     /// aliases that slice's coverage survey turned up).
     #[test]
@@ -1783,12 +1791,12 @@ mod tests {
                 }
             }
         }
-        assert_eq!(PORTABLE.len(), 44, "the verified portable subset");
+        assert_eq!(PORTABLE.len(), 50, "the verified portable subset");
         assert_eq!(REFUSED.len(), 11, "the refused rows");
         assert_eq!(UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
             foldable_entry_count(),
-            57,
+            63,
             "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354 and its aliases"
         );
         assert_eq!(
@@ -1926,6 +1934,55 @@ mod tests {
         assert_eq!(build, 1, "one row is about a build option, and it is preg_split");
     }
 
+    /// **No foldable name may invoke a callback.**
+    ///
+    /// The folding allowlist gates the *callee*. A builtin that takes a
+    /// callable smuggles a SECOND callee past that gate as an ordinary string
+    /// argument, and the fold seam hands string arguments to the runner
+    /// verbatim, which calls them. Measured, on a branch that briefly admitted
+    /// `array_filter`:
+    ///
+    /// * `array_filter(["a", "b"], "var_dump")` — the callback's output landed
+    ///   on stdout ahead of the JSON-RPC reply, desynced the NDJSON stream and
+    ///   poisoned the sidecar, degrading the whole run to the sound subset.
+    /// * `array_filter(["PATH"], "getenv")` — folded to `list{'PATH'}`, which
+    ///   is to say `getenv` ran inside the analysis and its answer reached the
+    ///   value domain. `system`, `unlink` and the rest are the same call.
+    ///
+    /// The allowlist is not a defence against this, because the name being
+    /// admitted is innocent; the argument is the callee. Until the fold gate
+    /// grows a shape rule — fold such a name only when the callback argument is
+    /// absent or a literal `null` — the catalog simply must not carry one, and
+    /// this asserts that rather than trusting the next author to notice.
+    ///
+    /// **What this does not prove.** The guard reads [`invocation_shape`],
+    /// which is a *curated* table with one `callback_param` position per row,
+    /// so it cannot express every callback-bearing builtin:
+    /// `preg_replace_callback_array` takes its callbacks as array *values*, and
+    /// the `array_udiff`/`array_uintersect` family takes a comparator at a
+    /// variadic tail. Admitting one of those would pass this test and reopen
+    /// the hole. The names on the allowlist today are safe — none takes a
+    /// callable at all — but a mechanical barrier needs an independent source
+    /// for "does this name take a callable", which is the mined
+    /// parameter-facts table issue #382 asks for. Until then this is a tripwire
+    /// for the shapes the catalog can see, and a new admission still has to be
+    /// read by a human.
+    #[test]
+    fn no_foldable_name_invokes_a_callback() {
+        use super::invocation_shape;
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            assert_eq!(
+                invocation_shape(name),
+                None,
+                "{name} invokes a callback, and folding it would execute an argument"
+            );
+        }
+        // The guard is not vacuous: the catalog does know callback-invoking
+        // names, and `array_filter` is the one that tried to get in.
+        assert!(invocation_shape("array_filter").is_some());
+        assert!(invocation_shape("usort").is_some());
+    }
+
     /// The alias rows: a second spelling of a name already on the list, and the
     /// pairing itself is the claim being pinned. If PHP ever stopped aliasing
     /// one of these the row would still be *sound* — it was probed on its own
@@ -2035,7 +2092,7 @@ mod tests {
             foldable_entry_count() - portable_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(portable_names().len(), 44);
+        assert_eq!(portable_names().len(), 50);
         assert_eq!(refused_names().len(), 11);
         assert_eq!(unverified_names().len(), 2);
     }

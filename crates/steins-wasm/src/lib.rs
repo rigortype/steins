@@ -742,6 +742,12 @@ mod replay {
     /// `chop`, `sizeof` and `doubleval` are PHP's own second spellings for
     /// names already here, so the browser folds four more and refuses nothing
     /// new.
+    ///
+    /// Wave 2 moved 57 → 63 in the safe direction only: `strpos`/`stripos`/
+    /// `strrpos` and `round`/`floor`/`ceil`, six names whose only integer
+    /// parameter declines rather than diverges on the narrow engine. Two more
+    /// were probed with them and withdrawn — see the ADR-0066 amendment and
+    /// issue #382 for the gates they turned out to need.
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -755,8 +761,8 @@ mod replay {
         assert_eq!(boot["fold_lane"], "portable_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 57);
-        assert_eq!(boot["fold_portable"], 44, "issue #354 and its aliases grew this engine's share by seven");
+        assert_eq!(boot["fold_total"], 63);
+        assert_eq!(boot["fold_portable"], 50, "issue #354 and its aliases grew this engine's share by seven");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::refused_names()),

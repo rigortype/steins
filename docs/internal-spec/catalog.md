@@ -62,7 +62,7 @@ it among several.
 The evidence discipline differs per class and is the point of the split:
 
 - **`Portable`** is a positive claim, and it is earned by probing. The current
-  subset was verified with 870 adversarial tuples through the same dispatch core
+  subset was verified with 991 adversarial tuples through the same dispatch core
   both engines run. A probe of an *array*-returning name compares the response
   **bytes**: array elements travel with no per-element type tag, so an `int` on
   one engine and a `float` on the other are legible only as
@@ -113,6 +113,16 @@ all-literal path and the rung survives beneath it as the no-sidecar floor.
 `array_slice`, `array_combine` and `array_fill_keys` are excluded by that same
 rule — their rungs are already exact, and cover non-literal arguments a fold
 never can.
+
+A foldable name must **not invoke a callback**. The allowlist gates the callee,
+and a builtin taking a callable smuggles a second callee past it as an ordinary
+string argument that the seam hands to the runner verbatim — measured, on a
+branch that briefly admitted `array_filter`: `array_filter(["PATH"], "getenv")`
+folded to `list{'PATH'}`, which is `getenv` running inside the analysis.
+`no_foldable_name_invokes_a_callback` asserts no allowlisted name carries an
+`invocation_shape` row, and lifting that needs a shape gate at the seam (fold
+only when the callback argument is absent or a literal `null`), not a catalog
+edit.
 
 The five names that amendment deferred were probed in issue #354 and left the
 deferral in both directions: `str_split`, `array_fill` and `array_unique` to

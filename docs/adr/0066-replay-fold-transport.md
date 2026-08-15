@@ -866,3 +866,95 @@ not:
 A missing variant is therefore not an oversight. The enum grows when a probe
 finds a new kind of divergence, and a hazard the instrument cannot see is
 handled by exclusion rather than by a class this table hands out.
+
+## Amendment (2026-08-15): wave 2 — the offsets and the roundings (issue #354 follow-up)
+
+Six names from the coverage survey's candidate list
+(`docs/notes/20260815-phpstan-type-php-coverage.md`), chosen so the probe set
+would double as the specification a signature-driven generator will encode: two
+parameter shapes with a hazard family each.
+
+### The disposition (126 tuples per convention, 6 admitted portable)
+
+| name | verdict | probes (silent/reverse/decline) | one-line reason |
+| --- | --- | --- | --- |
+| `strpos` | portable | 23 (0/0/0) | `int $offset` in, a position bounded by the subject out |
+| `stripos` | portable | 23 (0/0/0) | as `strpos`; case comparison is ASCII-only since PHP 8.2, the `ucwords` caveat |
+| `strrpos` | portable | 23 (0/0/0) | as `strpos`, searching from the other end |
+| `floor` | portable | 18 (0/0/0) | a double is a double on both machines |
+| `ceil` | portable | 18 (0/0/0) | as `floor` |
+| `round` | portable | 21 (0/0/2) | as `floor`; the two declines are an oversized `$precision`, a `TypeError` on the narrow engine |
+
+`round`'s edges are the ADR-0004 argument in miniature: PHP 8.4's rounding RFC
+changed which way some of them go, and the engine that answers is the one the
+project runs.
+
+**Both calling conventions were probed**, because the seam now carries the call
+site's `declare(strict_types=1)` (issue #383) and a portability verdict has to
+hold for whichever mode the request names. The same 126 tuples, twice:
+
+| convention | silent | reverse | decline |
+| --- | ---: | ---: | ---: |
+| weak | 0 | 0 | 2 |
+| strict | 0 | 0 | 0 |
+
+Strict is the *cleaner* half, which is the expected shape rather than a
+surprise: the two weak declines are `round`'s oversized `$precision`, where the
+narrow engine refuses a coercion the wide one performs — and under strict
+neither engine coerces at all, so they agree by throwing together. Strictness is
+not an engine property, so it cannot introduce a divergence; probing it confirms
+that rather than assuming it.
+
+### The parameter shapes, which are the generator's specification
+
+Each family was applied to every parameter of its shape, and that mapping is the
+reusable part — a name's arginfo says which families it owes:
+
+| parameter shape | family | what it is looking for |
+| --- | --- | --- |
+| `int` | `0`, `±1`, `±(2^31 − 1)`, `"2"`, `2.0`, `"3000000000"`, `3000000000.0`, `true` | an oversized argument: a decline is sound, a *value* is not |
+| `string\|int\|float` | the same, as strings | the `range` route — the machine types the numeric string |
+| `int\|float` | `±1.5`, `±0.0`, `1e15`, `1e20`, denormals, `0.285`, `1.005`, in-range ints, numeric strings | rendering and rounding edges, and the `TypeError` a string earns since PHP 8 |
+
+### Two names probed clean and are NOT admitted
+
+`array_filter` (11 tuples) and `preg_match` (21, two silent — the PCRE JIT
+divergence that refused `preg_split`, on the name that runs the same matcher)
+were part of this wave and were withdrawn from it. Each turned out to need a
+gate the seam does not have, and the gates are worth more than the two rows:
+
+**`array_filter` would let an argument execute.** The allowlist gates the
+*callee*; a builtin taking a callable smuggles a second callee past it as an
+ordinary string argument, and the seam hands string arguments to the runner
+verbatim. Measured: `array_filter(["a", "b"], "var_dump")` put the callback's
+output on stdout ahead of the JSON-RPC reply, desynced the NDJSON stream and
+poisoned the sidecar; `array_filter(["PATH"], "getenv")` folded to
+`list{'PATH'}`, which is `getenv` running inside the analysis with its answer
+reaching the value domain. `system` and `unlink` are the same call. Admitting
+the name needs a **shape gate** — fold a callback-invoking builtin only when the
+callback argument is absent or a literal `null` — and until that exists
+`no_foldable_name_invokes_a_callback` asserts the catalog carries no such row.
+
+**`preg_match`'s by-ref parameter needs a precondition nothing can currently
+check.** The seam passes arguments by value, so `$matches` is written on a copy
+and lost; that is sound only because ADR-0077's `out_params` seeding invalidates
+the argument, which `str_replace` has relied on since the first round. Making
+that a *rule* means asserting every foldable name's by-ref positions are
+declared — and the catalog cannot check itself here, because `by_value_arg`
+falls back to `out_params` and answers "by value" for every position of a
+foldable name that has no row. The check needs an independent signature source
+(mined arginfo), which is the same table the generator wants, and both belong to
+one follow-up rather than to this wave.
+
+`PORTABLE` is now **50**, `REFUSED` **11**, `UNVERIFIED` **2**, the allowlist
+**63**.
+
+### A coupling this wave found on the way
+
+Admitting `preg_match` turned a green test red for a reason that had nothing to
+do with folding: a builtin recognizer's "no project function shadows this name"
+leg was asked through a resolution whose notion of a known builtin is
+`effect_labels`, so **admitting a name to the allowlist flipped its recognizers
+from respecting a shadow to ignoring one**. The false positive was already live
+on `preg_split`. Fixed separately and first (`Cx::resolve_shadow`), because it
+is a defect of its own and this wave only made it reachable on one more name.
