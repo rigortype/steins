@@ -23578,8 +23578,8 @@ struct CallTarget<'a> {
     /// the target reads `T` out of.
     ///
     /// Filled by the exact `Receiver::Var` arm, which is the one arm with a heap
-    /// object in hand at resolution; — **after** resolution, by the caller that
-    /// mints it — for a `Receiver::New` (issue #386); and by the **non-exact**
+    /// object in hand at resolution; for a `Receiver::New`, **after** resolution, by
+    /// the caller that mints it (issue #386); and by the **non-exact**
     /// `Receiver::Var` arm with that object's *declared* carries only (issue #388),
     /// a `@param Helper<Model> $h` saying as much about a descendant of `Helper` as
     /// about a `Helper`. **Empty everywhere else**, and each emptiness is a stated
