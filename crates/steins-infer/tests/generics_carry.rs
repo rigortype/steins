@@ -1247,6 +1247,51 @@ fn two_occurrences_must_agree_or_the_name_is_unbound() {
 }
 
 #[test]
+fn an_occurrence_the_rule_cannot_read_contests_the_name_too() {
+    // The all-or-nothing rule spans EVERY occurrence, not just the readable ones,
+    // and the direction of the error is why. A `@template T` witnessed at two
+    // parameters says one type stands at both; reading the one position Steins
+    // understands and ignoring the other would answer *narrower* than the
+    // declaration supports, which is what this family refuses everywhere else.
+    //
+    // `bug2577.php` in PHPStan's own corpus is this shape exactly: PHPStan unifies
+    // the two positions into `A1|A2`, and Steins would otherwise have said `A2`.
+    let closure = format!(
+        "{BOXES}class A {{}}\nclass A1 extends A {{}}\nclass A2 extends A {{}}\n\
+         /**\n * @template T of A\n * @param \\Closure():T $make\n * @param T $seed\n\
+         \x20* @return T\n */\n\
+         function oneOrOther(\\Closure $make, A $seed) {{ return $seed; }}\n"
+    );
+    assert_eq!(
+        dumped(&format!(
+            "{closure}\\PHPStan\\dumpType(oneOrOther(function (): A1 {{ return new A1(); }}, new A2()));"
+        )),
+        "dumped type: unknown",
+    );
+
+    // The same rule over a nested spelling: `list<Box<T>>` is not a binding
+    // position, so it contests `T` and the readable `Box<T>` beside it does not
+    // rescue the read.
+    let nested = format!(
+        "{BOXES}/**\n * @template T\n * @param list<Box<T>> $many\n * @param Box<T> $one\n\
+         \x20* @return T\n */\n\
+         function fromEither(array $many, Box $one): mixed {{ return $one->value; }}\n"
+    );
+    assert_eq!(
+        dumped(&format!("{nested}\\PHPStan\\dumpType(fromEither([], new Box(1)));")),
+        "dumped type: unknown",
+    );
+    // Drop the unreadable parameter and the very same call resolves — which is what
+    // makes the silence above attributable to the occurrence rather than to the
+    // argument.
+    let alone = nested.replace(" * @param list<Box<T>> $many\n", "").replace("array $many, ", "");
+    assert_eq!(
+        dumped(&format!("{alone}\\PHPStan\\dumpType(fromEither(new Box(1)));")),
+        "dumped type: 1 (asserted)",
+    );
+}
+
+#[test]
 fn every_spelling_outside_the_binding_rule_stays_at_the_floor() {
     // Top-level positions only, and nothing nested or optional. Each of these names
     // `T` somewhere the rule deliberately does not look.

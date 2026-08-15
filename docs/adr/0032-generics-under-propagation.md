@@ -390,17 +390,37 @@ envelopes as the declaration's own `@template` shadow leaves them:
 - `@param T $p` at the **top level** binds `T` to the argument's proven
   value, when it has one.
 - **Nothing else binds.** Not `list<Box<T>>`, not `Box<T>|null`, not `?T`,
-  not `array<T>`, not any nested position; not a call with a named or
-  spread argument list (position no longer maps to a parameter, so the
-  whole call declines — the same list issue #295's sweep gate declines
-  on), not a by-ref or variadic parameter list, not an argument past the
-  declared arity.
-- **All-or-nothing per name.** Every occurrence of `T` in a binding
-  position must yield a binding and all of them must be equal; a
-  disagreement or a single occurrence that carries nothing leaves `T`
-  unbound and the read declines. Two `@param Box<T>` parameters handed
-  `Box<1>` and `Box<'s'>` say the author's `T` is not one thing here, and
-  the honest answer to that is silence, not a join.
+  not `array<T>`, not `\Closure():T`, not any nested position; not a call
+  with a named or spread argument list (position no longer maps to a
+  parameter, so the whole call declines — the same list issue #295's sweep
+  gate declines on), not a by-ref or variadic parameter list, not an
+  argument past the declared arity.
+- **All-or-nothing per name, over every occurrence and not merely the
+  readable ones.** `T` binds only when *every* place the parameter
+  envelopes mention it is a binding position the read actually performed,
+  and all of those reads agree. Two `@param Box<T>` parameters handed
+  `Box<1>` and `Box<'s'>` say the author's `T` is not one thing here. One
+  of them handed an object nobody proved says the same. And an occurrence
+  the rule cannot read at all — `@param \Closure():T $t1` beside
+  `@param T $t2`, a `list<Box<T>>` beside a `Box<T>`, a `@param` on a
+  parameter this call supplied no argument for — **contests the name**
+  rather than being skipped.
+
+**Why a non-binding occurrence contests rather than abstains.** A
+`@template T` witnessed at two parameters is the docblock stating that one
+type stands at both. Reading the position Steins understands and ignoring
+the other would answer **narrower than the declaration supports**:
+`@param \Closure():T $t1, @param T $t2, @return T` handed a `Closure(): A1`
+and an `A2` would come back `A2` where the declaration's own truth is
+`A1|A2`. Narrower-than-true is the direction every other decision in this
+family refuses — a stale carry is swept, a covariant position declines,
+an unproven argument contributes nothing — and the `Asserted` grade does
+not excuse it, because contract arms feed narrowing and the dump surface,
+not only diagnostics. The two alternatives are both worse: joining the
+readable position with a modelled reading of the unreadable one *is* the
+solver, and joining it with `mixed` is a claim about nothing. So the read
+declines, and this ADR says why rather than leaving the narrowing to be
+found in a corpus.
 
 **A bounded template does not bind, and the bound is why.** `@template T
 of int` has already become `int` in every envelope by the time this runs

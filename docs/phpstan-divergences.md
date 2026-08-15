@@ -90,11 +90,13 @@ PHPStan unifies template variables at call sites. Steins has no solver
 where it does not, silence. What Steins does instead of solving is
 *read*: a `@param Owner<…, T, …>` at the top level asks the argument's
 generics carry what sits at `T`'s position, so `@return T` names it —
-one positional lookup, no unification, no fixpoint, all-or-nothing when
-two occurrences disagree, and always underneath the body summary, which
-wins wherever it speaks. The accepted cost — thin library-author lints,
-plus the nested and bounded positions PHPStan solves and Steins leaves
-silent — is on the registry.
+one positional lookup, no unification, no fixpoint, and all-or-nothing
+across every occurrence of a name — one the read cannot perform
+(`\Closure():T`, `list<Box<T>>`) contests it rather than being skipped,
+so the answer is never narrower than the declaration supports. Always
+underneath the body summary, which wins wherever it speaks. The accepted
+cost — thin library-author lints, plus the nested and bounded positions
+PHPStan solves and Steins leaves silent — is on the registry.
 
 ## ImpurePoint vs Effect System
 
