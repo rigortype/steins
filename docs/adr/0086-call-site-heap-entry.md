@@ -197,6 +197,23 @@ re-diagnosed as one.
   it) still yields no props. A real, separate gap, named here so it is not
   mistaken for this one.
 
+  *Closed 2026-08-16 (#385), by ADR-0057's constructor-summary amendment: the
+  descent that already walked `__construct` for its diagnostics now runs with
+  `$this` seeded from the fresh allocation, and the caller's object becomes the
+  snapshot that descent's exits agree on. **Walked constructors supersede the
+  lexical rule below** — where the walk runs, its writes are the object's
+  properties and every literal default it did not overwrite stands. The lexical
+  rule stays as the **decline floor**, for the constructors no walk reaches
+  (none declared, abstract, unresolvable, poisoned, named/spread argument list,
+  budget or recursion, every path throwing), and its pins stay green as floor
+  pins. The seed also flips one field of §2's table — `escaped` is `false`
+  there, the one copy that is not pre-escaped, because a `new` site has no
+  caller-side object to escape — and pays for it with the same-`$this` sweep
+  ADR-0057 C5 adds: `$this->m(…)`, `parent::m(…)`, `self::m(…)` and
+  `static::m(…)` sweep the receiver's own non-readonly props in every walk,
+  resolved or not, which also closes the resolved-private-`$this->m()` hole
+  this ADR's own §3 seeding had left open.*
+
   *Amended 2026-08-16 (#377): that gap had a second, unsound half, and the half
   is closed.* Not walking the constructor also meant the **literal property
   defaults were seeded as if nothing ran between the allocation and the first
