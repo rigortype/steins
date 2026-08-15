@@ -14424,18 +14424,18 @@ fn constructed_object(
     descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> HeapObj {
-    let floor =
-        |folder: &mut dyn Folder| {
-            new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::Lexical)
-        };
+    let floor = |folder: &mut dyn Folder| {
+        new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::Lexical)
+    };
     if !named.is_empty() {
         return floor(folder);
     }
-    let seed =
-        new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::All);
+    let seed = new_heap_object(cx, folder, class, args, named, env, store, false, CtorDefaults::All);
     let arg_refs: Vec<&ArgValue> = args.iter().collect();
-    match ctor_heap_summary(cx, folder, class, &seed, &arg_refs, span_start, env, store, descent, out)
-    {
+    let summary = ctor_heap_summary(
+        cx, folder, class, &seed, &arg_refs, span_start, env, store, descent, out,
+    );
+    match summary {
         Some(h) => h.obj,
         None => floor(folder),
     }
