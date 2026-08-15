@@ -130,6 +130,35 @@ instead (below). The `this:` key component correspondingly carries the object's
 canonical rendering where a copy was seeded and the bare exact class FQN where
 none was (ADR-0075 §2.1, amended).
 
+**A class-typed parameter is a heap object** (ADR-0032's declared-parameter-seed
+amendment, #388), at every entry where neither of the two copies above landed —
+the plain per-scope pass above all. The gate is `!store.is_bound(param)` (and no
+`env` value), so a copy always wins. What seeds: a parameter whose **native**
+hint is exactly one non-nullable class the index knows. What it seeds: `class`
+from that hint, `class_exact = false` (audit G1), `escaped = true`, no props,
+`readonly`/`ro_written` from the class surface through the same derivation
+`seed_this_object` uses, and `targs` from the `@param`'s own type arguments as
+`CArg::Ty` — owner-keyed, arity-aligned to the owner's `@template` list, sited at
+the declaring file and offset, and dropped whole where an argument names a
+template or lowers to `Opaque`. `?Box`, a `= null` default, a union, an
+intersection, an unknown class, a by-ref or variadic position, and a `@param`
+that disagrees with the native hint or is not a plain (parameterized) class each
+seed nothing. The class never comes from the docblock alone: `HeapObj::class`
+carries no stratum, and it premises both the guarded dispatch below and the dump
+surface's un-`(asserted)` rung.
+
+Three consumers move with it. `resolve_call_target`'s **non-exact**
+`Receiver::Var` arm keeps the final/private override guard and now fills
+`receiver_carries` from the object's *declared* carries (`receiver_var` stays
+`None` — no identity is proven, so no `$this` copy is owed), which is what lets
+#362's `template-type` read work on a declared receiver. `check_phpdoc_param`
+and `bind_call_templates` read those same carries through `declared_carrier`,
+`resolve_cval` declining a lower-bound object on purpose; only the **argument**
+half of `Class<A, …>` judges there, the class half staying `Maybe`. And
+`resolve_arity_method` admits a lower-bound receiver under the final guard —
+ADR-0049 §6's declared-receiver refusal rests on an override adding optional
+parameters, which `final` forecloses.
+
 The value surface reads the same summary (ADR-0075 §3 as amended 2026-08-16).
 `ArgValue::MethodCall { callee, args, named }` carries a method or static call
 in value position — `Callee::Function` stays `ArgValue::Call` — and
