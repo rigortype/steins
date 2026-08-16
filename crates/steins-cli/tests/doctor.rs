@@ -766,9 +766,23 @@ fn doctor_catalog_reports_the_pin_and_freshness_context() {
         steins_catalog::unverified_names().len()
     );
     assert!(r.stdout.contains(&expected), "expected `{expected}`; stdout:\n{}", r.stdout);
+    // The guard this replaces required a NON-EMPTY unverified list, on the
+    // ground that a zero would make the line above vacuous. The class is empty
+    // since issue #382 measured its last two rows, and the concern it names is
+    // real: a hardcoded `0 unverified` would satisfy the format assertion. So
+    // the zero is asserted as a RENDERED fact — the doctor says "nothing here is
+    // unmeasured" rather than falling silent about the class — and the other two
+    // counts, which are non-empty, are what pin that the numbers come from the
+    // accessors at all.
     assert!(
-        !steins_catalog::unverified_names().is_empty(),
-        "an empty unverified list would make the assertion above vacuous"
+        r.stdout.contains("0 unverified"),
+        "an empty class is still reported, not omitted; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        !steins_catalog::portable_names().is_empty()
+            && !steins_catalog::refused_names().is_empty(),
+        "two non-empty counts are what make the format assertion above bite"
     );
 }
 
