@@ -2177,6 +2177,9 @@ impl<E: FoldEngine> EngineFolder<E> {
         if !fold_admitted_at_width(width, name, &fargs) {
             return None;
         }
+        if !fold_admitted_by_shape(name, &fargs) {
+            return None;
+        }
         match self.engine.fold(name, &fargs, strict) {
             FoldResult::Value(v) => fold_value_to_arg(&v),
             FoldResult::Throw { .. } | FoldResult::Widen { .. } => None,
@@ -2212,6 +2215,58 @@ fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -
         }
         FoldLane::Declined => false,
     }
+}
+
+/// The **shape gate** (issue #382): whether this call's argument list keeps every
+/// callable parameter empty.
+///
+/// # Why the allowlist is not enough
+///
+/// The allowlist gates the **callee**. A builtin that takes a callable smuggles a
+/// SECOND callee past that gate as an ordinary string argument, and the seam hands
+/// string arguments to the runner verbatim — which calls them. Measured, on a
+/// branch that briefly admitted `array_filter`:
+///
+/// * `array_filter(["a", "b"], "var_dump")` — the callback's output landed on
+///   stdout ahead of the JSON-RPC reply, desynced the NDJSON stream and poisoned
+///   the sidecar, degrading the whole run to the sound subset.
+/// * `array_filter(["PATH"], "getenv")` — folded to `list{'PATH'}`, which is
+///   `getenv` running inside the analysis with its answer reaching the value
+///   domain. `system` and `unlink` are the same call.
+///
+/// Nothing about `array_filter` is impure; the *argument* is the problem. So the
+/// rule is about the argument list, not the name: a callable position must be
+/// **absent** (the call does not reach it) or a **literal `null`** (PHP's own
+/// "no callback" spelling, which `array_filter` reads as "drop the falsy
+/// elements"). Anything else declines, including a literal string — a string is
+/// exactly what a callable argument looks like on this wire.
+///
+/// # Where the positions come from
+///
+/// `param_facts` — the engine's own arginfo (ADR-0077's 2026-08-16 amendment),
+/// not `invocation_shape`, which is a curated table with one position per row and
+/// cannot express `session_set_save_handler`'s seven. **A name with no mined row
+/// does not fold at all**: the catalog asserts every foldable name is mined, so
+/// this costs nothing today and means a future admission that skips the mining
+/// step declines rather than folding past a gate that cannot see it.
+///
+/// # What this gate does not cover, and what does
+///
+/// A callable can arrive somewhere the engine does not DECLARE one: the
+/// `array_udiff` family takes its comparator at a variadic `mixed` tail, and
+/// `preg_replace_callback_array` takes its callables as array values. Neither is
+/// visible here, and neither is on the allowlist — the catalog's
+/// `a_variadic_mixed_tail_on_a_foldable_name_is_argued_for` is the tripwire for
+/// the first shape and `out_params` excludes the second. Admitting such a name
+/// needs an argument, not just this gate.
+fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
+    let Some(facts) = steins_catalog::param_facts(name) else {
+        return false;
+    };
+    facts
+        .callable
+        .iter()
+        .all(|&p| matches!(args.get(p), None | Some(FoldArg::Null)))
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of

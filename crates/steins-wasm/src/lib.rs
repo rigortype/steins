@@ -745,9 +745,11 @@ mod replay {
     ///
     /// Wave 2 moved 57 → 63 in the safe direction only: `strpos`/`stripos`/
     /// `strrpos` and `round`/`floor`/`ceil`, six names whose only integer
-    /// parameter declines rather than diverges on the narrow engine. Two more
-    /// were probed with them and withdrawn — see the ADR-0066 amendment and
-    /// issue #382 for the gates they turned out to need.
+    /// parameter declines rather than diverges on the narrow engine. The two it
+    /// withdrew came back in issue #382 once the seam could gate them, and they
+    /// moved the counts in OPPOSITE directions: `array_filter` folds here
+    /// (portable 50 → 51), `preg_match` does not (refused 11 → 12, beside
+    /// `preg_split` and for the same PCRE build option).
     #[test]
     fn the_boot_object_describes_a_32_bit_engine() {
         let mut table = answered_table();
@@ -761,8 +763,8 @@ mod replay {
         assert_eq!(boot["fold_lane"], "portable_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 63);
-        assert_eq!(boot["fold_portable"], 50, "issue #354, its aliases and wave 2 grew this engine's share by thirteen");
+        assert_eq!(boot["fold_total"], 65);
+        assert_eq!(boot["fold_portable"], 51, "issue #354, its aliases, wave 2 and array_filter grew this engine's share by fourteen");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::refused_names()),
@@ -781,26 +783,29 @@ mod replay {
                 "hexdec",
                 "version_compare",
                 "range",
-                "preg_split"
+                "preg_split",
+                "preg_match"
             ])
         );
         // Beside the names, the reason each row is refused — the field the
         // boundary panel groups by, so its sentences cannot go false as the
         // table grows the way the hand-written one did.
         let refusals = boot["refusals"].as_array().expect("refusals is an array");
-        assert_eq!(refusals.len(), 11, "one entry per refused row");
+        assert_eq!(refusals.len(), 12, "one entry per refused row");
         assert_eq!(refusals[0]["name"], "abs");
         assert_eq!(refusals[0]["axis"], "integer_width");
         assert!(
             refusals[0]["witness"].as_str().expect("witness").contains(" / "),
             "a witness shows both engines' answers"
         );
-        let preg = refusals.iter().find(|r| r["name"] == "preg_split").expect("preg_split");
-        assert_eq!(preg["axis"], "build_option", "the one row that is not about the word size");
+        for name in ["preg_split", "preg_match"] {
+            let preg = refusals.iter().find(|r| r["name"] == name).expect("a PCRE row");
+            assert_eq!(preg["axis"], "build_option", "{name} is not about the word size");
+        }
         assert_eq!(
             refusals.iter().filter(|r| r["axis"] == "build_option").count(),
-            1,
-            "and it is the only one"
+            2,
+            "and those two are the only ones — same matcher, same build option"
         );
         assert_eq!(
             refusals.iter().map(|r| r["name"].clone()).collect::<Vec<_>>(),
