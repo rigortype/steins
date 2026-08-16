@@ -77,7 +77,7 @@ fn with_fold_strict(
     strict: bool,
     answer: serde_json::Value,
 ) {
-    table.insert(request_key("fold", &fold_params(name, args, strict)), answer);
+    table.insert(request_key("fold", &fold_params(name, args, strict).expect("askable")), answer);
 }
 
 /// A 64-bit engine at the pinned minor — the "everything admitted" baseline.
@@ -180,7 +180,7 @@ fn a_table_miss_declines_and_records_the_request() {
     assert_eq!(req["method"], "fold");
     assert_eq!(req["params"]["function"], "strtoupper");
     assert_eq!(req["params"]["args"], serde_json::json!(["ab"]));
-    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false)));
+    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false).expect("askable")));
 }
 
 #[test]
@@ -204,8 +204,8 @@ fn repeated_misses_are_deduped_in_first_occurrence_order() {
     let _ = folder.boot_surface_class_like("strlen"); // same `reflect` request
     let pending = folder.take_pending();
     assert_eq!(pending.len(), 3, "deduped: {pending:?}");
-    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false)));
-    assert_eq!(pending[1], request_key("fold", &fold_params("strtolower", &[FoldArg::Str("AB".to_owned())], false)));
+    assert_eq!(pending[0], request_key("fold", &fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false).expect("askable")));
+    assert_eq!(pending[1], request_key("fold", &fold_params("strtolower", &[FoldArg::Str("AB".to_owned())], false).expect("askable")));
     assert_eq!(pending[2], request_key("reflect", &reflect_params("strlen")));
 }
 
