@@ -224,6 +224,8 @@ refused_rows! {
     // issue #354 — a width-typed numeric string, and a PCRE build option
     "range" => (RefusalAxis::IntegerWidth, "range(\"3000000000\", \"3000000000\") is [int(3000000000)] / [float(3000000000.0)] — its bounds are declared string|int|float, so the machine types the numeric string"),
     "preg_split" => (RefusalAxis::BuildOption, "preg_split(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") splits / is false — PCRE2's JIT ignores the inline limit verbs its interpreter honours, and adding (*NO_JIT) makes both engines agree"),
+    // issue #382 — the same matcher as preg_split, so the same build option
+    "preg_match" => (RefusalAxis::BuildOption, "preg_match(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") is 1 / false, and (*LIMIT_RECURSION=1) diverges the same way — one PCRE2 build JITs and ignores the inline limit verbs the other honours"),
 }
 
 /// The portability class of `name` (case-insensitive), or `None` when not on
@@ -408,6 +410,12 @@ const PORTABLE: &[&str] = &[
     "round",
     "floor",
     "ceil",
+    // issue #382 — a callable-taking name, admitted only once the seam could
+    // refuse the callback argument. `array_filter` retypes nothing: it selects
+    // entries by PHP's own falsiness and preserves the keys it keeps, so no
+    // integer in the result was computed by the machine. The one decline is the
+    // narrow engine having no key after its own `PHP_INT_MAX`.
+    "array_filter",
 ];
 
 /// The **unverified rows** of the portability classification (ADR-0028's 2026-08-14
@@ -1842,13 +1850,14 @@ mod tests {
                 }
             }
         }
-        assert_eq!(PORTABLE.len(), 50, "the verified portable subset");
-        assert_eq!(REFUSED.len(), 11, "the refused rows");
+        assert_eq!(PORTABLE.len(), 51, "the verified portable subset");
+        assert_eq!(REFUSED.len(), 12, "the refused rows");
         assert_eq!(UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
         assert_eq!(
             foldable_entry_count(),
-            63,
-            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354 and its aliases"
+            65,
+            "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354, its \
+             aliases, wave 2, and the two names the seam's shape gate unblocked (issue #382)"
         );
         assert_eq!(
             PORTABLE.len() + REFUSED.len() + UNVERIFIED.len(),
@@ -1978,20 +1987,25 @@ mod tests {
             assert_eq!(axis_of(name), RefusalAxis::IntegerWidth, "{name} is an arithmetic row");
         }
         assert_eq!(axis_of("preg_split"), RefusalAxis::BuildOption);
+        assert_eq!(axis_of("preg_match"), RefusalAxis::BuildOption);
         let build = refused_names()
             .iter()
             .filter(|n| refusal(n).expect("refused").axis == RefusalAxis::BuildOption)
             .count();
-        assert_eq!(build, 1, "one row is about a build option, and it is preg_split");
+        assert_eq!(
+            build, 2,
+            "two rows are about a build option, and both run the same PCRE: preg_split and preg_match"
+        );
     }
 
-    /// **No foldable name may invoke a callback.**
+    /// **A foldable name that takes a callable is gated at the seam, and the
+    /// catalog's job is to keep that gate reachable.**
     ///
-    /// The folding allowlist gates the *callee*. A builtin that takes a
-    /// callable smuggles a SECOND callee past that gate as an ordinary string
-    /// argument, and the fold seam hands string arguments to the runner
-    /// verbatim, which calls them. Measured, on a branch that briefly admitted
-    /// `array_filter`:
+    /// The folding allowlist gates the *callee*. A builtin that takes a callable
+    /// smuggles a SECOND callee past that gate as an ordinary string argument,
+    /// and the fold seam hands string arguments to the runner verbatim, which
+    /// calls them. Measured, on a branch that briefly admitted `array_filter`
+    /// with no gate at all:
     ///
     /// * `array_filter(["a", "b"], "var_dump")` — the callback's output landed
     ///   on stdout ahead of the JSON-RPC reply, desynced the NDJSON stream and
@@ -2000,38 +2014,55 @@ mod tests {
     ///   is to say `getenv` ran inside the analysis and its answer reached the
     ///   value domain. `system`, `unlink` and the rest are the same call.
     ///
-    /// The allowlist is not a defence against this, because the name being
-    /// admitted is innocent; the argument is the callee. Until the fold gate
-    /// grows a shape rule — fold such a name only when the callback argument is
-    /// absent or a literal `null` — the catalog simply must not carry one, and
-    /// this asserts that rather than trusting the next author to notice.
+    /// Since issue #382 the seam refuses such a call unless every callable
+    /// position is **absent or a literal `null`** (`fold_admitted_by_shape`,
+    /// reading this crate's mined [`param_facts`] rather than the curated
+    /// [`invocation_shape`], which has one position per row and could not
+    /// express `session_set_save_handler`'s seven). Two things have to hold on
+    /// this side for that gate to be reachable at all, and neither is implied by
+    /// the other:
     ///
-    /// **What this does not prove.** The guard reads [`invocation_shape`],
-    /// which is a *curated* table with one `callback_param` position per row,
-    /// so it cannot express every callback-bearing builtin:
-    /// `preg_replace_callback_array` takes its callbacks as array *values*, and
-    /// the `array_udiff`/`array_uintersect` family takes a comparator at a
-    /// variadic tail. Admitting one of those would pass this test and reopen
-    /// the hole. The names on the allowlist today are safe — none takes a
-    /// callable at all — but a mechanical barrier needs an independent source
-    /// for "does this name take a callable", which is the mined
-    /// parameter-facts table issue #382 asks for. Until then this is a tripwire
-    /// for the shapes the catalog can see, and a new admission still has to be
-    /// read by a human.
+    /// 1. every callable position of a foldable name is **optional** — a
+    ///    required one would mean the gate refuses every call, so the row folds
+    ///    nothing and says otherwise;
+    /// 2. the name has an [`invocation_shape`] row, so the effects and throws
+    ///    passes read the same argument as a callback that the fold seam
+    ///    refuses to fill.
+    ///
+    /// The mined column is *declared* callables, which is sound and not
+    /// complete: `array_udiff` takes its comparator at a variadic `mixed` tail
+    /// and `preg_replace_callback_array` takes its callables as array values.
+    /// `a_variadic_mixed_tail_on_a_foldable_name_is_argued_for` is the tripwire
+    /// for the first shape; `out_params` keeps the second off the list. Neither
+    /// is this test's claim.
     #[test]
-    fn no_foldable_name_invokes_a_callback() {
+    fn a_foldable_names_callable_positions_are_gateable() {
         use super::invocation_shape;
         for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
-            assert_eq!(
-                invocation_shape(name),
-                None,
-                "{name} invokes a callback, and folding it would execute an argument"
-            );
+            let Some(facts) = param_facts(name) else { continue };
+            for &p in facts.callable {
+                assert!(
+                    facts.optional.contains(&p),
+                    "{name} folds and REQUIRES a callable at position {p}: the seam's shape gate \
+                     would refuse every call, so the row folds nothing"
+                );
+                assert_eq!(
+                    invocation_shape(name).map(|s| s.callback_param),
+                    Some(p),
+                    "{name} folds with a callable at {p} and the effects pass does not know it \
+                     is one"
+                );
+            }
         }
-        // The guard is not vacuous: the catalog does know callback-invoking
-        // names, and `array_filter` is the one that tried to get in.
-        assert!(invocation_shape("array_filter").is_some());
-        assert!(invocation_shape("usort").is_some());
+        // Not vacuous: `array_filter` is the name that tried to get in without a
+        // gate, and it is on the list now — with its callback position optional
+        // and rowed.
+        let filter = param_facts("array_filter").expect("array_filter is mined");
+        assert_eq!(filter.callable, &[1]);
+        assert!(foldable("array_filter"));
+        // …and the names that could NOT be gated this way are still off it.
+        assert!(!foldable("usort"), "a required callable cannot be gated away");
+        assert!(!foldable("array_udiff"), "a comparator at a variadic mixed tail is invisible here");
     }
 
     /// The alias rows: a second spelling of a name already on the list, and the
@@ -2143,8 +2174,8 @@ mod tests {
             foldable_entry_count() - portable_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(portable_names().len(), 50);
-        assert_eq!(refused_names().len(), 11);
+        assert_eq!(portable_names().len(), 51);
+        assert_eq!(refused_names().len(), 12);
         assert_eq!(unverified_names().len(), 2);
     }
 
@@ -2886,25 +2917,6 @@ mod tests {
         }
     }
 
-    /// **No foldable name takes a declared callable.** This is the mechanical
-    /// half of `no_foldable_name_invokes_a_callback`, which reads the *curated*
-    /// `invocation_shape` and so can only see the shapes that table can express.
-    /// The engine's arginfo sees every declared-callable parameter, whatever
-    /// the catalog knows about the name.
-    #[test]
-    fn no_foldable_name_takes_a_declared_callable() {
-        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
-            let Some(facts) = param_facts(name) else { continue };
-            assert!(
-                facts.callable.is_empty(),
-                "{name} folds and declares a callable at {:?} — the allowlist gates the CALLEE, \
-                 and a callable argument is a second callee the seam would hand the runner \
-                 verbatim",
-                facts.callable
-            );
-        }
-    }
-
     /// A foldable name with a **variadic tail the engine types `mixed`** is the
     /// one shape neither table can rule on: `array_udiff` hides its comparator
     /// exactly there, and no declared type gives it away. Such a name may fold
@@ -3093,7 +3105,13 @@ mod tests {
         assert_eq!(effect_labels("shuffle"), Some(&["nondet.random"][..]));
         assert_eq!(out_params("shuffle"), Some(&[0][..]));
         assert_eq!(out_params("rand"), None);
-        assert_eq!(effect_labels("preg_match"), None);
+        // A by-ref row is not an effect color: `similar_text` writes argument 2
+        // and touches nothing global. (`preg_match` used to be the example here
+        // and stopped being one when issue #382 admitted it — a foldable name is
+        // catalogued-PURE, `Some(&[])`, not uncatalogued.)
+        assert_eq!(out_params("similar_text"), Some(&[2][..]));
+        assert_eq!(effect_labels("similar_text"), None);
+        assert_eq!(effect_labels("preg_match"), Some(&[][..]), "foldable is catalogued-pure");
     }
 
     #[test]

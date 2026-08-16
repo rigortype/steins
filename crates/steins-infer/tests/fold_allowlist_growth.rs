@@ -619,3 +619,94 @@ fn a_non_finite_float_literal_declines_rather_than_folding() {
         assert_eq!(d[4], "1.0", "{mode}: a finite argument next door still folds");
     }
 }
+
+// issue #382: the two names wave 2 withdrew, admitted on the footing the seam
+// grew for them — a shape gate for the callback, and an `out_params` row the
+// engine's own arginfo now countersigns for the by-ref write.
+
+/// `array_filter` folds only with its callback argument **absent or a literal
+/// `null`**, and the hazard calls are the test.
+///
+/// The allowlist gates the callee; a callable argument is a second callee, and
+/// the seam hands string arguments to the runner verbatim. Both hazards below
+/// were *measured* on a branch that admitted the name with no gate:
+/// `array_filter(["a", "b"], "var_dump")` put the callback's output on stdout
+/// ahead of the JSON-RPC reply, desynced the NDJSON stream and poisoned the
+/// sidecar; `array_filter(["PATH"], "getenv")` folded to `list{'PATH'}`, which
+/// is `getenv` running inside the analysis with its answer reaching the value
+/// domain.
+///
+/// The last two dumps are the ones that matter most: a fold *after* the refused
+/// calls still answers, which is the "the sidecar was never poisoned" claim
+/// stated as a value rather than as an absence.
+#[test]
+fn array_filter_folds_only_with_no_callback() {
+    let Some(mut folder) = live("array_filter_folds_only_with_no_callback") else { return };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(array_filter([1, 0, 2, \"\", \"0\", null]));\n\
+         \\PHPStan\\dumpType(array_filter([1, 0], null));\n\
+         \\PHPStan\\dumpType(array_filter([\"a\", \"b\"], \"var_dump\"));\n\
+         \\PHPStan\\dumpType(array_filter([\"PATH\"], \"getenv\"));\n\
+         \\PHPStan\\dumpType(array_filter([5 => \"x\", 9 => \"\"]));\n\
+         \\PHPStan\\dumpType(strtoupper(\"still alive\"));\n";
+    let d = dumps(SRC, &mut folder);
+    // PHP's own falsiness decides, and the kept entries keep their keys.
+    assert_eq!(d[0], "array{0: 1, 2: 2}", "the falsy family is PHP's, not ours");
+    // Renders as a `list` because what survives is keys `0..n` — the same value,
+    // and the shape surface says so.
+    assert_eq!(d[1], "list{1}", "a literal null callback is the absent one");
+    // The hazards: no value at all, and in particular not the one the callback
+    // would have produced.
+    assert_ne!(d[2], "array{0: 'a', 1: 'b'}", "a callback argument must not fold");
+    assert_ne!(d[3], "array{0: 'PATH'}", "`getenv` must not run inside the analysis");
+    for (i, got) in [(2, &d[2]), (3, &d[3])] {
+        assert!(
+            !got.starts_with("array{"),
+            "dump {i} folded a call whose callback argument is a string: {got}"
+        );
+    }
+    // `array_filter` PRESERVES keys — it does not renumber.
+    assert_eq!(d[4], "array{5: 'x'}", "gaps survive");
+    // And the sidecar is still answering, which is the whole point of refusing
+    // BEFORE dispatch rather than after.
+    assert_eq!(d[5], "'STILL ALIVE'", "the refused calls did not poison the transport");
+}
+
+/// `preg_match` is `REFUSED`, not portable: the two PCRE builds disagree on the
+/// inline limit verbs, exactly as they do for `preg_split` (one JITs and ignores
+/// them, the other honours them). So it folds here, on a 64-bit engine with the
+/// project's own PCRE, and declines in the browser.
+///
+/// Its `$matches` is by-ref at position 2, and that is sound only because
+/// ADR-0077's seeding invalidates the argument: the seam passes by value, so the
+/// write is lost, and the variable must come back **unknown** rather than
+/// keeping its old value. Since issue #382 the engine's arginfo countersigns
+/// that the row is there and names position 2.
+#[test]
+fn preg_match_folds_and_its_matches_argument_is_invalidated() {
+    let Some(mut folder) = live("preg_match_folds_and_its_matches_argument_is_invalidated") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(preg_match(\"/a/\", \"abc\"));\n\
+         \\PHPStan\\dumpType(preg_match(\"/z/\", \"abc\"));\n\
+         \\PHPStan\\dumpType(preg_match(\"/[/\", \"abc\"));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "1",
+            // A miss is `0`, a VALUE the narrowing lane can act on where the
+            // declared `int|false` cannot.
+            "0",
+            // An uncompilable pattern is `false` — the third arm, and a value too.
+            "false",
+        ]
+    );
+    assert!(steins_catalog::foldable("preg_match"));
+    assert!(!steins_catalog::portable("preg_match"), "the two PCRE builds disagree");
+    assert_eq!(
+        steins_catalog::refusal("preg_match").map(|r| r.axis),
+        Some(steins_catalog::RefusalAxis::BuildOption),
+        "refused for how PCRE was compiled, not for the machine word"
+    );
+}

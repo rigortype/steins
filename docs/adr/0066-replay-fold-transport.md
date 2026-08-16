@@ -1029,3 +1029,62 @@ counting it would inflate the evidence with cases no fold can reach.
 The total is a summary. A row's evidence is its line in its round's disposition
 table, which is where the silent/reverse/decline split lives; nothing about a
 single name should be read off the ledger.
+
+## Amendment (2026-08-16): the two withdrawn names come back, gated (issue #382)
+
+Wave 2 probed eight names and admitted six. `array_filter` and `preg_match` were
+withdrawn — not for anything the probes found, but because each needed a gate the
+seam did not have. Both gates exist now, so both names are decided on their
+evidence rather than on the seam's limits.
+
+### `array_filter`: the gate is about the ARGUMENT, not the name
+
+The allowlist gates the *callee*. A builtin taking a callable smuggles a second
+callee past it as an ordinary string argument, and the seam hands string
+arguments to the runner verbatim. Nothing about `array_filter` is impure; the
+argument is the problem, and the fix is therefore a rule about argument lists:
+
+> `fold_admitted_by_shape` — fold a name with a declared-callable parameter only
+> when **every** such position is absent or a literal `null`.
+
+The positions come from the mined `param_facts` table (ADR-0077's 2026-08-16
+amendment), not from `invocation_shape`: the curated table has one position per
+row and cannot express `session_set_save_handler`'s seven. A name with **no**
+mined row does not fold at all, which costs nothing today (the catalog asserts
+every foldable name is mined) and means a future admission that skips the mining
+step declines instead of walking past a gate that cannot see it.
+
+`array_filter` is admitted **portable**: 11 tuples, zero silent, zero reverse,
+one decline in both calling conventions. It selects entries by PHP's own
+falsiness and preserves the keys it keeps, so no integer in the result was
+computed by the machine; the decline is the narrow engine having no key after its
+own `PHP_INT_MAX`.
+
+### `preg_match`: refused, on the axis `preg_split` already established
+
+Probed 21 tuples in each convention, **two silent** in both — and they are the
+same divergence that refused `preg_split`, on the name that runs the same
+matcher:
+
+| probe | 64-bit (PCRE 10.47, JIT on) | 32-bit (PCRE 10.44, no JIT) |
+| --- | --- | --- |
+| `preg_match('/(*LIMIT_MATCH=1)a/', "aaa")` | `1` | `false` |
+| `preg_match('/(*LIMIT_RECURSION=1)(?:a)+/', "aaa")` | `1` | `false` |
+
+So it joins `REFUSED` with a `BuildOption` axis: it folds on a 64-bit engine
+running the project's own PCRE, and declines in the browser. That is the second
+row on that axis, and the axis stops being a one-row special case.
+
+Its by-ref `$matches` needed the other half of #382. The seam passes arguments by
+value, so the write is lost, and that is sound only because ADR-0077's
+`out_params` seeding invalidates the argument independently — a premise that used
+to be unfalsifiable, and is now countersigned by the engine's own arginfo for
+every foldable name.
+
+`PORTABLE` is **51**, `REFUSED` **12**, `UNVERIFIED` **2**, the allowlist **65**.
+
+### The ledger does not move
+
+Both names' tuples were counted in wave 2's round (158 = 126 admitted + 11 + 21),
+and re-running the same 32 cases under the other calling convention is those
+tuples probed twice, not 32 more. The total stands at **1073**.

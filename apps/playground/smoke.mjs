@@ -215,10 +215,12 @@ assert(boot.fold_lane === "full", `a 64-bit engine folds the whole allowlist (go
 assert(boot.curated_rows === true && boot.absence_family === true, "every lane is live at the pin");
 assert(boot.refused_folds === undefined, "nothing is refused on the full lane");
 assert(boot.unverified_folds === undefined, "…and nothing is unverified there either");
-// 63 = 50 portable + 11 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1,
-// then issue #354's five, its four aliases, and wave 2). On the full lane every
-// one of the 63 folds, so what a narrow engine would decline is invisible here.
-assert(boot.fold_total === 63 && boot.fold_portable === 50, "the catalog's own counts travel");
+// 65 = 51 portable + 12 refused + 2 unverified (ADR-0028's 2026-08-14 wave 1,
+// then issue #354's five, its four aliases, wave 2, and the two names issue
+// #382's shape gate unblocked). `steins-catalog`'s partition test owns these
+// numbers; this asserts they travel. On the full lane every one of the 65 folds,
+// so what a narrow engine would decline is invisible here.
+assert(boot.fold_total === 65 && boot.fold_portable === 51, "the catalog's own counts travel");
 assert(steins.check(flagship).boot === undefined, "the sound-subset envelope carries no boot key");
 
 // annotate rides the same loop.

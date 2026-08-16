@@ -186,8 +186,10 @@ assert(boot.fold_lane === "portable_subset", `a 32-bit engine folds the portable
 // count moved; and wave 2 added `strpos`/`stripos`/`strrpos` and
 // `round`/`floor`/`ceil`, six names whose only integer parameter declines rather
 // than diverges on the narrow engine, so both counts moved together (44/57 →
-// 50/63) and nothing new was refused.
-assert(boot.fold_portable === 50, `this engine's share comes from the catalog (${boot.fold_portable})`);
+// 50/63) and nothing new was refused; and issue #382 added `array_filter` here
+// (50 → 51) with `preg_match` refused beside `preg_split` for the same PCRE
+// build option (11 → 12 refusals, the allowlist 63 → 65).
+assert(boot.fold_portable === 51, `this engine's share comes from the catalog (${boot.fold_portable})`);
 // `refused_folds` stays the REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
@@ -196,7 +198,7 @@ assert(boot.fold_portable === 50, `this engine's share comes from the catalog ($
 assert(
   Array.isArray(boot.refused_folds) &&
     boot.refused_folds.join(",") ===
-      "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split",
+      "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split,preg_match",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
 );
 // …and beside the names, WHY. The panel groups by `axis` and quotes `witness`,
