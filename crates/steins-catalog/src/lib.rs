@@ -248,9 +248,12 @@ pub fn portability_class(name: &str) -> Option<PortabilityClass> {
 /// returns, or **declines** (ADR-0066 §4). The lower bound is `-(2^31 - 1)`,
 /// not `-2^31`, to keep the `abs`-shaped boundary flip unreachable.
 ///
-/// Verified by **661 adversarial-tuple** differential probes against php-wasm
-/// 0.1.0 (`PHP_INT_SIZE = 4`) and `php` 8.5.8 (`PHP_INT_SIZE = 8`). See the
-/// ADR-0066 amendments for per-name tables.
+/// Earned by differential probes against php-wasm 0.1.0 (`PHP_INT_SIZE = 4`)
+/// and `php` 8.5.x (`PHP_INT_SIZE = 8`) — **1073 adversarial tuples** behind the
+/// classification as a whole, summed and defined by ADR-0066's probe ledger.
+/// This row's own evidence is its line in its round's disposition table, and
+/// that is the thing to read: the total says how hard the instrument was used,
+/// not what it found about any one name.
 ///
 /// A `false` here is a refusal to certify, not a claim of width-sensitivity.
 /// Default-deny: unclassified names fold only on a provably 64-bit engine.
@@ -1756,8 +1759,12 @@ mod tests {
     };
 
     /// Classes are pairwise DISJOINT, no name listed twice, size is 63
-    /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, issue #354, and the four
-    /// aliases that slice's coverage survey turned up).
+    /// (ADR-0066, plus ADR-0028's 2026-08-14 wave 1, issue #354, the four
+    /// aliases that slice's coverage survey turned up, and wave 2's six).
+    ///
+    /// This is where the three numbers are OWNED. The playground's smoke
+    /// scripts and the WASM boot test check that they travel; only this test
+    /// says what they are.
     #[test]
     fn the_portability_classes_partition_the_allowlist() {
         for (list, class, label) in [

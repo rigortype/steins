@@ -762,7 +762,7 @@ mod replay {
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
         assert_eq!(boot["fold_total"], 63);
-        assert_eq!(boot["fold_portable"], 50, "issue #354 and its aliases grew this engine's share by seven");
+        assert_eq!(boot["fold_portable"], 50, "issue #354, its aliases and wave 2 grew this engine's share by thirteen");
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::refused_names()),

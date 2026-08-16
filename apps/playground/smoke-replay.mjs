@@ -174,14 +174,20 @@ assert(boot !== undefined && boot !== null, "a replay envelope carries a boot ob
 assert(boot.php_version === engine.version, `boot.php_version is the engine's own (${boot.php_version} vs ${engine.version})`);
 assert(boot.int_size === engine.intSize, `boot.int_size is the engine's own (${boot.int_size} vs ${engine.intSize})`);
 assert(boot.fold_lane === "portable_subset", `a 32-bit engine folds the portable subset (got ${boot.fold_lane})`);
-// 63 = 50 portable + 11 refused + 2 unverified. ADR-0028's 2026-08-14 wave 1
-// added `array_merge` and `explode` as the first UNVERIFIED rows: the
-// allowlist grew, this engine's share did not. Issue #354 then probed the five
-// names that wave deferred and moved BOTH counts — `str_split`, `array_fill` and
-// `array_unique` fold here now, `range` and `preg_split` are named below. The
-// alias slice then added `join`/`chop`/`sizeof`/`doubleval`, which are second
-// spellings of names already folding here, so only the safe count moved.
-assert(boot.fold_portable === 50 && boot.fold_total === 63, `the counts come from the catalog (${boot.fold_portable}/${boot.fold_total})`);
+// This engine's SHARE of the allowlist is the number worth pinning by hand, and
+// it is the only one here: the total is derived below from the boot object's own
+// parts, and `steins-catalog`'s partition test owns it upstream. What moved it:
+// ADR-0028's 2026-08-14 wave 1 added `array_merge` and `explode` as the first
+// UNVERIFIED rows, so the allowlist grew and this engine's share did not; issue
+// #354 then probed the five names that wave deferred and moved BOTH counts —
+// `str_split`, `array_fill` and `array_unique` fold here now, `range` and
+// `preg_split` are named below; the alias slice added `join`/`chop`/`sizeof`/
+// `doubleval`, second spellings of names already folding here, so only the safe
+// count moved; and wave 2 added `strpos`/`stripos`/`strrpos` and
+// `round`/`floor`/`ceil`, six names whose only integer parameter declines rather
+// than diverges on the narrow engine, so both counts moved together (44/57 →
+// 50/63) and nothing new was refused.
+assert(boot.fold_portable === 50, `this engine's share comes from the catalog (${boot.fold_portable})`);
 // `refused_folds` stays the REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
@@ -265,6 +271,14 @@ assert(
 assert(
   Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
   `the unverified folds are named apart from the refused ones (got ${JSON.stringify(boot.unverified_folds)})`,
+);
+// The total, derived rather than transcribed: every allowlisted name is either
+// portable on this engine or one of the two kinds of decline named above, so the
+// three fields have to add up to it. A wave that grows the allowlist and forgets
+// to say which class it grew fails here without anyone editing a number.
+assert(
+  boot.fold_total === boot.fold_portable + boot.refused_folds.length + boot.unverified_folds.length,
+  `the boot object's own counts add up (${boot.fold_portable} + ${boot.refused_folds.length} + ${boot.unverified_folds.length} vs ${boot.fold_total})`,
 );
 assert(boot.curated_rows === false, "a curated row is pinned to a machine, not only a version");
 assert(boot.absence_family === true, "existence is not arithmetic — the absence family is live");

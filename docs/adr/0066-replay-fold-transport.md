@@ -958,3 +958,74 @@ leg was asked through a resolution whose notion of a known builtin is
 from respecting a shadow to ignoring one**. The false positive was already live
 on `preg_split`. Fixed separately and first (`Cx::resolve_shadow`), because it
 is a defect of its own and this wave only made it reachable on one more name.
+
+### An argument the wire cannot spell is not a question (review finding)
+
+The roundings made this reachable, and it was never about them. `1e309` has no
+finite `double`, so PHP's own lexer mints `INF` from it while it stays a
+*literal* — the fold gate's admission test sees a float and admits it. JSON has
+no token for `INF`, `-INF` or `NAN`, so `Number::from_f64` fails, and the
+encoder substituted `null`. The result is not an imprecision but a **different
+question**: in a weak call site `floor(1e309)` came back `0.0` — PHP's honest
+answer for `floor(null)` — as a `Verified` value, where the program's own answer
+is `INF`. Measured on this engine, `floor(1e309)`, `ceil(-1e309)` and
+`round(1e309)` were all `0.0`. A strict call site was already safe by accident:
+`floor(null)` is a `TypeError` there, so the runner declined.
+
+The argument was older than this wave — any allowlisted name with a float
+parameter could be reached the same way — and the fix is two-layered, because
+the two layers answer different questions:
+
+* the **gate** (`arg_to_fold`, and `fits_fold_budget` in the same words, since
+  those two compute one verdict twice) declines a non-finite float the way it
+  declines a non-UTF-8 string under ADR-0080 §2.6: the seam does not ask about a
+  value it cannot transmit;
+* the **encoder** (`fold_arg_to_json`, and `fold_params` with it) is now
+  *fallible* rather than lossy — a producer that cannot see the source, or a
+  future one that forgets the gate, gets `None` and widens instead of silently
+  minting a substitute argument. One unspellable element makes a whole array
+  unaskable: dropping it would send a shorter array, which is a different
+  argument, not a wider one.
+
+The runner has refused non-finite *results* since the fold lane opened
+(`['kind' => 'widen', 'reason' => 'non-finite float']`). This is the same
+refusal on the way in, which is where it should have been all along.
+
+## Amendment (2026-08-16): the probe ledger, and what a tuple is
+
+The amendments above each state their own round's count, and two places outside
+this file quote a running total: `portable()`'s rustdoc in `steins-catalog` and
+`docs/internal-spec/catalog.md`. They had drifted apart — 661 and 870, then 991
+against this wave's own "126 per convention" — because "the number of probes"
+had never been defined, so each update was free to add a different thing. It is
+defined here, and both places now cite this table rather than carrying an
+arithmetic of their own.
+
+**One tuple is one `(name, arguments)` case, put through the same
+`steins_handle` dispatch core on both engines and compared.** Running the same
+case again under the other calling convention is that tuple probed *twice*, not
+two tuples — which is why wave 2 reads "126 per convention" rather than 252. The
+ledger counts every row the classification carries, `Refused` and withdrawn
+candidates included: a refusal is as much a measured verdict as an admission,
+and the count is of what the instrument was pointed at, not of what came back
+clean.
+
+| round | tuples | what it covered |
+| --- | ---: | --- |
+| 2026-07-31, issue #64 S1.5 | 310 | the first portable subset of a 22-name allowlist |
+| 2026-08-01, issue #78 | 351 | twenty-four further names (the amendment's own running total: **661**) |
+| 2026-08-15, issue #354 | 209 | the five names ADR-0028's wave 1 deferred |
+| 2026-08-15, the alias rows | 45 | four aliases, four replies each (`{target, alias} × {64, 32}`) |
+| 2026-08-15, wave 2 | 158 | 126 over the six admitted, run under **both** conventions, and 32 over the two withdrawn (`array_filter` 11, `preg_match` 21) |
+| **total** | **1073** | |
+
+Two things sit deliberately *outside* the count, recorded in the round that
+found them: issue #354's seven bytewise re-probes of the wave-0 `str_replace`
+and `substr_replace` array rows (the same cases, re-measured under a sharper
+comparison), and the ten generated tuples that round refused as inadmissible
+before probing — a tuple the range guard would reject is not a probe, and
+counting it would inflate the evidence with cases no fold can reach.
+
+The total is a summary. A row's evidence is its line in its round's disposition
+table, which is where the silent/reverse/decline split lives; nothing about a
+single name should be read off the ledger.

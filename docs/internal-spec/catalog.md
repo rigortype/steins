@@ -61,9 +61,14 @@ it among several.
 
 The evidence discipline differs per class and is the point of the split:
 
-- **`Portable`** is a positive claim, and it is earned by probing. The current
-  subset was verified with 991 adversarial tuples through the same dispatch core
-  both engines run. A probe of an *array*-returning name compares the response
+- **`Portable`** is a positive claim, and it is earned by probing. The
+  classification as a whole stands on **1073 adversarial tuples** through the
+  same dispatch core both engines run — one tuple being one `(name, arguments)`
+  case, whichever way its verdict went, and a second calling convention over the
+  same case being that tuple probed twice rather than a second tuple. The
+  per-round ledger that defines and sums this is at the end of ADR-0066; a
+  single name's evidence is its line in its round's disposition table, never the
+  total. A probe of an *array*-returning name compares the response
   **bytes**: array elements travel with no per-element type tag, so an `int` on
   one engine and a `float` on the other are legible only as
   `JSON_PRESERVE_ZERO_FRACTION`'s `3000000000` versus `3000000000.0`, which any
@@ -123,6 +128,16 @@ folded to `list{'PATH'}`, which is `getenv` running inside the analysis.
 `invocation_shape` row, and lifting that needs a shape gate at the seam (fold
 only when the callback argument is absent or a literal `null`), not a catalog
 edit.
+
+That test is a **tripwire, not a barrier**, and the difference is worth keeping
+straight: `invocation_shape` is a curated table with one `callback_param`
+position per row, so it cannot express `preg_replace_callback_array`'s callbacks
+as array *values* or the `array_udiff` family's comparator at a variadic tail.
+Admitting one of those would pass the test. Every name on the list today takes
+no callable at all, so the rule holds; making it *mechanical* needs an
+independent answer to "does this name take a callable", which is the mined
+arginfo table issue #382 asks for. Until then a new admission is read by a
+human, and the test catches the shapes the catalog can already see.
 
 The five names that amendment deferred were probed in issue #354 and left the
 deferral in both directions: `str_split`, `array_fill` and `array_unique` to
