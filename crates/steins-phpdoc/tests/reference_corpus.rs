@@ -1,6 +1,11 @@
 //! Ported reference test corpus (ADR-0029): every phpstan/phpdoc-parser `TypeParserTest`
 //! input, paired with the real parser's verdict (`harness/phpdoc-oracle/dump.php`).
 //!
+//! A few inputs are Steins' own additions rather than upstream's, where a spelling
+//! Steins gives its own *meaning* still has to parse and canonicalize exactly as
+//! the reference parser does — the `unset` pseudo-type (ADR-0087) is one: the
+//! grammar agrees on `\DateTime|unset`, only the lowering diverges.
+//!
 //! Compatibility: OK/PARTIAL + we parse → `Display`/at-end must match *exactly*, else a
 //! FAILURE (wrong parse). OK/PARTIAL + outside our subset → error/`Unsupported`, a
 //! coverage gap not a failure. Reference errors → we must too, else FAILURE.

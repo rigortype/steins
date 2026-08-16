@@ -228,3 +228,6 @@ Foo | Bar | (Baz | Lorem)
 Closure(Container):($serviceId is class-string<TService> ? TService : mixed)
 MongoCollection <p>Returns a collection object representing the new collection.</p>
 array{Foo::BAR: int}
+unset
+\\DateTime|unset
+\\DateTime|null|unset

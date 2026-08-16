@@ -231,3 +231,6 @@ OK	(Foo | Bar | (Baz | Lorem))
 OK	Closure(Container): ($serviceId is class-string<TService> ? TService : mixed)
 PARTIAL	MongoCollection
 OK	array{Foo::BAR: int}
+OK	unset
+OK	(\\DateTime | unset)
+OK	(\\DateTime | null | unset)
