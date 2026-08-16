@@ -816,7 +816,11 @@ mod replay {
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
         assert_eq!(boot["fold_total"], 65);
-        assert_eq!(boot["fold_portable"], 51, "issue #354, its aliases, wave 2 and array_filter grew this engine's share by fourteen");
+        assert_eq!(
+            boot["fold_portable"], 53,
+            "…and issue #382 measured the last two unverified rows into it, so the ALLOWLIST \
+             stands still at 65 while this engine's share moves 51 -> 53"
+        );
         assert_eq!(
             boot["refused_folds"],
             serde_json::json!(steins_catalog::refused_names()),
@@ -869,7 +873,11 @@ mod replay {
             serde_json::json!(steins_catalog::unverified_names()),
             "the unverified rows are the catalog's own, in their own field"
         );
-        assert_eq!(boot["unverified_folds"], serde_json::json!(["array_merge", "explode"]));
+        // The class is empty now (issue #382 measured both rows into `portable`),
+        // and the field still travels: an empty list is "nothing is unmeasured",
+        // which is a different claim from a missing field ("this lane has no
+        // opinion") and the panel says so.
+        assert_eq!(boot["unverified_folds"], serde_json::json!([] as [&str; 0]));
     }
 
     /// …and on a 64-bit engine at the pinned minor the whole surface is live, so
