@@ -263,36 +263,26 @@ fn gen_declared_returns(check: bool) -> Result<(), String> {
 /// engine's own arginfo by `cargo xtask mine-param-facts`, into
 /// `param_facts_generated.rs`.
 ///
-/// Two shipped shapes come out of it. `ROWS` carries the positions for every
-/// name that has a hazard or sits on the folding allowlist; `PLAIN` carries the
-/// names mined and found to carry nothing. The second is not padding: the
-/// catalog's completeness tests have to tell "mined, and empty" from "never
-/// looked at", and a table with only the interesting rows cannot.
+/// One row per internal function the mining build had — including the ones that
+/// carry nothing, because "mined, and empty" has to be distinguishable from
+/// "never looked at", and because `cargo xtask fold-probe --names <name>` reads
+/// these facts to generate a candidate's tuples.
 fn gen_param_facts(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/param_facts.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: ParamDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
 
-    let mut plain: Vec<String> = doc.plain.names.iter().map(|n| n.to_ascii_lowercase()).collect();
-    plain.sort();
-    plain.dedup();
     let mut rows: BTreeMap<String, ParamRow> = BTreeMap::new();
     for (name, row) in &doc.r#fn {
         rows.insert(name.to_ascii_lowercase(), row.clone());
     }
-    for name in &plain {
-        if rows.contains_key(name) {
-            return Err(format!("`{name}` is both a row and a plain name in param_facts.toml"));
-        }
-    }
 
-    let out = render_param_facts(&doc.meta, &doc.counts, &rows, &plain);
+    let out = render_param_facts(&doc.meta, &doc.counts, &rows);
     let dst = repo_root().join("crates/steins-catalog/src/param_facts_generated.rs");
     emit(&dst, &out, check)?;
     println!(
-        "gen-catalog: {} parameter-fact rows + {} plain names {} → {}",
+        "gen-catalog: {} parameter-fact rows {} → {}",
         rows.len(),
-        plain.len(),
         verb(check),
         dst.display()
     );
@@ -306,7 +296,6 @@ struct ParamDoc {
     counts: ParamCounts,
     #[serde(default)]
     r#fn: BTreeMap<String, ParamRow>,
-    plain: PlainNames,
 }
 
 #[derive(serde::Deserialize)]
@@ -320,12 +309,6 @@ struct ParamCounts {
     internal_functions: usize,
     rows: usize,
     hazardous: usize,
-    plain: usize,
-}
-
-#[derive(serde::Deserialize)]
-struct PlainNames {
-    names: Vec<String>,
 }
 
 #[derive(Clone, serde::Deserialize)]
@@ -344,7 +327,6 @@ fn render_param_facts(
     meta: &ParamMeta,
     counts: &ParamCounts,
     rows: &BTreeMap<String, ParamRow>,
-    plain: &[String],
 ) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
@@ -374,9 +356,8 @@ fn render_param_facts(
     }
     s.push_str("//\n// Counts at the mining pin:\n");
     let _ = writeln!(s, "//   {:>5}  internal functions the build had", counts.internal_functions);
-    let _ = writeln!(s, "//   {:>5}  rows kept (a hazard, or a name the catalog reasons about)", counts.rows);
+    let _ = writeln!(s, "//   {:>5}  rows (one per internal function — an empty row is a FACT)", counts.rows);
     let _ = writeln!(s, "//   {:>5}    of those, carrying by-ref / declared-callable / variadic", counts.hazardous);
-    let _ = writeln!(s, "//   {:>5}  names mined and recorded as carrying none of the three", counts.plain);
     s.push_str(
         "\n/// One internal function's parameter facts, as the engine's arginfo reports\n\
          /// them. Positions are 0-based and ascending.\n\
@@ -409,28 +390,12 @@ fn render_param_facts(
     let _ = writeln!(s, "/// Sorted by name for binary search; keys are lowercase.");
     let _ = writeln!(s, "pub(crate) static PARAM_FACTS: &[(&str, ParamFacts)] = &[");
     for (name, r) in rows {
-        let _ = writeln!(s, "    (");
-        let _ = writeln!(s, "        {name:?},");
-        let _ = writeln!(s, "        ParamFacts {{");
-        let _ = writeln!(s, "            by_ref: &{:?},", r.by_ref);
-        let _ = writeln!(s, "            callable: &{:?},", r.callable);
-        let _ = writeln!(s, "            variadic: &{:?},", r.variadic);
-        let _ = writeln!(s, "            optional: &{:?},", r.optional);
-        let _ = writeln!(s, "            params: &{:?},", r.params);
-        let _ = writeln!(s, "            param_names: &{:?},", r.param_names);
-        let _ = writeln!(s, "            params_required: {},", r.params_required);
-        let _ = writeln!(s, "        }},");
-        let _ = writeln!(s, "    ),");
-    }
-    let _ = writeln!(s, "];\n");
-    s.push_str(
-        "/// Names mined and found to carry no by-ref, callable or variadic position.\n\
-         /// Sorted; lowercase. Membership is the FACT — the completeness tests read it\n\
-         /// to tell an empty row from a name nobody looked at.\n",
-    );
-    let _ = writeln!(s, "pub(crate) static PARAM_FACTS_PLAIN: &[&str] = &[");
-    for n in plain {
-        let _ = writeln!(s, "    {n:?},");
+        let _ = writeln!(
+            s,
+            "    ({name:?}, ParamFacts {{ by_ref: &{:?}, callable: &{:?}, variadic: &{:?}, \
+             optional: &{:?}, params: &{:?}, param_names: &{:?}, params_required: {} }}),",
+            r.by_ref, r.callable, r.variadic, r.optional, r.params, r.param_names, r.params_required
+        );
     }
     let _ = writeln!(s, "];");
     s

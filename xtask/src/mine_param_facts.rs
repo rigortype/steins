@@ -19,13 +19,18 @@
 //!
 //! # What is mined, and what is kept
 //!
-//! Every internal function the engine has is *mined*. A name is **kept with its
-//! full row** when it carries a hazard — a by-ref, declared-callable or variadic
-//! position — or when the catalog reasons about it (the folding allowlist,
-//! passed in by this command). Everything else is kept as a **name only**, in
-//! the `plain` list, and that list is load-bearing: "this name was mined and
-//! carries nothing" has to be a recorded fact, or the completeness tests are
-//! back to reading absence as agreement.
+//! Every internal function the engine has is mined, and **every one gets a full
+//! row**. "This name was mined and carries nothing" has to be a recorded fact —
+//! otherwise the completeness tests read absence as agreement, which is the
+//! vacuity this table exists to remove.
+//!
+//! An earlier cut kept full rows only for names carrying a hazard or sitting on
+//! the folding allowlist, and recorded the rest as bare names. That was enough
+//! for those tests and not enough for the table's other consumer:
+//! `cargo xtask fold-probe --names <name>` generates its tuples from these
+//! facts, so a name with no row cannot be probed — and the names worth probing
+//! are exactly the ones not yet admitted. A table that answers only about what
+//! is already decided is no use for deciding.
 //!
 //! # Usage
 //!
@@ -56,7 +61,6 @@ struct Mined {
     unreflectable: Vec<String>,
     absent: Vec<String>,
     rows: BTreeMap<String, Row>,
-    plain: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -72,22 +76,12 @@ struct Row {
 
 /// Entry point for `cargo xtask mine-param-facts`.
 pub fn run() -> Result<(), String> {
-    // The names the catalog reasons about, so their rows are kept even when they
-    // carry no hazard — which is the usual case for a foldable name and exactly
-    // the fact the fold-side tests need to be able to read.
-    let mut keep: Vec<&str> = Vec::new();
-    keep.extend_from_slice(steins_catalog::portable_names());
-    keep.extend_from_slice(steins_catalog::refused_names());
-    keep.extend_from_slice(steins_catalog::unverified_names());
-    let keep_json = serde_json::to_string(&keep).map_err(|e| format!("encode name list: {e}"))?;
-
-    let mined = run_miner(&keep_json)?;
+    let mined = run_miner("[]")?;
     println!(
-        "mine-param-facts: PHP {} — {} internal functions, {} rows kept, {} plain",
+        "mine-param-facts: PHP {} — {} internal functions, {} rows",
         mined.php,
         mined.internal_total,
         mined.rows.len(),
-        mined.plain.len(),
     );
     if !mined.unreflectable.is_empty() {
         return Err(format!(
@@ -109,9 +103,8 @@ pub fn run() -> Result<(), String> {
     let dst = repo_root().join("docs/research/phpsrc-mining/param_facts.toml");
     std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
     println!(
-        "mine-param-facts: {} rows ({hazardous} carrying a hazard) + {} plain names → {}",
+        "mine-param-facts: {} rows ({hazardous} carrying a hazard) → {}",
         mined.rows.len(),
-        mined.plain.len(),
         dst.display()
     );
     Ok(())
@@ -164,11 +157,12 @@ fn render(mined: &Mined, hazardous: usize) -> String {
          # would agree with them wherever they are wrong. Arginfo is what PHP dispatches\n\
          # on.\n\
          #\n\
-         # SCOPE. Every internal function of the build named in `[meta]`. A name with a\n\
-         # by-ref, declared-callable or variadic position gets a full row; so does every\n\
-         # name on the folding allowlist, hazard or not. Everything else is a name in\n\
-         # `[plain] names`, and that list is load-bearing: a completeness test that read\n\
-         # absence as agreement is the vacuity this table was built to remove.\n\
+         # SCOPE. Every internal function of the build named in `[meta]`, each with a\n\
+         # full row. `Mined, and carrying nothing` is a recorded fact rather than an\n\
+         # absence — a completeness test that read absence as agreement is the vacuity\n\
+         # this table was built to remove — and a row for every name is also what lets\n\
+         # `cargo xtask fold-probe --names <name>` probe a CANDIDATE, which is the whole\n\
+         # point of having a candidate.\n\
          #\n\
          # A `callable` position is one whose DECLARED type admits a callable. It is a\n\
          # sound marker, not a complete one: `array_udiff` takes its comparator at a\n\
@@ -190,12 +184,10 @@ fn render(mined: &Mined, hazardous: usize) -> String {
     let _ = writeln!(s, "# internal_functions  what the build had, before any filtering");
     let _ = writeln!(s, "# rows                names kept with their full parameter facts");
     let _ = writeln!(s, "# hazardous           of those, the ones carrying by-ref/callable/variadic");
-    let _ = writeln!(s, "# plain               names mined and recorded as carrying nothing");
     let _ = writeln!(s, "# catalog_absent      names the catalog knows and this build does not have");
     let _ = writeln!(s, "internal_functions = {}", mined.internal_total);
     let _ = writeln!(s, "rows = {}", mined.rows.len());
     let _ = writeln!(s, "hazardous = {hazardous}");
-    let _ = writeln!(s, "plain = {}", mined.plain.len());
     let _ = writeln!(s, "catalog_absent = {}", mined.absent.len());
     if !mined.absent.is_empty() {
         let _ = writeln!(s, "catalog_absent_names = {:?}", mined.absent);
@@ -217,12 +209,5 @@ fn render(mined: &Mined, hazardous: usize) -> String {
         s.push('\n');
     }
 
-    s.push_str("# Mined, and carrying no by-ref, callable or variadic position.\n");
-    let _ = writeln!(s, "[plain]");
-    let _ = writeln!(s, "names = [");
-    for n in &mined.plain {
-        let _ = writeln!(s, "  {},", toml_key(n));
-    }
-    let _ = writeln!(s, "]");
     s
 }

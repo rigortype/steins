@@ -43,7 +43,6 @@ function is_callable_type(string $spell): bool
 }
 
 $rows = [];
-$plain = [];
 $missing = [];
 $internal = get_defined_functions()['internal'];
 sort($internal);
@@ -75,13 +74,14 @@ foreach ($internal as $name) {
         if ($p->isVariadic()) $variadic[] = $i;
         if ($p->isOptional()) $optional[] = $i;
     }
-    $hazard = $by_ref !== [] || $callable !== [] || $variadic !== [];
-    if (!$hazard && !isset($keep[strtolower($name)])) {
-        // No hazard and nothing downstream reasons about it: the NAME is the
-        // whole fact, and it is still recorded so its emptiness is provable.
-        $plain[] = $name;
-        continue;
-    }
+    // EVERY name gets a full row. An earlier cut kept rows only for names
+    // carrying a hazard or sitting on the folding allowlist, and recorded the
+    // rest as bare names — enough for the completeness tests, and not enough for
+    // the thing the table is also for: `cargo xtask fold-probe --names <name>`
+    // generates its tuples from these facts, so a name with no row cannot be
+    // probed, and the names one wants to probe are exactly the ones not yet
+    // admitted. A table that answers only about what is already decided is no
+    // use for deciding.
     $rows[$name] = [
         'by_ref' => $by_ref,
         'callable' => $callable,
@@ -112,5 +112,4 @@ echo json_encode([
     'unreflectable' => $missing,
     'absent' => $absent,
     'rows' => $rows,
-    'plain' => $plain,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES);
