@@ -11111,6 +11111,22 @@ struct Store {
     /// the tail), and untouched by [`Self::unbind`]/[`Self::clear`] — a symbol's
     /// existence doesn't change on rebind or barrier.
     vouched: HashSet<Vouch>,
+    /// **Same-expression guards** (issue #421's follow-up to #418): call
+    /// expressions (`ArgValue::Call`/`MethodCall`) a `!== null`/`!== false`
+    /// comparison or a bare truthy test has named on the branch where the
+    /// non-null/non-false reading holds. The possibly-grade argument pair's
+    /// `Call`/`MethodCall` premise reader declines when its own argument
+    /// structurally equals one of these — the one operand shape neither
+    /// [`collect_cmp_refine`] (`Var`-keyed) nor [`collect_shape_guards`]
+    /// (`Offset`-keyed) can narrow, because a call has no binding to narrow: two
+    /// textually-identical calls are two separate evaluations, so nothing here
+    /// claims the ARGUMENT's own call returns what the GUARD's call proved —
+    /// only that the guard is evidence the caller already reasoned about this
+    /// exact expression, which is reason enough to stay silent rather than
+    /// convict guarded code. Same walk-local discipline as `vouched`: bound on
+    /// the branch clone, intersected at a join, untouched by
+    /// [`Self::unbind`]/[`Self::clear`].
+    guarded_calls: Vec<ArgValue>,
 }
 
 /// A symbol a positive existence guard vouches for (ADR-0049 §4 guard-respect leg).
@@ -11243,6 +11259,21 @@ impl Store {
     /// Record an existence vouch on this branch (ADR-0049 §4 guard-respect leg).
     fn vouch(&mut self, v: Vouch) {
         self.vouched.insert(v);
+    }
+
+    /// Record a same-expression call guard on this branch (issue #421). No dedup:
+    /// the list is walk-local and small (one push per guard clause a statement's
+    /// enclosing conditions carry), and `ArgValue`'s `Float` member has no `Eq`/
+    /// `Hash` for a set to key on — a linear [`Self::expr_is_guarded`] scan is the
+    /// cheaper honest answer than deriving one.
+    fn guard_call(&mut self, v: ArgValue) {
+        self.guarded_calls.push(v);
+    }
+
+    /// Whether `value` structurally equals a call this branch's guards named
+    /// (issue #421) — the possibly-grade pair's own decline check.
+    fn expr_is_guarded(&self, value: &ArgValue) -> bool {
+        self.guarded_calls.iter().any(|g| g == value)
     }
 
     /// Whether a positive existence guard on this path vouched `class::method`
@@ -15361,35 +15392,16 @@ fn apply_prop_assign(
     // Stratum rides with the resolution so an Asserted fold doesn't launder
     // (issue #127).
     let proven = cx.resolve_literal_strat_ex(value, env, false, folder, None, Some(&mut *out));
-    // The arm-lane fallback (issue #418): a `Var` rvalue whose only carrier is the
-    // declared-arm lane (a builtin's `T|false` floor, ADR-0069 — `seed_fact` skips
-    // a union, so the value lane is empty) previously left the prop with **no**
-    // fact at all, since `arg_abstract_fact` reads the value lane alone. Lowered
-    // the same way `maybe_arg_premise`'s own `Var` fallback reads it
-    // ([`arm_lane_premise`]), so `$x = file_get_contents($p); $this->p = $x;`
-    // leaves the prop the same fact `needString($x)` would see. Only the `Var`
-    // gap closes here: a builtin call written straight into the property
-    // (`$this->p = file_get_contents($p);`, with no intermediate variable) is a
-    // wider capability this slice does not add.
-    let var_arm_lane: Option<(Fact, Stratum)> = match value {
-        ArgValue::Var(name) if proven.is_none() && arg_abstract_fact(value, env, false).is_none() => {
-            store.contract_arms(name).and_then(|arms| arm_lane_premise(arms.to_vec())).map(|(f, s, _)| (f, s))
-        }
-        _ => None,
+    let (proven_lit, rvalue_strat) = match &proven {
+        Some((lit, strat)) => (Some(lit.clone()), *strat),
+        None => (None, value_stratum(value, env, Some(&*store))),
     };
-    let (proven_lit, rvalue_strat) = match (&proven, &var_arm_lane) {
-        (Some((lit, strat)), _) => (Some(lit.clone()), *strat),
-        (None, Some((_, strat))) => (None, *strat),
-        (None, None) => (None, value_stratum(value, env, Some(&*store))),
-    };
-    let prop_fact_val: Option<Fact> = proven_lit
-        .as_ref()
-        .and_then(|l| singleton_fact(l, cx.php_minor))
-        .or_else(|| var_arm_lane.as_ref().map(|(f, _)| f.clone()))
-        .or_else(|| match value {
+    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
+        match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
             _ => arg_abstract_fact(value, env, false).cloned(),
-        });
+        }
+    });
 
     // Locate the property declaration on the object's class surface (for its native
     // type and `@var` contract).
@@ -15680,6 +15692,16 @@ fn walk_if(
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, true, &mut bclasses);
         apply_shape_narrowing(w.cx, cond, true, &mut benv, &mut bclasses, true);
+        // Same-expression call guards (issue #421): a call has no binding to
+        // narrow, so this records the guard rather than a fact — only on the
+        // branch where the "not null"/"not false" reading actually holds, so a
+        // sibling branch that never tested the expression does not inherit it
+        // through the join (`join_stores` intersects, same as `vouched`).
+        let mut then_guards = Vec::new();
+        collect_same_expr_call_guards(cond, true, &mut then_guards);
+        for v in then_guards {
+            bclasses.guard_call(v);
+        }
         let mut then_calls = Vec::new();
         collect_guard_calls(cond, true, &mut then_calls);
         for (call, returns_true) in then_calls {
@@ -15707,6 +15729,14 @@ fn walk_if(
         apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
         apply_class_narrowing(w, cond, false, &mut bclasses);
         apply_shape_narrowing(w.cx, cond, false, &mut benv, &mut bclasses, true);
+        // Same-expression call guards, the false-branch twin (issue #421) — the
+        // "not null"/"not false" reading a `false`-polarity condition proves,
+        // e.g. `if ($e === null) {} else { <here> }`.
+        let mut else_guards = Vec::new();
+        collect_same_expr_call_guards(cond, false, &mut else_guards);
+        for v in else_guards {
+            bclasses.guard_call(v);
+        }
         let mut else_calls = Vec::new();
         collect_guard_calls(cond, false, &mut else_calls);
         for (call, returns_true) in else_calls {
@@ -18489,6 +18519,89 @@ fn collect_cmp_refine(
         if let Some(range) = ordering_range(branch_op, k) {
             out.push(Refine::IntRange(v, range));
         }
+    }
+}
+
+/// Reconstruct the value-position [`ArgValue`] a guard condition's call operand
+/// denotes (issue #421) — the same shape [`ArgValue::Call`]/[`ArgValue::MethodCall`]
+/// carry, built from the trace IR's own [`CallExpr`] rather than re-parsed, so a
+/// guard and an argument written identically can never fail to compare equal.
+///
+/// `None` for a spread call (`has_spread`): neither `ArgValue` variant has a slot
+/// for one, and a spread's cardinality is runtime-decided, so "the same call"
+/// is not even a claim this can state. A **free function** additionally requires
+/// `positional_only` — `ArgValue::Call` carries no named-argument slot at all,
+/// unlike its method twin.
+fn guard_call_as_value(call: &CallExpr) -> Option<ArgValue> {
+    if call.has_spread {
+        return None;
+    }
+    let args: Vec<ArgValue> = call.args.iter().map(|a| a.value.clone()).collect();
+    match &call.receiver {
+        Callee::Function(name) => {
+            if call.positional_only { Some(ArgValue::Call(name.clone(), args)) } else { None }
+        }
+        Callee::Method { .. } | Callee::Static { .. } => Some(ArgValue::MethodCall {
+            callee: call.receiver.clone(),
+            args,
+            named: call.named_args.clone(),
+        }),
+        Callee::Construct { .. } | Callee::DynamicVar(_) | Callee::Dynamic => None,
+    }
+}
+
+/// Collect the same-expression call guards (issue #421) a condition establishes
+/// on the given polarity — the possibly-grade argument pair's own decline
+/// premise, for the one operand shape [`collect_cmp_refine`] (`Var`-keyed) and
+/// [`collect_shape_guards`] (`Offset`-keyed) cannot narrow: a call.
+///
+/// Only the **negative**-equality reading against `null`/`false` fires (`$e !==
+/// null` true, or `$e === null` false — the same "not null" pair
+/// [`collect_cmp_refine`] reads for a `Var`, minus the loose one-direction
+/// carve-out: a loose `$e != null` is also true for `0`/`''`/`'0'`/`[]`, which
+/// says nothing about a call's own return, so only the strict operators qualify),
+/// plus a bare truthy `if ($e)` on its true branch. The positive reading (`$e
+/// === null` proven) says nothing about representability — the value this
+/// judgment would have read is exactly the one arm it never reaches — so it
+/// records nothing.
+///
+/// Same De Morgan distribution as [`collect_instanceof`]: negation flips
+/// polarity, `&&` distributes on the true-path, `||` on the false-path.
+fn collect_same_expr_call_guards(cond: &CondExpr, then: bool, out: &mut Vec<ArgValue>) {
+    match cond {
+        CondExpr::Cmp { op: op @ (CmpOp::Identical | CmpOp::NotIdentical), lhs, rhs } => {
+            let identical = match (op, then) {
+                (CmpOp::Identical, true) | (CmpOp::NotIdentical, false) => true,
+                (CmpOp::NotIdentical, true) | (CmpOp::Identical, false) => false,
+                _ => unreachable!("op is Identical or NotIdentical by the outer match"),
+            };
+            if identical {
+                return;
+            }
+            for (operand, other) in [(lhs, rhs), (rhs, lhs)] {
+                let CondOperand::Other { call: Some(call), .. } = operand else { continue };
+                if matches!(other, CondOperand::Literal(ArgValue::Null | ArgValue::Bool(false)))
+                    && let Some(v) = guard_call_as_value(call)
+                {
+                    out.push(v);
+                }
+            }
+        }
+        CondExpr::Truthy(CondOperand::Other { call: Some(call), .. }) if then => {
+            if let Some(v) = guard_call_as_value(call) {
+                out.push(v);
+            }
+        }
+        CondExpr::Not(c) => collect_same_expr_call_guards(c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_same_expr_call_guards(a, true, out);
+            collect_same_expr_call_guards(b, true, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_same_expr_call_guards(a, false, out);
+            collect_same_expr_call_guards(b, false, out);
+        }
+        _ => {}
     }
 }
 
@@ -21892,7 +22005,18 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
     let vouched: HashSet<Vouch> =
         first.vouched.iter().filter(|v| rest.iter().all(|s| s.vouched.contains(*v))).cloned().collect();
 
-    Store { refs, heap, contract, members, vouched }
+    // Same-expression call guards (issue #421): the same intersection as
+    // `vouched`, for the same reason — a guard bound on one arm of a branch that
+    // falls through must not silence the possibly-grade pair on a sibling path
+    // that never tested the expression.
+    let guarded_calls: Vec<ArgValue> = first
+        .guarded_calls
+        .iter()
+        .filter(|g| rest.iter().all(|s| s.guarded_calls.iter().any(|o| o == *g)))
+        .cloned()
+        .collect();
+
+    Store { refs, heap, contract, members, vouched, guarded_calls }
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the
@@ -29043,9 +29167,6 @@ fn collect_shape_guards(
                 _ => return,
             };
             let loose = matches!(op, CmpOp::Loose | CmpOp::NotLoose);
-            if !positive {
-                return;
-            }
             let (offset, lit) = match (lhs, rhs) {
                 (CondOperand::Offset { var, key }, CondOperand::Literal(v))
                 | (CondOperand::Literal(v), CondOperand::Offset { var, key }) => {
@@ -29053,6 +29174,33 @@ fn collect_shape_guards(
                 }
                 _ => return,
             };
+            // The **negative**-equality reading against `null` (`$x[k] !== null`
+            // true, or `$x[k] === null` false) is `isset($x[k])`'s own truth
+            // table (issue #421's follow-up to #418: the possibly-grade
+            // argument pair convicted `needInt($a['k'])` under exactly this
+            // guard, because nothing narrowed the field). PHP's `isset` on an
+            // absent key and on a present-null one both read `false`, which is
+            // this comparison's truth table too — strict only, since a loose
+            // `!= null` is also true for `0`/`''`/`'0'`/`[]` and proves nothing
+            // about this key's nullness (the same one-direction carve-out
+            // `collect_cmp_refine` takes for a `Var`). Routes through the SAME
+            // `ShapeGuard::Present`/`promote_present` isset already does, so
+            // the two guards can never disagree about what a key's presence
+            // narrows to.
+            if !positive && !loose && matches!(lit, ArgValue::Null) {
+                if let Some(k) = guard_key(offset.1, php_minor) {
+                    out.push(ShapeGuard::Present {
+                        var: offset.0.clone(),
+                        key: k,
+                        flavor: PresenceFlavor::Isset,
+                        positive: true,
+                    });
+                }
+                return;
+            }
+            if !positive {
+                return;
+            }
             if let Some(k) = guard_key(offset.1, php_minor) {
                 out.push(ShapeGuard::Tag {
                     var: offset.0.clone(),
@@ -30690,16 +30838,6 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// base). Ten of the twelve corpus hits issue #391 measured arrived on the arm
 /// lane and nowhere else.
 ///
-/// **`PropFetch` (`$o->p`, issue #418).** The heap prop's own fact, alias-correct
-/// (ADR-0036), at its own stratum — [`Store::prop_fact`]/[`Store::prop_stratum`],
-/// the same pair the object-world dump surface and the definite native check
-/// already read for this carrier. No arm-lane fallback here: unlike a `Var`'s
-/// [`Store::contract_arms`], a heap [`PropFact`] carries exactly one fact and one
-/// stratum, never a declared list — the write side (`apply_prop_assign`) has its
-/// own arm-lane repair for the one shape that needs it (a `Var` rvalue whose only
-/// carrier is a declared floor), so the prop this reads already has whatever a
-/// `Var` argument would.
-///
 /// **`Call`/`MethodCall` (a nested call, issue #386's value-IR carrier, issue
 /// #418).** The callee's proven return summary
 /// ([`project_call_summary`]/[`project_method_summary`]) where the body proved
@@ -30715,13 +30853,39 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// tree started from inside a live one would evade the on-stack recursion guard);
 /// the arm-lane fallback is not, since it walks no body.
 ///
+/// **Declines when the argument's own call is a same-expression guard**
+/// (issue #421's follow-up): a call has no binding to narrow — `if ($e !==
+/// null) { f($e); }` narrows `$e` for a `Var` because `$e` names one heap slot
+/// both the guard and the read consult, but a call is a fresh evaluation each
+/// time it is written, so a repeated `f($o->m())` under `if ($o->m() !== null)`
+/// is not the SAME value on any proof this analyzer holds — only evidence the
+/// caller already reasoned about this exact expression's null/false-ness.
+/// [`Store::expr_is_guarded`] is that decline, checked before either premise
+/// source is even read (a guarded call is silent whether the premise would have
+/// come from the summary or the floor).
+///
 /// **`OffsetRead` (`$a['k']`, issue #418).** The shape lane's fact for the key,
 /// through [`shape_read_at`] — the same resolver the array-shape read row (ADR-0062
 /// §4 S3) and the strict offset legs go through, so a read and this judgment can
 /// never disagree about which field they mean. Declines unless `base` is a `Var`
 /// carrying a `Fact::Shape` (`shape_read_at`'s own gate). Always `Asserted`: a
 /// shape fact is seeded at `Asserted` unconditionally (A-G9's corollary), so this
-/// carrier premises only `phpdoc.maybe-argument-mismatch`, never `type.*`.
+/// carrier premises only `phpdoc.maybe-argument-mismatch`, never `type.*`. A
+/// `!== null` guard on the same key narrows the field itself
+/// ([`collect_shape_guards`]'s isset-equivalent reading, issue #421) rather than
+/// needing a decline here — the read this function makes already sees it.
+///
+/// **`PropFetch` (`$o->p`) does not reach this function at all.** Issue #421:
+/// a depth-1 property fetch has no [`CondOperand`] variant of its own —
+/// `$o->p !== null` lowers its `$o->p` side to [`CondOperand::Other`], which
+/// carries a call's invalidation footprint but nothing that identifies the
+/// property read itself, so neither [`Store::prop_fact`] narrowing (there is
+/// none — confirmed by the same audit that added the `Call`/`MethodCall`
+/// decline above) nor a same-expression guard (there is nothing to structurally
+/// compare) is reachable for this carrier without a new lowering variant, which
+/// is a wider change than this slice makes. A carrier that would convict guarded
+/// code cannot ship even at the strict floor, so it is dropped rather than
+/// shipped unguarded (ADR-0002).
 ///
 /// A finite fact declines on every lane: `Singleton`/`OneOf` are the concrete
 /// lane's, and [`is_type_error`] has already judged them exactly.
@@ -30742,6 +30906,10 @@ fn maybe_arg_premise(
     if poisoned {
         return None;
     }
+    if matches!(value, ArgValue::Call(..) | ArgValue::MethodCall { .. }) && store.expr_is_guarded(value)
+    {
+        return None;
+    }
     match value {
         ArgValue::Var(name) => {
             if let Some(k) = env.get(name)
@@ -30750,10 +30918,6 @@ fn maybe_arg_premise(
                 return f.finite_members().is_none().then(|| (f.clone(), k.stratum, None));
             }
             arm_lane_premise(store.contract_arms(name)?.to_vec())
-        }
-        ArgValue::PropFetch { var, prop } => {
-            let f = store.prop_fact(var, prop)?;
-            f.finite_members().is_none().then(|| (f.clone(), store.prop_stratum(var, prop), None))
         }
         ArgValue::Call(name, args) => {
             if !in_descent

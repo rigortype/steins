@@ -220,16 +220,21 @@ fn the_coercive_table_keeps_the_string_arm_alive() {
 }
 
 
-// Issue #418: the non-`Var` carriers — a property fetch
+// Issue #418: a property fetch is NOT a carrier — issue #421's audit
 
 
 #[test]
-fn a_property_fetch_is_judged_too() {
-    // The corpus shape stays a builtin `T|false` — reached through an
-    // intermediate variable, since a bare `$c->p = file_get_contents(...)` has
-    // no fact to write today (`arg_abstract_fact` reads the value lane alone;
-    // see the write-side note beside `apply_prop_assign`'s arm-lane fallback).
-    let src = strict(
+fn a_property_fetch_never_reports_guarded_or_not() {
+    // `$o->p` has no `CondOperand` variant of its own — `$o->p !== null` lowers
+    // its `$o->p` side to `CondOperand::Other`, which retains nothing that
+    // identifies the property read, so neither `Store::prop_fact` narrowing nor
+    // a same-expression guard decline is reachable for this carrier without a
+    // new lowering variant (see `maybe_arg_premise`'s doc). A carrier that would
+    // convict guarded code cannot ship even at the strict floor (ADR-0002), so
+    // it was dropped rather than shipped unguarded — this pins the silence,
+    // guarded and not, so a later reader who re-adds `PropFetch` here trips a
+    // test and has to re-read why it left.
+    let unguarded = strict(
         "class C { public $p; }
 function f(): void {
     $c = new C();
@@ -238,32 +243,18 @@ function f(): void {
     needString($c->p);
 }\n",
     );
-    // No declared-arm lane to spell from here — `PropFact` carries one `Fact`
-    // and one stratum, never a list (see the write-side note above), so the
-    // message falls back to the BASE spelling `to_fact` widened `false` to
-    // (`bool`), the same fallback a value-lane `Var` premise takes.
-    let d = contract(&src);
-    assert_eq!(d.len(), 1, "{d:?}");
-    assert!(d[0].message.contains("$c->p is string|bool"), "{}", d[0].message);
-    assert!(d[0].message.contains("its bool arm"), "{}", d[0].message);
-    assert!(
-        proof(&src).is_empty(),
-        "the builtin floor arm is Asserted (ADR-0069) — never `type.*`: {:?}",
-        proof(&src)
-    );
-}
+    assert!(family(&unguarded).is_empty(), "{:?}", family(&unguarded));
 
-#[test]
-fn a_property_fetch_of_a_plain_string_is_silent() {
-    let src = strict(
+    let guarded = strict(
         "class C { public $p; }
-function f(string $s): void {
+function f(): void {
     $c = new C();
-    $c->p = $s;
-    needString($c->p);
+    $x = \\file_get_contents('/tmp/x');
+    $c->p = $x;
+    if ($c->p !== false) { needString($c->p); }
 }\n",
     );
-    assert!(family(&src).is_empty(), "{:?}", family(&src));
+    assert!(family(&guarded).is_empty(), "{:?}", family(&guarded));
 }
 
 
@@ -333,6 +324,74 @@ function f(): void { $c = new C(); needString($c->m()); }\n",
 }
 
 
+// Issue #421: a call has no binding to narrow, so a repeated same-expression
+// guard declines rather than narrows — the private fp-gate FP's exact shape
+// (phpstan-src, `IgnoredError.php:122`: a guard tests a method call's
+// null-ness, then the same call is handed straight to an argument position).
+
+
+#[test]
+fn a_nested_call_tested_not_null_by_the_same_expression_is_silent() {
+    let src = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { if (g($flag) !== false) { needString(g($flag)); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn a_nested_call_tested_not_null_on_the_false_branch_is_silent() {
+    // The `=== null` (or here, `=== false`) spelling of the same guard, proven
+    // on its FALSE branch — `collect_same_expr_call_guards`' other polarity.
+    let src = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { if (g($flag) === false) {} else { needString(g($flag)); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn a_nested_method_call_tested_not_null_by_the_same_expression_is_silent() {
+    let src = strict(
+        "class C {
+    public function m(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+}
+function f(bool $flag): void {
+    $c = new C();
+    if ($c->m($flag) !== false) { needString($c->m($flag)); }
+}\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn a_guard_on_a_different_call_does_not_decline() {
+    // Pin: the decline is keyed on structural equality with the guard's own
+    // expression — a guard elsewhere in scope does not blanket-silence every
+    // call in the branch.
+    let src = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function h(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { if (g($flag) !== false) { needString(h($flag)); } }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn a_guard_on_the_same_call_with_a_different_argument_does_not_decline() {
+    // The structural comparison is over the WHOLE call, arguments included —
+    // `g(true)` and `g($flag)` are two different expressions even though they
+    // share a callee.
+    let src = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { if (g(true) !== false) { needString(g($flag)); } }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+
 // Issue #418: the non-`Var` carriers — a shape-lane offset read
 
 
@@ -364,4 +423,59 @@ fn an_offset_read_of_a_plain_string_field_is_silent() {
         "/**\n * @param array{k: string} $a\n */\nfunction f($a): void { needString($a['k']); }\n",
     );
     assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+
+// Issue #421: a `!== null` guard on the SAME key narrows the field itself
+// (`collect_shape_guards`' isset-equivalent reading) — the private fp-gate's
+// dominant FP shape (7 of 8 rows, a declared `int|null` field read under its
+// own null guard).
+
+
+#[test]
+fn a_null_guard_on_the_same_key_narrows_the_field_and_silences_it() {
+    let src = strict(
+        "/**\n * @param array{k: int|null} $a\n */\nfunction f($a): void { if ($a['k'] !== null) { needInt($a['k']); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn the_false_branch_of_an_equals_null_key_guard_also_narrows() {
+    let src = strict(
+        "/**\n * @param array{k: int|null} $a\n */\nfunction f($a): void { if ($a['k'] === null) {} else { needInt($a['k']); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn the_null_arm_still_reports_unguarded() {
+    let src = strict(
+        "/**\n * @param array{k: int|null} $a\n */\nfunction f($a): void { needInt($a['k']); }\n",
+    );
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("its null arm"), "{}", d[0].message);
+}
+
+#[test]
+fn a_loose_null_guard_on_a_key_does_not_narrow_it() {
+    // The one-direction carve-out `collect_cmp_refine` takes for a `Var`'s loose
+    // null pair does not extend here: `$a['k'] != null` is also true for `0`, so
+    // narrowing on it would be unsound in the other direction the strict pair
+    // does not have.
+    let src = strict(
+        "/**\n * @param array{k: int|null} $a\n */\nfunction f($a): void { if ($a['k'] != null) { needInt($a['k']); } }\n",
+    );
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+#[test]
+fn a_guard_on_a_different_key_does_not_narrow_it() {
+    let src = strict(
+        "/**\n * @param array{j: int|null, k: int|null} $a\n */\nfunction f($a): void { if ($a['j'] !== null) { needInt($a['k']); } }\n",
+    );
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
 }
