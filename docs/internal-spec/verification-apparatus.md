@@ -582,6 +582,15 @@ allocation and a PHP fatal) is a verdict of its own, and any tuple carrying it
 fails the command: an unmeasured tuple is not a clean one. Requires `php` on
 `PATH` and php-wasm vendored by `sh apps/playground/build.sh`.
 
+**A probe runs the name.** There is no purity, effect or callback gate between a
+name and the engine here — this harness is what those gates are tested with — so
+`fold-probe --names file_put_contents` would write the file, and `unlink` and
+`exec` are the same call. The catalog's own colours are the gate: a name it
+knows to have effects is refused unless `--unsafe` says to mean it, and a name it
+does not colour runs with a line naming it, because refusing every uncoloured
+name would refuse every candidate and probing candidates is what `--names` is
+for.
+
 ## Conformance
 
 Steins runs the external `php-typing-conformance` suite. Standing at the last

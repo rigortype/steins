@@ -2266,14 +2266,39 @@ fn fold_within_allocation_budget(name: &str, args: &[FoldArg]) -> bool {
             return true;
         }
         // A float or a numeric string reaching a size parameter coerces the same
-        // way, so all three spellings are charged.
+        // way, so all three spellings are charged — and the string spelling is
+        // charged through PHP's OWN numeric grammar, not Rust's.
+        //
+        // A first cut read the string with `parse::<i64>()` and allowed whatever
+        // it could not read. PHP is weakly typed and Rust is not: `"2e9"`,
+        // `" 2000000000"` and `"2000000000.0"` are all two billion to the
+        // engine and all unreadable to that parser, so `str_repeat("x", "2e9")`
+        // walked past the budget and killed the child — the exact bomb this
+        // function exists to refuse (review finding, 2026-08-17).
+        //
+        // So: `php_is_numeric` decides what a number is, and a string that is
+        // NOT one fails closed. At a size parameter a non-numeric string is a
+        // `TypeError` under strict types and a coercion nobody should be
+        // guessing at otherwise, and declining costs a fold rather than a child.
         let asked = match args.get(i) {
-            Some(FoldArg::Int(v)) => Some(*v),
-            Some(FoldArg::Float(v)) => Some(*v as i64),
-            Some(FoldArg::Str(v)) => v.parse::<i64>().ok(),
-            _ => None,
+            Some(FoldArg::Int(v)) => *v,
+            // Saturating on the cast, so `1e30` lands above the budget rather
+            // than wrapping below it.
+            Some(FoldArg::Float(v)) => *v as i64,
+            Some(FoldArg::Str(v)) => {
+                if !steins_domain::php_is_numeric(v) {
+                    return false;
+                }
+                match v.trim().parse::<f64>() {
+                    Ok(f) => f as i64,
+                    // Numeric by PHP's grammar and unreadable here: refuse
+                    // rather than assume it is small.
+                    Err(_) => return false,
+                }
+            }
+            _ => return true,
         };
-        asked.is_none_or(|n| n.saturating_mul(unit) <= FOLD_ALLOCATION_MAX)
+        asked.saturating_mul(unit) <= FOLD_ALLOCATION_MAX
     })
 }
 

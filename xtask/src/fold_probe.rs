@@ -22,7 +22,7 @@
 //! # Usage
 //!
 //! ```text
-//! cargo xtask fold-probe [--names a,b,c] [--strict] [--json OUT]
+//! cargo xtask fold-probe [--names a,b,c] [--strict] [--json OUT] [--unsafe]
 //! ```
 //!
 //! `--names` probes exactly those (a candidate under consideration); with no
@@ -30,6 +30,11 @@
 //! mode: a row whose engines have started to disagree fails the command.
 //! `--strict` names the other calling convention — a portability verdict has to
 //! hold for whichever mode the request names (#390), so a row deserves both.
+//!
+//! **A probe runs the name.** There is no purity or effect gate between a name
+//! and the engine here — this harness is what those gates are tested with — so a
+//! name the catalog colours with effects is refused unless `--unsafe` says to
+//! mean it, and a name it does not colour runs with a warning naming it.
 //!
 //! Needs `php` on `PATH` and php-wasm vendored by `sh apps/playground/build.sh`
 //! (a gitignored build product — the exact engine the browser gets).
@@ -105,6 +110,28 @@ pub fn run(args: &[String]) -> Result<(), String> {
         }
     };
 
+    // **A probe RUNS the name.** `fold-probe --names file_put_contents` writes
+    // the file, and `unlink`/`exec` are the same call — the harness has no
+    // purity, effect or callback gate between a name and the engine, because it
+    // is the thing those gates are tested with. So the catalog's own effect
+    // colours are consulted here: a name it knows to have effects is refused,
+    // and `--unsafe` is the way to mean it (review finding, 2026-08-17).
+    //
+    // A name the catalog does not colour at all is the candidate case — the
+    // reason `--names` exists — so it runs, and the run says so. That is a
+    // warning rather than a gate on purpose: refusing every uncoloured name
+    // would refuse every candidate, and probing a candidate is the point.
+    let unsafe_ok = args.iter().any(|a| a == "--unsafe");
+    let uncoloured = effect_verdict(&names, unsafe_ok)?;
+    if !uncoloured.is_empty() {
+        println!(
+            "fold-probe: {} name(s) the catalog does not colour, so their effects are UNKNOWN \
+             and this run will execute them: {}",
+            uncoloured.len(),
+            uncoloured.join(", ")
+        );
+    }
+
     let mut tuples = Vec::new();
     let mut unprobeable = Vec::new();
     for name in &names {
@@ -155,6 +182,34 @@ pub fn run(args: &[String]) -> Result<(), String> {
     let probed: Vec<Probed> =
         serde_json::from_str(&text).map_err(|e| format!("parse {}: {e}", results_path.display()))?;
     report(&probed, regression)
+}
+
+/// Refuse the names the catalog knows to have effects, and name the ones it does
+/// not colour at all.
+///
+/// Returns the uncoloured names for the caller to warn about; `Err` when a
+/// coloured name is asked for without `--unsafe`.
+fn effect_verdict(names: &[String], unsafe_ok: bool) -> Result<Vec<&str>, String> {
+    let mut effectful: Vec<String> = Vec::new();
+    let mut uncoloured: Vec<&str> = Vec::new();
+    for name in names {
+        match steins_catalog::effect_labels(name) {
+            Some(labels) if !labels.is_empty() => {
+                effectful.push(format!("{name} ({})", labels.join(", ")));
+            }
+            // Catalogued PURE: the folding allowlist's own rows answer here.
+            Some(_) => {}
+            None => uncoloured.push(name),
+        }
+    }
+    if !effectful.is_empty() && !unsafe_ok {
+        return Err(format!(
+            "these names have EFFECTS in the catalog, and a probe runs them:\n  {}\n\
+             Probing `file_put_contents` writes the file. Pass --unsafe to mean it.",
+            effectful.join("\n  ")
+        ));
+    }
+    Ok(uncoloured)
 }
 
 /// The per-name disposition, in the shape ADR-0066's amendments tabulate — and,
@@ -717,6 +772,29 @@ mod tests {
         );
         // …and the float family does not, because no parameter is a float.
         assert!(!t.iter().any(|x| x.args.iter().any(|a| a == &raw("0.285"))));
+    }
+
+    /// A probe RUNS the name, so the catalog's effect colours gate which names
+    /// this command will run at all (review finding, 2026-08-17).
+    #[test]
+    fn a_probe_refuses_a_name_the_catalog_knows_has_effects() {
+        let effectful = ["file_put_contents".to_owned(), "unlink".to_owned()];
+        let err = effect_verdict(&effectful, false).expect_err("writing files is not a probe");
+        assert!(err.contains("file_put_contents (io)"), "{err}");
+        assert!(err.contains("--unsafe"), "the message says how to mean it: {err}");
+        // …and meaning it is possible, because the harness is also how an
+        // effectful name would be measured if anyone ever needed to.
+        assert!(effect_verdict(&effectful, true).is_ok());
+
+        // A catalogued-PURE name (the allowlist's own rows) runs with nothing said.
+        let pure = ["strtoupper".to_owned(), "str_repeat".to_owned()];
+        assert_eq!(effect_verdict(&pure, false).expect("pure names run"), Vec::<&str>::new());
+
+        // An UNCOLOURED name is the candidate case — it runs, and comes back to
+        // be named in a warning, because refusing it would refuse every
+        // candidate and probing candidates is the point.
+        let candidate = ["array_search".to_owned()];
+        assert_eq!(effect_verdict(&candidate, false).expect("candidates run"), vec!["array_search"]);
     }
 
     /// A size-shaped `int` loses its POSITIVE oversized probes and keeps the
