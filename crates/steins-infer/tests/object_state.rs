@@ -158,6 +158,71 @@ class W2 {\n\
     assert_eq!(f[0].id, ID);
 }
 
+// $this by NAME: `Foo::m()` closes the same hole symmetrically (issue #417)
+
+#[test]
+fn this_is_swept_by_a_named_call_to_self_or_an_ancestor() {
+    // `Foo::m()` written from inside `Foo` is `self::m()` under another spelling: PHP
+    // forwards `$this` to a non-static method called this way.
+    let src = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+class NWidget {\n\
+  public $p;\n\
+  public function init(): void {}\n\
+  public function run(): void { $this->p = \"abc\"; NWidget::init(); needInt($this->p); }\n\
+}\n";
+    let f = findings(src);
+    assert_eq!(f.len(), 0, "{f:#?}");
+
+    // And from a SUBCLASS: `Foo` need only be an ancestor of the enclosing class.
+    let subclass = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+class NBase { public $p; public function init(): void {} }\n\
+class NSub extends NBase {\n\
+  public function run(): void { $this->p = \"abc\"; NBase::init(); needInt($this->p); }\n\
+}\n";
+    let f = findings(subclass);
+    assert_eq!(f.len(), 0, "{f:#?}");
+}
+
+#[test]
+fn this_stands_through_a_named_static_method_or_an_unrelated_class() {
+    // A resolved STATIC method never carries `$this` — the write stands.
+    let static_call = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+class NStatic {\n\
+  public $p;\n\
+  public static function s(): void {}\n\
+  public function run(): void { $this->p = \"abc\"; NStatic::s(); needInt($this->p); }\n\
+}\n";
+    let f = findings(static_call);
+    assert_eq!(f.len(), 1, "{f:#?}");
+    assert_eq!(f[0].id, ID);
+
+    // A class UNRELATED to the enclosing one carries no `$this` either — the write
+    // stands, which is the precision payoff the ancestor check buys.
+    let unrelated = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+class NBar { public function m(): void {} }\n\
+class NUnrelated {\n\
+  public $p;\n\
+  public function run(): void { $this->p = \"abc\"; NBar::m(); needInt($this->p); }\n\
+}\n";
+    let f = findings(unrelated);
+    assert_eq!(f.len(), 1, "{f:#?}");
+    assert_eq!(f[0].id, ID);
+}
+
+#[test]
+fn this_is_swept_by_a_named_call_visibility_blocks_from_an_admitted_class() {
+    // The class is admitted (`NPrivSub` is-a `NPrivBase`) but the specific method is
+    // not resolvable there (private, invisible outside its declaring class): an
+    // unresolved target sweeps, exactly as the keyword spellings do (ADR-0057 C5).
+    let src = "<?php\nfunction needInt(int $x): int { return $x; }\n\
+class NPrivBase { public $p; private function secret(): void {} }\n\
+class NPrivSub extends NPrivBase {\n\
+  public function run(): void { $this->p = \"abc\"; NPrivBase::secret(); needInt($this->p); }\n\
+}\n";
+    let f = findings(src);
+    assert!(!f.iter().any(|d| d.id == ID), "a visibility-blocked target still sweeps: {f:#?}");
+}
+
 // readonly immunity: persists through escape + unknown calls
 
 #[test]
@@ -581,6 +646,53 @@ fn a_constructor_that_lets_this_out_of_its_own_text_drops_every_default() {
         passed.replace("register($this);", "$f = function () { $this->a = 1; }; $f();");
     let f = findings(&invoked);
     assert_eq!(f.len(), 0, "an unresolved call sweeps the constructor's `$this`: {f:#?}");
+}
+
+// (c) by NAME: `Foo::m()` is the delegating shape under the enclosing class's own
+// spelling, exactly as `self::m()` is (issue #417). A walked constructor now
+// supersedes this floor for the common case (ADR-0057's amendment), so these fixtures
+// force the DECLINE (a named argument, C6) to observe the lexical scan alone rather
+// than the walk that would drop the default anyway.
+
+#[test]
+fn a_constructor_that_delegates_by_its_own_class_name_drops_every_default() {
+    let named = format!(
+        "{PRELUDE}class Nm {{\n\
+         \x20 public $a = \"abc\";\n\
+         \x20 public function __construct(int $x) {{ Nm::init(); }}\n\
+         \x20 private function init(): void {{ $this->a = 1; }}\n\
+         }}\n$n = new Nm(x: 1);\nneedInt($n->a);\n"
+    );
+    assert_eq!(count(&named), 0, "`Nm::init()` reaches any slot exactly as `self::init()` does");
+}
+
+#[test]
+fn a_constructor_that_calls_an_unrelated_class_by_name_keeps_the_default() {
+    // A class name that is NOT the enclosing class's own is not this shape at all —
+    // the per-property rule stays fine-grained and the untouched default stands.
+    let named = format!(
+        "{PRELUDE}class NmOther {{ public function init(): void {{}} }}\n\
+         class Nm2 {{\n\
+         \x20 public $a = \"abc\";\n\
+         \x20 public function __construct(int $x) {{ NmOther::init(); }}\n\
+         }}\n$n = new Nm2(x: 1);\nneedInt($n->a);\n"
+    );
+    let f = findings(&named);
+    assert_eq!(f.len(), 1, "an unrelated class name is not the delegating shape: {f:#?}");
+    assert_eq!(f[0].id, ID);
+}
+
+#[test]
+fn a_constructor_that_delegates_by_its_fully_qualified_name_drops_every_default() {
+    // The FQN spelling, not only the short name — `\App\Nm3::init()` names the very
+    // same class the short name does.
+    let named = "<?php\nnamespace App;\nfunction needInt(int $x): int { return $x; }\n\
+         class Nm3 {\n\
+         \x20 public $a = \"abc\";\n\
+         \x20 public function __construct(int $x) { \\App\\Nm3::init(); }\n\
+         \x20 private function init(): void { $this->a = 1; }\n\
+         }\n$n = new Nm3(x: 1);\nneedInt($n->a);\n";
+    assert_eq!(count(named), 0, "the FQN spelling is the same class as the short name");
 }
 
 #[test]
