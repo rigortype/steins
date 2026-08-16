@@ -173,6 +173,18 @@ silent for a reason one layer below this ADR. That layer is where the
 remaining half of the parity lives; it is not a heap-entry gap and must not be
 re-diagnosed as one.
 
+**The leg is read in both directions since 2026-08-17 (#420).** ADR-0057's
+same-`$this` amendment (D2) reads the copy this section seeds *back*: where
+the descent returns a joined `$this` snapshot, the caller's receiver object
+takes it, replacing the #295/#377 caller-side sweep of that object for that
+call. The seeding rule here is untouched — still `receiver_var` for an exact
+`Receiver::Var` and for nothing else — and the refusal in §2 stands as
+written, the copy-back being the *opposite* move to the one it refuses: not
+keeping the caller's fact on a non-mutation judgment, but discarding it in
+favour of the callee's proven exit state. The walk's own `$this` joins the
+same road there, under D1's one changed field (`escaped` crosses verbatim,
+a same-`$this` call handing nothing over).
+
 *(c) closed 2026-08-16 (#386), one layer below, exactly as it said.* The value
 IR grew `ArgValue::MethodCall` and a `project_method_summary` that enters
 `descend` through the same `resolve_call_target` this leg does, so
@@ -238,7 +250,13 @@ the IR at last — ADR-0057 C7's deferral, discharged), and a nested-argument or
   resolves to the enclosing class-like or one of its ancestors, sweep the
   receiver's own non-readonly props in every walk, resolved or not, which
   also closes the resolved-private-`$this->m()` hole this ADR's own §3
-  seeding had left open.*
+  seeding had left open. **Amended 2026-08-17 (#420):** that sweep is now the
+  decline **floor**. A same-`$this` call whose target resolves descends with
+  `$this` seeded from a copy of the walk's own — under this ADR's field table
+  with `escaped` crossing verbatim, the call handing nothing over — and copies
+  the joined exit snapshot back, so a delegating constructor's and a
+  `parent::__construct()`'s writes are the constructed object's properties
+  too.*
 
   *Amended 2026-08-16 (#377): that gap had a second, unsound half, and the half
   is closed.* Not walking the constructor also meant the **literal property
