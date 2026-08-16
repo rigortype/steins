@@ -223,6 +223,41 @@ and the proof beat it.
 > *infers*. Chapter 3 covers the trust stratum that makes this
 > safe.
 
+### One docblock word is about the binding, not the value: `unset`
+
+Every spelling above names a set of values. One phpdoc word does
+not. In a top-level script — a Blade view, an `include`d partial —
+the variables arrive from whoever included the file, and the
+idiom for "this one may not have arrived" is:
+
+```php
+/** @var \DateTime|unset $date */
+echo $date->format('Y-m-d');            // phpdoc.maybe-undefined
+
+if (isset($date)) {
+    echo $date->format('Y-m-d');        // silent: the guard discharged it
+}
+```
+
+`unset` is vocabulary, never a class in the current namespace,
+and it contributes **no value**: it is not `null`, not `void`,
+not `never`, not `mixed`, and `\DateTime|unset` accepts exactly
+what `\DateTime` accepts. What it adds is a claim about the
+*binding* — the variable may not exist here — so an unguarded
+read is a `contracts`-profile finding, and `isset()`, `empty()`,
+`??`, `??=` or an assignment discharge it. The value lane never
+saw the word at all: for member resolution and acceptance the
+variable is a plain `\DateTime`. That reading attaches only to an
+inline `@var` on a top-level local; in `@param`, `@return`, a
+property `@var` or inside a function body the word still parses,
+still is not a class, and means nothing more (ADR-0087).
+
+> **If you know PHPStan:** it reads `unset` as an unknown class
+> and reports the `isset()` as redundant. Steins is the only
+> measured tool that models the possibly-undefined state; the
+> spelling is registered as a divergence
+> (zonuexe/php-typing-conformance#7).
+
 ## What "proven" means
 
 A `proof`-layer finding fires only when Steins can prove the
