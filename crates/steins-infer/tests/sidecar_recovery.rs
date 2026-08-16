@@ -1,19 +1,27 @@
-//! A fold that kills the PHP child costs one answer, not the rest of the run.
+//! A fold that would kill the PHP child never reaches it.
 //!
 //! `str_repeat("x", 2000000000)` is an ordinary literal call on the folding
 //! allowlist, and its result does not fit the runner's `memory_limit`. Memory
 //! exhaustion is a PHP *fatal*, not a `Throwable`, so no `catch` in the runner
-//! can turn it into a widen — the child dies mid-NDJSON. The transport recovers
-//! by replacing it (`Sidecar`'s respawn discipline); this file pins that the
-//! recovery survives the layers above — `ProcessEngine` latches "no engine" for
-//! a *spawn* failure and for `--no-php`, and neither must be reached by a dead
-//! child.
+//! could turn it into a widen: the child died mid-NDJSON, the transport replaced
+//! it, and the run carried a degradation notice it had not earned. phpstan-src
+//! ships `str_repeat('abcdefghij', 1000000000)` as its own regression fixture,
+//! so that was reachable by ordinary analysed code rather than by an attacker.
 //!
-//! Since issue #245 this file also pins what the run is allowed to SAY about
-//! that recovery (phpstan-src ships `str_repeat('abcdefghij', 1000000000)` as
-//! its own regression fixture, so the death is not hypothetical): ADR-0004
-//! says incompleteness is never silent, and a posture that changes partway is
-//! still a posture.
+//! The seam refuses it before dispatch now (`fold_within_allocation_budget`):
+//! the size-shaped parameters are read from the mined `param_facts`, the budget
+//! is charged on the PRODUCT (a 256-byte literal repeated 2^20 times is 256 MB
+//! with an innocent-looking count), and the answer widens exactly as a decline
+//! always has. This file pins that — the same snippet, and the engine intact
+//! afterwards.
+//!
+//! **The transport's recovery discipline is still tested, in
+//! `steins-sidecar/tests/protocol.rs`** (`timeout_poisons_and_the_lost_request_widens`,
+//! `the_respawn_cap_bounds_recovery_and_then_poisons_permanently`), where it
+//! belongs: it is a property of the transport, and it should not depend on
+//! analysed source being able to kill a process. What this file keeps is the
+//! layer above — that a refused fold widens to the floor and the next call in
+//! the same run still folds.
 //!
 //! Requires `php` on `PATH`; without it the test skips with an explicit marker.
 
@@ -40,6 +48,9 @@ fn dumps(src: &str, folder: &mut dyn Folder) -> Vec<String> {
 
 /// The whole point in one run: the bomb widens to the declared-return floor, and
 /// the very next call in the SAME analysis still folds to its value.
+///
+/// Unchanged in what it asserts, and changed in why it passes — the widen used
+/// to be the wreckage of a dead child and is now a decline before dispatch.
 #[test]
 fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     let mut folder = SidecarFolder::enabled();
@@ -59,13 +70,21 @@ fn a_bomb_fold_does_not_disable_the_folder_for_the_rest_of_the_run() {
     assert_eq!(dumps(BOMB_THEN_FOLDABLE, &mut folder), vec!["non-falsy-lowercase-string", "'AB'"]);
 }
 
-/// The same run, read as a coverage posture (issue #245): recovering from the
-/// death must not make it *unsayable*. The transport's recovery is exactly what
-/// makes this hard to see — a sidecar that answers, dies, is replaced, and
-/// answers again looks from the outside like one that lost nothing; the posture
-/// is the only place the difference survives to the end of the run.
+/// The same run, read as a coverage posture (issue #245).
+///
+/// It used to assert that a recovered death stays SAYABLE: one loss, one
+/// restart, and a posture no longer comparable with a run that lost nothing.
+/// The seam refuses the bomb before dispatch now, so there is no death to say
+/// anything about — and the posture claim inverts. That is the stronger
+/// property and the honest one to pin: a run whose folds were all answered or
+/// all declined *is* comparable, and saying otherwise would be reporting damage
+/// that did not happen.
+///
+/// The recovery machinery this used to exercise is covered in
+/// `steins-sidecar/tests/protocol.rs`, at the transport layer where a death can
+/// be induced without asking analysed source to do it.
 #[test]
-fn a_recovered_death_still_shows_in_the_run_posture() {
+fn a_refused_bomb_leaves_the_run_posture_intact() {
     let mut folder = SidecarFolder::enabled();
     if folder.fold("strtoupper", &[ArgValue::Str("probe".into())], true).is_none() {
         eprintln!(
@@ -85,12 +104,12 @@ fn a_recovered_death_still_shows_in_the_run_posture() {
     let _ = dumps(BOMB_THEN_FOLDABLE, &mut folder);
 
     let after = folder.posture();
-    assert_eq!(after.losses, 1, "the bomb cost exactly one answer, got {after:?}");
-    assert_eq!(after.restarts, 1, "and exactly one child was replaced, got {after:?}");
-    assert!(!after.abandoned, "one death is far inside the respawn budget, got {after:?}");
+    assert_eq!(after.losses, 0, "the bomb was refused, not survived, got {after:?}");
+    assert_eq!(after.restarts, 0, "so no child was replaced, got {after:?}");
+    assert!(!after.abandoned, "and nothing was abandoned, got {after:?}");
     assert!(
-        !after.sidecar_backed_throughout(),
-        "a run that lost an answer is not comparable with one that lost none, got {after:?}"
+        after.sidecar_backed_throughout(),
+        "every fold in this run was answered or declined by a live engine, got {after:?}"
     );
 }
 
