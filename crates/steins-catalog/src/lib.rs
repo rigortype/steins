@@ -51,6 +51,12 @@ mod return_facts_generated;
 /// [`resource_return`].
 mod resource_returns_generated;
 
+/// Builtin **per-parameter facts** (issue #382), from
+/// `docs/research/phpsrc-mining/param_facts.toml` — the engine's own arginfo,
+/// which is the independent source [`out_params`] and [`invocation_shape`] are
+/// checked against. Consulted by [`param_facts`] and [`param_facts_mined`].
+mod param_facts_generated;
+
 /// Builtin declared-return floor (ADR-0069, issues #73/#79), from
 /// `docs/research/phpstan-mining/declared_returns.toml`. Consulted only by
 /// [`declared_return`] and [`declared_return_changed_at`].
@@ -1718,6 +1724,44 @@ pub fn declared_return(name: &str) -> Option<&'static str> {
         .map(|i| declared_returns_generated::DECLARED_RETURNS[i].1)
 }
 
+pub use param_facts_generated::ParamFacts;
+
+/// One builtin's per-parameter facts as the **engine's arginfo** reports them
+/// (issue #382), or `None` when the mining build had no such internal function.
+///
+/// This is a second, independent witness, and that is its whole point.
+/// [`out_params`] and [`invocation_shape`] were transcribed from php-src's stubs
+/// by hand and nothing checked them; the check that was attempted could not
+/// work, because [`by_value_arg`] falls back to `out_params`, so a name with no
+/// row answers "by value" everywhere and a loop keyed on it skips exactly the
+/// omission it is hunting. Reading arginfo instead of the stubs a second time is
+/// what makes disagreement possible at all.
+///
+/// **A `None` is not "no parameters".** It means the mining build did not have
+/// the name — an extension it was not built with, or a name that does not exist.
+/// Use [`param_facts_mined`] to tell those apart: a name that was mined and
+/// carries nothing answers `true` there and `None` here only if it is absent.
+#[must_use]
+pub fn param_facts(name: &str) -> Option<&'static ParamFacts> {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    param_facts_generated::PARAM_FACTS
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| &param_facts_generated::PARAM_FACTS[i].1)
+}
+
+/// Whether the mining build had this internal function at all — a row of its
+/// own, or a name in the "carries nothing" list.
+///
+/// The negative is the useful half: a completeness test that reads an absent
+/// name as agreement is the vacuity issue #382 was opened about, so every such
+/// test asks this first and fails on `false` rather than passing quietly.
+#[must_use]
+pub fn param_facts_mined(name: &str) -> bool {
+    let key = name.trim_start_matches('\\').to_ascii_lowercase();
+    param_facts(&key).is_some() || param_facts_generated::PARAM_FACTS_PLAIN.binary_search(&key.as_str()).is_ok()
+}
+
 /// The minor at which a builtin's declared **return type** last moved across
 /// the supported 8.x line, or `None` when it never did (ADR-0069 §3, A11-shaped
 /// version discipline). A `Some((8, 2))` means the row is only known good at or
@@ -2568,7 +2612,8 @@ mod tests {
 
     use super::{
         LabelIntent, WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
-        out_param_written_when, out_params, retired_label, subsumes,
+        out_param_written_when, out_params, param_facts, param_facts_generated, param_facts_mined,
+        retired_label, subsumes,
     };
 
     #[test]
@@ -2769,6 +2814,200 @@ mod tests {
                     assert_eq!(by_value_arg(f, p), Some(false), "{f} argument {p}");
                 }
             }
+        }
+    }
+
+    // ---- The engine countersigns the two hand-transcribed parameter tables ----
+    //
+    // `param_facts` is `ReflectionFunction` over the resident engine, mined by
+    // `cargo xtask mine-param-facts`. Everything below is a claim these tables
+    // make that the engine can contradict — which is the property the previous
+    // by-ref check did not have: `by_value_arg` falls back to `out_params`, so a
+    // name with no row answered "by value" at every position and the loop
+    // skipped exactly the omission it was hunting (issue #382).
+
+    /// The anti-vacuity guard, and the reason every test below can be trusted:
+    /// a name nobody mined has no facts to disagree with, so an unmined
+    /// foldable name is a FAILURE rather than a quiet pass.
+    #[test]
+    fn every_foldable_name_was_mined() {
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            assert!(
+                param_facts_mined(name),
+                "{name} is foldable but absent from param_facts.toml — rerun \
+                 `cargo xtask mine-param-facts && cargo xtask gen-catalog`; until then \
+                 nothing below says anything about it"
+            );
+        }
+    }
+
+    /// **The by-ref precondition, made real.** The fold seam passes arguments by
+    /// value, so a callee's by-ref write is lost. That is sound only because
+    /// ADR-0077's `out_params` seeding invalidates the argument independently —
+    /// `$n = 'x'; str_replace('a', 'b', 'aa', $n)` folds the result and widens
+    /// `$n`, which is coarser than PHP's `2` and never wrong. The rule that
+    /// makes it sound is therefore: **every by-ref position of a foldable name
+    /// is declared**, and here the engine says which positions those are.
+    #[test]
+    fn every_foldable_names_by_ref_positions_are_declared() {
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let Some(facts) = param_facts(name) else { continue };
+            let declared: &[usize] = out_params(name).unwrap_or(&[]);
+            assert_eq!(
+                facts.by_ref, declared,
+                "{name} folds, and the engine's arginfo disagrees with its `out_params` row: \
+                 arginfo says {:?}, the catalog says {declared:?}. A by-ref position with no \
+                 row is written by the real call and never invalidated here.",
+                facts.by_ref
+            );
+        }
+    }
+
+    /// A row that names a position the engine does not have by-ref would
+    /// invalidate a variable PHP never writes — wrong in the other direction,
+    /// and just as much a defect. Checked over every mined name, so it also
+    /// covers rows for names that are not foldable.
+    #[test]
+    fn no_out_param_row_claims_a_position_the_engine_denies() {
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            let Some(declared) = out_params(name) else { continue };
+            assert_eq!(
+                declared, facts.by_ref,
+                "{name}'s `out_params` row is {declared:?}, the engine's arginfo is {:?}",
+                facts.by_ref
+            );
+        }
+        for name in param_facts_generated::PARAM_FACTS_PLAIN {
+            assert_eq!(
+                out_params(name),
+                None,
+                "{name} has an `out_params` row and the engine gives it no by-ref parameter at all"
+            );
+        }
+    }
+
+    /// **No foldable name takes a declared callable.** This is the mechanical
+    /// half of `no_foldable_name_invokes_a_callback`, which reads the *curated*
+    /// `invocation_shape` and so can only see the shapes that table can express.
+    /// The engine's arginfo sees every declared-callable parameter, whatever
+    /// the catalog knows about the name.
+    #[test]
+    fn no_foldable_name_takes_a_declared_callable() {
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let Some(facts) = param_facts(name) else { continue };
+            assert!(
+                facts.callable.is_empty(),
+                "{name} folds and declares a callable at {:?} — the allowlist gates the CALLEE, \
+                 and a callable argument is a second callee the seam would hand the runner \
+                 verbatim",
+                facts.callable
+            );
+        }
+    }
+
+    /// A foldable name with a **variadic tail the engine types `mixed`** is the
+    /// one shape neither table can rule on: `array_udiff` hides its comparator
+    /// exactly there, and no declared type gives it away. Such a name may fold
+    /// only if it is listed here with the argument for why it invokes nothing,
+    /// so admitting the next one costs a sentence rather than a silence.
+    #[test]
+    fn a_variadic_mixed_tail_on_a_foldable_name_is_argued_for() {
+        /// Foldable names whose variadic tail is untyped, each with the reason
+        /// the tail is data and not a callee.
+        const ARGUED: &[(&str, &str)] = &[
+            // A format string decides what each value is CAST to; nothing in
+            // the tail is called. Refused for the machine word, not for this.
+            ("sprintf", "the tail is rendered by the format string, never invoked"),
+        ];
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let Some(facts) = param_facts(name) else { continue };
+            let untyped_tail = facts
+                .variadic
+                .iter()
+                .any(|&i| facts.params.get(i).is_some_and(|t| *t == "mixed"));
+            if !untyped_tail {
+                continue;
+            }
+            assert!(
+                ARGUED.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)),
+                "{name} folds and takes an untyped variadic tail, which is where the \
+                 `array_udiff` family hides its comparator. Say why this one is data."
+            );
+        }
+    }
+
+    /// Every `invocation_shape` row names a position the engine declares
+    /// callable. A row pointing at the wrong index would make the effects and
+    /// throws passes read the wrong argument as the callback.
+    #[test]
+    fn every_invocation_shape_row_is_a_declared_callable_position() {
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            let Some(shape) = invocation_shape(name) else { continue };
+            assert!(
+                facts.callable.contains(&shape.callback_param),
+                "{name}'s invocation_shape names position {}, and the engine declares callables \
+                 at {:?}",
+                shape.callback_param,
+                facts.callable
+            );
+        }
+    }
+
+    /// …and the other direction: a name the engine says takes a callable is
+    /// either rowed or **named here as not invoking during the call**. The list
+    /// is closed, so a new callable-bearing builtin cannot arrive unexamined —
+    /// which is the completeness `no_foldable_name_invokes_a_callback` could
+    /// never claim on its own.
+    #[test]
+    fn every_declared_callable_builtin_is_rowed_or_excluded() {
+        /// Names that take a callable and get no `invocation_shape` row,
+        /// grouped by why. ADR-0033's "deliberate exclusions" paragraph is the
+        /// prose version; this is the enforced list.
+        const NOT_INVOKED_HERE: &[&str] = &[
+            // Registration: the callable is stored and invoked later, by the
+            // engine and not by this call, so there is no call-site effect to
+            // attribute (ADR-0033).
+            "set_error_handler",
+            "set_exception_handler",
+            "spl_autoload_register",
+            "spl_autoload_unregister",
+            "register_tick_function",
+            "unregister_tick_function",
+            "header_register_callback",
+            "readline_callback_handler_install",
+            "readline_completion_function",
+            "libxml_set_external_entity_loader",
+            "ldap_set_rebind_proc",
+            "session_set_save_handler",
+            "opcache_jit_blacklist",
+            "xml_set_character_data_handler",
+            "xml_set_default_handler",
+            "xml_set_element_handler",
+            "xml_set_end_namespace_decl_handler",
+            "xml_set_external_entity_ref_handler",
+            "xml_set_notation_decl_handler",
+            "xml_set_processing_instruction_handler",
+            "xml_set_start_namespace_decl_handler",
+            "xml_set_unparsed_entity_decl_handler",
+            // Immediate, and unrowed only because no consumer needs the shape
+            // yet — the callback's arguments are the forwarded arguments, which
+            // `ArgSource` has no spelling for.
+            "forward_static_call",
+            "forward_static_call_array",
+            // Immediate, extension-scoped: the replacement callback runs during
+            // the call. Rowing it is a `mbstring` slice of its own.
+            "mb_ereg_replace_callback",
+        ];
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            if facts.callable.is_empty() || invocation_shape(name).is_some() {
+                continue;
+            }
+            assert!(
+                NOT_INVOKED_HERE.contains(name),
+                "{name} declares a callable at {:?} with no `invocation_shape` row and no entry \
+                 in NOT_INVOKED_HERE — say which it is",
+                facts.callable
+            );
         }
     }
 

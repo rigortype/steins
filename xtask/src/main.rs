@@ -10,6 +10,7 @@
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
 //!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
+//!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
@@ -23,6 +24,7 @@ mod freq;
 mod licenses;
 mod gate;
 mod mine_function_map;
+mod mine_param_facts;
 mod gen_catalog;
 mod lean_check;
 mod nsrt;
@@ -92,6 +94,10 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        Some("mine-param-facts") => match mine_param_facts::run() {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        },
         Some("nsrt") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
             match nsrt::run(dir) {

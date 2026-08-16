@@ -1454,6 +1454,7 @@ dependencies = [
  "semver",
  "serde",
  "serde_json",
+ "steins-catalog",
  "steins-contract",
  "steins-db",
  "steins-domain",
