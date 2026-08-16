@@ -217,3 +217,59 @@ fn no_plain_function_is_colored_io_db() {
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void { query(\"SELECT 1\"); }\n";
     assert_eq!(effects(src).len(), 0, "a free query() proves nothing");
 }
+
+/// **A namespaced shadow of a newly-coloured builtin stays silent.**
+///
+/// Guards the rows that landed in the effects slices of this stack (`io.process`
+/// for the child-process family, `global.write` for handler registration,
+/// `io.db` for the procedural database families) against the coupling issue #375
+/// found the hard way: `effect_labels(name).is_some()` is not only the effect
+/// question, it is also the predicate several passes ask as *"does the catalog
+/// know this name"*. Colouring ~50 new names therefore changes what those passes
+/// consider known — and a resolution that reads a simple name as the builtin
+/// while PHP resolves it to the namespaced declaration would convict correct
+/// code.
+///
+/// `Cx::resolve_shadow` (#373) is what makes this hold; the test is here so that
+/// a change to either side has to notice the other. The positive control below
+/// is what keeps it from passing for the wrong reason — without it, a rule that
+/// simply stopped colouring these names would look identical.
+#[test]
+fn a_namespaced_shadow_of_a_newly_coloured_builtin_is_silent() {
+    const SHADOWED: &str = "<?php\nnamespace App;\n\
+         function exec(string $c): string { return $c; }\n\
+         function pg_query(string $s): string { return $s; }\n\
+         function set_error_handler(callable $h): void {}\n\
+         #[\\Steins\\Pure]\n\
+         function f(): string {\n\
+             $a = exec(\"ls\");\n\
+             $b = pg_query(\"SELECT 1\");\n\
+             set_error_handler(function () {});\n\
+             return $a . $b;\n\
+         }\n";
+    assert_eq!(
+        effects(SHADOWED).len(),
+        0,
+        "PHP resolves these to the namespaced declarations, so the builtin's colour is not the \
+         call's: {:#?}",
+        effects(SHADOWED)
+    );
+
+    // The control: the same envelope, the same names, no shadows — and the
+    // three colours this stack added all fire.
+    const REAL: &str = "<?php\nnamespace App;\n\
+         #[\\Steins\\Pure]\n\
+         function f(): string {\n\
+             $a = \\exec(\"ls\");\n\
+             \\set_error_handler(function () {});\n\
+             \\pg_query(\"SELECT 1\");\n\
+             return $a;\n\
+         }\n";
+    let fired = effects(REAL);
+    for label in ["io.process", "global.write", "io.db"] {
+        assert!(
+            fired.iter().any(|d| d.message.contains(label)),
+            "the unshadowed builtins must still be coloured — {label} is missing from {fired:#?}"
+        );
+    }
+}
