@@ -1817,16 +1817,16 @@ pub fn param_facts(name: &str) -> Option<&'static ParamFacts> {
         .map(|i| &param_facts_generated::PARAM_FACTS[i].1)
 }
 
-/// Whether the mining build had this internal function at all — a row of its
-/// own, or a name in the "carries nothing" list.
+/// Whether the mining build had this internal function at all.
 ///
 /// The negative is the useful half: a completeness test that reads an absent
 /// name as agreement is the vacuity issue #382 was opened about, so every such
-/// test asks this first and fails on `false` rather than passing quietly.
+/// test asks this first and fails on `false` rather than passing quietly. Every
+/// mined name has a row — an EMPTY row is the recorded fact "carries nothing" —
+/// so this is exactly "[`param_facts`] answers".
 #[must_use]
 pub fn param_facts_mined(name: &str) -> bool {
-    let key = name.trim_start_matches('\\').to_ascii_lowercase();
-    param_facts(&key).is_some() || param_facts_generated::PARAM_FACTS_PLAIN.binary_search(&key.as_str()).is_ok()
+    param_facts(name).is_some()
 }
 
 /// The minor at which a builtin's declared **return type** last moved across
@@ -3027,6 +3027,14 @@ mod tests {
     /// covers rows for names that are not foldable.
     #[test]
     fn no_out_param_row_claims_a_position_the_engine_denies() {
+        // A row, where present, must match. ABSENCE is legal and deliberate:
+        // ADR-0077 §3 restricts the table to the fixed positional refs the
+        // analysis needs, and 98 by-ref-bearing builtins carry no row on
+        // purpose. Requiring one for each would be 98 new claims about names
+        // nothing asks about — a different decision, and not this test's.
+        //
+        // A row on a name the engine gives no by-ref parameter at all is still
+        // caught, because that name now has a row too, with an empty `by_ref`.
         for (name, facts) in param_facts_generated::PARAM_FACTS {
             let Some(declared) = out_params(name) else { continue };
             assert_eq!(
@@ -3035,13 +3043,7 @@ mod tests {
                 facts.by_ref
             );
         }
-        for name in param_facts_generated::PARAM_FACTS_PLAIN {
-            assert_eq!(
-                out_params(name),
-                None,
-                "{name} has an `out_params` row and the engine gives it no by-ref parameter at all"
-            );
-        }
+
     }
 
     /// A foldable name with a **variadic tail the engine types `mixed`** is the
