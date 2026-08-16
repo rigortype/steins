@@ -15361,16 +15361,35 @@ fn apply_prop_assign(
     // Stratum rides with the resolution so an Asserted fold doesn't launder
     // (issue #127).
     let proven = cx.resolve_literal_strat_ex(value, env, false, folder, None, Some(&mut *out));
-    let (proven_lit, rvalue_strat) = match &proven {
-        Some((lit, strat)) => (Some(lit.clone()), *strat),
-        None => (None, value_stratum(value, env, Some(&*store))),
+    // The arm-lane fallback (issue #418): a `Var` rvalue whose only carrier is the
+    // declared-arm lane (a builtin's `T|false` floor, ADR-0069 — `seed_fact` skips
+    // a union, so the value lane is empty) previously left the prop with **no**
+    // fact at all, since `arg_abstract_fact` reads the value lane alone. Lowered
+    // the same way `maybe_arg_premise`'s own `Var` fallback reads it
+    // ([`arm_lane_premise`]), so `$x = file_get_contents($p); $this->p = $x;`
+    // leaves the prop the same fact `needString($x)` would see. Only the `Var`
+    // gap closes here: a builtin call written straight into the property
+    // (`$this->p = file_get_contents($p);`, with no intermediate variable) is a
+    // wider capability this slice does not add.
+    let var_arm_lane: Option<(Fact, Stratum)> = match value {
+        ArgValue::Var(name) if proven.is_none() && arg_abstract_fact(value, env, false).is_none() => {
+            store.contract_arms(name).and_then(|arms| arm_lane_premise(arms.to_vec())).map(|(f, s, _)| (f, s))
+        }
+        _ => None,
     };
-    let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
-        match value {
+    let (proven_lit, rvalue_strat) = match (&proven, &var_arm_lane) {
+        (Some((lit, strat)), _) => (Some(lit.clone()), *strat),
+        (None, Some((_, strat))) => (None, *strat),
+        (None, None) => (None, value_stratum(value, env, Some(&*store))),
+    };
+    let prop_fact_val: Option<Fact> = proven_lit
+        .as_ref()
+        .and_then(|l| singleton_fact(l, cx.php_minor))
+        .or_else(|| var_arm_lane.as_ref().map(|(f, _)| f.clone()))
+        .or_else(|| match value {
             ArgValue::PropFetch { var: rv, prop: rp } => store.prop_fact(rv, rp).cloned(),
             _ => arg_abstract_fact(value, env, false).cloned(),
-        }
-    });
+        });
 
     // Locate the property declaration on the object's class surface (for its native
     // type and `@var` contract).
@@ -22743,18 +22762,21 @@ fn check_propagated_call(
                 native_fired = true;
             }
             // The possibly-grade sibling (ADR-0081's 2026-08-16 amendment, issue
-            // #391), placed where the phpdoc check runs: after every native proof
-            // had its chance, so a definite No is never shadowed by the weaker
-            // claim about the same argument.
+            // #391; the non-`Var` carriers of issue #418), placed where the phpdoc
+            // check runs: after every native proof had its chance, so a definite No
+            // is never shadowed by the weaker claim about the same argument.
             if !native_fired {
                 check_maybe_argument_mismatch(
                     cx,
+                    folder,
                     param,
                     &decl.name,
                     arg.span.start,
                     &arg.value,
                     env,
                     store,
+                    this_exact,
+                    enclosing_class,
                     poisoned,
                     in_descent,
                     out,
@@ -30231,16 +30253,20 @@ fn check_method_args(
                 ));
                 native_fired = true;
             }
-            // The possibly-grade sibling, method-call twin (issue #391).
+            // The possibly-grade sibling, method-call twin (issue #391; the
+            // non-`Var` carriers of issue #418).
             if !native_fired {
                 check_maybe_argument_mismatch(
                     cx,
+                    folder,
                     param,
                     callee_name,
                     arg.span.start,
                     &arg.value,
                     env,
                     store,
+                    this_exact,
+                    enclosing_class,
                     poisoned,
                     in_descent,
                     out,
@@ -30629,34 +30655,17 @@ fn spell_rejected_arms(
     out
 }
 
-/// The abstract premise available for `value` at an argument position: the
-/// value-lane fact where there is one, else the declared-arm lane lowered through
-/// the same `to_fact` the scalar seeding uses, carrying the arms' own stratum.
+/// Lower a declared-arm list to the possibly-grade judgment's premise (issue #391
+/// A4 / issue #418): one [`Fact`] through the same `to_fact` the scalar seeding
+/// uses, the arms' own minimum [`Stratum`] (ADR-0052 §5's consumption rule), and
+/// the arm list itself for the message speller. Shared by every carrier whose
+/// value lane may be empty — a `Var`, a nested call, a nested method call — so
+/// the fallback reads one way everywhere.
 ///
-/// The arm lane is not an optional extra. The value lane has **no carrier** for a
-/// docblock-or-reflection `T|false`: [`seed_refined_scalar_fact`] mints a
-/// value-lane fact only when a native `General` is refined within its own base,
-/// and the inline-`@var` seeding only for array shapes. Ten of the twelve corpus
-/// hits issue #391 measured arrive on the arm lane and nowhere else.
-///
-/// A finite fact declines on both lanes: `Singleton`/`OneOf` are the concrete
-/// lane's, and [`is_type_error`] has already judged them exactly.
-fn maybe_arg_premise<'a>(
-    value: &ArgValue,
-    env: &HashMap<String, Known>,
-    store: &'a Store,
-    poisoned: bool,
-) -> Option<(Fact, Stratum, Option<&'a [ContractArm]>)> {
-    if poisoned {
-        return None;
-    }
-    let ArgValue::Var(name) = value else { return None };
-    if let Some(k) = env.get(name)
-        && let Some(f) = &k.fact
-    {
-        return f.finite_members().is_none().then(|| (f.clone(), k.stratum, None));
-    }
-    let arms = store.contract_arms(name)?;
+/// `None` for an empty arm list, an arm list the value domain cannot lower at
+/// all, or one that lowers to a finite fact (`Singleton`/`OneOf` are the
+/// concrete lane's, already judged exactly by [`is_type_error`]).
+fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec<ContractArm>>)> {
     if arms.is_empty() {
         return None;
     }
@@ -30666,11 +30675,130 @@ fn maybe_arg_premise<'a>(
     if lowered.finite_members().is_some() {
         return None;
     }
-    // The consumption rule (ADR-0052 §5) over every arm the verdict consults:
-    // "some rejected and some accepted" is a claim about the whole arm list, so
-    // the minimum runs over all of them, not only over the rejected ones.
     let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
     Some((lowered, stratum, Some(arms)))
+}
+
+/// The abstract premise available for `value` at an argument position (issue #391
+/// A4, extended to the non-`Var` carriers by issue #418): the value-lane fact
+/// where there is one, else the declared-arm lane lowered through
+/// [`arm_lane_premise`], carrying the arms' own stratum.
+///
+/// **`Var`.** The arm lane is not an optional extra: the value lane has **no
+/// carrier** for a docblock-or-reflection `T|false` ([`seed_refined_scalar_fact`]
+/// mints a value-lane fact only when a native `General` is refined within its own
+/// base). Ten of the twelve corpus hits issue #391 measured arrived on the arm
+/// lane and nowhere else.
+///
+/// **`PropFetch` (`$o->p`, issue #418).** The heap prop's own fact, alias-correct
+/// (ADR-0036), at its own stratum — [`Store::prop_fact`]/[`Store::prop_stratum`],
+/// the same pair the object-world dump surface and the definite native check
+/// already read for this carrier. No arm-lane fallback here: unlike a `Var`'s
+/// [`Store::contract_arms`], a heap [`PropFact`] carries exactly one fact and one
+/// stratum, never a declared list — the write side (`apply_prop_assign`) has its
+/// own arm-lane repair for the one shape that needs it (a `Var` rvalue whose only
+/// carrier is a declared floor), so the prop this reads already has whatever a
+/// `Var` argument would.
+///
+/// **`Call`/`MethodCall` (a nested call, issue #386's value-IR carrier, issue
+/// #418).** The callee's proven return summary
+/// ([`project_call_summary`]/[`project_method_summary`]) where the body proved
+/// one strictly sharper than its declared floor ([`summary_binds`] — a bare
+/// `General{base}` degraded join carries nothing beyond the arms, so the floor is
+/// preferred there for the same reason the dump surface prefers it); else the
+/// declared return arms
+/// ([`call_return_arms_by_name`]/[`method_return_arms_by_callee`]) at their own
+/// stratum, through [`arm_lane_premise`] — an `Asserted` arm premises
+/// `phpdoc.maybe-argument-mismatch`, never the `type.*` sibling (ADR-0052 §5).
+/// The summary read is skipped inside a binding descent (`in_descent`, the same
+/// recursion-guard reason the native definite check skips it — a fresh descent
+/// tree started from inside a live one would evade the on-stack recursion guard);
+/// the arm-lane fallback is not, since it walks no body.
+///
+/// **`OffsetRead` (`$a['k']`, issue #418).** The shape lane's fact for the key,
+/// through [`shape_read_at`] — the same resolver the array-shape read row (ADR-0062
+/// §4 S3) and the strict offset legs go through, so a read and this judgment can
+/// never disagree about which field they mean. Declines unless `base` is a `Var`
+/// carrying a `Fact::Shape` (`shape_read_at`'s own gate). Always `Asserted`: a
+/// shape fact is seeded at `Asserted` unconditionally (A-G9's corollary), so this
+/// carrier premises only `phpdoc.maybe-argument-mismatch`, never `type.*`.
+///
+/// A finite fact declines on every lane: `Singleton`/`OneOf` are the concrete
+/// lane's, and [`is_type_error`] has already judged them exactly.
+#[allow(clippy::too_many_arguments)]
+fn maybe_arg_premise(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    in_descent: bool,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    span_start: u32,
+    out: &mut Vec<Diagnostic>,
+) -> Option<(Fact, Stratum, Option<Vec<ContractArm>>)> {
+    if poisoned {
+        return None;
+    }
+    match value {
+        ArgValue::Var(name) => {
+            if let Some(k) = env.get(name)
+                && let Some(f) = &k.fact
+            {
+                return f.finite_members().is_none().then(|| (f.clone(), k.stratum, None));
+            }
+            arm_lane_premise(store.contract_arms(name)?.to_vec())
+        }
+        ArgValue::PropFetch { var, prop } => {
+            let f = store.prop_fact(var, prop)?;
+            f.finite_members().is_none().then(|| (f.clone(), store.prop_stratum(var, prop), None))
+        }
+        ArgValue::Call(name, args) => {
+            if !in_descent
+                && let Some(sv) = project_call_summary(
+                    cx, folder, name, args, env, store, poisoned, span_start, None, out,
+                )
+                .and_then(|s| s.value)
+                && summary_binds(&sv.fact)
+                && sv.fact.finite_members().is_none()
+            {
+                return Some((sv.fact, sv.stratum, None));
+            }
+            arm_lane_premise(call_return_arms_by_name(cx, folder, name, args, env, store, poisoned)?)
+        }
+        ArgValue::MethodCall { callee, args, named } => {
+            if !in_descent
+                && let Some(sv) = project_method_summary(
+                    cx, folder, callee, args, named, env, store, this_exact, enclosing_class,
+                    poisoned, span_start, None, out,
+                )
+                .and_then(|s| s.value)
+                && summary_binds(&sv.fact)
+                && sv.fact.finite_members().is_none()
+            {
+                return Some((sv.fact, sv.stratum, None));
+            }
+            arm_lane_premise(method_return_arms_by_callee(
+                cx,
+                folder,
+                callee,
+                args,
+                env,
+                store,
+                this_exact,
+                enclosing_class,
+                poisoned,
+            )?)
+        }
+        ArgValue::OffsetRead { base, key } => {
+            let (read, stratum) = shape_read_at(base, key, env, poisoned, cx.php_minor)?;
+            let f = read.into_fact()?;
+            f.finite_members().is_none().then_some((f, stratum, None))
+        }
+        _ => None,
+    }
 }
 
 /// Emit the possibly-grade argument finding for one argument position. Called from
@@ -30679,12 +30807,15 @@ fn maybe_arg_premise<'a>(
 #[allow(clippy::too_many_arguments)]
 fn check_maybe_argument_mismatch(
     cx: &Cx,
+    folder: &mut dyn Folder,
     param: &Param,
     callee: &str,
     arg_offset: u32,
     value: &ArgValue,
     env: &HashMap<String, Known>,
     store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
     poisoned: bool,
     in_descent: bool,
     out: &mut Vec<Diagnostic>,
@@ -30695,7 +30826,10 @@ fn check_maybe_argument_mismatch(
     if in_descent && ty.has_instance() {
         return;
     }
-    let Some((fact, stratum, lane)) = maybe_arg_premise(value, env, store, poisoned) else {
+    let Some((fact, stratum, lane)) = maybe_arg_premise(
+        cx, folder, value, env, store, poisoned, in_descent, this_exact, enclosing_class,
+        arg_offset, out,
+    ) else {
         return;
     };
     let (verdict, rejected, null_rejected) = maybe_arg_verdict(cx, param, ty, &fact);
@@ -30707,13 +30841,17 @@ fn check_maybe_argument_mismatch(
     } else {
         PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
     };
-    let ArgValue::Var(name) = value else { return };
     // Spell the subject the way `PHPStan\dumpType($x)` would, so the finding and
-    // the dump a reader reaches for cannot disagree.
+    // the dump a reader reaches for cannot disagree. `value.render()` is the
+    // subject's own spelling — `$x` for a `Var`, but also `$o->p`, `g()`,
+    // `$b->m()`, `$a['k']` for issue #418's carriers — one speller for the
+    // subject that appears twice in the message.
+    let subject_name = value.render();
     let subject = lane
+        .as_deref()
         .and_then(|arms| render_contract_arms(cx, arms))
         .unwrap_or_else(|| describe_fact(&fact).trim_start_matches("a value of type ").to_owned());
-    let named = spell_rejected_arms(cx, lane, &rejected, null_rejected);
+    let named = spell_rejected_arms(cx, lane.as_deref(), &rejected, null_rejected);
     let arms = if named.len() == 1 {
         format!("its {} arm raises a TypeError", named[0])
     } else {
@@ -30726,7 +30864,7 @@ fn check_maybe_argument_mismatch(
         line: pos.line,
         column: pos.column,
         message: format!(
-            "argument ${name} to {callee}() may not become {} ${} — ${name} is {subject}, and {arms} ({} mode)",
+            "argument {subject_name} to {callee}() may not become {} ${} — {subject_name} is {subject}, and {arms} ({} mode)",
             ty.render(),
             param.name,
             if cx.strict() { "strict" } else { "coercive" },
