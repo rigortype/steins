@@ -201,7 +201,7 @@ assert(boot.fold_portable === 53, `this engine's share comes from the catalog ($
 assert(
   Array.isArray(boot.refused_folds) &&
     boot.refused_folds.join(",") ===
-      "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split,preg_match",
+      "abs,intval,sprintf,dechex,decbin,decoct,bindec,hexdec,version_compare,range,preg_split,preg_match,preg_match_all,json_decode,json_encode",
   `the refused folds are named (got ${JSON.stringify(boot.refused_folds)})`,
 );
 // …and beside the names, WHY. The panel groups by `axis` and quotes `witness`,

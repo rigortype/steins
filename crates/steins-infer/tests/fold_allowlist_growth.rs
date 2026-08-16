@@ -838,3 +838,74 @@ fn a_numeric_string_cannot_smuggle_an_allocation_past_the_budget() {
         }
     }
 }
+
+// wave 3 (issue #382): the first names admitted on evidence the GENERATED probe
+// produced. All three are `REFUSED` — they fold on the project's own 64-bit PHP
+// and decline in the browser — and their witnesses are in the ADR-0066
+// amendment.
+
+/// The JSON pair. `json_decode` is `range`'s shape with none of `range`'s
+/// exotica: the document is the same text and the value's **type tag** is the
+/// parsing engine's word size, so `json_decode("3000000000")` is `int` here and
+/// `float` on a 32-bit engine. No flag, no option, no unusual input — which is
+/// why the row is refused rather than argued down to a guard.
+///
+/// The last dump is the one to read twice: an OBJECT result has no spelling on
+/// the fold wire, so the seam declines rather than inventing one. `json_decode`
+/// returns `stdClass` by default, so that is the common case, and the value
+/// lane keeps its floor.
+#[test]
+fn the_json_pair_folds_on_a_64_bit_engine() {
+    let Some(mut folder) = live("the_json_pair_folds_on_a_64_bit_engine") else { return };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(json_encode([\"a\" => 1]));\n\
+         \\PHPStan\\dumpType(json_decode(\"3000000000\"));\n\
+         \\PHPStan\\dumpType(json_decode(\"[1,2]\", true));\n\
+         \\PHPStan\\dumpType(json_decode(\"nope\"));\n\
+         \\PHPStan\\dumpType(json_decode('{\"a\":1}'));\n";
+    assert_eq!(
+        dumps(SRC, &mut folder),
+        vec![
+            "'{\"a\":1}'",
+            // The int this engine parses, and the row that says a narrower one
+            // would answer a float.
+            "3000000000",
+            "list{1, 2}",
+            // Invalid JSON is `null` — a VALUE the narrowing lane can act on.
+            "null",
+            // An object result: no wire spelling, so the fold declines.
+            "unknown",
+        ]
+    );
+    for name in ["json_encode", "json_decode"] {
+        assert!(steins_catalog::foldable(name));
+        assert!(!steins_catalog::portable(name), "{name} declines in the browser");
+        assert_eq!(
+            steins_catalog::refusal(name).map(|r| r.axis),
+            Some(steins_catalog::RefusalAxis::IntegerWidth),
+            "{name} is refused for the machine word"
+        );
+    }
+}
+
+/// `preg_match_all` joins `preg_split` and `preg_match` on the build-option
+/// axis: the inline limit verbs one PCRE build JITs past and the other honours.
+/// Its `$matches` is by-ref at position 2, which is sound only because
+/// ADR-0077's row invalidates the argument — countersigned by the engine's own
+/// arginfo since issue #382.
+#[test]
+fn preg_match_all_folds_and_is_refused_for_the_build_option() {
+    let Some(mut folder) = live("preg_match_all_folds_and_is_refused_for_the_build_option") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(preg_match_all(\"/a/\", \"aaa\"));\n\
+         \\PHPStan\\dumpType(preg_match_all(\"/z/\", \"aaa\"));\n\
+         \\PHPStan\\dumpType(preg_match_all(\"/[/\", \"aaa\"));\n";
+    assert_eq!(dumps(SRC, &mut folder), vec!["3", "0", "false"]);
+    assert_eq!(
+        steins_catalog::refusal("preg_match_all").map(|r| r.axis),
+        Some(steins_catalog::RefusalAxis::BuildOption),
+    );
+    assert_eq!(steins_catalog::out_params("preg_match_all"), Some(&[2][..]));
+}

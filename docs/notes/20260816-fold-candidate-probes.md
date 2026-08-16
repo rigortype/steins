@@ -1,5 +1,11 @@
 # Fold candidates, measured — the first `fold-probe` batch (2026-08-16)
 
+> **Acted on (2026-08-16).** The three divergent names were admitted as
+> `Refused` rows in ADR-0066's wave-3 amendment — they fold on the project's own
+> 64-bit PHP and decline in the browser. The thirteen clean names are **not**
+> thereby admitted: a width verdict is one of the two things a row needs, and
+> the paragraph below is why.
+
 **This is evidence, not a decision.** A width verdict is one of the two things an
 allowlist row needs; the other is the ADR-0008 purity/determinism argument, which
 probing does not supply and which is not attempted here. A name measured clean
