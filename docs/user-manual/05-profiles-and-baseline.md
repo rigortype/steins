@@ -185,14 +185,14 @@ $ steins doctor --no-php .
 | --- | --- | --- | --- |
 | `default` | — | — | 47 |
 | `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 48 |
-| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 62 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch` | 68 |
-| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 63 |
+| `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 63 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch` | 69 |
+| `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 64 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
 `pedantic` branch off their base, so neither contains nor is contained by
-`strict` — 63 and 68 are not steps on one scale, they are two different
-supersets of the same 62.
+`strict` — 64 and 69 are not steps on one scale, they are two different
+supersets of the same 63.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting
 it or defining `[profile.boundary]` is a config error until its design lands.

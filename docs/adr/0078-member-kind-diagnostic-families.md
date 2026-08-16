@@ -70,6 +70,7 @@ claim ships `php -r`-witnessed per the ADR-0049 point-10 discipline.
 | `constant.undefined` | proof / Default | fatal since 8.0; global constants; computed `define()` dams |
 | `variable.undefined` | proof / Default, gate | never-bound in scope; `extract`/`compact`/`$$` dam the scope |
 | `variable.maybe-undefined` | proof / Strict | some-paths-only; emitting since ADR-0081 — the binding-presence pass is the reachability foundation it waited on |
+| `phpdoc.maybe-undefined` | contract / Contracts | the same question from a declared premise (ADR-0087 §4): a read of a top-level `@var T\|unset $x`. Not a member of this family's proof-layer ladder — it sits on the contract layer because the premise is the author's assertion, and shares only ADR-0081's presence engine |
 | `call.inaccessible-method` | proof / Default | fatal; `__call` is an A14 obstacle |
 | `call.on-non-object` | proof / Default | fatal; sibling of `call.on-null`, whose meaning is unchanged |
 | `call.printf-too-few-arguments` | proof / Default | format-string-derived arity; distinct from signature-derived `call.too-few-arguments` so the M2 internal-arity slice stays clean |

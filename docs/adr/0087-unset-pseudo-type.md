@@ -144,10 +144,11 @@ means acceptance is not asked. Both together make the slice unable to emit.
   status quo's *behavior* with the reading corrected underneath it — the
   correction is a precondition for §4, not a finding.
 
-## 4. The semantics the tracer bullet will implement (issue #396)
+## 4. The semantics of the tracer bullet — **implemented** (issue #396)
 
 Owner-approved 2026-08-16, recorded here so the vocabulary above is not a
-decision in isolation.
+decision in isolation. **Landed with issue #396**; §8 amends it with what
+building it forced.
 
 1. **The claim.** A **top-level** inline `@var T|unset $x` states that reads of
    `$x` may find no binding. The `unset` member is read as the undefined state,
@@ -244,4 +245,106 @@ Silence is the safe residue, and it is the same silence they have today.
   stratum and with the same shape seed; a bare `unset` casts nothing and reaches
   the same dump an un-tagged variable does.
 - The conformance fixture `regressions_unset_pseudo_type.php` stays silent under
-  `--profile strict`, its `// V` controls included.
+  `--profile strict`, its `// V` controls included. (Superseded by §8: with the
+  tracer bullet landed the fixture reports its two `// E?` reads and nothing
+  else. `--profile default` is still silent on it.)
+
+## 8. Amendment (2026-08-16): the tracer bullet as built (issue #396)
+
+**Status: PENDING ratification**, with §4. What §4 decided stands unchanged;
+this records the four things building it forced, each of which is a decision
+rather than a note.
+
+### 8.1. The seeds cannot arrive from the crate that can read them
+
+§4 describes a declaration seeding a presence state. Two facts about where the
+code lives make the obvious wiring impossible. `steins-syntax` owns ADR-0081's
+presence pass and has no edge to `steins-phpdoc`/`steins-contract`, so it cannot
+decide that `\DateTime|unset` carries the pseudo-type; `steins-infer` can, but
+the CST does not outlive `SourceTree::parse`, so it cannot hand seeds back
+afterwards and have anything left to run them over.
+
+So the pass runs at parse time over a **syntactic superset** of the seeds:
+every `$name` token of a statement-adjacent docblock whose text contains the
+substring `unset`, case-blind. That gate is exact in the direction that matters
+— `ContractTy::Unset` is reachable from no other spelling — and coarse in the
+direction that is free, since an over-large candidate set can only produce
+candidate reads that the checker then drops. `steins-infer` confirms each one
+authoritatively: it lowers the named tag through the same `parse_tag_type` +
+`steins_contract::lower` the cast lane uses and asks whether a **top-level**
+union member `is_unset`. A nested one (`array<int, unset>`) is §5's undecided
+question and seeds nothing.
+
+The alternative — giving `steins-syntax` a dependency on the contract crates —
+is acyclic and was rejected as too large a structural change for a tracer
+bullet: it would move the phpdoc grammar into the crate whose whole discipline
+is being env-free and index-free. ADR-0048 §2 is satisfied the same way ADR-0081
+satisfies it: the walk is untouched.
+
+Two costs, both recorded rather than fixed. A file whose docblocks never spell
+`unset` pays one substring scan per docblock and nothing else. And where two
+docblocks seed the same name and only the later one is unconfirmed, the read
+attributes to the later declaration and goes silent — the silence direction.
+
+### 8.2. Three premises differ from ADR-0081's run, and only three
+
+The engine is reused, not copied: the same `PresenceCx`, the same
+`guard_bound_names` polarity table, the same `presence_stmt` transfer function,
+the same terminating-arm subtraction and loop fixpoint. What the new entry point
+changes:
+
+1. **Scope entry is `Bound`.** ADR-0081 §6 silences a script scope because an
+   included file inherits the includer's symbol table. That silence is kept
+   *literally*: a declared name starts bound, and only the author's own `|unset`
+   moves it to `Maybe`. A read **before** the declaration is therefore silent —
+   it has no premise yet — and a read after it is judged.
+2. **The reportable set is the declared names.** ADR-0081's disjointness premise
+   ("the scope binds this name somewhere") is a proof-layer premise about
+   reachability; here the premise is the declaration, so a name nothing declares
+   is nobody's finding. The two claims meet without merging, exactly as §4.5
+   asks: a declared name in a *function* scope keeps `variable.undefined`, and
+   nothing in ADR-0081's pass was modified.
+3. **The declaration re-declares, it does not narrow.** An inline `@var` is a
+   cast (ADR-0073 §2), so the seed applies at the adopted statement regardless
+   of the prior state: `$x = new \DateTime(); /** @var \DateTime|unset $x */`
+   reports at the read below, because the author's own tag says so.
+
+### 8.3. The name dams end the pass instead of blanking the scope
+
+ADR-0081 §6 inherits the definite id's rule: `extract`, `compact`,
+`get_defined_vars`, `$$x`, `eval`, `include`/`require` blank the whole scope for
+both passes. Kept as-is, that rule would kill this feature outright — a
+top-level template that receives its variables from an includer is exactly the
+kind of file that `include`s partials of its own, so the dam and the idiom
+co-occur by construction rather than by accident.
+
+**The rule here is positional**: every declared name becomes `Bound` from the
+first dam onwards. Reads *before* it are still judged; after it nothing is
+claimed. That is the silence direction on both sides of the line — the dam can
+only remove findings, never add one — and it is honest about what a dam means,
+which is that the symbol table stopped being readable from the text, not that
+the text before it was never read. A `goto` or a label anywhere still dams the
+pass outright: ADR-0081's non-goal, and an unbounded jump edge is not a
+positional fact.
+
+### 8.4. Two checker premises: no warning-handler gate, and a by-reference oracle
+
+**No ADR-0049 §7 gate.** The `variable.*` pair and `offset.missing` ride the
+declared `warning-handler` posture because their whole claim is "PHP emits an
+`E_WARNING` here", and a project that has installed a fatal handler has changed
+what that warning means. This id's claim is that the read contradicts the file's
+own docblock, which is true whatever the runtime does with the warning — and it
+is judged on the contract layer, where no runtime posture is consulted at all.
+Gating it would make a declared-contract finding depend on a runtime setting
+that has nothing to do with the declaration.
+
+**The out-parameter subtraction is inverted, and had to be.** ADR-0077's
+`arg_is_by_value` oracle answers "not by value" for every uncertainty — an
+unresolved callee, a builtin with no `out_params` row — which is right for a
+proof-layer id trading recall for a zero-FP bar. Reused verbatim it deletes the
+claim wholesale: `date_format` carries no row, so the conformance fixture's own
+`date_format($passed, …)` probe would be "maybe an out-parameter" and go silent,
+which is an acceptance criterion. So this id subtracts on a **confirmed**
+by-reference argument instead (a declared `&$p`, or a catalog `out_params` row),
+on the maybe leg's call-site-forward rule. An unresolvable callee proves nothing
+about the binding, and this id reports it.

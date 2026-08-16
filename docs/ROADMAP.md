@@ -62,8 +62,12 @@ Engine:
   layer, rides with `effect.envelope-exceeded`). The two ADR-0081
   possibly-grade legs registered ahead of emission since v0.1.4,
   `variable.maybe-undefined` and `property.maybe-undefined`, now fire
-  under `strict` (#267). `call.too-many-arguments` is now the only id
-  registered ahead of emission, still waiting on the reflect slice.
+  under `strict` (#267). `phpdoc.maybe-undefined` joined them (#396,
+  ADR-0087 §4): a read of a top-level `@var T|unset $x` the
+  declaration says may not be bound — contract layer, `contracts`
+  floor, since its premise is the docblock rather than reachability.
+  `call.too-many-arguments` is now the only id registered ahead of
+  emission, still waiting on the reflect slice.
 
 Verification apparatus (ADR-0013):
 
