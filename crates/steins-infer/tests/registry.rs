@@ -27,6 +27,8 @@ use steins_infer::{
 };
 // the argument side's possibly pair (ADR-0081 amendment, issue #391)
 use steins_infer::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID};
+// unset pseudo-type (ADR-0087 §4, issue #396)
+use steins_infer::PHPDOC_MAYBE_UNDEFINED_ID;
 // member absence (ADR-0078, issue #197)
 use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID};
 // global constants (ADR-0078, issue #198)
@@ -290,6 +292,40 @@ fn the_variable_pair_splits_across_the_two_floors() {
     assert_eq!(VARIABLE_UNDEFINED_ID, "variable.undefined");
     assert_eq!(VARIABLE_MAYBE_UNDEFINED_ID, "variable.maybe-undefined");
 }
+
+// unset pseudo-type (ADR-0087 §4, issue #396)
+
+/// The declared possibly-undefined read is a **third** id beside the `variable.*`
+/// pair, and its registry row is where the reason is pinned: it asks the same
+/// question about the same defect from a different premise, and a premise is what
+/// the layer answers to.
+#[test]
+fn the_declared_possibly_undefined_read_is_a_contract_id() {
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+
+    assert!(emittable.contains(PHPDOC_MAYBE_UNDEFINED_ID), "the emitter landed with issue #396");
+    assert!(!pending.contains(PHPDOC_MAYBE_UNDEFINED_ID));
+
+    // The premise is the author's own `@var T|unset`, unverifiable by definition, so
+    // ADR-0052 §5 forbids it behind a `type.*`/proof-layer id — the whole reason this
+    // is not `variable.maybe-undefined`, which is `Layer::Proof`.
+    assert_eq!(layer(PHPDOC_MAYBE_UNDEFINED_ID), Some(Layer::Contract));
+    // …and the `phpdoc.*` family floor, not the possibly grade's `Strict`. `Strict`
+    // answers uncertainty about the premise (`offset.maybe-missing`,
+    // `phpdoc.maybe-argument-mismatch`); a declaration has none, and the read
+    // contradicts it exactly as `phpdoc.param-mismatch`'s subject does.
+    assert_eq!(surface_floor(PHPDOC_MAYBE_UNDEFINED_ID), Some(Floor::Contracts));
+    assert_eq!(surface_floor(PARAM_MISMATCH_ID), Some(Floor::Contracts));
+
+    // Three ids, one defect, three premises — all distinct spellings, since every one
+    // of them reaches a user's baseline file.
+    assert_ne!(PHPDOC_MAYBE_UNDEFINED_ID, VARIABLE_MAYBE_UNDEFINED_ID);
+    assert_ne!(PHPDOC_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID);
+    assert_eq!(PHPDOC_MAYBE_UNDEFINED_ID, "phpdoc.maybe-undefined");
+}
+
+// end unset pseudo-type (ADR-0087 §4, issue #396)
 
 /// The registered-ahead-of-emission list holds exactly the one id argued above and
 /// nothing else — the cardinality guard that makes a forgotten emitter visible.

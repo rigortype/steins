@@ -2240,6 +2240,54 @@ pub struct UndefinedRead {
 
 // end undefined variables (ADR-0078, issue #194)
 
+// unset pseudo-type (ADR-0087 §4, issue #396)
+
+/// One read of a name a top-level `/** @var T|unset $x */` may have declared
+/// possibly-unbound — a **candidate** for `phpdoc.maybe-undefined`, an entry of
+/// [`UnsetSeedFacts::reads`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct UnsetSeedRead {
+    /// The read name without the leading `$`.
+    pub name: String,
+    /// The file byte span of the `$x` token at the read — the same key
+    /// [`UndefinedRead::span`] carries, so the out-parameter subtraction joins.
+    pub span: Span,
+    /// Byte offset of the statement whose adopted docblock seeded the name, so the
+    /// confirming reader can reach that docblock through [`SourceTree::stmt_docblock`].
+    pub seed_stmt: u32,
+}
+
+/// What lowering can say alone about the `unset` pseudo-type idiom (ADR-0087 §4):
+/// the reads a declared-possibly-unbound name reaches without a discharging guard,
+/// over the top-level script scope.
+///
+/// **These are candidates, not findings**, and the split is forced rather than
+/// chosen. Deciding that `@var \DateTime|unset $x` carries the pseudo-type means
+/// lowering the tag, which is `steins-phpdoc`/`steins-contract` work this crate has
+/// no edge to; and the CST does not outlive [`SourceTree::parse`], so a caller that
+/// *can* lower it cannot hand back seeds afterwards. So the pass runs here over a
+/// **syntactic superset** of the seeds — every `$name` token of an adjacent docblock
+/// whose text contains the substring `unset`, which is the only spelling any
+/// lowering can reach the `ContractTy::Unset` leaf from — and `steins-infer` confirms
+/// each candidate by lowering the named tag before emitting. The superset can only
+/// ever be too large; an unconfirmed candidate emits nothing.
+///
+/// Top-level scope only. ADR-0081 §6's silence over a script scope is deliberate —
+/// an included file inherits the includer's symbol table, so the CST cannot claim
+/// absence — and an explicit `|unset` is exactly the declaration that lifts it, for
+/// the declared name and nothing else.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+pub struct UnsetSeedFacts {
+    /// The candidate reads, in source order.
+    pub reads: Vec<UnsetSeedRead>,
+    /// The top-level out-parameter candidates, restricted to the seeded names — the
+    /// same residue [`Scope::ref_arg_candidates`] leaves the checker, which the script
+    /// scope never collects because it reports neither `variable.*` id.
+    pub ref_arg_candidates: Vec<UndefinedRead>,
+}
+
+// end unset pseudo-type (ADR-0087 §4, issue #396)
+
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ParseError {
@@ -2694,6 +2742,10 @@ pub struct SourceTree {
     /// `true`/`false`/`null`/the magic `__LINE__` family.
     const_refs: Vec<NameRef>,
     parse_errors: Vec<ParseError>,
+    // unset pseudo-type (ADR-0087 §4, issue #396)
+    /// The `phpdoc.maybe-undefined` candidate reads of the top-level script scope.
+    unset_seed_facts: UnsetSeedFacts,
+    // end unset pseudo-type (ADR-0087 §4, issue #396)
     /// The comment trivia in the file, in source order (ADR-0023 inline ignores).
     comments: Vec<Comment>,
     /// The namespace contexts of the file; index 0 is always the global context.
@@ -2764,6 +2816,18 @@ impl SourceTree {
         // Comment trivia (ADR-0023 inline ignores): whitespace trivia is dropped;
         // every comment shape is kept with its raw spelling and span.
         let comments: Vec<Comment> = program.trivia.iter().filter_map(lower_comment).collect();
+
+        // The `unset` pseudo-type's candidate reads (ADR-0087 §4): computed here rather
+        // than handed in, because the CST does not outlive this function and the caller
+        // that can lower a phpdoc type only exists afterwards. Gated on the word
+        // appearing in a docblock at all, so nearly every file pays one substring scan.
+        let unset_seed_facts = {
+            let mut top: Vec<&Statement<'_>> = Vec::new();
+            for s in program.statements.iter() {
+                flatten_top_level(s, &mut top);
+            }
+            unset_seed_facts(&top, source, &comments)
+        };
 
         // Fill the lowercase-normalized FQN on every declaration from the context
         // that encloses its name.
@@ -2849,6 +2913,7 @@ impl SourceTree {
             global_const_decls: lowered.global_const_decls,
             const_refs: lowered.const_refs,
             parse_errors,
+            unset_seed_facts,
             comments,
             contexts,
             regions,
@@ -3066,15 +3131,14 @@ impl SourceTree {
     /// comment in the gap breaks the adjacency, exactly as any code would.
     #[must_use]
     pub fn stmt_docblock(&self, stmt_start: u32) -> Option<&Comment> {
-        // Comment trivia are recovered in source order and never overlap, so
-        // `span.end` is monotone and the nearest preceding one is binary-searchable.
-        let idx = self.comments.partition_point(|c| c.span.end <= stmt_start).checked_sub(1)?;
-        let c = &self.comments[idx];
-        if c.kind != CommentKind::DocBlock {
-            return None;
-        }
-        let gap = self.text.get(c.span.end as usize..stmt_start as usize)?;
-        gap.chars().all(char::is_whitespace).then_some(c)
+        docblock_before(&self.comments, &self.text, stmt_start)
+    }
+
+    /// The candidate reads of the `unset` pseudo-type idiom (ADR-0087 §4, issue #396) —
+    /// see [`UnsetSeedFacts`] for why they are candidates and what confirms them.
+    #[must_use]
+    pub fn unset_seed_facts(&self) -> &UnsetSeedFacts {
+        &self.unset_seed_facts
     }
 
     // untyped surface (ADR-0078, issue #200)
@@ -7312,12 +7376,25 @@ enum PresenceFlow {
 /// The accumulator of the presence pass: the reads it judged, and the premises it
 /// judges them against.
 struct PresenceCx<'a> {
-    /// The scope's whole binding set — the definite pass's `bound`. A read of a
-    /// name absent from it is `variable.undefined`'s, never this id's (ADR-0081 §6):
-    /// what makes the pair disjoint by construction.
-    scope_bound: &'a HashSet<String>,
-    /// Reads whose presence was `Maybe` or `Unbound`.
-    out: Vec<UndefinedRead>,
+    /// The names this run may report a read of, and the only premise that differs
+    /// between the pass's two consumers.
+    ///
+    /// For `variable.maybe-undefined` it is the scope's whole binding set — the
+    /// definite pass's `bound` — so that a read of a name the scope binds nowhere is
+    /// `variable.undefined`'s and never this id's (ADR-0081 §6): what makes the pair
+    /// disjoint by construction. For the `unset` pseudo-type (ADR-0087 §4) it is the
+    /// declared names, whose *declaration* is the premise instead.
+    reportable: &'a HashSet<String>,
+    /// Where the `unset` pseudo-type's declarations sit, or `None` for the
+    /// ADR-0081 run, which seeds nothing beyond scope entry.
+    seeds: Option<&'a SeedIndex<'a>>,
+    /// The statement whose docblock last seeded each name, so a candidate read can
+    /// name the declaration the confirming reader must lower.
+    seeded_at: HashMap<String, u32>,
+    /// Reads whose presence was `Maybe` or `Unbound`, each with the seeding statement
+    /// [`Self::seeded_at`] held for it — `None` on the ADR-0081 run, which has no
+    /// declaration behind it.
+    out: Vec<(UndefinedRead, Option<u32>)>,
     /// Set while a loop body is being walked for its fixpoint rather than for its
     /// findings: the state is not yet stable, so nothing may be reported from it.
     silent: bool,
@@ -7334,7 +7411,7 @@ struct PresenceCx<'a> {
 
 impl PresenceCx<'_> {
     fn record(&mut self, read: &UndefinedRead, state: &PresenceState) {
-        if self.silent || !self.scope_bound.contains(&read.name) {
+        if self.silent || !self.reportable.contains(&read.name) {
             return;
         }
         let presence =
@@ -7343,7 +7420,8 @@ impl PresenceCx<'_> {
             return;
         }
         if self.seen.insert(read.span.start) {
-            self.out.push(read.clone());
+            let seed = self.seeded_at.get(&read.name).copied();
+            self.out.push((read.clone(), seed));
         }
     }
 }
@@ -7519,6 +7597,7 @@ fn presence_stmt(
     state: &mut PresenceState,
     cx: &mut PresenceCx,
 ) -> PresenceFlow {
+    apply_presence_seeds(s, state, cx);
     match s {
         Statement::Break(_) => {
             cx.breaks.push(state.clone());
@@ -7965,7 +8044,9 @@ fn maybe_undefined_reads(
         }
     }
     let mut cx = PresenceCx {
-        scope_bound,
+        reportable: scope_bound,
+        seeds: None,
+        seeded_at: HashMap::new(),
         out: Vec::new(),
         silent: false,
         seen: HashSet::new(),
@@ -7977,10 +8058,244 @@ fn maybe_undefined_reads(
             break;
         }
     }
-    let mut out = cx.out;
+    let mut out: Vec<UndefinedRead> = cx.out.into_iter().map(|(read, _)| read).collect();
     out.sort_by_key(|r| r.span.start);
     out
 }
+
+// unset pseudo-type (ADR-0087 §4, issue #396)
+
+/// Where a declaration re-seeds a name as possibly-unbound, and the text needed to
+/// find it: the docblock adoption rule is a byte-offset relation
+/// ([`docblock_before`]), so the seeds are keyed by the **docblock's** end offset and
+/// looked up from whatever statement adopts it.
+struct SeedIndex<'a> {
+    comments: &'a [Comment],
+    text: &'a str,
+    /// Docblock end offset → the names its `@var`-ish tags may declare `T|unset`.
+    names: HashMap<u32, Vec<String>>,
+}
+
+/// Re-seed every name a statement's adopted docblock declares possibly-unbound.
+///
+/// The declaration takes effect **at** the adopted statement and regardless of the
+/// prior state, because an inline `@var` is a cast: it re-declares what the name
+/// holds rather than narrowing it (ADR-0073 §2), and the state it re-declares here
+/// is presence. So `$x = new \DateTime(); /** @var \DateTime|unset $x */ echo $x->f();`
+/// reports, exactly as the author's own tag asks it to.
+///
+/// A no-op on the ADR-0081 run, which carries no seeds at all.
+fn apply_presence_seeds(s: &Statement<'_>, state: &mut PresenceState, cx: &mut PresenceCx) {
+    let Some(seeds) = cx.seeds else { return };
+    let start = to_span(s.span()).start;
+    let Some(doc) = docblock_before(seeds.comments, seeds.text, start) else { return };
+    let Some(names) = seeds.names.get(&doc.span.end) else { return };
+    for name in names {
+        state.insert(name.clone(), BindingPresence::Maybe);
+        cx.seeded_at.insert(name.clone(), start);
+    }
+}
+
+/// The `/** … */` docblock immediately preceding `stmt_start` — only whitespace
+/// between — the free-function core of [`SourceTree::stmt_docblock`], reached before
+/// the tree exists by the seed pass below.
+fn docblock_before<'a>(comments: &'a [Comment], text: &str, stmt_start: u32) -> Option<&'a Comment> {
+    // Comment trivia are recovered in source order and never overlap, so `span.end` is
+    // monotone and the nearest preceding one is binary-searchable.
+    let idx = comments.partition_point(|c| c.span.end <= stmt_start).checked_sub(1)?;
+    let c = &comments[idx];
+    if c.kind != CommentKind::DocBlock {
+        return None;
+    }
+    let gap = text.get(c.span.end as usize..stmt_start as usize)?;
+    gap.chars().all(char::is_whitespace).then_some(c)
+}
+
+/// The candidate reads of the `unset` pseudo-type idiom over the **top-level script
+/// scope** (ADR-0087 §4, issue #396) — the computation behind
+/// [`SourceTree::unset_seed_facts`].
+///
+/// The engine is [`maybe_undefined_reads`]', unchanged: the same three-valued
+/// lattice, the same polarity-consuming guards, the same terminating-arm subtraction,
+/// the same loop fixpoint. Three premises differ, and only three:
+///
+/// * **Scope entry is `Bound`, not `Unbound`.** ADR-0081 §6 silences a script scope
+///   because an included file inherits the includer's symbol table, so the CST cannot
+///   claim a name is absent. That silence is kept literally here: every candidate
+///   starts bound, and only the author's own `|unset` moves it to `Maybe`. A read
+///   *before* the declaration is therefore silent — it has no premise yet.
+/// * **The reportable set is the declared names**, not the scope's binding set: the
+///   premise is the declaration, so a name nothing declares is nobody's finding.
+/// * **A name dam ends the pass rather than blanking it.** `extract`, `compact`,
+///   `get_defined_vars`, `$$x`, `eval` and — the one that forces the rule — `include`
+///   / `require` are routine in exactly the top-level templates this idiom is written
+///   for, so blanking the scope whole (the ADR-0081 §6 rule) would silence the
+///   feature outright. Instead every seeded name becomes `Bound` from the dam
+///   onwards: reads *before* it are still judged, and after it nothing is claimed,
+///   which is the silence direction. A `goto` or label still dams the pass outright,
+///   the ADR-0081 non-goal.
+fn unset_seed_facts(top: &[&Statement<'_>], source: &str, comments: &[Comment]) -> UnsetSeedFacts {
+    let names = seed_candidate_names(comments);
+    if names.is_empty() {
+        return UnsetSeedFacts::default();
+    }
+    if top.iter().any(|s| subtree_has_goto(&Node::Statement(s))) {
+        return UnsetSeedFacts::default();
+    }
+    let reportable: HashSet<String> = names.values().flatten().cloned().collect();
+    let seeds = SeedIndex { comments, text: source, names };
+
+    let mut state = PresenceState::new();
+    for name in &reportable {
+        state.insert(name.clone(), BindingPresence::Bound);
+    }
+    let mut cx = PresenceCx {
+        reportable: &reportable,
+        seeds: Some(&seeds),
+        seeded_at: HashMap::new(),
+        out: Vec::new(),
+        silent: false,
+        seen: HashSet::new(),
+        breaks: Vec::new(),
+        continues: Vec::new(),
+    };
+    for s in top {
+        if presence_stmt(s, &mut state, &mut cx) != PresenceFlow::Fell {
+            break;
+        }
+    }
+
+    let dam = first_name_dam(top);
+    let mut reads: Vec<UnsetSeedRead> = cx
+        .out
+        .into_iter()
+        .filter(|(read, _)| dam.is_none_or(|d| read.span.start < d))
+        .filter_map(|(read, seed)| {
+            seed.map(|seed_stmt| UnsetSeedRead { name: read.name, span: read.span, seed_stmt })
+        })
+        .collect();
+    reads.sort_by_key(|r| r.span.start);
+    if reads.is_empty() {
+        return UnsetSeedFacts::default();
+    }
+
+    // The out-parameter residue (ADR-0077), collected the way `undefined_variable_reads`
+    // collects it and restricted to the names actually judged.
+    let mut acc = VarUsage::default();
+    for s in top {
+        scan_var_usage(&Node::Statement(s), false, &[], &mut acc);
+    }
+    let judged: HashSet<&str> = reads.iter().map(|r| r.name.as_str()).collect();
+    let ref_arg_candidates =
+        acc.arg_candidates.into_iter().filter(|c| judged.contains(c.name.as_str())).collect();
+    UnsetSeedFacts { reads, ref_arg_candidates }
+}
+
+/// The syntactic superset of the seeds: for every docblock whose text mentions
+/// `unset` at all, every `$name` it spells.
+///
+/// Deliberately coarse in the one direction that is safe. `steins-syntax` cannot
+/// lower a phpdoc type, so it cannot know which tag carries the pseudo-type; what it
+/// can know is that the leaf is unreachable without the word, so a docblock without
+/// it can be skipped outright — which is every docblock in almost every file. The
+/// caller lowers the named tag and drops whatever does not confirm.
+fn seed_candidate_names(comments: &[Comment]) -> HashMap<u32, Vec<String>> {
+    let mut out = HashMap::new();
+    for c in comments {
+        if c.kind != CommentKind::DocBlock || !mentions_unset(&c.text) {
+            continue;
+        }
+        let names = docblock_variable_names(&c.text);
+        if !names.is_empty() {
+            out.insert(c.span.end, names);
+        }
+    }
+    out
+}
+
+/// Whether a docblock spells `unset` anywhere, ASCII-case-insensitively — the gate
+/// that keeps this whole pass off every file that does not use the idiom.
+fn mentions_unset(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    bytes.windows(5).any(|w| w.eq_ignore_ascii_case(b"unset"))
+}
+
+/// Every `$name` token in a docblock's raw text, deduplicated in first-seen order.
+fn docblock_variable_names(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] != b'$' {
+            i += 1;
+            continue;
+        }
+        let start = i + 1;
+        let mut end = start;
+        while end < bytes.len() && (bytes[end] == b'_' || bytes[end].is_ascii_alphanumeric()) {
+            end += 1;
+        }
+        // A PHP variable name never starts with a digit; `$1` is not one.
+        if end > start && !bytes[start].is_ascii_digit() {
+            let name = String::from_utf8_lossy(&bytes[start..end]).into_owned();
+            if !out.contains(&name) {
+                out.push(name);
+            }
+        }
+        i = end.max(start);
+    }
+    out
+}
+
+/// The byte offset of the first name dam in this statement list, or `None`.
+///
+/// The dam set is [`scan_var_usage`]'s own — `$$x`, `eval`, `include`/`require`,
+/// `extract`, `compact`, `get_defined_vars` — asked for a *position* rather than for
+/// the scope-wide flag that pass records, because this consumer keeps the reads
+/// before the dam (see [`unset_seed_facts`]). Nested scopes are not descended into,
+/// matching where the pass itself looks.
+fn first_name_dam(top: &[&Statement<'_>]) -> Option<u32> {
+    let mut best: Option<u32> = None;
+    for s in top {
+        collect_name_dam(&Node::Statement(s), &mut best);
+    }
+    best
+}
+
+fn collect_name_dam(node: &Node<'_, '_>, best: &mut Option<u32>) {
+    let hit = match node {
+        Node::ArrowFunction(_)
+        | Node::Closure(_)
+        | Node::Function(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_)
+        | Node::AnonymousClass(_) => return,
+        Node::NestedVariable(_)
+        | Node::IndirectVariable(_)
+        | Node::EvalConstruct(_)
+        | Node::IncludeConstruct(_)
+        | Node::IncludeOnceConstruct(_)
+        | Node::RequireConstruct(_)
+        | Node::RequireOnceConstruct(_) => true,
+        Node::FunctionCall(fc) => matches!(fc.function, Expression::Identifier(id)
+            if matches!(
+                bytes_to_string(id.last_segment()).as_str(),
+                "extract" | "compact" | "get_defined_vars"
+            )),
+        _ => false,
+    };
+    if hit {
+        let start = to_span(node.span()).start;
+        *best = Some(best.map_or(start, |b| b.min(start)));
+    }
+    for child in node.children() {
+        collect_name_dam(&child, best);
+    }
+}
+
+// end unset pseudo-type (ADR-0087 §4, issue #396)
 
 /// Whether a statement **provably cannot throw**, over a whitelist narrow enough
 /// that no PHP semantics argument is needed to read it.
