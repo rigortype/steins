@@ -270,14 +270,40 @@ position (`(new C(1))->m()`), where the lowering likewise builds no constructor
 call, it runs where the receiver object is minted (issue #386 — the value-IR
 limit ADR-0057 C7 deferred this leg to). Each seam is the site's only site.
 
-An unescaped `$this` still owes its sweeps. A call running with the **same**
-`$this` — `$this->m(…)`, `parent::m(…)`, `self::m(…)`, `static::m(…)` — sweeps
-the receiver's own non-readonly props and value carries in every walk, resolved
-or not, since a descent into it seeds its *own* `$this` copy and its writes are
-invisible here; that also closes the resolved-private-`$this->m()` hole the
-receiver leg had left. And inside a constructor walk the unescaped `$this` is
+**A same-`$this` call descends and copies `$this` back** (ADR-0057's 2026-08-17
+amendment, the successor to C5). `$this->m(…)`, `self::m(…)`, `parent::m(…)`,
+`static::m(…)` and the by-name `Foo::m(…)` of issue #417 hand the callee a copy
+of the walk's own `$this` under the ADR-0086 §2 field table with **`escaped`
+crossing verbatim** — a same-`$this` call hands nothing over, so the bit is what
+it was an instant earlier. Inside a constructor walk that is `false` (C1) and
+the non-readonly props cross; in an ordinary method it is `true` and only the
+readonly ones and the carries do. The exit snapshot is a **third** summary
+component beside `value` and `heap`, filled by any walk whose `$this` came from
+a caller object, joined by the same `join_heap_exits`, and copied back into the
+caller's object at the call site: `props`, `readonly`, `ro_written` and
+`escaped` replaced, `class`/`class_exact` asserted, and `targs` deliberately
+**not** restored (a class-level carry is rewritten by `@phpstan-self-out`, which
+the walk models not at all, so the #295 sweep stands). The **receiver** leg
+travels the same road — an exact `$o->m()` already seeded its `$this` from a
+copy of `$o`, so a fluent `$o->setX(1)` reads its own write. A constructor's
+snapshot is that same component, read where the `new` site mints its object.
+
+The copy-back runs after the statement's escape-and-sweep pass, so the sweep is
+the **decline floor** for free: an unresolvable target, a guarded-refused one, a
+poisoned scope, named or spread arguments, the budget, a recursion pair, a
+generator, a resolved static target (which carries no `$this` at all), an
+`Opaque` `may_return` exit and an exit at which `$this` is gone all leave it
+standing. Two statement-scoped guards decline a composition that cannot be
+ordered: an unresolved call anywhere in the statement, and two snapshots naming
+one object. Value position (`f($this->m())`) keeps the sweep too — that road
+holds the caller's store by shared reference and has no write-back channel, the
+same structural limit ADR-0057 B5 records for the heap component there.
+
+An unescaped `$this` still owes its other sweep: inside a constructor walk it is
 swept by the same `object_passed || unknown` condition that sweeps escaped
-objects, a non-static closure being able to bind `$this` without naming it.
+objects, a non-static closure being able to bind `$this` without naming it. The
+condition reads the bit off the object rather than off the walk's flavour, which
+is where the rule lives — `seed_this_object` pre-escapes every other `$this`.
 
 Where the descent declines — no constructor, abstract, unresolvable, poisoned on
 either side, a named or spread argument list, the depth budget, a recursion pair,
