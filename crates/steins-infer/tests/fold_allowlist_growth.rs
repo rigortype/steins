@@ -574,3 +574,48 @@ fn the_roundings_fold_to_floats() {
          \\PHPStan\\dumpType(floor(-1.5));\n";
     assert_eq!(dumps(SRC, &mut folder), vec!["1.23", "0.29", "1.0", "2.0", "-2.0"]);
 }
+
+/// An overflowed float literal is **not** a fold argument, in either convention.
+///
+/// `1e309` has no finite `double`, so PHP's own lexer makes it `INF` — a value
+/// the source spells as a literal and the IR carries as `ArgValue::Float`. JSON
+/// has no spelling for it: `Number::from_f64(INF)` fails, and a wire encoder
+/// that substituted anything at all would ask the engine about a *different*
+/// argument. It substituted `null`, and `floor(null)` is `0.0`, so
+/// `floor(1e309)` came back `Verified 0.0` where the program's own answer is
+/// `INF` — a fabricated value, which is the one failure this seam may never
+/// have.
+///
+/// Both conventions are asserted because they are different requests (#383) and
+/// neither may fold: the argument is unrepresentable on the wire, which is a
+/// property of the transport rather than of the coercion rules. The runner has
+/// refused non-finite *results* since the fold lane opened; this is the same
+/// refusal on the way in.
+#[test]
+fn a_non_finite_float_literal_declines_rather_than_folding() {
+    let Some(mut folder) = live("a_non_finite_float_literal_declines_rather_than_folding") else {
+        return;
+    };
+    const BODY: &str = "function f(): void {\n\
+         \\PHPStan\\dumpType(floor(1e309));\n\
+         \\PHPStan\\dumpType(ceil(-1e309));\n\
+         \\PHPStan\\dumpType(round(1e309));\n\
+         \\PHPStan\\dumpType(floor([1e309][0]));\n\
+         \\PHPStan\\dumpType(floor(1.5));\n\
+         }\n";
+    for (mode, src) in [
+        ("strict", format!("<?php\ndeclare(strict_types=1);\n{BODY}")),
+        ("weak", format!("<?php\ndeclare(strict_types=0);\n{BODY}")),
+    ] {
+        let d = dumps(&src, &mut folder);
+        for (i, got) in d.iter().take(4).enumerate() {
+            assert_ne!(got, "0.0", "{mode}: dump {i} fabricated PHP's `floor(null)` answer");
+            assert_ne!(got, "-0.0", "{mode}: dump {i} fabricated a value for an INF argument");
+            assert!(
+                got.parse::<f64>().is_err(),
+                "{mode}: dump {i} folded an unrepresentable argument to {got}"
+            );
+        }
+        assert_eq!(d[4], "1.0", "{mode}: a finite argument next door still folds");
+    }
+}

@@ -275,28 +275,43 @@ pub fn defined_params(name: &str) -> serde_json::Value {
 /// a weak one ask different questions of the same name and arguments, so they
 /// must not share a replay-table entry or a memo slot, and putting the field
 /// here is what keeps them apart everywhere at once.
+///
+/// `None` when any argument has no JSON spelling ([`fold_arg_to_json`]) — the
+/// request is not askable, so the caller widens rather than sending a question
+/// about a value the source does not contain.
 #[must_use]
-pub fn fold_params(name: &str, args: &[FoldArg], strict: bool) -> serde_json::Value {
-    serde_json::json!({
+pub fn fold_params(name: &str, args: &[FoldArg], strict: bool) -> Option<serde_json::Value> {
+    let args: Option<Vec<_>> = args.iter().map(fold_arg_to_json).collect();
+    Some(serde_json::json!({
         "function": name,
-        "args": args.iter().map(fold_arg_to_json).collect::<Vec<_>>(),
+        "args": args?,
         "strict": strict,
-    })
+    }))
 }
 
 /// Encode a [`FoldArg`] as JSON, preserving float-ness (`5.0` not `5`); an array
 /// becomes `{"__steins_array": [[key, value], …]}`, keys `null`/int/string, recursing.
+///
+/// `None` when the argument cannot be spelled in JSON, which is exactly the
+/// non-finite floats: `INF`, `-INF` and `NAN` have no JSON token, and PHP mints
+/// the first two from ordinary source (`1e309` overflows to `INF` in the lexer).
+/// This is fallible rather than lossy on purpose. A substitution here is not an
+/// imprecision but a **different question**: an earlier revision encoded them as
+/// `null`, and a weak-mode `floor(1e309)` came back `0.0` — PHP's answer for
+/// `floor(null)` — as a `Verified` value where the program's own answer is
+/// `INF`. Callers widen on `None`; a producer that can see the source (the
+/// analysis' own fold gate) declines earlier still, and this is the floor under
+/// it that no future producer can step through.
 #[must_use]
-pub fn fold_arg_to_json(arg: &FoldArg) -> serde_json::Value {
-    match arg {
+pub fn fold_arg_to_json(arg: &FoldArg) -> Option<serde_json::Value> {
+    Some(match arg {
         FoldArg::Int(v) => serde_json::json!(v),
-        FoldArg::Float(v) => serde_json::Number::from_f64(*v)
-            .map_or(serde_json::Value::Null, serde_json::Value::Number),
+        FoldArg::Float(v) => serde_json::Value::Number(serde_json::Number::from_f64(*v)?),
         FoldArg::Str(v) => serde_json::json!(v),
         FoldArg::Bool(v) => serde_json::json!(v),
         FoldArg::Null => serde_json::Value::Null,
         FoldArg::Array(entries) => {
-            let items: Vec<serde_json::Value> = entries
+            let items: Option<Vec<serde_json::Value>> = entries
                 .iter()
                 .map(|(k, v)| {
                     let key = match k {
@@ -304,12 +319,15 @@ pub fn fold_arg_to_json(arg: &FoldArg) -> serde_json::Value {
                         Some(FoldKey::Int(i)) => serde_json::json!(i),
                         Some(FoldKey::Str(s)) => serde_json::json!(s),
                     };
-                    serde_json::Value::Array(vec![key, fold_arg_to_json(v)])
+                    // One unspellable element makes the WHOLE array unaskable:
+                    // dropping it would send a shorter array, which is a
+                    // different argument, not a wider one.
+                    Some(serde_json::Value::Array(vec![key, fold_arg_to_json(v)?]))
                 })
                 .collect();
-            serde_json::json!({ ARRAY_TAG: items })
+            serde_json::json!({ ARRAY_TAG: items? })
         }
-    }
+    })
 }
 
 // Responses: the `result` half of each method.
@@ -715,7 +733,7 @@ mod tests {
 
     #[test]
     fn fold_params_encode_scalars_with_their_phpness() {
-        let p = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], true);
+        let p = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], true).expect("askable");
         assert_eq!(
             p,
             serde_json::json!({ "function": "strtoupper", "args": ["ab"], "strict": true })
@@ -723,13 +741,37 @@ mod tests {
         // The convention is part of the params, so the two call sites ask
         // DIFFERENT questions — which is what keeps them out of one memo slot
         // and one replay-table row.
-        let weak = fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false);
+        let weak =
+            fold_params("strtoupper", &[FoldArg::Str("ab".to_owned())], false).expect("askable");
         assert_ne!(weak, p, "a weak call site is a different request");
         assert_eq!(weak["strict"], serde_json::json!(false));
         // A float stays a float on the wire — `5.0`, not `5`.
-        let p = fold_params("strval", &[FoldArg::Float(5.0)], true);
+        let p = fold_params("strval", &[FoldArg::Float(5.0)], true).expect("askable");
         assert_eq!(p["args"][0].as_f64(), Some(5.0));
         assert!(p["args"][0].is_f64(), "float-ness survives: {p}");
+    }
+
+    /// A non-finite float has no JSON token, so the request is **not askable**.
+    ///
+    /// The failure this pins is not a lost fold but a fabricated value: while
+    /// this encoder substituted `null`, a weak-mode `floor(1e309)` folded to
+    /// PHP's `floor(null)` answer, `0.0`, where the program itself says `INF`.
+    /// Nesting is charged too — one unspellable element makes the whole array
+    /// unaskable, since a shorter array is a different argument.
+    #[test]
+    fn a_non_finite_float_has_no_askable_request() {
+        for v in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+            assert_eq!(fold_arg_to_json(&FoldArg::Float(v)), None);
+            assert_eq!(fold_params("floor", &[FoldArg::Float(v)], false), None);
+            let nested = FoldArg::Array(vec![(
+                Some(FoldKey::Str("k".into())),
+                FoldArg::Array(vec![(None, FoldArg::Float(v))]),
+            )]);
+            assert_eq!(fold_params("count", &[nested], true), None, "nesting is charged");
+        }
+        // The neighbours still travel: this refuses a token, not a type.
+        assert!(fold_params("floor", &[FoldArg::Float(f64::MAX)], false).is_some());
+        assert!(fold_params("floor", &[FoldArg::Float(-0.0)], false).is_some());
     }
 
     #[test]
@@ -739,7 +781,7 @@ mod tests {
             (Some(FoldKey::Str("k".into())), FoldArg::Bool(true)),
             (Some(FoldKey::Int(-3)), FoldArg::Null),
         ]);
-        let p = fold_params("count", &[arg], true);
+        let p = fold_params("count", &[arg], true).expect("askable");
         assert_eq!(
             p["args"][0][ARRAY_TAG],
             serde_json::json!([[serde_json::Value::Null, 1], ["k", true], [-3, serde_json::Value::Null]])
@@ -750,7 +792,7 @@ mod tests {
     fn nested_array_arguments_nest_their_envelopes() {
         let inner = FoldArg::Array(vec![(None, FoldArg::Int(7))]);
         let outer = FoldArg::Array(vec![(None, inner)]);
-        let p = fold_params("count", &[outer], true);
+        let p = fold_params("count", &[outer], true).expect("askable");
         assert_eq!(p["args"][0][ARRAY_TAG][0][1][ARRAY_TAG][0][1], serde_json::json!(7));
     }
 

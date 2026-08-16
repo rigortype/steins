@@ -2694,7 +2694,13 @@ impl FoldEngine for TableEngine {
     }
 
     fn fold(&mut self, name: &str, args: &[FoldArg], strict: bool) -> FoldResult {
-        match self.ask("fold", &steins_sidecar::fold_params(name, args, strict)) {
+        // Not askable at all (a non-finite float has no JSON spelling), so it
+        // is not a *pending* request either: recording it would put a key in
+        // the table that no engine can ever answer.
+        let Some(params) = steins_sidecar::fold_params(name, args, strict) else {
+            return FoldResult::widen("unrepresentable argument");
+        };
+        match self.ask("fold", &params) {
             Some(answer) => steins_sidecar::parse_fold_result(&answer),
             // Unanswered: the same decline a dead sidecar gives.
             None => FoldResult::widen("pending"),
@@ -2887,6 +2893,10 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
             }
             true
         }
+        // A non-finite float is a literal the source really spells (`1e309`
+        // overflows to `INF` in PHP's own lexer) and a value the JSON wire has
+        // no token for, so it is not sendable — see `arg_to_fold_within`.
+        ArgValue::Float(f) if !f.is_finite() => false,
         v => v.is_literal(),
     }
 }
@@ -2947,7 +2957,13 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
 fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<FoldArg> {
     match arg {
         ArgValue::Int(v) => Some(FoldArg::Int(*v)),
-        ArgValue::Float(v) => Some(FoldArg::Float(*v)),
+        // JSON has no token for `INF`/`-INF`/`NAN`, and PHP's lexer mints the
+        // first two from source a program can contain: `1e309` overflows to
+        // `INF` while staying a literal. There is no encoding that asks the
+        // engine the question the source asked, so the fold **declines** — the
+        // same shape as the non-UTF-8 string below, and the mirror of the
+        // runner's own refusal to return a non-finite result.
+        ArgValue::Float(v) => v.is_finite().then_some(FoldArg::Float(*v)),
         // The fold wire is JSON, which cannot carry arbitrary bytes, so a
         // non-UTF-8 string is **not sent** (ADR-0080 §2.6): the fold declines
         // rather than asking PHP about a different string than the source has.

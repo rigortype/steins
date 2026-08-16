@@ -301,7 +301,13 @@ impl Sidecar {
         if !self.revive() {
             return FoldResult::widen("sidecar poisoned");
         }
-        let Some(value) = self.request("fold", fold_params(name, args, strict)) else {
+        // An argument with no JSON spelling (a non-finite float) is not a
+        // question this transport can ask, and poisoning is not warranted: the
+        // child is fine, the request was never askable.
+        let Some(params) = fold_params(name, args, strict) else {
+            return FoldResult::widen("unrepresentable argument");
+        };
+        let Some(value) = self.request("fold", params) else {
             return FoldResult::widen("sidecar failure");
         };
         let Some(result) = value.get("result") else {
