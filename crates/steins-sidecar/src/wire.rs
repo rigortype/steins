@@ -97,6 +97,37 @@ pub struct Reflection {
     pub params_total: Option<u32>,
     /// `getNumberOfRequiredParameters()`; same `None` semantics as [`Self::params_total`].
     pub params_required: Option<u32>,
+    /// `getParameters()` per position, in declaration order (ADR-0056 §9) — the
+    /// parameter twin of [`Self::return_type`]. `None` where the counts above are
+    /// `None`, and for the same reasons: an older runner, a replay table recorded
+    /// before the field, a reflection failure, a name that is not a function. A
+    /// zero-parameter function reports `Some(vec![])` — an empty list is an answer.
+    pub params: Option<Vec<BuiltinParam>>,
+}
+
+/// One parameter of a resident function as the running engine reports it
+/// (ADR-0056 §9): the Verified, version-correct signature the argument judgment
+/// reads, never a curated row.
+///
+/// The three shape bits travel because each is a *decline* on the consuming side —
+/// a by-ref position takes an out-parameter rather than a value, a variadic binds
+/// every argument after it, and neither is a type question.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BuiltinParam {
+    /// `getName()` without the leading `$`, so a finding can name the parameter
+    /// the way PHP's own `TypeError` does (`strlen(): Argument #1 ($string)`).
+    pub name: String,
+    /// The `(string)` rendering of `getType()` (`"string"`, `"?int"`,
+    /// `"array|string"`), or `None` where the position declares no type at all.
+    pub ty: Option<String>,
+    /// `isPassedByReference()`.
+    pub by_ref: bool,
+    /// `isVariadic()`.
+    pub variadic: bool,
+    /// `isOptional()` — carried for completeness of the signature surface; the
+    /// argument judgment does not read it (a defaulted position that *is* given an
+    /// argument is type-checked exactly like a required one).
+    pub optional: bool,
 }
 
 impl Reflection {
@@ -380,6 +411,32 @@ pub fn parse_reflection_result(result: &serde_json::Value, target: &str) -> Opti
         // rule withholds. An old reply must keep parsing, never fail outright.
         params_total: parse_count(result.get("params_total")),
         params_required: parse_count(result.get("params_required")),
+        // Whole or not at all (ADR-0056 §9): a list one of whose entries does not
+        // read is not a signature, and a truncated one would silently renumber
+        // every position after the gap. Absent / `null` / unreadable all collapse
+        // to `None`, which withholds the judgment.
+        params: result.get("params").and_then(parse_builtin_params),
+    })
+}
+
+/// Read a `reflection` reply's `params` array. `None` unless the value is an
+/// array **every** entry of which parses (see the call site).
+fn parse_builtin_params(value: &serde_json::Value) -> Option<Vec<BuiltinParam>> {
+    value.as_array()?.iter().map(parse_builtin_param).collect()
+}
+
+/// One `params` entry. `name` is required — a position with no name is not a
+/// position this reply can describe. The type is `None` on absent or `null` (an
+/// untyped position); the three shape bits default to `false`, which is the shape
+/// of an ordinary by-value required parameter.
+fn parse_builtin_param(value: &serde_json::Value) -> Option<BuiltinParam> {
+    let flag = |k: &str| value.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    Some(BuiltinParam {
+        name: value.get("name")?.as_str()?.to_owned(),
+        ty: value.get("type").and_then(serde_json::Value::as_str).map(ToOwned::to_owned),
+        by_ref: flag("by_ref"),
+        variadic: flag("variadic"),
+        optional: flag("optional"),
     })
 }
 
@@ -988,6 +1045,58 @@ mod tests {
         let r = parse_reflection_result(&failed, "strlen").expect("reflection");
         assert_eq!(r.params_total, None);
         assert_eq!(r.params_required, None);
+        // The parameter list of ADR-0056 §9 rides the same back-compat rule: an old
+        // reply and a live reflection failure are both unanswerable, never empty.
+        assert_eq!(r.params, None);
+        assert_eq!(parse_reflection_result(&old, "strlen").expect("old").params, None);
+    }
+
+    #[test]
+    fn reflection_carries_the_parameter_list() {
+        let refl = serde_json::json!({
+            "kind": "reflection",
+            "target": "preg_match",
+            "function": true,
+            "class_like": false,
+            "return_type": "int|false",
+            "params": [
+                { "name": "pattern", "type": "string", "by_ref": false, "variadic": false, "optional": false },
+                { "name": "subject", "type": "string", "by_ref": false, "variadic": false, "optional": false },
+                { "name": "matches", "type": null, "by_ref": true, "variadic": false, "optional": true },
+            ],
+        });
+        let p = parse_reflection_result(&refl, "preg_match").expect("reflection").params.expect("params");
+        assert_eq!(p.len(), 3);
+        assert_eq!(p[0].name, "pattern");
+        assert_eq!(p[0].ty.as_deref(), Some("string"));
+        assert!(!p[0].by_ref && !p[0].variadic && !p[0].optional);
+        // The out-parameter: untyped, by reference, optional — three declines in one row.
+        assert_eq!(p[2].ty, None);
+        assert!(p[2].by_ref && p[2].optional);
+    }
+
+    #[test]
+    fn a_parameter_list_parses_whole_or_not_at_all() {
+        // A nameless entry cannot be described, and a partial list would renumber
+        // every position after the gap — so the WHOLE list is withheld.
+        let broken = serde_json::json!({
+            "kind": "reflection",
+            "target": "f",
+            "function": true,
+            "class_like": false,
+            "params": [{ "name": "a", "type": "int" }, { "type": "int" }],
+        });
+        assert_eq!(parse_reflection_result(&broken, "f").expect("reflection").params, None);
+        // A zero-parameter function answers with an empty list, which is an answer.
+        let nullary = serde_json::json!({
+            "kind": "reflection",
+            "target": "time",
+            "function": true,
+            "class_like": false,
+            "return_type": "int",
+            "params": [],
+        });
+        assert_eq!(parse_reflection_result(&nullary, "time").expect("reflection").params, Some(Vec::new()));
     }
 
     #[test]
