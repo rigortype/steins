@@ -135,6 +135,37 @@ rules instead of a keyword zoo:
   directly rather than a node to lower, so this lane never sees those spellings
   either. The floor is what remains for everything neither the declarations nor a
   carry decide.
+- `unset` → `ContractTy::Unset`, the **possibly-undefined pseudo-type**
+  (ADR-0087, issue #395). `/** @var \DateTime|unset $x */` is the Blade-view
+  idiom: `$x` is a `\DateTime`, or the variable is not defined at all. The member
+  states something about the *binding*, so it contributes **no value** — it is
+  not `null`, not `void`, not `never`, not `mixed` — and the arms of
+  `\DateTime|unset` are exactly the arms of `\DateTime`. It is **non-shadowable**
+  (`unset` is a reserved language construct, so `class unset {}` does not parse),
+  unlike every pseudo-type that is also a legal class name.
+
+  It has its own leaf rather than a `KNOWN_UNENFORCED` entry for two reasons: the
+  opaque floor spells back as `mixed`, so `\DateTime|unset` would round-trip as
+  `\DateTime|mixed` and lose the word the author wrote; and every other name in
+  that table denotes some unmodeled *set of values*, which this one never will.
+  The word is carried through lowering for the speller alone and dropped from the
+  value lane at one boundary (`flatten_arms`), so a `T|unset` arm list is
+  *structurally* a `T` arm list and no later reader sees the variant. A bare
+  `@var unset $x` lowers to an empty arm list — the "no envelope, seed nothing"
+  outcome (ADR-0029) — and reports nothing. The leaves that remain reachable
+  floor honestly: acceptance answers `Maybe` (never `Never`'s `No`, which would
+  convict every value a bare-`unset` variable holds) and `to_fact` answers
+  `None`.
+
+  What a `T|unset` read *means* — `isset`/`empty`/`??`/`??=`/assignment
+  discharge, the guard never redundant, and the `phpdoc.maybe-undefined` id — is
+  issue #396, and it attaches to an inline `@var` naming a **top-level** local
+  and to nothing else. In every other position (`@param`, `@return`, a property
+  `@var`, `$this->p`, a function-scope local, a nested `array<int, unset>`) the
+  member is **inert** (ADR-0087 §5, issue #397): no presence claim, no new
+  finding — and no *lost* finding either, since the acceptance folds drop the
+  member instead of folding its `Maybe` in. Registered as divergence-registry
+  core entry 15 — PHPStan reports the spelling as an unknown class.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own
@@ -174,6 +205,17 @@ literal type `5.0` (IEEE `==`), deliberately unlike the domain's set equality
 where `5` and `5.0` are distinct values.
 
 **`mixed` admits everything, including null. `never` admits nothing.**
+
+**`unset` decides nothing — and is not `never`.** The possibly-undefined
+pseudo-type answers `Maybe` for every value, because it says nothing *about* a
+value (ADR-0087). `never`'s `No` would be the arithmetically tidy answer for a
+member no value inhabits, and it would convict every value a bare `@var unset $x`
+variable holds. The union case never reaches the leaf: the member is dropped
+twice over — out of the arm list at `flatten_arms`, and out of a union's own
+or-fold in `admits_val`/`base_only`/`admits_shape_fact` — so `\DateTime|unset` is
+judged as `\DateTime`. The second drop is not redundant: without it the leaf's
+`Maybe` would absorb a sibling's `No` and a `@param \DateTime|unset $d` would
+accept an argument `@param \DateTime $d` refuses (ADR-0087 §9.1).
 
 **Provenance-flavored string types can never answer `Yes`.** `literal-string`
 and `callable-string` lower to `StrOpaque`: a non-string is `No`, a string is

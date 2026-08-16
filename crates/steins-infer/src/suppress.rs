@@ -65,6 +65,8 @@ use crate::{
 use crate::CONSTANT_UNDEFINED_ID;
 // undefined variables (ADR-0078, issue #194)
 use crate::{VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID};
+// unset pseudo-type (ADR-0087 §4, issue #396)
+use crate::PHPDOC_MAYBE_UNDEFINED_ID;
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -330,6 +332,14 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // The `unset` pseudo-type's read (ADR-0087 §4, issue #396). `Layer::Contract`
+    // because the premise is the author's own `@var T|unset`, not a reachability
+    // fact — the reason it is not `variable.maybe-undefined`, which is proof-layer.
+    // `Contracts`, the family floor, not the possibly grade's `Strict`: the read
+    // contradicts an explicit declaration exactly as `phpdoc.param-mismatch` does,
+    // and the uncertainty the `Strict` rung answers for is uncertainty about the
+    // *premise*, which a declaration does not have.
+    (PHPDOC_MAYBE_UNDEFINED_ID, Layer::Contract, Floor::Contracts),
     // The same judgment on an `Asserted` premise (ADR-0052 §5 forbids it reaching
     // a `type.*` id). `Strict`, not the family's `Contracts`, on the
     // `offset.maybe-missing` precedent: layer answers whose claim, floor answers

@@ -184,6 +184,52 @@ and the carry read is the floor under it rather than a rival inference.
 Reconsideration precondition: none — this is a standing refusal of the solver,
 not a deferral (ADR-0032, ADR-0030 reg. entry above).
 
+**15. `unset` in a phpdoc union is a pseudo-type, not a class.** PHPStan — and
+every tool the conformance suite measured except Intelephense — resolves the
+`unset` member of `/** @var \DateTime|unset $x */` as a **class name**: the
+spelling is absent from the docblock keyword table, falls through to the
+named-object atom, and is **reported as an unknown class** — PHPStan raises
+`class.notFound` on it, as do Psalm, Mago, PHPantom, Qodana, php.py and NoVerify.
+Intelephense keeps the spelling instead and rejects the union as non-object. The
+grammar is not the disagreement: phpstan/phpdoc-parser parses `\DateTime|unset`
+without complaint, and so does Steins — only the *resolution* diverges. Steins
+reads it as the possibly-undefined pseudo-type
+(ADR-0087): the union member says the *variable may not be bound*, contributes no
+value to the type lane (not `null`, not `void`, not `never`, not `mixed`), and is
+non-shadowable, because `unset` is a reserved language construct rather than a
+legal class name. `\DateTime|unset` accepts exactly what `\DateTime` accepts.
+
+The rationale is that the class reading is the one plainly wrong one: no value of
+any class satisfies the member the author wrote, so nothing about the idiom's
+meaning survives it. Steins' own silence today was the right output from the wrong
+reading — a nonexistent-class arm answers `Maybe` for every object value, and
+Steins emits no unknown-class-in-phpdoc diagnostic — which is the same
+right-for-the-wrong-reason shape ADR-0056 §8 named for `resource`.
+
+**The cost is a Steins-only spelling**, accepted under the same rule as the
+refined-string grid above: PHPStan reads a docblock carrying the word as a
+phantom class reference, so an annotation Steins writes with it will not lower in
+PHPStan. Reading PHPStan-shaped annotations is unaffected — nothing else changes
+about the spelling. Source: zonuexe/php-typing-conformance#7, with
+PHPantom-dev/phpantom_lsp#366 as prior art. Reconsideration precondition: none —
+this is a standing correction, not a deferral.
+
+**The positions are decided** (ADR-0087 §5, issue #397). The divergent *spelling*
+is accepted wherever the phpdoc grammar reaches — lowering is position-blind, so
+no position ever reads the word as a class — but the definedness meaning attaches
+only to an inline `@var` naming a **top-level** local, where `phpdoc.maybe-undefined`
+reports an undischarged read (issue #396). `@param`, `@return`, a property `@var`,
+an inline `@var $this->p`, a function-scope local and a nested `array<int, unset>`
+are **inert**: the member is dropped from the value arms, no presence claim is
+seeded, and the declaration accepts and refuses exactly what the same declaration
+without the member does. A function scope keeps `variable.undefined` and
+`variable.maybe-undefined` unchanged — a docblock manufactures no binding and
+silences no proof. `transform phpdoc-to-native` refuses to promote a `T|unset`
+`@param`, so the divergent spelling is never written into a native declaration
+where it could not survive. Still deferred: letting a **function-scope**
+`T|unset` participate in the emitter, the `include`-inside-a-function idiom
+(ADR-0087 §5.6).
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

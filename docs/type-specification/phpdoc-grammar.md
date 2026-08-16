@@ -58,6 +58,52 @@ one, and the `template-type` resolution below, where a node nothing decides
 becomes one. Both lower `Opaque` — the same silence a template floor already
 gets.
 
+### `unset` — the possibly-undefined pseudo-type
+
+`unset` is **vocabulary**, not a class name (ADR-0087, issue #395). The parser
+has no keyword table, so the spelling arrives as a plain
+`TypeKind::Identifier("unset")`; the identifier table lowers it to
+`ContractTy::Unset` rather than letting the class catch-all invent a class named
+`unset` in the current namespace.
+
+`/** @var \DateTime|unset $x */` is the Blade-view and included-partial idiom:
+`$x` holds a `\DateTime`, or the variable is not defined at all. The member
+speaks about the *binding*, so it carries **no value** — it is not `null`, not
+`void`, not `never`, not `mixed` — and `\DateTime|unset` accepts exactly what
+`\DateTime` accepts. Because `unset` is a reserved PHP language construct
+(`class unset {}` does not parse), it is **non-shadowable**: a same-named class
+in scope can never win, unlike the pseudo-types that are also legal class names
+(`integer`, `number`, `closure`, …). The word round-trips — lowering
+`\DateTime|unset` and spelling it back yields `\DateTime|unset`.
+
+A bare `@var unset $x` parses, lowers to an empty value-arm list, and is treated
+as "no envelope" (ADR-0029) — nothing is seeded and nothing is reported.
+
+**Positions** (ADR-0087 §5, issue #397). The spelling is accepted everywhere the
+grammar reaches and is never a class in any of them; the *definedness* claim
+attaches to exactly one position.
+
+| Position | Diagnostic meaning |
+| --- | --- |
+| inline `@var T\|unset $x` on a **top-level** local | `phpdoc.maybe-undefined` on an undischarged read (issue #396) |
+| `@param T\|unset $d` | inert — a parameter is always bound by the call |
+| `@return T\|unset` | inert — a function returns a value or does not return |
+| property `@var T\|unset` | inert — the slot exists whenever the object does |
+| inline `@var T\|unset $this->p` | inert — the tag names a property, not a local |
+| inline `@var T\|unset $x` in a function, method or closure | inert *for this id*; `variable.undefined` / `variable.maybe-undefined` are unaffected |
+| nested (`array<int, unset>`) | inert — it speaks about an array's values |
+
+"Inert" is two-sided: the member adds no finding **and removes none**. A
+`@param \DateTime|unset $d` accepts and refuses exactly what `@param \DateTime $d`
+accepts and refuses, which is why the acceptance folds skip the member rather
+than folding its `Maybe` in (ADR-0087 §9.1). `transform phpdoc-to-native` refuses
+to promote a `T|unset` `@param` — a native declaration cannot spell the member.
+
+PHPStan reports the spelling as an unknown class (`class.notFound`), and
+phpstan/phpdoc-parser parses it without complaint — the divergence is in the
+resolution, not the grammar. See
+[divergence-registry.md](divergence-registry.md), core entry 15.
+
 ### `template-type<Subject, Owner, 'TName'>`
 
 PHPStan's "read a `@template` argument out of an object type" utility is

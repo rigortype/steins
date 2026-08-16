@@ -109,7 +109,9 @@ Emitting ids, by layer (the registry is the source of truth —
   `call.too-few-arguments`, `call.unknown-named-argument`,
   `offset.missing`, `offset.on-unsupported`.
 - **contract** — `phpdoc.param-mismatch`, `phpdoc.return-mismatch`,
-  `phpdoc.property-mismatch`, `phpdoc.undefined-method`, `throw.undeclared`,
+  `phpdoc.property-mismatch`, `phpdoc.undefined-method`,
+  `phpdoc.maybe-undefined` (a read of a top-level `@var T|unset $x` the
+  declaration says may not be bound — ADR-0087 §4), `throw.undeclared`,
   `throw.liskov-widened`, `effect.envelope-exceeded`, `effect.liskov-widened`,
   `effect.interop-unknown-label` (floor `contracts`, like the rest of this
   list: an unrecognized label in one of upstream's purity tags, reported only

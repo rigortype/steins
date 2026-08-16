@@ -267,13 +267,17 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. } => subsumes_array(a, b),
 
-        // Callable / provenance / opaque `b`: outside the scalar-fact
+        // Callable / provenance / opaque / `unset` `b`: outside the scalar-fact
         // vocabulary. Only `mixed` provably covers them (a cut of `mixed` still
         // spans every base, so it has no scalar-fact denotation either);
-        // otherwise the honest `Maybe`, never a wrong `Yes`.
+        // otherwise the honest `Maybe`, never a wrong `Yes`. `unset` is here and
+        // not beside `Never` above: its empty *value* denotation would make
+        // `a ⊇ unset` a free `Yes`, a claim about a member no value inhabits, so
+        // the floor stays undecided (ADR-0087) — arm builders drop it anyway.
         ContractTy::CallableTy { .. }
         | ContractTy::StrOpaque
         | ContractTy::MixedMinus(_)
+        | ContractTy::Unset
         | ContractTy::Opaque => match a {
             ContractTy::Mixed => Yes,
             _ => Maybe,
@@ -388,7 +392,8 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         ContractTy::Mixed | ContractTy::MixedMinus(MixedCut::Null) => Yes,
         // Falsy cut removes only `[]`; law 2 already proved `b` non-empty here.
         ContractTy::MixedMinus(MixedCut::Falsy) => Yes,
-        ContractTy::Opaque => Maybe,
+        // `unset` admits no array, but claims nothing either (ADR-0087).
+        ContractTy::Unset | ContractTy::Opaque => Maybe,
         // `callable` may be a method array (undecided); `*-closure` (ADR-0063 P3)
         // demands a `Closure` instance, which no array is — proven `No`.
         ContractTy::CallableTy { obl, .. } => {

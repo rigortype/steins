@@ -290,7 +290,13 @@ impl Dropped {
             // producer has no declared return type.
             | ContractTy::Resource
             | ContractTy::Opaque => &mut self.objects,
-            ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::Never => &mut self.voidish,
+            // `unset` counts with the value-less spellings; a mined stub return
+            // type never carries it (ADR-0087), so this arm keeps the census
+            // total exact without shifting any series.
+            ContractTy::Mixed
+            | ContractTy::MixedMinus(_)
+            | ContractTy::Never
+            | ContractTy::Unset => &mut self.voidish,
             // A bare scalar base would have been admitted by `canonical_envelope`.
             ContractTy::Base(_) => &mut self.refinements,
         };

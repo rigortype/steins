@@ -149,8 +149,8 @@ $ steins doctor --no-php .
   surface: layers [mechanics, proof], 47 checked id(s)
 ```
 
-Today that count runs 47 ids at `default`, 48 at `throws-direct`, 62 at
-`contracts`, 68 at `strict` and 63 at `pedantic`. The profiles, the baseline
+Today that count runs 47 ids at `default`, 48 at `throws-direct`, 63 at
+`contracts`, 69 at `strict` and 64 at `pedantic`. The profiles, the baseline
 ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
@@ -520,7 +520,7 @@ src/Readonly.php:9:9: error[readonly.reassigned]: Cannot modify readonly propert
 
 ### `phpdoc.*` — declared contracts you wrote in a docblock
 
-Four ids, contract layer, `contracts` rung. PHP does not enforce PHPDoc at
+Five ids, contract layer, `contracts` rung. PHP does not enforce PHPDoc at
 runtime, so nothing here breaks your program. What breaks is the promise the
 docblock makes to every reader and every tool downstream.
 
@@ -615,6 +615,78 @@ finding back on `phpdoc.undefined-method` and back behind `--profile contracts`:
 the id follows the weakest premise the claim rests on. The evidence wording is
 the same either way, so `declared receiver $x` in a `call.undefined-method`
 message is how you tell this lane's findings from the exact-receiver ones.
+
+**`phpdoc.maybe-undefined`** is the fifth, and the one that is about a
+*binding* rather than a value. In a top-level script, `/** @var \DateTime|unset
+$x */` says `$x` is either a `\DateTime` or **not defined at all** — the
+included-partial idiom, where the file is handed its variables by whatever
+included it. Steins reports nothing about presence in a top-level script
+otherwise, and deliberately: an included file inherits the includer's symbol
+table, so nothing in the text can claim a name is absent. The `unset` member is
+you saying it, so it is you who lifts that silence, for that name only.
+
+```php
+<?php
+
+/** @var \DateTime|unset $date */
+echo $date->format('Y-m-d');
+
+/** @var \DateTime|unset $other */
+if (isset($other)) {
+    echo $other->format('Y-m-d');
+}
+```
+
+```
+$ steins check --profile contracts view.php
+view.php:4:6: error[phpdoc.maybe-undefined]: $date is declared \DateTime|unset and may be undefined at this read — guard it with isset($date) or give it a default
+```
+
+Everything that makes the read safe discharges it, from the point it appears:
+`isset($x)` on its true branch, `!isset($x)` or `empty($x)` on their false
+branches (an early `return` included), `$x ?? $default`, `$x ??= $default`, an
+assignment, and the defaulting idiom `if (!isset($x)) { $x = …; }`. A guard
+through a chain reaches its root, so `if (!isset($x['k'])) { return; }` guards
+`$x`. Inside the guard the type is plain `\DateTime` — the `unset` member
+carries no value — so member resolution is unchanged, and the guard is never
+reported as redundant.
+
+An `include`, `require`, `extract`, `compact`, `get_defined_vars`, `eval` or
+`$$name` **ends** the claim rather than blanking the file: reads before it are
+still judged, reads after it are not, because from there the symbol table is no
+longer readable from the text.
+
+The id sits on the `contracts` profile, with the rest of the `phpdoc.*` family:
+its premise is your own declaration, not something Steins proved, so it is a
+finding you asked for by writing the tag. A bare `steins check` stays silent on
+it.
+
+#### Where `unset` is accepted but means nothing
+
+You may write the word in any phpdoc position, and it is never read as a class
+anywhere — a `@param \DateTime|unset $d`, a `@return \DateTime|unset`, a property
+`@var \DateTime|unset`, an inline `@var \DateTime|unset $this->p` and a nested
+`array<int, unset>` all lower to the pseudo-type and produce no
+type-resolution finding. What they do **not** carry is the definedness claim
+above: "undefined" has no subject in those positions, because a parameter is
+always bound by the call, a function returns a value or does not return, and a
+property slot exists whenever the object does. The member is dropped from the
+value arms and everything else behaves exactly as the same declaration without
+it — `@param \DateTime|unset $d` accepts and refuses precisely what
+`@param \DateTime $d` accepts and refuses, and the message quotes your spelling
+so you can see which declaration was violated.
+
+Inside a function, a method or a closure, an inline `@var \DateTime|unset $x`
+is likewise inert for this id — but the *proof*-layer pair is not. A local
+nothing binds still reports `variable.undefined`, and one bound on only some
+paths still reports `variable.maybe-undefined` at `--profile strict`: a
+docblock cannot manufacture a binding the body proves absent, and it does not
+silence one either. An arrow function's body keeps its own silence, unchanged.
+
+`steins transform phpdoc-to-native` will not promote a `T|unset` `@param` to a
+native declaration. There is no native syntax for "the argument may not be
+there", so the rewrite would delete what you wrote; the transform refuses it as
+`type-not-natively-representable`.
 
 ### `throw.*` — `@throws` envelopes
 

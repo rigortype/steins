@@ -751,3 +751,54 @@ mod is_refined_scalar_keyword_tests {
         }
     }
 }
+
+/// The `unset` pseudo-type is never promoted away (ADR-0087 §5, issue #397).
+///
+/// A native declaration cannot say what `T|unset` says: PHP has no syntax for
+/// "the argument may not be there", and `@param int|unset $x` rewritten to
+/// `int $x` would delete the author's own statement and emit a declaration
+/// stricter than the docblock it replaced. The transform therefore refuses —
+/// which it already did, for the ordinary reason that `unset` has no native
+/// member, and this pins that the reason keeps holding now that the word is
+/// vocabulary rather than a class name.
+#[cfg(test)]
+mod unset_is_never_promoted {
+    use super::{is_finer_than_native, phpdoc_to_native};
+    use steins_phpdoc::parse_type;
+
+    fn native_rendering(text: &str) -> Option<super::NativeType> {
+        let parsed = parse_type(text).expect("the grammar accepts the spelling");
+        assert!(parsed.at_end, "`{text}` parses whole");
+        phpdoc_to_native(&parsed.ty)
+    }
+
+    #[test]
+    fn a_union_carrying_the_member_has_no_native_rendering() {
+        for text in ["int|unset", "unset|int", "int|UNSET", "unset", "string|null|unset"] {
+            assert!(
+                native_rendering(text).is_none(),
+                "`{text}` must refuse promotion — a native type cannot spell the member"
+            );
+        }
+    }
+
+    /// And it refuses as `type-not-natively-representable`, not as
+    /// `phpdoc-finer-than-native`: `int|unset` is not a *narrower* `int`, it is a
+    /// statement about the binding, so the refusal a reader is shown must not
+    /// promise that a finer native type exists.
+    #[test]
+    fn the_refusal_is_representability_not_refinement() {
+        for text in ["int|unset", "unset"] {
+            let parsed = parse_type(text).expect("the grammar accepts the spelling");
+            assert!(!is_finer_than_native(&parsed.ty), "`{text}` is not a scalar refinement");
+        }
+    }
+
+    /// The control: the same union without the member promotes as it always did,
+    /// so the refusal above is the member's doing and not the union's.
+    #[test]
+    fn the_same_union_without_the_member_still_renders() {
+        assert!(native_rendering("int").is_some());
+        assert!(native_rendering("int|string").is_some());
+    }
+}
