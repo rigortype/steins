@@ -40,11 +40,57 @@
 //! asserts the committed files stay sorted and self-consistent.
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 use crate::corpus::repo_root;
 
+/// What a run did, for its own output — a `--check` run that says "emitted" is
+/// telling the reader it wrote something.
+fn verb(check: bool) -> &'static str {
+    if check { "verified" } else { "emitted" }
+}
+
+/// Write a rendered table — or, in check mode, assert the committed file already
+/// **is** it, byte for byte.
+///
+/// The check half is the point. A generator whose output is committed has two
+/// sources of truth for one artefact, and they drift silently: editing a
+/// committed header (as the 2026-08-15 comment-compression pass did) leaves the
+/// render template behind, so the next regeneration of any table reverts files
+/// nobody touched.
+fn emit(dst: &Path, text: &str, check: bool) -> Result<(), String> {
+    if !check {
+        return std::fs::write(dst, text).map_err(|e| format!("write {}: {e}", dst.display()));
+    }
+    let have = std::fs::read_to_string(dst).map_err(|e| format!("read {}: {e}", dst.display()))?;
+    if have == text {
+        return Ok(());
+    }
+    let (line, committed, rendered) = have
+        .lines()
+        .zip(text.lines())
+        .enumerate()
+        .find(|(_, (a, b))| a != b)
+        .map_or((0, "", ""), |(i, (a, b))| (i + 1, a, b));
+    Err(format!(
+        "{} is not what the generator renders — `cargo xtask gen-catalog` would rewrite it.\n  \
+         first difference at line {line}:\n    committed: {committed}\n    rendered:  {rendered}\n  \
+         Edit the render template in xtask/src/gen_catalog.rs, not the generated file.",
+        dst.display()
+    ))
+}
+
 /// Entry point for `cargo xtask gen-catalog`.
-pub fn run() -> Result<(), String> {
+///
+/// `check` renders every table and compares it with what is committed instead of
+/// writing — `cargo xtask gen-catalog --check`. That mode exists because the
+/// generator once drifted from its own output: the committed headers had been
+/// edited (the 2026-08-15 comment-compression pass) while the render templates
+/// still emitted the older, longer text, so the next person to regenerate ANY
+/// table silently reverted three files they never meant to touch, and their
+/// reviewer saw churn with nothing to do with the change. A generator whose
+/// output is committed has to be idempotent, and now a test says so.
+pub fn run(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/hierarchy.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: Doc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
@@ -77,24 +123,25 @@ pub fn run() -> Result<(), String> {
 
     let out = render(&table);
     let dst = repo_root().join("crates/steins-catalog/src/hierarchy_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
+    emit(&dst, &out, check)?;
 
     println!(
-        "gen-catalog: {} classes/interfaces emitted, {} enums skipped → {}",
+        "gen-catalog: {} classes/interfaces {}, {} enums skipped → {}",
         table.len(),
+        verb(check),
         skipped_enums,
         dst.display()
     );
 
     let out = render_display_names(&display);
     let dst = repo_root().join("crates/steins-catalog/src/display_names_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
-    println!("gen-catalog: {} display-name rows emitted → {}", display.len(), dst.display());
+    emit(&dst, &out, check)?;
+    println!("gen-catalog: {} display-name rows {} → {}", display.len(), verb(check), dst.display());
 
-    gen_return_facts()?;
-    gen_resource_returns()?;
-    gen_declared_returns()?;
-    gen_param_facts()?;
+    gen_return_facts(check)?;
+    gen_resource_returns(check)?;
+    gen_declared_returns(check)?;
+    gen_param_facts(check)?;
     Ok(())
 }
 
@@ -103,7 +150,7 @@ pub fn run() -> Result<(), String> {
 /// fields survive transcription — name and whether the stub's `@return`
 /// carries a `false` arm; the rest (stub path, probe transcript, confidence
 /// grade) is evidence that belongs in the source of record, not here.
-fn gen_resource_returns() -> Result<(), String> {
+fn gen_resource_returns(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/resource_returns.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: ResourceDoc =
@@ -128,8 +175,8 @@ fn gen_resource_returns() -> Result<(), String> {
 
     let out = render_resource_returns(&table);
     let dst = repo_root().join("crates/steins-catalog/src/resource_returns_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
-    println!("gen-catalog: {} resource-return rows emitted → {}", table.len(), dst.display());
+    emit(&dst, &out, check)?;
+    println!("gen-catalog: {} resource-return rows {} → {}", table.len(), verb(check), dst.display());
     Ok(())
 }
 
@@ -183,7 +230,7 @@ fn render_resource_returns(table: &BTreeMap<String, bool>) -> String {
 /// cross-check); this function only transcribes it, so mining (needs
 /// phpstan-src + live `php`) and generation (needs neither) run
 /// independently.
-fn gen_declared_returns() -> Result<(), String> {
+fn gen_declared_returns(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpstan-mining/declared_returns.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: EnvelopeDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
@@ -201,11 +248,12 @@ fn gen_declared_returns() -> Result<(), String> {
 
     let out = render_declared_returns(&doc.meta, &doc.counts, &rows, &sensitive);
     let dst = repo_root().join("crates/steins-catalog/src/declared_returns_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
+    emit(&dst, &out, check)?;
     println!(
-        "gen-catalog: {} declared-return rows + {} version-sensitive names emitted → {}",
+        "gen-catalog: {} declared-return rows + {} version-sensitive names {} → {}",
         rows.len(),
         sensitive.len(),
+        verb(check),
         dst.display()
     );
     Ok(())
@@ -220,7 +268,7 @@ fn gen_declared_returns() -> Result<(), String> {
 /// names mined and found to carry nothing. The second is not padding: the
 /// catalog's completeness tests have to tell "mined, and empty" from "never
 /// looked at", and a table with only the interesting rows cannot.
-fn gen_param_facts() -> Result<(), String> {
+fn gen_param_facts(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/param_facts.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: ParamDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
@@ -240,11 +288,12 @@ fn gen_param_facts() -> Result<(), String> {
 
     let out = render_param_facts(&doc.meta, &doc.counts, &rows, &plain);
     let dst = repo_root().join("crates/steins-catalog/src/param_facts_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
+    emit(&dst, &out, check)?;
     println!(
-        "gen-catalog: {} parameter-fact rows + {} plain names emitted → {}",
+        "gen-catalog: {} parameter-fact rows + {} plain names {} → {}",
         rows.len(),
         plain.len(),
+        verb(check),
         dst.display()
     );
     Ok(())
@@ -438,11 +487,10 @@ fn render_declared_returns(
         "// @generated by `cargo xtask gen-catalog` from\n\
          // docs/research/phpstan-mining/declared_returns.toml — DO NOT EDIT BY HAND.\n\
          //\n\
-         // Builtin DECLARED RETURN TYPES: the ADR-0069 Asserted floor\n\
-         // (issues #73/#79, widened for the array vocabulary by ADR-0071).\n\
-         // Without a live engine every rung of the return ladder is engine-gated and a\n\
-         // builtin call with variable operands types as `unknown`; these rows raise that\n\
-         // floor with the type the builtin DECLARES.\n\
+         // Builtin DECLARED RETURN TYPES: the ADR-0069 Asserted floor (issues #73/#79,\n\
+         // widened for arrays by ADR-0071). Without a live engine a builtin call with\n\
+         // variable operands types as `unknown`; these rows raise that floor to the\n\
+         // builtin's declared type.\n\
          //\n\
          // LINEAGE — see the root NOTICE file for both MIT permission notices:\n\
          //   Steins <- phpstan-src `resources/functionMap.php`\n\
@@ -467,34 +515,27 @@ fn render_declared_returns(
     let _ = writeln!(s, "//   {:>5}    RICHER than a single-base envelope (the #79 and ADR-0071 reach)", counts.admitted_rich);
     s.push_str(
         "//\n\
-         // The skipped methods and the object bucket are what remains deferred\n\
-         // (ADR-0069 §5 as amended 2026-08-01, ADR-0071 §2.3). Object, class-name,\n\
-         // `callable` and `resource` arms have no extensional denotation — the\n\
-         // acceptance relation falls to a reflexive is-a floor and steins-contract\n\
-         // carries no hierarchy — so the countersign could only answer `Maybe`, and a\n\
-         // row entering uncountersigned is what ADR-0069 §3 refuses. The shaped-array\n\
-         // bucket is empty since ADR-0071 gave the relation a structural denotation\n\
-         // for `array` / `list<T>` / `array<K, V>` / `array{…}`.\n\
+         // Skipped methods and the object bucket remain deferred (ADR-0069 §5 as\n\
+         // amended 2026-08-01, ADR-0071 §2.3): object/class-name/callable/resource arms\n\
+         // have no denotation, so the countersign could only answer `Maybe`, which\n\
+         // ADR-0069 §3 refuses. The shaped-array bucket is empty since ADR-0071 gave\n\
+         // `array`/`list<T>`/`array<K, V>`/`array{…}` a structural denotation.\n\
          //\n\
-         // GRADE: every row seeds at the `Asserted` stratum, never `Verified`\n\
-         // (ADR-0069 §2). It reaches the dump surface and contracts-tier reasoning;\n\
-         // the proof layer's all-Verified premise rule keeps it out of every finding.\n\
+         // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2) — it\n\
+         // reaches the dump surface and contracts-tier reasoning, but the proof\n\
+         // layer's all-Verified premise rule excludes it from every finding.\n\
          //\n\
-         // WHEN IT SPEAKS: per NAME, not per run. The consuming rung fires exactly\n\
-         // where the folder's reflected envelope yielded None for the asked name —\n\
-         // `--no-php` is only the total case. With a live engine the floor still\n\
-         // speaks where that engine is SILENT: an extension the analyzing PHP does\n\
-         // not load, or a builtin with no declared return type. Where the engine\n\
-         // answers, the floor never overrides it. The absence family never reads\n\
-         // these rows at all: existence is a boot-surface fact, and an absence\n\
-         // finding standing beside a floor fact is complementary, not contradictory.\n\
+         // WHEN IT SPEAKS: per NAME, not per run, where the folder's reflected\n\
+         // envelope yielded None (`--no-php` is the total case). With a live engine it\n\
+         // speaks only where the engine is SILENT (unloaded extension, or no declared\n\
+         // return type); the engine is never overridden. The absence family never\n\
+         // reads these rows — existence is a boot-surface fact, complementary to an\n\
+         // absence finding.\n\
          //\n\
-         // Each row: (lowercased builtin name, canonical phpdoc spelling — a base, a\n\
-         // `T|false` failure union, a refinement, or an array type). The consumer\n\
-         // re-lowers the string\n\
-         // through the SAME `lower_str` → `flatten_arms` seam a PROJECT function's\n\
-         // declared return takes (issue #60) and seeds the arms Asserted. Sorted by key\n\
-         // for binary search.\n\n",
+         // Each row: (lowercased builtin name, canonical phpdoc spelling). Re-lowered\n\
+         // through the same `lower_str` → `flatten_arms` seam a PROJECT function's\n\
+         // declared return takes (issue #60), seeded Asserted. Sorted by key for\n\
+         // binary search.\n\n",
     );
     s.push_str("pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[\n");
     for (key, ty) in rows {
@@ -504,11 +545,9 @@ fn render_declared_returns(
     s.push_str(
         "// The A11-shaped change oracle: names whose declared RETURN type moves between\n\
          // two adjacent supported minors, keyed to the minor it moved AT. A project whose\n\
-         // declared PhpTarget is not wholly at or above that minor declines the row; an\n\
-         // unknown target admits (the row is Asserted anyway, ADR-0069 §3).\n\
-         //\n\
-         // Listed independently of the table above: a name can be version-sensitive\n\
-         // without carrying an admitted row, and the gate must stay complete either way.\n\
+         // declared PhpTarget is below that minor declines the row; unknown target admits\n\
+         // (the row is Asserted anyway, ADR-0069 §3). Listed independently of the table\n\
+         // above since a name can be version-sensitive without an admitted row.\n\
          // Sorted by key for binary search.\n\n",
     );
     s.push_str("pub(crate) static RETURN_VERSION_SENSITIVE: &[(&str, (u16, u16))] = &[\n");
@@ -523,7 +562,7 @@ fn render_declared_returns(
 /// `return_facts.toml` into `return_facts_generated.rs`. Each row is a curated
 /// phpdoc-type refinement keyed by lowercased builtin name; may be empty (R1
 /// lands zero rows — the reflected envelope alone serves the bool family).
-fn gen_return_facts() -> Result<(), String> {
+fn gen_return_facts(check: bool) -> Result<(), String> {
     let src = repo_root().join("docs/research/phpsrc-mining/return_facts.toml");
     let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
     let doc: ReturnDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
@@ -538,8 +577,8 @@ fn gen_return_facts() -> Result<(), String> {
 
     let out = render_return_facts(&table);
     let dst = repo_root().join("crates/steins-catalog/src/return_facts_generated.rs");
-    std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
-    println!("gen-catalog: {} return-fact rows emitted → {}", table.len(), dst.display());
+    emit(&dst, &out, check)?;
+    println!("gen-catalog: {} return-fact rows {} → {}", table.len(), verb(check), dst.display());
     Ok(())
 }
 
@@ -594,12 +633,11 @@ fn render_display_names(table: &BTreeMap<String, String>) -> String {
          // cross-checked against PHP 8.5.8. Source of record is the TOML; run\n\
          // `cargo xtask gen-catalog` to regenerate after editing it.\n\
          //\n\
-         // Each row: (lowercased class/interface/enum name, the casing php-src\n\
-         // DECLARES it with). Display fidelity only — every judgment compares\n\
-         // through the case-insensitive `class_eq`, so nothing may decide on this\n\
-         // table. Unlike HIERARCHY it keeps the enum rows: the enum exclusion\n\
-         // there guards the is-a oracle against an incomplete super-edge set, and\n\
-         // a display name has no such soundness gate.\n\
+         // Each row: (lowercased name, php-src's DECLARED casing). Display fidelity\n\
+         // only — judgments compare via the case-insensitive `class_eq`, so nothing\n\
+         // decides on this table. Unlike HIERARCHY, enum rows are kept: HIERARCHY\n\
+         // excludes them to guard the is-a oracle against an incomplete super-edge\n\
+         // set, a soundness gate that doesn't apply here.\n\
          //\n\
          // Sorted by key for binary search.\n\n",
     );
@@ -638,11 +676,11 @@ fn render(table: &BTreeMap<String, Vec<String>>) -> String {
          // cross-checked against PHP 8.5.8. Source of record is the TOML; run\n\
          // `cargo xtask gen-catalog` to regenerate after editing it.\n\
          //\n\
-         // Each row: (lowercased class/interface name, its DIRECT supertypes with\n\
-         // declared casing preserved — `extends` then `implements`). The is-a oracle\n\
-         // (ADR-0043) walks these transitively; a name absent here is an unknown\n\
-         // external (→ oracle `Unknown`, never `No`). Builtin enums are deliberately\n\
-         // omitted (incomplete implicit-interface/backing data — see gen_catalog.rs).\n\
+         // Each row: (lowercased class/interface name, DIRECT supertypes with declared\n\
+         // casing — `extends` then `implements`). The is-a oracle (ADR-0043) walks\n\
+         // these transitively; an absent name is an unknown external (→ `Unknown`,\n\
+         // never `No`). Builtin enums are omitted (incomplete implicit-interface/\n\
+         // backing data — see gen_catalog.rs).\n\
          //\n\
          // Sorted by key for binary search.\n\n",
     );
@@ -658,4 +696,27 @@ fn render(table: &BTreeMap<String, Vec<String>>) -> String {
     }
     s.push_str("];\n");
     s
+}
+
+#[cfg(test)]
+mod tests {
+    /// **Regenerating is a no-op**, which is the property a committed generated
+    /// file needs and did not have.
+    ///
+    /// The templates and their output are two sources of truth for one artefact,
+    /// and they drifted: the 2026-08-15 comment-compression pass edited the
+    /// committed headers of `hierarchy_generated.rs`,
+    /// `display_names_generated.rs` and `declared_returns_generated.rs`, the
+    /// render templates kept emitting the older text, and so the next
+    /// `cargo xtask gen-catalog` — run for an unrelated table — reverted three
+    /// files nobody had touched. That is invisible to a reviewer reading a diff
+    /// for something else, which is what makes it worth a test rather than a
+    /// note.
+    ///
+    /// A failure here means the render template and the committed file disagree.
+    /// Fix the **template**; the generated file is the output, not the source.
+    #[test]
+    fn regenerating_the_catalog_tables_changes_nothing() {
+        super::run(true).expect("`cargo xtask gen-catalog` must be a no-op on a clean tree");
+    }
 }

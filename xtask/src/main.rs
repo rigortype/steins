@@ -7,7 +7,7 @@
 //!   fold-probe [--names …]   differential 32/64-bit width probe over the fold allowlist
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
 //!   freq                     builtin-call frequency, written to docs/notes/
-//!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
+//!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
 //!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
@@ -78,7 +78,7 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },
-        Some("gen-catalog") => match gen_catalog::run() {
+        Some("gen-catalog") => match gen_catalog::run(args[1..].iter().any(|a| a == "--check")) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },
