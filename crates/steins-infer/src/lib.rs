@@ -2860,6 +2860,94 @@ const FOLD_ARRAY_MAX_DEPTH: u8 = 8;
 const UNION_FOLD_MEMBER_CAP: usize = 4;
 const UNION_FOLD_COMBINATION_CAP: usize = 16;
 
+/// The wire spelling of **one non-array value**, or `None` when it has none.
+///
+/// This is where the fold seam decides what can cross the JSON wire at all, and
+/// it decides it **once**. Two recursions consult it — [`fits_fold_budget`]'s
+/// gate and [`arg_to_fold_within`]'s encoder — because they need different
+/// things from the same verdict (a `bool` and a value), and a rule transcribed
+/// into both is a rule that can be extended in one of them. It has been:
+/// non-finite floats were caught in review only after the two had drifted apart
+/// in exactly that way.
+///
+/// The declines, each for its own reason:
+///
+/// * **A non-finite float.** JSON has no token for `INF`/`-INF`/`NAN`, and PHP's
+///   lexer mints the first two from source a program can contain: `1e309`
+///   overflows to `INF` while staying a literal. There is no encoding that asks
+///   the engine the question the source asked — encoding it as `null` made a
+///   weak-mode `floor(1e309)` answer `0.0`, which is `floor(null)` — so the fold
+///   declines. It is the mirror of the runner's own refusal to *return* a
+///   non-finite result.
+/// * **A non-UTF-8 string.** The fold wire is JSON, which cannot carry arbitrary
+///   bytes (ADR-0080 §2.6), so the fold declines rather than asking PHP about a
+///   different string than the source has. Restoring it is ADR-0080 §3.1.
+/// * **Anything that is not a literal at all**, each for its own reason. A
+///   method call (issue #386) is no more a wire value than a function call: the
+///   fold sends proven values, and this one is proven — if at all — by a descent
+///   the fold road has no store to run (ADR-0075 §3). A concatenation is not a
+///   wire value either: `try_fold` resolves each argument through
+///   `resolve_literal` first, so a provable `"a" . $b` arrives here already
+///   collapsed to its `Str`, and one that did not resolve is unproven — sending
+///   its operands would be sending a different call than was written. A
+///   comparison in value position (issue #260) is the same story: decided ones
+///   arrive as a `Bool`, undecided ones are unproven. Object-world values
+///   (ADR-0043) are unproven here by construction, and a global-constant fetch
+///   (issue #168) is too — only the preg flags reader resolves the modeled
+///   engine constants, by value.
+///
+/// An **array** answers `None` here, and that is not the array's verdict: an
+/// array's admission is the depth-and-budget walk its two callers own, and each
+/// matches the array arm before consulting this. `None` is the conservative
+/// answer to a question this function is not asked.
+fn scalar_to_fold(v: &ArgValue) -> Option<FoldArg> {
+    match v {
+        ArgValue::Int(v) => Some(FoldArg::Int(*v)),
+        ArgValue::Float(v) => v.is_finite().then_some(FoldArg::Float(*v)),
+        ArgValue::Str(v) => Some(FoldArg::Str(v.as_str()?.to_owned())),
+        ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
+        ArgValue::Null => Some(FoldArg::Null),
+        ArgValue::Array(_)
+        | ArgValue::Var(_)
+        | ArgValue::Call(..)
+        | ArgValue::MethodCall { .. }
+        | ArgValue::New(..)
+        | ArgValue::Ternary { .. }
+        | ArgValue::Closure(_)
+        | ArgValue::PropFetch { .. }
+        | ArgValue::Clone(_)
+        | ArgValue::Coalesce(..)
+        | ArgValue::OffsetRead { .. }
+        | ArgValue::Concat(..)
+        | ArgValue::Binary { .. }
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
+        | ArgValue::GlobalConst(..)
+        | ArgValue::Other => None,
+    }
+}
+
+/// The wire spelling of **one array-literal key**, or `None` when it has none.
+///
+/// The nesting reads oddly and is load-bearing: the outer `Option` is the
+/// admission, and the inner one is the key's own **absence**. `Some(None)` is
+/// `[$a]`'s auto key, which travels as JSON `null` so PHP's own next-int rule
+/// assigns it; `None` is a key that cannot be sent at all, and it widens the
+/// WHOLE array rather than degrading to an auto key — that would be a different
+/// claim about the array than the source makes.
+///
+/// Two keys have no spelling: one the source did not write as a literal (issue
+/// #336) — the seam sends the engine the array that was written or nothing at
+/// all — and a non-UTF-8 string key, for the reason [`scalar_to_fold`] gives.
+fn array_key_to_fold(k: &ArrayKey) -> Option<Option<FoldKey>> {
+    match k {
+        ArrayKey::Auto => Some(None),
+        ArrayKey::Int(i) => Some(Some(FoldKey::Int(*i))),
+        ArrayKey::Str(s) => Some(Some(FoldKey::Str(s.as_str()?.to_owned()))),
+        ArrayKey::Expr(_) => None,
+    }
+}
+
 /// Charge `v` against the fold seam's array budget: `false` when it nests deeper
 /// than `depth` or its entries (recursively) exhaust `budget`, or when it is not a
 /// self-evident value at all. A scalar literal always fits and costs nothing.
@@ -2867,7 +2955,10 @@ const UNION_FOLD_COMBINATION_CAP: usize = 16;
 /// The budget is **per argument**, and both users of it ([`Cx::try_fold`]'s gate
 /// and [`arg_to_fold`]'s encoder) charge identically, so the gate's verdict and the
 /// encoder's are the same verdict computed twice — never a gate that admits what
-/// the encoder then refuses.
+/// the encoder then refuses. Only the *walk* is computed twice now: what a single
+/// value or key may be is [`scalar_to_fold`]'s and [`array_key_to_fold`]'s answer,
+/// asked here and by the encoder, so a new wire constraint cannot land in one
+/// recursion and miss the other.
 fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
     match v {
         ArgValue::Array(items) => {
@@ -2879,12 +2970,7 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
                     return false;
                 }
                 *budget -= 1;
-                // A key the source did not spell as a literal (issue #336) is not
-                // sendable, and this gate must agree with `arg_to_fold_within`'s
-                // encoder to the letter — the two compute one verdict twice, and
-                // a gate that admits what the encoder refuses would ask the
-                // engine a question it cannot be given.
-                if matches!(key, ArrayKey::Expr(_)) {
+                if array_key_to_fold(key).is_none() {
                     return false;
                 }
                 if !fits_fold_budget(el, depth - 1, budget) {
@@ -2893,11 +2979,7 @@ fn fits_fold_budget(v: &ArgValue, depth: u8, budget: &mut usize) -> bool {
             }
             true
         }
-        // A non-finite float is a literal the source really spells (`1e309`
-        // overflows to `INF` in PHP's own lexer) and a value the JSON wire has
-        // no token for, so it is not sendable — see `arg_to_fold_within`.
-        ArgValue::Float(f) if !f.is_finite() => false,
-        v => v.is_literal(),
+        v => scalar_to_fold(v).is_some(),
     }
 }
 
@@ -2956,21 +3038,6 @@ fn arg_to_fold(arg: &ArgValue) -> Option<FoldArg> {
 /// running the fold on the project's PHP is for (ADR-0004/0028).
 fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<FoldArg> {
     match arg {
-        ArgValue::Int(v) => Some(FoldArg::Int(*v)),
-        // JSON has no token for `INF`/`-INF`/`NAN`, and PHP's lexer mints the
-        // first two from source a program can contain: `1e309` overflows to
-        // `INF` while staying a literal. There is no encoding that asks the
-        // engine the question the source asked, so the fold **declines** — the
-        // same shape as the non-UTF-8 string below, and the mirror of the
-        // runner's own refusal to return a non-finite result.
-        ArgValue::Float(v) => v.is_finite().then_some(FoldArg::Float(*v)),
-        // The fold wire is JSON, which cannot carry arbitrary bytes, so a
-        // non-UTF-8 string is **not sent** (ADR-0080 §2.6): the fold declines
-        // rather than asking PHP about a different string than the source has.
-        // Restoring the fold for byte strings is ADR-0080 §3.1.
-        ArgValue::Str(v) => Some(FoldArg::Str(v.as_str()?.to_owned())),
-        ArgValue::Bool(v) => Some(FoldArg::Bool(*v)),
-        ArgValue::Null => Some(FoldArg::Null),
         // An array literal (issue #39): representable when every element is, and
         // nested literals recurse. One unrepresentable element widens the WHOLE
         // array — `count([1, $x])` is not 2, because `$x` may not be one entry.
@@ -2984,50 +3051,16 @@ fn arg_to_fold_within(arg: &ArgValue, depth: u8, budget: &mut usize) -> Option<F
                     return None;
                 }
                 *budget -= 1;
-                let key = match k {
-                    ArrayKey::Auto => None,
-                    ArrayKey::Int(i) => Some(FoldKey::Int(*i)),
-                    // `?` widens the WHOLE array, exactly like an unrepresentable
-                    // element: `None` here would mean "auto key", a different claim.
-                    ArrayKey::Str(s) => Some(FoldKey::Str(s.as_str()?.to_owned())),
-                    // A key the source did not spell as a literal (issue #336)
-                    // is not a fold argument: the seam sends the engine the
-                    // array that was written or nothing at all.
-                    ArrayKey::Expr(_) => return None,
-                };
-                entries.push((key, arg_to_fold_within(v, depth - 1, budget)?));
+                // Both `?`s widen the whole array rather than dropping an entry:
+                // a shorter array is a different argument, not a wider one.
+                entries.push((array_key_to_fold(k)?, arg_to_fold_within(v, depth - 1, budget)?));
             }
             Some(FoldArg::Array(entries))
         }
-        ArgValue::Var(_)
-        | ArgValue::Call(..)
-        // A method call (issue #386) is no more a wire value than a function
-        // call: the fold sends proven values, and this one is proven — if at
-        // all — by a descent the fold road has no store to run (ADR-0075 §3).
-        | ArgValue::MethodCall { .. }
-        | ArgValue::New(..)
-        | ArgValue::Ternary { .. }
-        | ArgValue::Closure(_)
-        | ArgValue::PropFetch { .. }
-        | ArgValue::Clone(_)
-        | ArgValue::Coalesce(..)
-        | ArgValue::OffsetRead { .. }
-        // A concatenation is not a wire value: `try_fold` resolves each argument
-        // through `resolve_literal` first, so a provable `"a" . $b` arrives here
-        // already collapsed to its `Str`. One that did not resolve is unproven, and
-        // sending its operands would be sending a different call than was written.
-        | ArgValue::Concat(..)
-        // A comparison in value position (issue #260) is not a wire value either:
-        // `resolve_literal` collapses a decided one to its `Bool` before the fold
-        // sees it, and an undecided one is unproven.
-        | ArgValue::Binary { .. }
-        // Object-world values (ADR-0043) are not fold arguments — unproven, == Other.
-        | ArgValue::ClassConst(..)
-        | ArgValue::EnumCase(..)
-        // A global-constant fetch (issue #168) is unproven here: only the preg
-        // flags reader resolves the modeled engine constants, by value.
-        | ArgValue::GlobalConst(..)
-        | ArgValue::Other => None,
+        // Every other value is a wire question or it is not, and that is
+        // `scalar_to_fold`'s single answer — the same one `fits_fold_budget`
+        // gets, which is the point of it living there.
+        v => scalar_to_fold(v),
     }
 }
 
@@ -38112,5 +38145,103 @@ mod php_view_tests {
         assert_eq!(v.version_id, Some((80100, Some(80199))));
         let v = effective_php_view(None, None);
         assert_eq!((v.effective_minor, v.catalog_skew, v.version_id), (None, false, None));
+    }
+}
+
+#[cfg(test)]
+mod fold_wire_tests {
+    //! The fold seam's admission, checked where it is now decided *once*.
+    //!
+    //! [`fits_fold_budget`]'s gate and [`arg_to_fold_within`]'s encoder run over
+    //! the same argument at different moments — the gate before `folder.fold` so
+    //! an inadmissible literal is never cloned into the memo, the encoder inside
+    //! it — and the seam's standing invariant is that they never disagree. A gate
+    //! that admits what the encoder refuses asks the engine a question it cannot
+    //! be given; a gate that refuses what the encoder would send loses a fold for
+    //! no reason. Both now read [`scalar_to_fold`] and [`array_key_to_fold`], so
+    //! this asserts the property rather than two transcriptions of it.
+    use super::*;
+    use steins_domain::PhpStr;
+    use steins_syntax::{ArgValue, ArrayKey};
+
+    /// A byte string with no UTF-8 reading — `as_str()` is `None`, ADR-0080.
+    fn raw_byte_string() -> PhpStr {
+        PhpStr::from_bytes(&[0xC0])
+    }
+
+    /// Every value the seam has an opinion about, sendable or not.
+    fn every_shape() -> Vec<ArgValue> {
+        let inner = ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Int(1))]);
+        vec![
+            ArgValue::Int(1),
+            ArgValue::Float(1.5),
+            ArgValue::Float(-0.0),
+            ArgValue::Float(f64::MAX),
+            ArgValue::Float(f64::INFINITY),
+            ArgValue::Float(f64::NEG_INFINITY),
+            ArgValue::Float(f64::NAN),
+            ArgValue::Str(PhpStr::from("ab")),
+            ArgValue::Str(raw_byte_string()),
+            ArgValue::Bool(true),
+            ArgValue::Null,
+            ArgValue::Other,
+            ArgValue::Array(vec![]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Int(1))]),
+            // The hazards, each buried one level down: the array is admissible
+            // in every other respect, and one entry has to take it down.
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Float(f64::INFINITY))]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str(raw_byte_string()))]),
+            ArgValue::Array(vec![(ArrayKey::Str(raw_byte_string()), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Expr(Box::new(ArgValue::Other)), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Int(-3), ArgValue::Null)]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Other)]),
+            // …and nested twice, since the walk is where the two recursions
+            // could still drift apart.
+            ArgValue::Array(vec![(ArrayKey::Auto, inner)]),
+            ArgValue::Array(vec![(
+                ArrayKey::Auto,
+                ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Float(f64::NAN))]),
+            )]),
+        ]
+    }
+
+    #[test]
+    fn the_gate_admits_exactly_what_the_encoder_sends() {
+        for v in every_shape() {
+            assert_eq!(
+                is_fold_arg(&v),
+                arg_to_fold(&v).is_some(),
+                "the gate and the encoder disagree about {v:?}"
+            );
+        }
+    }
+
+    /// The three values that have no JSON spelling, named so a future reader
+    /// sees WHICH shapes the agreement above is really about.
+    #[test]
+    fn a_value_with_no_wire_spelling_is_refused_by_both() {
+        for v in [
+            ArgValue::Float(f64::INFINITY),
+            ArgValue::Str(raw_byte_string()),
+            ArgValue::Array(vec![(ArrayKey::Str(raw_byte_string()), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Expr(Box::new(ArgValue::Other)), ArgValue::Int(1))]),
+        ] {
+            assert!(!is_fold_arg(&v), "the gate admits {v:?}");
+            assert_eq!(arg_to_fold(&v), None, "the encoder sends {v:?}");
+        }
+        // The neighbours still travel: this refuses spellings, not types.
+        assert!(arg_to_fold(&ArgValue::Float(f64::MAX)).is_some());
+        assert!(arg_to_fold(&ArgValue::Str(PhpStr::from("ab"))).is_some());
+    }
+
+    /// An absent key is a key the wire carries (`null`, for PHP's next-int
+    /// rule); it is not the "no spelling" answer, and the nesting in
+    /// [`array_key_to_fold`]'s return type is what keeps them apart.
+    #[test]
+    fn an_absent_key_is_not_a_refused_key() {
+        assert_eq!(array_key_to_fold(&ArrayKey::Auto), Some(None));
+        assert_eq!(array_key_to_fold(&ArrayKey::Int(7)), Some(Some(FoldKey::Int(7))));
+        assert_eq!(array_key_to_fold(&ArrayKey::Expr(Box::new(ArgValue::Other))), None);
+        assert_eq!(array_key_to_fold(&ArrayKey::Str(raw_byte_string())), None);
     }
 }
