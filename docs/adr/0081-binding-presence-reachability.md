@@ -415,7 +415,10 @@ conclude the shape is rare.
   the builtin catalog supplies arity only — so every argument-side finding
   is capped at project-defined callees. A separate slice with its own
   measurement, and recorded in the divergence registry rather than left
-  to be discovered.
+  to be discovered. *(Closed by issue #423 / ADR-0056 §9, 2026-08-17: the
+  source is the sidecar's own `getParameters()`, and this pair judges a
+  builtin argument on the same terms it judges a project one — with the
+  `null` arm taking the internal coercive carve-out §9.3 measures.)*
 - **Non-`Var` argument carriers** (`$o->p`, `f(g($x))`, `$a['k']`): 74%
   of the 39,754 argument positions the probe saw. The same judgment at a
   different seam.

@@ -295,8 +295,12 @@ than reclassified; entry 14 (the solver) is unaffected.
 These are gaps, not divergences, and they are tracked in
 [not-implemented.md](not-implemented.md):
 
-- **builtin parameter types** — no source for them exists in the check, so every
-  argument-side finding stops at project-defined callees (issue #391);
+- **builtin parameter types** — *closed* by issue #423 (ADR-0056 §9): the source
+  is the sidecar's own `getParameters()`, and the argument side judges a builtin
+  exactly as it judges a project callee. What remains is bounded and listed in
+  not-implemented.md — no engine, no judgment; and a position whose type the
+  native relation does not model (`array`, `callable`, a class) declines there
+  exactly as it declines on a project parameter;
 - generic type-argument carry *through a variable binding* (the direct-`new`
   argument position landed as ADR-0032 stage 1; the heap carries no type
   arguments);
