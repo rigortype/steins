@@ -18,7 +18,12 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
     match ty {
         ContractTy::Mixed => Yes,
         ContractTy::Never => No,
-        ContractTy::Opaque => Maybe,
+        // `unset` states nothing about a value, so it decides nothing about one
+        // (ADR-0087). NOT `Never`'s `No`: a bare `@var unset $x` would then
+        // convict every value the variable holds. Arm-list builders drop the
+        // member ([`ContractTy::is_unset`]); this is the floor for any path
+        // that reaches the leaf anyway.
+        ContractTy::Unset | ContractTy::Opaque => Maybe,
         ContractTy::Null => Certainty::from_bool(*v == Val::Null),
         // `php_is_falsy` is the engine's own falsy judgment (null included).
         ContractTy::MixedMinus(MixedCut::Null) => Certainty::from_bool(*v != Val::Null),
@@ -157,7 +162,8 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
     match ty {
         ContractTy::Mixed => Yes,
         ContractTy::Never => No,
-        ContractTy::Opaque => Maybe,
+        // The `unset` floor, as in `admits_val` (ADR-0087).
+        ContractTy::Unset | ContractTy::Opaque => Maybe,
         ContractTy::Null => No,
         // Base part is non-null by construction; caller judges `nullable` separately.
         ContractTy::MixedMinus(MixedCut::Null) => Yes,
@@ -503,7 +509,8 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
     match ty {
         // `mixed` covers everything; the null cut removes no array.
         ContractTy::Mixed | ContractTy::MixedMinus(MixedCut::Null) => Yes,
-        ContractTy::Opaque => Maybe,
+        // The `unset` floor, as in `admits_val` (ADR-0087).
+        ContractTy::Unset | ContractTy::Opaque => Maybe,
         ContractTy::MixedMinus(MixedCut::Falsy) => ne_gate(sf),
         // `never` admits nothing, and the fact is already proven nonempty above.
         ContractTy::Never => No,

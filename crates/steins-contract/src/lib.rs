@@ -260,6 +260,24 @@ pub enum ContractTy {
     /// ADR-0063 P3); [`CallableObl::is_bare`] leaves bare-callable consumers
     /// unaffected.
     CallableTy { sig: Option<Box<CallableSig>>, obl: CallableObl },
+    /// `unset` — the possibly-undefined pseudo-type (ADR-0087): `@var
+    /// \DateTime|unset $x` says the variable holds a `\DateTime` **or has no
+    /// binding at all**. Not a class, and not any value: it is neither `null`
+    /// nor `void` nor `never` nor `mixed`.
+    ///
+    /// Contributes **no value** to the type lane. The word is carried this far
+    /// (rather than dropped at lowering) only so the speller can render it
+    /// back — [`ContractTy::Opaque`] spells as `mixed` and would lose it. Every
+    /// value-domain reader therefore drops it: [`admits_val`]/[`admits_fact`]
+    /// answer `Maybe` (the honest floor — this variant states nothing about a
+    /// value), [`to_fact`]/[`to_shape_fact`] answer `None`, and consumers that
+    /// build arm lists filter it out with [`ContractTy::is_unset`] so
+    /// `\DateTime|unset`'s value arms are *structurally* those of `\DateTime`.
+    ///
+    /// What the state MEANS for reads of the variable is issue #396; positions
+    /// other than an inline top-level `@var` are issue #397. This slice is
+    /// vocabulary only and emits nothing.
+    Unset,
     /// Union.
     Union(Vec<ContractTy>),
     /// Intersection.
@@ -267,6 +285,20 @@ pub enum ContractTy {
     /// Anything not modeled: conditionals, offset access, const fetches,
     /// `$this`/`self`/`static`, templates. Always `Maybe`.
     Opaque,
+}
+
+impl ContractTy {
+    /// Is this the `unset` pseudo-type — a member that carries a *spelling* but
+    /// no value (ADR-0087)?
+    ///
+    /// The one predicate arm-list builders use to keep the word out of the value
+    /// lane: filter with this **before** the emptiness check, so `\DateTime|unset`
+    /// yields exactly `\DateTime`'s arms and a bare `unset` yields an empty list
+    /// (the no-envelope outcome, ADR-0029: nothing is seeded, nothing reports).
+    #[must_use]
+    pub fn is_unset(&self) -> bool {
+        matches!(self, ContractTy::Unset)
+    }
 }
 
 /// Lower a parsed phpdoc type into its semantic contract form. Total: every
@@ -415,6 +447,14 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         "mixed" => ContractTy::Mixed,
         "never" | "never-return" | "never-returns" | "no-return" | "noreturn" => ContractTy::Never,
         "void" => ContractTy::Opaque,
+        // The possibly-undefined pseudo-type (ADR-0087, issue #395). Its own
+        // variant rather than a `KNOWN_UNENFORCED` entry: the opaque floor
+        // spells back as `mixed` and would lose the word, and unlike the names
+        // in that table `unset` is not an unmodeled *type* — it carries no
+        // value at all. Without this arm the catch-all read it as a class named
+        // `unset` in the current namespace (the one plainly wrong reading,
+        // zonuexe/php-typing-conformance#7).
+        "unset" => ContractTy::Unset,
         // Three spellings, one leaf — see ContractTy::Resource (ADR-0056 §8).
         "resource" | "open-resource" | "closed-resource" => ContractTy::Resource,
         "scalar" => scalar(),
@@ -589,8 +629,9 @@ fn grid_str_preds(name: &str) -> Option<StrPreds> {
 /// the vocabulary half of PHPStan's pseudo-type/class precedence rule
 /// (`TypeNodeResolver::tryResolvePseudoTypeClassType`).
 ///
-/// PHP **reserves** its native type words (listed in the match below), so the
-/// keyword always wins there. Every other spelling [`lower_identifier`] knows
+/// PHP **reserves** its native type words and `unset` (listed in the match
+/// below), so the keyword always wins there. Every other spelling
+/// [`lower_identifier`] knows
 /// is a phpdoc **pseudo-type** (`integer`, `number`, `scalar`, `closure`, …)
 /// and a legal class name, so `Integer` in scope makes `@param Integer` that
 /// class, not `int`. A hyphenated keyword (`positive-int`) is not a legal
@@ -623,6 +664,10 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
             | "static"
             | "self"
             | "parent"
+            // Not a native type word but a reserved *language construct*
+            // (`unset()`), so `class unset {}` is a parse error and nothing can
+            // shadow the pseudo-type (ADR-0087).
+            | "unset"
     )
 }
 
@@ -1942,5 +1987,148 @@ mod shape_fact_lowering_tests {
         );
         assert_eq!(shape_of("list<string>").count_range(), IntRange::NON_NEGATIVE);
         assert_eq!(shape_of("non-empty-list<string>").count_range(), IntRange::POSITIVE);
+    }
+}
+
+#[cfg(test)]
+mod unset_pseudo_type_tests {
+    use super::*;
+    use steins_domain::Val;
+
+    /// The spelling is vocabulary, not a class in the current namespace — the
+    /// one plainly wrong reading (zonuexe/php-typing-conformance#7, ADR-0087).
+    #[test]
+    fn the_spelling_is_never_a_class() {
+        for name in ["unset", "UNSET", "Unset", "\\unset"] {
+            assert_eq!(
+                lower_identifier(name),
+                ContractTy::Unset,
+                "{name} should lower to the unset pseudo-type",
+            );
+        }
+    }
+
+    /// `unset` is not any of the four words it is easy to mistake it for: not
+    /// the null type, not `void`'s opaque floor, not `never`'s empty
+    /// denotation, and not `mixed`.
+    #[test]
+    fn the_pseudo_type_is_none_of_the_neighbouring_words() {
+        let unset = lower_str("unset").expect("lowers");
+        for other in ["null", "void", "never", "mixed"] {
+            assert_ne!(
+                unset,
+                lower_str(other).expect("lowers"),
+                "unset must not lower like {other}",
+            );
+        }
+    }
+
+    /// A reserved language construct (`unset()`), so no class in scope shadows
+    /// it — unlike the phpdoc pseudo-types (`integer`, `number`, `closure`).
+    #[test]
+    fn the_pseudo_type_is_not_shadowable() {
+        assert!(!is_shadowable_pseudo_type("unset"));
+        assert!(!is_shadowable_pseudo_type("UNSET"));
+        // The control: a spelling that IS a legal class name, hence shadowable.
+        assert!(is_shadowable_pseudo_type("integer"));
+    }
+
+    /// **The acceptance criterion**: the member contributes no value, so the
+    /// union carries its neighbours plus the marker — and once the marker is
+    /// filtered (what every arm-list builder does with [`ContractTy::is_unset`])
+    /// what remains is *structurally* the lowering of the union without it.
+    #[test]
+    fn the_member_contributes_no_value_to_the_union() {
+        for (with, without) in [
+            ("\\DateTime|unset", "\\DateTime"),
+            ("int|unset", "int"),
+            ("\\DateTime|null|unset", "\\DateTime|null"),
+            ("unset|int", "int"),
+        ] {
+            let ContractTy::Union(members) = lower_str(with).expect("lowers") else {
+                panic!("{with} should lower to a union")
+            };
+            let kept: Vec<ContractTy> = members.into_iter().filter(|m| !m.is_unset()).collect();
+            let expected = match lower_str(without).expect("lowers") {
+                ContractTy::Union(m) => m,
+                one => vec![one],
+            };
+            assert_eq!(kept, expected, "{with} must carry exactly {without}'s value arms");
+        }
+    }
+
+    /// No `Class("unset")` arm survives anywhere in the lowering — the defect
+    /// this slice removes, stated as its own assertion.
+    #[test]
+    fn no_phantom_class_arm_is_invented() {
+        for src in ["unset", "\\DateTime|unset", "int|null|unset", "array<int, unset>"] {
+            let lowered = lower_str(src).expect("lowers");
+            assert!(
+                !mentions_unset_class(&lowered),
+                "{src} lowered to a phantom class: {lowered:?}",
+            );
+        }
+    }
+
+    fn mentions_unset_class(ty: &ContractTy) -> bool {
+        match ty {
+            ContractTy::Class(n) => n == "unset",
+            ContractTy::Union(m) | ContractTy::Inter(m) => m.iter().any(mentions_unset_class),
+            ContractTy::MapOf { key, val, .. } | ContractTy::IterableOf { key, val } => {
+                mentions_unset_class(key) || mentions_unset_class(val)
+            }
+            ContractTy::ListOf { elem, .. } => mentions_unset_class(elem),
+            ContractTy::Shape { fields, unsealed, .. } => {
+                fields.iter().any(|f| mentions_unset_class(&f.ty))
+                    || unsealed.as_ref().is_some_and(|(k, v)| {
+                        k.as_deref().is_some_and(mentions_unset_class)
+                            || mentions_unset_class(v)
+                    })
+            }
+            _ => false,
+        }
+    }
+
+    /// The leaf decides nothing about a value (`Maybe`), so a bare
+    /// `@var unset $x` convicts nothing. `Never`'s `No` would convict every
+    /// value the variable holds.
+    #[test]
+    fn the_leaf_decides_nothing_about_a_value() {
+        for v in [Val::Null, Val::Int(1), Val::Bool(false), Val::Str(PhpStr::from("x"))] {
+            assert_eq!(
+                admits_val(&ContractTy::Unset, &v),
+                Certainty::Maybe,
+                "unset must stay undecided about {v:?}",
+            );
+        }
+    }
+
+    /// It states no value-slot fact either — a union carrying it stops lowering
+    /// to one fact, which only ever widens.
+    #[test]
+    fn the_leaf_states_no_fact() {
+        assert_eq!(to_fact(&ContractTy::Unset), None);
+        assert_eq!(to_shape_fact(&ContractTy::Unset), None);
+    }
+
+    /// **The round trip** — the reason for a dedicated variant: the word
+    /// survives spelling, so lower → spell → lower is the identity. Parked on
+    /// [`ContractTy::Opaque`] it would have spelled back as `mixed`.
+    #[test]
+    fn the_spelling_round_trips() {
+        for (src, spelled) in [
+            ("\\DateTime|unset", "datetime|unset"),
+            ("int|unset", "int|unset"),
+            ("unset", "unset"),
+        ] {
+            let lowered = lower_str(src).expect("lowers");
+            let back = spell::spell_nested_for_test(&lowered);
+            assert_eq!(back, spelled, "{src} spelled back wrong");
+            assert_eq!(
+                lower_str(&back).expect("re-lowers"),
+                lowered,
+                "{src} did not round-trip through {back}",
+            );
+        }
     }
 }

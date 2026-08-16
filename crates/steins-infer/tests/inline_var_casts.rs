@@ -181,6 +181,39 @@ fn a_template_name_stays_opaque() {
     assert_eq!(one_type(src), "dumped type: unknown");
 }
 
+
+// The `unset` pseudo-type (ADR-0087, issue #395): vocabulary, no value
+
+
+#[test]
+fn an_unset_member_leaves_the_remaining_arms_untouched() {
+    // The acceptance criterion, read through the cast lane: `T|unset` casts what
+    // `T` casts. `flatten_arms` drops the member before an arm list exists, so
+    // the shape seed, the stratum and the spelling are all the plain ones.
+    assert_eq!(
+        cast_dump("array{a: int, b: int}|unset", "count($arr)"),
+        "dumped type: 2 (asserted)"
+    );
+    assert_eq!(
+        cast_dump("array{a: int, b: int}|unset", "$arr"),
+        "dumped type: array{a: int, b: int} (asserted)"
+    );
+    let src = "<?php\nfunction f($x): void {\n  /** @var positive-int|unset $x */\n  \\PHPStan\\dumpType($x);\n}\n";
+    assert_eq!(one_type(src), "dumped type: int<1, max> (asserted)");
+}
+
+#[test]
+fn a_bare_unset_casts_nothing_and_never_panics() {
+    // No value arm survives, so the tag has no envelope to state (ADR-0029) and
+    // the native `array $arr` stands. What the state MEANS for reads is #396.
+    assert_eq!(cast_dump("unset", "count($arr)"), "dumped type: int<0, max>");
+    // `unknown` is exactly what an un-cast `$arr` dumps (the native envelope
+    // states no value fact) — the same answer a template name reaches above.
+    assert_eq!(cast_dump("unset", "$arr"), "dumped type: unknown");
+    let no_tag = "<?php\nfunction f(array $arr): void {\n  \\PHPStan\\dumpType($arr);\n}\n";
+    assert_eq!(one_type(no_tag), "dumped type: unknown");
+}
+
 #[test]
 fn a_prefixed_var_displaces_the_plain_one() {
     let src = "<?php\nfunction f(array $arr): void {\n  /**\n   * @phpstan-var array{a: int} $arr\n   * @var array{a: int, b: int} $arr\n   */\n  \\PHPStan\\dumpType(count($arr));\n}\n";

@@ -63,7 +63,10 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             | ContractTy::ListOf { .. }
             | ContractTy::MapOf { .. }
             | ContractTy::Shape { .. } => array_members.push(spell_array_arm(arm)),
-            // No faithful plain-scalar spelling: the `type-not-renderable` refusal.
+            // No faithful plain-scalar spelling: the `type-not-renderable`
+            // refusal. `unset` lands here and stays refused — it is vocabulary,
+            // not a value, so no summarized value set contains it (ADR-0087);
+            // the spelling that renders it is `spell_nested`.
             _ => return None,
         }
     }
@@ -239,6 +242,10 @@ fn spell_nested(ty: &ContractTy) -> String {
         ContractTy::Mixed => "mixed".to_owned(),
         ContractTy::Never => "never".to_owned(),
         ContractTy::Opaque => "mixed".to_owned(),
+        // The whole reason `unset` has its own variant (ADR-0087): the opaque
+        // floor above spells as `mixed`, so parking the word there would lose
+        // it, and `\DateTime|unset` would round-trip as `\DateTime|mixed`.
+        ContractTy::Unset => "unset".to_owned(),
         ContractTy::MixedMinus(MixedCut::Null) => "non-null-mixed".to_owned(),
         ContractTy::MixedMinus(MixedCut::Falsy) => "non-empty-mixed".to_owned(),
         ContractTy::Class(name) => name.clone(),

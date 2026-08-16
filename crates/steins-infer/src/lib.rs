@@ -17920,9 +17920,18 @@ fn native_arms(ty: &NativeType) -> Vec<ContractTy> {
 /// Flatten a lowered contract into a top-level arm list, dissolving nested unions
 /// (a declared `User|Guest|null` lowers to a `Union`; each member is one arm). A
 /// non-union lowers to a single arm.
+///
+/// **The value-lane boundary for `unset`** (ADR-0087): the possibly-undefined
+/// pseudo-type carries a spelling but no value, so it is dropped here — the one
+/// place every declared arm list is built. `@var \DateTime|unset $x` therefore
+/// yields *structurally* the arm list of `@var \DateTime $x`, and no downstream
+/// reader learns the variant exists. A bare `@var unset $x` yields an empty list,
+/// which every caller already reads as "no envelope, seed nothing" (ADR-0029).
 fn flatten_arms(cty: ContractTy) -> Vec<ContractTy> {
     match cty {
         ContractTy::Union(members) => members.into_iter().flat_map(flatten_arms).collect(),
+        // Dropped at every depth, since a nested union recurses through here.
+        other if other.is_unset() => Vec::new(),
         other => vec![other],
     }
 }
@@ -18397,7 +18406,17 @@ fn arm_rt_kinds(arm: &ContractTy) -> Option<&'static [RtKind]> {
         // `[obj, 'm']`/`['C', 'm']` pair-array, a Closure or an `__invoke`able.
         C::IterableOf { .. } => &[Array, Object],
         C::CallableTy { .. } => &[Str, Array, Object],
-        C::Mixed | C::MixedMinus(_) | C::Opaque | C::Never | C::Union(_) | C::Inter(_) => {
+        // `Unset` is unreachable here — [`flatten_arms`] drops it before any arm
+        // list exists (ADR-0087) — and answers `None` for the same reason the
+        // floors below do: an arm spanning no known runtime kind must survive
+        // both polarities rather than be narrowed away.
+        C::Mixed
+        | C::MixedMinus(_)
+        | C::Opaque
+        | C::Unset
+        | C::Never
+        | C::Union(_)
+        | C::Inter(_) => {
             return None;
         }
     })
