@@ -1141,30 +1141,36 @@ re-read.
 A generated sweep does not reproduce every recorded witness, and the command
 says which. After the disposition table it lists the `Refused` rows whose
 divergence the generated families did not reach; those keep the hand-written
-witness this ADR records. Measured over the whole allowlist, four:
+witness this ADR records. Two causes, and they are different:
 
-| row | why generation misses it |
-| --- | --- |
-| `version_compare` | needs **two** arguments at once — `version_compare("2147483647", "2147483648")` is `-1` / `0` because *both* runs saturate a C `long`, and neither argument alone shows anything |
-| `sprintf` | the same shape: the format and the value are one hazard (`sprintf("%x", -1)`) |
-| `bindec` | the witness is a 32-character binary string, a content the `string` family does not carry |
-| `intval` | its parameter is `mixed`, and "every literal at once" does not include the oversized numeric string the witness uses |
+| row | why | cause |
+| --- | --- | --- |
+| `version_compare` | needs **two** arguments at once — `version_compare("2147483647", "2147483648")` is `-1` / `0` because *both* runs saturate a C `long`, and neither argument alone shows anything | structural |
+| `sprintf` | the same shape: the format and the value are one hazard (`sprintf("%x", -1)`) | structural |
+| `abs` (strict sweep only) | its witness rides a weak-mode coercion, `abs("3000000000")`. Under `declare(strict_types=1)` that argument is a `TypeError` on both engines, so there is nothing left to diverge about | convention |
 
-Two causes, worth keeping apart: the first two are **structural** (one-at-a-time
-generation cannot reach a two-argument hazard), the last two are a **family
-gap** that a richer `string`/`mixed` family would close. Either way the row's
-evidence stands on its recorded witness — and a tool that reported them as clean
-without saying so would be the exact failure mode the four properties above
-exist to prevent.
+The **structural** two are what one-at-a-time generation cannot build, and they
+stay. The **convention** one is the verdict being right rather than the sweep
+being blind: `abs` reproduces in the weak sweep, which is where its divergence
+lives.
+
+A third cause has been closed. `bindec` and `intval` were unreproduced because
+their witnesses are about argument **content** the families did not carry —
+`bindec("11111111111111111111111111111111")` is thirty-two ones, and `intval`
+takes its oversized numeric string on a `mixed` parameter, where "every literal
+at once" had not included one. Both families carry it now, and both witnesses
+reproduce. Content is a hazard a declared type cannot suggest, which is worth
+remembering the next time a row reads clean.
 
 ### The first full sweep
 
-**1,138 tuples over all 65 rows, in each calling convention**, from one command:
+**1,339 tuples over all 65 rows, in each calling convention**, from one command:
 no `Portable` row diverges either way, and every `silent` verdict lands on a
-`Refused` one — `decbin`, `dechex`, `decoct`, `hexdec`, `range`, `preg_split`,
-`preg_match` in both, plus `abs` in the weak convention only, since strictness
-removes the string-to-int coercion that carries its width. That is what those
-rows claim, re-derived rather than re-read. Two defects in the generator itself were found by running it, and both had the
+`Refused` one — `bindec`, `decbin`, `dechex`, `decoct`, `hexdec`, `intval`,
+`range`, `preg_split`, `preg_match` in both, plus `abs` in the weak convention
+only, since strictness removes the string-to-int coercion that carries its
+width. Ten of the twelve refused rows, re-derived rather than re-read; the other
+two are the structural pair above. Two defects in the generator itself were found by running it, and both had the
 same shape — a probe that agrees for a reason that is not agreement. Varying a
 parameter used to **truncate the argument list at it**, so any position before
 the last required one produced an under-arity call: an `ArgumentCountError` on
