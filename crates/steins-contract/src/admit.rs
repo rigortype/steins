@@ -106,13 +106,30 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             Val::Str(_) | Val::Array(_) if !obl.closure_only => Maybe,
             _ => No,
         },
-        ContractTy::Union(members) => {
-            members.iter().fold(No, |acc, m| acc.or(admits_val(m, v)))
-        }
+        ContractTy::Union(members) => match value_arms(members) {
+            None => Maybe,
+            Some(arms) => arms.fold(No, |acc, m| acc.or(admits_val(m, v))),
+        },
         ContractTy::Inter(members) => {
             members.iter().fold(Yes, |acc, m| acc.and(admits_val(m, v)))
         }
     }
+}
+
+/// A union's **value** members: the `unset` ones removed (ADR-0087 §2.1 — the arms
+/// of `\DateTime|unset` are exactly the arms of `\DateTime`). `None` when the union
+/// has no value member left, which is the bare-`unset` floor: undecided, never `No`.
+///
+/// Folding the member in instead would let its `Maybe` swallow a sibling's `No`,
+/// which does not merely widen — it **deletes** a finding the same union without
+/// the member reports (`f(1)` against `@param \DateTime|unset $d`). `flatten_arms`
+/// in `steins-infer` drops the member for every consumer that builds an arm list;
+/// this is the same drop for the consumers that judge the lowered type directly.
+fn value_arms(members: &[ContractTy]) -> Option<impl Iterator<Item = &ContractTy>> {
+    if members.iter().all(ContractTy::is_unset) {
+        return None;
+    }
+    Some(members.iter().filter(|m| !m.is_unset()))
 }
 
 /// Is *every* value the fact admits also admitted by the contract?
@@ -255,9 +272,10 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         ContractTy::CallableTy { obl, .. } => {
             if base == Base::String && !obl.closure_only { Maybe } else { No }
         }
-        ContractTy::Union(members) => {
-            members.iter().fold(No, |acc, m| acc.or(base_only(m, base, refinement)))
-        }
+        ContractTy::Union(members) => match value_arms(members) {
+            None => Maybe,
+            Some(arms) => arms.fold(No, |acc, m| acc.or(base_only(m, base, refinement))),
+        },
         ContractTy::Inter(members) => {
             members.iter().fold(Yes, |acc, m| acc.and(base_only(m, base, refinement)))
         }
@@ -547,9 +565,10 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         }
         // NO haircut (ADR-0072 as-built amendment): the or-fold is exact for
         // disjointness, member-wise, unlike ADR-0071 §2's coverage haircut.
-        ContractTy::Union(members) => {
-            members.iter().fold(No, |acc, m| acc.or(admits_shape_fact(m, sf)))
-        }
+        ContractTy::Union(members) => match value_arms(members) {
+            None => Maybe,
+            Some(arms) => arms.fold(No, |acc, m| acc.or(admits_shape_fact(m, sf))),
+        },
         // `A ∩ B` admits a member iff both do — sound in both directions.
         ContractTy::Inter(members) => {
             members.iter().fold(Yes, |acc, m| acc.and(admits_shape_fact(m, sf)))

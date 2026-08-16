@@ -31954,9 +31954,20 @@ fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
             _ => accepts(cx, cfile, coff, inner, v),
         },
         // Union: `Yes` if any member accepts, `No` only if all definitely reject.
+        //
+        // An `unset` member is skipped, not folded (ADR-0087 §5): it states nothing
+        // about a value, so its `Maybe` would swallow every sibling's `No` and
+        // delete the finding `@param \DateTime $d` reports on the same argument.
+        // The member is inert in this position — the value arms of `\DateTime|unset`
+        // are `\DateTime`'s, which is §2.1 — and a union of nothing else keeps the
+        // bare-`unset` floor below.
         PKind::Union { types, .. } => {
             let (mut any_yes, mut any_maybe) = (false, false);
-            for t in types {
+            let value_arms: Vec<&PType> = types.iter().filter(|t| !is_unset_atom(t)).collect();
+            if value_arms.is_empty() {
+                return Tri::Maybe;
+            }
+            for t in value_arms {
                 match accepts(cx, cfile, coff, t, v) {
                     Tri::Yes => any_yes = true,
                     Tri::Maybe => any_maybe = true,
@@ -31993,6 +32004,13 @@ fn accepts(cx: &Cx, cfile: usize, coff: u32, ty: &PType, v: &CVal) -> Tri {
         PKind::Callable(_) | PKind::OffsetAccess { .. } | PKind::Conditional(_)
         | PKind::ObjectShape(_) | PKind::Unsupported(_) => Tri::Maybe,
     }
+}
+
+/// Whether a phpdoc union member is the `unset` pseudo-type (ADR-0087 §2). Read
+/// through `lower_identifier` rather than by spelling, so the case-blindness and
+/// the leading-backslash handling are the one table's, not a second one's.
+fn is_unset_atom(ty: &PType) -> bool {
+    matches!(&ty.kind, PKind::Identifier(name) if steins_contract::lower_identifier(name).is_unset())
 }
 
 /// Acceptance for a bare identifier type.
