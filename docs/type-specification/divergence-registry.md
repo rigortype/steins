@@ -184,6 +184,35 @@ and the carry read is the floor under it rather than a rival inference.
 Reconsideration precondition: none — this is a standing refusal of the solver,
 not a deferral (ADR-0032, ADR-0030 reg. entry above).
 
+**15. `unset` in a phpdoc union is a pseudo-type, not a class.** PHPStan — and
+every tool the conformance suite measured except Intelephense — resolves the
+`unset` member of `/** @var \DateTime|unset $x */` as a **class name**: the
+spelling is absent from the docblock keyword table, falls through to the
+named-object atom, and is either reported as an unknown class or silently carried
+as a phantom arm. Steins reads it as the possibly-undefined pseudo-type
+(ADR-0087): the union member says the *variable may not be bound*, contributes no
+value to the type lane (not `null`, not `void`, not `never`, not `mixed`), and is
+non-shadowable, because `unset` is a reserved language construct rather than a
+legal class name. `\DateTime|unset` accepts exactly what `\DateTime` accepts.
+
+The rationale is that the class reading is the one plainly wrong one: no value of
+any class satisfies the member the author wrote, so nothing about the idiom's
+meaning survives it. Steins' own silence today was the right output from the wrong
+reading — a nonexistent-class arm answers `Maybe` for every object value, and
+Steins emits no unknown-class-in-phpdoc diagnostic — which is the same
+right-for-the-wrong-reason shape ADR-0056 §8 named for `resource`.
+
+**The cost is a Steins-only spelling**, accepted under the same rule as the
+refined-string grid above: PHPStan reads a docblock carrying the word as a
+phantom class reference, so an annotation Steins writes with it will not lower in
+PHPStan. Reading PHPStan-shaped annotations is unaffected — nothing else changes
+about the spelling. Source: zonuexe/php-typing-conformance#7, with
+PHPantom-dev/phpantom_lsp#366 as prior art. Reconsideration precondition: none —
+this is a standing correction, not a deferral. What is *deferred* is the meaning:
+the possibly-undefined state is reported by nothing yet (issue #396), and
+positions other than an inline top-level `@var` carry the corrected vocabulary
+with no semantics (issue #397).
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

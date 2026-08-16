@@ -58,6 +58,32 @@ one, and the `template-type` resolution below, where a node nothing decides
 becomes one. Both lower `Opaque` — the same silence a template floor already
 gets.
 
+### `unset` — the possibly-undefined pseudo-type
+
+`unset` is **vocabulary**, not a class name (ADR-0087, issue #395). The parser
+has no keyword table, so the spelling arrives as a plain
+`TypeKind::Identifier("unset")`; the identifier table lowers it to
+`ContractTy::Unset` rather than letting the class catch-all invent a class named
+`unset` in the current namespace.
+
+`/** @var \DateTime|unset $x */` is the Blade-view and included-partial idiom:
+`$x` holds a `\DateTime`, or the variable is not defined at all. The member
+speaks about the *binding*, so it carries **no value** — it is not `null`, not
+`void`, not `never`, not `mixed` — and `\DateTime|unset` accepts exactly what
+`\DateTime` accepts. Because `unset` is a reserved PHP language construct
+(`class unset {}` does not parse), it is **non-shadowable**: a same-named class
+in scope can never win, unlike the pseudo-types that are also legal class names
+(`integer`, `number`, `closure`, …). The word round-trips — lowering
+`\DateTime|unset` and spelling it back yields `\DateTime|unset`.
+
+A bare `@var unset $x` parses, lowers to an empty value-arm list, and is treated
+as "no envelope" (ADR-0029) — nothing is seeded and nothing is reported. **No
+diagnostic reads the state yet**: the semantics (`isset`/`empty`/`??`/`??=`/
+assignment discharge, the guard never redundant, and the
+`phpdoc.maybe-undefined` id) are issue #396, and positions other than an inline
+top-level `@var` are issue #397. PHPStan resolves the spelling as a class — see
+[divergence-registry.md](divergence-registry.md), core entry 15.
+
 ### `template-type<Subject, Owner, 'TName'>`
 
 PHPStan's "read a `@template` argument out of an object type" utility is
