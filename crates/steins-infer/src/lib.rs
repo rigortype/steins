@@ -14652,13 +14652,18 @@ fn new_heap_object(
 fn ctor_touched_props(cx: &Cx, class: &str, props: &[&PropertyDecl]) -> Option<HashSet<String>> {
     let (cfile, ctor) = cx.find_ctor(class)?;
     let all = || props.iter().map(|p| p.name.clone()).collect::<HashSet<String>>();
+    // The class whose declaration owns the body being scanned — a `Foo::init(…)` in
+    // that body's own text names *itself* by this spelling, the by-name twin of
+    // `self::init(…)` (issue #417).
+    let owner_fqn = ctor_owner_fqn(cx, class);
     // A poisoned constructor can reach a slot without spelling it.
-    if cx.method_scope(cfile, &ctor_owner_fqn(cx, class), &ctor.name).is_none_or(|s| s.poisoned) {
+    if cx.method_scope(cfile, &owner_fqn, &ctor.name).is_none_or(|s| s.poisoned) {
         return Some(all());
     }
     let Some(span) = ctor.body_span else { return Some(all()) };
     let Some(text) = cx.units[cfile].tree.text_at(span) else { return Some(all()) };
-    let reach = this_prop_mentions(text);
+    let owner_name = cx.find_class(&owner_fqn).map_or(owner_fqn.as_str(), |(_, cd)| cd.name.as_str());
+    let reach = this_prop_mentions(text, &owner_fqn, owner_name);
     // `$this` reached somewhere this scan cannot follow: no slot is safe.
     if reach.escapes {
         return Some(all());
@@ -14703,9 +14708,11 @@ struct ThisReach {
     /// * **`$this->m(…)`** — the delegating shape (`__construct() { $this->init(); }`
     ///   with `init()` writing `$this->view`). A method call runs a body this scan is
     ///   not reading.
-    /// * **`parent::m(…)`, `self::m(…)`, `static::m(…)`** — `parent::__construct()`
-    ///   above all. These run with the *same* `$this`, so they are the delegating
-    ///   shape under a different spelling.
+    /// * **`parent::m(…)`, `self::m(…)`, `static::m(…)`, and `Foo::m(…)` spelling
+    ///   the enclosing class by its own short name or FQN** — `parent::__construct()`
+    ///   above all, and `Foo::init()` written from inside `Foo`'s own constructor is
+    ///   `self::init()` under another spelling (issue #417). These run with the
+    ///   *same* `$this`, so they are the delegating shape under a different spelling.
     /// * **`$this->$name` / `$this->{…}`** — the slot is chosen at runtime, so the
     ///   text names none.
     ///
@@ -14724,12 +14731,20 @@ struct ThisReach {
 /// Scan a constructor body's **source text** for [`ThisReach`]. The property-world
 /// twin of [`mentions_variable`], and deliberately just as blunt.
 ///
+/// `owner_fqn` and `owner_name` are the FQN and short name of the class whose
+/// declaration the scanned body belongs to (issue #417) — a `Foo::init(…)` spelled
+/// either way is `self::init(…)` under the enclosing class's own name rather than
+/// the keyword, and closes the same hole. Both are compared case-insensitively,
+/// matching PHP's own class-name resolution; the FQN is expected pre-normalized
+/// (no leading `\`, [`ClassDecl::fqn`]'s own form) since the scan tolerates one
+/// appearing in the text either way (see below).
+///
 /// Boundaries are what keep `$this->view` from matching `$this->viewCount`. Whitespace
 /// of any kind may sit around the arrow (a `$this` and its `->` on two lines is one
 /// access), and `$this?->p` is the same slot under a null guard. A match inside a
 /// string literal or a comment is *accepted* as a mention, which errs toward dropping
 /// the seed and so toward silence.
-fn this_prop_mentions(text: &str) -> ThisReach {
+fn this_prop_mentions(text: &str, owner_fqn: &str, owner_name: &str) -> ThisReach {
     let bytes = text.as_bytes();
     let is_name_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || !b.is_ascii();
     let skip_ws = |mut j: usize| {
@@ -14738,9 +14753,11 @@ fn this_prop_mentions(text: &str) -> ThisReach {
         }
         j
     };
-    // `parent::m(…)` / `self::m(…)` / `static::m(…)`: another body, the same `$this`.
-    // The keywords are case-insensitive in PHP; `to_ascii_lowercase` rewrites no
-    // multi-byte character, so offsets into it are offsets into `text`.
+    // `parent::m(…)` / `self::m(…)` / `static::m(…)` / `Foo::m(…)`: another body,
+    // the same `$this`. The keywords and class names are case-insensitive in PHP;
+    // `to_ascii_lowercase` rewrites no multi-byte character, so offsets into it are
+    // offsets into `text`. A leading `\` before an FQN spelling (`\App\Foo::m(…)`)
+    // is not a name byte, so the left-boundary check below admits it unchanged.
     let lower = text.to_ascii_lowercase();
     let same_this_static_call = |kw: &str| {
         let mut i = 0usize;
@@ -14766,9 +14783,12 @@ fn this_prop_mentions(text: &str) -> ThisReach {
         false
     };
 
+    let owner_fqn_kw = format!("{}::", owner_fqn.to_ascii_lowercase());
+    let owner_name_kw = format!("{}::", owner_name.to_ascii_lowercase());
     let mut named: HashSet<String> = HashSet::new();
-    let mut escapes =
-        ["parent::", "self::", "static::"].iter().any(|kw| same_this_static_call(kw));
+    let mut escapes = ["parent::", "self::", "static::", owner_fqn_kw.as_str(), owner_name_kw.as_str()]
+        .iter()
+        .any(|kw| same_this_static_call(kw));
     let mut i = 0usize;
     while let Some(off) = text[i..].find("$this") {
         let mut j = i + off + "$this".len();
@@ -22150,7 +22170,8 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
         store.sweep_escaped();
     }
     // A call that runs with the SAME `$this` — `$this->m(…)`, `parent::m(…)`,
-    // `self::m(…)`, `static::m(…)`, `parent::__construct(…)` above all — writes
+    // `self::m(…)`, `static::m(…)`, `parent::__construct(…)` above all, and a
+    // `Foo::m(…)` compatible with the enclosing class-like (issue #417) — writes
     // properties this walk never executes: a descent into it seeds its own `$this`
     // (ADR-0086 §3 fills `receiver_var` for an exact `Receiver::Var` and for nothing
     // else), so its writes land in *its* store; an unresolved one is a body never read
@@ -22164,7 +22185,7 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     // in the body binds `$this` without naming it and is invoked through exactly such
     // an unresolved call, which is why the condition is the coarse one and not a leak
     // test.
-    let same_this = calls.iter().any(|c| runs_with_same_this(&c.receiver));
+    let same_this = calls.iter().any(|c| runs_with_same_this(w, c, &*store));
     if same_this || ((object_passed || unknown) && w.ctor_walk()) {
         store.sweep_this();
     }
@@ -22227,18 +22248,44 @@ fn escape_nested_args(
     }
 }
 
-/// Whether a call runs with the **same** `$this` as the walk making it (ADR-0057 C5):
-/// `$this->m(…)`, and the `self::`/`parent::`/`static::` spellings of the same thing —
-/// `parent::__construct(…)` is the shape that matters most. An explicitly named
-/// `Foo::m(…)` is a static call with no receiver and is not one of these, even where
-/// `Foo` happens to be the enclosing class (PHP would pass no `$this` unless the
-/// method is non-static and called from a compatible context — a shape the walk does
-/// not model and does not claim).
-fn runs_with_same_this(receiver: &Callee) -> bool {
-    match receiver {
+/// Whether a call runs with the **same** `$this` as the walk making it (ADR-0057 C5,
+/// closed symmetrically by issue #417): `$this->m(…)`, the `self::`/`parent::`/
+/// `static::` spellings of the same thing (`parent::__construct(…)` the shape that
+/// matters most), and an explicitly named `Foo::m(…)` where `Foo` resolves to the
+/// enclosing class-like or one of its ancestors and `m` is a non-static instance
+/// method — PHP forwards `$this` to a by-name static-syntax call exactly when the
+/// calling scope's `$this` is an instance of the named class (a "forwarding call",
+/// distinct from the deprecated calling-a-non-static-method-statically shape), so
+/// `Foo::m()` from inside `Foo` (or a subclass of `Foo`) is `self::m()` under another
+/// spelling and `Bar::m()` from somewhere unrelated to `Bar` carries no `$this` at
+/// all.
+///
+/// **Every uncertainty sweeps, on both legs it can arise on.** A completely
+/// enumerated hierarchy that excludes the named class ([`IsA::No`]) is the one case
+/// treated as unrelated; an incomplete one ([`IsA::Unknown`]) is not. Once the class
+/// is admitted, an unresolvable method (abstract, missing from the chain, private-
+/// blocked, a poisoned scope) is treated the same as a resolved non-static one — "an
+/// unresolved one is a body never read at all" (ADR-0057 C5) applies here exactly as
+/// it does to the keyword spellings; only a *resolved* **static** method is proven to
+/// carry no `$this`.
+fn runs_with_same_this(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
+    match &call.receiver {
         Callee::Method { receiver: Receiver::This, .. } => true,
-        Callee::Static { class, .. } => {
-            matches!(class, StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static)
+        Callee::Static { class: StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static, .. } => {
+            true
+        }
+        Callee::Static { class: StaticClass::Named(name), .. } => {
+            let Some(enclosing) = w.enclosing_class else { return false };
+            let fqn = w.cx.class_fqn(name);
+            if matches!(w.cx.is_a(enclosing, &fqn), IsA::No) {
+                return false; // a completely enumerated hierarchy excludes it
+            }
+            match resolve_call_target(
+                w.cx, &call.receiver, store, w.this_exact, w.enclosing_class, w.scope.poisoned,
+            ) {
+                Some(target) => !target.method.is_static,
+                None => true, // unresolvable: sweeps, as every uncertainty does
+            }
         }
         _ => false,
     }

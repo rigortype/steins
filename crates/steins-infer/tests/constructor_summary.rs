@@ -191,6 +191,56 @@ fn a_delegating_constructor_yields_nothing_and_never_the_stale_default() {
 }
 
 #[test]
+fn a_constructor_that_delegates_by_the_class_own_name_yields_nothing() {
+    // PINNED (issue #417): `Foo::init()` in `Foo`'s own constructor is `self::init()`
+    // under another spelling — the same walk, the same sweep (C5, generalized to a
+    // by-name static call whose class resolves to the enclosing class-like).
+    let src = "<?php\ndeclare(strict_types=1);\n\
+        class Del3 { public $value = 0;\n\
+        \x20 public function __construct() { Del3::init(); }\n\
+        \x20 private function init(): void { $this->value = 2; } }\n\
+        $d = new Del3();\n\\PHPStan\\dumpType($d->value);\n";
+    assert_eq!(dumped(src), "dumped type: unknown");
+}
+
+#[test]
+fn a_constructor_that_delegates_to_an_ancestor_by_name_yields_nothing() {
+    // The named class need only be an ancestor of the class whose constructor is
+    // running — `DBase::init()` written inside `DChild`'s own constructor still runs
+    // with `DChild`'s `$this` (PHP forwards it: `$this` is-a `DBase`).
+    let src = "<?php\ndeclare(strict_types=1);\n\
+        class DBase { public $value = 0; public function init(): void { $this->value = 2; } }\n\
+        class DChild extends DBase {\n\
+        \x20 public function __construct() { DBase::init(); } }\n\
+        $d = new DChild();\n\\PHPStan\\dumpType($d->value);\n";
+    assert_eq!(dumped(src), "dumped type: unknown");
+}
+
+#[test]
+fn a_constructor_that_calls_a_static_method_by_name_does_not_sweep() {
+    // A resolved STATIC method never carries `$this` (issue #417's other half): the
+    // constructor's own write stands.
+    let src = "<?php\ndeclare(strict_types=1);\n\
+        class Del4 { public $value = 0;\n\
+        \x20 public function __construct() { $this->value = 2; Del4::helper(); }\n\
+        \x20 public static function helper(): void {} }\n\
+        $d = new Del4();\n\\PHPStan\\dumpType($d->value);\n";
+    assert_eq!(dumped(src), "dumped type: 2");
+}
+
+#[test]
+fn a_constructor_that_calls_an_unrelated_class_by_name_does_not_sweep() {
+    // A class unrelated to the one whose constructor is running carries no `$this`
+    // either — the write stands, the precision payoff the ancestor check buys.
+    let src = "<?php\ndeclare(strict_types=1);\n\
+        class DOther { public function m(): void {} }\n\
+        class Del5 { public $value = 0;\n\
+        \x20 public function __construct() { $this->value = 2; DOther::m(); } }\n\
+        $d = new Del5();\n\\PHPStan\\dumpType($d->value);\n";
+    assert_eq!(dumped(src), "dumped type: 2");
+}
+
+#[test]
 fn a_constructor_that_leaks_this_yields_a_pre_escaped_swept_object() {
     // `register($this)` escapes the allocation inside the walk, and the sweep that
     // rides the same statement takes its non-readonly props with it. The `escaped`
