@@ -1,0 +1,27 @@
+coercive	strlen	string	int	0	accept
+coercive	strlen	string	float(1.5)	1.5	accept
+coercive	strlen	string	float(1.0)	1.0	accept
+coercive	strlen	string	string(numeric)	'5'	accept
+coercive	strlen	string	string(non-numeric)	'abc'	accept
+coercive	strlen	string	bool(true)	true	accept
+coercive	strlen	string	bool(false)	false	accept
+coercive	strlen	string	null	null	accept	deprecated
+coercive	strlen	string	array	[]	TypeError
+coercive	dechex	int	int	0	accept
+coercive	dechex	int	float(1.5)	1.5	accept	deprecated
+coercive	dechex	int	float(1.0)	1.0	accept
+coercive	dechex	int	string(numeric)	'5'	accept
+coercive	dechex	int	string(non-numeric)	'abc'	TypeError
+coercive	dechex	int	bool(true)	true	accept
+coercive	dechex	int	bool(false)	false	accept
+coercive	dechex	int	null	null	accept	deprecated
+coercive	dechex	int	array	[]	TypeError
+coercive	abs	int|float	int	0	accept
+coercive	abs	int|float	float(1.5)	1.5	accept
+coercive	abs	int|float	float(1.0)	1.0	accept
+coercive	abs	int|float	string(numeric)	'5'	accept
+coercive	abs	int|float	string(non-numeric)	'abc'	TypeError
+coercive	abs	int|float	bool(true)	true	accept
+coercive	abs	int|float	bool(false)	false	accept
+coercive	abs	int|float	null	null	accept	deprecated
+coercive	abs	int|float	array	[]	TypeError
