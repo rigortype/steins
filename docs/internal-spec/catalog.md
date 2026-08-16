@@ -81,9 +81,15 @@ The evidence discipline differs per class and is the point of the split:
   makes the discipline mechanical, and the playground's boundary panel composes
   its sentences from that instead of writing them itself.
 - **`Unverified`** claims nothing. It means nobody looked, and **the correct
-  number of probes behind a row here today is zero** — evidence would move the
-  row out, to `Portable` if the engines agree and to `Refused` with its
-  divergence if they do not.
+  number of probes behind a row here is zero** — evidence moves the row out, to
+  `Portable` if the engines agree and to `Refused` with its divergence if they
+  do not. **The class is empty today**, and that is the class working rather
+  than the class being retired: its last two rows, `array_merge` and `explode`,
+  were measured by `cargo xtask fold-probe` in issue #382 (25 and 13 tuples,
+  both calling conventions, zero silent and zero reverse) and both left for
+  `Portable`. An empty list is what "no outstanding debt" looks like; the class
+  stays so the next row admitted ahead of its evidence has somewhere honest to
+  sit.
 
 `Refused` and `Unverified` are *mechanically identical*: they ride the one
 `portable` question the fold gate asks, and neither folds on a narrow engine.
@@ -112,7 +118,8 @@ spots and they are worth stating:
   `mb_*` answered `widen: unknown function` for all eleven probes.
 
 A name reaches `Unverified` only when the fold is **strictly stronger** than the
-Rust rung it would shadow (the amendment's §5): `explode`'s rung is type-level
+Rust rung it would shadow (the amendment's §5) — the admission rule, which still
+governs even with no row currently in the class: `explode`'s rung is type-level
 (`non-empty-list<string>`), so the fold upgrades a type to a value on the
 all-literal path and the rung survives beneath it as the no-sidecar floor.
 `array_slice`, `array_combine` and `array_fill_keys` are excluded by that same
