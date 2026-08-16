@@ -500,3 +500,26 @@ and is refused in both directions. Deciding those needs a real is-a oracle at
 generation time, which is the same sidecar `reflect` extension element-level
 countersigning needs. One extension, two deferrals, and both now have their
 numbers written down.
+
+## Note (2026-08-17): parameters stay out of the floor
+
+ADR-0056 §9 gave builtins a **parameter** surface, read off the engine's own
+`ReflectionFunction::getParameters()`. It does not reach this table, and the
+asymmetry is §2's firewall rather than an ordering of work.
+
+A declared *return* is consumed by the dump surface and by contracts-tier
+reasoning, where an Asserted row is exactly the right grade: wrong, it costs
+precision. A declared *parameter* is consumed by the proof layer — it premises
+`type.argument-mismatch` on the default surface — where a wrong row costs a
+false positive on green code. To be useful in the argument direction a row
+would have to enter Verified, and no functionMap row may (§2, first bullet);
+to be admissible here it would have to stay Asserted, where the proof layer
+cannot cite it by construction and it would judge nothing at all. That is not
+a gap to be closed later: it is the same reasoning that put the floor in the
+Asserted lane in the first place, read in the other direction.
+
+So the builtin parameter surface is engine-only. `--no-php`, the pre-boot
+browser and a spawn failure answer `None` and judge no builtin argument —
+which is the sound subset (ADR-0004), and which keeps `steins check` and
+`steins check --no-php` differing in *reach* and never in *verdict*.
+ADR-0069's scope is unchanged: returns, by name, Asserted.

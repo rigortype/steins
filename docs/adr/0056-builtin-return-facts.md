@@ -374,3 +374,166 @@ otherwise unchanged.
   models the kind; the state would need a different mechanism.
 - **A `resource` value in the value domain.** Standing refusal, per
   ADR-0035/0038.
+
+## 9. Amendment (2026-08-17): R1's parameter twin
+
+Status: PENDING ratification.
+
+§8.7 left "resource-consuming parameters" out because the builtin
+*parameter* surface did not exist. Neither did any other parameter
+judgment about a builtin: `Folder::builtin_return_type` answered what a
+name gives back, `Folder::builtin_param_counts` (ADR-0064's arity leg)
+how many arguments it takes, and nothing answered what those arguments
+must **be**. So `strlen(1)` under `strict_types` was silent while
+`f(1)` on `function f(string $s)` was a finding, for no reason a reader
+of the code could account for — the argument relation was never the
+missing part, only the parameter it had nothing to judge against.
+
+This amendment gives R1 its parameter twin. It adds no new judgment, no
+new id and no new stratum: it adds a *source*, on the road R1 already
+built, and hands what it reads to the relation that has judged project
+parameters since ADR-0043.
+
+### 9.1 What the reflection answers
+
+`ReflectionFunction::getParameters()`, per position, on the same
+`reflect(target)` reply the return envelope rides (no new protocol
+method — the reply grows a `params` array):
+
+- `getName()` — so the finding can name `$string` the way PHP's own
+  `TypeError` does;
+- the `(string)` rendering of `getType()` (`"string"`, `"?int"`,
+  `"array|string"`), or nothing where the position declares no type;
+- `isPassedByReference()`, `isVariadic()`, `isOptional()`.
+
+**Verified**, on the same ground the envelope is: this is the running
+engine's own arginfo, read off the engine that will run the code, so it
+is version-correct by construction (§1) and immune to the rot §6
+refuses a signature map for. Nothing is recalled and nothing is
+curated — see §9.5.
+
+The gates are R1's, unchanged and shared: a live engine with no
+ADR-0049 A9 monkey-patcher loaded, the name resident as a *function*,
+and a project function of the same simple name refusing outright (its
+own declaration is the better answer, and the builtin is not what runs).
+Memoized once per lowercased name, exactly as the three rungs beside it.
+`--no-php`, a spawn failure, and a replay table recorded before the
+field all answer `None` — the reply parses whole or not at all, so an
+older row is an unanswerable position, never a guessed one. The static
+`functionMap` floor answers nothing here at all (§9.5).
+
+### 9.2 The judgment is the existing relation, unchanged
+
+At a call to a uniquely-resolved builtin, each positional argument is
+judged by the same two rungs a project argument meets, in the same
+order, at the **call-site file's** `strict_types`:
+
+1. the proven-value definite No — `is_type_error`, emitting
+   `type.argument-mismatch` on an all-`Verified` premise (ADR-0052 §5,
+   ADR-0002's bar);
+2. where no definite No fired, the possibly pair of ADR-0081's
+   2026-08-16 amendment (issues #391/#418) on an abstract premise,
+   with its carriers exactly as #418 leaves them.
+
+One relation, one coercion table, one set of ids. A builtin parameter
+and a project parameter of the same spelling are judged identically or
+not at all — which is the property that makes this slice a source and
+not a second checker.
+
+**The lowering is the declaration lowering.** The reflected string goes
+through `steins_contract::lower_str` — the seam the return envelope
+already reads — and then into the `NativeType` shape a project
+parameter's hint lowers to, under `lower_hint`'s discipline: the four
+scalar bases, the `true`/`false` literal members, `null` as the
+nullable flag, and **silence for everything else**. A single unmodeled
+member collapses the whole position, so `array|string`
+(`str_replace`'s first three) declines exactly as `array|string $x`
+written in a project signature does, and `array` (`array_map`'s second)
+declines exactly as `array $x` does. The issue's motivating list is
+therefore only partly answered here, and deliberately: what the native
+relation cannot say about a project parameter it does not learn to say
+about a builtin one.
+
+### 9.3 The one table difference: the internal-null coercive carve-out
+
+PHP's coercion table is not quite the same on both sides of the
+internal/userland line, in exactly one cell. From 8.1 on, passing
+`null` to a **non-nullable scalar parameter of an internal function**
+in coercive mode is a *deprecation*, not a `TypeError`:
+
+```
+$ php -r 'echo strlen(null);'
+Deprecated: strlen(): Passing null to parameter #1 ($string) of type
+string is deprecated
+0
+$ php -r 'declare(strict_types=1); echo strlen(null);'
+Fatal error: Uncaught TypeError: strlen(): Argument #1 ($string) must
+be of type string, null given
+```
+
+So a proven `null` into a builtin's non-nullable scalar parameter is
+**silent in a coercive file** and a finding in a strict one, and the
+possibly pair's `null` arm is suppressed on the same terms. The cell is
+measured, not recalled: `harness/coercion-grid/` — issue #391's witness
+harness — gains an internal grid
+(`witness-internal-{strict,coercive}.tsv`, produced by running the
+calls on the pinned PHP), and a test pins Steins' verdict against
+PHP's cell for cell, the way the userland grid has been pinned since
+#391. A deprecation is not this analyzer's business today (there is no
+id for one); if it ever becomes one, it becomes one on the mechanics
+layer with its own id, and never by weakening `type.argument-mismatch`
+into a maybe.
+
+### 9.4 What declines
+
+Each of these is silence, and each has a reason that is not
+"unimplemented":
+
+- **an untyped position** — nothing to judge against;
+- **`mixed`** — the total envelope, which refuses nothing (ADR-0064's
+  reason for the arity leg, in the parameter direction);
+- **a by-reference position** — the argument is an *out*-parameter
+  (`preg_match`'s `$matches`); what PHP requires of it is a variable,
+  not a value of a type;
+- **a variadic position, and every position after it** — the tail is a
+  spread, and one parameter binds many arguments;
+- **any type the native relation does not model** — `array`, `iterable`,
+  `callable`, `object`, `resource`, and (a v1 bound, unlike
+  `lower_hint`) a **class-typed** position: the reflected string carries
+  no source casing to display and the object-world definite No wants the
+  project's own class oracle for a class the project may never index;
+- **a named argument** — name-to-position binding for an internal
+  target is its own slice (v1; ADR-0049 §6's named-argument machinery
+  is userland-only today);
+- **argument unpacking** — the position of an argument after a spread
+  is a runtime fact;
+- **a name the folder does not answer** — no engine, a monkey-patcher,
+  a project function of the same name, a name this engine does not have.
+
+### 9.5 No parameter types in the static floor (ADR-0069)
+
+ADR-0069's `functionMap` import is **returns only, Asserted**, and this
+amendment does not widen it. A parameter type is consumed by the proof
+layer — it premises `type.argument-mismatch` on the default surface —
+and ADR-0069 §2's whole firewall is that no imported row ever carries
+that authority. A static parameter table would have to enter Verified
+to be useful here and Asserted to be admissible there, which is the
+contradiction that keeps it out. The parameter surface is engine-only,
+by the same rule §1 states for the envelope: the real thing draws the
+boundary.
+
+### 9.6 What stays out
+
+- **Method parameters.** §4's function-keyed bound, unchanged: the
+  reflected class world (issue #269) already carries per-method
+  parameter *counts*, and the types would arrive there, not here.
+- **Resource-consuming parameters** (§8.7's entry) — still out. A
+  `resource` position declines with the other unmodeled types, so
+  `fwrite($notAResource, …)` is silent; the direction now has a road,
+  not a judgment.
+- **Curated parameter refinements.** §1's composition is stated for
+  returns and is not extended: a curated `non-empty-string` *parameter*
+  would refuse values the engine accepts, which is a finding-adding
+  claim on hand-written evidence — the opposite of what curation is
+  admitted for.
+- **Deprecation findings.** See §9.3.
