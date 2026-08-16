@@ -126,11 +126,14 @@ means acceptance is not asked. Both together make the slice unable to emit.
 
 ## 3. Consequences accepted
 
-- **A Steins-only spelling.** PHPStan reads `unset` as a class, so a docblock
-  Steins writes carrying the word is a phantom class reference to PHPStan. This
-  is the same cost the refined-string grid already accepts by owner ruling
-  (2026-08-08): Steins' vocabulary is Steins' (ADR-0030). Registered as
-  divergence-registry core entry 15.
+- **A Steins-only spelling.** PHPStan *reports* `unset` as an unknown class, so
+  a docblock Steins writes carrying the word does not merely fail to lower
+  elsewhere — it is a finding there, and in the five other tools that resolve it
+  the same way. This is the cost the refined-string grid already accepts by
+  owner ruling (2026-08-08), reached by the same route: a word PHPStan has no
+  keyword for is a class reference to it. Steins' vocabulary is Steins'
+  (ADR-0030). Registered as divergence-registry core entry 15. Reading a
+  PHPStan-shaped annotation is unaffected — only what Steins writes diverges.
 - **`ContractTy` grows a variant that is not a type.** Five exhaustive matches
   in `steins-contract` and one each in `steins-infer` and `xtask` were extended;
   every other reader has a catch-all that already lands on an honest floor. The
