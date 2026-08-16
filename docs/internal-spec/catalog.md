@@ -386,6 +386,14 @@ the argument for why that tail is data; and every `invocation_shape` row names a
 position the engine declares callable, with every other declared-callable builtin
 either rowed or named in a closed exclusion list.
 
+> The same table drives `cargo xtask fold-probe`, the differential width probe:
+> its tuple families are keyed by **declared parameter type**, read from here, so
+> the generator's specification is a property of the signature rather than of
+> whoever wrote a per-name tuple list. Parameter *names* are mined for one
+> reason — only the name tells a size-shaped `int` (`$length`, `$times`,
+> `$count`) from an offset, and an oversized probe on the first is a
+> multi-gigabyte allocation and a dead runner.
+
 ## `return_fact(name)` — curated value-domain return refinements
 
 **Consumed** (ADR-0056 R3+R4). A small hand-curated table

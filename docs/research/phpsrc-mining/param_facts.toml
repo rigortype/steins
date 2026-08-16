@@ -118,6 +118,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int|float"]
+param_names = ["num"]
 params_required = 1
 
 [fn."addslashes"]
@@ -126,6 +127,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."array_all"]
@@ -134,6 +136,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."array_any"]
@@ -142,6 +145,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."array_diff"]
@@ -150,6 +154,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_diff_assoc"]
@@ -158,6 +163,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_diff_key"]
@@ -166,6 +172,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_diff_uassoc"]
@@ -174,6 +181,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_diff_ukey"]
@@ -182,6 +190,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_fill"]
@@ -190,6 +199,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int", "int", "mixed"]
+param_names = ["start_index", "count", "value"]
 params_required = 3
 
 [fn."array_filter"]
@@ -198,6 +208,7 @@ callable = [1]
 variadic = []
 optional = [1, 2]
 params = ["array", "?callable", "int"]
+param_names = ["array", "callback", "mode"]
 params_required = 1
 
 [fn."array_find"]
@@ -206,6 +217,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."array_find_key"]
@@ -214,6 +226,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."array_intersect"]
@@ -222,6 +235,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_intersect_assoc"]
@@ -230,6 +244,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_intersect_key"]
@@ -238,6 +253,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "arrays"]
 params_required = 1
 
 [fn."array_intersect_uassoc"]
@@ -246,6 +262,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_intersect_ukey"]
@@ -254,6 +271,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_map"]
@@ -262,6 +280,7 @@ callable = [0]
 variadic = [2]
 optional = [2]
 params = ["?callable", "array", "array"]
+param_names = ["callback", "array", "arrays"]
 params_required = 2
 
 [fn."array_merge"]
@@ -270,6 +289,7 @@ callable = []
 variadic = [0]
 optional = [0]
 params = ["array"]
+param_names = ["arrays"]
 params_required = 0
 
 [fn."array_merge_recursive"]
@@ -278,6 +298,7 @@ callable = []
 variadic = [0]
 optional = [0]
 params = ["array"]
+param_names = ["arrays"]
 params_required = 0
 
 [fn."array_multisort"]
@@ -286,6 +307,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_pop"]
@@ -294,6 +316,7 @@ callable = []
 variadic = []
 optional = []
 params = ["array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."array_push"]
@@ -302,6 +325,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "values"]
 params_required = 1
 
 [fn."array_reduce"]
@@ -310,6 +334,7 @@ callable = [1]
 variadic = []
 optional = [2]
 params = ["array", "callable", "mixed"]
+param_names = ["array", "callback", "initial"]
 params_required = 2
 
 [fn."array_replace"]
@@ -318,6 +343,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "replacements"]
 params_required = 1
 
 [fn."array_replace_recursive"]
@@ -326,6 +352,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "array"]
+param_names = ["array", "replacements"]
 params_required = 1
 
 [fn."array_shift"]
@@ -334,6 +361,7 @@ callable = []
 variadic = []
 optional = []
 params = ["array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."array_splice"]
@@ -342,6 +370,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["array", "int", "?int", "mixed"]
+param_names = ["array", "offset", "length", "replacement"]
 params_required = 2
 
 [fn."array_udiff"]
@@ -350,6 +379,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_udiff_assoc"]
@@ -358,6 +388,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_udiff_uassoc"]
@@ -366,6 +397,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_uintersect"]
@@ -374,6 +406,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_uintersect_assoc"]
@@ -382,6 +415,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_uintersect_uassoc"]
@@ -390,6 +424,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "rest"]
 params_required = 1
 
 [fn."array_unique"]
@@ -398,6 +433,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."array_unshift"]
@@ -406,6 +442,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["array", "mixed"]
+param_names = ["array", "values"]
 params_required = 1
 
 [fn."array_walk"]
@@ -414,6 +451,7 @@ callable = [1]
 variadic = []
 optional = [2]
 params = ["object|array", "callable", "mixed"]
+param_names = ["array", "callback", "arg"]
 params_required = 2
 
 [fn."array_walk_recursive"]
@@ -422,6 +460,7 @@ callable = [1]
 variadic = []
 optional = [2]
 params = ["object|array", "callable", "mixed"]
+param_names = ["array", "callback", "arg"]
 params_required = 2
 
 [fn."arsort"]
@@ -430,6 +469,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."asort"]
@@ -438,6 +478,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."base64_decode"]
@@ -446,6 +487,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "bool"]
+param_names = ["string", "strict"]
 params_required = 1
 
 [fn."base64_encode"]
@@ -454,6 +496,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."bindec"]
@@ -462,6 +505,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["binary_string"]
 params_required = 1
 
 [fn."boolval"]
@@ -470,6 +514,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed"]
+param_names = ["value"]
 params_required = 1
 
 [fn."call_user_func"]
@@ -478,6 +523,7 @@ callable = [0]
 variadic = [1]
 optional = [1]
 params = ["callable", "mixed"]
+param_names = ["callback", "args"]
 params_required = 1
 
 [fn."call_user_func_array"]
@@ -486,6 +532,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable", "array"]
+param_names = ["callback", "args"]
 params_required = 2
 
 [fn."ceil"]
@@ -494,6 +541,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int|float"]
+param_names = ["num"]
 params_required = 1
 
 [fn."chop"]
@@ -502,6 +550,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "string"]
+param_names = ["string", "characters"]
 params_required = 1
 
 [fn."collator_asort"]
@@ -510,6 +559,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Collator", "array", "int"]
+param_names = ["object", "array", "flags"]
 params_required = 2
 
 [fn."collator_sort"]
@@ -518,6 +568,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Collator", "array", "int"]
+param_names = ["object", "array", "flags"]
 params_required = 2
 
 [fn."collator_sort_with_sort_keys"]
@@ -526,6 +577,7 @@ callable = []
 variadic = []
 optional = []
 params = ["Collator", "array"]
+param_names = ["object", "array"]
 params_required = 2
 
 [fn."compact"]
@@ -534,6 +586,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["var_name", "var_names"]
 params_required = 1
 
 [fn."count"]
@@ -542,6 +595,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["Countable|array", "int"]
+param_names = ["value", "mode"]
 params_required = 1
 
 [fn."curl_multi_exec"]
@@ -550,6 +604,7 @@ callable = []
 variadic = []
 optional = []
 params = ["CurlMultiHandle", "mixed"]
+param_names = ["multi_handle", "still_running"]
 params_required = 2
 
 [fn."curl_multi_info_read"]
@@ -558,6 +613,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["CurlMultiHandle", "mixed"]
+param_names = ["multi_handle", "queued_messages"]
 params_required = 1
 
 [fn."datefmt_localtime"]
@@ -566,6 +622,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["IntlDateFormatter", "string", "mixed"]
+param_names = ["formatter", "string", "offset"]
 params_required = 2
 
 [fn."datefmt_parse"]
@@ -574,6 +631,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["IntlDateFormatter", "string", "mixed"]
+param_names = ["formatter", "string", "offset"]
 params_required = 2
 
 [fn."debug_zval_dump"]
@@ -582,6 +640,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["value", "values"]
 params_required = 1
 
 [fn."decbin"]
@@ -590,6 +649,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int"]
+param_names = ["num"]
 params_required = 1
 
 [fn."dechex"]
@@ -598,6 +658,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int"]
+param_names = ["num"]
 params_required = 1
 
 [fn."decoct"]
@@ -606,6 +667,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int"]
+param_names = ["num"]
 params_required = 1
 
 [fn."dns_get_mx"]
@@ -614,6 +676,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "mixed", "mixed"]
+param_names = ["hostname", "hosts", "weights"]
 params_required = 2
 
 [fn."dns_get_record"]
@@ -622,6 +685,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4]
 params = ["string", "int", "mixed", "mixed", "bool"]
+param_names = ["hostname", "type", "authoritative_name_servers", "additional_records", "raw"]
 params_required = 1
 
 [fn."doubleval"]
@@ -630,6 +694,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed"]
+param_names = ["value"]
 params_required = 1
 
 [fn."end"]
@@ -638,6 +703,7 @@ callable = []
 variadic = []
 optional = []
 params = ["object|array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."exec"]
@@ -646,6 +712,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["string", "mixed", "mixed"]
+param_names = ["command", "output", "result_code"]
 params_required = 1
 
 [fn."exif_thumbnail"]
@@ -654,6 +721,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3]
 params = ["mixed", "mixed", "mixed", "mixed"]
+param_names = ["file", "width", "height", "image_type"]
 params_required = 1
 
 [fn."explode"]
@@ -662,6 +730,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "int"]
+param_names = ["separator", "string", "limit"]
 params_required = 2
 
 [fn."extract"]
@@ -670,6 +739,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["array", "int", "string"]
+param_names = ["array", "flags", "prefix"]
 params_required = 1
 
 [fn."floatval"]
@@ -678,6 +748,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed"]
+param_names = ["value"]
 params_required = 1
 
 [fn."flock"]
@@ -686,6 +757,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["mixed", "int", "mixed"]
+param_names = ["stream", "operation", "would_block"]
 params_required = 2
 
 [fn."floor"]
@@ -694,6 +766,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int|float"]
+param_names = ["num"]
 params_required = 1
 
 [fn."forward_static_call"]
@@ -702,6 +775,7 @@ callable = [0]
 variadic = [1]
 optional = [1]
 params = ["callable", "mixed"]
+param_names = ["callback", "args"]
 params_required = 1
 
 [fn."forward_static_call_array"]
@@ -710,6 +784,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable", "array"]
+param_names = ["callback", "args"]
 params_required = 2
 
 [fn."fprintf"]
@@ -718,6 +793,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["mixed", "string", "mixed"]
+param_names = ["stream", "format", "values"]
 params_required = 2
 
 [fn."fscanf"]
@@ -726,6 +802,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["mixed", "string", "mixed"]
+param_names = ["stream", "format", "vars"]
 params_required = 2
 
 [fn."fsockopen"]
@@ -734,6 +811,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4]
 params = ["string", "int", "mixed", "mixed", "?float"]
+param_names = ["hostname", "port", "error_code", "error_message", "timeout"]
 params_required = 1
 
 [fn."ftp_alloc"]
@@ -742,6 +820,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["FTP\\Connection", "int", "mixed"]
+param_names = ["ftp", "size", "response"]
 params_required = 2
 
 [fn."getimagesize"]
@@ -750,6 +829,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["filename", "image_info"]
 params_required = 1
 
 [fn."getimagesizefromstring"]
@@ -758,6 +838,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["string", "image_info"]
 params_required = 1
 
 [fn."getmxrr"]
@@ -766,6 +847,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "mixed", "mixed"]
+param_names = ["hostname", "hosts", "weights"]
 params_required = 2
 
 [fn."getopt"]
@@ -774,6 +856,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["string", "array", "mixed"]
+param_names = ["short_options", "long_options", "rest_index"]
 params_required = 1
 
 [fn."gettype"]
@@ -782,6 +865,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed"]
+param_names = ["value"]
 params_required = 1
 
 [fn."gnupg_decryptverify"]
@@ -790,6 +874,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed", "mixed", "mixed"]
+param_names = ["res", "enctext", "plaintext"]
 params_required = 3
 
 [fn."gnupg_verify"]
@@ -798,6 +883,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["mixed", "mixed", "mixed", "mixed"]
+param_names = ["res", "text", "signature", "plaintext"]
 params_required = 3
 
 [fn."grapheme_extract"]
@@ -806,6 +892,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4]
 params = ["string", "int", "int", "int", "mixed"]
+param_names = ["haystack", "size", "type", "offset", "next"]
 params_required = 2
 
 [fn."header_register_callback"]
@@ -814,6 +901,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable"]
+param_names = ["callback"]
 params_required = 1
 
 [fn."headers_sent"]
@@ -822,6 +910,7 @@ callable = []
 variadic = []
 optional = [0, 1]
 params = ["mixed", "mixed"]
+param_names = ["filename", "line"]
 params_required = 0
 
 [fn."hexdec"]
@@ -830,6 +919,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["hex_string"]
 params_required = 1
 
 [fn."idn_to_ascii"]
@@ -838,6 +928,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3]
 params = ["string", "int", "int", "mixed"]
+param_names = ["domain", "flags", "variant", "idna_info"]
 params_required = 1
 
 [fn."idn_to_utf8"]
@@ -846,6 +937,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3]
 params = ["string", "int", "int", "mixed"]
+param_names = ["domain", "flags", "variant", "idna_info"]
 params_required = 1
 
 [fn."imagefilter"]
@@ -854,6 +946,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["GdImage", "int", "mixed"]
+param_names = ["image", "filter", "args"]
 params_required = 2
 
 [fn."implode"]
@@ -862,6 +955,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array|string", "?array"]
+param_names = ["separator", "array"]
 params_required = 1
 
 [fn."in_array"]
@@ -870,6 +964,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["mixed", "array", "bool"]
+param_names = ["needle", "haystack", "strict"]
 params_required = 2
 
 [fn."intdiv"]
@@ -878,6 +973,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int", "int"]
+param_names = ["num1", "num2"]
 params_required = 2
 
 [fn."intltz_get_canonical_id"]
@@ -886,6 +982,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["timezoneId", "isSystemId"]
 params_required = 1
 
 [fn."intltz_get_offset"]
@@ -894,6 +991,7 @@ callable = []
 variadic = []
 optional = []
 params = ["IntlTimeZone", "float", "bool", "mixed", "mixed"]
+param_names = ["timezone", "timestamp", "local", "rawOffset", "dstOffset"]
 params_required = 5
 
 [fn."intval"]
@@ -902,6 +1000,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["mixed", "int"]
+param_names = ["value", "base"]
 params_required = 1
 
 [fn."is_callable"]
@@ -910,6 +1009,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["mixed", "bool", "mixed"]
+param_names = ["value", "syntax_only", "callable_name"]
 params_required = 1
 
 [fn."iterator_apply"]
@@ -918,6 +1018,7 @@ callable = [1]
 variadic = []
 optional = [2]
 params = ["Traversable", "callable", "?array"]
+param_names = ["iterator", "callback", "args"]
 params_required = 2
 
 [fn."join"]
@@ -926,6 +1027,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array|string", "?array"]
+param_names = ["separator", "array"]
 params_required = 1
 
 [fn."krsort"]
@@ -934,6 +1036,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."ksort"]
@@ -942,6 +1045,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."lcfirst"]
@@ -950,6 +1054,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."ldap_exop"]
@@ -958,6 +1063,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4, 5]
 params = ["LDAP\\Connection", "string", "?string", "?array", "mixed", "mixed"]
+param_names = ["ldap", "request_oid", "request_data", "controls", "response_data", "response_oid"]
 params_required = 2
 
 [fn."ldap_exop_passwd"]
@@ -966,6 +1072,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4]
 params = ["LDAP\\Connection", "string", "string", "string", "mixed"]
+param_names = ["ldap", "user", "old_password", "new_password", "controls"]
 params_required = 1
 
 [fn."ldap_exop_sync"]
@@ -974,6 +1081,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4, 5]
 params = ["LDAP\\Connection", "string", "?string", "?array", "mixed", "mixed"]
+param_names = ["ldap", "request_oid", "request_data", "controls", "response_data", "response_oid"]
 params_required = 2
 
 [fn."ldap_get_option"]
@@ -982,6 +1090,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["?LDAP\\Connection", "int", "mixed"]
+param_names = ["ldap", "option", "value"]
 params_required = 2
 
 [fn."ldap_parse_exop"]
@@ -990,6 +1099,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["LDAP\\Connection", "LDAP\\Result", "mixed", "mixed"]
+param_names = ["ldap", "result", "response_data", "response_oid"]
 params_required = 2
 
 [fn."ldap_parse_reference"]
@@ -998,6 +1108,7 @@ callable = []
 variadic = []
 optional = []
 params = ["LDAP\\Connection", "LDAP\\ResultEntry", "mixed"]
+param_names = ["ldap", "entry", "referrals"]
 params_required = 3
 
 [fn."ldap_parse_result"]
@@ -1006,6 +1117,7 @@ callable = []
 variadic = []
 optional = [3, 4, 5, 6]
 params = ["LDAP\\Connection", "LDAP\\Result", "mixed", "mixed", "mixed", "mixed", "mixed"]
+param_names = ["ldap", "result", "error_code", "matched_dn", "error_message", "referrals", "controls"]
 params_required = 3
 
 [fn."ldap_set_rebind_proc"]
@@ -1014,6 +1126,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["LDAP\\Connection", "?callable"]
+param_names = ["ldap", "callback"]
 params_required = 2
 
 [fn."libxml_set_external_entity_loader"]
@@ -1022,6 +1135,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["?callable"]
+param_names = ["resolver_function"]
 params_required = 1
 
 [fn."ltrim"]
@@ -1030,6 +1144,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "string"]
+param_names = ["string", "characters"]
 params_required = 1
 
 [fn."max"]
@@ -1038,6 +1153,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["value", "values"]
 params_required = 1
 
 [fn."mb_convert_variables"]
@@ -1046,6 +1162,7 @@ callable = []
 variadic = [3]
 optional = [3]
 params = ["string", "array|string", "mixed", "mixed"]
+param_names = ["to_encoding", "from_encoding", "var", "vars"]
 params_required = 3
 
 [fn."mb_ereg"]
@@ -1054,6 +1171,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "mixed"]
+param_names = ["pattern", "string", "matches"]
 params_required = 2
 
 [fn."mb_ereg_replace_callback"]
@@ -1062,6 +1180,7 @@ callable = [1]
 variadic = []
 optional = [3]
 params = ["string", "callable", "string", "?string"]
+param_names = ["pattern", "callback", "string", "options"]
 params_required = 3
 
 [fn."mb_eregi"]
@@ -1070,6 +1189,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "mixed"]
+param_names = ["pattern", "string", "matches"]
 params_required = 2
 
 [fn."mb_parse_str"]
@@ -1078,6 +1198,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "mixed"]
+param_names = ["string", "result"]
 params_required = 2
 
 [fn."min"]
@@ -1086,6 +1207,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["value", "values"]
 params_required = 1
 
 [fn."msg_receive"]
@@ -1094,6 +1216,7 @@ callable = []
 variadic = []
 optional = [5, 6, 7]
 params = ["SysvMessageQueue", "int", "mixed", "int", "mixed", "bool", "int", "mixed"]
+param_names = ["queue", "desired_message_type", "received_message_type", "max_message_size", "message", "unserialize", "flags", "error_code"]
 params_required = 5
 
 [fn."msg_send"]
@@ -1102,6 +1225,7 @@ callable = []
 variadic = []
 optional = [3, 4, 5]
 params = ["SysvMessageQueue", "int", "mixed", "bool", "bool", "mixed"]
+param_names = ["queue", "message_type", "message", "serialize", "blocking", "error_code"]
 params_required = 3
 
 [fn."mysqli_poll"]
@@ -1110,6 +1234,7 @@ callable = []
 variadic = []
 optional = [4]
 params = ["?array", "?array", "array", "int", "int"]
+param_names = ["read", "error", "reject", "seconds", "microseconds"]
 params_required = 4
 
 [fn."mysqli_stmt_bind_param"]
@@ -1118,6 +1243,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["mysqli_stmt", "string", "mixed"]
+param_names = ["statement", "types", "vars"]
 params_required = 2
 
 [fn."mysqli_stmt_bind_result"]
@@ -1126,6 +1252,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mysqli_stmt", "mixed"]
+param_names = ["statement", "vars"]
 params_required = 1
 
 [fn."natcasesort"]
@@ -1134,6 +1261,7 @@ callable = []
 variadic = []
 optional = []
 params = ["array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."natsort"]
@@ -1142,6 +1270,7 @@ callable = []
 variadic = []
 optional = []
 params = ["array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."next"]
@@ -1150,6 +1279,7 @@ callable = []
 variadic = []
 optional = []
 params = ["object|array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."numfmt_parse"]
@@ -1158,6 +1288,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["NumberFormatter", "string", "int", "mixed"]
+param_names = ["formatter", "string", "type", "offset"]
 params_required = 2
 
 [fn."numfmt_parse_currency"]
@@ -1166,6 +1297,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["NumberFormatter", "string", "mixed", "mixed"]
+param_names = ["formatter", "string", "currency", "offset"]
 params_required = 3
 
 [fn."odbc_fetch_into"]
@@ -1174,6 +1306,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Odbc\\Result", "mixed", "?int"]
+param_names = ["statement", "array", "row"]
 params_required = 2
 
 [fn."opcache_jit_blacklist"]
@@ -1182,6 +1315,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["Closure"]
+param_names = ["closure"]
 params_required = 1
 
 [fn."openssl_cms_read"]
@@ -1190,6 +1324,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "mixed"]
+param_names = ["input_filename", "certificates"]
 params_required = 2
 
 [fn."openssl_csr_export"]
@@ -1198,6 +1333,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["OpenSSLCertificateSigningRequest|string", "mixed", "bool"]
+param_names = ["csr", "output", "no_text"]
 params_required = 2
 
 [fn."openssl_csr_new"]
@@ -1206,6 +1342,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["array", "mixed", "?array", "?array"]
+param_names = ["distinguished_names", "private_key", "options", "extra_attributes"]
 params_required = 2
 
 [fn."openssl_encrypt"]
@@ -1214,6 +1351,7 @@ callable = []
 variadic = []
 optional = [3, 4, 5, 6, 7]
 params = ["string", "string", "string", "int", "string", "mixed", "string", "int"]
+param_names = ["data", "cipher_algo", "passphrase", "options", "iv", "tag", "aad", "tag_length"]
 params_required = 3
 
 [fn."openssl_open"]
@@ -1222,6 +1360,7 @@ callable = []
 variadic = []
 optional = [5]
 params = ["string", "mixed", "string", "mixed", "string", "?string"]
+param_names = ["data", "output", "encrypted_key", "private_key", "cipher_algo", "iv"]
 params_required = 5
 
 [fn."openssl_pkcs12_export"]
@@ -1230,6 +1369,7 @@ callable = []
 variadic = []
 optional = [4]
 params = ["OpenSSLCertificate|string", "mixed", "mixed", "string", "array"]
+param_names = ["certificate", "output", "private_key", "passphrase", "options"]
 params_required = 4
 
 [fn."openssl_pkcs12_read"]
@@ -1238,6 +1378,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "mixed", "string"]
+param_names = ["pkcs12", "certificates", "passphrase"]
 params_required = 3
 
 [fn."openssl_pkcs7_read"]
@@ -1246,6 +1387,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "mixed"]
+param_names = ["data", "certificates"]
 params_required = 2
 
 [fn."openssl_pkey_export"]
@@ -1254,6 +1396,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["mixed", "mixed", "?string", "?array"]
+param_names = ["key", "output", "passphrase", "options"]
 params_required = 2
 
 [fn."openssl_private_decrypt"]
@@ -1262,6 +1405,7 @@ callable = []
 variadic = []
 optional = [3, 4]
 params = ["string", "mixed", "mixed", "int", "?string"]
+param_names = ["data", "decrypted_data", "private_key", "padding", "digest_algo"]
 params_required = 3
 
 [fn."openssl_private_encrypt"]
@@ -1270,6 +1414,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["string", "mixed", "mixed", "int"]
+param_names = ["data", "encrypted_data", "private_key", "padding"]
 params_required = 3
 
 [fn."openssl_public_decrypt"]
@@ -1278,6 +1423,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["string", "mixed", "mixed", "int"]
+param_names = ["data", "decrypted_data", "public_key", "padding"]
 params_required = 3
 
 [fn."openssl_public_encrypt"]
@@ -1286,6 +1432,7 @@ callable = []
 variadic = []
 optional = [3, 4]
 params = ["string", "mixed", "mixed", "int", "?string"]
+param_names = ["data", "encrypted_data", "public_key", "padding", "digest_algo"]
 params_required = 3
 
 [fn."openssl_random_pseudo_bytes"]
@@ -1294,6 +1441,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["int", "mixed"]
+param_names = ["length", "strong_result"]
 params_required = 1
 
 [fn."openssl_seal"]
@@ -1302,6 +1450,7 @@ callable = []
 variadic = []
 optional = [5]
 params = ["string", "mixed", "mixed", "array", "string", "mixed"]
+param_names = ["data", "sealed_data", "encrypted_keys", "public_key", "cipher_algo", "iv"]
 params_required = 5
 
 [fn."openssl_sign"]
@@ -1310,6 +1459,7 @@ callable = []
 variadic = []
 optional = [3, 4]
 params = ["string", "mixed", "mixed", "string|int", "int"]
+param_names = ["data", "signature", "private_key", "algorithm", "padding"]
 params_required = 3
 
 [fn."openssl_x509_export"]
@@ -1318,6 +1468,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["OpenSSLCertificate|string", "mixed", "bool"]
+param_names = ["certificate", "output", "no_text"]
 params_required = 2
 
 [fn."pack"]
@@ -1326,6 +1477,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["format", "values"]
 params_required = 1
 
 [fn."parse_str"]
@@ -1334,6 +1486,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "mixed"]
+param_names = ["string", "result"]
 params_required = 2
 
 [fn."passthru"]
@@ -1342,6 +1495,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["command", "result_code"]
 params_required = 1
 
 [fn."pcntl_sigprocmask"]
@@ -1350,6 +1504,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["int", "array", "mixed"]
+param_names = ["mode", "signals", "old_signals"]
 params_required = 2
 
 [fn."pcntl_wait"]
@@ -1358,6 +1513,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["mixed", "int", "mixed"]
+param_names = ["status", "flags", "resource_usage"]
 params_required = 1
 
 [fn."pcntl_waitid"]
@@ -1366,6 +1522,7 @@ callable = []
 variadic = []
 optional = [0, 1, 2, 3, 4]
 params = ["int", "?int", "mixed", "int", "mixed"]
+param_names = ["idtype", "id", "info", "flags", "resource_usage"]
 params_required = 0
 
 [fn."pcntl_waitpid"]
@@ -1374,6 +1531,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["int", "mixed", "int", "mixed"]
+param_names = ["process_id", "status", "flags", "resource_usage"]
 params_required = 2
 
 [fn."pfsockopen"]
@@ -1382,6 +1540,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4]
 params = ["string", "int", "mixed", "mixed", "?float"]
+param_names = ["hostname", "port", "error_code", "error_message", "timeout"]
 params_required = 1
 
 [fn."preg_filter"]
@@ -1390,6 +1549,7 @@ callable = []
 variadic = []
 optional = [3, 4]
 params = ["array|string", "array|string", "array|string", "int", "mixed"]
+param_names = ["pattern", "replacement", "subject", "limit", "count"]
 params_required = 3
 
 [fn."preg_match"]
@@ -1398,6 +1558,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4]
 params = ["string", "string", "mixed", "int", "int"]
+param_names = ["pattern", "subject", "matches", "flags", "offset"]
 params_required = 2
 
 [fn."preg_match_all"]
@@ -1406,6 +1567,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4]
 params = ["string", "string", "mixed", "int", "int"]
+param_names = ["pattern", "subject", "matches", "flags", "offset"]
 params_required = 2
 
 [fn."preg_quote"]
@@ -1414,6 +1576,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "?string"]
+param_names = ["str", "delimiter"]
 params_required = 1
 
 [fn."preg_replace"]
@@ -1422,6 +1585,7 @@ callable = []
 variadic = []
 optional = [3, 4]
 params = ["array|string", "array|string", "array|string", "int", "mixed"]
+param_names = ["pattern", "replacement", "subject", "limit", "count"]
 params_required = 3
 
 [fn."preg_replace_callback"]
@@ -1430,6 +1594,7 @@ callable = [1]
 variadic = []
 optional = [3, 4, 5]
 params = ["array|string", "callable", "array|string", "int", "mixed", "int"]
+param_names = ["pattern", "callback", "subject", "limit", "count", "flags"]
 params_required = 3
 
 [fn."preg_replace_callback_array"]
@@ -1438,6 +1603,7 @@ callable = []
 variadic = []
 optional = [2, 3, 4]
 params = ["array", "array|string", "int", "mixed", "int"]
+param_names = ["pattern", "subject", "limit", "count", "flags"]
 params_required = 2
 
 [fn."preg_split"]
@@ -1446,6 +1612,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["string", "string", "int", "int"]
+param_names = ["pattern", "subject", "limit", "flags"]
 params_required = 2
 
 [fn."prev"]
@@ -1454,6 +1621,7 @@ callable = []
 variadic = []
 optional = []
 params = ["object|array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."printf"]
@@ -1462,6 +1630,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["format", "values"]
 params_required = 1
 
 [fn."proc_open"]
@@ -1470,6 +1639,7 @@ callable = []
 variadic = []
 optional = [3, 4, 5]
 params = ["array|string", "array", "mixed", "?string", "?array", "?array"]
+param_names = ["command", "descriptor_spec", "pipes", "cwd", "env_vars", "options"]
 params_required = 3
 
 [fn."range"]
@@ -1478,6 +1648,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string|int|float", "string|int|float", "int|float"]
+param_names = ["start", "end", "step"]
 params_required = 2
 
 [fn."rawurldecode"]
@@ -1486,6 +1657,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."rawurlencode"]
@@ -1494,6 +1666,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."readline_callback_handler_install"]
@@ -1502,6 +1675,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["string", "callable"]
+param_names = ["prompt", "callback"]
 params_required = 2
 
 [fn."readline_completion_function"]
@@ -1510,6 +1684,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable"]
+param_names = ["callback"]
 params_required = 1
 
 [fn."register_shutdown_function"]
@@ -1518,6 +1693,7 @@ callable = [0]
 variadic = [1]
 optional = [1]
 params = ["callable", "mixed"]
+param_names = ["callback", "args"]
 params_required = 1
 
 [fn."register_tick_function"]
@@ -1526,6 +1702,7 @@ callable = [0]
 variadic = [1]
 optional = [1]
 params = ["callable", "mixed"]
+param_names = ["callback", "args"]
 params_required = 1
 
 [fn."reset"]
@@ -1534,6 +1711,7 @@ callable = []
 variadic = []
 optional = []
 params = ["object|array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."round"]
@@ -1542,6 +1720,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["int|float", "int", "RoundingMode|int"]
+param_names = ["num", "precision", "mode"]
 params_required = 1
 
 [fn."rsort"]
@@ -1550,6 +1729,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."rtrim"]
@@ -1558,6 +1738,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "string"]
+param_names = ["string", "characters"]
 params_required = 1
 
 [fn."session_set_save_handler"]
@@ -1566,6 +1747,7 @@ callable = [2, 3, 4, 5, 6, 7, 8]
 variadic = []
 optional = [1, 2, 3, 4, 5, 6, 7, 8]
 params = ["mixed", "mixed", "callable", "callable", "callable", "callable", "?callable", "?callable", "?callable"]
+param_names = ["open", "close", "read", "write", "destroy", "gc", "create_sid", "validate_sid", "update_timestamp"]
 params_required = 1
 
 [fn."set_error_handler"]
@@ -1574,6 +1756,7 @@ callable = [0]
 variadic = []
 optional = [1]
 params = ["?callable", "int"]
+param_names = ["callback", "error_levels"]
 params_required = 1
 
 [fn."set_exception_handler"]
@@ -1582,6 +1765,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["?callable"]
+param_names = ["callback"]
 params_required = 1
 
 [fn."setlocale"]
@@ -1590,6 +1774,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["int", "mixed", "mixed"]
+param_names = ["category", "locales", "rest"]
 params_required = 2
 
 [fn."settype"]
@@ -1598,6 +1783,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed", "string"]
+param_names = ["var", "type"]
 params_required = 2
 
 [fn."shuffle"]
@@ -1606,6 +1792,7 @@ callable = []
 variadic = []
 optional = []
 params = ["array"]
+param_names = ["array"]
 params_required = 1
 
 [fn."similar_text"]
@@ -1614,6 +1801,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "mixed"]
+param_names = ["string1", "string2", "percent"]
 params_required = 2
 
 [fn."sizeof"]
@@ -1622,6 +1810,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["Countable|array", "int"]
+param_names = ["value", "mode"]
 params_required = 1
 
 [fn."socket_create_pair"]
@@ -1630,6 +1819,7 @@ callable = []
 variadic = []
 optional = []
 params = ["int", "int", "int", "mixed"]
+param_names = ["domain", "type", "protocol", "pair"]
 params_required = 4
 
 [fn."socket_getpeername"]
@@ -1638,6 +1828,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Socket", "mixed", "mixed"]
+param_names = ["socket", "address", "port"]
 params_required = 2
 
 [fn."socket_getsockname"]
@@ -1646,6 +1837,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Socket", "mixed", "mixed"]
+param_names = ["socket", "address", "port"]
 params_required = 2
 
 [fn."socket_recv"]
@@ -1654,6 +1846,7 @@ callable = []
 variadic = []
 optional = []
 params = ["Socket", "mixed", "int", "int"]
+param_names = ["socket", "data", "length", "flags"]
 params_required = 4
 
 [fn."socket_recvfrom"]
@@ -1662,6 +1855,7 @@ callable = []
 variadic = []
 optional = [5]
 params = ["Socket", "mixed", "int", "int", "mixed", "mixed"]
+param_names = ["socket", "data", "length", "flags", "address", "port"]
 params_required = 5
 
 [fn."socket_recvmsg"]
@@ -1670,6 +1864,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["Socket", "array", "int"]
+param_names = ["socket", "message", "flags"]
 params_required = 2
 
 [fn."socket_select"]
@@ -1678,6 +1873,7 @@ callable = []
 variadic = []
 optional = [4]
 params = ["?array", "?array", "?array", "?int", "int"]
+param_names = ["read", "write", "except", "seconds", "microseconds"]
 params_required = 4
 
 [fn."sodium_add"]
@@ -1686,6 +1882,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "string"]
+param_names = ["string1", "string2"]
 params_required = 2
 
 [fn."sodium_crypto_generichash_final"]
@@ -1694,6 +1891,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "int"]
+param_names = ["state", "length"]
 params_required = 1
 
 [fn."sodium_crypto_generichash_update"]
@@ -1702,6 +1900,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "string"]
+param_names = ["state", "message"]
 params_required = 2
 
 [fn."sodium_crypto_secretstream_xchacha20poly1305_pull"]
@@ -1710,6 +1909,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "string"]
+param_names = ["state", "ciphertext", "additional_data"]
 params_required = 2
 
 [fn."sodium_crypto_secretstream_xchacha20poly1305_push"]
@@ -1718,6 +1918,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["string", "string", "string", "int"]
+param_names = ["state", "message", "additional_data", "tag"]
 params_required = 2
 
 [fn."sodium_crypto_secretstream_xchacha20poly1305_rekey"]
@@ -1726,6 +1927,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["state"]
 params_required = 1
 
 [fn."sodium_increment"]
@@ -1734,6 +1936,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."sodium_memzero"]
@@ -1742,6 +1945,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."sort"]
@@ -1750,6 +1954,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["array", "int"]
+param_names = ["array", "flags"]
 params_required = 1
 
 [fn."spl_autoload_register"]
@@ -1758,6 +1963,7 @@ callable = [0]
 variadic = []
 optional = [0, 1, 2]
 params = ["?callable", "bool", "bool"]
+param_names = ["callback", "throw", "prepend"]
 params_required = 0
 
 [fn."spl_autoload_unregister"]
@@ -1766,6 +1972,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable"]
+param_names = ["callback"]
 params_required = 1
 
 [fn."sprintf"]
@@ -1774,6 +1981,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["format", "values"]
 params_required = 1
 
 [fn."sscanf"]
@@ -1782,6 +1990,7 @@ callable = []
 variadic = [2]
 optional = [2]
 params = ["string", "string", "mixed"]
+param_names = ["string", "format", "vars"]
 params_required = 2
 
 [fn."str_contains"]
@@ -1790,6 +1999,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "string"]
+param_names = ["haystack", "needle"]
 params_required = 2
 
 [fn."str_decrement"]
@@ -1798,6 +2008,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."str_ends_with"]
@@ -1806,6 +2017,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "string"]
+param_names = ["haystack", "needle"]
 params_required = 2
 
 [fn."str_increment"]
@@ -1814,6 +2026,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."str_ireplace"]
@@ -1822,6 +2035,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["array|string", "array|string", "array|string", "mixed"]
+param_names = ["search", "replace", "subject", "count"]
 params_required = 3
 
 [fn."str_pad"]
@@ -1830,6 +2044,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["string", "int", "string", "int"]
+param_names = ["string", "length", "pad_string", "pad_type"]
 params_required = 2
 
 [fn."str_repeat"]
@@ -1838,6 +2053,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "int"]
+param_names = ["string", "times"]
 params_required = 2
 
 [fn."str_replace"]
@@ -1846,6 +2062,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["array|string", "array|string", "array|string", "mixed"]
+param_names = ["search", "replace", "subject", "count"]
 params_required = 3
 
 [fn."str_split"]
@@ -1854,6 +2071,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "int"]
+param_names = ["string", "length"]
 params_required = 1
 
 [fn."str_starts_with"]
@@ -1862,6 +2080,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string", "string"]
+param_names = ["haystack", "needle"]
 params_required = 2
 
 [fn."stream_select"]
@@ -1870,6 +2089,7 @@ callable = []
 variadic = []
 optional = [4]
 params = ["?array", "?array", "?array", "?int", "?int"]
+param_names = ["read", "write", "except", "seconds", "microseconds"]
 params_required = 4
 
 [fn."stream_socket_accept"]
@@ -1878,6 +2098,7 @@ callable = []
 variadic = []
 optional = [1, 2]
 params = ["mixed", "?float", "mixed"]
+param_names = ["socket", "timeout", "peer_name"]
 params_required = 1
 
 [fn."stream_socket_client"]
@@ -1886,6 +2107,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4, 5]
 params = ["string", "mixed", "mixed", "?float", "int", "mixed"]
+param_names = ["address", "error_code", "error_message", "timeout", "flags", "context"]
 params_required = 1
 
 [fn."stream_socket_recvfrom"]
@@ -1894,6 +2116,7 @@ callable = []
 variadic = []
 optional = [2, 3]
 params = ["mixed", "int", "int", "mixed"]
+param_names = ["socket", "length", "flags", "address"]
 params_required = 2
 
 [fn."stream_socket_server"]
@@ -1902,6 +2125,7 @@ callable = []
 variadic = []
 optional = [1, 2, 3, 4]
 params = ["string", "mixed", "mixed", "int", "mixed"]
+param_names = ["address", "error_code", "error_message", "flags", "context"]
 params_required = 1
 
 [fn."stripos"]
@@ -1910,6 +2134,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "int"]
+param_names = ["haystack", "needle", "offset"]
 params_required = 2
 
 [fn."strlen"]
@@ -1918,6 +2143,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."strpos"]
@@ -1926,6 +2152,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "int"]
+param_names = ["haystack", "needle", "offset"]
 params_required = 2
 
 [fn."strrev"]
@@ -1934,6 +2161,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."strrpos"]
@@ -1942,6 +2170,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "int"]
+param_names = ["haystack", "needle", "offset"]
 params_required = 2
 
 [fn."strtolower"]
@@ -1950,6 +2179,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."strtoupper"]
@@ -1958,6 +2188,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."strtr"]
@@ -1966,6 +2197,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "array|string", "?string"]
+param_names = ["string", "from", "to"]
 params_required = 2
 
 [fn."strval"]
@@ -1974,6 +2206,7 @@ callable = []
 variadic = []
 optional = []
 params = ["mixed"]
+param_names = ["value"]
 params_required = 1
 
 [fn."substr"]
@@ -1982,6 +2215,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "int", "?int"]
+param_names = ["string", "offset", "length"]
 params_required = 2
 
 [fn."substr_replace"]
@@ -1990,6 +2224,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["array|string", "array|string", "array|int", "array|int|null"]
+param_names = ["string", "replace", "offset", "length"]
 params_required = 3
 
 [fn."system"]
@@ -1998,6 +2233,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "mixed"]
+param_names = ["command", "result_code"]
 params_required = 1
 
 [fn."trim"]
@@ -2006,6 +2242,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "string"]
+param_names = ["string", "characters"]
 params_required = 1
 
 [fn."uasort"]
@@ -2014,6 +2251,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."ucfirst"]
@@ -2022,6 +2260,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."ucwords"]
@@ -2030,6 +2269,7 @@ callable = []
 variadic = []
 optional = [1]
 params = ["string", "string"]
+param_names = ["string", "separators"]
 params_required = 1
 
 [fn."uksort"]
@@ -2038,6 +2278,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."unregister_tick_function"]
@@ -2046,6 +2287,7 @@ callable = [0]
 variadic = []
 optional = []
 params = ["callable"]
+param_names = ["callback"]
 params_required = 1
 
 [fn."urldecode"]
@@ -2054,6 +2296,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."urlencode"]
@@ -2062,6 +2305,7 @@ callable = []
 variadic = []
 optional = []
 params = ["string"]
+param_names = ["string"]
 params_required = 1
 
 [fn."usort"]
@@ -2070,6 +2314,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["array", "callable"]
+param_names = ["array", "callback"]
 params_required = 2
 
 [fn."var_dump"]
@@ -2078,6 +2323,7 @@ callable = []
 variadic = [1]
 optional = [1]
 params = ["mixed", "mixed"]
+param_names = ["value", "values"]
 params_required = 1
 
 [fn."version_compare"]
@@ -2086,6 +2332,7 @@ callable = []
 variadic = []
 optional = [2]
 params = ["string", "string", "?string"]
+param_names = ["version1", "version2", "operator"]
 params_required = 2
 
 [fn."xml_parse_into_struct"]
@@ -2094,6 +2341,7 @@ callable = []
 variadic = []
 optional = [3]
 params = ["XMLParser", "string", "mixed", "mixed"]
+param_names = ["parser", "data", "values", "index"]
 params_required = 3
 
 [fn."xml_set_character_data_handler"]
@@ -2102,6 +2350,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_default_handler"]
@@ -2110,6 +2359,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_element_handler"]
@@ -2118,6 +2368,7 @@ callable = [1, 2]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null", "callable|string|null"]
+param_names = ["parser", "start_handler", "end_handler"]
 params_required = 3
 
 [fn."xml_set_end_namespace_decl_handler"]
@@ -2126,6 +2377,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_external_entity_ref_handler"]
@@ -2134,6 +2386,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_notation_decl_handler"]
@@ -2142,6 +2395,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_processing_instruction_handler"]
@@ -2150,6 +2404,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_start_namespace_decl_handler"]
@@ -2158,6 +2413,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 [fn."xml_set_unparsed_entity_decl_handler"]
@@ -2166,6 +2422,7 @@ callable = [1]
 variadic = []
 optional = []
 params = ["XMLParser", "callable|string|null"]
+param_names = ["parser", "handler"]
 params_required = 2
 
 # Mined, and carrying no by-ref, callable or variadic position.
