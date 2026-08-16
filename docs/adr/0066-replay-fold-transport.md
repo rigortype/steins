@@ -1136,41 +1136,48 @@ witness** — `abs("3000000000")` is `int(3000000000)` here and
 which is the first time a row's evidence has been re-derived rather than
 re-read.
 
-### The limitations, reported by the tool itself
+### What a sweep reaches, and what it still does not
 
-A generated sweep does not reproduce every recorded witness, and the command
-says which. After the disposition table it lists the `Refused` rows whose
-divergence the generated families did not reach; those keep the hand-written
-witness this ADR records. Two causes, and they are different:
+A generated sweep reproduces **every** recorded witness in the weak convention,
+and eleven of the twelve under `--strict`. The command lists the `Refused` rows
+it did not reach, and there is one, for a reason that is not a limitation:
 
-| row | why | cause |
-| --- | --- | --- |
-| `version_compare` | needs **two** arguments at once — `version_compare("2147483647", "2147483648")` is `-1` / `0` because *both* runs saturate a C `long`, and neither argument alone shows anything | structural |
-| `sprintf` | the same shape: the format and the value are one hazard (`sprintf("%x", -1)`) | structural |
-| `abs` (strict sweep only) | its witness rides a weak-mode coercion, `abs("3000000000")`. Under `declare(strict_types=1)` that argument is a `TypeError` on both engines, so there is nothing left to diverge about | convention |
+> `abs`'s witness rides a weak-mode coercion, `abs("3000000000")`. Under
+> `declare(strict_types=1)` that argument is a `TypeError` on both engines, so
+> there is nothing left to diverge about. The verdict is right; the sweep is not
+> blind.
 
-The **structural** two are what one-at-a-time generation cannot build, and they
-stay. The **convention** one is the verdict being right rather than the sweep
-being blind: `abs` reproduces in the weak sweep, which is where its divergence
-lives.
+Getting there closed two causes that were real:
 
-A third cause has been closed. `bindec` and `intval` were unreproduced because
-their witnesses are about argument **content** the families did not carry —
-`bindec("11111111111111111111111111111111")` is thirty-two ones, and `intval`
-takes its oversized numeric string on a `mixed` parameter, where "every literal
-at once" had not included one. Both families carry it now, and both witnesses
-reproduce. Content is a hazard a declared type cannot suggest, which is worth
-remembering the next time a row reads clean.
+**Content.** `bindec`'s witness is thirty-two ones and `intval`'s is an oversized
+numeric string on a `mixed` parameter — argument *content* no declared type
+suggests. `string` says nothing about what is in it, and `mixed` says everything
+and therefore nothing. Both families carry those spellings now, and `$format`
+joins `$pattern` as a parameter keyed by NAME rather than type, because the
+conversion is the hazard: `%b`/`%x`/`%o`/`%u` render the machine word.
+
+**Two arguments at once.** `version_compare("2147483647", "2147483648")` is `-1`
+on the wide engine and `0` on the narrow one because *both* runs saturate to the
+same value there, and neither argument alone shows anything. `sprintf("%x", -1)`
+is the same shape. Generation is one-at-a-time, so neither was ever built. It now
+also runs a **pairwise pass over the hazard values only** — the oversized runs,
+the machine-word contents, the width conversions, the all-ones negative — two
+per position.
+
+The bound is stated rather than silent: **a third hazard value at a position is
+not paired, and a divergence needing three arguments at once is still out of
+reach.** The full product over four parameters is thousands of round trips; this
+is a few dozen, and it is what the recorded witnesses turned out to need.
 
 ### The first full sweep
 
-**1,339 tuples over all 65 rows, in each calling convention**, from one command:
+**1,698 tuples over all 65 rows, in each calling convention**, from one command:
 no `Portable` row diverges either way, and every `silent` verdict lands on a
-`Refused` one — `bindec`, `decbin`, `dechex`, `decoct`, `hexdec`, `intval`,
-`range`, `preg_split`, `preg_match` in both, plus `abs` in the weak convention
-only, since strictness removes the string-to-int coercion that carries its
-width. Ten of the twelve refused rows, re-derived rather than re-read; the other
-two are the structural pair above. Two defects in the generator itself were found by running it, and both had the
+`Refused` one. In the weak sweep that is **all twelve** — `abs`, `bindec`,
+`decbin`, `dechex`, `decoct`, `hexdec`, `intval`, `range`, `preg_split`,
+`preg_match`, `sprintf`, `version_compare` — every refused row's evidence
+re-derived rather than re-read. The strict sweep is the same eleven without
+`abs`, whose divergence that convention removes. Two defects in the generator itself were found by running it, and both had the
 same shape — a probe that agrees for a reason that is not agreement. Varying a
 parameter used to **truncate the argument list at it**, so any position before
 the last required one produced an under-arity call: an `ArgumentCountError` on
