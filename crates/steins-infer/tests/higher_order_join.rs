@@ -97,7 +97,11 @@ fn opaque_callback_at_a_cataloged_position_keeps_the_builtins_own_color() {
 #[test]
 fn deferred_invokers_contribute_nothing_new() {
     // set_error_handler & friends STORE the callable; the engine invokes it later.
-    // They have no row, so P1 adds no finding for them.
+    // They have no row, so P1 adds nothing FROM THE CALLBACK — which is a
+    // sharper claim than "adds nothing", now that registering a handler is
+    // itself a `global.write` (effects_gaps.md §5). The callback echoes; if P1
+    // propagated it there would be an `io.output.buffer` finding beside the
+    // write, and that is exactly what these names must not produce.
     for f in [
         "set_error_handler",
         "set_exception_handler",
@@ -107,7 +111,13 @@ fn deferred_invokers_contribute_nothing_new() {
         let src = format!(
             "<?php\n#[\\Steins\\Pure]\nfunction f(): void {{\n    {f}(function () {{ echo \"x\"; }});\n}}\n"
         );
-        assert_eq!(effects(&src).len(), 0, "{f}: non-immediate position adds nothing");
+        let found = effects(&src);
+        assert!(
+            found.iter().all(|d| !d.message.contains("io.output.buffer")),
+            "{f}: a non-immediate position must not propagate its callback: {found:#?}"
+        );
+        assert_eq!(found.len(), 1, "{f}: only the registration's own write: {found:#?}");
+        assert!(found[0].message.contains("global.write"), "{f}: {}", found[0].message);
     }
 }
 
@@ -115,9 +125,19 @@ fn deferred_invokers_contribute_nothing_new() {
 fn register_shutdown_function_is_unchanged_by_p1() {
     // The one grandfathered Deferred row still propagates its callback's effects
     // (ADR-0033: Deferred claims nothing about WHEN, not whether) — P1 is neutral.
+    // Two findings since the registration itself became a `global.write`: this
+    // row's distinction from the exclusions above is the CALLBACK one, so that
+    // is what is asserted rather than the count alone.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    register_shutdown_function(function () { echo \"bye\"; });\n}\n";
-    let d = one(src);
-    assert!(d.message.contains("io.output.buffer"), "{}", d.message);
+    let found = effects(src);
+    assert!(
+        found.iter().any(|d| d.message.contains("io.output.buffer")),
+        "the grandfathered Deferred row propagates its callback: {found:#?}"
+    );
+    assert!(
+        found.iter().any(|d| d.message.contains("global.write")),
+        "…and registering it is a write like its unrowed siblings: {found:#?}"
+    );
 }
 
 #[test]

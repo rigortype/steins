@@ -78,9 +78,25 @@ fn array_filter_one_arg_form_has_no_callback() {
 fn register_shutdown_function_deferred_effects_propagate() {
     // register_shutdown_function is DEFERRED, but its callback's effects still join
     // the caller's set (ADR-0033: Deferred claims nothing about WHEN, not whether).
+    //
+    // TWO findings, and the pair is the point. Registering a handler writes the
+    // engine's dispatch table (`global.write`, effects_gaps.md §5), and what the
+    // registered callback does is a second, independent effect carried by the
+    // invocation shape. Reporting only the first would lose the deferred
+    // propagation this test is about; reporting only the second would hide that
+    // the registration itself is a write.
     let src = "<?php\n#[\\Steins\\Pure]\nfunction f(): void {\n    register_shutdown_function(function () { echo \"bye\"; });\n}\n";
-    let d = one(src);
-    assert!(d.message.contains("io.output.buffer"), "deferred callback effect propagates: {}", d.message);
+    let found = effects(src);
+    assert_eq!(found.len(), 2, "the registration AND the callback, got: {found:#?}");
+    assert!(
+        found.iter().any(|d| d.message.contains("io.output.buffer") && d.message.contains("closure")),
+        "deferred callback effect propagates: {found:#?}"
+    );
+    assert!(
+        found.iter().any(|d| d.message.contains("global.write")
+            && d.message.contains("register_shutdown_function")),
+        "…and registering it is itself a write: {found:#?}"
+    );
 }
 
 // Named / string callables
