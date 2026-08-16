@@ -11,6 +11,13 @@
 //! The **all**-arms-rejected verdict is not emitted at all — issue #291 measured
 //! it empty on every public source — and that silence is pinned too, so a later
 //! reader does not mistake it for a gap.
+//!
+//! Issue #418 extends the premise reader past `ArgValue::Var` to the other
+//! carriers the propagated-argument checks already resolve a fact for: a
+//! depth-1 property fetch (`$o->p`), a nested call/method call's return
+//! (`g($x)`, `$b->m()`), and a shape-lane offset read (`$a['k']`). Each carrier
+//! gets its own reporting/silent pair below, plus a stratum pin where that
+//! carrier's own routing differs from the `Var` case.
 
 use steins_infer::{
     Diagnostic, ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, check,
@@ -210,4 +217,151 @@ fn the_coercive_table_keeps_the_string_arm_alive() {
 
     let tight = strict("function f(?string $x): void { needInt($x); }\n");
     assert!(family(&tight).is_empty(), "strict mode rejects both arms — the definite verdict");
+}
+
+
+// Issue #418: the non-`Var` carriers — a property fetch
+
+
+#[test]
+fn a_property_fetch_is_judged_too() {
+    // The corpus shape stays a builtin `T|false` — reached through an
+    // intermediate variable, since a bare `$c->p = file_get_contents(...)` has
+    // no fact to write today (`arg_abstract_fact` reads the value lane alone;
+    // see the write-side note beside `apply_prop_assign`'s arm-lane fallback).
+    let src = strict(
+        "class C { public $p; }
+function f(): void {
+    $c = new C();
+    $x = \\file_get_contents('/tmp/x');
+    $c->p = $x;
+    needString($c->p);
+}\n",
+    );
+    // No declared-arm lane to spell from here — `PropFact` carries one `Fact`
+    // and one stratum, never a list (see the write-side note above), so the
+    // message falls back to the BASE spelling `to_fact` widened `false` to
+    // (`bool`), the same fallback a value-lane `Var` premise takes.
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("$c->p is string|bool"), "{}", d[0].message);
+    assert!(d[0].message.contains("its bool arm"), "{}", d[0].message);
+    assert!(
+        proof(&src).is_empty(),
+        "the builtin floor arm is Asserted (ADR-0069) — never `type.*`: {:?}",
+        proof(&src)
+    );
+}
+
+#[test]
+fn a_property_fetch_of_a_plain_string_is_silent() {
+    let src = strict(
+        "class C { public $p; }
+function f(string $s): void {
+    $c = new C();
+    $c->p = $s;
+    needString($c->p);
+}\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+
+// Issue #418: the non-`Var` carriers — a nested call / method call
+
+
+#[test]
+fn a_nested_call_result_is_judged_too() {
+    // The callee's own body join is finite (`Fact::OneOf`, the concrete lane's
+    // own — `is_type_error` already judges it exactly), so this reaches the
+    // declared native return arms instead. `Verified`, since the return type is
+    // a native hint, not a docblock claim.
+    let src = strict(
+        "function g(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { needString(g($flag)); }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("g() is string|false"), "{}", d[0].message);
+    assert!(d[0].message.contains("its false arm"), "{}", d[0].message);
+}
+
+#[test]
+fn a_nested_call_result_of_a_plain_string_is_silent() {
+    let src =
+        strict("function g(): string { return 'x'; }\nfunction f(): void { needString(g()); }\n");
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+#[test]
+fn a_nested_call_with_a_docblock_only_return_is_asserted() {
+    // No native return hint at all — the only arms are the phpdoc's, `Asserted`
+    // (ADR-0037 trust order), the same routing the builtin floor takes.
+    let src = strict(
+        "/**\n * @return string|false\n */\nfunction g(bool $ok) { if ($ok) { return \"value\"; } return false; }
+function f(bool $flag): void { needString(g($flag)); }\n",
+    );
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(
+        proof(&src).is_empty(),
+        "an Asserted arm must not premise `type.maybe-argument-mismatch`: {:?}",
+        proof(&src)
+    );
+}
+
+#[test]
+fn a_nested_method_call_result_is_judged_too() {
+    let src = strict(
+        "class C {
+    public function m(bool $ok): string|false { if ($ok) { return \"value\"; } return false; }
+}
+function f(bool $flag): void { $c = new C(); needString($c->m($flag)); }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("$c->m() is string|false"), "{}", d[0].message);
+}
+
+#[test]
+fn a_nested_method_call_of_a_plain_string_is_silent() {
+    let src = strict(
+        "class C { public function m(): string { return 'x'; } }
+function f(): void { $c = new C(); needString($c->m()); }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+
+// Issue #418: the non-`Var` carriers — a shape-lane offset read
+
+
+#[test]
+fn an_offset_read_is_judged_too() {
+    // The shape lane's field fact for the key (`shape_read_at`, ADR-0062 §4 S3's
+    // own resolver — a read and this judgment can never disagree about which
+    // field they mean). A shape fact is seeded `Asserted` unconditionally
+    // (A-G9's corollary), so this carrier premises only the contract id.
+    let src = strict(
+        "/**\n * @param array{k: string|false} $a\n */\nfunction f($a): void { needString($a['k']); }\n",
+    );
+    // The shape field's slot is a bare `Fact` too (no arm list riding along), so
+    // this takes the same base-spelling fallback the prop carrier does.
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("is string|bool"), "{}", d[0].message);
+    assert!(d[0].message.contains("its bool arm"), "{}", d[0].message);
+    assert!(
+        proof(&src).is_empty(),
+        "a shape fact is always Asserted — never `type.*`: {:?}",
+        proof(&src)
+    );
+}
+
+#[test]
+fn an_offset_read_of_a_plain_string_field_is_silent() {
+    let src = strict(
+        "/**\n * @param array{k: string} $a\n */\nfunction f($a): void { needString($a['k']); }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
 }
