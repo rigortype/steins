@@ -30959,6 +30959,10 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// ([`call_return_arms_by_name`]/[`method_return_arms_by_callee`]) at their own
 /// stratum, through [`arm_lane_premise`] — an `Asserted` arm premises
 /// `phpdoc.maybe-argument-mismatch`, never the `type.*` sibling (ADR-0052 §5).
+/// A **builtin** callee reads the builtin ladder instead (ADR-0056 §9): the
+/// reflected return fact, else the ADR-0069 declared floor, in the order the
+/// assignment path takes them, so `f(realpath($p))` and `$r = realpath($p);
+/// f($r)` cannot answer differently about one call.
 /// The summary read is skipped inside a binding descent (`in_descent`, the same
 /// recursion-guard reason the native definite check skips it — a fresh descent
 /// tree started from inside a live one would evade the on-stack recursion guard);
@@ -31041,7 +31045,23 @@ fn maybe_arg_premise(
             {
                 return Some((sv.fact, sv.stratum, None));
             }
-            arm_lane_premise(call_return_arms_by_name(cx, folder, name, args, env, store, poisoned)?)
+            if let Some(arms) =
+                call_return_arms_by_name(cx, folder, name, args, env, store, poisoned)
+            {
+                return arm_lane_premise(arms);
+            }
+            // A **builtin** callee (ADR-0056 §9): `value_lane_fn_site` above answers
+            // only for a project function, so `realpath($p)` reached no premise at
+            // all — while `$r = realpath($p); f($r)` did, off the very same rungs.
+            // The two spellings are one call, so they read the same ladder, in the
+            // assignment path's own order: the engine's own return fact first
+            // (`Verified`, ADR-0056 §2), and only where the engine seeds nothing the
+            // ADR-0069 declared floor (`Asserted`, so it premises
+            // `phpdoc.maybe-argument-mismatch` and never the `type.*` sibling).
+            builtin_call_return_fact(cx, folder, name).map_or_else(
+                || arm_lane_premise(builtin_return_floor(cx, name)?),
+                |f| f.finite_members().is_none().then_some((f, Stratum::Verified, None)),
+            )
         }
         ArgValue::MethodCall { callee, args, named } => {
             if !in_descent
