@@ -18,12 +18,23 @@ is not a type of value. It is a statement about the binding.
 
 The conformance suite measured what the tools resolve it to. Every one but
 Intelephense reads `unset` as a **class name**: the spelling is absent from the
-docblock keyword table, falls through to the named-object atom, and is either
-reported as an unknown class (PHPantom, mir) or silently carried as a phantom
-arm (PHPStan, phpstan/phpdoc-parser). Reading it as the undefined state and
-reading it as a nullable union are both honest interpretations; resolving it to
-a class is the one plainly wrong reading, because no value of any class ever
-satisfies the member the author wrote.
+docblock keyword table, falls through to the named-object atom, and is
+**reported as an unknown class** — PHPStan (`class.notFound`: "PHPDoc tag @var
+… contains unknown class …\unset"), Psalm, Mago, PHPantom (issue #366), Qodana,
+php.py and NoVerify all say so out loud. Intelephense is the one that keeps the
+spelling, and rejects the union as non-object rather than resolving it. Two
+silences in the measurement are not readings: mir's was the harness's — its
+diagnostic is info severity, which the adapter used to request on `debug_*`
+files only — and Steins' was its own catch-all's, below. The **grammar** is a
+separate question and agrees everywhere: phpstan/phpdoc-parser parses
+`\DateTime|unset` without complaint, because the spelling is a well-formed
+union of identifiers. What each tool then *resolves* the identifier to is where
+this ADR sits.
+
+Reading `unset` as the undefined state and reading it as a nullable union are
+both honest interpretations; resolving it to a class is the one plainly wrong
+reading, because no value of any class ever satisfies the member the author
+wrote.
 
 Steins was in the wrong column. `steins-phpdoc` has no keyword table — a bare
 identifier is a bare identifier — and `lower_identifier`'s catch-all lowers an
@@ -143,11 +154,20 @@ decision in isolation.
    assignment to `$x` all discharge the state. Inside the guarded branch the
    undefined path is gone and the guarded reads are silent — which is why the
    conformance fixture's `isset()` block carries `Q` lines, not `E?` ones.
-3. **The guard is never redundant.** A variable that may be undefined makes
-   `isset($x)` meaningful, so the redundant-condition family must not report the
-   guard. This is a real interaction, not a note: the guard's `Maybe` presence
-   has to reach the redundancy judgment, or correcting the vocabulary would
-   *create* a false positive where the phantom class arm caused none.
+3. **The guard is never redundant — a constraint recorded ahead of the id that
+   would need it.** Steins has **no redundant-`isset` diagnostic today**: no
+   `isset.*`, always-true or redundant-condition id is registered, so nothing
+   can report the guard now and #396 adds nothing that could. What #396 pins is
+   the *property*: a `T|unset` variable's `isset($x)` produces nothing. A future
+   redundancy id inherits the constraint rather than discovering it — the
+   guard's `Maybe` presence has to reach whatever judgment that id makes, or the
+   family would arrive reporting a guard the declaration makes meaningful. The
+   question of a pointless-guard id was already deferred once, when
+   `variable.maybe-undefined` shipped (ADR-0081) — mechanics there would be
+   un-disableable against defensive house styles, so the shape gets measured
+   before it gets a name. This is a second input to that measurement. Worth
+   stating here precisely because it is not enforceable by a test yet: there is
+   no id to hold to it, only this record.
 4. **A new id: `phpdoc.maybe-undefined`,** `Layer::Contract`, `Floor::Contracts`.
    Deliberately **not** `variable.maybe-undefined` (ADR-0081): that id is
    `Layer::Proof`, `Floor::Strict`, and its premise is a reachability fact the

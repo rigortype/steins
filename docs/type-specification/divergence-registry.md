@@ -188,8 +188,12 @@ not a deferral (ADR-0032, ADR-0030 reg. entry above).
 every tool the conformance suite measured except Intelephense — resolves the
 `unset` member of `/** @var \DateTime|unset $x */` as a **class name**: the
 spelling is absent from the docblock keyword table, falls through to the
-named-object atom, and is either reported as an unknown class or silently carried
-as a phantom arm. Steins reads it as the possibly-undefined pseudo-type
+named-object atom, and is **reported as an unknown class** — PHPStan raises
+`class.notFound` on it, as do Psalm, Mago, PHPantom, Qodana, php.py and NoVerify.
+Intelephense keeps the spelling instead and rejects the union as non-object. The
+grammar is not the disagreement: phpstan/phpdoc-parser parses `\DateTime|unset`
+without complaint, and so does Steins — only the *resolution* diverges. Steins
+reads it as the possibly-undefined pseudo-type
 (ADR-0087): the union member says the *variable may not be bound*, contributes no
 value to the type lane (not `null`, not `void`, not `never`, not `mixed`), and is
 non-shadowable, because `unset` is a reserved language construct rather than a

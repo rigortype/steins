@@ -161,7 +161,7 @@ rules instead of a keyword zoo:
   (`isset`/`empty`/`??`/`??=`/assignment discharge, the guard never redundant, and
   the `phpdoc.maybe-undefined` id) is issue #396; positions other than an inline
   top-level `@var` are issue #397. Registered as divergence-registry core entry
-  15 — PHPStan resolves the spelling as a class.
+  15 — PHPStan reports the spelling as an unknown class.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own

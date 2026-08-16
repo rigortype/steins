@@ -81,7 +81,9 @@ as "no envelope" (ADR-0029) — nothing is seeded and nothing is reported. **No
 diagnostic reads the state yet**: the semantics (`isset`/`empty`/`??`/`??=`/
 assignment discharge, the guard never redundant, and the
 `phpdoc.maybe-undefined` id) are issue #396, and positions other than an inline
-top-level `@var` are issue #397. PHPStan resolves the spelling as a class — see
+top-level `@var` are issue #397. PHPStan reports the spelling as an unknown
+class (`class.notFound`), and phpstan/phpdoc-parser parses it without complaint
+— the divergence is in the resolution, not the grammar. See
 [divergence-registry.md](divergence-registry.md), core entry 15.
 
 ### `template-type<Subject, Owner, 'TName'>`
