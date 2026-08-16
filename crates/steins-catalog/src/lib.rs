@@ -3046,6 +3046,51 @@ mod tests {
 
     }
 
+    /// **Every by-value claim, at every position, countersigned by the engine.**
+    ///
+    /// `by_value_arg` is the predicate consumers ask before keeping a
+    /// variable's fact across a call: `Some(true)` says the callee cannot write
+    /// through that argument. It answers from two hand-maintained sources — a
+    /// certified-extra list, and `out_params` for everything foldable — and
+    /// until this table existed nothing could contradict either. A `Some(true)`
+    /// at a position the engine declares `&$` means the call writes through an
+    /// argument while the analysis carries the old value forward, which is a
+    /// wrong fact rather than a missing one.
+    ///
+    /// Positional, because the predicate is: `preg_match_all` is by value at 0
+    /// and 1 and by reference at 2, and a whole-name reading of it would be
+    /// both wrong and vacuous.
+    #[test]
+    fn every_by_value_claim_matches_the_engine_at_that_position() {
+        let mut claims = 0usize;
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            for position in 0..facts.params.len() {
+                let by_ref = facts.by_ref.contains(&position);
+                match by_value_arg(name, position) {
+                    // No claim at all: nothing to contradict.
+                    None => {}
+                    Some(true) => {
+                        claims += 1;
+                        assert!(
+                            !by_ref,
+                            "{name} is certified by value at {position} and the engine declares \
+                             it `&$`: a caller would keep a fact the call overwrites"
+                        );
+                    }
+                    Some(false) => {
+                        claims += 1;
+                        assert!(
+                            by_ref,
+                            "{name} is claimed by REFERENCE at {position} and the engine declares \
+                             it by value: the caller drops a fact the call cannot touch"
+                        );
+                    }
+                }
+            }
+        }
+        assert!(claims > 200, "the predicate should answer widely, saw {claims} claims");
+    }
+
     /// A foldable name with a **variadic tail the engine types `mixed`** is the
     /// one shape neither table can rule on: `array_udiff` hides its comparator
     /// exactly there, and no declared type gives it away. Such a name may fold
