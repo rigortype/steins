@@ -1088,3 +1088,119 @@ every foldable name.
 Both names' tuples were counted in wave 2's round (158 = 126 admitted + 11 + 21),
 and re-running the same 32 cases under the other calling convention is those
 tuples probed twice, not 32 more. The total stands at **1073**.
+
+## Amendment (2026-08-16): the probe becomes a command (issue #382)
+
+Every amendment above is a table of tuples that some scratch directory produced.
+The instrument was real and the discipline was real; what was missing is that
+neither was *committed*. Two consequences, both of which happened:
+
+- The tuple families were written per name, by hand, from a reading of that
+  name's signature — so they could drift from the parameter facts they were
+  supposed to cover, and a wave's families were only as good as its author's
+  reading.
+- A row, once admitted, was never re-probed. Nothing said "the engines still
+  agree about `str_repeat`"; the claim aged in place.
+
+`cargo xtask fold-probe` is the instrument as a command. The families are keyed
+by **declared parameter type**, read from the mined `param_facts` table — the
+engine's own arginfo — so the generator's specification is a property of the
+signature rather than of whoever wrote the tuple list. With `--names` it probes a
+candidate; with no arguments it probes **every row on the allowlist**, and a
+`silent` or `reverse` verdict on a name the catalog calls `Portable` fails the
+command. That is the second consequence answered: the claim is re-checkable in
+one line.
+
+### What it generates, and what it deliberately does not
+
+Per name: the required-arity call, then **each position varied across its whole
+family with the others held at a base value**. One-at-a-time, not a cartesian
+product — the product over four parameters is thousands of engine round trips,
+and every hazard these amendments recorded is per-parameter (a width-typed
+numeric string on `range`, an oversized `int` on `str_split`). The cost is
+explicit: **a hazard that needs two arguments at once is not generated**, and a
+row whose divergence lives there still needs a hand-written tuple. `--names` runs
+those.
+
+Generation **refuses** rather than skipping: a name with no mined row, or with a
+parameter no literal can fill (`iterator_apply`'s `Traversable`), is an error and
+not an empty clean run. A callable position is generated as a literal `null` and
+nothing else, which is the only callback argument the shape gate admits — so a
+generated run cannot execute one.
+
+Two checks on the generator rather than claims about it. It produces **23**
+tuples for `strpos`, the same number wave 2's hand-written family did. And run
+over the whole allowlist it **independently reproduces `abs`'s recorded
+witness** — `abs("3000000000")` is `int(3000000000)` here and
+`float(3000000000.0)` there, a divergence visible only in the response bytes —
+which is the first time a row's evidence has been re-derived rather than
+re-read.
+
+### The limitations, reported by the tool itself
+
+A generated sweep does not reproduce every recorded witness, and the command
+says which. After the disposition table it lists the `Refused` rows whose
+divergence the generated families did not reach; those keep the hand-written
+witness this ADR records. Measured over the whole allowlist, four:
+
+| row | why generation misses it |
+| --- | --- |
+| `version_compare` | needs **two** arguments at once — `version_compare("2147483647", "2147483648")` is `-1` / `0` because *both* runs saturate a C `long`, and neither argument alone shows anything |
+| `sprintf` | the same shape: the format and the value are one hazard (`sprintf("%x", -1)`) |
+| `bindec` | the witness is a 32-character binary string, a content the `string` family does not carry |
+| `intval` | its parameter is `mixed`, and "every literal at once" does not include the oversized numeric string the witness uses |
+
+Two causes, worth keeping apart: the first two are **structural** (one-at-a-time
+generation cannot reach a two-argument hazard), the last two are a **family
+gap** that a richer `string`/`mixed` family would close. Either way the row's
+evidence stands on its recorded witness — and a tool that reported them as clean
+without saying so would be the exact failure mode the four properties above
+exist to prevent.
+
+### The first full sweep
+
+**1,138 tuples over all 65 rows, in each calling convention**, from one command:
+no `Portable` row diverges either way, and every `silent` verdict lands on a
+`Refused` one — `decbin`, `dechex`, `decoct`, `hexdec`, `range`, `preg_split`,
+`preg_match` in both, plus `abs` in the weak convention only, since strictness
+removes the string-to-int coercion that carries its width. That is what those
+rows claim, re-derived rather than re-read. Two defects in the generator itself were found by running it, and both had the
+same shape — a probe that agrees for a reason that is not agreement. Varying a
+parameter used to **truncate the argument list at it**, so any position before
+the last required one produced an under-arity call: an `ArgumentCountError` on
+both engines, which agrees trivially and measures nothing. It was hiding the
+PCRE witnesses, because varying `preg_match`'s `$pattern` dropped its
+`$subject`. And the `string` family's base value was the empty string, which
+disarms every *other* parameter's family in a one-at-a-time sweep; the base is
+`"aaa"` now — a subject that matches, repeats and splits.
+
+Two engine-killing arguments were found on the way and are now
+generated from the negative side only (`str_pad`'s `$length`, and its siblings
+named `$times`/`$count`): a target width cannot be neutralised with an empty
+subject, so the positive oversized probe is a three-gigabyte allocation, a PHP
+fatal, and a runner that dies mid-NDJSON. The harness used to **hang** on that —
+the pending promise never settled, which reads as a slow run forever. An engine
+death is now a verdict of its own, and any tuple carrying it fails the command:
+an unmeasured tuple is not a clean one.
+
+### The four properties that keep a run honest
+
+Unchanged from the scratch harness, and now written down beside the code they
+live in. Each, dropped, produces a **false clean** — a run reporting an agreement
+it never measured:
+
+1. **Compare the response bytes, not parsed JSON.** Array elements cross the seam
+   with no per-element type tag, so an `int` on one engine and a `float` on the
+   other differ only as `3000000000` versus `3000000000.0` — which JavaScript's
+   single number type erases on parse. This is how `range`'s divergence was found
+   after a parsed comparison called it clean.
+2. **A float argument cannot be a JavaScript number.** `3000000000.0` round-trips
+   through `JSON.stringify` as `3000000000` and reaches the runner as an int — an
+   argument the range guard refuses, so the tuple is not a probe at all. Float
+   arguments travel as the raw token `@@…@@`.
+3. **Refuse inadmissible tuples.** A tuple carrying an integer outside
+   ±(2^31 − 1) is one the fold gate would never send; counting it would inflate
+   the evidence with cases no fold can reach.
+4. **Name the calling convention.** A verdict has to hold for whichever mode the
+   request names (#390), so a row is probed both ways: `--strict` is the other
+   half.

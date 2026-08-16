@@ -62,9 +62,14 @@ foreach ($internal as $name) {
     $variadic = [];
     $optional = [];
     $params = [];
+    $param_names = [];
     foreach ($rf->getParameters() as $i => $p) {
         $s = spell($p);
         $params[] = $s;
+        // The declared NAME as well as the type: a size-shaped `int` parameter
+        // ($length, $times) turns an oversized probe into a multi-gigabyte
+        // allocation and a PHP fatal, and only the name tells it from an offset.
+        $param_names[] = $p->getName();
         if ($p->isPassedByReference()) $by_ref[] = $i;
         if (is_callable_type($s)) $callable[] = $i;
         if ($p->isVariadic()) $variadic[] = $i;
@@ -83,6 +88,7 @@ foreach ($internal as $name) {
         'variadic' => $variadic,
         'optional' => $optional,
         'params' => $params,
+        'param_names' => $param_names,
         'params_required' => $rf->getNumberOfRequiredParameters(),
     ];
 }
