@@ -188,8 +188,11 @@ assert(boot.fold_lane === "portable_subset", `a 32-bit engine folds the portable
 // than diverges on the narrow engine, so both counts moved together (44/57 →
 // 50/63) and nothing new was refused; and issue #382 added `array_filter` here
 // (50 → 51) with `preg_match` refused beside `preg_split` for the same PCRE
-// build option (11 → 12 refusals, the allowlist 63 → 65).
-assert(boot.fold_portable === 51, `this engine's share comes from the catalog (${boot.fold_portable})`);
+// build option (11 → 12 refusals, the allowlist 63 → 65); and the generated
+// probe then measured the two rows ADR-0028 had admitted UNMEASURED, so
+// `array_merge` and `explode` fold here too (51 → 53) while the allowlist
+// stands still — nothing was admitted, a debt was paid.
+assert(boot.fold_portable === 53, `this engine's share comes from the catalog (${boot.fold_portable})`);
 // `refused_folds` stays the REFUSED rows — the ones with a recorded
 // divergence, which is what the boundary panel's sentence about them claims. The
 // unverified rows decline on the same gate with nothing on record, so they are not
@@ -270,9 +273,12 @@ assert(
   "the portable-subset lane still reports its share",
 );
 
+// The class is EMPTY now, and the field still travels: "nothing is unmeasured"
+// is a claim, and a different one from a missing field ("this lane has no
+// opinion"). The panel has to say the first without inventing the second.
 assert(
-  Array.isArray(boot.unverified_folds) && boot.unverified_folds.join(",") === "array_merge,explode",
-  `the unverified folds are named apart from the refused ones (got ${JSON.stringify(boot.unverified_folds)})`,
+  Array.isArray(boot.unverified_folds) && boot.unverified_folds.length === 0,
+  `nothing is unmeasured any more (got ${JSON.stringify(boot.unverified_folds)})`,
 );
 // The total, derived rather than transcribed: every allowlisted name is either
 // portable on this engine or one of the two kinds of decline named above, so the

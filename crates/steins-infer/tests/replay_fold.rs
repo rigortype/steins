@@ -492,25 +492,46 @@ fn a_width_unverified_name_declines_on_a_32_bit_engine_and_folds_at_width_8() {
         ]))
     }
     let args = [ArgValue::Str(",".into()), ArgValue::Str("a,b".into())];
+    // The class this fixture was written for is EMPTY now (issue #382 measured
+    // its last two rows and both left for `Portable`), so what it pins has
+    // changed: `explode` folds on the narrow machine too. The gate itself never
+    // had a case per class — it asks `steins_catalog::portable` and nothing
+    // else, which the refused leg above still pins — so an unverified row would
+    // decline here exactly as a refused one does, and there is simply no such
+    // row to write a fixture against.
     assert_eq!(
         steins_catalog::portability_class("explode"),
-        Some(steins_catalog::PortabilityClass::Unverified),
-        "the fixture is about the unverified class, not the refused one",
+        Some(steins_catalog::PortabilityClass::Portable),
+        "measured in issue #382",
+    );
+    assert!(
+        steins_catalog::unverified_names().is_empty(),
+        "an unverified row is back — give it this fixture's narrow-engine leg, which used to \
+         assert a decline",
     );
 
-    // php-wasm's machine: every argument is a string (no integer for the range
-    // guard to reject), so the decline is the NAME's, refused before the engine is touched.
+    // php-wasm's machine. Every argument is a string, so the range guard has no
+    // integer to reject and the verdict is the NAME's alone — which is now
+    // `Portable`, so the call reaches the engine and folds. This half asserted a
+    // decline until the row was measured, and the flip is the whole user-visible
+    // effect of measuring it.
     let engine = FakeEngine::new("8.5.2", Some(4)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
-    assert_eq!(folder.fold("explode", &args, false), None);
+    assert_eq!(
+        folder.fold("explode", &args, false),
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("a".into())),
+            (ArrayKey::Int(1), ArgValue::Str("b".into())),
+        ])),
+        "a probed row folds on the narrow machine too"
+    );
     assert!(
-        folder.engine_mut().dispatched.is_empty(),
-        "an unverified name is refused before dispatch: {:?}",
-        folder.engine_mut().dispatched
+        !folder.engine_mut().dispatched.is_empty(),
+        "…and it got there by asking the engine"
     );
 
-    // The same call and table on a proven 64-bit engine folds: the decline above
-    // is the width, not a missing answer or a broken array path.
+    // The same call on a proven 64-bit engine, unchanged since before the row was
+    // measured — the pair together is what shows the width gate is class-blind.
     let engine = FakeEngine::new("8.5.8", Some(8)).with_fold("explode", pieces());
     let mut folder = EngineFolder::with_engine(engine);
     assert_eq!(
@@ -541,11 +562,14 @@ fn the_replay_transport_declines_an_unverified_name_on_a_32_bit_table() {
     let mut folder = TableFolder::with_table(t);
     assert_eq!(
         folder.fold("explode", &[ArgValue::Str(",".into()), ArgValue::Str("a,b".into())], false),
-        None
+        Some(ArgValue::Array(vec![
+            (ArrayKey::Int(0), ArgValue::Str("a".into())),
+            (ArrayKey::Int(1), ArgValue::Str("b".into())),
+        ])),
+        "the row is `Portable` since issue #382, so the narrow table answers too"
     );
-    assert!(folder.pending().is_empty(), "a declined fold asks nothing: {:?}", folder.pending());
 
-    // …and the identical table with `int_size: 8` folds it — the table wasn't the problem.
+    // …and the identical table with `int_size: 8`, unchanged.
     let mut t = Table::new();
     with_env(&mut t, "8.5.8", 8);
     with_fold(&mut t, "explode", &args, fold_answer);
@@ -589,15 +613,19 @@ fn the_explode_rung_still_answers_where_the_unverified_fold_declines() {
     let args =
         [FoldArg::Str(",".to_owned()), FoldArg::Str("a,b,c".to_owned())];
 
-    // php-wasm's machine: the fold declines, the rung answers.
+    // php-wasm's machine. The rung is still there and still the floor — but the
+    // fold no longer declines above it, because issue #382 measured the row. So
+    // what the browser keeps is the VALUE now, and the rung's own answer is
+    // visible only where the fold has nothing to say (no sidecar, a
+    // non-literal argument), which the sound-subset test below pins.
     let mut t = Table::new();
     with_env(&mut t, "8.5.2", 4);
     with_reflect(&mut t, "explode", fn_reflection("explode", "array"));
     with_fold(&mut t, "explode", &args, fold_answer.clone());
     assert_eq!(
         dumps(&mut TableFolder::with_table(t)),
-        vec!["non-empty-list<string>".to_owned()],
-        "the type-level transfer is what the browser keeps"
+        vec!["list{'a', 'b', 'c'}".to_owned()],
+        "a measured row folds in the browser, strictly stronger than its rung"
     );
 
     // The same table at width 8: the fold answers instead, strictly stronger.
