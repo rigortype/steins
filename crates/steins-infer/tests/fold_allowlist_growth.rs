@@ -714,3 +714,34 @@ fn preg_match_folds_and_its_matches_argument_is_invalidated() {
         "refused for how PCRE was compiled, not for the machine word"
     );
 }
+
+/// The **untyped variadic tail** is refused at the seam, not only in a catalog
+/// test (issue #382's last shape).
+///
+/// `sprintf` is `REFUSED` for the machine word, so it folds on this 64-bit
+/// engine — and its tail is the one the catalog argues carries data, rendered by
+/// the format string. That is the half of the rule that has to keep working: a
+/// gate which refused every untyped tail would silently stop folding it.
+///
+/// The other half cannot be exercised end to end today, because no name whose
+/// tail hides a comparator is on the allowlist — which is the point of the
+/// tripwire beside it. `array_udiff` is asserted off the list here so that
+/// admitting it without reading this test fails a different one.
+#[test]
+fn an_argued_variadic_tail_still_folds() {
+    let Some(mut folder) = live("an_argued_variadic_tail_still_folds") else { return };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(sprintf(\"%s-%d\", \"a\", 7));\n\
+         \\PHPStan\\dumpType(sprintf(\"%05.2f\", 1.5));\n\
+         \\PHPStan\\dumpType(sprintf(\"no args\"));\n";
+    assert_eq!(dumps(SRC, &mut folder), vec!["'a-7'", "'01.50'", "'no args'"]);
+    assert!(
+        steins_catalog::variadic_tail_is_data("sprintf"),
+        "the gate lets it through because the catalog argues the tail is values"
+    );
+    assert!(
+        !steins_catalog::variadic_tail_is_data("array_udiff")
+            && !steins_catalog::foldable("array_udiff"),
+        "the family the rule exists for is neither argued nor admitted"
+    );
+}
