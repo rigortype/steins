@@ -46,8 +46,8 @@ use steins_db::{
     SourceFile, parse, project_index,
 };
 use steins_sidecar::{
-    ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue, PregCompile,
-    Reflection,
+    BuiltinParam, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult,
+    FoldValue, PregCompile, Reflection,
 };
 #[cfg(not(target_arch = "wasm32"))]
 use steins_sidecar::Sidecar;
@@ -1470,6 +1470,28 @@ pub trait Folder {
         None
     }
 
+    /// The **reflected parameter list** of a uniquely-resolved builtin `name` —
+    /// `ReflectionFunction::getParameters()` per position, in declaration order
+    /// (ADR-0056 §9, R1's parameter twin).
+    ///
+    /// The counts above pin a *rule*; this judges an *argument*. It is the source
+    /// the builtin arm of the argument check reads, and it is Verified for the same
+    /// reason the return envelope is: the running engine's own arginfo, read off the
+    /// engine that will run the code, so it is version-correct by construction and
+    /// carries none of the rot a signature map would (§6).
+    ///
+    /// Same gates as [`Self::builtin_return_type`], and the same silences: `None`
+    /// without a live engine (`--no-php`), with an ADR-0049 A9 monkey-patcher
+    /// loaded, for a name the runtime does not know as a function, and for a replay
+    /// table recorded before the field. `Some(vec![])` is a zero-parameter function
+    /// — an empty list is an answer, `None` never is. Default `None` (sound subset,
+    /// ADR-0004); the ADR-0069 static floor answers nothing here, ever, and §9.5
+    /// says why.
+    fn builtin_param_types(&mut self, name: &str) -> Option<Vec<BuiltinParam>> {
+        let _ = name;
+        None
+    }
+
     // preg pattern refusal (ADR-0078, issue #189)
 
     /// The project's own PCRE **refusal** of `pattern`, as PCRE's own words — or
@@ -1626,6 +1648,10 @@ pub struct EngineFolder<E: FoldEngine> {
     /// ADR-0064's mixed-pin second leg, riding the same `reflect` reply as the two
     /// memos above and following the same per-name pattern.
     param_counts_memo: HashMap<String, Option<(u32, u32)>>,
+    /// Per-name memo of the reflected parameter list (ADR-0056 §9) — the fourth
+    /// answer read off the same `reflect` reply, memoized on the same terms, so a
+    /// builtin called in fifty files costs the round trip once.
+    param_types_memo: HashMap<String, Option<Vec<BuiltinParam>>>,
     /// Per-**pattern** memo of the PCRE compile verdict (ADR-0078, issue #189):
     /// the dedupe that makes a pattern repeated across a run cost exactly one
     /// `preg_compile` request. Keyed by the pattern verbatim — PCRE is
@@ -1700,6 +1726,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             return_type_memo: HashMap::new(),
             resource_return_memo: HashMap::new(),
             param_counts_memo: HashMap::new(),
+            param_types_memo: HashMap::new(),
             preg_refusal_memo: HashMap::new(),
             boot_surface_const_memo: HashMap::new(),
             class_reflect_memo: HashMap::new(),
@@ -1730,6 +1757,7 @@ impl<E: FoldEngine> EngineFolder<E> {
             self.return_fact_memo.clear();
             self.return_type_memo.clear();
             self.param_counts_memo.clear();
+            self.param_types_memo.clear();
             self.boot_surface_memo.clear();
             self.boot_surface_fn_memo.clear();
             self.boot_surface_const_memo.clear();
@@ -2006,6 +2034,24 @@ impl<E: FoldEngine> EngineFolder<E> {
         }
         Some((refl.params_total?, refl.params_required?))
     }
+
+    /// The reflected parameter list for `key` (already lowercased), under the same
+    /// gate the three computations above apply (ADR-0056 §9.1). Called once per
+    /// name; [`Folder::builtin_param_types`] memoizes.
+    ///
+    /// No minor pin and no curated composition: unlike the return rung there is
+    /// nothing to refine *within* — the engine's own signature is the whole answer,
+    /// and §9.5 refuses the alternative outright.
+    fn compute_builtin_param_types(&mut self, key: &str) -> Option<Vec<BuiltinParam>> {
+        if !self.absence_family_available() {
+            return None;
+        }
+        let refl = self.engine.reflect(key)?;
+        if !refl.function_exists {
+            return None;
+        }
+        refl.params
+    }
 }
 
 impl<E: FoldEngine> Folder for EngineFolder<E> {
@@ -2175,6 +2221,16 @@ impl<E: FoldEngine> Folder for EngineFolder<E> {
         }
         let answer = self.compute_builtin_param_counts(&key);
         self.param_counts_memo.insert(key, answer);
+        answer
+    }
+
+    fn builtin_param_types(&mut self, name: &str) -> Option<Vec<BuiltinParam>> {
+        let key = name.to_ascii_lowercase();
+        if let Some(cached) = self.param_types_memo.get(&key) {
+            return cached.clone();
+        }
+        let answer = self.compute_builtin_param_types(&key);
+        self.param_types_memo.insert(key, answer.clone());
         answer
     }
 
@@ -22676,6 +22732,135 @@ fn call_is_resolved(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
     }
 }
 
+/// The **propagated value** an argument position carries: the resolved
+/// [`ArgValue`], a provenance phrase for the message, and the trust stratum that
+/// arrived with the resolution (issue #127 review).
+///
+/// The stratum is the resolution's own and never a re-read of the syntactic call
+/// tree through `value_stratum`, which would launder an `Asserted` fold
+/// (`strtoupper(g(...))`) into `Verified` — the proof gate consumes it directly
+/// (ADR-0052 §5).
+///
+/// One resolver, two consumers: the project arm of [`check_propagated_call`] and
+/// the builtin arm beside it (ADR-0056 §9.2). A builtin argument is resolved by
+/// exactly the code a project argument is, which is what makes the two judgments
+/// the same judgment rather than two that agree today.
+#[allow(clippy::too_many_arguments)]
+fn propagated_arg_value(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+    in_descent: bool,
+    span_start: u32,
+    out: &mut Vec<Diagnostic>,
+) -> Option<(ArgValue, String, Stratum)> {
+    match value {
+        ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
+            let v = k.singleton()?;
+            let prov = match &k.bound {
+                Some(b) => format!("from ${name}, {b}"),
+                None => format!("from ${name}, assigned at line {}", k.line),
+            };
+            Some((v, prov, k.stratum))
+        }),
+        ArgValue::Call(name, args) => {
+            let direct = if args.is_empty() {
+                cx.resolve_const_fn(name)
+                    .map(|(lit, line)| {
+                        (
+                            lit,
+                            format!("from {name}(), defined at line {line}"),
+                            Stratum::Verified,
+                        )
+                    })
+                    .or_else(|| {
+                        cx.try_fold_emit(name, args, env, poisoned, folder, out)
+                    })
+            } else {
+                cx.try_fold_emit(name, args, env, poisoned, folder, out)
+            };
+            // A nested project call (issue #60): its Singleton return summary
+            // is the argument's proven value — `takesInt(g(1))` sees what `g`
+            // provably returns, the same crossing `$x = g(1); takesInt($x)`
+            // always had. Plain per-scope pass only: a fresh descent tree
+            // started from inside a live descent would evade the on-stack
+            // recursion guard (mutual recursion through an argument position
+            // would loop), and the plain pass walks every scope anyway, so
+            // the descent-pass decline loses no site. `Verified`-only: the
+            // native proof below consumes an all-Verified premise (ADR-0052
+            // §5), and an Asserted summary must not launder into it. Findings
+            // go to the real `out` so a binding-specific proof under `g(1)`
+            // is not discarded (issue #127 review); dedup absorbs any
+            // binding-independent copy already emitted by the plain walk.
+            direct.or_else(|| {
+                if in_descent {
+                    return None;
+                }
+                let summary = project_call_summary(
+                    cx, folder, name, args, env, store, poisoned, span_start, None, out,
+                )?;
+                let sv = summary.value?;
+                if sv.stratum != Stratum::Verified {
+                    return None;
+                }
+                let Fact::Singleton(v) = &sv.fact else { return None };
+                Some((arg_of_val(v), format!("returned from {name}()"), sv.stratum))
+            })
+        }
+        // A nested method / static call (issue #386): its `Singleton` summary
+        // is the argument's proven value, on the same terms the function arm
+        // above states — plain per-scope pass only, `Verified` only, findings
+        // to the real `out`. The provenance names the call as it was written,
+        // since a method has no bare name to print.
+        ArgValue::MethodCall { callee, args, named } if !in_descent => {
+            let summary = project_method_summary(
+                cx,
+                folder,
+                callee,
+                args,
+                named,
+                env,
+                store,
+                this_exact,
+                enclosing_class,
+                poisoned,
+                span_start,
+                None,
+                out,
+            );
+            summary.and_then(|s| {
+                let sv = s.value?;
+                if sv.stratum != Stratum::Verified {
+                    return None;
+                }
+                let Fact::Singleton(v) = &sv.fact else { return None };
+                Some((
+                    arg_of_val(v),
+                    format!("returned from {}", value.render()),
+                    sv.stratum,
+                ))
+            })
+        }
+        // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
+        ArgValue::PropFetch { var, prop } if !poisoned => {
+            store.prop_fact(var, prop).and_then(|f| match f {
+                Fact::Singleton(v) => Some((
+                    arg_of_val(v),
+                    format!("from ${var}->{prop}"),
+                    store.prop_stratum(var, prop),
+                )),
+                _ => None,
+            })
+        }
+        _ => None,
+    }
+}
+
 /// Check a function call whose arguments may be propagated values (`Var`/`Call`/
 /// array). Runs the native runtime check and the phpdoc declared-contract check;
 /// a site where the native check fired is skipped by the phpdoc check.
@@ -22714,110 +22899,12 @@ fn check_propagated_call(
 
         let mut native_fired = false;
         if let Some(ty) = param.ty.as_ref() {
-            // Resolved value + provenance + the trust stratum that arrived with the
-            // resolution (issue #127 review). The proof gate must use this stratum —
-            // never a re-read of the syntactic call tree via `value_stratum`, which
-            // would launder an Asserted fold (`strtoupper(g(...))`) into Verified.
-            let resolved: Option<(ArgValue, String, Stratum)> = match &arg.value {
-                ArgValue::Var(name) if !poisoned => env.get(name).and_then(|k| {
-                    let v = k.singleton()?;
-                    let prov = match &k.bound {
-                        Some(b) => format!("from ${name}, {b}"),
-                        None => format!("from ${name}, assigned at line {}", k.line),
-                    };
-                    Some((v, prov, k.stratum))
-                }),
-                ArgValue::Call(name, args) => {
-                    let direct = if args.is_empty() {
-                        cx.resolve_const_fn(name)
-                            .map(|(lit, line)| {
-                                (
-                                    lit,
-                                    format!("from {name}(), defined at line {line}"),
-                                    Stratum::Verified,
-                                )
-                            })
-                            .or_else(|| {
-                                cx.try_fold_emit(name, args, env, poisoned, folder, out)
-                            })
-                    } else {
-                        cx.try_fold_emit(name, args, env, poisoned, folder, out)
-                    };
-                    // A nested project call (issue #60): its Singleton return summary
-                    // is the argument's proven value — `takesInt(g(1))` sees what `g`
-                    // provably returns, the same crossing `$x = g(1); takesInt($x)`
-                    // always had. Plain per-scope pass only: a fresh descent tree
-                    // started from inside a live descent would evade the on-stack
-                    // recursion guard (mutual recursion through an argument position
-                    // would loop), and the plain pass walks every scope anyway, so
-                    // the descent-pass decline loses no site. `Verified`-only: the
-                    // native proof below consumes an all-Verified premise (ADR-0052
-                    // §5), and an Asserted summary must not launder into it. Findings
-                    // go to the real `out` so a binding-specific proof under `g(1)`
-                    // is not discarded (issue #127 review); dedup absorbs any
-                    // binding-independent copy already emitted by the plain walk.
-                    direct.or_else(|| {
-                        if in_descent {
-                            return None;
-                        }
-                        let summary = project_call_summary(
-                            cx, folder, name, args, env, store, poisoned, arg.span.start, None, out,
-                        )?;
-                        let sv = summary.value?;
-                        if sv.stratum != Stratum::Verified {
-                            return None;
-                        }
-                        let Fact::Singleton(v) = &sv.fact else { return None };
-                        Some((arg_of_val(v), format!("returned from {name}()"), sv.stratum))
-                    })
-                }
-                // A nested method / static call (issue #386): its `Singleton` summary
-                // is the argument's proven value, on the same terms the function arm
-                // above states — plain per-scope pass only, `Verified` only, findings
-                // to the real `out`. The provenance names the call as it was written,
-                // since a method has no bare name to print.
-                ArgValue::MethodCall { callee, args, named } if !in_descent => {
-                    let summary = project_method_summary(
-                        cx,
-                        folder,
-                        callee,
-                        args,
-                        named,
-                        env,
-                        store,
-                        this_exact,
-                        enclosing_class,
-                        poisoned,
-                        arg.span.start,
-                        None,
-                        out,
-                    );
-                    summary.and_then(|s| {
-                        let sv = s.value?;
-                        if sv.stratum != Stratum::Verified {
-                            return None;
-                        }
-                        let Fact::Singleton(v) = &sv.fact else { return None };
-                        Some((
-                            arg_of_val(v),
-                            format!("returned from {}", arg.value.render()),
-                            sv.stratum,
-                        ))
-                    })
-                }
-                // A property read `$o->p` (ADR-0036): a `Singleton` prop fact flows.
-                ArgValue::PropFetch { var, prop } if !poisoned => {
-                    store.prop_fact(var, prop).and_then(|f| match f {
-                        Fact::Singleton(v) => Some((
-                            arg_of_val(v),
-                            format!("from ${var}->{prop}"),
-                            store.prop_stratum(var, prop),
-                        )),
-                        _ => None,
-                    })
-                }
-                _ => None,
-            };
+            // The resolution is shared with the builtin arm (ADR-0056 §9.2) — see
+            // `propagated_arg_value` for why the stratum is the resolution's own.
+            let resolved = propagated_arg_value(
+                cx, folder, &arg.value, env, store, this_exact, enclosing_class, poisoned,
+                in_descent, arg.span.start, out,
+            );
             // Proof-layer consumption rule (ADR-0052 §5): the native
             // `type.argument-mismatch` fires only on an all-`Verified` premise. A
             // value proven through an `Asserted` env/heap fact stays silent (the
