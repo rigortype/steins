@@ -815,7 +815,7 @@ mod replay {
         assert_eq!(boot["fold_lane"], "portable_subset");
         assert_eq!(boot["curated_rows"], false, "a curated row is pinned to a machine too");
         assert_eq!(boot["absence_family"], true, "existence is not arithmetic");
-        assert_eq!(boot["fold_total"], 65);
+        assert_eq!(boot["fold_total"], 68);
         assert_eq!(
             boot["fold_portable"], 53,
             "…and issue #382 measured the last two unverified rows into it, so the ALLOWLIST \
@@ -840,28 +840,31 @@ mod replay {
                 "version_compare",
                 "range",
                 "preg_split",
-                "preg_match"
+                "preg_match",
+                "preg_match_all",
+                "json_decode",
+                "json_encode"
             ])
         );
         // Beside the names, the reason each row is refused — the field the
         // boundary panel groups by, so its sentences cannot go false as the
         // table grows the way the hand-written one did.
         let refusals = boot["refusals"].as_array().expect("refusals is an array");
-        assert_eq!(refusals.len(), 12, "one entry per refused row");
+        assert_eq!(refusals.len(), 15, "one entry per refused row");
         assert_eq!(refusals[0]["name"], "abs");
         assert_eq!(refusals[0]["axis"], "integer_width");
         assert!(
             refusals[0]["witness"].as_str().expect("witness").contains(" / "),
             "a witness shows both engines' answers"
         );
-        for name in ["preg_split", "preg_match"] {
+        for name in ["preg_split", "preg_match", "preg_match_all"] {
             let preg = refusals.iter().find(|r| r["name"] == name).expect("a PCRE row");
             assert_eq!(preg["axis"], "build_option", "{name} is not about the word size");
         }
         assert_eq!(
             refusals.iter().filter(|r| r["axis"] == "build_option").count(),
-            2,
-            "and those two are the only ones — same matcher, same build option"
+            3,
+            "and those three are the only ones — same matcher, same build option"
         );
         assert_eq!(
             refusals.iter().map(|r| r["name"].clone()).collect::<Vec<_>>(),

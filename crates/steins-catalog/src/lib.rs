@@ -226,6 +226,10 @@ refused_rows! {
     "preg_split" => (RefusalAxis::BuildOption, "preg_split(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") splits / is false — PCRE2's JIT ignores the inline limit verbs its interpreter honours, and adding (*NO_JIT) makes both engines agree"),
     // issue #382 — the same matcher as preg_split, so the same build option
     "preg_match" => (RefusalAxis::BuildOption, "preg_match(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") is 1 / false, and (*LIMIT_RECURSION=1) diverges the same way — one PCRE2 build JITs and ignores the inline limit verbs the other honours"),
+    // wave 3 — measured by the generated probe, not by a hand-written family
+    "preg_match_all" => (RefusalAxis::BuildOption, "preg_match_all(\"/(*LIMIT_MATCH=1)a/\", \"aaa\") is 3 / false — the third name on the axis preg_split opened, and for the same reason: one PCRE2 build JITs past the inline limit verbs the other honours"),
+    "json_decode" => (RefusalAxis::IntegerWidth, "json_decode(\"3000000000\") is int(3000000000) / float(3000000000.0) — the document is the same text and the value's TYPE TAG is the parsing engine's word size, with no flag, option or unusual input involved"),
+    "json_encode" => (RefusalAxis::IntegerWidth, "json_encode(\"3000000000\", JSON_NUMERIC_CHECK|JSON_PRESERVE_ZERO_FRACTION) is \"3000000000\" / \"3000000000.0\" — NUMERIC_CHECK retypes the numeric string, the narrow engine has no int that wide so it becomes a float, and PRESERVE_ZERO_FRACTION renders the fraction; NEITHER FLAG ALONE DIVERGES"),
 }
 
 /// The portability class of `name` (case-insensitive), or `None` when not on
@@ -1970,7 +1974,7 @@ mod tests {
             }
         }
         assert_eq!(PORTABLE.len(), 53, "the verified portable subset");
-        assert_eq!(REFUSED.len(), 12, "the refused rows");
+        assert_eq!(REFUSED.len(), 15, "the refused rows");
         assert_eq!(
             UNVERIFIED.len(),
             0,
@@ -1979,7 +1983,7 @@ mod tests {
         );
         assert_eq!(
             foldable_entry_count(),
-            65,
+            68,
             "the allowlist size the ADR-0066 amendments tabulate, plus wave 1, issue #354, its \
              aliases, wave 2, and the two names the seam's shape gate unblocked (issue #382)"
         );
@@ -2066,15 +2070,20 @@ mod tests {
         {
             assert_eq!(axis_of(name), RefusalAxis::IntegerWidth, "{name} is an arithmetic row");
         }
-        assert_eq!(axis_of("preg_split"), RefusalAxis::BuildOption);
-        assert_eq!(axis_of("preg_match"), RefusalAxis::BuildOption);
+        for name in ["preg_split", "preg_match", "preg_match_all"] {
+            assert_eq!(axis_of(name), RefusalAxis::BuildOption, "{name} runs PCRE");
+        }
+        // …and the JSON pair is the word size, not the build.
+        for name in ["json_encode", "json_decode"] {
+            assert_eq!(axis_of(name), RefusalAxis::IntegerWidth, "{name} is about the machine word");
+        }
         let build = refused_names()
             .iter()
             .filter(|n| refusal(n).expect("refused").axis == RefusalAxis::BuildOption)
             .count();
         assert_eq!(
-            build, 2,
-            "two rows are about a build option, and both run the same PCRE: preg_split and preg_match"
+            build, 3,
+            "three rows are about a build option, and all three run the same PCRE"
         );
     }
 
@@ -2255,7 +2264,7 @@ mod tests {
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
         assert_eq!(portable_names().len(), 53);
-        assert_eq!(refused_names().len(), 12);
+        assert_eq!(refused_names().len(), 15);
         assert_eq!(unverified_names().len(), 0);
     }
 

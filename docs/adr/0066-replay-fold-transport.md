@@ -1255,3 +1255,63 @@ falsifiable. Two fixtures that used `explode` to pin the unverified leg of the
 width gate now pin the opposite (it folds on the narrow machine), and one of them
 asserts the class is empty so the next row that enters is handed the fixture it
 needs.
+
+## Amendment (2026-08-16): wave 3 — the JSON pair and `preg_match_all`
+
+The first names admitted on evidence the **generated** probe produced. Sixteen
+candidates from the coverage survey were run through `cargo xtask fold-probe` in
+both calling conventions; thirteen measured clean and three diverged, and those
+three are these. The full disposition is
+`docs/notes/20260816-fold-candidate-probes.md`; this records what the catalog
+did with it.
+
+| name | corpus | weak | strict | verdict |
+| --- | ---: | --- | --- | --- |
+| `json_encode` | 133 | 42 (2/0/4) | 42 (2/0/0) | `Refused`, `IntegerWidth` |
+| `json_decode` | 116 | 46 (3/0/0) | 46 (3/0/0) | `Refused`, `IntegerWidth` |
+| `preg_match_all` | 14 | 72 (2/0/4) | 72 (2/0/0) | `Refused`, `BuildOption` |
+
+All three **fold on the project's own 64-bit PHP** and decline in the browser,
+which is what a `Refused` row is for.
+
+### `json_decode` is `range`'s shape with none of `range`'s exotica
+
+| probe | 64-bit | 32-bit |
+| --- | --- | --- |
+| `json_decode("3000000000")` | `int(3000000000)` | `float(3000000000.0)` |
+| `json_decode("2147483648")` | `int(2147483648)` | `float(2147483648.0)` |
+
+The document is the same text; the value's **type tag** is the parsing engine's
+word size. `range` needed a `string|int|float` parameter to reach the same flip
+and this needs nothing at all — no flag, no option, no unusual argument. Any
+JSON carrying an integer past 2³¹ diverges, which is why the row is a refusal
+rather than a guard on some argument shape.
+
+### `json_encode` needs two flags at once
+
+```text
+json_encode("3000000000", JSON_NUMERIC_CHECK|JSON_PRESERVE_ZERO_FRACTION)
+  64-bit: "3000000000"     32-bit: "3000000000.0"
+```
+
+`JSON_NUMERIC_CHECK` retypes the numeric string, the narrow engine has no int
+that wide so it becomes a float, and `JSON_PRESERVE_ZERO_FRACTION` renders the
+fraction. **Neither flag alone diverges** — the pairwise hazard pass is what
+reached it, and one-at-a-time generation would have reported the name clean.
+That is worth remembering the next time a single-argument sweep reads as clean.
+
+### `preg_match_all`: the third name on an axis, which stops being a special case
+
+`preg_split` opened the `BuildOption` axis and `preg_match` joined it; this makes
+three, all running the same matcher, all diverging on the inline limit verbs one
+PCRE build JITs past and the other honours. Its `$matches` is by-ref at position
+2, sound only because ADR-0077's row invalidates the argument — countersigned by
+the engine's own arginfo since issue #382.
+
+### What the seam declines anyway
+
+`json_decode` returns `stdClass` by default, and an **object has no spelling on
+the fold wire**, so `json_decode('{"a":1}')` declines and the value lane keeps
+its floor. The row admits the name; the wire still decides what can travel.
+
+`PORTABLE` is **53**, `REFUSED` **15**, `UNVERIFIED` **0**, the allowlist **68**.
