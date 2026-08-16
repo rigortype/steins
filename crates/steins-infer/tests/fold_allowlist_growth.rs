@@ -196,8 +196,9 @@ fn explode_folds_to_the_engines_own_pieces() {
     );
     assert_eq!(
         steins_catalog::portability_class("explode"),
-        Some(steins_catalog::PortabilityClass::Unverified),
-        "folds here, declines in the browser, with no probe on record either way"
+        Some(steins_catalog::PortabilityClass::Portable),
+        "measured at last (issue #382): 25 generated tuples, both conventions, and the only \
+         non-agreements are the narrow engine's TypeError on an oversized $limit"
     );
 }
 
@@ -224,7 +225,10 @@ fn array_merge_folds_with_the_engines_own_key_resolution() {
     );
     assert_eq!(
         steins_catalog::portability_class("array_merge"),
-        Some(steins_catalog::PortabilityClass::Unverified)
+        Some(steins_catalog::PortabilityClass::Portable),
+        "measured at last (issue #382): 13 generated tuples across one, two and three arrays, \
+         both conventions — neither the renumbering nor the last-wins rule consults the \
+         machine word"
     );
 }
 

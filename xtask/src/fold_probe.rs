@@ -444,8 +444,24 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
                     (serde_json::Value::Null, serde_json::json!(0)),
                 ]),
                 list(vec![list(vec![]), list(vec![serde_json::json!(1)])]),
+                // Mixed keys: a merge RENUMBERS integer keys and keeps string
+                // ones, so an array carrying both is where that rule is
+                // visible — and a negative integer key is where PHP 8.3 changed
+                // what "next" means.
+                arr(vec![
+                    (serde_json::json!(-3), serde_json::json!("x")),
+                    (serde_json::json!("k"), serde_json::json!("y")),
+                    (serde_json::Value::Null, serde_json::json!(1)),
+                ]),
+                // The same string key twice across two arrays is last-wins, and
+                // which one wins is the engine's rule, not ours.
+                arr(vec![
+                    (serde_json::json!("k"), serde_json::json!("second")),
+                    (serde_json::json!(0), serde_json::json!("also zero")),
+                ]),
             ],
-            "PHP's own falsiness, key preservation, and the next-int rule at the narrow max",
+            "PHP's own falsiness, key preservation, integer renumbering and last-wins string \
+             keys, and the next-int rule at the narrow max",
         ),
         // A callable position is one the seam refuses to fill (issue #382's
         // shape gate), so the only probe that exists for it is the one the gate
@@ -508,6 +524,28 @@ fn generate(name: &str) -> Result<Vec<Tuple>, String> {
         args: base[..facts.params_required.min(base.len())].to_vec(),
         note: "the required-arity call".to_owned(),
     });
+    // A VARIADIC position takes as many arguments as the call cares to pass, and
+    // one of them is not a probe of the name: `array_merge`'s whole job is what
+    // happens BETWEEN its arrays — integer keys renumbered, string keys
+    // last-wins. So a variadic tail is called at three arities with values drawn
+    // from its own family.
+    for &v in facts.variadic {
+        let Some((values, note)) = families.get(v) else { continue };
+        for arity in 2..=3usize {
+            for chunk in values.chunks(arity) {
+                if chunk.len() < arity {
+                    continue;
+                }
+                let mut args = base[..v].to_vec();
+                args.extend(chunk.iter().cloned());
+                out.push(Tuple {
+                    name: name.to_owned(),
+                    args,
+                    note: format!("{note} — {arity} arguments in the variadic tail"),
+                });
+            }
+        }
+    }
     for (i, (values, note)) in families.iter().enumerate() {
         // Every REQUIRED position stays filled. Truncating at the varied one
         // instead made an under-arity call whenever `i` sat before the last

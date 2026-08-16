@@ -416,6 +416,15 @@ const PORTABLE: &[&str] = &[
     // integer in the result was computed by the machine. The one decline is the
     // narrow engine having no key after its own `PHP_INT_MAX`.
     "array_filter",
+    // issue #330's two UNVERIFIED rows, measured at last (ADR-0066's 2026-08-16
+    // amendment) — the first names admitted by the generated probe rather than
+    // by a hand-written tuple list. `array_merge` renumbers integer keys and
+    // keeps string ones under PHP's own last-wins, and neither rule consults the
+    // machine word; `explode`'s `int $limit` is the shape wave 2 admitted six
+    // times over, where an oversized argument is a `TypeError` and therefore a
+    // decline.
+    "array_merge",
+    "explode",
 ];
 
 /// The **unverified rows** of the portability classification (ADR-0028's 2026-08-14
@@ -425,23 +434,21 @@ const PORTABLE: &[&str] = &[
 /// A probe finding agreement moves a row to `PORTABLE`, a divergence to
 /// `REFUSED`.
 ///
-/// Both names are admitted by the amendment's §5 strictly-stronger rule (their
-/// Rust rungs are type-level only) rather than re-derived in Rust per ADR-0004:
+/// **The class is empty today, and that is the class working rather than the
+/// class being retired.** It held exactly two rows, `array_merge` and `explode`,
+/// admitted unmeasured by that amendment because their Rust rungs were
+/// type-level and a fold could only be strictly stronger. Both were measured in
+/// issue #382 (13 and 25 tuples, both calling conventions, zero silent and zero
+/// reverse) and left for `PORTABLE`, which is the only way out this class has.
+/// The five names it deferred before them — `range`, `preg_split`, `str_split`,
+/// `array_unique`, `array_fill` — left the same way in issue #354, three to
+/// `PORTABLE` and two to `REFUSED`.
 ///
-/// * `explode` — rung is `non-empty-list<string>` (`explode_transfer`). Not
-///   reimplemented since an empty `$separator` is a `ValueError` since PHP 8.0
-///   and a negative `$limit` can empty the result outright, so the rung
-///   declines the three-argument form.
-/// * `array_merge` — no value rung at all: duplicate **string** keys resolve
-///   last-wins and integer keys **renumber** from zero, so result keys are a
-///   function of the engine's own construction, not the arguments as written.
-///
-/// The five names this class deferred — `range`, `preg_split`, `str_split`,
-/// `array_unique`, `array_fill` — were probed in issue #354 and left it: three
-/// to `PORTABLE`, two to `REFUSED`. Nothing was promoted *into* here,
-/// which is the class working as defined: a probe moves a row out, and a row
-/// only enters by being admitted unmeasured.
-const UNVERIFIED: &[&str] = &["array_merge", "explode"];
+/// Nothing has ever been promoted *into* here, and nothing should be casually:
+/// a row enters only by being admitted **unmeasured**, which is a debt the next
+/// probe run pays. An empty list is what "no outstanding debt" looks like, and
+/// the class stays so the next admission has somewhere honest to sit.
+const UNVERIFIED: &[&str] = &[];
 
 /// The effect labels (ADR-0018 hierarchical dot-paths) a builtin carries, or
 /// `None` when **uncatalogued** (unknown effects, ADR-0005): `Some(&[])` is
@@ -1850,9 +1857,14 @@ mod tests {
                 }
             }
         }
-        assert_eq!(PORTABLE.len(), 51, "the verified portable subset");
+        assert_eq!(PORTABLE.len(), 53, "the verified portable subset");
         assert_eq!(REFUSED.len(), 12, "the refused rows");
-        assert_eq!(UNVERIFIED.len(), 2, "the unverified rows (ADR-0028 wave 1)");
+        assert_eq!(
+            UNVERIFIED.len(),
+            0,
+            "the class is EMPTY, not gone: a row enters only by being admitted unmeasured, \
+             and there is no such debt outstanding"
+        );
         assert_eq!(
             foldable_entry_count(),
             65,
@@ -1866,21 +1878,29 @@ mod tests {
         );
     }
 
-    /// An unverified name declines exactly where a refused one does, without
-    /// being one.
+    /// The unverified class is **empty**, and every name that ever sat in it
+    /// left through a probe.
+    ///
+    /// The class claims nothing, so its rows cost precision until measured; the
+    /// only way out is evidence. `array_merge` and `explode` were the last two
+    /// and left in issue #382 (13 and 25 generated tuples, both calling
+    /// conventions, zero silent and zero reverse). The five before them left in
+    /// issue #354, three to `PORTABLE` and two to `REFUSED`.
     #[test]
-    fn the_unverified_rows_decline_like_refused_ones_without_being_them() {
+    fn the_unverified_class_is_empty_and_everything_left_it_by_probe() {
+        assert!(UNVERIFIED.is_empty(), "an unmeasured row is a debt, and there is none");
+        assert!(unverified_names().is_empty());
+        // The two that left last: portable now, and still catalogued pure.
         for name in ["array_merge", "explode", "Array_Merge", "EXPLODE"] {
-            assert_eq!(portability_class(name), Some(PortabilityClass::Unverified));
+            assert_eq!(portability_class(name), Some(PortabilityClass::Portable));
             assert!(foldable(name), "{name} folds on a 64-bit engine");
-            assert!(!portable(name), "{name} declines on anything narrower");
+            assert!(portable(name), "{name} folds in the browser too now");
             assert_eq!(effect_labels(name), Some(&[][..]), "{name} is catalogued pure");
         }
         assert!(!REFUSED.contains(&"explode"));
         assert!(!REFUSED.contains(&"array_merge"));
-        // The five this class deferred are no longer deferred: issue #354
-        // probed each and landed it in the class its evidence chose. None of
-        // them passed through here, and the class did not grow.
+        // The five this class deferred earlier landed in the class their
+        // evidence chose, and none of them passed back through here.
         for name in ["str_split", "array_unique", "array_fill"] {
             assert_eq!(portability_class(name), Some(PortabilityClass::Portable), "{name} probed clean");
         }
@@ -1888,61 +1908,9 @@ mod tests {
             assert_eq!(
                 portability_class(name),
                 Some(PortabilityClass::Refused),
-                "{name} has a recorded divergence"
+                "{name} probed dirty"
             );
-        }
-    }
-
-    /// The eleven refused rows, named; see [`refusal`] for each row's axis and
-    /// witness. Ten are width-sensitive and one — `preg_split` — is not, which
-    /// is why the test is named for the class and not for the axis.
-    #[test]
-    fn the_refused_rows_fold_only_on_a_64_bit_engine() {
-        for name in [
-            "abs",
-            "intval",
-            "sprintf",
-            "dechex",
-            "decbin",
-            "decoct",
-            "bindec",
-            "hexdec",
-            "version_compare",
-            "range",
-            "preg_split",
-            "ABS",
-            "IntVal",
-            "SPRINTF",
-            "DecHex",
-            "Version_Compare",
-            "Range",
-            "PREG_SPLIT",
-        ] {
-            assert!(!portable(name), "{name} must not be certified portable");
-            assert!(foldable(name), "{name} is refused, not off the allowlist");
-            assert!(
-                refusal(name).is_some(),
-                "{name} is refused, so it owes an axis and a witness"
-            );
-        }
-        for name in [
-            "strtoupper",
-            "substr",
-            "str_repeat",
-            "count",
-            "in_array",
-            "STRLEN",
-            "str_contains",
-            "base64_decode",
-            "strtr",
-            "substr_replace",
-            "str_increment",
-            "GetType",
-            "str_split",
-            "array_fill",
-            "array_UNIQUE",
-        ] {
-            assert!(portable(name), "{name} is a verified portable fold");
+            assert!(refusal(name).is_some(), "{name} carries its witness");
         }
     }
 
@@ -2174,9 +2142,9 @@ mod tests {
             foldable_entry_count() - portable_names().len(),
             "refused ∪ unverified is exactly what a 32-bit engine does not fold"
         );
-        assert_eq!(portable_names().len(), 51);
+        assert_eq!(portable_names().len(), 53);
         assert_eq!(refused_names().len(), 12);
-        assert_eq!(unverified_names().len(), 2);
+        assert_eq!(unverified_names().len(), 0);
     }
 
     /// Default-deny: a name without a portability classification is not portable.

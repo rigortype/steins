@@ -1204,3 +1204,41 @@ it never measured:
 4. **Name the calling convention.** A verdict has to hold for whichever mode the
    request names (#390), so a row is probed both ways: `--strict` is the other
    half.
+
+## Amendment (2026-08-16): the unverified class is empty (issue #330 closed)
+
+ADR-0028's 2026-08-14 amendment §4 created a third portability class for rows it
+admitted **unmeasured** — `array_merge` and `explode`, whose Rust rungs were
+type-level, so a fold could only be strictly stronger. The class claims nothing
+by design: the correct probe count behind a row there is zero, and the name folds
+only on a provably 64-bit engine until someone measures it.
+
+Someone measured it. Both rows were probed by `cargo xtask fold-probe` — the
+first names decided by the generated families rather than a hand-written tuple
+list — in **both calling conventions**:
+
+| name | probes (silent/reverse/decline) | verdict |
+| --- | --- | --- |
+| `explode` | 25 (0/0/2) weak, 25 (0/0/0) strict | portable |
+| `array_merge` | 13 (0/0/3) weak, 13 (0/0/3) strict | portable |
+
+`explode`'s two weak declines are the shape wave 2 admitted six times over: an
+oversized `$limit` is a `TypeError` on the narrow engine, and under strict
+neither engine coerces at all, so they agree by throwing together.
+`array_merge`'s three are the narrow engine having no key past its own
+`PHP_INT_MAX` — the same decline `implode` and `count` show, and the reason its
+family probes one, two and three arrays: what `array_merge` does *between* its
+arguments is its whole job, and neither the integer renumbering nor the last-wins
+string rule consults the machine word.
+
+**The allowlist does not grow.** `PORTABLE` is 53, `REFUSED` 12, `UNVERIFIED`
+**0**, the allowlist still 65: nothing was admitted, a debt was paid.
+
+The class stays. An empty list is what "no outstanding debt" looks like, and the
+next row admitted ahead of its evidence needs somewhere honest to sit. Its
+absence would say something else — that every name here has been measured *by
+construction* — which is exactly the kind of claim this ADR exists to keep
+falsifiable. Two fixtures that used `explode` to pin the unverified leg of the
+width gate now pin the opposite (it folds on the narrow machine), and one of them
+asserts the class is empty so the next row that enters is handed the fixture it
+needs.
