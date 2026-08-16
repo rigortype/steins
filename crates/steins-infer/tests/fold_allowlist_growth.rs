@@ -745,3 +745,47 @@ fn an_argued_variadic_tail_still_folds() {
         "the family the rule exists for is neither argued nor admitted"
     );
 }
+
+/// **Analysed source cannot spend the engine's memory.**
+///
+/// A fold hands the source's own literals to a real PHP process, and a few
+/// builtins turn an integer argument into that much memory. Past the engine's
+/// `memory_limit` PHP raises a FATAL — not catchable — so the resident runner
+/// dies mid-NDJSON, and ADR-0024's contract is that a lost reply is never
+/// retried: respawn recovers the instance, not the answer. Measured before the
+/// guard, `str_repeat("ab", 2000000000)` in a one-line file killed the sidecar
+/// and printed the degradation notice for the whole run.
+///
+/// It is availability rather than soundness — the answer widens, it never lies —
+/// but it is reachable by anyone whose code Steins analyses, which is the same
+/// trust boundary the callback gate is about.
+///
+/// Both halves matter: the oversized call must decline, and the ordinary one
+/// must still fold, or the guard has bought silence instead of safety.
+#[test]
+fn an_oversized_allocation_declines_and_the_engine_survives() {
+    let Some(mut folder) = live("an_oversized_allocation_declines_and_the_engine_survives") else {
+        return;
+    };
+    const SRC: &str = "<?php\n\
+         \\PHPStan\\dumpType(str_repeat(\"ab\", 2000000000));\n\
+         \\PHPStan\\dumpType(str_pad(\"a\", 2147483647));\n\
+         \\PHPStan\\dumpType(array_fill(0, 999999999, \"x\"));\n\
+         \\PHPStan\\dumpType(str_repeat(\"ab\", 3));\n\
+         \\PHPStan\\dumpType(str_pad(\"a\", 4, \"-\"));\n\
+         \\PHPStan\\dumpType(strtoupper(\"still alive\"));\n";
+    let d = dumps(SRC, &mut folder);
+    for (i, got) in d.iter().take(3).enumerate() {
+        assert!(
+            !got.starts_with('\''),
+            "dump {i} folded an allocation the engine would have died on: {got}"
+        );
+    }
+    // …and the ordinary sizes are untouched, which is what makes the guard a
+    // budget rather than a ban.
+    assert_eq!(d[3], "'ababab'");
+    assert_eq!(d[4], "'a---'");
+    // The transport is alive at the end — the point of declining BEFORE
+    // dispatch rather than surviving a fatal afterwards.
+    assert_eq!(d[5], "'STILL ALIVE'");
+}
