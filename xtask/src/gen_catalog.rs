@@ -286,6 +286,7 @@ struct ParamRow {
     variadic: Vec<usize>,
     optional: Vec<usize>,
     params: Vec<String>,
+    param_names: Vec<String>,
     params_required: usize,
 }
 
@@ -347,6 +348,11 @@ fn render_param_facts(
          \x20   /// Each position's declared type as the engine spells it; `mixed` when\n\
          \x20   /// the parameter has no declared type at all.\n\
          \x20   pub params: &'static [&'static str],\n\
+         \x20   /// Each position's declared NAME. Only the name tells a size-shaped\n\
+         \x20   /// `int` ($length, $times) from an offset — and an oversized probe on\n\
+         \x20   /// the first is a multi-gigabyte allocation, a PHP fatal, and a dead\n\
+         \x20   /// runner (ADR-0066's deliberately-absent probe).\n\
+         \x20   pub param_names: &'static [&'static str],\n\
          \x20   /// `getNumberOfRequiredParameters()`.\n\
          \x20   pub params_required: usize,\n\
          }\n\n",
@@ -362,6 +368,7 @@ fn render_param_facts(
         let _ = writeln!(s, "            variadic: &{:?},", r.variadic);
         let _ = writeln!(s, "            optional: &{:?},", r.optional);
         let _ = writeln!(s, "            params: &{:?},", r.params);
+        let _ = writeln!(s, "            param_names: &{:?},", r.param_names);
         let _ = writeln!(s, "            params_required: {},", r.params_required);
         let _ = writeln!(s, "        }},");
         let _ = writeln!(s, "    ),");

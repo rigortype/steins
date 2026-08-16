@@ -66,6 +66,7 @@ struct Row {
     variadic: Vec<usize>,
     optional: Vec<usize>,
     params: Vec<String>,
+    param_names: Vec<String>,
     params_required: usize,
 }
 
@@ -211,6 +212,7 @@ fn render(mined: &Mined, hazardous: usize) -> String {
         let _ = writeln!(s, "variadic = {:?}", r.variadic);
         let _ = writeln!(s, "optional = {:?}", r.optional);
         let _ = writeln!(s, "params = {:?}", r.params);
+        let _ = writeln!(s, "param_names = {:?}", r.param_names);
         let _ = writeln!(s, "params_required = {}", r.params_required);
         s.push('\n');
     }

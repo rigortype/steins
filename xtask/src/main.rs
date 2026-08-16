@@ -4,6 +4,7 @@
 //! cargo xtask <command>
 //!
 //!   corpus-sync [--update]   materialize the pinned FP-gate corpus into corpus/
+//!   fold-probe [--names …]   differential 32/64-bit width probe over the fold allowlist
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
 //!   freq                     builtin-call frequency, written to docs/notes/
 //!   gen-catalog              regenerate the builtin hierarchy table from mining TOML
@@ -20,6 +21,7 @@
 
 mod corpus;
 mod corpus_local;
+mod fold_probe;
 mod freq;
 mod licenses;
 mod gate;
@@ -63,6 +65,10 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        Some("fold-probe") => match fold_probe::run(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        },
         Some("fp-gate") => match gate::run() {
             Ok(true) => ExitCode::SUCCESS,
             Ok(false) => ExitCode::FAILURE, // ADR-0013: any diagnostic on clean code blocks release.
