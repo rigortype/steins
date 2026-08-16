@@ -2266,11 +2266,24 @@ fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -
 /// one of the other twenty-nine cannot quietly reopen the hole: the seam refuses
 /// the call that would execute the comparator whether or not anyone noticed.
 ///
-/// # What this gate still does not cover
+/// # The array whose values are callables
 ///
-/// `preg_replace_callback_array` takes its callables as array **values**, which
-/// neither table sees and no position rule reaches. It is excluded by its by-ref
-/// position instead, and admitting it needs an argument rather than this gate.
+/// `preg_replace_callback_array` takes `[pattern => callback, …]`, which arginfo
+/// describes as `array` and stops — "array of callables" is not a type PHP
+/// declares, so no rule about types or positions can see into it. That one is
+/// **curated** ([`steins_catalog::callables_in_array_param`]), and the curation
+/// is the claim: the engine reaches into that array and calls what it finds.
+///
+/// The refusal is about the hazard rather than the name, like the other two: an
+/// EMPTY array at that position carries no callee and folds. Measured with the
+/// name force-admitted, `preg_replace_callback_array(["/a/" => "strtoupper"],
+/// "aaa")` does not fold while `preg_replace_callback_array([], "aaa")` answers
+/// `'aaa'`.
+///
+/// With that, all three shapes a callback can arrive in are refused: a declared
+/// `callable` parameter, an untyped variadic tail, and an array of callables.
+/// Two are mechanical and one is a list — and the list is one row, because
+/// nothing in a signature distinguishes `[$k => $callback]` from `[$k => $v]`.
 fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
     let Some(facts) = steins_catalog::param_facts(name) else {
         return false;
@@ -2290,12 +2303,30 @@ fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
     // POSITION rather than the type — an argument reaching an untyped variadic
     // tail is refused unless the catalog argues that tail carries data
     // (`sprintf`'s is rendered by its format string).
-    facts.variadic.iter().all(|&p| {
+    let tail_is_safe = facts.variadic.iter().all(|&p| {
         let untyped = facts.params.get(p).is_some_and(|t| *t == "mixed");
         !untyped
             || args.len() <= p
             || steins_catalog::variadic_tail_is_data(name)
-    })
+    });
+    if !tail_is_safe {
+        return false;
+    }
+    // …and the array whose VALUES are callables. `preg_replace_callback_array`
+    // takes `[pattern => callback, …]`, which arginfo describes as `array` and
+    // no rule about types or positions can see into. The catalog curates the
+    // position (`callables_in_array_param`); the seam refuses to fold a call
+    // that puts anything there, since every entry is a callee.
+    match steins_catalog::callables_in_array_param(name) {
+        None => true,
+        Some(p) => match args.get(p) {
+            None | Some(FoldArg::Null) => true,
+            Some(FoldArg::Array(entries)) => entries.is_empty(),
+            // Anything else in that position is not the array the name expects,
+            // so the call is not one this seam should be asking about either.
+            Some(_) => false,
+        },
+    }
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of
