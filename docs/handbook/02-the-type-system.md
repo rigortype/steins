@@ -631,23 +631,49 @@ you an object *no one else holds*, whose properties survive an
 unrelated call. It works wherever you write the `new`: assigned,
 passed as an argument, or returned from a factory.
 
-**Where it stops, it stops honestly.** Two shapes are worth
-knowing because they are common:
+**A delegating constructor counts too.** `__construct() {
+$this->init(); }` — and `parent::__construct()`, and `self::`,
+and `static::` — runs with the *same* `$this`, so Steins walks it
+and folds its writes into the object exactly as if you had
+written them inline:
 
-- **A delegating constructor.** `__construct() { $this->init(); }`
-  — Steins does not fold `init()`'s writes into the object, so
-  every property the constructor could have written through that
-  call comes back **unknown**. Not the declared default: the
-  default would be a claim the constructor may have replaced, and
-  a wrong proven value is worse than no value. The same goes for
-  `parent::__construct()`. Write the values in the constructor
-  itself and they come through.
-- **Anything Steins refuses to walk** — a constructor it cannot
-  resolve, an abstract one, one using `extract` or `$$name`, a
-  `new C(x: 1)` written with named arguments, a recursive pair —
-  falls back to the older, blunter rule: a declared default
-  survives only if the constructor's text never mentions the
-  slot at all.
+```php
+class B {
+    public $value;
+    public function __construct($v) { $this->init($v); }
+    private function init($v): void { $this->value = $v; }
+}
+$b = new B(2);
+needString($b->value);   // still reported: value is 2
+```
+
+Chains work: `parent::__construct()` inside the parent reaches
+the grandparent, one frame per level under the ordinary call
+budget. The same applies to a **fluent setter** — `$o->setX(1)`
+writes `$o`, and the next read of `$o->x` sees `1` rather than
+the blank the call used to leave behind. What crosses *into* the
+delegate differs by where you are: inside a constructor the
+object is not yet anyone else's, so its properties travel; inside
+an ordinary method `$this` may be held elsewhere, so only
+`readonly` ones do. What comes *back* is the same either way.
+
+**Where it stops, it stops honestly** — the call falls back to
+the blank it used to always leave:
+
+- **A call Steins cannot pin down.** An overridable method on a
+  `$this` whose exact class is not proven (a subclass could
+  replace it), `static::`, an unresolvable or abstract target, a
+  body using `extract` or `$$name`, a call written with named
+  arguments, a recursive pair, or a delegate that returns from
+  inside a `foreach`/`try`. Every one of them leaves the
+  properties **unknown** — never the declared default, which
+  would be a claim the call may have replaced.
+- **The same call written inside another expression.**
+  `f($this->init())` still sweeps; only a call in statement or
+  assignment position writes back.
+- **A constructor Steins refuses to walk at all** falls back to
+  the older, blunter rule: a declared default survives only if
+  the constructor's text never mentions the slot.
 
 ## Callable signatures
 
