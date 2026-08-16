@@ -14,7 +14,10 @@ is the instrument.
 | `corpus-sync` | clone/refresh the pinned corpus (`--update` re-resolves to latest stable) |
 | `phpdoc-oracle` | differential the PHPDoc parser against the real `phpstan/phpdoc-parser` |
 | `lean-check` | build the Lean 4 spec of the value domain and verify the committed differential vectors are still what it prints (`--bless` to rewrite) |
-| `gen-catalog` | regenerate the builtin class hierarchy **and the return-fact table** from the mining TOML |
+| `gen-catalog` | regenerate the committed catalog tables from the mining TOML; `--check` verifies instead of writing |
+| `mine-function-map` | mine phpstan-src's `functionMap` into the declared-return TOML, countersigned by the real engine (ADR-0069) |
+| `mine-param-facts` | mine the **resident engine's own arginfo** into the parameter-facts TOML (issue #382) |
+| `fold-probe` | the ADR-0066 differential width probe: 32-bit against 64-bit over the folding allowlist; **red on a divergence a `Portable` row denies** |
 | `freq` | builtin frequency mining (catalog seeding input) |
 | `nsrt` | the `assertType` harness (oracle idea B): five-verdict measurement of dump renderings against PHPStan's own `nsrt/` fixtures, `assertType` recognized **harness-only** |
 
@@ -493,8 +496,79 @@ files are `@generated` and carry the php-src commit pin and the PHP version they
 were cross-checked against. Editing the Rust by hand is a defect.
 
 The mining directory also holds `throws.toml`, `failure_arms.toml`,
-`return_facts.toml`, `effects_gaps.md`, and a `crosscheck.txt` — the per-arm C
-evidence behind the catalog's claims.
+`return_facts.toml`, `param_facts.toml`, `effects_gaps.md`, and a
+`crosscheck.txt` — the per-arm C evidence behind the catalog's claims.
+
+**`--check` verifies instead of writing**, and exists because a generator whose
+output is committed has two sources of truth for one artefact. They drift
+silently: the 2026-08-15 comment-compression pass edited three committed headers
+and left the render templates behind, so the next regeneration of *any* table
+rewrote three files nobody had touched. The flag renders every table and asserts
+the committed file already is it, byte for byte, reporting the first differing
+line and pointing at the template rather than the output.
+`regenerating_the_catalog_tables_changes_nothing` runs the generator that way.
+
+## `mine-param-facts`
+
+Mines every internal function of the **resident engine** through
+`ReflectionFunction` into `docs/research/phpsrc-mining/param_facts.toml`: per
+position, by-ref / declared-callable / variadic / optional, the declared type
+spelling, and the parameter's declared name.
+
+Deliberately **not** a second pass over php-src's stubs. `out_params` (ADR-0077)
+and `invocation_shape` (ADR-0033) were transcribed from those by hand, and a
+second transcription would agree with them wherever they are wrong; arginfo is
+what PHP dispatches on. It is the independent witness those two tables are
+checked against, and the check it replaced could not fail at all — `by_value_arg`
+falls back to `out_params`, so a name with no row answered "by value" everywhere
+and a loop keyed on it skipped exactly the omission it was hunting.
+
+Names carrying no hazard are recorded as bare names rather than dropped. That
+list is load-bearing: a completeness test has to tell "mined, and carries
+nothing" from "nobody looked", and reading absence as agreement is the vacuity
+the table exists to remove.
+
+## `fold-probe`
+
+The ADR-0066 differential width probe as a command: every fold request runs
+through the **same** `steins_handle` dispatch core on both machines — the local
+64-bit `php` over the runner's NDJSON protocol, and 32-bit php-wasm over the
+patched prologue — and the responses are compared.
+
+```text
+cargo xtask fold-probe [--names a,b,c] [--strict] [--json OUT]
+```
+
+`--names` probes a candidate. With no arguments it probes **every row on the
+allowlist**, which is the regression mode: a `silent` or `reverse` verdict on a
+name the catalog calls `Portable` fails the command. `--strict` names the other
+calling convention, since a portability verdict has to hold for whichever mode
+the request names (#390).
+
+Tuple families are keyed by **declared parameter type**, read from the
+`mine-param-facts` table, so the generator's specification is a property of the
+signature rather than of whoever wrote a per-name tuple list. Two parameters are
+keyed by NAME instead, because their hazard is entirely in the content: a PCRE
+`$pattern` (the inline limit verbs one build JITs past) and a `$format` (the
+conversions that render the machine word). Generation **refuses** rather than
+skipping — a name with no mined row, or one whose every union arm is an
+object/resource, is an error and not an empty clean run.
+
+Four properties keep a run honest. Each, dropped, produces a **false clean** — a
+run reporting an agreement it never measured:
+
+1. **Compare the response bytes, not parsed JSON.** Array elements cross the seam
+   with no per-element type tag, so an `int` on one engine and a `float` on the
+   other differ only as `3000000000` versus `3000000000.0`, which JavaScript's
+   single number type erases on parse.
+2. **A float argument cannot be a JavaScript number** — it travels as a raw token.
+3. **Refuse inadmissible tuples**: one the range guard would reject is not a probe.
+4. **Name the calling convention**, and probe a row both ways.
+
+An engine that **dies** (a size-shaped `int` at 2^31−1 is a multi-gigabyte
+allocation and a PHP fatal) is a verdict of its own, and any tuple carrying it
+fails the command: an unmeasured tuple is not a clean one. Requires `php` on
+`PATH` and php-wasm vendored by `sh apps/playground/build.sh`.
 
 ## Conformance
 
