@@ -958,6 +958,34 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
     }
 }
 
+/// The position of an `array` parameter whose **values are callables**, or
+/// `None` (issue #382).
+///
+/// The last callback shape no mechanical source can see. `preg_replace_callback_array`
+/// takes `[pattern => callback, …]` at position 0: arginfo says `array` and
+/// stops, because "array of callables" is not a type PHP declares. The
+/// `callable` column cannot see it, `invocation_shape` names a positional
+/// argument and these are array *values*, and the untyped-variadic-tail rule
+/// does not apply because the parameter is neither untyped nor variadic.
+///
+/// So this is **curated on purpose**, and the curation is the claim: a row says
+/// the engine reaches into that array and calls what it finds. The fold seam
+/// refuses to fold a call that puts anything in it, which is the same posture
+/// the other two shapes get — the difference is only where the knowledge comes
+/// from.
+///
+/// One row today. A second belongs here the moment a builtin is found that
+/// invokes array values, and finding one is a reading exercise, not a query:
+/// nothing in a signature distinguishes `[$k => $callback]` from `[$k => $v]`.
+#[must_use]
+pub fn callables_in_array_param(name: &str) -> Option<usize> {
+    match name.to_ascii_lowercase().as_str() {
+        // `preg_replace_callback_array([$pattern => $callback, …], $subject)`.
+        "preg_replace_callback_array" => Some(0),
+        _ => None,
+    }
+}
+
 /// Whether a foldable name's **untyped variadic tail carries data** rather than
 /// a callee (issue #382).
 ///
@@ -2803,7 +2831,7 @@ mod tests {
     use super::{
         LabelIntent, WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
         out_param_written_when, out_params, param_facts, param_facts_generated, param_facts_mined,
-        retired_label, subsumes, variadic_tail_is_data,
+        callables_in_array_param, retired_label, subsumes, variadic_tail_is_data,
     };
 
     #[test]
@@ -3156,6 +3184,35 @@ mod tests {
         for name in ["array_udiff", "array_uintersect", "array_diff_ukey"] {
             assert!(!variadic_tail_is_data(name), "{name} hides a comparator in its tail");
             assert!(!foldable(name), "{name} is not on the allowlist");
+        }
+    }
+
+    /// The third callback shape, and the only one that is a **list**.
+    ///
+    /// `preg_replace_callback_array` takes `[pattern => callback, …]`: arginfo
+    /// says `array` and stops, because "array of callables" is not a type PHP
+    /// declares. So no mechanical rule can find it — not the `callable` column,
+    /// not `invocation_shape` (these are array *values*, not a positional
+    /// argument), not the untyped-variadic-tail rule (the parameter is neither).
+    ///
+    /// The row is the claim, and this pins both halves of it: the name is
+    /// curated, and it is not on the folding allowlist — so the seam's refusal
+    /// is defence for a future admission rather than something load-bearing
+    /// today, which is exactly the posture the other two shapes have.
+    #[test]
+    fn the_array_of_callables_is_curated_and_not_admitted() {
+        assert_eq!(callables_in_array_param("preg_replace_callback_array"), Some(0));
+        assert_eq!(callables_in_array_param("PREG_REPLACE_CALLBACK_ARRAY"), Some(0));
+        assert!(!foldable("preg_replace_callback_array"));
+        // Not a blanket rule about array parameters: the names that take an
+        // array of VALUES are untouched, or `count`/`implode` would stop folding.
+        for name in ["count", "implode", "array_merge", "array_filter"] {
+            assert_eq!(callables_in_array_param(name), None, "{name} takes values, not callees");
+        }
+        // …and every foldable name is clear of it, which is what lets the seam's
+        // rule cost nothing today.
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            assert_eq!(callables_in_array_param(name), None, "{name} folds and carries callees");
         }
     }
 
