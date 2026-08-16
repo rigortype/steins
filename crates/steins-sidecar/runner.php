@@ -211,6 +211,22 @@ function steins_env()
  * a consumer that cannot read the arity withholds its rule exactly as it withholds
  * on an absent declaration.
  *
+ * ## Parameter surface (ADR-0056 §9, R1's parameter twin)
+ *
+ * `params` is the same signature read one level deeper: one entry per position of
+ * `ReflectionFunction::getParameters()`, in declaration order, each carrying
+ * `name` (so a finding can name `$string` the way PHP's own TypeError does), the
+ * `(string)` rendering of `getType()` — `null` where the position declares none —
+ * and the three shape bits `by_ref` / `variadic` / `optional`
+ * (`isPassedByReference`, `isVariadic`, `isOptional`).
+ *
+ * The counts above and this list are not redundant: a count pins a *rule*, this
+ * list judges an *argument*, and a consumer of one is not a consumer of the other.
+ * `params` sits inside the same try/catch, so a reflection failure leaves it
+ * `null` — and an absent list (an older runner, a replay table recorded before the
+ * field) withholds the judgment exactly as an absent declaration withholds a seed.
+ * A zero-parameter function reports `[]`, which is an answer; `null` never is.
+ *
  * @param array<mixed> $params
  * @return array<string, mixed>
  */
@@ -240,6 +256,7 @@ function steins_reflect(array $params)
     $tentative = false;
     $params_total = null;
     $params_required = null;
+    $parameters = null;
     if ($function) {
         try {
             $rf = new ReflectionFunction($name);
@@ -256,11 +273,23 @@ function steins_reflect(array $params)
             }
             $params_total = $rf->getNumberOfParameters();
             $params_required = $rf->getNumberOfRequiredParameters();
+            $parameters = [];
+            foreach ($rf->getParameters() as $rp) {
+                $pt = $rp->getType();
+                $parameters[] = [
+                    'name' => $rp->getName(),
+                    'type' => $pt === null ? null : (string) $pt,
+                    'by_ref' => $rp->isPassedByReference(),
+                    'variadic' => $rp->isVariadic(),
+                    'optional' => $rp->isOptional(),
+                ];
+            }
         } catch (\Throwable $e) {
             $return_type = null;
             $tentative = false;
             $params_total = null;
             $params_required = null;
+            $parameters = null;
         }
     }
 
@@ -274,6 +303,7 @@ function steins_reflect(array $params)
         'return_type_tentative' => $tentative,
         'params_total' => $params_total,
         'params_required' => $params_required,
+        'params' => $parameters,
     ];
 }
 

@@ -161,6 +161,50 @@ fn reflect_reports_the_parameter_counts() {
     }
 }
 
+#[test]
+fn reflect_reports_the_parameter_list() {
+    // ADR-0056 §9: the reply carries `getParameters()` per position — the source
+    // the builtin-argument judgment reads. Every answer below is the live engine's.
+    let Some(mut sc) = spawn_or_skip("reflect_reports_the_parameter_list") else { return };
+    let strlen = sc.reflect("strlen").expect("reflection reply");
+    let p = strlen.params.clone().expect("strlen has a parameter list");
+    assert_eq!(p.len(), 1, "strlen(string $string): {strlen:?}");
+    assert_eq!(p[0].name, "string");
+    assert_eq!(p[0].ty.as_deref(), Some("string"));
+    assert!(!p[0].by_ref && !p[0].variadic && !p[0].optional);
+
+    // The by-ref out-parameter (`preg_match`'s `$matches`) and the variadic tail
+    // (`sprintf`'s `$values`) — the two shapes the judgment declines on.
+    let matches = &sc.reflect("preg_match").expect("reply").params.expect("params")[2];
+    assert_eq!(matches.name, "matches", "preg_match's third parameter: {matches:?}");
+    assert!(matches.by_ref, "$matches is an out-parameter: {matches:?}");
+    let sprintf = sc.reflect("sprintf").expect("reply").params.expect("params");
+    assert_eq!(sprintf[0].ty.as_deref(), Some("string"), "sprintf(string $format, …)");
+    assert!(sprintf.last().expect("a tail").variadic, "sprintf's tail is variadic: {sprintf:?}");
+
+    // `mixed` travels verbatim; the consumer is what declines on it.
+    assert_eq!(
+        sc.reflect("var_dump").expect("reply").params.expect("params")[0].ty.as_deref(),
+        Some("mixed"),
+    );
+    // An optional position with a default, and a union spelling.
+    let substr = sc.reflect("substr").expect("reply").params.expect("params");
+    assert_eq!(substr[2].ty.as_deref(), Some("?int"), "substr's $length: {substr:?}");
+    assert!(substr[2].optional, "substr's $length has a default: {substr:?}");
+    assert_eq!(
+        sc.reflect("str_replace").expect("reply").params.expect("params")[0].ty.as_deref(),
+        Some("array|string"),
+    );
+
+    // A name that is not resident is a structured not-found: no list, never an
+    // empty one — the same rule the counts follow.
+    let missing = sc.reflect("steins_no_such_function").expect("reflection reply");
+    assert!(!missing.exists(), "{missing:?}");
+    assert_eq!(missing.params, None, "no list for a name that is not resident: {missing:?}");
+    // A class-like carries none either.
+    assert_eq!(sc.reflect("Exception").expect("reply").params, None);
+}
+
 /// `Random\Randomizer` (ext-random, 8.2+) has no catalog row (issue #269, CI 8.4/local 8.5).
 #[test]
 fn reflect_class_reads_an_extension_class_declaration() {

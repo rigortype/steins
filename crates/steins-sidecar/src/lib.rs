@@ -44,7 +44,7 @@
 pub mod wire;
 
 pub use wire::{
-    ARRAY_TAG, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue,
+    ARRAY_TAG, BuiltinParam, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue,
     PregCompile, ReflectedClass, ReflectedClassKind, ReflectedConst, ReflectedMethod,
     ReflectedProperty, Reflection, Visibility, defined_params, env_params, fold_arg_to_json,
     fold_params, parse_class_reflection_result, parse_defined_result, parse_env_result,
