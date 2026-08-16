@@ -8,6 +8,17 @@ table. For each side-effect KIND actually present in php-src's standard-library
 surface I state whether Steins' registry already has a node for it, and for each
 gap I propose a dot-path label in the registry's prefix-subsumption style.
 
+> **Update 2026-08-16 (issue #382 follow-up).** The two *seeding* gaps this
+> audit recorded are closed. §5's handler-registration set is coloured
+> `global.write` (with `spl_autoload_unregister`, the `stream_wrapper_*` trio
+> and the tick-function pair beside the names proposed here), and the process
+> family is whole: `exec`, `shell_exec`, `popen` and `proc_open` carry
+> `io.process`, kept apart from `system`/`passthru`'s `io.process` + `io.output`
+> because those two RELAY the child's output and these four hand it back. What
+> remains uncoloured, and is still a seeding gap rather than a vocabulary one,
+> is the procedural database family: `io.db` exists, `PDO`'s methods return it,
+> and `mysqli_query`/`pg_query` still widen.
+>
 > **Update 2026-08-12 (ADR-0083).** Every gap ranked below has since landed,
 > and the `output` root the audit was written against no longer exists: output
 > is now an ambient channel under `io` (`io.output`, split by

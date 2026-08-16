@@ -494,6 +494,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // Runs a child process and relays its output; unsettled OB-capturability
     // keeps parent `io.output` rather than `.buffer` (ADR-0083).
     const PROCESS_TO_OUTPUT: &[&str] = &["io.process", "io.output"];
+    // Runs a child and hands its output BACK — captured, returned, or piped —
+    // so the parent's own output channel is untouched.
+    const IO_PROCESS: &[&str] = &["io.process"];
     // `curl_exec`: response body to output unless `CURLOPT_RETURNTRANSFER`.
     const NET_TO_OUTPUT: &[&str] = &["io.net", "io.output"];
 
@@ -527,6 +530,15 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         }
         // Shell out and relay the child's output (ADR-0083).
         "system" | "passthru" => Some(PROCESS_TO_OUTPUT),
+        // Shell out and DO NOT relay: `exec` captures into its by-ref array and
+        // returns the last line, `shell_exec` returns the whole output as a
+        // string, and `popen`/`proc_open` hand back pipes for the caller to read
+        // (effects_gaps.md's seeding gap — the label existed, the rows did not).
+        // So the parent's own output is untouched and `io.process` stands alone:
+        // the child still runs, which is the effect a purity envelope is about.
+        // A relayed child is `system`/`passthru` above, and that difference is
+        // exactly why these are not simply added to that row.
+        "exec" | "shell_exec" | "popen" | "proc_open" => Some(IO_PROCESS),
         "curl_exec" => Some(NET_TO_OUTPUT),
         "error_log" | "syslog" | "sleep" | "usleep" => Some(IO),
         "date_default_timezone_set" | "mb_regex_encoding" | "setlocale" | "ini_set" | "putenv" => {
@@ -535,6 +547,21 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         // Process-global state, no channel: seeding pair replaces RNG state;
         // `clearstatcache` empties the stat cache. Drawing stays `nondet.random`.
         "srand" | "mt_srand" | "clearstatcache" => Some(GLOBAL_WRITE),
+        // Handler and wrapper REGISTRATION (effects_gaps.md §5): each writes a
+        // slot of the engine's own dispatch table, which every later call in the
+        // process reads. `global.write` is the honest coarse colour — a finer
+        // node would claim a channel these do not touch by themselves.
+        //
+        // The write is the effect, not the eventual call: `register_shutdown_function`
+        // additionally carries the callback into shutdown (ADR-0033's deferred
+        // invoker), and `stream_wrapper_register` re-points a SCHEME, so a later
+        // `file_get_contents('foo://x')` runs user code — which is why `io` is
+        // the arg-blind colour on the stream family and why this row is a write
+        // rather than an `io` of its own.
+        "set_error_handler" | "set_exception_handler" | "spl_autoload_register"
+        | "spl_autoload_unregister" | "stream_wrapper_register" | "stream_wrapper_unregister"
+        | "stream_wrapper_restore" | "register_shutdown_function" | "register_tick_function"
+        | "unregister_tick_function" => Some(GLOBAL_WRITE),
         "getenv" | "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
         // Signal delivery/handling (effects_gaps.md §1); pcntl/posix functions.
         "pcntl_signal" | "pcntl_signal_dispatch" | "pcntl_alarm" | "pcntl_async_signals"
@@ -2222,11 +2249,72 @@ mod tests {
         }
     }
 
+    /// Uncatalogued is a real answer and not a leftover: an unknown name, and a
+    /// family nobody has coloured yet.
+    ///
+    /// `proc_open` used to be the example here and stopped being one — it runs a
+    /// child process, which is exactly what `io.process` is for, and
+    /// effects_gaps.md had it on record as a *seeding* gap rather than a
+    /// vocabulary one. The procedural database families are still the real
+    /// example: `io.db` exists and nothing returns it, so every `mysqli_query`
+    /// widens today.
     #[test]
     fn uncatalogued_builtins_are_none() {
-        for name in ["some_unknown_fn", "mysqli_query", "proc_open"] {
+        for name in ["some_unknown_fn", "mysqli_query", "pg_query", "sqlite_query"] {
             assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
         }
+    }
+
+    /// The process family, whole (effects_gaps.md's seeding gap): every builtin
+    /// that starts a child carries `io.process`, and the ones that RELAY the
+    /// child's output to the parent's carry `io.output` beside it.
+    ///
+    /// The split is the whole content of the rows. `exec` captures into its
+    /// by-ref array and returns the last line, `shell_exec` returns the output
+    /// as a string, `popen`/`proc_open` hand back pipes — none of them writes to
+    /// the parent's output, so claiming `io.output` there would convict a
+    /// declared-`io.process` function of an effect it does not have.
+    #[test]
+    fn every_child_process_builtin_is_coloured() {
+        for name in ["exec", "shell_exec", "popen", "proc_open"] {
+            assert_eq!(effect_labels(name), Some(&["io.process"][..]), "{name} runs a child");
+        }
+        for name in ["system", "passthru"] {
+            assert_eq!(
+                effect_labels(name),
+                Some(&["io.process", "io.output"][..]),
+                "{name} runs a child AND relays its output"
+            );
+        }
+    }
+
+    /// Handler and wrapper registration (effects_gaps.md §5): a write to the
+    /// engine's own dispatch table, which every later call in the process reads.
+    ///
+    /// Paired with the read side of the same table, so the test says what the
+    /// colour means rather than repeating the list: registering is
+    /// `global.write`, and the eventual invocation is somebody else's effect —
+    /// `invocation_shape` is what carries it (ADR-0033).
+    #[test]
+    fn registering_a_handler_writes_global_state() {
+        for name in [
+            "set_error_handler",
+            "set_exception_handler",
+            "spl_autoload_register",
+            "spl_autoload_unregister",
+            "stream_wrapper_register",
+            "stream_wrapper_unregister",
+            "stream_wrapper_restore",
+            "register_shutdown_function",
+            "register_tick_function",
+            "unregister_tick_function",
+        ] {
+            assert_eq!(effect_labels(name), Some(&["global.write"][..]), "{name} writes dispatch state");
+        }
+        // The seeding pair sits on the same colour for the same reason, and the
+        // DRAW stays nondeterministic — writing the RNG state is not reading it.
+        assert_eq!(effect_labels("mt_srand"), Some(&["global.write"][..]));
+        assert_eq!(effect_labels("mt_rand"), Some(&["nondet.random"][..]));
     }
 
     #[test]
