@@ -328,9 +328,11 @@ impl FakeEngine {
                 return_type: Some(return_type.to_owned()),
                 return_type_tentative: false,
                 // No arity: a declaration with no parameter counts is the old-runner
-                // case, on which the arity-pinned rules must withhold.
+                // case, on which the arity-pinned rules must withhold. The parameter
+                // list is absent for the same reason (ADR-0056 §9.1).
                 params_total: None,
                 params_required: None,
+                params: None,
             },
         );
         self

@@ -76,6 +76,7 @@ impl FoldEngine for Engine {
             return_type_tentative: false,
             params_total: None,
             params_required: None,
+            params: None,
         })
     }
     fn reflect_class(&mut self, _target: &str) -> Option<ClassReflection> {
