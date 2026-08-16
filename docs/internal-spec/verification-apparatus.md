@@ -547,7 +547,19 @@ the request names (#390).
 
 Tuple families are keyed by **declared parameter type**, read from the
 `mine-param-facts` table, so the generator's specification is a property of the
-signature rather than of whoever wrote a per-name tuple list. Two parameters are
+signature rather than of whoever wrote a per-name tuple list. That table carries
+a row for **every** builtin, not only the admitted ones, because the names worth
+probing are precisely the ones not yet on the allowlist — the first candidate
+batch run this way turned up a divergence nobody had looked for:
+
+```text
+json_encode("3000000000", JSON_NUMERIC_CHECK|JSON_PRESERVE_ZERO_FRACTION)
+  64-bit: "3000000000"   32-bit: "3000000000.0"
+```
+
+`JSON_NUMERIC_CHECK` retypes the numeric string, the narrow engine has no int
+that wide so it becomes a float, and `JSON_PRESERVE_ZERO_FRACTION` then renders
+the fraction. Neither flag alone diverges. Two parameters are
 keyed by NAME instead, because their hazard is entirely in the content: a PCRE
 `$pattern` (the inline limit verbs one build JITs past) and a `$format` (the
 conversions that render the machine word). Generation **refuses** rather than
