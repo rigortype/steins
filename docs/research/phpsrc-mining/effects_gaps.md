@@ -14,10 +14,20 @@ gap I propose a dot-path label in the registry's prefix-subsumption style.
 > and the tick-function pair beside the names proposed here), and the process
 > family is whole: `exec`, `shell_exec`, `popen` and `proc_open` carry
 > `io.process`, kept apart from `system`/`passthru`'s `io.process` + `io.output`
-> because those two RELAY the child's output and these four hand it back. What
-> remains uncoloured, and is still a seeding gap rather than a vocabulary one,
-> is the procedural database family: `io.db` exists, `PDO`'s methods return it,
-> and `mysqli_query`/`pg_query` still widen.
+> because those two RELAY the child's output and these four hand it back. The
+> procedural database family is coloured too, by one rule — **talks to the
+> server**: connecting and closing, sending a statement (including the async
+> `pg_send_*`/`mysqli_reap_async_query` spellings and the `COPY` pair), and the
+> transaction control that sends `COMMIT`/`ROLLBACK`, across `mysqli_*`, `pg_*`
+> and `odbc_*`. What stays uncoloured is the buffered/local half — error and
+> metadata accessors, `mysqli_real_escape_string`, and the `*_fetch_*` families
+> — because on an UNBUFFERED result some of those do reach the wire, and telling
+> those apart is a property of the call site's earlier `MYSQLI_USE_RESULT` that
+> a name-keyed table cannot see. That is the same shape as `fwrite`'s `STDOUT`
+> destination below, deferred for the same reason.
+>
+> **Every gap this audit recorded, vocabulary and seeding alike, is now closed
+> or explicitly deferred with its reason.**
 >
 > **Update 2026-08-12 (ADR-0083).** Every gap ranked below has since landed,
 > and the `output` root the audit was written against no longer exists: output

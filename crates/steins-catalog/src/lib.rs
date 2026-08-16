@@ -497,6 +497,9 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     // Runs a child and hands its output BACK — captured, returned, or piped —
     // so the parent's own output channel is untouched.
     const IO_PROCESS: &[&str] = &["io.process"];
+    // Talks to a database server. Named apart from the method-side `IO_DB` so
+    // the two tables can be read side by side without one shadowing the other.
+    const IO_DB_LABELS: &[&str] = &["io.db"];
     // `curl_exec`: response body to output unless `CURLOPT_RETURNTRANSFER`.
     const NET_TO_OUTPUT: &[&str] = &["io.net", "io.output"];
 
@@ -562,6 +565,28 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
         | "spl_autoload_unregister" | "stream_wrapper_register" | "stream_wrapper_unregister"
         | "stream_wrapper_restore" | "register_shutdown_function" | "register_tick_function"
         | "unregister_tick_function" => Some(GLOBAL_WRITE),
+        // The procedural database families (effects_gaps.md's last seeding gap).
+        // `io.db` has existed since ADR-0018 and `PDO`'s methods return it; the
+        // procedural spellings returned nothing, so `mysqli_query($c, $sql)` in
+        // a declared-pure function said nothing while `$pdo->query($sql)` did.
+        //
+        // The rule is **talks to the server**: opening or closing a connection,
+        // sending a statement, and the transaction control that sends `COMMIT`
+        // or `ROLLBACK`. Async sends are the same wire traffic under a different
+        // name, and `mysqli_poll`/`pg_get_result` read it back.
+        "mysqli_connect" | "mysqli_real_connect" | "mysqli_close" | "mysqli_ping"
+        | "mysqli_query" | "mysqli_real_query" | "mysqli_multi_query" | "mysqli_execute_query"
+        | "mysqli_prepare" | "mysqli_stmt_prepare" | "mysqli_execute" | "mysqli_stmt_execute"
+        | "mysqli_stmt_send_long_data" | "mysqli_reap_async_query" | "mysqli_poll"
+        | "mysqli_commit" | "mysqli_rollback" | "mysqli_begin_transaction" | "mysqli_autocommit"
+        | "pg_connect" | "pg_pconnect" | "pg_close" | "pg_ping" | "pg_connection_reset"
+        | "pg_query" | "pg_query_params" | "pg_exec" | "pg_prepare" | "pg_execute"
+        | "pg_send_query" | "pg_send_query_params" | "pg_send_prepare" | "pg_send_execute"
+        | "pg_get_result" | "pg_cancel_query" | "pg_flush"
+        | "pg_copy_from" | "pg_copy_to" | "pg_put_line" | "pg_end_copy"
+        | "odbc_connect" | "odbc_pconnect" | "odbc_close" | "odbc_exec" | "odbc_do"
+        | "odbc_prepare" | "odbc_execute" | "odbc_commit" | "odbc_rollback"
+        | "odbc_autocommit" => Some(IO_DB_LABELS),
         "getenv" | "ini_get" | "date_default_timezone_get" => Some(GLOBAL_READ),
         // Signal delivery/handling (effects_gaps.md §1); pcntl/posix functions.
         "pcntl_signal" | "pcntl_signal_dispatch" | "pcntl_alarm" | "pcntl_async_signals"
@@ -2249,19 +2274,65 @@ mod tests {
         }
     }
 
-    /// Uncatalogued is a real answer and not a leftover: an unknown name, and a
-    /// family nobody has coloured yet.
+    /// Uncatalogued is a real answer and not a leftover.
     ///
-    /// `proc_open` used to be the example here and stopped being one — it runs a
-    /// child process, which is exactly what `io.process` is for, and
-    /// effects_gaps.md had it on record as a *seeding* gap rather than a
-    /// vocabulary one. The procedural database families are still the real
-    /// example: `io.db` exists and nothing returns it, so every `mysqli_query`
-    /// widens today.
+    /// Both of this test's previous examples stopped being ones — `proc_open`
+    /// when the process family was coloured, `mysqli_query` when the database
+    /// families were. What is left is an unknown name and the parts of those
+    /// families deliberately left alone, which
+    /// `the_database_families_are_coloured_where_they_talk_to_the_server`
+    /// argues for by name.
     #[test]
     fn uncatalogued_builtins_are_none() {
-        for name in ["some_unknown_fn", "mysqli_query", "pg_query", "sqlite_query"] {
+        for name in ["some_unknown_fn", "mysqli_error", "mysqli_real_escape_string", "pg_last_error"] {
             assert_eq!(effect_labels(name), None, "{name} must be uncatalogued");
+        }
+    }
+
+    /// The procedural database families, coloured by one rule: **talks to the
+    /// server**.
+    ///
+    /// `io.db` has existed since ADR-0018 and `PDO`'s methods return it, so
+    /// `$pdo->query($sql)` in a declared-pure function was reported while
+    /// `mysqli_query($c, $sql)` was silent — the audit's last seeding gap.
+    ///
+    /// What is deliberately NOT coloured, and why it is a separate question:
+    ///
+    /// * **error and metadata accessors** (`mysqli_error`, `mysqli_num_rows`,
+    ///   `pg_last_error`) read state the extension already holds for a buffered
+    ///   result. On an UNBUFFERED one some of them do reach the wire, and
+    ///   telling those apart is a property of the call site's earlier
+    ///   `MYSQLI_USE_RESULT`, which a name-keyed table cannot see — the same
+    ///   shape as `fwrite`'s `STDOUT` destination, deferred for the same reason.
+    /// * **`mysqli_real_escape_string`** consults the connection's charset and
+    ///   sends nothing.
+    /// * **the `*_fetch_*` families**, for the buffered/unbuffered reason above.
+    #[test]
+    fn the_database_families_are_coloured_where_they_talk_to_the_server() {
+        for name in [
+            "mysqli_connect", "mysqli_query", "mysqli_multi_query", "mysqli_prepare",
+            "mysqli_stmt_execute", "mysqli_commit", "mysqli_rollback", "mysqli_close",
+            "pg_connect", "pg_query", "pg_query_params", "pg_send_query", "pg_get_result",
+            "pg_copy_from", "pg_close",
+            "odbc_connect", "odbc_exec", "odbc_execute", "odbc_commit", "odbc_close",
+        ] {
+            assert_eq!(effect_labels(name), Some(&["io.db"][..]), "{name} reaches the server");
+        }
+        // Case-insensitive like every other row. The tail is upper-cased rather
+        // than the head: a capitalised-word-underscore-capitalised-word shape
+        // reads as a private class name to the leak tripwire, and it is right to.
+        assert_eq!(effect_labels("mysqli_QUERY"), Some(&["io.db"][..]));
+        // And the deliberate exclusions, so the boundary is asserted rather than
+        // implied by absence.
+        for name in [
+            "mysqli_error",
+            "mysqli_num_rows",
+            "mysqli_real_escape_string",
+            "mysqli_fetch_assoc",
+            "pg_last_error",
+            "pg_fetch_assoc",
+        ] {
+            assert_eq!(effect_labels(name), None, "{name} is the buffered/local half");
         }
     }
 
