@@ -1122,22 +1122,42 @@ fn a_this_receiver_contributes_no_carry() {
     // class is `final` so that `$this->first()` resolves at all (the override
     // guard), which is what makes the silence attributable to the empty carry
     // rather than to a missing target.
-    let src = "<?php\n\
+    //
+    // The witness had to be re-cut 2026-08-17 (issue #420) and the claim is
+    // unchanged. `$this->first()` used to bind NOTHING at all — a zero-argument
+    // `$this` call had no binding to descend on — so the declared `template-type`
+    // read was the only speaker and its silence proved the empty carry. A
+    // same-`$this` call seeds `$this` now, which counts as a binding (ADR-0086 §3(a)),
+    // so `first()` is walked and its `return new Child()` crosses as the heap
+    // component's walk truth (ADR-0057 §2.6 — the declaration is a claim, the walk is
+    // a proof). That answer comes from a different lane entirely, so the carry lane
+    // gets its own witness below: a body whose exit is no allocation summarizes
+    // nothing, and the declared read is once again the only speaker.
+    let base = "<?php\n\
         /** @template TChild of ChildInterface */\n\
         interface ModelInterface { /** @return TChild[] */ public function getChildren(): array; }\n\
         /** @implements ModelInterface<Child> */\n\
         class Model implements ModelInterface { public function getChildren(): array { return []; } }\n\
         interface ChildInterface {}\n\
         class Child implements ChildInterface {}\n\
+        function opaqueChild(): ChildInterface { return unknownFactory(); }\n\
         /** @template T of ModelInterface */\n\
         final class FinalHelper {\n\
             /** @param T $model */\n\
             public function __construct(private ModelInterface $model) {}\n\
             /** @return template-type<T, ModelInterface, 'TChild'> */\n\
             public function first(): ChildInterface { return new Child(); }\n\
-            public function viaThis(): void { $c = $this->first(); \\PHPStan\\dumpType($c); }\n\
-        }\n";
-    assert_eq!(dumped(src), "dumped type: unknown");
+            /** @return template-type<T, ModelInterface, 'TChild'> */\n\
+            public function firstOpaque(): ChildInterface { return opaqueChild(); }\n";
+    let via_this = format!(
+        "{base}    public function viaThis(): void {{ $c = $this->first(); \\PHPStan\\dumpType($c); }}\n}}\n"
+    );
+    assert_eq!(dumped(&via_this), "dumped type: Child");
+
+    let via_this_opaque = format!(
+        "{base}    public function viaThis(): void {{ $c = $this->firstOpaque(); \\PHPStan\\dumpType($c); }}\n}}\n"
+    );
+    assert_eq!(dumped(&via_this_opaque), "dumped type: unknown");
 }
 
 #[test]

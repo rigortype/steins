@@ -4123,7 +4123,7 @@ fn check_units(
                 None,
                 Some(&mut dead_spans),
                 None,
-                false,
+                None,
                 &mut out,
             );
         }
@@ -4571,7 +4571,7 @@ fn annotate_units(
             Some(&mut facts),
             None,
             None,
-            false,
+            None,
             &mut sink,
         );
     }
@@ -11285,6 +11285,37 @@ impl Store {
         }
     }
 
+    /// Replace the object `var` refers to with a descent's `$this` snapshot
+    /// (ADR-0057 C4, generalized by the 2026-08-17 amendment's D4): `props`,
+    /// `readonly`, `ro_written` and `escaped` come from the callee's exit state, and
+    /// `class`/`class_exact` are asserted rather than copied — no walk alters what
+    /// class an allocation is, and the assert is what would catch a snapshot that got
+    /// here from the wrong seed.
+    ///
+    /// **`targs` is the one field the snapshot does not speak for**, so the #295/#377
+    /// carry sweep the statement already ran stands (D4). A property write is
+    /// something the walk models and can therefore be believed about; a class-level
+    /// carry is rewritten by `@phpstan-self-out self<U>`, which the walk models not at
+    /// all — the callee's copy carries what came in and hands the same thing back,
+    /// so restoring it would resurrect exactly the stale carry the ADR-0032 binding
+    /// amendment closed, and in the direction that convicts correct code.
+    ///
+    /// A no-op where `var` is unbound: the statement's own effects may have dropped
+    /// the binding between the descent and here, and a snapshot has no object of its
+    /// own to bind to.
+    fn copy_back(&mut self, var: &str, snapshot: &HeapObj) {
+        let Some(id) = self.refs.get(var).copied() else { return };
+        let Some(obj) = self.heap.get_mut(&id) else { return };
+        debug_assert_eq!(
+            obj.class, snapshot.class,
+            "a `$this` snapshot must be the very allocation its call was made on",
+        );
+        obj.props = snapshot.props.clone();
+        obj.readonly = snapshot.readonly.clone();
+        obj.ro_written = snapshot.ro_written.clone();
+        obj.escaped = snapshot.escaped;
+    }
+
     /// Sweep every escaped object's non-readonly props (an unknown call ran that may
     /// mutate any escaped object). Non-escaped objects survive (ADR-0036 payoff).
     fn sweep_escaped(&mut self) {
@@ -11399,6 +11430,18 @@ struct ReturnSummary {
     /// The heap-object component (ADR-0057 §1, landed in T1): the joined snapshot of
     /// the allocation every returning exit hands back.
     heap: Option<HeapSummary>,
+    /// The **`$this`** component (ADR-0057's 2026-08-17 same-`$this` amendment, D3):
+    /// the joined snapshot of the callee's own `$this` at every exit, filled by any
+    /// walk whose `$this` was seeded from a caller object — a constructor descent
+    /// (C2), a same-`$this` call (D1), an exact `Receiver::Var` call (D2).
+    ///
+    /// Beside the other two rather than inside either: a constructor reads it where
+    /// the site mints its object, and every other seeded walk reads it as the
+    /// **copy-back** into the caller's own object, which is what lets a delegating
+    /// constructor's and a fluent setter's writes survive the call (D4). The return
+    /// value keeps riding `value`/`heap` untouched, which is the whole reason this is
+    /// a third channel and not a re-purposed first one.
+    this: Option<HeapSummary>,
 }
 
 /// The value-domain half of a [`ReturnSummary`]: the joined fact and its stratum
@@ -11460,13 +11503,17 @@ struct SummaryCtx {
     /// Each returning exit's contribution, in walk order (RefCell — pushed through
     /// the shared-immutable [`WalkCx`] as branches recurse).
     exits: std::cell::RefCell<Vec<ExitContribution>>,
-    /// Whether this walk is a **constructor** descent (ADR-0057's constructor-summary
-    /// amendment, C2). `new` evaluates to the object the body leaves behind, so every
-    /// exit snapshots the callee's `$this` instead of a returned value — a bare
-    /// `return;` and the body's fall-through alike, a `throw` never. The flavour lives
-    /// here, on the descent, rather than as a second [`ExitContribution`] variant: one
-    /// classifier, two sources.
-    ctor_this: bool,
+    /// The **`$this`** snapshot at each exit, `Some` exactly where this walk's `$this`
+    /// was seeded from a caller object (ADR-0057 C2, generalized by the 2026-08-17
+    /// amendment's D3): a constructor descent, a same-`$this` call, an exact
+    /// `Receiver::Var` call. A bare `return;`, a value `return`, and the body's
+    /// fall-through all contribute the snapshot; a `throw` contributes nothing, and an
+    /// `Opaque` that `may_return` contributes the floor, which ends the component.
+    ///
+    /// A second list rather than a flavour on [`ExitContribution`]: the flavour is the
+    /// descent's, and an ordinary method has a returned value to summarize on the
+    /// other list at the very same exit.
+    this_exits: Option<std::cell::RefCell<Vec<ExitContribution>>>,
 }
 
 impl SummaryCtx {
@@ -11506,10 +11553,11 @@ fn analyze_scope(
     mut facts: Option<&mut Vec<LineFact>>,
     dead_out: Option<&mut Vec<Span>>,
     ret_exits: Option<&mut Vec<ExitContribution>>,
-    // Whether this is a **constructor** descent, whose exits snapshot the callee's
-    // `$this` rather than a returned value (ADR-0057's constructor-summary amendment,
-    // C2). Meaningful only alongside `ret_exits`.
-    ctor_this: bool,
+    // The `$this`-snapshot out-channel (ADR-0057 C2, generalized by the 2026-08-17
+    // amendment's D3): `Some` exactly where this walk's `$this` was seeded from a
+    // caller object, so every exit records what the walk left it holding. Meaningful
+    // only alongside `ret_exits`, which is what turns summary collection on at all.
+    this_exits: Option<&mut Vec<ExitContribution>>,
     out: &mut Vec<Diagnostic>,
 ) {
     let enclosing_class = scope_class(scope);
@@ -11680,7 +11728,7 @@ fn analyze_scope(
     let summary = ret_exits.as_ref().map(|_| SummaryCtx {
         native: cx.scope_return(scope).map(|(ty, _)| native_arms(ty)).unwrap_or_default(),
         exits: std::cell::RefCell::new(Vec::new()),
-        ctor_this,
+        this_exits: this_exits.as_ref().map(|_| std::cell::RefCell::new(Vec::new())),
     });
     let w = WalkCx {
         cx,
@@ -11699,6 +11747,7 @@ fn analyze_scope(
         && let Some(sc) = w.summary
     {
         let mut exits = sc.exits.into_inner();
+        let mut this_out = sc.this_exits.map(std::cell::RefCell::into_inner);
         // Untyped fallthrough is PHP's implicit `return null` (ADR-0057 §5). The
         // test is the **raw** written return hint (`ret_hint`), not whether Steins
         // lowers a representable `NativeType`: `void` / `never` / `: object` /
@@ -11707,18 +11756,22 @@ fn analyze_scope(
         // nothing is contributed (same as an A2-dropped exit). Generators refuse
         // summaries entirely (`join_summary`); they also skip fallthrough null.
         if flow == Flow::FellThrough {
-            if sc.ctor_this {
-                // A constructor's normal exit (ADR-0057 C2): the object `new` yields
-                // is the `$this` the joined paths reaching here left behind. Where
-                // `this` is no longer in the store — a `Barrier` cleared it — the exit
-                // contributes the value floor, which per §2.5 ends the heap summary
-                // and lands the site on the ADR-0086 §4 floor (C6).
-                exits.push(this_exit_contribution(&store));
-            } else if scope.ret_hint.is_none() && !scope.is_generator {
+            // The fall-through is a constructor's NORMAL exit and an ordinary
+            // method's last one (ADR-0057 C2/D3): the `$this` the joined paths
+            // reaching here left behind. Where `this` is no longer in the store — a
+            // `Barrier` cleared it — the exit contributes the value floor, which per
+            // §2.5 ends the component and lands the call on its decline floor.
+            if let Some(te) = &mut this_out {
+                te.push(this_exit_contribution(&store));
+            }
+            if scope.ret_hint.is_none() && !scope.is_generator {
                 exits.push(ExitContribution::Fact(Fact::Singleton(Val::Null), Stratum::Verified));
             }
         }
         *out = exits;
+        if let Some((sink, collected)) = this_exits.zip(this_out) {
+            *sink = collected;
+        }
     }
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
@@ -11772,12 +11825,6 @@ impl WalkCx<'_, '_> {
         let id = self.alloc.get();
         self.alloc.set(id + 1);
         id
-    }
-
-    /// Whether this walk is a **constructor** descent, whose `$this` is the fresh
-    /// allocation and is therefore not pre-escaped (ADR-0057 C1/C5).
-    fn ctor_walk(&self) -> bool {
-        self.summary.as_ref().is_some_and(|s| s.ctor_this)
     }
 }
 
@@ -11901,6 +11948,11 @@ fn walk_trace(
         // the object build — `apply_assign`'s `New` arm in step 2, or the
         // `return new C()` arm of step 1c's classifier. One walk, one site.
         let mut stmt_ctor_heap: Option<HeapSummary> = None;
+        // The `$this` snapshots this statement's descents came back with (ADR-0057's
+        // 2026-08-17 amendment, D4), applied by step 1a AFTER its sweeps — a list
+        // rather than a slot because an `echo` carries several calls, and because it
+        // is the list that lets that step decline a pair naming one object.
+        let mut stmt_this_backs: Vec<ThisWriteBack> = Vec::new();
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -12015,6 +12067,9 @@ fn walk_trace(
                         stmt_summary = outcome.summary;
                         stmt_return_arms = outcome.return_arms;
                     }
+                    // …and, for a call that ran with a `$this` seeded from a caller
+                    // object, the snapshot step 1a copies back (D4).
+                    stmt_this_backs.extend(outcome.this_back);
                 }
                 // `$fn(...)` — resolve the callee variable against the env: a proven
                 // closure value descends into its scope (ADR-0033), a proven string
@@ -12128,8 +12183,9 @@ fn walk_trace(
         // an unknown/overridable call — or any call an object was passed into —
         // sweeps every escaped object's non-readonly props. `$this` is pre-escaped,
         // so an overridable call on it sweeps it, while a resolved private/final
-        // call with no object args leaves it intact.
-        apply_call_escape_and_sweep(w, &stmt.kind, store);
+        // call with no object args leaves it intact. Then the `$this` copy-backs, over
+        // whatever the sweeps left (ADR-0057's 2026-08-17 amendment, D4).
+        apply_call_escape_and_sweep(w, &stmt.kind, store, &stmt_this_backs);
 
         // 1b. Return-type check (native + phpdoc contract).
         if let StmtKind::Return { value, span, .. } = &stmt.kind {
@@ -12208,17 +12264,18 @@ fn walk_trace(
         // carries the escape bit it had **before** the return marked it (§2.1's
         // escaped-before-return). The join is deferred to `descend`; here we only
         // classify the exit (A2 drop/cross, A3 floor, T1 allocation).
+        //
+        // The `$this` channel first, and independently (ADR-0057 C2 as generalized by
+        // D3): where this walk's `$this` came from a caller object, every exit records
+        // what it holds — a constructor's bare `return;`, and an ordinary method's
+        // value `return`, which summarizes its value on the other channel at the very
+        // same exit. Read at the same instant, before the return's own effects.
         if let StmtKind::Return { .. } = &stmt.kind
-            && let Some(sc) = &w.summary
-            && sc.ctor_this
+            && let Some(te) = w.summary.as_ref().and_then(|sc| sc.this_exits.as_ref())
         {
-            // A constructor descent (ADR-0057 C2): `new` evaluates to the object the
-            // body leaves behind, so a `return;` snapshots `$this` — never a value,
-            // a constructor that returns one being a PHP fatal. Read here, before the
-            // return statement's own effects, exactly where §2.1 reads the
-            // return-object snapshot.
-            sc.exits.borrow_mut().push(this_exit_contribution(store));
-        } else if let StmtKind::Return { value, .. } = &stmt.kind
+            te.borrow_mut().push(this_exit_contribution(store));
+        }
+        if let StmtKind::Return { value, .. } = &stmt.kind
             && let Some(sc) = &w.summary
         {
             // Composition (A1): when the returned expression IS a call whose
@@ -12320,6 +12377,12 @@ fn walk_trace(
                     && let Some(sc) = &w.summary
                 {
                     sc.exits.borrow_mut().push(ExitContribution::Floor);
+                    // …and the same floor on the `$this` channel (ADR-0057 C2/D3): a
+                    // hidden exit is an exit whose `$this` this walk never saw, so it
+                    // ends the component exactly as an unbound `$this` does.
+                    if let Some(te) = &sc.this_exits {
+                        te.borrow_mut().push(ExitContribution::Floor);
+                    }
                 }
                 Flow::FellThrough
             }
@@ -15127,7 +15190,7 @@ fn ctor_heap_summary(
         descent,
         out,
     )?;
-    summary.heap
+    summary.this
 }
 
 /// The copy of a caller object that crosses the binding descent (ADR-0086 §2's
@@ -15551,7 +15614,7 @@ fn walk_if(
     // proven-non-null receiver), then by-ref argument invalidation and opaque reads
     // are forgotten. Both apply before the branch clones.
     let guard_calls: Vec<&CallExpr> = collect_guard_calls_any(cond);
-    escape_and_sweep_calls(w, &guard_calls, store);
+    escape_and_sweep_calls(w, &guard_calls, store, &[]);
     // The pattern-refusal check at guard position (ADR-0078 / issue #189):
     // `if (preg_match('/…/', $s))` is the idiom the id is about, and a guard
     // condition is not a `checkable_calls` position. An `elseif` chain recurses
@@ -22104,9 +22167,29 @@ fn checkable_calls(kind: &StmtKind) -> Vec<&CallExpr> {
 /// to a project target), sweep every escaped object's non-readonly props. A purely
 /// local object never passed anywhere survives an unrelated unknown call — the
 /// precision payoff.
-fn apply_call_escape_and_sweep(w: &WalkCx, kind: &StmtKind, store: &mut Store) {
+fn apply_call_escape_and_sweep(
+    w: &WalkCx,
+    kind: &StmtKind,
+    store: &mut Store,
+    this_backs: &[ThisWriteBack],
+) {
     let calls = checkable_calls(kind);
-    escape_and_sweep_calls(w, &calls, store);
+    escape_and_sweep_calls(w, &calls, store, this_backs);
+}
+
+/// One resolved call's `$this` snapshot, waiting to be copied back into the caller's
+/// own object (ADR-0057's 2026-08-17 amendment, D4). Produced by
+/// [`handle_method_call`] where the descent seeded `$this` from an object a caller
+/// **name** still denotes, and applied by [`escape_and_sweep_calls`] after the
+/// statement's sweeps — the ordering being the whole of "skip the sweep for that
+/// call": the sweep clears the props, this writes the walk's truth over the result.
+struct ThisWriteBack {
+    /// The caller variable whose object the snapshot replaces: `"this"` for a
+    /// same-`$this` call, the receiver's own variable for an exact `$o->m()`.
+    var: String,
+    /// The joined snapshot. `class`/`class_exact` are asserted rather than copied —
+    /// no walk alters what class an allocation is (C4's field list).
+    obj: HeapObj,
 }
 
 /// Escape + sweep for an explicit set of calls (ADR-0036), shared by the
@@ -22116,7 +22199,17 @@ fn apply_call_escape_and_sweep(w: &WalkCx, kind: &StmtKind, store: &mut Store) {
 /// call — sweeps every escaped object's non-readonly props. The receiver's var→id
 /// *binding* survives (a method call does not rebind its receiver variable), so the
 /// receiver stays usable on the guarded path; only its mutable props are swept.
-fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
+///
+/// `this_backs` carries the `$this` snapshots this statement's resolved descents came
+/// back with (D4). They are applied **last**, over whatever the sweeps left, and the
+/// guard position passes none — a guard call's descent has no statement rung to hand
+/// one to.
+fn escape_and_sweep_calls(
+    w: &WalkCx,
+    calls: &[&CallExpr],
+    store: &mut Store,
+    this_backs: &[ThisWriteBack],
+) {
     if calls.is_empty() {
         return;
     }
@@ -22179,15 +22272,37 @@ fn escape_and_sweep_calls(w: &WalkCx, calls: &[&CallExpr], store: &mut Store) {
     // **whether or not the target resolved** — the resolved private/final case is
     // exactly the one `sweep_escaped` above never covered (ADR-0057 C5).
     //
-    // The constructor walk's `$this` is the one heap object that is not pre-escaped
-    // (C1), so `sweep_escaped` passes it by; inside such a walk it is swept by the
-    // same `object_passed || unknown` condition instead. A non-static closure created
-    // in the body binds `$this` without naming it and is invoked through exactly such
-    // an unresolved call, which is why the condition is the coarse one and not a leak
-    // test.
-    let same_this = calls.iter().any(|c| runs_with_same_this(w, c, &*store));
-    if same_this || ((object_passed || unknown) && w.ctor_walk()) {
+    // Since the 2026-08-17 amendment that sweep is the **decline floor** (D5): where
+    // the target resolved and the descent came back with a snapshot, `this_backs`
+    // below overwrites what this sweep cleared with what the callee's walk proved.
+    // The sweep runs unconditionally, so every decline lands on it for free.
+    //
+    // An **unescaped** `$this` is the one heap object `sweep_escaped` passes by (C1 —
+    // a constructor's, and a same-`$this` copy inside one), so it is swept by the
+    // `object_passed || unknown` condition instead. A non-static closure created in
+    // the body binds `$this` without naming it and is invoked through exactly such an
+    // unresolved call, which is why the condition is the coarse one and not a leak
+    // test. Reading the bit off the object rather than off the walk's flavour states
+    // the rule where it lives: `seed_this_object` pre-escapes every other `$this`, so
+    // this is `false` exactly where C1 made it so.
+    let same_this = calls.iter().any(|c| {
+        runs_with_same_this(w.cx, &c.receiver, &*store, w.this_exact, w.enclosing_class, w.scope.poisoned)
+    });
+    let this_unescaped = store.obj_of("this").is_some_and(|o| !o.escaped);
+    if same_this || ((object_passed || unknown) && this_unescaped) {
         store.sweep_this();
+    }
+    // The copy-back (D4), last and over the sweeps. Two statement-scoped guards, both
+    // about a composition that cannot be ordered: an **unresolved** call anywhere in
+    // this statement may reach `$this` through a closure alias, and **two** snapshots
+    // for one name were each seeded from the same pre-statement object, so the second
+    // would erase the first's write. Either way the floor above stands.
+    if !unknown {
+        for wb in this_backs {
+            if this_backs.iter().filter(|o| o.var == wb.var).count() == 1 {
+                store.copy_back(&wb.var, &wb.obj);
+            }
+        }
     }
 }
 
@@ -22268,21 +22383,31 @@ fn escape_nested_args(
 /// unresolved one is a body never read at all" (ADR-0057 C5) applies here exactly as
 /// it does to the keyword spellings; only a *resolved* **static** method is proven to
 /// carry no `$this`.
-fn runs_with_same_this(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
-    match &call.receiver {
+///
+/// Taken apart rather than as a [`WalkCx`] (issue #420): the seed side asks the same
+/// question from [`handle_method_call`] and [`project_method_summary`], neither of
+/// which holds one, and the two must never disagree — the sweep is the floor of
+/// exactly the descent the seed runs.
+fn runs_with_same_this(
+    cx: &Cx,
+    receiver: &Callee,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> bool {
+    match receiver {
         Callee::Method { receiver: Receiver::This, .. } => true,
         Callee::Static { class: StaticClass::SelfKw | StaticClass::Parent | StaticClass::Static, .. } => {
             true
         }
         Callee::Static { class: StaticClass::Named(name), .. } => {
-            let Some(enclosing) = w.enclosing_class else { return false };
-            let fqn = w.cx.class_fqn(name);
-            if matches!(w.cx.is_a(enclosing, &fqn), IsA::No) {
+            let Some(enclosing) = enclosing_class else { return false };
+            let fqn = cx.class_fqn(name);
+            if matches!(cx.is_a(enclosing, &fqn), IsA::No) {
                 return false; // a completely enumerated hierarchy excludes it
             }
-            match resolve_call_target(
-                w.cx, &call.receiver, store, w.this_exact, w.enclosing_class, w.scope.poisoned,
-            ) {
+            match resolve_call_target(cx, receiver, store, this_exact, enclosing_class, poisoned) {
                 Some(target) => !target.method.is_static,
                 None => true, // unresolvable: sweeps, as every uncertainty does
             }
@@ -22850,6 +22975,16 @@ fn project_method_summary(
     let callee_scope =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)?;
     let arg_values: Vec<&ArgValue> = args.iter().collect();
+    // The same-`$this` seed, on the same terms the statement rung uses — which is the
+    // point: `f($this->m())` and `$this->m();` must build the SAME `BindingKey` or
+    // the memo doubles the walk and the emission. Its `$this` component is dropped
+    // here, deliberately (ADR-0057's 2026-08-17 amendment, D6): this road holds the
+    // caller's store by shared reference and has no channel back to the statement
+    // walk that owns it, so a value-position same-`$this` call stays on the C5 sweep
+    // floor — silent about props, never stale.
+    let same_this = !target.method.is_static
+        && store.is_bound("this")
+        && runs_with_same_this(cx, callee, store, this_exact, enclosing_class, poisoned);
     descend(
         cx,
         folder,
@@ -22859,7 +22994,7 @@ fn project_method_summary(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display_of_call(callee, &target.declaring_class.name, &target.method.name),
         target.this_exact,
-        this_seed_of(None, recv_new.as_ref(), target.receiver_var.as_deref()),
+        this_seed_of(None, recv_new.as_ref(), target.receiver_var.as_deref(), same_this),
         &arg_values,
         span_start,
         &[],
@@ -23219,6 +23354,21 @@ enum ThisSeed<'a> {
     /// what got OUT, not what may be written: the walk still sweeps its own `$this`
     /// at every call that could reach the allocation without naming it (C5).
     Ctor(&'a HeapObj),
+    /// The walk's **own** `$this`, for a call that runs with the same one —
+    /// `$this->m(…)`, `self::m(…)`, `parent::m(…)`, `static::m(…)`, and the by-name
+    /// `Foo::m(…)` of issue #417 (ADR-0057's 2026-08-17 amendment, D1). The source is
+    /// `refs["this"]` in the caller's own store, so an argument that is `$this` shares
+    /// the copy exactly as `$b->m($b)` shares a receiver's.
+    ///
+    /// [`copy_for_descent`]'s field table applies with **`escaped` crossing
+    /// verbatim** rather than forced to `true`: every other copy is pre-escaped
+    /// because the call hands the caller's object over, and this call hands nothing
+    /// over — the callee's `$this` IS the caller's, the same object under the same
+    /// name. Inside a constructor walk that bit is `false` (C1) and the non-readonly
+    /// props cross; in an ordinary method it is `true` and only the readonly props
+    /// and the carries do, which is what ADR-0086 §3 already said about a
+    /// `$this`-origin receiver.
+    SameThis,
 }
 
 /// Interprocedural argument-binding descent into a resolved callee body. Returns the
@@ -23291,7 +23441,10 @@ fn descend(
     // `$b = new B(1)` survive a later unrelated unknown call. It says what got OUT,
     // not what may be written: the walk still sweeps its own `$this` at every call
     // that could reach the allocation without naming it (C5, `escape_and_sweep_calls`).
-    let ctor_walk = matches!(this_seed, Some(ThisSeed::Ctor(_)));
+    //
+    // A **same-`$this`** call seeds from the walk's own `$this` (the 2026-08-17
+    // amendment, D1), with `escaped` crossing verbatim for the mirror-image reason:
+    // the call hands nothing over, so the bit is what it was an instant earlier.
     let seeded_this: Option<AllocId> = this_seed.filter(|_| !poisoned).and_then(|seed| {
         // The caller allocation this copy stands for, for the aliasing rule — `None`
         // where there is none to alias: a `new` in receiver position and the fresh
@@ -23308,13 +23461,29 @@ fn descend(
                 let caller_id = caller_store.id_of(v)?;
                 (copy_for_descent(caller_store.heap.get(&caller_id)?), Some(caller_id))
             }
+            ThisSeed::SameThis => {
+                let caller_id = caller_store.id_of("this")?;
+                let src = caller_store.heap.get(&caller_id)?;
+                let mut copy = copy_for_descent(src);
+                copy.escaped = src.escaped;
+                (copy, Some(caller_id))
+            }
         };
         // The copy IS the receiver the dispatch resolved through, so its exactness
         // cannot disagree with the one the callee walks under: every seeding receiver
         // is one `resolve_call_target` proved an exact class for, and it passed that
         // same class on as `this_exact` (a constructor's is the class it mints).
+        //
+        // A same-`$this` seed is the exception, and it is not an exactness leak (D1):
+        // the copy's bit is a fact about the CALLER's allocation, while
+        // `body_this_exact` is whatever the target's own resolution proved — `None`
+        // for `parent::`, `self::` and the by-name spelling, which resolve without an
+        // exact receiver. The callee walks under the weaker `$this` dispatch its
+        // resolution named while holding the stronger object the caller proved, which
+        // is the sound pairing; nothing is promoted either way.
         debug_assert!(
-            obj.class_exact && body_this_exact.as_deref() == Some(obj.class.as_str()),
+            matches!(seed, ThisSeed::SameThis)
+                || (obj.class_exact && body_this_exact.as_deref() == Some(obj.class.as_str())),
             "a seeded `$this` must be the exact receiver `body_this_exact` names",
         );
         let id = seed_store.heap.len() as AllocId;
@@ -23570,6 +23739,7 @@ fn descend(
             d.stack.push(key.clone());
             let child = Descent { provenance, depth: next_depth, stack: d.stack, memo: d.memo };
             let mut exits: Vec<ExitContribution> = Vec::new();
+            let mut this_exits: Vec<ExitContribution> = Vec::new();
             analyze_scope(
                 &child_cx,
                 folder,
@@ -23581,11 +23751,11 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
-                ctor_walk,
+                seeded_this.map(|_| &mut this_exits),
                 out,
             );
             d.stack.pop();
-            let summary = join_summary(&child_cx, callee_scope, &exits);
+            let summary = join_summary(&child_cx, callee_scope, &exits, &this_exits);
             d.memo.insert(key, summary.clone());
             summary
         }
@@ -23594,6 +23764,7 @@ fn descend(
             let mut memo: HashMap<BindingKey, Option<ReturnSummary>> = HashMap::new();
             let child = Descent { provenance, depth: next_depth, stack: &mut stack, memo: &mut memo };
             let mut exits: Vec<ExitContribution> = Vec::new();
+            let mut this_exits: Vec<ExitContribution> = Vec::new();
             analyze_scope(
                 &child_cx,
                 folder,
@@ -23605,10 +23776,10 @@ fn descend(
                 None,
                 None,
                 Some(&mut exits),
-                ctor_walk,
+                seeded_this.map(|_| &mut this_exits),
                 out,
             );
-            join_summary(&child_cx, callee_scope, &exits)
+            join_summary(&child_cx, callee_scope, &exits, &this_exits)
         }
     }
 }
@@ -23621,22 +23792,33 @@ fn descend(
 /// The two are independent (T1 amendment B3): each refusal below is the value
 /// component's own, so a callee whose value summary dies for want of a representable
 /// floor — which is EVERY object-returning factory — still crosses its allocation.
-/// `None` only when neither component survived.
+///
+/// The **`$this`** component (the 2026-08-17 amendment, D3) is a third, joined from
+/// its own exit list by the same `join_heap_exits` and independent of both: a
+/// constructor reads it where its `new` site mints the object, and every other
+/// seeded walk reads it as the copy-back into the caller's own.
+///
+/// `None` only when no component survived.
 fn join_summary(
     cx: &Cx,
     callee_scope: &Scope,
     exits: &[ExitContribution],
+    this_exits: &[ExitContribution],
 ) -> Option<ReturnSummary> {
     // Generators: the call result is a Generator, not the value of `return` after
-    // `yield` (ADR-0057 §5) — refuse BOTH components. The one refusal the heap
+    // `yield` (ADR-0057 §5) — refuse EVERY component. The one refusal the heap
     // component shares, and for the heap the reason is even plainer: the returned
-    // allocation is not what the call evaluates to.
+    // allocation is not what the call evaluates to. For the `$this` component it is
+    // plainer still — the body does not run at the call at all, so there is no exit
+    // state to copy back (D5).
     if callee_scope.is_generator {
         return None;
     }
     let heap = join_heap_exits(exits);
+    let this = join_heap_exits(this_exits);
     let value = join_value_component(cx, callee_scope, exits);
-    (value.is_some() || heap.is_some()).then_some(ReturnSummary { value, heap })
+    (value.is_some() || heap.is_some() || this.is_some())
+        .then_some(ReturnSummary { value, heap, this })
 }
 
 /// The value half of [`join_summary`] (ADR-0057 amendment T0), unchanged in content
@@ -29609,6 +29791,11 @@ struct MethodCallOutcome {
     /// wherever the descent declined (C6), which leaves the site on the ADR-0086 §4
     /// lexical floor.
     ctor_heap: Option<HeapSummary>,
+    /// The `$this` snapshot to copy back into a **caller-named** object (ADR-0057's
+    /// 2026-08-17 amendment, D2/D4): the walk's own `$this` for a same-`$this` call,
+    /// the receiver's variable for an exact `$o->m()`. `None` at every decline (D5),
+    /// which leaves the statement's sweep standing as the floor.
+    this_back: Option<ThisWriteBack>,
 }
 
 /// Check + descend one method / static / constructor call. Returns the callee's
@@ -29629,7 +29816,8 @@ fn handle_method_call(
     mut descent: Option<&mut Descent<'_>>,
     out: &mut Vec<Diagnostic>,
 ) -> MethodCallOutcome {
-    let empty = MethodCallOutcome { summary: None, return_arms: None, ctor_heap: None };
+    let empty =
+        MethodCallOutcome { summary: None, return_arms: None, ctor_heap: None, this_back: None };
     let Some(mut target) =
         resolve_call_target(cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned)
     else {
@@ -29705,12 +29893,12 @@ fn handle_method_call(
     // positional-only (named/spread parameter binding is not modeled here); the
     // contract check above already covered the arguments.
     if !call.positional_only {
-        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None };
+        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None, this_back: None };
     }
     let Some(callee_scope) =
         cx.method_scope(target.class_file, &target.declaring_class.fqn, &target.method.name)
     else {
-        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None };
+        return MethodCallOutcome { summary: None, return_arms, ctor_heap: None, this_back: None };
     };
     let display = display_of_call(&call.receiver, &target.declaring_class.name, &target.method.name);
     let arg_values: Vec<&ArgValue> = call.args.iter().map(|a| &a.value).collect();
@@ -29735,6 +29923,31 @@ fn handle_method_call(
         }
         _ => None,
     };
+    // The same-`$this` seed (ADR-0057's 2026-08-17 amendment, D1): a call the walk
+    // makes with its OWN `$this` hands the callee a copy of it, so a delegating
+    // `$this->init()` and a `parent::__construct()` write the object this walk holds
+    // rather than a store that dies at the boundary. A resolved **static** target
+    // carries no `$this` (issue #417's other half) and seeds nothing.
+    let same_this = !target.method.is_static
+        && store.is_bound("this")
+        && runs_with_same_this(
+            cx, &call.receiver, store, this_exact, enclosing_class, scope.poisoned,
+        );
+    let seed = this_seed_of(
+        ctor_seed.as_ref(),
+        recv_new.as_ref(),
+        target.receiver_var.as_deref(),
+        same_this,
+    );
+    // The caller name the copy-back writes into, decided from the same seed so the two
+    // can never name different objects (D2): the walk's own `$this`, or the receiver's
+    // variable. A constructor's snapshot goes to the `new` site instead, and a
+    // receiver-position `new` mints an object no name survives to observe.
+    let back_var: Option<String> = match &seed {
+        Some(ThisSeed::SameThis) => Some("this".to_owned()),
+        Some(ThisSeed::ReceiverVar(v)) => Some((*v).to_owned()),
+        Some(ThisSeed::Ctor(_) | ThisSeed::ReceiverNew(_)) | None => None,
+    };
     // ADR-0075: the same `descend` path functions use; the walk-trace rebinds the
     // value summary for method/static calls and the heap snapshot for constructors.
     let summary = descend(
@@ -29746,7 +29959,7 @@ fn handle_method_call(
         &format!("{}::{}", target.declaring_class.fqn, target.method.name),
         &display,
         target.this_exact,
-        this_seed_of(ctor_seed.as_ref(), recv_new.as_ref(), target.receiver_var.as_deref()),
+        seed,
         &arg_values,
         call.span.start,
         &[],
@@ -29756,24 +29969,32 @@ fn handle_method_call(
         descent,
         out,
     );
+    // The copy-back the statement applies after its sweeps (D4). `None` at every
+    // decline, which is what leaves the C5 sweep standing as the floor.
+    let this_back = back_var.zip(summary.as_ref().and_then(|s| s.this.clone())).map(
+        |(var, snapshot)| ThisWriteBack { var, obj: snapshot.obj },
+    );
     match ctor_seed {
-        // A constructor's summary is its heap component and nothing else (ADR-0075 §3
-        // as superseded): the value component cannot exist, an object being no value.
+        // A constructor's summary is its `$this` component and nothing else (ADR-0075
+        // §3 as superseded): the value component cannot exist, an object being no
+        // value, and the heap one describes a `return` a constructor cannot write.
         Some(_) => MethodCallOutcome {
             summary: None,
             return_arms,
-            ctor_heap: summary.and_then(|s| s.heap),
+            ctor_heap: summary.and_then(|s| s.this),
+            this_back: None,
         },
         // The body was walked for its diagnostics either way; what a `?->` refuses is
-        // the rebind (ADR-0075 §3.1).
+        // the rebind (ADR-0075 §3.1) — and the copy-back with it, the receiver being
+        // the very thing that may be `null`.
         None if nullsafe_call(&call.receiver) => {
-            MethodCallOutcome { summary: None, return_arms, ctor_heap: None }
+            MethodCallOutcome { summary: None, return_arms, ctor_heap: None, this_back: None }
         }
-        None => MethodCallOutcome { summary, return_arms, ctor_heap: None },
+        None => MethodCallOutcome { summary, return_arms, ctor_heap: None, this_back },
     }
 }
 
-/// The `$this` seed of a method/constructor descent, from the three sources
+/// The `$this` seed of a method/constructor descent, from the four sources
 /// [`handle_method_call`] and [`project_method_summary`] may hold — mutually
 /// exclusive by construction (a call has one receiver), ordered here only so the
 /// exclusion is stated once rather than at each caller.
@@ -29781,10 +30002,12 @@ fn this_seed_of<'a>(
     ctor: Option<&'a HeapObj>,
     recv_new: Option<&'a HeapObj>,
     receiver_var: Option<&'a str>,
+    same_this: bool,
 ) -> Option<ThisSeed<'a>> {
     ctor.map(ThisSeed::Ctor)
         .or_else(|| recv_new.map(ThisSeed::ReceiverNew))
         .or_else(|| receiver_var.map(ThisSeed::ReceiverVar))
+        .or_else(|| same_this.then_some(ThisSeed::SameThis))
 }
 
 /// Whether a call short-circuits to `null` on a `null` receiver — the `?->` form

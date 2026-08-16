@@ -1159,10 +1159,22 @@ suppressed by a walk flavour. One classifier, one channel, no flavour.
 ### D4. Copy-back, per field, and the aliasing argument
 
 At the call site, where a snapshot came back, the caller's object takes
-it: `props`, `readonly`, `ro_written`, `escaped` and `targs` are
-**replaced** from the snapshot; `class` and `class_exact` are asserted
-unchanged, no walk altering what class an allocation is. That is C4's
-field list, unchanged.
+it: `props`, `readonly`, `ro_written` and `escaped` are **replaced** from
+the snapshot; `class` and `class_exact` are asserted unchanged, no walk
+altering what class an allocation is.
+
+**`targs` is the one field of C4's list this leg does not take**, and the
+#295/#377 carry sweep therefore stands over every same-`$this` and
+receiver call exactly as it did. The asymmetry is the modelling, not a
+hedge: a property write is something the walk executes and can be believed
+about, while a class-level carry is rewritten by `@phpstan-self-out
+self<U>`, which the walk models not at all — the callee's copy carries in
+what the caller had and hands the identical thing back, so restoring it
+would resurrect precisely the stale carry the ADR-0032 binding amendment
+closed, in the direction that convicts correct code. A **constructor**'s
+copy-back is unaffected and still takes the carries (C4 verbatim): there
+the seed was built at the `new` site from the constructor's own arguments,
+and the walk is the whole story.
 
 The copy-back runs **after** the statement's escape-and-sweep pass, not
 instead of it, and the ordering is the whole of the "skip the sweep"
@@ -1305,5 +1317,7 @@ what crosses is the walk's knowledge and the walk knows nothing there.
   keeps its rungs; the snapshot is its own component (D3).
 - **Applying a copy-back beside an unresolved call, or two for one name**
   — neither composition can be ordered (D4).
+- **Restoring the class-level carries from the snapshot** — `self-out` is
+  unmodelled, so the copy hands back what it was given (D4).
 - **A copy-back in value position** — the seam holds no write channel,
   ADR-0057 B5's limit one layer down (D6).
