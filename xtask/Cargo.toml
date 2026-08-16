@@ -27,6 +27,11 @@ steins-contract = { path = "../crates/steins-contract" }
 # the generator can never admit a row the seam would drop or the runtime disowns.
 steins-domain = { path = "../crates/steins-domain" }
 steins-sidecar = { path = "../crates/steins-sidecar" }
+# The folding allowlist, for `mine-param-facts` (issue #382): the names the
+# catalog reasons about are kept in the mined table even when they carry no
+# hazard, so "this name was mined and carries nothing" is a recorded fact rather
+# than an absence a completeness test would read as agreement.
+steins-catalog = { path = "../crates/steins-catalog" }
 
 rayon.workspace = true
 toml.workspace = true

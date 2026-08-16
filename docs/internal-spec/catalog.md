@@ -341,6 +341,51 @@ callback's argument source. The table and its irregularities are documented in
 table is not treated as a higher-order invoker — its callback argument stays an
 opaque taint.
 
+## `param_facts(name)` / `param_facts_mined(name)` — the engine's own arginfo
+
+The independent witness the two hand-transcribed parameter tables are checked
+against (issue #382). Mined by `cargo xtask mine-param-facts`, which reads every
+internal function of the resident engine through `ReflectionFunction`, into
+`docs/research/phpsrc-mining/param_facts.toml`; `cargo xtask gen-catalog` emits
+the shipped `param_facts_generated.rs`.
+
+Deliberately **not** a second pass over php-src's stubs: `out_params` and
+`invocation_shape` were transcribed from those by hand, and a second
+transcription would agree with them wherever they are wrong. Arginfo is what PHP
+dispatches on.
+
+A row carries, per position, `by_ref`, `callable`, `variadic` and `optional`,
+plus each parameter's declared type spelling and the required-argument count.
+Rows are kept for every name carrying one of the first three, and for every name
+on the folding allowlist whether it carries anything or not; every other mined
+name is recorded as a bare name. That second list is load-bearing rather than
+padding — `param_facts_mined` is how a test tells "mined, and carries nothing"
+from "nobody looked", and reading absence as agreement is the exact vacuity this
+table was built to remove:
+
+> `by_value_arg` falls back to `out_params`, so a name with **no** row answers
+> `Some(true)` at every position, and a loop keyed on it skips precisely the
+> omission it is hunting.
+
+What the table can and cannot see:
+
+- `by_ref` is exact — it is the engine's own parameter flag.
+- `callable` means the parameter's **declared type** admits a callable. Sound,
+  not complete: `array_udiff` takes its comparator at a variadic `mixed` tail
+  and `preg_replace_callback_array` takes its callables as array *values*.
+  Neither is declared; both are caught only because they carry another hazard.
+- The universe is **the mining build's**. `[meta] extensions` records which
+  build answered; a name from an extension it lacked is absent, not clean.
+
+Six properties are enforced against it, and each fails loudly rather than
+quietly: every foldable name was mined; a foldable name's by-ref positions are
+exactly its `out_params` row (the ADR-0077 precondition, previously unfalsifiable);
+no `out_params` row claims a position the engine denies; no foldable name takes a
+declared callable; a foldable name with an untyped variadic tail is listed with
+the argument for why that tail is data; and every `invocation_shape` row names a
+position the engine declares callable, with every other declared-callable builtin
+either rowed or named in a closed exclusion list.
+
 ## `return_fact(name)` — curated value-domain return refinements
 
 **Consumed** (ADR-0056 R3+R4). A small hand-curated table
