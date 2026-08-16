@@ -367,12 +367,60 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   $contents)` (RequireCommand.php:597) and into `stripWhitespace(string
     //   $source)` (Compiler.php:227); `inet_pton()` into `ipMapTo6(string
     //   $binary)` (NoProxyPattern.php:246).
-    ("composer/composer", 24),
+    //
+    // The issue #423 wave (2026-08-17, ADR-0056 §9) is the same judgment reaching
+    // two places it could not reach before, and it moves six packages. Both halves
+    // land on the CONTRACT id for the same reason the #391 wave did — the premise
+    // is the ADR-0069 declared-return floor, which is `Asserted` — so none of this
+    // touches the proof layer, and the corpus-wide `diagnostics` column stayed 0
+    // through the whole wave.
+    //
+    //   (a) **A builtin callee is judged now.** `strlen($maybeFalse)` used to be
+    //       silent because a builtin's parameters had no type source; they have
+    //       one (the sidecar's own `getParameters()`), so a `T|false` handed to a
+    //       builtin's native `T` reads exactly as it already read at a project
+    //       callee.
+    //   (b) **A builtin call written directly in argument position carries a
+    //       premise now.** `f(realpath($p))` reached none, while
+    //       `$r = realpath($p); f($r)` reached one off the very same rungs — one
+    //       call written two ways answering differently. The Call carrier now
+    //       reads the builtin ladder in the assignment path's own order.
+    //
+    // Every row below was read against its source line; not one is a guarded site.
+    //
+    //   24 → 31 (+7), all shape (b) except the last: `realpath()` into
+    //   `Filesystem::normalizePath(string $path)` (AutoloadGenerator.php:217, 218)
+    //   and into `findShortestPathCode(string $from/$to)` (224, 225);
+    //   `file_get_contents()` into `Locker::__construct(string
+    //   $composerFileContents)` (Factory.php:428) and into
+    //   `JsonFile::parseJson(?string $json)` (JsonLoader.php:44); `json_encode()`
+    //   into `new JsonManipulator(string $contents)`
+    //   (Test/Json/JsonManipulatorTest.php:3231).
+    ("composer/composer", 31),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
     //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and
     //   `ExcludeList::addDirectory($directory)` in `ExcludeListTest.php`.
-    ("sebastianbergmann/phpunit", 12),
+    //   12 → 51 (+39), 2026-08-17 (issue #423), every one shape (b) and every one
+    //   the same two-line idiom repeated across the assertion suite: a fixture is
+    //   read or encoded inline and handed straight to the assertion's `string`
+    //   parameter. 22 are `file_get_contents()` into `Assert::assertStringEquals
+    //   File*`/`assertStringNotEqualsFile*`/`assertXmlString*XmlFile`/
+    //   `assertStringEqualsStringIgnoringLineEndings`; 5 are `json_encode()` into
+    //   `assertJsonStringEqualsJsonFile`/`assertJsonStringNotEqualsJsonFile`/`new
+    //   JsonMatches`; 11 are `realpath()` into `Issue::from(string $file)` /
+    //   `Reader::read(string $baselineFile)` across the `Runner/Baseline` tests;
+    //   1 is `ini_get()` into `assertStringStartsWith(string $string)`
+    //   (TextUI/PhpHandlerTest.php:41). All TRUE at the possibly grade: the false
+    //   arm of each of those four builtins is real, and a test that never sees it
+    //   is a path claim this grade deliberately does not make.
+    ("sebastianbergmann/phpunit", 51),
+    // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
+    // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
+    // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
+    // and `unlink(string $filename)` (Handler/StreamHandlerTest.php:807). The
+    // builtin sink is the only new part; the argument's type was already read.
+    ("guzzle/guzzle", 4),
     // 4 → 5 (+1), 2026-08-14, with ADR-0056 §8: `resource` stopped being an
     // unmodeled spelling and became a relation. `StreamHandlerTest`'s
     // `testWriteMissingResource` constructs `new StreamHandler(null)` against
@@ -383,7 +431,11 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // opaque `Maybe` that swallowed the union's verdict. The exact shape the
     // flysystem and symfony/console entries below already record: a deliberate
     // negative-test call site the contract layer can now read.
-    ("Seldaek/monolog", 5),
+    // 5 → 6 (+1), 2026-08-17 (issue #423), shape (a): `json_encode()` straight
+    // into `substr(string $string, …)` (Formatter/JsonFormatterTest.php:238).
+    // `json_encode` really does answer `false` on malformed UTF-8, and `substr`
+    // under `strict_types` really does fatal on it.
+    ("Seldaek/monolog", 6),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
     // finding is a class-value contract: `new MountManager(['valid' => 'something
     // else'])` — a plain string in the `array<string, FilesystemOperator>` value
@@ -427,7 +479,25 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // $str)` — carries an all-`Verified` premise and so lands on the proof id, in
     // POSSIBLY_EXPECTED below, not here. One package, one judgment, two buckets:
     // the stratum split, visible in the gate.
-    ("nikic/PHP-Parser", 16),
+    // 16 → 17 (+1), 2026-08-17 (issue #423), shape (a): `array_splice($this->
+    // visitors, $index, 1, [])` in `NodeTraverser.php:56`, where `$index` is the
+    // `int|string` key of a `foreach` over a declared array. `array_splice`'s
+    // `$offset` is a native `int`, so the string arm fatals — TRUE at the
+    // possibly grade, and contract-layer because the `int|string` is a docblock's
+    // claim about the array's keys rather than anything PHP enforces.
+    ("nikic/PHP-Parser", 17),
+    // 0 → 9 (+9), 2026-08-17 (issue #423), all shape (a). Two in `src/`:
+    // `preg_split('/[_.-]+/', $completeLocale)` with `$completeLocale` a
+    // `string|false` (AbstractTranslator.php:353), and `array_splice($arguments,
+    // key($timezoneParameters), …)` where `key()` is `int|string|null` against a
+    // native `int $offset` (Factory.php:757). Seven in `tests/`: four
+    // `date('Y-m-d', strtotime(…))` (`int|false` into `?int`, CreateTest.php:268,
+    // 273, 278, 283), two `json_decode(json_encode(Carbon::now()))`
+    // (JsonSerializationTest.php:27 in both the Carbon and CarbonImmutable
+    // suites), and `trim(file_get_contents(…))`
+    // (CarbonInterval/ConstructTest.php:563). Each is one line of PHP and each
+    // false/null arm is real.
+    ("briannesbitt/Carbon", 9),
     // The private monorepo (corpus.local.toml); matched by its local project name.
     //
     // Ledger of every move, oldest first. Standing conditions unless a row says
@@ -773,7 +843,18 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
     ("symfony/process", 6),
     // 2 — both class 4 (`markTestSkipped()` in the serialization tests).
-    ("briannesbitt/Carbon", 2),
+    // 2 → 3, 2026-08-17 with issue #423 (ADR-0056 §9): the wave's one proof-layer
+    // row, and the one that pays for the whole slice. `CarbonInterval::
+    // createFromFormat(string $format, ?string $interval)` calls
+    // `explode($match[1], $interval)` at `CarbonInterval.php:739` — a NATIVE
+    // `?string` straight into `explode`'s native `string $string`, so the premise
+    // is all-`Verified` and the id is `type.maybe-argument-mismatch`. The
+    // normalization that would have saved it (`$interval ??= '';`) sits four lines
+    // BELOW the call, inside a `preg_match` branch the null value reaches, so
+    // `createFromFormat('H:i:s.v', null)` fatals on a released, strict-types
+    // library. TRUE, unguarded, and reachable through the public API — exactly the
+    // shape a builtin parameter surface exists to see.
+    ("briannesbitt/Carbon", 3),
     // 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
     // a binding claim at all: `type.maybe-argument-mismatch` on
     // `PrettyPrinter/Standard.php:1100`. `preg_replace()` declares `string|null`
