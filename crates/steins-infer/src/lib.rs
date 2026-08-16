@@ -12056,6 +12056,22 @@ fn walk_trace(
                         w.enclosing_class,
                         out,
                     );
+                    // The builtin arm of the same judgment (ADR-0056 §9): the check
+                    // above returns early for a callee it cannot resolve to a
+                    // project function, and this one answers exactly there, off the
+                    // engine's own reflected parameter list.
+                    check_builtin_call_args(
+                        cx,
+                        folder,
+                        scope.poisoned,
+                        descent.is_some(),
+                        call,
+                        env,
+                        store,
+                        w.this_exact,
+                        w.enclosing_class,
+                        out,
+                    );
                     // Userland function arity (ADR-0049 §6 / S5): judged once in the
                     // plain per-scope pass, like the checks below.
                     if descent.is_none() {
@@ -22990,6 +23006,7 @@ fn check_propagated_call(
                     enclosing_class,
                     poisoned,
                     in_descent,
+                    false, // a userland parameter: PHP's table has no null carve-out
                     out,
                 );
             }
@@ -30504,6 +30521,7 @@ fn check_method_args(
                     enclosing_class,
                     poisoned,
                     in_descent,
+                    false, // a userland parameter: PHP's table has no null carve-out
                     out,
                 );
             }
@@ -30794,6 +30812,10 @@ fn spell_arm(arm: &AbstractArm) -> String {
 /// `false` for an array by construction, so admitting it here would smuggle in
 /// the second table this judgment refuses.
 ///
+/// `null_tolerated` is the internal-null coercive carve-out (ADR-0056 §9.3),
+/// `false` for every userland parameter: the `null` side-flag cannot be a rejected
+/// arm where PHP only deprecates it. See [`internal_null_tolerated`].
+///
 /// Returns the verdict, the rejected bases, and whether the `null` side-flag is
 /// rejected. Spelling is the caller's, since the declared-arm lane can name an arm
 /// (`false`) more precisely than its base (`bool`).
@@ -30802,6 +30824,7 @@ fn maybe_arg_verdict(
     p: &Param,
     ty: &NativeType,
     fact: &Fact,
+    null_tolerated: bool,
 ) -> (MaybeArgVerdict, Vec<AbstractArm>, bool) {
     let Some((arms, nullable)) = maybe_arg_arms(fact) else {
         return (MaybeArgVerdict::Nothing, Vec::new(), false);
@@ -30818,7 +30841,8 @@ fn maybe_arg_verdict(
     // as it is for a proven `null` (issue #391's second repair).
     let null_rejected = nullable
         && is_type_error(cx, ty, &ArgValue::Null)
-        && !implicit_null_accepted(p, &ArgValue::Null);
+        && !implicit_null_accepted(p, &ArgValue::Null)
+        && !null_tolerated;
     let total = arms.len() + usize::from(nullable);
     let n = rejected.len() + usize::from(null_rejected);
     let verdict = if n == total {
@@ -31053,8 +31077,12 @@ fn maybe_arg_premise(
 }
 
 /// Emit the possibly-grade argument finding for one argument position. Called from
-/// both propagated-call checks at the point the native proof did **not** fire, so
-/// a definite No is never shadowed by its own weaker sibling.
+/// both propagated-call checks and from the builtin arm (ADR-0056 §9.2) at the
+/// point the native proof did **not** fire, so a definite No is never shadowed by
+/// its own weaker sibling.
+///
+/// `null_tolerated` is the internal-null coercive carve-out, `false` everywhere but
+/// the builtin arm in a coercive file — see [`internal_null_tolerated`].
 #[allow(clippy::too_many_arguments)]
 fn check_maybe_argument_mismatch(
     cx: &Cx,
@@ -31069,6 +31097,7 @@ fn check_maybe_argument_mismatch(
     enclosing_class: Option<&str>,
     poisoned: bool,
     in_descent: bool,
+    null_tolerated: bool,
     out: &mut Vec<Diagnostic>,
 ) {
     let Some(ty) = param.ty.as_ref() else { return };
@@ -31083,7 +31112,8 @@ fn check_maybe_argument_mismatch(
     ) else {
         return;
     };
-    let (verdict, rejected, null_rejected) = maybe_arg_verdict(cx, param, ty, &fact);
+    let (verdict, rejected, null_rejected) =
+        maybe_arg_verdict(cx, param, ty, &fact, null_tolerated);
     if verdict != MaybeArgVerdict::Partial {
         return;
     }
@@ -31123,6 +31153,281 @@ fn check_maybe_argument_mismatch(
         facet: None,
         fix: None,
     });
+}
+
+// ===========================================================================
+// Builtin arguments (ADR-0056 §9, R1's parameter twin): the engine's own
+// reflected parameter list, judged by the relation that has judged project
+// parameters since ADR-0043.
+//
+// No new id, no new stratum and — with exactly one measured exception — no new
+// coercion table. What this arm adds is a SOURCE: `Folder::builtin_param_types`
+// answers what `strlen`'s parameter is, and everything downstream of that is the
+// code the project arm runs. That is the whole design, and it is why the two
+// arms cannot drift: they are the same judgment reached from two declarations.
+// ===========================================================================
+
+/// The **internal-null coercive carve-out** (ADR-0056 §9.3) — PHP's one
+/// internal/userland difference in the parameter-coercion table.
+///
+/// From 8.1 on, `null` into a non-nullable scalar parameter of an *internal*
+/// function is a deprecation in coercive mode, and a `TypeError` only under
+/// `declare(strict_types=1)`. Probed at 8.5.9:
+///
+/// ```text
+/// $ php -r 'echo strlen(null);'
+/// Deprecated: strlen(): Passing null to parameter #1 ($string) of type string
+/// 0
+/// $ php -r 'declare(strict_types=1); echo strlen(null);'
+/// Fatal error: Uncaught TypeError: strlen(): Argument #1 ($string) must be of
+/// type string, null given
+/// ```
+///
+/// Measured rather than recalled: `harness/coercion-grid/witness.php internal`
+/// runs the cells on the project's own PHP and `tests/builtin_param_types.rs`
+/// pins Steins against the recorded rows in both modes, the way the userland
+/// grid has been pinned since issue #391.
+///
+/// A deprecation is not a finding here — there is no id for one, and claiming a
+/// `TypeError` where PHP raises none is precisely the false positive ADR-0002
+/// bars. The userland arms pass `false`: `f(null)` on `function f(string $s)`
+/// fatals in both modes, and nothing about this carve-out reaches them.
+fn internal_null_tolerated(cx: &Cx) -> bool {
+    !cx.strict()
+}
+
+/// Lower a **reflected parameter type** — the `(string)` rendering of
+/// `ReflectionParameter::getType()` — to the [`NativeType`] the same spelling
+/// written in a project signature lowers to, or `None` where the native relation
+/// models nothing (ADR-0056 §9.2).
+///
+/// Two steps, both existing seams. [`steins_contract::lower_str`] is the reader
+/// the reflected *return* envelope already goes through, so one wire form has one
+/// parser; the member discipline below then mirrors `steins_syntax`'s
+/// `lower_hint` — the four scalar bases, the `true`/`false` literal members,
+/// `null` as the nullable flag, and a single unmodeled member collapsing the
+/// whole position to silence.
+///
+/// That mirroring is the point rather than a convenience. `"string"`, `"?int"`
+/// and `"int|string"` judge exactly as those hints judge on a project parameter;
+/// `"array|string"` (`str_replace`'s first three) and `"array"` (`array_map`'s
+/// second) decline exactly as they do there, because [`NativeType`] has no array
+/// member and inventing one here would be the second coercion table §9.2 refuses.
+///
+/// **One deliberate narrowing against `lower_hint`** (§9.4): a class-typed
+/// position declines. The reader lowercases the class name, so there is no source
+/// casing left to display, and the object-world definite No wants the project's
+/// own is-a oracle for a class the project may never index.
+fn builtin_param_native_type(rendered: &str) -> Option<NativeType> {
+    let mut members = Vec::new();
+    let mut nullable = false;
+    lower_reflected_param_member(&steins_contract::lower_str(rendered)?, &mut members, &mut nullable)?;
+    // A type with no non-null member (a standalone `null`) is not modeled — the
+    // same refusal `lower_hint` makes for the same spelling.
+    (!members.is_empty()).then_some(NativeType { members, nullable })
+}
+
+/// Accumulate one lowered member into `members`, recording `null` in `nullable`.
+/// `None` the moment any part is a type the native relation does not model, which
+/// the caller propagates into silence for the whole position.
+fn lower_reflected_param_member(
+    ty: &ContractTy,
+    members: &mut Vec<TypeMember>,
+    nullable: &mut bool,
+) -> Option<()> {
+    match ty {
+        ContractTy::Null => *nullable = true,
+        ContractTy::Base(Base::Int) => members.push(TypeMember::Scalar(ScalarType::Int)),
+        ContractTy::Base(Base::Float) => members.push(TypeMember::Scalar(ScalarType::Float)),
+        ContractTy::Base(Base::String) => members.push(TypeMember::Scalar(ScalarType::String)),
+        ContractTy::Base(Base::Bool) => members.push(TypeMember::Scalar(ScalarType::Bool)),
+        ContractTy::LitBool(b) => members.push(TypeMember::BoolLiteral(*b)),
+        ContractTy::Union(ms) => {
+            for m in ms {
+                lower_reflected_param_member(m, members, nullable)?;
+            }
+        }
+        // `mixed`, `array`, `iterable`, `callable`, `object`, `resource`, `void`,
+        // a class, a refinement the native lane cannot spell — all silence.
+        _ => return None,
+    }
+    Some(())
+}
+
+/// The synthetic [`Param`] one reflected position judges as. Carries the engine's
+/// own parameter name, so the message names `$string` the way PHP's own
+/// `TypeError` does.
+///
+/// `has_null_default` is deliberately `false` even for an optional position: the
+/// null question at a builtin is [`internal_null_tolerated`]'s, which is about the
+/// internal boundary and not about a default this signature may not have. Reading
+/// a `null` default off reflection and folding it in here would answer the same
+/// question twice, out of two different sources.
+fn builtin_param_as_param(bp: &BuiltinParam, ty: NativeType, span: Span) -> Param {
+    Param {
+        name: bp.name.clone(),
+        ty: Some(ty),
+        hint_span: None,
+        variadic: false,
+        by_ref: false,
+        has_null_default: false,
+        has_default: bp.optional,
+        default: None,
+        span,
+    }
+}
+
+/// Judge the positional arguments of a call to a uniquely-resolved **builtin**
+/// against the engine's own reflected parameter types (ADR-0056 §9).
+///
+/// Called from the statement walk beside [`check_propagated_call`], which returns
+/// early for a callee it cannot resolve to a project function — so this is the
+/// only reporter at a builtin call site and there is no double-report to avoid.
+/// It runs inside a binding descent on the same terms its neighbour does: the
+/// callee's body is real code, and an argument proven there is proven at the line
+/// it is written on.
+///
+/// Two resolutions feed one relation, because a builtin's single arm has to make
+/// the split the project side carries as two whole passes: the propagated value
+/// ([`propagated_arg_value`] — `$v`, `g()`, `$o->m()`, `$o->p`, at its own
+/// stratum) and the env-free static one (`Cx::resolve_static_value` — a literal,
+/// a `new`, an enum case, a class constant). Then the same four rungs in the same
+/// order the project arm runs them: the proven-value definite No, the proven
+/// object, the proven resource, and — only where none of those fired — the
+/// possibly pair.
+#[allow(clippy::too_many_arguments)]
+fn check_builtin_call_args(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    poisoned: bool,
+    in_descent: bool,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    out: &mut Vec<Diagnostic>,
+) {
+    // A named argument or an argument unpacking breaks the position→parameter map
+    // this whole judgment is indexed by (§9.4, v1). `positional_only` is `false`
+    // for both, and for the first-class-callable shape `f(...)`, which is a value
+    // and not a call at all.
+    if !call.positional_only {
+        return;
+    }
+    let Some(name) = call.callee.as_deref() else { return };
+    // A project function of this simple name shadows the builtin (or makes the
+    // name ambiguous) — the same refusal `builtin_call_return_fact` makes, for the
+    // same reason: what runs is not what the engine reflected.
+    if cx.index.has_simple_function(name) {
+        return;
+    }
+    let Some(params) = folder.builtin_param_types(name) else { return };
+    let null_tolerated = internal_null_tolerated(cx);
+    for (i, arg) in call.args.iter().enumerate() {
+        // Past the declared list: an extra argument is an arity question, not a
+        // type one, and `call.too-many-arguments` for internal targets is its own
+        // slice (ADR-0049 §6, still REGISTERED_NOT_YET_EMITTED).
+        let Some(bp) = params.get(i) else { break };
+        // A variadic binds every argument from here on, so there is no position
+        // left to index by — `break`, exactly as the project arm does.
+        if bp.variadic {
+            break;
+        }
+        // An out-parameter (`preg_match`'s `$matches`): what PHP requires there is
+        // a variable, not a value of a type.
+        if bp.by_ref {
+            continue;
+        }
+        // An untyped or unmodeled position (`var_dump`'s `mixed`, `array_map`'s
+        // `array`) declines; §9.4 lists the whole set and why each is silence.
+        let Some(ty) = bp.ty.as_deref().and_then(builtin_param_native_type) else { continue };
+        let param = builtin_param_as_param(bp, ty, arg.span);
+        let ty = param.ty.as_ref().expect("set just above");
+
+        let mut native_fired = false;
+        let proven = propagated_arg_value(
+            cx, folder, &arg.value, env, store, this_exact, enclosing_class, poisoned, in_descent,
+            arg.span.start, out,
+        )
+        .map(|(v, prov, s)| (v, Some(prov), s))
+        .or_else(|| {
+            // A literal in the source IS the value, so it enters `Verified` with no
+            // provenance phrase — the direct pass's shape, reached from here.
+            cx.resolve_static_value(&arg.value, enclosing_class)
+                .map(|v| (v, None, Stratum::Verified))
+        });
+        // Proof-layer consumption rule (ADR-0052 §5): an all-`Verified` premise, or
+        // silence. The carve-out sits beside the coercion table rather than inside
+        // it — `is_type_error` answers what PHP does at a *userland* boundary, and
+        // this is the one cell where the internal boundary differs (§9.3).
+        if let Some((value, provenance, strat)) = proven
+            && strat == Stratum::Verified
+            && is_type_error(cx, ty, &value)
+            && !(null_tolerated && matches!(value, ArgValue::Null))
+            && !object_world_guard_blind(in_descent, ty, &value)
+        {
+            out.push(cx.diagnostic(
+                arg.span.start,
+                &value,
+                provenance.as_deref(),
+                name,
+                &param.name,
+                ty,
+            ));
+            native_fired = true;
+        }
+        // A variable bound to a proven object, and one whose contract lane is a
+        // bare `Verified` resource (ADR-0056 §8) — the two non-scalar definite-No
+        // branches the project arm carries, on the same guards.
+        if !native_fired
+            && !poisoned
+            && !in_descent
+            && let ArgValue::Var(v) = &arg.value
+            && store.is_exact(v)
+            && let Some(class) = store.class_of(v)
+            && cx.object_is_type_error(ty, class)
+        {
+            out.push(cx.diagnostic(
+                arg.span.start,
+                &arg.value,
+                Some(&format!("holds a {}", simple_class(class))),
+                name,
+                &param.name,
+                ty,
+            ));
+            native_fired = true;
+        }
+        if !native_fired
+            && !poisoned
+            && let ArgValue::Var(v) = &arg.value
+            && store_holds_resource(store, v)
+            && cx.resource_is_type_error(ty)
+        {
+            out.push(cx.resource_diagnostic(arg.span.start, v, name, &param.name, ty));
+            native_fired = true;
+        }
+        // The possibly pair (issues #391/#418), where no definite No fired — so the
+        // weaker claim never shadows the stronger one about the same argument.
+        if !native_fired {
+            check_maybe_argument_mismatch(
+                cx,
+                folder,
+                &param,
+                name,
+                arg.span.start,
+                &arg.value,
+                env,
+                store,
+                this_exact,
+                enclosing_class,
+                poisoned,
+                in_descent,
+                null_tolerated,
+                out,
+            );
+        }
+    }
 }
 
 /// Strict mode: does a single union `member` accept the non-null literal `arg`
