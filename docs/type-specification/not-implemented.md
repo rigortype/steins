@@ -65,20 +65,34 @@ still read UTF-8-lossily, so a file that is not itself valid UTF-8 collapses
 before parsing (ADR-0080 §3.2), which also leaves the salsa backdating in §3.3
 open.
 
-**Builtin parameter types are not checked at all** (issue #391). Every
-argument-side finding — the definite `type.argument-mismatch` and the
-possibly-grade pair beside it — judges an argument against a **project-defined**
-callee's declared parameter. A builtin's parameters have no type source in the
-check: the builtin catalog supplies arity (that is what
-`call.too-few-arguments` runs on) and return facts (ADR-0056/ADR-0069), and
-nothing supplies parameter types. So `strlen($maybeFalse)` and
-`json_decode($maybeNull)` are silent where the same value into a project
-function is reported. This caps the reach of the whole argument side, and
-closing it is a slice with its own measurement rather than a patch. The
-argument *carrier* is a second cap in the same place: only a plain `$variable`
-argument is read, which was 26% of the 39,754 argument positions the issue #291
-probe saw — `f($o->prop)`, `f(g($x))` and `f($a['k'])` carry the same judgment
-at a seam that does not run it.
+**Builtin parameter types reach only what the engine can be asked and the
+native relation can spell** (issue #423, ADR-0056 §9; the whole-surface gap of
+issue #391 is closed). A builtin's parameters now have a type source — the
+sidecar's `ReflectionFunction::getParameters()`, Verified — and
+`type.argument-mismatch` plus the possibly pair judge a builtin argument by the
+same relation they judge a project one, at the call-site file's `strict_types`,
+with the internal-null coercive carve-out §9.3 measures. What is left is
+bounded and stated:
+
+- **No engine, no judgment.** `--no-php`, a sidecar that cannot spawn, the
+  pre-boot playground and a replay table recorded before the field all answer
+  `None`. That is the sound subset (ADR-0004) and not a gap to close: ADR-0069's
+  note of 2026-08-17 explains why no static row may stand in.
+- **Positions the native relation does not model.** `array`, `iterable`,
+  `callable`, `object`, `resource` and a class-typed position all decline, so
+  `array_map('f', 'notanarray')`, `str_replace([], 1, 1)` and
+  `fwrite($notAResource, …)` stay silent. Every one of those declines exactly as
+  the same spelling written on a *project* parameter does — the cap is
+  `NativeType`'s member set, in one place, for both.
+- **Named arguments to a builtin** (v1): name→position binding for an internal
+  target is its own slice.
+- **`mixed`, untyped, by-reference and variadic positions**, each for a reason
+  §9.4 gives; these are silence by construction rather than unfinished work.
+
+The argument *carrier* is a separate cap in the same place, and it has shrunk to
+one shape: the possibly-grade pair reads `$v`, `f(g($x))`, `f($o->m())` and
+`f($a['k'])` (issue #418) but not `f($o->prop)`, which has no condition-operand
+variant of its own to narrow through and so cannot be shipped guarded.
 
 **Generic type-argument carry drops conservatively past a variable binding**
 (issue #295, ADR-0032 stage 1). `$box = new MutableBox(1); f($box);` now

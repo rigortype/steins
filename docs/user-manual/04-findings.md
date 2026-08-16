@@ -295,11 +295,36 @@ nothing in strict mode, where *every* arm breaks. That last silence is
 deliberate: "every arm breaks" is a claim about the declaration rather than
 about any value on any path, and it was measured to fire on nothing real.
 
-Two limits worth knowing. Arguments to **builtins** are not checked against
-builtin parameter types at all — Steins has no builtin parameter-type source
-— so `strlen($maybeFalse)` is silent. And only a plain `$variable` argument is
-read: `f($o->prop)`, `f(g($x))` and `f($a['k'])` carry the same risk and are
-not judged here.
+**Arguments to builtins are judged too**, on the same two ids and the same
+relation. The parameter types come from your own PHP — Steins asks it, through
+the sidecar, what `strlen`'s parameter is — so what you get is the signature
+the engine that will run your code actually has, at your PHP's version, with
+your extensions loaded:
+
+```
+$ steins check src/Paths.php
+src/Paths.php:9:8: error[type.argument-mismatch]: argument 1 to strlen() cannot become string $string — proven TypeError (strict mode)
+```
+
+There is **one thing PHP itself spells differently** for a builtin, and Steins
+follows it: passing `null` to a non-nullable scalar parameter of a builtin is
+a *deprecation* in a coercive file and a `TypeError` only under
+`declare(strict_types=1)`. So `strlen(null)` reports in a strict file and says
+nothing in a coercive one — Steins has no deprecation finding, and claiming a
+`TypeError` where PHP raises none would be a false positive.
+
+Several positions stay silent on purpose, each because there is nothing to
+judge rather than because nobody got to it: an untyped or `mixed` position
+(`var_dump()`), a by-reference out-parameter (`preg_match()`'s third
+argument), a variadic tail (`sprintf()`'s), a type the native relation does
+not model anywhere — `array`, `iterable`, `callable`, `object`, a class name —
+so `array_map('f', 'notanarray')` and `str_replace([], 1, 1)` say nothing, and
+a named argument to a builtin. **Without a PHP** — `--no-php`, a sidecar that
+cannot start, the browser playground before it boots — no builtin argument is
+judged at all, because the only honest source is the engine itself.
+
+One limit remains on the argument side: a `$o->prop` argument is not read.
+`f($v)`, `f(g($x))`, `f($o->m())` and `f($a['k'])` all are.
 
 ### `call.*` — calls that cannot complete
 

@@ -177,7 +177,7 @@ is the only channel available to hand the runner its own source.
 | --- | --- | --- |
 | `env` | `{php_version, extensions, sapi}` — coverage-posture material and the PHP-minor check for catalog version skew | implemented |
 | `fold` | a call's value, tagged with its PHP type | implemented |
-| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads — and its **parameter counts** (`params_total`, `params_required`) | implemented |
+| `reflect` | whether a name is a resident function and/or class-like on this PHP, autoload **disabled**; for a resident function also its **reflected return type** (`return_type`, with `return_type_tentative` when the engine carries only a tentative type) — the envelope the ADR-0056 return-fact seeder reads — its **parameter counts** (`params_total`, `params_required`) and its **parameter list** (`params`) | implemented |
 | `plugin` | — | **stub**: returns `{kind: "widen", reason: "unimplemented"}` |
 
 `reflect`'s reply is always structured: a name that exists nowhere is a
@@ -198,6 +198,23 @@ return countersigns a transfer rule with nothing, so such a rule pins the live
 recorded before the field, a reflection failure — withhold the rule exactly as an
 absent declaration does; **older replies keep parsing unchanged**, which is what
 lets the pre-existing replay tables stay valid.
+
+The **parameter list** (`params`, ADR-0056 §9) is the same signature one level
+deeper: one entry per position of `ReflectionFunction::getParameters()`, in
+declaration order, each carrying `name`, the `(string)` rendering of `getType()`
+(`null` for an untyped position) and the three shape bits `by_ref` / `variadic` /
+`optional`. The counts pin a *rule* (a bare-`mixed` transfer countersigning
+itself against the live signature); this list judges an *argument*
+(`type.argument-mismatch` and the possibly pair at a builtin call site), so a
+consumer of one is not a consumer of the other.
+
+It **parses whole or not at all**: a nameless or unreadable entry withholds the
+entire list, because a truncated one would silently renumber every position after
+the gap and the judgment is indexed by position. `null`, an absent field and an
+unreadable list all read as "unanswerable" and withhold the judgment; a
+zero-parameter function reports `[]`, which is an answer. Like the counts, the
+field is additive — an older reply, and a replay table recorded before it, keep
+parsing and simply judge nothing.
 
 `fold` returns one of three outcomes, and the middle one is the interesting one:
 

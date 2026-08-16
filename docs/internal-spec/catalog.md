@@ -493,6 +493,18 @@ format the other tables will follow once a consumer wants them.
   read this surface instead of a parameter table. Absent counts (an older runner,
   a canned replay table recorded before the field, a reflection failure) stay
   `None`, which withholds rather than guesses.
+
+  **The parameter-type half is over too, and it never becomes a catalog row**
+  (issue #423, ADR-0056 §9). The same `reflect` reply carries `params` —
+  `ReflectionFunction::getParameters()` per position, with the parameter name, the
+  `(string)` rendering of `getType()` and the `by_ref`/`variadic`/`optional` bits —
+  reachable through `steins_infer::Folder::builtin_param_types`, and
+  `type.argument-mismatch` plus the possibly pair consume it at a builtin call
+  site. That surface is deliberately **engine-only**: a parameter type premises a
+  proof-layer finding on the default floor, and ADR-0069 §2's firewall forbids an
+  imported row from carrying that authority (the ADR-0069 note of 2026-08-17 states
+  the whole argument). So the "no parameter types" sentence above stays true of the
+  catalog and always will be, and `--no-php` judges no builtin argument at all.
 - **Flag inspection** — `json_decode`/`json_encode` throw `JsonException` only
   under `JSON_THROW_ON_ERROR`; without flag inspection those rows stay
   uncatalogued (widen) rather than manufacture a throw. The keys are present in
