@@ -84,6 +84,17 @@ Verification apparatus (ADR-0013):
   used to carry). Three fails are registered refusals (ADR-0030), three
   are absent machinery reducing to three capabilities — see M1's exit
   criteria below, which state the standing in full.
+  **One row moved since that measurement, and the total has not been
+  re-run**: `regressions_unset_pseudo_type` went `unrecognized` →
+  `recognized` with the vocabulary (#395/#400) and its enforcement from
+  `partial` (3/5 — the three `// Q` guarded lines, silent for the right
+  reason) to **full 5/5** with the emitter (#396), which reports the two
+  `// E?` reads under `--profile contracts` and nothing else on the file.
+  Issue #397 changed no row: it decided that every position outside a
+  top-level inline `@var` is inert, which the fixture does not exercise.
+  The suite lives in the sibling php-typing-conformance repo, so the
+  denominator and the total pass count are to be re-measured there and
+  dated before this line is rewritten.
 - ~4,180 workspace tests; zero conformance regressions ever.
 
 CLI (ADR-0020, partially landed):

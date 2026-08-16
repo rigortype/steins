@@ -3,7 +3,8 @@
 Issue #395. **Status: proposed (2026-08-16), PENDING ratification.** Drafted
 under the owner's standing delegation, recorded with the vocabulary slice it
 governs. The semantics of §4 are owner-approved (2026-08-16) and ship in issue
-#396; §5's position question is open.
+#396; §5's position question is **decided** (2026-08-16, issue #397), amended by
+§9.
 
 Parent: zonuexe/php-typing-conformance#7, the cross-tool measurement of the
 spelling. Prior art: PHPantom-dev/phpantom_lsp#366, where the same docblock
@@ -187,29 +188,66 @@ building it forced.
    different grades; the tracer bullet decides the ordering, and the ADR-0081
    pass is not modified by this slice.
 
-## 5. Open item: positions other than an inline top-level `@var` (issue #397)
+## 5. Positions other than an inline top-level `@var` — **decided** (issue #397)
 
-Undecided, and deliberately not decided here. The vocabulary of §2 applies
-wherever the phpdoc grammar reaches, because lowering is position-blind: `@param
-\DateTime|unset $x`, `@return T|unset`, a property `@var T|unset` and a
-function-scope inline `@var T|unset` all lower without a phantom class arm
-today. What none of them has is a *meaning*, and the candidates are not
-obviously the same in each position:
+**Decided 2026-08-16 with issue #397**, resolving what this section previously
+left open. The ruling: **the spelling is accepted everywhere, and the definedness
+semantics of §4 attach to exactly one position.**
 
-- `@param T|unset` could mean an optional parameter, a by-reference out
-  parameter that may stay unwritten, or nothing at all — PHP has native syntax
-  for optionality, so the spelling may be a redundancy to refuse.
-- `@return T|unset` has no obvious reading: a function either returns a value or
-  does not return.
-- A property `@var T|unset` is arguably the uninitialized-typed-property state,
-  which is a native PHP concept with its own errors.
-- A function-scope inline `@var T|unset` is the closest to §4's case, but a
-  function's locals are bound by its own body rather than by an includer, so the
-  claim has a different justification.
+1. **Spelling, everywhere.** Lowering is position-blind, so `@param
+   \DateTime|unset $d`, `@return T|unset`, a property `@var T|unset`, an inline
+   `@var T|unset $this->p` and a function-scope inline `@var T|unset $x` all
+   reach `ContractTy::Unset` — never a class, never a type-resolution finding.
+   `// T: unset` means the same thing in every position, which is what makes the
+   conformance measurement comparable across them.
 
-Until #397 decides, these positions carry the corrected vocabulary and no
-semantics: the member is dropped from the value arms and nothing is reported.
-Silence is the safe residue, and it is the same silence they have today.
+2. **Semantics, only on an inline `@var` naming a top-level local.** Everywhere
+   else the member is **inert**: dropped from the value arms, seeding no presence
+   claim, adding no diagnostic. One line per position for why "undefined" has no
+   subject there:
+
+   | Position | Reading | Why inert |
+   | --- | --- | --- |
+   | `@param T\|unset $d` | inert | A parameter is always bound by the call; PHP already has native syntax for optionality, so the member would restate it or contradict it. |
+   | `@return T\|unset` | inert | A function returns a value or does not return; there is no third outcome for the member to name. |
+   | property `@var T\|unset` | inert | An uninitialized *typed* property is a native PHP concept with its own errors, and an untyped one is `null`; neither is a missing binding. |
+   | inline `@var T\|unset $this->p` | inert | The tag speaks about a property slot, which exists whenever the object does. |
+   | function-scope inline `@var T\|unset $x` | inert *for this id* | A function's locals are bound by its own body, so the CST already decides presence — see 3. |
+   | nested (`array<int, unset>`) | inert | It speaks about an array's values, not about whether the variable is bound. |
+
+3. **A function scope keeps the proof-layer pair, unchanged.** A never-bound
+   local still reports `variable.undefined` and a conditionally-bound one still
+   reports `variable.maybe-undefined` at `strict`; the docblock neither
+   manufactures a binding nor silences a proof. This holds in a plain function, a
+   method and a closure body alike. An arrow function's body is an expression, so
+   a statement-adjacent inline `@var` sits in the enclosing scope and the body
+   keeps its documented silence — the member changes nothing there either.
+
+4. **Inert is two-sided, and the second side needed a fix.** "No new finding" was
+   already true. "No *lost* finding" was not: `Unset`'s acceptance leaf answers
+   `Maybe` (§2's table), and the union folds that judge a lowered or parsed type
+   directly — rather than through `flatten_arms` — folded it in, where a `Maybe`
+   swallows a sibling's `No`. `f(1)` against `@param \DateTime|unset $d` went
+   silent, as did a violating `@return` and a violating property assignment. The
+   fold now skips the member in `accepts`'s phpdoc-AST union (`steins-infer`) and
+   in `steins-contract`'s three acceptance unions; a union with no value member
+   left keeps the bare-`unset` floor. §9 records this.
+
+5. **`transform`/`annotate` never promote the member away.** `phpdoc-to-native`
+   refuses a `T|unset` `@param` as `type-not-natively-representable`, which is
+   the behavior it already had and the correct one: no native declaration can
+   spell "the argument may not be there", so rewriting `@param int|unset $x` to
+   `int $x` would delete the author's own statement and emit a declaration
+   stricter than the docblock it replaced.
+
+6. **Deferred, not refused: a function-scope `T|unset` that participates in the
+   emitter.** `include`-inside-a-function is a real idiom — a function that
+   `include`s a partial and reads what the partial bound — and §8.3's positional
+   dam rule is exactly the machinery it would need. It is not built here: the
+   §8.2 premise that makes the top-level claim honest (a script scope has no
+   proof of absence, so the declaration is the only premise) does not transfer,
+   because a function scope *does* have one, and the two premises would have to
+   be ordered before the id could speak. Recorded in `not-implemented.md`.
 
 ## 6. Alternatives considered
 
@@ -348,3 +386,43 @@ which is an acceptance criterion. So this id subtracts on a **confirmed**
 by-reference argument instead (a declared `&$p`, or a catalog `out_params` row),
 on the maybe leg's call-site-forward rule. An unresolvable callee proves nothing
 about the binding, and this id reports it.
+
+## 9. Amendment (2026-08-16): the position ruling as built (issue #397)
+
+**Status: PENDING ratification**, with §4 and §8. §5's ruling stands as written;
+this records the one thing pinning it forced, and the shape of the evidence.
+
+### 9.1. `Maybe` at the acceptance leaf was not defense after all
+
+§2 called the leaves' `Maybe` "defense, not the mechanism", on the reasoning that
+`flatten_arms` drops the member before acceptance is asked. That is true of every
+consumer that builds a `Vec<ContractArm>` — the cast lane, the shape seed, the
+stratum rule, the speller — and it is false of the consumers that judge a
+declared type *directly*. `check_phpdoc_param` walks the phpdoc AST through
+`accepts` for a proven value and the lowered `ContractTy` through `admits_fact`
+for an abstract one; neither passes through an arm list. There the `Maybe` was
+the mechanism, and a union's or-fold turned it into silence: a `Maybe` absorbs a
+sibling's `No`, so the member **deleted** findings — `phpdoc.param-mismatch`,
+`phpdoc.return-mismatch`, `phpdoc.property-mismatch` — that the same declaration
+without it reports.
+
+The fix keeps the leaves as they are and changes the **folds**: a union's value
+members are its non-`unset` members, in `accepts` (`steins-infer`) and in
+`admits_val` / `base_only` / `admits_shape_fact` (`steins-contract`). A union
+left with no value member answers `Maybe`, which is the bare-`unset` floor of
+§2.4 reached by a different route. The `Inter` folds are untouched: `T&unset` is
+not an idiom, and an intersection's `and` degrades toward `Maybe`, so its residue
+is silence rather than a manufactured `No`.
+
+Nothing outside a docblock that already spells the word can move, so the change
+is inert on any code written before #400 — which is every line of both corpora.
+
+### 9.2. The fixtures compare lists, because absence is the wrong question
+
+Each position is pinned by rendering the same source twice, with the member and
+without, and asserting the two **complete** diagnostic lists agree. Asking
+instead whether some id is absent would have passed on all six positions while
+the deletion above was live. The one licensed difference is the message's
+rendering of the declaration, which quotes the author's own spelling
+(`(\DateTime | unset)`) so a reader is shown the docblock that is actually in the
+file; the comparison normalizes it and a separate fixture pins that it is there.

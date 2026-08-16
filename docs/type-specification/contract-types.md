@@ -157,11 +157,15 @@ rules instead of a keyword zoo:
   convict every value a bare-`unset` variable holds) and `to_fact` answers
   `None`.
 
-  **Nothing reports on the state yet.** What a `T|unset` read *means*
-  (`isset`/`empty`/`??`/`??=`/assignment discharge, the guard never redundant, and
-  the `phpdoc.maybe-undefined` id) is issue #396; positions other than an inline
-  top-level `@var` are issue #397. Registered as divergence-registry core entry
-  15 — PHPStan reports the spelling as an unknown class.
+  What a `T|unset` read *means* — `isset`/`empty`/`??`/`??=`/assignment
+  discharge, the guard never redundant, and the `phpdoc.maybe-undefined` id — is
+  issue #396, and it attaches to an inline `@var` naming a **top-level** local
+  and to nothing else. In every other position (`@param`, `@return`, a property
+  `@var`, `$this->p`, a function-scope local, a nested `array<int, unset>`) the
+  member is **inert** (ADR-0087 §5, issue #397): no presence claim, no new
+  finding — and no *lost* finding either, since the acceptance folds drop the
+  member instead of folding its `Maybe` in. Registered as divergence-registry
+  core entry 15 — PHPStan reports the spelling as an unknown class.
 - Conditionals, offset-access types, const fetches, `$this`/`self`/`static`,
   templates, and anything the parser marks unsupported → `Opaque`. A
   **template name in scope shadows the class universe** for its own
@@ -206,8 +210,12 @@ where `5` and `5.0` are distinct values.
 pseudo-type answers `Maybe` for every value, because it says nothing *about* a
 value (ADR-0087). `never`'s `No` would be the arithmetically tidy answer for a
 member no value inhabits, and it would convict every value a bare `@var unset $x`
-variable holds. The union case never reaches the leaf: the member is filtered out
-of the arm list, so `\DateTime|unset` is judged as `\DateTime`.
+variable holds. The union case never reaches the leaf: the member is dropped
+twice over — out of the arm list at `flatten_arms`, and out of a union's own
+or-fold in `admits_val`/`base_only`/`admits_shape_fact` — so `\DateTime|unset` is
+judged as `\DateTime`. The second drop is not redundant: without it the leaf's
+`Maybe` would absorb a sibling's `No` and a `@param \DateTime|unset $d` would
+accept an argument `@param \DateTime $d` refuses (ADR-0087 §9.1).
 
 **Provenance-flavored string types can never answer `Yes`.** `literal-string`
 and `callable-string` lower to `StrOpaque`: a non-string is `No`, a string is

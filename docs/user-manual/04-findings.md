@@ -654,8 +654,39 @@ reported as redundant.
 An `include`, `require`, `extract`, `compact`, `get_defined_vars`, `eval` or
 `$$name` **ends** the claim rather than blanking the file: reads before it are
 still judged, reads after it are not, because from there the symbol table is no
-longer readable from the text. Only a top-level inline `@var` means this today;
-in a function, `@param T|unset` and friends carry no semantics yet.
+longer readable from the text.
+
+The id sits on the `contracts` profile, with the rest of the `phpdoc.*` family:
+its premise is your own declaration, not something Steins proved, so it is a
+finding you asked for by writing the tag. A bare `steins check` stays silent on
+it.
+
+#### Where `unset` is accepted but means nothing
+
+You may write the word in any phpdoc position, and it is never read as a class
+anywhere — a `@param \DateTime|unset $d`, a `@return \DateTime|unset`, a property
+`@var \DateTime|unset`, an inline `@var \DateTime|unset $this->p` and a nested
+`array<int, unset>` all lower to the pseudo-type and produce no
+type-resolution finding. What they do **not** carry is the definedness claim
+above: "undefined" has no subject in those positions, because a parameter is
+always bound by the call, a function returns a value or does not return, and a
+property slot exists whenever the object does. The member is dropped from the
+value arms and everything else behaves exactly as the same declaration without
+it — `@param \DateTime|unset $d` accepts and refuses precisely what
+`@param \DateTime $d` accepts and refuses, and the message quotes your spelling
+so you can see which declaration was violated.
+
+Inside a function, a method or a closure, an inline `@var \DateTime|unset $x`
+is likewise inert for this id — but the *proof*-layer pair is not. A local
+nothing binds still reports `variable.undefined`, and one bound on only some
+paths still reports `variable.maybe-undefined` at `--profile strict`: a
+docblock cannot manufacture a binding the body proves absent, and it does not
+silence one either. An arrow function's body keeps its own silence, unchanged.
+
+`steins transform phpdoc-to-native` will not promote a `T|unset` `@param` to a
+native declaration. There is no native syntax for "the argument may not be
+there", so the rewrite would delete what you wrote; the transform refuses it as
+`type-not-natively-representable`.
 
 ### `throw.*` — `@throws` envelopes
 

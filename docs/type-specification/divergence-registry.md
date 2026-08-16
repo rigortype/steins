@@ -212,10 +212,23 @@ phantom class reference, so an annotation Steins writes with it will not lower i
 PHPStan. Reading PHPStan-shaped annotations is unaffected — nothing else changes
 about the spelling. Source: zonuexe/php-typing-conformance#7, with
 PHPantom-dev/phpantom_lsp#366 as prior art. Reconsideration precondition: none —
-this is a standing correction, not a deferral. What is *deferred* is the meaning:
-the possibly-undefined state is reported by nothing yet (issue #396), and
-positions other than an inline top-level `@var` carry the corrected vocabulary
-with no semantics (issue #397).
+this is a standing correction, not a deferral.
+
+**The positions are decided** (ADR-0087 §5, issue #397). The divergent *spelling*
+is accepted wherever the phpdoc grammar reaches — lowering is position-blind, so
+no position ever reads the word as a class — but the definedness meaning attaches
+only to an inline `@var` naming a **top-level** local, where `phpdoc.maybe-undefined`
+reports an undischarged read (issue #396). `@param`, `@return`, a property `@var`,
+an inline `@var $this->p`, a function-scope local and a nested `array<int, unset>`
+are **inert**: the member is dropped from the value arms, no presence claim is
+seeded, and the declaration accepts and refuses exactly what the same declaration
+without the member does. A function scope keeps `variable.undefined` and
+`variable.maybe-undefined` unchanged — a docblock manufactures no binding and
+silences no proof. `transform phpdoc-to-native` refuses to promote a `T|unset`
+`@param`, so the divergent spelling is never written into a native declaration
+where it could not survive. Still deferred: letting a **function-scope**
+`T|unset` participate in the emitter, the `include`-inside-a-function idiom
+(ADR-0087 §5.6).
 
 ## Conformance-suite divergences (intentional silences)
 
