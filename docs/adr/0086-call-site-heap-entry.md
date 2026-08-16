@@ -233,10 +233,12 @@ the IR at last — ADR-0057 C7's deferral, discharged), and a nested-argument or
   pins. The seed also flips one field of §2's table — `escaped` is `false`
   there, the one copy that is not pre-escaped, because a `new` site has no
   caller-side object to escape — and pays for it with the same-`$this` sweep
-  ADR-0057 C5 adds: `$this->m(…)`, `parent::m(…)`, `self::m(…)` and
-  `static::m(…)` sweep the receiver's own non-readonly props in every walk,
-  resolved or not, which also closes the resolved-private-`$this->m()` hole
-  this ADR's own §3 seeding had left open.*
+  ADR-0057 C5 adds: `$this->m(…)`, `parent::m(…)`, `self::m(…)`,
+  `static::m(…)`, and (issue #417) an explicitly named `Foo::m(…)` whose class
+  resolves to the enclosing class-like or one of its ancestors, sweep the
+  receiver's own non-readonly props in every walk, resolved or not, which
+  also closes the resolved-private-`$this->m()` hole this ADR's own §3
+  seeding had left open.*
 
   *Amended 2026-08-16 (#377): that gap had a second, unsound half, and the half
   is closed.* Not walking the constructor also meant the **literal property
@@ -261,17 +263,21 @@ the IR at last — ADR-0057 C7's deferral, discharged), and a nested-argument or
   constructor that lets `$this` out of its own text drops every default.** A
   delegating `__construct() { $this->init(); }` whose `init()` writes
   `$this->view` spells no `$this->view`, and `view`'s default would have
-  survived and been wrong by the identical argument. Four shapes therefore set
+  survived and been wrong by the identical argument. Five shapes therefore set
   the coarse answer, each a route by which a slot is written without this text
   naming it: a **bare `$this`** (not followed by `->` — passed to a function,
   assigned to a variable, returned, captured by a closure: an alias leaves, and
   any holder can write any property); **`$this->m(…)`**, a call into a body
-  this scan is not reading; **`parent::m(…)` / `self::m(…)` / `static::m(…)`**,
-  which are that same call under a spelling that keeps the very same `$this`
-  (`parent::__construct()` above all, while a bare `self::CONST` runs nothing
-  and is not a call); and the **dynamic** access. Where none of them occurs the
-  per-property rule stays fine-grained: a constructor whose only `$this` uses
-  are `$this->a = 1; $this->b = $x;` keeps `$c`'s default.
+  this scan is not reading; **`parent::m(…)` / `self::m(…)` / `static::m(…)`
+  / `Foo::m(…)` spelling the declaring class's own short name or FQN**
+  (issue #417), all of which are that same call under a spelling that keeps
+  the very same `$this` (`parent::__construct()` above all, while a bare
+  `self::CONST` runs nothing and is not a call, and a class name that is
+  **not** the declaring class's own is not this shape at all — an unrelated
+  `Bar::m()` leaves the per-property rule fine-grained); and the **dynamic**
+  access. Where none of them occurs the per-property rule stays fine-grained:
+  a constructor whose only `$this` uses are `$this->a = 1; $this->b = $x;`
+  keeps `$c`'s default.
 
   **This is deliberately coarse and its precision cost is unknown**, not small:
   a constructor calling one `$this` method loses the defaults of properties that
