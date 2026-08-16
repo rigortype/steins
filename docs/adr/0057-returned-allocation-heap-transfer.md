@@ -867,6 +867,31 @@ and two routes write `$this` without this walk running the write:
   `ThisReach::escapes` was built to over-approximate — and because C1's
   unescaped seed is what makes it load-bearing rather than merely tidy.
 
+  *Closed symmetrically 2026-08-17 (issue #417): the four spellings above
+  are not the only way PHP forwards `$this` to a same-object call — an
+  explicitly named `Foo::m(…)` does too, whenever `Foo` resolves (at the
+  call site) to the enclosing class-like or one of its ancestors and `m`
+  is non-static. `runs_with_same_this` now resolves `Callee::Static {
+  class: StaticClass::Named(n), .. }` the same way: a completely
+  enumerated hierarchy that excludes `n` (the is-a oracle's `No`) is the
+  one case excluded, matching a genuinely unrelated `Bar::m()`; anything
+  else — an admitted class whose method is unresolvable (abstract,
+  missing, private-blocked, a poisoned scope) — sweeps, the same
+  "unresolved is a body never read at all" reasoning already applied to
+  the keyword spellings. A *resolved* **static** method is the one
+  admitted case proven not to carry `$this`, and does not sweep.
+  ADR-0086 §4's lexical `ThisReach::escapes` gained the same clause over
+  text, gated on the enclosing declaration's own short name and FQN
+  spelling (`ctor_touched_props` already resolves both). One asymmetry is
+  left standing, and it is honest rather than deferred: the WALK-side
+  check resolves `n` through the project's `use`-import table like any
+  other class reference, while the lexical scan is pure text and
+  recognizes only the two literal spellings — a same-class call written
+  through an import alias (`use self as X;` is legal PHP, if rare) drops
+  no default at the floor. It costs nothing where the walk runs (which is
+  every non-declined constructor now), and the floor was already
+  text-only for every other clause it carries.*
+
 * **An unknown or overridable call while an implicit alias exists** — a
   non-static closure created in the body binds `$this` without naming it,
   and is invoked through a call the walk cannot resolve. So inside a
