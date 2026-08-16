@@ -267,6 +267,37 @@ fn flag_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
 // Tuple generation: parameter shape → probe family.
 // ---------------------------------------------------------------------------
 
+/// Whether a generated value is one of the **hazard spellings** — the arguments
+/// these probes exist to put in front of the two engines.
+///
+/// Used only to bound the pairwise pass: pairing every value with every other
+/// is a product no sweep can afford, and pairing the harmless ones buys nothing
+/// (`strpos("aaa", "abc")` twice over is not a width probe). What counts as a
+/// hazard is what the recorded witnesses are made of — an integer or numeric run
+/// past the narrow `PHP_INT_MAX`, a string whose content is a machine word, a
+/// conversion that renders one, and the all-ones negative.
+fn is_hazard(v: &serde_json::Value) -> bool {
+    const SPELLINGS: &[&str] = &[
+        "3000000000",
+        "2147483648",
+        "11111111111111111111111111111111",
+        "FFFFFFFF",
+        "%x",
+        "%b",
+        "%o",
+        "%u",
+        "%d",
+        "@@3000000000.0@@",
+    ];
+    match v {
+        serde_json::Value::String(s) => SPELLINGS.contains(&s.as_str()),
+        serde_json::Value::Number(n) => {
+            n.as_i64().is_some_and(|i| i == 2_147_483_647 || i == -2_147_483_647 || i == -1)
+        }
+        _ => false,
+    }
+}
+
 /// A float argument spelled as a raw JSON token (property 2 above).
 fn raw(t: &str) -> serde_json::Value {
     serde_json::Value::String(format!("@@{t}@@"))
@@ -359,6 +390,24 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
     // what the engine declares for both and the hazard is entirely in the
     // content: a PCRE `$pattern` carries the inline limit verbs one build JITs
     // past and the other honours — the divergence that refused `preg_split`.
+    if arm == "string" && param_name == "format" {
+        // The conversion is the hazard, not the subject: `%b`/`%x`/`%o`/`%u`
+        // render the machine WORD, and `%d` re-imports `intval`'s saturation.
+        // `sprintf`'s recorded witness is a conversion and a value together, so
+        // no family keyed on the declared type alone could reach it.
+        return Some((
+            vec![
+                serde_json::json!("%s"),
+                serde_json::json!("%d"),
+                serde_json::json!("%x"),
+                serde_json::json!("%b"),
+                serde_json::json!("%o"),
+                serde_json::json!("%u"),
+                serde_json::json!("%f"),
+            ],
+            "the conversions that render the machine word",
+        ));
+    }
     if arm == "string" && param_name == "pattern" {
         return Some((
             vec![
@@ -437,6 +486,11 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
                 // them. Content is a hazard the declared type cannot suggest.
                 serde_json::json!("11111111111111111111111111111111"),
                 serde_json::json!("FFFFFFFF"),
+                // One past the narrow `PHP_INT_MAX`. Beside `"3000000000"` this
+                // gives a pair of runs that saturate to the SAME value on the
+                // narrow engine and differ on the wide one, which is
+                // `version_compare`'s recorded witness.
+                serde_json::json!("2147483648"),
             ],
             "byte work, multibyte subjects, numeric strings that must stay strings, and \
              32-bit-wide content the base-conversion family reads as a number",
@@ -506,9 +560,11 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
                 // the name as clean until the family carried it.
                 serde_json::json!("3000000000"),
                 serde_json::json!("11111111111111111111111111111111"),
+                // Two's complement: `-1` is all ones, as wide as the machine.
+                serde_json::json!(-1),
             ],
             "an undeclared parameter is every literal at once, the oversized numeric string \
-             included",
+             and the all-ones negative included",
         ),
         "null" => (vec![serde_json::Value::Null], "the null arm"),
         // An object, resource, enum or `iterable` arm cannot be filled by a
@@ -570,6 +626,41 @@ fn generate(name: &str) -> Result<Vec<Tuple>, String> {
                     args,
                     note: format!("{note} — {arity} arguments in the variadic tail"),
                 });
+            }
+        }
+    }
+    // **Pairwise, over the hazard values only.** One-at-a-time cannot reach a
+    // divergence that needs two arguments at once, and the allowlist has two:
+    // `version_compare("2147483647", "2147483648")` (both runs saturate to the
+    // same narrow value and differ on the wide one — neither argument alone
+    // shows anything) and `sprintf("%x", -1)` (the conversion and the value are
+    // one hazard). The full product is thousands of round trips; the product
+    // over each position's HAZARD values, two per position, is a few dozen.
+    //
+    // The cap is stated rather than silent: a third hazard value at a position
+    // is not paired, and a name whose divergence needs three arguments at once
+    // is still out of reach.
+    const HAZARDS_PER_POSITION: usize = 2;
+    let hazardous: Vec<Vec<serde_json::Value>> = families
+        .iter()
+        .map(|(values, _)| {
+            values.iter().filter(|v| is_hazard(v)).take(HAZARDS_PER_POSITION).cloned().collect()
+        })
+        .collect();
+    for i in 0..families.len() {
+        for j in (i + 1)..families.len() {
+            for a in &hazardous[i] {
+                for b in &hazardous[j] {
+                    let end = (j + 1).max(facts.params_required.min(base.len()));
+                    let mut args = base[..end].to_vec();
+                    args[i] = a.clone();
+                    args[j] = b.clone();
+                    out.push(Tuple {
+                        name: name.to_owned(),
+                        args,
+                        note: format!("two hazards at once, positions {i} and {j}"),
+                    });
+                }
             }
         }
     }
