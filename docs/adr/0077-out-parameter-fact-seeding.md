@@ -184,3 +184,52 @@ whose floor is `-1` exactly where an unmatched entry can be written. Any
 unknown bit, any unproven value — including a `|` expression the lowering does
 not fold — and the measured-`ValueError` combination of both order bits all
 decline the entire seed, silently.
+
+## Amendment (2026-08-16, issue #382): the engine countersigns the by-ref rows
+
+`out_params` was transcribed from php-src's stubs by hand, and until now nothing
+could contradict it. Worse, the check that was attempted **could not fail**:
+`by_value_arg` falls back to `out_params`, so a name with no row answers "by
+value" at every position, and a loop keyed on it skips precisely the omission it
+is looking for. That is the vacuity the fold seam's by-ref precondition rested
+on — the seam passes arguments by value, and a callee's by-ref write is lost
+unless this table invalidates the argument independently.
+
+The fix is a second source that can disagree: `param_facts.toml`, mined by
+`cargo xtask mine-param-facts` from the **resident engine's own arginfo**
+through `ReflectionFunction`. Not the stubs a second time — a second
+transcription of the same stubs agrees with the first wherever the first is
+wrong. Arginfo is what PHP dispatches on.
+
+### What the countersign found
+
+| | |
+| --- | --- |
+| rows in `out_params` | 30, and **every one agrees with arginfo exactly** — no wrong position, no missing position |
+| internal functions with a by-ref parameter | 128 on the mining build |
+| of those, carrying no `out_params` row | 98, deliberately: §3's restriction to fixed positional refs the analysis needs, and silence beats a wrong colour |
+| foldable names with a by-ref parameter | **one**, `str_replace` (position 3, `$count`) — the case this ADR has carried since the first fold round |
+
+The 98 are why "complete" is scoped rather than absolute. Requiring a row for
+every by-ref parameter in the standard library would mean 98 new claims about
+names nothing asks about; requiring it **where the fold seam relies on it** is
+the property that was actually missing, and it is now enforced:
+
+* `every_foldable_names_by_ref_positions_are_declared` — a foldable name's
+  by-ref positions must be exactly its `out_params` row. A fold whose by-ref
+  write goes uninvalidated now fails the build.
+* `no_out_param_row_claims_a_position_the_engine_denies` — the other direction,
+  over every mined name: a row must not invalidate a variable PHP never writes.
+* `every_foldable_name_was_mined` — the anti-vacuity guard. A foldable name
+  absent from the mined table fails rather than passing quietly, so the two
+  tests above cannot be silently emptied by forgetting to regenerate.
+
+### What it deliberately does not settle
+
+The mined table is scoped to the build that produced it — `[meta] extensions`
+records which — so a name from an extension that build lacked is absent rather
+than clean. And a `callable` column entry means the parameter's **declared type**
+admits one: sound, not complete. `array_udiff` takes its comparator at a
+variadic `mixed` tail and `preg_replace_callback_array` takes its callables as
+array *values*; neither is declared, and both are caught here only because they
+carry another hazard. The seam-side shape gate is the other half of issue #382.
