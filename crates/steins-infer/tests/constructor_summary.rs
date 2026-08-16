@@ -167,18 +167,19 @@ fn the_private_shape_guard_never_reads_a_default_as_proven() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_delegating_constructor_yields_nothing_and_never_the_stale_default() {
-    // PINNED, with the reason: `$this->init()` is a call that runs with the SAME
-    // `$this`, and a descent into it seeds its own `$this` copy (ADR-0086 §3), so its
-    // write lands in *its* store and is invisible here. The walk therefore sweeps its
-    // own `$this` at that call (C5) and the slot ends unknown. It is emphatically NOT
-    // the declared default — that would be the wrong `Verified` fact #377 closed.
+fn a_delegating_constructor_yields_the_delegates_own_write() {
+    // MOVED 2026-08-17 (issue #420), deliberately: this pin used to read `unknown`,
+    // because a same-`$this` call swept. It descends and copies back now (ADR-0057's
+    // same-`$this` amendment, D1/D4) — `init`'s `$this` is a copy of the walk's own,
+    // unescaped inside a constructor walk, so its write is the object's. Still
+    // emphatically not the declared default: the value is the delegate's `2`, and a
+    // delegate that wrote nothing would leave the slot swept, not defaulted.
     let src = "<?php\ndeclare(strict_types=1);\n\
         class Del { public $value = 0;\n\
         \x20 public function __construct() { $this->init(); }\n\
         \x20 private function init(): void { $this->value = 2; } }\n\
         $d = new Del();\n\\PHPStan\\dumpType($d->value);\n";
-    assert_eq!(dumped(src), "dumped type: unknown");
+    assert_eq!(dumped(src), "dumped type: 2");
 
     // Write AFTER the delegation and the write stands: the sweep is a statement
     // effect, not a verdict on the whole body.
@@ -191,29 +192,31 @@ fn a_delegating_constructor_yields_nothing_and_never_the_stale_default() {
 }
 
 #[test]
-fn a_constructor_that_delegates_by_the_class_own_name_yields_nothing() {
-    // PINNED (issue #417): `Foo::init()` in `Foo`'s own constructor is `self::init()`
-    // under another spelling — the same walk, the same sweep (C5, generalized to a
-    // by-name static call whose class resolves to the enclosing class-like).
+fn a_constructor_that_delegates_by_the_class_own_name_descends() {
+    // MOVED with the test above (#420): `Foo::init()` in `Foo`'s own constructor is
+    // `self::init()` under another spelling (issue #417), so it takes the same road —
+    // the same seed, the same copy-back — and not merely the same sweep.
     let src = "<?php\ndeclare(strict_types=1);\n\
         class Del3 { public $value = 0;\n\
         \x20 public function __construct() { Del3::init(); }\n\
         \x20 private function init(): void { $this->value = 2; } }\n\
         $d = new Del3();\n\\PHPStan\\dumpType($d->value);\n";
-    assert_eq!(dumped(src), "dumped type: unknown");
+    assert_eq!(dumped(src), "dumped type: 2");
 }
 
 #[test]
-fn a_constructor_that_delegates_to_an_ancestor_by_name_yields_nothing() {
+fn a_constructor_that_delegates_to_an_ancestor_by_name_descends() {
     // The named class need only be an ancestor of the class whose constructor is
     // running — `DBase::init()` written inside `DChild`'s own constructor still runs
-    // with `DChild`'s `$this` (PHP forwards it: `$this` is-a `DBase`).
+    // with `DChild`'s `$this` (PHP forwards it: `$this` is-a `DBase`) — and the seed
+    // is that `$this`, class `DChild`, so `DBase::init`'s write lands on the child's
+    // own slot (#420).
     let src = "<?php\ndeclare(strict_types=1);\n\
         class DBase { public $value = 0; public function init(): void { $this->value = 2; } }\n\
         class DChild extends DBase {\n\
         \x20 public function __construct() { DBase::init(); } }\n\
         $d = new DChild();\n\\PHPStan\\dumpType($d->value);\n";
-    assert_eq!(dumped(src), "dumped type: unknown");
+    assert_eq!(dumped(src), "dumped type: 2");
 }
 
 #[test]
@@ -320,18 +323,17 @@ fn an_inherited_constructor_writes_the_childs_object() {
 }
 
 #[test]
-fn a_parent_construct_chain_sweeps_rather_than_descends() {
-    // PINNED, with the reason: `parent::__construct()` runs with the SAME `$this`
-    // under another spelling, and the nested descent seeds its own `$this` copy — so
-    // the parent's writes are invisible here and the call sweeps (C5). The depth
-    // behaviour is therefore "one level, then the sweep": what the CHILD writes after
-    // the chain call stands, what the PARENT writes does not.
+fn a_parent_construct_chain_descends_and_copies_back() {
+    // MOVED 2026-08-17 (#420): `parent::__construct()` runs with the SAME `$this`
+    // under another spelling, so it descends and copies back like every other
+    // same-`$this` call. The parent's write is the child object's, and the child's own
+    // write after the chain call still stands.
     let src = "<?php\ndeclare(strict_types=1);\n\
         class PBase { public $x = 0; public function __construct(int $v) { $this->x = $v; } }\n\
         class PChild extends PBase { public $own;\n\
         \x20 public function __construct(int $v) { parent::__construct($v); $this->own = 5; } }\n\
         $c = new PChild(4);\n\\PHPStan\\dumpType($c->x);\n\\PHPStan\\dumpType($c->own);\n";
-    assert_eq!(dumps(src), vec!["dumped type: unknown", "dumped type: 5"]);
+    assert_eq!(dumps(src), vec!["dumped type: 4", "dumped type: 5"]);
 }
 
 // ---------------------------------------------------------------------------
