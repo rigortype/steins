@@ -221,12 +221,22 @@ fn report(probed: &[Probed], regression: bool) -> Result<(), String> {
     }
     {
         // The other half of the truth, and the reason this is a report rather
-        // than a pass/fail: a REFUSED row claims a divergence, and generation is
-        // ONE-AT-A-TIME, so a hazard needing two arguments at once is not
-        // generated. `version_compare("2147483647", "2147483648")` is exactly
-        // that shape — both arguments oversized, neither alone enough — and it
-        // shows here as clean while its recorded witness stands. Saying so is
-        // the difference between a limitation and a false clean.
+        // than a pass/fail: a REFUSED row claims a divergence, and a generated
+        // sweep does not always reach it. Two causes are on record and they are
+        // different, so the line below states the FACT and offers them rather
+        // than asserting one:
+        //
+        // * **structural** — generation is one-at-a-time, so a hazard needing
+        //   two arguments at once is never built.
+        //   `version_compare("2147483647", "2147483648")` is exactly that shape:
+        //   both runs saturate a C `long`, and neither argument alone shows
+        //   anything. `sprintf("%x", -1)` is the same, format and value
+        //   together.
+        // * **convention** — a row whose divergence rides a weak-mode coercion
+        //   has nothing to diverge about under `--strict`. `abs("3000000000")`
+        //   reproduces in the weak sweep and is a `TypeError` on both engines in
+        //   the strict one, so it appears here only in that half. That is the
+        //   verdict being correct, not the sweep being blind.
         let mut unreproduced: Vec<&str> = by_name
             .iter()
             .filter(|(name, a)| steins_catalog::refusal(name).is_some() && a[1] + a[2] == 0)
@@ -235,9 +245,10 @@ fn report(probed: &[Probed], regression: bool) -> Result<(), String> {
         unreproduced.sort_unstable();
         if !unreproduced.is_empty() {
             println!(
-                "fold-probe: {} refused row(s) whose divergence the generated families do NOT \
-                 reproduce — one-at-a-time generation cannot reach a hazard that needs two \
-                 arguments at once, so these keep the hand-written witness ADR-0066 records: {}",
+                "fold-probe: {} refused row(s) whose divergence this sweep did NOT reproduce, \
+                 so they keep the hand-written witness ADR-0066 records — either the hazard \
+                 needs two arguments at once (which one-at-a-time generation never builds) or \
+                 it rides a coercion this calling convention removes: {}",
                 unreproduced.len(),
                 unreproduced.join(", ")
             );
@@ -418,8 +429,17 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
                 // A numeric string stays a string — unless something retypes it.
                 serde_json::json!("3000000000"),
                 serde_json::json!("0"),
+                // A string whose CONTENT is a machine word. The base-conversion
+                // family reads these as numbers, and 32 bits of them is exactly
+                // where the narrow engine's int stops: `bindec`'s and
+                // `hexdec`'s recorded witnesses are these two strings, and the
+                // sweep could not reproduce either until the family carried
+                // them. Content is a hazard the declared type cannot suggest.
+                serde_json::json!("11111111111111111111111111111111"),
+                serde_json::json!("FFFFFFFF"),
             ],
-            "byte work, multibyte subjects, and numeric strings that must stay strings",
+            "byte work, multibyte subjects, numeric strings that must stay strings, and \
+             32-bit-wide content the base-conversion family reads as a number",
         ),
         "bool" => (vec![serde_json::json!(true), serde_json::json!(false)], "both arms"),
         "array" => (
@@ -480,8 +500,15 @@ fn arm_family(arm: &str, param_name: &str) -> Option<(Vec<serde_json::Value>, &'
                 serde_json::json!(true),
                 serde_json::Value::Null,
                 list(vec![serde_json::json!(1)]),
+                // …including the oversized numeric string, which is where an
+                // undeclared parameter meets the machine word. `intval`'s
+                // recorded witness is exactly this argument, and the sweep read
+                // the name as clean until the family carried it.
+                serde_json::json!("3000000000"),
+                serde_json::json!("11111111111111111111111111111111"),
             ],
-            "an undeclared parameter is every literal at once",
+            "an undeclared parameter is every literal at once, the oversized numeric string \
+             included",
         ),
         "null" => (vec![serde_json::Value::Null], "the null arm"),
         // An object, resource, enum or `iterable` arm cannot be filled by a
