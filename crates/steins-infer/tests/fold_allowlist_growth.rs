@@ -789,3 +789,52 @@ fn an_oversized_allocation_declines_and_the_engine_survives() {
     // dispatch rather than surviving a fatal afterwards.
     assert_eq!(d[5], "'STILL ALIVE'");
 }
+
+/// **The allocation budget is charged through PHP's numeric grammar, not
+/// Rust's** (review finding, 2026-08-17).
+///
+/// PHP is weakly typed and Rust is not. `"2e9"`, `" 2000000000"` and
+/// `"2000000000.0"` are all two billion to the engine, and all unreadable to
+/// `parse::<i64>()` — which the first cut of the guard used, allowing whatever
+/// it could not read. `str_repeat("x", "2e9")` therefore walked past the budget
+/// and killed the child: the exact bomb the guard exists to refuse, dressed
+/// differently. The tests that shipped with it used an integer literal, so they
+/// never saw it.
+///
+/// Both conventions are asserted because they decline for different reasons: in
+/// a weak file PHP coerces the string and the guard refuses it, and in a strict
+/// one the argument is a `TypeError` before any of that. A rule that only held
+/// in one mode would be a rule with a spelling that gets past it.
+#[test]
+fn a_numeric_string_cannot_smuggle_an_allocation_past_the_budget() {
+    let Some(mut folder) = live("a_numeric_string_cannot_smuggle_an_allocation_past_the_budget")
+    else {
+        return;
+    };
+    const BODY: &str = "function f(): void {\n\
+         \\PHPStan\\dumpType(str_repeat(\"x\", \"2e9\"));\n\
+         \\PHPStan\\dumpType(str_repeat(\"x\", \" 2000000000\"));\n\
+         \\PHPStan\\dumpType(str_repeat(\"x\", \"2000000000.0\"));\n\
+         \\PHPStan\\dumpType(str_pad(\"a\", \"2e9\"));\n\
+         \\PHPStan\\dumpType(array_fill(0, \"2e9\", \"x\"));\n\
+         \\PHPStan\\dumpType(str_repeat(\"ab\", \"3\"));\n\
+         }\n";
+    for (mode, src) in [
+        ("weak", format!("<?php\ndeclare(strict_types=0);\n{BODY}")),
+        ("strict", format!("<?php\ndeclare(strict_types=1);\n{BODY}")),
+    ] {
+        let d = dumps(&src, &mut folder);
+        for (i, got) in d.iter().take(5).enumerate() {
+            assert!(
+                !got.starts_with('\'') && !got.starts_with("list{") && !got.starts_with("array{"),
+                "{mode}: dump {i} folded a two-billion allocation spelled as a string: {got}"
+            );
+        }
+        // The honest numeric string is untouched in the weak convention, and is
+        // a TypeError in the strict one — the guard must not be what decides
+        // that, so only the weak half is asserted as a value.
+        if mode == "weak" {
+            assert_eq!(d[5], "'ababab'", "a small numeric string still folds");
+        }
+    }
+}
