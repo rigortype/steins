@@ -844,6 +844,12 @@ until the boundary is entered.
 
 ### C5. What the walk must still sweep, and the older hole it closes
 
+*Superseded in its first bullet 2026-08-17 (issue #420), which is why that
+bullet now reads as the floor rather than as the rule: a same-`$this` call
+**descends and copies `$this` back** where the descent runs, and sweeps
+where it declines. The 2026-08-17 amendment below is that successor; the
+enumeration here stands verbatim as its decline list (D5).*
+
 `escaped = false` says no name outside the walk holds the allocation. It
 does not say the walk executes every write through the names *inside* it,
 and two routes write `$this` without this walk running the write:
@@ -1040,3 +1046,264 @@ and the join is the walk's own.
 - **A receiver-position `new`** — the value-IR limit of issue #374, not a
   heap-transfer gap (C7). *No longer a refusal (#386): the limit lifted and
   the leg followed it.*
+
+## Amendment (2026-08-17): a same-`$this` call descends and copies `$this` back — C5's precise successor
+
+**Status: PENDING ratification.** Issue #420, the successor to #385 and
+#417. C5 above made every call that runs with the same `$this` a **sweep**
+— the receiver's own non-readonly properties and value carries dropped,
+resolved or not — and that is why a delegating constructor
+(`__construct() { $this->init(); }`), a `parent::__construct()` chain and
+a fluent `$this->setX()` all yield *unknown* where the body's writes are
+right there. This amendment replaces the sweep with the two mechanisms
+already in the tree, composed: **seed the callee's `$this` from a copy of
+the caller's, and copy the joined exit snapshot back**. The sweep does not
+go away; it becomes the **decline floor** (D5), which is where it was
+always right.
+
+Nothing here is new machinery. C1's seed, C2's exit snapshot, C3's join
+and C4's copy-back are the constructor's, and this amendment says only
+that a constructor is not the only walk entitled to them.
+
+### D1. The seed: the caller's own `$this`, with `escaped` crossing verbatim
+
+A call the walk makes with the same `$this` — `$this->m(…)`, `self::m(…)`,
+`parent::m(…)`, `static::m(…)`, and the by-name `Foo::m(…)` of #417 — hands
+the callee a copy of the object `refs["this"]` names, built by
+`copy_for_descent` under ADR-0086 §2's field table, with **one field
+decided as C1 decides it**: `escaped` crosses **verbatim** rather than
+being forced to `true`.
+
+The reason reads off the call, and it is C1's reason under a different
+allocation. Every ADR-0086 copy is pre-escaped because the caller's object
+is marked escaped *by the very call that hands it over* — a receiver or an
+argument leaves the caller's exclusive reach. **A same-`$this` call hands
+nothing over.** The callee's `$this` is the caller's `$this`: the same
+runtime object under the same name, and no new alias comes into existence
+because the frame changed. So the bit says what it said one instant
+earlier, and the field table's own prop rule then does the rest:
+
+* inside a **constructor-summary walk** the object is unescaped (C1), so
+  its non-readonly props cross and the delegate sees them;
+* inside an **ordinary method** walk `$this` is pre-escaped by
+  construction (`seed_this_object`, ADR-0036), so only readonly props and
+  the carries cross — exactly what ADR-0086 §3 already said about a
+  `$this`-origin receiver, and the reason that section could say "nothing
+  changes for it".
+
+Exactness is **copied, never promoted** (A1), and it is copied
+independently of `body_this_exact`. The two are different questions: the
+copy's `class_exact` is a fact about the caller's allocation, while
+`body_this_exact` is whatever the *target resolution* proved — `None` for
+`parent::`, `self::` and the by-name spelling, which resolve through
+`resolve_static_named`/`resolve_guarded` without an exact receiver. The
+callee therefore walks under the weaker `$this` dispatch its own
+resolution named while holding the stronger object the caller proved.
+Weaker dispatch over a stronger object is the sound pairing; the converse
+would not be.
+
+A same-`$this` call whose resolved target is **static** carries no `$this`
+at all (#417's other half) and seeds nothing — the callee has no `$this`
+to seed.
+
+### D2. The receiver leg travels with it: `$o->m()` copies back too
+
+The fluent setter `$o->setX(1); $o->getX();` is not a same-`$this` call —
+it is a receiver call on `$o` — and it is in this amendment because the
+mechanism is the same one. ADR-0086 §3 already seeds such a descent's
+`$this` from a **copy of `$o`**; all that was missing was reading the
+result. So the copy-back is applied **uniformly**, to every descent whose
+`$this` was seeded from a caller object that a caller *name* still
+denotes: an exact `Receiver::Var` (`$o`) and the walk's own `$this`.
+
+The two seeds that name no caller variable get no copy-back, and neither
+is a gap: a **constructor**'s snapshot is the object the `new` site yields
+(C4, unchanged, the same channel under a new name), and a
+**receiver-position `new`** (`(new C(1))->m()`) mints an object no name
+survives to observe.
+
+This **replaces** the #295/#377 caller-side sweep of `$o` for exactly the
+calls that came back with a snapshot, and it is not the weakening ADR-0086
+§2 refuses. That refusal is about *keeping the caller's own fact* on the
+strength of a descent that saw no write — a non-mutation proof, whose
+precondition is ADR-0055 Part II. This is the opposite move: the caller's
+fact is discarded and the **callee's proven exit state** put in its place.
+No non-mutation judgment is made or needed.
+
+### D3. The `$this` snapshot is its own component
+
+C2 made a constructor's exits snapshot `$this` *instead of* a returned
+value, which was right because a constructor has no returned value. An
+ordinary method has one, and this amendment must not cost it: **the return
+value keeps riding the existing summary rungs, unchanged**. So the
+snapshot moves to a component of its own — `ReturnSummary::this` beside
+`value` and `heap` — filled at every exit of any walk whose `$this` was
+seeded from a caller object, and joined by `join_heap_exits` verbatim
+(C3's join, B3's table).
+
+Which exits contribute is C2 verbatim, and the two silent ones matter as
+much here as there: an `Opaque` construct that `may_return` hides an exit
+this walk cannot see, and an exit at which `$this` is no longer in the
+store (a `Barrier` cleared it — `$this->$k = …`, `$this->a->b = …`) both
+contribute the value floor, which kills the component and lands the call
+on D5's floor. A `throw` contributes nothing, and a method every path of
+which throws therefore yields no snapshot — which is right, since the
+caller's statement is not reached on those paths either.
+
+The constructor's own snapshot moves to this component with everything
+else. C4 is unchanged in content: `new` reads `summary.this` where it read
+`summary.heap`, and a constructor's value component — which cannot be read,
+an object being no value — is simply computed and ignored rather than
+suppressed by a walk flavour. One classifier, one channel, no flavour.
+
+### D4. Copy-back, per field, and the aliasing argument
+
+At the call site, where a snapshot came back, the caller's object takes
+it: `props`, `readonly`, `ro_written`, `escaped` and `targs` are
+**replaced** from the snapshot; `class` and `class_exact` are asserted
+unchanged, no walk altering what class an allocation is. That is C4's
+field list, unchanged.
+
+The copy-back runs **after** the statement's escape-and-sweep pass, not
+instead of it, and the ordering is the whole of the "skip the sweep"
+instruction: the sweep clears the props, the copy-back writes the walk's
+truth over the result. Two guards keep that composition honest, both
+statement-scoped:
+
+* **an unresolved call anywhere in the statement declines every
+  copy-back in it.** `echo $this->setA(1), unknownThing();` cannot order
+  the two effects, and the unknown call may reach `$this` through a
+  closure alias (C5's second bullet). The floor stands for the whole
+  statement.
+* **two snapshots for one target decline each other.** `echo
+  $this->setA(1), $this->setB(2);` seeds both descents from the *same*
+  pre-statement `$this`, so the second snapshot does not contain the
+  first's write and installing it would erase a write that really
+  happened. Where a statement carries two calls writing back to one name,
+  neither is applied.
+
+**The aliasing argument.** C4's is "the fresh allocation had no alias
+before the constructor ran". That sentence does not hold here — `$this`
+and `$o` may well be aliased — and it does not have to, because what
+crosses is already gated on exactly that question. An **escaped** object
+hands over **no non-readonly props** (ADR-0086 §2's aliasing rule), so the
+snapshot's non-readonly props are only the ones the callee itself wrote
+through its own `$this`, plus what was immune by language guarantee.
+Nothing an alias could have written comes back, because nothing an alias
+could have written went in. An **unescaped** object has no alias at all —
+that is what the bit means — so C4's sentence applies to it verbatim.
+
+The remaining route is a write the callee performs through an alias it
+holds itself, and the callee's own walk already answers it, which is why
+this amendment adds no clause for it: a depth-2 property write is a
+`Barrier` that clears the store (so the exit contributes the floor), an
+unresolved or overridable call inside the callee sweeps every escaped
+object including its own `$this`, and a nested same-`$this` call is this
+same mechanism one frame down. What the walk holds at the exit is what the
+walk is entitled to hold; the snapshot claims nothing more.
+
+### D5. The decline floor: the sweep, verbatim
+
+Where no snapshot comes back the C5 sweep runs exactly as it does today,
+and it runs for every one of these:
+
+* an **unresolvable** target — a `static::` call (late static binding
+  resolves to nothing), a dynamic or property-fetch receiver, a missing or
+  abstract method, a chain leaving the project;
+* a **guarded-refused** target — a non-exact `$this` calling a method that
+  is neither `final` nor `private` nor declared in a `final` class
+  (`resolve_guarded`), which is the standing degrade every layer trusts;
+* a **poisoned** scope on either side;
+* a **named or spread** argument list (the descent is positional-only, §3);
+* the **budget** (`> MAX_BINDING_DEPTH`) and a **recursion pair** (the key
+  already on the descent stack);
+* a **generator** callee — the body does not run at the call at all
+  (`join_summary`'s standing refusal, §5);
+* a **static** resolved target, which carries no `$this` (#417);
+* every exit shape D3 lists as killing the component; and
+* the two statement-scoped guards of D4.
+
+Because the sweep is the floor rather than the alternative, every decline
+is *silence about the props*, never a stale value — the same direction C6
+takes for a `new`.
+
+### D6. One walk per call, one memo entry, one emission
+
+The descent is the descent that already ran: `handle_method_call` resolves
+the target through `resolve_call_target` and walks the body for its
+diagnostics exactly as before, and this amendment reads what came back.
+The memo key carries the seeded object's canonical rendering in its
+`this:` component (C8's rule, ADR-0086 §3's spelling), so two different
+`$this` states reach one body under two keys and neither replays the
+other's snapshot nor suppresses the other's emission; two calls in one
+state share one walk and report once.
+
+**Value position stays on the floor, deliberately.** `f($this->m())` and
+`dumpType($this->m())` reach the same descent through
+`project_method_summary` (#386) — the same resolver, the same key, the same
+one walk — and their `this` component is dropped. The reason is the seam,
+not the mechanism: that road holds the caller's store by shared reference
+and has no channel back to the statement walk that owns it, the same
+structural limit ADR-0057 B5 records for the heap component in value
+position. The call still sweeps, so a value-position same-`$this` call is
+silent about props rather than stale. When that seam grows a write-back
+channel this leg follows it with no design left to do.
+
+### D7. ADR-0048 obligations
+
+**§2 (replayable).** The snapshot is a pure function of (the callee's CST,
+the entry state the `BindingKey` names, query answers) — §1's argument
+verbatim, and the same one C9 makes for the constructor. The seed is a
+pure function of the caller's walk state at the call. No `AllocId` enters
+the seed, the key or the snapshot; the copy-back writes into an allocation
+the caller's own walk already minted.
+
+**§3 (entry-state contribution) — nothing new.** The callee's `$this` is
+**the caller's object by copy**, which is the clause ADR-0086 §3 already
+wrote for the receiver leg and C9 restated for the constructor. This
+amendment widens *which* calls take that clause; it introduces no
+contributor of a kind §3 does not already name. At every other entry
+`$this` seeds from `seed_this_object` as it did.
+
+**§4 (no global ordering).** The seed depends on the caller's statement
+order and on nothing across scopes; the join is B3's intersections and
+`min`s, commutative and associative; the copy-back is applied at one point
+in one statement's walk.
+
+### D8. What this does to the proof layer
+
+A property written by a delegated call is a **new premise**, and the
+finding-adding shape is four lines of PHP:
+
+```php
+class B { private string $value;
+  public function __construct(int $v) { $this->init($v); }
+  private function init(int $v): void { $this->value = $v; } }
+$b = new B(1);
+needString($b->value);   // type.argument-mismatch, from the delegate's own write
+```
+
+Everything §6's soundness legs demand is demanded here and satisfied by
+the same code: strata cross with their facts, exactness is copied and
+never promoted, hooked properties never enter the heap, readonly
+bookkeeping crosses and stays sweep-immune, and the join is the walk's
+own. The #385 private-shape guard is unmoved — a constructor computing
+`$this->view` from an unknown argument still yields *unknown*, because
+what crosses is the walk's knowledge and the walk knows nothing there.
+
+### Same-`$this` refusals (each one line, each anchored)
+
+- **Forcing the same-`$this` copy pre-escaped** — the call hands nothing
+  over, so the bit crosses verbatim (D1).
+- **Promoting the copy's exactness to match `body_this_exact`, or demoting
+  it to match** — two different questions; weaker dispatch over a stronger
+  object is the sound pairing (D1).
+- **Keeping the caller's own props on a descent that saw no write** — that
+  is the non-mutation proof ADR-0086 §2 refuses; this replaces the fact
+  instead (D2).
+- **Snapshotting `$this` on the return-value channel** — the return value
+  keeps its rungs; the snapshot is its own component (D3).
+- **Applying a copy-back beside an unresolved call, or two for one name**
+  — neither composition can be ordered (D4).
+- **A copy-back in value position** — the seam holds no write channel,
+  ADR-0057 B5's limit one layer down (D6).
