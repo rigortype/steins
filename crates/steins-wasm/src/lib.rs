@@ -531,6 +531,14 @@ mod replay {
     const FOLD_KEY: &str =
         r#"{"method":"fold","params":{"function":"str_repeat","args":["Hello, World! ",2],"strict":false}}"#;
     const REFLECT_KEY: &str = r#"{"method":"reflect","params":{"target":"greet"}}"#;
+    /// The builtin the flagship's body calls: asked about since ADR-0056 §9, whose
+    /// argument judgment needs the reflected parameter list of every builtin call
+    /// it reaches — one question per name per run, memoized.
+    const REFLECT_STR_REPEAT_KEY: &str =
+        r#"{"method":"reflect","params":{"target":"str_repeat"}}"#;
+    /// `\PHPStan\dumpType` is written as a call, so it is asked about like any
+    /// other name — and answered, honestly, with a structured not-found.
+    const REFLECT_DUMPTYPE_KEY: &str = r#"{"method":"reflect","params":{"target":"dumptype"}}"#;
 
     fn answered_table() -> HashMap<String, serde_json::Value> {
         HashMap::from([
@@ -556,6 +564,36 @@ mod replay {
                 serde_json::json!({
                     "kind": "reflection",
                     "target": "greet",
+                    "exists": false,
+                    "function": false,
+                    "class_like": false,
+                    "return_type": serde_json::Value::Null,
+                    "return_type_tentative": false,
+                }),
+            ),
+            (
+                REFLECT_STR_REPEAT_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "reflection",
+                    "target": "str_repeat",
+                    "exists": true,
+                    "function": true,
+                    "class_like": false,
+                    "return_type": "string",
+                    "return_type_tentative": false,
+                    "params_total": 2,
+                    "params_required": 2,
+                    "params": [
+                        { "name": "string", "type": "string", "by_ref": false, "variadic": false, "optional": false },
+                        { "name": "times", "type": "int", "by_ref": false, "variadic": false, "optional": false },
+                    ],
+                }),
+            ),
+            (
+                REFLECT_DUMPTYPE_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "reflection",
+                    "target": "dumptype",
                     "exists": false,
                     "function": false,
                     "class_like": false,
@@ -680,6 +718,20 @@ mod replay {
                     "function": true,
                     "class_like": false,
                     "return_type": "int",
+                    "return_type_tentative": false,
+                }),
+            ),
+            // The dump call is a name too (ADR-0056 §9): asked about like any
+            // other, answered with a structured not-found.
+            (
+                REFLECT_DUMPTYPE_KEY.to_owned(),
+                serde_json::json!({
+                    "kind": "reflection",
+                    "target": "dumptype",
+                    "exists": false,
+                    "function": false,
+                    "class_like": false,
+                    "return_type": serde_json::Value::Null,
                     "return_type_tentative": false,
                 }),
             ),
