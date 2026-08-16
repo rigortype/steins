@@ -380,7 +380,10 @@ What the table can and cannot see:
 - `callable` means the parameter's **declared type** admits a callable. Sound,
   not complete: `array_udiff` takes its comparator at a variadic `mixed` tail
   and `preg_replace_callback_array` takes its callables as array *values*.
-  Neither is declared; both are caught only because they carry another hazard.
+  Neither is declared. The first is covered anyway — the fold seam refuses an
+  argument reaching an untyped variadic tail unless `variadic_tail_is_data`
+  argues that tail carries values — and the second is caught only because it
+  carries another hazard.
 - The universe is **the mining build's**. `[meta] extensions` records which
   build answered; a name from an extension it lacked is absent, not clean.
 

@@ -2250,15 +2250,27 @@ fn fold_admitted_at_width(int_size: Option<u32>, name: &str, args: &[FoldArg]) -
 /// this costs nothing today and means a future admission that skips the mining
 /// step declines rather than folding past a gate that cannot see it.
 ///
-/// # What this gate does not cover, and what does
+/// # The tail nothing declares
 ///
-/// A callable can arrive somewhere the engine does not DECLARE one: the
-/// `array_udiff` family takes its comparator at a variadic `mixed` tail, and
-/// `preg_replace_callback_array` takes its callables as array values. Neither is
-/// visible here, and neither is on the allowlist — the catalog's
-/// `a_variadic_mixed_tail_on_a_foldable_name_is_argued_for` is the tripwire for
-/// the first shape and `out_params` excludes the second. Admitting such a name
-/// needs an argument, not just this gate.
+/// A callable can also arrive where the engine declares no type at all. The
+/// `array_udiff`/`array_uintersect` family takes its comparator at a variadic
+/// `mixed` tail: `param_facts`' `callable` column is blind to it because nothing
+/// declares it callable, and `invocation_shape` cannot name it because that
+/// table has one fixed index per row.
+///
+/// So the second half of this gate is about the **position**, not the type: an
+/// argument reaching an untyped variadic tail is refused unless the catalog
+/// argues that tail carries data ([`steins_catalog::variadic_tail_is_data`] —
+/// `sprintf` and its siblings, whose tail is rendered by the format string).
+/// Thirty-three builtins declare such a tail and four are argued, so admitting
+/// one of the other twenty-nine cannot quietly reopen the hole: the seam refuses
+/// the call that would execute the comparator whether or not anyone noticed.
+///
+/// # What this gate still does not cover
+///
+/// `preg_replace_callback_array` takes its callables as array **values**, which
+/// neither table sees and no position rule reaches. It is excluded by its by-ref
+/// position instead, and admitting it needs an argument rather than this gate.
 fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
     let Some(facts) = steins_catalog::param_facts(name) else {
         return false;
