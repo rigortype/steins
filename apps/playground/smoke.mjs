@@ -133,6 +133,33 @@ const ANSWERS = {
     return_type: null,
     return_type_tentative: false,
   },
+  // Since ADR-0056 §9 every builtin call site asks for the reflected parameter
+  // list — one question per name per run, memoized — so the flagship's body call
+  // and the dump call are both names the loop now asks about.
+  '{"method":"reflect","params":{"target":"str_repeat"}}': {
+    kind: "reflection",
+    target: "str_repeat",
+    exists: true,
+    function: true,
+    class_like: false,
+    return_type: "string",
+    return_type_tentative: false,
+    params_total: 2,
+    params_required: 2,
+    params: [
+      { name: "string", type: "string", by_ref: false, variadic: false, optional: false },
+      { name: "times", type: "int", by_ref: false, variadic: false, optional: false },
+    ],
+  },
+  '{"method":"reflect","params":{"target":"dumptype"}}': {
+    kind: "reflection",
+    target: "dumptype",
+    exists: false,
+    function: false,
+    class_like: false,
+    return_type: null,
+    return_type_tentative: false,
+  },
 };
 
 const empty = steins.checkReplay(flagship, {});
