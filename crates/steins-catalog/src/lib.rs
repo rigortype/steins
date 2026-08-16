@@ -958,6 +958,38 @@ pub fn method_effect_labels(class: &str, method: &str) -> Option<&'static [&'sta
     }
 }
 
+/// Whether a foldable name's **untyped variadic tail carries data** rather than
+/// a callee (issue #382).
+///
+/// 33 builtins declare a `mixed ...$rest`, and the declared type says nothing
+/// about what goes in it. The `array_udiff`/`array_uintersect` family puts its
+/// **comparator** there — a callable the engine invokes, invisible to
+/// [`param_facts`]'s `callable` column because nothing declares it callable and
+/// invisible to [`invocation_shape`] because that table names one fixed index.
+/// It is the one callback shape neither table can express, and the fold seam
+/// refuses an argument in such a tail unless the name is listed here.
+///
+/// A row is an argument, not a note: it says the tail is values, and it has to
+/// be true for every call, since the seam consults the name and not the site.
+///
+/// The list is deliberately short. A name that merely *looks* safe does not
+/// belong — `array_multisort` takes sort flags AND arrays by reference in the
+/// same tail, `call_user_func` takes the callee's own arguments after a callee.
+/// Both are excluded by other rules already; neither needs to be argued here,
+/// and arguing one would be claiming something about a name the seam never
+/// reaches.
+#[must_use]
+pub fn variadic_tail_is_data(name: &str) -> bool {
+    match name.to_ascii_lowercase().as_str() {
+        // `sprintf`/`printf`'s tail is rendered BY the format string. Each value
+        // is cast and substituted; nothing in it is called. (`sprintf` is
+        // `REFUSED` for the machine word, not for this, so it folds on a 64-bit
+        // engine and the gate has to let it.)
+        "sprintf" | "printf" | "vsprintf" | "vprintf" => true,
+        _ => false,
+    }
+}
+
 /// The **by-ref out-parameter rows** (ADR-0063 §2.3): 0-based positional
 /// indices a builtin writes through a reference parameter.
 ///
@@ -2771,7 +2803,7 @@ mod tests {
     use super::{
         LabelIntent, WrittenWhen, by_value_arg, is_core_label, is_known_label, nearest_label,
         out_param_written_when, out_params, param_facts, param_facts_generated, param_facts_mined,
-        retired_label, subsumes,
+        retired_label, subsumes, variadic_tail_is_data,
     };
 
     #[test]
@@ -3092,19 +3124,16 @@ mod tests {
     }
 
     /// A foldable name with a **variadic tail the engine types `mixed`** is the
-    /// one shape neither table can rule on: `array_udiff` hides its comparator
-    /// exactly there, and no declared type gives it away. Such a name may fold
-    /// only if it is listed here with the argument for why it invokes nothing,
-    /// so admitting the next one costs a sentence rather than a silence.
+    /// one shape neither parameter table can rule on: `array_udiff` hides its
+    /// comparator exactly there, and no declared type gives it away.
+    ///
+    /// Such a name may fold only if [`variadic_tail_is_data`] argues the tail
+    /// carries values — the same predicate the seam's shape gate consults, so
+    /// the catalog and the seam cannot disagree about which names are argued.
+    /// (An earlier revision kept the list here, privately, which made two
+    /// sources of truth for one claim: the disease this whole slice is about.)
     #[test]
     fn a_variadic_mixed_tail_on_a_foldable_name_is_argued_for() {
-        /// Foldable names whose variadic tail is untyped, each with the reason
-        /// the tail is data and not a callee.
-        const ARGUED: &[(&str, &str)] = &[
-            // A format string decides what each value is CAST to; nothing in
-            // the tail is called. Refused for the machine word, not for this.
-            ("sprintf", "the tail is rendered by the format string, never invoked"),
-        ];
         for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
             let Some(facts) = param_facts(name) else { continue };
             let untyped_tail = facts
@@ -3115,10 +3144,18 @@ mod tests {
                 continue;
             }
             assert!(
-                ARGUED.iter().any(|(n, _)| n.eq_ignore_ascii_case(name)),
+                variadic_tail_is_data(name),
                 "{name} folds and takes an untyped variadic tail, which is where the \
                  `array_udiff` family hides its comparator. Say why this one is data."
             );
+        }
+        // Not vacuous in either direction: one foldable name has such a tail and
+        // is argued, and the family the rule exists for is neither argued nor
+        // foldable.
+        assert!(variadic_tail_is_data("sprintf") && foldable("sprintf"));
+        for name in ["array_udiff", "array_uintersect", "array_diff_ukey"] {
+            assert!(!variadic_tail_is_data(name), "{name} hides a comparator in its tail");
+            assert!(!foldable(name), "{name} is not on the allowlist");
         }
     }
 

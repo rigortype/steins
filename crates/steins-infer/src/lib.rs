@@ -2379,10 +2379,27 @@ fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
     let Some(facts) = steins_catalog::param_facts(name) else {
         return false;
     };
-    facts
+    let declared_callables_are_empty = facts
         .callable
         .iter()
-        .all(|&p| matches!(args.get(p), None | Some(FoldArg::Null)))
+        .all(|&p| matches!(args.get(p), None | Some(FoldArg::Null)));
+    if !declared_callables_are_empty {
+        return false;
+    }
+    // …and the tail nothing declares. 33 builtins take a `mixed ...$rest`, and
+    // the `array_udiff`/`array_uintersect` family puts its COMPARATOR there:
+    // a callable the engine invokes, which no declared type marks and which
+    // `invocation_shape`'s single fixed index cannot name. It is the one
+    // callback shape neither table can express, so the rule here is about the
+    // POSITION rather than the type — an argument reaching an untyped variadic
+    // tail is refused unless the catalog argues that tail carries data
+    // (`sprintf`'s is rendered by its format string).
+    facts.variadic.iter().all(|&p| {
+        let untyped = facts.params.get(p).is_some_and(|t| *t == "mixed");
+        !untyped
+            || args.len() <= p
+            || steins_catalog::variadic_tail_is_data(name)
+    })
 }
 
 /// Which fold lane an engine of this integer width gets — the width half of
