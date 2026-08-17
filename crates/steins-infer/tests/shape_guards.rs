@@ -532,6 +532,25 @@ fn a_flow_refined_fact_outspells_its_declared_arm() {
     );
 }
 
+#[test]
+fn a_narrowed_sibling_key_keeps_a_float_fields_spelling() {
+    // Issue #424: `steins_contract::to_fact`'s float/int floor leaves a
+    // `float` field's value-lane slot `None` from the seed (`float` accepts
+    // ints, `Fact::General { Float }` doesn't), so once ANY key of the same
+    // array gets narrowed the fact-lane spelling — the ONE speller a
+    // flow-refined shape uses — must still fall back to the declared arm for
+    // `b` rather than printing `mixed`. Both `isset` and its `!== null` twin
+    // (#418/#421) are pinned; the sibling's own presence/value are untouched.
+    assert_eq!(
+        guarded("array{a?: string, b: float}", "isset($v['a'])", "$v"),
+        "dumped type: array{a: string, b: float} (asserted)"
+    );
+    assert_eq!(
+        guarded("array{a?: string, b: float}", "$v['a'] !== null", "$v"),
+        "dumped type: array{a: string, b: float} (asserted)"
+    );
+}
+
 // ---- Invalidation (A-G8's table) -------------------------------------------
 
 #[test]

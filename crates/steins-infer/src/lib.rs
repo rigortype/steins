@@ -13107,7 +13107,29 @@ fn render_dump_fact(fact: &Fact) -> String {
 /// fact form. Every field/tail slot recurses through [`render_dump_fact`] (the
 /// domain's `Fact` is recursive, ADR-0062 §3). [`describe_fact`] inherits it for
 /// `phpdoc.*-mismatch` messages, so the diagnostic and dump surfaces agree.
+///
+/// No declared-arm fallback for a `None` field slot ([`render_shape_fact_flow`]
+/// is the variant that has one) — every caller here has no arm list in hand
+/// (a nested field, or a caller with none to offer).
 fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
+    render_shape_fact_flow(shape, nullable, &[])
+}
+
+/// [`render_shape_fact`] with a **declared-arm fallback** for a field whose
+/// value-lane slot is `None` (issue #424): `steins-contract::to_fact`'s
+/// float/int floor deliberately never lowers a `float`-typed field, so that
+/// field's slot is `None` from the seed — sound while the shape is freshly
+/// seeded (the caller spells straight from the arm lane then, S3), but once
+/// S4 flow-refines ANY key of the same array the render switches to this
+/// fact-lane speller, and without a fallback the float sibling would degrade
+/// to `mixed` for no reason of its own. `fallback_arms` is searched
+/// (`steins_contract::spell::spell_shape_field`) only for fields whose slot
+/// is empty — a populated slot (the narrowing's own finding) always wins.
+fn render_shape_fact_flow(
+    shape: &ShapeFact,
+    nullable: bool,
+    fallback_arms: &[ContractArm],
+) -> String {
     use steins_domain::{KeyClass, Presence, Tail};
 
     let is_list = shape.is_list == Certainty::Yes;
@@ -13155,7 +13177,10 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
         .into_iter()
         .filter(|(_, p, _)| !matches!(p, Presence::Absent))
         .map(|(k, p, slot)| {
-            let value = slot.as_ref().map_or_else(|| "mixed".to_owned(), |f| render_dump_fact(f));
+            let value = slot.as_ref().map_or_else(
+                || shape_field_fallback(fallback_arms, k).unwrap_or_else(|| "mixed".to_owned()),
+                |f| render_dump_fact(f),
+            );
             (k.clone(), p.is_required(), value)
         })
         .collect();
@@ -13176,6 +13201,15 @@ fn render_shape_fact(shape: &ShapeFact, nullable: bool) -> String {
     };
     let body = steins_contract::spell::spell_shape(is_list, shape.non_empty, &fields, &tail);
     with_null(body, nullable)
+}
+
+/// The declared spelling of field `k`, read off `arms` — the first arm whose
+/// `Shape` declares `k` wins ([`steins_contract::spell::spell_shape_field`]).
+/// `None` when no arm declares it (an unsealed-tail addition the guard
+/// admitted, or `arms` itself carries nothing shaped). Issue #424's fallback:
+/// [`render_shape_fact_flow`]'s only caller of this.
+fn shape_field_fallback(arms: &[ContractArm], k: &VKey) -> Option<String> {
+    arms.iter().find_map(|a| steins_contract::spell::spell_shape_field(&a.ty, k))
 }
 
 /// Value-precise spelling of a finite value set (`Singleton`/`OneOf` members) for
@@ -13343,6 +13377,20 @@ fn best_dump_type(
                 return DumpRendering {
                     text,
                     asserted: arms.iter().any(|a| a.stratum == Stratum::Asserted),
+                };
+            }
+            // Flow-refined (or arm-less): the fact-lane spelling, same as the
+            // fallthrough below — except a `Shape` still keeps a fallback to
+            // the declared arms for any field the S4 narrowing didn't touch
+            // (issue #424). `to_fact`'s float/int floor leaves such a field's
+            // value-lane slot `None` from the seed; without this, the ONE
+            // switch above (full arm text vs. full fact text) would make that
+            // field read `mixed` the moment a sibling key got narrowed.
+            if let Fact::Shape { shape, nullable } = fact {
+                let fallback = store.contract_arms(name).unwrap_or(&[]);
+                return DumpRendering {
+                    text: render_shape_fact_flow(shape, *nullable, fallback),
+                    asserted: known.stratum == Stratum::Asserted,
                 };
             }
             return DumpRendering {
