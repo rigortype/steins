@@ -414,7 +414,19 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   (TextUI/PhpHandlerTest.php:41). All TRUE at the possibly grade: the false
     //   arm of each of those four builtins is real, and a test that never sees it
     //   is a path claim this grade deliberately does not make.
-    ("sebastianbergmann/phpunit", 51),
+    //   51 → 55 measured on the gate's OWN engine (CI pins PHP 8.4): phpunit's
+    //   composer.json pins `config.platform.php` at 8.4.1, so an 8.4 runtime is
+    //   admitted as a witness and the sidecar answers `builtin_param_types`,
+    //   while an 8.5 runtime is outside the declared target and the builtin arm
+    //   declines (issue #28's posture — a runtime the project does not ship on
+    //   proves nothing). The four extra rows are all builtin CALLEES with a
+    //   builtin `T|false` argument, one shape and TRUE at the possibly grade:
+    //   `file_get_contents()` into `json_decode()` (build/scripts/phar-manifest.php)
+    //   and into `preg_match_all()` (Framework/Assert/FunctionsTest.php ×2),
+    //   `getmypid()` into `posix_kill()` (end-to-end/_files/…/InterruptTest.php).
+    //   A local 8.5 run therefore reads 51 here and stays under the tripwire; the
+    //   seeded count is the CI engine's, which is the one the gate is calibrated on.
+    ("sebastianbergmann/phpunit", 55),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
