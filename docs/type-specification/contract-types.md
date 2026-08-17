@@ -198,7 +198,13 @@ compute a joint-coverage decision it cannot justify.
 These are the places where "obvious" would be wrong.
 
 **`float` accepts `int`.** PHPStan core semantics, and PHP's own widening; an
-int value satisfies a `float` contract with `Yes`.
+int value satisfies a `float` contract with `Yes`. `to_fact` (`steins-contract`)
+never lowers a `float`-typed field to a value-lane `Fact` for the same reason:
+`Fact::General { base: Float }` does not admit ints, so lowering would reject
+values the contract admits — the field's value-lane slot stays `None`. A
+narrowed shape's dump render (`steins-infer`) still spells such a field from
+its declared arm rather than `mixed` (issue #424): the floor bounds what the
+*value* lane may claim, not what the *declared* type is known to be.
 
 **Float literal types compare by PHP value equality.** Int `5` satisfies the
 literal type `5.0` (IEEE `==`), deliberately unlike the domain's set equality
