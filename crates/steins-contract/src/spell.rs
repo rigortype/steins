@@ -215,6 +215,23 @@ fn ckey_to_key(k: &CKey) -> Key {
     }
 }
 
+/// The declared spelling of `ty`'s field at `key`, when `ty` is a
+/// [`ContractTy::Shape`] declaring that key — `None` for any other arm shape
+/// or an undeclared key.
+///
+/// The one place `steins-infer`'s flow-narrowed dump render can still recover
+/// a *sibling* field's spelling once its value-lane slot is `None` (issue
+/// #424): [`crate::to_fact`]'s float/int floor deliberately never lowers a
+/// `float`-typed field to a value-lane [`steins_domain::Fact`], so that
+/// field's slot is `None` from the seed. The arm lane still carries it —
+/// this is that lookup, one field at a time rather than the whole arm list
+/// [`spell_arms`] would (over-)spell.
+#[must_use]
+pub fn spell_shape_field(ty: &ContractTy, key: &Key) -> Option<String> {
+    let ContractTy::Shape { fields, .. } = ty else { return None };
+    fields.iter().find(|f| ckey_to_key(&f.key) == *key).map(|f| spell_nested(&f.ty))
+}
+
 /// Spell a single nested array slot; unlike [`spell_arms`] never refuses
 /// (floors to the loosest honest keyword). Class names spell
 /// lowered/unqualified-stripped (casing table lives in `steins-infer`'s `Cx`).
