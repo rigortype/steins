@@ -642,7 +642,16 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //              diff against the #388 run: exactly these eight rows plus the
     //              possibly-grade rows below; no other id moved (repair A's
     //              `assert(... instanceof)` widening added nothing here).
-    ("pxxxx-monorepo", 551),
+    //   551 → 553  2026-08-17, issue #423 (builtin parameter types): two
+    //              `phpdoc.maybe-argument-mismatch` rows, one shape — a
+    //              `tempnam()`-family `non-falsy-string|false` handed straight to
+    //              `file_put_contents()` / `unlink()`'s native `string` under
+    //              `strict_types`, the builtin twin of the shape #391 seeded. Both
+    //              read against the source: neither is guarded. Finding-level diff
+    //              against the same-day master run: exactly these two rows and the
+    //              one proof-layer row baselined in `EXPECTED_PROOF_FINDINGS`;
+    //              nothing else moved.
+    ("pxxxx-monorepo", 553),
 ];
 
 /// The expected `phpdoc.*` count for a package/local-project name (0 if untabled).
@@ -1580,6 +1589,19 @@ const EXPECTED_PROOF_FINDINGS: &[ExpectedProofFinding] = &[
         path_suffix: "Log/FluentdLogger.php",
         line: 41,
         message_contains: "$write_time is never bound",
+    },
+    // Builtin parameter types (issue #423): a date helper forwards its
+    // `$timestamp` to `\date()`, and its own test hands it a non-numeric string
+    // on purpose — the test's `expectException(TypeError::class)` names exactly
+    // this "must be of type ?int, string given". A non-numeric string is a
+    // TypeError for an `int` parameter in BOTH modes, so the descent-bound
+    // literal convicts the forwarding line. TRUE, and asserted by its own test.
+    ExpectedProofFinding {
+        package: "pxxxx-monorepo",
+        id: "type.argument-mismatch",
+        path_suffix: "Util/DateTime.php",
+        line: 65,
+        message_contains: "to date() cannot become ?int $timestamp",
     },
 ];
 
