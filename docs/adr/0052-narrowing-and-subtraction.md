@@ -1280,11 +1280,16 @@ the interval rule's one other finite base), not here.
 **Deliberately not landed:** the class-constant arm condition still keeps the
 whole construct opaque (`usable_operand`), so a `match`/`switch` over an enum is
 not structured and the `EnumCase` subtrahend wired here has nothing to run on yet.
-Lifting that refusal makes every class-constant `switch` in a project structured
-for the first time — a reachability and arm-body change whose blast radius is
-issues #430/#431's to measure, not this one's. The enum leg of the no-match
-subtraction is written and pinned by nothing; it starts working the day the
-refusal lifts, with no further change here.
+The refusal was lifted experimentally to check the wiring: an enum `match` covering
+every case goes silent and one missing a case reports exactly the missing case, and
+the 6670-file public corpus answers identically with the lift and without it,
+across its 184 `case X::C:` labels and 463 `X::C =>` arms. It is still not this
+slice's to land, and the reason is not caution about the subtraction. Structuring
+turns on the rest of the construct's modelling too, and the idiomatic exhaustive
+enum `match` has **no `default`** — so the day class-constant arms structure, every
+one of them starts surfacing an `\UnhandledMatchError` it cannot throw. ADR-0088 §5
+gates that origin on *Verified* coverage, which is the exhaustion check nothing has
+built yet, so the lift needs that check beside it. Issue #431 owns the pair.
 
 Fixtures: `crates/steins-infer/tests/match_no_match_subtraction.rs` (the
 reproducer in both positions and its `if` twin, the `switch` pair, the loose

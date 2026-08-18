@@ -323,7 +323,14 @@ coverage question is not the one answered here" now has an operational reading:
 `switch` buys silence and may never buy a finding. Every id in §7 that reports on a
 non-empty residue is `match`-only until that changes.
 
-One prerequisite is still missing and is not this slice's: a class-constant arm
-condition keeps the whole construct opaque, so an enum `match` is not structured at
-all. The `EnumCase` subtrahend is wired into the no-match path and idle; §8's last
-row — the one the whole design is for — arrives when #431 lifts that refusal.
+One prerequisite is still missing, and it turns out to be §5's rather than §4's. A
+class-constant arm condition keeps the whole construct opaque, so an enum `match`
+is not structured at all and the `EnumCase` subtrahend wired into the no-match path
+sits idle. Lifting that refusal experimentally does produce §8's last row — every
+case covered goes silent, one case missed reports exactly the missing case, and the
+public corpus does not move — but it also structures the *rest* of the construct,
+and the idiomatic exhaustive enum `match` has no `default`. Every one of them would
+begin surfacing an `\UnhandledMatchError` origin under §5, which §5 gates on
+Verified coverage: the exhaustion check that the empty lane now makes *possible*
+and nobody has *built*. So the enum row and §5's gate are one piece of work, not
+two, and #431 should land them together.
