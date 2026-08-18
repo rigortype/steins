@@ -1289,7 +1289,9 @@ turns on the rest of the construct's modelling too, and the idiomatic exhaustive
 enum `match` has **no `default`** — so the day class-constant arms structure, every
 one of them starts surfacing an `\UnhandledMatchError` it cannot throw. ADR-0088 §5
 gates that origin on *Verified* coverage, which is the exhaustion check nothing has
-built yet, so the lift needs that check beside it. Issue #431 owns the pair.
+built yet, so the lift needs that check beside it. Issue #433 owns the pair — it is
+the `\UnhandledMatchError` origin, and the enum-arm lift ships with its gate or not
+at all.
 
 Fixtures: `crates/steins-infer/tests/match_no_match_subtraction.rs` (the
 reproducer in both positions and its `if` twin, the `switch` pair, the loose
