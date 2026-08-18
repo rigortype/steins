@@ -118,7 +118,7 @@ pub const RETURN_ID: &str = "type.return-mismatch";
 /// runtime relation ([`ID`]); phpdoc types are never enforced at runtime.
 pub const PARAM_MISMATCH_ID: &str = "phpdoc.param-mismatch";
 
-/// The registry id for the **sentinel-parameter** check (ADR-0088 §3, issue
+/// The registry id for the **sentinel-parameter** check (ADR-0088 §4, issue
 /// #428): an argument passed to a `@param never` parameter whose own
 /// most-refined declared type — the `@param`-refined domain where a docblock
 /// narrows the argument's native declaration, the native declaration alone
@@ -1220,7 +1220,7 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // judgment, two ids, routed by the premise's minimum stratum.
     TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID,
-    // sentinel parameter (ADR-0088 §3, issue #428): the never-declared carve-out
+    // sentinel parameter (ADR-0088 §4, issue #428): the never-declared carve-out
     // out of `phpdoc.param-mismatch`.
     NEVER_PARAM_REACHABLE_ID,
 ];
@@ -33856,7 +33856,7 @@ fn check_phpdoc_param(
     }
     let Some(ty) = envelopes.param(&param.name) else { return };
 
-    // Sentinel-parameter carve-out (ADR-0088 §3, issue #428): `@param never` is an
+    // Sentinel-parameter carve-out (ADR-0088 §4, issue #428): `@param never` is an
     // explicit reachability claim, not an ordinary declared contract — `never` is
     // uninhabited, so [`admits_fact`]/[`accepts`] read `ContractTy::Never` as a
     // blanket `No` and every argument would trivially "violate" it below. That is
@@ -33864,7 +33864,7 @@ fn check_phpdoc_param(
     // here is "your case analysis upstream is incomplete") and the wrong grade
     // (the ordinary path asks the VERIFIED type, but a `match`/`if`-`elseif` chain
     // narrows the Asserted arm lane, which subtraction CAN empty). One id must not
-    // carry two remedies (ADR-0088 design ruling 1), so `never` leaves this check
+    // carry two remedies (ADR-0088 §4), so `never` leaves this check
     // entirely and asks [`check_never_sentinel`]'s question instead.
     if matches!(steins_contract::lower(ty), ContractTy::Never) {
         check_never_sentinel(
@@ -33985,7 +33985,7 @@ fn check_phpdoc_param(
     });
 }
 
-/// The sentinel-parameter question (ADR-0088 §3, issue #428), asked in place of
+/// The sentinel-parameter question (ADR-0088 §4, issue #428), asked in place of
 /// [`check_phpdoc_param`]'s ordinary declared-contract check where `ty` lowers to
 /// `never` — see the carve-out at that call site. Not "does this argument satisfy
 /// `never`" (nothing does); "does the argument's own MOST-REFINED DECLARED type
@@ -34002,16 +34002,21 @@ fn check_phpdoc_param(
 /// - a bare **`$var`** reports iff [`Store::contract_arms`] still holds a
 ///   non-empty arm list for it: the seeded declared arms (native, refined by
 ///   `@param` where one narrows it) minus every guard subtraction the current
-///   branch proved. [`subtract_contract_lane`] drops an emptied lane to no-fact
-///   rather than recording bottom explicitly — the very shape of the bug this id
-///   fixes, read here on purpose: an *absent* lane is exactly the emptied-domain
-///   case (the `elseif` chain's own `1|2` narrowed to nothing), and reports
-///   nothing.
+///   branch proved. Reading the arm lane rather than the value lane is the whole
+///   fix — a `@param 1|2` over a native `int` never reaches the value lane at all
+///   (`seed_refined_scalar_fact` declines to overwrite a `General` base with a
+///   `OneOf`), so the narrowed domain lives here and nowhere else.
 ///
-/// Every other shape — no contract lane at all (an argument with no declared
-/// type to refine), a non-`Var`/non-literal expression — declines rather than
-/// guess which grade it would have asked (ADR-0002: an uncertainty is never a
-/// finding, in either direction).
+/// An **absent** lane is the silent case, and it deliberately conflates three
+/// situations this check cannot tell apart: a lane subtraction emptied (the
+/// `elseif` chain's own `1|2` narrowed to nothing — the case the id exists to
+/// stay quiet about), a lane never seeded (an argument with no declared type to
+/// refine), and a lane invalidated (a by-reference call between the guard and
+/// the sentinel drops it). Only the first is a proven emptiness; the other two
+/// are ignorance. Conflating them costs findings and never manufactures one, so
+/// it is the direction the zero-false-positive bar requires (ADR-0002) — a known
+/// residue, not papered over. A non-`Var`/non-literal argument declines for the
+/// same reason.
 #[allow(clippy::too_many_arguments)]
 fn check_never_sentinel(
     cx: &Cx,
@@ -34045,7 +34050,7 @@ fn check_never_sentinel(
         line: pos.line,
         column: pos.column,
         message: format!(
-            "{surviving} can still reach {callee}()'s @param {ty} ${param_name} — the case analysis above is not exhaustive",
+            "{surviving} can still reach {callee}()'s @param {ty} ${param_name} — the unreachability claim is refuted",
         ),
         facet: None,
         fix: None,

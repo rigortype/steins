@@ -26,10 +26,10 @@ use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, EFFECT_ID,
     CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID,
     EFFECT_LISKOV_ID, FOREACH_NON_ITERABLE_ID, ID, INTEROP_UNKNOWN_LABEL_ID, INVALID_OPERAND_ID,
+    NEVER_PARAM_REACHABLE_ID,
     OFFSET_MAYBE_MISSING_ID,
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
-    NEVER_PARAM_REACHABLE_ID,
     PARAM_MISMATCH_ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
@@ -333,7 +333,7 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
-    // Sentinel parameter (ADR-0088 §3, issue #428): the `never`-declared carve-out
+    // Sentinel parameter (ADR-0088 §4, issue #428): the `never`-declared carve-out
     // out of `phpdoc.param-mismatch` above. `Layer::Contract` because the sentinel
     // is spelled in a docblock, so the premise is `Asserted` by construction —
     // regardless of whether the surviving type that still reaches it is itself
