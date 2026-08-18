@@ -16197,6 +16197,7 @@ fn walk_match(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
+        refine_match_arm_enum_case(w, subject, &arm.conditions, loose, &mut bclasses);
         // Tag-based discrimination (ADR-0062 A-G4): a `match`/`switch` on a
         // constant-key projection subtracts the base's array arms by the field's
         // `admits` verdict, minting the collapsed shape into the arm's env. The
@@ -16330,6 +16331,42 @@ fn refine_match_arm(
         let line = env.get(name).map_or(0, |k| k.line);
         env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
     }
+}
+
+/// Refine the subject's enum-case identity inside a matched arm (issue #433):
+/// the arm-lane twin of [`refine_match_arm`], for the one identity
+/// [`refine_match_arm`] cannot carry — an enum case is an object and has no
+/// [`Val`], exactly the reason [`subtract_no_match_path`] gives for reading the
+/// arm lane there too. Reuses [`apply_class_narrowing`]'s own positive-polarity
+/// `Subtrahend::EnumCase` subtraction (the `$s === Suit::Hearts` guard's own
+/// mechanism), so a matched arm and a taken guard branch narrow the same way
+/// through the same call.
+///
+/// Only a **single-condition** arm narrows: `case Hearts, Spades => …` is a
+/// disjunction ("is Hearts OR Spades") no single subtraction call spells, so a
+/// multi-condition arm is left unrefined — the conservative direction every
+/// unrepresentable shape takes (ADR-0002), matching [`refine_match_arm`]'s own
+/// per-operand `return` on the first condition it cannot carry.
+fn refine_match_arm_enum_case(
+    w: &WalkCx,
+    subject: &CondOperand,
+    conditions: &[CondOperand],
+    loose: bool,
+    store: &mut Store,
+) {
+    if loose {
+        return;
+    }
+    let CondOperand::Var(name) = subject else { return };
+    let [CondOperand::ClassConst(sc, case)] = conditions else { return };
+    let Some(enum_fqn) = w.cx.resolve_enum_case(sc, case, w.enclosing_class) else { return };
+    let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
+    subtract_contract_lane(
+        store,
+        name,
+        &normalize::Subtrahend::EnumCase { enum_fqn, case: case.clone(), polarity: true },
+        &oracle,
+    );
 }
 
 /// Subtract every arm's conditions from the subject on the **no-match path**
