@@ -48,15 +48,20 @@
 //! since ADR-0031. Measured: every fixture in this file answers identically with
 //! #439 beneath it and without it.
 //!
-//! One **false positive** is pinned here rather than hidden
-//! (`a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing`): a
-//! guard's positive refinement replaces the lane instead of intersecting it with
-//! what the guards above left, so `$v === 1 => …, $v !== 1 => …` ends with the
-//! `default` reading `1` on a path PHP never takes. The `if`/`elseif` spelling
-//! reports it identically and did so before this slice existed — which is the
-//! desugaring being faithful, not the desugaring being wrong — but `match (true)`
-//! syntax newly reaches it, so it is pinned in both spellings, and the day the
-//! positive side learns to intersect, both fixtures flip together.
+//! **Guards compose by intersection** (issue #445, the false positive this file
+//! pinned before it was fixed): a later guard's positive refinement meets what the
+//! guards above it left rather than replacing it, so `$v === 1 => …, $v !== 1 => …`
+//! ends with a `default` PHP never reaches and a lane that says so. Until #445 the
+//! positive side seeded its own answer and the `default` read `1` — the value the
+//! chain had just disproved. The `if`/`elseif` spelling reported it identically
+//! and did so before this slice existed — the desugaring being faithful, not the
+//! desugaring being wrong — which is why the fix landed in the guard vocabulary
+//! and every spelling went quiet at once. Four fixtures hold the rule down:
+//! `a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing`,
+//! `the_re_narrowing_is_the_guard_vocabulary_and_needs_no_match_at_all`,
+//! `the_type_predicate_vocabulary_composes_the_same_way`, and — the direction
+//! that costs findings rather than manufacturing them —
+//! `a_chain_that_leaves_a_genuine_residue_still_reports_it`.
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -452,50 +457,104 @@ fn the_no_match_path_of_a_default_less_chain_falls_through() {
     );
 }
 
-// ---- The inherited gap, pinned in both spellings -----------------------
+// ---- Composition: a later guard intersects, it does not replace (issue #445) ----
 
 #[test]
 fn a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing() {
-    // A FALSE POSITIVE, pinned so it cannot be forgotten. `$v === 1` leaves the
-    // residue `2`; `$v !== 1` should intersect that with `{1}` and empty it, and
-    // instead its positive refinement *replaces* the lane, so the `default` reads
-    // `1` on a path PHP never takes and the sentinel reports.
+    // Issue #445, closed: `$foo === 1` leaves the residue `2`; `$foo !== 1` then
+    // intersects that residue with `{1}` and empties it, so the `default` is a
+    // path PHP never takes and the sentinel says nothing about it. Until #445 the
+    // positive side *seeded* the lane instead, and the `default` read `1` — the
+    // value the chain above had just disproved — and reported.
     //
-    // The point of the pair is where the fault lives: the `if`/`elseif` spelling
-    // reports the identical finding, and reported it before this slice existed.
-    // The desugaring inherits the gap exactly — that is
-    // `the_if_chain_of_the_same_shape_answers_identically` doing its job on a
-    // shape where the shared answer happens to be wrong. It closes when a guard's
-    // positive side intersects the lane it finds instead of seeding it, and both
-    // halves of this fixture flip on the same day.
+    // The pair is what says where the fault lived: the `if`/`elseif` spelling
+    // reported the identical finding, and reported it before the `match (true)`
+    // slice existed. The desugaring inherited the gap exactly rather than
+    // introducing it — `the_if_chain_of_the_same_shape_answers_identically` doing
+    // its job on a shape whose shared answer happened to be wrong — so both
+    // halves went silent on the same day, in the guard vocabulary and not in the
+    // lowering.
     let arms = format!(
         "<?php\n{SENTINEL}/** @param 1|2 $foo */\nfunction f(int $foo): int {{\n\treturn match (true) {{\n\t\t$foo === 1 => 1,\n\t\t$foo !== 1 => 2,\n\t\tdefault => assertNever($foo),\n\t}};\n}}\n"
     );
     let chain = format!(
         "<?php\n{SENTINEL}/** @param 1|2 $foo */\nfunction f(int $foo): int {{\n\tif ($foo === 1) {{ return 1; }}\n\telseif ($foo !== 1) {{ return 2; }}\n\telse {{ assertNever($foo); }}\n}}\n"
     );
-    let a = sentinel(&arms);
-    assert_eq!(a.len(), 1, "the re-narrowed lane reports: {a:?}");
-    assert_eq!(a[0].id, NEVER_PARAM_REACHABLE_ID);
-    assert_eq!(
-        a.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
-        sentinel(&chain).iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
-        "both spellings are wrong in exactly the same words"
-    );
+    assert!(sentinel(&arms).is_empty(), "the intersection emptied the lane: {:?}", sentinel(&arms));
+    assert!(sentinel(&chain).is_empty(), "and identically in the if spelling: {:?}", sentinel(&chain));
 }
 
 #[test]
 fn the_re_narrowing_is_the_guard_vocabulary_and_needs_no_match_at_all() {
-    // The same gap with no `match` in sight, so the next reader does not go
-    // looking for it in the lowering. Two sequential guards: the first leaves the
-    // residue, the second replaces it.
+    // The same composition with no `match` in sight, so the next reader does not
+    // go looking for it in the lowering. Two sequential guards: the first leaves
+    // the residue `2` in the arm lane (a `@param 1|2` over a native `int` has no
+    // value-lane carrier, so `int` is the sharpest the value lane can say), the
+    // second intersects `{1}` into it and comes out empty. `unknown` is the value
+    // lane's spelling of a domain the subtraction emptied — the same word the
+    // `default` of an exhaustive chain gets, and the one thing that is certainly
+    // not the answer is `1` (issue #445).
     assert_eq!(
         dumps(
             "<?php\n/** @param 1|2 $v */\nfunction f(int $v): void {\n\tif ($v === 1) { return; }\n\t\\PHPStan\\dumpType($v);\n\tif ($v !== 1) { return; }\n\t\\PHPStan\\dumpType($v);\n}\n"
         ),
-        vec!["dumped type: int", "dumped type: 1"],
-        "the second dump is on a path PHP cannot reach, and reads the later guard"
+        vec!["dumped type: int", "dumped type: unknown"],
+        "the residue survives the first guard and the second empties it"
     );
+}
+
+#[test]
+fn the_type_predicate_vocabulary_composes_the_same_way() {
+    // The `is_string` half of issue #445, whose seed is a *base* rather than a
+    // value: `!is_string` leaves `int`, and the `is_string` below it intersects to
+    // nothing instead of minting `string` over a binding whose fact lane was
+    // empty. Both the sentinel and the dump, since the two read different carriers
+    // and the fix has to reach both.
+    let chain = format!(
+        "<?php\n{SENTINEL}function f(string|int $foo): int {{\n\tif (is_string($foo)) {{ return 1; }}\n\telseif (!is_string($foo)) {{ return 2; }}\n\telse {{ assertNever($foo); }}\n}}\n"
+    );
+    assert!(sentinel(&chain).is_empty(), "nothing reaches the else: {:?}", sentinel(&chain));
+    assert_eq!(
+        dumps(
+            "<?php\nfunction f(string|int $v): void {\n\tif (is_string($v)) { return; }\n\t\\PHPStan\\dumpType($v);\n\tif (!is_string($v)) { return; }\n\t\\PHPStan\\dumpType($v);\n}\n"
+        ),
+        vec!["dumped type: int", "dumped type: unknown"],
+        "the second dump is the emptied domain, not the guard's own base"
+    );
+}
+
+#[test]
+fn a_chain_that_leaves_a_genuine_residue_still_reports_it() {
+    // The over-silencing guard the composition rule owes. Same shape, one value
+    // wider: `1|2|3` guarded by `=== 1` and `=== 2` leaves `3`, and `3` genuinely
+    // reaches the `else`. Intersecting must not be mistaken for emptying — if this
+    // fixture ever goes silent, #445's fix has started swallowing true positives.
+    let chain = format!(
+        "<?php\n{SENTINEL}/** @param 1|2|3 $foo */\nfunction f(int $foo): int {{\n\tif ($foo === 1) {{ return 1; }}\n\telseif ($foo === 2) {{ return 2; }}\n\telse {{ assertNever($foo); }}\n}}\n"
+    );
+    let d = sentinel(&chain);
+    assert_eq!(d.len(), 1, "the uncovered `3` still refutes the claim: {d:?}");
+    assert_eq!(d[0].id, NEVER_PARAM_REACHABLE_ID);
+    assert!(d[0].message.contains('3'), "{}", d[0].message);
+}
+
+#[test]
+fn a_positive_refinement_the_lane_still_admits_narrows_as_it_always_did() {
+    // The other half of the same guard: intersecting is only the *empty* case's
+    // business. A `=== 1` the lane still admits keeps proving `1` exactly as it
+    // did before #445 — the singleton IS the intersection there — so the value
+    // lane below it is unchanged and the sentinel still convicts.
+    assert_eq!(
+        dumps(
+            "<?php\n/** @param 1|2 $v */\nfunction f(int $v): void {\n\tif ($v === 1) { \\PHPStan\\dumpType($v); }\n}\n"
+        ),
+        vec!["dumped type: 1"],
+        "the guard still proves its own value where nothing refutes it"
+    );
+    let chain = format!(
+        "<?php\n{SENTINEL}/** @param 1|2 $foo */\nfunction f(int $foo): void {{\n\tif ($foo === 1) {{ assertNever($foo); }}\n}}\n"
+    );
+    assert_eq!(sentinel(&chain).len(), 1, "`1` reaches it: {:?}", sentinel(&chain));
 }
 
 // ---- Two shapes the mixing rule must NOT over-silence ------------------
