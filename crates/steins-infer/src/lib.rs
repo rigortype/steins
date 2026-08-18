@@ -118,6 +118,24 @@ pub const RETURN_ID: &str = "type.return-mismatch";
 /// runtime relation ([`ID`]); phpdoc types are never enforced at runtime.
 pub const PARAM_MISMATCH_ID: &str = "phpdoc.param-mismatch";
 
+/// The registry id for the **sentinel-parameter** check (ADR-0088 §3, issue
+/// #428): an argument passed to a `@param never` parameter whose own
+/// most-refined declared type — the `@param`-refined domain where a docblock
+/// narrows the argument's native declaration, the native declaration alone
+/// otherwise (ADR-0037 trust order) — is still provably non-empty on the
+/// current path. `never` is uninhabited, so it is excluded from
+/// [`PARAM_MISMATCH_ID`] entirely rather than demoted or reworded (one id, one
+/// remedy): that id says "fix this argument", this one says "the case analysis
+/// reaching this call is incomplete".
+///
+/// The sentinel is spelled in a docblock, so the premise is `Asserted` by
+/// construction — this is contract layer regardless of whether the surviving
+/// domain is itself all-`Verified` (the claim being checked is the sentinel's,
+/// not the surviving type's provenance). `Floor::Contracts`: the question is
+/// definite ("still reachable" or silent), not a possibly-grade one, so it sits
+/// beside [`PARAM_MISMATCH_ID`] rather than the `Strict`-floor maybe family.
+pub const NEVER_PARAM_REACHABLE_ID: &str = "phpdoc.never-param-reachable";
+
 /// The registry id for the phpdoc declared-contract return check (ADR-0030): a
 /// proven `return <value>;` that provably does not inhabit the `@return` envelope
 /// under contract acceptance.
@@ -1202,6 +1220,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // judgment, two ids, routed by the premise's minimum stratum.
     TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID,
+    // sentinel parameter (ADR-0088 §3, issue #428): the never-declared carve-out
+    // out of `phpdoc.param-mismatch`.
+    NEVER_PARAM_REACHABLE_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]
@@ -33835,6 +33856,23 @@ fn check_phpdoc_param(
     }
     let Some(ty) = envelopes.param(&param.name) else { return };
 
+    // Sentinel-parameter carve-out (ADR-0088 §3, issue #428): `@param never` is an
+    // explicit reachability claim, not an ordinary declared contract — `never` is
+    // uninhabited, so [`admits_fact`]/[`accepts`] read `ContractTy::Never` as a
+    // blanket `No` and every argument would trivially "violate" it below. That is
+    // the wrong id (the remedy for a bad argument is "fix the call"; the remedy
+    // here is "your case analysis upstream is incomplete") and the wrong grade
+    // (the ordinary path asks the VERIFIED type, but a `match`/`if`-`elseif` chain
+    // narrows the Asserted arm lane, which subtraction CAN empty). One id must not
+    // carry two remedies (ADR-0088 design ruling 1), so `never` leaves this check
+    // entirely and asks [`check_never_sentinel`]'s question instead.
+    if matches!(steins_contract::lower(ty), ContractTy::Never) {
+        check_never_sentinel(
+            cx, folder, ty, &param.name, callee, arg_offset, value, env, store, poisoned, out,
+        );
+        return;
+    }
+
     // ADR-0063 P3 — the refined callable spellings' obligations, propagation-pass
     // lane. A variable bound to a PROVEN closure value carries no scalar fact
     // (`Known::closure` sets `fact: None`), so neither lane below can see it; the
@@ -33942,6 +33980,73 @@ fn check_phpdoc_param(
         line: pos.line,
         column: pos.column,
         message,
+        facet: None,
+        fix: None,
+    });
+}
+
+/// The sentinel-parameter question (ADR-0088 §3, issue #428), asked in place of
+/// [`check_phpdoc_param`]'s ordinary declared-contract check where `ty` lowers to
+/// `never` — see the carve-out at that call site. Not "does this argument satisfy
+/// `never`" (nothing does); "does the argument's own MOST-REFINED DECLARED type
+/// still admit a value here" — the `@param`-refined domain where a docblock
+/// narrows the argument's native declaration, the native declaration alone
+/// otherwise (ADR-0037 trust order), evaluated on the CURRENT branch.
+///
+/// Two sources, in the same priority [`check_phpdoc_param`]'s proven-value lane
+/// uses:
+///
+/// - a **proven value** ([`Cx::resolve_cval`] — a literal, a proven scalar/object/
+///   resource) is trivially non-empty and always reports, named by its own
+///   rendering;
+/// - a bare **`$var`** reports iff [`Store::contract_arms`] still holds a
+///   non-empty arm list for it: the seeded declared arms (native, refined by
+///   `@param` where one narrows it) minus every guard subtraction the current
+///   branch proved. [`subtract_contract_lane`] drops an emptied lane to no-fact
+///   rather than recording bottom explicitly — the very shape of the bug this id
+///   fixes, read here on purpose: an *absent* lane is exactly the emptied-domain
+///   case (the `elseif` chain's own `1|2` narrowed to nothing), and reports
+///   nothing.
+///
+/// Every other shape — no contract lane at all (an argument with no declared
+/// type to refine), a non-`Var`/non-literal expression — declines rather than
+/// guess which grade it would have asked (ADR-0002: an uncertainty is never a
+/// finding, in either direction).
+#[allow(clippy::too_many_arguments)]
+fn check_never_sentinel(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    ty: &PType,
+    param_name: &str,
+    callee: &str,
+    arg_offset: u32,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: &Store,
+    poisoned: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let surviving = match cx.resolve_cval(value, env, store, poisoned, folder) {
+        Some(cv) => rendered_cval(&cv),
+        None => {
+            if poisoned {
+                return;
+            }
+            let ArgValue::Var(name) = value else { return };
+            let Some(arms) = store.contract_arms(name) else { return };
+            let Some(text) = render_contract_arms(cx, arms) else { return };
+            text
+        }
+    };
+    let pos = cx.tree().position(arg_offset);
+    out.push(Diagnostic {
+        id: NEVER_PARAM_REACHABLE_ID,
+        path: cx.path().to_owned(),
+        line: pos.line,
+        column: pos.column,
+        message: format!(
+            "{surviving} can still reach {callee}()'s @param {ty} ${param_name} — the case analysis above is not exhaustive",
+        ),
         facet: None,
         fix: None,
     });

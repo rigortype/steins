@@ -29,6 +29,7 @@ use crate::{
     OFFSET_MAYBE_MISSING_ID,
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
+    NEVER_PARAM_REACHABLE_ID,
     PARAM_MISMATCH_ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
@@ -332,6 +333,15 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // Sentinel parameter (ADR-0088 §3, issue #428): the `never`-declared carve-out
+    // out of `phpdoc.param-mismatch` above. `Layer::Contract` because the sentinel
+    // is spelled in a docblock, so the premise is `Asserted` by construction —
+    // regardless of whether the surviving type that still reaches it is itself
+    // Verified. `Floor::Contracts`, the declared-contract family's own floor, not
+    // the possibly-grade `Strict`: the question this asks is definite ("the
+    // most-refined declared domain is still non-empty here", or silence), never a
+    // some-arms-rejected uncertainty.
+    (NEVER_PARAM_REACHABLE_ID, Layer::Contract, Floor::Contracts),
     // The `unset` pseudo-type's read (ADR-0087 §4, issue #396). `Layer::Contract`
     // because the premise is the author's own `@var T|unset`, not a reachability
     // fact — the reason it is not `variable.maybe-undefined`, which is proof-layer.
