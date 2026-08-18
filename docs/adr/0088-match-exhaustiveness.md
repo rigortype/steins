@@ -453,3 +453,97 @@ mechanism the 2026-08-19 note above credits for §8's layered row), so the
 guard-chain spelling would go silent where its by-value twin reports. Measured on
 #448's branch: the layered row reports by value and is silent through
 `match (true)`.
+||||||| parent of 7846f31 (ADR-0088: record the match(true) gap closing and its own asymmetry)
+
+## Note (2026-08-19): the `match (true)` gap closes, off the CST rather than the trace (issue #448)
+
+The first scope gap above is closed. The obstacle was never the coverage
+question itself — `subtract_contract_lane`/`Store::contract` already answer it
+correctly once a chain's guards have run — it was that `walk_if` had no way to
+tell "no `else` because this was a plain `if`" from "no `default` because this
+was a `match`". A desugared guard chain's `default` becomes an `else` wherever
+one is written, so a chain *with* a `default` was never at risk; the gap was
+specifically the default-less chain, whose missing `else` is an ordinary
+fall-through for a plain `if` and an `\UnhandledMatchError` for a `match`, and
+nothing in `StmtKind::If` records which.
+
+**The two shapes the issue weighed, and why the CST-side one won.** A marker on
+`StmtKind::If` itself — "this came from a `match`" — would have answered the
+question for one extra `bool`, but it would have done it by putting a
+syntactic-provenance bit on the trace IR's own `If` variant, which ADR-0031 has
+deliberately kept free of them: every existing field on that variant (`cond`,
+`then_trace`, `elseifs`, `else_trace`) describes control flow, not where the
+control flow came from. The shape that shipped instead keeps `StmtKind::If`
+byte-for-byte what it always was, and answers the question off the CST alone,
+independently of the trace: a new structural scan
+(`scan_guard_chain_no_default`, mirroring `scan_throw_origins`'s own
+independent `Node::Match` arm) records the span of every `match (true)`/`match
+(false)` chain with no `default` in a scope (`Scope::guard_chain_no_default`),
+the same way `ForeachSite`/`OperandSite` already answer a question their own
+trace node's shape cannot carry. The walk consults the list purely by span —
+exactly the correlation `throw_origins`' `ThrowKind::New` fact for the same
+construct already uses against this gate's own `uncovered` map (§5's landed
+note, above) — never a bit living on the node it is asking about.
+
+This is a deliberate reading of "ask the coverage question at the desugaring
+site" from the issue: the *lowering* does not answer the question (it cannot —
+the subject's Verified domain is an inference-time fact `scan_guard_chain_no_default`
+never has access to, since it re-derives its verdict from `lower_match_stmt`
+itself rather than duplicating the shape judgment); it only records *that* the
+question exists and *where*. The answer stays entirely the walk's, deferred all
+the way to the one place that has ever known it.
+
+**A second restriction the issue's own weighing did not anticipate**: a
+desugared chain has no explicit "subject" at all — `match (true)`'s own subject
+is the literal `true`, and the variable a chain is "about" lives only in its arm
+conditions, which may not agree. `match (true) { $x === 1 => …, $y === 2 => … }`
+is a chain no single `Store::contract` lane answers a joint exhaustion question
+for, and reading either variable's lane alone risks exactly the false-positive
+shape this run's hazard note describes: a lane no guard in the chain actually
+narrowed, read as evidence. So the walk asks the question only for a chain
+whose arm conditions — leading condition plus every `elseif`, across the whole
+construct — mention exactly one variable (`guard_chain_subject`); zero or more
+than one declines silently, in ADR-0002's zero-false-positive direction.
+
+**One asymmetry surfaced here first, and was then fixed at its source rather
+than worked around here.** §5's gate reads `Store::contract_emptied` to tell
+"the residue died" from "the lane was never touched" — sound for a by-value
+`match`, because every subtrahend it carries reaches the arm lane through
+`subtract_contract_lane`, whose kept-empty carrier is what `contract_emptied`
+reads. The guard-chain idiom's own vocabulary — `is_string`/`is_int` and kin,
+§1's `f1` itself — narrowed through `subtract_pred_arms` instead, which dropped
+an emptied lane to *absent* unconditionally, with no kept-empty case. Reading
+`contract_emptied` after an `is_string`/`is_int` pair exhausts a `string|int`
+subject therefore answered `false` whether the lane was exhausted or never
+touched, in the unsafe direction. The exhaustive-chain fixture — the cell that
+breaks loudest if this gate is wrong — caught it as a spurious throw.
+
+This slice first worked around it by reading `contract_arms` instead. That
+workaround is **gone**: the #432 measurement found the same discrepancy from the
+other side and unified the two spellings at the source (ADR-0052's 2026-08-19
+note), so `subtract_pred_arms` now keeps an all-`Verified` emptied lane exactly
+as `subtract_contract_lane` does. Both gates read `contract_emptied` again, and
+they agree.
+
+Keeping the workaround would have cost the very thing the desugaring exists to
+protect. `contract_arms` collapses *absent* into *silent*, and absence-on-taint
+is what makes §8's layered-premise rows report: measured on the workaround
+branch, `mixed` + `@param string|int` with an exhaustive guard chain stayed
+silent while its by-value twin reported the same row. Two spellings of one
+construct, disagreeing — which is the divergence #431's desugaring was built to
+prevent.
+
+The second scope gap — a `try`/`catch` damming the construct regardless of the
+caught type — is unaffected and still open; it is `walk_match`'s own
+restriction (the dataflow walk never structures a `try` body), and a desugared
+guard chain inherits it unchanged rather than introducing a new instance of it.
+
+Fixtures: `crates/steins-infer/tests/match_true_unhandled_throw.rs` (the worked
+example; the same chain with a `default`; the exhaustive pair — the cell that
+found the `subtract_pred_arms` asymmetry #432 then fixed at its source;
+`match (false)`; a
+plain `if`/`elseif` with no `else` over the identical narrowing shape, pinned
+silent; an unrecognized guard that narrows nothing; an untyped subject; a
+two-variable chain the single-subject restriction declines; propagation and
+`try`/`catch` damming; and the by-value/guard-chain enum twins showing the
+`Cmp`-vocabulary path was never affected by the `subtract_pred_arms` asymmetry).
