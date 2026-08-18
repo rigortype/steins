@@ -283,6 +283,10 @@ impl Dropped {
             | ContractTy::LitBool(_)
             | ContractTy::Null => &mut self.refinements,
             ContractTy::Class(_)
+            // No phpdoc spelling lowers to an enum-case arm (issue #429 seeds it
+            // from a native declaration alone), so a mined row never reaches
+            // here; it counts with the objects for the day one does.
+            | ContractTy::EnumCase { .. }
             | ContractTy::ObjectAny
             | ContractTy::CallableTy { .. }
             // `resource` stays in this bucket (ADR-0069 §5) so the comparison series doesn't

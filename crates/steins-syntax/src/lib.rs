@@ -1580,6 +1580,13 @@ pub enum CondOperand {
     /// A bare global-constant fetch (`PHP_VERSION_ID`, `SOME_CONST`), carried as written
     /// (issue #29) so the version-guard fold can resolve it against the target range.
     Const(NameRef),
+    /// A class-constant / enum-case fetch `Class::NAME` (issue #429), carried as
+    /// written — the [`Self::Const`] shape one scope in. **Unproven**, exactly as
+    /// [`ArgValue::ClassConst`] is: inference resolves it against the class index,
+    /// and only the enum-case resolution is consumed today (identity narrowing over
+    /// the finite case domain). Nothing folds it to a verdict, so a comparison
+    /// against one still evaluates `Maybe`.
+    ClassConst(StaticClass, String),
     /// Anything else (call, property fetch, arithmetic sub-expression, …) — unrepresentable
     /// for the verdict but never opaque about its effects: under-modeling once let a stale
     /// `$m = []` survive `preg_match($re,$s,$m)===1` as a false `list{}` (issue #158).
@@ -9330,6 +9337,12 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
 fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     match lower_cond_operand(expr) {
         CondOperand::Other { .. } => None,
+        // A class-constant arm keeps the whole construct opaque, exactly as it did
+        // before the operand had a variant of its own (issue #429): `match` and
+        // `switch` over an enum are their own slice (#430/#431), and structuring
+        // `case Suit::Hearts:` here would silently move statement-position
+        // narrowing that nothing in this slice has measured.
+        CondOperand::ClassConst(..) => None,
         operand => Some(operand),
     }
 }
@@ -9631,6 +9644,15 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
         // A bare constant fetch (issue #29). `true`/`false`/`null` never reach
         // here — they lex as literals and lower through the arm below.
         Expression::ConstantAccess(ca) => CondOperand::Const(name_ref(&ca.name)),
+        // A class-constant / enum-case fetch (issue #429), recognized by the same
+        // static-class path `lower_arg_value` uses; a dynamic class or constant
+        // name falls through to `Other` as it always did.
+        Expression::Access(Access::ClassConstant(cc)) => {
+            match (trace_static_class(cc.class), class_const_name(&cc.constant)) {
+                (Some(class), Some(name)) => CondOperand::ClassConst(class, name),
+                _ => lower_cond_operand_other(expr.unparenthesized()),
+            }
+        }
         other => match lower_arg_value(other) {
             // A scalar literal, or a fully-concrete array literal — the latter lets a
             // `$x === []` / `$x === [1, 2]` guard narrow `$x` to a `Singleton` array
@@ -9638,25 +9660,28 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             // non-concrete array (an element that is a `Var`/call/offset read) stays
             // `Other`, so nothing unproven is ever treated as a decided literal.
             v if v.is_concrete_value() => CondOperand::Literal(v),
-            _ => {
-                // The invalidation set is collected only when the operand can
-                // write at all — `$o->p === 1` reads `$o` and rebinds nothing,
-                // and forgetting there would be a precision loss with no
-                // soundness content (issue #158).
-                let node = Node::Expression(other);
-                let writers = operand_writers(&node);
-                CondOperand::Other {
-                    call: named_call(other).map(Box::new),
-                    invalidates: match writers {
-                        OperandWriters::None => Vec::new(),
-                        _ => cond_reads(other),
-                    },
-                    sites: match writers {
-                        OperandWriters::Calls => call_invalidation(&node),
-                        _ => Vec::new(),
-                    },
-                }
-            }
+            _ => lower_cond_operand_other(other),
+        },
+    }
+}
+
+/// The [`CondOperand::Other`] floor of [`lower_cond_operand`], with its
+/// invalidation bookkeeping. The invalidation set is collected only when the
+/// operand can write at all — `$o->p === 1` reads `$o` and rebinds nothing, and
+/// forgetting there would be a precision loss with no soundness content
+/// (issue #158).
+fn lower_cond_operand_other(other: &Expression<'_>) -> CondOperand {
+    let node = Node::Expression(other);
+    let writers = operand_writers(&node);
+    CondOperand::Other {
+        call: named_call(other).map(Box::new),
+        invalidates: match writers {
+            OperandWriters::None => Vec::new(),
+            _ => cond_reads(other),
+        },
+        sites: match writers {
+            OperandWriters::Calls => call_invalidation(&node),
+            _ => Vec::new(),
         },
     }
 }
