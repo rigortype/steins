@@ -28,8 +28,11 @@
 //!   empties, and there is no residue to report. Before it, the same two fixtures
 //!   passed because the proven-narrowing gate declined on an untouched lane.
 //!
-//! Guard-shaped arm conditions (`match (true) { is_string($f) => … }`) are still
-//! refused by `usable_operand` and still buy nothing; that is issue #431.
+//! Guard-shaped arm conditions (`match (true) { is_string($f) => … }`) were still
+//! refused by `usable_operand` and still bought nothing when this file landed;
+//! issue #431 lowers them as a guard chain instead, and `match_true_guards.rs`
+//! is where that is pinned. The hoist tested here is shape-blind — it carries
+//! whatever the lowering structures — so only one fixture below moved.
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -199,15 +202,18 @@ fn an_unlowerable_arm_condition_buys_nothing() {
 }
 
 #[test]
-fn a_guard_shaped_arm_condition_still_buys_nothing() {
-    // `match (true) { is_string($f) => … }` — the arm condition is a call, so the
-    // construct is unstructured exactly as before. Issue #431's subject.
+fn a_guard_shaped_arm_condition_is_a_chain_the_hoist_carries_too() {
+    // `match (true) { is_string($f) => … }` used to be refused here — the arm
+    // condition is a call, not a literal — and since issue #431 it lowers as a
+    // guard chain instead. What this file owes is only that the value-position
+    // hoist carries whatever the lowering structures, shape-blind: the chain's own
+    // narrowing and subtraction are `match_true_guards.rs`'s subject.
     assert_eq!(
         dumps(&body(
             "$r = match (true) { is_string($x) => \\PHPStan\\dumpType($x), default => 0 };"
         )),
-        Vec::<String>::new(),
-        "a guard arm is not a literal — refused here, and still refused"
+        vec!["dumped type: string"],
+        "the hoist walks a guard chain in value position exactly as it walks a by-value match"
     );
 }
 
