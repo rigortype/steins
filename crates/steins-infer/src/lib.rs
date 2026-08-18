@@ -11173,6 +11173,22 @@ struct Store {
     /// reserved-for-S6 declared-receiver lane); never by `call.on-null` proofs,
     /// arity, `call.undefined-method`, or binding descent.
     contract: HashMap<String, Vec<ContractArm>>,
+    /// **Narrowed marks** (ADR-0088 §4's proven-narrowing rule, issue #428): the
+    /// set of variables whose `contract` lane has had an actual guard subtraction
+    /// land on the current path — an arm died or shrank, not merely "the lane
+    /// exists". Set only by the three arm-subtraction functions
+    /// ([`subtract_contract_lane`], [`subtract_pred_arms`], [`subtract_shape_arms`])
+    /// when they change something; a fresh seed or reseed clears it (piggybacked on
+    /// [`Store::unbind`], which already voids `contract` for the same reason).
+    ///
+    /// Exists because `contract_arms` alone cannot distinguish "narrowed to this
+    /// residue" from "never touched, still the full seeded declaration" — both read
+    /// as a non-empty arm list. A guard shape the arm lane cannot yet model (enum
+    /// case identity, boolean literals — issue #429) leaves the lane at its full
+    /// seed, indistinguishable from reachability without this bit, which is exactly
+    /// the false-positive class this set exists to keep [`check_never_sentinel`]
+    /// from manufacturing.
+    narrowed: HashSet<String>,
     /// **Class facts** (ADR-0052 §1): guard-derived is-a bounds on an
     /// object-holding variable, beside the heap's exact class. A positive
     /// `instanceof T` binds `T` into `yes`; negative binds into `no`. Deliberately
@@ -11306,6 +11322,9 @@ impl Store {
         // narrowing carriers are scope-local and die with the value they described).
         self.members.remove(var);
         self.contract.remove(var);
+        // The narrowed mark describes THIS binding's guard history; a rebound var
+        // starts a fresh one with none (issue #428).
+        self.narrowed.remove(var);
     }
 
     /// Clear all bindings and the heap — a Barrier: nothing is reachable.
@@ -11314,6 +11333,7 @@ impl Store {
         self.heap.clear();
         self.members.clear();
         self.contract.clear();
+        self.narrowed.clear();
     }
 
     /// The narrowed declared-type arm lane of `var` (ADR-0052 §3, consumer (d) —
@@ -11324,6 +11344,14 @@ impl Store {
     /// `User|Guest`); each carries its stratum for the min-premise rule.
     fn contract_arms(&self, var: &str) -> Option<&[ContractArm]> {
         self.contract.get(var).map(Vec::as_slice)
+    }
+
+    /// Whether `var`'s contract lane has had a **proven narrowing** land on the
+    /// current path (issue #428) — an actual arm death/shrink, not merely a
+    /// present lane. See [`Store::narrowed`] for why this is a separate bit from
+    /// [`Store::contract_arms`] rather than derived from it.
+    fn contract_narrowed(&self, var: &str) -> bool {
+        self.narrowed.contains(var)
     }
 
     /// The class-membership fact of `var` (ADR-0052 §1 `Member`), if any guard bound
@@ -18850,7 +18878,11 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
 /// Subtract `sub` from `var`'s contract lane in `store`, arm-wise, preserving each
 /// surviving arm's stratum ([`normalize::subtract_arm`] applied to the stratified
 /// lane — a partial deletion, an interval arm clipped at its endpoint, keeps the
-/// stratum of the arm it shrinks); an emptied lane drops to no-fact.
+/// stratum of the arm it shrinks); an emptied lane drops to no-fact. Marks
+/// [`Store::narrowed`] whenever an arm actually died or shrank (issue #428) — a
+/// `sub` every arm survives unchanged (the guard shape this subtrahend can't
+/// touch, e.g. an enum-case/bool-literal exclusion against a bare class/bool arm,
+/// pre-#429) leaves the mark unset.
 fn subtract_contract_lane(
     store: &mut Store,
     var: &str,
@@ -18858,16 +18890,25 @@ fn subtract_contract_lane(
     oracle: &dyn normalize::IsaOracle,
 ) {
     if let Some(arms) = store.contract.get_mut(var) {
+        let mut changed = false;
         arms.retain_mut(|a| match normalize::subtract_arm(sub, &a.ty, oracle) {
             normalize::ArmFate::Survives => true,
-            normalize::ArmFate::Dies => false,
+            normalize::ArmFate::Dies => {
+                changed = true;
+                false
+            }
             normalize::ArmFate::Narrows(narrowed) => {
                 a.ty = narrowed;
+                changed = true;
                 true
             }
         });
-        if arms.is_empty() {
+        let empty = arms.is_empty();
+        if empty {
             store.contract.remove(var);
+        }
+        if changed {
+            store.narrowed.insert(var.to_owned());
         }
     }
 }
@@ -19304,15 +19345,21 @@ fn apply_type_narrowing(
 /// Arm-lane subtraction for one type predicate: the TRUE branch deletes the arms
 /// the predicate **refutes**, the FALSE branch the arms it **proves**. `Maybe`
 /// keeps the arm on both. An emptied lane drops to no-fact, never a death signal
-/// (ADR-0052 §2).
+/// (ADR-0052 §2). Marks [`Store::narrowed`] when an arm actually died (issue #428).
 fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bool) {
     let Some(arms) = store.contract.get_mut(var) else { return };
+    let before = arms.len();
     arms.retain(|a| {
         let holds = pred_holds_on_arm(pred, &a.ty);
         if positive { holds != Certainty::No } else { !holds.is_yes() }
     });
-    if arms.is_empty() {
+    let narrowed = arms.len() != before;
+    let empty = arms.is_empty();
+    if empty {
         store.contract.remove(var);
+    }
+    if narrowed {
+        store.narrowed.insert(var.to_owned());
     }
 }
 
@@ -22121,6 +22168,20 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         contract.insert(var.clone(), merged);
     }
 
+    // Narrowed marks (issue #428): the same INTERSECTION [`vouched`]/`members` take
+    // — a var counts as narrowed after the join only where every branch proved a
+    // subtraction landed on it. A var one branch narrowed and a sibling left
+    // untouched is, after the merge, exactly a lane the merge cannot tell apart
+    // from an unnarrowed one (its joined arms are the sibling's full seed at
+    // best), so claiming it here would be the same manufactured-evidence shape
+    // [`check_never_sentinel`] exists to refuse.
+    let narrowed: HashSet<String> = first
+        .narrowed
+        .iter()
+        .filter(|v| rest.iter().all(|s| s.narrowed.contains(*v)))
+        .cloned()
+        .collect();
+
     // Member lane: a var survives only if present in every branch; its `yes`/`no`
     // sets are the INTERSECTION across branches (a bound holds after the merge only
     // if it held on every path). An emptied Member is dropped (no-fact).
@@ -22157,7 +22218,7 @@ fn join_stores(first: &Store, rest: &[&Store]) -> Store {
         .cloned()
         .collect();
 
-    Store { refs, heap, contract, members, vouched, guarded_calls }
+    Store { refs, heap, contract, narrowed, members, vouched, guarded_calls }
 }
 
 /// Remove contract arms another surviving arm subsumes (`Certainty::Yes`) — the
@@ -29565,7 +29626,9 @@ fn apply_shape_guard(
 /// the one case PHP decides — `isset` on an offset of `null` is false, so an
 /// `isset`-true branch kills a `null` arm.
 ///
-/// An emptied lane drops to no-fact, never a death signal (ADR-0052 §2).
+/// An emptied lane drops to no-fact, never a death signal (ADR-0052 §2). Marks
+/// [`Store::narrowed`] on the way out (issue #428) — every path past the
+/// `kept.len() == arms.len()` no-op return below has already proven a kill.
 fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
     let Some(arms) = store.contract.get(g.var()) else { return };
     // A single-arm lane has no discrimination to do.
@@ -29584,6 +29647,7 @@ fn subtract_shape_arms(cx: &Cx, g: &ShapeGuard, store: &mut Store) {
     if kept.is_empty() && matches!(g, ShapeGuard::Count { .. }) {
         return;
     }
+    store.narrowed.insert(g.var().to_owned());
     if kept.is_empty() {
         store.contract.remove(g.var());
     } else {
@@ -34000,23 +34064,46 @@ fn check_phpdoc_param(
 ///   resource) is trivially non-empty and always reports, named by its own
 ///   rendering;
 /// - a bare **`$var`** reports iff [`Store::contract_arms`] still holds a
-///   non-empty arm list for it: the seeded declared arms (native, refined by
-///   `@param` where one narrows it) minus every guard subtraction the current
-///   branch proved. Reading the arm lane rather than the value lane is the whole
-///   fix — a `@param 1|2` over a native `int` never reaches the value lane at all
-///   (`seed_refined_scalar_fact` declines to overwrite a `General` base with a
-///   `OneOf`), so the narrowed domain lives here and nowhere else.
+///   non-empty arm list for it AND [`Store::contract_narrowed`] says a
+///   subtraction actually landed on it on this path: the seeded declared arms
+///   (native, refined by `@param` where one narrows it) minus every guard
+///   subtraction the current branch proved. Reading the arm lane rather than the
+///   value lane is the whole fix — a `@param 1|2` over a native `int` never
+///   reaches the value lane at all (`seed_refined_scalar_fact` declines to
+///   overwrite a `General` base with a `OneOf`), so the narrowed domain lives
+///   here and nowhere else.
 ///
-/// An **absent** lane is the silent case, and it deliberately conflates three
-/// situations this check cannot tell apart: a lane subtraction emptied (the
-/// `elseif` chain's own `1|2` narrowed to nothing — the case the id exists to
-/// stay quiet about), a lane never seeded (an argument with no declared type to
-/// refine), and a lane invalidated (a by-reference call between the guard and
-/// the sentinel drops it). Only the first is a proven emptiness; the other two
-/// are ignorance. Conflating them costs findings and never manufactures one, so
-/// it is the direction the zero-false-positive bar requires (ADR-0002) — a known
-/// residue, not papered over. A non-`Var`/non-literal argument declines for the
-/// same reason.
+/// # The proven-narrowing rule (issue #428 amendment, audited)
+///
+/// A non-empty arm list is NOT by itself evidence of reachability — it is also
+/// what an **untouched** lane looks like, and the two are indistinguishable
+/// without a separate mark. A guard the arm lane cannot yet model — enum-case
+/// identity, boolean-literal equality (issue #429 teaches these; not this
+/// slice) — leaves the seeded arms exactly as wide as they started, so an
+/// exhaustive `if`/`elseif` over every enum case or both booleans would report
+/// "still reaches" on a lane that was never actually subtracted: a manufactured
+/// finding, the one thing ADR-0002 forbids outright. [`Store::contract_narrowed`]
+/// is the bit that tells the two apart — set only where an arm demonstrably died
+/// or shrank ([`subtract_contract_lane`], [`subtract_pred_arms`],
+/// [`subtract_shape_arms`]), so an un-narrowed lane reads as ignorance about
+/// reachability, not evidence for it. One casualty, accepted: a completely
+/// unguarded call (`assertNever($foo)` with no chain above it) now declines too
+/// — its lane is non-empty and un-narrowed by the same test, even though the
+/// call is in fact always reachable. Losing that cell is the trade for never
+/// firing on the enum/bool cells; the partial-coverage cells (a union missing an
+/// arm, `1|2` missing a value) are unaffected — their residue is precisely an
+/// arm a subtraction proved dead around it, so the mark is set.
+///
+/// An **absent** lane is the silent case regardless, and it deliberately
+/// conflates three situations this check cannot tell apart: a lane subtraction
+/// emptied (the `elseif` chain's own `1|2` narrowed to nothing — the case the id
+/// exists to stay quiet about), a lane never seeded (an argument with no
+/// declared type to refine), and a lane invalidated (a by-reference call between
+/// the guard and the sentinel drops it). Only the first is a proven emptiness;
+/// the other two are ignorance. Conflating them costs findings and never
+/// manufactures one, so it is the direction the zero-false-positive bar requires
+/// (ADR-0002) — a known residue, not papered over. A non-`Var`/non-literal
+/// argument declines for the same reason.
 #[allow(clippy::too_many_arguments)]
 fn check_never_sentinel(
     cx: &Cx,
@@ -34038,6 +34125,9 @@ fn check_never_sentinel(
                 return;
             }
             let ArgValue::Var(name) = value else { return };
+            if !store.contract_narrowed(name) {
+                return;
+            }
             let Some(arms) = store.contract_arms(name) else { return };
             let Some(text) = render_contract_arms(cx, arms) else { return };
             text
