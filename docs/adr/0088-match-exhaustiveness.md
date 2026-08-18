@@ -133,6 +133,27 @@ premise is Asserted by construction, and the finding takes a `phpdoc.` prefix. I
 a native or attribute spelling is ever introduced, a Verified sibling joins it
 then; there is none today.
 
+**The residue must be a proven narrowing.** Added 2026-08-18, from the first
+implementation's measurement (#428): reading "the declared domain is non-empty
+here" off the arm lane is not sufficient, because a lane also sits at its full
+seeded declaration when the guards *were* written and the lane simply cannot
+model them. Measured, an exhaustive `enum` chain and an exhaustive
+`$b === true` / `$b === false` chain both left the lane untouched and both
+reported — two false positives of the same shape, from guard forms whose
+subtraction is unimplemented rather than from any real reachability. So the rule
+gains a second half: the sentinel reports only where the residue is non-empty
+**and strictly smaller than what the declaration seeded**, i.e. where some
+subtraction demonstrably landed on this path. An un-narrowed lane is ignorance,
+not evidence, and the two are indistinguishable from inside the check.
+
+The price is the unguarded call — `assertNever($foo)` with no case analysis above
+it goes silent, though it is trivially reachable. That is the right trade: the id
+exists for case analyses that have stopped being exhaustive, and buying the
+weakest cell at the cost of a false-positive class is exactly the bargain the
+crying-wolf prohibition forbids. The consequence is that this id's reach grows
+with the narrowing vocabulary rather than ahead of it — the enum leg arrives when
+#429 teaches the lane to subtract cases, not before.
+
 The corollary is a carve-out in the other direction: a `never`-declared parameter
 leaves `phpdoc.param-mismatch` entirely. That id says "this call site passes the
 wrong thing" and its remedy is to fix the argument; the sentinel says "the case
