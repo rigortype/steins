@@ -265,3 +265,29 @@ and every `match` that forgot it says so.
   of today's spelling and not as a law.
 - **Whether `match.dead-default` ships at all.** §7 leaves that to the
   measurement.
+
+## Note (2026-08-18): the no-match path is the keystone, and today's silence is accidental (issue #439)
+
+Measured while landing value-position `match` (#430): every verdict this ADR
+defines is a question about the **no-match path**, and `walk_match` refines that
+path with nothing. It narrows the subject *inside* a conditional arm and leaves
+the `default` arm reading the subject exactly as it arrived.
+
+That has a consequence worth stating plainly, because it makes a rule above look
+like it is working when it is not. `default => assertNever($foo)` is silent today
+**because the sentinel's proven-narrowing gate (§4) declines on an untouched
+lane** — not because §3's defensive terminator recognized anything. The right
+answer is arriving for the wrong reason. Once the arms are subtracted on the
+no-match path, the lane will empty, the gate will pass, and §3 will have to carry
+the weight it is currently being credited with.
+
+The same gap is why none of §7's ids can be built yet: "the arms exhausted the
+Verified domain" *is* the no-match lane being empty, and "this `match` can throw
+`\UnhandledMatchError`" is that lane being non-empty. §8's grid describes
+outcomes that the machinery cannot currently distinguish. Issue #439 closes it,
+for `match` and `switch` together, and it blocks #432, #433 and #434.
+
+It is also where the enum leg (#429) meets `match`: covering every case subtracts
+to empty and is silent; missing one leaves exactly the missing case and reports.
+That pair is the finding this whole run exists to produce, and it does not exist
+until the subtraction does.
