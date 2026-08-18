@@ -11924,6 +11924,7 @@ fn analyze_scope(
         ret_info: &ret_info,
         ret_phpdoc: &ret_phpdoc,
         dead: std::cell::RefCell::new(Vec::new()),
+        uncovered_matches: std::cell::RefCell::new(Vec::new()),
         alloc: std::cell::Cell::new(alloc_start),
         summary,
     };
@@ -11995,6 +11996,17 @@ struct WalkCx<'a, 'w> {
     /// per-scope walk's regions are universal truths — a binding descent's dead
     /// branches are dead only for that binding, so descents discard theirs.
     dead: std::cell::RefCell<Vec<Span>>,
+    /// Spans of default-less `match` statements proven, on this walk, not to
+    /// cover the subject's Verified domain (ADR-0088 §5, issue #433) — the
+    /// dataflow half of the `throw.undeclared` `\UnhandledMatchError` gate. Same
+    /// plain-walk-only discipline as [`Self::dead`]: a descent's hypothetical
+    /// bindings are per-call-site, not a fact about the declaration, so a
+    /// descent never pushes here (see [`walk_match`]'s `descent.is_none()`
+    /// guard). The throw system correlates these against
+    /// [`ThrowKind::New`]'s own span for the same construct (both trace back to
+    /// the same CST `Match` node's start offset), so nothing pairs this set
+    /// with a file index here — the caller does that.
+    uncovered_matches: std::cell::RefCell<Vec<Span>>,
     /// A monotone allocation-id counter for this scope walk (ADR-0036). Shared
     /// across branch clones (they clone the `Store`, not this cell), so a `new` in
     /// one branch never collides with one in another that later joins.
