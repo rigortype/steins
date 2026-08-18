@@ -1223,3 +1223,72 @@ the accumulating chain and the two chain outcomes, the backed/pure split, the
 five absence shapes, the out-of-scope pins); `crates/steins-contract/src/`
 `normalize.rs` (the arm's subsumption, both polarities of the subtrahend, the
 no-finality rule, the unknown-hierarchy keep).
+
+## Note (2026-08-18): the no-match path of a `match`/`switch` subtracts the arms (issue #439)
+
+Completion of point 2, not new design: the subtraction machinery was already
+built, and the `match` construct simply never called it. `walk_match` refined the
+subject *inside* a conditional arm and refined **nothing** on the path reached
+because every arm failed, so a `default` read the subject exactly as it arrived.
+The negated-guard reasoning an `elseif` chain has done since ADR-0031 stopped at
+the `match` keyword.
+
+**The rule.** Reaching the no-match path — a `default` body, or the fall-through
+of a `default`-less `switch` — means every arm was tried and every arm failed, so
+the path carries the **conjunction** of the negated conditions. Each condition is
+therefore subtracted on its own, and an arm mixing a subtractable literal with an
+unrepresentable operand still contributes the literal. That is the mirror image of
+the positive side, where an arm's conditions are a *disjunction* and one
+unrepresentable operand voids the whole arm's refinement. Both ADR-0052 carriers
+are subtracted, through the guard path's own machinery: the value lane via the
+`NotNull`/`Exclude` refinements at the `Verified` stratum, the arm lane via
+`Subtrahend::Null` / `Subtrahend::Value`, plus `Subtrahend::EnumCase` for an
+`Enum::Case` arm condition — the one subtrahend the value lane cannot carry.
+
+**`switch` subtracts the same set, and its residue is not evidence.** `switch`
+compares loosely, so its no-match path proves `$s != c`, and `$s === c` implies
+`$s == c`, so the failure of the loose test carries the failure of the strict one.
+Subtracting the exact literal is sound — the same one-directional reading the
+2026-08-18 `$x == null` carve-out (issue #391) already applies to the failing
+branch of a loose comparison, one construct up. What does not carry over is the
+converse: `case 0` also consumes `"0"`, `false` and `0.0`, and the loose-equal set
+of a literal is infinite, so it has no finite subtrahend spelling. A `switch`'s
+modelled residue is therefore an **over-approximation** where a `match`'s is
+exact, and that decides what may be read off it. An *empty* residue still proves
+emptiness — an over-approximation that is empty leaves nothing underneath — but a
+*non-empty* one proves nothing, because what it still holds may be precisely what
+a loose comparison consumed. So a `switch` subtraction narrows the lane (buying
+silence, the direction that cannot manufacture a finding) and never sets the
+proven-narrowing mark ADR-0088 §4 reads.
+
+**A partially-landed chain claims nothing.** ADR-0088 §4's proven-narrowing rule
+was designed against a single guard, where "a subtraction landed" and "this path's
+narrowing is modelled" are the same statement. A `match` is a whole chain at once
+and the mark is one bit, so a chain where some conditions landed and others did
+not would set it and hand the consumer a residue that is ignorance about the arms
+it could not model. Measured: `match ($b) { null => …, true => …, false => … }`
+over a `?bool` kills the `null` arm and leaves the general `bool` arm standing
+(point 2's interior-point rule — neither literal covers it), so the residue reads
+`bool` on a chain that is in fact exhaustive. Amended, therefore: **the mark
+survives a no-match subtraction only when every condition's subtraction landed.**
+The narrowing itself is kept either way; it is only the claim that is withheld.
+The same `?bool` shape spelled as an `if`/`elseif` chain reports today and is
+untouched by this — it is the bool-literal gap ADR-0088 §4's note names, and it
+closes when `Base::Bool` learns point 2's endpoint clip (its two-point domain is
+the interval rule's one other finite base), not here.
+
+**Deliberately not landed:** the class-constant arm condition still keeps the
+whole construct opaque (`usable_operand`), so a `match`/`switch` over an enum is
+not structured and the `EnumCase` subtrahend wired here has nothing to run on yet.
+Lifting that refusal makes every class-constant `switch` in a project structured
+for the first time — a reachability and arm-body change whose blast radius is
+issues #430/#431's to measure, not this one's. The enum leg of the no-match
+subtraction is written and pinned by nothing; it starts working the day the
+refusal lifts, with no further change here.
+
+Fixtures: `crates/steins-infer/tests/match_no_match_subtraction.rs` (the
+reproducer in both positions and its `if` twin, the `switch` pair, the loose
+weakness, the two evidence refusals, the inexpressible condition, the arm-local
+rebinding); `crates/steins-infer/tests/match_value_position.rs` (the residue
+fixture this closes, and the two `assertNever` tripwires whose silence now comes
+from an emptied domain rather than an untouched lane).

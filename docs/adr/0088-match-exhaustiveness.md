@@ -291,3 +291,39 @@ It is also where the enum leg (#429) meets `match`: covering every case subtract
 to empty and is silent; missing one leaves exactly the missing case and reports.
 That pair is the finding this whole run exists to produce, and it does not exist
 until the subtraction does.
+
+## Note (2026-08-18): the keystone landed, and §4 gains an all-conditions clause (issue #439)
+
+The no-match path now subtracts (ADR-0052's note of the same date). Three
+consequences for this ADR.
+
+**§4's silence has moved to the right place.** `default => assertNever($foo)` over
+an exhausted declared domain is still silent, and it is now silent because the
+arms subtracted the domain to nothing and there is no residue to report — the
+reason §4 states. The note above predicted the gate would start passing; measured,
+it does, and the emptied lane is what answers instead. §3's defensive terminator
+was never carrying this and still is not: it governs the dead-*arm* findings of §7,
+none of which are registered yet.
+
+**§4 gains a clause.** The proven-narrowing rule was written against a single
+guard, where "a subtraction landed" and "this path's narrowing is modelled" say the
+same thing. A `match` is a chain of subtractions at once and the mark is one bit
+per variable, so a chain where only *some* conditions landed would set it and offer
+a residue that is ignorance about the rest. The rule therefore reads: the residue
+is evidence only where **every** condition of every arm subtracted something. The
+casualty is the chain mixing a modelled guard form with an unmodelled one; the
+alternative was a manufactured finding, which ADR-0002 forbids outright.
+
+**§7's ids are unblocked, and §9's `switch` line is now specific.** "The arms
+exhausted the Verified domain" is readable (an emptied lane), and so is "this
+`match` can throw" (a non-empty one), for the shapes the arm lane can model.
+`switch` subtracts too, but its residue's *non-emptiness* proves nothing — loose
+`==` consumes an infinite, unspellable set around each literal — so §9's "its
+coverage question is not the one answered here" now has an operational reading:
+`switch` buys silence and may never buy a finding. Every id in §7 that reports on a
+non-empty residue is `match`-only until that changes.
+
+One prerequisite is still missing and is not this slice's: a class-constant arm
+condition keeps the whole construct opaque, so an enum `match` is not structured at
+all. The `EnumCase` subtrahend is wired into the no-match path and idle; §8's last
+row — the one the whole design is for — arrives when #431 lifts that refusal.

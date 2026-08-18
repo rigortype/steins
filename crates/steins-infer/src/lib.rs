@@ -16128,8 +16128,11 @@ fn walk_else(
 ///
 /// The "no arm matched" outcome: with a `default` arm it runs that body (unless
 /// dead); without one, a `switch` falls through unchanged while a `match` raises
-/// `\UnhandledMatchError` (a terminator). The successor env is the join of every
-/// branch that falls through; if none does, the construct terminates.
+/// `\UnhandledMatchError` (a terminator). Either way the no-match path carries the
+/// arms' conditions **subtracted** from the subject ([`subtract_no_match_path`],
+/// issue #439) — the negated-guard path an `elseif` chain has always modelled. The
+/// successor env is the join of every branch that falls through; if none does, the
+/// construct terminates.
 #[allow(clippy::too_many_arguments)]
 fn walk_match(
     w: &WalkCx,
@@ -16225,6 +16228,7 @@ fn walk_match(
             } else {
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
+                subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
                 if walk_trace(w, folder, dtrace, &mut benv, &mut bclasses, descent, facts, true, out)
                     == Flow::FellThrough
                 {
@@ -16233,11 +16237,15 @@ fn walk_match(
             }
         }
         None => {
-            // A default-less `switch` falls through to after itself on no match
-            // (entry env unchanged); a default-less `match` throws
-            // `\UnhandledMatchError` — a terminator that joins nothing.
+            // A default-less `switch` falls through to after itself on no match —
+            // carrying the same subtraction the `default` body would have carried;
+            // a default-less `match` throws `\UnhandledMatchError`, a terminator
+            // that joins nothing (and so has no path to refine).
             if loose && no_match_taken != Certainty::No {
-                fell.push((env.clone(), store.clone()));
+                let mut benv = env.clone();
+                let mut bclasses = store.clone();
+                subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
+                fell.push((benv, bclasses));
             }
         }
     }
@@ -16321,6 +16329,127 @@ fn refine_match_arm(
     if let Some(fact) = Fact::from_vals(vals) {
         let line = env.get(name).map_or(0, |k| k.line);
         env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
+    }
+}
+
+/// Subtract every arm's conditions from the subject on the **no-match path**
+/// (issue #439): the `default` body, and the fall-through of a `default`-less
+/// `switch`. Reaching it means each arm was tried and each failed, so the path
+/// carries the conjunction of the negated conditions — exactly the negated-guard
+/// path an `elseif` chain has modelled since ADR-0031, and the one path
+/// `walk_match` refined with nothing.
+///
+/// Because it is a **conjunction** of negations, each condition is subtracted on
+/// its own: an arm mixing a subtractable literal with an unrepresentable operand
+/// still contributes the literal. That is the mirror image of [`refine_match_arm`],
+/// where the arm's conditions are a *disjunction* and one unrepresentable operand
+/// therefore voids the whole arm's positive refinement.
+///
+/// Both ADR-0052 carriers are subtracted, through the machinery the guard path
+/// already uses — no parallel mechanism:
+///
+/// * the **value lane**, via [`Refine::NotNull`] / [`Refine::Exclude`] at the
+///   `Verified` stratum (a runtime comparison decided this path);
+/// * the **arm lane**, via [`normalize::Subtrahend::Null`] /
+///   [`normalize::Subtrahend::Value`], plus [`normalize::Subtrahend::EnumCase`] for
+///   a `Enum::Case` arm condition — the one subtrahend the value lane cannot carry,
+///   since an enum case is an object and has no [`Val`] (ADR-0052's 2026-08-18
+///   note).
+///
+/// A condition whose subtraction is inexpressible subtracts nothing and leaves the
+/// lane as wide as it arrived — the conservative direction every other guard takes
+/// (ADR-0002).
+///
+/// # The residue is evidence only when EVERY condition landed
+///
+/// ADR-0088 §4's proven-narrowing rule reads [`Store::narrowed`] before it treats a
+/// non-empty residue as reachability, because an untouched lane and a narrowed one
+/// look alike. A `match` is a whole chain of subtractions at once, and the mark is
+/// one bit per variable, so a chain where *some* conditions landed and others did
+/// not would set it and hand a consumer a residue that is ignorance about the arms
+/// it could not model. `match ($b) { null => …, true => …, false => … }` over a
+/// `?bool` is the measured shape: the `null` arm dies, neither bool literal covers
+/// the general `bool` arm, and the residue reads `bool` on a chain that is in fact
+/// exhaustive. So the mark survives this construct only when every condition's
+/// subtraction demonstrably landed — one that did not voids the evidence for the
+/// whole no-match path, exactly as one unrepresentable arm condition voids the
+/// construct's structuring. The narrowing itself is kept either way; it is only the
+/// *claim* that is withheld.
+///
+/// # `switch` subtracts the same set, and its residue is never evidence
+///
+/// A `switch` compares loosely, so its no-match path proves `$s != c`, which
+/// **implies** `$s !== c` (identity implies loose equality, so the failure of the
+/// loose test carries the failure of the strict one). Subtracting the exact literal
+/// is therefore sound for `switch` too — the same one-directional reading
+/// [`collect_cmp_refine`] already applies to the failing branch of `$x == null`
+/// (issue #391).
+///
+/// What does not carry over is the *converse*: `case 0` also consumes `"0"`,
+/// `false` and `0.0`, and the loose-equal set of a literal is infinite, so it has
+/// no finite subtrahend spelling. A `switch`'s modelled residue is therefore only
+/// an **over-approximation** of what actually reaches the no-match path, where a
+/// `match`'s is exact. That asymmetry decides what may be read off it: an *empty*
+/// residue still proves emptiness (an over-approximation that is empty leaves
+/// nothing underneath), but a *non-empty* one proves nothing, because the values it
+/// still holds may be precisely the ones a loose comparison already consumed. So a
+/// `switch` subtraction leaves the mark unset unconditionally. Silence is bought; a
+/// finding is not.
+fn subtract_no_match_path(
+    w: &WalkCx,
+    subject: &CondOperand,
+    arms: &[MatchArmT],
+    loose: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let CondOperand::Var(name) = subject else { return };
+    let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
+    // The mark an earlier guard on this path already set is this construct's to
+    // keep, never to earn: only what happens below is judged.
+    let was_narrowed = store.contract_narrowed(name);
+    let mut every_condition_landed = true;
+    for cond in arms.iter().flat_map(|a| a.conditions.iter()) {
+        let landed = match cond {
+            CondOperand::Literal(lit) => match val_of(lit, w.cx.php_minor) {
+                Some(val) => {
+                    let (refine, sub) = if matches!(val, Val::Null) {
+                        (Refine::NotNull(name.clone()), normalize::Subtrahend::Null)
+                    } else {
+                        (
+                            Refine::Exclude(name.clone(), val.clone()),
+                            normalize::Subtrahend::Value(val),
+                        )
+                    };
+                    apply_refinements(&[refine], env, store, Stratum::Verified);
+                    subtract_contract_lane(store, name, &sub, &oracle)
+                }
+                None => false,
+            },
+            // An enum-case arm. The absence discipline decides whether the case
+            // resolves at all; one that does not subtracts nothing, so no chain can
+            // claim an exhaustion over a case set the declaration never proved.
+            CondOperand::ClassConst(sc, case) => {
+                match w.cx.resolve_enum_case(sc, case, w.enclosing_class) {
+                    Some(enum_fqn) => subtract_contract_lane(
+                        store,
+                        name,
+                        &normalize::Subtrahend::EnumCase {
+                            enum_fqn,
+                            case: case.clone(),
+                            polarity: false,
+                        },
+                        &oracle,
+                    ),
+                    None => false,
+                }
+            }
+            _ => false,
+        };
+        every_condition_landed &= landed;
+    }
+    if (loose || !every_condition_landed) && !was_narrowed {
+        store.narrowed.remove(name);
     }
 }
 
@@ -19151,12 +19280,18 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
 /// `sub` every arm survives unchanged (the guard shape this subtrahend can't
 /// touch, e.g. an enum-case/bool-literal exclusion against a bare class/bool arm,
 /// pre-#429) leaves the mark unset.
+///
+/// Returns whether the subtraction **landed** — the same question the mark answers,
+/// handed back so a caller subtracting a whole set of conditions at once can tell a
+/// residue that every condition shaped from one that some condition never touched
+/// ([`subtract_no_match_path`]).
 fn subtract_contract_lane(
     store: &mut Store,
     var: &str,
     sub: &normalize::Subtrahend,
     oracle: &dyn normalize::IsaOracle,
-) {
+) -> bool {
+    let mut landed = false;
     if let Some(arms) = store.contract.get_mut(var) {
         let mut changed = false;
         // Whether the lane, before this subtraction, was held on Verified premises
@@ -19191,7 +19326,9 @@ fn subtract_contract_lane(
         if changed {
             store.narrowed.insert(var.to_owned());
         }
+        landed = changed;
     }
+    landed
 }
 
 // ---------------------------------------------------------------------------

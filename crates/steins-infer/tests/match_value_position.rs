@@ -23,7 +23,10 @@
 //!   first-match and no-`default`-throws rules;
 //! * `default => assertNever($foo)` over an exhausted domain stays silent now
 //!   that the arm is walked (ADR-0088 §4 / issue #428) — the sequencing reason
-//!   that slice had to land first.
+//!   that slice had to land first. Since issue #439 that silence has a different
+//!   source: the arms are subtracted on the no-match path, the declared domain
+//!   empties, and there is no residue to report. Before it, the same two fixtures
+//!   passed because the proven-narrowing gate declined on an untouched lane.
 //!
 //! Guard-shaped arm conditions (`match (true) { is_string($f) => … }`) are still
 //! refused by `usable_operand` and still buy nothing; that is issue #431.
@@ -227,31 +230,25 @@ fn a_default_assert_never_over_an_exhausted_domain_stays_silent() {
     assert!(noisy.is_empty(), "the sentinel arm must stay silent, got: {noisy:?}");
 }
 
-// ---- The residue this slice inherits, recorded rather than papered over --
+// ---- The residue this slice inherited, since closed by issue #439 --------
 
 #[test]
-fn the_default_arm_reads_an_unsubtracted_subject_exactly_as_statement_position_does() {
-    // `walk_match` refines the subject inside a conditional arm and refines
-    // NOTHING on the default path: a `default` reached only because `null` was
-    // consumed above it still sees `string|null`, and the strict-floor possibly
-    // leg says so. That is wrong, it is wrong identically in statement position
-    // (where it has always been wrong), and it is not this slice's to fix —
-    // subtracting the arms' literals from the subject on the no-match path is one
-    // change that has to land for both positions at once.
-    //
-    // What this fixture guards is the ONLY property value position owes here: it
-    // introduces no asymmetry. Whatever the statement form answers, the value
-    // form answers too. Zero occurrences of the shape across the 6670-file
-    // fp-gate corpus, measured on this branch.
+fn the_default_arm_reads_the_subtracted_subject_in_both_positions() {
+    // This began as the fixture recording what this slice inherited: `walk_match`
+    // refined the subject inside a conditional arm and refined NOTHING on the
+    // default path, so a `default` reached only because `null` was consumed above
+    // it still saw `string|null` and the strict-floor possibly leg said so — twice,
+    // once per position. Issue #439 subtracts the arms on the no-match path and
+    // both went silent together, which is the property this fixture was really
+    // guarding: whatever the statement form answers, the value form answers too.
     let src = format!(
         "{HDR}function name(string $s): string {{ return $s; }}\nfunction stmt(?string $s): void {{\n\tmatch ($s) {{ null => 'none', default => name($s) }};\n}}\nfunction value(?string $s): string {{\n\treturn match ($s) {{ null => 'none', default => name($s) }};\n}}\n"
     );
     let maybe: Vec<Diagnostic> =
         findings(&src).into_iter().filter(|d| d.id.contains("maybe-argument")).collect();
-    assert_eq!(
-        maybe.len(),
-        2,
-        "one per position — the value form inherits the statement form's residue, no more: {maybe:?}"
+    assert!(
+        maybe.is_empty(),
+        "the null arm consumed null in both positions alike: {maybe:?}"
     );
 }
 
