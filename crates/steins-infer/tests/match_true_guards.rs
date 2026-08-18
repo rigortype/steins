@@ -123,9 +123,9 @@ fn a_multi_condition_arm_subtracts_the_whole_disjunction() {
     // `!a && !b`. The arm itself narrows nothing (a disjunction of two predicates
     // is not one fact), which is the `if (a || b)` answer, unchanged.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(string|int|float $foo): void {{\n\techo match (true) {{\n\t\tis_string($foo), is_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(string|int|float $foo): void {\n\techo match (true) {\n\t\tis_string($foo), is_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};\n}\n"
+        ),
         vec!["dumped type: int|float|string", "dumped type: float"]
     );
 }
@@ -186,17 +186,17 @@ fn a_non_boolean_subject_stays_unstructured() {
     // `is_string($foo)`. That is a comparison, not a guard chain, and reading it as
     // one would narrow `$foo` on a branch PHP selected by `$k`.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(string|int $foo, int $k): void {{\n\techo match ($k) {{\n\t\tis_string($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(string|int $foo, int $k): void {\n\techo match ($k) {\n\t\tis_string($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};\n}\n"
+        ),
         Vec::<String>::new(),
         "an integer subject buys nothing, arms included"
     );
     // A literal non-boolean subject is the same refusal, not a special case.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(string|int $foo): void {{\n\techo match (1) {{\n\t\tis_string($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(string|int $foo): void {\n\techo match (1) {\n\t\tis_string($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};\n}\n"
+        ),
         Vec::<String>::new()
     );
 }
@@ -208,9 +208,9 @@ fn a_truthy_valued_arm_condition_refuses_the_whole_construct() {
     // reading the residue as "`$n` is falsy" would be a narrowing PHP never proved.
     // One such arm opaques the construct — including the guards beside it.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(string|int $foo, int $n): void {{\n\techo match (true) {{\n\t\t$n => \\PHPStan\\dumpType($foo),\n\t\tis_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => 0,\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(string|int $foo, int $n): void {\n\techo match (true) {\n\t\t$n => \\PHPStan\\dumpType($foo),\n\t\tis_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => 0,\n\t};\n}\n"
+        ),
         Vec::<String>::new(),
         "all-or-nothing: a bare-variable arm takes the guards down with it"
     );
@@ -235,9 +235,9 @@ fn a_by_value_match_on_a_boolean_subject_is_unchanged() {
     // is still the boolean-subject `match` it always was — the guard chain is only
     // ever reached where the answer used to be `Opaque`.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(bool $b): void {{\n\techo match ($b) {{\n\t\ttrue => \\PHPStan\\dumpType($b),\n\t\tfalse => \\PHPStan\\dumpType($b),\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(bool $b): void {\n\techo match ($b) {\n\t\ttrue => \\PHPStan\\dumpType($b),\n\t\tfalse => \\PHPStan\\dumpType($b),\n\t};\n}\n"
+        ),
         vec!["dumped type: true", "dumped type: false"]
     );
 }
@@ -252,9 +252,9 @@ fn an_inexpressible_guard_subtracts_nothing_and_the_arm_is_still_walked() {
     // answer `if (cool($foo))` gives; what matters here is that neither side
     // claims a narrowing.)
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction cool(mixed $v): bool {{ return true; }}\nfunction f(string|int $foo): void {{\n\techo match (true) {{\n\t\tcool($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction cool(mixed $v): bool { return true; }\nfunction f(string|int $foo): void {\n\techo match (true) {\n\t\tcool($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};\n}\n"
+        ),
         vec!["dumped type: unknown", "dumped type: unknown"]
     );
 }
@@ -388,9 +388,9 @@ fn a_guard_chain_nested_in_an_arm_body_is_walked() {
     // An arm body is a statement position by any other name, so the chain inside
     // one gets the same treatment — including the inner subtraction.
     assert_eq!(
-        dumps(&format!(
-            "<?php\nfunction f(string|int $foo, ?int $n): void {{\n\techo match (true) {{\n\t\tis_string($foo) => match (true) {{ $n === null => \\PHPStan\\dumpType($n), default => \\PHPStan\\dumpType($n) }},\n\t\tdefault => 0,\n\t}};\n}}\n"
-        )),
+        dumps(
+            "<?php\nfunction f(string|int $foo, ?int $n): void {\n\techo match (true) {\n\t\tis_string($foo) => match (true) { $n === null => \\PHPStan\\dumpType($n), default => \\PHPStan\\dumpType($n) },\n\t\tdefault => 0,\n\t};\n}\n"
+        ),
         vec!["dumped type: null", "dumped type: int"]
     );
 }
@@ -412,10 +412,9 @@ fn a_default_written_first_is_still_the_no_match_arm() {
 fn a_guard_chain_whose_every_arm_throws_terminates_the_trace() {
     // Reachability rides on the same `if` machinery: no branch falls through, so
     // the function does not read as falling off its end.
-    let src = format!(
-        "<?php\nfunction f(string|int $foo): int {{\n\t$r = match (true) {{\n\t\tis_string($foo) => throw new LogicException(),\n\t\tdefault => throw new LogicException(),\n\t}};\n}}\n"
-    );
-    let ds = findings(&src);
+    let src =
+        "<?php\nfunction f(string|int $foo): int {\n\t$r = match (true) {\n\t\tis_string($foo) => throw new LogicException(),\n\t\tdefault => throw new LogicException(),\n\t};\n}\n";
+    let ds = findings(src);
     assert!(ds.is_empty(), "a body that always throws misses no return, got: {ds:?}");
 }
 
