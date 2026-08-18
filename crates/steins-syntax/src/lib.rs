@@ -2151,9 +2151,9 @@ pub struct Scope {
     /// `default` arm is absent (ADR-0088 §5's note on issue #448) — every one is
     /// the same span [`ThrowKind::New`]'s synthetic `UnhandledMatchError` origin
     /// for the construct already carries (`scan_throw_origins`'s `Node::Match`
-    /// arm), computed independently by [`scan_guard_chain_no_default`].
+    /// arm), computed independently by `scan_guard_chain_no_default`.
     ///
-    /// [`lower_match_guard_chain`] desugars such a chain to [`StmtKind::If`] with
+    /// `lower_match_guard_chain` desugars such a chain to [`StmtKind::If`] with
     /// `else_trace: None` — deliberately (issue #431), so the guard vocabulary and
     /// the join stay the `if` path's — but that erases the one bit the coverage
     /// gate needs: whether a missing `else` is an ordinary fall-through or a
@@ -9370,17 +9370,16 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
 /// is still reached, since only the outer construct's own arms are skipped by
 /// [`lower_match_stmt`] itself, not this walk.
 fn scan_guard_chain_no_default(node: &Node<'_, '_>, out: &mut Vec<Span>) {
-    if let Node::Match(m) = node {
-        if !m.arms.iter().any(mago_syntax::cst::MatchArm::is_default)
-            && matches!(
-                lower_match_stmt(m),
-                Some(Stmt { kind: StmtKind::If { else_trace: None, .. }, .. })
-            )
-        {
-            out.push(to_span(m.span()));
-        }
-        // Fall through to descend into the arms below — they may hold matches of
-        // their own, whether or not this outer one qualified.
+    if let Node::Match(m) = node
+        && !m.arms.iter().any(mago_syntax::cst::MatchArm::is_default)
+        && matches!(
+            lower_match_stmt(m),
+            Some(Stmt { kind: StmtKind::If { else_trace: None, .. }, .. })
+        )
+    {
+        out.push(to_span(m.span()));
+        // Fall through (below) to descend into the arms too — they may hold
+        // matches of their own.
     }
     if matches!(
         node,
