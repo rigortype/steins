@@ -9219,11 +9219,26 @@ fn scan_value_matches(node: &Node<'_, '_>, out: &mut Vec<Stmt>) {
 }
 
 /// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).
-/// Returns `None` — falling back to `Opaque` — when the subject or any arm
-/// condition does not lower to a variable/literal, or when more than one
-/// `default` arm is present (partial structuring is unsound for the first-match
-/// and no-`default`-throws rules, so it is all-or-nothing).
+/// Returns `None` — falling back to `Opaque` — when neither shape fits: the
+/// **by-value** shape ([`lower_match_by_value`], subject and every arm condition a
+/// variable/literal) or the **guard-chain** shape ([`lower_match_guard_chain`],
+/// `match (true)`/`match (false)` over conditions). Both are all-or-nothing:
+/// partial structuring is unsound for the first-match and no-`default`-throws
+/// rules.
+///
+/// The by-value shape is tried first, so nothing it already structures changes
+/// meaning — `match (true) { true => …, false => … }` stays a by-value `match` on
+/// a boolean subject, and the guard chain is reached only where the answer used to
+/// be `Opaque`.
 fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
+    lower_match_by_value(m).or_else(|| lower_match_guard_chain(m))
+}
+
+/// The by-value `match`: subject and every arm condition lower to a
+/// variable/literal, and the arms are compared against the subject with `===`.
+/// `None` when any of them does not lower, or when more than one `default` arm is
+/// present.
+fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
     let subject = usable_operand(m.expression)?;
     let mut arms = Vec::new();
     let mut default: Option<Vec<Stmt>> = None;
@@ -9245,6 +9260,121 @@ fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
         }
     }
     Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: false }, Vec::new()))
+}
+
+/// Structure `match (true) { <guard> => …, … }` — an `if`/`elseif` chain written
+/// in `match` syntax (issue #431) — as exactly that: a [`StmtKind::If`] whose
+/// links are the arms in source order and whose `else` is the `default`.
+///
+/// The desugaring is the whole point. First-match order *is* `elseif` order, so
+/// the arm walk, the accumulated subtraction every later arm and the `default`
+/// inherit (ADR-0052's arm-wise negation), the guard vocabulary and the dead-branch
+/// marking all arrive as the `if` path's, not as a second implementation of them.
+/// `default` becomes the `else` wherever it is written, since PHP consults it only
+/// when nothing else matched.
+///
+/// Three refusals, each all-or-nothing (`None` → the whole construct is `Opaque`):
+///
+/// * a subject that is not the literal `true`/`false`. `match ($x) { is_int($y) => … }`
+///   is a *comparison* against `$x`, not a guard chain, and `match (1) { … }` likewise;
+/// * an arm condition [`arm_cond_is_bool_valued`] refuses — `match` compares with
+///   `===`, so reading the arm as its condition's truth is only sound where the two
+///   agree;
+/// * a second `default`.
+///
+/// `match (false)` is the same chain with every arm's sense inverted: the arm runs
+/// when its condition is `false`, which is `!cond` for the conditions this accepts.
+fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
+    let sense = bool_literal_subject(m.expression)?;
+    let mut links: Vec<(CondExpr, Vec<Stmt>)> = Vec::new();
+    let mut default: Option<Vec<Stmt>> = None;
+    for arm in m.arms.iter() {
+        match arm {
+            mago_syntax::cst::MatchArm::Expression(a) => {
+                // `cond1, cond2 => …` takes the arm when EITHER holds, so the
+                // conditions fold with `||` — after the per-condition inversion, so
+                // `match (false) { a, b => … }` reads `!a || !b`.
+                let mut cond: Option<CondExpr> = None;
+                for c in a.conditions.iter() {
+                    let one = guard_arm_cond(c, sense)?;
+                    cond = Some(match cond {
+                        None => one,
+                        Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one)),
+                    });
+                }
+                links.push((cond?, lower_arm_body(a.expression)));
+            }
+            mago_syntax::cst::MatchArm::Default(a) => {
+                if default.is_some() {
+                    return None; // two defaults — give up (unreachable in valid PHP)
+                }
+                default = Some(lower_arm_body(a.expression));
+            }
+        }
+    }
+    let mut links = links.into_iter();
+    let (cond, then_trace) = links.next()?; // `match (true) { default => … }` is by-value
+    Some(Stmt::lowered(
+        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
+        Vec::new(),
+    ))
+}
+
+/// `Some(true)` / `Some(false)` when the `match` subject is written as the literal
+/// `true` / `false`, else `None`. Read off [`lower_cond_operand`] so a parenthesized
+/// or case-varied spelling (`match (TRUE)`) answers the same as the bare one.
+fn bool_literal_subject(expr: &Expression<'_>) -> Option<bool> {
+    match lower_cond_operand(expr) {
+        CondOperand::Literal(ArgValue::Bool(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// One arm condition of a guard chain, lowered by [`lower_cond`] — the very
+/// lowering the `if` path uses — and inverted for a `match (false)` subject.
+fn guard_arm_cond(expr: &Expression<'_>, sense: bool) -> Option<CondExpr> {
+    let cond = lower_cond(expr);
+    if !arm_cond_is_bool_valued(&cond) {
+        return None;
+    }
+    Some(if sense { cond } else { CondExpr::Not(Box::new(cond)) })
+}
+
+/// May a `match (true)` arm be read as "its condition holds"?
+///
+/// `match` compares with `===`, so the arm runs on `<cond> === true` and the later
+/// arms inherit `<cond> !== true` — which is the condition's negation **only where
+/// the condition is boolean-valued**. `match (true) { $n => … }` is the shape that
+/// makes the difference bite: `$n = 5` takes no arm, and reading the residue as
+/// "`$n` is falsy" would hand every later arm and the `default` a narrowing PHP
+/// never proved. So [`CondExpr::Truthy`] — the one lowered form whose truth set is
+/// wider than `{true}` — is refused, and with it the whole construct.
+///
+/// `!`, `&&` and `||` yield `bool` in PHP whatever their operands are, comparisons
+/// and `instanceof` and `isset` likewise, so those are unconditionally fine.
+/// [`CondExpr::Opaque`] is fine for the opposite reason: it narrows nothing on
+/// either side, so no reading of it can claim anything.
+///
+/// [`CondExpr::Call`] is the judgment call. A call in `match (true)` arm position
+/// is a predicate in every idiom that works — a callee returning anything but
+/// `bool` matches *no* arm at all, so the code would not be written — and refusing
+/// calls would refuse `is_string($foo)`, the form the feature exists for. The
+/// residual exposure is a non-`bool` callee that also carries
+/// `@phpstan-assert-if-false` or an out-parameter (`preg_match(…) => …`), where the
+/// no-match path would read the tag at a polarity PHP did not prove; measured at
+/// zero occurrences across the public corpus.
+fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
+    match cond {
+        CondExpr::Cmp { .. }
+        | CondExpr::Instanceof { .. }
+        | CondExpr::Not(_)
+        | CondExpr::And(..)
+        | CondExpr::Or(..)
+        | CondExpr::Isset { .. }
+        | CondExpr::Call { .. }
+        | CondExpr::Opaque { .. } => true,
+        CondExpr::Truthy(_) => false,
+    }
 }
 
 /// Structure a `switch ($subject) { … }` (ADR-0031 Part B) into the same
@@ -9333,7 +9463,9 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
 
 /// Lower an operand to a *usable* [`CondOperand`] — a bare variable or a literal —
 /// or `None` for anything else (a call, property fetch, arithmetic). Used to gate
-/// whether a `match`/`switch` can be structured at all.
+/// whether the **by-value** shape of a `match`/`switch` can be structured at all;
+/// a `match` this refuses is offered to [`lower_match_guard_chain`] before it is
+/// given up as `Opaque`.
 fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     match lower_cond_operand(expr) {
         CondOperand::Other { .. } => None,
@@ -9977,9 +10109,10 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             }
         },
         // A statement-position `match` (ADR-0031 Part B): structure its arms when
-        // the subject and every arm condition lower to a variable/literal; else
-        // fall back to `Opaque` over the whole subtree (partial structuring is
-        // unsound for the first-match / no-default-throws rules).
+        // the subject and every arm condition lower to a variable/literal, or when
+        // it is a `match (true)`/`match (false)` guard chain; else fall back to
+        // `Opaque` over the whole subtree (partial structuring is unsound for the
+        // first-match / no-default-throws rules).
         Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
             let (writes, reads, poisons, may_return) = opaque_sets(&node);
