@@ -4160,6 +4160,14 @@ fn check_units(
     let never_returning = never_returning_names(units);
     // end return missing (ADR-0078, issue #199)
 
+    // ADR-0088 §5 (issue #433): the dataflow walk's own verdict on which
+    // default-less `match` statements do NOT cover their subject's Verified
+    // domain, keyed by (file, span-start) — the same key the structural throw
+    // scan's `ThrowKind::New` origin for the same construct carries (both trace
+    // back to the same CST `Match` node). Populated below, read by
+    // `throw_diagnostics` at the end.
+    let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
+
     for fi in 0..units.len() {
         // parse failure (ADR-0079, issue #180): the broken file's own passes do not
         // run at all. The project-wide passes below (effects, throws) are filtered
@@ -4188,6 +4196,7 @@ fn check_units(
         // (live-path discipline, ADR-0002/0031). Binding descents contribute
         // nothing here: their deadness is per-binding, not universal. ---------
         let mut dead_spans: Vec<Span> = Vec::new();
+        let mut uncovered_spans: Vec<Span> = Vec::new();
         for scope in cx.tree().scopes() {
             analyze_scope(
                 &cx,
@@ -4199,11 +4208,13 @@ fn check_units(
                 None,
                 None,
                 Some(&mut dead_spans),
+                Some(&mut uncovered_spans),
                 None,
                 None,
                 &mut out,
             );
         }
+        uncovered_matches.insert(fi, uncovered_spans.iter().map(|s| s.start).collect());
 
         // --- The `class.undefined` pass (ADR-0049 §5 / S4): the file's hard-error
         // class references, judged once each. A reference in a proven-dead region is
@@ -4361,7 +4372,7 @@ fn check_units(
     out.extend(effect_diagnostics(units, index, plugins, policy));
 
     // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
-    out.extend(throw_diagnostics(units, index));
+    out.extend(throw_diagnostics(units, index, &uncovered_matches));
 
     // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
     // passes above attributed to a broken file. §2.4 is about the file, not about
@@ -4646,6 +4657,7 @@ fn annotate_units(
             None,
             None,
             Some(&mut facts),
+            None,
             None,
             None,
             None,
@@ -8961,7 +8973,18 @@ fn out_param_argument_spans(cx: &Cx) -> HashSet<u32> {
 
 /// The whole-project throw diagnostics: `throw.undeclared` envelope escapes and
 /// `throw.liskov-widened` overrides (ADR-0040/0033).
-fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
+///
+/// `uncovered` is the dataflow walk's own ADR-0088 §5 verdict (issue #433):
+/// per file index, the span-starts of default-less `match` statements proven
+/// not to cover their subject's Verified domain. [`emit_undeclared`] consults it
+/// to decide whether a structurally-recorded `UnhandledMatchError` origin (every
+/// default-less `match`, scanned independently of coverage — see
+/// [`scan_throw_origins`]'s own `Node::Match` arm) is a REPORTABLE contribution.
+fn throw_diagnostics(
+    units: &[FileUnit],
+    index: &Index,
+    uncovered: &HashMap<usize, HashSet<u32>>,
+) -> Vec<Diagnostic> {
     // Fast path: nothing to check without a `@throws` tag anywhere.
     let any_throws = units.iter().any(|u| {
         let has = |d: Option<&str>| d.is_some_and(|t| t.contains("@throws") || t.contains("throws"));
@@ -8984,7 +9007,10 @@ fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
                 continue;
             }
             let sym = Sym::Func(f.fqn.clone());
-            emit_undeclared(&mut out, &cx, index, units, &sym, &f.name, &declared, &throws, &f.throw_origins);
+            emit_undeclared(
+                &mut out, &cx, index, units, &sym, &f.name, &declared, &throws, &f.throw_origins,
+                uncovered,
+            );
         }
         for c in cx.tree().classes() {
             for m in &c.methods {
@@ -8992,7 +9018,10 @@ fn throw_diagnostics(units: &[FileUnit], index: &Index) -> Vec<Diagnostic> {
                 let display = format!("{}::{}", c.name, m.name);
                 if !declared.is_empty() {
                     let sym = Sym::Method(c.fqn.clone(), m.name.clone());
-                    emit_undeclared(&mut out, &cx, index, units, &sym, &display, &declared, &throws, &m.throw_origins);
+                    emit_undeclared(
+                        &mut out, &cx, index, units, &sym, &display, &declared, &throws,
+                        &m.throw_origins, uncovered,
+                    );
                 }
                 // Liskov: an override/impl whose declared throws widen the parent's.
                 emit_liskov(&mut out, &cx, c, m, &declared);
@@ -9015,6 +9044,7 @@ fn emit_undeclared(
     declared: &[String],
     throws: &HashMap<Sym, ThrowSet>,
     decl_origins: &[ThrowOrigin],
+    uncovered: &HashMap<usize, HashSet<u32>>,
 ) {
     let Some(set) = throws.get(sym) else { return };
     let declared_list = declared.iter().map(|d| last_segment(d).to_owned()).collect::<Vec<_>>().join("|");
@@ -9024,7 +9054,31 @@ fn emit_undeclared(
         if cert != Certainty::Yes {
             continue; // Maybe-escape is silent (ADR-0040)
         }
-        if throw_checked(cx, &fact.class) != Certainty::Yes {
+        // ADR-0088 §5 (issue #433): `UnhandledMatchError` is an `Error` — unchecked
+        // by ADR-0007's family default, `throw_checked` below says so, and every
+        // OTHER `Error`/`LogicException` throw stays exactly that unchecked. This
+        // one class earns the opposite answer for the reason ADR-0007's own
+        // rationale gives for the default: the proof layer is supposed to own
+        // `Error`, by proving the throwing branch dead. A default-less `match`
+        // missing a case is precisely the shape the proof layer has nothing to
+        // prove dead — the coverage verdict already establishes it is LIVE — so
+        // it is checked, but ONLY where `fact.offset` names a construct
+        // `file_uncovered` actually proved uncovered. Every other
+        // `UnhandledMatchError` fact (a covered match, an unstructured/opaque one
+        // the walk never judged, or one this pass's own `descent.is_none()`
+        // restriction left unrecorded) falls through to the ordinary unchecked
+        // answer below and never reaches this id — silence being the safe
+        // default for anything this gate did not itself prove live.
+        let is_unhandled_match_error = fact.class.trim_start_matches('\\').eq_ignore_ascii_case("UnhandledMatchError");
+        let checked = if is_unhandled_match_error {
+            let uncovered_here = uncovered
+                .get(&fact.origin_file)
+                .is_some_and(|spans| spans.contains(&fact.offset));
+            if uncovered_here { Certainty::Yes } else { Certainty::No }
+        } else {
+            throw_checked(cx, &fact.class)
+        };
+        if checked != Certainty::Yes {
             continue; // unchecked or unknown-hierarchy — never counts
         }
         // Covered iff a subclass of some declared class (Yes through chain).
@@ -11734,6 +11788,10 @@ fn analyze_scope(
     mut descent: Option<Descent<'_>>,
     mut facts: Option<&mut Vec<LineFact>>,
     dead_out: Option<&mut Vec<Span>>,
+    // Spans of default-less `match` statements this walk proved do not cover the
+    // subject's Verified domain (ADR-0088 §5, issue #433) — the [`WalkCx::uncovered_matches`]
+    // out-channel, same `Some`-only-for-the-plain-walk discipline as `dead_out`.
+    uncovered_out: Option<&mut Vec<Span>>,
     ret_exits: Option<&mut Vec<ExitContribution>>,
     // The `$this`-snapshot out-channel (ADR-0057 C2, generalized by the 2026-08-17
     // amendment's D3): `Some` exactly where this walk's `$this` was seeded from a
@@ -11924,6 +11982,7 @@ fn analyze_scope(
         ret_info: &ret_info,
         ret_phpdoc: &ret_phpdoc,
         dead: std::cell::RefCell::new(Vec::new()),
+        uncovered_matches: std::cell::RefCell::new(Vec::new()),
         alloc: std::cell::Cell::new(alloc_start),
         summary,
     };
@@ -11962,6 +12021,9 @@ fn analyze_scope(
     if let Some(sink) = dead_out {
         sink.extend(w.dead.into_inner());
     }
+    if let Some(sink) = uncovered_out {
+        sink.extend(w.uncovered_matches.into_inner());
+    }
 }
 
 /// One constructor-walk exit's contribution (ADR-0057 C2): the snapshot of the
@@ -11995,6 +12057,17 @@ struct WalkCx<'a, 'w> {
     /// per-scope walk's regions are universal truths — a binding descent's dead
     /// branches are dead only for that binding, so descents discard theirs.
     dead: std::cell::RefCell<Vec<Span>>,
+    /// Spans of default-less `match` statements proven, on this walk, not to
+    /// cover the subject's Verified domain (ADR-0088 §5, issue #433) — the
+    /// dataflow half of the `throw.undeclared` `\UnhandledMatchError` gate. Same
+    /// plain-walk-only discipline as [`Self::dead`]: a descent's hypothetical
+    /// bindings are per-call-site, not a fact about the declaration, so a
+    /// descent never pushes here (see [`walk_match`]'s `descent.is_none()`
+    /// guard). The throw system correlates these against
+    /// [`ThrowKind::New`]'s own span for the same construct (both trace back to
+    /// the same CST `Match` node's start offset), so nothing pairs this set
+    /// with a file index here — the caller does that.
+    uncovered_matches: std::cell::RefCell<Vec<Span>>,
     /// A monotone allocation-id counter for this scope walk (ADR-0036). Shared
     /// across branch clones (they clone the `Store`, not this cell), so a `new` in
     /// one branch never collides with one in another that later joins.
@@ -12677,8 +12750,8 @@ fn walk_trace(
                 descent, facts, out,
             ),
             StmtKind::Match { subject, arms, default, loose } => walk_match(
-                w, folder, subject, arms, default.as_deref(), *loose, env, store, descent,
-                facts, out,
+                w, folder, subject, arms, default.as_deref(), *loose, stmt.span, env, store,
+                descent, facts, out,
             ),
         };
 
@@ -16133,6 +16206,14 @@ fn walk_else(
 /// issue #439) — the negated-guard path an `elseif` chain has always modelled. The
 /// successor env is the join of every branch that falls through; if none does, the
 /// construct terminates.
+///
+/// A default-less `match` (not `switch`) additionally asks ADR-0088 §5's question
+/// (issue #433): does the subtraction above prove the subject's Verified domain is
+/// NOT exhausted? When it does — on the plain per-scope walk only, per
+/// [`WalkCx::uncovered_matches`]'s own doc — `match_span` (this construct's own
+/// span, the same one [`ThrowKind::New`]'s synthetic `UnhandledMatchError` origin
+/// carries) is recorded there, for the throw system to read back and decide
+/// whether the contribution is real.
 #[allow(clippy::too_many_arguments)]
 fn walk_match(
     w: &WalkCx,
@@ -16141,6 +16222,7 @@ fn walk_match(
     arms: &[MatchArmT],
     default: Option<&[Stmt]>,
     loose: bool,
+    match_span: Span,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     descent: &mut Option<Descent<'_>>,
@@ -16197,6 +16279,7 @@ fn walk_match(
         let mut benv = env.clone();
         let mut bclasses = store.clone();
         refine_match_arm(subject, &arm.conditions, loose, &mut benv, w.cx.php_minor);
+        refine_match_arm_enum_case(w, subject, &arm.conditions, loose, &mut bclasses);
         // Tag-based discrimination (ADR-0062 A-G4): a `match`/`switch` on a
         // constant-key projection subtracts the base's array arms by the field's
         // `admits` verdict, minting the collapsed shape into the arm's env. The
@@ -16240,12 +16323,46 @@ fn walk_match(
             // A default-less `switch` falls through to after itself on no match —
             // carrying the same subtraction the `default` body would have carried;
             // a default-less `match` throws `\UnhandledMatchError`, a terminator
-            // that joins nothing (and so has no path to refine).
-            if loose && no_match_taken != Certainty::No {
+            // that joins nothing (and so has no path to refine). Both outcomes need
+            // the identical subtraction, so it runs once regardless of `loose`.
+            if no_match_taken != Certainty::No {
                 let mut benv = env.clone();
                 let mut bclasses = store.clone();
                 subtract_no_match_path(w, subject, arms, loose, &mut benv, &mut bclasses);
-                fell.push((benv, bclasses));
+                if loose {
+                    fell.push((benv, bclasses));
+                } else {
+                    // ADR-0088 §5 (issue #433): does the subtraction just run prove
+                    // the arms do NOT exhaust the subject's Verified domain? Read
+                    // exactly the way #428's sentinel already reads the same
+                    // question in the other direction (`check_never_sentinel`):
+                    // [`Store::contract_narrowed`] is the chain-level evidence bit
+                    // that separates a residue a real subtraction produced from a
+                    // lane the arm conditions simply could not touch (a `switch`'s
+                    // own over-approximate residue included — `loose` is handled
+                    // above and never reaches here), and
+                    // [`Store::contract_emptied`] is `true` only for a lane that
+                    // was all-`Verified` AND emptied, never for one merely absent.
+                    // A narrowed-but-non-empty residue is the missing-a-case
+                    // shape; an un-narrowed or absent lane is ignorance, and stays
+                    // silent (ADR-0002) exactly as the sentinel declines it.
+                    //
+                    // Plain per-scope walk only: a descent's `bclasses` reflects
+                    // one caller's hypothetical bindings, not a fact this
+                    // construct's own declaration earns (mirrors `dead`'s same
+                    // restriction, and `Store::contract` is never even seeded on a
+                    // descent — see `analyze_scope`'s own seeding gate).
+                    if descent.is_none()
+                        && let CondOperand::Var(name) = subject
+                        && bclasses.contract_narrowed(name)
+                        && !bclasses.contract_emptied(name)
+                    {
+                        w.uncovered_matches.borrow_mut().push(match_span);
+                    }
+                    // No `fell.push`: the construct still terminates here exactly
+                    // as it always has — the coverage verdict decides whether the
+                    // throw is REPORTABLE, never whether it happens.
+                }
             }
         }
     }
@@ -16330,6 +16447,42 @@ fn refine_match_arm(
         let line = env.get(name).map_or(0, |k| k.line);
         env.insert(name.clone(), Known::value(fact, line, Some("matched arm".to_owned())));
     }
+}
+
+/// Refine the subject's enum-case identity inside a matched arm (issue #433):
+/// the arm-lane twin of [`refine_match_arm`], for the one identity
+/// [`refine_match_arm`] cannot carry — an enum case is an object and has no
+/// [`Val`], exactly the reason [`subtract_no_match_path`] gives for reading the
+/// arm lane there too. Reuses [`apply_class_narrowing`]'s own positive-polarity
+/// `Subtrahend::EnumCase` subtraction (the `$s === Suit::Hearts` guard's own
+/// mechanism), so a matched arm and a taken guard branch narrow the same way
+/// through the same call.
+///
+/// Only a **single-condition** arm narrows: `case Hearts, Spades => …` is a
+/// disjunction ("is Hearts OR Spades") no single subtraction call spells, so a
+/// multi-condition arm is left unrefined — the conservative direction every
+/// unrepresentable shape takes (ADR-0002), matching [`refine_match_arm`]'s own
+/// per-operand `return` on the first condition it cannot carry.
+fn refine_match_arm_enum_case(
+    w: &WalkCx,
+    subject: &CondOperand,
+    conditions: &[CondOperand],
+    loose: bool,
+    store: &mut Store,
+) {
+    if loose {
+        return;
+    }
+    let CondOperand::Var(name) = subject else { return };
+    let [CondOperand::ClassConst(sc, case)] = conditions else { return };
+    let Some(enum_fqn) = w.cx.resolve_enum_case(sc, case, w.enclosing_class) else { return };
+    let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
+    subtract_contract_lane(
+        store,
+        name,
+        &normalize::Subtrahend::EnumCase { enum_fqn, case: case.clone(), polarity: true },
+        &oracle,
+    );
 }
 
 /// Subtract every arm's conditions from the subject on the **no-match path**
@@ -24657,6 +24810,7 @@ fn descend(
                 Some(child),
                 None,
                 None,
+                None,
                 Some(&mut exits),
                 seeded_this.map(|_| &mut this_exits),
                 out,
@@ -24680,6 +24834,7 @@ fn descend(
                 seed_store,
                 body_this_exact,
                 Some(child),
+                None,
                 None,
                 None,
                 Some(&mut exits),

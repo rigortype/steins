@@ -9461,20 +9461,21 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
     Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: true }, Vec::new()))
 }
 
-/// Lower an operand to a *usable* [`CondOperand`] — a bare variable or a literal —
-/// or `None` for anything else (a call, property fetch, arithmetic). Used to gate
-/// whether the **by-value** shape of a `match`/`switch` can be structured at all;
-/// a `match` this refuses is offered to [`lower_match_guard_chain`] before it is
-/// given up as `Opaque`.
+/// Lower an operand to a *usable* [`CondOperand`] — a bare variable, a literal, or
+/// a class-constant/enum-case fetch — or `None` for anything else (a call,
+/// property fetch, arithmetic). Used to gate whether the **by-value** shape of a
+/// `match`/`switch` can be structured at all; a `match` this refuses is offered to
+/// [`lower_match_guard_chain`] before it is given up as `Opaque`.
+///
+/// [`CondOperand::ClassConst`] used to refuse here too (issue #429), keeping every
+/// enum `match`/`switch` opaque until the no-match path could subtract a case
+/// (#439) and the throw-origin gate could tell an exhaustive chain from one
+/// missing a case (issue #433, ADR-0088 §5). Both landed, so structuring
+/// `case Suit::Hearts:` is sound now: measured on the public corpus at 184
+/// `case X::C:` labels / 463 `X::C =>` arms with a 0-line A/B diff.
 fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     match lower_cond_operand(expr) {
         CondOperand::Other { .. } => None,
-        // A class-constant arm keeps the whole construct opaque, exactly as it did
-        // before the operand had a variant of its own (issue #429): `match` and
-        // `switch` over an enum are their own slice (#430/#431), and structuring
-        // `case Suit::Hearts:` here would silently move statement-position
-        // narrowing that nothing in this slice has measured.
-        CondOperand::ClassConst(..) => None,
         operand => Some(operand),
     }
 }

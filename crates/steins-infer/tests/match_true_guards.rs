@@ -238,15 +238,26 @@ fn a_truthy_valued_arm_condition_refuses_the_whole_construct() {
 }
 
 #[test]
-fn a_class_constant_arm_is_refused_exactly_as_before() {
-    // `usable_operand`'s explicit `ClassConst` refusal is untouched by this slice,
-    // and the guard chain does not smuggle it back in: `Suit::Hearts` lowers to a
-    // truthiness test over a class constant, which the shape above refuses.
+fn a_class_constant_arm_reaches_the_by_value_shape_first_now() {
+    // Issue #433 lifts `usable_operand`'s `ClassConst` refusal, and
+    // `lower_match_stmt` tries the by-value shape BEFORE offering a `match` to
+    // the guard chain (its own doc): `match (true) { Suit::Hearts => …, … }` now
+    // structures as an ordinary by-value match whose SUBJECT is the literal
+    // `true`, never reaching `lower_match_guard_chain` at all — so this is not a
+    // guard chain smuggling a class constant back in, it is the shape above
+    // never getting a turn.
+    //
+    // `true === Suit::Hearts` is comparing across types PHP always answers
+    // `false` for, but `ClassConst` is "unproven" to the value lane (its own
+    // doc), so `eval_arm_cond` cannot fold that to a `No` and both arms stay
+    // `Maybe` — walked, not pruned. Neither arm's subject is `$s` (it is the
+    // literal `true`), so nothing narrows `$s` on either side: both dump the
+    // untouched declaration.
     assert_eq!(
         dumps(
             "<?php\nenum Suit { case Hearts; case Spades; }\nfunction f(Suit $s): void {\n\techo match (true) {\n\t\tSuit::Hearts => \\PHPStan\\dumpType($s),\n\t\tdefault => \\PHPStan\\dumpType($s),\n\t};\n}\n"
         ),
-        Vec::<String>::new()
+        vec!["dumped type: Suit", "dumped type: Suit"]
     );
 }
 
