@@ -1136,3 +1136,90 @@ Fixtures: `crates/steins-infer/tests/count_guards.rs` — both arms clearing
 identically, the sealed/unsealed cases unaffected, an expression `count()`
 cannot bind to a subject still doing nothing, and the catch-arm regression
 above.
+
+## Note (2026-08-18): the enum case set is a finite Verified domain, and an emptied Verified lane is readable (issue #429)
+
+Completion of point 1 and an **amendment to point 2's emptied-carrier
+rule**, recorded together because the second exists for the first.
+
+**The domain.** A PHP enum is the one place the runtime-enforced type is
+*finite*, so it is the one place an exhaustiveness question is answerable on
+Verified premises alone. A case is an object with exactly one inhabitant, and
+the value domain is object-free (ADR-0035/0038/0043), so the singleton has no
+`Val` and no `Fact`. Point 1 already says where declared alternatives live,
+and that is where it goes: `ContractTy::EnumCase { enum_fqn, case }` is one
+arm, and a native `Suit $s` seeds one arm per declared case at `Verified`.
+`normalize::Subtrahend::EnumCase` subtracts them, mirroring
+`Subtrahend::Class`'s polarity pair.
+
+Two judgments differ from the class subtrahend's, both because the subtrahend
+is a single **value** rather than a class extent:
+
+* **No finality question.** The positive branch deletes a `Class(M)` arm iff
+  `is_a(E, M) = No`. Whether `M` has unseen descendants cannot change whether
+  `E::C` is one of `M`'s instances, so point 2's `final`-gate — which exists
+  because a subtrahend covering a class extent must reason about the whole
+  extent — has nothing to gate here.
+* **The positive branch narrows.** The 2026-08-01 note refused keep-only
+  narrowing on the arm lane because "the value lane's `Refine::Exact` already
+  owns that branch". For an enum case the value lane cannot own it — there is
+  no `Val` to be exact about. Rather than add an intersection operator, the
+  positive branch is spelled as the subtraction it is: `$s === Suit::Hearts`
+  removes every value that is not `Suit::Hearts`. The lane stays what point 2
+  built, a carrier every mutation removes provably-dead arms from.
+
+**The amendment.** Point 2's last bullet says an emptied carrier "**drops to
+no-fact** … never a death signal". The drop is what makes the finite domain
+unusable: a chain that covers every case produces exactly the emptiness a
+consumer needs to read, and dropping it makes that outcome indistinguishable
+from a variable with no lane at all — which is the *absence* answer, and the
+opposite claim. Amended: **an emptied lane whose every arm was `Verified` is
+kept, empty**, and a new accessor reads it. A lane holding any `Asserted` arm
+keeps the landed drop, because emptying a docblock's claim proves nothing.
+
+The rest of the bullet is untouched and load-bearing: an empty lane is still
+**not a death signal**. No branch is pruned by it, `eval_cond` is taught
+nothing about enum identity, and the verdict keeps owning death. What the
+empty lane buys is a consumer's *silence* — the direction that cannot
+manufacture a finding.
+
+**The absence discipline decides where the domain exists** (ADR-0049,
+ADR-0002 outranking coverage). The case set is complete only when one
+declaration can be read whole: a uniquely-resolved, unconditionally declared
+enum in a file that parsed, with at least one case. Anything else keeps its
+`Class` arm — which no identity guard can subtract to empty, so nothing
+downstream can claim an exhaustion the declaration never proved. The guard
+side asks the same gate as the seed, so a lane that was never expanded is
+never subtracted from as though it had been. And only a `Verified` arm
+expands: `@param Suit` over an untyped parameter is a claim, and a claim may
+not mint a finite domain (ADR-0037).
+
+**Rendering** stays on the point-4 cut's far side. The expansion is semantics;
+`Suit` and `Suit::Hearts|Suit::Spades|Suit::Clubs` denote one set, so an enum
+whose whole case set survives collapses back to the enum's name before it is
+spelled, and only a narrowed domain shows its cases. An emptied domain dumps
+as PHPStan's own `*NEVER*`.
+
+**Deliberately not landed**, each its own question:
+
+* **`match`/`switch`.** Value-position `match` is not analyzed at all, and
+  statement-position structuring still refuses a class-constant arm outright,
+  exactly as it did when the operand had no variant of its own — issues
+  #430/#431 inherit this domain when they land.
+* **Backed-enum `->value` / `->name`.** Narrowing is on case identity;
+  the backing slot is a separate question and claims nothing today.
+* **Loose `==`.** PHP decides `==` between two cases through their own
+  `name`/`value` slots — a different question with a different proof.
+* **The property carrier.** A declared enum-typed *property* has no arm lane:
+  heap property slots hold a `Fact`, and a `Fact` cannot hold an object. The
+  parameter and declared-return legs land; the property leg needs the
+  object-graph extension ADR-0036 already queues.
+* **Return through a body summary.** A callee that summarizes hands its caller
+  a heap object, which has no arm lane to narrow; the declared-return floor is
+  where this leg lands today.
+
+Fixtures: `crates/steins-infer/tests/enum_case_domain.rs` (both directions,
+the accumulating chain and the two chain outcomes, the backed/pure split, the
+five absence shapes, the out-of-scope pins); `crates/steins-contract/src/`
+`normalize.rs` (the arm's subsumption, both polarities of the subtrahend, the
+no-finality rule, the unknown-hierarchy keep).
