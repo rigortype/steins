@@ -8507,6 +8507,11 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         }
         return;
     }
+    // A `match` in value position gets its arms walked, as an entry of its own
+    // placed ahead of the statement that consumes its result (issue #430). The
+    // consuming statement is lowered below exactly as before — this adds a walk,
+    // never a value.
+    value_position_matches(s, out);
     let stmt_span = to_span(s.span());
     let stmt = match s {
         // Benign: no effect on local values — keep known values flowing across.
@@ -9085,20 +9090,125 @@ fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
     out
 }
 
-/// Lower a match-arm body expression (`… => <expr>`) to a one-statement sub-trace.
-/// The body is an expression, so it reuses [`lower_expr_stmt`] (an arm body that
-/// is `throw …` therefore lowers to a real [`StmtKind::Throw`] terminator).
+/// Lower a match-arm body expression (`… => <expr>`) to a sub-trace. The body is
+/// an expression, so it reuses [`lower_expr_stmt`] (an arm body that is `throw …`
+/// therefore lowers to a real [`StmtKind::Throw`] terminator), preceded by the
+/// entries a `match` in value position inside it contributes (issue #430) — an
+/// arm body is a statement position by any other name, so it gets the same
+/// treatment [`lower_stmt`] gives one.
 fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
+    let mut out = Vec::new();
+    // A `match` that IS the arm body is a statement position: `lower_expr_stmt`
+    // structures it below, and hoisting it here too would walk its arms twice.
+    if !matches!(expr.unparenthesized(), Expression::Match(_)) {
+        scan_value_matches(&Node::Expression(expr), &mut out);
+    }
     let st = lower_expr_stmt(expr);
     // This path bypasses `lower_stmt`, so it owns its own terminality fill
     // (ADR-0078, issue #199) — from the arm's expression, the same `expr_end` a
     // statement-position expression gets.
-    vec![Stmt {
+    out.push(Stmt {
         span: to_span(expr.span()),
         end: expr_end(expr),
         has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
         ..st
-    }]
+    });
+    out
+}
+
+/// The trace entries a statement's **value-position** `match` expressions
+/// contribute, pushed ahead of the statement that consumes them (issue #430).
+///
+/// A `match` whose result is consumed — `$r = match (…)`, `return match (…)`,
+/// `echo match (…)`, `f(match (…))` — is the form nearly all real code uses, and
+/// until it lowered here its arms were never walked at all: only the
+/// statement-position path reached [`lower_match_stmt`], so every arm body was
+/// invisible to the walk. The hoisted entry restores exactly what statement
+/// position already had — per-arm first-match certainty, dead-arm marking, and
+/// the diagnostics an arm body emits — and nothing else. The **value** the
+/// `match` produces stays what it was: `lower_arg_value` still answers
+/// [`ArgValue::Other`] for a `match` and `named_call` still answers `None`, so
+/// the consuming statement's own value lane is untouched by this.
+///
+/// Only the positions whose expressions PHP evaluates in the statement's own
+/// entry env are read — an expression statement, `return`, and the two `echo`
+/// forms — the same boundary [`string_context_sites`] draws and for the same
+/// reason. A `match` in an `if` condition or a loop header is evaluated in an env
+/// this pass does not hold, and stays unstructured.
+fn value_position_matches(s: &Statement<'_>, out: &mut Vec<Stmt>) {
+    match s {
+        Statement::Expression(es) => {
+            // A `match` that IS the statement is a statement position, already
+            // structured by `lower_expr_stmt`; hoisting it would double the walk.
+            if matches!(es.expression.unparenthesized(), Expression::Match(_)) {
+                return;
+            }
+            scan_value_matches(&Node::Expression(es.expression), out);
+        }
+        Statement::Return(r) => {
+            if let Some(e) = r.value {
+                scan_value_matches(&Node::Expression(e), out);
+            }
+        }
+        Statement::Echo(e) => {
+            for v in e.values.iter() {
+                scan_value_matches(&Node::Expression(v), out);
+            }
+        }
+        Statement::EchoTag(e) => {
+            for v in e.values.iter() {
+                scan_value_matches(&Node::Expression(v), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect the structured entries for every value-position `match` in one
+/// expression subtree, in source order.
+///
+/// Two subtrees are never descended, each for its own reason:
+///
+/// * a nested function-like or class — a separate scope, lowered separately, and
+///   its free variables are not this statement's env;
+/// * the arms of a `match` this scan has already taken — [`lower_arm_body`] runs
+///   the same hoist inside each arm, so descending here would walk them twice.
+///
+/// A `match` [`lower_match_stmt`] refuses contributes nothing and is not
+/// descended either: all-or-nothing structuring is what makes the first-match and
+/// no-`default`-throws rules sound, and an arm of an unstructured outer `match`
+/// is not a position this walk can claim is reached.
+fn scan_value_matches(node: &Node<'_, '_>, out: &mut Vec<Stmt>) {
+    match node {
+        Node::Function(_)
+        | Node::Method(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        Node::Match(m) => {
+            if let Some(st) = lower_match_stmt(m) {
+                out.push(Stmt {
+                    span: to_span(m.span()),
+                    // The same terminality a statement-position `match` gets, off
+                    // the same CST node (ADR-0078): a construct every arm of which
+                    // throws does not fall through just because its result was
+                    // about to be assigned.
+                    end: match_end(m),
+                    has_terminator: subtree_has_function_exit(node),
+                    ..st
+                });
+            }
+            return;
+        }
+        _ => {}
+    }
+    for child in children(node) {
+        scan_value_matches(&child, out);
+    }
 }
 
 /// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).
