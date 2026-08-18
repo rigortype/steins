@@ -1360,28 +1360,105 @@ no `else` and falls through to it instead. Falling through only widens the join
 truthiness and would therefore admit the arm conditions this note refuses:
 sound, unbuilt, and not asked for.
 
-**One inherited gap becomes reachable through the new spelling**, and it is
-recorded here because it is the hazard class this run keeps hitting. A later
-guard's *positive* refinement replaces the lane instead of intersecting it with
-what the guards above it left, so a chain whose second arm re-narrows what the
-first subtracted ends with a lane that was never proved:
-
-```php
-if ($v === 1) { return; }   // residue 2
-if ($v !== 1) { return; }   // PHP: unreachable below. Steins: $v is 1.
-```
-
-The `default` of `match (true) { $v === 1 => …, $v !== 1 => …, default => … }`
-therefore reads `1` where PHP reaches nothing at all, and a sentinel in that
-`default` reports. Measured: the `if`/`elseif` spelling of the same shape reports
-the identical finding, at the identical wording, on the base this slice sits on —
-the desugaring inherits the gap exactly rather than introducing it, which is the
-`the_if_chain_of_the_same_shape_answers_identically` property doing its job. It
-is still a false positive that `match (true)` syntax newly reaches, and the fix
-belongs where the gap is: the positive side of a guard must intersect the lane it
-finds, not seed it.
+**One inherited gap became reachable through the new spelling**, and was pinned
+here as a false positive before the note below fixed it: a later guard's
+*positive* refinement replaced the lane instead of intersecting it with what the
+guards above it left, so a chain whose second arm re-narrowed what the first
+subtracted ended with a lane that was never proved. Measured at the time: the
+`if`/`elseif` spelling of the same shape reported the identical finding, at the
+identical wording — the desugaring inheriting the gap exactly rather than
+introducing it, which is the `the_if_chain_of_the_same_shape_answers_identically`
+property doing its job. That is why the fix landed one layer down, in the guard
+vocabulary, and every spelling went quiet at once. See the note of 2026-08-19
+(issue #445).
 
 Fixtures: `crates/steins-infer/tests/match_true_guards.rs` (the worked
 example's cells, the accumulated subtraction, `match (false)`, the three
 refusals, the inexpressible guard, the pair that proves the subtraction
-landed, and the re-narrowing chain above pinned in both spellings).
+landed, and the re-narrowing chain above, now pinned silent in both spellings).
+
+## Note (2026-08-19): guards compose by intersection, and an emptied intersection is the empty domain (issue #445)
+
+§2 said what one subtraction does to one lane and never said what a *second*
+guard does to the residue the first one left. The unwritten answer the code gave
+was "the last guard wins": a **positive** refinement — `$v === 1`, `is_string($v)`
+— overwrote the carrier it found instead of meeting it. Every negative
+refinement already composed correctly (`!== null`, `!== v`, an interval, a
+truthiness test all narrow *the existing fact*), so the asymmetry was invisible
+until a chain put a positive guard underneath a negative one:
+
+```php
+/** @param 1|2 $v */
+function t(int $v): void {
+	if ($v === 1) { return; }   // residue: 2
+	if ($v !== 1) { return; }   // PHP reaches nothing below. Steins said: $v is 1.
+}
+```
+
+and its type-predicate twin, where the seed is a base rather than a value:
+
+```php
+function t(string|int $v): void {
+	if (is_string($v)) { return; }    // residue: int
+	if (!is_string($v)) { return; }   // PHP reaches nothing below. Steins said: string.
+}
+```
+
+**The rule.** A positive refinement is an **intersection** with what the branch
+already proved, never a seed. Both carriers can hold the earlier proof and either
+one alone decides it:
+
+- the **value lane** — a fact that does not admit the refinement's value
+  (`Fact::admits`, extensional membership);
+- the **arm lane** — a lane every surviving arm of which provably cannot hold it
+  (`admits_val` answering `No` for a value; `pred_holds_on_arm` answering `No`
+  for a predicate). `Maybe` keeps the arm, so an arm the judgment cannot decide
+  never refutes anything: short of proof, the refinement stands.
+
+The arm lane is not a second opinion here, it is frequently the *only* witness. A
+`@param 1|2` over a native `int` never reaches the value lane at all
+(`seed_refined_scalar_fact` declines to overwrite a `General` base with a
+`OneOf`), so the residue `2` lives in the arm lane and nowhere else — which is
+why the composition failure survived every fixture that exercised one guard in
+isolation.
+
+**And an emptied intersection leaves the empty domain**, not the refinement's own
+seed. This is the half that matters: the seed is the one answer that is certainly
+wrong, because it states on a path PHP never takes precisely the value the guards
+above disproved. The empty domain is spelled the way an exhausted chain already
+spells it — no value fact, no arm lane — so every consumer of either carrier
+answers about the position the way it answers about the `default` of a chain that
+covered its subject: silence, on the ground that it knows of no value that gets
+there. Consistent with §2 throughout, this is **not a death signal**: nothing is
+pruned, no branch is marked unreachable, and the verdict keeps owning death.
+
+**What the rule does not do**, and deliberately. Where the intersection is
+*non-empty* nothing changes: `{v}` meets anything admitting `v` at `{v}`, so a
+positive `=== v` still proves `v` at its own stratum and still unbinds the arm
+lane the value lane now strictly outranks. Narrowing the arm lane to the kept
+arms instead would be defensible and would *add* findings (`if ($x === 1) {
+assertNever($x); }` over a `@param 1|2` would gain an arm-lane witness alongside
+the value-lane one it already has), and this clause is finding-removing by
+construction. Measured: an A/B of the public corpus at `--profile strict` is
+exactly neutral, 8922 findings either side, none added and none removed — the
+shape needs a re-narrowing guard chain over a declared finite domain, which the
+corpus does not contain, so the fixtures are the whole of the evidence that the
+behaviour changed at all.
+
+The three consumers this reaches are `phpdoc.never-param-reachable` (ADR-0088 §4,
+the surface that reported it), the dump surface (the second dump above now reads
+`unknown`, the value lane's spelling of a domain the subtraction emptied, rather
+than the guard's own answer), and every coverage verdict of ADR-0088 §2 that
+rests on the same lane. Residue, recorded rather than papered over: an all-
+`Verified` lane that a *predicate* subtraction empties is still dropped rather
+than kept-empty, so it reads as `unknown` where the `Value`-subtrahend path of
+the 2026-08-18 enum note would read `*NEVER*`. Both are silent and neither
+manufactures anything; unifying the two spellings is a separate change.
+
+Fixtures: `crates/steins-infer/tests/match_true_guards.rs` —
+`a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing` and
+`the_re_narrowing_is_the_guard_vocabulary_and_needs_no_match_at_all` (both
+flipped from the false positive they pinned),
+`the_type_predicate_vocabulary_composes_the_same_way`,
+`a_positive_refinement_the_lane_still_admits_narrows_as_it_always_did`, and the
+over-silencing guard `a_chain_that_leaves_a_genuine_residue_still_reports_it`.

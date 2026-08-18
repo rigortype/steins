@@ -19743,11 +19743,24 @@ fn apply_type_narrowing(
     for g in &guards {
         match g {
             TypeGuard::Pred { var, pred, positive } => {
+                // Asked BEFORE the subtraction, which is what erases the evidence:
+                // an arm lane the guards above left holding nothing this predicate
+                // can prove refutes the positive side outright (issue #445), and
+                // `subtract_pred_arms` is about to empty and drop that same lane.
+                let refuted = *positive && arms_refute_pred(store, var, *pred);
                 subtract_pred_arms(store, var, *pred, *positive);
                 // An arm lane collapsed to a single array arm mints its shape fact
                 // through the same gated helper `is_array`'s S4 siblings use.
                 mint_collapsed_shape(var, env, store);
-                refine_fact_for_pred(env, var, *pred, *positive);
+                if refuted {
+                    // The intersection is empty, so the empty domain is the answer.
+                    // Left to itself the mint below would seed the predicate's own
+                    // base over a binding with no fact — `string` under an
+                    // `is_string` the chain above had already ruled out.
+                    leave_empty_domain(env, store, var);
+                } else {
+                    refine_fact_for_pred(env, var, *pred, *positive);
+                }
                 // A value the guard proved is not an object cannot still carry a
                 // heap binding or is-a bound; the declared-arm lane stays.
                 if *positive && !pred_kind_sets(*pred).0.contains(&RtKind::Object) {
@@ -19756,7 +19769,19 @@ fn apply_type_narrowing(
                 }
             }
             TypeGuard::InArray { var, lits, positive } => {
-                refine_fact_for_in_array(env, var, lits, *positive);
+                // The same composition question, one vocabulary over (issue #445):
+                // a membership test proves the needle is one of the haystack
+                // literals, and a lane holding none of them refutes every one.
+                if *positive
+                    && arms_refute(store, var, |arm| {
+                        lits.iter()
+                            .all(|v| steins_contract::admits_val(arm, v) == Certainty::No)
+                    })
+                {
+                    leave_empty_domain(env, store, var);
+                } else {
+                    refine_fact_for_in_array(env, var, lits, *positive);
+                }
             }
         }
     }
@@ -19781,6 +19806,19 @@ fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bo
     if narrowed {
         store.narrowed.insert(var.to_owned());
     }
+}
+
+/// **Does the arm lane already refute this predicate?** (issue #445) — the
+/// [`refinement_refuted`] sibling for the type-predicate vocabulary, where the
+/// positive side's claim is a base rather than a value.
+///
+/// True iff the declared lane is present and every arm the guards above left is
+/// one the predicate provably does not hold on ([`pred_holds_on_arm`] answering
+/// `No`); `Maybe` keeps the arm and so keeps the guard. Must be asked before
+/// [`subtract_pred_arms`] runs, since that is the call which empties the lane and
+/// drops it.
+fn arms_refute_pred(store: &Store, var: &str, pred: TypePred) -> bool {
+    arms_refute(store, var, |arm| pred_holds_on_arm(pred, arm) == Certainty::No)
 }
 
 /// Value-fact narrowing for one type predicate.
@@ -20009,10 +20047,21 @@ fn apply_refinements(
 ) {
     for r in refs {
         match r {
-            // `=== v` replaces the value with proven equality: the fact is exactly
-            // as trustworthy as the test that established it (`stratum`), regardless
-            // of any prior (weaker) knowledge about the variable.
+            // `=== v` INTERSECTS the branch's knowledge with proven equality
+            // (issue #445). Where the intersection is non-empty the singleton is
+            // the whole of it — `{v}` meets anything admitting `v` at `{v}` — so
+            // the fact is exactly as trustworthy as the test that established it
+            // (`stratum`), regardless of any prior (weaker) knowledge; and the arm
+            // lane, which the value lane now strictly outranks, is unbound as
+            // before. Where the guards above this one already refuted `v`, the
+            // intersection is EMPTY, and the empty domain is what must be left —
+            // never `v` itself, which would state on an unreachable path exactly
+            // what the chain disproved.
             Refine::Exact(var, val) => {
+                if refinement_refuted(env, store, var, val) {
+                    leave_empty_domain(env, store, var);
+                    continue;
+                }
                 env.insert(
                     var.clone(),
                     Known::value_strat(
@@ -20034,6 +20083,62 @@ fn apply_refinements(
             Refine::Truthy(var) => refine_fact(env, var, stratum, truthy_narrow),
         }
     }
+}
+
+/// **Is a positive refinement's own claim already refuted on this branch?**
+/// (issue #445) — the composition question a chain of guards asks and a single
+/// guard cannot: one guard states `$var === val`, and the guards above it may
+/// already have proved that nothing `$var` can still hold IS `val`. Two carriers
+/// can hold that proof, and either alone is enough:
+///
+/// * the **value lane** — a fact that does not admit `val` ([`Fact::admits`],
+///   extensional membership);
+/// * the **arm lane** — a lane whose every surviving arm provably cannot hold
+///   `val` ([`steins_contract::admits_val`] answering `No`). `Maybe` keeps the arm
+///   in play, so an arm the judgment cannot decide never refutes: short of proof
+///   the answer is always "the refinement stands".
+///
+/// The arm lane matters on its own, not merely as a second opinion: a `@param 1|2`
+/// over a native `int` never reaches the value lane at all
+/// ([`seed_refined_scalar_fact`] declines to overwrite a `General` base with a
+/// `OneOf`), so the residue `2` that such a chain's first guard leaves lives there
+/// and nowhere else — which is exactly why replacing the lane rather than
+/// intersecting it went unnoticed for as long as it did.
+fn refinement_refuted(env: &HashMap<String, Known>, store: &Store, var: &str, val: &Val) -> bool {
+    if env.get(var).and_then(|k| k.fact.as_ref()).is_some_and(|f| !f.admits(val)) {
+        return true;
+    }
+    arms_refute(store, var, |arm| steins_contract::admits_val(arm, val) == Certainty::No)
+}
+
+/// Ask `refutes` of **every** surviving arm of `var`'s declared lane and answer
+/// whether the lane both exists and answered unanimously.
+///
+/// The three-way distinction [`Store::contract_arms`] draws is the whole point of
+/// routing through it: an ABSENT lane states nothing at all — an undeclared
+/// variable, one a by-reference call invalidated, an enum whose case set the
+/// absence discipline refused to complete — and answers `false`, leaving the
+/// caller's refinement exactly as it was. Only a lane that is present, non-empty
+/// and unanimous refutes anything.
+fn arms_refute(store: &Store, var: &str, refutes: impl Fn(&ContractTy) -> bool) -> bool {
+    store.contract_arms(var).is_some_and(|arms| arms.iter().all(|a| refutes(&a.ty)))
+}
+
+/// **The empty domain** — what a positive refinement leaves behind when the
+/// intersection with what the branch already proved comes out empty (issue #445).
+///
+/// Not a death signal: ADR-0052 §2 puts death with the verdict, and nothing here
+/// prunes a branch or marks one unreachable. It is the same shape an exhausted
+/// guard chain already reaches by subtraction alone — no value fact, no arm lane —
+/// so every consumer of either carrier answers about this position the way it
+/// already answers about the `default` of a chain that covered its subject:
+/// silence, on the ground that it knows of no value that gets here. The
+/// alternative, keeping the refinement's own seed, is the one answer that is
+/// certainly wrong: it states on a path PHP never takes precisely the value the
+/// guards above disproved.
+fn leave_empty_domain(env: &mut HashMap<String, Known>, store: &mut Store, var: &str) {
+    env.remove(var);
+    store.unbind(var);
 }
 
 /// Transform the fact of `var` in place with `f` (a `None` result drops the fact —
