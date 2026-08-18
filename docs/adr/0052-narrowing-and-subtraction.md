@@ -1299,3 +1299,59 @@ weakness, the two evidence refusals, the inexpressible condition, the arm-local
 rebinding); `crates/steins-infer/tests/match_value_position.rs` (the residue
 fixture this closes, and the two `assertNever` tripwires whose silence now comes
 from an emptied domain rather than an untouched lane).
+
+## Note (2026-08-18): a `match (true)` chain is an `if`/`elseif` chain, and subtracts like one (issue #431)
+
+`match (true) { is_string($foo) => …, is_int($foo) => … }` is how a case
+analysis over a union is written when the author prefers `match` syntax.
+Nothing in this ADR was missing for it — the arm-wise subtraction the
+`if`/`elseif` chain performs is exactly the subtraction its arms want — and
+what was missing was the lowering: arm conditions had to be a variable or a
+literal, so a guard opaqued the construct.
+
+**The decision is a desugaring, not a second narrowing path.** A `match` the
+by-value shape refuses, whose subject is the literal `true` or `false`, lowers
+to `StmtKind::If`: the arms in source order are the links, the `default` is the
+`else`, and each arm condition goes through the same `lower_cond` an `if`
+condition does. First-match order *is* `elseif` order and PHP consults the
+`default` only when nothing matched, so the two constructs denote the same
+control flow; giving them one IR node is what guarantees they can never answer
+differently. Everything this ADR says about a chain therefore reaches the
+`match` spelling with no clause of its own: the positive refinement inside an
+arm, the negation every later arm and the `default` inherit, the enum case
+domain of the note above, the derivation clause, the stand-down clause.
+
+**The `===` gate is the one thing the desugaring has to prove.** `match`
+compares with `===`, so an arm runs on `<cond> === true` and the arms below it
+inherit `<cond> !== true`. That is the condition's truth and its negation only
+where the condition is **boolean-valued**. `!`, `&&`, `||`, the comparisons,
+`instanceof` and `isset` are unconditionally so; a condition the lowering
+could not model at all is inert on both sides and therefore safe under either
+reading. A bare truthiness test is not: `match (true) { $n => … }` with `$n =
+5` matches no arm, and reading the residue as "`$n` is falsy" would hand every
+arm below it a narrowing PHP never made. So a truthiness-shaped arm condition
+refuses the whole construct, on the standing all-or-nothing rule.
+
+A **call** in arm position is accepted, and it is the one judgment rather than
+a proof. A callee returning anything but `bool` matches no arm at all, so the
+shape is not written; and refusing calls would refuse `is_string($foo)`, which
+is the whole idiom. The residual exposure is a non-`bool` callee that also
+carries `@phpstan-assert-if-false` or an out-parameter, where the no-match path
+would read a tag at a polarity PHP did not prove. Measured at zero occurrences
+across the public corpus; if it ever appears, the gate to add is the callee's
+declared return type, which the walk has and the lowering does not.
+
+**What the subtraction does not yet reach**, and deliberately: the no-match
+path of a `default`-less chain. A by-value `match` with no `default` raises
+`\UnhandledMatchError`, so its successor is unreachable; the desugared chain
+has no `else` and falls through to it instead. Falling through only widens the
+join — it costs precision and cannot manufacture a claim — and modelling the
+throw belongs with issue #439, which decides the no-match path for `match` and
+`switch` together. Likewise `switch (true)`, whose loose `== true` is exactly
+truthiness and would therefore admit the arm conditions this note refuses:
+sound, unbuilt, and not asked for.
+
+Fixtures: `crates/steins-infer/tests/match_true_guards.rs` (the worked
+example's cells, the accumulated subtraction, `match (false)`, the three
+refusals, the inexpressible guard, and the pair that proves the subtraction
+landed).
