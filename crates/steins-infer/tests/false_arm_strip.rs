@@ -1,9 +1,14 @@
 //! Value subtraction on the contract-arm lane (ADR-0052 §2).
 //!
 //! An arm dies iff the subtrahend covers it with `Yes`; `Maybe` keeps it. Thus
-//! `false` deletes a `false` arm but not a general `bool` arm. An `int<lo, hi>`
-//! arm minus an endpoint shrinks by one, while an interior point keeps it whole
-//! because a gap has no arm spelling (issue #90).
+//! `false` deletes a `false` arm from a lane that also spells `true` as its own
+//! arm. A general `bool` arm is the other shape entirely: `bool` is a two-point
+//! domain with no interior point to protect (issue #443), so `false` NARROWS it
+//! to `true` rather than surviving — the same partial-deletion move an
+//! `int<lo, hi>` arm gets at its own endpoints, minus the interior-point
+//! refusal an interval needs and `bool` does not. An `int<lo, hi>` arm minus an
+//! endpoint shrinks by one, while an interior point keeps it whole because a
+//! gap has no arm spelling (issue #90).
 //!
 //! Two deliberate limits are pinned:
 //! * truthiness over `int|false` strips nothing because it excludes both `0` and
@@ -227,12 +232,12 @@ fn an_assert_reaches_the_null_subtrahend_too() {
 }
 
 #[test]
-fn an_assert_keeps_the_maybe_arm_like_every_other_guard() {
-    // The FP-safety direction is the guard's, not the statement form's: a general
-    // `bool` arm has an interior point `!== false` says nothing about.
+fn an_assert_narrows_the_general_bool_arm_like_every_other_guard() {
+    // The wiring direction is the guard's, not the statement form's: `assert()`
+    // reaches the same `Base::Bool` endpoint clip the `if` twin does (issue #443).
     assert_eq!(
         after_assert("string|bool", "$x !== false"),
-        "dumped type: string|bool (asserted)"
+        "dumped type: string|true (asserted)"
     );
 }
 
@@ -251,14 +256,26 @@ fn a_loose_comparison_is_not_an_identity_and_subtracts_nothing() {
 
 
 #[test]
-fn a_general_bool_arm_survives_the_false_exclusion() {
-    // THE soundness pin. `subtrahend_covers(Value(false), Base(Bool))` is `Maybe` —
-    // a `bool` may still be `true` — so the arm must stay. Deleting it would be a
-    // false narrowing of exactly the kind this lane exists to avoid.
-    assert_eq!(then_branch("bool", "$x !== false"), "dumped type: bool (asserted)");
+fn a_general_bool_arm_narrows_to_the_surviving_literal() {
+    // THE re-pinned soundness pin (issue #443). This used to read
+    // `a_general_bool_arm_survives_the_false_exclusion` and assert survival on the
+    // theory that `subtrahend_covers(Value(false), Base(Bool))` answering `Maybe`
+    // meant nothing more could be said — `bool` "may still be `true`", so deleting
+    // the arm looked like a false narrowing.
+    //
+    // That theory conflated `Maybe` (the whole-arm death question `subtrahend_covers`
+    // answers) with "nothing more can be said": `bool` is a two-point domain, not an
+    // interval with an unreachable interior, and its one other point is exactly
+    // `true` — the same shape `int<lo, hi>` already narrows at an endpoint
+    // (`subtract_arm`'s `ArmFate::Narrows`). Surviving whole was therefore an
+    // under-approximation, not a soundness floor, and it is what let an exhaustive
+    // `if ($b === true) … elseif ($b === false) … else { assertNever($b); }` report
+    // a residue PHP can never reach. `Maybe` still governs whether the arm DIES;
+    // it was never the answer to whether it narrows.
+    assert_eq!(then_branch("bool", "$x !== false"), "dumped type: true (asserted)");
     assert_eq!(
         then_branch("bool|string", "$x !== false"),
-        "dumped type: string|bool (asserted)"
+        "dumped type: string|true (asserted)"
     );
 }
 
@@ -279,6 +296,19 @@ fn an_emptied_lane_drops_to_no_fact_never_a_death_signal() {
     // goes to no-fact and the walk continues; unreachability is not this carrier's
     // claim to make.
     assert_eq!(then_branch("false", "$x !== false"), "dumped type: unknown");
+}
+
+#[test]
+fn excluding_both_bool_literals_in_sequence_empties_the_general_arm() {
+    // The chained shape issue #443 exists for: `bool` narrows to `true` under the
+    // first exclusion, then that literal arm dies under the second — an exhausted
+    // `bool`, exactly as an `int<lo, hi>` walked down by repeated endpoint clips
+    // (`repeated_endpoint_clips_walk_the_interval_down_to_a_literal`) collapses to
+    // nothing rather than surviving whole.
+    assert_eq!(
+        then_branch("bool", "$x !== false && $x !== true"),
+        "dumped type: unknown"
+    );
 }
 
 

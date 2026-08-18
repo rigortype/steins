@@ -19190,11 +19190,13 @@ fn collect_enum_identity<'a>(
 /// 4. `!== v` subtracts value `v` from the contract lane
 ///    ([`normalize::Subtrahend::Value`], ADR-0052 §2): an arm dies iff the literal
 ///    provably covers the whole arm. Strips the `false` arm of a `T|false` row
-///    under `if (strpos(…) !== false)`, general over any literal. The interior-point
-///    rule keeps it sound: `false` does NOT cover a general `bool` arm, so `bool`
-///    survives `!== false`. The one partial deletion is an interval endpoint:
-///    `!== 0` clips `int<0, max>` to `int<1, max>` ([`normalize::ArmFate::Narrows`]);
-///    an interior `!== 5` leaves it whole.
+///    under `if (strpos(…) !== false)`, general over any literal. Two partial
+///    deletions replace outright survival: an interval endpoint
+///    (`!== 0` clips `int<0, max>` to `int<1, max>`; an interior `!== 5` leaves
+///    it whole — the gap has no arm spelling) and, since issue #443, a general
+///    `bool` arm's one of two literals — `!== false` narrows `bool` to `true`,
+///    because `bool` has no interior point to protect and every non-covering
+///    subtrahend of it is the other literal ([`normalize::ArmFate::Narrows`]).
 ///
 /// Two neighbouring narrowings are deliberately NOT here: `Refine::Truthy` (`if
 /// ($pos)` over `int|false` — truthiness kills `0`/`''` too, not a value

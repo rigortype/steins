@@ -576,10 +576,17 @@ lane, hundreds of them `T|false`, and every one of them was previously
 un-narrowable at exactly the guard PHP code writes.
 
 The rule's two sides are one rule, and both are pinned: `!== false`
-deletes a `false` arm, and does **not** delete a general `bool` arm —
+deletes a `false` arm, and ~~does **not** delete a general `bool` arm —
 `bool` has an interior point (`true`) the guard says nothing about, so
 the coverage is `Maybe`. The interior-point discipline of point 2's
-`Refined` clause is the same discipline here, one carrier up.
+`Refined` clause is the same discipline here, one carrier up.~~
+**Superseded 2026-08-19 (issue #443) — see the note below.** The claim
+of an interior point was the bug: `bool` is a *two*-point domain, and
+`true` is the domain's other endpoint, not a gap between two others. The
+interior-point discipline this paragraph borrowed from the `Refined`
+clause governs an *interval*, where a middle point really does have no
+arm spelling; `bool` has no middle at all, so nothing here should have
+answered `Maybe`, and the note below answers `Narrows` instead.
 
 Deliberately **not** landed:
 
@@ -1462,3 +1469,113 @@ flipped from the false positive they pinned),
 `the_type_predicate_vocabulary_composes_the_same_way`,
 `a_positive_refinement_the_lane_still_admits_narrows_as_it_always_did`, and the
 over-silencing guard `a_chain_that_leaves_a_genuine_residue_still_reports_it`.
+
+## Note (2026-08-19): `Base::Bool` is a two-point domain too (issue #443)
+
+Completion of point 2's endpoint clip, not new design: the 2026-08-02 note gave
+the arm carrier a partial deletion for `int<lo, hi>` losing one of its own
+endpoints, and `bool` is the same shape with its two points spelled `true` and
+`false` rather than counted. `Base::Bool` had never been taught it.
+
+**Why the old line said the opposite.** The 2026-08-01 note pinned "`!== false`
+… does **not** delete a general `bool` arm" and gave a reason: `bool` "has an
+interior point (`true`) the guard says nothing about." That reason borrowed the
+`Refined` clause's interior-point discipline — sound for an *interval*, where a
+middle value really does sit between two others with no arm to spell it — and
+applied it to `bool` without checking the premise. `bool` has exactly two
+values and no interior at all: `true` is not a point the guard "says nothing
+about," it is the domain's *other endpoint*, named by exhaustion the moment
+`false` is excluded. The old pin was a sound conservatism resting on a false
+premise about the domain's shape, not a soundness requirement.
+
+**The consequence, reproducible on `master` with no `match` involved:**
+
+```php
+/** @param never $value */
+function assertNever(mixed $value): never { throw new LogicException(); }
+
+function f(?bool $b): void {
+	if ($b === null) { echo 1; }
+	elseif ($b === true) { echo 2; }
+	elseif ($b === false) { echo 3; }
+	else { assertNever($b); }   // reported — the chain is exhaustive
+}
+```
+
+The leading `$b === null` guard lands a real subtraction (the `Null` arm
+dies), which sets the proven-narrowing mark issue #428 gates
+`phpdoc.never-param-reachable` on; the two bool-literal guards below it then
+touched nothing, under the old rule, so the mark stayed set while the general
+`Base::Bool` arm sat un-narrowed at the `else` — reachable-looking evidence for
+a residue PHP can never produce. This is a **different** wall than the one the
+2026-08-18 `match`/`switch` note (issue #439) already named for the same
+`?bool` shape at the value-position `match ($b) { null => …, true => …,
+false => … }` spelling: "it closes when `Base::Bool` learns point 2's endpoint
+clip." It does, here, and for both spellings at once — the arm-lane fix is one
+function shared by every guard vocabulary that reaches `subtract_contract_lane`
+(`if`/`elseif`, `assert()`, value-position `match`, and `match (true)`'s
+desugaring alike), not a per-construct patch.
+
+**The rule.** `subtract_arm` gains one clause, symmetric with
+`clip_int_endpoint` but simpler, because `bool` has no point-interval-death
+case and no arithmetic to overflow: `Subtrahend::Value(Val::Bool(b))` against
+`ContractTy::Base(Base::Bool)` always answers `ArmFate::Narrows(LitBool(!b))`.
+A second exclusion then meets the narrowed literal arm through the pre-existing
+literal path (`subsumes` against a `LitBool`), which dies exactly as any other
+covered literal does — so a chain excluding both literals empties the lane in
+two ordinary steps, the same walk `int<0, 2>` less `0` less `1` already takes
+down to its own surviving literal.
+
+**What falls out for free, and what does not.** The emptied-lane amendment
+(the 2026-08-18 enum note) is stated over *any* subtrahend that reaches
+`subtract_contract_lane`, not one gated to `Subtrahend::EnumCase` — so a
+native, non-nullable `bool $b` whose guards exclude both literals gets the same
+**kept-empty** Verified lane an exhausted enum case set gets, with no change to
+that function. One asymmetry is a recorded residue, not a defect: the dump
+surface's rung order tries a *value-lane* fact before the arm-lane's
+`narrowed_lane_dump`, and `bool` (unlike an enum case, which is object-free and
+leaves the value lane with no `Fact` at all) always has one —
+`Fact::General{Bool}`, which this ADR's point 2 leaves untouched by
+base-level subtraction by design. So `\PHPStan\dumpType($b)` on the exhausted
+`else` branch of a **native** `bool` still reads the declaration's own `bool`
+back, where the arm lane underneath it has in fact gone to `*NEVER*` — visible
+only through `phpdoc.never-param-reachable` and `Store::contract_emptied`
+directly, not through the dump rung. An **Asserted**-only `bool` (a bare
+docblock over an untyped native parameter) has no such competing value-lane
+fact and takes the ordinary dropped-to-no-fact path instead — correctly: an
+Asserted arm list must not mint a kept-empty (Verified) exhaustion, and nothing
+here changes that gate.
+
+**The premise-grade question the issue asked after.** An Asserted `bool`
+narrows exactly as a Verified one does — the per-arm judgment in
+`subtract_arm` does not see strata at all, only `subtract_contract_lane` does
+— so a docblock-only `@param bool $x` on an untyped native parameter still
+narrows `false` to `true` under `!== false`, still reports the surviving
+literal when only one is excluded, and still declines to mint a Verified
+emptiness when both are: the emptied lane drops to no-fact (the pre-existing
+`!all_verified` branch), never the kept-empty one. No new gate was needed for
+this; the stratum discipline that already existed for every other subtrahend
+covers the new one without a clause of its own.
+
+Measured: the full public corpus is byte-identical at `--profile strict` and
+at `--profile contracts`, before and after (a 0-line diff each way), and the
+nsrt harness is unmoved (headline 2333, admissible 2793, identical). Neither
+fixture set contains a two-literal bool exhaustion feeding a proof- or
+contract-layer consumer, so the integration fixtures below are the whole of
+the evidence that the behavior changed.
+
+Fixtures: `crates/steins-contract/src/normalize.rs` (`subtract_arm`'s two new
+unit tests for each direction, the emptied-by-two-steps walk, and the
+cross-contamination refusals — a bool subtrahend leaves an interval alone and
+an int subtrahend leaves the general `bool` arm alone); re-pinned in
+`crates/steins-infer/tests/false_arm_strip.rs`
+(`a_general_bool_arm_narrows_to_the_surviving_literal`, formerly
+`a_general_bool_arm_survives_the_false_exclusion` — the soundness pin this
+note supersedes — plus `an_assert_narrows_the_general_bool_arm_like_every_other_guard`
+and the new `excluding_both_bool_literals_in_sequence_empties_the_general_arm`);
+`crates/steins-infer/tests/never_sentinel.rs`
+(`the_nullable_bool_reproducer_of_issue_443_is_silent`, the issue's own
+worked example; `a_bool_missing_one_literal_still_reports`, the
+over-silencing guard; `a_bool_covered_by_both_literals_is_silent`, re-pinned
+with its true reason recorded rather than the proven-narrowing gate's
+fallback).
