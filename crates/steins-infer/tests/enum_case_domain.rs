@@ -22,7 +22,12 @@
 //!   type. In every one of them the guard narrows nothing and no chain empties.
 //! * **What is out of scope, pinned as claiming nothing**: backed-enum `->value`
 //!   comparisons (issue #429's own exclusion — the backing value is a separate
-//!   question), and `match`/`switch` of any kind (issues #430/#431).
+//!   question).
+//! * **`match`/`switch` over enum cases** (issue #433 lifts the class-constant
+//!   refusal issues #430/#431 left in place): a by-value `match`/`switch`
+//!   structures like any other now, so the two fixtures below pin what that
+//!   buys — a matched arm's own narrowing, and the same no-match subtraction
+//!   every other by-value construct already carries.
 //! * **Zero emission.** This slice adds narrowing vocabulary, not a check: no
 //!   fixture here may produce a non-debug finding. The consumer that reports —
 //!   `phpdoc.never-param-reachable` — is issue #428's, and nothing here depends
@@ -324,28 +329,42 @@ fn a_nullable_declaration_keeps_its_null_arm_out_of_the_subtraction() {
 }
 
 // ---------------------------------------------------------------------------
-// `match` and `switch`: a later slice, pinned to claim nothing here
+// `match` and `switch` over enum cases (issue #433 lifts the refusal)
 // ---------------------------------------------------------------------------
 
 #[test]
-fn a_switch_over_enum_cases_claims_nothing() {
-    // OUT OF SCOPE (issues #430/#431). A case-constant arm keeps the whole
-    // construct opaque, exactly as it did before the operand had a variant of its
-    // own, so no dump inside it fires and nothing is narrowed by it.
-    assert!(
+fn a_statement_position_match_over_enum_cases_narrows_and_subtracts() {
+    // The by-value shape now structures over enum-case arm conditions (issue
+    // #433 lifts `usable_operand`'s class-constant refusal). The Hearts arm
+    // narrows to exactly that case — the arm-lane twin of the guard-side
+    // narrowing pinned above — and the default arm carries the same no-match
+    // subtraction every other by-value construct already gets, leaving exactly
+    // the two cases the one arm did not cover.
+    assert_eq!(
         suit(
-            "switch ($s) { case Suit::Hearts: \\PHPStan\\dumpType($s); break;\
-             default: \\PHPStan\\dumpType($s); break; }"
-        )
-        .is_empty()
+            "match ($s) { Suit::Hearts => \\PHPStan\\dumpType($s), default => \\PHPStan\\dumpType($s) };"
+        ),
+        ["Suit::Hearts", "Suit::Spades|Suit::Clubs"]
     );
 }
 
 #[test]
-fn a_statement_position_match_over_enum_cases_claims_nothing() {
-    assert!(
-        suit("match ($s) { Suit::Hearts => \\PHPStan\\dumpType($s), default => null };")
-            .is_empty()
+fn a_switch_over_enum_cases_subtracts_but_never_narrows_an_arm() {
+    // `switch` compares loosely and binds nothing inside a matched case — its
+    // truth set is multi-valued, so no single arm is sound — so the Hearts
+    // case body dumps the untouched declaration, not the one case. The default
+    // arm still carries the no-match subtraction: `switch`'s subtrahend is the
+    // exact literal `Suit::Hearts`, sound to subtract even though (per
+    // `subtract_no_match_path`'s own doc) a `switch` residue is never read as
+    // coverage EVIDENCE by a consumer that asks the exhaustiveness question —
+    // the dump surface asks a different question (what narrowed here), not
+    // that one.
+    assert_eq!(
+        suit(
+            "switch ($s) { case Suit::Hearts: \\PHPStan\\dumpType($s); break;\
+             default: \\PHPStan\\dumpType($s); break; }"
+        ),
+        ["Suit", "Suit::Spades|Suit::Clubs"]
     );
 }
 
