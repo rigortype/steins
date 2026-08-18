@@ -9407,6 +9407,38 @@ impl<'a> Cx<'a> {
         }
     }
 
+    /// The **complete** case set of the enum `fqn` declares, in declaration order
+    /// (issue #429) — the one finite domain PHP's runtime enforces, so a Verified
+    /// fact (ADR-0037) rather than a docblock claim.
+    ///
+    /// `None` is the absence discipline (ADR-0049), and it outranks coverage
+    /// (ADR-0002): a domain this cannot complete must not exist at all, because
+    /// everything downstream reads a finite domain as "these and no others". Four
+    /// ways to answer `None`, each a different way of not knowing the whole set:
+    ///
+    /// * the name resolves to no class, or to more than one ([`Cx::find_class`]
+    ///   answers only on `Res::Unique`) — there is no single declaration to read;
+    /// * the declaration is not an enum;
+    /// * it is **conditionally declared** ([`steins_syntax::ClassDecl::conditional`],
+    ///   ADR-0049 A2i) — a sibling branch may declare a different case set under
+    ///   the same name, and nothing here can tell which one runs;
+    /// * its file did not parse ([`Cx::member_incomplete`], ADR-0079 §2.5) — a
+    ///   recovery point may have swallowed a `case` out of the body, which is
+    ///   exactly the shape that would turn a missing case into a false exhaustion.
+    ///
+    /// A case-less `enum E {}` also answers `None`: its domain is genuinely empty,
+    /// and an empty seed is indistinguishable from a lane narrowed to nothing.
+    /// No enum-typed declaration can hold a value anyway, so the coverage lost is
+    /// a shape no program reaches.
+    fn enum_case_names(&self, fqn: &str) -> Option<Vec<String>> {
+        let (file, cd) = self.find_class(fqn)?;
+        if !cd.is_enum || cd.conditional || self.member_incomplete(file) {
+            return None;
+        }
+        let cases: Vec<String> = cd.enum_cases.iter().map(|c| c.name.clone()).collect();
+        (!cases.is_empty()).then_some(cases)
+    }
+
     /// Whether a `$this` seeded from enclosing class `class_fqn` is provably the
     /// **exact** runtime class (audit G1). A `final` class or an enum has no
     /// subclass, so its `$this` is exact; any other project class is only a lower
@@ -11343,7 +11375,21 @@ impl Store {
     /// on the live branch (e.g. `{Guest}` after the else of `instanceof User` over
     /// `User|Guest`); each carries its stratum for the min-premise rule.
     fn contract_arms(&self, var: &str) -> Option<&[ContractArm]> {
-        self.contract.get(var).map(Vec::as_slice)
+        self.contract.get(var).map(Vec::as_slice).filter(|a| !a.is_empty())
+    }
+
+    /// Whether `var`'s declared lane has been **subtracted to nothing** on this
+    /// branch (issue #429): the lane exists, every arm it held was `Verified`, and
+    /// the guards on the way here deleted all of them — so no value of `var`
+    /// reaches this point.
+    ///
+    /// Distinct from `contract_arms(var).is_none()`, which is the *absence* of a
+    /// lane — the answer for an undeclared variable, an invalidated one, and an
+    /// enum whose case set the absence discipline refused to complete. The two
+    /// must not be confused: absence states nothing, and a consumer reading it as
+    /// emptiness would claim an exhaustion nothing proved.
+    fn contract_emptied(&self, var: &str) -> bool {
+        self.contract.get(var).is_some_and(Vec::is_empty)
     }
 
     /// Whether `var`'s contract lane has had a **proven narrowing** land on the
@@ -11755,9 +11801,13 @@ fn analyze_scope(
             let resolve = |n: &str| {
                 cx.resolve_pclass(cx.cur, p.span.start, n).trim_start_matches('\\').to_ascii_lowercase()
             };
-            if let Some(arms) = seed_contract_arms(p, phpdoc, &resolve)
+            if let Some(mut arms) = seed_contract_arms(p, phpdoc, &resolve)
                 && !arms.is_empty()
             {
+                // The finite enum domain (issue #429), planted here rather than
+                // inside the shared refinement so the trust question is already
+                // settled when it is asked: only a `Verified` class arm expands.
+                expand_enum_case_arms(cx, &mut arms);
                 // Abstract array stratum's entry state (ADR-0062 S3): a lane whose
                 // array vocabulary collapsed to ONE arm also seeds the value lane
                 // with that arm's shape fact. Multi-arm lanes seed nothing — the
@@ -12960,6 +13010,12 @@ fn value_stratum_of_args(
 /// to spell about the expression. Never a guess, never a `mixed` pretense.
 const DUMP_UNKNOWN: &str = "unknown";
 
+/// The rendering of a domain guards have subtracted to **nothing** (issue #429),
+/// spelled as PHPStan's own dump spells the empty type. The opposite of
+/// [`DUMP_UNKNOWN`] in every way: that one says the analysis has no faithful
+/// answer, this one says the answer is that no value reaches here.
+const DUMP_NEVER: &str = "*NEVER*";
+
 /// The `debug.phpdoc-type` rendering when the contract carrier is empty (ADR-0053
 /// §2): no declared `@param`/native envelope narrows the expression — never a
 /// synthesized type.
@@ -13332,6 +13388,46 @@ fn base_keyword(b: Base) -> &'static str {
     }
 }
 
+/// Fold each enum whose **whole** declared case set is present back into one
+/// [`ContractTy::Class`] arm (issue #429) — the inverse of
+/// [`expand_enum_case_arms`], applied at the rendering boundary only.
+///
+/// Purely a spelling rule, and it belongs on this side of the ADR-0052 §4 cut for
+/// the reason the ADR states: the expansion is what makes the domain finite and
+/// subtractable, while `Suit` and `Suit::Hearts|Suit::Spades|Suit::Clubs` denote
+/// one set, so which of the two a reader sees is rendering policy. The collapsed
+/// arm keeps the first case arm's position, so declaration order survives.
+fn collapse_whole_enums(cx: &Cx, tys: impl Iterator<Item = ContractTy>) -> Vec<ContractTy> {
+    let tys: Vec<ContractTy> = tys.collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for ty in &tys {
+        if let ContractTy::EnumCase { enum_fqn, .. } = ty {
+            *counts.entry(enum_fqn.as_str()).or_default() += 1;
+        }
+    }
+    let whole: HashSet<&str> = counts
+        .into_iter()
+        .filter(|(fqn, n)| cx.enum_case_names(fqn).is_some_and(|all| all.len() == *n))
+        .map(|(fqn, _)| fqn)
+        .collect();
+    if whole.is_empty() {
+        return tys;
+    }
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut out: Vec<ContractTy> = Vec::with_capacity(tys.len());
+    for ty in &tys {
+        match ty {
+            ContractTy::EnumCase { enum_fqn, .. } if whole.contains(enum_fqn.as_str()) => {
+                if seen.insert(enum_fqn.as_str()) {
+                    out.push(ContractTy::Class(enum_fqn.clone()));
+                }
+            }
+            other => out.push(other.clone()),
+        }
+    }
+    out
+}
+
 /// How an int interval spells on the dump surface — shares
 /// [`steins_contract::spell::int_range_keyword`] with the contract-arm path so
 /// the two can't disagree about a range (issue #90). [`describe_fact`] keeps its
@@ -13345,8 +13441,12 @@ fn int_range_keyword(r: IntRange) -> String {
 /// pure class/`null` arm list renders each class's source-cased FQN (via
 /// [`Cx::class_display_fqn`], matching PHPStan); anything else has no faithful
 /// spelling (`None` — caller falls to honest unknown).
+///
+/// An enum whose cases are ALL still present collapses back to the enum's own
+/// name first (issue #429): the expanded case set and the declaration denote the
+/// same thing, and a reader who narrowed nothing must be shown what they wrote.
 fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
-    let tys: Vec<ContractTy> = arms.iter().map(|a| a.ty.clone()).collect();
+    let tys: Vec<ContractTy> = collapse_whole_enums(cx, arms.iter().map(|a| a.ty.clone()));
     if let Some(scalar) = steins_contract::spell::spell_arms(&tys) {
         return Some(scalar);
     }
@@ -13354,6 +13454,11 @@ fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
     for ty in &tys {
         match ty {
             ContractTy::Class(n) => parts.push(cx.class_display_fqn(n)),
+            // `Suit::Hearts`, PHPStan's own spelling, with the enum's declared
+            // casing recovered the way a class arm's is (issue #429).
+            ContractTy::EnumCase { enum_fqn, case } => {
+                parts.push(format!("{}::{case}", cx.class_display_fqn(enum_fqn)));
+            }
             ContractTy::Null => parts.push("null".to_owned()),
             // An array/generic/shape/callable/intersection arm has no faithful plain
             // spelling here — honest unknown rather than a guess (§7).
@@ -13361,6 +13466,42 @@ fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
         }
     }
     (!parts.is_empty()).then(|| parts.join("|"))
+}
+
+/// The dump spelling of a declared lane the branch's guards NARROWED (issue #429),
+/// or `None` when the lane says no more than the declaration and the rungs below
+/// should answer.
+///
+/// Two things qualify, and only two:
+///
+/// * a lane **subtracted to nothing** ([`Store::contract_emptied`]) —
+///   [`DUMP_NEVER`]. Every arm was `Verified` and every guard that deleted one was
+///   a native runtime test, so this is the statement that no value reaches the
+///   position, not a guess;
+/// * a lane that is entirely enum cases of ONE enum and holds **fewer than all**
+///   of them. The unnarrowed case set denotes exactly what `Suit` denotes, and
+///   spelling out every case there would make an untouched parameter dump as a
+///   union nobody wrote.
+///
+/// Mixed lanes, class lanes, scalar lanes and the array vocabulary all decline:
+/// their narrowing has other carriers with their own dump rungs, and this one
+/// exists for the domain that has no other home.
+fn narrowed_lane_dump(cx: &Cx, store: &Store, var: &str) -> Option<String> {
+    if store.contract_emptied(var) {
+        return Some(DUMP_NEVER.to_owned());
+    }
+    let arms = store.contract_arms(var)?;
+    let mut of: Option<&str> = None;
+    for a in arms {
+        let ContractTy::EnumCase { enum_fqn, .. } = &a.ty else { return None };
+        if *of.get_or_insert(enum_fqn.as_str()) != enum_fqn.as_str() {
+            return None;
+        }
+    }
+    if cx.enum_case_names(of?).is_some_and(|all| all.len() == arms.len()) {
+        return None;
+    }
+    render_contract_arms(cx, arms)
 }
 
 /// The `Known::bound` provenance every S4 flow refinement stamps on a shape
@@ -13446,6 +13587,16 @@ fn best_dump_type(
                 text: render_dump_fact(fact),
                 asserted: known.stratum == Stratum::Asserted,
             };
+        }
+        // 1b. A declared lane the guards on this path have NARROWED (issue #429),
+        //     above every object rung for rung 2b's reason: a guard the walk just
+        //     executed is strictly stronger than the declaration it narrowed, and
+        //     printing `Suit` inside `if ($s === Suit::Hearts)` would report the
+        //     declaration back at a reader who had already refined it. An
+        //     un-narrowed lane declines here and the declaration wins, exactly as
+        //     before.
+        if let Some(text) = narrowed_lane_dump(cx, store, name) {
+            return DumpRendering { text, asserted: false };
         }
         // 2. An object holder whose class the heap proved EXACT — the allocation's
         //    own class, rendered source-cased and namespace-qualified (matching
@@ -17494,6 +17645,47 @@ fn seed_contract_arms(
     refine_contract_arms(&native, phpdoc, resolve_class)
 }
 
+/// Replace every enum-typed class arm with the enum's declared cases, one arm
+/// each (issue #429) — the step that makes a declared `Suit $s` a **finite**
+/// domain instead of a class membership.
+///
+/// Runs on the seeded lane, after [`refine_contract_arms`] has settled trust:
+///
+/// * only a `Verified` arm expands. The case set is what the engine enforces at
+///   the boundary, so it is a Verified fact and stays one; an `Asserted` arm is a
+///   docblock's claim about which values arrive, and expanding it would let a
+///   refinement nobody checks mint a finite domain the exhaustiveness question
+///   then reads as complete (ADR-0037's trust order, ADR-0052 §5).
+/// * only where [`Cx::enum_case_names`] can state the WHOLE set. Everywhere else
+///   the arm is left exactly as it was — a `Class` membership arm, which no
+///   identity guard can subtract to empty, so nothing downstream can claim an
+///   exhaustion the declaration never proved.
+///
+/// A no-op for every non-enum lane, which is nearly all of them.
+fn expand_enum_case_arms(cx: &Cx, arms: &mut Vec<ContractArm>) {
+    if !arms.iter().any(|a| matches!(a.ty, ContractTy::Class(_)) && a.stratum == Stratum::Verified)
+    {
+        return;
+    }
+    let mut out: Vec<ContractArm> = Vec::with_capacity(arms.len());
+    for arm in arms.drain(..) {
+        let expanded = match (&arm.ty, arm.stratum) {
+            (ContractTy::Class(fqn), Stratum::Verified) => {
+                cx.enum_case_names(fqn).map(|cases| (fqn.clone(), cases))
+            }
+            _ => None,
+        };
+        match expanded {
+            Some((fqn, cases)) => out.extend(cases.into_iter().map(|case| ContractArm {
+                ty: ContractTy::EnumCase { enum_fqn: fqn.clone(), case },
+                stratum: Stratum::Verified,
+            })),
+            None => out.push(arm),
+        }
+    }
+    *arms = out;
+}
+
 /// The value-lane seed a seeded contract-arm lane contributes (ADR-0062 S3): the
 /// canonical [`Fact::Shape`] of a lane whose array vocabulary is ONE arm, plus a
 /// `null` arm's nullability (A-G2, a side-flag, never a field inside the shape).
@@ -17858,7 +18050,12 @@ fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     let resolve = |n: &str| {
         cx.resolve_pclass(site.file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
-    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+    let mut arms = refine_contract_arms(&native, phpdoc.as_ref(), &resolve)?;
+    // The finite enum domain travels the return direction too (issue #429): a
+    // `: Suit` declaration states the same enforced case set on either side of
+    // the boundary.
+    expand_enum_case_arms(cx, &mut arms);
+    Some(arms)
 }
 
 /// [`fn_return_arms`] with the call's own **arguments** in hand (ADR-0032's second
@@ -18306,7 +18503,10 @@ fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractAr
     let resolve = |n: &str| {
         cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
-    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
+    let mut arms = refine_contract_arms(&native, phpdoc.as_ref(), &resolve)?;
+    // As in [`fn_return_arms`] (issue #429).
+    expand_enum_case_arms(cx, &mut arms);
+    Some(arms)
 }
 
 /// The return arms of a `@return template-type<T, Owner, 'TName'>` whose subject
@@ -18801,6 +19001,50 @@ fn collect_instanceof<'a>(
     }
 }
 
+/// The enum-case identity guards this branch proves, as
+/// `(var, class ref, case name, positive)` — the [`collect_instanceof`] shape for
+/// `===`/`!==` against an enum case (issue #429). `positive` is whether the branch
+/// proves the variable IS that case; the `&&`/`||`/`!` distribution is
+/// [`collect_refine`]'s, so a guard nested in a threaded condition still reaches
+/// its consumption point (ADR-0052 §6).
+///
+/// **`===`/`!==` only.** Loose `==` on two enum cases is a property comparison PHP
+/// decides by the cases' own `name`/`value` slots, a different question with a
+/// different proof; the issue asks for identity and identity is what this reads.
+fn collect_enum_identity<'a>(
+    cond: &'a CondExpr,
+    then: bool,
+    out: &mut Vec<(&'a str, &'a StaticClass, &'a str, bool)>,
+) {
+    match cond {
+        CondExpr::Cmp { op, lhs, rhs } => {
+            let positive = match op {
+                CmpOp::Identical => then,
+                CmpOp::NotIdentical => !then,
+                _ => return,
+            };
+            let (var, sc, case) = match (lhs, rhs) {
+                (CondOperand::Var(v), CondOperand::ClassConst(sc, n))
+                | (CondOperand::ClassConst(sc, n), CondOperand::Var(v)) => {
+                    (v.as_str(), sc, n.as_str())
+                }
+                _ => return,
+            };
+            out.push((var, sc, case, positive));
+        }
+        CondExpr::Not(c) => collect_enum_identity(c, !then, out),
+        CondExpr::And(a, b) if then => {
+            collect_enum_identity(a, true, out);
+            collect_enum_identity(b, true, out);
+        }
+        CondExpr::Or(a, b) if !then => {
+            collect_enum_identity(a, false, out);
+            collect_enum_identity(b, false, out);
+        }
+        _ => {}
+    }
+}
+
 /// Apply a branch's class-fact narrowing (ADR-0052 N4) to its cloned `Store`: the
 /// two NEW carriers, mutated arm-wise through the real is-a oracle. Runs beside
 /// [`apply_refinements`] (which owns the value-domain `Fact` carrier).
@@ -18873,6 +19117,30 @@ fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut St
             _ => {}
         }
     }
+
+    // (5) `$s === Enum::Case` / `!== Enum::Case` subtracts from the enum-case arm
+    // lane (issue #429), the one identity guard the value lane cannot own: an enum
+    // case is an object and has no `Val`. Both polarities are subtractions — the
+    // true branch removes every OTHER case — so the lane keeps the shape ADR-0052
+    // §2 gave it. A case whose enum the absence discipline could not complete
+    // resolves to nothing here and subtracts nothing.
+    let mut ids = Vec::new();
+    collect_enum_identity(cond, then, &mut ids);
+    for (var, sc, case, positive) in ids {
+        let Some(enum_fqn) = w.cx.resolve_enum_case(sc, case, w.enclosing_class) else {
+            continue;
+        };
+        subtract_contract_lane(
+            store,
+            var,
+            &normalize::Subtrahend::EnumCase {
+                enum_fqn,
+                case: case.to_owned(),
+                polarity: positive,
+            },
+            &oracle,
+        );
+    }
 }
 
 /// Subtract `sub` from `var`'s contract lane in `store`, arm-wise, preserving each
@@ -18891,6 +19159,9 @@ fn subtract_contract_lane(
 ) {
     if let Some(arms) = store.contract.get_mut(var) {
         let mut changed = false;
+        // Whether the lane, before this subtraction, was held on Verified premises
+        // alone — the question the emptied-lane rule below asks (issue #429).
+        let all_verified = arms.iter().all(|a| a.stratum == Stratum::Verified);
         arms.retain_mut(|a| match normalize::subtract_arm(sub, &a.ty, oracle) {
             normalize::ArmFate::Survives => true,
             normalize::ArmFate::Dies => {
@@ -18903,8 +19174,18 @@ fn subtract_contract_lane(
                 true
             }
         });
-        let empty = arms.is_empty();
-        if empty {
+        // The emptied carrier (ADR-0052 §2). An all-`Verified` lane subtracted to
+        // nothing is **kept, empty**, so [`Store::contract_emptied`] can read it:
+        // every arm was a runtime-enforced alternative and every subtrahend that
+        // reaches here is a native guard, so "no value of this variable reaches
+        // here" is a Verified statement. It is still not a death signal — the
+        // verdict owns death, and no branch is pruned by it; what the empty lane
+        // buys is a consumer's *silence*.
+        //
+        // A lane holding any `Asserted` arm keeps the landed fallback and drops to
+        // no-fact: emptying a docblock's claim proves nothing, and a consumer must
+        // not read a lying `@param` as an exhaustion.
+        if arms.is_empty() && !all_verified {
             store.contract.remove(var);
         }
         if changed {
@@ -32863,6 +33144,25 @@ impl<'a> Cx<'a> {
             return Some(ArgValue::EnumCase(cd.fqn.clone(), name.to_owned()));
         }
         self.resolve_const_literal(&fqn, name)
+    }
+
+    /// The **normalized enum FQN** `sc::case` names, when `case` is one of a
+    /// completely-known case set (issue #429). `None` for everything else: a
+    /// class constant that is not a case, an enum whose declaration
+    /// [`Cx::enum_case_names`] refuses to complete, an unresolvable `static::`.
+    ///
+    /// Asking through `enum_case_names` rather than the decl directly is what
+    /// keeps the guard and the seed on one gate: a lane that was never expanded
+    /// must not be subtracted from as though it had been.
+    fn resolve_enum_case(
+        &self,
+        sc: &StaticClass,
+        case: &str,
+        enclosing: Option<&str>,
+    ) -> Option<String> {
+        let fqn = self.resolve_static_class_fqn(sc, enclosing)?;
+        let (_, cd) = self.find_class(&fqn)?;
+        self.enum_case_names(&fqn)?.iter().any(|c| c == case).then(|| cd.fqn.clone())
     }
 
     /// Resolve a class constant `fqn::name` to its literal value by walking the
