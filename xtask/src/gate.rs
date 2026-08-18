@@ -742,7 +742,23 @@ const THROW_EXPECTED: &[(&str, usize)] = &[
     //                  tree, and an assertion where a `throw` used to be is exactly
     //                  one `throw.undeclared` fewer. A baseline 488 above the truth
     //                  would swallow the next 488 real regressions in silence.
-    ("pxxxx-monorepo", 43886),
+    //   43886 → 44112  2026-08-19, **two components, measured separately** so that
+    //                  neither hides behind the other:
+    //                  * +206 is live-tree drift. Unmodified master measures 44092
+    //                    at the corpus revision this run saw, against a baseline
+    //                    seeded at an earlier one — established by running the gate
+    //                    on master itself, not inferred. Not triaged
+    //                    finding-by-finding; at this volume the attribution is the
+    //                    only honest evidence, as the 2026-08-05 row already records.
+    //                  * +20 is issue #433's `\UnhandledMatchError` origin, and this
+    //                    half IS triaged finding-by-finding: 4 distinct sites,
+    //                    multiplied to 20 by propagation to declaring callers. Every
+    //                    one is a `default`-less `match` over a subject the engine
+    //                    types wider than its docblock does — native `string` with a
+    //                    `@phpstan-param 'asc'|'desc'`, and its kin. The docblock is
+    //                    unenforced, so the throw is real, which is exactly the cell
+    //                    ADR-0088 §5 gates on the Verified grade.
+    ("pxxxx-monorepo", 44112),
 ];
 
 /// The expected `throw.*` count for a package/local-project name (0 if untabled).
