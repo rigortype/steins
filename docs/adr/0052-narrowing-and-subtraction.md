@@ -1341,17 +1341,47 @@ would read a tag at a polarity PHP did not prove. Measured at zero occurrences
 across the public corpus; if it ever appears, the gate to add is the callee's
 declared return type, which the walk has and the lowering does not.
 
-**What the subtraction does not yet reach**, and deliberately: the no-match
-path of a `default`-less chain. A by-value `match` with no `default` raises
-`\UnhandledMatchError`, so its successor is unreachable; the desugared chain
-has no `else` and falls through to it instead. Falling through only widens the
-join — it costs precision and cannot manufacture a claim — and modelling the
-throw belongs with issue #439, which decides the no-match path for `match` and
-`switch` together. Likewise `switch (true)`, whose loose `== true` is exactly
+**The no-match subtraction of the note above does not reach this shape, and
+does not need to.** Issue #439 taught `walk_match` to subtract every arm's
+conditions on the no-match path; a desugared guard chain never enters
+`walk_match`, and its `default` has been reading the accumulated negation since
+ADR-0031, because that is what an `else` is. Measured: every fixture of this
+slice answers identically with #439 beneath it and without it. The two notes
+close the same gap for the two different IR nodes the two `match` shapes lower
+to, and neither is a prerequisite for the other.
+
+**What the desugaring does not reach**, and deliberately: the no-match path of a
+`default`-less chain *terminating*. A by-value `match` with no `default` raises
+`\UnhandledMatchError`, so its successor is unreachable; the desugared chain has
+no `else` and falls through to it instead. Falling through only widens the join
+— it costs precision and cannot manufacture a claim — and inventing a
+`StmtKind::Throw` here would feed the throw accounting a contribution ADR-0088
+§5 has not ruled on. Likewise `switch (true)`, whose loose `== true` is exactly
 truthiness and would therefore admit the arm conditions this note refuses:
 sound, unbuilt, and not asked for.
 
+**One inherited gap becomes reachable through the new spelling**, and it is
+recorded here because it is the hazard class this run keeps hitting. A later
+guard's *positive* refinement replaces the lane instead of intersecting it with
+what the guards above it left, so a chain whose second arm re-narrows what the
+first subtracted ends with a lane that was never proved:
+
+```php
+if ($v === 1) { return; }   // residue 2
+if ($v !== 1) { return; }   // PHP: unreachable below. Steins: $v is 1.
+```
+
+The `default` of `match (true) { $v === 1 => …, $v !== 1 => …, default => … }`
+therefore reads `1` where PHP reaches nothing at all, and a sentinel in that
+`default` reports. Measured: the `if`/`elseif` spelling of the same shape reports
+the identical finding, at the identical wording, on the base this slice sits on —
+the desugaring inherits the gap exactly rather than introducing it, which is the
+`the_if_chain_of_the_same_shape_answers_identically` property doing its job. It
+is still a false positive that `match (true)` syntax newly reaches, and the fix
+belongs where the gap is: the positive side of a guard must intersect the lane it
+finds, not seed it.
+
 Fixtures: `crates/steins-infer/tests/match_true_guards.rs` (the worked
 example's cells, the accumulated subtraction, `match (false)`, the three
-refusals, the inexpressible guard, and the pair that proves the subtraction
-landed).
+refusals, the inexpressible guard, the pair that proves the subtraction
+landed, and the re-narrowing chain above pinned in both spellings).

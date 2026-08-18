@@ -39,8 +39,24 @@
 //!   (`\UnhandledMatchError`). The `if` shape has no throw to model and inventing a
 //!   `StmtKind::Throw` here would feed the throw accounting a contribution
 //!   ADR-0088 §5 has not yet ruled on. Falling through only ever widens the join,
-//!   so it costs precision and claims nothing; issue #439 is where the no-match
-//!   path is decided for `match` and `switch` together.
+//!   so it costs precision and claims nothing.
+//!
+//! Issue #439 — the no-match subtraction for `match`/`switch` — sits directly
+//! beneath this slice and does not touch it: it refines the no-match path inside
+//! `walk_match`, and a desugared guard chain never reaches `walk_match`. Its
+//! `default` is an `else`, and an `else` has carried the accumulated negation
+//! since ADR-0031. Measured: every fixture in this file answers identically with
+//! #439 beneath it and without it.
+//!
+//! One **false positive** is pinned here rather than hidden
+//! (`a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing`): a
+//! guard's positive refinement replaces the lane instead of intersecting it with
+//! what the guards above left, so `$v === 1 => …, $v !== 1 => …` ends with the
+//! `default` reading `1` on a path PHP never takes. The `if`/`elseif` spelling
+//! reports it identically and did so before this slice existed — which is the
+//! desugaring being faithful, not the desugaring being wrong — but `match (true)`
+//! syntax newly reaches it, so it is pinned in both spellings, and the day the
+//! positive side learns to intersect, both fixtures flip together.
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, check};
 use steins_syntax::SourceTree;
@@ -424,9 +440,9 @@ fn the_no_match_path_of_a_default_less_chain_falls_through() {
     // no-match path (PHP raises `\UnhandledMatchError`), and the desugared guard
     // chain falls through to the statement after it instead. Falling through only
     // widens the join — `$foo` below is the entry union joined with both arms, so
-    // nothing downstream claims a narrowing — and modelling the throw is issue
-    // #439's, for `match` and `switch` together. The day this changes, this fixture
-    // is the one to edit on purpose.
+    // nothing downstream claims a narrowing — and teaching the chain to terminate
+    // means giving the throw accounting a contribution ADR-0088 §5 has not ruled
+    // on. The day that changes, this fixture is the one to edit on purpose.
     assert_eq!(
         dumps(&over_union(
             "\techo match (true) {\n\t\tis_string($foo) => 1,\n\t\tis_int($foo) => 2,\n\t};\n\t\\PHPStan\\dumpType($foo);"
@@ -434,6 +450,113 @@ fn the_no_match_path_of_a_default_less_chain_falls_through() {
         vec!["dumped type: unknown"],
         "the tail is reachable and its lane claims nothing"
     );
+}
+
+// ---- The inherited gap, pinned in both spellings -----------------------
+
+#[test]
+fn a_chain_whose_later_arm_re_narrows_reports_where_php_reaches_nothing() {
+    // A FALSE POSITIVE, pinned so it cannot be forgotten. `$v === 1` leaves the
+    // residue `2`; `$v !== 1` should intersect that with `{1}` and empty it, and
+    // instead its positive refinement *replaces* the lane, so the `default` reads
+    // `1` on a path PHP never takes and the sentinel reports.
+    //
+    // The point of the pair is where the fault lives: the `if`/`elseif` spelling
+    // reports the identical finding, and reported it before this slice existed.
+    // The desugaring inherits the gap exactly — that is
+    // `the_if_chain_of_the_same_shape_answers_identically` doing its job on a
+    // shape where the shared answer happens to be wrong. It closes when a guard's
+    // positive side intersects the lane it finds instead of seeding it, and both
+    // halves of this fixture flip on the same day.
+    let arms = format!(
+        "<?php\n{SENTINEL}/** @param 1|2 $foo */\nfunction f(int $foo): int {{\n\treturn match (true) {{\n\t\t$foo === 1 => 1,\n\t\t$foo !== 1 => 2,\n\t\tdefault => assertNever($foo),\n\t}};\n}}\n"
+    );
+    let chain = format!(
+        "<?php\n{SENTINEL}/** @param 1|2 $foo */\nfunction f(int $foo): int {{\n\tif ($foo === 1) {{ return 1; }}\n\telseif ($foo !== 1) {{ return 2; }}\n\telse {{ assertNever($foo); }}\n}}\n"
+    );
+    let a = sentinel(&arms);
+    assert_eq!(a.len(), 1, "the re-narrowed lane reports: {a:?}");
+    assert_eq!(a[0].id, NEVER_PARAM_REACHABLE_ID);
+    assert_eq!(
+        a.iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        sentinel(&chain).iter().map(|d| d.message.clone()).collect::<Vec<_>>(),
+        "both spellings are wrong in exactly the same words"
+    );
+}
+
+#[test]
+fn the_re_narrowing_is_the_guard_vocabulary_and_needs_no_match_at_all() {
+    // The same gap with no `match` in sight, so the next reader does not go
+    // looking for it in the lowering. Two sequential guards: the first leaves the
+    // residue, the second replaces it.
+    assert_eq!(
+        dumps(
+            "<?php\n/** @param 1|2 $v */\nfunction f(int $v): void {\n\tif ($v === 1) { return; }\n\t\\PHPStan\\dumpType($v);\n\tif ($v !== 1) { return; }\n\t\\PHPStan\\dumpType($v);\n}\n"
+        ),
+        vec!["dumped type: int", "dumped type: 1"],
+        "the second dump is on a path PHP cannot reach, and reads the later guard"
+    );
+}
+
+// ---- Two shapes the mixing rule must NOT over-silence ------------------
+
+#[test]
+fn an_unmodellable_guard_on_another_variable_leaves_the_subject_proven() {
+    // `cool($s)` models nothing and touches nothing the subject's lane holds, so
+    // the `is_string` above it still stands: an `int` genuinely reaches the
+    // `default` when `cool()` answers false, and saying so is a TRUE positive.
+    // The mixing refusal is about the *subject's* lane, not about the presence of
+    // any unmodellable condition anywhere in the chain.
+    let src = format!(
+        "<?php\n{SENTINEL}function cool(mixed $v): bool {{ return true; }}\nfunction f(string|int $foo, string $s): int {{\n\treturn match (true) {{\n\t\tis_string($foo) => 1,\n\t\tcool($s) => 2,\n\t\tdefault => assertNever($foo),\n\t}};\n}}\n"
+    );
+    let d = sentinel(&src);
+    assert_eq!(d.len(), 1, "the uncovered `int` still refutes the claim: {d:?}");
+    assert!(d[0].message.contains("int"), "{}", d[0].message);
+}
+
+#[test]
+fn a_guard_on_another_variable_does_not_break_an_exhaustive_chain() {
+    // The mirror: a foreign guard sitting between two guards that do exhaust the
+    // subject must not cost the exhaustion. Nothing about `$flag` says anything
+    // about `$foo`, in either direction.
+    let src = format!(
+        "<?php\n{SENTINEL}function f(string|int $foo, bool $flag): int {{\n\treturn match (true) {{\n\t\tis_string($foo) => 1,\n\t\t$flag === true => 2,\n\t\tis_int($foo) => 3,\n\t\tdefault => assertNever($foo),\n\t}};\n}}\n"
+    );
+    assert!(sentinel(&src).is_empty(), "the chain still exhausts `$foo`: {:?}", sentinel(&src));
+}
+
+#[test]
+fn a_non_bool_callee_in_arm_position_is_accepted_and_claims_nothing() {
+    // The one judgment ADR-0052's note records rather than proves: a call is taken
+    // for a predicate. `nonbool()` returns `int`, so in PHP its arm matches
+    // nothing at all and the arms below it all run — and Steins reads it as an
+    // ordinary unmodellable guard, which subtracts nothing and lets the chain
+    // below it stand. The `is_int` arm still exhausts what is left, so the
+    // sentinel is answered. If `arm_cond_is_bool_valued` ever gains a return-type
+    // gate, this is the fixture that changes.
+    let src = format!(
+        "<?php\n{SENTINEL}function nonbool(mixed $v): int {{ return 1; }}\nfunction f(string|int $foo): int {{\n\treturn match (true) {{\n\t\tis_string($foo) => 1,\n\t\tnonbool($foo) => 2,\n\t\tis_int($foo) => 3,\n\t\tdefault => assertNever($foo),\n\t}};\n}}\n"
+    );
+    assert!(sentinel(&src).is_empty(), "got: {:?}", sentinel(&src));
+}
+
+#[test]
+fn a_default_less_chain_whose_arms_all_throw_is_not_a_missing_return() {
+    // The fall-through recorded above must not manufacture a finding out of the
+    // path it invents. PHP raises `\UnhandledMatchError` here and never reaches
+    // the end of the body; Steins falls through to it and still says nothing,
+    // because the widened path carries no claim. The `if`/`elseif` spelling of the
+    // same code DOES report — and correctly, since an `else`-less chain really
+    // does fall through in PHP — so this is the one place the two spellings are
+    // allowed to differ, and they differ in PHP too.
+    let arms = "<?php\nfunction f(string|int $foo): int {\n\tmatch (true) {\n\t\tis_string($foo) => throw new LogicException(),\n\t\tis_int($foo) => throw new LogicException(),\n\t};\n}\n";
+    assert!(findings(arms).is_empty(), "got: {:?}", findings(arms));
+
+    let chain = "<?php\nfunction f(string|int $foo): int {\n\tif (is_string($foo)) { throw new LogicException(); }\n\telseif (is_int($foo)) { throw new LogicException(); }\n}\n";
+    let d = findings(chain);
+    assert_eq!(d.len(), 1, "the else-less chain really does fall through: {d:?}");
+    assert!(d[0].id.contains("return"), "{}", d[0].id);
 }
 
 // ---- Whole-file adversarial probes -------------------------------------
