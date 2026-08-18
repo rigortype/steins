@@ -334,3 +334,55 @@ begin surfacing an `\UnhandledMatchError` origin under §5, which §5 gates on
 Verified coverage: the exhaustion check that the empty lane now makes *possible*
 and nobody has *built*. So the enum row and §5's gate are one piece of work, not
 two, and #431 should land them together.
+
+## Note (2026-08-19): §5 lands, and the gate's actual shape (issue #433)
+
+The class-constant refusal is lifted and §5's throw contribution ships together,
+as the note above required. The gate reads `subtract_no_match_path`'s residue on
+the subject's `Store::contract` lane exactly the way §4's sentinel reads the same
+lane for the opposite verdict: `Store::contract_narrowed` says a real subtraction
+landed (an untouched lane, or one only a `switch`'s over-approximate residue
+touched, never counts); `Store::contract_emptied` says it landed on nothing —
+true only for a lane that was all-`Verified` when it emptied, because
+`subtract_contract_lane` drops a lane that empties with any surviving-`Asserted`
+history to *absent* rather than *kept-empty*. That absence-on-taint is what makes
+the layered worked-example row behave: `int` native narrowed by `@param 1|2`,
+matched exactly on `1` and `2`, still reports — the lane was Asserted-tainted, so
+its emptying proves nothing about `int`, and the gate reads that correctly without
+any special case for docblocks at all.
+
+Reaching `throw.undeclared` needed one more thing this ADR did not anticipate:
+`UnhandledMatchError` extends `Error`, which ADR-0007 keeps unchecked by default,
+and that default would have silenced every contribution this section exists to
+make. The gate carries one class-specific carve-out in `emit_undeclared` —
+`UnhandledMatchError` is checked, but only where this walk's own verdict proved
+the specific construct live. ADR-0007's rationale is what licenses the exception:
+the unchecked default exists because the proof layer is supposed to own `Error`,
+by proving the throwing branch dead, and an uncovered `match` is precisely the
+shape the proof layer has nothing to prove dead — coverage failure already
+establishes the branch is live.
+
+Two scope gaps, both in the safe (false-negative) direction, neither a §5
+violation because §5 asks about `StmtKind::Match`, and neither shape reaches it as
+one:
+
+* **`match (true)` guard chains never reach the gate.** `lower_match_guard_chain`
+  desugars a default-less `match (true) { is_int($x) => …, … }` straight into
+  `StmtKind::If` with no `else` — the shape §1's own worked example uses for its
+  exhaustive `string|int` row. An `If` with no `else` falls through silently in
+  this walk; nothing marks it as a `match` that would have thrown. Measured: a
+  non-exhaustive guard chain with no `default` — a genuine runtime
+  `\UnhandledMatchError` — reports nothing, on a release build, at
+  `--profile contracts`. Silent is the safe direction, but it means every native
+  premise-grade row §1 opens with is currently unreachable by this gate; only the
+  by-value and enum forms are covered. Left for a follow-up, since closing it
+  means teaching `walk_if` that some `If`s are match-shaped.
+* **A `try`/`catch` around the construct dams it unconditionally**, regardless of
+  the caught type. The dataflow walk never structures a `try` body at all (it is
+  `StmtKind::Opaque` end to end), so a `match` written inside one is invisible to
+  this gate no matter what the `catch` clause names — `catch (\LogicException $e)`
+  dams an uncovered enum `match` exactly as `catch (\UnhandledMatchError $e)`
+  would. The structural throw scan's own guard-stack tracking (`scan_throw_origins`)
+  is type-aware and would get this right if the dataflow verdict reached it; it
+  currently cannot, because the verdict is computed on a walk that never enters
+  the `try` body in the first place.
