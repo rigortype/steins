@@ -286,17 +286,17 @@ fn non_lowerable_arm_condition_forces_whole_opaque() {
     assert_eq!(n(&structured), 0, "fully-lowerable → structured → decided-No arm pruned");
 }
 
-// assignment-RHS match is unchanged (not structured)
+// assignment-RHS match is structured too (issue #430)
 
 #[test]
-fn assignment_rhs_match_is_not_structured() {
-    // `$w = match (...) { ... }` keeps today's behavior: the RHS isn't flow-
-    // structured, so a decided arm does NOT prune a sibling's bad literal.
+fn assignment_rhs_match_is_structured_like_statement_position() {
+    // `$w = match (...) { ... }` is walked exactly as the statement form is: the
+    // decided arm prunes the sibling, so its bad literal is silent.
     let src = format!(
         "{HDR}$x = 5;\n$w = match ($x) {{ 5 => 1, 6 => width(\"abc\") }};\n"
     );
-    assert_eq!(n(&src), 1, "assignment-RHS match is unstructured → sibling bad literal still flagged");
-    // Contrast: the SAME shape in statement position IS structured → pruned.
+    assert_eq!(n(&src), 0, "assignment-RHS match is structured → dead sibling arm pruned");
+    // The SAME shape in statement position answers the same, and always did.
     let stmt = format!(
         "{HDR}$x = 5;\nmatch ($x) {{ 5 => 1, 6 => width(\"abc\") }};\n"
     );

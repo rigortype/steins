@@ -96,7 +96,8 @@ pub fn admits_val(ty: &ContractTy, v: &Val) -> Certainty {
             Val::Array(items) => admits_shape(*list, fields, *sealed, *non_empty, unsealed, items),
             _ => No,
         },
-        ContractTy::Class(_) | ContractTy::ObjectAny => No,
+        // An enum case is an object, so it joins the object arms: no `Val` is one.
+        ContractTy::Class(_) | ContractTy::EnumCase { .. } | ContractTy::ObjectAny => No,
         // No coercion to resource, even weakly (probed 8.5.9): `No`, not the
         // old `KNOWN_UNENFORCED` floor (ADR-0056 §8).
         ContractTy::Resource => No,
@@ -265,6 +266,7 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         | ContractTy::IterableOf { .. }
         | ContractTy::Shape { .. }
         | ContractTy::Class(_)
+        | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         // Scalars only; no scalar is a resource ([`admits_val`]'s disjointness).
         | ContractTy::Resource => No,
@@ -543,6 +545,7 @@ fn admits_shape_fact(ty: &ContractTy, sf: &ShapeFact) -> Certainty {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
+        | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         // An array is never a resource.
         | ContractTy::Resource => No,

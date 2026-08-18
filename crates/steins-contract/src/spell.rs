@@ -266,6 +266,10 @@ fn spell_nested(ty: &ContractTy) -> String {
         ContractTy::MixedMinus(MixedCut::Null) => "non-null-mixed".to_owned(),
         ContractTy::MixedMinus(MixedCut::Falsy) => "non-empty-mixed".to_owned(),
         ContractTy::Class(name) => name.clone(),
+        // PHPStan's own spelling for the case type (issue #429). The enum FQN
+        // carries the arm's normalization, exactly as the class arm above does;
+        // source casing is a caller's concern, not this module's.
+        ContractTy::EnumCase { enum_fqn, case } => format!("{enum_fqn}::{case}"),
         ContractTy::ObjectAny => "object".to_owned(),
         // One spelling for all three forms: open/closed is not modeled.
         ContractTy::Resource => "resource".to_owned(),

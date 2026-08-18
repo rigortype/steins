@@ -1136,3 +1136,252 @@ Fixtures: `crates/steins-infer/tests/count_guards.rs` — both arms clearing
 identically, the sealed/unsealed cases unaffected, an expression `count()`
 cannot bind to a subject still doing nothing, and the catch-arm regression
 above.
+
+## Note (2026-08-18): the enum case set is a finite Verified domain, and an emptied Verified lane is readable (issue #429)
+
+Completion of point 1 and an **amendment to point 2's emptied-carrier
+rule**, recorded together because the second exists for the first.
+
+**The domain.** A PHP enum is the one place the runtime-enforced type is
+*finite*, so it is the one place an exhaustiveness question is answerable on
+Verified premises alone. A case is an object with exactly one inhabitant, and
+the value domain is object-free (ADR-0035/0038/0043), so the singleton has no
+`Val` and no `Fact`. Point 1 already says where declared alternatives live,
+and that is where it goes: `ContractTy::EnumCase { enum_fqn, case }` is one
+arm, and a native `Suit $s` seeds one arm per declared case at `Verified`.
+`normalize::Subtrahend::EnumCase` subtracts them, mirroring
+`Subtrahend::Class`'s polarity pair.
+
+Two judgments differ from the class subtrahend's, both because the subtrahend
+is a single **value** rather than a class extent:
+
+* **No finality question.** The positive branch deletes a `Class(M)` arm iff
+  `is_a(E, M) = No`. Whether `M` has unseen descendants cannot change whether
+  `E::C` is one of `M`'s instances, so point 2's `final`-gate — which exists
+  because a subtrahend covering a class extent must reason about the whole
+  extent — has nothing to gate here.
+* **The positive branch narrows.** The 2026-08-01 note refused keep-only
+  narrowing on the arm lane because "the value lane's `Refine::Exact` already
+  owns that branch". For an enum case the value lane cannot own it — there is
+  no `Val` to be exact about. Rather than add an intersection operator, the
+  positive branch is spelled as the subtraction it is: `$s === Suit::Hearts`
+  removes every value that is not `Suit::Hearts`. The lane stays what point 2
+  built, a carrier every mutation removes provably-dead arms from.
+
+**The amendment.** Point 2's last bullet says an emptied carrier "**drops to
+no-fact** … never a death signal". The drop is what makes the finite domain
+unusable: a chain that covers every case produces exactly the emptiness a
+consumer needs to read, and dropping it makes that outcome indistinguishable
+from a variable with no lane at all — which is the *absence* answer, and the
+opposite claim. Amended: **an emptied lane whose every arm was `Verified` is
+kept, empty**, and a new accessor reads it. A lane holding any `Asserted` arm
+keeps the landed drop, because emptying a docblock's claim proves nothing.
+
+The rest of the bullet is untouched and load-bearing: an empty lane is still
+**not a death signal**. No branch is pruned by it, `eval_cond` is taught
+nothing about enum identity, and the verdict keeps owning death. What the
+empty lane buys is a consumer's *silence* — the direction that cannot
+manufacture a finding.
+
+**The absence discipline decides where the domain exists** (ADR-0049,
+ADR-0002 outranking coverage). The case set is complete only when one
+declaration can be read whole: a uniquely-resolved, unconditionally declared
+enum in a file that parsed, with at least one case. Anything else keeps its
+`Class` arm — which no identity guard can subtract to empty, so nothing
+downstream can claim an exhaustion the declaration never proved. The guard
+side asks the same gate as the seed, so a lane that was never expanded is
+never subtracted from as though it had been. And only a `Verified` arm
+expands: `@param Suit` over an untyped parameter is a claim, and a claim may
+not mint a finite domain (ADR-0037).
+
+**Rendering** stays on the point-4 cut's far side. The expansion is semantics;
+`Suit` and `Suit::Hearts|Suit::Spades|Suit::Clubs` denote one set, so an enum
+whose whole case set survives collapses back to the enum's name before it is
+spelled, and only a narrowed domain shows its cases. An emptied domain dumps
+as PHPStan's own `*NEVER*`.
+
+**Deliberately not landed**, each its own question:
+
+* **`match`/`switch`.** Value-position `match` is not analyzed at all, and
+  statement-position structuring still refuses a class-constant arm outright,
+  exactly as it did when the operand had no variant of its own — issues
+  #430/#431 inherit this domain when they land.
+* **Backed-enum `->value` / `->name`.** Narrowing is on case identity;
+  the backing slot is a separate question and claims nothing today.
+* **Loose `==`.** PHP decides `==` between two cases through their own
+  `name`/`value` slots — a different question with a different proof.
+* **The property carrier.** A declared enum-typed *property* has no arm lane:
+  heap property slots hold a `Fact`, and a `Fact` cannot hold an object. The
+  parameter and declared-return legs land; the property leg needs the
+  object-graph extension ADR-0036 already queues.
+* **Return through a body summary.** A callee that summarizes hands its caller
+  a heap object, which has no arm lane to narrow; the declared-return floor is
+  where this leg lands today.
+
+Fixtures: `crates/steins-infer/tests/enum_case_domain.rs` (both directions,
+the accumulating chain and the two chain outcomes, the backed/pure split, the
+five absence shapes, the out-of-scope pins); `crates/steins-contract/src/`
+`normalize.rs` (the arm's subsumption, both polarities of the subtrahend, the
+no-finality rule, the unknown-hierarchy keep).
+
+## Note (2026-08-18): the no-match path of a `match`/`switch` subtracts the arms (issue #439)
+
+Completion of point 2, not new design: the subtraction machinery was already
+built, and the `match` construct simply never called it. `walk_match` refined the
+subject *inside* a conditional arm and refined **nothing** on the path reached
+because every arm failed, so a `default` read the subject exactly as it arrived.
+The negated-guard reasoning an `elseif` chain has done since ADR-0031 stopped at
+the `match` keyword.
+
+**The rule.** Reaching the no-match path — a `default` body, or the fall-through
+of a `default`-less `switch` — means every arm was tried and every arm failed, so
+the path carries the **conjunction** of the negated conditions. Each condition is
+therefore subtracted on its own, and an arm mixing a subtractable literal with an
+unrepresentable operand still contributes the literal. That is the mirror image of
+the positive side, where an arm's conditions are a *disjunction* and one
+unrepresentable operand voids the whole arm's refinement. Both ADR-0052 carriers
+are subtracted, through the guard path's own machinery: the value lane via the
+`NotNull`/`Exclude` refinements at the `Verified` stratum, the arm lane via
+`Subtrahend::Null` / `Subtrahend::Value`, plus `Subtrahend::EnumCase` for an
+`Enum::Case` arm condition — the one subtrahend the value lane cannot carry.
+
+**`switch` subtracts the same set, and its residue is not evidence.** `switch`
+compares loosely, so its no-match path proves `$s != c`, and `$s === c` implies
+`$s == c`, so the failure of the loose test carries the failure of the strict one.
+Subtracting the exact literal is sound — the same one-directional reading the
+2026-08-18 `$x == null` carve-out (issue #391) already applies to the failing
+branch of a loose comparison, one construct up. What does not carry over is the
+converse: `case 0` also consumes `"0"`, `false` and `0.0`, and the loose-equal set
+of a literal is infinite, so it has no finite subtrahend spelling. A `switch`'s
+modelled residue is therefore an **over-approximation** where a `match`'s is
+exact, and that decides what may be read off it. An *empty* residue still proves
+emptiness — an over-approximation that is empty leaves nothing underneath — but a
+*non-empty* one proves nothing, because what it still holds may be precisely what
+a loose comparison consumed. So a `switch` subtraction narrows the lane (buying
+silence, the direction that cannot manufacture a finding) and never sets the
+proven-narrowing mark ADR-0088 §4 reads.
+
+**A partially-landed chain claims nothing.** ADR-0088 §4's proven-narrowing rule
+was designed against a single guard, where "a subtraction landed" and "this path's
+narrowing is modelled" are the same statement. A `match` is a whole chain at once
+and the mark is one bit, so a chain where some conditions landed and others did
+not would set it and hand the consumer a residue that is ignorance about the arms
+it could not model. Measured: `match ($b) { null => …, true => …, false => … }`
+over a `?bool` kills the `null` arm and leaves the general `bool` arm standing
+(point 2's interior-point rule — neither literal covers it), so the residue reads
+`bool` on a chain that is in fact exhaustive. Amended, therefore: **the mark
+survives a no-match subtraction only when every condition's subtraction landed.**
+The narrowing itself is kept either way; it is only the claim that is withheld.
+The same `?bool` shape spelled as an `if`/`elseif` chain reports today and is
+untouched by this — it is the bool-literal gap ADR-0088 §4's note names, and it
+closes when `Base::Bool` learns point 2's endpoint clip (its two-point domain is
+the interval rule's one other finite base), not here.
+
+**Deliberately not landed:** the class-constant arm condition still keeps the
+whole construct opaque (`usable_operand`), so a `match`/`switch` over an enum is
+not structured and the `EnumCase` subtrahend wired here has nothing to run on yet.
+The refusal was lifted experimentally to check the wiring: an enum `match` covering
+every case goes silent and one missing a case reports exactly the missing case, and
+the 6670-file public corpus answers identically with the lift and without it,
+across its 184 `case X::C:` labels and 463 `X::C =>` arms. It is still not this
+slice's to land, and the reason is not caution about the subtraction. Structuring
+turns on the rest of the construct's modelling too, and the idiomatic exhaustive
+enum `match` has **no `default`** — so the day class-constant arms structure, every
+one of them starts surfacing an `\UnhandledMatchError` it cannot throw. ADR-0088 §5
+gates that origin on *Verified* coverage, which is the exhaustion check nothing has
+built yet, so the lift needs that check beside it. Issue #433 owns the pair — it is
+the `\UnhandledMatchError` origin, and the enum-arm lift ships with its gate or not
+at all.
+
+Fixtures: `crates/steins-infer/tests/match_no_match_subtraction.rs` (the
+reproducer in both positions and its `if` twin, the `switch` pair, the loose
+weakness, the two evidence refusals, the inexpressible condition, the arm-local
+rebinding); `crates/steins-infer/tests/match_value_position.rs` (the residue
+fixture this closes, and the two `assertNever` tripwires whose silence now comes
+from an emptied domain rather than an untouched lane).
+
+## Note (2026-08-18): a `match (true)` chain is an `if`/`elseif` chain, and subtracts like one (issue #431)
+
+`match (true) { is_string($foo) => …, is_int($foo) => … }` is how a case
+analysis over a union is written when the author prefers `match` syntax.
+Nothing in this ADR was missing for it — the arm-wise subtraction the
+`if`/`elseif` chain performs is exactly the subtraction its arms want — and
+what was missing was the lowering: arm conditions had to be a variable or a
+literal, so a guard opaqued the construct.
+
+**The decision is a desugaring, not a second narrowing path.** A `match` the
+by-value shape refuses, whose subject is the literal `true` or `false`, lowers
+to `StmtKind::If`: the arms in source order are the links, the `default` is the
+`else`, and each arm condition goes through the same `lower_cond` an `if`
+condition does. First-match order *is* `elseif` order and PHP consults the
+`default` only when nothing matched, so the two constructs denote the same
+control flow; giving them one IR node is what guarantees they can never answer
+differently. Everything this ADR says about a chain therefore reaches the
+`match` spelling with no clause of its own: the positive refinement inside an
+arm, the negation every later arm and the `default` inherit, the enum case
+domain of the note above, the derivation clause, the stand-down clause.
+
+**The `===` gate is the one thing the desugaring has to prove.** `match`
+compares with `===`, so an arm runs on `<cond> === true` and the arms below it
+inherit `<cond> !== true`. That is the condition's truth and its negation only
+where the condition is **boolean-valued**. `!`, `&&`, `||`, the comparisons,
+`instanceof` and `isset` are unconditionally so; a condition the lowering
+could not model at all is inert on both sides and therefore safe under either
+reading. A bare truthiness test is not: `match (true) { $n => … }` with `$n =
+5` matches no arm, and reading the residue as "`$n` is falsy" would hand every
+arm below it a narrowing PHP never made. So a truthiness-shaped arm condition
+refuses the whole construct, on the standing all-or-nothing rule.
+
+A **call** in arm position is accepted, and it is the one judgment rather than
+a proof. A callee returning anything but `bool` matches no arm at all, so the
+shape is not written; and refusing calls would refuse `is_string($foo)`, which
+is the whole idiom. The residual exposure is a non-`bool` callee that also
+carries `@phpstan-assert-if-false` or an out-parameter, where the no-match path
+would read a tag at a polarity PHP did not prove. Measured at zero occurrences
+across the public corpus; if it ever appears, the gate to add is the callee's
+declared return type, which the walk has and the lowering does not.
+
+**The no-match subtraction of the note above does not reach this shape, and
+does not need to.** Issue #439 taught `walk_match` to subtract every arm's
+conditions on the no-match path; a desugared guard chain never enters
+`walk_match`, and its `default` has been reading the accumulated negation since
+ADR-0031, because that is what an `else` is. Measured: every fixture of this
+slice answers identically with #439 beneath it and without it. The two notes
+close the same gap for the two different IR nodes the two `match` shapes lower
+to, and neither is a prerequisite for the other.
+
+**What the desugaring does not reach**, and deliberately: the no-match path of a
+`default`-less chain *terminating*. A by-value `match` with no `default` raises
+`\UnhandledMatchError`, so its successor is unreachable; the desugared chain has
+no `else` and falls through to it instead. Falling through only widens the join
+— it costs precision and cannot manufacture a claim — and inventing a
+`StmtKind::Throw` here would feed the throw accounting a contribution ADR-0088
+§5 has not ruled on. Likewise `switch (true)`, whose loose `== true` is exactly
+truthiness and would therefore admit the arm conditions this note refuses:
+sound, unbuilt, and not asked for.
+
+**One inherited gap becomes reachable through the new spelling**, and it is
+recorded here because it is the hazard class this run keeps hitting. A later
+guard's *positive* refinement replaces the lane instead of intersecting it with
+what the guards above it left, so a chain whose second arm re-narrows what the
+first subtracted ends with a lane that was never proved:
+
+```php
+if ($v === 1) { return; }   // residue 2
+if ($v !== 1) { return; }   // PHP: unreachable below. Steins: $v is 1.
+```
+
+The `default` of `match (true) { $v === 1 => …, $v !== 1 => …, default => … }`
+therefore reads `1` where PHP reaches nothing at all, and a sentinel in that
+`default` reports. Measured: the `if`/`elseif` spelling of the same shape reports
+the identical finding, at the identical wording, on the base this slice sits on —
+the desugaring inherits the gap exactly rather than introducing it, which is the
+`the_if_chain_of_the_same_shape_answers_identically` property doing its job. It
+is still a false positive that `match (true)` syntax newly reaches, and the fix
+belongs where the gap is: the positive side of a guard must intersect the lane it
+finds, not seed it.
+
+Fixtures: `crates/steins-infer/tests/match_true_guards.rs` (the worked
+example's cells, the accumulated subtraction, `match (false)`, the three
+refusals, the inexpressible guard, the pair that proves the subtraction
+landed, and the re-narrowing chain above pinned in both spellings).

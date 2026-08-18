@@ -317,6 +317,36 @@ strict-floor end state, registered ahead of emission when its definite leg
 ships.
 _Avoid_: scoping the possibly-leg out of existence
 
+**Defensive terminator** (ADR-0088 §3):
+A provably-dead arm whose body does nothing but terminate — `throw`, `exit`, a
+call to a `: never` function. Never reported as dead, at either coverage grade:
+guarding a case the type system already excludes is the conservative style
+Steins encourages, and scolding it teaches the author to delete their own safety
+net. Extends ADR-0019 §2's ruling on live `exit` to the dead case. Structural —
+what the body *does*, never what it is called.
+_Avoid_: unreachable arm (names the position, not the intent), assertNever
+handling (the rule knows no such name)
+
+**Sentinel parameter** (ADR-0088 §4):
+A parameter declared `never` — uninhabited, so a call to it is coherent only if
+unreachable. The explicit opt-in that separates ordinary error handling in a
+dead branch from a *claim* the author wants checked, licensing one rule that is
+not about `match` at all: an argument whose most-refined **declared** type is
+non-empty on this path is a finding. Docblock-spelled, so contract-layer and
+`phpdoc.`-prefixed by construction. Leaves `phpdoc.param-mismatch` entirely —
+that id's remedy is "fix the argument", this one's is "handle a case".
+_Avoid_: exhaustiveness check (the rule is about one call, not one construct),
+never-type check
+
+**Coverage grade** (ADR-0088 §2):
+Which domain a `match`'s arms are asked to exhaust: the **Verified** one the
+engine enforces (what decides whether `\UnhandledMatchError` can be thrown) or
+the **Asserted** one the docblock most-refines (what decides whether the
+author's own case analysis is complete). Two questions, asked separately; every
+finding in the area names which it answers. Asserted coverage is the weaker
+claim — exhausting `1|2` says nothing about `int`.
+_Avoid_: exhaustiveness (singular — it hides which of the two is meant)
+
 **Warning-handler gate**:
 The `[runtime] warning-handler = "abort" | "null"` pseudo-constant
 (ADR-0049 §7): under the default `"abort"` a proven `E_WARNING` is a proven

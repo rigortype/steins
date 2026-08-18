@@ -63,6 +63,24 @@ pub enum Subtrahend {
         fqn: String,
         polarity: bool,
     },
+    /// `=== Enum::Case` / `!== Enum::Case` narrowing over enum-case arms (issue
+    /// #429), the [`Self::Class`] shape one rung finer: the subtrahend is a
+    /// single *value*, not a class extent.
+    ///
+    /// `polarity`: `false` is the negative branch (`$s !== Enum::Case`, subtract
+    /// that one case); `true` the positive branch (`$s === Enum::Case`, subtract
+    /// **everything else**). The positive branch is a subtraction here rather
+    /// than a keep-only intersection precisely so the arm lane stays what
+    /// ADR-0052 §2 built it as — a carrier every mutation removes provably-dead
+    /// arms from — even though the value lane cannot own this branch the way it
+    /// owns `if ($x === false)` (an enum case has no `Val`).
+    EnumCase {
+        /// The guard enum's FQN (normalized on comparison).
+        enum_fqn: String,
+        /// The guard case name (compared case-sensitively).
+        case: String,
+        polarity: bool,
+    },
 }
 
 /// The is-a oracle for class-arm subtraction (ADR-0052 §2), a trait so
@@ -245,6 +263,7 @@ pub fn subsumes(a: &ContractTy, b: &ContractTy) -> Certainty {
 
         // Object arms: no scalar-fact denotation; reflexive is-a floor.
         ContractTy::Class(name) => subsumes_class(a, name),
+        ContractTy::EnumCase { enum_fqn, case } => subsumes_enum_case(a, enum_fqn, case),
         ContractTy::ObjectAny => subsumes_object(a),
         // The resource leaf: no scalar-fact denotation, but no hierarchy to be
         // unsure about either, so the answer is exact both ways (ADR-0056 §8).
@@ -297,12 +316,49 @@ fn subsumes_class(a: &ContractTy, name: &str) -> Certainty {
         ContractTy::Class(n) => {
             if class_eq(n, name) { Yes } else { Maybe }
         }
+        // One case never covers a whole class — but it is not disjoint from one
+        // either (a single-case enum's one case IS the enum, and any class arm
+        // this module cannot place in the hierarchy may be a supertype). The
+        // honest floor, never the `No` the catch-all below would claim.
+        ContractTy::EnumCase { .. } => Maybe,
         // Some union member covering the class suffices (instances share a class).
         ContractTy::Union(members) => {
             members.iter().fold(No, |acc, m| acc.or(subsumes_class(m, name)))
         }
         ContractTy::Inter(members) => {
             members.iter().fold(Yes, |acc, m| acc.and(subsumes_class(m, name)))
+        }
+        _ => No,
+    }
+}
+
+/// Whether `a` subsumes the single value `enum_fqn::case` (issue #429). Sharper
+/// than [`subsumes_class`] on both ends, because an enum case is one *value*
+/// rather than a class extent: the enum's own name covers it outright, a
+/// different case of the same enum is provably disjoint from it, and both cuts
+/// of `mixed` keep it (an object is neither null nor falsy — the argument
+/// [`subsumes_resource`] makes for the resource leaf).
+///
+/// The one place the floor stays `Maybe` is a foreign class arm: an enum may
+/// implement interfaces, and this module carries no hierarchy to rule that in
+/// or out (ADR-0052 §2 "Unknown is-a keeps the arm").
+fn subsumes_enum_case(a: &ContractTy, enum_fqn: &str, case: &str) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+    match a {
+        ContractTy::Mixed | ContractTy::MixedMinus(_) | ContractTy::ObjectAny => Yes,
+        ContractTy::Opaque => Maybe,
+        ContractTy::EnumCase { enum_fqn: e, case: c } => {
+            // Case names are class constants: PHP compares them case-sensitively.
+            Certainty::from_bool(class_eq(e, enum_fqn) && c == case)
+        }
+        ContractTy::Class(n) => {
+            if class_eq(n, enum_fqn) { Yes } else { Maybe }
+        }
+        ContractTy::Union(members) => {
+            members.iter().fold(No, |acc, m| acc.or(subsumes_enum_case(m, enum_fqn, case)))
+        }
+        ContractTy::Inter(members) => {
+            members.iter().fold(Yes, |acc, m| acc.and(subsumes_enum_case(m, enum_fqn, case)))
         }
         _ => No,
     }
@@ -427,6 +483,7 @@ fn subsumes_array(a: &ContractTy, b: &ContractTy) -> Certainty {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
+        | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         | ContractTy::Resource => No,
     }
@@ -452,6 +509,7 @@ pub(crate) fn array_incapable(t: &ContractTy) -> bool {
         | ContractTy::LitStr(_)
         | ContractTy::LitBool(_)
         | ContractTy::Class(_)
+        | ContractTy::EnumCase { .. }
         | ContractTy::ObjectAny
         | ContractTy::Resource => true,
         // Only the `*-closure` spellings refuse an array outright.
@@ -1294,6 +1352,85 @@ pub fn subtrahend_covers(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOra
         Subtrahend::Value(v) => subsumes(&val_contract(v), arm),
         Subtrahend::Base(b) => subsumes(&ContractTy::Base(*b), arm),
         Subtrahend::Class { fqn, polarity } => class_covers(fqn, *polarity, arm, oracle),
+        Subtrahend::EnumCase { enum_fqn, case, polarity } => {
+            enum_case_covers(enum_fqn, case, *polarity, arm, oracle)
+        }
+    }
+}
+
+/// The enum-case polarity asymmetry (issue #429), the [`class_covers`] mirror
+/// for a subtrahend that is one *value*.
+///
+/// - **Negative** (`$s !== E::C`, subtrahend = the single value `E::C`): the arm
+///   dies only if the arm IS that value, which [`subsumes`] decides exactly. A
+///   `Class(E)` arm — an enum whose declaration never got expanded — survives,
+///   because one case is not the whole enum.
+/// - **Positive** (`$s === E::C`, subtrahend = every value other than `E::C`):
+///   the arm dies iff it provably cannot hold `E::C`. For an enum-case arm that
+///   is exact; for a class arm it is `is_a(E, M) = No` — and **no finality
+///   question arises**, unlike [`class_covers`], because the subtrahend removes
+///   a single value rather than a whole class extent: whether `M` has unseen
+///   descendants cannot change whether `E::C` is one of `M`'s instances. A
+///   scalar/null/array arm holds no object at all and dies; `object`/`mixed`/
+///   `Opaque` survive.
+fn enum_case_covers(
+    enum_fqn: &str,
+    case: &str,
+    polarity: bool,
+    arm: &ContractTy,
+    oracle: &dyn IsaOracle,
+) -> Certainty {
+    use Certainty::{Maybe, No, Yes};
+    let value = ContractTy::EnumCase { enum_fqn: enum_fqn.to_owned(), case: case.to_owned() };
+    if !polarity {
+        return subsumes(&value, arm);
+    }
+    match arm {
+        // Exact: the arm is one value, so it dies iff it is a DIFFERENT one.
+        ContractTy::EnumCase { .. } => Certainty::from_bool(!subsumes(&value, arm).is_yes()),
+        ContractTy::Class(m) => {
+            if oracle.is_a(enum_fqn, m) == No { Yes } else { Maybe }
+        }
+        // Object-capable, and nothing here rules `E::C` in or out.
+        ContractTy::Mixed
+        | ContractTy::MixedMinus(_)
+        | ContractTy::ObjectAny
+        | ContractTy::Opaque
+        // An enum may declare `__invoke`, so a `callable` arm may hold a case.
+        | ContractTy::CallableTy { .. } => Maybe,
+        // Object-incapable: no value of the arm is any enum case.
+        ContractTy::Never
+        | ContractTy::Null
+        | ContractTy::Base(_)
+        | ContractTy::IntIn(_)
+        | ContractTy::StrWith(_)
+        | ContractTy::StrOpaque
+        | ContractTy::LitInt(_)
+        | ContractTy::LitFloat(_)
+        | ContractTy::LitStr(_)
+        | ContractTy::LitBool(_)
+        | ContractTy::ArrayAny { .. }
+        | ContractTy::ListOf { .. }
+        | ContractTy::MapOf { .. }
+        | ContractTy::IterableOf { .. }
+        | ContractTy::Shape { .. }
+        | ContractTy::Resource
+        | ContractTy::Unset => Yes,
+        // A union is covered only if every member is; an intersection as soon as
+        // one member is.
+        ContractTy::Union(members) => Certainty::all_of(
+            members.iter().map(|m| enum_case_covers(enum_fqn, case, polarity, m, oracle)),
+        ),
+        ContractTy::Inter(members) => {
+            if members
+                .iter()
+                .any(|m| enum_case_covers(enum_fqn, case, polarity, m, oracle).is_yes())
+            {
+                Yes
+            } else {
+                Maybe
+            }
+        }
     }
 }
 
@@ -2318,6 +2455,135 @@ mod tests {
         let mut arms = vec![class("animal")];
         subtract(&mut arms, &Subtrahend::Class { fqn: "Cat".to_owned(), polarity: true }, &mock());
         assert_eq!(arms, vec![class("animal")]);
+    }
+
+    // ---- the enum case arm and its subtrahend (issue #429) ------------------
+
+    fn ecase(e: &str, c: &str) -> ContractTy {
+        ContractTy::EnumCase { enum_fqn: e.to_owned(), case: c.to_owned() }
+    }
+
+    fn suit(case: &str, polarity: bool) -> Subtrahend {
+        Subtrahend::EnumCase {
+            enum_fqn: "suit".to_owned(),
+            case: case.to_owned(),
+            polarity,
+        }
+    }
+
+    #[test]
+    fn an_enum_case_arm_subsumes_only_itself() {
+        assert_eq!(subsumes(&ecase("suit", "Hearts"), &ecase("suit", "Hearts")), Certainty::Yes);
+        // Two cases of one enum are disjoint values, not merely unrelated.
+        assert_eq!(subsumes(&ecase("suit", "Hearts"), &ecase("suit", "Spades")), Certainty::No);
+        // Case names are class constants: PHP compares them case-sensitively.
+        assert_eq!(subsumes(&ecase("suit", "Hearts"), &ecase("suit", "HEARTS")), Certainty::No);
+        // The declaring enum covers its own case; a foreign class stays undecided
+        // (an enum may implement interfaces this module knows no hierarchy for).
+        assert_eq!(subsumes(&class("suit"), &ecase("suit", "Hearts")), Certainty::Yes);
+        assert_eq!(subsumes(&class("unitenum"), &ecase("suit", "Hearts")), Certainty::Maybe);
+        // A case is an object: no scalar arm holds one, and both cuts of `mixed` do.
+        assert_eq!(subsumes(&ContractTy::Base(Base::Int), &ecase("suit", "Hearts")), Certainty::No);
+        assert_eq!(subsumes(&ContractTy::Mixed, &ecase("suit", "Hearts")), Certainty::Yes);
+        assert_eq!(
+            subsumes(&ContractTy::MixedMinus(MixedCut::Falsy), &ecase("suit", "Hearts")),
+            Certainty::Yes
+        );
+    }
+
+    #[test]
+    fn an_enum_case_arm_never_claims_disjointness_from_a_class() {
+        // The `subsumes_class` floor: one case does not cover a class extent, but
+        // a single-case enum's case IS its enum, so `No` would be a false claim.
+        assert_eq!(subsumes(&ecase("suit", "Hearts"), &class("suit")), Certainty::Maybe);
+    }
+
+    #[test]
+    fn the_negative_branch_deletes_exactly_the_named_case() {
+        // `$s !== Suit::Hearts`: the Hearts arm dies, its siblings survive.
+        let mut arms = vec![ecase("suit", "Hearts"), ecase("suit", "Spades")];
+        subtract(&mut arms, &suit("Hearts", false), &ReflexiveFloor);
+        assert_eq!(arms, vec![ecase("suit", "Spades")]);
+    }
+
+    #[test]
+    fn the_negative_branch_keeps_an_unexpanded_enum_arm() {
+        // An enum whose declaration never resolved stays one `Class` arm, and one
+        // case does not cover it — the absence discipline, read off the algebra.
+        let mut arms = vec![class("suit")];
+        subtract(&mut arms, &suit("Hearts", false), &ReflexiveFloor);
+        assert_eq!(arms, vec![class("suit")]);
+    }
+
+    #[test]
+    fn the_positive_branch_deletes_every_other_case() {
+        // `$s === Suit::Hearts`: the arm lane keeps its subtraction shape — the
+        // branch removes the cases it proves dead rather than intersecting.
+        let mut arms =
+            vec![ecase("suit", "Hearts"), ecase("suit", "Spades"), ecase("suit", "Clubs")];
+        subtract(&mut arms, &suit("Hearts", true), &ReflexiveFloor);
+        assert_eq!(arms, vec![ecase("suit", "Hearts")]);
+    }
+
+    #[test]
+    fn the_positive_branch_deletes_a_scalar_arm_and_keeps_the_open_ones() {
+        let mut arms = vec![
+            ContractTy::Base(Base::String),
+            ContractTy::Null,
+            ecase("suit", "Hearts"),
+            ContractTy::ObjectAny,
+            ContractTy::Opaque,
+        ];
+        subtract(&mut arms, &suit("Hearts", true), &ReflexiveFloor);
+        assert_eq!(
+            arms,
+            vec![ecase("suit", "Hearts"), ContractTy::ObjectAny, ContractTy::Opaque]
+        );
+    }
+
+    #[test]
+    fn the_positive_branch_asks_no_finality_question() {
+        // Unlike the class subtrahend, this one removes a single VALUE, so an
+        // unseen descendant of the arm cannot change whether it holds `E::C`.
+        // `Animal` is open and `is_a(cat, animal) = Yes`, so the arm survives; a
+        // proven non-membership deletes it whether or not the arm is final.
+        let sub = Subtrahend::EnumCase {
+            enum_fqn: "cat".to_owned(),
+            case: "Tabby".to_owned(),
+            polarity: true,
+        };
+        let mut kept = vec![class("animal")];
+        subtract(&mut kept, &sub, &mock());
+        assert_eq!(kept, vec![class("animal")]);
+        let mut died = vec![class("dog")];
+        subtract(&mut died, &sub, &mock());
+        assert_eq!(died, Vec::<ContractTy>::new(), "is_a(cat, dog) = No deletes the arm");
+    }
+
+    #[test]
+    fn an_unknown_hierarchy_keeps_the_arm_on_both_polarities() {
+        // `Mystery` is outside the enumeration, so `is_a(Mystery, Animal)` is
+        // Unknown and the arm survives either way (FP-safe, ADR-0052 §2).
+        for polarity in [true, false] {
+            let mut arms = vec![class("animal")];
+            subtract(
+                &mut arms,
+                &Subtrahend::EnumCase {
+                    enum_fqn: "mystery".to_owned(),
+                    case: "Tabby".to_owned(),
+                    polarity,
+                },
+                &mock(),
+            );
+            assert_eq!(arms, vec![class("animal")], "polarity {polarity}");
+        }
+    }
+
+    #[test]
+    fn an_enum_case_arm_spells_as_phpstan_spells_it() {
+        assert_eq!(crate::spell::spell_nested_for_test(&ecase("suit", "Hearts")), "suit::Hearts");
+        // The scalar speller declines it, as it declines every object arm.
+        assert!(crate::spell::spell_arms(&[ecase("suit", "Hearts")]).is_none());
     }
 
     // ---- inhabitance under the `[runtime] final-keyword` posture (issue #234) --

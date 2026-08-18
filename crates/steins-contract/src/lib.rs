@@ -232,6 +232,29 @@ pub enum ContractTy {
     /// A class or interface name (normalized: lowercased, leading `\`
     /// stripped). Scalars/arrays/null are never instances.
     Class(String),
+    /// **One enum case** — `Suit::Hearts` (issue #429). The enum FQN carries
+    /// [`Self::Class`]'s normalization (lowercased, leading `\` stripped); the
+    /// case name is stored as declared, because PHP compares case names
+    /// case-sensitively.
+    ///
+    /// The arm the finite enum domain is made of. A PHP enum case is an object
+    /// with exactly one inhabitant, and the value domain is object-free
+    /// (ADR-0035/0038/0043), so the singleton has no `Val` and no `Fact` — it
+    /// lives in the arm lane, which is where ADR-0052 §1 puts declared
+    /// alternatives anyway. An enum-typed declaration therefore seeds one arm
+    /// per declared case, and identity narrowing deletes arms
+    /// ([`normalize::Subtrahend::EnumCase`]).
+    ///
+    /// Never produced by phpdoc lowering: `@param Suit::Hearts` stays
+    /// [`Self::Opaque`] (a `ConstExpr::Fetch`). The case set is a **Verified**
+    /// fact read off a resolved native declaration, and ADR-0037's trust order
+    /// forbids laundering one in from a docblock.
+    EnumCase {
+        /// The declaring enum's FQN, normalized as [`Self::Class`]'s is.
+        enum_fqn: String,
+        /// The case name, as declared (compared case-sensitively).
+        case: String,
+    },
     /// The `object` keyword and object shapes.
     ObjectAny,
     /// `resource` — a legacy PHP resource handle, the one type PHP itself

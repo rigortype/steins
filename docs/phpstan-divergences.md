@@ -208,3 +208,23 @@ or the guard vocabulary — with the import queue ordered by conformance
 rows and corpus frequency, not taste. A sixth open-ended hook would be a
 second extension mechanism competing with the plugin contract, so it is
 refused.
+
+## "Always evaluate to true" on an arm condition vs the complement pair
+
+PHPStan reports the last covering arm of an exhaustive `match`/`if` chain
+as a condition that "will always evaluate to true". Steins registers no
+`condition.*` family and emits nothing there, permanently (ADR-0088 §6).
+Where the subject's type is Verified, the redundancy is the *point* of an
+exhaustive chain and the diagnostic pushes the author toward deleting
+their own safety net; where it is Asserted, the claim rests on a docblock
+the runtime never checks, which is the `treatPhpDocTypesAsCertain`
+divergence above applied to arm conditions. What Steins reports instead is
+the complement PHPStan is silent about: the `default` arm the chain
+provably exhausts (`match.dead-default`, and `phpdoc.dead-default` at the
+pedantic floor), the case analysis that has stopped being exhaustive
+(`phpdoc.never-param-reachable`, read off a `@param never` **sentinel
+parameter**), and the `\UnhandledMatchError` an uncovered `default`-less
+`match` throws, as an `origin = direct` contribution to `throw.undeclared`.
+A dead arm whose body only terminates — the **defensive terminator** — is
+never reported by any of them, extending ADR-0019 §2's live-`exit` ruling
+to the dead case.

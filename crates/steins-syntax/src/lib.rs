@@ -1580,6 +1580,13 @@ pub enum CondOperand {
     /// A bare global-constant fetch (`PHP_VERSION_ID`, `SOME_CONST`), carried as written
     /// (issue #29) so the version-guard fold can resolve it against the target range.
     Const(NameRef),
+    /// A class-constant / enum-case fetch `Class::NAME` (issue #429), carried as
+    /// written — the [`Self::Const`] shape one scope in. **Unproven**, exactly as
+    /// [`ArgValue::ClassConst`] is: inference resolves it against the class index,
+    /// and only the enum-case resolution is consumed today (identity narrowing over
+    /// the finite case domain). Nothing folds it to a verdict, so a comparison
+    /// against one still evaluates `Maybe`.
+    ClassConst(StaticClass, String),
     /// Anything else (call, property fetch, arithmetic sub-expression, …) — unrepresentable
     /// for the verdict but never opaque about its effects: under-modeling once let a stale
     /// `$m = []` survive `preg_match($re,$s,$m)===1` as a false `list{}` (issue #158).
@@ -8507,6 +8514,11 @@ fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         }
         return;
     }
+    // A `match` in value position gets its arms walked, as an entry of its own
+    // placed ahead of the statement that consumes its result (issue #430). The
+    // consuming statement is lowered below exactly as before — this adds a walk,
+    // never a value.
+    value_position_matches(s, out);
     let stmt_span = to_span(s.span());
     let stmt = match s {
         // Benign: no effect on local values — keep known values flowing across.
@@ -9085,28 +9097,148 @@ fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
     out
 }
 
-/// Lower a match-arm body expression (`… => <expr>`) to a one-statement sub-trace.
-/// The body is an expression, so it reuses [`lower_expr_stmt`] (an arm body that
-/// is `throw …` therefore lowers to a real [`StmtKind::Throw`] terminator).
+/// Lower a match-arm body expression (`… => <expr>`) to a sub-trace. The body is
+/// an expression, so it reuses [`lower_expr_stmt`] (an arm body that is `throw …`
+/// therefore lowers to a real [`StmtKind::Throw`] terminator), preceded by the
+/// entries a `match` in value position inside it contributes (issue #430) — an
+/// arm body is a statement position by any other name, so it gets the same
+/// treatment [`lower_stmt`] gives one.
 fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
+    let mut out = Vec::new();
+    // A `match` that IS the arm body is a statement position: `lower_expr_stmt`
+    // structures it below, and hoisting it here too would walk its arms twice.
+    if !matches!(expr.unparenthesized(), Expression::Match(_)) {
+        scan_value_matches(&Node::Expression(expr), &mut out);
+    }
     let st = lower_expr_stmt(expr);
     // This path bypasses `lower_stmt`, so it owns its own terminality fill
     // (ADR-0078, issue #199) — from the arm's expression, the same `expr_end` a
     // statement-position expression gets.
-    vec![Stmt {
+    out.push(Stmt {
         span: to_span(expr.span()),
         end: expr_end(expr),
         has_terminator: subtree_has_function_exit(&Node::Expression(expr)),
         ..st
-    }]
+    });
+    out
+}
+
+/// The trace entries a statement's **value-position** `match` expressions
+/// contribute, pushed ahead of the statement that consumes them (issue #430).
+///
+/// A `match` whose result is consumed — `$r = match (…)`, `return match (…)`,
+/// `echo match (…)`, `f(match (…))` — is the form nearly all real code uses, and
+/// until it lowered here its arms were never walked at all: only the
+/// statement-position path reached [`lower_match_stmt`], so every arm body was
+/// invisible to the walk. The hoisted entry restores exactly what statement
+/// position already had — per-arm first-match certainty, dead-arm marking, and
+/// the diagnostics an arm body emits — and nothing else. The **value** the
+/// `match` produces stays what it was: `lower_arg_value` still answers
+/// [`ArgValue::Other`] for a `match` and `named_call` still answers `None`, so
+/// the consuming statement's own value lane is untouched by this.
+///
+/// Only the positions whose expressions PHP evaluates in the statement's own
+/// entry env are read — an expression statement, `return`, and the two `echo`
+/// forms — the same boundary [`string_context_sites`] draws and for the same
+/// reason. A `match` in an `if` condition or a loop header is evaluated in an env
+/// this pass does not hold, and stays unstructured.
+fn value_position_matches(s: &Statement<'_>, out: &mut Vec<Stmt>) {
+    match s {
+        Statement::Expression(es) => {
+            // A `match` that IS the statement is a statement position, already
+            // structured by `lower_expr_stmt`; hoisting it would double the walk.
+            if matches!(es.expression.unparenthesized(), Expression::Match(_)) {
+                return;
+            }
+            scan_value_matches(&Node::Expression(es.expression), out);
+        }
+        Statement::Return(r) => {
+            if let Some(e) = r.value {
+                scan_value_matches(&Node::Expression(e), out);
+            }
+        }
+        Statement::Echo(e) => {
+            for v in e.values.iter() {
+                scan_value_matches(&Node::Expression(v), out);
+            }
+        }
+        Statement::EchoTag(e) => {
+            for v in e.values.iter() {
+                scan_value_matches(&Node::Expression(v), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Collect the structured entries for every value-position `match` in one
+/// expression subtree, in source order.
+///
+/// Two subtrees are never descended, each for its own reason:
+///
+/// * a nested function-like or class — a separate scope, lowered separately, and
+///   its free variables are not this statement's env;
+/// * the arms of a `match` this scan has already taken — [`lower_arm_body`] runs
+///   the same hoist inside each arm, so descending here would walk them twice.
+///
+/// A `match` [`lower_match_stmt`] refuses contributes nothing and is not
+/// descended either: all-or-nothing structuring is what makes the first-match and
+/// no-`default`-throws rules sound, and an arm of an unstructured outer `match`
+/// is not a position this walk can claim is reached.
+fn scan_value_matches(node: &Node<'_, '_>, out: &mut Vec<Stmt>) {
+    match node {
+        Node::Function(_)
+        | Node::Method(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => return,
+        Node::Match(m) => {
+            if let Some(st) = lower_match_stmt(m) {
+                out.push(Stmt {
+                    span: to_span(m.span()),
+                    // The same terminality a statement-position `match` gets, off
+                    // the same CST node (ADR-0078): a construct every arm of which
+                    // throws does not fall through just because its result was
+                    // about to be assigned.
+                    end: match_end(m),
+                    has_terminator: subtree_has_function_exit(node),
+                    ..st
+                });
+            }
+            return;
+        }
+        _ => {}
+    }
+    for child in children(node) {
+        scan_value_matches(&child, out);
+    }
 }
 
 /// Structure a statement-position `match ($subject) { … }` (ADR-0031 Part B).
-/// Returns `None` — falling back to `Opaque` — when the subject or any arm
-/// condition does not lower to a variable/literal, or when more than one
-/// `default` arm is present (partial structuring is unsound for the first-match
-/// and no-`default`-throws rules, so it is all-or-nothing).
+/// Returns `None` — falling back to `Opaque` — when neither shape fits: the
+/// **by-value** shape ([`lower_match_by_value`], subject and every arm condition a
+/// variable/literal) or the **guard-chain** shape ([`lower_match_guard_chain`],
+/// `match (true)`/`match (false)` over conditions). Both are all-or-nothing:
+/// partial structuring is unsound for the first-match and no-`default`-throws
+/// rules.
+///
+/// The by-value shape is tried first, so nothing it already structures changes
+/// meaning — `match (true) { true => …, false => … }` stays a by-value `match` on
+/// a boolean subject, and the guard chain is reached only where the answer used to
+/// be `Opaque`.
 fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
+    lower_match_by_value(m).or_else(|| lower_match_guard_chain(m))
+}
+
+/// The by-value `match`: subject and every arm condition lower to a
+/// variable/literal, and the arms are compared against the subject with `===`.
+/// `None` when any of them does not lower, or when more than one `default` arm is
+/// present.
+fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
     let subject = usable_operand(m.expression)?;
     let mut arms = Vec::new();
     let mut default: Option<Vec<Stmt>> = None;
@@ -9128,6 +9260,121 @@ fn lower_match_stmt(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
         }
     }
     Some(Stmt::lowered(StmtKind::Match { subject, arms, default, loose: false }, Vec::new()))
+}
+
+/// Structure `match (true) { <guard> => …, … }` — an `if`/`elseif` chain written
+/// in `match` syntax (issue #431) — as exactly that: a [`StmtKind::If`] whose
+/// links are the arms in source order and whose `else` is the `default`.
+///
+/// The desugaring is the whole point. First-match order *is* `elseif` order, so
+/// the arm walk, the accumulated subtraction every later arm and the `default`
+/// inherit (ADR-0052's arm-wise negation), the guard vocabulary and the dead-branch
+/// marking all arrive as the `if` path's, not as a second implementation of them.
+/// `default` becomes the `else` wherever it is written, since PHP consults it only
+/// when nothing else matched.
+///
+/// Three refusals, each all-or-nothing (`None` → the whole construct is `Opaque`):
+///
+/// * a subject that is not the literal `true`/`false`. `match ($x) { is_int($y) => … }`
+///   is a *comparison* against `$x`, not a guard chain, and `match (1) { … }` likewise;
+/// * an arm condition [`arm_cond_is_bool_valued`] refuses — `match` compares with
+///   `===`, so reading the arm as its condition's truth is only sound where the two
+///   agree;
+/// * a second `default`.
+///
+/// `match (false)` is the same chain with every arm's sense inverted: the arm runs
+/// when its condition is `false`, which is `!cond` for the conditions this accepts.
+fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
+    let sense = bool_literal_subject(m.expression)?;
+    let mut links: Vec<(CondExpr, Vec<Stmt>)> = Vec::new();
+    let mut default: Option<Vec<Stmt>> = None;
+    for arm in m.arms.iter() {
+        match arm {
+            mago_syntax::cst::MatchArm::Expression(a) => {
+                // `cond1, cond2 => …` takes the arm when EITHER holds, so the
+                // conditions fold with `||` — after the per-condition inversion, so
+                // `match (false) { a, b => … }` reads `!a || !b`.
+                let mut cond: Option<CondExpr> = None;
+                for c in a.conditions.iter() {
+                    let one = guard_arm_cond(c, sense)?;
+                    cond = Some(match cond {
+                        None => one,
+                        Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one)),
+                    });
+                }
+                links.push((cond?, lower_arm_body(a.expression)));
+            }
+            mago_syntax::cst::MatchArm::Default(a) => {
+                if default.is_some() {
+                    return None; // two defaults — give up (unreachable in valid PHP)
+                }
+                default = Some(lower_arm_body(a.expression));
+            }
+        }
+    }
+    let mut links = links.into_iter();
+    let (cond, then_trace) = links.next()?; // `match (true) { default => … }` is by-value
+    Some(Stmt::lowered(
+        StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
+        Vec::new(),
+    ))
+}
+
+/// `Some(true)` / `Some(false)` when the `match` subject is written as the literal
+/// `true` / `false`, else `None`. Read off [`lower_cond_operand`] so a parenthesized
+/// or case-varied spelling (`match (TRUE)`) answers the same as the bare one.
+fn bool_literal_subject(expr: &Expression<'_>) -> Option<bool> {
+    match lower_cond_operand(expr) {
+        CondOperand::Literal(ArgValue::Bool(b)) => Some(b),
+        _ => None,
+    }
+}
+
+/// One arm condition of a guard chain, lowered by [`lower_cond`] — the very
+/// lowering the `if` path uses — and inverted for a `match (false)` subject.
+fn guard_arm_cond(expr: &Expression<'_>, sense: bool) -> Option<CondExpr> {
+    let cond = lower_cond(expr);
+    if !arm_cond_is_bool_valued(&cond) {
+        return None;
+    }
+    Some(if sense { cond } else { CondExpr::Not(Box::new(cond)) })
+}
+
+/// May a `match (true)` arm be read as "its condition holds"?
+///
+/// `match` compares with `===`, so the arm runs on `<cond> === true` and the later
+/// arms inherit `<cond> !== true` — which is the condition's negation **only where
+/// the condition is boolean-valued**. `match (true) { $n => … }` is the shape that
+/// makes the difference bite: `$n = 5` takes no arm, and reading the residue as
+/// "`$n` is falsy" would hand every later arm and the `default` a narrowing PHP
+/// never proved. So [`CondExpr::Truthy`] — the one lowered form whose truth set is
+/// wider than `{true}` — is refused, and with it the whole construct.
+///
+/// `!`, `&&` and `||` yield `bool` in PHP whatever their operands are, comparisons
+/// and `instanceof` and `isset` likewise, so those are unconditionally fine.
+/// [`CondExpr::Opaque`] is fine for the opposite reason: it narrows nothing on
+/// either side, so no reading of it can claim anything.
+///
+/// [`CondExpr::Call`] is the judgment call. A call in `match (true)` arm position
+/// is a predicate in every idiom that works — a callee returning anything but
+/// `bool` matches *no* arm at all, so the code would not be written — and refusing
+/// calls would refuse `is_string($foo)`, the form the feature exists for. The
+/// residual exposure is a non-`bool` callee that also carries
+/// `@phpstan-assert-if-false` or an out-parameter (`preg_match(…) => …`), where the
+/// no-match path would read the tag at a polarity PHP did not prove; measured at
+/// zero occurrences across the public corpus.
+fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
+    match cond {
+        CondExpr::Cmp { .. }
+        | CondExpr::Instanceof { .. }
+        | CondExpr::Not(_)
+        | CondExpr::And(..)
+        | CondExpr::Or(..)
+        | CondExpr::Isset { .. }
+        | CondExpr::Call { .. }
+        | CondExpr::Opaque { .. } => true,
+        CondExpr::Truthy(_) => false,
+    }
 }
 
 /// Structure a `switch ($subject) { … }` (ADR-0031 Part B) into the same
@@ -9216,10 +9463,18 @@ fn lower_switch(sw: &mago_syntax::cst::Switch<'_>) -> Option<Stmt> {
 
 /// Lower an operand to a *usable* [`CondOperand`] — a bare variable or a literal —
 /// or `None` for anything else (a call, property fetch, arithmetic). Used to gate
-/// whether a `match`/`switch` can be structured at all.
+/// whether the **by-value** shape of a `match`/`switch` can be structured at all;
+/// a `match` this refuses is offered to [`lower_match_guard_chain`] before it is
+/// given up as `Opaque`.
 fn usable_operand(expr: &Expression<'_>) -> Option<CondOperand> {
     match lower_cond_operand(expr) {
         CondOperand::Other { .. } => None,
+        // A class-constant arm keeps the whole construct opaque, exactly as it did
+        // before the operand had a variant of its own (issue #429): `match` and
+        // `switch` over an enum are their own slice (#430/#431), and structuring
+        // `case Suit::Hearts:` here would silently move statement-position
+        // narrowing that nothing in this slice has measured.
+        CondOperand::ClassConst(..) => None,
         operand => Some(operand),
     }
 }
@@ -9521,6 +9776,15 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
         // A bare constant fetch (issue #29). `true`/`false`/`null` never reach
         // here — they lex as literals and lower through the arm below.
         Expression::ConstantAccess(ca) => CondOperand::Const(name_ref(&ca.name)),
+        // A class-constant / enum-case fetch (issue #429), recognized by the same
+        // static-class path `lower_arg_value` uses; a dynamic class or constant
+        // name falls through to `Other` as it always did.
+        Expression::Access(Access::ClassConstant(cc)) => {
+            match (trace_static_class(cc.class), class_const_name(&cc.constant)) {
+                (Some(class), Some(name)) => CondOperand::ClassConst(class, name),
+                _ => lower_cond_operand_other(expr.unparenthesized()),
+            }
+        }
         other => match lower_arg_value(other) {
             // A scalar literal, or a fully-concrete array literal — the latter lets a
             // `$x === []` / `$x === [1, 2]` guard narrow `$x` to a `Singleton` array
@@ -9528,25 +9792,28 @@ fn lower_cond_operand(expr: &Expression<'_>) -> CondOperand {
             // non-concrete array (an element that is a `Var`/call/offset read) stays
             // `Other`, so nothing unproven is ever treated as a decided literal.
             v if v.is_concrete_value() => CondOperand::Literal(v),
-            _ => {
-                // The invalidation set is collected only when the operand can
-                // write at all — `$o->p === 1` reads `$o` and rebinds nothing,
-                // and forgetting there would be a precision loss with no
-                // soundness content (issue #158).
-                let node = Node::Expression(other);
-                let writers = operand_writers(&node);
-                CondOperand::Other {
-                    call: named_call(other).map(Box::new),
-                    invalidates: match writers {
-                        OperandWriters::None => Vec::new(),
-                        _ => cond_reads(other),
-                    },
-                    sites: match writers {
-                        OperandWriters::Calls => call_invalidation(&node),
-                        _ => Vec::new(),
-                    },
-                }
-            }
+            _ => lower_cond_operand_other(other),
+        },
+    }
+}
+
+/// The [`CondOperand::Other`] floor of [`lower_cond_operand`], with its
+/// invalidation bookkeeping. The invalidation set is collected only when the
+/// operand can write at all — `$o->p === 1` reads `$o` and rebinds nothing, and
+/// forgetting there would be a precision loss with no soundness content
+/// (issue #158).
+fn lower_cond_operand_other(other: &Expression<'_>) -> CondOperand {
+    let node = Node::Expression(other);
+    let writers = operand_writers(&node);
+    CondOperand::Other {
+        call: named_call(other).map(Box::new),
+        invalidates: match writers {
+            OperandWriters::None => Vec::new(),
+            _ => cond_reads(other),
+        },
+        sites: match writers {
+            OperandWriters::Calls => call_invalidation(&node),
+            _ => Vec::new(),
         },
     }
 }
@@ -9842,9 +10109,10 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
             }
         },
         // A statement-position `match` (ADR-0031 Part B): structure its arms when
-        // the subject and every arm condition lower to a variable/literal; else
-        // fall back to `Opaque` over the whole subtree (partial structuring is
-        // unsound for the first-match / no-default-throws rules).
+        // the subject and every arm condition lower to a variable/literal, or when
+        // it is a `match (true)`/`match (false)` guard chain; else fall back to
+        // `Opaque` over the whole subtree (partial structuring is unsound for the
+        // first-match / no-default-throws rules).
         Expression::Match(m) => lower_match_stmt(m).unwrap_or_else(|| {
             let node = Node::Expression(expr);
             let (writes, reads, poisons, may_return) = opaque_sets(&node);
