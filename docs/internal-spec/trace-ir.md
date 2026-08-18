@@ -51,7 +51,7 @@ an opaque entry keeps the blanket drop.
 | `Return { value, call, span }` | `return <value>` (`Other` for bare `return`) |
 | `Echo(Vec<CallExpr>)` | `echo e1, e2` — carries named calls among the operands |
 | `If { cond, then_trace, elseifs, else_trace }` | structured branches, recursively lowered |
-| `Match { subject, arms, default, loose }` | statement-position `match` (strict, first-match, throws on no match) and `switch` (loose, falls through) |
+| `Match { subject, arms, default, loose }` | `match` (strict, first-match, throws on no match) and `switch` (loose, falls through) |
 | `Assert { cond }` | `assert($expr)` with a lowerable condition |
 | `Throw { span }` / `Exit { span }` | trace terminators |
 | `Opaque { writes, reads, poisons, may_return }` | a recognized control-flow construct whose internals are not modeled but whose write and read sets are; `may_return` is true when the subtree contains a `return` the walk cannot see as a top-level `Return` |
@@ -61,13 +61,36 @@ Compound assignment (`+=`, `.=`) lowers its value to `Other` — the statement i
 modeled, the value is not. A dynamic property name (`$o->$p = …`) or a chained
 lvalue (`$a->b->c = …`, `Foo::$s = …`) is a `Barrier`, never a `PropAssign`.
 
+### Value-position `match`
+
+A `match` whose result is consumed rather than discarded — `$r = match (…)`,
+`return match (…)`, `echo match (…)`, `f(match (…))` — lowers to a `Match` entry
+of its own, placed in the trace immediately **ahead of** the statement that
+consumes it. The consuming statement is lowered exactly as it would be without
+the `match`, so what this buys is the walk and nothing else: per-arm first-match
+certainty, dead-arm marking, and every diagnostic an arm body emits.
+
+The value stays out of it on purpose. `lower_arg_value` answers `Other` for a
+`match` and `named_call` answers `None`, so the consuming statement's value lane
+is what it always was; joining the arm values into the expression's result is a
+separate question with its own consequences for return typing.
+
+Only the positions PHP evaluates in the statement's own entry env are read — an
+expression statement, `return`, and the two `echo` forms — the same boundary the
+string-context scan draws. A `match` in an `if` condition or a loop header is
+evaluated in an env this pass does not hold, and stays unstructured. A match-arm
+body gets the same treatment, so a `match` nested inside one is walked too.
+
 ### All-or-nothing structuring
 
 `match`/`switch` reaches the structured form only when the subject and every arm
 condition lower to a bare variable or a literal, and (for `switch`) every
 non-empty case terminates without fall-through. One unrepresentable arm makes
 the **whole** construct `Opaque`. Partial structuring would be unsound for
-`match`'s first-match rule and its `\UnhandledMatchError` on no match.
+`match`'s first-match rule and its `\UnhandledMatchError` on no match. A refused
+`match` in value position is not descended into either, for the same reason: an
+arm of an unstructured outer `match` is not a position the walk can claim is
+reached.
 
 ### `Opaque` versus `Barrier`
 

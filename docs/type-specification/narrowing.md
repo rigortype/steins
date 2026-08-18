@@ -17,11 +17,20 @@ Modeled today:
 | Construct | Trace form |
 | --- | --- |
 | `if` / `elseif` / `else` (statement form) | structured sub-traces per branch |
-| statement-position `match` / `switch` | arms + optional default, with strict/loose comparison distinguished |
+| `match` / `switch` | arms + optional default, with strict/loose comparison distinguished |
 | `assert($expr)` | a guard applied to the fall-through env at the `Verified` stratum (read as a throw-guard — owner ruling, ADR-0052 amendment) |
 | `throw`, `exit` / `die` | trace terminators |
-| loops, `try`, nested blocks, expression-position `match` | `Opaque { writes, reads, poisons }` |
+| loops, `try`, nested blocks | `Opaque { writes, reads, poisons }` |
 | `goto`, labels, `declare`, `__halt_compiler`, anything unsure | `Barrier` |
+
+A `match` used as an **expression** — `$r = match (…)`, `return match (…)`,
+`echo match (…)`, `f(match (…))` — is structured too, as an entry placed ahead of
+the statement that consumes its result. Its arms are walked, its subject is
+refined per arm, and its dead arms are pruned exactly as the statement form's
+are; what the expression itself evaluates to is a separate question and is not
+answered here, so the consuming statement's value lane is unchanged. A `match` in
+an `if` condition or a loop header is evaluated in an env this pass does not
+hold, and stays `Opaque`.
 
 `match`/`switch` structuring is **all-or-nothing**: the subject and every arm
 condition must lower to a bare variable or a literal, and every non-empty

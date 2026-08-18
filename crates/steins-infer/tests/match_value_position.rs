@@ -135,6 +135,32 @@ fn a_dead_default_is_silent() {
     );
 }
 
+// ---- Reachability, which arm walking now decides ------------------------
+
+#[test]
+fn a_match_whose_every_arm_throws_terminates_the_trace() {
+    // `type.return-maybe-missing` fired here before the arms were walked: the
+    // body's only statement is an assignment, which falls through as far as
+    // `stmt_end` was concerned. It does not — every arm throws — and the hoisted
+    // entry carries `match_end`'s answer, which says so.
+    let src = format!(
+        "{HDR}function f(string $x): int {{\n\t$r = match ($x) {{ 'a' => throw new LogicException(), default => throw new LogicException() }};\n}}\n"
+    );
+    let ds = findings(&src);
+    assert!(ds.is_empty(), "a body that always throws misses no return, got: {ds:?}");
+}
+
+#[test]
+fn a_no_default_match_that_misses_every_arm_kills_the_tail() {
+    // PHP raises `\UnhandledMatchError`, so the statement after is unreachable and
+    // the proven-bad call it holds is silent — the answer statement position has
+    // always given.
+    let src = format!(
+        "{HDR}function f(): void {{\n\t$x = 'z';\n\t$r = match ($x) {{ 'a' => 1, 'b' => 2 }};\n\tsink(\\PHPStan\\dumpType($x));\n}}\n"
+    );
+    assert_eq!(dumps(&src), Vec::<String>::new(), "the tail after an unhandled match is dead");
+}
+
 // ---- The value question, deliberately out of scope ----------------------
 
 #[test]
@@ -199,6 +225,34 @@ fn a_default_assert_never_over_an_exhausted_domain_stays_silent() {
         .filter(|d| d.id == NEVER_PARAM_REACHABLE_ID || d.id == PARAM_MISMATCH_ID)
         .collect();
     assert!(noisy.is_empty(), "the sentinel arm must stay silent, got: {noisy:?}");
+}
+
+// ---- The residue this slice inherits, recorded rather than papered over --
+
+#[test]
+fn the_default_arm_reads_an_unsubtracted_subject_exactly_as_statement_position_does() {
+    // `walk_match` refines the subject inside a conditional arm and refines
+    // NOTHING on the default path: a `default` reached only because `null` was
+    // consumed above it still sees `string|null`, and the strict-floor possibly
+    // leg says so. That is wrong, it is wrong identically in statement position
+    // (where it has always been wrong), and it is not this slice's to fix —
+    // subtracting the arms' literals from the subject on the no-match path is one
+    // change that has to land for both positions at once.
+    //
+    // What this fixture guards is the ONLY property value position owes here: it
+    // introduces no asymmetry. Whatever the statement form answers, the value
+    // form answers too. Zero occurrences of the shape across the 6670-file
+    // fp-gate corpus, measured on this branch.
+    let src = format!(
+        "{HDR}function name(string $s): string {{ return $s; }}\nfunction stmt(?string $s): void {{\n\tmatch ($s) {{ null => 'none', default => name($s) }};\n}}\nfunction value(?string $s): string {{\n\treturn match ($s) {{ null => 'none', default => name($s) }};\n}}\n"
+    );
+    let maybe: Vec<Diagnostic> =
+        findings(&src).into_iter().filter(|d| d.id.contains("maybe-argument")).collect();
+    assert_eq!(
+        maybe.len(),
+        2,
+        "one per position — the value form inherits the statement form's residue, no more: {maybe:?}"
+    );
 }
 
 #[test]
