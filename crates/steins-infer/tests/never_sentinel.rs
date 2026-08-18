@@ -24,13 +24,21 @@
 //! `$var` path: reporting requires not just a non-empty arm lane but a **proven
 //! narrowing** — [`steins_infer`]'s `Store::contract_narrowed` bit, set only
 //! where a subtraction demonstrably killed or shrank an arm. Without it, a guard
-//! shape the arm lane cannot yet model (enum-case identity, boolean-literal
-//! equality — issue #429's job) leaves the lane at its full seeded declaration,
-//! and an exhaustive `if`/`elseif` over every enum case or both booleans read as
-//! "still reaches" on a lane nothing ever touched — two false-positive classes
-//! caught after the first version of this file landed. The trade: a completely
+//! shape the arm lane cannot yet model leaves the lane at its full seeded
+//! declaration, and an exhaustive `if`/`elseif` over every alternative reads as
+//! "still reaches" on a lane nothing ever touched — a false-positive class
+//! caught after the first version of this file landed (at the time, both the
+//! enum-case cell below and the boolean-literal one). The trade: a completely
 //! unguarded call (no chain above it at all) now declines too, since its lane is
 //! equally untouched. See `an_unguarded_call_declines_an_untouched_lane`.
+//!
+//! The enum-case cell's *model* landed with issue #429, and the boolean-literal
+//! cell's with issue #443 (`Base::Bool`'s own two-point endpoint clip,
+//! ADR-0052) — each teaches the arm lane the guard shape it previously could
+//! not touch, so `a_bool_covered_by_both_literals_is_silent` now reaches its
+//! silence through a lane genuinely subtracted to nothing, not an unmodelled
+//! one; the proven-narrowing gate above still backstops whatever guard shape
+//! the arm lane cannot yet model next.
 //!
 //! Every fixture below calls a shared sentinel:
 //! ```php
@@ -127,13 +135,38 @@ fn an_enum_exhausted_over_every_case_is_silent() {
 
 #[test]
 fn a_bool_covered_by_both_literals_is_silent() {
-    // Same root cause as the enum cell: the arm lane cannot yet subtract a
-    // boolean-literal equality guard, so an exhaustive `true`/`false` pair must
-    // not read as reachable either.
+    // Issue #443: `Base::Bool` now narrows under `!== true`/`!== false` exactly as
+    // an `int<lo, hi>` narrows at an endpoint, so this chain empties the arm lane
+    // for real (kept-empty, every arm was Verified) rather than leaving an
+    // untouched declaration behind — the silence is a proven exhaustion now, not
+    // the proven-narrowing gate's fallback for a guard shape it cannot model.
     let d = never_reachable(
         "function k(bool $b): void {\n\tif ($b === true) { echo 1; }\n\telseif ($b === false) { echo 2; }\n\telse { assertNever($b); }\n}\n",
     );
     assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn the_nullable_bool_reproducer_of_issue_443_is_silent() {
+    // Issue #443's worked example verbatim: `null`/`true`/`false` is an exhaustive
+    // three-way split of `?bool`, and before this fix the residual `bool` arm
+    // (unnarrowed by either bool-literal guard) made the sentinel read reachable.
+    let d = never_reachable(
+        "function f(?bool $b): void {\n\tif ($b === null) { echo 1; }\n\telseif ($b === true) { echo 2; }\n\telseif ($b === false) { echo 3; }\n\telse { assertNever($b); }\n}\n",
+    );
+    assert!(d.is_empty(), "{d:?}");
+}
+
+#[test]
+fn a_bool_missing_one_literal_still_reports() {
+    // The over-silencing guard for issue #443's own fix: a chain that excludes
+    // only `true` leaves the arm lane narrowed to exactly `false`, which is a
+    // proven narrowing (not an untouched lane) and must still report it.
+    let d = never_reachable(
+        "function k(bool $b): void {\n\tif ($b === true) { echo 1; }\n\telse { assertNever($b); }\n}\n",
+    );
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("false"), "{}", d[0].message);
 }
 
 #[test]
