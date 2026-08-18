@@ -1276,9 +1276,12 @@ fn summarize_string_group(strings: &[&PhpStr]) -> Vec<ContractTy> {
 /// Subtract a guard's negative information from an arm list, arm-wise
 /// (ADR-0052 §2), by each arm's [`subtract_arm`] fate: an arm dies iff the
 /// subtrahend subsumes it with [`Certainty::Yes`] (`Maybe` keeps it), except
-/// that a [`ContractTy::IntIn`] arm minus one of its own **endpoints** shrinks
-/// by one instead of surviving whole. An emptied list is left empty — the
-/// caller drops it to no-fact (the verdict owns death, ADR-0052 §2).
+/// for the two partial deletions [`subtract_arm`] documents — a
+/// [`ContractTy::IntIn`] arm minus one of its own **endpoints** shrinks by one,
+/// and a [`ContractTy::Base`]`(`[`Base::Bool`]`)` arm minus one of its two
+/// **literals** narrows to the other (issue #443) — instead of surviving
+/// whole. An emptied list is left empty — the caller drops it to no-fact (the
+/// verdict owns death, ADR-0052 §2).
 pub fn subtract(arms: &mut Vec<ContractTy>, sub: &Subtrahend, oracle: &dyn IsaOracle) {
     arms.retain_mut(|arm| match subtract_arm(sub, arm, oracle) {
         ArmFate::Survives => true,
@@ -1305,16 +1308,26 @@ pub enum ArmFate {
 }
 
 /// The fate of `arm` under `sub` (ADR-0052 §2): [`ArmFate::Dies`] iff
-/// [`subtrahend_covers`] answers [`Certainty::Yes`], plus the one **partial**
-/// deletion the arm vocabulary can spell back — a [`ContractTy::IntIn`] arm
-/// minus one of its own endpoints shrinks by one (`int<lo, hi>` less `lo` is
-/// `int<lo+1, hi>`; a two-point interval collapses to the surviving literal;
-/// the point interval dies). An **interior** point must not split the
-/// interval — no arm can spell the gap — so it survives whole.
+/// [`subtrahend_covers`] answers [`Certainty::Yes`], plus the two **partial**
+/// deletions the arm vocabulary can spell back:
+///
+/// - a [`ContractTy::IntIn`] arm minus one of its own endpoints shrinks by one
+///   (`int<lo, hi>` less `lo` is `int<lo+1, hi>`; a two-point interval
+///   collapses to the surviving literal; the point interval dies). An
+///   **interior** point must not split the interval — no arm can spell the
+///   gap — so it survives whole.
+/// - a [`ContractTy::Base`]`(`[`Base::Bool`]`)` arm minus one of its two
+///   literals narrows to the other (issue #443): unlike an interval, `bool`
+///   has no interior point to protect, so every non-covering subtrahend of
+///   this arm is one of its exactly two members and the narrowing is total,
+///   never a survival.
 #[must_use]
 pub fn subtract_arm(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOracle) -> ArmFate {
     if let (Subtrahend::Value(Val::Int(n)), ContractTy::IntIn(r)) = (sub, arm) {
         return clip_int_endpoint(*n, *r);
+    }
+    if let (Subtrahend::Value(Val::Bool(b)), ContractTy::Base(Base::Bool)) = (sub, arm) {
+        return ArmFate::Narrows(ContractTy::LitBool(!b));
     }
     if subtrahend_covers(sub, arm, oracle).is_yes() { ArmFate::Dies } else { ArmFate::Survives }
 }
@@ -2296,7 +2309,7 @@ mod tests {
         assert!(arms.is_empty());
     }
 
-    // ---- subtract: interval endpoints (the one partial deletion) ------------
+    // ---- subtract: interval endpoints (one of the two partial deletions) ----
 
     #[test]
     fn subtract_lo_endpoint_clips_the_interval() {
@@ -2366,6 +2379,65 @@ mod tests {
         let mut arms = vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)];
         subtract(&mut arms, &Subtrahend::Value(Val::Bool(false)), &ReflexiveFloor);
         assert_eq!(arms, vec![ContractTy::IntIn(IntRange::NON_NEGATIVE)]);
+    }
+
+    // Regression guards: a bool subtrahend must not leak into the int endpoint
+    // clip, and an int subtrahend must not leak into the bool one (issue #443)
+    // — the two partial deletions are siblings, not a shared code path.
+
+    #[test]
+    fn subtract_bool_value_leaves_an_unrelated_interval_alone() {
+        let mut arms = vec![rng(0, 10)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(true)), &ReflexiveFloor);
+        assert_eq!(arms, vec![rng(0, 10)]);
+    }
+
+    #[test]
+    fn subtract_int_value_leaves_the_general_bool_arm_alone() {
+        let mut arms = vec![ContractTy::Base(Base::Bool)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Int(0)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::Base(Base::Bool)]);
+    }
+
+    // ---- subtract: bool endpoints (the other partial deletion, issue #443) --
+
+    #[test]
+    fn subtract_false_narrows_the_general_bool_arm_to_true() {
+        let mut arms = vec![ContractTy::Base(Base::Bool)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(false)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::LitBool(true)]);
+    }
+
+    #[test]
+    fn subtract_true_narrows_the_general_bool_arm_to_false() {
+        // The domain has exactly two points, spelled either direction: unlike
+        // `int<lo, hi>` there is no interior point and no endpoint asymmetry.
+        let mut arms = vec![ContractTy::Base(Base::Bool)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(true)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::LitBool(false)]);
+    }
+
+    #[test]
+    fn subtract_bool_literal_from_its_own_singleton_still_empties() {
+        // The narrowed arm is an ordinary `LitBool`, so the pre-existing literal
+        // path (not the new endpoint clip) handles a second subtraction on it —
+        // `subtract_arm`'s `Base(Bool)` guard does not fire on a `LitBool` arm.
+        let mut arms = vec![ContractTy::LitBool(false)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(false)), &ReflexiveFloor);
+        assert!(arms.is_empty());
+    }
+
+    #[test]
+    fn subtract_both_bool_literals_in_sequence_empties_the_lane() {
+        // The exhaustive-chain shape (issue #443's reproducer, at the primitive
+        // level): `bool` less `true` less `false` is no-fact, mirroring
+        // `subtract_two_point_interval_collapses_to_the_surviving_literal`
+        // followed by `subtract_point_interval_dies_like_its_literal` for ints.
+        let mut arms = vec![ContractTy::Base(Base::Bool)];
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(true)), &ReflexiveFloor);
+        assert_eq!(arms, vec![ContractTy::LitBool(false)]);
+        subtract(&mut arms, &Subtrahend::Value(Val::Bool(false)), &ReflexiveFloor);
+        assert!(arms.is_empty());
     }
 
     // ---- subtract with a REAL is-a oracle -----------------------------------
