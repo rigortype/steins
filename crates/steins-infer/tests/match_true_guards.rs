@@ -23,15 +23,14 @@
 //!
 //! Two measured results are recorded here rather than smoothed over.
 //!
-//! * **Which lane prints the empty domain depends on the lane.** An exhausted
-//!   *enum* subject dumps as `*NEVER*` (ADR-0052's 2026-08-18 note: an emptied
-//!   all-`Verified` lane is kept, empty, and readable). An exhausted `string|int`
-//!   dumps as `unknown` — the scalar value lane has no empty domain to print, so
-//!   there a subtraction that removed everything reads the same as one that was
-//!   never made. That is not this slice's doing: the `if` chain of each shape
-//!   prints exactly the same thing, which is the property the slice actually owes
-//!   (`the_if_chain_of_the_same_shape_answers_identically`). Where the value lane
-//!   cannot tell the two apart, the contract lane the sentinel reads can, and
+//! * **Both lanes now print the empty domain the same way.** An exhausted *enum*
+//!   subject dumps as `*NEVER*` (ADR-0052's 2026-08-18 note: an emptied
+//!   all-`Verified` lane is kept, empty, and readable), and since issue #432 an
+//!   exhausted `string|int` does too — the predicate vocabulary was dropping its
+//!   emptied lane instead of keeping it, so a subtraction that removed everything
+//!   read as one that was never made. It no longer does. Either way the property
+//!   this slice actually owes is that the `if` chain of each shape prints exactly
+//!   the same thing (`the_if_chain_of_the_same_shape_answers_identically`), and
 //!   `an_exhausted_chain_is_silent_and_a_partial_one_is_not` is the pair that
 //!   proves the subtraction really landed.
 //! * The no-match path of a `default`-less guard chain falls through to the
@@ -109,9 +108,12 @@ fn guard_arms_narrow_and_the_default_sees_the_accumulated_subtraction() {
         dumps(&over_union(
             "\techo match (true) {\n\t\tis_string($foo) => \\PHPStan\\dumpType($foo),\n\t\tis_int($foo) => \\PHPStan\\dumpType($foo),\n\t\tdefault => \\PHPStan\\dumpType($foo),\n\t};"
         )),
-        vec!["dumped type: string", "dumped type: int", "dumped type: unknown"],
-        "each arm narrows to its own guard; the default's `unknown` is the value lane's \
-         spelling of a domain the subtraction emptied"
+        vec!["dumped type: string", "dumped type: int", "dumped type: *NEVER*"],
+        "each arm narrows to its own guard; the default's `*NEVER*` is the emptied \
+         arm lane, which a predicate subtraction now keeps (issue #432) instead of \
+         dropping to the value lane's `unknown` — the residue ADR-0052's 2026-08-19 \
+         note recorded, closed so that an exhausted native union is spelled the same \
+         way an exhausted enum case set already was"
     );
 }
 

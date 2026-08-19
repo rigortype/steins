@@ -386,3 +386,70 @@ one:
   is type-aware and would get this right if the dataflow verdict reached it; it
   currently cannot, because the verdict is computed on a walk that never enters
   the `try` body in the first place.
+
+## Note (2026-08-19): §7's measurement ran, and `match.dead-default` is not registered (issue #432)
+
+§7 left this id's floor to measurement rather than taste, and named the question
+the measurement would answer: *how much of the population does §3's carve-out
+remove?* It ran over both corpora — **100,359 files, 1,066 written `default`
+arms** — and the answer is **all of it**. Full record and verbatim triage in
+`docs/notes/20260819-match-dead-default-measurement.md`.
+
+**Three provably-dead `default` arms exist in that thousand.** All three are
+`switch` (§9 defers it), all three hold on `Asserted` premises alone (§2 refuses
+them), and all three are a bare `throw` (§3 carves them out). Each gate removes
+the whole population on its own. So **`match.dead-default` would report nothing,
+and it is not registered** — §7's own last sentence applied to §7's own
+measurement. All three triaged TRUE; there were no false positives to fix.
+
+**§7's floor question stays open, not settled.** With a yield of zero there is no
+triage to choose between `Floor::Default` and `Floor::Contracts`, and picking one
+anyway would be exactly the taste call §7 wrote itself to avoid.
+`REGISTERED_NOT_YET_EMITTED` is not the home either: that list is for ids whose
+emitter is coming, and this one's emitter was built, run, and found nothing.
+
+**#434 inherits a measured population of zero.** `phpdoc.dead-default` owns
+exactly the Asserted grade these three sit at — and §7 gives it the same
+terminator carve-out, so it reports nothing on them either. The two ids together
+are silent on every provably-dead `default` arm in both corpora. Recorded here so
+the next person does not measure it a second time.
+
+**The carve-out was aimed at the right shape.** §3 was written ahead of any
+measurement, from one worked example, and predicted that a dead `default` under
+an exhaustive chain would be a guard rather than a value. Three for three, it is
+— one of them annotated by its own author as *"有り得ないケース"*, "impossible
+case". And it removes them on §3's *letter*, the sole-terminator reading: the
+cell where the letter ("does nothing but terminate") and the rationale (a safety
+net is a safety net) disagree did not occur once, so that disagreement is real
+but not load-bearing, and settling it can wait for a case that exhibits it.
+
+**The reach limit is the arm lane's, and it is what to re-measure.**
+`Store::contract` is seeded from declared parameters and declared returns, so a
+`match` on a local, on a property, or in a poisoned scope has no lane to empty
+however exhaustive its arms are — all three hits are `switch ($parameter)`. When
+ADR-0052's queued property leg or its return-summary leg lands, this measurement
+should be re-run rather than trusted.
+
+**The measurement machinery itself does not ship** (owner ruling, 2026-08-19).
+With no id registered it emits nothing and finds nothing, and reaching the
+guard-chain spelling had cost a syntactic-provenance bit on `StmtKind::If` —
+which ADR-0031 deliberately keeps off that variant, and which issue #448 answers
+without touching, off the CST. Two mechanisms for one provenance question is
+worse than one, and re-measurement is gated on a distant change that will want to
+build on whichever mechanism exists then. What survives is the conclusion above
+and the method in the note.
+
+One repair from the measurement **did** ship, because it is independently
+correct: the type-predicate vocabulary was dropping an emptied all-`Verified`
+lane where the value-subtrahend path keeps it, so §8's *first* row — a native
+`string|int` exhausted by `is_string`/`is_int` — read as absence rather than
+emptiness, which is the opposite claim. ADR-0052's note of the same date has it.
+That fix is also what issue #448 met from the other side: its guard-chain throw
+gate hit the same asymmetry and worked around it at its own call site by reading
+`Store::contract_arms(..).is_some()`. Once the source repair lands, that
+workaround is unnecessary and slightly lossy — `contract_arms` collapses *absent*
+with *kept-empty*, and §5 wants to report on the first (the absence-on-taint
+mechanism the 2026-08-19 note above credits for §8's layered row), so the
+guard-chain spelling would go silent where its by-value twin reports. Measured on
+#448's branch: the layered row reports by value and is silent through
+`match (true)`.

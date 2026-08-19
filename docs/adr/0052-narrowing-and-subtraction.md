@@ -1579,3 +1579,60 @@ worked example; `a_bool_missing_one_literal_still_reports`, the
 over-silencing guard; `a_bool_covered_by_both_literals_is_silent`, re-pinned
 with its true reason recorded rather than the proven-narrowing gate's
 fallback).
+
+## Note (2026-08-19): the predicate vocabulary keeps its emptied lane too (issue #432)
+
+Completion of the 2026-08-18 enum note's amendment, not new design: that note
+made an emptied all-`Verified` arm lane **kept, empty** so a consumer could
+read it, and wrote the rule into `subtract_contract_lane`. `subtract_pred_arms`
+— the type-predicate vocabulary's own lane surgery, which does not route
+through that function — was never taught it, and went on removing the lane
+outright. The 2026-08-19 guard-composition note recorded the divergence as a
+residue and deferred it. It is closed here, because ADR-0088 §8's whole first
+row depends on it.
+
+**What the divergence cost.** A native `string|int` exhausted by
+`is_string`/`is_int` left *no lane at all*, which is the **absence** answer —
+what an undeclared variable, an invalidated one, and a refused enum case set
+all look like. Absence states nothing; emptiness states that no value reaches
+the position. So the most idiomatic exhaustive case analysis the language has
+produced the one reading that cannot be told apart from ignorance, while an
+exhausted enum case set two lines away produced the readable one.
+`\PHPStan\dumpType` showed it plainly: `unknown` where the sibling carrier said
+`*NEVER*`.
+
+**The rule is the one already written**, applied at the second call site: an
+emptied lane is kept when every arm it held was `Verified`, and dropped to
+no-fact otherwise. The soundness argument does not turn on the subtrahend's
+shape. `!is_string` deletes a `string` arm because `pred_holds_on_arm` answered
+`Yes` — the predicate provably holds on every value that arm admits — which is
+the same warrant `!== 1` has for deleting a `1` arm. A `Verified` lane every
+one of whose arms a native runtime test deleted is the statement that no value
+of that variable reaches here, however the arms were spelled. The stratum gate
+is untouched and still load-bearing: an `Asserted` arm in the lane still drops
+it, so a docblock's exhausted claim still mints nothing.
+
+Still not a death signal, at both call sites alike: no branch is pruned, the
+verdict keeps owning death, and what the empty lane buys a consumer is silence.
+
+**Measured.** The public corpus is byte-identical before and after (a 0-line
+diff), and the nsrt harness is unmoved — headline 2333, admissible 2793,
+identical either side. Two integration fixtures move, both from `unknown` to
+`*NEVER*`, and both name positions PHP genuinely cannot reach: the `default` of
+ADR-0088 §1's own worked example, and the `!is_string($s)` branch of a native
+`string $s`. The second is worth stating, because it is the shape a reader is
+most likely to think changed meaning: the *value* lane still drops there rather
+than carrying the refuting fact in, which is what the type-predicate slice's
+measured false-positive class needed; it is only the arm lane underneath that
+now answers first, and more precisely.
+
+Fixtures: re-pinned in `crates/steins-infer/tests/match_true_guards.rs`
+(`guard_arms_narrow_and_the_default_sees_the_accumulated_subtraction`) and
+`crates/steins-infer/tests/type_predicate_guards.rs`
+(`the_refutation_drop_holds_on_the_false_branch_too`, whose sibling
+`a_refuted_guard_drops_the_fact_because_the_verdict_owns_death` is untouched
+and pins that the value lane's own behaviour did not move). New in the same
+file, the stratum gate in both directions, since every pre-existing pin there
+runs over a docblock-only lane and so exercises one side only:
+`a_verified_lane_exhausted_by_two_predicates_is_kept_empty` and
+`an_asserted_lane_exhausted_the_same_way_still_drops`.
