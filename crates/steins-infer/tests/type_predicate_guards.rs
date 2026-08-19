@@ -17,7 +17,13 @@
 //! assert-specific plumbing. **The verdict owns death** — a guard its own
 //! binding's fact refutes describes an unreachable branch, so the fact DROPS to
 //! nothing there rather than being rewritten into the predicate's base or
-//! carried in unchanged (the measured FP class).
+//! carried in unchanged (the measured FP class). What changed with issue #432 is
+//! only what answers *instead*: where the guard deleted every arm of an
+//! all-`Verified` declared lane, that lane is now kept empty rather than removed,
+//! so the dump reads `*NEVER*` — the position is unreachable — where it used to
+//! fall through to the value lane's `unknown`. The value lane's own behaviour is
+//! untouched, which is what
+//! `a_refuted_guard_drops_the_fact_because_the_verdict_owns_death` still pins.
 //!
 //! NB: a call invalidates its argument after the statement (by-ref
 //! conservatism), so each fixture dumps a binding once per branch, never before
@@ -266,9 +272,47 @@ fn a_refuted_guard_drops_the_fact_because_the_verdict_owns_death() {
 #[test]
 fn the_refutation_drop_holds_on_the_false_branch_too() {
     // Symmetric: `!is_string($s)` on a proven-string binding is the unreachable
-    // side, and drops rather than carrying `string` into it.
+    // side, and the VALUE lane still drops rather than carrying `string` into it —
+    // which is what the sibling above pins and what the measured FP class needed.
+    //
+    // The declared ARM lane answers first here, and since issue #432 it answers
+    // `*NEVER*`: the guard deleted the only arm a native `string $s` seeds, every
+    // arm was `Verified`, so the lane is kept-empty rather than dropped and says
+    // outright that no value reaches this branch. Strictly more than the `unknown`
+    // this pinned before, and the same spelling an exhausted enum case set has had
+    // since issue #429 — the two carriers agreeing is the point of the change.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (!is_string($s)) { \\PHPStan\\dumpType($s); }\n}\n";
+    assert_eq!(dumps(src), vec!["*NEVER*"]);
+}
+
+#[test]
+fn a_verified_lane_exhausted_by_two_predicates_is_kept_empty() {
+    // The multi-arm form of the same rule, and ADR-0088 §1's own idiom: a native
+    // `string|int` whose two arms both die leaves a lane that is present and
+    // empty, not absent. The distinction is the whole point — absence is what an
+    // undeclared variable looks like, and reading it as "no value reaches here"
+    // would be the opposite claim.
+    let src = "<?php\nfunction f(string|int $v): void {\n\
+               if (is_string($v)) { return; }\n\
+               if (is_int($v)) { return; }\n\
+               \\PHPStan\\dumpType($v);\n}\n";
+    assert_eq!(dumps(src), vec!["*NEVER*"]);
+}
+
+#[test]
+fn an_asserted_lane_exhausted_the_same_way_still_drops() {
+    // The stratum gate, and the reason `subtract_pred_arms` asks `all_verified`
+    // before it retains rather than after. The identical guard sequence over a
+    // docblock-only union must NOT mint a kept-empty (Verified) emptiness: the
+    // engine enforces nothing on an untyped `$v`, so a value outside `string|int`
+    // genuinely arrives and this position is genuinely reachable. Emptying a
+    // docblock's claim proves nothing, so the lane drops and the value lane's
+    // `unknown` answers instead.
+    let src = "<?php\n/** @param string|int $v */\nfunction f($v): void {\n\
+               if (is_string($v)) { return; }\n\
+               if (is_int($v)) { return; }\n\
+               \\PHPStan\\dumpType($v);\n}\n";
     assert_eq!(dumps(src), vec!["unknown"]);
 }
 

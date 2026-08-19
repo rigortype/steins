@@ -19944,18 +19944,36 @@ fn apply_type_narrowing(
 
 /// Arm-lane subtraction for one type predicate: the TRUE branch deletes the arms
 /// the predicate **refutes**, the FALSE branch the arms it **proves**. `Maybe`
-/// keeps the arm on both. An emptied lane drops to no-fact, never a death signal
-/// (ADR-0052 §2). Marks [`Store::narrowed`] when an arm actually died (issue #428).
+/// keeps the arm on both. Marks [`Store::narrowed`] when an arm actually died
+/// (issue #428).
+///
+/// An emptied lane takes [`subtract_contract_lane`]'s two endings, not a third of
+/// its own (issue #432, closing the residue ADR-0052's 2026-08-19 note recorded):
+/// **kept, empty** when every arm it held was `Verified`, so
+/// [`Store::contract_emptied`] can read it, and dropped to no-fact otherwise. The
+/// soundness argument is the one that function gives, and it does not turn on the
+/// subtrahend's shape: `!is_string` deletes a `string` arm because the predicate
+/// provably holds on every value that arm admits, exactly as `!== 1` deletes a
+/// `1` arm, so a `Verified` lane every one of whose arms a native runtime test
+/// deleted is the statement that no value reaches here. Leaving the predicate
+/// vocabulary alone made an exhausted native union — `string|int` under
+/// `is_string`/`is_int`, ADR-0088 §1's own idiom — indistinguishable from a
+/// variable that never had a lane, which is the *absence* answer and the opposite
+/// claim.
+///
+/// Still not a death signal: no branch is pruned, and what the empty lane buys a
+/// consumer is silence.
 fn subtract_pred_arms(store: &mut Store, var: &str, pred: TypePred, positive: bool) {
     let Some(arms) = store.contract.get_mut(var) else { return };
     let before = arms.len();
+    // Asked before the retain, which is what erases the evidence.
+    let all_verified = arms.iter().all(|a| a.stratum == Stratum::Verified);
     arms.retain(|a| {
         let holds = pred_holds_on_arm(pred, &a.ty);
         if positive { holds != Certainty::No } else { !holds.is_yes() }
     });
     let narrowed = arms.len() != before;
-    let empty = arms.is_empty();
-    if empty {
+    if arms.is_empty() && !all_verified {
         store.contract.remove(var);
     }
     if narrowed {
