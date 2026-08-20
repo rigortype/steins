@@ -2147,6 +2147,24 @@ pub struct Scope {
     pub effect_origins: Vec<EffectOrigin>,
     /// Throw-origin candidates of a closure/arrow body — the throw-fixpoint analogue of [`Self::effect_origins`].
     pub throw_origins: Vec<ThrowOrigin>,
+    /// Spans of `match (true)`/`match (false)` guard chains in this scope whose
+    /// `default` arm is absent (ADR-0088 §5's note on issue #448) — every one is
+    /// the same span [`ThrowKind::New`]'s synthetic `UnhandledMatchError` origin
+    /// for the construct already carries (`scan_throw_origins`'s `Node::Match`
+    /// arm), computed independently by `scan_guard_chain_no_default`.
+    ///
+    /// `lower_match_guard_chain` desugars such a chain to [`StmtKind::If`] with
+    /// `else_trace: None` — deliberately (issue #431), so the guard vocabulary and
+    /// the join stay the `if` path's — but that erases the one bit the coverage
+    /// gate needs: whether a missing `else` is an ordinary fall-through or a
+    /// `\UnhandledMatchError`. ADR-0031 keeps the trace IR itself free of
+    /// syntactic-provenance bits, so the question is answered *here*, off the CST,
+    /// independently of [`Self::stmts`], and consulted by the walk purely by span
+    /// — the same discipline [`ForeachSite`]/[`OperandSite`] already use for a
+    /// question the trace's own node shape cannot carry. Never an answer: whether
+    /// a listed construct actually throws is an inference-time question (the
+    /// subject's Verified domain) this pass cannot ask.
+    pub guard_chain_no_default: Vec<Span>,
     /// `true` when a closure/arrow scope ([`ScopeOwner::Closure`]) was declared `static`
     /// (`static function () {}`, `static fn () => …`) — can never bind to an object or touch
     /// `$this`. A syntactic fact (ADR-0063 §2 decision 4), making `static-closure`'s binding
@@ -6561,10 +6579,12 @@ fn build_scope_from(
     let mut stmts = Vec::new();
     let mut method_calls = Vec::new();
     let mut is_generator = false;
+    let mut guard_chain_no_default = Vec::new();
     for s in statements {
         lower_stmt(s, &mut stmts);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
+        scan_guard_chain_no_default(&Node::Statement(s), &mut guard_chain_no_default);
         if !is_generator {
             is_generator = node_is_generator(&Node::Statement(s));
         }
@@ -6589,6 +6609,7 @@ fn build_scope_from(
         ret_ty: None,
         effect_origins: Vec::new(),
         throw_origins: Vec::new(),
+        guard_chain_no_default,
         is_static: false,
         docblock: None,
         unused_captures: Vec::new(),
@@ -6672,6 +6693,7 @@ fn build_closure_scope_from_closure(
     let mut effect_origins = Vec::new();
     let mut throw_origins = Vec::new();
     let mut method_calls = Vec::new();
+    let mut guard_chain_no_default = Vec::new();
     // The closure's own scope is poisoned by a by-ref `use (&$x)` capture (its
     // captured var is a reference alias) or any in-body poison marker — it defeats
     // frame-locality for the whole body just as an in-body `global` would.
@@ -6693,6 +6715,7 @@ fn build_closure_scope_from_closure(
         scan_throw_origins(&Node::Statement(s), &[], &[], &cx.locals, &mut throw_origins);
         scan_method_calls(&Node::Statement(s), &mut method_calls);
         scan_opaque(&Node::Statement(s), &mut opaque, false);
+        scan_guard_chain_no_default(&Node::Statement(s), &mut guard_chain_no_default);
         if !is_generator {
             is_generator = node_is_generator(&Node::Statement(s));
         }
@@ -6717,6 +6740,7 @@ fn build_closure_scope_from_closure(
         ret_ty: cl.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        guard_chain_no_default,
         is_static: cl.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(cl.span()).start, def_offset, stmt_doc),
         unused_captures: unused_by_value_captures(cl),
@@ -8400,6 +8424,13 @@ fn build_closure_scope_from_arrow(
     scan_throw_origins(&Node::Expression(af.expression), &[], &[], &cx.locals, &mut throw_origins);
     let mut method_calls = Vec::new();
     scan_method_calls(&Node::Expression(af.expression), &mut method_calls);
+    // An arrow body lowers straight to a `return <expr>;` (below) rather than
+    // through `value_position_matches`/`lower_stmt`, so no `StmtKind::If` this
+    // scope's own `stmts` could ever carry actually traces back to a `match` here
+    // — kept for the same reason every sibling scan runs uniformly across scope
+    // kinds (`Scope::guard_chain_no_default`'s doc), not because it fires today.
+    let mut guard_chain_no_default = Vec::new();
+    scan_guard_chain_no_default(&Node::Expression(af.expression), &mut guard_chain_no_default);
     // The arrow body is its return value: lower as a `return <expr>;` trace.
     let value = lower_arg_value(af.expression);
     let invalidated = call_invalidation(&Node::Expression(af.expression));
@@ -8439,6 +8470,7 @@ fn build_closure_scope_from_arrow(
         ret_ty: af.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
         effect_origins,
         throw_origins,
+        guard_chain_no_default,
         is_static: af.r#static.is_some(),
         docblock: adopt_closure_docblock(docs, to_span(af.span()).start, def_offset, stmt_doc),
         // An arrow function's captures are *derived* from its body's free
@@ -9318,6 +9350,53 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
         StmtKind::If { cond, then_trace, elseifs: links.collect(), else_trace: default },
         Vec::new(),
     ))
+}
+
+/// Structural scan (issue #448, ADR-0088 §5's note) for `match (true)`/`match
+/// (false)` guard chains with no `default` arm — the shape [`lower_match_guard_chain`]
+/// desugars to [`StmtKind::If`] with `else_trace: None`. Populates
+/// [`Scope::guard_chain_no_default`]; see that field's doc for why this lives
+/// outside the trace IR rather than as a bit on [`StmtKind::If`] itself.
+///
+/// Authoritative rather than re-deriving the three refusals by hand: a `Match`
+/// node's span is recorded exactly when [`lower_match_stmt`] — the same function
+/// [`scan_value_matches`] and the statement-position lowering both call — answers
+/// with an `If` carrying no `else`. Cheap: the re-lowering this calls is pure and
+/// runs only on an actual `match` construct, and default-less `match (true)`
+/// chains are rare.
+///
+/// Nested scopes are skipped, matching every sibling structural scan
+/// ([`scan_throw_origins`], [`scan_effect_origins`]); a `match` inside a live arm
+/// is still reached, since only the outer construct's own arms are skipped by
+/// [`lower_match_stmt`] itself, not this walk.
+fn scan_guard_chain_no_default(node: &Node<'_, '_>, out: &mut Vec<Span>) {
+    if let Node::Match(m) = node
+        && !m.arms.iter().any(mago_syntax::cst::MatchArm::is_default)
+        && matches!(
+            lower_match_stmt(m),
+            Some(Stmt { kind: StmtKind::If { else_trace: None, .. }, .. })
+        )
+    {
+        out.push(to_span(m.span()));
+        // Fall through (below) to descend into the arms too — they may hold
+        // matches of their own.
+    }
+    if matches!(
+        node,
+        Node::Function(_)
+            | Node::Closure(_)
+            | Node::ArrowFunction(_)
+            | Node::AnonymousClass(_)
+            | Node::Class(_)
+            | Node::Interface(_)
+            | Node::Trait(_)
+            | Node::Enum(_)
+    ) {
+        return;
+    }
+    for child in children(node) {
+        scan_guard_chain_no_default(&child, out);
+    }
 }
 
 /// `Some(true)` / `Some(false)` when the `match` subject is written as the literal

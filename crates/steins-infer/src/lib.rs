@@ -12745,10 +12745,36 @@ fn walk_trace(
                 );
                 Flow::FellThrough
             }
-            StmtKind::If { cond, then_trace, elseifs, else_trace } => walk_if(
-                w, folder, cond, then_trace, elseifs, else_trace.as_deref(), env, store,
-                descent, facts, out,
-            ),
+            StmtKind::If { cond, then_trace, elseifs, else_trace } => {
+                // ADR-0088 §5 (issue #448): a `match (true)`/`match (false)`
+                // guard chain with no `default` desugars to exactly this shape
+                // (`else_trace: None`, issue #431) — the coverage question
+                // `walk_match` asks of a by-value `match` must still be asked
+                // here. `scope.guard_chain_no_default` is the structural,
+                // span-keyed record of which `If`s are such a chain (computed
+                // off the CST, independently of this trace — ADR-0031 keeps
+                // `StmtKind::If` itself free of the bit); `guard_chain_subject`
+                // is the further restriction to a chain every arm of which
+                // addresses one common variable, the only shape a single
+                // `Store::contract` lane can answer for. Plain per-scope walk
+                // only, mirroring `walk_match`'s own `descent.is_none()` gate.
+                let chain = (descent.is_none() && else_trace.is_none())
+                    .then(|| {
+                        scope
+                            .guard_chain_no_default
+                            .iter()
+                            .find(|s| s.start == stmt.span.start)
+                            .and_then(|&span| {
+                                guard_chain_subject(cond, elseifs)
+                                    .map(|subject| GuardChainCoverage { span, subject })
+                            })
+                    })
+                    .flatten();
+                walk_if(
+                    w, folder, cond, then_trace, elseifs, else_trace.as_deref(), chain.as_ref(),
+                    env, store, descent, facts, out,
+                )
+            }
             StmtKind::Match { subject, arms, default, loose } => walk_match(
                 w, folder, subject, arms, default.as_deref(), *loose, stmt.span, env, store,
                 descent, facts, out,
@@ -15997,6 +16023,13 @@ fn build_closure_val(
 /// positive refinement), then joins the envs of the branches that fall through.
 /// When no live branch falls through, the code after the `if` is unreachable and
 /// the whole construct terminates.
+///
+/// `chain` is `Some` only when this whole `if`/`elseif` construct IS a `match
+/// (true)`/`match (false)` guard chain with no `default` (ADR-0088 §5, issue
+/// #448) — computed once by [`walk_trace`] before the first call and threaded
+/// unchanged through every recursive `walk_if`/`walk_else` pair for the SAME
+/// chain, never recomputed. [`walk_else`]'s own terminal case is where it is
+/// finally consulted.
 #[allow(clippy::too_many_arguments)]
 fn walk_if(
     w: &WalkCx,
@@ -16005,6 +16038,7 @@ fn walk_if(
     then_trace: &[Stmt],
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
+    chain: Option<&GuardChainCoverage>,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     descent: &mut Option<Descent<'_>>,
@@ -16145,7 +16179,7 @@ fn walk_if(
         // $s, $m)) { return; }` reaches its else-branch with the call proven
         // truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
         seed_out_params(w, folder, cond, false, &mut benv, &mut bclasses);
-        if walk_else(w, folder, elseifs, else_trace, &mut benv, &mut bclasses, descent, facts, out)
+        if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
             fell.push((benv, bclasses));
@@ -16164,13 +16198,19 @@ fn walk_if(
 
 /// Walk the `else` side of an `if`: the `elseif` chain desugars to a nested
 /// `if`/`else`; the terminal `else` (if any) is a plain sub-trace; an absent
-/// `else` falls through unchanged (the negated-guard path).
+/// `else` falls through unchanged (the negated-guard path) — UNLESS `chain`
+/// names this construct as a desugared `match (true)`/`match (false)` guard
+/// chain (ADR-0088 §5, issue #448), in which case the fall-through is exactly
+/// the no-`default` `\UnhandledMatchError` path and asks the same coverage
+/// question [`walk_match`] asks for a by-value `match`, off the SAME
+/// accumulated `store` the ordinary `elseif` recursion already built.
 #[allow(clippy::too_many_arguments)]
 fn walk_else(
     w: &WalkCx,
     folder: &mut dyn Folder,
     elseifs: &[(CondExpr, Vec<Stmt>)],
     else_trace: Option<&[Stmt]>,
+    chain: Option<&GuardChainCoverage>,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
     descent: &mut Option<Descent<'_>>,
@@ -16179,12 +16219,83 @@ fn walk_else(
 ) -> Flow {
     match elseifs.split_first() {
         Some(((cond, trace), rest)) => {
-            walk_if(w, folder, cond, trace, rest, else_trace, env, store, descent, facts, out)
+            walk_if(w, folder, cond, trace, rest, else_trace, chain, env, store, descent, facts, out)
         }
         None => match else_trace {
             Some(stmts) => walk_trace(w, folder, stmts, env, store, descent, facts, true, out),
-            None => Flow::FellThrough,
+            None => {
+                if let Some(gc) = chain
+                    && store.contract_narrowed(&gc.subject)
+                    && !store.contract_emptied(&gc.subject)
+                {
+                    w.uncovered_matches.borrow_mut().push(gc.span);
+                }
+                Flow::FellThrough
+            }
         },
+    }
+}
+
+/// The desugared `match (true)`/`match (false)` guard-chain coverage question
+/// (ADR-0088 §5, issue #448), computed once by [`walk_trace`] and threaded
+/// unchanged through one `if`/`elseif` chain's recursive walk: `span` is the
+/// original `match`'s own span — the same one [`ThrowKind::New`]'s synthetic
+/// `UnhandledMatchError` fact for the same construct already carries — and
+/// `subject` is the one variable every arm condition in the chain addresses
+/// ([`guard_chain_subject`]).
+struct GuardChainCoverage {
+    span: Span,
+    subject: String,
+}
+
+/// The chain-wide subject of a desugared `match (true)`/`match (false)` guard
+/// chain (issue #448): the single variable every arm condition — the leading
+/// `cond` plus every `elseifs` link — mentions, when there is exactly one such
+/// variable across the whole chain. `None` when the chain mentions zero
+/// variables (nothing to check) or more than one distinct variable, declining
+/// rather than guessing: whether a MULTI-variable chain is exhaustive is a
+/// joint-domain question one variable's [`Store::contract`] lane cannot answer,
+/// and reading a lane no guard in THIS chain actually narrowed as evidence is
+/// exactly the false-positive shape this run's hazard note warns about.
+fn guard_chain_subject(cond: &CondExpr, elseifs: &[(CondExpr, Vec<Stmt>)]) -> Option<String> {
+    let mut vars = Vec::new();
+    collect_cond_vars(cond, &mut vars);
+    for (c, _) in elseifs {
+        collect_cond_vars(c, &mut vars);
+    }
+    vars.sort();
+    vars.dedup();
+    match vars.split_first() {
+        Some((only, [])) => Some(only.clone()),
+        _ => None,
+    }
+}
+
+/// Every bare variable name a condition mentions, anywhere — not narrowing
+/// specifically, just *mentioned*, which is the conservative (over-inclusive)
+/// reading [`guard_chain_subject`] needs: a condition that touches a second
+/// variable in any way at all is reason enough to decline picking one.
+fn collect_cond_vars(cond: &CondExpr, out: &mut Vec<String>) {
+    match cond {
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            push_cond_operand_var(lhs, out);
+            push_cond_operand_var(rhs, out);
+        }
+        CondExpr::Truthy(op) => push_cond_operand_var(op, out),
+        CondExpr::Instanceof { operand, .. } => push_cond_operand_var(operand, out),
+        CondExpr::Not(c) => collect_cond_vars(c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_cond_vars(a, out);
+            collect_cond_vars(b, out);
+        }
+        CondExpr::Call { reads, .. } | CondExpr::Opaque { reads } => out.extend(reads.iter().cloned()),
+        CondExpr::Isset { var, .. } => out.push(var.clone()),
+    }
+}
+
+fn push_cond_operand_var(op: &CondOperand, out: &mut Vec<String>) {
+    if let CondOperand::Var(v) = op {
+        out.push(v.clone());
     }
 }
 
