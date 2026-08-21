@@ -44,6 +44,8 @@ pub enum RefKind {
 /// A reference to a function/class name at a use site: raw spelling (leading
 /// `\` stripped, case preserved), [`RefKind`], and byte `offset` (selects the
 /// namespace via [`SourceTree::ctx_at`]); `offset` excluded from equality/hashing.
+///
+/// [`SourceTree::ctx_at`]: crate::SourceTree::ctx_at
 #[derive(Debug, Clone)]
 pub struct NameRef {
     pub raw: String,
@@ -229,6 +231,8 @@ pub struct Param {
     // untyped surface (ADR-0078, issue #200)
     /// **File byte span of the native type hint**, `None` if none declared —
     /// [`Self::ty`] also lowers unsupported-but-valid hints to `None`; slice with [`SourceTree::source_slice`] for spelling.
+    ///
+    /// [`SourceTree::source_slice`]: crate::SourceTree::source_slice
     pub hint_span: Option<Span>,
     // end untyped surface (ADR-0078, issue #200)
     /// `...$x` — the checker skips this and every later position.
@@ -2045,6 +2049,8 @@ pub enum RetHintKind {
 /// written ([`SourceTree::text_at`]): `: array`/`: mixed` lower to no [`NativeType`], so
 /// `ret`/[`Scope::ret_ty`] can't name them, yet PHP's own `TypeError` does. Kind and span
 /// travel together so they can't drift apart.
+///
+/// [`SourceTree::text_at`]: crate::SourceTree::text_at
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RetHint {
     pub kind: RetHintKind,
@@ -2227,6 +2233,8 @@ pub struct UnsetSeedRead {
     pub span: Span,
     /// Byte offset of the statement whose adopted docblock seeded the name, so the
     /// confirming reader can reach that docblock through [`SourceTree::stmt_docblock`].
+    ///
+    /// [`SourceTree::stmt_docblock`]: crate::SourceTree::stmt_docblock
     pub seed_stmt: u32,
 }
 
@@ -2249,6 +2257,8 @@ pub struct UnsetSeedRead {
 /// an included file inherits the includer's symbol table, so the CST cannot claim
 /// absence — and an explicit `|unset` is exactly the declaration that lifts it, for
 /// the declared name and nothing else.
+///
+/// [`SourceTree::parse`]: crate::SourceTree::parse
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
 pub struct UnsetSeedFacts {
     /// The candidate reads, in source order.

@@ -417,6 +417,8 @@ impl SourceTree {
 
     /// The reflection-driven invocation sites found file-wide (issue #30). Poison no scope,
     /// dam no claim — inventoried so a quiet run can say what it declined to follow (a guess; see [`ReflectionKind`]).
+    ///
+    /// [`ReflectionKind`]: crate::ReflectionKind
     #[must_use]
     pub fn reflection_sites(&self) -> &[ReflectionSite] {
         &self.reflection
@@ -509,6 +511,8 @@ impl SourceTree {
     /// `doc_end` lands on EOF, a closing `}`, or another comment. A `?>` close tag is
     /// deliberately not a proof: `<?php /** @var View $v */ ?>` is a legal annotation, not
     /// rot. `true` proves non-adoption; `false` only means "something follows".
+    ///
+    /// [`Stmt`]: crate::Stmt
     #[must_use]
     pub fn docblock_adopts_nothing(&self, doc_end: u32) -> bool {
         let Some(rest) = self.text.get(doc_end as usize..) else { return true };
