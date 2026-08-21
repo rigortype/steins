@@ -24,12 +24,15 @@ use crate::lower_effect::{
     EffectScanCx, body_aliased, collect_body_callables, receiver_writes, scan_effect_origins,
     scan_throw_origins,
 };
+use crate::lower_expr::{
+    class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
+    method_name_of, trace_static_class,
+};
 use crate::stack_guard;
 use crate::tree::Lowered;
 use crate::{
-    PREG_FLAG_CONST_NAMES, RefResolver, bytes_to_string, children, class_const_name, ctx_of,
-    instantiation_class, is_strict_types_one, lower_arg_value, lower_call, method_name_of, name_ref,
-    strip_dollar, to_span, trace_static_class, use_binds_php_version_id, use_binds_preg_flag_const,
+    PREG_FLAG_CONST_NAMES, RefResolver, bytes_to_string, children, ctx_of, name_ref, strip_dollar,
+    to_span, use_binds_php_version_id, use_binds_preg_flag_const,
 };
 
 // ---------------------------------------------------------------------------
