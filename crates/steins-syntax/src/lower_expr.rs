@@ -18,11 +18,12 @@ use crate::lower_effect::EffectScanCx;
 use crate::lower_scope::{
     arrow_def_offset, arrow_free_vars, closure_def_offset, closure_use_captures,
 };
-use crate::stack_guard;
-use crate::{
-    bytes_to_string, call_invalidation, children, collect_assign_writes, collect_call_vars,
-    collect_read_vars, name_ref, named_call, node_poisons, strip_dollar, to_span,
+use crate::lower_stmt::{
+    call_invalidation, collect_assign_writes, collect_call_vars, collect_read_vars, named_call,
+    node_poisons,
 };
+use crate::stack_guard;
+use crate::{bytes_to_string, children, name_ref, strip_dollar, to_span};
 
 pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
     let (callee, callee_ref) = match c.function {

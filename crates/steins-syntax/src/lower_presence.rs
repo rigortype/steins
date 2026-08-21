@@ -13,7 +13,8 @@ use mago_syntax::cst::{
 
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{VarUsage, bind_lvalue_roots, scan_var_usage};
-use crate::{bytes_to_string, expr_is_false, expr_is_true, stmt_end, strip_dollar, to_span};
+use crate::lower_stmt::{expr_is_false, expr_is_true, stmt_end};
+use crate::{bytes_to_string, strip_dollar, to_span};
 
 // binding presence (ADR-0081, issue #267)
 

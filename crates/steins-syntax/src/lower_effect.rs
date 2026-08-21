@@ -23,10 +23,10 @@ use crate::lower_expr::{
     lower_static_call, method_name_of, prop_fetch_of,
 };
 use crate::lower_scope::{arrow_def_offset, closure_def_offset};
-use crate::{
-    bytes_to_string, children, collect_assign_writes, collect_call_vars, collect_direct_vars,
-    name_ref, node_poisons, strip_dollar, to_span,
+use crate::lower_stmt::{
+    collect_assign_writes, collect_call_vars, collect_direct_vars, node_poisons,
 };
+use crate::{bytes_to_string, children, name_ref, strip_dollar, to_span};
 
 /// A resolvable [`CallbackRef`] for a callback argument expression (ADR-0033): an
 /// inline closure/arrow, a first-class callable, or a string-literal function name.

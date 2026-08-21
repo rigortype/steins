@@ -18,10 +18,11 @@ use crate::lower_decl::{DocIndex, collect_steins_aliases, lower_classes, walk};
 use crate::lower_expr::method_name_of;
 use crate::lower_presence::{docblock_before, unset_seed_facts};
 use crate::lower_scope::{flatten_top_level, lower_scopes};
+use crate::lower_stmt::{collect_array_literal_sites, collect_foreach_sites, collect_operand_sites};
 use crate::stack_guard;
 use crate::{
-    RefResolver, build_contexts, collect_array_literal_sites, collect_foreach_sites,
-    collect_operand_sites, ctx_of, fqn_of, line_starts, lower_comment, resolve_class_ref, to_span,
+    RefResolver, build_contexts, ctx_of, fqn_of, line_starts, lower_comment, resolve_class_ref,
+    to_span,
 };
 
 /// An owned, Mago-free lowering of one parsed PHP file.
