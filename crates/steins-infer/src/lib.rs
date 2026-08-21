@@ -2293,7 +2293,7 @@ impl<E: FoldEngine> EngineFolder<E> {
         if !fold_admitted_at_width(width, name, &fargs) {
             return None;
         }
-            if !fold_admitted_by_shape(name, &fargs) {
+        if !fold_admitted_by_shape(name, &fargs) {
             return None;
         }
         if !fold_within_allocation_budget(name, &fargs) {
