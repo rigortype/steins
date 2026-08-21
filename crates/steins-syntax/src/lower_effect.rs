@@ -22,9 +22,10 @@ use crate::lower_expr::{
     first_class_method_ref, first_class_static_ref, instantiation_class, lower_method_call,
     lower_static_call, method_name_of, prop_fetch_of,
 };
+use crate::lower_scope::{arrow_def_offset, closure_def_offset};
 use crate::{
-    arrow_def_offset, bytes_to_string, children, closure_def_offset, collect_assign_writes,
-    collect_call_vars, collect_direct_vars, name_ref, node_poisons, strip_dollar, to_span,
+    bytes_to_string, children, collect_assign_writes, collect_call_vars, collect_direct_vars,
+    name_ref, node_poisons, strip_dollar, to_span,
 };
 
 /// A resolvable [`CallbackRef`] for a callback argument expression (ADR-0033): an

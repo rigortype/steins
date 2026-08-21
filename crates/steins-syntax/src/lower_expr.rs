@@ -15,10 +15,12 @@ use crate::ast::{
     NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt, StmtKind, ValueOp,
 };
 use crate::lower_effect::EffectScanCx;
+use crate::lower_scope::{
+    arrow_def_offset, arrow_free_vars, closure_def_offset, closure_use_captures,
+};
 use crate::stack_guard;
 use crate::{
-    arrow_def_offset, arrow_free_vars, bytes_to_string, call_invalidation, children,
-    closure_def_offset, closure_use_captures, collect_assign_writes, collect_call_vars,
+    bytes_to_string, call_invalidation, children, collect_assign_writes, collect_call_vars,
     collect_read_vars, name_ref, named_call, node_poisons, strip_dollar, to_span,
 };
 

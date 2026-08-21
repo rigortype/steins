@@ -16,11 +16,12 @@ use crate::ast::{
 };
 use crate::lower_decl::{DocIndex, collect_steins_aliases, lower_classes, walk};
 use crate::lower_expr::method_name_of;
+use crate::lower_scope::{flatten_top_level, lower_scopes};
 use crate::stack_guard;
 use crate::{
     RefResolver, build_contexts, collect_array_literal_sites, collect_foreach_sites,
-    collect_operand_sites, ctx_of, docblock_before, flatten_top_level, fqn_of, line_starts,
-    lower_comment, lower_scopes, resolve_class_ref, to_span, unset_seed_facts,
+    collect_operand_sites, ctx_of, docblock_before, fqn_of, line_starts, lower_comment,
+    resolve_class_ref, to_span, unset_seed_facts,
 };
 
 /// An owned, Mago-free lowering of one parsed PHP file.
