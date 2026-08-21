@@ -14,12 +14,12 @@ use crate::ast::{
     OperandSite, ParseError, Position, ReflectionSite, RetBoundKind, Scope, Span, TypeMember,
     UnsetSeedFacts,
 };
+use crate::lower_decl::{DocIndex, collect_steins_aliases, lower_classes, walk};
 use crate::stack_guard;
 use crate::{
-    DocIndex, RefResolver, build_contexts, collect_array_literal_sites, collect_foreach_sites,
-    collect_operand_sites, collect_steins_aliases, ctx_of, docblock_before, flatten_top_level,
-    fqn_of, line_starts, lower_classes, lower_comment, lower_scopes, method_name_of,
-    resolve_class_ref, to_span, unset_seed_facts, walk,
+    RefResolver, build_contexts, collect_array_literal_sites, collect_foreach_sites,
+    collect_operand_sites, ctx_of, docblock_before, flatten_top_level, fqn_of, line_starts,
+    lower_comment, lower_scopes, method_name_of, resolve_class_ref, to_span, unset_seed_facts,
 };
 
 /// An owned, Mago-free lowering of one parsed PHP file.
