@@ -8,10 +8,11 @@ use std::collections::HashMap;
 use steins_domain::{Base, Fact, Val};
 use steins_syntax::{CallExpr, Callee, Receiver, Span};
 
-use crate::{
-    CALL_ON_NON_OBJECT_ID, CALL_ON_NULL_ID, Cx, Diagnostic, Known, PROPERTY_ON_NON_OBJECT_ID, Store,
-    Stratum, WalkCx,
-};
+use crate::cx::Cx;
+use crate::env::{Known, Store, Stratum};
+use crate::project::Diagnostic;
+use crate::walk::WalkCx;
+use crate::{CALL_ON_NON_OBJECT_ID, CALL_ON_NULL_ID, PROPERTY_ON_NON_OBJECT_ID};
 
 /// The branch-sensitive null-dereference proof (ADR-0031, `call.on-null`): a
 /// non-null-safe `$v->m(...)` whose receiver `$v` is proven `Singleton(null)` on

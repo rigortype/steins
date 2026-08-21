@@ -35,7 +35,8 @@ use steins_db::{Db, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_phpdoc::EnvelopeTag;
 
 use crate::purity::{EffectSet, InteropTag, compute_effects, interop_tag};
-use crate::{FileUnit, Index, Sym};
+use crate::project::{FileUnit, Index};
+use crate::Sym;
 
 /// What the effect fixpoint proves about one function or method.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

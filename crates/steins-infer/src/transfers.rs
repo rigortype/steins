@@ -7,10 +7,10 @@ use std::collections::HashMap;
 use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, ShapeFact, StrPreds, Val};
 use steins_syntax::ArgValue;
 
-use crate::{
-    ContractArm, Cx, Folder, Known, Store, Stratum, array_literal_fact, fact_is_int, singleton_fact,
-    value_stratum,
-};
+use crate::cx::Cx;
+use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
+use crate::walk::value_stratum;
+use crate::{Folder, fact_is_int};
 use crate::builtin_returns::transfer_declaration_admits;
 use crate::shape_projection::{shape_fact, shape_value_union};
 

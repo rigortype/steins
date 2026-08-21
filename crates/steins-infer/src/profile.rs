@@ -57,11 +57,11 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::project::Diagnostic;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
-    Diagnostic, Facet,
-    Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer, pattern_is_known,
-    pattern_matches, surface_floor,
+    Facet, Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer,
+    pattern_is_known, pattern_matches, surface_floor,
 };
 
 /// The default profile name, used when neither `--profile` nor `[check] profile`

@@ -11,10 +11,14 @@ use steins_domain::Certainty;
 use steins_syntax::{ClassDecl, MethodDecl, NameRef, NativeType, Param, Span, Visibility};
 
 use crate::generics::native_to_contract;
+use crate::cx::Cx;
+use crate::project::{Diagnostic, Res};
+use crate::return_arms::native_arms;
+use crate::walk::in_dead;
 use crate::{
-    CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID, Cx, Diagnostic, OVERRIDE_FINAL_ID,
+    CLASS_ABSTRACT_UNIMPLEMENTED_ID, CLASS_EXTENDS_FINAL_ID, OVERRIDE_FINAL_ID,
     OVERRIDE_PARAMETER_VARIANCE_ID, OVERRIDE_RETURN_VARIANCE_ID, OVERRIDE_STATIC_MISMATCH_ID,
-    OVERRIDE_VISIBILITY_WEAKENED_ID, Res, in_dead, native_arms,
+    OVERRIDE_VISIBILITY_WEAKENED_ID,
 };
 
 // ---------------------------------------------------------------------------

@@ -9,10 +9,11 @@ use steins_contract::{ContractTy, normalize};
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, Key as VKey, Val};
 use steins_syntax::ArgValue;
 
-use crate::{
-    ContractArm, Cx, Folder, Known, Store, Stratum, array_literal_fact, flatten_arms,
-    refine_declared_arms, seed_shape_fact, singleton_fact, value_stratum,
-};
+use crate::cx::Cx;
+use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
+use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
+use crate::walk::value_stratum;
+use crate::Folder;
 use crate::shape_projection::{
     shape_projection_fact, witnessed_family_fact, witnessed_projection_fact,
 };

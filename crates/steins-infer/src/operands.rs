@@ -9,7 +9,10 @@ use steins_syntax::{
     ArgValue, BinaryOperandOp, OperandSite, OperandSiteKind, Stmt, StmtKind, UnaryOperandOp,
 };
 
-use crate::{Cx, Diagnostic, INVALID_OPERAND_ID, Known, Stratum};
+use crate::cx::Cx;
+use crate::env::{Known, Stratum};
+use crate::project::Diagnostic;
+use crate::INVALID_OPERAND_ID;
 
 // ---------------------------------------------------------------------------
 // `type.invalid-operand` (ADR-0078, issue #191).

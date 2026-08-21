@@ -6,7 +6,10 @@ use std::collections::HashMap;
 use steins_domain::{Base, Fact, Val};
 use steins_syntax::ForeachSite;
 
-use crate::{Cx, Diagnostic, FOREACH_NON_ITERABLE_ID, Known, Stratum, describe_fact, render_val};
+use crate::cx::Cx;
+use crate::env::{Known, Stratum, render_val};
+use crate::project::Diagnostic;
+use crate::{FOREACH_NON_ITERABLE_ID, describe_fact};
 
 // ---------------------------------------------------------------------------
 // `foreach.non-iterable` (ADR-0078, issue #192).

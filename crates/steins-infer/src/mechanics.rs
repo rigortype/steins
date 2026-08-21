@@ -4,7 +4,9 @@
 
 use steins_syntax::duplicate_array_keys;
 
-use crate::{ARRAY_DUPLICATE_KEY_ID, Cx, Diagnostic, FileUnit, SYNTAX_UNPARSABLE_ID};
+use crate::cx::Cx;
+use crate::project::{Diagnostic, FileUnit};
+use crate::{ARRAY_DUPLICATE_KEY_ID, SYNTAX_UNPARSABLE_ID};
 
 // ---------------------------------------------------------------------------
 // `syntax.unparsable` (ADR-0079, issue #180, mechanics layer).

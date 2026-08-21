@@ -9,9 +9,13 @@ use steins_syntax::{
     ArgValue, CallExpr, Callee, MethodDecl, Param, Receiver, StaticClass, Visibility,
 };
 
+use crate::cx::Cx;
+use crate::env::{Known, Store};
+use crate::existence::global_function_callee;
+use crate::project::{Diagnostic, FnResolution};
 use crate::{
-    CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID, Cx,
-    Diagnostic, FnResolution, Folder, Known, Store, global_function_callee,
+    CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
+    Folder,
 };
 
 // ---------------------------------------------------------------------------

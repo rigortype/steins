@@ -5,7 +5,7 @@
 use steins_domain::{Base, Fact, PhpStr, Refinement, Val, php_is_numeric};
 use steins_syntax::{ArgValue, NativeType, ScalarType, TypeMember};
 
-use crate::Cx;
+use crate::cx::Cx;
 use crate::arg_check::is_type_error;
 
 /// Strict mode: does a single union `member` accept the non-null literal `arg`

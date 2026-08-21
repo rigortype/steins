@@ -8,11 +8,18 @@ use std::collections::HashMap;
 use steins_domain::{Fact, PhpStr, ShapeFact, Key as VKey, Val};
 use steins_syntax::{ArgValue, CallExpr, Span, php_canonical_int_string};
 
+use crate::assign::{coalesce_projection, cover_discharges, flatten_coalesce};
+use crate::cx::Cx;
+use crate::dump::render_shape_fact;
+use crate::env::{Known, Store, Stratum, render_val, singleton_fact};
+use crate::project::Diagnostic;
+use crate::refine::seed_shape_fact;
+use crate::return_arms::call_return_arms;
+use crate::shapes::{array_has_key, base_fact_val, emit_offset};
+use crate::walk::WalkCx;
 use crate::{
-    Cx, Diagnostic, Folder, Known, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID,
-    OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID, Store, Stratum, WalkCx, array_has_key,
-    base_fact_val, call_return_arms, coalesce_projection, cover_discharges, emit_offset,
-    flatten_coalesce, render_shape_fact, render_val, seed_shape_fact, singleton_fact,
+    Folder, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
+    OFFSET_UNDECLARED_ID,
 };
 
 // ---------------------------------------------------------------------------

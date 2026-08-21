@@ -13,10 +13,14 @@ use steins_syntax::{
     ArgValue, ClosureRef, NamedArg, NativeType, NormKey, Param, ScalarType, TypeMember,
 };
 
+use crate::cx::Cx;
+use crate::dump::render_contract_arms;
+use crate::env::{ClosureTarget, Known, Store};
+use crate::project::{Diagnostic, FnResolution};
+use crate::return_arms::class_template_names;
 use crate::{
-    ClosureTarget, Cx, Diagnostic, FnResolution, Folder, Known, NEVER_PARAM_REACHABLE_ID,
-    PARAM_MISMATCH_ID, Store, Sym, arg_abstract_fact, class_template_names, contract_touches_class,
-    describe_fact, is_pure_class_contract, phpdoc_object_guard_blind, render_contract_arms,
+    Folder, NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, Sym, arg_abstract_fact,
+    contract_touches_class, describe_fact, is_pure_class_contract, phpdoc_object_guard_blind,
     rendered_cval,
 };
 use crate::contract::{

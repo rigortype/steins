@@ -6,10 +6,10 @@ use steins_contract::{ContractTy, normalize};
 use steins_syntax::{CallExpr, Callee, ClassDecl, Receiver};
 
 use crate::contract::{IsA, ProjectIsa};
-use crate::{
-    CALL_UNDEFINED_METHOD_ID, ContractArm, Cx, Diagnostic, Folder, PHPDOC_UNDEFINED_METHOD_ID, Res,
-    Store, Stratum,
-};
+use crate::cx::Cx;
+use crate::env::{ContractArm, Store, Stratum};
+use crate::project::{Diagnostic, Res};
+use crate::{CALL_UNDEFINED_METHOD_ID, Folder, PHPDOC_UNDEFINED_METHOD_ID};
 use crate::absence::{ChainWalk, UndefKind, enumerate_method_chain, magic_obstacles_in_reach};
 
 // ---------------------------------------------------------------------------

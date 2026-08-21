@@ -10,9 +10,10 @@ use steins_syntax::{
     body_has_terminator,
 };
 
-use crate::{
-    Cx, Diagnostic, FileUnit, TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID, checkable_calls,
-};
+use crate::cx::Cx;
+use crate::descent::checkable_calls;
+use crate::project::{Diagnostic, FileUnit};
+use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
 
 // return missing (ADR-0078, issue #199)
 

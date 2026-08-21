@@ -10,7 +10,9 @@ use steins_db::{Db, Project};
 use steins_domain::{Certainty, Fact, Val};
 use steins_syntax::Stmt;
 
-use crate::{Cx, Folder, Known, NoFold, Stratum, check_project};
+use crate::cx::Cx;
+use crate::env::{Known, Stratum};
+use crate::{Folder, NoFold, check_project};
 
 // ---------------------------------------------------------------------------
 // The assertType harness seam (oracle idea B): consume

@@ -29,7 +29,9 @@ use steins_db::{Db, Project, SourceFile, parse, project_index};
 use steins_domain::Certainty;
 
 use crate::throws::{compute_throws, declared_throws, throw_checked, throw_subtype};
-use crate::{Cx, FileUnit, Index, Sym};
+use crate::cx::Cx;
+use crate::project::{FileUnit, Index};
+use crate::Sym;
 
 /// One envelope-relevant escaping throw class of a declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]

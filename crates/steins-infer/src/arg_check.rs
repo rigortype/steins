@@ -11,11 +11,17 @@ use steins_domain::{Base, Fact, Refinement};
 use steins_sidecar::BuiltinParam;
 use steins_syntax::{ArgValue, CallExpr, NativeType, Param, ScalarType, Span, TypeMember};
 
+use crate::cx::Cx;
+use crate::descent::{
+    project_call_summary, project_method_summary, propagated_arg_value, summary_binds,
+};
+use crate::dump::render_contract_arms;
+use crate::env::{ContractArm, Known, Store, Stratum};
+use crate::heap::simple_class;
+use crate::project::Diagnostic;
+use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
 use crate::{
-    ContractArm, Cx, Diagnostic, Folder, Known, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Store, Stratum,
-    TYPE_MAYBE_ARGUMENT_MISMATCH_ID, call_return_arms_by_name, describe_fact,
-    method_return_arms_by_callee, project_call_summary, project_method_summary,
-    propagated_arg_value, render_contract_arms, simple_class, summary_binds,
+    Folder, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact,
 };
 use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
 use crate::coerce::{member_accepts_coercive, member_accepts_strict};

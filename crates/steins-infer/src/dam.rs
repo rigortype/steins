@@ -34,7 +34,7 @@ use std::collections::HashSet;
 use steins_db::ProjectLayout;
 use steins_syntax::{DynamismKind, IncludePath};
 
-use crate::FileUnit;
+use crate::project::FileUnit;
 
 /// The kind of a dam site (ADR-0049 §2), carried so triage/coverage surfaces
 /// can name it.

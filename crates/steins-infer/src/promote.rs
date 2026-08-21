@@ -17,7 +17,10 @@ use steins_syntax::{
     StmtKind, Visibility,
 };
 
-use crate::{Cx, FileUnit, FnResolution, Index, Store, resolve_call_target};
+use crate::cx::Cx;
+use crate::dispatch::resolve_call_target;
+use crate::env::Store;
+use crate::project::{FileUnit, FnResolution, Index};
 
 /// One positional argument observed at a call site resolving uniquely to a target.
 #[derive(Debug, Clone)]

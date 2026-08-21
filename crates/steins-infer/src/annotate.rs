@@ -11,7 +11,11 @@ use steins_db::{
 };
 use steins_syntax::{ClassDecl, FunctionDecl, SourceTree};
 
-use crate::{Cx, Diagnostic, FileUnit, Folder, Index, Store, analyze_scope, check_units};
+use crate::cx::Cx;
+use crate::env::Store;
+use crate::project::{Diagnostic, FileUnit, Index};
+use crate::walk::analyze_scope;
+use crate::{Folder, check_units};
 use crate::purity::{EffectSummary, effect_summary_units};
 
 // ---------------------------------------------------------------------------

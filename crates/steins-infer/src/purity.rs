@@ -23,10 +23,10 @@ use crate::throws::{
     ThrowFact, ThrowSet, classify_throw_origins, compute_throws, interface_abstraction_methods,
     last_segment,
 };
-use crate::{
-    Cx, Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, FileUnit, FnResolution, INTEROP_UNKNOWN_LABEL_ID,
-    Index, Resolution, Sym, UNKNOWN_LABEL_ID, resolve_in_chain,
-};
+use crate::cx::Cx;
+use crate::dispatch::{Resolution, resolve_in_chain};
+use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
+use crate::{EFFECT_ID, EFFECT_LISKOV_ID, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID};
 
 // ---------------------------------------------------------------------------
 // Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking, project-wide.

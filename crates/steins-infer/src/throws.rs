@@ -15,9 +15,9 @@ use steins_syntax::{
 };
 
 use crate::contract::parse_tag_type;
-use crate::{
-    Cx, Diagnostic, FileUnit, FnResolution, Index, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
-};
+use crate::cx::Cx;
+use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
+use crate::{Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
 use crate::purity::resolve_effect_edge;
 use crate::suppress::{Facet, Origin};
 

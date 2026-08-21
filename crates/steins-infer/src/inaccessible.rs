@@ -9,10 +9,12 @@ use steins_syntax::{
 };
 
 use crate::contract::IsA;
-use crate::{
-    CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, Cx, Diagnostic,
-    PROPERTY_INACCESSIBLE_ID, Resolution, Store, WalkCx, private_blocked, resolve_in_chain,
-};
+use crate::cx::Cx;
+use crate::dispatch::{Resolution, private_blocked, resolve_in_chain};
+use crate::env::Store;
+use crate::project::Diagnostic;
+use crate::walk::WalkCx;
+use crate::{CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, PROPERTY_INACCESSIBLE_ID};
 use crate::absence::magic_obstacles_in_reach;
 
 // ---------------------------------------------------------------------------
