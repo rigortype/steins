@@ -2,6 +2,11 @@
 //! pipeline, prints proof-layer diagnostics, exits 1 if any finding was
 //! reported. `annotate` reprints a file with a right-margin *proven*-fact
 //! column. `transform`, `effect-diff`, `doctor`, `version`, `license` complete it.
+//!
+//! One file per subcommand (`check`, `annotate`, `transform`, `effect_diff`,
+//! `doctor`, `mcp`); `config` parses `steins.toml` and `project` loads the
+//! salsa project they share. Sibling modules (`doctor`, `mcp`, `render`) reach
+//! the shared helpers as `crate::X` through the re-exports below.
 
 // Output seam (issue #44), declared first: `outln!`/`out!`/`errln!` are
 // textually-scoped macros, so every module using them must come after this.
@@ -28,8 +33,6 @@ pub(crate) use steins_infer::profile;
 use std::io::Write as _;
 use std::process::ExitCode;
 
-// Sibling modules (`doctor`, `mcp`, `render`) reach these as `crate::X`; the
-// re-exports keep their call sites verbatim across the split.
 pub(crate) use check::suppression_pipeline;
 pub(crate) use config::{
     RuntimeConfig, allow_list, allow_list_from_disk, effects_from_config, effects_policy_from_disk,
