@@ -8,8 +8,9 @@ use steins_syntax::{
     CallExpr, Callee, ClassDecl, Receiver, Scope, ScopeOwner, Span, StaticClass, Visibility,
 };
 
+use crate::contract::IsA;
 use crate::{
-    CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, Cx, Diagnostic, IsA,
+    CALL_INACCESSIBLE_METHOD_ID, CLASS_CONST_INACCESSIBLE_ID, Cx, Diagnostic,
     PROPERTY_INACCESSIBLE_ID, Resolution, Store, WalkCx, private_blocked, resolve_in_chain,
 };
 use crate::absence::magic_obstacles_in_reach;

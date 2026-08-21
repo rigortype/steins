@@ -6,10 +6,10 @@ use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{Param, Span};
 
+use crate::contract::{TemplateShadow, for_each_child_type, parse_tag_type, template_names_of};
 use crate::{
-    Cx, Diagnostic, TemplateShadow, UNTYPED_CLASS_CONSTANT_ID, UNTYPED_GENERICS_ID,
-    UNTYPED_ITERABLE_VALUE_ID, UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
-    for_each_child_type, parse_tag_type, template_names_of,
+    Cx, Diagnostic, UNTYPED_CLASS_CONSTANT_ID, UNTYPED_GENERICS_ID, UNTYPED_ITERABLE_VALUE_ID,
+    UNTYPED_PARAMETER_ID, UNTYPED_PROPERTY_ID, UNTYPED_RETURN_ID,
 };
 use crate::docblock_hygiene::param_subject;
 use crate::throws::resolve_class_name;

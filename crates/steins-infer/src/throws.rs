@@ -14,9 +14,9 @@ use steins_syntax::{
     CatchClause, ClassDecl, MethodDecl, NameRef, RefKind, ScopeOwner, ThrowKind, ThrowOrigin,
 };
 
+use crate::contract::parse_tag_type;
 use crate::{
     Cx, Diagnostic, FileUnit, FnResolution, Index, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
-    parse_tag_type,
 };
 use crate::purity::resolve_effect_edge;
 use crate::suppress::{Facet, Origin};

@@ -7,8 +7,9 @@ use std::collections::HashMap;
 use steins_domain::{Certainty, Fact};
 use steins_syntax::{ArgValue, Stmt, StringContextSite};
 
+use crate::contract::IsA;
 use crate::{
-    Cx, Diagnostic, Folder, IsA, Known, STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID, Store,
+    Cx, Diagnostic, Folder, Known, STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID, Store,
     Stratum, TypePred, WalkCx, pred_holds_on_fact, singleton_fact,
 };
 use crate::absence::{ChainWalk, UndefKind, enumerate_method_chain};

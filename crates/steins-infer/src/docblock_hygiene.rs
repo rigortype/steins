@@ -8,9 +8,10 @@ use steins_syntax::{
     Comment, CommentKind, OpaqueConstruct, Param, Scope, ScopeOwner, Stmt, StmtKind,
 };
 
+use crate::contract::{IsA, parse_tag_type};
 use crate::{
-    CLOSURE_UNUSED_USE_ID, Cx, Diagnostic, IsA, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID,
-    PHPDOC_STALE_VAR_ID, PHPDOC_THROWS_NOT_THROWABLE_ID, PHPDOC_UNPARSABLE_ID, parse_tag_type,
+    CLOSURE_UNUSED_USE_ID, Cx, Diagnostic, PHPDOC_MISPLACED_VAR_ID, PHPDOC_STALE_PARAM_ID,
+    PHPDOC_STALE_VAR_ID, PHPDOC_THROWS_NOT_THROWABLE_ID, PHPDOC_UNPARSABLE_ID,
 };
 use crate::throws::{collect_class_names, resolve_class_name};
 
