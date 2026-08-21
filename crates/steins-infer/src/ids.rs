@@ -630,6 +630,8 @@ pub const STRING_ARRAY_CONVERSION_ID: &str = "string.array-conversion";
 /// whole-universe dam as [`DamKind::Unparsable`] (§2.2); in `vendor/` the
 /// ADR-0046 §2 presumption carries over (§2.3): not a dam site, ordinary vendor
 /// filter applies.
+///
+/// [`DamKind::Unparsable`]: crate::DamKind::Unparsable
 pub const SYNTAX_UNPARSABLE_ID: &str = "syntax.unparsable";
 
 // end parse failure (ADR-0079, issue #180)
@@ -852,6 +854,9 @@ pub const CLASS_CONST_UNDEFINED_ID: &str = "class-const.undefined";
 /// declaring `: never` is silent, whole. A callee that never returns without
 /// *declaring* it — the legacy `function redirect($u) { header(…); exit; }` —
 /// is not modelled, and is this id's one named over-report risk.
+///
+/// [`body_has_terminator`]: steins_syntax::body_has_terminator
+/// [`BodyEnd::provably_falls_through`]: steins_syntax::BodyEnd::provably_falls_through
 pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 
 /// The registry id for the **possibly** leg of [`TYPE_RETURN_MISSING_ID`]
@@ -881,6 +886,8 @@ pub const TYPE_RETURN_MISSING_ID: &str = "type.return-missing";
 /// Every premise, silence leg and recorded obstacle is [`TYPE_RETURN_MISSING_ID`]'s
 /// — the two ids differ in exactly one predicate, [`body_has_terminator`], and are
 /// disjoint by construction, so no site can ever report both.
+///
+/// [`body_has_terminator`]: steins_syntax::body_has_terminator
 pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 
 // end return missing (ADR-0078, issue #199)
@@ -938,6 +945,8 @@ pub const TYPE_RETURN_MAYBE_MISSING_ID: &str = "type.return-maybe-missing";
 /// the standard counterexample), and the four-layer value domain has no object
 /// denotation at all ([`Val`] cannot spell one). An object operand carries no
 /// `Fact`, resolves to no operand kind, and is silent without a special case.
+///
+/// [`Val`]: steins_domain::Val
 pub const INVALID_OPERAND_ID: &str = "type.invalid-operand";
 
 // end invalid operands (ADR-0078, issue #191)
@@ -1041,6 +1050,8 @@ pub const PHPDOC_MAYBE_UNDEFINED_ID: &str = "phpdoc.maybe-undefined";
 ///
 /// `SUPPRESS_UNMATCHED_ID` / `SUPPRESS_UNKNOWN_ID` are emitted from
 /// [`suppress`] and so are covered via the registry side of the test.
+///
+/// [`DIAGNOSTIC_REGISTRY`]: suppress::DIAGNOSTIC_REGISTRY
 pub const ALL_EMITTABLE_IDS: &[&str] = &[
     ID,
     RETURN_ID,
@@ -1165,6 +1176,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
 /// must be in `ALL_EMITTABLE_IDS ∪ REGISTERED_NOT_YET_EMITTED`, the two lists are
 /// **disjoint**, and every id here must actually be registered. An emitted id
 /// missing from `ALL_EMITTABLE_IDS` still fails forward totality.
+///
+/// [`DIAGNOSTIC_REGISTRY`]: suppress::DIAGNOSTIC_REGISTRY
 pub const REGISTERED_NOT_YET_EMITTED: &[&str] = &[
     // The too-many-arguments arm fires for INTERNAL targets only (userland
     // too-many runs clean), so it waits for the reflect slice (M2).
