@@ -21,11 +21,12 @@ use crate::lower_effect::{
     scan_method_calls, scan_throw_origins,
 };
 use crate::lower_expr::lower_arg_value;
+use crate::lower_presence::maybe_undefined_reads;
 use crate::stack_guard;
 use crate::{
-    RefResolver, bytes_to_string, call_invalidation, children, ctx_of, lower_stmt,
-    maybe_undefined_reads, named_call, node_poisons, push_byref_captures,
-    scan_guard_chain_no_default, scan_opaque, scan_string_contexts, strip_dollar, to_span,
+    RefResolver, bytes_to_string, call_invalidation, children, ctx_of, lower_stmt, named_call,
+    node_poisons, push_byref_captures, scan_guard_chain_no_default, scan_opaque,
+    scan_string_contexts, strip_dollar, to_span,
 };
 
 // ---------------------------------------------------------------------------
