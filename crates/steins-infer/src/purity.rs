@@ -19,10 +19,13 @@ use steins_syntax::{
 use steins_domain::Certainty;
 use steins_phpdoc::{EnvelopeTag, TagKind, scan_docblock};
 
+use crate::throws::{
+    ThrowFact, ThrowSet, classify_throw_origins, compute_throws, interface_abstraction_methods,
+    last_segment,
+};
 use crate::{
     Cx, Diagnostic, EFFECT_ID, EFFECT_LISKOV_ID, FileUnit, FnResolution, INTEROP_UNKNOWN_LABEL_ID,
-    Index, Resolution, Sym, ThrowFact, ThrowSet, UNKNOWN_LABEL_ID, classify_throw_origins,
-    compute_throws, interface_abstraction_methods, last_segment, resolve_in_chain,
+    Index, Resolution, Sym, UNKNOWN_LABEL_ID, resolve_in_chain,
 };
 
 // ---------------------------------------------------------------------------
