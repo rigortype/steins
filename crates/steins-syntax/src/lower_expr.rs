@@ -22,8 +22,9 @@ use crate::lower_stmt::{
     call_invalidation, collect_assign_writes, collect_call_vars, collect_read_vars, named_call,
     node_poisons,
 };
+use crate::names::name_ref;
 use crate::stack_guard;
-use crate::{bytes_to_string, children, name_ref, strip_dollar, to_span};
+use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 pub(crate) fn lower_call(c: &FunctionCall<'_>) -> CallExpr {
     let (callee, callee_ref) = match c.function {

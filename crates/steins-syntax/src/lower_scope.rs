@@ -26,8 +26,9 @@ use crate::lower_stmt::{
     call_invalidation, lower_stmt, named_call, node_poisons, push_byref_captures,
     scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
 };
+use crate::names::{RefResolver, ctx_of};
 use crate::stack_guard;
-use crate::{RefResolver, bytes_to_string, children, ctx_of, strip_dollar, to_span};
+use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 // ---------------------------------------------------------------------------
 // Scope / linear-trace lowering (ADR-0001 value propagation).

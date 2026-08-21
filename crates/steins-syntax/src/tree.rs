@@ -19,11 +19,9 @@ use crate::lower_expr::method_name_of;
 use crate::lower_presence::{docblock_before, unset_seed_facts};
 use crate::lower_scope::{flatten_top_level, lower_scopes};
 use crate::lower_stmt::{collect_array_literal_sites, collect_foreach_sites, collect_operand_sites};
+use crate::names::{RefResolver, build_contexts, ctx_of, fqn_of, resolve_class_ref};
 use crate::stack_guard;
-use crate::{
-    RefResolver, build_contexts, ctx_of, fqn_of, line_starts, lower_comment, resolve_class_ref,
-    to_span,
-};
+use crate::{line_starts, lower_comment, to_span};
 
 /// An owned, Mago-free lowering of one parsed PHP file.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

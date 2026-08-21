@@ -28,12 +28,13 @@ use crate::lower_expr::{
     class_const_name, instantiation_class, is_strict_types_one, lower_arg_value, lower_call,
     method_name_of, trace_static_class,
 };
+use crate::names::{
+    PREG_FLAG_CONST_NAMES, RefResolver, ctx_of, name_ref, use_binds_php_version_id,
+    use_binds_preg_flag_const,
+};
 use crate::stack_guard;
 use crate::tree::Lowered;
-use crate::{
-    PREG_FLAG_CONST_NAMES, RefResolver, bytes_to_string, children, ctx_of, name_ref, strip_dollar,
-    to_span, use_binds_php_version_id, use_binds_preg_flag_const,
-};
+use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 // ---------------------------------------------------------------------------
 // Lowering (private): walk the Mago CST, emit owned data.

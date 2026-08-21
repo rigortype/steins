@@ -20,7 +20,8 @@ use crate::lower_expr::{
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
-use crate::{bytes_to_string, children, name_ref, strip_dollar, to_span};
+use crate::names::name_ref;
+use crate::{bytes_to_string, children, strip_dollar, to_span};
 
 /// Append the lowered [`Stmt`] for one source statement (or nothing, for benign
 /// statements that neither define values nor disturb them).
