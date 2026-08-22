@@ -47,7 +47,8 @@ use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
 use steins_infer::{Diagnostic, SidecarFolder, check_project_with_runtime};
 
-use crate::{TransformKind, profile};
+use crate::profile;
+use crate::transform::TransformKind;
 
 /// The MCP revision this server implements. `initialize` echoes the client's
 /// requested version when it is one of [`SPOKEN_VERSIONS`], which is what a

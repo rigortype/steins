@@ -34,8 +34,8 @@ use std::collections::HashMap;
 
 use steins_infer::{Diagnostic, Layer};
 
-use crate::profile;
-use crate::{FixRun, sarif};
+use crate::check::FixRun;
+use crate::{profile, sarif};
 
 /// Which spelling of the displayed surface `check` emits.
 ///
