@@ -18,7 +18,7 @@ use std::collections::HashSet;
 
 use steins_syntax::SourceTree;
 
-use crate::Diagnostic;
+use crate::project::Diagnostic;
 use crate::{
     ARRAY_DUPLICATE_KEY_ID, CALL_ON_NULL_ID, CALL_PRINTF_TOO_FEW_ARGUMENTS_ID,
     CALL_TOO_FEW_ARGUMENTS_ID, CALL_TOO_MANY_ARGUMENTS_ID, CALL_UNDEFINED_FUNCTION_ID,

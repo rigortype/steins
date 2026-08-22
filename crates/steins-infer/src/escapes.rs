@@ -28,7 +28,10 @@ use std::collections::HashMap;
 use steins_db::{Db, Project, SourceFile, parse, project_index};
 use steins_domain::Certainty;
 
-use crate::{Cx, FileUnit, Index, Sym, compute_throws, declared_throws, throw_checked, throw_subtype};
+use crate::throws::{compute_throws, declared_throws, throw_checked, throw_subtype};
+use crate::cx::Cx;
+use crate::project::{FileUnit, Index};
+use crate::Sym;
 
 /// One envelope-relevant escaping throw class of a declaration.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,7 +123,7 @@ pub fn sweep_escapes(db: &dyn Db, project: Project) -> EscapeSweep {
 /// empty entry would enumerate a candidate with nothing to decide).
 fn decl_escapes(
     cx: &Cx,
-    throws: &HashMap<Sym, crate::ThrowSet>,
+    throws: &HashMap<Sym, crate::throws::ThrowSet>,
     sym: &Sym,
     offset: u32,
     docblock: Option<&str>,
@@ -130,7 +133,7 @@ fn decl_escapes(
 
     // Deterministic order: the same first-origin source sort `throw.undeclared`
     // emission uses.
-    let mut facts: Vec<(&crate::ThrowFact, Certainty)> =
+    let mut facts: Vec<(&crate::throws::ThrowFact, Certainty)> =
         set.facts.iter().map(|(f, c)| (f, *c)).collect();
     facts.sort_by(|a, b| {
         (a.0.origin_file, a.0.offset, &a.0.class).cmp(&(b.0.origin_file, b.0.offset, &b.0.class))

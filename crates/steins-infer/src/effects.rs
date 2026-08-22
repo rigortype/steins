@@ -34,7 +34,9 @@ use std::collections::HashMap;
 use steins_db::{Db, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_phpdoc::EnvelopeTag;
 
-use crate::{EffectSet, FileUnit, Index, InteropTag, Sym, compute_effects, interop_tag};
+use crate::purity::{EffectSet, InteropTag, compute_effects, interop_tag};
+use crate::project::{FileUnit, Index};
+use crate::Sym;
 
 /// What the effect fixpoint proves about one function or method.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
