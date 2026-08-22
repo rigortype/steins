@@ -12,7 +12,8 @@ use steins_syntax::{
     RetHintKind, ScalarType, Scope, ScopeOwner, StaticClass, StmtKind, TypeMember,
 };
 
-use crate::{Folder, MAX_BINDING_DEPTH};
+use crate::fold::Folder;
+use crate::MAX_BINDING_DEPTH;
 use crate::arg_check::{
     check_maybe_argument_mismatch, implicit_null_accepted, is_type_error, object_world_guard_blind,
     render_call,

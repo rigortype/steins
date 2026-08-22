@@ -13,7 +13,7 @@ use crate::cx::Cx;
 use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
 use crate::walk::value_stratum;
-use crate::Folder;
+use crate::fold::Folder;
 use crate::shape_projection::{
     shape_projection_fact, witnessed_family_fact, witnessed_projection_fact,
 };

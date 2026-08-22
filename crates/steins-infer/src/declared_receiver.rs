@@ -9,7 +9,8 @@ use crate::contract::{IsA, ProjectIsa};
 use crate::cx::Cx;
 use crate::env::{ContractArm, Store, Stratum};
 use crate::project::{Diagnostic, Res};
-use crate::{CALL_UNDEFINED_METHOD_ID, Folder, PHPDOC_UNDEFINED_METHOD_ID};
+use crate::fold::Folder;
+use crate::{CALL_UNDEFINED_METHOD_ID, PHPDOC_UNDEFINED_METHOD_ID};
 use crate::absence::{ChainWalk, UndefKind, enumerate_method_chain, magic_obstacles_in_reach};
 
 // ---------------------------------------------------------------------------

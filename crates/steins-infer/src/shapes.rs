@@ -10,7 +10,7 @@ use steins_domain::{
 };
 use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, Span};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::cond::eval_cmp;
 use crate::cx::Cx;
 use crate::dump::SHAPE_REFINED;

@@ -8,7 +8,8 @@ use steins_contract::{ContractTy, normalize};
 use steins_domain::Certainty;
 use steins_syntax::{ArgValue, ArrayKey, NameRef, NormKey, Scope, StaticClass, normalize_array};
 
-use crate::{FOLD_ARRAY_MAX_DEPTH, Folder};
+use crate::fold::Folder;
+use crate::fold_args::FOLD_ARRAY_MAX_DEPTH;
 use crate::contract::GenericCarry;
 use crate::cx::Cx;
 use crate::descent::scope_class;

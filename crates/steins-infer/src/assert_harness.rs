@@ -12,7 +12,8 @@ use steins_syntax::Stmt;
 
 use crate::cx::Cx;
 use crate::env::{Known, Stratum};
-use crate::{Folder, NoFold, check_project};
+use crate::fold::{Folder, NoFold};
+use crate::check_project;
 
 // ---------------------------------------------------------------------------
 // The assertType harness seam (oracle idea B): consume

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Key as VKey};
 use steins_syntax::{ArgValue, CallExpr};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
 use crate::builtin_returns::{
     CATALOG_FLOOR, builtin_call_return_fact, builtin_resource_arms, builtin_return_floor,

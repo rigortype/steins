@@ -10,7 +10,7 @@ use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::{ConstExpr, TypeKind as PKind, StringLit};
 use steins_syntax::{ArgValue, CallExpr, Callee, NativeType, Param, ScalarType, TypeMember};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::contract::{
     CArg, CVal, Envelopes, TemplateShadow, declared_carrier, for_each_child_type, template_names_of,
 };

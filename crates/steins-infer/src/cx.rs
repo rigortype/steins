@@ -16,10 +16,9 @@ use steins_syntax::{
     PropertyDecl, RefKind, Scope, ScopeOwner, SourceTree, StmtKind, ValueOp,
 };
 
-use crate::{
-    Folder, ID, RETURN_ID, Sym, UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast,
-    is_fold_arg,
-};
+use crate::fold::Folder;
+use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast, is_fold_arg};
+use crate::{ID, RETURN_ID, Sym};
 use crate::arg_check::render_call;
 use crate::builtin_returns::shape_builtin_return_fact;
 use crate::cond::eval_cmp;

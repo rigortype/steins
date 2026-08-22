@@ -7,7 +7,7 @@ use std::collections::HashSet;
 use steins_domain::Certainty;
 use steins_syntax::{ArgValue, CallExpr, ClassDecl, NameRef, RefKind, StaticClass};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::cx::Cx;
 use crate::env::{Store, Vouch};
 use crate::project::{FnResolution, Res};

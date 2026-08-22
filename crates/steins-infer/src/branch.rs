@@ -8,7 +8,7 @@ use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::AssertKind;
 use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT, Span, Stmt};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::annotate::LineFact;
 use crate::asserts::{apply_guard_asserts, cond_invalidations, guard_assert_kept_lanes};
 use crate::cond::{eval_cmp, eval_cond, operand_values};

@@ -8,7 +8,7 @@ use steins_contract::ContractTy;
 use steins_domain::{Base, Certainty, Fact, Val};
 use steins_syntax::{ArgValue, CmpOp, CondExpr, CondOperand, NameRef, RefKind, Span, ValueOp};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::asserts::cond_invalidations;
 use crate::compare::{php_identical, php_loose_eq, php_truthy};
 use crate::contract::IsA;

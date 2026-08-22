@@ -10,7 +10,8 @@ use steins_syntax::ArgValue;
 use crate::cx::Cx;
 use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
 use crate::walk::value_stratum;
-use crate::{Folder, fact_is_int};
+use crate::fold::Folder;
+use crate::fact_is_int;
 use crate::builtin_returns::transfer_declaration_admits;
 use crate::shape_projection::{shape_fact, shape_value_union};
 

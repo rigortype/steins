@@ -16,10 +16,11 @@ use crate::env::{Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::{Diagnostic, MagicObstacle, Res};
 use crate::walk::WalkCx;
+use crate::fold::Folder;
 use crate::{
     CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CLASS_CONST_UNDEFINED_ID,
-    CLASS_UNDEFINED_ID, CONSTANT_UNDEFINED_ID, Folder, PROPERTY_MAYBE_UNDEFINED_ID,
-    PROPERTY_UNDEFINED_ID, is_dump_family_fqn,
+    CLASS_UNDEFINED_ID, CONSTANT_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPERTY_UNDEFINED_ID,
+    is_dump_family_fqn,
 };
 use crate::declared_receiver::{DescendantClosure, declared_receiver_conjuncts, descendant_closure};
 

@@ -11,7 +11,8 @@ use steins_syntax::{ArgValue, php_canonical_int_string};
 
 use crate::cx::Cx;
 use crate::env::{Known, Store};
-use crate::{Folder, fact_admitting_null, join_into, val_of_key};
+use crate::fold::Folder;
+use crate::{fact_admitting_null, join_into, val_of_key};
 use crate::builtin_returns::transfer_declaration_admits;
 use crate::transfers::transfer_arg_fact;
 

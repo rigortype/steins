@@ -9,7 +9,8 @@ use steins_domain::{
 };
 use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind};
 
-use crate::{Folder, PREG_INVALID_PATTERN_ID};
+use crate::fold::Folder;
+use crate::PREG_INVALID_PATTERN_ID;
 use crate::asserts::guard_call_line;
 use crate::cx::Cx;
 use crate::env::{Known, Store, Stratum};

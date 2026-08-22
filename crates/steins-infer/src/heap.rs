@@ -10,8 +10,9 @@ use steins_phpdoc::{Type as PType, TagKind, scan_docblock};
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{ArgValue, NamedArg, Param, PropertyDecl, TypeMember};
 
+use crate::fold::Folder;
 use crate::{
-    Folder, PHPDOC_PROP_MISMATCH_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, arg_abstract_fact,
+    PHPDOC_PROP_MISMATCH_ID, PROP_MISMATCH_ID, READONLY_REASSIGNED_ID, arg_abstract_fact,
     contract_touches_class, describe_fact,
 };
 use crate::arg_check::is_type_error;

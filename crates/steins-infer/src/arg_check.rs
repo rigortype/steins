@@ -20,9 +20,8 @@ use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::heap::simple_class;
 use crate::project::Diagnostic;
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
-use crate::{
-    Folder, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact,
-};
+use crate::fold::Folder;
+use crate::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, describe_fact};
 use crate::builtin_returns::{builtin_call_return_fact, builtin_return_floor, store_holds_resource};
 use crate::coerce::{member_accepts_coercive, member_accepts_strict};
 use crate::offsets::shape_read_at;

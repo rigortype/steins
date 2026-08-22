@@ -17,9 +17,9 @@ use crate::refine::seed_shape_fact;
 use crate::return_arms::call_return_arms;
 use crate::shapes::{array_has_key, base_fact_val, emit_offset};
 use crate::walk::WalkCx;
+use crate::fold::Folder;
 use crate::{
-    Folder, OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID,
-    OFFSET_UNDECLARED_ID,
+    OFFSET_MAYBE_MISSING_ID, OFFSET_MISSING_ID, OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
 };
 
 // ---------------------------------------------------------------------------

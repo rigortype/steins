@@ -11,9 +11,10 @@ use steins_syntax::{
     ArgValue, CallExpr, Callee, Comment, NameRef, RefKind, SourceTree, Span, Stmt, StmtKind,
 };
 
+use crate::fold::Folder;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DUMP_PHPDOC_TYPE_FQN,
-    DUMP_TYPE_FQN, Folder,
+    DUMP_TYPE_FQN,
 };
 use crate::assert_harness::{ASSERT_SINK, AssertObservation};
 use crate::assign::eval_coalesce_fact;

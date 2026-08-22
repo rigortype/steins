@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use steins_domain::Fact;
 use steins_syntax::{ArgValue, CallExpr, Callee, MethodDecl, Receiver, Scope};
 
-use crate::Folder;
+use crate::fold::Folder;
 use crate::arg_check::{
     check_maybe_argument_mismatch, implicit_null_accepted, is_type_error, object_world_guard_blind,
 };

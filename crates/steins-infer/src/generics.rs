@@ -18,10 +18,10 @@ use crate::dump::render_contract_arms;
 use crate::env::{ClosureTarget, Known, Store};
 use crate::project::{Diagnostic, FnResolution};
 use crate::return_arms::class_template_names;
+use crate::fold::Folder;
 use crate::{
-    Folder, NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, Sym, arg_abstract_fact,
-    contract_touches_class, describe_fact, is_pure_class_contract, phpdoc_object_guard_blind,
-    rendered_cval,
+    NEVER_PARAM_REACHABLE_ID, PARAM_MISMATCH_ID, Sym, arg_abstract_fact, contract_touches_class,
+    describe_fact, is_pure_class_contract, phpdoc_object_guard_blind, rendered_cval,
 };
 use crate::contract::{
     CArg, CVal, Envelopes, GenericCarry, accepts, accepts_class_generic, class_key, combine,

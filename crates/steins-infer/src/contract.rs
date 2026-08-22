@@ -16,7 +16,8 @@ use steins_syntax::{
 
 use crate::cx::Cx;
 use crate::env::{Known, Store, val_of};
-use crate::{Folder, contract_touches_class};
+use crate::fold::Folder;
+use crate::contract_touches_class;
 use crate::builtin_returns::store_holds_resource;
 use crate::generics::{
     accepts_carried_ty, accepts_shape, carry_for_owner, check_arraylike, domain_key,

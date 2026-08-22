@@ -11,8 +11,9 @@ use steins_syntax::{
     Span, Stmt, StmtKind,
 };
 
+use crate::fold::Folder;
 use crate::{
-    Folder, RETURN_MISMATCH_ID, arg_abstract_fact, contract_touches_class, describe_fact,
+    RETURN_MISMATCH_ID, arg_abstract_fact, contract_touches_class, describe_fact,
     is_dump_family_fqn, is_pure_class_contract, phpdoc_object_guard_blind, rendered_cval,
 };
 use crate::absence::{

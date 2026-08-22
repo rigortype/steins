@@ -13,9 +13,9 @@ use crate::cx::Cx;
 use crate::env::{Known, Store};
 use crate::existence::global_function_callee;
 use crate::project::{Diagnostic, FnResolution};
+use crate::fold::Folder;
 use crate::{
     CALL_PRINTF_TOO_FEW_ARGUMENTS_ID, CALL_TOO_FEW_ARGUMENTS_ID, CALL_UNKNOWN_NAMED_ARGUMENT_ID,
-    Folder,
 };
 
 // ---------------------------------------------------------------------------

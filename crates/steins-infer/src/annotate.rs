@@ -15,7 +15,8 @@ use crate::cx::Cx;
 use crate::env::Store;
 use crate::project::{Diagnostic, FileUnit, Index};
 use crate::walk::analyze_scope;
-use crate::{Folder, check_units};
+use crate::fold::Folder;
+use crate::check_units;
 use crate::purity::{EffectSummary, effect_summary_units};
 
 // ---------------------------------------------------------------------------

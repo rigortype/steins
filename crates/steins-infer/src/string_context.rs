@@ -13,7 +13,8 @@ use crate::env::{Known, Store, Stratum, singleton_fact};
 use crate::predicates::{TypePred, pred_holds_on_fact};
 use crate::project::Diagnostic;
 use crate::walk::WalkCx;
-use crate::{Folder, STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID};
+use crate::fold::Folder;
+use crate::{STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID};
 use crate::absence::{ChainWalk, UndefKind, enumerate_method_chain};
 
 // ---------------------------------------------------------------------------
