@@ -15,3 +15,7 @@ Single-context repo: one `CONTEXT.md` and `docs/adr/` at the repo root. See `doc
 ### Release
 
 Cutting a version is PR-gated and tag-driven: `.claude/skills/steins-release-prep/SKILL.md`. There is no crates.io channel — the rev-pinned Mago fork is a git dependency, so the channels are the GitHub Release binaries, the Homebrew tap, and `cargo install --git`. Pushing a branch or a tag needs the owner's explicit approval each time.
+
+### Stacked pull requests
+
+Use `/gh-stack` autonomously when a change is genuinely stackable: each layer builds on the one below and is meant to land in that order, the bottom merging while the top is still being written. The test is the dependency, and it is read off the code, not the run: work that compiles and reviews on its own gets its own PR (or its own stack) even when it was authored alongside the rest. A stack is kept live with `gh stack sync` and leaves through `gh stack merge`. A GitHub stack refuses a base-branch change, so "rebase the top and close the rest" starts with `gh stack unstack` — the exit #398–#416 took after six days unsynced, which is the case this rule exists to avoid (2026-08-22).
