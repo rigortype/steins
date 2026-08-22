@@ -557,3 +557,140 @@ pub(crate) fn transfer_declaration_admits(
         Some(pin) => folder.builtin_param_counts(name) == Some(pin),
     }
 }
+
+#[cfg(test)]
+mod return_fact_admission_tests {
+    //! ADR-0056 §1–2 — the pure admission-gate core ([`admit_return_fact`] and its
+    //! helpers), tested without a sidecar. Covers: the reflected envelope alone for
+    //! each single representable base; the un-representable cases (multi-base union,
+    //! non-scalar, `mixed`/`void`); and the three curated-refinement legs — admitted
+    //! (subset ∧ pinned), rejected by a failed subset check, and rejected by a minor
+    //! mismatch. The R1 generated table is empty, so curation is exercised with
+    //! hand-passed refinement strings here.
+    use super::*;
+    use crate::builtin_returns::admit_return_fact;
+    use steins_contract::ContractTy;
+    use crate::builtin_returns::{envelope_fact, floor_target_admits};
+
+    #[test]
+    fn envelope_alone_for_each_representable_base() {
+        // A curated-less row (the R1 reality) seeds exactly the reflected base.
+        assert_eq!(admit_return_fact("bool", None, true), Some(Fact::General { base: Base::Bool, nullable: false }));
+        assert_eq!(admit_return_fact("int", None, true), Some(Fact::General { base: Base::Int, nullable: false }));
+        assert_eq!(admit_return_fact("string", None, true), Some(Fact::General { base: Base::String, nullable: false }));
+        assert_eq!(admit_return_fact("float", None, true), Some(Fact::General { base: Base::Float, nullable: false }));
+        // A `?T` nullable envelope carries nullability.
+        assert_eq!(admit_return_fact("?string", None, true), Some(Fact::General { base: Base::String, nullable: true }));
+    }
+
+    #[test]
+    fn unrepresentable_envelopes_seed_nothing() {
+        // A multi-base union (`int|false`) is not a single value-domain fact — the
+        // union case is deferred (§4), so R1 seeds nothing rather than a wrong arm.
+        assert_eq!(admit_return_fact("int|false", None, true), None);
+        assert_eq!(admit_return_fact("string|int|false", None, true), None);
+        // Non-scalars and the top/void keywords never seed.
+        assert_eq!(admit_return_fact("array", None, true), None);
+        assert_eq!(admit_return_fact("object", None, true), None);
+        assert_eq!(admit_return_fact("mixed", None, true), None);
+        assert_eq!(admit_return_fact("void", None, true), None);
+        assert_eq!(admit_return_fact("DateTime", None, true), None);
+    }
+
+    #[test]
+    fn curated_refinement_admitted_when_subset_and_pinned() {
+        // `count(): int` envelope refined to `int<0, max>` — a subset of `int` — is
+        // admitted at the pinned minor, yielding a Refined (narrower) int fact.
+        let got = admit_return_fact("int", Some("int<0, max>"), true).expect("some fact");
+        assert!(
+            matches!(got, Fact::Refined { base: Base::Int, .. }),
+            "the admitted refinement must be a Refined int, got {got:?}"
+        );
+        assert_ne!(got, Fact::General { base: Base::Int, nullable: false }, "must be narrower than the envelope");
+    }
+
+    #[test]
+    fn curated_string_refinement_admitted_within_string_envelope() {
+        // R4 shape: `sha1(): string` envelope refined to `non-falsy-string` — a
+        // subset of `string`, same base — is admitted at the pinned minor as a
+        // Refined string fact (narrower than the bare string envelope).
+        let got = admit_return_fact("string", Some("non-falsy-string"), true).expect("some fact");
+        assert!(
+            matches!(got, Fact::Refined { base: Base::String, .. }),
+            "the admitted refinement must be a Refined string, got {got:?}"
+        );
+        assert_ne!(
+            got,
+            Fact::General { base: Base::String, nullable: false },
+            "must be narrower than the string envelope"
+        );
+    }
+
+    #[test]
+    fn curated_refinement_rejected_when_not_a_subset() {
+        // `non-empty-string` is NOT a subset of an `int` envelope (base mismatch):
+        // the row is discarded and the envelope stands alone (never a wrong premise).
+        assert_eq!(
+            admit_return_fact("int", Some("non-empty-string"), true),
+            Some(Fact::General { base: Base::Int, nullable: false })
+        );
+    }
+
+    #[test]
+    fn curated_refinement_rejected_on_minor_mismatch() {
+        // A perfectly valid subset refinement is still NOT admitted when the project
+        // PHP minor differs from PINNED_PHP (the A11 narrowing-direction guard, §2):
+        // the envelope stands alone.
+        assert_eq!(
+            admit_return_fact("int", Some("int<0, max>"), false),
+            Some(Fact::General { base: Base::Int, nullable: false })
+        );
+    }
+
+    #[test]
+    fn envelope_fact_shapes() {
+        assert_eq!(envelope_fact(&ContractTy::Base(Base::Bool)), Some(Fact::General { base: Base::Bool, nullable: false }));
+        // A non-nullable multi-base union → None.
+        assert_eq!(
+            envelope_fact(&ContractTy::Union(vec![ContractTy::Base(Base::Int), ContractTy::LitBool(false)])),
+            None
+        );
+    }
+
+    /// The ADR-0069 floor's version gate, against the real change oracle.
+    ///
+    /// The gate's own law, unit-tested against the mined data: `str_split` is the
+    /// witness whose declared return type moved at 8.2. (Whether that particular
+    /// name also carries an admitted row is a property of the mining, not of this
+    /// gate — `declared_return_floor.rs` pins the end-to-end decline on a name that
+    /// does.)
+    #[test]
+    fn floor_target_gate_declines_below_a_names_change_boundary() {
+        use steins_db::{PhpTarget, PhpTargetSource};
+        let target = |floor: (u16, u16), ceiling: Option<(u16, u16)>| PhpTarget {
+            floor,
+            ceiling,
+            source: PhpTargetSource::Require,
+            raw: "test".to_owned(),
+        };
+        // `str_split`'s declared return type moved at 8.2.
+        assert_eq!(steins_catalog::declared_return_changed_at("str_split"), Some((8, 2)));
+
+        // A STRADDLING target has no single answer — decline (the A11 shape).
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), Some((8, 5))))));
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), None))));
+        // A target lying entirely BELOW the boundary is just as wrong: the mined row
+        // states the type at the pin, which that project never runs.
+        assert!(!floor_target_admits("str_split", Some(&target((8, 1), Some((8, 1))))));
+        // Wholly at or above the boundary: the row is exactly what that range runs.
+        assert!(floor_target_admits("str_split", Some(&target((8, 2), Some((8, 2))))));
+        assert!(floor_target_admits("str_split", Some(&target((8, 3), None))));
+        // An UNDECLARED target admits — the row is Asserted anyway, and its
+        // consumers tolerate that grade (ADR-0069 §3).
+        assert!(floor_target_admits("str_split", None));
+        // A name the oracle does not list is admitted for every target: its declared
+        // return type never moved across the supported line.
+        assert!(floor_target_admits("str_repeat", Some(&target((8, 1), None))));
+        assert!(floor_target_admits("str_repeat", None));
+    }
+}

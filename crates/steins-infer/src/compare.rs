@@ -198,3 +198,169 @@ fn php_array_loose_eq(
     }
     Some(true)
 }
+
+#[cfg(test)]
+mod domain_tests {
+    //! Unit tests for the ADR-0031/0035 domain skeleton: the unified [`Certainty`]
+    //! algebra, [`Fact`] joins (agree / OneOf / cap overflow), and the empirically
+    //! settled PHP comparison primitives.
+    use steins_domain::Certainty;
+    use crate::env::Known;
+    use steins_domain::{Base, Fact, Val};
+    use steins_domain::PhpStr;
+    use crate::compare::{php_identical, php_loose_eq, php_truthy};
+    use crate::env::singleton_fact;
+    use steins_syntax::ArgValue;
+
+    fn sing(v: ArgValue) -> Fact {
+        // Scalars only here — no array literal, so the minor is immaterial.
+        singleton_fact(&v, None).expect("literal converts")
+    }
+
+    #[test]
+    fn certainty_algebra() {
+        use Certainty::{Maybe, No, Yes};
+        // not swaps the poles, fixes Maybe.
+        assert_eq!(Yes.not(), No);
+        assert_eq!(No.not(), Yes);
+        assert_eq!(Maybe.not(), Maybe);
+        // and: No dominates, then Maybe.
+        assert_eq!(Yes.and(Yes), Yes);
+        assert_eq!(Yes.and(No), No);
+        assert_eq!(Yes.and(Maybe), Maybe);
+        assert_eq!(No.and(Maybe), No);
+        // or: Yes dominates, then Maybe.
+        assert_eq!(No.or(No), No);
+        assert_eq!(No.or(Yes), Yes);
+        assert_eq!(No.or(Maybe), Maybe);
+        assert_eq!(Yes.or(Maybe), Yes);
+    }
+
+    #[test]
+    fn fact_join_agree_keeps_singleton() {
+        // The env now stores `steins_domain::Fact`; joins go through the domain
+        // algebra. Equal singletons stay a Singleton and resolve to the value.
+        let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(5))).unwrap();
+        assert!(matches!(j, Fact::Singleton(Val::Int(5))));
+        let k = Known::value(j, 0, None);
+        assert_eq!(k.singleton(), Some(ArgValue::Int(5)));
+    }
+
+    #[test]
+    fn fact_join_differ_forms_oneof_and_dedups() {
+        let j = sing(ArgValue::Int(5)).join(&sing(ArgValue::Int(6))).unwrap();
+        assert!(matches!(&j, Fact::OneOf(vs) if vs.len() == 2));
+        // A OneOf never resolves to a single proven value.
+        assert_eq!(Known::value(j.clone(), 0, None).singleton(), None);
+        // Re-joining an already-present value dedups.
+        let j2 = j.join(&sing(ArgValue::Int(6))).unwrap();
+        assert!(matches!(&j2, Fact::OneOf(vs) if vs.len() == 2));
+    }
+
+    #[test]
+    fn fact_join_overflow_widens_to_refined() {
+        // Beyond the OneOf cap the domain widens to a *computed* Refined summary
+        // (an int interval), rather than dropping — abstract facts now flow
+        // through the env (ADR-0035 stage 2). The widened fact resolves no value.
+        let full = Fact::from_vals((0..steins_domain::CAP as i64).map(Val::Int).collect()).unwrap();
+        assert!(matches!(full, Fact::OneOf(_)));
+        let widened = full.join(&sing(ArgValue::Int(999))).unwrap();
+        assert!(matches!(widened, Fact::Refined { base: Base::Int, .. }));
+        assert_eq!(Known::value(widened, 0, None).singleton(), None);
+    }
+
+    #[test]
+    fn loose_eq_measured_cells_php_8_5_8() {
+        use ArgValue::{Bool, Int, Null, Str};
+        let s = |x: &str| Str(x.into());
+        // A representative slice of the recorded PHP 8.5.8 table.
+        assert_eq!(php_loose_eq(&Null, &Null, Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &Int(0), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s(""), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Null, &s("0"), Some((8, 5))), Some(false)); // the PHP 8 trap
+        assert_eq!(php_loose_eq(&Null, &Bool(false), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("0"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Bool(false), &s("abc"), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&Bool(true), &s("abc"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s("abc"), Some((8, 5))), Some(false)); // PHP 8, not PHP 7
+        assert_eq!(php_loose_eq(&Int(0), &s("0"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&Int(0), &s(""), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&s("0"), &s(""), Some((8, 5))), Some(false));
+        assert_eq!(php_loose_eq(&s("5"), &s("5"), Some((8, 5))), Some(true));
+        assert_eq!(php_loose_eq(&s("5"), &Int(5), Some((8, 5))), Some(true));
+    }
+
+    #[test]
+    fn truthiness_edge_cells() {
+        use ArgValue::{Array, Float, Int, Null, Str};
+        assert_eq!(php_truthy(&Str("0".into())), Some(false)); // "0" is falsy
+        assert_eq!(php_truthy(&Str("0.0".into())), Some(true)); // but "0.0" is truthy
+        assert_eq!(php_truthy(&Str(PhpStr::new())), Some(false));
+        assert_eq!(php_truthy(&Int(0)), Some(false));
+        assert_eq!(php_truthy(&Float(0.0)), Some(false));
+        assert_eq!(php_truthy(&Null), Some(false));
+        assert_eq!(php_truthy(&Array(vec![])), Some(false)); // [] is falsy
+    }
+
+    #[test]
+    fn identical_is_type_strict() {
+        use ArgValue::{Float, Int};
+        assert_eq!(php_identical(&Int(5), &Int(5), Some((8, 5))), Some(true));
+        assert_eq!(php_identical(&Int(5), &Float(5.0), Some((8, 5))), Some(false)); // 5 === 5.0 is false
+    }
+
+    /// ADR-0049 A12: the next-auto-index rule for negative keys changed in PHP
+    /// 8.3, so an array `===` verdict is a function of the *project's* minor —
+    /// and is unproven when no minor was reported.
+    #[test]
+    fn negative_key_arrays_compare_per_the_project_minor() {
+        use steins_syntax::ArrayKey;
+        let s = |x: &str| ArgValue::Str(x.into());
+        let arr = |items: Vec<(ArrayKey, ArgValue)>| ArgValue::Array(items);
+
+        // `[-5 => 'a', 'b']` — the omitted key is where the two rules disagree.
+        let auto = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Auto, s("b"))]);
+        // `[-5 => 'a', -4 => 'b']` (the 8.3+ landing) and `[-5 => 'a', 0 => 'b']`
+        // (the pre-8.3 landing), both written with explicit keys.
+        let at_minus_4 = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(-4), s("b"))]);
+        let at_zero = arr(vec![(ArrayKey::Int(-5), s("a")), (ArrayKey::Int(0), s("b"))]);
+
+        // Witnessed on PHP 8.5.8:
+        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",-4=>"b"]);' → true
+        //   php -r 'var_export([-5=>"a","b"] === [-5=>"a",0=>"b"]);'  → false
+        assert_eq!(php_identical(&auto, &at_minus_4, Some((8, 5))), Some(true));
+        assert_eq!(php_identical(&auto, &at_zero, Some((8, 5))), Some(false));
+
+        // A project on 8.1/8.2 floors the auto index at 0 — the verdicts invert.
+        for minor in [(8, 1), (8, 2)] {
+            assert_eq!(php_identical(&auto, &at_minus_4, Some(minor)), Some(false), "{minor:?}");
+            assert_eq!(php_identical(&auto, &at_zero, Some(minor)), Some(true), "{minor:?}");
+        }
+
+        // No reported minor: unproven, not guessed. This is the leg that keeps a
+        // wrong key out of the proof layer.
+        assert_eq!(php_identical(&auto, &at_minus_4, None), None);
+        assert_eq!(php_identical(&auto, &at_zero, None), None);
+        assert_eq!(php_loose_eq(&auto, &at_minus_4, None), None);
+
+        // A version-independent literal still decides under an unknown minor —
+        // the widening stays narrow.
+        let list = arr(vec![(ArrayKey::Auto, s("a"))]);
+        let list_explicit = arr(vec![(ArrayKey::Int(0), s("a"))]);
+        assert_eq!(php_identical(&list, &list_explicit, None), Some(true));
+    }
+
+    /// The same premise on the fact side: an unresolvable key drops the
+    /// `Val::Array` singleton rather than recording a guessed one.
+    #[test]
+    fn unproven_negative_key_drops_the_singleton_fact() {
+        use steins_syntax::ArrayKey;
+        let arr = ArgValue::Array(vec![
+            (ArrayKey::Int(-5), ArgValue::Str("a".into())),
+            (ArrayKey::Auto, ArgValue::Str("b".into())),
+        ]);
+        assert!(singleton_fact(&arr, None).is_none());
+        assert!(singleton_fact(&arr, Some((8, 5))).is_some());
+        assert!(singleton_fact(&arr, Some((8, 1))).is_some());
+    }
+}

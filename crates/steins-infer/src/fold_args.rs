@@ -372,3 +372,154 @@ fn fold_value_shape(value: &FoldValue) -> Option<ArgValue> {
         }
     })
 }
+
+#[cfg(test)]
+mod php_view_tests {
+    use super::*;
+    use steins_db::{PhpTarget, PhpTargetSource};
+
+    fn target(floor: (u16, u16), ceiling: Option<(u16, u16)>) -> PhpTarget {
+        PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: String::new() }
+    }
+
+    /// Issue #28: the one seam both A11 and A12 follow (and, since #29, the
+    /// PHP_VERSION_ID guard interval).
+    #[test]
+    fn a_declared_target_overrides_the_runtime() {
+        // A range straddling the A12 boundary declines the effective minor
+        // (boundary-sensitive literals must decline) and skews the catalog; the
+        // version-id interval spans the declared range [8.1.00, 8.99.99].
+        let caret81 = target((8, 1), Some((8, u16::MAX)));
+        let v = effective_php_view(Some((8, 5)), Some(&caret81));
+        assert_eq!((v.effective_minor, v.catalog_skew), (None, true));
+        assert_eq!(v.version_id, Some((80100, Some(89999))));
+        // A range entirely below the boundary answers with its floor.
+        let old = target((8, 1), Some((8, 2)));
+        let v = effective_php_view(Some((8, 5)), Some(&old));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 1)), true));
+        assert_eq!(v.version_id, Some((80100, Some(80299))));
+        // A range entirely at/above the boundary answers with its floor too; an
+        // open ceiling is an open interval.
+        let new = target((8, 3), None);
+        let v = effective_php_view(Some((8, 1)), Some(&new));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 3)), true));
+        assert_eq!(v.version_id, Some((80300, None)));
+        // A target pinned exactly to the catalog pin carries no skew.
+        let pinned = target(steins_catalog::PINNED_PHP, Some(steins_catalog::PINNED_PHP));
+        let v = effective_php_view(None, Some(&pinned));
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some(steins_catalog::PINNED_PHP), false));
+    }
+
+    /// No declaration: the pre-#28 posture, verbatim — runtime minor passthrough,
+    /// skew iff the runtime differs from the pin; the version-id interval spans
+    /// the runtime's minor (the exact patch is unknown).
+    #[test]
+    fn no_target_falls_back_to_the_runtime() {
+        let v = effective_php_view(Some(steins_catalog::PINNED_PHP), None);
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some(steins_catalog::PINNED_PHP), false));
+        let v = effective_php_view(Some((8, 1)), None);
+        assert_eq!((v.effective_minor, v.catalog_skew), (Some((8, 1)), true));
+        assert_eq!(v.version_id, Some((80100, Some(80199))));
+        let v = effective_php_view(None, None);
+        assert_eq!((v.effective_minor, v.catalog_skew, v.version_id), (None, false, None));
+    }
+}
+
+#[cfg(test)]
+mod fold_wire_tests {
+    //! The fold seam's admission, checked where it is now decided *once*.
+    //!
+    //! [`fits_fold_budget`]'s gate and [`arg_to_fold_within`]'s encoder run over
+    //! the same argument at different moments — the gate before `folder.fold` so
+    //! an inadmissible literal is never cloned into the memo, the encoder inside
+    //! it — and the seam's standing invariant is that they never disagree. A gate
+    //! that admits what the encoder refuses asks the engine a question it cannot
+    //! be given; a gate that refuses what the encoder would send loses a fold for
+    //! no reason. Both now read [`scalar_to_fold`] and [`array_key_to_fold`], so
+    //! this asserts the property rather than two transcriptions of it.
+    use steins_sidecar::FoldKey;
+    use crate::fold_args::{arg_to_fold, array_key_to_fold, is_fold_arg};
+    use steins_domain::PhpStr;
+    use steins_syntax::{ArgValue, ArrayKey};
+
+    /// A byte string with no UTF-8 reading — `as_str()` is `None`, ADR-0080.
+    fn raw_byte_string() -> PhpStr {
+        PhpStr::from_bytes(&[0xC0])
+    }
+
+    /// Every value the seam has an opinion about, sendable or not.
+    fn every_shape() -> Vec<ArgValue> {
+        let inner = ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Int(1))]);
+        vec![
+            ArgValue::Int(1),
+            ArgValue::Float(1.5),
+            ArgValue::Float(-0.0),
+            ArgValue::Float(f64::MAX),
+            ArgValue::Float(f64::INFINITY),
+            ArgValue::Float(f64::NEG_INFINITY),
+            ArgValue::Float(f64::NAN),
+            ArgValue::Str(PhpStr::from("ab")),
+            ArgValue::Str(raw_byte_string()),
+            ArgValue::Bool(true),
+            ArgValue::Null,
+            ArgValue::Other,
+            ArgValue::Array(vec![]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Int(1))]),
+            // The hazards, each buried one level down: the array is admissible
+            // in every other respect, and one entry has to take it down.
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Float(f64::INFINITY))]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Str(raw_byte_string()))]),
+            ArgValue::Array(vec![(ArrayKey::Str(raw_byte_string()), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Expr(Box::new(ArgValue::Other)), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Int(-3), ArgValue::Null)]),
+            ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Other)]),
+            // …and nested twice, since the walk is where the two recursions
+            // could still drift apart.
+            ArgValue::Array(vec![(ArrayKey::Auto, inner)]),
+            ArgValue::Array(vec![(
+                ArrayKey::Auto,
+                ArgValue::Array(vec![(ArrayKey::Auto, ArgValue::Float(f64::NAN))]),
+            )]),
+        ]
+    }
+
+    #[test]
+    fn the_gate_admits_exactly_what_the_encoder_sends() {
+        for v in every_shape() {
+            assert_eq!(
+                is_fold_arg(&v),
+                arg_to_fold(&v).is_some(),
+                "the gate and the encoder disagree about {v:?}"
+            );
+        }
+    }
+
+    /// The three values that have no JSON spelling, named so a future reader
+    /// sees WHICH shapes the agreement above is really about.
+    #[test]
+    fn a_value_with_no_wire_spelling_is_refused_by_both() {
+        for v in [
+            ArgValue::Float(f64::INFINITY),
+            ArgValue::Str(raw_byte_string()),
+            ArgValue::Array(vec![(ArrayKey::Str(raw_byte_string()), ArgValue::Int(1))]),
+            ArgValue::Array(vec![(ArrayKey::Expr(Box::new(ArgValue::Other)), ArgValue::Int(1))]),
+        ] {
+            assert!(!is_fold_arg(&v), "the gate admits {v:?}");
+            assert_eq!(arg_to_fold(&v), None, "the encoder sends {v:?}");
+        }
+        // The neighbours still travel: this refuses spellings, not types.
+        assert!(arg_to_fold(&ArgValue::Float(f64::MAX)).is_some());
+        assert!(arg_to_fold(&ArgValue::Str(PhpStr::from("ab"))).is_some());
+    }
+
+    /// An absent key is a key the wire carries (`null`, for PHP's next-int
+    /// rule); it is not the "no spelling" answer, and the nesting in
+    /// [`array_key_to_fold`]'s return type is what keeps them apart.
+    #[test]
+    fn an_absent_key_is_not_a_refused_key() {
+        assert_eq!(array_key_to_fold(&ArrayKey::Auto), Some(None));
+        assert_eq!(array_key_to_fold(&ArrayKey::Int(7)), Some(Some(FoldKey::Int(7))));
+        assert_eq!(array_key_to_fold(&ArrayKey::Expr(Box::new(ArgValue::Other))), None);
+        assert_eq!(array_key_to_fold(&ArrayKey::Str(raw_byte_string())), None);
+    }
+}
