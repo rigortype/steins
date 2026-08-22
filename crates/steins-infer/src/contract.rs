@@ -1809,3 +1809,420 @@ pub(crate) fn declared_carrier(
 pub(crate) fn class_key(fqn: &str) -> String {
     fqn.trim_start_matches('\\').to_ascii_lowercase()
 }
+
+#[cfg(test)]
+mod oracle_tests {
+    //! Unit tests for the ADR-0043 §3 trinary is-a oracle ([`Cx::is_a`]): the
+    //! parent chain, the transitive `implements` closure, interface-extends, the
+    //! builtin exception tree, the enum interface roots, the closed-set `No`, and
+    //! every `Unknown` condition. The oracle is exercised directly against a
+    //! one-file project so its verdicts are asserted without routing through
+    //! instanceof branch analysis (integration tests cover that path separately).
+    use super::*;
+    use crate::FileUnit;
+    use crate::project::Index;
+    use steins_syntax::SourceTree;
+    use crate::contract::IsA;
+
+    fn is_a(src: &str, sub: &str, sup: &str) -> IsA {
+        let tree = SourceTree::parse(src);
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        Cx::new(&units, &index, 0).is_a(sub, sup)
+    }
+
+    #[test]
+    fn reflexive_and_parent_chain() {
+        let src = "<?php class A {} class B extends A {} class C extends B {}";
+        assert_eq!(is_a(src, "c", "c"), IsA::Yes, "reflexive");
+        assert_eq!(is_a(src, "c", "a"), IsA::Yes, "grandparent via chain");
+        assert_eq!(is_a(src, "b", "a"), IsA::Yes);
+        // Fully enumerated, unrelated direction → No.
+        assert_eq!(is_a(src, "a", "c"), IsA::No, "a is not a c (closed set)");
+    }
+
+    #[test]
+    fn transitive_implements_and_interface_extends() {
+        let src = "<?php
+interface I {}
+interface J extends I {}
+class Base implements J {}
+class Foo extends Base {}";
+        assert_eq!(is_a(src, "foo", "j"), IsA::Yes, "class implements via parent");
+        assert_eq!(is_a(src, "foo", "i"), IsA::Yes, "transitive interface-extends");
+        assert_eq!(is_a(src, "base", "i"), IsA::Yes);
+        assert_eq!(is_a(src, "j", "i"), IsA::Yes, "interface extends interface");
+        // A class with no relation to K, fully enumerated → No.
+        let src2 = "<?php interface I {} interface K {} class Foo implements I {}";
+        assert_eq!(is_a(src2, "foo", "k"), IsA::No);
+    }
+
+    #[test]
+    fn builtin_exception_tree_closed() {
+        let src = "<?php class MyEx extends \\RuntimeException {}";
+        // Chain leaves the project into the catalogued exception tree — enumerated.
+        assert_eq!(is_a(src, "myex", "runtimeexception"), IsA::Yes);
+        assert_eq!(is_a(src, "myex", "exception"), IsA::Yes);
+        assert_eq!(is_a(src, "myex", "throwable"), IsA::Yes);
+        // A catalogued exception is provably NOT a LogicException (both under the
+        // fully-known SPL tree).
+        assert_eq!(is_a(src, "myex", "logicexception"), IsA::No);
+        // PHP 8.0+: `Throwable extends Stringable`, so every Throwable IS-A
+        // Stringable (verified against PHP 8.5). A `No` here would be unsound.
+        assert_eq!(is_a(src, "myex", "stringable"), IsA::Yes);
+    }
+
+    #[test]
+    fn enum_is_a_its_interfaces_and_roots() {
+        let src = "<?php
+interface HasLabel {}
+enum Suit: string implements HasLabel { case H = 'h'; }
+enum Dir { case Up; }";
+        // A backed enum is-a UnitEnum, BackedEnum, and its explicit interface.
+        assert_eq!(is_a(src, "suit", "unitenum"), IsA::Yes);
+        assert_eq!(is_a(src, "suit", "backedenum"), IsA::Yes);
+        assert_eq!(is_a(src, "suit", "haslabel"), IsA::Yes);
+        // A pure enum is-a UnitEnum but NOT BackedEnum (closed enumeration).
+        assert_eq!(is_a(src, "dir", "unitenum"), IsA::Yes);
+        assert_eq!(is_a(src, "dir", "backedenum"), IsA::No);
+        assert_eq!(is_a(src, "dir", "haslabel"), IsA::No);
+    }
+
+    #[test]
+    fn unknown_when_chain_leaves_project() {
+        // Parent is an uncatalogued external → enumeration incomplete → Unknown.
+        let src = "<?php class Foo extends \\Vendor\\Base {}";
+        assert_eq!(is_a(src, "foo", "vendor\\base"), IsA::Yes, "the named parent is still Yes");
+        assert_eq!(is_a(src, "foo", "somethingelse"), IsA::Unknown, "beyond the unknown parent");
+    }
+
+    #[test]
+    fn unknown_when_sub_or_super_unknown() {
+        let src = "<?php class A {}";
+        // Sub is an unknown external → Unknown (unless reflexively equal).
+        assert_eq!(is_a(src, "ghost", "a"), IsA::Unknown);
+        assert_eq!(is_a(src, "ghost", "ghost"), IsA::Yes, "reflexive even when unknown");
+        // Sub known+enumerated, super an unknown name absent from the closed set → No.
+        assert_eq!(is_a(src, "a", "ghost"), IsA::No);
+    }
+
+    #[test]
+    fn ambiguous_sub_is_unknown() {
+        // Two definitions of the same FQN → ambiguous → not Unique → Unknown.
+        let src = "<?php class Dup {} class Dup {}";
+        assert_eq!(is_a(src, "dup", "whatever"), IsA::Unknown);
+    }
+
+    #[test]
+    fn trait_use_does_not_force_unknown() {
+        // A `use`d trait adds no type; the class is still fully enumerated (its real
+        // parent/interfaces), so a `No` verdict stands.
+        let src = "<?php trait T {} class A {} class Foo extends A { use T; }";
+        assert_eq!(is_a(src, "foo", "a"), IsA::Yes);
+        assert_eq!(is_a(src, "foo", "unrelated"), IsA::No, "trait use keeps closure complete");
+    }
+}
+
+#[cfg(test)]
+mod template_type_rewrite_tests {
+    //! Unit tests for [`Cx::resolve_template_types`] (issue #361) at the level the
+    //! rewrite actually operates on: the phpdoc AST, before any lowering.
+    //!
+    //! The integration tests pin what the resolved envelopes *judge*; these pin
+    //! what the node *becomes*, which is a distinct claim in two places the
+    //! judgement cannot see. A declined node must be `Unsupported` and still read
+    //! back as what was written; a node whose subject is a template name must be
+    //! left byte-identical, because the carry readers (#362/#363) intercept exactly
+    //! that spelling and a rewrite would erase it.
+    use super::*;
+    use crate::project::{FileUnit, Index};
+    use steins_syntax::SourceTree;
+    use steins_phpdoc::parse_type;
+
+    /// `passes` applications of the rewrite to `spelling`, read in file `file` at
+    /// offset `off` of a project made of `srcs`.
+    fn rewritten_n(srcs: &[&str], file: usize, off: u32, spelling: &str, passes: usize) -> PType {
+        let trees: Vec<SourceTree> = srcs.iter().map(|s| SourceTree::parse(s)).collect();
+        let paths: Vec<String> = (0..srcs.len()).map(|i| format!("t{i}.php")).collect();
+        let units: Vec<FileUnit> = trees
+            .iter()
+            .zip(&paths)
+            .map(|(tree, path)| FileUnit { path: path.as_str(), tree })
+            .collect();
+        let index = Index::from_units(&units);
+        let cx = Cx::new(&units, &index, file);
+        let mut ty = parse_type(spelling).expect("the spelling parses").ty;
+        for _ in 0..passes {
+            cx.resolve_template_types(&mut ty, file, off);
+        }
+        ty
+    }
+
+    /// The rewrite of `spelling`, read in file `file` at offset `off`.
+    fn rewritten_in(srcs: &[&str], file: usize, off: u32, spelling: &str) -> PType {
+        rewritten_n(srcs, file, off, spelling, 1)
+    }
+
+    /// The rewrite of `spelling` against a single global-namespace file.
+    fn rewritten(src: &str, spelling: &str) -> PType {
+        rewritten_in(&[src], 0, 0, spelling)
+    }
+
+    /// The `@return` envelope of the **last** function declared in `src`, built the
+    /// way every consumer builds one — [`Cx::envelopes_of`], so the declaration's
+    /// own `@template` shadow has run before the rewrite, exactly as in production.
+    fn envelope_return(src: &str) -> PType {
+        let tree = SourceTree::parse(src);
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        let cx = Cx::new(&units, &index, 0);
+        let f = tree.functions().last().expect("a function is declared");
+        cx.envelopes_of(f.docblock.as_deref(), 0, f.span.start)
+            .expect("the docblock carries envelopes")
+            .ret
+            .expect("the docblock carries a @return")
+    }
+
+    const BOX: &str = "<?php\n/** @template T */\nclass Box {}\n";
+
+    #[test]
+    fn a_spelled_parameterization_becomes_the_argument_itself() {
+        let ty = rewritten(BOX, "template-type<Box<int>, Box, 'T'>");
+        assert!(matches!(&ty.kind, PKind::Identifier(n) if n == "int"), "{ty}");
+        // Inside-out: the outer `list` survives, the inner node resolves.
+        let nested = rewritten(BOX, "list<template-type<Box<int>, Box, 'T'>>");
+        assert_eq!(nested.to_string(), "list<int>");
+    }
+
+    #[test]
+    fn a_template_subject_is_left_exactly_as_written() {
+        // The orchestrating rule for the follow-ups: a subject that names a
+        // template is not this slice's to decide, and it must survive the rewrite
+        // as the node the carry readers will match on. `Opaque` either way today
+        // (issue #360), so nothing observable changes — which is the point.
+        // Both spellings that reach the rewrite as a bare identifier: a template
+        // name, and any other name no class answers to.
+        for spelling in ["template-type<T, Box, 'T'>", "template-type<Unresolvable, Box, 'T'>"] {
+            let ty = rewritten(BOX, spelling);
+            let PKind::Generic { base, args } = &ty.kind else {
+                panic!("{spelling} was rewritten to {ty}");
+            };
+            assert_eq!(base, "template-type");
+            assert_eq!(args.len(), 3);
+            assert_eq!(steins_contract::lower(&ty), steins_contract::ContractTy::Opaque);
+        }
+    }
+
+    #[test]
+    fn the_shadowed_spelling_of_a_template_subject_survives_too() {
+        // The path production actually takes. `parse_envelopes` applies the
+        // declaration's own `@template` shadow *before* the rewrite, so a
+        // function-level `T` subject is no longer an identifier by the time the
+        // projection sees it — it is an `Unsupported` node, and the previous test's
+        // identifier arm never covers it. Declining here would rewrite the node and
+        // erase the spelling #363 intercepts.
+        let src = "<?php\n/** @template T */\nclass Box {}\n\
+                   /**\n * @template T\n * @param Box<T> $b\n\
+                   \x20* @return template-type<T, Box, 'T'>\n */\n\
+                   function f(Box $b) {}\n";
+        let ret = envelope_return(src);
+        let PKind::Generic { base, args } = &ret.kind else { panic!("rewritten to {ret}") };
+        assert_eq!(base, "template-type");
+        assert_eq!(args.len(), 3);
+        assert!(
+            matches!(&args[0].ty.kind, PKind::Unsupported(_)),
+            "the shadow left {}, not an opaque node",
+            args[0].ty,
+        );
+        assert_eq!(steins_contract::lower(&ret), steins_contract::ContractTy::Opaque);
+
+        // Its sibling through case (a): the owner parameterized by the same
+        // shadowed template resolves, and what it resolves *to* is that node — so
+        // the envelope reads as `@return T` reads, which is the acceptance
+        // criterion. One spelling defers, the other projects; neither invents.
+        let spelled = src.replace("template-type<T, Box, 'T'>", "template-type<Box<T>, Box, 'T'>");
+        let resolved = envelope_return(&spelled);
+        assert!(matches!(&resolved.kind, PKind::Unsupported(_)), "{resolved}");
+        assert_eq!(steins_contract::lower(&resolved), steins_contract::ContractTy::Opaque);
+    }
+
+    #[test]
+    fn a_decline_becomes_an_opaque_node_that_still_says_what_it_was() {
+        // `Box` is the owner itself, unparameterized — nothing to project.
+        let ty = rewritten(BOX, "template-type<Box, Box, 'T'>");
+        assert!(
+            matches!(&ty.kind, PKind::Unsupported(raw) if raw == "template-type<Box, Box, 'T'>"),
+            "{ty}",
+        );
+        assert_eq!(steins_contract::lower(&ty), steins_contract::ContractTy::Opaque);
+    }
+
+    #[test]
+    fn the_rewrite_is_idempotent() {
+        // Load-bearing: the member sites apply a second shadow stage after
+        // `envelopes_of` has run, and every stage over an envelope is written to be
+        // safe to re-apply.
+        for spelling in [
+            "template-type<Box<int>, Box, 'T'>",
+            "template-type<Box, Box, 'T'>",
+            "template-type<T, Box, 'T'>",
+        ] {
+            assert_eq!(
+                rewritten_n(&[BOX], 0, 0, spelling, 1),
+                rewritten_n(&[BOX], 0, 0, spelling, 2),
+                "{spelling}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_edge_argument_keeps_naming_the_class_it_named_where_it_was_written() {
+        // The projection lifts `@extends Box<Dog>` out of `App`'s file into a
+        // declaration written in `Other`, where a bare `Dog` would name a
+        // different class. It arrives fully qualified instead.
+        let app = "<?php\nnamespace App;\n/** @template T */\nclass Box {}\nclass Dog {}\n\
+                   /** @extends Box<Dog> */\nfinal class DogBox extends Box {}\n";
+        let other = "<?php\nnamespace Other;\nclass Dog {}\n";
+        let off = other.len() as u32;
+        let ty = rewritten_in(
+            &[app, other],
+            1,
+            off,
+            "template-type<\\App\\DogBox, \\App\\Box, 'T'>",
+        );
+        assert_eq!(ty.to_string(), "\\App\\Dog");
+    }
+}
+
+#[cfg(test)]
+mod phpdoc_walk_tests {
+    //! Unit tests for the one traversal every phpdoc-type walk in this crate goes
+    //! through ([`for_each_child_type`] and its mutable twin, issue #374), pinned
+    //! through the walk whose reach is observable node by node: the `@template`
+    //! shadow ([`neutralize_templates`]).
+    //!
+    //! One test per node kind, and every one reads the position out of the AST **by
+    //! hand**. A test that recursed the way the subject recurses would agree with it
+    //! about a position neither reaches, and so would pass vacuously on exactly the
+    //! drift it exists to catch — which is how `\Closure(): T` stayed unshadowed
+    //! through four issues.
+    use super::*;
+    use crate::contract::{neutralize_templates, template_names_of};
+    use crate::return_arms::mentioned_templates;
+    use steins_phpdoc::ast::ConditionalSubject;
+    use steins_phpdoc::parse_type;
+    use crate::contract::parse_envelopes;
+    use crate::contract::type_has_unsupported;
+
+    /// `spelling` after the shadow of a lone `@template T` has run over it.
+    fn shadowed(spelling: &str) -> PType {
+        let shadow = template_names_of(Some("/** @template T */"));
+        let mut ty = parse_type(spelling).expect("the spelling parses").ty;
+        neutralize_templates(&mut ty, &shadow);
+        ty
+    }
+
+    /// Whether the shadow reached this position: the template name has become the
+    /// opaque node that lowers to `Opaque` and judges nothing, keeping its spelling.
+    fn neutral(ty: &PType) -> bool {
+        matches!(&ty.kind, PKind::Unsupported(raw) if raw == "T")
+    }
+
+    #[test]
+    fn a_callables_parameters_and_return_are_shadowed() {
+        // The leak this walk was unified to close: `T` here lowered as a class
+        // named `T`, so a project declaring one judged closure arguments against it.
+        let ty = shadowed("callable(T, int): T");
+        let PKind::Callable(c) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&c.params[0].ty), "parameter: {}", c.params[0].ty);
+        assert!(neutral(&c.return_type), "return: {}", c.return_type);
+        // What the contract lane makes of it: the signature survives, and the two
+        // shadowed positions lower to the silent arm rather than to a class named
+        // `T`. The untouched `int` parameter is the control.
+        let lowered = steins_contract::lower(&ty);
+        let steins_contract::ContractTy::CallableTy { sig: Some(sig), .. } = lowered else {
+            panic!("lowered to {lowered:?}");
+        };
+        assert_eq!(sig.params[0].ty, steins_contract::ContractTy::Opaque);
+        assert_eq!(sig.ret, steins_contract::ContractTy::Opaque);
+        assert_ne!(sig.params[1].ty, steins_contract::ContractTy::Opaque, "int is untouched");
+    }
+
+    #[test]
+    fn a_conditionals_subject_target_and_branches_are_shadowed() {
+        let ty = shadowed("(T is T ? T : T)");
+        let PKind::Conditional(c) = &ty.kind else { panic!("parsed as {ty}") };
+        let ConditionalSubject::Type(subject) = &c.subject else { panic!("parsed as {ty}") };
+        assert!(neutral(subject), "subject: {subject}");
+        assert!(neutral(&c.target), "target: {}", c.target);
+        assert!(neutral(&c.if_type), "if branch: {}", c.if_type);
+        assert!(neutral(&c.else_type), "else branch: {}", c.else_type);
+    }
+
+    #[test]
+    fn an_offset_accesss_base_and_offset_are_shadowed() {
+        let ty = shadowed("T[T]");
+        let PKind::OffsetAccess { base, offset } = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(base), "base: {base}");
+        assert!(neutral(offset), "offset: {offset}");
+    }
+
+    #[test]
+    fn a_shape_value_and_its_unsealed_tail_are_shadowed() {
+        let ty = shadowed("array{a: T, ...<T, T>}");
+        let PKind::ArrayShape(s) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&s.items[0].value), "value: {}", s.items[0].value);
+        let tail = s.unsealed.as_ref().expect("the tail parsed");
+        assert!(neutral(&tail.value), "tail value: {}", tail.value);
+        assert!(neutral(tail.key.as_ref().expect("the tail key parsed")), "tail key");
+        // The object-shape twin of the value position.
+        let obj = shadowed("object{a: T}");
+        let PKind::ObjectShape(items) = &obj.kind else { panic!("parsed as {obj}") };
+        assert!(neutral(&items[0].value), "object value: {}", items[0].value);
+    }
+
+    #[test]
+    fn the_positions_that_were_never_in_doubt_still_are_shadowed() {
+        // The composites the hand-rolled walk already covered, kept under the pin so
+        // the unification is measurably behaviour-preserving where it should be.
+        let ty = shadowed("?list<T>");
+        let PKind::Nullable(inner) = &ty.kind else { panic!("parsed as {ty}") };
+        let PKind::Generic { args, .. } = &inner.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&args[0].ty), "generic argument: {}", args[0].ty);
+        let arr = shadowed("(T|int)[]");
+        let PKind::Array(elem) = &arr.kind else { panic!("parsed as {arr}") };
+        let PKind::Union { types, .. } = &elem.kind else { panic!("parsed as {arr}") };
+        assert!(neutral(&types[0]), "union member: {}", types[0]);
+    }
+
+    #[test]
+    fn the_names_a_node_carries_are_each_walks_own_business() {
+        // A `\`-qualified reference opts out of the template namespace (issue #5's
+        // own rule), and a generic *base* is a string no rewrite touches — the
+        // mention scan is what reads it, and it still does.
+        let ty = shadowed("list<\\T>");
+        let PKind::Generic { args, .. } = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(matches!(&args[0].ty.kind, PKind::Identifier(n) if n == "\\T"), "{ty}");
+        let base = shadowed("T<int>");
+        assert!(matches!(&base.kind, PKind::Generic { base, .. } if base == "T"), "{base}");
+        let shadow = template_names_of(Some("/** @template T */"));
+        let mut names = Vec::new();
+        mentioned_templates(&base, &shadow, &mut names);
+        assert_eq!(names, vec!["T".to_owned()], "the base is a mention the read cannot index");
+    }
+
+    #[test]
+    fn the_shadow_runs_after_the_opaque_test_and_the_envelope_survives() {
+        // The order inside `parse_envelopes` is load-bearing now that the shadow
+        // reaches inside a signature. `parse_tag_type` refuses a type carrying an
+        // opaque node; the shadow plants one. Were the two the other way round,
+        // every `\Closure(): T` envelope would vanish instead of merely going quiet
+        // about the class named `T`.
+        let env = parse_envelopes(Some("/** @template T\n * @param \\Closure(): T $f */"))
+            .expect("the docblock carries an envelope");
+        let ty = env.param("f").expect("the @param survived the shadow");
+        let PKind::Callable(c) = &ty.kind else { panic!("parsed as {ty}") };
+        assert!(neutral(&c.return_type), "return: {}", c.return_type);
+        assert!(type_has_unsupported(ty), "the opaque test reaches inside a signature too");
+    }
+}

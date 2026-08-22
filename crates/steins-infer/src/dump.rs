@@ -1239,3 +1239,128 @@ fn assert_expected_string(
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod dump_render_tests {
+    //! ADR-0053 §7 — the dump fact renderer. Finite facts render **value-precisely**
+    //! (the literal itself: `5`, `false`, `'abc'`); the abstract layers render the
+    //! honest keyword ladder. Rendering, not the walk, is under test here; the
+    //! end-to-end emitter is covered by the `dump_surface` integration test.
+    //!
+    //! The earlier ADR-0053 §9 pin — collapse a finite fact to its base type on the
+    //! dump path — is reversed FOR THE DUMP PATH by the rendering-fidelity fix:
+    //! value-precision is what the dump surface exists to show, and PHPStan itself
+    //! renders constant types (`5`, `false`, `'a'`). The `annotate`/docblock
+    //! renderer keeps the base-collapsed spelling unchanged (untouched byte-parity
+    //! suite in `steins-edit`). §9's message *frame* is non-contractual; only the
+    //! rendered fact changed.
+    use super::*;
+    use steins_domain::StrPreds;
+    use crate::dump::render_dump_fact;
+
+    fn i(n: i64) -> Val {
+        Val::Int(n)
+    }
+    fn s(v: &str) -> Val {
+        Val::Str(v.into())
+    }
+
+    #[test]
+    fn finite_facts_render_value_precisely() {
+        let r = |vals: &[Val]| render_dump_fact(&Fact::from_vals(vals.to_vec()).expect("nonempty"));
+        // Singleton int / string, OneOf int / string-enum, dedup, nullable, bool.
+        assert_eq!(r(&[i(5)]), "5");
+        assert_eq!(r(&[s("abc")]), "'abc'");
+        assert_eq!(r(&[i(1), i(2), i(3)]), "1|2|3");
+        assert_eq!(r(&[s("GET"), s("POST")]), "'GET'|'POST'");
+        assert_eq!(r(&[i(1), i(2), i(1)]), "1|2"); // dedup
+        assert_eq!(r(&[i(1), Val::Null]), "1|null");
+        // Both bool literals ⟺ the whole `bool` type (PHPStan renders `bool`, not
+        // `false|true`); a lone literal stays precise.
+        assert_eq!(r(&[Val::Bool(true), Val::Bool(false)]), "bool");
+        assert_eq!(r(&[Val::Bool(true)]), "true");
+        // `bool` joins other precise members (e.g. an int literal alongside).
+        assert_eq!(r(&[i(1), Val::Bool(true), Val::Bool(false)]), "1|bool");
+        // Floats keep a visible fractional part; strings stay precise alongside ints.
+        assert_eq!(r(&[Val::Float(123.0)]), "123.0");
+        assert_eq!(r(&[Val::Float(2.5)]), "2.5");
+        assert_eq!(r(&[i(-5)]), "-5");
+    }
+
+    #[test]
+    fn singleton_renders_the_php_literal_not_the_base_type() {
+        // The dump surface renders the literal itself (value-precision — the ADR-0053
+        // §9 collapse is reversed for this path), NOT the collapsed base `int`. A
+        // string literal is single-quoted; `null` is `null`.
+        assert_eq!(render_dump_fact(&Fact::Singleton(i(5))), "5");
+        assert_eq!(render_dump_fact(&Fact::Singleton(s("abc"))), "'abc'");
+        assert_eq!(render_dump_fact(&Fact::Singleton(Val::Bool(false))), "false");
+        assert_eq!(render_dump_fact(&Fact::Singleton(Val::Null)), "null");
+    }
+
+    #[test]
+    fn abstract_layers_render_the_honest_keyword_ladder() {
+        // General: bare base, with nullability.
+        assert_eq!(render_dump_fact(&Fact::General { base: Base::Int, nullable: false }), "int");
+        assert_eq!(
+            render_dump_fact(&Fact::General { base: Base::String, nullable: true }),
+            "string|null"
+        );
+        // Refined int range: the interval, PHPStan's own spelling for every range
+        // (issue #90 — `positive-int` is phpdoc input sugar, never dump output).
+        assert_eq!(
+            render_dump_fact(&Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false)),
+            "int<1, max>"
+        );
+        // Refined string: reuse the speller's own preds_keyword so a refined-string
+        // dump and its spell_arms rendering agree.
+        let numeric = Fact::refined(Base::String, Refinement::Str(StrPreds::NUMERIC.close()), false);
+        assert_eq!(
+            render_dump_fact(&numeric),
+            steins_contract::spell::preds_keyword(StrPreds::NUMERIC.close())
+        );
+    }
+
+    #[test]
+    fn array_bearing_fact_spells_through_the_d4_array_vocabulary() {
+        // ADR-0062 §6 flip: the array-vocabulary slice teaches the speller, so an
+        // array-bearing fact is no longer an honest-unknown refusal. The empty
+        // array is denotationally a Yes-list (array_is_list([]) is vacuously
+        // true, §3), and it is the one shape issue #163 does not print the word
+        // for: `array{}` already says "no keys at all" and re-parses to the very
+        // same `Yes`.
+        let fact = Fact::Singleton(Val::Array(vec![]));
+        assert_eq!(render_dump_fact(&fact), "array{}");
+    }
+
+    #[test]
+    fn concrete_array_values_spell_value_precisely() {
+        // Point 3 of the S1 mission fixtures: a keyed non-list value spells its
+        // keys under `array{…}`; a sequential value IS a key sequence (a concrete
+        // array is order-witnessed) and spells positionally under `list{…}`,
+        // stating the fact rather than the oracle's spelling of it (issue #163).
+        let map = Fact::Singleton(Val::Array(vec![(VKey::Str("a".into()), s("v"))]));
+        assert_eq!(render_dump_fact(&map), "array{a: 'v'}");
+        let list = Fact::Singleton(Val::Array(vec![(VKey::Int(0), s("x")), (VKey::Int(1), s("y"))]));
+        assert_eq!(render_dump_fact(&list), "list{'x', 'y'}");
+    }
+
+    #[test]
+    fn shape_fact_spells_through_the_shared_speller() {
+        // ADR-0062 S1 point 4: `Fact::Shape` spells through the shared speller, so
+        // every consumer inherits the rendering for free.
+        use steins_domain::{Presence, ShapeFact, Tail};
+        let shape = ShapeFact::normalize(
+            vec![(VKey::Str("a".into()), Presence::Required { witnessed: false }, None)],
+            Tail::Sealed,
+            steins_domain::Certainty::Maybe,
+            false,
+            Vec::new(),
+        );
+        let fact = Fact::Shape { shape: Box::new(shape), nullable: false };
+        // `ShapeFact::normalize` sets `non_empty` from the `Required` field
+        // itself (shape.rs), but a sealed shape's required key already proves
+        // non-emptiness, so issue #159 stops printing the modifier twice.
+        assert_eq!(render_dump_fact(&fact), "array{a: mixed}");
+    }
+}

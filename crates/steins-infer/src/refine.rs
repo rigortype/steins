@@ -1246,3 +1246,364 @@ pub(crate) fn add_str_preds(f: &Fact, preds: StrPreds) -> Fact {
         other => other.clone(),
     }
 }
+
+#[cfg(test)]
+mod n4_carrier_tests {
+    //! ADR-0052 N4 — contract facts, class facts, and instanceof subtraction at the
+    //! carrier level (the walk-integration path is covered by the `narrowing_n4`
+    //! integration test). Each adversarial drift direction of the slice prompt has a
+    //! test: argument-order (`is_a(M,T)`), positive-branch non-final survival,
+    //! Unknown-keeps-both, emptied-lane-is-no-fact, Asserted-never-launders, and the
+    //! A11 catalog-skew demotion scoped to arm deletion.
+    use super::*;
+    use crate::FileUnit;
+    use crate::fold_args::effective_php_view;
+    use crate::project::Index;
+    use steins_contract::normalize::FinalKeyword;
+    use steins_syntax::SourceTree;
+    use crate::fold_args::parse_php_minor;
+    use crate::contract::ProjectIsa;
+    use steins_contract::{ContractTy, normalize};
+    use steins_syntax::ScopeOwner;
+    use crate::cond::member_instanceof;
+    use crate::cx::EMPTY_DAM;
+    use crate::env::{ContractArm, Member, Stratum, dedup_contract_arms, join_stores};
+    use crate::refine::{seed_contract_arms, subtract_contract_lane};
+
+    /// Build a `Cx` over a one-file project and run `f` against it. `php_minor` seeds
+    /// the A11 version input; the skew flag is derived from it exactly as
+    /// [`effective_php_view`] does with no declared target.
+    fn with_cx<R>(src: &str, php_minor: Option<(u16, u16)>, f: impl FnOnce(&Cx) -> R) -> R {
+        let tree = SourceTree::parse(src);
+        let units = [FileUnit { path: "t.php", tree: &tree }];
+        let index = Index::from_units(&units);
+        let view = effective_php_view(php_minor, None);
+        let cx = Cx::new_with(
+            &units,
+            &index,
+            0,
+            &EMPTY_DAM,
+            true,
+            FinalKeyword::Enforced,
+            view.effective_minor,
+            view.catalog_skew,
+            view.version_id,
+            None,
+            None,
+        );
+        f(&cx)
+    }
+
+    fn cls(s: &str) -> ContractTy {
+        ContractTy::Class(s.to_owned())
+    }
+    fn arm(ty: ContractTy, stratum: Stratum) -> ContractArm {
+        ContractArm { ty, stratum }
+    }
+    fn oracle<'c, 'a>(cx: &'c Cx<'a>) -> ProjectIsa<'c, 'a> {
+        ProjectIsa { cx, demote_catalog: cx.a11_demote_catalog() }
+    }
+
+    /// The identity class resolver for the global-namespace seeding tests: the
+    /// lowered phpdoc names are already the normalized FQNs there.
+    fn id_resolve(n: &str) -> String {
+        n.to_ascii_lowercase()
+    }
+
+    // ---- native_arms / flatten_arms / seeding -------------------------------
+
+    #[test]
+    fn native_arms_lowers_scalars_instances_and_null() {
+        let src = "<?php function f(?int $a, User|Guest $b): void {}";
+        with_cx(src, None, |cx| {
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let params = cx.scope_params(scope).unwrap();
+            // `?int` → [int, null] Verified.
+            assert_eq!(
+                seed_contract_arms(&params[0], None, &id_resolve),
+                Some(vec![arm(ContractTy::Base(Base::Int), Stratum::Verified), arm(ContractTy::Null, Stratum::Verified)])
+            );
+            // `User|Guest` native (object instances) → [User, Guest] Verified.
+            assert_eq!(
+                seed_contract_arms(&params[1], None, &id_resolve),
+                Some(vec![arm(cls("user"), Stratum::Verified), arm(cls("guest"), Stratum::Verified)])
+            );
+        });
+    }
+
+    #[test]
+    fn seed_phpdoc_refines_at_asserted_stratum() {
+        // `object $value` (native None) + `@param User|Guest` → phpdoc arms, Asserted.
+        let src = "<?php /** @param User|Guest $value */ function f(object $value): void {}";
+        with_cx(src, None, |cx| {
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let p = &cx.scope_params(scope).unwrap()[0];
+            let env = cx.scope_envelopes(scope).unwrap();
+            let seeded = seed_contract_arms(p, env.param("value"), &id_resolve).unwrap();
+            assert_eq!(
+                seeded,
+                vec![arm(cls("user"), Stratum::Asserted), arm(cls("guest"), Stratum::Asserted)]
+            );
+        });
+    }
+
+    #[test]
+    fn seed_phpdoc_arm_backed_by_native_stays_verified() {
+        // `int $x` + `@param int $x`: the `int` arm the native ALSO proves keeps the
+        // Verified stratum (no needless downgrade); a phpdoc-only refinement would be
+        // Asserted.
+        let src = "<?php /** @param int $x */ function f(int $x): void {}";
+        with_cx(src, None, |cx| {
+            let scope = cx.tree().scopes().iter().find(|s| matches!(&s.owner, ScopeOwner::Function(n) if n == "f")).unwrap();
+            let p = &cx.scope_params(scope).unwrap()[0];
+            let env = cx.scope_envelopes(scope).unwrap();
+            assert_eq!(
+                seed_contract_arms(p, env.param("x"), &id_resolve),
+                Some(vec![arm(ContractTy::Base(Base::Int), Stratum::Verified)])
+            );
+        });
+    }
+
+    #[test]
+    fn dedup_contract_arms_ties_keep_min_stratum() {
+        // Two arm_eq arms (a Verified `int` and an Asserted `int`, as a join would
+        // produce): the survivor keeps the WEAKER (Asserted) stratum — no laundering.
+        let mut arms = vec![
+            arm(ContractTy::Base(Base::Int), Stratum::Verified),
+            arm(ContractTy::Base(Base::Int), Stratum::Asserted),
+        ];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms, vec![arm(ContractTy::Base(Base::Int), Stratum::Asserted)]);
+    }
+
+    #[test]
+    fn dedup_collapses_identical_opaque_arms() {
+        // Survey non-termination regression (nextcloud `core/Migrations`): the
+        // non-extensional arms (`CallableTy`/`StrOpaque`/`Opaque`) have
+        // `subsumes(x, x) == Maybe`, so `arm_eq` alone could NOT collapse two
+        // identical copies — a branch-union then doubled the pile at every join,
+        // reaching 2^depth. Structural equality must collapse them.
+        // (`Mixed`/`ObjectAny` are arm_eq-reflexive already, unaffected.)
+        //
+        // The survey's OTHER exploding arm, `array $options`, is deliberately no
+        // longer in this list: ADR-0071 made every array arm arm_eq-reflexive
+        // (pinned in steins-contract's `array_arms_are_arm_eq_reflexive`), so the
+        // structural-equality collapse still catches it first.
+        for ty in [
+            ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() },
+            ContractTy::StrOpaque,
+            ContractTy::Opaque,
+        ] {
+            assert!(!normalize::arm_eq(&ty, &ty), "{ty:?} is expectedly non-arm_eq-reflexive");
+            let mut arms: Vec<ContractArm> =
+                (0..64).map(|_| arm(ty.clone(), Stratum::Verified)).collect();
+            dedup_contract_arms(&mut arms);
+            assert_eq!(arms, vec![arm(ty.clone(), Stratum::Verified)], "{ty:?} pile must collapse to one");
+        }
+        // The array arm collapses too, now for the stronger reason (ADR-0071).
+        let array = ContractTy::ArrayAny { non_empty: false };
+        assert!(normalize::arm_eq(&array, &array), "array arms are arm_eq-reflexive since ADR-0071");
+        let mut arms: Vec<ContractArm> =
+            (0..64).map(|_| arm(array.clone(), Stratum::Verified)).collect();
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms, vec![arm(array, Stratum::Verified)], "array pile must collapse to one");
+    }
+
+    #[test]
+    fn dedup_identical_opaque_keeps_min_stratum() {
+        // The structural-equality collapse still honors the derivation clause: a
+        // Verified + Asserted pair of the SAME opaque arm survives at Asserted.
+        let mut arms = vec![
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Verified),
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Asserted),
+            arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Verified),
+        ];
+        dedup_contract_arms(&mut arms);
+        assert_eq!(arms, vec![arm(ContractTy::CallableTy { sig: None, obl: steins_contract::CallableObl::default() }, Stratum::Asserted)]);
+    }
+
+    // ---- the deliverable: else-of-instanceof leaves {Guest} -----------------
+
+    const FIXTURE: &str = "<?php interface Named { public function name(): string; } \
+        final class User implements Named { public function name(): string { return 'u'; } } \
+        final class Guest { public function guestId(): int { return 1; } }";
+
+    #[test]
+    fn negative_branch_leaves_guest_arm_asserted() {
+        // The conformance deliverable, at the carrier level: a `User|Guest` lane, the
+        // else of `instanceof User` subtracts User (is_a(User,User)=Yes), leaving
+        // {Guest} — and Guest keeps its Asserted stratum (came from `@param`).
+        with_cx(FIXTURE, None, |cx| {
+            let mut store = Store::default();
+            store.contract.insert(
+                "value".into(),
+                vec![arm(cls("user"), Stratum::Asserted), arm(cls("guest"), Stratum::Asserted)],
+            );
+            subtract_contract_lane(
+                &mut store,
+                "value",
+                &normalize::Subtrahend::Class { fqn: "user".into(), polarity: false },
+                &oracle(cx),
+            );
+            assert_eq!(store.contract_arms("value"), Some([arm(cls("guest"), Stratum::Asserted)].as_slice()));
+        });
+    }
+
+    #[test]
+    fn negative_branch_argument_order_is_m_then_t() {
+        // `Named` is a supertype of `User`. else of `instanceof User` over a lane
+        // holding `Named` asks is_a(Named, User) = No (a Named need not be a User) →
+        // the arm SURVIVES. A reversed is_a(User, Named)=Yes would wrongly delete it.
+        with_cx(FIXTURE, None, |cx| {
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(cls("named"), Stratum::Verified)]);
+            subtract_contract_lane(
+                &mut store,
+                "v",
+                &normalize::Subtrahend::Class { fqn: "user".into(), polarity: false },
+                &oracle(cx),
+            );
+            assert_eq!(store.contract_arms("v"), Some([arm(cls("named"), Stratum::Verified)].as_slice()));
+        });
+    }
+
+    #[test]
+    fn positive_branch_deletes_final_nonmember_keeps_open() {
+        // then of `instanceof User` over `Guest|Named`: Guest is final and
+        // is_a(Guest,User)=No → deleted; Named is NOT final → survives (an unseen
+        // Named subclass could be a User). Guards both positive-branch drifts.
+        with_cx(FIXTURE, None, |cx| {
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(cls("guest"), Stratum::Verified), arm(cls("named"), Stratum::Verified)]);
+            subtract_contract_lane(
+                &mut store,
+                "v",
+                &normalize::Subtrahend::Class { fqn: "user".into(), polarity: true },
+                &oracle(cx),
+            );
+            assert_eq!(store.contract_arms("v"), Some([arm(cls("named"), Stratum::Verified)].as_slice()));
+        });
+    }
+
+    #[test]
+    fn emptied_lane_drops_to_no_fact() {
+        // A `!== null` on a `null`-only lane empties it → the lane is REMOVED (no
+        // key), never a death signal (§2: the verdict owns death).
+        with_cx(FIXTURE, None, |cx| {
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(ContractTy::Null, Stratum::Verified)]);
+            subtract_contract_lane(&mut store, "v", &normalize::Subtrahend::Null, &oracle(cx));
+            assert_eq!(store.contract_arms("v"), None, "emptied lane is no-fact, not present-and-empty");
+        });
+    }
+
+    // ---- Member fact + eval_instanceof implication (§3b) --------------------
+
+    #[test]
+    fn member_implication_yes_no_maybe() {
+        with_cx(FIXTURE, None, |cx| {
+            // yes:[User], test `instanceof Named`: is_a(User,Named)=Yes → Yes.
+            let m = Member { yes: vec!["user".into()], no: vec![] };
+            assert_eq!(member_instanceof(cx, Some(&m), "named"), Certainty::Yes);
+            // no:[Named], test `instanceof User`: is_a(User,Named)=Yes so a User would
+            // be a Named, which the guard excluded → No.
+            let m2 = Member { yes: vec![], no: vec!["named".into()] };
+            assert_eq!(member_instanceof(cx, Some(&m2), "user"), Certainty::No);
+            // yes:[Guest], test `instanceof Named`: is_a(Guest,Named)=No, no exclusion
+            // matches → Maybe.
+            let m3 = Member { yes: vec!["guest".into()], no: vec![] };
+            assert_eq!(member_instanceof(cx, Some(&m3), "named"), Certainty::Maybe);
+            // No fact → Maybe.
+            assert_eq!(member_instanceof(cx, None, "named"), Certainty::Maybe);
+        });
+    }
+
+    // ---- A11 catalog version-skew demotion ----------------------------------
+
+    #[test]
+    fn a11_catalog_backed_deletion_demoted_only_on_skew() {
+        // Empty project: `ArrayObject`/`Traversable` resolve through the builtin
+        // CATALOG. else of `instanceof Traversable` over an `ArrayObject` arm asks
+        // is_a(ArrayObject, Traversable) = Yes (catalog-backed).
+        let sub = normalize::Subtrahend::Class { fqn: "traversable".into(), polarity: false };
+        // Pinned minor (matches catalog) → verdict stands → arm deleted.
+        with_cx("<?php", Some(steins_catalog::PINNED_PHP), |cx| {
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(cls("arrayobject"), Stratum::Verified)]);
+            subtract_contract_lane(&mut store, "v", &sub, &oracle(cx));
+            assert_eq!(store.contract_arms("v"), None, "matching minor: catalog verdict stands, arm deleted");
+        });
+        // Skewed minor → catalog-backed verdict demotes to Unknown → arm KEPT.
+        with_cx("<?php", Some((steins_catalog::PINNED_PHP.0, steins_catalog::PINNED_PHP.1 - 1)), |cx| {
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(cls("arrayobject"), Stratum::Verified)]);
+            subtract_contract_lane(&mut store, "v", &sub, &oracle(cx));
+            assert_eq!(
+                store.contract_arms("v"),
+                Some([arm(cls("arrayobject"), Stratum::Verified)].as_slice()),
+                "skewed minor: catalog-backed deletion demoted, arm kept (FP-safe)"
+            );
+        });
+    }
+
+    #[test]
+    fn a11_in_project_deletion_not_demoted_on_skew() {
+        // A purely in-project `User|Guest` union narrows the SAME under a skewed minor
+        // — A11 touches only catalog-backed edges, never in-project source.
+        with_cx(FIXTURE, Some((steins_catalog::PINNED_PHP.0, steins_catalog::PINNED_PHP.1 - 1)), |cx| {
+            assert!(cx.a11_demote_catalog(), "skew is active");
+            let mut store = Store::default();
+            store.contract.insert("v".into(), vec![arm(cls("user"), Stratum::Verified), arm(cls("guest"), Stratum::Verified)]);
+            subtract_contract_lane(
+                &mut store,
+                "v",
+                &normalize::Subtrahend::Class { fqn: "user".into(), polarity: false },
+                &oracle(cx),
+            );
+            assert_eq!(
+                store.contract_arms("v"),
+                Some([arm(cls("guest"), Stratum::Verified)].as_slice()),
+                "in-project is_a(User,User)=Yes not catalog-backed → deletion stands under skew"
+            );
+        });
+    }
+
+    #[test]
+    fn parse_php_minor_reads_major_minor() {
+        assert_eq!(parse_php_minor("8.5.8"), Some((8, 5)));
+        assert_eq!(parse_php_minor("8.4.10-dev"), Some((8, 4)));
+        assert_eq!(parse_php_minor("nonsense"), None);
+    }
+
+    // ---- join semantics -----------------------------------------------------
+
+    #[test]
+    fn join_unions_contract_arms_and_intersects_members() {
+        // A branch with lane {User} and Member{yes:[User]} joined with a branch with
+        // lane {Guest} and Member{yes:[Guest]}: the merged lane is {User,Guest} (a
+        // value live on EITHER path is possible), and the Member intersection is empty
+        // (no bound holds on both) → dropped.
+        let mut a = Store::default();
+        a.contract.insert("v".into(), vec![arm(cls("user"), Stratum::Asserted)]);
+        a.members.insert("v".into(), Member { yes: vec!["user".into()], no: vec![] });
+        let mut b = Store::default();
+        b.contract.insert("v".into(), vec![arm(cls("guest"), Stratum::Asserted)]);
+        b.members.insert("v".into(), Member { yes: vec!["guest".into()], no: vec![] });
+        let j = join_stores(&a, &[&b]);
+        let mut got = j.contract.get("v").cloned().unwrap();
+        got.sort_by(|x, y| format!("{:?}", x.ty).cmp(&format!("{:?}", y.ty)));
+        assert_eq!(got, vec![arm(cls("guest"), Stratum::Asserted), arm(cls("user"), Stratum::Asserted)]);
+        assert_eq!(j.members.get("v"), None, "disjoint members intersect to empty → dropped");
+    }
+
+    #[test]
+    fn unbind_forgets_narrowing_carriers() {
+        // Reassignment (`store.unbind`) voids both new carriers for the var.
+        let mut store = Store::default();
+        store.contract.insert("v".into(), vec![arm(cls("user"), Stratum::Verified)]);
+        store.members.insert("v".into(), Member { yes: vec!["user".into()], no: vec![] });
+        store.unbind("v");
+        assert_eq!(store.contract_arms("v"), None);
+        assert_eq!(store.member_of("v"), None);
+    }
+}
