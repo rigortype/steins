@@ -249,10 +249,18 @@ jobs:
         with:
           key: xtask
 
+      # Both tools are PINNED rather than `@latest`: the notices file is diffed
+      # against the committed one below, and cargo-about's output moves with
+      # the tool, not only with Cargo.lock — 0.9.2 (2026-08-18) began rendering
+      # vendored snippets as their own sections and turned master red with no
+      # dependency change (#455, regenerated in #462). With a pin, a tool
+      # release is a deliberate bump: raise the version here, regenerate with
+      # that same version, and commit both together. about.toml's header names
+      # the version for local regeneration — keep the two in sync.
       - name: Install cargo-about + cargo-deny
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about,cargo-deny
+          tool: cargo-about@0.9.2,cargo-deny@0.20.2
 
       # Fails if any dependency's license falls outside deny.toml's allow list.
       # For Steins that list is permissive-only ON PURPOSE — a copyleft

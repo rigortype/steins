@@ -37,7 +37,10 @@ fn generate(root: &Path) -> Result<String, String> {
         .current_dir(root)
         .args(["about", "generate", "about.hbs"])
         .output()
-        .map_err(|e| format!("running `cargo about`: {e} (install it with `cargo install cargo-about`)"))?;
+        .map_err(|e| format!(
+            "running `cargo about`: {e} (install it with `cargo install --locked cargo-about --features cli`, \
+             at the version .github/workflows/ci.yml pins)"
+        ))?;
     if !out.status.success() {
         return Err(format!(
             "`cargo about generate` failed ({}):\n{}",
