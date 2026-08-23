@@ -142,13 +142,49 @@ start, **included in the continuation** — and both `parseTemplateTagValue` and
 `@phpstan-type foo-bar = int` an alias named `foo-bar`.
 
 So Steins' tag scanner **diverges from the oracle on hyphenated tag names**,
-today, by accident rather than by decision. That divergence is not this ADR's
-to settle — it is issue #472's, which is where alias names acquire meaning —
-but it has to be settled deliberately there, and this ADR's recommendation is
-that a hyphenated tag name be **rejected** rather than silently truncated,
-since the whole point of §3 is that the hyphen space is not the program's to
-name. Either way, the ordering above is what carries the reservation, so §3
-does not wait on the answer.
+by accident rather than by decision — and §4.1 turns it into one.
+
+### 4.1 Owner ruling (2026-08-24): alias names, and the plugin channel
+
+**A user-defined type alias may be named `foo_bar`. It may not be named
+`foo-bar`, and this is made explicit rather than left to truncation.**
+
+The underscore half is PHPStan/Psalm compatibility and covers everything anyone
+writes: an alias name that is a legal PHP identifier resolves exactly as it does
+upstream. The hyphen half is a **registered divergence** — phpdoc-parser accepts
+`@phpstan-type foo-bar = int` and declares an alias by that name — and it is the
+direct consequence of §3. The hyphen space is type vocabulary; a program naming
+an alias into it is claiming ground the analyzer has reserved.
+
+*Reject*, not truncate. Truncation is the current accident and it is the worst
+of the three options: `@phpstan-type foo-bar` silently becomes an alias named
+`foo`, so a later `@param foo-bar $x` looks up a name the author never wrote,
+finds nothing, and floors for a reason no reader could guess from the docblock.
+A rejected tag declares no alias — the no-envelope outcome (ADR-0029) — and the
+declaration itself is reportable under §6's family, at the same floor and by the
+same calibration.
+
+**The space is reserved, not frozen: a plugin may register utility types into
+it.** This is the half that makes the reservation tolerable rather than
+imprisoning, and it follows PHPStan, where an extension adds type resolution the
+core does not ship. Without it, §3 would fix the vocabulary at whatever Steins
+happens to ship and every unmodeled spelling would stay a defect forever.
+
+The channel exists and the registration kind is new. `PluginFacts` today carries
+a `LabelRegistry` plus per-function effect colorings, loaded from a
+`type: steins-plugin` package's `steins-plugin.json` with vendor-root checking
+and load-time refusals surfaced as notices (ADR-0039/0068). Type vocabulary is a
+**second registration kind on that same manifest**, not a second channel — same
+discovery, same auditability, same "a hit is an assertion, never a proof"
+discipline the effect side already states.
+
+One consequence has to be named because it moves a baseline. §6's allowlist
+becomes *builtin tables + plugin registrations*, so the diagnostic is computed
+**after** plugin load and is **plugin-set dependent**: dropping a plugin from a
+project introduces findings on the docblocks that used its vocabulary. That is
+the correct answer — the vocabulary really did go away — but it means the id's
+baseline moves with configuration rather than with code, which is a thing
+ADR-0022's baseline discipline has to be told about rather than discover.
 
 The one theoretical escape is a name that reaches the class table as a
 **string** rather than through the compiler — `class_alias` with an odd second
@@ -258,11 +294,17 @@ tables are for (§7). A divergence entry: where PHPStan, Psalm and Mago report
 an unknown *class*, Steins reports unknown *vocabulary* or stays silent, and
 never over-rejects.
 
-**Surfaced, not settled.** §4 found that Steins' tag scanner truncates a
-hyphenated `@template` / `@phpstan-type` name where phpstan/phpdoc-parser keeps
-it whole — an unregistered divergence from the ADR-0029 oracle, in the one crate
-whose premise is faithful porting. It is issue #472's to decide, it wants a
-registry entry once decided, and §3 does not depend on the answer.
+**Settled by ruling, needs registering.** §4 found that Steins' tag scanner
+truncates a hyphenated `@template` / `@phpstan-type` name where
+phpstan/phpdoc-parser keeps it whole — an unregistered divergence from the
+ADR-0029 oracle, in the one crate whose premise is faithful porting. §4.1 makes
+it deliberate: `foo_bar` yes, `foo-bar` rejected, and the hyphen space stays
+extensible through the plugin manifest instead. That is a divergence-registry
+entry and an issue #472 requirement, not a free choice for the implementation.
+
+**Plugin-set dependence.** §4.1's channel makes §6's diagnostic depend on which
+plugins are loaded, which is a baseline that moves with configuration. Named
+here so ADR-0022 is told rather than surprised.
 
 **Bounded.** No denotation changes for any name Steins already models. Every
 spelling in `KNOWN_UNENFORCED`, `DERIVED_OPERATORS`, the refined-string grid
