@@ -1009,14 +1009,13 @@ pub fn project_parameters_of(inner: &ContractTy) -> ContractTy {
     }
     let mut fields: Vec<CField> = Vec::with_capacity(sig.params.len());
     let mut unsealed = None;
-    let mut key: i64 = 0;
-    for p in &sig.params {
+    for (pos, p) in sig.params.iter().enumerate() {
         if p.variadic {
             unsealed = Some((None, Box::new(p.ty.clone())));
             break;
         }
-        fields.push(CField { key: CKey::Int(key), optional: p.optional, ty: p.ty.clone() });
-        key += 1;
+        let key = CKey::Int(i64::try_from(pos).expect("a parameter list fits i64"));
+        fields.push(CField { key, optional: p.optional, ty: p.ty.clone() });
     }
     ContractTy::Shape {
         // The empty sealed shape is `array{}` in every lane: the list flavour
