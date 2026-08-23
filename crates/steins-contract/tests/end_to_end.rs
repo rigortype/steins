@@ -241,6 +241,181 @@ fn key_of_keeps_optional_keys_and_floors_open_operands() {
     assert_eq!(admits_val(&ty("value-of"), &s("a")), Maybe);
 }
 
+/// `non-nullable<T>` (ADR-0089 §5.1): the arm-lane subtraction, named.
+#[test]
+fn non_nullable_deletes_the_null_arm() {
+    for src in ["non-nullable<int|null>", "non-nullable<?int>", "non-nullable<null|int>"] {
+        let t = ty(src);
+        assert_eq!(admits_val(&t, &Val::Int(1)), Yes, "{src} keeps the int arm");
+        assert_eq!(admits_val(&t, &Val::Null), No, "{src} deletes the null arm");
+    }
+
+    // An operand carrying no null arm is returned as it is, not narrowed.
+    assert_eq!(ty("non-nullable<int>"), ty("int"));
+    assert_eq!(ty("non-nullable<int|string>"), ty("int|string"));
+
+    // Nothing is known about an Opaque operand, so nothing is cut — the floor
+    // states nothing rather than claiming the null arm was absent.
+    assert_eq!(admits_val(&ty("non-nullable<$this>"), &Val::Null), Maybe);
+}
+
+/// The two edges of `non-nullable` that touch other records: the `mixed` cut
+/// (ADR-0030's registry entry 6) and the empty set.
+#[test]
+fn non_nullable_reaches_the_mixed_cut_and_the_empty_set() {
+    // The SECOND declaration-side construction site for `MixedMinus` — the
+    // amendment ADR-0089 §5.1 makes to ADR-0030's entry 6.
+    assert_eq!(ty("non-nullable<mixed>"), ty("non-null-mixed"));
+    assert_eq!(admits_val(&ty("non-nullable<mixed>"), &Val::Null), No);
+    assert_eq!(admits_val(&ty("non-nullable<mixed>"), &Val::Int(1)), Yes);
+    // Arm-wise, so a `mixed` beside a `null` reaches the cut rather than
+    // surviving as a `mixed` arm that still admits null.
+    assert_eq!(admits_val(&ty("non-nullable<mixed|null>"), &Val::Null), No);
+    // `non-empty-mixed` is already the falsy cut, which excludes null.
+    assert_eq!(ty("non-nullable<non-empty-mixed>"), ty("non-empty-mixed"));
+
+    // The empty set is the honest answer, not a manufactured `No`: `never` is
+    // a type the author could already spell, and this operand asked for it.
+    assert_eq!(ty("non-nullable<null>"), ty("never"));
+}
+
+/// `return-type<F>` / `parameters-of<F>` (ADR-0089 §5.2): the two halves of a
+/// declared `callable(P): R`, which nothing else could spell.
+#[test]
+fn the_callable_readers_project_a_declared_signature() {
+    assert_eq!(ty("return-type<\\Closure(int): string>"), ty("string"));
+    assert_eq!(ty("return-type<callable(int, string): bool>"), ty("bool"));
+
+    // The argument list, positionally.
+    let params = ty("parameters-of<\\Closure(int, string): bool>");
+    assert_eq!(admits_val(&params, &list(vec![Val::Int(1), s("x")])), Yes);
+    assert_eq!(admits_val(&params, &list(vec![s("x"), Val::Int(1)])), No);
+    assert_eq!(admits_val(&params, &list(vec![Val::Int(1)])), No);
+
+    // An optional parameter is an optional field.
+    let opt = ty("parameters-of<\\Closure(int, string=): bool>");
+    assert_eq!(admits_val(&opt, &list(vec![Val::Int(1), s("x")])), Yes);
+    assert_eq!(admits_val(&opt, &list(vec![Val::Int(1)])), Yes);
+    assert_eq!(admits_val(&opt, &list(vec![])), No);
+
+    // A variadic is the unsealed tail.
+    let var = ty("parameters-of<\\Closure(int, string...): void>");
+    assert_eq!(admits_val(&var, &list(vec![Val::Int(1)])), Yes);
+    assert_eq!(admits_val(&var, &list(vec![Val::Int(1), s("a"), s("b")])), Yes);
+    assert_eq!(admits_val(&var, &list(vec![Val::Int(1), Val::Int(2)])), No);
+}
+
+/// The refusals both callable readers state, rather than guessing through.
+#[test]
+fn the_callable_readers_decline_what_they_cannot_read() {
+    for src in [
+        // No signature to read: the bare vocabulary.
+        "return-type<callable>",
+        "parameters-of<callable>",
+        "return-type<\\Closure>",
+        "parameters-of<\\Closure>",
+        // Not a callable at all.
+        "return-type<int>",
+        "parameters-of<array{a: int}>",
+        // A by-ref parameter names a binding the callee writes back through,
+        // not the type of a value an argument array would carry.
+        "parameters-of<\\Closure(int, string&): void>",
+    ] {
+        assert_eq!(
+            admits_val(&ty(src), &Val::Int(1)),
+            Maybe,
+            "{src} must floor to Opaque rather than answer",
+        );
+    }
+}
+
+/// `exclude-from<T, U>` / `extract-from<T, U>` (ADR-0089 §5.3): the arm
+/// filters, over `normalize::subsumes`.
+#[test]
+fn the_arm_filters_partition_a_union() {
+    let kept = ty("exclude-from<int|string|null, null>");
+    assert_eq!(admits_val(&kept, &Val::Int(1)), Yes);
+    assert_eq!(admits_val(&kept, &s("x")), Yes);
+    assert_eq!(admits_val(&kept, &Val::Null), No);
+    // The same denotation `non-nullable` reaches by its own route.
+    assert_eq!(ty("exclude-from<int|null, null>"), ty("non-nullable<int|null>"));
+
+    let taken = ty("extract-from<int|string|null, string|null>");
+    assert_eq!(admits_val(&taken, &s("x")), Yes);
+    assert_eq!(admits_val(&taken, &Val::Null), Yes);
+    assert_eq!(admits_val(&taken, &Val::Int(1)), No);
+
+    // A non-union subject is a one-arm list, judged the same way.
+    assert_eq!(ty("exclude-from<int, string>"), ty("int"));
+    assert_eq!(ty("extract-from<int, string>"), ty("never"));
+    // `mixed` provably subsumes every arm, so the exclusion really is empty.
+    assert_eq!(ty("exclude-from<int|string, mixed>"), ty("never"));
+}
+
+/// **The safety property**: both filters widen relative to a perfect filter,
+/// reaching it from opposite ends of the trinary. `exclude-from` drops only on
+/// a proven `Yes`; `extract-from` keeps on `Maybe` and drops only on a proven
+/// `No`. Keeping `extract-from` on `Yes` alone would delete an arm the value
+/// may well inhabit, and a missing arm is a manufactured `No`.
+#[test]
+fn both_arm_filters_widen_rather_than_narrow() {
+    // `$this` is Opaque, so `subsumes` answers `Maybe` about it either way.
+    // Exclude keeps it (no proof to delete on); extract keeps it too (no
+    // proof to delete on) — the arm survives both, and nothing is invented.
+    assert_eq!(admits_val(&ty("exclude-from<$this, int>"), &Val::Int(1)), Maybe);
+    assert_eq!(admits_val(&ty("extract-from<$this, int>"), &Val::Int(1)), Maybe);
+    assert_eq!(ty("extract-from<$this, int>"), ty("$this"));
+
+    // The undecided arm survives beside a decided one, in both directions.
+    let mixed_bag = ty("exclude-from<int|$this, int>");
+    assert_eq!(admits_val(&mixed_bag, &s("x")), Maybe, "the Opaque arm is still there");
+    assert_eq!(admits_val(&ty("extract-from<int|$this, int>"), &s("x")), Maybe);
+}
+
+/// **The projection discipline, stated as a test** (ADR-0089 §3): an operator
+/// is a front-end, so its *spelling* does not survive lowering. What comes
+/// back is the type it projected to, in Steins' ordinary vocabulary — which is
+/// what `annotate` writes, and why no operator can ever appear in output.
+///
+/// The `parameters-of` rows are the ones that pin a real hazard: a keyed tail
+/// (`list{int, ...<int, string>}`) is not a spelling the grammar accepts, so a
+/// projection that produced one would be a contract no phpdoc string can
+/// express and the round-trip would silently stop being structural.
+#[test]
+fn the_projections_round_trip() {
+    for (src, projected) in [
+        ("non-nullable<int|null>", "int"),
+        ("non-nullable<mixed>", "non-null-mixed"),
+        ("non-nullable<null>", "never"),
+        ("return-type<\\Closure(int): string>", "string"),
+        ("parameters-of<\\Closure(int, string): bool>", "list{int, string}"),
+        ("parameters-of<\\Closure(int, string=): bool>", "list{0: int, 1?: string}"),
+        ("parameters-of<\\Closure(int, string...): void>", "list{int, ...<string>}"),
+        ("parameters-of<\\Closure(): void>", "array{}"),
+        ("parameters-of<\\Closure(string...): void>", "list{...<string>}"),
+        ("exclude-from<int|string|null, null>", "int|string"),
+        ("extract-from<int|string|null, string|null>", "string|null"),
+    ] {
+        let lowered = ty(src);
+        assert_eq!(lowered, ty(projected), "{src} must lower exactly as {projected} does");
+        // And the projected spelling is itself a fixed point: re-lowering what
+        // the operand projected to changes nothing.
+        assert_eq!(ty(projected), ty(projected), "{projected} must be stable");
+    }
+
+    // The operator name never survives as a class arm — the failure mode the
+    // arity-blind floor exists to prevent, checked on the projecting path too.
+    for src in [
+        "non-nullable<int|null>",
+        "return-type<\\Closure(int): string>",
+        "parameters-of<\\Closure(int): bool>",
+        "exclude-from<int|null, null>",
+        "extract-from<int|null, null>",
+    ] {
+        assert_eq!(admits_val(&ty(src), &Val::Bool(true)), No, "{src} must judge, not floor");
+    }
+}
+
 #[test]
 fn shapes_follow_14939() {
     let shape = ty("array{id: int, name?: string}");

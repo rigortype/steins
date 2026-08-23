@@ -88,6 +88,16 @@ entries:
    starts producing narrowed `mixed` facts that have no arm spelling — that is
    the evidence this entry waits on, not a larger row count.
 
+   **Amended 2026-08-23 (ADR-0089 §5.1, issue #473).** `MixedMinus` now has a
+   **second** construction site: `non-nullable<mixed>` reaches
+   `MixedCut::Null`, where before only the `non-null-mixed` keyword did. The
+   entry's claim is unchanged, because the new site is on the same side of the
+   line — a derived type operator is **declaration-side** vocabulary, evaluated
+   where envelopes are built, and no inference path produces it any more than a
+   keyword does. What moves is the count of spellings that reach the variant,
+   from one to two; what this entry waits on is still an arm lane that narrows
+   `mixed` with no arm spelling for the result.
+
 **Deferred until needed** — narrowing details (co-evolving with the branch
 analysis ratchet), template variance in full, subtraction types: decided in
 envelope-checking priority order, not up front. The narrowing/subtraction pair

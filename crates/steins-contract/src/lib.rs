@@ -442,6 +442,39 @@ const KNOWN_UNENFORCED: &[&str] = &[
     "template-type",
 ];
 
+/// The **derived type operators** (ADR-0089): vocabulary this crate *does*
+/// hold a relation for, at one arity each, and which must floor to
+/// [`ContractTy::Opaque`] at **every other** arity and as a bare identifier.
+///
+/// Distinct from `KNOWN_UNENFORCED`, which is for names with no relation at
+/// all — putting an operator there would floor it before [`lower_generic`]'s
+/// match could project it. What the two tables share is the property that
+/// matters: the name is decided **before** any argument count is, so a
+/// misspelled arity can never fall through to the class catch-all.
+///
+/// That fall-through was a live wrong-`No`. Before ADR-0089,
+/// `key-of<int, int>` lowered to `Class("key-of")` — a reference to a
+/// nonexistent class, whose acceptance leg answers a definite `No` for every
+/// non-object value — while `key-of<int>` correctly floored to `Opaque`. A
+/// wrong `No` is a false positive rather than lost precision (the
+/// closure-argument variance check raises findings on `No`), so `key-of` and
+/// `value-of` join the new names here rather than keeping the hazard.
+const DERIVED_OPERATORS: &[&str] = &[
+    "key-of",
+    "value-of",
+    "non-nullable",
+    "return-type",
+    "parameters-of",
+    "exclude-from",
+    "extract-from",
+];
+
+/// Is `name` a [`DERIVED_OPERATORS`] spelling? Already normalized by both
+/// callers (leading `\` stripped, lowercased).
+fn is_derived_operator(name: &str) -> bool {
+    DERIVED_OPERATORS.contains(&name)
+}
+
 /// **The one identifier table**: what every phpdoc *keyword* spelled as a bare
 /// identifier means, lowered to a [`ContractTy`]. Both lanes read this table
 /// (ADR-0030's no-second-relation discipline, as [`shape_verdict`] applies it
@@ -579,7 +612,11 @@ pub fn lower_identifier(name: &str) -> ContractTy {
             ContractTy::CallableTy { sig: None, obl: callable_obl(&norm).unwrap_or_default() }
         }
         "object" => ContractTy::ObjectAny,
-        "self" | "static" | "parent" | "key-of" | "value-of" => ContractTy::Opaque,
+        "self" | "static" | "parent" => ContractTy::Opaque,
+        // A derived operator spelled bare (`@param key-of`, `@param
+        // non-nullable`) names an operator with no operand, so it states
+        // nothing: the honest floor, never the class catch-all (ADR-0089 §4).
+        other if is_derived_operator(other) => ContractTy::Opaque,
         // The refined-string grid (issue #240), the last keyword rung before the
         // class catch-all: every cell the speller can emit lowers back to the set
         // it was spelled from, and anything else is a class name as before.
@@ -762,6 +799,23 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
         // lowering, then one projection (ADR-0030).
         ("key-of", 1) => project_key_of(&arg(0).expect("len checked")),
         ("value-of", 1) => project_value_of(&arg(0).expect("len checked")),
+        // The ADR-0089 roster, projected the same way and for the same reason.
+        ("non-nullable", 1) => project_non_nullable(&arg(0).expect("len checked")),
+        ("return-type", 1) => project_return_type(&arg(0).expect("len checked")),
+        ("parameters-of", 1) => project_parameters_of(&arg(0).expect("len checked")),
+        ("exclude-from", 2) => project_arm_filter(
+            &arg(0).expect("len checked"),
+            &arg(1).expect("len checked"),
+            ArmFilter::Exclude,
+        ),
+        ("extract-from", 2) => project_arm_filter(
+            &arg(0).expect("len checked"),
+            &arg(1).expect("len checked"),
+            ArmFilter::Extract,
+        ),
+        // Every OTHER arity of a derived operator, checked before the class
+        // catch-all can manufacture a `No` out of it — see [`DERIVED_OPERATORS`].
+        (other, _) if is_derived_operator(other) => ContractTy::Opaque,
         _ => ContractTy::Class(norm),
     }
 }
@@ -836,6 +890,200 @@ pub fn project_value_of(inner: &ContractTy) -> ContractTy {
         ContractTy::MapOf { val, .. } => (**val).clone(),
         _ => ContractTy::Opaque,
     }
+}
+
+/// `non-nullable<T>`: `T` with its `null` arm deleted — the arm-lane
+/// subtraction ADR-0052 §1 already performs on declared alternatives, given a
+/// name (ADR-0089 §5.1).
+///
+/// | Operand | `non-nullable` |
+/// | --- | --- |
+/// | `int\|null`, `?\DateTime` | the union minus its `null` arm |
+/// | `mixed` | `non-null-mixed` ([`MixedCut::Null`]) |
+/// | `null` | [`ContractTy::Never`] |
+/// | anything carrying no `null` arm | itself |
+/// | [`ContractTy::Opaque`] | `Opaque` — nothing is known, so nothing is cut |
+///
+/// **`mixed` is the cell that touches the registry.** It is a *second*
+/// declaration-side construction site for [`ContractTy::MixedMinus`], where
+/// ADR-0030's registry entry 6 recorded exactly one ([`lower_identifier`]'s
+/// `non-null-mixed` keyword). Entry 6's claim survives verbatim — the variant
+/// is still declaration-side vocabulary no inference path produces; only the
+/// number of spellings that reach it moves.
+///
+/// **`non-nullable<null>` is `never`, and that is honest** rather than a
+/// manufactured `No`: the empty set is what the operand asked for, and `never`
+/// is a type an author can already spell. Whether an operator that provably
+/// empties its operand should *also* report is left open (ADR-0089 §5.1).
+#[must_use]
+pub fn project_non_nullable(inner: &ContractTy) -> ContractTy {
+    match inner {
+        ContractTy::Null => ContractTy::Never,
+        ContractTy::Mixed => ContractTy::MixedMinus(MixedCut::Null),
+        // Arm-wise, so a `mixed` beside a `null` reaches the cut instead of
+        // surviving as a `mixed` arm that still admits null.
+        ContractTy::Union(members) => union_of(
+            members
+                .iter()
+                .map(project_non_nullable)
+                .filter(|m| !matches!(m, ContractTy::Never))
+                .collect(),
+        ),
+        // `non-empty-mixed` already excludes null (it is the falsy cut), and
+        // every other arm carries no `null` member to delete.
+        other => other.clone(),
+    }
+}
+
+/// `return-type<F>`: the `R` of a declared `callable(P): R`, read off
+/// [`CallableSig::ret`] (ADR-0089 §5.2).
+///
+/// A bare `callable`/`Closure` carries no signature (`sig: None`) and floors,
+/// as does every non-callable operand and every arity but one. A union floors
+/// unless **every** arm is a signatured callable, per ADR-0089 §4: an arm the
+/// rule declines takes the whole type down, rather than one arm widening to
+/// `Opaque` while the others narrow.
+///
+/// **There is no `typeof`.** TypeScript writes `ReturnType<typeof f>`; Steins
+/// has no operator turning a declared function's *name* into its type, so the
+/// operand is a callable **type** spelling and never a reference to a
+/// function. That is the limit on this operator, and it is deliberate.
+#[must_use]
+pub fn project_return_type(inner: &ContractTy) -> ContractTy {
+    match inner {
+        ContractTy::CallableTy { sig: Some(sig), .. } => sig.ret.clone(),
+        ContractTy::Union(members) => {
+            let rets: Vec<ContractTy> = members.iter().map(project_return_type).collect();
+            if rets.iter().any(|r| matches!(r, ContractTy::Opaque)) {
+                return ContractTy::Opaque;
+            }
+            union_of(rets)
+        }
+        _ => ContractTy::Opaque,
+    }
+}
+
+/// `parameters-of<F>`: the argument list a declared signature describes, as a
+/// positional shape — `\Closure(int, string=): bool` is `list{int, string?}`
+/// (ADR-0089 §5.2).
+///
+/// Optional parameters become optional fields, and a variadic becomes the
+/// unsealed tail (`list{int, ...<string>}`) — the faithful reading of the
+/// array `call_user_func_array` would be handed.
+///
+/// The tail carries **no key contract**, deliberately. A keyed tail was the
+/// first reading (a variadic really does collect into consecutive int keys),
+/// but `list{int, ...<int, string>}` is not a spelling the grammar accepts, so
+/// that shape would have been a [`ContractTy`] no phpdoc string can express —
+/// the speller drops the key and the round-trip stops being structural. It
+/// also bought nothing: the list flavour already forces int keys, so the two
+/// forms answer identically for every value (`the_projections_round_trip`).
+///
+/// **A by-reference parameter floors the whole operator.** A `&$x` position
+/// does not carry the declared type of a value the caller supplies; it names a
+/// binding the callee writes back through, and the array that would stand in
+/// for it cannot be spelled. [`CallableParamTy::by_ref`] is already the axis
+/// the closure-argument variance check stays silent on, and this keeps that
+/// silence rather than inventing an answer for it.
+///
+/// **The reading is positional by construction.** PHP 8's named arguments let
+/// `call_user_func_array` take a string-keyed array, which this sealed
+/// positional shape refuses — but that refusal is the *author's* claim, made
+/// no differently than by writing `@param list{int, string}` out by hand, and
+/// a declaration is an authoritative envelope (ADR-0001). The wrong-`No`
+/// prohibition is about the analyzer manufacturing a `No` out of a name it did
+/// not understand, not about honoring one an author spelled.
+#[must_use]
+pub fn project_parameters_of(inner: &ContractTy) -> ContractTy {
+    let ContractTy::CallableTy { sig: Some(sig), .. } = inner else {
+        return ContractTy::Opaque;
+    };
+    // Two signatures this projection declines to read: one that writes back
+    // through a parameter, and one whose variadic is not last (the grammar
+    // permits the spelling; no argument array corresponds to it).
+    if sig.params.iter().any(|p| p.by_ref) {
+        return ContractTy::Opaque;
+    }
+    if sig.params.iter().rev().skip(1).any(|p| p.variadic) {
+        return ContractTy::Opaque;
+    }
+    let mut fields: Vec<CField> = Vec::with_capacity(sig.params.len());
+    let mut unsealed = None;
+    for (pos, p) in sig.params.iter().enumerate() {
+        if p.variadic {
+            unsealed = Some((None, Box::new(p.ty.clone())));
+            break;
+        }
+        let key = CKey::Int(i64::try_from(pos).expect("a parameter list fits i64"));
+        fields.push(CField { key, optional: p.optional, ty: p.ty.clone() });
+    }
+    ContractTy::Shape {
+        // The empty sealed shape is `array{}` in every lane: the list flavour
+        // is vacuous there (the empty array is a list) and `lower_shape`
+        // produces that form, so match it rather than minting a second
+        // `ContractTy` for one type — two structures that spell alike are what
+        // `arm_eq` and the dedup pass then have to paper over.
+        list: !(fields.is_empty() && unsealed.is_none()),
+        fields,
+        sealed: unsealed.is_none(),
+        // Left to the denotational computation, exactly as `lower_shape`
+        // leaves it: a required field already implies non-emptiness, and
+        // `ShapeFact::normalize` is what decides `is_list` besides.
+        non_empty: false,
+        unsealed,
+    }
+}
+
+/// Which direction [`project_arm_filter`] reads its verdict in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ArmFilter {
+    /// `exclude-from<T, U>` — drop `T`'s arms that `U` **provably** subsumes.
+    Exclude,
+    /// `extract-from<T, U>` — keep `T`'s arms that `U` does not **provably**
+    /// fail to subsume.
+    Extract,
+}
+
+/// `exclude-from<T, U>` / `extract-from<T, U>`: `T`'s arm list filtered
+/// against `U` through [`normalize::subsumes`], the single pairwise arm
+/// relation everything else reduces to (ADR-0052 §4). TypeScript's
+/// `Exclude`/`Extract` distribute over unions; Steins' arm lane *is*
+/// distribution, so there is nothing to add for that (ADR-0089 §5.3).
+///
+/// **Both filters widen**, which is the only safe direction, and they reach it
+/// from opposite ends of the trinary:
+///
+/// - `exclude-from` drops an arm on `Yes` **only**. Deleting an arm on an
+///   undecided relation is exactly the arm deletion ADR-0052 forbids without
+///   proof, so a `Maybe` keeps the arm and the result is wider than a perfect
+///   `Exclude`.
+/// - `extract-from` keeps an arm on `Yes` **and on `Maybe`**, dropping only on
+///   a proven `No`. Keeping on `Yes` alone would run the *narrowing* way: an
+///   arm the value may well inhabit would vanish, and a missing arm is a
+///   manufactured `No` at the acceptance leg.
+///
+/// So an [`ContractTy::Opaque`] arm survives both, because `subsumes` answers
+/// `Maybe` about it — `extract-from<Opaque, T>` is `Opaque`, never `Never`.
+/// `exclude-from<T, mixed>` really is `never`, on the other hand: `mixed`
+/// subsumes every arm with a proven `Yes`, which is the correct answer and not
+/// an undecided one.
+fn project_arm_filter(subject: &ContractTy, against: &ContractTy, filter: ArmFilter) -> ContractTy {
+    let arms: &[ContractTy] = match subject {
+        ContractTy::Union(members) => members,
+        one => std::slice::from_ref(one),
+    };
+    let kept: Vec<ContractTy> = arms
+        .iter()
+        .filter(|arm| {
+            let verdict = normalize::subsumes(against, arm);
+            match filter {
+                ArmFilter::Exclude => !verdict.is_yes(),
+                ArmFilter::Extract => verdict != Certainty::No,
+            }
+        })
+        .cloned()
+        .collect();
+    union_of(kept)
 }
 
 /// Lower a `callable(P1, P2=): R` / `\Closure(P): R` signature (issue #11).
@@ -2151,6 +2399,108 @@ mod unset_pseudo_type_tests {
                 lower_str(&back).expect("re-lowers"),
                 lowered,
                 "{src} did not round-trip through {back}",
+            );
+        }
+    }
+}
+
+/// ADR-0089's **vocabulary** half: what the operator names are, and what every
+/// spelling that is not the operator's own arity does. The *projections* are
+/// judged end to end in `tests/end_to_end.rs`, against real values.
+#[cfg(test)]
+mod derived_operator_tests {
+    use super::*;
+
+    /// The naming rule's whole point. A kebab-case operator is non-shadowable
+    /// **by construction** — it is not a legal PHP identifier, so no class can
+    /// carry the name — and that needs no entry in
+    /// [`is_shadowable_pseudo_type`]'s reserved-word list, which would have
+    /// been a claim about PHP that PHP does not make.
+    ///
+    /// The lowercase spelling the operators were first proposed in could not
+    /// have done this: PHP class names are case-insensitive, so `partial` and
+    /// a project's `class Partial` are one name, and the precedence rule
+    /// resolves that collision in the class's favour.
+    #[test]
+    fn every_operator_is_non_shadowable_without_a_reserved_word() {
+        for name in DERIVED_OPERATORS {
+            assert!(
+                !is_shadowable_pseudo_type(name),
+                "{name} must be non-shadowable — the hyphen rule, not a reserved word",
+            );
+            assert!(name.contains('-'), "{name} must be kebab-case (ADR-0089 §2)");
+        }
+        // The control: a single-word pseudo-type IS a legal class name.
+        assert!(is_shadowable_pseudo_type("integer"));
+    }
+
+    /// An operator spelled bare names an operator with no operand, so it
+    /// states nothing. `Opaque` is the floor; the class catch-all is not.
+    #[test]
+    fn a_bare_operator_spelling_floors() {
+        for name in DERIVED_OPERATORS {
+            let lowered = lower_identifier(name);
+            assert_eq!(lowered, ContractTy::Opaque, "bare {name} must floor to Opaque");
+        }
+    }
+
+    /// **The arity-blind floor** (ADR-0089 §4), and a regression: before this
+    /// slice `key-of<int, int>` lowered to `Class("key-of")`, whose acceptance
+    /// leg answers a definite `No` for every non-object value — a false
+    /// positive, since the closure-argument variance check raises findings on
+    /// `No`. A misspelled arity is now silent instead of wrong.
+    #[test]
+    fn every_wrong_arity_floors_and_is_never_a_class() {
+        for src in [
+            "key-of<int, int>",
+            "value-of<int, int>",
+            "non-nullable<int, int>",
+            "return-type<int, int>",
+            "parameters-of<int, int>",
+            "exclude-from<int>",
+            "extract-from<int>",
+            "exclude-from<int, int, int>",
+            "key-of<int, int, int>",
+        ] {
+            let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
+            assert_eq!(lowered, ContractTy::Opaque, "{src} must floor to Opaque");
+        }
+    }
+
+    /// The refusals of ADR-0089 §6 are refusals, not omissions: they are
+    /// **not** vocabulary and keep the ordinary class reading, which is the
+    /// behaviour that was already there. Stated as an assertion so a later
+    /// reader does not mistake the absence for an oversight.
+    #[test]
+    fn the_refused_utility_types_are_not_vocabulary() {
+        for src in [
+            "record<string, int>",
+            "readonly<int>",
+            "instance-type<int>",
+            "no-infer<int>",
+            "awaited<int>",
+            "this-type<int>",
+            "this-parameter-type<int>",
+            "omit-this-parameter<int>",
+        ] {
+            let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
+            assert!(
+                matches!(lowered, ContractTy::Class(_)),
+                "{src} is refused vocabulary and must stay a class name, got {lowered:?}",
+            );
+        }
+    }
+
+    /// The two tables are disjoint and mean different things: a
+    /// `KNOWN_UNENFORCED` name has **no** relation here, a `DERIVED_OPERATORS`
+    /// name has one at exactly one arity. Putting an operator in the former
+    /// would floor it before [`lower_generic`] could project it.
+    #[test]
+    fn the_two_vocabulary_tables_do_not_overlap() {
+        for name in DERIVED_OPERATORS {
+            assert!(
+                !KNOWN_UNENFORCED.contains(name),
+                "{name} has a relation, so it must not be KNOWN_UNENFORCED",
             );
         }
     }

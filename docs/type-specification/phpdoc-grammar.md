@@ -206,6 +206,81 @@ the author expects of *substitution*, which is why acceptance is gated on it
 (issue #294); reading an argument out by position asks nothing about
 substitution.
 
+### Derived type operators
+
+**Status: the `lower_generic` roster is implemented** (ADR-0089, issue #473);
+`constructor-parameters-of` (#474) and the shape modifiers (ADR-0090, #475)
+are not. See [not-implemented.md](not-implemented.md).
+
+A **derived type operator** computes a type from its operands instead of naming
+one. `key-of<T>` and `value-of<T>` were the first two; ADR-0089 adds five and
+fixes the rules the whole family obeys.
+
+| Operator | Reads | Result |
+| --- | --- | --- |
+| `non-nullable<T>` | the arm list | `T` without its `null` arm; `mixed` becomes `non-null-mixed`, `null` becomes `never` |
+| `return-type<F>` | a declared `callable(P): R` | `R` |
+| `parameters-of<F>` | the same | the argument list as a positional shape — `\Closure(int, string=): bool` is `list{0: int, 1?: string}` |
+| `exclude-from<T, U>` | the arm list | `T`'s arms that `U` does not **provably** subsume |
+| `extract-from<T, U>` | the arm list | `T`'s arms that `U` does not **provably** fail to subsume |
+
+Three rules apply to every one of them, and none is optional:
+
+**Kebab-case, always.** A hyphenated spelling is not a legal PHP identifier, so
+no class can be declared with the name and the operator is non-shadowable by
+construction — `is_shadowable_pseudo_type` short-circuits on the hyphen. This
+is the reason the naming is not a style choice: PHP class names are
+**case-insensitive**, so a lowercase operator and a project's class of that name
+are one name, and the pseudo-type/class precedence rule resolves that collision
+in the class's favour. Where the natural name is one word, `-of` (the operand is
+read) or `-from` (the second operand is filtered against the first) forces the
+hyphen.
+
+**A projection, never a representation.** Each operator lowers by projecting the
+operand's already-lowered [`ContractTy`](contract-types.md) into an existing
+one — one lowering, then one projection, no new variant (ADR-0030's
+one-relation discipline). So the operator **spelling does not survive**:
+`non-nullable<int|null>` spells back as `int`, and no Steins output ever
+contains an operator. That is deliberate — `annotate` writes Steins' own
+vocabulary, and the projected form is that vocabulary.
+
+**An arity-blind `Opaque` floor.** The operator names are decided *before* any
+argument count is, so a misspelled arity (`key-of<A, B>`), a bare spelling
+(`@param non-nullable`) and an operand the projection cannot read all floor to
+`Opaque` — never to the class catch-all, whose acceptance leg would answer a
+definite `No` for every non-object value. This closed a live wrong-`No`:
+`key-of<int, int>` used to lower to `Class("key-of")`.
+
+Applied to a **union**, an operator maps over the arms and leaves an arm it does
+not apply to unchanged; where its rule declines for one arm, the whole type
+floors rather than transforming the readable arms and passing the rest through.
+
+The two arm filters both **widen** relative to a perfect filter — the only safe
+direction, since a missing arm is a manufactured `No` — and they reach it from
+opposite ends of the trinary: `exclude-from` drops an arm only on a proven
+`Yes`, `extract-from` keeps an arm on `Maybe` and drops only on a proven `No`.
+So an `Opaque` arm survives both, and `extract-from<$this, int>` is `$this`
+rather than `never`.
+
+`parameters-of` states two refusals rather than guessing: a **by-reference**
+parameter floors the operator (the position names a binding the callee writes
+back through, not the type of a value an argument array carries — the same axis
+the closure-variance check stays silent on), and a bare `callable`/`Closure`
+carries no signature to read. The reading is **positional**, which a
+string-keyed named-argument array does not satisfy; that refusal is the
+author's own claim, made no differently than by writing the `list{…}` out.
+
+**Refused, with reasons** (ADR-0089 §6): `Record` (`array<K, V>` denotes it),
+`Readonly` (PHP arrays are value types), `InstanceType` (`class-string`'s bound
+is dropped at lowering by design), `NoInfer` (no solver to steer, ADR-0032),
+`ThisType` / `ThisParameterType` / `OmitThisParameter` (no `this` parameter in a
+PHP callable type), `Awaited` (no promise in PHP core), and the four casing
+intrinsics (the refined-string grid holds the predicates; the sidecar folds the
+transforms). These are **not** vocabulary and keep the ordinary class reading.
+
+PHPStan reports every operator on this roster as `class.notFound` — see
+[divergence-registry.md](divergence-registry.md), core entry 16.
+
 ### Accepted syntactically, erased semantically
 
 `__benevolent<A|B>` parses and is recorded as a union with a `benevolent`
