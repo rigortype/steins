@@ -117,19 +117,38 @@ hyphenated strings in it are phpdoc vocabulary, a date format, and a crate
 name), and **6,670** PHP files in the pinned public corpus declare **zero**
 hyphenated class-likes.
 
-**It cannot be a `@template` name, and it cannot be a `@phpstan-type` alias.**
-The two layers of the parser disagree about the hyphen, and the disagreement is
-exactly load-bearing:
+**It cannot be a `@template` name or a `@phpstan-type` alias — stated as an
+ordering, not as a lexical fact.** The reservation applies to an identifier
+that **survives** the two rewrites that resolve those: the `@template` shadow
+and (once issue #472 lands) alias expansion. Both already run over the parsed
+type before anything is lowered, so the ordering costs nothing and the rule
+holds whatever either rewrite decides.
+
+Stating it lexically would have been wrong, and the draft of this ADR did state
+it that way. Steins' own two layers do disagree about the hyphen —
 
 | Layer | Predicate | `-` in an identifier |
 | --- | --- | --- |
 | type lexer (`steins-phpdoc`'s `lexer.rs`) | `is_ident_cont` | **yes** |
 | tag scanner (`docblock.rs`) | `is_ident_byte` | **no** |
 
-So `@template foo-bar` and `@phpstan-type foo-bar = int` both read the name as
-`foo` and stop at the hyphen. A hyphenated identifier standing in a type
-position can never match a template name or an alias name, because neither can
-contain one.
+— so `@phpstan-type foo-bar = int` scans here as an alias named `foo`,
+measured. But **phpstan/phpdoc-parser does not agree**, and it is the oracle
+(ADR-0029). Its `TOKEN_IDENTIFIER` is
+`(?:[\\]?+[a-z_\x80-\xFF][0-9a-z_\x80-\xFF-]*+)++` — hyphen excluded at the
+start, **included in the continuation** — and both `parseTemplateTagValue` and
+`parseTypeAliasTagValue` read their name with exactly that token. Upstream,
+`@template foo-bar` declares a template named `foo-bar` and
+`@phpstan-type foo-bar = int` an alias named `foo-bar`.
+
+So Steins' tag scanner **diverges from the oracle on hyphenated tag names**,
+today, by accident rather than by decision. That divergence is not this ADR's
+to settle — it is issue #472's, which is where alias names acquire meaning —
+but it has to be settled deliberately there, and this ADR's recommendation is
+that a hyphenated tag name be **rejected** rather than silently truncated,
+since the whole point of §3 is that the hyphen space is not the program's to
+name. Either way, the ordering above is what carries the reservation, so §3
+does not wait on the answer.
 
 The one theoretical escape is a name that reaches the class table as a
 **string** rather than through the compiler — `class_alias` with an odd second
@@ -152,9 +171,11 @@ set of two: a misspelling of vocabulary, or vocabulary from a tool Steins does
 not model. Both are things worth saying, and neither can be a false positive
 about the *program* — the identifier provably denotes nothing.
 
-**A hyphenated identifier that is not recognized vocabulary is therefore a
-provable defect in the docblock**, and a diagnostic on it is zero-FP-clean in
-the sense ADR-0002 means. That is a rare thing to be able to say.
+**A hyphenated identifier that survives the rewrites and is not recognized
+vocabulary is therefore a provable defect in the docblock**, and a diagnostic on
+it is zero-FP-clean in the sense ADR-0002 means. That is a rare thing to be able
+to say — and the qualifier is load-bearing, per §4: the claim is about what
+reaches lowering, not about what the lexer can spell.
 
 ## 6. The diagnostic, and the one thing it must be calibrated against
 
@@ -236,6 +257,12 @@ before it ships (§6). Two table doc-comments that no longer describe what their
 tables are for (§7). A divergence entry: where PHPStan, Psalm and Mago report
 an unknown *class*, Steins reports unknown *vocabulary* or stays silent, and
 never over-rejects.
+
+**Surfaced, not settled.** §4 found that Steins' tag scanner truncates a
+hyphenated `@template` / `@phpstan-type` name where phpstan/phpdoc-parser keeps
+it whole — an unregistered divergence from the ADR-0029 oracle, in the one crate
+whose premise is faithful porting. It is issue #472's to decide, it wants a
+registry entry once decided, and §3 does not depend on the answer.
 
 **Bounded.** No denotation changes for any name Steins already models. Every
 spelling in `KNOWN_UNENFORCED`, `DERIVED_OPERATORS`, the refined-string grid
