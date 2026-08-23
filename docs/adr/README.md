@@ -125,3 +125,5 @@ list in one place.
 | ADR-0086 | [Call-site heap entry: an argument's object crosses the binding descent by copy](0086-call-site-heap-entry.md) |
 | ADR-0087 | [The `unset` pseudo-type: a phpdoc union member that says the variable may not be there](0087-unset-pseudo-type.md) |
 | ADR-0088 | [`match` exhaustiveness: two coverage grades, the defensive terminator, and the sentinel parameter](0088-match-exhaustiveness.md) |
+| ADR-0089 | [Derived type operators: kebab-case vocabulary, projection over representation, and the non-shape roster](0089-derived-type-operators.md) |
+| ADR-0090 | [Shape modifiers: the presence axis, the seal axis, and the alias prerequisite](0090-shape-modifiers.md) |
