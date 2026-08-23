@@ -21,6 +21,18 @@ the runtime never checks it. Steins encourages only simple one-dimensional
 phpdoc types (`list<Foo>`, `non-empty-array<int, bool>`).
 _Avoid_: annotation (collides with PHP attributes)
 
+**Derived type operator**:
+A phpdoc spelling that *computes* a type from its operands instead of naming
+one — `key-of<T>`, `value-of<T>`, `template-type<…>`, and the roster ADR-0089
+governs. Always **kebab-case**: PHP class names are case-insensitive, so a
+lowercase name is shadowable by a class of that name, while a hyphenated one
+is not a legal PHP identifier and therefore cannot be shadowed at all. Always
+lowered as a **projection** into an existing `ContractTy`, never as a variant
+of its own — so the operator spelling does not survive lowering, and never
+appears in Steins output.
+_Avoid_: utility type (TypeScript's word, and only for a subset of them),
+type function
+
 ### Analysis model
 
 **Call-site value propagation**:
