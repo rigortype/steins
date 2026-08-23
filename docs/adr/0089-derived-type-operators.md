@@ -1,10 +1,11 @@
 # Derived type operators: kebab-case vocabulary, projection over representation, and the non-shape roster
 
 **Status: proposed (2026-08-23), PENDING ratification.** Drafted under the
-owner's standing delegation, ahead of any slice. No lowering ships with this
-ADR. It governs the whole operator family; [ADR-0090](0090-shape-modifiers.md)
-takes the six operators that act on a shape, which carry a prerequisite this
-roster does not.
+owner's standing delegation, ahead of the slices it governs (#473 the
+vocabulary rule and the five `lower_generic` operators, #474
+`constructor-parameters-of`). No lowering ships with this ADR. It governs the
+whole operator family; [ADR-0090](0090-shape-modifiers.md) takes the six
+operators that act on a shape, which carry a prerequisite this roster does not.
 
 ## 1. Context: a request arriving in TypeScript's vocabulary
 
@@ -322,6 +323,7 @@ each other. The honest note about value, which ADR-0090 §7 develops: **only
 this roster, applied to an operand written inline, is longer than the type it
 projects to. The family earns its keep when an operand can be a name — a
 `@template` bound by issue #363's carry, or a `@phpstan-type` alias, which
-Steins does not resolve at all (ADR-0049 A14, issue #195). That is not an
-argument against the roster; it is the argument for landing the discipline in
+Steins does not resolve at all — issue #195 put the tags in the index without
+giving them a meaning (ADR-0049 A14), and issue #472 is what would. That is not
+an argument against the roster; it is the argument for landing the discipline in
 §§2–4 first and letting the slices follow the prerequisite.

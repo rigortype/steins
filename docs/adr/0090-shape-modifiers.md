@@ -1,8 +1,9 @@
 # Shape modifiers: the presence axis, the seal axis, and the alias prerequisite
 
 **Status: proposed (2026-08-23), PENDING ratification.** Drafted under the
-owner's standing delegation, ahead of any slice. No lowering ships with this
-ADR, and none should until §7's prerequisite is met.
+owner's standing delegation, ahead of the slice it governs (#475). No lowering
+ships with this ADR, and none should until §7's prerequisite — issue #472 — is
+met.
 [ADR-0089](0089-derived-type-operators.md) governs the naming rule, the
 projection discipline and the `Opaque` floor this ADR inherits without
 restating; read it first.
@@ -193,12 +194,17 @@ operand is a **name** — so that one shape is written once and the variants are
 derived from it. There are two candidate names and neither is available today:
 
 **A `@phpstan-type` alias — the one that actually unlocks the family, and it is
-absent.** Steins does not resolve type aliases at all. `@phpstan-type` /
-`@psalm-type` / the `-import-type` pair are recorded as **silence obstacles**
-(ADR-0049 A14, issue #195): a class-like carrying one makes every absence proof
-over it silent, on the grounds that members live where the index cannot
-enumerate them. The alias is parsed and shelved, never expanded. Until it is,
-`partial-of<UserRow>` has nothing to read and floors.
+absent.** Steins does not resolve type aliases at all. Issue #195 put the tags
+in the index as **silence obstacles** alongside `@method` / `@property` /
+`@mixin` (ADR-0049 A14) and stopped there: the alias is parsed and shelved,
+never expanded, so `partial-of<UserRow>` has nothing to read and floors. Issue
+#472 is what would expand it, on `template-type`'s declared-side rewrite
+precedent.
+
+That the alias also *obstructs* is a separate defect (issue #471) and not this
+family's business: A14 names only `@method` / `@property` / `@mixin`, and its
+justification — members live where the index cannot enumerate them — does not
+reach a tag that declares no member.
 
 **A `@template T` bound at the call site — closer, but not free either.** Issue
 #363 binds a declaration's own `@template` from an argument's carry, which is
@@ -211,7 +217,7 @@ free ride on #363, and widening #363 to reach it is a change to a rule ADR-0032
 kept narrow on purpose.
 
 **Decision on sequencing.** This family is designed here and **implemented
-after issue #195**, not before. Aliases are the cheaper unlock, they are
+after issue #472**, not before. Aliases are the cheaper unlock, they are
 declaration-side so they need no call-site plumbing, and they are the form the
 value case is actually made of — a codebase that names `UserRow` once instead
 of copying a twelve-field shape into every `POST`, `PATCH` and projection
