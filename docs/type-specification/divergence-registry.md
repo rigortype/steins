@@ -230,6 +230,35 @@ where it could not survive. Still deferred: letting a **function-scope**
 `T|unset` participate in the emitter, the `include`-inside-a-function idiom
 (ADR-0087 §5.6).
 
+**16. Derived type operators are Steins vocabulary PHPStan reports as an unknown
+class.** ADR-0089's roster — `non-nullable<T>`, `return-type<F>`,
+`parameters-of<F>`, `exclude-from<T, U>`, `extract-from<T, U>`, and the slices
+that follow it — are spellings PHPStan has no keyword for, so they fall through
+its named-object atom and are reported as `class.notFound`, exactly as
+`unset` is (entry 15) and for the same mechanical reason. Psalm and Mago do the
+same.
+
+The divergence is deliberate and its cost is **bounded by the lowering
+discipline**, not by hope. Each operator is a *projection* into a type the arm
+vocabulary already holds (ADR-0089 §3), so the operator spelling never survives
+lowering: what Steins stores, dumps, judges and — decisively — what `annotate`
+and `transform` write back is the projected form in ordinary vocabulary.
+No Steins output contains one. A project adopting the operators therefore
+chooses the divergence **file by file, in its own hand-written docblocks**, and
+can back it out by spelling the projection instead.
+
+Naming follows the non-shadowability rule the existing vocabulary already
+obeys: every operator is **kebab-case**, because a hyphenated spelling is not a
+legal PHP identifier and so no class can shadow it
+(`is_shadowable_pseudo_type`). The lowercase spelling the family was first
+proposed in could not have carried that property — PHP class names are
+case-insensitive, so a single-word operator and a project's class of that name
+are one name, resolved in the class's favour.
+
+Not offered upstream. `key-of` and `value-of` came *from* PHPStan; this roster
+comes from TypeScript by way of a request, and whether any of it belongs
+upstream is a separate question with separate evidence.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

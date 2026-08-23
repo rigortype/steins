@@ -141,7 +141,8 @@ Two edges are worth stating because they touch existing entries:
 - **`non-nullable<mixed>` is `non-null-mixed`** —
   `ContractTy::MixedMinus(MixedCut::Null)`, the cut Steins already spells.
   This makes a **second** construction site for that variant, where
-  divergence registry entry 6 records exactly one
+  ADR-0030's registry entry 6 ("two named cuts of `mixed`") records exactly
+  one
   (`lower_identifier`'s keyword arm). Entry 6's *reasoning* is unaffected and
   its claim survives verbatim: `MixedMinus` remains **declaration-side**
   vocabulary that no inference path produces. Only the count of declaration-side
@@ -194,12 +195,27 @@ distribute over unions, and Steins' arm lane *is* distribution — the relation
 they need is `normalize::subsumes`, which ADR-0052 §4 already makes the single
 pairwise arm relation.
 
-The filter reads a `Certainty`, so the rule states all three answers: an arm is
-removed by `exclude-from` on `Yes` only, and kept on `Maybe`. `Maybe` means the
-subsumption is undecided, and removing an arm on an undecided relation is
-exactly the arm deletion ADR-0052 forbids without proof. `extract-from` mirrors
-it — an arm is kept on `Yes` only. Both therefore **widen** relative to a
-perfect filter, which is the safe direction.
+The filter reads a `Certainty`, so the rule states all three answers. Both
+filters must **widen** relative to a perfect filter — that is the only safe
+direction, because a missing arm is a manufactured `No` at the acceptance leg —
+and they reach it from **opposite ends** of the trinary:
+
+- `exclude-from` drops an arm on `Yes` **only**, keeping it on `Maybe`.
+  Removing an arm on an undecided relation is exactly the arm deletion ADR-0052
+  forbids without proof.
+- `extract-from` keeps an arm on `Yes` **and on `Maybe`**, dropping only on a
+  proven `No`.
+
+**Amended 2026-08-23 (issue #473), during implementation.** This ADR first said
+`extract-from` "mirrors" `exclude-from` and keeps an arm on `Yes` only, and
+concluded that both widen. The second half did not follow from the first: for
+`extract-from`, keeping on `Yes` alone keeps *fewer* arms than a perfect filter,
+which is the narrowing direction. The concrete failure is
+`extract-from<T, U>` over an operand carrying an [`ContractTy::Opaque`] arm — a
+`@template`, a `$this`, a conditional — where `subsumes` can only answer
+`Maybe`: the arm would be deleted, and `extract-from<$this, int>` would come
+back `never` and refuse every value. Dropping on a proven `No` is what mirrors
+`exclude-from`'s "act only on proof", and it is what ships.
 
 `exclude-from<T, null>` and `non-nullable<T>` denote the same type. The
 redundancy is accepted: `non-nullable` is the spelling authors will reach for,
@@ -228,7 +244,7 @@ needs the second lowering site.
 **`Record<K, V>` → refused.** `array<K, V>` denotes the identical set. The
 governing rule of the divergence registry — vocabulary tracks PHPStan, because
 familiarity is cheap and compounding — cuts against adding a synonym that
-PHPStan does not have and that denotes nothing new. Registry entry 6 is the
+PHPStan does not have and that denotes nothing new. ADR-0030's entry 6 is the
 measured precedent for exactly this shape of decision: 44 of the `mixed~…`
 rows were "exact re-spellings of the two cuts Steins already holds", and the
 entry's
@@ -287,10 +303,10 @@ That reads the *actual* argument at the call site, which is the ADR-0001 answer;
 
 Two entries are touched, and one is added.
 
-**Entry 6 is amended** (§5.1): `MixedMinus` gains a second declaration-side
-construction site. The entry's substantive claim — that it is declaration-side
-vocabulary no inference path produces, so extending it buys nothing — is
-unchanged and is the reason the amendment is small.
+**ADR-0030's entry 6 is amended** (§5.1): `MixedMinus` gains a second
+declaration-side construction site. The entry's substantive claim — that it is
+declaration-side vocabulary no inference path produces, so extending it buys
+nothing — is unchanged and is the reason the amendment is small.
 
 **A new entry records the family.** These operators are Steins vocabulary that
 PHPStan does not have, so PHPStan reports each of them as `class.notFound` —
