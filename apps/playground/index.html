@@ -11,18 +11,19 @@
     tokens, and interaction model follow the rigor-playground frontend (rigor
     ADR-29), the sibling project this page's spec comes from.
 
-    By DEFAULT every run is the documented sound subset (no PHP engine): the
-    banner at the bottom is the envelope's `notice` field rendered as data —
-    the same sentence `steins check --no-php` prints. That sentence now also
-    names the ADR-0069 floor: with no engine to reflect them, a builtin's
-    return type comes from the catalog's declaration, unverified.
+    The php-wasm engine (issue #64) loads at boot by default; while it loads
+    (and whenever it is toggled off or fails) every run is the documented
+    sound subset: the banner at the bottom is the envelope's `notice` field
+    rendered as data — the same sentence `steins check --no-php` prints. That
+    sentence also names the ADR-0069 floor: with no engine to reflect them, a
+    builtin's return type comes from the catalog's declaration, unverified.
 
-    With the optional php-wasm engine loaded (issue #64), the banner, the
-    engine line and the "Precision boundary" panel are composed from the
-    envelope's `boot` object instead: the engine surface as the ANALYSIS' OWN
-    GATES see it (ADR-0066). Nothing about the boundary is asserted here —
-    every number and every refused name below travels as data, so the page
-    cannot state a boundary the analysis does not apply.
+    With the engine live, the banner, the engine line and the "Precision
+    boundary" panel are composed from the envelope's `boot` object instead:
+    the engine surface as the ANALYSIS' OWN GATES see it (ADR-0066). Nothing
+    about the boundary is asserted here — every number and every refused name
+    below travels as data, so the page cannot state a boundary the analysis
+    does not apply.
   -->
 
   <!-- Set theme before first paint to avoid a flash of the wrong theme -->
@@ -315,8 +316,9 @@
   <script type="module">
     import { basicSetup } from "codemirror"
     import { EditorState, Prec, StateField, StateEffect } from "@codemirror/state"
-    import { EditorView, Decoration, WidgetType } from "@codemirror/view"
-    import { HighlightStyle, syntaxHighlighting } from "@codemirror/language"
+    import { EditorView, Decoration, WidgetType, keymap } from "@codemirror/view"
+    import { HighlightStyle, syntaxHighlighting, indentUnit } from "@codemirror/language"
+    import { indentWithTab } from "@codemirror/commands"
     import { php } from "@codemirror/lang-php"
     import { lintGutter, setDiagnostics } from "@codemirror/lint"
     import { tags as t } from "@lezer/highlight"
@@ -329,16 +331,16 @@
     // 3 at strict — so the cumulative model is visible in three clicks.
     const SAMPLE = `<?php
 // Steins Playground — edit this code and see findings in real time.
-// The analyzer runs entirely in your browser. By default it is the
-// documented sound subset: no PHP engine, so findings that require
-// executing PHP are omitted — and nothing false is added. Builtin
-// return types then come from the catalog's declarations, marked
-// (asserted) because a declaration is not a runtime answer.
+// The analyzer runs entirely in your browser, and real php-src
+// (php-wasm) loads alongside it: greet() below inlines to its actual
+// string, undefined names are caught, and the engine bar states exactly
+// which lanes that lights up and which it does not.
 //
-// Click "Load PHP engine" to run real php-src here too. greet() below
-// then inlines to its actual string, undefined names are caught, and the
-// engine bar states exactly which lanes that lights up and which it
-// does not.
+// While the engine loads — or with it toggled off — every run is the
+// documented sound subset: findings that require executing PHP are
+// omitted, and nothing false is added. Builtin return types then come
+// from the catalog's declarations, marked (asserted) because a
+// declaration is not a runtime answer.
 //
 // Try the Profile selector: strictness in Steins is a cumulative ladder,
 // default < contracts < strict, and this sample climbs it —
@@ -394,11 +396,11 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       })
     }
 
-    // ── The optional PHP engine (issue #64) ───────────────────────────────
-    // OFF by default, and off means today's page exactly: the plain
-    // check/annotate pair, no php-wasm fetched, no behavior changed. Turning it
-    // on is a deliberate click because it downloads a php-src build (~16 MB, a
-    // few MB over the wire compressed).
+    // ── The PHP engine (issue #64) ────────────────────────────────────────
+    // Loads at boot by default: the page paints the plain (sound-subset)
+    // result first, and the engine's ~4 MB download proceeds alongside it —
+    // the first converged run repaints. The toggle turns it off, and off
+    // means the plain check/annotate pair, no engine asked.
     //
     // On, an analysis runs the ADR-0066 replay loop: check the source against a
     // session-global answer table, hand whatever it could not answer to the PHP
@@ -577,6 +579,11 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
         doc: INITIAL_DOC,
         extensions: [
           basicSetup,
+          // Tab indents (Shift-Tab dedents) instead of moving focus; keyboard
+          // users can still escape the editor with Esc, then Tab (the CM6
+          // built-in). PHP convention (PSR-12): one indent unit is 4 spaces.
+          keymap.of([indentWithTab]),
+          indentUnit.of("    "),
           php(),
           Prec.highest(syntaxHighlighting(steinsHighlight)),
           lintGutter(),
@@ -881,10 +888,7 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
       engineNote.hidden = !reason
       engineNote.textContent = reason ? `this run used the built-in analysis (${reason})` : ""
     }
-    engineBtn.addEventListener("click", async () => {
-      if (engineState === "on") { setEngineState("off"); runCheck(); return }
-      if (engineState !== "off") return
-      if (engineEverLoaded) { setEngineState("on"); runCheck(); return }
+    async function loadEngine() {
       setEngineState("loading")
       try {
         await bootEngine()
@@ -897,6 +901,12 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
         setEngineState("failed", err.message)
       }
       runCheck()
+    }
+    engineBtn.addEventListener("click", () => {
+      if (engineState === "on") { setEngineState("off"); runCheck(); return }
+      if (engineState !== "off") return
+      if (engineEverLoaded) { setEngineState("on"); runCheck(); return }
+      loadEngine()
     })
 
     // ── Posture banner + status ───────────────────────────────────────────
@@ -925,7 +935,10 @@ $greeting = str_repeat("Hello, " . "World" . "! ", 2);
     }
 
     // ── Boot ──────────────────────────────────────────────────────────────
+    // The plain check paints immediately; the engine loads alongside it and
+    // repaints via its own runCheck once live (runToken drops the stale run).
     runCheck()
+    loadEngine()
   </script>
 </body>
 </html>

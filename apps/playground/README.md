@@ -5,22 +5,25 @@ core **fully in-browser** as a wasm module in a Web Worker. There is no backend
 — the spec follows the rigor-playground frontend (rigor ADR-29) in its end
 state, where the engine is a cached static asset.
 
-By default every run here is the documented **sound subset** (ADR-0004): no PHP
-sidecar, so findings that require executing PHP are omitted and nothing false is
-added. A builtin's return type then comes from the catalog's mined declaration
-(ADR-0069), rendered `(asserted)` — a claim, never a runtime answer. The banner at the bottom of the page is the analysis envelope's `notice`
-field — the same sentence `steins check --no-php` prints — rendered as data.
-With the optional engine loaded that sentence is no longer the posture, so the
-banner states what the engine did and points at the boundary panel; the
-envelope's `notice` text itself is untouched, because the UI decides what to
-show and not what is true.
+While the engine loads — and whenever it is toggled off or fails — every run
+here is the documented **sound subset** (ADR-0004): no PHP sidecar, so findings
+that require executing PHP are omitted and nothing false is added. A builtin's
+return type then comes from the catalog's mined declaration (ADR-0069),
+rendered `(asserted)` — a claim, never a runtime answer. The banner at the
+bottom of the page is the analysis envelope's `notice` field — the same
+sentence `steins check --no-php` prints — rendered as data. With the engine
+live that sentence is no longer the posture, so the banner states what the
+engine did and points at the boundary panel; the envelope's `notice` text
+itself is untouched, because the UI decides what to show and not what is true.
 
-## The optional PHP engine (issue #64)
+## The PHP engine (issue #64)
 
-The page can also load **php-wasm** — php-src compiled to WebAssembly — and let
-the analysis ask the real engine its questions. It is off until you click *Load
-PHP engine*, and off means literally today's page: the plain `sw_check` /
-`sw_annotate` pair, nothing fetched, nothing changed.
+The page loads **php-wasm** — php-src compiled to WebAssembly — and lets the
+analysis ask the real engine its questions. It loads at page boot by default:
+the plain (sound-subset) result paints first, the ~4 MB download proceeds
+alongside it, and the first converged run repaints. The *PHP engine* button
+toggles it off, and off means the plain `sw_check` / `sw_annotate` pair,
+nothing asked of the engine.
 
 On, an analysis runs the ADR-0066 **replay loop**:
 
