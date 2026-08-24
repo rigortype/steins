@@ -329,39 +329,31 @@
     // The seeded sample demonstrates the rung ladder (ADR-0062 A-G10):
     // findings APPEAR as the profile climbs — 1 at default, 2 at contracts,
     // 3 at strict — so the cumulative model is visible in three clicks.
+    //
+    // It is deliberately a small, plain program with almost no comments: the
+    // page's own surfaces (the findings panel, the posture banner, the margin
+    // overlay, the engine bar) carry the explanation, so the sample reads as
+    // code someone might write, not as documentation. What each line is FOR:
+    //   label()   — the unguarded read of the optional 'name' key (strict);
+    //   load()    — throws outside its declared @throws contract (contracts);
+    //   greet("three", …) — the proven TypeError (default);
+    //   $greeting — a builtin call the engine folds to its real value in the
+    //               margin, and the sound subset widens (a user call like
+    //               greet(2, …) gets no margin fact, so the builtin stays).
     const SAMPLE = `<?php
-// Steins Playground — edit this code and see findings in real time.
-// The analyzer runs entirely in your browser, and real php-src
-// (php-wasm) loads alongside it: greet() below inlines to its actual
-// string, undefined names are caught, and the engine bar states exactly
-// which lanes that lights up and which it does not.
-//
-// While the engine loads — or with it toggled off — every run is the
-// documented sound subset: findings that require executing PHP are
-// omitted, and nothing false is added. Builtin return types then come
-// from the catalog's declarations, marked (asserted) because a
-// declaration is not a runtime answer.
-//
-// Try the Profile selector: strictness in Steins is a cumulative ladder,
-// default < contracts < strict, and this sample climbs it —
-//   default   reports the proven TypeError at the bottom;
-//   contracts adds the wrong @throws contract;
-//   strict    adds the unguarded read of an optional array key.
+// Steins — proof-first PHP analysis, running entirely in your browser.
+// Edit the code and watch the findings; the Profile ladder adds more.
 
 /** @param array{id: int, name?: string} $user */
 function label(array $user): string {
-    $id = $user['id'];        // declared present: clean on every rung
-    $name = $user['name'];    // strict: 'name' is optional and nothing proves it here
-    if (isset($user['name'])) {
-        $name = $user['name']; // guarded: clean — silenced by proof, not by skip
-    }
-    return "#" . $id . " " . $name;
+    $name = $user['name'];
+    return "#" . $user['id'] . " " . $name;
 }
 
 /** @throws InvalidArgumentException */
 function load(string $path): string {
     if ($path === '') {
-        throw new RuntimeException('empty path'); // contracts: not the declared @throws
+        throw new RuntimeException('empty path');
     }
     return $path;
 }
@@ -370,11 +362,8 @@ function greet(int $times, string $name): string {
     return str_repeat("Hello, " . $name . "! ", $times);
 }
 
-greet("three", "World"); // default: "three" can never satisfy int
+greet("three", "World");
 
-// The precision boundary, in one line. With the PHP engine loaded this
-// folds to its real value, because the engine computes it; without one
-// the analyzer widens rather than guess. Turn the types overlay on.
 $greeting = str_repeat("Hello, " . "World" . "! ", 2);
 `
 
