@@ -14,6 +14,7 @@ use mago_syntax::cst::{
 use crate::ast::{Comment, CommentKind, UndefinedRead, UnsetSeedFacts, UnsetSeedRead};
 use crate::lower_scope::{VarUsage, bind_lvalue_roots, scan_var_usage};
 use crate::lower_stmt::{expr_is_false, expr_is_true, stmt_end};
+use crate::memo;
 use crate::{bytes_to_string, strip_dollar, to_span};
 
 // binding presence (ADR-0081, issue #267)
@@ -166,18 +167,26 @@ impl PresenceCx<'_> {
 /// `$x .= 'a'` cannot manufacture a finding out of an intra-expression evaluation
 /// order this pass does not model.
 fn presence_leaf(node: &Node<'_, '_>, state: &mut PresenceState, cx: &mut PresenceCx) {
-    let mut acc = VarUsage::default();
-    let mut shield = Vec::new();
-    collect_presence_shield(node, &mut shield);
-    scan_var_usage(node, false, &shield, &mut acc);
-    for read in &acc.reads {
-        if acc.bound.contains(&read.name) {
+    // The shield-and-scan pair is a pure function of the unit's subtree, and a
+    // loop body re-walks its units once per fixpoint round (up to two silent
+    // rounds plus the reporting one, compounding under nesting), so the pair is
+    // cached per node (issue #484). Only the judgment against the flowing
+    // state — which the rounds exist to change — runs per visit.
+    let leaf = memo::presence_leaf(node, || {
+        let mut acc = VarUsage::default();
+        let mut shield = Vec::new();
+        collect_presence_shield(node, &mut shield);
+        scan_var_usage(node, false, &shield, &mut acc);
+        memo::PresenceLeaf { reads: acc.reads, bound: acc.bound }
+    });
+    for read in &leaf.reads {
+        if leaf.bound.contains(&read.name) {
             continue;
         }
         cx.record(read, state);
     }
-    for name in acc.bound {
-        state.insert(name, BindingPresence::Bound);
+    for name in &leaf.bound {
+        state.insert(name.clone(), BindingPresence::Bound);
     }
 }
 

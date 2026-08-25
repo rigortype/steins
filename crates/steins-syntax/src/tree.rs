@@ -112,6 +112,10 @@ impl SourceTree {
         // the wasm playground (fixed-size shadow stack) keeps the guard, appending a refusal
         // to `parse_errors` instead of overflowing.
         let guard = stack_guard::Scope::enter();
+        // Per-parse memo for the pure subtree scans (issue #484): entered after
+        // the stack guard so it can see whether a floor is installed, dropped —
+        // and with it every cached entry — when this function returns.
+        let _memo = crate::memo::Scope::enter();
         let arena = LocalArena::new();
         let file_id = FileId::new(b"<steins>");
         let program = mago_syntax::parser::parse_file_content(&arena, file_id, source.as_bytes());

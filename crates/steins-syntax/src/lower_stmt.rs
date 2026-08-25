@@ -3,6 +3,8 @@
 //! (ADR-0088), and the file-wide site collectors (`foreach`, array literals,
 //! operands, opaque constructs).
 
+use std::rc::Rc;
+
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, AssignmentOperator, BinaryOperator, Call, Construct, Expression,
@@ -20,6 +22,7 @@ use crate::lower_expr::{
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
+use crate::memo;
 use crate::names::name_ref;
 use crate::{bytes_to_string, children, strip_dollar, to_span};
 
@@ -177,6 +180,31 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
 ///   `FallsThrough` anyway — bounding it needs the iterator's value, whole-program
 ///   reasoning the syntactic CFG reading rules out.
 pub(crate) fn stmt_end(s: &Statement<'_>) -> BodyEnd {
+    // The arms that re-walk nested statements — an `if` in an `if` is otherwise
+    // judged once per enclosing level, and every judged statement is judged
+    // again by `lower_stmt` — are memoized per node (issue #484). Every other
+    // arm is O(1) and cheaper than the lookup it would pay for.
+    if !matches!(
+        s,
+        Statement::Block(_)
+            | Statement::If(_)
+            | Statement::Switch(_)
+            | Statement::While(_)
+            | Statement::DoWhile(_)
+            | Statement::For(_)
+    ) {
+        return stmt_end_walk(s);
+    }
+    if let Some(end) = memo::stmt_end_lookup(s) {
+        return end;
+    }
+    let end = stmt_end_walk(s);
+    memo::stmt_end_store(s, end);
+    end
+}
+
+/// The uncached judgment behind [`stmt_end`], one arm per construct.
+fn stmt_end_walk(s: &Statement<'_>) -> BodyEnd {
     match s {
         Statement::Return(_) => BodyEnd::Terminates,
         // `break` / `continue` leave the enclosing statement list. A `switch`
@@ -362,6 +390,17 @@ fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
         | Node::DieConstruct(_)
         | Node::HaltCompiler(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,
+        // `lower_stmt` fills `Stmt::has_terminator` at every nesting level, so
+        // each statement is asked once per enclosing statement — memoized at
+        // statement nodes (issue #484).
+        Node::Statement(s) => {
+            if let Some(hit) = memo::function_exit_lookup(s) {
+                return hit;
+            }
+            let hit = children(node).iter().any(subtree_has_function_exit);
+            memo::function_exit_store(s, hit);
+            hit
+        }
         _ => children(node).iter().any(subtree_has_function_exit),
     }
 }
@@ -1222,7 +1261,40 @@ fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
 
 /// Collect the names of bare local variables passed as an argument to any call
 /// within `node`. Used to invalidate those variables after the statement.
+///
+/// A function body's statements go through this twice — once building the
+/// callback map, once building the receiver-write set — so the per-entry result
+/// is memoized (issue #484). The cached list is merged with the same
+/// first-occurrence dedup the walk applies, so a shared `out` accumulating
+/// across statements reads identically either way.
 pub(crate) fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
+    let key = if memo::enabled() { memo::node_key(node) } else { None };
+    let Some(key) = key else {
+        collect_call_vars_walk(node, out);
+        return;
+    };
+    if let Some(cached) = memo::call_vars_lookup(key) {
+        merge_names(out, &cached);
+        return;
+    }
+    let mut fresh = Vec::new();
+    collect_call_vars_walk(node, &mut fresh);
+    merge_names(out, &fresh);
+    memo::call_vars_store(key, Rc::new(fresh));
+}
+
+/// First-occurrence-order union, the dedup [`collect_call_vars_walk`] applies
+/// name by name.
+fn merge_names(out: &mut Vec<String>, names: &[String]) {
+    for name in names {
+        if !out.contains(name) {
+            out.push(name.clone());
+        }
+    }
+}
+
+/// The uncached walk behind [`collect_call_vars`].
+fn collect_call_vars_walk(node: &Node<'_, '_>, out: &mut Vec<String>) {
     let arguments = match node {
         Node::FunctionCall(c) => Some(&c.argument_list),
         Node::MethodCall(c) => Some(&c.argument_list),
@@ -1241,7 +1313,7 @@ pub(crate) fn collect_call_vars(node: &Node<'_, '_>, out: &mut Vec<String>) {
         }
     }
     for child in children(node) {
-        collect_call_vars(&child, out);
+        collect_call_vars_walk(&child, out);
     }
 }
 
@@ -1821,9 +1893,40 @@ pub(crate) fn node_poisons(node: &Node<'_, '_>) -> bool {
 /// inventory path passes `false` and gets every site. Both share this control flow
 /// exactly, so the predicate cannot recognize a construct the inventory misses.
 ///
-/// A matched construct is not descended into: the outermost construct is the site
-/// (`extract(compact($a))` is one `extract`), where the predicate stops too.
+/// A body's statements go through this twice — the predicate for the effects
+/// context, the inventory for the scope build — so the full inventory is
+/// memoized per entry (issue #484), and even the predicate path computes it on a
+/// miss: sharing one traversal means emptiness agrees either way, and the full
+/// result is what the inventory call reuses. The predicate path still receives
+/// at most the first site, exactly what the early exit gave it.
 pub(crate) fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bool) {
+    let key = if memo::enabled() { memo::node_key(node) } else { None };
+    let Some(key) = key else {
+        scan_opaque_walk(node, out, stop_at_first);
+        return;
+    };
+    let sites = match memo::opaque_lookup(key) {
+        Some(sites) => sites,
+        None => {
+            let mut full = Vec::new();
+            scan_opaque_walk(node, &mut full, false);
+            let sites = Rc::new(full);
+            memo::opaque_store(key, Rc::clone(&sites));
+            sites
+        }
+    };
+    if stop_at_first {
+        out.extend(sites.first().copied());
+    } else {
+        out.extend(sites.iter().copied());
+    }
+}
+
+/// The uncached walk behind [`scan_opaque`]; see there for the traversal
+/// discipline. A matched construct is not descended into: the outermost
+/// construct is the site (`extract(compact($a))` is one `extract`), where the
+/// predicate stops too.
+fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_first: bool) {
     let direct = match node {
         // Direct markers.
         Node::Global(_) => Some(OpaqueConstruct::Global),
@@ -1872,7 +1975,7 @@ pub(crate) fn scan_opaque(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_a
         return;
     }
     for child in children(node) {
-        scan_opaque(&child, out, stop_at_first);
+        scan_opaque_walk(&child, out, stop_at_first);
         if stop_at_first && !out.is_empty() {
             return;
         }

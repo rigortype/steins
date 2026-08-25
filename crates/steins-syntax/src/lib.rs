@@ -17,6 +17,7 @@ mod lower_expr;
 mod lower_presence;
 mod lower_scope;
 mod lower_stmt;
+mod memo;
 mod names;
 pub mod stack_guard;
 mod tree;
