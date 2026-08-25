@@ -3,6 +3,9 @@
 # Private-corpus injection point (ADR-0013 §4): local FP-gate projects live
 # outside the repo so non-public codebases never land in git.
 /corpus.local.toml
+# Machine-local perf baselines (`cargo xtask perf --bless`, ADR-0092 §5): the
+# timings are one machine's, so the file never lands in git.
+/perf.local.toml
 # PHPDoc oracle harness (ADR-0029): composer deps are materialized locally, never
 # committed. composer.lock IS committed so the reference version is reproducible.
 /harness/phpdoc-oracle/vendor

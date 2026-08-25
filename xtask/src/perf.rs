@@ -1,0 +1,839 @@
+//! `perf`: the ADR-0092 performance harness — cold baselines and the
+//! **cold half of the warm ≡ cold oracle** (ROADMAP M5, issue #483).
+//!
+//! Measures the library path the way `fp-gate` drives it (load → parse →
+//! `check_project`, never a shelled-out binary, so process startup is not in
+//! the numbers), per target tree, reporting the median over N runs. Two
+//! verdicts ride on the measurement:
+//!
+//! - **Determinism (the point of this slice).** Every invocation runs the full
+//!   cold analysis at least twice on identical inputs and asserts the runs'
+//!   findings serialize byte-identically (sorted the way `steins check` sorts
+//!   its output). This is the cold half of ADR-0092 §5's warm ≡ cold oracle:
+//!   "warm findings ≡ cold findings" is only meaningful once "cold ≡ cold"
+//!   holds, and this harness pins that today. Issue #489 extends this same
+//!   comparison to warm-vs-cold when the generation layer lands — extend the
+//!   comparison here, do not reinvent it.
+//! - **The blessed baseline.** `--bless` records, per target, the file count,
+//!   findings count, a SHA-256 of the serialized findings, the median cold
+//!   timings, and the engine posture into `perf.local.toml` (repo root,
+//!   machine-local, untracked like `corpus.local.toml`). Without `--bless`, a
+//!   findings-hash mismatch against the baseline is a hard failure; timing
+//!   deltas are printed but never fail — machine variance, and the enforcement
+//!   point is later slices' cold-vs-pre-persistence comparison.
+//!
+//! Provisional M5 targets live HERE, not in the roadmap (ROADMAP M5): cold
+//! within [`COLD_BUDGET_FRACTION`] of the pre-persistence baseline this
+//! harness pins today, and warm re-check ≤ 2s p95 at the ~30k-file first-party
+//! scale (unenforceable until issue #489 builds the warm path).
+//!
+//! Each run is cold by construction: a fresh salsa DB and a fresh sidecar per
+//! run. The OS file cache is the one warmth the harness does not control,
+//! which is part of why timing never gates.
+
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
+
+use serde::{Deserialize, Serialize};
+use steins_db::{Project, SourceFile, SteinsDatabase, composer, parse};
+use steins_infer::{Diagnostic, SidecarFolder, check_project};
+
+use crate::corpus::{collect_php_files, repo_root};
+use crate::sha256;
+
+/// Median-of-N default. Three is enough for a median that shrugs off one
+/// scheduler hiccup without making a corpus-sized target tedious.
+const DEFAULT_RUNS: usize = 3;
+
+/// Headroom for the worker thread each cold run executes on — same number and
+/// reasoning as `xtask/src/nsrt.rs` and the CLI's `WORKER_STACK_SIZE` (issue
+/// #246): CST recursion costs a frame per nesting level, and an overflow
+/// aborts the whole process. Lazily committed, free when unused.
+const WORKER_STACK_SIZE: usize = 256 * 1024 * 1024;
+
+/// The machine-local baseline file at the repo root. Untracked (.gitignore),
+/// beside `corpus.local.toml` in spirit: timings are one machine's.
+const BASELINE_FILE: &str = "perf.local.toml";
+
+/// Provisional M5 cold budget (ROADMAP M5 keeps the number here): once the
+/// generation layer lands, a cold build must stay within this fraction over
+/// the pre-persistence baseline this harness blesses today. Advisory now — a
+/// crossed budget prints a note, timing never fails.
+const COLD_BUDGET_FRACTION: f64 = 0.10;
+
+/// Entry point for `cargo xtask perf <target-dir>... [--runs N] [--bless]
+/// [--no-php]`. Returns `Ok(true)` when green; `Ok(false)` on a determinism
+/// or baseline-hash failure; `Err` for operator mistakes (bad args, unreadable
+/// baseline, posture mismatch — a compare across postures is an error, not a
+/// number).
+pub fn run(args: &[String]) -> Result<bool, String> {
+    let parsed = parse_args(args)?;
+    let runs = if parsed.runs < 2 {
+        // The determinism oracle needs two runs to compare; a single run
+        // measures nothing this slice is for.
+        println!("perf: --runs {} raised to 2 (the determinism oracle compares two runs)", parsed.runs);
+        2
+    } else {
+        parsed.runs
+    };
+    let posture = if parsed.no_php { Posture::NoPhp } else { Posture::Php };
+
+    let baseline_path = repo_root().join(BASELINE_FILE);
+    let mut baseline = read_baseline(&baseline_path)?;
+
+    let mut green = true;
+    let mut blessed: Vec<BaselineEntry> = Vec::new();
+    for target in &parsed.targets {
+        let m = measure_target(Path::new(target), runs, posture)?;
+        print_measurement(target, posture, &m);
+
+        match &m.determinism {
+            Determinism::Ok => println!(
+                "    determinism: OK — {runs}/{runs} cold runs serialize byte-identically (the cold half of warm ≡ cold, ADR-0092 §5)"
+            ),
+            Determinism::Mismatch { run_index, diff } => {
+                green = false;
+                println!(
+                    "    determinism: FAILED — run {run_index} serializes differently from run 1 on identical inputs"
+                );
+                for line in diff.lines() {
+                    println!("      {line}");
+                }
+            }
+        }
+
+        if parsed.bless {
+            blessed.push(entry_from(target, posture, &m));
+        } else {
+            match verdict(baseline.get(target), &m, posture) {
+                BaselineVerdict::NoBaseline => println!(
+                    "    baseline: none recorded for this target on this machine — `--bless` to pin one"
+                ),
+                BaselineVerdict::PostureMismatch { recorded } => {
+                    return Err(format!(
+                        "target `{target}`: baseline was blessed under posture `{recorded}` but this run is `{}` — a cross-posture compare is an error, not a number; re-run under the blessed posture or re-bless",
+                        posture.as_str()
+                    ));
+                }
+                BaselineVerdict::HashMismatch { recorded } => {
+                    green = false;
+                    println!(
+                        "    baseline: FINDINGS HASH MISMATCH — recorded {} findings over {} files (sha256 {}…), measured {} findings over {} files (sha256 {}…). The target tree moved or the analyzer changed what it finds; triage, then re-bless consciously.",
+                        recorded.findings,
+                        recorded.files,
+                        &recorded.findings_sha256[..12.min(recorded.findings_sha256.len())],
+                        m.findings,
+                        m.files,
+                        &m.findings_sha256[..12]
+                    );
+                }
+                BaselineVerdict::Match { recorded } => {
+                    println!("    baseline: findings hash matches ({BASELINE_FILE})");
+                    print_timing_delta(&recorded, &m.median);
+                }
+            }
+        }
+    }
+
+    if parsed.bless {
+        if !green {
+            println!("perf: refusing to bless — the determinism oracle failed; a baseline must pin a deterministic analysis");
+            return Ok(false);
+        }
+        for e in blessed {
+            baseline.upsert(e);
+        }
+        write_baseline(&baseline_path, &baseline)?;
+        println!("perf: blessed {} target(s) → {}", parsed.targets.len(), baseline_path.display());
+    }
+
+    Ok(green)
+}
+
+// ---------------------------------------------------------------------------
+// Arguments
+// ---------------------------------------------------------------------------
+
+/// Parsed `perf` arguments. `runs` is as requested — `run` raises it to the
+/// oracle's floor of 2 with a printed note.
+struct PerfArgs {
+    targets: Vec<String>,
+    runs: usize,
+    bless: bool,
+    no_php: bool,
+}
+
+fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
+    let mut targets = Vec::new();
+    let mut runs = DEFAULT_RUNS;
+    let mut bless = false;
+    let mut no_php = false;
+    let mut it = args.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--runs" => {
+                let v = it.next().ok_or("--runs needs a number")?;
+                runs = v
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|n| *n >= 1)
+                    .ok_or_else(|| format!("--runs {v}: expected a positive integer"))?;
+            }
+            "--bless" => bless = true,
+            "--no-php" => no_php = true,
+            other if other.starts_with("--") => {
+                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php])"));
+            }
+            dir => targets.push(dir.to_owned()),
+        }
+    }
+    if targets.is_empty() {
+        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php]".to_owned());
+    }
+    Ok(PerfArgs { targets, runs, bless, no_php })
+}
+
+/// The engine posture a measurement ran under (recorded in the baseline; the
+/// full ADR-0092 §2 identity — PHP version, width, extension set — arrives
+/// with the generation fingerprint, not here). Cross-posture findings differ
+/// legitimately (fold answers, curated-fact admission), so a baseline is only
+/// comparable under the posture that blessed it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Posture {
+    /// The default: fold via the resident PHP sidecar (ADR-0004).
+    Php,
+    /// `--no-php`: the sidecar disabled, folds decline.
+    NoPhp,
+}
+
+impl Posture {
+    fn as_str(self) -> &'static str {
+        match self {
+            Posture::Php => "php",
+            Posture::NoPhp => "no-php",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Measurement
+// ---------------------------------------------------------------------------
+
+/// One cold run's phase timings, milliseconds.
+#[derive(Debug, Clone, Copy)]
+pub struct RunTiming {
+    /// Collect + read + `SourceFile` + parse of every file + layout/plugin
+    /// discovery + `Project` construction.
+    pub load_ms: f64,
+    /// `check_project` on a fresh folder under the target's declared PHP range.
+    pub analyze_ms: f64,
+    /// The two phases' wall clock together.
+    pub total_ms: f64,
+}
+
+/// What one invocation measured for one target: the canonical findings (count,
+/// hash), per-run and median timings, and the determinism verdict.
+pub struct Measurement {
+    pub files: usize,
+    pub findings: usize,
+    pub findings_sha256: String,
+    pub timings: Vec<RunTiming>,
+    pub median: RunTiming,
+    pub determinism: Determinism,
+}
+
+/// The within-invocation determinism verdict — the cold half of ADR-0092 §5's
+/// warm ≡ cold oracle (see the module doc; issue #489 grows the warm half onto
+/// this same comparison).
+pub enum Determinism {
+    /// Every run's canonical serialization is byte-identical.
+    Ok,
+    /// Run `run_index` (1-based) differs from run 1; `diff` is the printable
+    /// per-diagnostic-id count diff (or the first differing line, when the
+    /// counts agree and only bytes moved).
+    Mismatch { run_index: usize, diff: String },
+}
+
+/// One cold run's full result, kept only long enough to compare runs.
+struct ColdRun {
+    files: usize,
+    timing: RunTiming,
+    serialized: String,
+    id_counts: BTreeMap<&'static str, usize>,
+}
+
+/// Measure `dir` over `runs` cold runs on a worker thread sized per
+/// [`WORKER_STACK_SIZE`] (the analysis recursion must not overflow `main`'s
+/// default stack — same shape as `nsrt`).
+pub fn measure_target(dir: &Path, runs: usize, posture: Posture) -> Result<Measurement, String> {
+    let dir = dir.to_path_buf();
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || measure_on_worker(&dir, runs, posture))
+        .expect("failed to spawn the perf worker thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measurement, String> {
+    if !dir.is_dir() {
+        return Err(format!("target `{}` is not a directory", dir.display()));
+    }
+    let mut cold: Vec<ColdRun> = Vec::with_capacity(runs);
+    for _ in 0..runs {
+        cold.push(cold_run(dir, posture)?);
+    }
+
+    // Inputs must hold still for the oracle to mean anything: a tree that
+    // changes mid-invocation is an operator problem, not nondeterminism.
+    if let Some(moved) = cold.iter().position(|r| r.files != cold[0].files) {
+        return Err(format!(
+            "target `{}` changed while measuring: run 1 saw {} files, run {} saw {}",
+            dir.display(),
+            cold[0].files,
+            moved + 1,
+            cold[moved].files
+        ));
+    }
+
+    let determinism = match cold.iter().position(|r| r.serialized != cold[0].serialized) {
+        None => Determinism::Ok,
+        Some(i) => Determinism::Mismatch {
+            run_index: i + 1,
+            diff: determinism_diff(&cold[0], &cold[i]),
+        },
+    };
+
+    let timings: Vec<RunTiming> = cold.iter().map(|r| r.timing).collect();
+    let median = RunTiming {
+        load_ms: median(timings.iter().map(|t| t.load_ms)),
+        analyze_ms: median(timings.iter().map(|t| t.analyze_ms)),
+        total_ms: median(timings.iter().map(|t| t.total_ms)),
+    };
+    let findings = cold[0].id_counts.values().sum();
+    let findings_sha256 = sha256::hex(cold[0].serialized.as_bytes());
+    Ok(Measurement {
+        files: cold[0].files,
+        findings,
+        findings_sha256,
+        timings,
+        median,
+        determinism,
+    })
+}
+
+/// One cold run: fresh DB, fresh folder, the `fp-gate` load path
+/// (`xtask/src/gate.rs::analyze_local`) minus its gate bookkeeping — every
+/// diagnostic `check_project` emits counts here, vendor and parse-error files
+/// included, because the harness measures the analysis, not the gate policy.
+fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
+    let t_load = Instant::now();
+    let mut files = Vec::new();
+    collect_php_files(dir, &mut files);
+    files.sort();
+    if files.is_empty() {
+        return Err(format!("target `{}` holds no .php files", dir.display()));
+    }
+
+    let db = SteinsDatabase::default();
+    let mut inputs: Vec<SourceFile> = Vec::with_capacity(files.len());
+    for f in &files {
+        // Target-relative paths, like the gate's local-project path: keeps the
+        // serialized findings (and so the hash) independent of where the
+        // target happens to be mounted.
+        let rel = f.strip_prefix(dir).unwrap_or(f).to_string_lossy().into_owned();
+        let text = match std::fs::read(f) {
+            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
+            Err(_) => String::new(), // unreadable → empty, as the gate reads it
+        };
+        inputs.push(SourceFile::new(&db, rel, text));
+    }
+    // Force the parse memo in the load phase, so the analyze phase times
+    // inference rather than a parse it happens to trigger first.
+    for &input in &inputs {
+        let _ = parse(&db, input).parse_errors();
+    }
+    let layout = composer::discover(&[dir.to_path_buf()], dir);
+    let php_target = layout.php_target().cloned();
+    let plugins = steins_db::PluginFacts::discover(&layout, None);
+    let project = Project::new(&db, inputs, layout, plugins);
+    let load_ms = ms(t_load.elapsed());
+
+    let t_analyze = Instant::now();
+    // A fresh folder per run keeps the fold memo from warming run 2 — the run
+    // is cold by construction. The target's declared PHP range applies, as in
+    // the gate (issue #28/#63: an unset target silently changes fact seeding).
+    let mut folder = match posture {
+        Posture::Php => SidecarFolder::enabled(),
+        Posture::NoPhp => SidecarFolder::new(true),
+    };
+    folder.set_php_target(php_target);
+    let diags = check_project(&db, project, &mut folder);
+    let analyze_ms = ms(t_analyze.elapsed());
+
+    let mut id_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for d in &diags {
+        *id_counts.entry(d.id).or_insert(0) += 1;
+    }
+    Ok(ColdRun {
+        files: files.len(),
+        timing: RunTiming { load_ms, analyze_ms, total_ms: load_ms + analyze_ms },
+        serialized: canonical_serialization(diags),
+        id_counts,
+    })
+}
+
+fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
+}
+
+/// The median of an iterator of milliseconds; the mean of the two middles on
+/// an even count.
+fn median(values: impl Iterator<Item = f64>) -> f64 {
+    let mut v: Vec<f64> = values.collect();
+    v.sort_by(f64::total_cmp);
+    let n = v.len();
+    if n == 0 {
+        return 0.0;
+    }
+    if n % 2 == 1 { v[n / 2] } else { (v[n / 2 - 1] + v[n / 2]) / 2.0 }
+}
+
+// ---------------------------------------------------------------------------
+// Canonical serialization — what the determinism oracle and the hash pin
+// ---------------------------------------------------------------------------
+
+/// Serialize findings the way the CLI's output path does: sorted by
+/// `(path, line, column, id)` (`crates/steins-cli/src/check.rs`), then one
+/// compact JSON object per line in the `--format json` field order (`id`,
+/// `path`, `line`, `column`, `message`, plus the additive facet and fix keys —
+/// `serde_json`'s `preserve_order` keeps insertion order). `layer` and `level`
+/// are omitted: both are functions of the id and the active surface, not of
+/// the analysis run, so they cannot carry nondeterminism the id itself would
+/// not.
+pub fn canonical_serialization(mut diags: Vec<Diagnostic>) -> String {
+    diags.sort_by(|a, b| {
+        (a.path.as_str(), a.line, a.column, a.id).cmp(&(b.path.as_str(), b.line, b.column, b.id))
+    });
+    let mut out = String::new();
+    for d in &diags {
+        let mut obj = serde_json::json!({
+            "id": d.id,
+            "path": d.path,
+            "line": d.line,
+            "column": d.column,
+            "message": d.message,
+        });
+        if let Some(facet) = d.facet {
+            obj[facet.key()] = serde_json::Value::String(facet.value().to_owned());
+        }
+        if let Some(fix) = &d.fix {
+            let edits: Vec<serde_json::Value> = fix
+                .edits
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "path": e.path,
+                        "span": { "start": e.start, "end": e.end },
+                        "replacement": e.replacement,
+                    })
+                })
+                .collect();
+            obj["fix"] = serde_json::json!({ "title": fix.title, "edits": edits });
+        }
+        out.push_str(&obj.to_string());
+        out.push('\n');
+    }
+    out
+}
+
+/// The printable diff between two runs that failed the oracle: per-id count
+/// movements when any id's count moved, else the first byte-differing line
+/// (same counts, different rendering — a message or ordering instability).
+fn determinism_diff(first: &ColdRun, other: &ColdRun) -> String {
+    let moved = id_count_diff(&first.id_counts, &other.id_counts);
+    if !moved.is_empty() {
+        let mut out = String::from("per-diagnostic-id count diff (run 1 → mismatching run):\n");
+        for (id, a, b) in moved {
+            out.push_str(&format!("  {id}: {a} → {b}\n"));
+        }
+        return out;
+    }
+    let mut out = String::from("per-id counts agree; the serialization differs in rendering:\n");
+    for (a, b) in first.serialized.lines().zip(other.serialized.lines()) {
+        if a != b {
+            out.push_str(&format!("  run 1: {a}\n  other: {b}\n"));
+            return out;
+        }
+    }
+    // Same lines, different length (one is a prefix of the other).
+    out.push_str(&format!(
+        "  run 1 has {} finding(s), the other {}\n",
+        first.serialized.lines().count(),
+        other.serialized.lines().count()
+    ));
+    out
+}
+
+/// The ids whose counts differ between two runs, as `(id, count_a, count_b)`,
+/// sorted by id. An id absent from a run counts 0.
+fn id_count_diff(
+    a: &BTreeMap<&'static str, usize>,
+    b: &BTreeMap<&'static str, usize>,
+) -> Vec<(&'static str, usize, usize)> {
+    let mut ids: Vec<&'static str> = a.keys().chain(b.keys()).copied().collect();
+    ids.sort_unstable();
+    ids.dedup();
+    ids.into_iter()
+        .filter_map(|id| {
+            let ca = a.get(id).copied().unwrap_or(0);
+            let cb = b.get(id).copied().unwrap_or(0);
+            (ca != cb).then_some((id, ca, cb))
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The baseline file
+// ---------------------------------------------------------------------------
+
+/// The machine-local baseline document (`perf.local.toml`).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct Baseline {
+    #[serde(default, rename = "target")]
+    pub targets: Vec<BaselineEntry>,
+}
+
+/// One blessed target. `path` is the target argument as given on the command
+/// line — the file is machine-local, so a spelling is an identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BaselineEntry {
+    pub path: String,
+    /// `"php"` or `"no-php"` — see [`Posture`].
+    pub posture: String,
+    pub files: usize,
+    pub findings: usize,
+    pub findings_sha256: String,
+    pub load_ms: f64,
+    pub analyze_ms: f64,
+    pub total_ms: f64,
+}
+
+impl Baseline {
+    /// The entry blessed for `path`, if any.
+    pub fn get(&self, path: &str) -> Option<&BaselineEntry> {
+        self.targets.iter().find(|e| e.path == path)
+    }
+
+    /// Insert or replace the entry for `entry.path`, keeping the file sorted
+    /// by path for a stable diff (the `corpus.lock.toml` discipline).
+    pub fn upsert(&mut self, entry: BaselineEntry) {
+        if let Some(slot) = self.targets.iter_mut().find(|e| e.path == entry.path) {
+            *slot = entry;
+        } else {
+            self.targets.push(entry);
+        }
+        self.targets.sort_by(|a, b| a.path.cmp(&b.path));
+    }
+}
+
+/// Read the baseline, or an empty one if the file does not exist yet. A
+/// malformed file is an error naming the remedy, not a silent fresh start —
+/// silently dropping baselines is how a regression sails through.
+fn read_baseline(path: &Path) -> Result<Baseline, String> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => toml::from_str(&text)
+            .map_err(|e| format!("{} is malformed ({e}); fix or delete it, then re-bless", path.display())),
+        Err(_) => Ok(Baseline::default()),
+    }
+}
+
+/// Write the baseline with a short provenance header (`corpus.lock.toml`'s shape).
+fn write_baseline(path: &Path, baseline: &Baseline) -> Result<(), String> {
+    let body = toml::to_string_pretty(baseline).expect("baseline serializes");
+    let text = format!(
+        "# Machine-local perf baselines (ADR-0092 §5 / ROADMAP M5). Generated by\n\
+         # `cargo xtask perf <target>... --bless`. Untracked: the timings are this\n\
+         # machine's; the findings hash pins the cold analysis of each target tree.\n\n{body}"
+    );
+    std::fs::write(path, text).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+/// A [`BaselineEntry`] from a finished measurement, timings rounded to 0.1 ms
+/// so the file diffs readably.
+fn entry_from(target: &str, posture: Posture, m: &Measurement) -> BaselineEntry {
+    let round = |x: f64| (x * 10.0).round() / 10.0;
+    BaselineEntry {
+        path: target.to_owned(),
+        posture: posture.as_str().to_owned(),
+        files: m.files,
+        findings: m.findings,
+        findings_sha256: m.findings_sha256.clone(),
+        load_ms: round(m.median.load_ms),
+        analyze_ms: round(m.median.analyze_ms),
+        total_ms: round(m.median.total_ms),
+    }
+}
+
+/// How a measurement relates to its blessed baseline.
+pub enum BaselineVerdict {
+    /// Nothing blessed for this target on this machine.
+    NoBaseline,
+    /// Blessed under the other engine posture — refuse to compare (an error,
+    /// not a number: cross-posture findings differ legitimately).
+    PostureMismatch { recorded: String },
+    /// The findings hash moved: hard failure, triage then re-bless.
+    HashMismatch { recorded: BaselineEntry },
+    /// The findings hash matches; timing deltas are advisory.
+    Match { recorded: BaselineEntry },
+}
+
+/// Judge `m` against the blessed entry, posture first: a hash comparison
+/// across postures would attribute a legitimate posture difference to drift.
+pub fn verdict(entry: Option<&BaselineEntry>, m: &Measurement, posture: Posture) -> BaselineVerdict {
+    let Some(e) = entry else { return BaselineVerdict::NoBaseline };
+    if e.posture != posture.as_str() {
+        return BaselineVerdict::PostureMismatch { recorded: e.posture.clone() };
+    }
+    if e.findings_sha256 != m.findings_sha256 {
+        return BaselineVerdict::HashMismatch { recorded: e.clone() };
+    }
+    BaselineVerdict::Match { recorded: e.clone() }
+}
+
+// ---------------------------------------------------------------------------
+// Reporting
+// ---------------------------------------------------------------------------
+
+fn print_measurement(target: &str, posture: Posture, m: &Measurement) {
+    println!(
+        "\nperf: {target} — {} files, {} findings, posture {}, {} run(s)",
+        m.files,
+        m.findings,
+        posture.as_str(),
+        m.timings.len()
+    );
+    for (i, t) in m.timings.iter().enumerate() {
+        println!(
+            "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms",
+            i + 1,
+            t.load_ms,
+            t.analyze_ms,
+            t.total_ms
+        );
+    }
+    println!(
+        "    median: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms  (findings sha256 {}…)",
+        m.median.load_ms,
+        m.median.analyze_ms,
+        m.median.total_ms,
+        &m.findings_sha256[..12]
+    );
+}
+
+/// Print the timing movement against the blessed medians. Never gates: this
+/// is machine variance until later slices measure cold-vs-pre-persistence.
+/// The provisional M5 budget prints as an advisory when crossed.
+fn print_timing_delta(recorded: &BaselineEntry, median: &RunTiming) {
+    let pct = |old: f64, new: f64| if old > 0.0 { (new - old) / old * 100.0 } else { 0.0 };
+    let total_pct = pct(recorded.total_ms, median.total_ms);
+    println!(
+        "    timing vs baseline (never gates): load+parse {:.1} → {:.1} ms ({:+.1}%), analyze {:.1} → {:.1} ms ({:+.1}%), total {:.1} → {:.1} ms ({:+.1}%)",
+        recorded.load_ms,
+        median.load_ms,
+        pct(recorded.load_ms, median.load_ms),
+        recorded.analyze_ms,
+        median.analyze_ms,
+        pct(recorded.analyze_ms, median.analyze_ms),
+        recorded.total_ms,
+        median.total_ms,
+        total_pct
+    );
+    if total_pct > COLD_BUDGET_FRACTION * 100.0 {
+        println!(
+            "    note: total is {total_pct:+.1}% over the blessed baseline — past the provisional M5 cold budget ({:.0}%); advisory only until the generation layer lands",
+            COLD_BUDGET_FRACTION * 100.0
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steins_infer::{Facet, Origin};
+
+    fn diag(id: &'static str, path: &str, line: u32, column: u32, message: &str) -> Diagnostic {
+        Diagnostic {
+            id,
+            path: path.to_owned(),
+            line,
+            column,
+            message: message.to_owned(),
+            facet: None,
+            fix: None,
+        }
+    }
+
+    #[test]
+    fn canonical_serialization_sorts_like_the_cli_and_is_input_order_independent() {
+        let a = diag("type.mismatch", "src/a.php", 3, 1, "a");
+        let b = diag("variable.undefined", "src/a.php", 3, 1, "b");
+        let c = diag("type.mismatch", "src/b.php", 1, 9, "c");
+        // Two presentation orders of the same set serialize identically…
+        let one = canonical_serialization(vec![c.clone(), b.clone(), a.clone()]);
+        let two = canonical_serialization(vec![a.clone(), c.clone(), b.clone()]);
+        assert_eq!(one, two);
+        // …in the CLI's (path, line, column, id) order.
+        let lines: Vec<&str> = one.lines().collect();
+        assert_eq!(lines.len(), 3);
+        assert!(lines[0].contains("\"type.mismatch\""), "{one}");
+        assert!(lines[1].contains("\"variable.undefined\""), "{one}");
+        assert!(lines[2].contains("src/b.php"), "{one}");
+    }
+
+    #[test]
+    fn canonical_serialization_keeps_the_additive_facet_key() {
+        let mut d = diag("throw.undeclared", "src/a.php", 1, 1, "escapes");
+        d.facet = Some(Facet::Origin(Origin::Direct));
+        let s = canonical_serialization(vec![d]);
+        assert!(s.contains("\"origin\":\"direct\""), "{s}");
+    }
+
+    #[test]
+    fn id_count_diff_reports_only_moved_ids() {
+        let mut a = BTreeMap::new();
+        a.insert("type.mismatch", 5);
+        a.insert("variable.undefined", 2);
+        let mut b = BTreeMap::new();
+        b.insert("type.mismatch", 6);
+        b.insert("variable.undefined", 2);
+        b.insert("throw.undeclared", 1);
+        let diff = id_count_diff(&a, &b);
+        assert_eq!(diff, vec![("throw.undeclared", 0, 1), ("type.mismatch", 5, 6)]);
+    }
+
+    #[test]
+    fn median_takes_the_middle_and_averages_an_even_pair() {
+        assert_eq!(median([3.0, 1.0, 2.0].into_iter()), 2.0);
+        assert_eq!(median([4.0, 2.0].into_iter()), 3.0);
+        assert_eq!(median(std::iter::empty()), 0.0);
+    }
+
+    #[test]
+    fn baseline_round_trips_through_toml_and_upsert_replaces() {
+        let mut baseline = Baseline::default();
+        baseline.upsert(BaselineEntry {
+            path: "corpus/b".to_owned(),
+            posture: "php".to_owned(),
+            files: 10,
+            findings: 2,
+            findings_sha256: "aa".repeat(32),
+            load_ms: 12.5,
+            analyze_ms: 100.0,
+            total_ms: 112.5,
+        });
+        baseline.upsert(BaselineEntry {
+            path: "corpus/a".to_owned(),
+            posture: "no-php".to_owned(),
+            files: 3,
+            findings: 0,
+            findings_sha256: "bb".repeat(32),
+            load_ms: 1.0,
+            analyze_ms: 2.0,
+            total_ms: 3.0,
+        });
+        // Sorted by path for a stable file.
+        assert_eq!(baseline.targets[0].path, "corpus/a");
+        // Replacing keeps one entry per path.
+        let mut replaced = baseline.targets[1].clone();
+        replaced.findings = 7;
+        baseline.upsert(replaced);
+        assert_eq!(baseline.targets.len(), 2);
+        assert_eq!(baseline.get("corpus/b").unwrap().findings, 7);
+
+        let text = toml::to_string_pretty(&baseline).expect("serializes");
+        let back: Baseline = toml::from_str(&text).expect("parses");
+        assert_eq!(back.targets, baseline.targets);
+    }
+
+    #[test]
+    fn verdict_orders_posture_before_hash() {
+        let entry = BaselineEntry {
+            path: "t".to_owned(),
+            posture: "php".to_owned(),
+            files: 1,
+            findings: 1,
+            findings_sha256: "cc".repeat(32),
+            load_ms: 1.0,
+            analyze_ms: 1.0,
+            total_ms: 2.0,
+        };
+        let m = Measurement {
+            files: 1,
+            findings: 1,
+            findings_sha256: "dd".repeat(32),
+            timings: vec![],
+            median: RunTiming { load_ms: 1.0, analyze_ms: 1.0, total_ms: 2.0 },
+            determinism: Determinism::Ok,
+        };
+        // Same posture, different hash → the hash mismatch reds.
+        assert!(matches!(
+            verdict(Some(&entry), &m, Posture::Php),
+            BaselineVerdict::HashMismatch { .. }
+        ));
+        // Different posture → refused before any hash comparison.
+        assert!(matches!(
+            verdict(Some(&entry), &m, Posture::NoPhp),
+            BaselineVerdict::PostureMismatch { .. }
+        ));
+        // No entry → no baseline, never a failure.
+        assert!(matches!(verdict(None, &m, Posture::Php), BaselineVerdict::NoBaseline));
+    }
+
+    /// Integration smoke: a tiny self-contained PHP tree (the temp-dir fixture
+    /// shape `corpus_local.rs`/`nsrt.rs` tests use — never the corpus, which
+    /// worktrees do not have). Runs the full measure path under `--no-php`
+    /// (the test environment need not ship a PHP binary) and holds the
+    /// determinism oracle plus cross-invocation hash stability — the property
+    /// the blessed baseline relies on.
+    #[test]
+    fn smoke_a_tiny_fixture_tree_measures_deterministically() {
+        let dir = std::env::temp_dir().join(format!("steins-perf-smoke-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("src")).expect("mkdir fixture tree");
+        std::fs::write(
+            dir.join("src/add.php"),
+            "<?php\nfunction add(int $x, int $y): int {\n    return $x + $y;\n}\n",
+        )
+        .expect("write add.php");
+        std::fs::write(
+            dir.join("src/use_add.php"),
+            "<?php\nfunction use_add(): int {\n    return add(1, 2);\n}\n",
+        )
+        .expect("write use_add.php");
+        std::fs::write(
+            dir.join("src/broken.php"),
+            "<?php\nfunction broken(): int {\n    return $undef;\n}\n",
+        )
+        .expect("write broken.php");
+
+        let m = measure_target(&dir, 2, Posture::NoPhp).expect("measure the fixture tree");
+        assert_eq!(m.files, 3);
+        assert!(matches!(m.determinism, Determinism::Ok), "the oracle must hold on a fixed tree");
+        assert!(m.findings >= 1, "the unbound read in broken.php should be found");
+        assert_eq!(m.timings.len(), 2);
+
+        // A second, independent invocation reproduces the hash — what makes a
+        // blessed baseline comparable at all.
+        let again = measure_target(&dir, 2, Posture::NoPhp).expect("measure again");
+        assert_eq!(again.findings_sha256, m.findings_sha256);
+        assert_eq!(again.findings, m.findings);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
