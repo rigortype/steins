@@ -42,9 +42,11 @@ declarations produce silence rather than a guess.
 
 **Granularity, recorded honestly:** `project_index` is one monolithic tracked
 query, so *any* file edit invalidates it and everything downstream. That is
-acceptable for a batch CLI. The recorded plan is per-symbol salsa interning, so
-an edit re-indexes only its own symbols — an LSP prerequisite, not a checker
-one (ADR-0009, roadmap M5).
+acceptable for a batch CLI. ADR-0009 recorded per-symbol salsa interning as
+the plan; ADR-0092 §3 supersedes it — the index shards per *package*, with
+every global table merged per generation, and `project_index` already
+delegates to that shard builder (`steins_db::shard`, issue #486). What has
+not landed is persistence: the shards are rebuilt in memory each run.
 
 ## What runs outside the graph
 
@@ -90,7 +92,9 @@ Everything else about the LSP is M5/M6 work.
 ## Not implemented
 
 - **Per-declaration entry-state summaries as memoized queries** — the M5 slice.
-- **Sharded per-symbol `project_index`.**
+- **Sharded per-symbol `project_index`** — superseded by ADR-0092 §3's
+  per-package shards; the shard builder underneath `project_index` landed
+  (issue #486), its persistence has not (#487).
 - **Fold results as recorded inputs.**
 - **Any warm path or cross-run cache.** There is no on-disk cache at all.
 - **A perf harness.** Cold/warm baselines are not measured under `xtask`.

@@ -1060,6 +1060,8 @@ dependencies = [
  "salsa",
  "serde_json",
  "steins-catalog",
+ "steins-gen",
+ "steins-phpdoc",
  "steins-syntax",
 ]
 

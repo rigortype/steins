@@ -12,4 +12,12 @@ steins-syntax = { path = "../steins-syntax" }
 # The label registry the plugin channel extends (ADR-0068): plugin discovery has
 # to judge a registration against the core taxonomy roots, which the catalog owns.
 steins-catalog = { path = "../steins-catalog" }
+# The partition vocabulary (ADR-0092 §3): `Package`/`PackageUniverse` are
+# generation identity, so the types live in the leaf crate and this crate —
+# where project discovery already lives — builds them from composer.lock.
+steins-gen = { path = "../steins-gen" }
+# The magic-member tag scan (ADR-0049 A14): the obstacle table is one of the
+# per-package shard tables the generation merge recomputes, so the per-class
+# scan lives beside the shard builder here.
+steins-phpdoc = { path = "../steins-phpdoc" }
 serde_json.workspace = true

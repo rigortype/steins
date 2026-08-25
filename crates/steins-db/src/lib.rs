@@ -7,7 +7,7 @@
 //! here, so the checking logic stays out of the engine crate while remaining a
 //! first-class salsa query.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use salsa::Storage;
 use steins_syntax::{FunctionDecl, SourceTree};
@@ -15,11 +15,18 @@ use steins_syntax::{FunctionDecl, SourceTree};
 pub mod composer;
 pub mod effects;
 pub mod layout;
+pub mod partition;
 pub mod plugins;
+pub mod shard;
 
 pub use effects::EffectsPolicy;
 pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallback_is_vendor};
+pub use partition::PackagePartition;
 pub use plugins::PluginFacts;
+pub use shard::{
+    MagicObstacle, MergedTables, PackageShard, ShardSite, class_magic_obstacles,
+    fallback_package_key, merge_shards,
+};
 
 /// The database trait analysis queries are written against. Downstream crates
 /// (e.g. `steins-infer`) define tracked queries taking `&dyn Db`.
@@ -109,9 +116,12 @@ pub enum Resolve {
 /// The whole-project symbol index (ADR-0009). FQN keys are lowercase-normalized
 /// (PHP function/class/namespace names are case-insensitive).
 ///
-/// **Granularity (ADR-0009):** one monolithic tracked query, so *any* file edit
-/// invalidates it and everything downstream — acceptable for the batch CLI;
-/// per-symbol salsa interning is the recorded plan for the LSP.
+/// **Granularity:** one monolithic tracked query, so *any* file edit
+/// invalidates it and everything downstream — acceptable for the batch CLI.
+/// ADR-0009 recorded per-symbol salsa interning as the LSP plan; ADR-0092 §3
+/// supersedes it — the index shards per *package* (see [`shard`]), with every
+/// global table merged per generation, and this query already delegates to
+/// that builder.
 #[derive(Clone, Default, PartialEq, Eq)]
 pub struct ProjectIndex {
     /// Unambiguous function FQN → definition site.
@@ -200,70 +210,55 @@ impl ProjectIndex {
     }
 }
 
-/// Build the whole-project symbol index by parsing every file and folding its
-/// declarations in. Duplicate FQNs are demoted to the ambiguous set (and dropped
-/// from the resolvable map), so an ambiguous symbol is never resolved.
+/// Build the whole-project symbol index via the package-shard builder
+/// (ADR-0092 §3, issue #486): group the files into per-package shards, merge
+/// every global table from them, and keep the symbol half. Duplicate FQNs are
+/// demoted to the ambiguous set (and dropped from the resolvable map), so an
+/// ambiguous symbol is never resolved — the merge's multiset arithmetic, which
+/// the differential-oracle test pins against the pre-shard construction.
+///
+/// The grouping is [`fallback_package_key`] — a path heuristic, because no
+/// `composer.lock` rides on [`Project`]; the merge is partition-invariant, so
+/// the grouping decides shard boundaries and never the result.
 #[salsa::tracked]
 pub fn project_index(db: &dyn Db, project: Project) -> ProjectIndex {
-    let mut idx = ProjectIndex::default();
-    for &file in project.files(db) {
-        let tree = parse(db, file);
-        for (i, f) in tree.functions().iter().enumerate() {
-            let site = DeclSite { file, index: i };
-            idx.fn_by_simple.entry(f.name.to_ascii_lowercase()).or_default().push(site);
-            insert_unique(&mut idx.functions, &mut idx.ambiguous_functions, &f.fqn, site);
-        }
-        for (i, c) in tree.classes().iter().enumerate() {
-            let site = DeclSite { file, index: i };
-            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
-        }
+    let files = project.files(db);
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (slot, file) in files.iter().enumerate() {
+        groups.entry(shard::fallback_package_key(file.path(db))).or_default().push(slot);
     }
-    // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in after every
-    // textual declaration; see `fold_class_alias_edges`.
-    fold_class_alias_edges(db, project, &mut idx);
-    idx
+    let mut shards: Vec<PackageShard> = Vec::with_capacity(groups.len());
+    for slots in groups.into_values() {
+        let mut s = PackageShard::default();
+        for slot in slots {
+            let file = files[slot];
+            let tree = parse(db, file);
+            s.add_file(slot, file.path(db), tree);
+        }
+        shards.push(s);
+    }
+    ProjectIndex::from_merged(merge_shards(&shards), files)
 }
 
-/// Fold every file's literal `class_alias` edges into the class map (ADR-0049
-/// §2). Targets are resolved against the **textual** index snapshot (no
-/// alias-to-alias chaining, so the result is order-independent, ADR-0048); an
-/// alias colliding with a textual decl of the same FQN, or two alias edges for
-/// one name, demotes to `Ambiguous`. An alias whose target is absent or itself
-/// ambiguous mints no edge.
-fn fold_class_alias_edges(db: &dyn Db, project: Project, idx: &mut ProjectIndex) {
-    let mut resolved: Vec<(String, DeclSite)> = Vec::new();
-    for &file in project.files(db) {
-        let tree = parse(db, file);
-        for edge in tree.class_alias_edges() {
-            if idx.ambiguous_classes.contains(&edge.target_fqn) {
-                continue;
-            }
-            if let Some(&target) = idx.classes.get(&edge.target_fqn) {
-                resolved.push((edge.alias_fqn.clone(), target));
-            }
+impl ProjectIndex {
+    /// The symbol half of a merge, with universe slots mapped back to the
+    /// project's [`SourceFile`]s (`files` is the slot order the shards were
+    /// built over). The merged obstacle/write/constant tables are dropped
+    /// here: they are `steins_infer::project::Index`'s tables, scanned off the
+    /// same shards on that side.
+    fn from_merged(m: MergedTables, files: &[SourceFile]) -> Self {
+        let site = |s: ShardSite| DeclSite { file: files[s.file], index: s.index };
+        Self {
+            functions: m.functions.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),
+            classes: m.classes.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),
+            ambiguous_functions: m.ambiguous_functions,
+            ambiguous_classes: m.ambiguous_classes,
+            fn_by_simple: m
+                .fn_by_simple
+                .into_iter()
+                .map(|(simple, sites)| (simple, sites.into_iter().map(site).collect()))
+                .collect(),
         }
-    }
-    for (alias_fqn, target) in resolved {
-        insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
-    }
-}
-
-/// Insert `fqn → site`, demoting to ambiguity on any collision. `fqn` is already
-/// lowercase-normalized by the syntax layer.
-fn insert_unique(
-    map: &mut HashMap<String, DeclSite>,
-    ambiguous: &mut HashSet<String>,
-    fqn: &str,
-    site: DeclSite,
-) {
-    if ambiguous.contains(fqn) {
-        return;
-    }
-    if map.remove(fqn).is_some() {
-        // A second definition of the same FQN: mark ambiguous, keep it unresolved.
-        ambiguous.insert(fqn.to_owned());
-    } else {
-        map.insert(fqn.to_owned(), site);
     }
 }
 
@@ -279,3 +274,111 @@ impl salsa::Database for SteinsDatabase {}
 
 #[salsa::db]
 impl Db for SteinsDatabase {}
+
+/// The differential oracle for the shard delegation (issue #486): the frozen
+/// pre-shard construction of [`ProjectIndex`], kept test-only, and the
+/// assertion that the partition → shards → merge path underneath
+/// [`project_index`] reproduces it exactly. Inside the crate because both the
+/// reference and the equality need the private fields.
+#[cfg(test)]
+mod shard_oracle {
+    use super::*;
+
+    /// The pre-#486 `project_index` body, frozen verbatim: a single streaming
+    /// pass with duplicate demotion, then the literal `class_alias` fold
+    /// against the textual snapshot (ADR-0049 §2).
+    fn project_index_reference(db: &dyn Db, project: Project) -> ProjectIndex {
+        fn insert_unique(
+            map: &mut HashMap<String, DeclSite>,
+            ambiguous: &mut HashSet<String>,
+            fqn: &str,
+            site: DeclSite,
+        ) {
+            if ambiguous.contains(fqn) {
+                return;
+            }
+            if map.remove(fqn).is_some() {
+                ambiguous.insert(fqn.to_owned());
+            } else {
+                map.insert(fqn.to_owned(), site);
+            }
+        }
+        let mut idx = ProjectIndex::default();
+        for &file in project.files(db) {
+            let tree = parse(db, file);
+            for (i, f) in tree.functions().iter().enumerate() {
+                let site = DeclSite { file, index: i };
+                idx.fn_by_simple.entry(f.name.to_ascii_lowercase()).or_default().push(site);
+                insert_unique(&mut idx.functions, &mut idx.ambiguous_functions, &f.fqn, site);
+            }
+            for (i, c) in tree.classes().iter().enumerate() {
+                let site = DeclSite { file, index: i };
+                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
+            }
+        }
+        let mut resolved: Vec<(String, DeclSite)> = Vec::new();
+        for &file in project.files(db) {
+            let tree = parse(db, file);
+            for edge in tree.class_alias_edges() {
+                if idx.ambiguous_classes.contains(&edge.target_fqn) {
+                    continue;
+                }
+                if let Some(&target) = idx.classes.get(&edge.target_fqn) {
+                    resolved.push((edge.alias_fqn.clone(), target));
+                }
+            }
+        }
+        for (alias_fqn, target) in resolved {
+            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
+        }
+        idx
+    }
+
+    /// A fixture wide enough to make every merge leg observable: root and
+    /// vendor paths (multiple shards under [`fallback_package_key`]),
+    /// cross-shard function and class duplicates, a within-shard duplicate,
+    /// simple-name collisions, and alias edges whose targets and collisions
+    /// cross shard boundaries.
+    fn fixture() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "src/app.php",
+                "<?php\nnamespace App;\nfunction run() {}\nfunction helper() {}\nclass Kernel {}\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\n",
+            ),
+            (
+                "vendor/lib/a/src/widget.php",
+                "<?php\nnamespace Lib\\A;\nfunction helper() {}\nclass Widget {}\nclass Dup {}\n",
+            ),
+            (
+                "vendor/lib/b/src/dup.php",
+                "<?php\nnamespace Lib\\A;\nclass Dup {}\nfunction helper() {}\n",
+            ),
+            (
+                "vendor/lib/b/src/more.php",
+                "<?php\nclass Local {}\nclass Local {}\nclass_alias('app\\\\kernel', 'shim');\nclass_alias('lib\\\\a\\\\dup', 'never');\n",
+            ),
+            ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
+        ]
+    }
+
+    #[test]
+    fn project_index_matches_the_frozen_reference() {
+        let db = SteinsDatabase::default();
+        let inputs: Vec<SourceFile> = fixture()
+            .iter()
+            .map(|(p, t)| SourceFile::new(&db, (*p).to_owned(), (*t).to_owned()))
+            .collect();
+        let project = Project::new(&db, inputs, ProjectLayout::fallback(), PluginFacts::none());
+        let via_shards = project_index(&db, project);
+        let reference = project_index_reference(&db, project);
+        assert!(*via_shards == reference, "shard merge diverged from the frozen construction");
+        // The fixture is only honest if the cross-shard machinery fired.
+        assert!(via_shards.ambiguous_functions.contains("lib\\a\\helper"));
+        assert!(via_shards.ambiguous_classes.contains("lib\\a\\dup"));
+        assert!(via_shards.ambiguous_classes.contains("local"), "within-shard duplicate survives");
+        assert!(via_shards.classes.contains_key("app\\widget"), "cross-shard alias minted");
+        assert!(via_shards.classes.contains_key("shim"), "vendor alias of a root target minted");
+        assert!(!via_shards.classes.contains_key("never"), "ambiguous target mints no edge");
+        assert_eq!(via_shards.fn_by_simple["helper"].len(), 3);
+    }
+}

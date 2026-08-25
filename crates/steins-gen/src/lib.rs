@@ -21,6 +21,11 @@
 //! - The sealed capture ([`SourceInventory`]): sources are captured once,
 //!   sealed, and revalidated immediately before publish, so a concurrent
 //!   edit rejects the whole candidate.
+//! - The partition vocabulary ([`Package`], [`PackageKind`],
+//!   [`PackageUniverse`]): the Composer-package partition of the universe
+//!   and its reverse-dependency closure (ADR-0092 §3). Plain data — the
+//!   builder that reads a real `composer.lock` lives with project discovery
+//!   in `steins-db`, which consumes this crate, never the reverse.
 //!
 //! The standing invariant, imported verbatim from the ADR: **a cache miss
 //! may change cost, never meaning.** Artifacts carry [`SCHEMA_VERSION`]; a
@@ -36,6 +41,7 @@ mod fingerprint;
 mod identity;
 mod inventory;
 mod names;
+mod partition;
 mod store;
 
 pub use container::{
@@ -45,4 +51,5 @@ pub use fingerprint::{FieldHasher, Fingerprint};
 pub use identity::{EnginePosture, GenerationId, GenerationInputs};
 pub use inventory::{DriftKind, SourceDrift, SourceEntry, SourceError, SourceInventory};
 pub use names::{NameError, PackageName, SectionName};
+pub use partition::{Package, PackageKind, PackageUniverse};
 pub use store::{Candidate, Generation, PublishError, Store};

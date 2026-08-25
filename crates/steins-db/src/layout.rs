@@ -257,6 +257,13 @@ impl ProjectLayout {
         &self.roots
     }
 
+    /// The captured working directory — what the partition classifier
+    /// (`crate::partition`) resolves relative paths against, so its answers
+    /// and [`ProjectLayout::is_vendor`]'s agree on the same spelling.
+    pub(crate) fn cwd(&self) -> &Path {
+        &self.cwd
+    }
+
     /// Whether this layout carries no declarations, so every answer is the
     /// fallback guess. `doctor` says so out loud: a run that guessed and a run
     /// that read the project's own manifest are different claims.

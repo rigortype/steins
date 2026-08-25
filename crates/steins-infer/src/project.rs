@@ -2,11 +2,13 @@
 //! [`FileUnit`], [`Index`], the magic-member obstacles (ADR-0046), the `Diagnostic` /
 //! `Fix` records every pass emits, and the vendor-path test.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use steins_db::{DeclSite, ProjectIndex, Resolve, SourceFile};
-use steins_phpdoc::{MagicTagKind, scan_magic_member_tags};
-use steins_syntax::{ClassDecl, NameRef, RefKind, SourceTree};
+use steins_db::{
+    DeclSite, MergedTables, PackageShard, ProjectIndex, Resolve, ShardSite, SourceFile,
+    fallback_package_key, merge_shards,
+};
+use steins_syntax::{NameRef, RefKind, SourceTree};
 
 use crate::absence::magic_obstacles_in_reach;
 use crate::cx::Cx;
@@ -111,43 +113,24 @@ pub(crate) enum Res {
     Ambiguous,
 }
 
-/// One recorded **silence obstacle** a class-like's docblock declares (ADR-0049
-/// A14, issue #195): a `@method` / `@property*` / `@mixin` / `@phpstan-type` tag
-/// says members exist somewhere the index cannot enumerate, so every absence
-/// proof over that class-like is silent.
-///
-/// The shape is normative: a record is `(class-like, obstacle kind, subject)` —
-/// **never** a class-level "has magic somewhere" boolean. A plugin pack that
-/// declares what the magic actually provides (ADR-0039) must be able to discharge
-/// the obstacle member by member and re-enable the absence proof for the
-/// undeclared remainder, which a boolean forecloses. The discharge channel itself
-/// is not built here; only the record granularity that lets it be.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MagicObstacle {
-    /// The declaring class-like's own FQN, lowercase-normalized
-    /// ([`ClassDecl::fqn`]) — the class-like half of the A14 triple.
-    pub class: String,
-    /// Which tag recorded it.
-    pub kind: MagicTagKind,
-    /// The tag's subject as written: the method name, the property name (no `$`),
-    /// the mixin target reference, the alias name. Empty when the tag's tail gave
-    /// none — presence alone still obstructs.
-    pub subject: String,
-    /// For [`MagicTagKind::Mixin`] only: [`Self::subject`] resolved to a project
-    /// FQN against the declaring file's namespace and `use` imports, so the reach
-    /// walk can follow it. A target that resolves to nothing is not a finding and
-    /// not an error — the `@mixin` record itself already obstructs.
-    pub mixin_target: Option<String>,
-}
+/// The A14 silence-obstacle record (ADR-0049 A14, issue #195). Defined beside
+/// the package-shard builder since issue #486 — the obstacle table is one of
+/// the per-package tables the generation merge recomputes — and re-exported
+/// here unchanged, where its consumers live.
+pub use steins_db::MagicObstacle;
 
 /// The project symbol index in the analysis's own `Site` terms (a file *index*,
 /// not a salsa handle). Built either directly from the [`FileUnit`] slice
 /// (single-file / test paths) or adapted from the salsa [`ProjectIndex`]
 /// (the db-backed [`check_project`] path — so the tracked query is the authority
-/// on incrementality, ADR-0009).
+/// on incrementality, ADR-0009). Both routes stand on the package-shard builder
+/// (ADR-0092 §3, issue #486): [`Index::from_units`] partitions the units into
+/// [`PackageShard`]s and merges every global table from them, and the salsa
+/// query delegates to the same builder on its side — one implementation under
+/// what used to be two.
 ///
 /// [`check_project`]: crate::check_project
-#[derive(Default)]
+#[derive(Default, PartialEq)]
 pub(crate) struct Index {
     functions: HashMap<String, Site>,
     ambiguous_functions: HashSet<String>,
@@ -183,10 +166,11 @@ pub(crate) struct Index {
     /// family's business, not this id's. Presence can only silence an absence
     /// claim, never raise one.
     ///
-    /// Scanned off the [`FileUnit`] slice rather than carried on the salsa
-    /// [`ProjectIndex`], the same route [`Self::magic_obstacles`] takes: the
-    /// lowering (which salsa memoizes) already holds the records, and a set with no
-    /// site identity needs none of the project index's collision machinery.
+    /// Scanned off the [`FileUnit`] slice (via the shard merge) rather than
+    /// carried on the salsa [`ProjectIndex`], the same route
+    /// [`Self::magic_obstacles`] takes: the lowering (which salsa memoizes)
+    /// already holds the records, and a set with no site identity needs none of
+    /// the project index's collision machinery.
     constants: HashSet<String>,
     // end global constants (ADR-0078, issue #198)
     /// Every unit's diagnostic path → its index in the [`FileUnit`] slice — the
@@ -197,75 +181,62 @@ pub(crate) struct Index {
     files: HashMap<String, usize>,
 }
 
-// member absence (ADR-0078, issue #197)
-/// Fold every file's property-write inventory into one project-wide obstacle set
-/// (ADR-0078, issue #197). A whole-universe query in the ADR-0048 sense:
-/// recomputed per run from the unit slice, with no ordering dependence.
-fn scan_property_writes(units: &[FileUnit]) -> (HashSet<String>, bool) {
-    let mut names: HashSet<String> = HashSet::new();
-    let mut dynamic = false;
-    for u in units {
-        names.extend(u.tree.property_write_names().iter().cloned());
-        dynamic |= u.tree.writes_computed_property_name();
+/// Partition the units by [`fallback_package_key`], build one [`PackageShard`]
+/// per package, and recompute every global table from the shards (ADR-0092 §3,
+/// issue #486). The merge is partition-invariant — the differential-oracle
+/// tests pin that any grouping of the same units merges identically — so the
+/// path heuristic decides shard boundaries and never a table's contents.
+fn merged_tables(units: &[FileUnit]) -> MergedTables {
+    let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    for (slot, u) in units.iter().enumerate() {
+        groups.entry(fallback_package_key(u.path)).or_default().push(slot);
     }
-    (names, dynamic)
-}
-// end member absence (ADR-0078, issue #197)
-
-/// Map every unit's diagnostic path to its position in the slice (issue #497) —
-/// the [`Index::file_index_of`] table, built once per run from the same slice
-/// every other per-run query reads.
-fn scan_file_paths(units: &[FileUnit]) -> HashMap<String, usize> {
-    units.iter().enumerate().map(|(i, u)| (u.path.to_owned(), i)).collect()
+    let mut shards: Vec<PackageShard> = Vec::with_capacity(groups.len());
+    for slots in groups.into_values() {
+        let mut s = PackageShard::default();
+        for slot in slots {
+            s.add_file(slot, units[slot].path, units[slot].tree);
+        }
+        shards.push(s);
+    }
+    merge_shards(&shards)
 }
 
 impl Index {
-    /// Build the index straight from the file units (mirrors the db query).
+    /// Build the index straight from the file units, via the package-shard
+    /// builder (issue #486) — the same one implementation the salsa
+    /// `project_index` delegates to on its side.
     pub(crate) fn from_units(units: &[FileUnit]) -> Self {
-        let mut idx = Index::default();
-        for (fi, u) in units.iter().enumerate() {
-            for (i, f) in u.tree.functions().iter().enumerate() {
-                let site = Site { file: fi, index: i };
-                idx.fn_by_simple.entry(f.name.to_ascii_lowercase()).or_default().push(site);
-                insert_unique(&mut idx.functions, &mut idx.ambiguous_functions, &f.fqn, site);
-            }
-            for (i, c) in u.tree.classes().iter().enumerate() {
-                let site = Site { file: fi, index: i };
-                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
-            }
+        Self::from_merged(merged_tables(units))
+    }
+
+    /// Every table of a merge, with universe slots read as unit-slice indices
+    /// — on this path they are the same thing.
+    fn from_merged(m: MergedTables) -> Self {
+        let site = |s: ShardSite| Site { file: s.file, index: s.index };
+        Index {
+            functions: m.functions.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),
+            ambiguous_functions: m.ambiguous_functions,
+            classes: m.classes.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),
+            ambiguous_classes: m.ambiguous_classes,
+            fn_by_simple: m
+                .fn_by_simple
+                .into_iter()
+                .map(|(simple, sites)| (simple, sites.into_iter().map(site).collect()))
+                .collect(),
+            magic_obstacles: m.magic_obstacles,
+            property_writes: m.property_writes,
+            constants: m.constants,
+            files: m.files,
         }
-        // Literal `class_alias` edges (ADR-0049 §2 / A2iii) fold in after every
-        // textual decl, mirroring the db-backed `project_index`. Targets resolve
-        // against the textual snapshot (order-independent, ADR-0048); collisions
-        // (alias vs textual, or two aliases for one name) demote to `Ambiguous`.
-        let mut resolved: Vec<(String, Site)> = Vec::new();
-        for u in units {
-            for edge in u.tree.class_alias_edges() {
-                if idx.ambiguous_classes.contains(&edge.target_fqn) {
-                    continue;
-                }
-                if let Some(&target) = idx.classes.get(&edge.target_fqn) {
-                    resolved.push((edge.alias_fqn.clone(), target));
-                }
-            }
-        }
-        for (alias_fqn, target) in resolved {
-            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
-        }
-        idx.magic_obstacles = scan_magic_obstacles(units);
-        // member absence (ADR-0078, issue #197)
-        idx.property_writes = scan_property_writes(units);
-        // end member absence (ADR-0078, issue #197)
-        idx.constants = scan_global_constants(units);
-        idx.files = scan_file_paths(units);
-        idx
     }
 
     /// Adapt the salsa [`ProjectIndex`] to `Site`s, using `pos` to map each
     /// [`SourceFile`] to its position in the (identically ordered) unit slice.
-    /// The A14 obstacle records are scanned off the same unit slice: they are a
-    /// docblock fact of the lowered tree (which salsa already memoizes), not a
-    /// symbol-table fact the project index carries.
+    /// The obstacle/write/constant/file tables come from the same shard merge
+    /// as [`Index::from_units`]'s: they are facts of the lowered trees (which
+    /// salsa already memoizes), not symbol-table facts the project index
+    /// carries.
     pub(crate) fn from_db(
         db_index: &ProjectIndex,
         pos: &HashMap<SourceFile, usize>,
@@ -284,12 +255,11 @@ impl Index {
         for (simple, sites) in db_index.fn_by_simple() {
             idx.fn_by_simple.insert(simple.clone(), sites.iter().map(site).collect());
         }
-        idx.magic_obstacles = scan_magic_obstacles(units);
-        // member absence (ADR-0078, issue #197)
-        idx.property_writes = scan_property_writes(units);
-        // end member absence (ADR-0078, issue #197)
-        idx.constants = scan_global_constants(units);
-        idx.files = scan_file_paths(units);
+        let m = merged_tables(units);
+        idx.magic_obstacles = m.magic_obstacles;
+        idx.property_writes = m.property_writes;
+        idx.constants = m.constants;
+        idx.files = m.files;
         idx
     }
 
@@ -367,94 +337,18 @@ impl Index {
     }
 }
 
-/// Scan the universe for every global constant declaration (ADR-0078, issue #198)
-/// — `const FOO = …;` and `define('FOO', …)` alike, already normalized to the
-/// matching key by the lowering.
-///
-/// Vendor files are **included**, deliberately: a constant a package declares is
-/// as real as one the project declares, and the vendor presumption of ADR-0046 §2
-/// is about unproven *dynamism*, not about ignoring plain declarations.
-fn scan_global_constants(units: &[FileUnit]) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for u in units {
-        for decl in u.tree.global_const_decls() {
-            out.insert(decl.fqn.clone());
-        }
-    }
-    out
-}
-
-/// Scan every class-like docblock in the project for magic-member tags, keyed by
-/// the declaring class-like's own lowercase FQN (ADR-0049 A14, issue #195).
-///
-/// A `@mixin` subject is resolved here, once, against its declaring file's
-/// namespace and `use` imports — the same resolution a written `extends` gets,
-/// because a docblock class reference obeys the same PHP name-resolution rules.
-fn scan_magic_obstacles(units: &[FileUnit]) -> HashMap<String, Vec<MagicObstacle>> {
-    let mut out: HashMap<String, Vec<MagicObstacle>> = HashMap::new();
-    let mut buf: Vec<MagicObstacle> = Vec::new();
-    for u in units {
-        for cd in u.tree.classes() {
-            class_magic_obstacles(u, cd, &mut buf);
-            if !buf.is_empty() {
-                out.entry(cd.fqn.to_ascii_lowercase()).or_default().append(&mut buf);
-            }
-        }
-    }
-    out
-}
-
-/// Append one class-like's own magic-member records to `out` (nothing appended
-/// when it carries none).
-fn class_magic_obstacles(u: &FileUnit, cd: &ClassDecl, out: &mut Vec<MagicObstacle>) {
-    let Some(doc) = cd.docblock.as_deref() else { return };
-    // Cheap reject: most class docblocks are prose, and the scan below is the
-    // only place that pays.
-    if !doc.contains('@') {
-        return;
-    }
-    for tag in scan_magic_member_tags(doc) {
-        let mixin_target = (tag.kind.is_mixin() && !tag.subject.is_empty())
-            .then(|| u.tree.resolve_class_fqn(&docblock_class_ref(&tag.subject, cd.span.start)));
-        out.push(MagicObstacle {
-            class: cd.fqn.clone(),
-            kind: tag.kind,
-            subject: tag.subject,
-            mixin_target,
-        });
-    }
-}
-
-/// Turn a class reference **written in a docblock** into a [`NameRef`] resolvable
-/// against the declaring file's namespace context. `offset` is the declaration's
-/// own position, so the context is the one that governs its `extends` clause.
-fn docblock_class_ref(raw: &str, offset: u32) -> NameRef {
-    if let Some(rest) = raw.strip_prefix('\\') {
-        return NameRef { raw: rest.to_owned(), kind: RefKind::FullyQualified, offset };
-    }
-    // The `namespace\Foo` relative form (ADR-0049 A8) resolves against the
-    // enclosing namespace with no imports applied; `raw` drops the prefix.
-    // `get` (not a slice) because a class reference may be non-ASCII, and byte 10
-    // is then not guaranteed to be a char boundary.
-    if raw.get(..10).is_some_and(|p| p.eq_ignore_ascii_case("namespace\\")) {
-        return NameRef { raw: raw[10..].to_owned(), kind: RefKind::Relative, offset };
-    }
-    let kind = if raw.contains('\\') { RefKind::Qualified } else { RefKind::Unqualified };
-    NameRef { raw: raw.to_owned(), kind, offset }
-}
-
 /// Every magic-member obstacle record the project declares (ADR-0049 A14), in
 /// file then source order — the seam a posture/`doctor` surface aggregates
 /// ("N absence claims silenced by `@method` tags on M classes") and the one a
 /// plugin discharge channel (ADR-0039) will subtract from. The ladders read the
-/// same records through the per-class index built from this scan; nothing in this
-/// slice reports them.
+/// same records through the per-class index built from the same scan (the
+/// shard builder's, since issue #486); nothing in this slice reports them.
 #[must_use]
 pub fn magic_obstacles(units: &[FileUnit<'_>]) -> Vec<MagicObstacle> {
     let mut recs: Vec<MagicObstacle> = Vec::new();
     for u in units {
         for cd in u.tree.classes() {
-            class_magic_obstacles(u, cd, &mut recs);
+            steins_db::class_magic_obstacles(u.tree, cd, &mut recs);
         }
     }
     recs
@@ -523,23 +417,6 @@ pub fn resolves_to_user_function(index: &ProjectIndex, tree: &SourceTree, r: &Na
     }
 }
 
-/// Insert `fqn → site`, demoting to ambiguity on any collision.
-fn insert_unique(
-    map: &mut HashMap<String, Site>,
-    ambiguous: &mut HashSet<String>,
-    fqn: &str,
-    site: Site,
-) {
-    if ambiguous.contains(fqn) {
-        return;
-    }
-    if map.remove(fqn).is_some() {
-        ambiguous.insert(fqn.to_owned());
-    } else {
-        map.insert(fqn.to_owned(), site);
-    }
-}
-
 /// How an unqualified/qualified/FQ **function** call resolves (ADR-0001).
 pub(crate) enum FnResolution {
     /// A user function defined in the project (its declaration site).
@@ -568,4 +445,202 @@ pub(crate) enum FnResolution {
     /// Ambiguous or unresolved — skip everything (no check, no fold, no effect
     /// classification). The silent side.
     Unknown,
+}
+
+/// The differential oracle for the shard delegation (issue #486): the frozen
+/// pre-shard construction of [`Index`], kept test-only, and the assertions
+/// that partition → shards → merge reproduces it exactly — under the
+/// production grouping, under the real Composer partition, and under the
+/// finest partition there is (one file per shard). Inside the module because
+/// both the reference and the equality need the private fields.
+#[cfg(test)]
+mod shard_oracle {
+    use steins_db::{GoverningRoot, PackagePartition, ProjectLayout};
+
+    use super::*;
+
+    /// The pre-#486 `Index::from_units` body, frozen verbatim: a single
+    /// streaming pass with duplicate demotion, the literal `class_alias` fold
+    /// against the textual snapshot, and the direct whole-slice scans.
+    fn from_units_reference(units: &[FileUnit]) -> Index {
+        fn insert_unique(
+            map: &mut HashMap<String, Site>,
+            ambiguous: &mut HashSet<String>,
+            fqn: &str,
+            site: Site,
+        ) {
+            if ambiguous.contains(fqn) {
+                return;
+            }
+            if map.remove(fqn).is_some() {
+                ambiguous.insert(fqn.to_owned());
+            } else {
+                map.insert(fqn.to_owned(), site);
+            }
+        }
+        let mut idx = Index::default();
+        for (fi, u) in units.iter().enumerate() {
+            for (i, f) in u.tree.functions().iter().enumerate() {
+                let site = Site { file: fi, index: i };
+                idx.fn_by_simple.entry(f.name.to_ascii_lowercase()).or_default().push(site);
+                insert_unique(&mut idx.functions, &mut idx.ambiguous_functions, &f.fqn, site);
+            }
+            for (i, c) in u.tree.classes().iter().enumerate() {
+                let site = Site { file: fi, index: i };
+                insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &c.fqn, site);
+            }
+        }
+        let mut resolved: Vec<(String, Site)> = Vec::new();
+        for u in units {
+            for edge in u.tree.class_alias_edges() {
+                if idx.ambiguous_classes.contains(&edge.target_fqn) {
+                    continue;
+                }
+                if let Some(&target) = idx.classes.get(&edge.target_fqn) {
+                    resolved.push((edge.alias_fqn.clone(), target));
+                }
+            }
+        }
+        for (alias_fqn, target) in resolved {
+            insert_unique(&mut idx.classes, &mut idx.ambiguous_classes, &alias_fqn, target);
+        }
+        let mut buf: Vec<MagicObstacle> = Vec::new();
+        for u in units {
+            for cd in u.tree.classes() {
+                steins_db::class_magic_obstacles(u.tree, cd, &mut buf);
+                if !buf.is_empty() {
+                    idx.magic_obstacles.entry(cd.fqn.to_ascii_lowercase()).or_default().append(&mut buf);
+                }
+            }
+            idx.property_writes.0.extend(u.tree.property_write_names().iter().cloned());
+            idx.property_writes.1 |= u.tree.writes_computed_property_name();
+            for decl in u.tree.global_const_decls() {
+                idx.constants.insert(decl.fqn.clone());
+            }
+        }
+        idx.files = units.iter().enumerate().map(|(i, u)| (u.path.to_owned(), i)).collect();
+        idx
+    }
+
+    /// A fixture wide enough to make every merged table observable across
+    /// shard boundaries: root and vendor paths, cross- and within-shard
+    /// duplicate FQNs, cross-shard alias edges (minted and demoted), magic
+    /// tags on two classes sharing one lowercase FQN in different shards,
+    /// property writes (a computed one in vendor only), and constants.
+    fn fixture() -> Vec<(&'static str, &'static str)> {
+        vec![
+            (
+                "src/app.php",
+                "<?php\nnamespace App;\nfunction run() {}\nfunction helper() {}\n/** @method int magic() */\nclass Kernel {}\nclass_alias('lib\\\\a\\\\widget', 'app\\\\widget');\nconst LIMIT = 3;\n$k->written = 1;\n",
+            ),
+            (
+                "vendor/lib/a/src/widget.php",
+                "<?php\nnamespace Lib\\A;\nfunction helper() {}\n/** @property string $p */\nclass Widget {}\nclass Dup {}\nclass Same {}\n",
+            ),
+            (
+                "vendor/lib/b/src/dup.php",
+                "<?php\nnamespace Lib\\A;\nclass Dup {}\nfunction helper() {}\n/** @mixin Widget */\nclass Same {}\ndefine('FLAG', true);\n$o->{$name} = 5;\n",
+            ),
+            (
+                "vendor/lib/b/src/more.php",
+                "<?php\nclass Local {}\nclass Local {}\nclass_alias('app\\\\kernel', 'shim');\nclass_alias('lib\\\\a\\\\dup', 'never');\n",
+            ),
+            ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
+        ]
+    }
+
+    fn parse_all(sources: &[(&'static str, &'static str)]) -> Vec<(&'static str, SourceTree)> {
+        sources.iter().map(|&(p, s)| (p, SourceTree::parse(s))).collect()
+    }
+
+    fn units_of<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<FileUnit<'a>> {
+        parsed.iter().map(|(p, t)| FileUnit { path: p, tree: t }).collect()
+    }
+
+    /// The oracle under the production grouping: `from_units` (which now
+    /// delegates through the shard builder) reproduces the frozen
+    /// construction on every table.
+    #[test]
+    fn from_units_matches_the_frozen_reference() {
+        let parsed = parse_all(&fixture());
+        let units = units_of(&parsed);
+        let via_shards = Index::from_units(&units);
+        let reference = from_units_reference(&units);
+        assert!(via_shards == reference, "shard merge diverged from the frozen construction");
+        // The fixture is only honest if the cross-shard machinery fired.
+        assert!(via_shards.ambiguous_functions.contains("lib\\a\\helper"));
+        assert!(via_shards.ambiguous_classes.contains("lib\\a\\dup"));
+        assert!(via_shards.classes.contains_key("app\\widget"), "cross-shard alias minted");
+        assert!(!via_shards.classes.contains_key("never"), "ambiguous target mints no edge");
+        assert_eq!(via_shards.fn_by_simple["helper"].len(), 3);
+        assert_eq!(
+            via_shards.magic_obstacles["lib\\a\\same"].len(),
+            1,
+            "the tag-carrying Same, not its tag-free twin"
+        );
+        assert!(via_shards.property_writes.1 && via_shards.property_writes.0.contains("written"));
+        assert!(via_shards.declares_constant("app\\LIMIT") && via_shards.declares_constant("FLAG"));
+        assert_eq!(via_shards.file_index_of("vendor/autoload.php"), Some(4));
+    }
+
+    /// The oracle under the real Composer partition (the classification the
+    /// generation build will use): grouping the same units by
+    /// [`PackagePartition::package_of`] — a *different* partition from the
+    /// production heuristic (`lib/b`'s files land in stray here, since only
+    /// `lib/a` is locked) — merges to the identical index.
+    #[test]
+    fn composer_partition_shards_merge_like_the_reference() {
+        let dir = std::path::PathBuf::from("/proj");
+        let root = GoverningRoot::new(
+            dir.join("composer.json"),
+            dir.clone(),
+            vec![dir.join("vendor")],
+            vec![dir.join("src")],
+        );
+        let layout = ProjectLayout::new(dir, vec![root]);
+        let lock = r#"{"packages": [
+            {"name": "lib/a", "require": {"php": ">=8.1"}},
+            {"name": "local/pkg", "dist": {"type": "path"}}
+        ]}"#;
+        let partition = PackagePartition::from_lock(&layout, Some(lock));
+
+        let parsed = parse_all(&fixture());
+        let units = units_of(&parsed);
+        let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+        for (slot, u) in units.iter().enumerate() {
+            groups.entry(partition.package_of(u.path).as_str().to_owned()).or_default().push(slot);
+        }
+        assert!(groups.len() > 1, "the partition must actually split the fixture");
+        assert!(groups.contains_key("lib/a"), "the locked package claims its files");
+        let mut shards: Vec<PackageShard> = Vec::new();
+        for slots in groups.into_values() {
+            let mut s = PackageShard::default();
+            for slot in slots {
+                s.add_file(slot, units[slot].path, units[slot].tree);
+            }
+            shards.push(s);
+        }
+        let via_partition = Index::from_merged(merge_shards(&shards));
+        assert!(via_partition == from_units_reference(&units), "partition → shards → merge diverged");
+        assert!(via_partition == Index::from_units(&units), "two groupings, one merge");
+    }
+
+    /// The finest partition there is — one file per shard — merges to the
+    /// identical index: the strongest statement of partition invariance.
+    #[test]
+    fn a_per_file_partition_merges_identically() {
+        let parsed = parse_all(&fixture());
+        let units = units_of(&parsed);
+        let shards: Vec<PackageShard> = units
+            .iter()
+            .enumerate()
+            .map(|(slot, u)| {
+                let mut s = PackageShard::default();
+                s.add_file(slot, u.path, u.tree);
+                s
+            })
+            .collect();
+        let merged = Index::from_merged(merge_shards(&shards));
+        assert!(merged == from_units_reference(&units));
+    }
 }
