@@ -31,6 +31,11 @@ serde_json.workspace = true
 # points at it, never back.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 steins-gen = { path = "../steins-gen" }
+# The generation orchestrator (ADR-0092 §5, issue #489) reads and writes the
+# per-package payloads, so the native build turns steins-db's `persist` codecs
+# on. Target-gated like steins-gen above: the wasm graph keeps its surface
+# (ADR-0065) — nothing in the playground persists.
+steins-db = { path = "../steins-db", features = ["persist"] }
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }

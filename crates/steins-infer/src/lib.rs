@@ -48,6 +48,8 @@ mod fold_args;
 mod fold_persist;
 #[cfg(not(target_arch = "wasm32"))]
 mod fold_process;
+#[cfg(not(target_arch = "wasm32"))]
+mod generation;
 mod fold_table;
 mod foreach_check;
 mod generics;
@@ -145,6 +147,11 @@ pub use fold_persist::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_process::{ProcessEngine, SidecarFolder};
+#[cfg(not(target_arch = "wasm32"))]
+pub use generation::{
+    FoldReport, GenerationError, GenerationMode, GenerationOutcome, GenerationParams,
+    GenerationReport, PackageKind, PackageReport, PhaseTimings, SOURCES_SECTION, generation_check,
+};
 pub use fold_table::{TableEngine, TableFolder, request_key};
 // end return missing (ADR-0078, issue #199)
 

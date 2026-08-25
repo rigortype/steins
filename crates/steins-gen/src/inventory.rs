@@ -139,6 +139,15 @@ impl SourceInventory {
 
     pub fn entry(&self, path: &str) -> Option<&SourceEntry> { self.entries.get(path) }
 
+    /// The sealed key a capture-time path resolves to, if the seal holds it —
+    /// the same normalization [`SourceInventory::capture`] applied, so a caller
+    /// that kept its own spelling (absolute, `./`-prefixed) can find the entry
+    /// it captured without re-deriving the rule. `None` for a path that
+    /// normalizes to nothing sealed (or escapes the root).
+    pub fn key_for(&self, path: &Path) -> Option<String> {
+        relative_key(&self.root, path).ok().filter(|key| self.entries.contains_key(key))
+    }
+
     /// The package source fingerprint, domain `"steins-gen/source"`: each
     /// entry contributes its relative path, size, and content hash, in path
     /// order. mtime stays out (see [`SourceEntry::mtime`]); the root stays
