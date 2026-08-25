@@ -189,6 +189,12 @@ pub(crate) struct Index {
     /// site identity needs none of the project index's collision machinery.
     constants: HashSet<String>,
     // end global constants (ADR-0078, issue #198)
+    /// Every unit's diagnostic path → its index in the [`FileUnit`] slice — the
+    /// per-run derivation of a units index from the stable file identity (issue
+    /// #497). A value type that survives a walk names a file by path; a consumer
+    /// that needs a `Cx` (or unit order) looks the index up here rather than
+    /// embedding one.
+    files: HashMap<String, usize>,
 }
 
 // member absence (ADR-0078, issue #197)
@@ -205,6 +211,13 @@ fn scan_property_writes(units: &[FileUnit]) -> (HashSet<String>, bool) {
     (names, dynamic)
 }
 // end member absence (ADR-0078, issue #197)
+
+/// Map every unit's diagnostic path to its position in the slice (issue #497) —
+/// the [`Index::file_index_of`] table, built once per run from the same slice
+/// every other per-run query reads.
+fn scan_file_paths(units: &[FileUnit]) -> HashMap<String, usize> {
+    units.iter().enumerate().map(|(i, u)| (u.path.to_owned(), i)).collect()
+}
 
 impl Index {
     /// Build the index straight from the file units (mirrors the db query).
@@ -244,6 +257,7 @@ impl Index {
         idx.property_writes = scan_property_writes(units);
         // end member absence (ADR-0078, issue #197)
         idx.constants = scan_global_constants(units);
+        idx.files = scan_file_paths(units);
         idx
     }
 
@@ -275,7 +289,18 @@ impl Index {
         idx.property_writes = scan_property_writes(units);
         // end member absence (ADR-0078, issue #197)
         idx.constants = scan_global_constants(units);
+        idx.files = scan_file_paths(units);
         idx
+    }
+
+    /// The per-run units index of the file whose diagnostic path is `path`, or
+    /// `None` when no unit of this run has that path (issue #497). This is where
+    /// a stable file identity carried by a value type turns back into the index
+    /// a [`Cx`] or the unit-order sorts need.
+    ///
+    /// [`Cx`]: crate::cx::Cx
+    pub(crate) fn file_index_of(&self, path: &str) -> Option<usize> {
+        self.files.get(path).copied()
     }
 
     // global constants (ADR-0078, issue #198)

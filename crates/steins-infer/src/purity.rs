@@ -1063,7 +1063,6 @@ fn region_purity_in(
             .collect();
         classify_throw_origins(
             &cx,
-            file,
             class_fqn,
             &picked_throws,
             &mut throw_direct,

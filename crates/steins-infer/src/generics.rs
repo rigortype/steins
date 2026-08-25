@@ -53,7 +53,9 @@ pub(crate) fn carry_for_owner<'c>(carries: &'c [GenericCarry], owner_fqn: &str) 
 /// takes one: a [`CArg::Ty`] holds names spelled against the *declaring* file's
 /// namespace scope, and reading them anywhere else would name a different class.
 /// `None` is a value carry, which needs no resolution context — its class is
-/// already an FQN.
+/// already an FQN. The carry names the file by path (issue #497); this holds the
+/// per-run units index [`GenericCarry::site_index`] derived from it, the shape
+/// the resolution consumers take.
 pub(crate) struct CarriedArg<'c> {
     pub(crate) arg: &'c CArg,
     pub(crate) site: Option<(usize, u32)>,
@@ -87,7 +89,7 @@ pub(crate) fn get_template_type<'c>(
         .iter()
         .position(|n| n == template_name)
         .or_else(|| names.iter().position(|n| n.eq_ignore_ascii_case(template_name)))?;
-    Some(CarriedArg { arg: carry.args.get(i)?, site: carry.site })
+    Some(CarriedArg { arg: carry.args.get(i)?, site: carry.site_index(cx) })
 }
 
 /// The carries a carry argument itself holds — the **second hop** of a
