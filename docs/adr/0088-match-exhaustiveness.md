@@ -453,7 +453,6 @@ mechanism the 2026-08-19 note above credits for §8's layered row), so the
 guard-chain spelling would go silent where its by-value twin reports. Measured on
 #448's branch: the layered row reports by value and is silent through
 `match (true)`.
-||||||| parent of 7846f31 (ADR-0088: record the match(true) gap closing and its own asymmetry)
 
 ## Note (2026-08-19): the `match (true)` gap closes, off the CST rather than the trace (issue #448)
 
