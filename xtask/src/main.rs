@@ -13,6 +13,7 @@
 //!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
 //!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
+//!   perf <DIR>… [--bless]    cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
 //! ```
 //!
@@ -30,7 +31,9 @@ mod mine_param_facts;
 mod gen_catalog;
 mod lean_check;
 mod nsrt;
+mod perf;
 mod phpdoc_oracle;
+mod sha256;
 mod sync;
 
 use std::process::ExitCode;
@@ -111,6 +114,12 @@ fn main() -> ExitCode {
                 Err(e) => fail(&e),
             }
         }
+        Some("perf") => match perf::run(&args[1..]) {
+            Ok(true) => ExitCode::SUCCESS,
+            // ADR-0092 §5: a determinism or blessed-findings break blocks; timing never does.
+            Ok(false) => ExitCode::FAILURE,
+            Err(e) => fail(&e),
+        },
         Some("phpdoc-oracle") => {
             let check = args[1..].iter().any(|a| a == "--check");
             match phpdoc_oracle::run(check) {
@@ -119,11 +128,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | phpdoc-oracle)"
+            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | perf | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }
