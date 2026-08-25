@@ -26,7 +26,7 @@ whole surface to stderr and exits `2`:
 
 ```
 $ steins
-usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
