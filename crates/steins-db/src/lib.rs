@@ -16,6 +16,8 @@ pub mod composer;
 pub mod effects;
 pub mod layout;
 pub mod partition;
+#[cfg(feature = "persist")]
+pub mod persist;
 pub mod plugins;
 pub mod shard;
 

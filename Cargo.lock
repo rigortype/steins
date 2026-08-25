@@ -1058,8 +1058,10 @@ name = "steins-db"
 version = "0.1.6"
 dependencies = [
  "salsa",
+ "serde",
  "serde_json",
  "steins-catalog",
+ "steins-db",
  "steins-gen",
  "steins-phpdoc",
  "steins-syntax",
@@ -1070,6 +1072,7 @@ name = "steins-domain"
 version = "0.1.6"
 dependencies = [
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -1128,6 +1131,7 @@ dependencies = [
  "mago-database",
  "mago-span",
  "mago-syntax",
+ "serde",
  "steins-domain",
 ]
 

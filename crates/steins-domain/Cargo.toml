@@ -8,6 +8,15 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+# `persist` only (ADR-0092 §2, issue #487): the Serialize/Deserialize impls a
+# stored generation needs. Optional so the default build — and everything the
+# wasm module pulls (ADR-0065 leanness) — stays serde-free.
+serde = { workspace = true, optional = true }
+
+[features]
+# Serde impls for the value vocabulary (`PhpStr`), for the per-package
+# artifacts of ADR-0092 §2. Enabled by `steins-syntax/persist`.
+persist = ["dep:serde"]
 
 [dev-dependencies]
 proptest = "1"

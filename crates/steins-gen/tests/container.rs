@@ -65,6 +65,34 @@ fn round_trip_reads_every_section_by_name() {
     assert!(!reader.has_section(&sec("absent")));
 }
 
+/// The sub-range primitive (issue #487): a window into one section reads
+/// exactly its bytes, and every way the window can lie about its bounds — a
+/// range past the section's end, an offset past it with zero length asked, an
+/// arithmetic overflow, an absent section — is a `Miss`, never an
+/// out-of-section read.
+#[test]
+fn section_slice_reads_windows_and_refuses_ranges_outside() {
+    let dir = TempDir::new("slice");
+    let path = sample_artifact(&dir, "a.pkg");
+    let mut reader = ArtifactReader::open(&path, DecodeBudget::default()).unwrap();
+    assert_eq!(reader.section_slice(&sec("symbols"), 0, 3).unwrap(), b"the");
+    assert_eq!(reader.section_slice(&sec("symbols"), 4, 6).unwrap(), b"symbol");
+    assert_eq!(reader.section_slice(&sec("symbols"), 16, 0).unwrap(), Vec::<u8>::new());
+    assert_eq!(reader.section_slice(&sec("empty"), 0, 0).unwrap(), Vec::<u8>::new());
+    // A full-section window and `section` agree byte for byte.
+    assert_eq!(reader.section_slice(&sec("summaries"), 0, 4096).unwrap(), vec![0xAB; 4096]);
+    for (offset, len) in [(0, 17), (16, 1), (17, 0), (u64::MAX, 1), (1, u64::MAX)] {
+        assert!(
+            reader.section_slice(&sec("symbols"), offset, len).is_err(),
+            "({offset}, {len}) lies outside the section"
+        );
+    }
+    assert!(matches!(
+        reader.section_slice(&sec("absent"), 0, 0),
+        Err(Miss::AbsentSection(_))
+    ));
+}
+
 /// Sections read out of write order too — the directory is the access path,
 /// not the byte order.
 #[test]

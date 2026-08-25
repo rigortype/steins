@@ -21,3 +21,20 @@ steins-gen = { path = "../steins-gen" }
 # scan lives beside the shard builder here.
 steins-phpdoc = { path = "../steins-phpdoc" }
 serde_json.workspace = true
+# `persist` only (ADR-0092 §2, issue #487): the derives behind the per-package
+# payload codec in `persist`.
+serde = { workspace = true, optional = true }
+
+[features]
+# The per-package artifact payloads (ADR-0092 §2, issue #487): the `symbols`/
+# `contracts`/`trace` section codecs, the read transaction, and the residency
+# policy vocabulary. A feature — not unconditional — so the wasm module, which
+# consumes this crate, keeps its dependency surface (ADR-0065): nothing in the
+# playground persists.
+persist = ["dep:serde", "steins-syntax/persist"]
+
+[dev-dependencies]
+# The self-dependency trick: enables `persist` for this crate's own test
+# builds (CI runs `cargo test --workspace` with default features), without
+# enabling it for any dependent — the wasm graph stays serde-derive-free.
+steins-db = { path = ".", features = ["persist"] }

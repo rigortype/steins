@@ -198,6 +198,56 @@ impl PartialEq<&str> for PhpStr {
     }
 }
 
+// The `persist` serde impls (ADR-0092 §2, issue #487). Hand-written, not
+// derived, for two reasons: the canonical-form invariant (the `Utf8` arm holds
+// exactly the values `from_utf8` admits) must survive deserialization, which a
+// derived `Deserialize` on the private enum would not guarantee; and the
+// common UTF-8 value should cost a JSON string, not an array of byte numbers.
+// A UTF-8 value serializes as a string, a non-UTF-8 one as a byte sequence,
+// and both deserialize through the canonicalizing constructors — so a
+// round-trip is byte-exact and always canonical. A cache format (no external
+// consumer): the artifact schema version governs its evolution.
+#[cfg(feature = "persist")]
+impl serde::Serialize for PhpStr {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self.as_str() {
+            Some(s) => serializer.serialize_str(s),
+            None => serializer.serialize_bytes(self.as_bytes()),
+        }
+    }
+}
+
+#[cfg(feature = "persist")]
+impl<'de> serde::Deserialize<'de> for PhpStr {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = PhpStr;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a string or a byte sequence")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<PhpStr, E> {
+                Ok(PhpStr::from(v))
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<PhpStr, E> {
+                Ok(PhpStr::from_bytes(v))
+            }
+
+            fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<PhpStr, A::Error> {
+                let mut bytes = Vec::with_capacity(seq.size_hint().unwrap_or(0).min(4096));
+                while let Some(b) = seq.next_element::<u8>()? {
+                    bytes.push(b);
+                }
+                Ok(PhpStr::from_vec(bytes))
+            }
+        }
+        deserializer.deserialize_any(Visitor)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

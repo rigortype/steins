@@ -24,7 +24,16 @@ use crate::stack_guard;
 use crate::{line_starts, lower_comment, to_span};
 
 /// An owned, Mago-free lowering of one parsed PHP file.
+///
+/// Under the `persist` feature the whole tree — private fields, source text
+/// and all — (de)serializes, so a generation can store one file's trace IR and
+/// hand it back without re-parsing (ADR-0092 §2, issue #487). The derive is on
+/// the tree itself deliberately: a wire twin would have to duplicate every
+/// field and would drift. What the bytes mean on disk is `steins-db`'s
+/// business; a value that deserializes is exactly a value [`SourceTree::parse`]
+/// once produced, or the section it came from fails to decode wholesale.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct SourceTree {
     strict_types: bool,
     functions: Vec<FunctionDecl>,
@@ -650,6 +659,7 @@ pub(crate) struct Lowered {
 /// name (ADR-0078, issue #197) — storage behind [`SourceTree::property_write_names`] /
 /// [`SourceTree::writes_computed_property_name`].
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct PropertyWrites {
     /// The written names, deduplicated, as written (property names are case-sensitive in PHP).
     pub(crate) names: Vec<String>,

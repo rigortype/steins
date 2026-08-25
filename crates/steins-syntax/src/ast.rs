@@ -13,6 +13,7 @@ use steins_domain::PhpStr;
 
 /// A byte-offset span into the source file. `end` is exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -28,6 +29,7 @@ pub struct Position {
 /// How a name was written at a *reference* site, driving PHP name resolution
 /// (namespace fallback, `use` imports, builtin catalog — resolved in `steins-infer`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum RefKind {
     /// `\Foo\bar` — absolute, leading `\` stripped from `raw`.
     FullyQualified,
@@ -47,6 +49,7 @@ pub enum RefKind {
 ///
 /// [`SourceTree::ctx_at`]: crate::SourceTree::ctx_at
 #[derive(Debug, Clone)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct NameRef {
     pub raw: String,
     pub kind: RefKind,
@@ -80,6 +83,7 @@ impl NameRef {
 /// A file-region namespace context: enclosing namespace plus `use` imports in
 /// scope. Names/targets **case-preserved**; import-map keys lowercased (PHP lookup is case-insensitive).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct NsCtx {
     /// The namespace path (`App\Models`), or empty for the global namespace.
     pub namespace: String,
@@ -116,6 +120,7 @@ impl std::hash::Hash for NsCtx {
 
 /// The supported scalar native types (PHP 8.1+; ADR-0011).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScalarType {
     Int,
     Float,
@@ -140,6 +145,7 @@ impl ScalarType {
 /// pseudo-member, or a class/interface/enum **object** type (ADR-0043).
 /// [`TypeMember::Instance`] carries the FQN twice: lowercase matching key + source-cased display. Not [`Copy`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum TypeMember {
     /// A full scalar type (`int`, `float`, `string`, `bool`).
     Scalar(ScalarType),
@@ -163,6 +169,7 @@ pub enum TypeMember {
 /// One class/interface membership in a native object type — FQN carried twice as
 /// in [`TypeMember::Instance`]; the element of [`TypeMember::InstanceInter`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassRef {
     /// The namespace-resolved, **lowercase-normalized** FQN — the matching / is-a key.
     pub fqn: String,
@@ -190,6 +197,7 @@ impl TypeMember {
 /// nullable, unions. Unsupported members (`array`, `mixed`, `iterable`, etc.)
 /// lower the **whole** type to `None` so the checker stays silent (ADR-0002).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct NativeType {
     /// The union members, in source order. Always non-empty — a hint that would
     /// lower to zero members (e.g. standalone `null`) lowers to `None` instead.
@@ -223,6 +231,7 @@ impl NativeType {
 
 /// A single declared parameter.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Param {
     /// Parameter name without the leading `$`.
     pub name: String,
@@ -257,6 +266,7 @@ pub struct Param {
 /// not reachability-aware. Classifies each call argument's **lvalue root** for
 /// by-ref out-parameter coloring (ADR-0063 §2.3) — distinguishes `mutate.local`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum RefTarget {
     /// A binding **private to the calling frame**: a plain `$v` (or `$v['k']`),
     /// not a by-ref param, no aliasing construct — unobservable → `mutate.local`.
@@ -276,7 +286,13 @@ pub(crate) const SUPERGLOBALS: &[&str] = &[
     "GLOBALS", "_SERVER", "_GET", "_POST", "_FILES", "_COOKIE", "_SESSION", "_REQUEST", "_ENV",
 ];
 
+// `Deserialize` is hand-written (`crate::persist`), not derived: serde's
+// derive implicitly borrows a `&str` field from the input, which a
+// `&'static str` keyword can never satisfy, and `serde(with)` does not lift
+// the implicit borrow. The derived `Serialize` and the hand-written inverse
+// share one wire shape, pinned by the round-trip tests in `steins-db`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize))]
 pub enum EffectOrigin {
     /// A call to a statically-named function at `span`. `name` resolves
     /// project-wide (builtin/user function/ambiguous → taints exhaustiveness);
@@ -286,10 +302,18 @@ pub enum EffectOrigin {
     Call { name: NameRef, span: Span, arg_targets: Option<Vec<RefTarget>>, const_args: ConstArgs },
     /// An `echo`/`print`/short-echo, or non-blank inline HTML between `?>` and
     /// `<?php`, at `span` — `io.output.buffer` effect (ADR-0083, OB-capturable).
-    Output { keyword: &'static str, span: Span },
+    Output {
+        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
+        keyword: &'static str,
+        span: Span,
+    },
     /// An `exit` / `die` construct at `span` — the `exit` effect (ADR-0019 rule
     /// 4: `Pure` forbids exit). `keyword` is the spelling for diagnostics.
-    Exit { keyword: &'static str, span: Span },
+    Exit {
+        #[cfg_attr(feature = "persist", serde(serialize_with = "crate::persist::keyword::serialize"))]
+        keyword: &'static str,
+        span: Span,
+    },
     /// A method/static call whose *receiver* resolves without a flow env
     /// (`$this->`, `self::`, `parent::`, `Foo::`, `new Foo()->`) — propagates
     /// `#[\Steins\Pure]` edges, and a *declared* receiver (ADR-0067) carries an
@@ -322,6 +346,7 @@ pub enum EffectOrigin {
 /// interpolation, class constant, array element) is simply absent from
 /// [`ConstArgs`]; the consumer keeps its argument-blind default.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CallTarget {
     /// A quoted string literal with **no interpolation** (decoded value); an
     /// interpolated `"…{$x}…"` is a composite string, never this.
@@ -335,6 +360,7 @@ pub enum CallTarget {
 /// positions 0/1, `None` unless [`CallTarget`] could read it — matching what
 /// stream rows need (a target + mode/second target). Named/spread empties both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstArgs {
     /// Positional argument 0.
     pub first: Option<CallTarget>,
@@ -345,6 +371,7 @@ pub struct ConstArgs {
 /// A resolvable callback argument (ADR-0033): an inline closure/arrow scope (by
 /// definition offset) or a named free function; joins into the caller's effects/throws.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CallbackRef {
     /// An inline closure/arrow whose body scope is at this definition offset.
     Closure(u32),
@@ -355,6 +382,7 @@ pub enum CallbackRef {
 /// The receiver of an [`EffectOrigin::MethodCall`], restricted to the forms the
 /// effects pass can resolve to a same-file target without a flow environment.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum EffectRecv {
     /// `$this->m()` — resolved against the enclosing class chain under the
     /// final/private guard (a non-final public method may be overridden).
@@ -377,6 +405,7 @@ pub enum EffectRecv {
 /// One `catch` clause's caught types + bound variable, for the throw damming
 /// walk (ADR-0040); an unnameable caught type sets `has_unresolvable` → `Maybe`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct CatchClause {
     /// Statically-named caught classes (resolved to FQNs project-wide). Empty
     /// with `has_unresolvable` set means "caught, but we cannot name what".
@@ -390,6 +419,7 @@ pub struct CatchClause {
 /// What a [`ThrowOrigin`] contributes to a body's throw set (ADR-0040) — the
 /// thrown class (explicit-throw) or a propagation edge (call variants), re-filtered by this origin's guards.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ThrowKind {
     /// `throw new X(...)` — `X` is the class as written.
     New(NameRef),
@@ -413,6 +443,7 @@ pub enum ThrowKind {
 /// One throw-relevant construct in a function/method body, with ordered
 /// `try`/`catch` guards that may dam it (ADR-0040); computed for *all* functions/methods.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ThrowOrigin {
     pub kind: ThrowKind,
     /// The span of the throwing/calling construct (diagnostic position).
@@ -428,6 +459,7 @@ pub struct ThrowOrigin {
 /// (`#[\Steins\Pure]`), non-empty from `#[\Steins\Effect(...)]`. Both present →
 /// `Pure` wins, no contradiction fires.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct EffectEnvelope {
     /// The declared effect labels (ADR-0018 dot-paths). Empty = `Pure`.
     pub labels: Vec<String>,
@@ -437,6 +469,7 @@ pub struct EffectEnvelope {
 
 /// A user-defined function declaration (top-level or namespaced); `name` is the simple name as written.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct FunctionDecl {
     pub name: String,
     /// Fully-qualified, lowercase-normalized name (PHP names case-insensitive); project index keys on this.
@@ -480,6 +513,7 @@ pub struct FunctionDecl {
 
 /// A method's declared visibility; absent modifiers default to `Public` (PHP semantics).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum Visibility {
     Public,
     Protected,
@@ -490,6 +524,7 @@ pub enum Visibility {
 /// (bare `self`/`static`/`parent`, ADR-0043 amendment). `lower_method` has no
 /// class context yet, so only kind + nullability are recorded; FQN-stamping resolves the bound later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum RetBoundKind {
     /// `: self` — bound is the enclosing class directly (not late-bound).
     SelfKw,
@@ -503,6 +538,7 @@ pub enum RetBoundKind {
 /// Recorded return-position LSB keyword shape (kind + nullability), before the
 /// enclosing-class context resolves it to a bound (ADR-0043 amendment §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct RetBoundKeyword {
     pub kind: RetBoundKind,
     /// `true` when the hint was `?self`/`?static`/`?parent` (nullable bound also accepts `null`).
@@ -512,6 +548,7 @@ pub struct RetBoundKeyword {
 /// A user-defined method declaration — class-world analogue of [`FunctionDecl`],
 /// carrying the same data plus dispatch modifiers (ADR-0001).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct MethodDecl {
     /// Simple method name as written (case preserved; matching is case-insensitive).
     pub name: String,
@@ -564,6 +601,7 @@ pub struct MethodDecl {
 /// Static properties are lowered for a complete class surface but **never
 /// tracked in the heap** (global state, ADR-0036).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct PropertyDecl {
     /// Property name without the leading `$`.
     pub name: String,
@@ -603,6 +641,7 @@ pub struct PropertyDecl {
 /// carry `value: None`. Not a heap-tracked property — a class constant holding
 /// an object of the enum class — so it lives here, off the property path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct EnumCaseDecl {
     /// The case name as written (e.g. `Hearts`).
     pub name: String,
@@ -617,6 +656,7 @@ pub struct EnumCaseDecl {
 /// every declared constant regardless of initializer; enum cases live in
 /// [`ClassDecl::enum_cases`], not here.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassConstDecl {
     /// The constant name as written (constant names are case-sensitive).
     pub name: String,
@@ -636,6 +676,7 @@ pub struct ClassConstDecl {
 /// method bodies unanalyzed ([`Self::methods`] empty, still class-indexed).
 /// A class *using* a trait sets [`ClassDecl::uses_traits`] so resolution gives up.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassDecl {
     /// Simple (unqualified) class name as written at the declaration site (used for diagnostics).
     pub name: String,
@@ -726,9 +767,14 @@ pub struct ClassDecl {
 /// method **first-class callable** (`$o->m(...)` is a value, not a call — see
 /// [`ClosureRef::FunctionName`], which carries the free-function form only).
 #[derive(Debug, Clone, PartialEq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ArgValue {
     Int(i64),
-    Float(f64),
+    // Persisted as IEEE bits (`u64`), not a JSON number: JSON has no spelling
+    // for the non-finite floats a literal like `1e999` lowers to (serde_json
+    // would write `null` and the round-trip would refuse itself), and bits are
+    // exact for every value including them.
+    Float(#[cfg_attr(feature = "persist", serde(with = "crate::persist::f64_bits"))] f64),
     /// A PHP string literal's value — a byte string, not a Rust `String` (ADR-0080).
     Str(PhpStr),
     Bool(bool),
@@ -835,6 +881,7 @@ pub enum ArgValue {
 /// closure/arrow's own [`Scope`] (by definition offset), or a named free
 /// function. `captures` lists only names — snapshots taken at closure-creation time (PHP's by-value capture).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ClosureRef {
     /// A closure/arrow with its own scope at `def_offset` (matches
     /// [`ScopeOwner::Closure`]); `captures` are by-value captured names.
@@ -847,6 +894,7 @@ pub enum ClosureRef {
 /// A lowered array-literal key. `Auto` is an absent key, resolved to its next
 /// integer position by [`normalize_array`]; `Int`/`Str` are already-normalized.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ArrayKey {
     /// An absent key — normalized to the next integer position.
     Auto,
@@ -1028,6 +1076,7 @@ pub fn normalize_array(
 /// One element of a literal array expression, reduced to what
 /// [`duplicate_array_keys`] needs (issue #187): resolved key + own span.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArrayLiteralElement {
     /// `Some(ArrayKey::Auto)` for a bare `value` element; `Some(Int/Str)` for an
     /// explicit key the fold gate resolves (PHP's own coercion: `1`/`'1'`/`1.7`/
@@ -1042,6 +1091,7 @@ pub struct ArrayLiteralElement {
 /// One literal array expression (`[...]`/`array(...)`), elements in source
 /// order — the evidence `array.duplicate-key` needs (issue #187).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ArrayLiteralSite {
     pub elements: Vec<ArrayLiteralElement>,
 }
@@ -1302,6 +1352,7 @@ fn render_array_value(v: &ArgValue) -> String {
 
 /// A single positional call argument.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Arg {
     pub value: ArgValue,
     pub span: Span,
@@ -1312,6 +1363,7 @@ pub struct Arg {
 /// the phpdoc declared-contract lane also binds the argument's **value**. Makes
 /// the call non-[`CallExpr::positional_only`]; positional args stay in [`CallExpr::args`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct NamedArg {
     /// Parameter name bound, without the leading `$` (e.g. `b` in `f(b: 2)`).
     /// PHP compares **case-sensitively** here (`f(A: 1)` on `function f($a)` is fatal).
@@ -1325,6 +1377,7 @@ pub struct NamedArg {
 /// What a [`CallExpr`] is called *on* — the receiver dimension class-world
 /// resolution dispatches on (ADR-0001); resolvability depends on receiver exactness (`steins-infer`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum Callee {
     /// `f(args...)` — a statically-named function (the last, unqualified name).
     Function(String),
@@ -1349,6 +1402,7 @@ pub enum Callee {
 
 /// Object an instance-method call dispatches on, restricted to forms resolution can reason about.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum Receiver {
     /// `$this->m()` — inside a class body.
     This,
@@ -1387,6 +1441,7 @@ impl Receiver {
 
 /// The class portion of a static `Class::m()` call, as written.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum StaticClass {
     /// Explicit class reference (`Foo::m()`/`Sub\Foo::m()`) — exact, FQN-resolved.
     Named(NameRef),
@@ -1413,6 +1468,7 @@ impl StaticClass {
 
 /// A function-call (or method / static / constructor call) expression.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct CallExpr {
     /// Simple callee name, if statically-known **function** identifier; `None`
     /// for dynamic/method/static/constructor calls. Full receiver is [`Self::receiver`].
@@ -1462,6 +1518,7 @@ impl CallExpr {
 
 /// A comparison operator in a lowered [`CondExpr`] (ADR-0031).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CmpOp {
     /// `===` — strict identity.
     Identical,
@@ -1503,6 +1560,7 @@ impl CmpOp {
 /// **value** position (issue #260), same operator as [`CondExpr::Cmp`]'s guard
 /// form (`$b = $x > 3;` vs `if ($x > 3)`); unrepresentable operators stay [`ArgValue::Other`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ValueOp {
     /// A comparison `=== !== == != < <= > >=`. Its value is a `bool`.
     Cmp(CmpOp),
@@ -1521,6 +1579,7 @@ impl ValueOp {
 /// A lowered operand of a [`CondExpr`] comparison (ADR-0031): a bare local
 /// variable, a concrete literal value, or anything the lowering can't represent.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CondOperand {
     /// `$name` — a bare local variable (name without the `$`).
     Var(String),
@@ -1562,6 +1621,7 @@ pub enum CondOperand {
 /// env to a `Certainty` (yes/no/maybe). Unrecognized conditions become [`CondExpr::Opaque`],
 /// carrying the read variables so the walk can forget them on the excluded path.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CondExpr {
     /// `lhs <op> rhs` — a comparison (`===`/`!==`/`==`/`!=`).
     Cmp { op: CmpOp, lhs: CondOperand, rhs: CondOperand },
@@ -1597,6 +1657,7 @@ pub enum CondExpr {
 /// the subject equals any of them (`===` for match, loose `==` for switch). `trace` is the
 /// arm body, lowered like any sub-trace; a switch arm's terminating `break` is stripped.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct MatchArmT {
     pub conditions: Vec<CondOperand>,
     pub trace: Vec<Stmt>,
@@ -1605,6 +1666,7 @@ pub struct MatchArmT {
 /// One entry of a scope's linear trace IR (ADR-0001). A scope's body lowers to an ordered
 /// list of these; anything unrecognized becomes [`StmtKind::Barrier`] (sound over-lowering).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum StmtKind {
     /// `$var = <value>;` — a plain assignment to a bare local. `span` is the left-hand
     /// `$var`. `call` carries the full [`CallExpr`] when the RHS is a statically-named call
@@ -1739,6 +1801,7 @@ pub enum StmtKind {
 /// Both predicates exist so neither consumer writes `!= Terminates` / `!= FallsThrough` —
 /// exactly the mistake that would invert the other's safe side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum BodyEnd {
     /// Control provably never reaches the end: `return`/`throw`/`exit`, a branch whose every
     /// arm terminates, or a loop with no exit edge.
@@ -1829,6 +1892,7 @@ pub fn body_has_terminator(stmts: &[Stmt]) -> bool {
 
 /// A trace entry plus the local variables it feeds into a call.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Stmt {
     pub kind: StmtKind,
     /// The whole statement's source span (set by `lower_stmt` from the CST node; nested
@@ -1882,6 +1946,7 @@ impl Stmt {
 /// records where conversions are; legality (`int`/`null`/other scalars fine, array warns,
 /// no-`__toString` object fatals) is the inference layer's judgement.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct StringContextSite {
     /// The converted operand, lowered like a call argument. An operand the lowering can't
     /// spell arrives as [`ArgValue::Other`] — silence, never a manufactured finding.
@@ -1895,6 +1960,7 @@ pub struct StringContextSite {
 /// The syntactic form of a [`StringContextSite`]. PHP converts identically in all of
 /// them — the distinction exists only so a finding can name the construct.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum StringContextKind {
     /// An expression embedded in a double-quoted string/heredoc (`"x $v"`, `"{$v}"`), or a
     /// backtick shell-exec string (same conversion).
@@ -1927,6 +1993,7 @@ impl StringContextKind {
 /// syntax layer only guarantees completeness: `sites` lists EVERY occurrence in the
 /// statement's call arguments, or `opaque` is set and `sites` is empty — no third state.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct InvalidatedVar {
     /// The local variable's name, without the leading `$`.
     pub name: String,
@@ -1945,6 +2012,7 @@ const ZERO_SPAN: Span = Span { start: 0, end: 0 };
 /// Who owns an analysis [`Scope`] — top-level script, free function, or class method. Method
 /// scopes carry their declaring class so `$this->`/`self::`/`parent::` resolve (ADR-0001).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ScopeOwner {
     TopLevel,
     Function(String),
@@ -1960,6 +2028,7 @@ pub enum ScopeOwner {
 /// [`Scope::poisoned`] is set; `scan_opaque` backs both the predicate and this inventory, so
 /// `steins doctor`'s report can never drift from a hand-maintained parallel list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum OpaqueConstruct {
     /// `eval(<expr>)` — code as data (also a [`DynamismKind::Eval`] dam site).
     Eval,
@@ -2018,6 +2087,7 @@ impl OpaqueConstruct {
 /// One give-up-list construct, where it stands. Collected per scope (see [`Scope::opaque`]),
 /// since "no local is known here" is a scope-level fact, not a file-wide one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct OpaqueSite {
     pub construct: OpaqueConstruct,
     /// The construct's source span (the outermost, when nested — the predicate stops there too).
@@ -2029,6 +2099,7 @@ pub struct OpaqueSite {
 /// PHP's implicit `return null` to return-fact fallthrough (ADR-0075); `void`/`never`/other
 /// don't.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum RetHintKind {
     /// `: void`
     Void,
@@ -2052,6 +2123,7 @@ pub enum RetHintKind {
 ///
 /// [`SourceTree::text_at`]: crate::SourceTree::text_at
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct RetHint {
     pub kind: RetHintKind,
     /// The hint's own file byte span; `SourceTree::text_at` maps it back to text.
@@ -2061,6 +2133,7 @@ pub struct RetHint {
 /// One analysis scope: top-level script, function body, or method body. Carries the linear
 /// trace and a whole-scope `poisoned` flag (ADR-0001 give-up list).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Scope {
     /// `None` for the top-level script and method bodies; `Some(name)` for a free function
     /// body — needed by function-world propagation paths that key on a free-function name.
@@ -2196,6 +2269,7 @@ pub struct Scope {
 /// One by-value `use ($x)` capture a closure body never mentions — an entry of
 /// [`Scope::unused_captures`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnusedCapture {
     /// The captured name without the leading `$`.
     pub name: String,
@@ -2208,6 +2282,7 @@ pub struct UnusedCapture {
 /// One read of a name its scope never binds — an entry of
 /// [`Scope::undefined_reads`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct UndefinedRead {
     /// The read name without the leading `$`.
     pub name: String,
@@ -2225,6 +2300,7 @@ pub struct UndefinedRead {
 /// possibly-unbound — a **candidate** for `phpdoc.maybe-undefined`, an entry of
 /// [`UnsetSeedFacts::reads`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnsetSeedRead {
     /// The read name without the leading `$`.
     pub name: String,
@@ -2260,6 +2336,7 @@ pub struct UnsetSeedRead {
 ///
 /// [`SourceTree::parse`]: crate::SourceTree::parse
 #[derive(Debug, Default, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct UnsetSeedFacts {
     /// The candidate reads, in source order.
     pub reads: Vec<UnsetSeedRead>,
@@ -2273,6 +2350,7 @@ pub struct UnsetSeedFacts {
 
 /// A recovered parse error with its span (ADR-0003: error-tolerant).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ParseError {
     pub message: String,
     pub span: Span,
@@ -2281,6 +2359,7 @@ pub struct ParseError {
 /// The lexical form of a source [`Comment`] — the trivia shapes the `@steins-ignore`
 /// channel reads (ADR-0023); doc-blocks are exposed too, in case a directive sits in one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum CommentKind {
     /// `// …` single-line comment.
     Line,
@@ -2295,6 +2374,7 @@ pub enum CommentKind {
 /// A comment trivium recovered from the parse (ADR-0023 inline-ignore channel). `text` is
 /// the raw spelling including delimiters; the suppression layer scans it for `@steins-ignore`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct Comment {
     pub kind: CommentKind,
     pub span: Span,
@@ -2306,6 +2386,7 @@ pub struct Comment {
 /// since an unprovable path could pull in out-of-universe code (e.g. compiled template
 /// caches) that calls any function with no visible call site.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum IncludePath {
     /// A fully-proven literal path (`'inc/util.php'`, or literal-only concatenation
     /// `'a'.'b'`), resolved against the analyzed universe (relative → including file's dir).
@@ -2321,6 +2402,7 @@ pub enum IncludePath {
 /// The kind of a dynamic-code construct that can invisibly reach code the
 /// call-site sweep cannot see (ADR-0046 §2, "universe havoc").
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum DynamismKind {
     /// `eval(<expr>)` — code as data; can call any function with no CST call site.
     Eval,
@@ -2346,6 +2428,7 @@ pub enum DynamismKind {
 /// value-havoc flag: this records invisible callers/out-of-universe code, a different
 /// soundness hole.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct DynamismSite {
     pub kind: DynamismKind,
     /// The construct's source span (its starting line is the vouching key).
@@ -2358,6 +2441,7 @@ pub struct DynamismSite {
 /// until measured: shapes named by a cross-analyzer survey, recognized syntactically and so
 /// both over- and under-inclusive, inventoried so the guess can be corrected against a corpus.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ReflectionKind {
     /// `$r->invoke(...)` / `$r->invokeArgs(...)` — any `->invoke*()` method call
     /// (`ReflectionMethod`, `ReflectionFunction`, `Closure::__invoke`).
@@ -2395,6 +2479,7 @@ impl ReflectionKind {
 /// One reflection-driven invocation site, collected file-wide like [`DynamismSite`].
 /// Consumed only by `steins doctor`'s coverage posture — no checker/dam/transform reads it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ReflectionSite {
     pub kind: ReflectionKind,
     pub span: Span,
@@ -2408,6 +2493,7 @@ pub struct ReflectionSite {
 /// FQN `Ambiguous`. FQNs are lowercase-normalized, leading `\` stripped, like
 /// [`ClassDecl::fqn`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ClassAliasEdge {
     /// The alias name being minted (`class_alias`'s 2nd arg), lowercase FQN.
     pub alias_fqn: String,
@@ -2428,6 +2514,7 @@ pub struct ClassAliasEdge {
 /// contributes a [`DynamismKind::DefineDynamic`] dam site instead (same split as
 /// `class_alias`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct GlobalConstDecl {
     /// The declared name, normalized by [`normalize_const_fqn`]: leading `\`
     /// stripped, namespace segments lowercased, the final segment case-preserved.
@@ -2461,6 +2548,7 @@ pub fn normalize_const_fqn(name: &str) -> String {
 /// lowerings (parent + implements, no members) to taint closure: any anon-class edge
 /// resolving to — or `Unknown` against — a union member forces `Unknown`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct AnonClassEdge {
     /// The `extends` parent as written, if any.
     pub parent: Option<NameRef>,
@@ -2475,6 +2563,7 @@ pub struct AnonClassEdge {
 /// narrow v1 is instead of hiding it (ADR-0076 §4). Syntax reports shape only — purity,
 /// `array`/`is_list` proof, and rewrite legality are inference questions answered elsewhere.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ForeachSite {
     /// The whole `foreach (…) …` statement's span — what the rewrite replaces,
     /// together with [`Self::prev_stmt`]'s span.
@@ -2501,6 +2590,7 @@ pub struct ForeachSite {
 /// The statement immediately preceding a [`ForeachSite`], reduced to what the adjacency
 /// rule needs: its span (the rewrite consumes it) and whether it's an accumulator initializer.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct PrevStmt {
     /// The preceding statement's own span.
     pub span: Span,
@@ -2513,6 +2603,7 @@ pub struct PrevStmt {
 
 /// A [`ForeachSite`] body's lowered shape.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ForeachBodyShape {
     /// How many statements the body holds (`0` for `{}` / a bare `;`).
     pub stmt_count: usize,
@@ -2525,6 +2616,7 @@ pub struct ForeachBodyShape {
 
 /// The single `$acc[] = <expr>;` statement of an eligible loop body.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct AppendStmt {
     /// The accumulator variable's name (no `$`).
     pub acc: String,
@@ -2555,6 +2647,7 @@ pub struct AppendStmt {
 /// operand pair, arrays and objects included); `++`/`--` (fatal on an array, but a mutation
 /// statement, not an operand expression — out of v1's reach).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct OperandSite {
     /// The whole operator application's span (`$a + $b`, `-$a`) — where the finding points.
     pub span: Span,
@@ -2569,6 +2662,7 @@ pub struct OperandSite {
 
 /// The operator half of an [`OperandSite`].
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum OperandSiteKind {
     /// A binary application `lhs <op> rhs`.
     Binary {
@@ -2591,6 +2685,7 @@ pub enum OperandSiteKind {
 /// The binary operators whose operand types PHP's arithmetic table can refuse. `.`, `??`,
 /// comparisons, and logical operators are excluded (see [`OperandSite`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum BinaryOperandOp {
     /// `+`
     Add,
@@ -2639,6 +2734,7 @@ impl BinaryOperandOp {
 /// The unary prefix operators whose operand type PHP can refuse. `!` is not here — it's
 /// total (`php -r`-witnessed legal on every operand kind, including arrays and objects).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum UnaryOperandOp {
     /// `-`
     Minus,
