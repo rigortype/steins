@@ -264,3 +264,15 @@ type tag, so an `int`/`float` flip inside a result is visible only in the
 response bytes, and the probe harness of the day compared parsed JSON. Both
 names were re-probed bytewise in #354 and are unchanged — the conclusion was
 right, the evidence for it was not, and that distinction is the reusable part.
+
+## Amendment (2026-08-25): the revisit trigger lands as generation inputs (ADR-0092 §4)
+
+The trigger above said fold results would move into the graph "as an
+explicit salsa input layer". ADR-0092 restates the destination: fold
+results become recorded rows in the per-package generation artifact,
+written and replayed through the ADR-0066 table seam, keyed under the
+generation's engine identity — a different engine is a miss, never a
+reinterpretation. The invariant is untouched: a fold that fails widens,
+a recorded row never outlives the fingerprint that scopes it, and the
+`replay_fold.rs` differential oracle is the acceptance pin that
+replay-from-disk means what ask-the-engine means.

@@ -186,7 +186,7 @@ names its milestone.
 10. **Performance and incrementality.** ~200s full batch over 90,709
     files on dev hardware is CI-viable; there is no warm story and no
     cross-run persistence. Not checker-release-blocking; LSP-blocking.
-    → M5
+    The mechanism is ADR-0092's frozen generations. → M5
 11. **Adoption path.** Docs, install/distribution, licensing, public
     repo — USER gates G2/G3. → M3
 12. **Position queries** (LSP): constrained now by ADR-0048, built at
@@ -312,22 +312,33 @@ and the monorepo.
 
 ### M5 — Incrementality and scale
 
-Goal: the warm path exists and is measured; ADR-0048 §5 prerequisites
-land.
+Goal: the warm path exists, is measured, and survives the process;
+ADR-0092's frozen generations land. (This milestone was rewritten
+2026-08-25 when ADR-0092 superseded the salsa-decomposition plan; the
+prior text is in history.)
 
-Work: perf harness under xtask (cold/warm, per-corpus); per-declaration
-entry-state summaries as memoized salsa queries; `project_index`
-sharded per-symbol (the ADR-0009 recorded plan); fold results into the
-graph as recorded inputs (ADR-0028's revisit trigger).
+Work: perf harness under xtask (cold/warm, per-corpus, carrying the
+warm ≡ cold differential oracle); generation identity and
+candidate-then-publish (ADR-0092 §2); the Composer-package universe
+partition, reverse-closure invalidation, and per-generation global
+merges (§3); per-package artifacts — symbol shards, per-declaration
+summaries, trace-IR file shards, recorded fold tables (§2, §4);
+summary-seeded re-runs of the effect and throw fixpoints and the dam
+(§5); package-parallel generation builds; the MCP server resident over
+published generations.
 
 Exit criteria:
 
-- Cold full-run within 10% of the pre-decomposition batch time (the
-  decomposition must not tax CI).
+- Cold full-run within 10% of the pre-persistence batch time (the
+  persistence layer must not tax CI).
 - Warm re-check after a single-file edit on the ~30k-file first-party
   scale: ≤ 2s p95 (provisional — the harness sets the final number
   from measured baselines, and the target is recorded in the harness,
   not here).
+- Warm ≡ cold: a warm generation's findings are byte-identical to a
+  cold build of the same tree, pinned as a differential gate in the
+  harness (ADR-0092 §5).
+- An unchanged vendor tree costs no vendor re-analysis on a warm run.
 
 ### M6 — LSP preview
 
@@ -335,10 +346,13 @@ Goal: `steins lsp` with diagnostics, hover, and the flagship:
 type-directed member completion at the cursor.
 
 Work: `steins-lsp` crate per ADR-0048 §6; span-keyed facts (LineFact
-generalization); position queries by scope replay from memoized entry
-states (ADR-0048 §1); completion = facts-at-position → type → members
-(the second half — project index + trinary is-a + `TypeMember` — has
-existed since ADR-0043); sidecar crash transparency in-session
+generalization); position queries by scope replay from the generation's
+persisted entry states (ADR-0048 §1, ADR-0092 §5); the dirty-buffer
+contract — request-only re-analysis of the enclosing declaration
+against the frozen generation, header anchoring, cross-file staleness
+refused by name (ADR-0092 §6); completion = facts-at-position → type →
+members (the second half — project index + trinary is-a + `TypeMember`
+— has existed since ADR-0043); sidecar crash transparency in-session
 (ADR-0024's stateless methods).
 
 Exit criteria: completion correctness fixture matrix (receiver forms ×
@@ -386,8 +400,10 @@ position-indexed fact tables (memory at 30k-file scale, plus
 invalidation would need replay anyway), not by per-query whole-project
 re-inference (minutes-scale). What binds *today* is deliberately
 minimal: scope-walk replayability, canonical entry states, no
-global-ordering dependence (ADR-0048 §2–4). Everything else about LSP
-is M5/M6 work.
+global-ordering dependence (ADR-0048 §2–4). ADR-0092 decides how the
+entry states persist and what invalidates them — frozen per-package
+generations, not a finer query graph. Everything else about LSP is
+M5/M6 work.
 
 ## Won't build
 
