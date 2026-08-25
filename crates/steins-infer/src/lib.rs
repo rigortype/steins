@@ -384,10 +384,17 @@ fn check_units(
         view.version_id
     };
 
-    // The callable-purity oracle (ADR-0063 P3): one whole-project effect fixpoint per
-    // run, shared by every file's context, and built only when some docblock actually
-    // spells a purity-bearing callable.
-    let purity = PurityOracle::build(units, index, plugins, policy);
+    // The run's shared fixpoint holder (issue #489): the effect and throw
+    // fixpoints are computed at most once here, lazily, and every internal
+    // consumer — the purity oracle, `effect_diagnostics`, `throw_diagnostics` —
+    // reads the same result. Each consumer keeps its own cheap gate, so a
+    // project spelling none of the triggering constructs still pays nothing.
+    let fixpoints = Fixpoints::new(units, index, plugins, policy);
+
+    // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
+    // fixpoint, consulted by every file's context, and built only when some
+    // docblock actually spells a purity-bearing callable.
+    let purity = PurityOracle::build(&fixpoints);
 
     // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
     // One finding per broken file at its first error, and then NOTHING else from
@@ -621,10 +628,10 @@ fn check_units(
     }
 
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
-    out.extend(effect_diagnostics(units, index, plugins, policy));
+    out.extend(effect_diagnostics(&fixpoints));
 
     // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
-    out.extend(throw_diagnostics(units, index, &uncovered_matches));
+    out.extend(throw_diagnostics(&fixpoints, &uncovered_matches));
 
     // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
     // passes above attributed to a broken file. §2.4 is about the file, not about
@@ -652,6 +659,78 @@ enum Sym {
     /// A closure/arrow body (ADR-0033), keyed by file path + definition-site
     /// offset (closures are same-file, so this key is stable within a project).
     Closure(String, u32),
+}
+
+/// The whole-project effect and throw fixpoint results of ONE check run,
+/// computed at most once each (issue #489 / ADR-0092 §5).
+///
+/// Before this holder, [`check_units`] ran the effect fixpoint inside every
+/// consumer that wanted it — `PurityOracle::build` and `effect_diagnostics`
+/// each computed their own copy, and `throw_diagnostics` its own throw
+/// fixpoint. The fixpoints are deterministic and order-independent (ADR-0048
+/// §4), so those copies were byte-identical; this makes the sharing structural:
+/// one producer per run, every internal consumer reads the same value.
+///
+/// Laziness is load-bearing, not an optimization nicety: each consumer keeps
+/// its own cheap textual gate (a project with no envelope, no purity-bearing
+/// callable and no `@throws` never pays for a fixpoint at all), and the holder
+/// computes on the first gate that passes.
+///
+/// Standalone library entry points (`effect_summary`, `region_purity_project`,
+/// `sweep_escapes`, the JSON effect surface) run outside a check and keep
+/// computing their own copy — determinism makes those equal by construction.
+pub(crate) struct Fixpoints<'a> {
+    units: &'a [FileUnit<'a>],
+    index: &'a Index,
+    plugins: &'a PluginFacts,
+    policy: &'a EffectsPolicy,
+    effects: std::cell::OnceCell<HashMap<Sym, purity::EffectSet>>,
+    throws: std::cell::OnceCell<HashMap<Sym, throws::ThrowSet>>,
+}
+
+impl<'a> Fixpoints<'a> {
+    pub(crate) fn new(
+        units: &'a [FileUnit<'a>],
+        index: &'a Index,
+        plugins: &'a PluginFacts,
+        policy: &'a EffectsPolicy,
+    ) -> Self {
+        Self {
+            units,
+            index,
+            plugins,
+            policy,
+            effects: std::cell::OnceCell::new(),
+            throws: std::cell::OnceCell::new(),
+        }
+    }
+
+    pub(crate) fn units(&self) -> &'a [FileUnit<'a>] {
+        self.units
+    }
+
+    pub(crate) fn index(&self) -> &'a Index {
+        self.index
+    }
+
+    pub(crate) fn plugins(&self) -> &'a PluginFacts {
+        self.plugins
+    }
+
+    pub(crate) fn policy(&self) -> &'a EffectsPolicy {
+        self.policy
+    }
+
+    /// The effect fixpoint result, computed on first request.
+    pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
+        self.effects
+            .get_or_init(|| purity::compute_effects(self.units, self.index, self.plugins, self.policy))
+    }
+
+    /// The throw fixpoint result, computed on first request.
+    pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
+        self.throws.get_or_init(|| throws::compute_throws(self.units, self.index))
+    }
 }
 
 /// Join `f` into an accumulator that may still be empty; `None` propagates the

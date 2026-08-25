@@ -13,20 +13,21 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use steins_db::{Db, EffectsPolicy, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_syntax::Span;
 use steins_syntax::{
-    CatchClause, ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
+    ClassDecl, EffectEnvelope, EffectOrigin, EffectRecv, FunctionDecl, MethodDecl,
     NameRef, ScopeOwner, SourceTree, ThrowOrigin, Visibility,
 };
-use steins_domain::Certainty;
 use steins_phpdoc::{EnvelopeTag, TagKind, scan_docblock};
 
 use crate::throws::{
-    ThrowFact, ThrowSet, classify_throw_origins, compute_throws, interface_abstraction_methods,
-    last_segment,
+    ThrowOwnRow, ThrowSet, classify_throw_origins, compute_throws,
+    interface_abstraction_methods, last_segment,
 };
 use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
-use crate::{EFFECT_ID, EFFECT_LISKOV_ID, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID};
+use crate::{
+    EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
+};
 
 // ---------------------------------------------------------------------------
 // Effects pass (ADR-0005): `#[\Steins\Pure]` envelope checking, project-wide.
@@ -97,6 +98,52 @@ pub(crate) struct EffectSet {
     attribution: Vec<String>,
 }
 
+/// One unit's **own** contribution to the effect fixpoint — everything
+/// [`classify_effect_origins`] proves about a declaration in isolation, before
+/// any propagation (issue #489). This is the propagation-independent half of
+/// the effects pass, and the value ADR-0092 §5's per-package artifact will
+/// persist per declaration: the fixpoint itself is re-run from complete own
+/// rows at every generation, never cached, which is what keeps warm ≡ cold
+/// (a propagated finding embeds its *origin's* line/path, so caching it would
+/// go stale on any callee-file edit).
+///
+/// The edges here are the *resolved* `Sym` edges of this run; the persisted
+/// form (the second half of #489) stores them unresolved and re-resolves
+/// against the generation's merged index. The unit's ADR-0084 attribution is
+/// deliberately NOT a field: it is a fact of the `[effects]` policy table,
+/// resolved by [`propagate_effects`] at propagation time.
+#[derive(Debug, Clone)]
+pub(crate) struct EffectOwnRow {
+    /// The findings that arise in this unit's own body — with their attribution
+    /// sets as full copies, never collapsed to labels (ADR-0084 §2).
+    pub(crate) findings: HashSet<EffectFinding>,
+    /// Declared-lane labels imported *locally* — one entry per call site whose
+    /// receiver's declared interface method carries an envelope (ADR-0067).
+    pub(crate) declared: HashSet<String>,
+    /// The own-exhaustiveness bit: `false` once any origin in this body is
+    /// dynamic/unresolved. Propagation can only lower it further.
+    pub(crate) exhaustive: bool,
+    /// Resolved call edges whose findings AND exhaustiveness taint propagate.
+    pub(crate) edges: HashSet<Sym>,
+    /// Edges whose findings propagate but whose exhaustiveness taint does not —
+    /// a callee whose ADR-0063 conditional-purity contract was fully decided at
+    /// the call site.
+    pub(crate) untainting: HashSet<Sym>,
+}
+
+impl EffectOwnRow {
+    /// The empty row: a unit with no origins has no effects and is exhaustive.
+    pub(crate) fn new() -> Self {
+        Self {
+            findings: HashSet::new(),
+            declared: HashSet::new(),
+            exhaustive: true,
+            edges: HashSet::new(),
+            untainting: HashSet::new(),
+        }
+    }
+}
+
 /// Resolve a [`CallbackRef`] to its effect [`Sym`], for the [`Sym::Closure`] key.
 /// A named callback resolving to a builtin/unknown returns `None` (the caller
 /// handles those inline).
@@ -118,17 +165,15 @@ fn add_callback_effects(
     cbref: &steins_syntax::CallbackRef,
     span: steins_syntax::Span,
     policy: &EffectsPolicy,
-    d: &mut HashSet<EffectFinding>,
-    e: &mut HashSet<Sym>,
-    ex: &mut bool,
+    row: &mut EffectOwnRow,
 ) {
     match cbref {
         steins_syntax::CallbackRef::Closure(off) => {
-            e.insert(Sym::Closure(cx.path().to_owned(), *off));
+            row.edges.insert(Sym::Closure(cx.path().to_owned(), *off));
         }
         steins_syntax::CallbackRef::Named(name) => match cx.resolve_effect_function(name) {
             FnResolution::User(site) => {
-                e.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
+                row.edges.insert(Sym::Func(cx.fn_decl(site).fqn.clone()));
             }
             FnResolution::Builtin(builtin_name) => {
                 // A builtin passed *as* a callback is invoked by the higher-order
@@ -137,10 +182,10 @@ fn add_callback_effects(
                 for f in
                     builtin_findings(&builtin_name, span, cx.tree(), cx.path(), None, None, policy)
                 {
-                    d.insert(f);
+                    row.findings.insert(f);
                 }
             }
-            FnResolution::Unknown => *ex = false,
+            FnResolution::Unknown => row.exhaustive = false,
         },
     }
 }
@@ -290,13 +335,30 @@ fn plugin_call_labels<'p>(
 }
 
 /// The unified effect fixpoint for **every** function and method in the whole
-/// project, keyed by [`Sym`] (FQN-based, so cross-file edges match).
+/// project, keyed by [`Sym`] (FQN-based, so cross-file edges match): the own
+/// rows, then propagation over them. The two halves are separate functions
+/// because they have separate futures (issue #489 / ADR-0092 §5): the rows
+/// become the persisted per-declaration summaries, while propagation re-runs
+/// from complete rows at every generation.
 pub(crate) fn compute_effects(
     units: &[FileUnit],
     index: &Index,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> HashMap<Sym, EffectSet> {
+    let (syms, rows) = effect_own_rows(units, index, plugins, policy);
+    propagate_effects(&syms, &rows, policy)
+}
+
+/// Classify every unit's own effect contribution into one [`EffectOwnRow`] per
+/// [`Sym`]. Also returns the syms in unit order (duplicates preserved — the
+/// final collect depends on the order).
+fn effect_own_rows(
+    units: &[FileUnit],
+    index: &Index,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+) -> (Vec<Sym>, HashMap<Sym, EffectOwnRow>) {
     // Each effect unit with the file it lives in and its enclosing class FQN.
     struct Unit<'a> {
         sym: Sym,
@@ -344,22 +406,10 @@ pub(crate) fn compute_effects(
         }
     }
 
-    let mut direct: HashMap<Sym, HashSet<EffectFinding>> = HashMap::new();
-    // Declared-lane labels imported *locally* — one entry per call site whose
-    // receiver's declared interface method carries an envelope (ADR-0067).
-    let mut declared_direct: HashMap<Sym, HashSet<String>> = HashMap::new();
-    let mut edges: HashMap<Sym, HashSet<Sym>> = HashMap::new();
-    // Edges whose findings propagate but whose exhaustiveness taint does not — a
-    // callee whose ADR-0063 conditional-purity contract was fully decided here.
-    let mut untainting: HashMap<Sym, HashSet<Sym>> = HashMap::new();
-    let mut exhaustive: HashMap<Sym, bool> = HashMap::new();
+    let mut rows: HashMap<Sym, EffectOwnRow> = HashMap::new();
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
-        let d = direct.entry(unit.sym.clone()).or_default();
-        let dc = declared_direct.entry(unit.sym.clone()).or_default();
-        let e = edges.entry(unit.sym.clone()).or_default();
-        let nt = untainting.entry(unit.sym.clone()).or_default();
-        let ex = exhaustive.entry(unit.sym.clone()).or_insert(true);
+        let row = rows.entry(unit.sym.clone()).or_insert_with(EffectOwnRow::new);
         classify_effect_origins(
             &cx,
             unit.class_fqn.as_deref(),
@@ -367,26 +417,30 @@ pub(crate) fn compute_effects(
             unit.origins,
             plugins,
             policy,
-            d,
-            dc,
-            e,
-            nt,
-            ex,
+            row,
         );
     }
+    (ulist.into_iter().map(|u| u.sym).collect(), rows)
+}
 
-    // Fixpoint: effects(u) = direct(u) ∪ ⋃ effects(callees); exhaustive taints.
-    // The declared lane rides the same edges, monotone in the same way (ADR-0067):
-    // declared(u) = locally-imported bounds(u) ∪ ⋃ declared(callees). A declared
-    // label never crosses into `findings`, in either direction.
-    let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
+/// Fixpoint: effects(u) = own(u) ∪ ⋃ effects(callees); exhaustive taints, from
+/// the complete own rows. The declared lane rides the same edges, monotone in
+/// the same way (ADR-0067): declared(u) = locally-imported bounds(u) ∪
+/// ⋃ declared(callees). A declared label never crosses into `findings`, in
+/// either direction. Monotone and order-independent (ADR-0048 §4); the rows
+/// are read-only — propagated state never flows back into an own row.
+fn propagate_effects(
+    syms: &[Sym],
+    rows: &HashMap<Sym, EffectOwnRow>,
+    policy: &EffectsPolicy,
+) -> HashMap<Sym, EffectSet> {
     // Each unit's own attribution (ADR-0084 §1), resolved once against the policy.
     // A closure is unnamed and so unattributable — the config has no key that could
     // reach one, which is why the table is keyed by [`Sym`] rather than consulted
     // per edge.
     let mut attribution: HashMap<Sym, Vec<String>> = HashMap::new();
     if !policy.is_empty() {
-        for sym in &syms {
+        for sym in syms {
             let labels = match sym {
                 Sym::Func(fqn) => policy.function_attribution(fqn).to_vec(),
                 Sym::Method(class, method) => policy.method_attribution(class, method),
@@ -397,19 +451,22 @@ pub(crate) fn compute_effects(
             }
         }
     }
-    let mut findings: HashMap<Sym, HashSet<EffectFinding>> = direct;
-    let mut declared: HashMap<Sym, HashSet<String>> = declared_direct;
+    let mut findings: HashMap<Sym, HashSet<EffectFinding>> =
+        rows.iter().map(|(s, r)| (s.clone(), r.findings.clone())).collect();
+    let mut declared: HashMap<Sym, HashSet<String>> =
+        rows.iter().map(|(s, r)| (s.clone(), r.declared.clone())).collect();
+    let mut exhaustive: HashMap<Sym, bool> =
+        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive)).collect();
     loop {
         let mut changed = false;
-        for sym in &syms {
-            let callees: Vec<Sym> = edges.get(sym).into_iter().flatten().cloned().collect();
-            // Contract-discharged callees (ADR-0063 §2 decision 2): their proven
-            // findings still join, their unknown remainder does not.
-            let untainted: Vec<Sym> = untainting.get(sym).into_iter().flatten().cloned().collect();
+        for sym in syms {
+            let Some(row) = rows.get(sym) else { continue };
             let mut incoming: Vec<EffectFinding> = Vec::new();
             let mut incoming_declared: Vec<String> = Vec::new();
             let mut callee_taint = false;
-            for c in callees.iter().chain(untainted.iter()) {
+            // Contract-discharged callees (ADR-0063 §2 decision 2): their proven
+            // findings still join, their unknown remainder does not.
+            for c in row.edges.iter().chain(row.untainting.iter()) {
                 if let Some(ce) = findings.get(c) {
                     // Crossing out of an attributed callee stamps the copies with
                     // that callee's labels (ADR-0084 §2). The originals stay where
@@ -424,7 +481,7 @@ pub(crate) fn compute_effects(
                     incoming_declared.extend(cd.iter().cloned());
                 }
             }
-            for c in &callees {
+            for c in &row.edges {
                 if exhaustive.get(c).copied() == Some(false) {
                     callee_taint = true;
                 }
@@ -447,24 +504,23 @@ pub(crate) fn compute_effects(
         }
     }
 
-    syms.into_iter()
+    syms.iter()
         .map(|s| {
-            let f = findings.remove(&s).unwrap_or_default();
-            let dc = declared.remove(&s).unwrap_or_default();
-            let ex = exhaustive.get(&s).copied().unwrap_or(true);
-            let at = attribution.remove(&s).unwrap_or_default();
-            (s, EffectSet { findings: f, declared: dc, exhaustive: ex, attribution: at })
+            let f = findings.remove(s).unwrap_or_default();
+            let dc = declared.remove(s).unwrap_or_default();
+            let ex = exhaustive.get(s).copied().unwrap_or(true);
+            let at = attribution.remove(s).unwrap_or_default();
+            (s.clone(), EffectSet { findings: f, declared: dc, exhaustive: ex, attribution: at })
         })
         .collect()
 }
 
-/// Classify one unit's (or one **region**'s — ADR-0076) effect origins into the
-/// fixpoint's four accumulators plus the exhaustiveness bit. Split out of
+/// Classify one unit's (or one **region**'s — ADR-0076) effect origins into its
+/// [`EffectOwnRow`]. Split out of
 /// [`compute_effects`] so a *sub-span* of a body can be asked the same question
 /// the whole body is asked, through exactly the same code: the loop→`array_map`
 /// transform's purity precondition is the fixpoint's own verdict restricted to
 /// the loop body, never a second opinion about what an effect is.
-#[allow(clippy::too_many_arguments)]
 fn classify_effect_origins(
     cx: &Cx,
     class_fqn: Option<&str>,
@@ -472,11 +528,7 @@ fn classify_effect_origins(
     origins: &[EffectOrigin],
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
-    d: &mut HashSet<EffectFinding>,
-    dc: &mut HashSet<String>,
-    e: &mut HashSet<Sym>,
-    nt: &mut HashSet<Sym>,
-    ex: &mut bool,
+    row: &mut EffectOwnRow,
 ) {
     for origin in origins {
         match origin {
@@ -489,7 +541,7 @@ fn classify_effect_origins(
                         match conditional_purity(decl.docblock.as_ref(), &decl.params) {
                             Some(cp) => {
                                 let r = eval_conditional_purity(&cp, &[], targets, |cbref| {
-                                    add_callback_effects(cx, cbref, *span, policy, d, e, ex);
+                                    add_callback_effects(cx, cbref, *span, policy, row);
                                 });
                                 // A userland out-param row is produced at this
                                 // call site but is the CALLEE's contract, so it
@@ -498,7 +550,7 @@ fn classify_effect_origins(
                                 // for the same reason: no edge carries these.
                                 let attributed = policy.function_attribution(&decl.fqn);
                                 for label in r.labels {
-                                    d.insert(
+                                    row.findings.insert(
                                         EffectFinding::direct(
                                             label.to_owned(),
                                             name.simple().to_owned(),
@@ -509,13 +561,13 @@ fn classify_effect_origins(
                                     );
                                 }
                                 if r.discharge_taint {
-                                    nt.insert(sym);
+                                    row.untainting.insert(sym);
                                 } else {
-                                    e.insert(sym);
+                                    row.edges.insert(sym);
                                 }
                             }
                             None => {
-                                e.insert(sym);
+                                row.edges.insert(sym);
                             }
                         }
                     }
@@ -529,7 +581,7 @@ fn classify_effect_origins(
                             Some(const_args),
                             policy,
                         ) {
-                            d.insert(f);
+                            row.findings.insert(f);
                         }
                     }
                     // Ambiguous / unresolved: effects unknown → non-exhaustive.
@@ -538,14 +590,14 @@ fn classify_effect_origins(
                     // row are both already spoken for above.
                     FnResolution::Unknown => {
                         if let Some(labels) = plugin_call_labels(cx, plugins, name) {
-                            dc.extend(labels.iter().cloned());
+                            row.declared.extend(labels.iter().cloned());
                         }
-                        *ex = false;
+                        row.exhaustive = false;
                     }
                 }
             }
             EffectOrigin::Output { keyword, span } => {
-                d.insert(EffectFinding::direct(
+                row.findings.insert(EffectFinding::direct(
                     "io.output.buffer".to_owned(),
                     (*keyword).to_owned(),
                     cx.tree().position(span.start).line,
@@ -553,7 +605,7 @@ fn classify_effect_origins(
                 ));
             }
             EffectOrigin::Exit { keyword, span } => {
-                d.insert(EffectFinding::direct(
+                row.findings.insert(EffectFinding::direct(
                     "exit".to_owned(),
                     (*keyword).to_owned(),
                     cx.tree().position(span.start).line,
@@ -563,7 +615,7 @@ fn classify_effect_origins(
             EffectOrigin::MethodCall { receiver, method, span } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
                     Some(callee) => {
-                        e.insert(callee);
+                        row.edges.insert(callee);
                     }
                     // No project edge — the builtin-class catalog gets its say
                     // (`new PDO(...)->query()` is `io.db`), and failing that the
@@ -582,7 +634,7 @@ fn classify_effect_origins(
                     None => match builtin_method_findings(cx, receiver, method, *span, policy) {
                         Some(fs) => {
                             for f in fs {
-                                d.insert(f);
+                                row.findings.insert(f);
                             }
                         }
                         None => match resolve_declared_bound(
@@ -594,7 +646,7 @@ fn classify_effect_origins(
                             method,
                         ) {
                             // A checked envelope answers this call site outright.
-                            Some(DeclaredBound::Checked(labels)) => dc.extend(labels),
+                            Some(DeclaredBound::Checked(labels)) => row.declared.extend(labels),
                             // An interop envelope (ADR-0082) contributes its bound
                             // and keeps the taint: ADR-0068's plugin discipline,
                             // applied to the unchecked stratum. An empty bound
@@ -603,10 +655,10 @@ fn classify_effect_origins(
                             // possibly more", which is the truth of a claim
                             // nothing here has verified.
                             Some(DeclaredBound::Interop(labels)) => {
-                                dc.extend(labels);
-                                *ex = false;
+                                row.declared.extend(labels);
+                                row.exhaustive = false;
                             }
-                            None => *ex = false,
+                            None => row.exhaustive = false,
                         },
                     },
                 }
@@ -643,15 +695,15 @@ fn classify_effect_origins(
                             Some(const_args),
                             policy,
                         ) {
-                            d.insert(f);
+                            row.findings.insert(f);
                         }
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => {
-                                    add_callback_effects(cx, cbref, *span, policy, d, e, ex);
+                                    add_callback_effects(cx, cbref, *span, policy, row);
                                 }
                                 // Callback slot filled by an unresolvable value.
-                                None => *ex = false,
+                                None => row.exhaustive = false,
                             }
                         }
                     }
@@ -668,11 +720,11 @@ fn classify_effect_origins(
                                         &cp,
                                         callbacks,
                                         targets,
-                                        |cbref| add_callback_effects(cx, cbref, *span, policy, d, e, ex),
+                                        |cbref| add_callback_effects(cx, cbref, *span, policy, row),
                                     );
                                     let attributed = policy.function_attribution(&decl.fqn);
                                     for label in r.labels {
-                                        d.insert(
+                                        row.findings.insert(
                                             EffectFinding::direct(
                                                 label.to_owned(),
                                                 callee.simple().to_owned(),
@@ -683,13 +735,13 @@ fn classify_effect_origins(
                                         );
                                     }
                                     if r.discharge_taint {
-                                        nt.insert(sym);
+                                        row.untainting.insert(sym);
                                     } else {
-                                        e.insert(sym);
+                                        row.edges.insert(sym);
                                     }
                                 }
                                 None => {
-                                    e.insert(sym);
+                                    row.edges.insert(sym);
                                 }
                             }
                         }
@@ -703,23 +755,23 @@ fn classify_effect_origins(
                                 Some(const_args),
                                 policy,
                             ) {
-                                d.insert(f);
+                                row.findings.insert(f);
                             }
                         }
                         FnResolution::Unknown => {
                             if let Some(labels) = plugin_call_labels(cx, plugins, callee) {
-                                dc.extend(labels.iter().cloned());
+                                row.declared.extend(labels.iter().cloned());
                             }
-                            *ex = false;
+                            row.exhaustive = false;
                         }
                     },
                 }
             }
             // A `$fn()` resolved to a body-local closure — its effects join.
             EffectOrigin::Callback { cbref, span } => {
-                add_callback_effects(cx, cbref, *span, policy, d, e, ex);
+                add_callback_effects(cx, cbref, *span, policy, row);
             }
-            EffectOrigin::Opaque { .. } => *ex = false,
+            EffectOrigin::Opaque { .. } => row.exhaustive = false,
         }
     }
 }
@@ -1023,14 +1075,10 @@ fn region_purity_in(
     // Every effect/throw origin of this file that falls inside the region, kept
     // with the frame facts its classification needs (the enclosing class for a
     // `$this->`/`self::` edge, the parameter list for an ADR-0067 receiver type).
-    let mut eff: HashSet<EffectFinding> = HashSet::new();
-    let mut declared: HashSet<String> = HashSet::new();
-    let mut edges: HashSet<Sym> = HashSet::new();
-    let mut untainting: HashSet<Sym> = HashSet::new();
-    let mut exhaustive = true;
-    let mut throw_direct: HashMap<ThrowFact, Certainty> = HashMap::new();
-    let mut throw_edges: Vec<(Sym, Vec<Vec<CatchClause>>)> = Vec::new();
-    let mut throws_exhaustive = true;
+    // The region is classified into an own row exactly as a whole unit is
+    // (issue #489) — the same value, restricted to a sub-span.
+    let mut row = EffectOwnRow::new();
+    let mut trow = ThrowOwnRow::new();
 
     let mut take = |class_fqn: Option<&str>,
                     params: &[steins_syntax::Param],
@@ -1038,19 +1086,7 @@ fn region_purity_in(
                     to: &[ThrowOrigin]| {
         let picked: Vec<EffectOrigin> =
             eo.iter().filter(|o| inside(effect_origin_span(o))).cloned().collect();
-        classify_effect_origins(
-            &cx,
-            class_fqn,
-            params,
-            &picked,
-            plugins,
-            policy,
-            &mut eff,
-            &mut declared,
-            &mut edges,
-            &mut untainting,
-            &mut exhaustive,
-        );
+        classify_effect_origins(&cx, class_fqn, params, &picked, plugins, policy, &mut row);
         // The guards are dropped, not carried: this region's own body cannot
         // hold a `try` (a `try` is a statement, and the eligible body is one
         // append), so every guard on a picked origin is an ENCLOSING one — and
@@ -1061,14 +1097,7 @@ fn region_purity_in(
             .filter(|o| inside(o.span))
             .map(|o| ThrowOrigin { kind: o.kind.clone(), span: o.span, guards: Vec::new() })
             .collect();
-        classify_throw_origins(
-            &cx,
-            class_fqn,
-            &picked_throws,
-            &mut throw_direct,
-            &mut throw_edges,
-            &mut throws_exhaustive,
-        );
+        classify_throw_origins(&cx, class_fqn, &picked_throws, &mut trow);
     };
 
     for f in tree.functions() {
@@ -1085,15 +1114,16 @@ fn region_purity_in(
 
     // Join the callees' fixpoint results — the region's transitive answer. Both
     // lanes ride the same edges, monotone in the same way, and never mix.
-    let mut labels: Vec<String> = eff.iter().map(|f| f.label.clone()).collect();
-    let mut declared_labels: Vec<String> = declared.into_iter().collect();
-    for callee in edges.iter().chain(untainting.iter()) {
+    let mut exhaustive = row.exhaustive;
+    let mut labels: Vec<String> = row.findings.iter().map(|f| f.label.clone()).collect();
+    let mut declared_labels: Vec<String> = row.declared.into_iter().collect();
+    for callee in row.edges.iter().chain(row.untainting.iter()) {
         if let Some(set) = effects.get(callee) {
             labels.extend(set.findings.iter().map(|f| f.label.clone()));
             declared_labels.extend(set.declared.iter().cloned());
         }
     }
-    for callee in &edges {
+    for callee in &row.edges {
         if effects.get(callee).is_some_and(|s| !s.exhaustive) {
             exhaustive = false;
         }
@@ -1103,9 +1133,10 @@ fn region_purity_in(
     declared_labels.sort();
     declared_labels.dedup();
 
+    let mut throws_exhaustive = trow.exhaustive;
     let mut classes: Vec<String> =
-        throw_direct.keys().map(|f| last_segment(&f.class).to_owned()).collect();
-    for (callee, _) in &throw_edges {
+        trow.facts.keys().map(|f| last_segment(&f.class).to_owned()).collect();
+    for (callee, _) in &trow.edges {
         if let Some(set) = throws.get(callee) {
             classes.extend(set.facts.keys().map(|f| last_segment(&f.class).to_owned()));
             if !set.exhaustive {
@@ -1155,16 +1186,18 @@ const fn effect_origin_span(o: &EffectOrigin) -> steins_syntax::Span {
 /// that `preg_match`es into one of its own locals satisfies `pure-callable` —
 /// ADR-0063 §2.3's `mutate.local` tolerance — while the same closure writing
 /// `$this->matches` does not.
-pub(crate) struct PurityOracle {
-    effects: HashMap<Sym, EffectSet>,
-    /// The project's tolerated-effects policy (ADR-0084 §3). Owned rather than
-    /// borrowed because the oracle outlives the config read and is handed around
-    /// by reference itself; a policy is a handful of strings, so the clone is
-    /// cheaper than the lifetime it would otherwise thread through [`Cx`].
-    policy: EffectsPolicy,
+pub(crate) struct PurityOracle<'a> {
+    /// The run's shared effect fixpoint result, borrowed from the
+    /// [`Fixpoints`] holder (issue #489) so the oracle and the envelope
+    /// diagnostics read one computation rather than each running their own.
+    effects: &'a HashMap<Sym, EffectSet>,
+    /// The project's tolerated-effects policy (ADR-0084 §3), borrowed from the
+    /// same holder — one lifetime already threads through [`Cx`], so the clone
+    /// the previous owned form paid for is no longer buying anything.
+    policy: &'a EffectsPolicy,
 }
 
-impl PurityOracle {
+impl<'a> PurityOracle<'a> {
     /// Build the oracle, or `None` when no docblock in the project spells a
     /// purity-bearing callable. The fixpoint is a whole-project pass and
     /// [`effect_diagnostics`] already guards its own use of it the same way; without
@@ -1174,16 +1207,11 @@ impl PurityOracle {
     /// judgment by being *written*, and every purity-bearing spelling in the
     /// vocabulary (`pure-callable`, `pure-closure`, `static-pure-closure`) contains
     /// one of the two literal substrings tested.
-    pub(crate) fn build(
-        units: &[FileUnit],
-        index: &Index,
-        plugins: &PluginFacts,
-        policy: &EffectsPolicy,
-    ) -> Option<Self> {
+    pub(crate) fn build(fx: &'a Fixpoints<'a>) -> Option<Self> {
         let spells_purity = |doc: Option<&String>| {
             doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
         };
-        let any = units.iter().any(|u| {
+        let any = fx.units().iter().any(|u| {
             u.tree.functions().iter().any(|f| spells_purity(f.docblock.as_ref()))
                 || u.tree
                     .classes()
@@ -1193,10 +1221,7 @@ impl PurityOracle {
         if !any {
             return None;
         }
-        Some(PurityOracle {
-            effects: compute_effects(units, index, plugins, policy),
-            policy: policy.clone(),
-        })
+        Some(PurityOracle { effects: fx.effects(), policy: fx.policy() })
     }
 
     /// Whether `sym`'s inferred effect envelope is **provably** not pure: the
@@ -1221,18 +1246,15 @@ impl PurityOracle {
     /// caller here.
     pub(crate) fn provably_impure(&self, sym: &Sym) -> bool {
         self.effects.get(sym).is_some_and(|e| {
-            finding_groups(&e.findings, &[], &self.policy).iter().any(|&(_, d)| !d)
+            finding_groups(&e.findings, &[], self.policy).iter().any(|&(_, d)| !d)
         })
     }
 }
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).
-pub(crate) fn effect_diagnostics(
-    units: &[FileUnit],
-    index: &Index,
-    plugins: &PluginFacts,
-    policy: &EffectsPolicy,
-) -> Vec<Diagnostic> {
+pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
+    let (units, index) = (fx.units(), fx.index());
+    let (plugins, policy) = (fx.plugins(), fx.policy());
     // Fast path: no envelope anywhere → nothing to check. Interop envelopes
     // (ADR-0082 role B) are checked here too, so the gate admits their carriers
     // through [`docblock_envelope_tag`]'s own substring test — over-approximate
@@ -1255,7 +1277,7 @@ pub(crate) fn effect_diagnostics(
         return Vec::new();
     }
 
-    let effects = compute_effects(units, index, plugins, policy);
+    let effects = fx.effects();
     // The registry this project's declared labels are judged against (ADR-0068):
     // builtin taxonomy plus whatever the plugin channel registered.
     let registry = plugins.registry();
@@ -1290,7 +1312,7 @@ pub(crate) fn effect_diagnostics(
             else {
                 continue;
             };
-            report_unit(&mut out, &cx, None, &f.name, bound, &f.effect_origins, &effects, registry);
+            report_unit(&mut out, &cx, None, &f.name, bound, &f.effect_origins, effects, registry);
         }
         for c in cx.tree().classes() {
             // The class-level tag is one declaration, so its vocabulary is judged
@@ -1338,7 +1360,7 @@ pub(crate) fn effect_diagnostics(
                         &display,
                         bound,
                         &m.effect_origins,
-                        &effects,
+                        effects,
                         registry,
                     );
                 }
@@ -1353,7 +1375,7 @@ pub(crate) fn effect_diagnostics(
                 // only, and an interop-declared abstraction never yields
                 // `effect.liskov-widened`.
                 if !c.is_interface && !m.is_abstract {
-                    emit_effect_liskov(&mut out, &cx, c, m, &effects, policy);
+                    emit_effect_liskov(&mut out, &cx, c, m, effects, policy);
                 }
             }
         }

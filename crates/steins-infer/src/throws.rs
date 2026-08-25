@@ -17,7 +17,7 @@ use steins_syntax::{
 use crate::contract::parse_tag_type;
 use crate::cx::Cx;
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
-use crate::{Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
+use crate::{Fixpoints, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
 use crate::purity::resolve_effect_edge;
 use crate::suppress::{Facet, Origin};
 
@@ -54,6 +54,36 @@ pub(crate) struct ThrowSet {
     pub(crate) exhaustive: bool,
 }
 
+/// One unit's **own** contribution to the throw fixpoint — everything
+/// [`classify_throw_origins`] proves about a declaration in isolation, before
+/// any propagation (issue #489). This is the propagation-independent half of
+/// the throw system, and the value ADR-0092 §5's per-package artifact will
+/// persist per declaration: the fixpoint itself is re-run from complete own
+/// rows at every generation, never cached.
+///
+/// The edges here are the *resolved* `Sym` edges of this run; the persisted
+/// form (the second half of #489) stores them unresolved and re-resolves
+/// against the generation's merged index.
+#[derive(Debug, Clone)]
+pub(crate) struct ThrowOwnRow {
+    /// The unit's own escaping throw facts, each at its best escape
+    /// [`Certainty`] past the origin's enclosing guards (`No` never enters).
+    pub(crate) facts: HashMap<ThrowFact, Certainty>,
+    /// The own-exhaustiveness bit: `false` once any origin in this body is
+    /// dynamic/unresolved. Propagation can only lower it further.
+    pub(crate) exhaustive: bool,
+    /// Guarded call edges: the resolved callee plus the ordered
+    /// (innermost-first) guard stacks the callee's throws must escape through.
+    pub(crate) edges: Vec<(Sym, Vec<Vec<CatchClause>>)>,
+}
+
+impl ThrowOwnRow {
+    /// The empty row: a unit with no origins raises nothing and is exhaustive.
+    pub(crate) fn new() -> Self {
+        Self { facts: HashMap::new(), exhaustive: true, edges: Vec::new() }
+    }
+}
+
 /// Wire a resolved callback's throws into the throw graph (ADR-0033), filtered by
 /// the call site's `guards`: a closure/user callback is an edge; a builtin
 /// callback contributes its curated throws directly; an unknown callback taints.
@@ -62,17 +92,15 @@ fn add_callback_throws(
     cbref: &steins_syntax::CallbackRef,
     span: steins_syntax::Span,
     guards: &[Vec<CatchClause>],
-    d: &mut HashMap<ThrowFact, Certainty>,
-    e: &mut Vec<(Sym, Vec<Vec<CatchClause>>)>,
-    x: &mut bool,
+    row: &mut ThrowOwnRow,
 ) {
     match cbref {
         steins_syntax::CallbackRef::Closure(off) => {
-            e.push((Sym::Closure(cx.path().to_owned(), *off), guards.to_vec()));
+            row.edges.push((Sym::Closure(cx.path().to_owned(), *off), guards.to_vec()));
         }
         steins_syntax::CallbackRef::Named(name) => match cx.resolve_function(name) {
             FnResolution::User(site) => {
-                e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.to_vec()));
+                row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.to_vec()));
             }
             FnResolution::Builtin(builtin_name) => {
                 if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
@@ -89,12 +117,12 @@ fn add_callback_throws(
                             line,
                             path: cx.path().to_owned(),
                         };
-                        let slot = d.entry(fact).or_insert(Certainty::No);
+                        let slot = row.facts.entry(fact).or_insert(Certainty::No);
                         *slot = slot.or(esc);
                     }
                 }
             }
-            FnResolution::Unknown => *x = false,
+            FnResolution::Unknown => row.exhaustive = false,
         },
     }
 }
@@ -183,8 +211,24 @@ fn escape_through_guards(cx: &Cx, sub: &str, guards: &[Vec<CatchClause>]) -> Cer
 }
 
 /// The unified throw fixpoint for every function/method in the project, keyed by
-/// [`Sym`] (shared with the effect graph).
+/// [`Sym`] (shared with the effect graph): the own rows, then propagation over
+/// them. The two halves are separate functions because they have separate
+/// futures (issue #489 / ADR-0092 §5): the rows become the persisted
+/// per-declaration summaries, while propagation re-runs from complete rows at
+/// every generation.
 pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
+    let (syms, files, rows) = throw_own_rows(units, index);
+    propagate_throws(units, index, &syms, &files, &rows)
+}
+
+/// Classify every unit's own throw contribution into one [`ThrowOwnRow`] per
+/// [`Sym`]. Also returns the syms in unit order (duplicates preserved — the
+/// final collect depends on the order) and each sym's file index, which the
+/// propagation loop needs to resolve guard classes in the caller's context.
+fn throw_own_rows(
+    units: &[FileUnit],
+    index: &Index,
+) -> (Vec<Sym>, HashMap<Sym, usize>, HashMap<Sym, ThrowOwnRow>) {
     struct Unit<'a> {
         sym: Sym,
         file: usize,
@@ -219,31 +263,38 @@ pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, 
         }
     }
 
-    type Edge = (Sym, Vec<Vec<CatchClause>>);
-    let mut direct: HashMap<Sym, HashMap<ThrowFact, Certainty>> = HashMap::new();
-    let mut edges: HashMap<Sym, Vec<Edge>> = HashMap::new();
-    let mut ex: HashMap<Sym, bool> = HashMap::new();
+    let mut rows: HashMap<Sym, ThrowOwnRow> = HashMap::new();
     let mut sym_file: HashMap<Sym, usize> = HashMap::new();
-
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         sym_file.insert(unit.sym.clone(), unit.file);
-        let d = direct.entry(unit.sym.clone()).or_default();
-        let e = edges.entry(unit.sym.clone()).or_default();
-        let x = ex.entry(unit.sym.clone()).or_insert(true);
-        classify_throw_origins(&cx, unit.class_fqn.as_deref(), unit.origins, d, e, x);
+        let row = rows.entry(unit.sym.clone()).or_insert_with(ThrowOwnRow::new);
+        classify_throw_origins(&cx, unit.class_fqn.as_deref(), unit.origins, row);
     }
+    (ulist.into_iter().map(|u| u.sym).collect(), sym_file, rows)
+}
 
-    // Fixpoint: propagate callee throws through each call site's guards.
-    let syms: Vec<Sym> = ulist.iter().map(|u| u.sym.clone()).collect();
-    let mut facts = direct;
+/// Fixpoint: propagate callee throws through each call site's guards, from the
+/// complete own rows. Monotone and order-independent (ADR-0048 §4); the rows
+/// are read-only — propagated state never flows back into an own row.
+fn propagate_throws(
+    units: &[FileUnit],
+    index: &Index,
+    syms: &[Sym],
+    files: &HashMap<Sym, usize>,
+    rows: &HashMap<Sym, ThrowOwnRow>,
+) -> HashMap<Sym, ThrowSet> {
+    let mut facts: HashMap<Sym, HashMap<ThrowFact, Certainty>> =
+        rows.iter().map(|(s, r)| (s.clone(), r.facts.clone())).collect();
+    let mut ex: HashMap<Sym, bool> =
+        rows.iter().map(|(s, r)| (s.clone(), r.exhaustive)).collect();
     loop {
         let mut changed = false;
-        for sym in &syms {
-            let file = sym_file[sym];
+        for sym in syms {
+            let file = files[sym];
             let cx = Cx::new(units, index, file);
-            let sym_edges: Vec<Edge> = edges.get(sym).cloned().unwrap_or_default();
-            for (callee, guards) in &sym_edges {
+            let Some(row) = rows.get(sym) else { continue };
+            for (callee, guards) in &row.edges {
                 if ex.get(callee).copied() == Some(false) && ex.get(sym).copied() != Some(false) {
                     ex.insert(sym.clone(), false);
                     changed = true;
@@ -278,17 +329,17 @@ pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, 
         }
     }
 
-    syms.into_iter()
+    syms.iter()
         .map(|s| {
-            let f = facts.remove(&s).unwrap_or_default();
-            let x = ex.get(&s).copied().unwrap_or(true);
-            (s, ThrowSet { facts: f, exhaustive: x })
+            let f = facts.remove(s).unwrap_or_default();
+            let x = ex.get(s).copied().unwrap_or(true);
+            (s.clone(), ThrowSet { facts: f, exhaustive: x })
         })
         .collect()
 }
 
-/// Classify one unit's (or one **region**'s — ADR-0076) throw origins into the
-/// throw fixpoint's accumulators. The regional twin of [`classify_effect_origins`]:
+/// Classify one unit's (or one **region**'s — ADR-0076) throw origins into its
+/// [`ThrowOwnRow`]. The regional twin of [`classify_effect_origins`]:
 /// a sub-span of a body is asked exactly the question the whole body is asked, so
 /// the loop transform's "proven throw set empty" precondition is the throw pass's
 /// own verdict rather than a second opinion about what a throw is.
@@ -296,9 +347,7 @@ pub(crate) fn classify_throw_origins(
     cx: &Cx,
     class_fqn: Option<&str>,
     origins: &[ThrowOrigin],
-    d: &mut HashMap<ThrowFact, Certainty>,
-    e: &mut Vec<(Sym, Vec<Vec<CatchClause>>)>,
-    x: &mut bool,
+    row: &mut ThrowOwnRow,
 ) {
     let add_fact = |class: String, origin: String, span: steins_syntax::Span, cert: Certainty, d: &mut HashMap<ThrowFact, Certainty>| {
         if cert == Certainty::No {
@@ -321,44 +370,44 @@ pub(crate) fn classify_throw_origins(
                 let d_fqn = cx.class_fqn(class);
                 let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
                 let display = format!("new {}", last_segment(&d_fqn));
-                add_fact(d_fqn, display, origin.span, esc, d);
+                add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
             }
             ThrowKind::Rethrow { caught, has_unresolvable } => {
                 for cref in caught {
                     let d_fqn = cx.class_fqn(cref);
                     let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
                     let display = format!("rethrow {}", last_segment(&d_fqn));
-                    add_fact(d_fqn, display, origin.span, esc, d);
+                    add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
                 }
                 if *has_unresolvable {
-                    *x = false;
+                    row.exhaustive = false;
                 }
             }
             ThrowKind::Call(name) => match cx.resolve_function(name) {
                 FnResolution::User(site) => {
-                    e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                    row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
                 }
                 FnResolution::Builtin(builtin_name) => {
                     if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
                         for c in classes {
                             let esc = escape_through_guards(cx, c, &origin.guards);
-                            add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, d);
+                            add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, &mut row.facts);
                         }
                     }
                 }
-                FnResolution::Unknown => *x = false,
+                FnResolution::Unknown => row.exhaustive = false,
             },
             ThrowKind::MethodCall { receiver, method } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
-                    Some(callee) => e.push((callee, origin.guards.clone())),
-                    None => *x = false,
+                    Some(callee) => row.edges.push((callee, origin.guards.clone())),
+                    None => row.exhaustive = false,
                 }
             }
             // A resolved callback's throws propagate through this call site's
             // guards (ADR-0033): a closure/user callback is an edge; a builtin
             // callback contributes its curated throws; unknown taints.
             ThrowKind::Callback { cbref } => {
-                add_callback_throws(cx, cbref, origin.span, &origin.guards, d, e, x);
+                add_callback_throws(cx, cbref, origin.span, &origin.guards, row);
             }
             ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
                 match cx.resolve_invoker_function(callee) {
@@ -368,29 +417,29 @@ pub(crate) fn classify_throw_origins(
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => add_callback_throws(
-                                    cx, cbref, origin.span, &origin.guards, d, e, x,
+                                    cx, cbref, origin.span, &origin.guards, row,
                                 ),
-                                None => *x = false,
+                                None => row.exhaustive = false,
                             }
                         }
                     }
                     FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_function(callee) {
                         FnResolution::User(site) => {
-                            e.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                            row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
                         }
                         FnResolution::Builtin(builtin_name) => {
                             if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
                                 for c in classes {
                                     let esc = escape_through_guards(cx, c, &origin.guards);
-                                    add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, d);
+                                    add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, &mut row.facts);
                                 }
                             }
                         }
-                        FnResolution::Unknown => *x = false,
+                        FnResolution::Unknown => row.exhaustive = false,
                     },
                 }
             }
-            ThrowKind::Taint => *x = false,
+            ThrowKind::Taint => row.exhaustive = false,
         }
     }
 }
@@ -459,10 +508,10 @@ pub(crate) fn collect_class_names(ty: &PType, f: &mut dyn FnMut(&str)) {
 /// default-less `match`, scanned independently of coverage — see
 /// [`scan_throw_origins`]'s own `Node::Match` arm) is a REPORTABLE contribution.
 pub(crate) fn throw_diagnostics(
-    units: &[FileUnit],
-    index: &Index,
+    fx: &Fixpoints<'_>,
     uncovered: &HashMap<usize, HashSet<u32>>,
 ) -> Vec<Diagnostic> {
+    let (units, index) = (fx.units(), fx.index());
     // Fast path: nothing to check without a `@throws` tag anywhere.
     let any_throws = units.iter().any(|u| {
         let has = |d: Option<&str>| d.is_some_and(|t| t.contains("throws"));
@@ -475,7 +524,7 @@ pub(crate) fn throw_diagnostics(
         return Vec::new();
     }
 
-    let throws = compute_throws(units, index);
+    let throws = fx.throws();
     let mut out = Vec::new();
     for fi in 0..units.len() {
         let cx = Cx::new(units, index, fi);
@@ -486,7 +535,7 @@ pub(crate) fn throw_diagnostics(
             }
             let sym = Sym::Func(f.fqn.clone());
             emit_undeclared(
-                &mut out, &cx, index, units, &sym, &f.name, &declared, &throws, &f.throw_origins,
+                &mut out, &cx, index, units, &sym, &f.name, &declared, throws, &f.throw_origins,
                 uncovered,
             );
         }
@@ -497,7 +546,7 @@ pub(crate) fn throw_diagnostics(
                 if !declared.is_empty() {
                     let sym = Sym::Method(c.fqn.clone(), m.name.clone());
                     emit_undeclared(
-                        &mut out, &cx, index, units, &sym, &display, &declared, &throws,
+                        &mut out, &cx, index, units, &sym, &display, &declared, throws,
                         &m.throw_origins, uncovered,
                     );
                 }

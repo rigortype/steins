@@ -104,7 +104,7 @@ pub(crate) struct Cx<'a> {
     /// (and therefore also for every auxiliary pass, which reports no findings of
     /// this family). `None` makes [`Self::provably_impure`] answer `false`, i.e. the
     /// obligation stays silent — the safe side.
-    pub(crate) purity: Option<&'a PurityOracle>,
+    pub(crate) purity: Option<&'a PurityOracle<'a>>,
     /// The PHP target range the project DECLARES, verbatim (issue #73). The
     /// version-keyed value rules read [`Self::php_minor`], which has already
     /// collapsed the range to one effective minor; the ADR-0069 floor's gate needs
@@ -143,7 +143,7 @@ impl<'a> Cx<'a> {
         php_minor: Option<(u16, u16)>,
         catalog_skew: bool,
         version_id: Option<(u32, Option<u32>)>,
-        purity: Option<&'a PurityOracle>,
+        purity: Option<&'a PurityOracle<'a>>,
         php_target: Option<&'a steins_db::PhpTarget>,
     ) -> Self {
         Self {
