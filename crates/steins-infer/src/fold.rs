@@ -471,7 +471,8 @@ pub struct EngineFolder<E: FoldEngine> {
     /// Also keyed by the `env()` identity ([`Self::env_identity`]): an engine that
     /// changes underneath the run invalidates every prior answer rather than
     /// silently mixing two runtimes' class worlds. Per-run memoization only;
-    /// cross-run persistence is M5's problem (issue #269).
+    /// cross-run persistence of engine answers lives in `fold_persist`, the
+    /// generation-scoped fold table (ADR-0092 §4, issue #500).
     ///
     /// Engine-intrinsic, like `int_size` and `preg_refusal_memo`: [`Self::set_php_target`]
     /// does not drop it, since the target gates absence claims and a declaration
