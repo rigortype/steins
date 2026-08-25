@@ -1301,8 +1301,10 @@ fn fold_admitted_by_shape(name: &str, args: &[FoldArg]) -> bool {
 /// Which fold lane an engine of this integer width gets — the width half of
 /// [`fold_admitted_at_width`], named so a description of the boundary
 /// ([`EngineFolder::surface_summary`]) reads the same three cases the gate
-/// branches on instead of restating them.
-fn fold_lane_at_width(int_size: Option<u32>) -> FoldLane {
+/// branches on instead of restating them. `pub(crate)` for the same reason:
+/// the persisted fold table's engine identity (ADR-0092 §4) records the lane,
+/// and it must record the gate's own verdict, not a restatement.
+pub(crate) fn fold_lane_at_width(int_size: Option<u32>) -> FoldLane {
     match int_size {
         Some(8) => FoldLane::Full,
         Some(4) => FoldLane::PortableSubset,

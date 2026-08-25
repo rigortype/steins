@@ -47,9 +47,9 @@ pub use wire::{
     ARRAY_TAG, BuiltinParam, ClassReflection, ConstantDefined, EnvInfo, FoldArg, FoldKey, FoldResult, FoldValue,
     PregCompile, ReflectedClass, ReflectedClassKind, ReflectedConst, ReflectedMethod,
     ReflectedProperty, Reflection, Visibility, defined_params, env_params, fold_arg_to_json,
-    fold_params, parse_class_reflection_result, parse_defined_result, parse_env_result,
-    parse_fold_result, parse_fold_value, parse_preg_compile_result, parse_reflection_result,
-    preg_compile_params, reflect_class_params, reflect_params,
+    fold_params, fold_result_is_well_formed, parse_class_reflection_result, parse_defined_result,
+    parse_env_result, parse_fold_result, parse_fold_value, parse_preg_compile_result,
+    parse_reflection_result, preg_compile_params, reflect_class_params, reflect_params,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
