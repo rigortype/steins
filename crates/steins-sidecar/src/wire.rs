@@ -599,6 +599,28 @@ pub fn parse_fold_result(result: &serde_json::Value) -> FoldResult {
     }
 }
 
+/// Whether a *stored* fold `result` replays as the engine's own answer — i.e.
+/// [`parse_fold_result`] on it yields the recorded verdict rather than one of
+/// its own malformed-shape widens (`unencodable value`, `throw without class`,
+/// `unknown result kind`).
+///
+/// [`parse_fold_result`] deliberately collapses malformedness into a widen,
+/// because on a live transport there is nobody better to ask. A recorded row
+/// (ADR-0092 §4) is different: a malformed row is a **miss for that row** —
+/// the live engine is still there to ask — so its reader needs to tell "the
+/// engine answered widen" from "the bytes rotted", which this predicate does.
+/// The branches mirror [`parse_fold_result`]'s exactly; a shape that parser
+/// learns to read is well-formed here in the same commit.
+#[must_use]
+pub fn fold_result_is_well_formed(result: &serde_json::Value) -> bool {
+    match result.get("kind").and_then(serde_json::Value::as_str) {
+        Some("value") => parse_fold_value(result).is_some(),
+        Some("throw") => result.get("class").and_then(serde_json::Value::as_str).is_some(),
+        Some("widen") => true,
+        _ => false,
+    }
+}
+
 /// Turn a `{kind:"value", value, type}` object into a typed [`FoldValue`]. The
 /// `type` tag disambiguates cases JSON alone cannot (e.g. `1` as int vs. bool).
 #[must_use]
@@ -1204,6 +1226,34 @@ mod tests {
             serde_json::json!(42),
         ] {
             assert!(matches!(parse_fold_result(&bad), FoldResult::Widen { .. }), "{bad}");
+        }
+    }
+
+    /// The well-formedness predicate agrees with the parser row by row: a shape
+    /// the parser reads as the engine's own verdict is well-formed, and every
+    /// shape it collapses into a malformed-shape widen is not (ADR-0092 §4's
+    /// stored-row reader tells the two apart to re-ask the live engine).
+    #[test]
+    fn well_formedness_splits_answers_from_rot() {
+        for good in [
+            serde_json::json!({ "kind": "value", "type": "string", "value": "AB" }),
+            serde_json::json!({ "kind": "throw", "class": "DivisionByZeroError" }),
+            serde_json::json!({ "kind": "widen", "reason": "unknown function" }),
+            // A reason-less widen still parses as a widen, so it is an answer.
+            serde_json::json!({ "kind": "widen" }),
+        ] {
+            assert!(fold_result_is_well_formed(&good), "{good}");
+        }
+        for rotten in [
+            serde_json::json!({}),
+            serde_json::json!({ "kind": "array" }),
+            serde_json::json!({ "kind": "value", "type": "array", "value": [] }),
+            serde_json::json!({ "kind": "value" }),
+            serde_json::json!({ "kind": "throw" }),
+            serde_json::json!(42),
+            serde_json::json!("garbage"),
+        ] {
+            assert!(!fold_result_is_well_formed(&rotten), "{rotten}");
         }
     }
 

@@ -24,6 +24,14 @@ steins-phpdoc = { path = "../steins-phpdoc" }
 steins-sidecar = { path = "../steins-sidecar" }
 serde_json.workspace = true
 
+# The persisted fold table (ADR-0092 §4) rides the steins-gen artifact
+# container. Native-only, like the process transport it wraps: the browser's
+# replay transport has no disk, and the wasm dependency graph stays free of
+# the store's filesystem machinery. steins-gen stays a leaf crate — this edge
+# points at it, never back.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+steins-gen = { path = "../steins-gen" }
+
 [dev-dependencies]
 steins-db = { path = "../steins-db" }
 steins-syntax = { path = "../steins-syntax" }

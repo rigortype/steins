@@ -45,6 +45,8 @@ mod existence;
 mod fold;
 mod fold_args;
 #[cfg(not(target_arch = "wasm32"))]
+mod fold_persist;
+#[cfg(not(target_arch = "wasm32"))]
 mod fold_process;
 mod fold_table;
 mod foreach_check;
@@ -135,6 +137,11 @@ pub use steins_syntax::{BodyEnd, body_end, body_has_terminator};
 pub use fold::{
     EngineFolder, FoldEngine, FoldLane, FoldPosture, Folder, MONKEY_PATCH_EXTENSIONS, NoFold,
     RefusalNote, SurfaceSummary,
+};
+#[cfg(not(target_arch = "wasm32"))]
+pub use fold_persist::{
+    FOLD_IDENTITY_SECTION, FOLD_PACKAGE, FOLD_ROWS_SECTION, FoldTableArtifact, FoldTableIdentity,
+    RecordingEngine, RecordingFolder, fold_package,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_process::{ProcessEngine, SidecarFolder};

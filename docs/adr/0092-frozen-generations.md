@@ -250,3 +250,20 @@ contract for unsaved buffers, taken from the same prior art:
   (size limits, schema check) and every failure path is
   rebuild-from-source. The recovery story is deliberately unclever —
   throw the cache away; §2's invariant makes that always correct.
+
+## Amendment (2026-08-25): the fold table is one generation-level artifact
+
+§4's letter puts the recorded rows "in the package artifact".
+Implementation (issue #488) corrects the placement, not the mechanism:
+the rows persist as **one** generation-level artifact beside the package
+artifacts, under the reserved package name `__fold__`. The ADR-0066
+table seam, the wire key, and the engine-identity gating stand exactly
+as §4 states them.
+
+A single table follows from that mechanism. ADR-0066's replay loop
+drives exactly one table; a warm run rebuilding one package folds
+through calls that can name anything, so per-package attribution would
+only duplicate rows; and a row's validity is scoped by the engine
+identity alone, never by source location, so packages add no
+invalidation axis. Growth control is mark-and-sweep by construction — a
+published table holds exactly the rows its run consumed or newly asked.
