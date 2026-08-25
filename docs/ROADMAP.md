@@ -12,7 +12,7 @@ position queries reachable — but they release after the checker is
 genuinely usable. The specifically protected LSP capability:
 type-directed member completion at a cursor position.
 
-## Current state (verified against the tree, 2026-08-08)
+## Current state (verified against the tree, 2026-08-25)
 
 Engine:
 
@@ -27,7 +27,7 @@ Engine:
   (ADR-0028, folding impurity) — nothing of inference is memoized
   across runs. Acceptable for batch CLI; the LSP prerequisite is
   ADR-0048 §5.
-- Diagnostic surface, through v0.1.5. Pre-existing: `type.argument-mismatch`,
+- Diagnostic surface, through v0.1.6. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
   `phpdoc.return-mismatch`, `phpdoc.property-mismatch`,
@@ -62,23 +62,32 @@ Engine:
   layer, rides with `effect.envelope-exceeded`). The two ADR-0081
   possibly-grade legs registered ahead of emission since v0.1.4,
   `variable.maybe-undefined` and `property.maybe-undefined`, now fire
-  under `strict` (#267). `phpdoc.maybe-undefined` joined them (#396,
-  ADR-0087 §4): a read of a top-level `@var T|unset $x` the
-  declaration says may not be bound — contract layer, `contracts`
-  floor, since its premise is the docblock rather than reachability.
+  under `strict` (#267).
+- v0.1.6 added four ids. `type.maybe-argument-mismatch` and
+  `phpdoc.maybe-argument-mismatch` (#391, ADR-0081 §8): a builtin's
+  `T|false` handed straight to a native `T` — the possibly grade on
+  the argument side, `strict` floor, prefix split by premise grade.
+  `phpdoc.maybe-undefined` (#396, ADR-0087 §4): a read of a top-level
+  `@var T|unset $x` the declaration says may not be bound — contract
+  layer, `contracts` floor, since its premise is the docblock rather
+  than reachability. `phpdoc.never-param-reachable` (#428, ADR-0088
+  §4): a `@param never` sentinel reached with a non-empty declared
+  domain, carved out of `phpdoc.param-mismatch`, which no longer
+  judges a never-declared parameter at all.
   `call.too-many-arguments` is now the only id registered ahead of
   emission, still waiting on the reflect slice.
 
 Verification apparatus (ADR-0013):
 
-- fp-gate: runtime layer zero-FP over 90,709 corpus files (10 pinned
-  OSS packages + a private legacy monorepo injected via
-  `corpus.local.toml`). `phpdoc.*` (488) and `throw.*` (44,164) are
-  increase-tripwires in measurement mode, and so are the
-  **possibly-grade** proof ids (`Layer::Proof` + `Floor::Strict`) since
-  ADR-0081 §8 scoped the strict-zero bar to the definite ids; triaged
-  true positives among the definite ids are fingerprint-pinned
-  (`EXPECTED_PROOF_FINDINGS`).
+- fp-gate: runtime layer zero-FP over ~85k corpus files (10 pinned
+  OSS packages + phpstan-src and a private legacy monorepo injected
+  via `corpus.local.toml`; those two are unpinned live checkouts, so
+  the total drifts with them). `phpdoc.*` (680), `throw.*` (44,333)
+  and `effect.*` (4,442) are increase-tripwires in measurement mode,
+  and so are the **possibly-grade** proof ids (`Layer::Proof` +
+  `Floor::Strict`) since ADR-0081 §8 scoped the strict-zero bar to
+  the definite ids; triaged true positives among the definite ids are
+  fingerprint-pinned (`EXPECTED_PROOF_FINDINGS`).
 - php-typing-conformance: 208/214 (re-measured 2026-08-09 after issues
   #288 and #293; the suite grew past the 98-case denominator this line
   used to carry). Three fails are registered refusals (ADR-0030), three
@@ -95,12 +104,13 @@ Verification apparatus (ADR-0013):
   The suite lives in the sibling php-typing-conformance repo, so the
   denominator and the total pass count are to be re-measured there and
   dated before this line is rewritten.
-- ~4,180 workspace tests; zero conformance regressions ever.
+- ~5,110 workspace tests; zero conformance regressions ever.
 
 CLI (ADR-0020, partially landed):
 
 - Landed: `check` (`--format text|json|github|sarif`, `--profile`,
-  `--no-php` sound subset, `--vendor-diagnostics`, `--fix`, baseline
+  `--no-php` sound subset, `--no-tolerated-effects` audit switch per
+  ADR-0084, `--vendor-diagnostics`, `--fix`, baseline
   set/match/stale per ADR-0022), `annotate` (margin facts, `…?`
   non-exhaustiveness), `transform` (`phpdoc-to-native`,
   `phpdoc-honesty`, `throws-envelope`, `effects-envelope`,
@@ -183,10 +193,12 @@ names its milestone.
 9. **Ecosystem packs** (ADR-0044/0045: PSL, Serde, Valinor, PSR) —
    designed, not implemented; the mapper-boundary types they recover
    are exactly where legacy modernization needs truth. → M4
-10. **Performance and incrementality.** ~200s full batch over 90,709
-    files on dev hardware is CI-viable; there is no warm story and no
-    cross-run persistence. Not checker-release-blocking; LSP-blocking.
-    The mechanism is ADR-0092's frozen generations. → M5
+10. **Performance and incrementality.** A full batch over the ~85k-file
+    mounted corpus is ~10 minutes on dev hardware
+    (`docs/agents/profiling.md` records where the time goes) and
+    CI-viable; there is no warm story and no cross-run persistence.
+    Not checker-release-blocking; LSP-blocking. The mechanism is
+    ADR-0092's frozen generations. → M5
 11. **Adoption path.** Docs, install/distribution, licensing, public
     repo — USER gates G2/G3. → M3
 12. **Position queries** (LSP): constrained now by ADR-0048, built at
