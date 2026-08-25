@@ -20,3 +20,18 @@ Budgets (inference cutoffs) are imported from Rigor, and a budget cutoff
 **names itself** — Rigor's Certainty discipline: `maybe` is reported as
 `maybe`, silence is never manufactured. The dual of the crying-wolf
 prohibition: quiet misses must announce themselves too.
+
+## Amendment (2026-08-25): the mechanism moves to frozen generations (ADR-0092)
+
+The decision above has two halves. The *principles* — budgets first-class,
+a cutoff names itself, `maybe` reported as `maybe`, LSP as a design premise
+— stand. The *mechanism* — all analysis as memoized queries with
+framework-tracked minimal invalidation — is superseded by ADR-0092: the
+batch pass is the generation builder, persistence is eager per-package
+artifacts on disk, invalidation is a package plus its reverse-dependency
+closure, and editor interactivity comes from request-only replay
+(ADR-0048 §1) rather than fine-grained invalidation. The fear recorded
+here — a batch design as a permanent shackle — is answered there by
+identity and persistence rather than by decomposition. A month of
+implementation is the warrant: the graph stayed a shell while
+ADR-0048's constraints, not salsa, kept the walk replayable.

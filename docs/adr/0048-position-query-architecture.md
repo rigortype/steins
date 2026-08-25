@@ -66,3 +66,17 @@ that keeps position queries reachable, and nothing more.
    session index persistence, cancellation, position encoding.
    Span-keying the fact surface (today line-keyed `LineFact`) is
    mechanical M6 work, not a present constraint.
+
+## Amendment (2026-08-25): §5's prerequisites are replaced by ADR-0092
+
+§5 scheduled inference into the salsa graph — entry states as tracked
+queries, per-symbol `project_index` sharding, folds as salsa inputs.
+ADR-0092 replaces that list: entry states and effect/throw summaries
+persist in per-package generation artifacts, the index shards per
+*package* with every global table merged per generation, and folds are
+recorded generation inputs (its §4). §§2–4 do not move, and now do
+double duty as the warm ≡ cold soundness argument (its §5); §1's replay
+decision and §6's packaging are unchanged. M6 additionally inherits the
+dirty-buffer contract of its §6 — request-only re-analysis of the
+enclosing declaration, header anchoring matched only when unique on
+both sides, and cross-file staleness refused by name.
