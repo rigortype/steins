@@ -157,34 +157,73 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         }
     };
 
-    // One folder for the whole run: owns the sidecar + fold memo, so repeated
-    // calls across files never re-spawn or re-fold.
-    let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
-
-    // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
-    // DB) so cross-file calls, class chains, effects resolve.
-    let loaded = load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
-    let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
-    // Target PHP range (issue #28) gates the folder's absence family and curated facts.
-    folder.set_php_target(loaded.layout.php_target().cloned());
-    // `[runtime]` pseudo-constants (ADR-0037 §2): an unknown value on a known
-    // key warns and keeps the safe default (a parse error already exited 2).
+    // `[runtime]` pseudo-constants (ADR-0037 §2), resolved up front (pure;
+    // an unknown value on a known key warns — printed in each arm below at
+    // the same point it always was — and keeps the safe default).
     let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
-    for w in &runtime_warnings {
-        errln!("steins: {w}");
-    }
-    let findings: Vec<Diagnostic> = check_project_with_postures(
-        db,
-        project,
-        &mut folder,
-        postures.warning_handler_abort,
-        postures.final_keyword,
-    );
+
+    // The experimental frozen-generation lifecycle (ADR-0092 §5, issue #489
+    // slice A): activated only by `STEINS_EXPERIMENTAL_GENERATIONS=1` in the
+    // environment — read once here, plumbed as a bool, deliberately no CLI
+    // flag (flag promotion is an ADR-0020 owner decision). With the variable
+    // unset — every CI run — this function is byte-identical to before the
+    // gate existed; any gated failure degrades to the ordinary arm below.
+    let experimental_generations =
+        std::env::var("STEINS_EXPERIMENTAL_GENERATIONS").is_ok_and(|v| v == "1");
+    let gated = if experimental_generations {
+        crate::generation::try_generation_check(
+            &files,
+            &paths,
+            plugin_allow.as_deref(),
+            &effects_policy,
+            &postures,
+            no_php,
+            &runtime_warnings,
+        )
+    } else {
+        None
+    };
+
+    let (loaded, findings, gated_trees) = match gated {
+        Some(run) => (run.loaded, run.findings, Some(run.trees)),
+        None => {
+            // One folder for the whole run: owns the sidecar + fold memo, so repeated
+            // calls across files never re-spawn or re-fold.
+            let mut folder =
+                if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+
+            // Project mode (ADR-0009/0015): all `.php` files form ONE project (one salsa
+            // DB) so cross-file calls, class chains, effects resolve.
+            let loaded = load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
+            // Target PHP range (issue #28) gates the folder's absence family and curated facts.
+            folder.set_php_target(loaded.layout.php_target().cloned());
+            for w in &runtime_warnings {
+                errln!("steins: {w}");
+            }
+            let findings: Vec<Diagnostic> = check_project_with_postures(
+                &loaded.db,
+                loaded.project,
+                &mut folder,
+                postures.warning_handler_abort,
+                postures.final_keyword,
+            );
+            (loaded, findings, None)
+        }
+    };
+    let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
 
     // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
-    // inline). Baseline stays here: it's the CI ratchet, this command's own argument.
-    let (inline, vendor_suppressed) =
-        suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
+    // inline). Baseline stays here: it's the CI ratchet, this command's own
+    // argument. The gated arm supplies the orchestrator's own trees so the
+    // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
+    let (inline, vendor_suppressed) = match &gated_trees {
+        Some(trees) => {
+            let pairs: Vec<(String, &SourceTree)> =
+                trees.iter().map(|(path, tree)| (path.clone(), tree)).collect();
+            suppression_over(&loaded.layout, pairs, findings, &surface, vendor_diagnostics)
+        }
+        None => suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics),
+    };
 
     // Baseline file (ADR-0022): `--set-baseline`/`--baseline` name one
     // explicitly, else the default auto-loads unless `--ignore-baseline`.
@@ -495,6 +534,27 @@ fn match_baseline(
 /// inline. Baseline deliberately NOT here — a per-invocation argument.
 pub(crate) fn suppression_pipeline(
     loaded: &LoadedProject,
+    findings: Vec<Diagnostic>,
+    surface: &profile::Surface,
+    vendor_diagnostics: bool,
+) -> (steins_infer::InlineOutcome, usize) {
+    let db = &loaded.db;
+    let trees: Vec<&SourceTree> = loaded.inputs.iter().map(|&sf| parse_tree(db, sf)).collect();
+    let file_pairs: Vec<(String, &SourceTree)> = loaded
+        .inputs
+        .iter()
+        .zip(trees.iter())
+        .map(|(&sf, &t)| (sf.path(db).to_owned(), t))
+        .collect();
+    suppression_over(&loaded.layout, file_pairs, findings, surface, vendor_diagnostics)
+}
+
+/// The pipeline proper, over trees the caller already holds — the seam the
+/// experimental generation path (issue #489) comes through with the
+/// orchestrator's owned trees, so a warm run's inline scan re-parses nothing.
+pub(crate) fn suppression_over(
+    layout: &steins_db::ProjectLayout,
+    file_pairs: Vec<(String, &SourceTree)>,
     mut findings: Vec<Diagnostic>,
     surface: &profile::Surface,
     vendor_diagnostics: bool,
@@ -504,7 +564,7 @@ pub(crate) fn suppression_pipeline(
     let mut vendor_suppressed = 0usize;
     if !vendor_diagnostics {
         let before = findings.len();
-        findings.retain(|d| !loaded.layout.is_vendor(&d.path));
+        findings.retain(|d| !layout.is_vendor(&d.path));
         vendor_suppressed = before - findings.len();
     }
 
@@ -516,14 +576,6 @@ pub(crate) fn suppression_pipeline(
     let findings = apply_policy_stage(findings);
 
     // Inline `@steins-ignore` next (ADR-0023): suppressed findings skip the baseline.
-    let db = &loaded.db;
-    let trees: Vec<&SourceTree> = loaded.inputs.iter().map(|&sf| parse_tree(db, sf)).collect();
-    let file_pairs: Vec<(String, &SourceTree)> = loaded
-        .inputs
-        .iter()
-        .zip(trees.iter())
-        .map(|(&sf, &t)| (sf.path(db).to_owned(), t))
-        .collect();
     (apply_inline_ignores(findings, &file_pairs), vendor_suppressed)
 }
 

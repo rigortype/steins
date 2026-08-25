@@ -126,6 +126,34 @@ pub(crate) fn load_project(
     LoadedProject { db, project, inputs, texts, layout }
 }
 
+/// Assemble a [`LoadedProject`] from texts already in hand — the experimental
+/// generation path (issue #489), whose sources were read through the sealed
+/// capture and whose trees are owned by the orchestrator. Builds the same salsa
+/// view [`load_project`] builds (so `--fix`'s post-check and the baseline
+/// machinery work unchanged) but triggers no parse and prints no notices: the
+/// gated caller printed the channel notices itself, and the attribution check
+/// came back from the orchestrator without forcing a salsa parse.
+///
+/// `entries` must be in the orchestrator's universe-slot order, so the salsa
+/// project and the generation analysis agree on file identity.
+pub(crate) fn assemble_loaded(
+    entries: Vec<(String, String)>,
+    layout: ProjectLayout,
+    plugins: PluginFacts,
+    effects: EffectsPolicy,
+) -> LoadedProject {
+    let db = SteinsDatabase::default();
+    let mut inputs: Vec<SourceFile> = Vec::with_capacity(entries.len());
+    let mut texts: HashMap<String, String> = HashMap::with_capacity(entries.len());
+    for (path, text) in entries {
+        texts.insert(path.clone(), text.clone());
+        inputs.push(SourceFile::new(&db, path, text));
+    }
+    let project =
+        Project::builder(inputs.clone(), layout.clone(), plugins).effects(effects).new(&db);
+    LoadedProject { db, project, inputs, texts, layout }
+}
+
 /// Load the plugin channel (ADR-0068) for `layout`, reporting every load-time
 /// refusal on stderr. Never a diagnostic — the zero-FP banner covers the
 /// user's code, not a third party's packaging mistake.

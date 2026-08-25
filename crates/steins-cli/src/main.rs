@@ -20,6 +20,7 @@ mod config;
 mod doctor;
 mod effect_baseline;
 mod effect_diff;
+mod generation;
 mod mcp;
 mod project;
 mod render;

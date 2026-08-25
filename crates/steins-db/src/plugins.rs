@@ -99,6 +99,16 @@ impl PluginFacts {
         &self.notices
     }
 
+    /// Every accepted coloring, `(lowercased function name, labels)`, in name
+    /// order (the map is a `BTreeMap`). This is the channel's whole
+    /// finding-relevant content beside the registered labels, which is what the
+    /// generation fingerprint (ADR-0092 §2) needs: two runs whose plugin
+    /// channel contributed the same labels and colorings infer alike, whatever
+    /// package names delivered them.
+    pub fn colorings(&self) -> impl Iterator<Item = (&str, &[String])> {
+        self.effects.iter().map(|(name, labels)| (name.as_str(), labels.as_slice()))
+    }
+
     /// Whether the channel contributed nothing at all (no labels, no colorings).
     #[must_use]
     pub fn is_empty(&self) -> bool {

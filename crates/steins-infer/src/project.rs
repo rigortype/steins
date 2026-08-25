@@ -211,8 +211,11 @@ impl Index {
     }
 
     /// Every table of a merge, with universe slots read as unit-slice indices
-    /// — on this path they are the same thing.
-    fn from_merged(m: MergedTables) -> Self {
+    /// — on this path they are the same thing. `pub(crate)` for the generation
+    /// orchestrator (issue #489), whose warm path merges loaded-or-rebuilt
+    /// shards itself and hands the result here; the merge is
+    /// partition-invariant, so this is the same index either grouping builds.
+    pub(crate) fn from_merged(m: MergedTables) -> Self {
         let site = |s: ShardSite| Site { file: s.file, index: s.index };
         Index {
             functions: m.functions.into_iter().map(|(fqn, s)| (fqn, site(s))).collect(),

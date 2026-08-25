@@ -32,12 +32,15 @@
 //! which is part of why timing never gates.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
-use steins_db::{Project, SourceFile, SteinsDatabase, composer, parse};
-use steins_infer::{Diagnostic, SidecarFolder, check_project};
+use steins_db::{EffectsPolicy, PluginFacts, Project, SourceFile, SteinsDatabase, composer, parse};
+use steins_infer::{
+    Diagnostic, FinalKeyword, GenerationMode, GenerationParams, SidecarFolder, check_project,
+    generation_check,
+};
 
 use crate::corpus::{collect_php_files, repo_root};
 use crate::sha256;
@@ -63,10 +66,18 @@ const BASELINE_FILE: &str = "perf.local.toml";
 const COLD_BUDGET_FRACTION: f64 = 0.10;
 
 /// Entry point for `cargo xtask perf <target-dir>... [--runs N] [--bless]
-/// [--no-php]`. Returns `Ok(true)` when green; `Ok(false)` on a determinism
-/// or baseline-hash failure; `Err` for operator mistakes (bad args, unreadable
-/// baseline, posture mismatch — a compare across postures is an error, not a
-/// number).
+/// [--no-php] [--warm]`. Returns `Ok(true)` when green; `Ok(false)` on a
+/// determinism, baseline-hash, or warm ≡ cold failure; `Err` for operator
+/// mistakes (bad args, unreadable baseline, posture mismatch — a compare
+/// across postures is an error, not a number).
+///
+/// `--warm` (issue #489, the warm half of ADR-0092 §5's oracle): per target,
+/// cold-build + publish a generation into a scratch store, then measure warm
+/// rebuilds (median over the same N) and assert in-process that every warm
+/// run's findings hash equals the cold hash this invocation measured. The
+/// lines are additive to the existing output; `--bless` still records the
+/// cold numbers only — warm baselines become meaningful in slice B, so warm
+/// timings are printed, never persisted.
 pub fn run(args: &[String]) -> Result<bool, String> {
     let parsed = parse_args(args)?;
     let runs = if parsed.runs < 2 {
@@ -100,6 +111,18 @@ pub fn run(args: &[String]) -> Result<bool, String> {
                 for line in diff.lines() {
                     println!("      {line}");
                 }
+            }
+        }
+
+        if parsed.warm {
+            match measure_warm(Path::new(target), runs, posture, &m) {
+                Ok(w) => {
+                    print_warm(&w, &m);
+                    if !w.matches {
+                        green = false;
+                    }
+                }
+                Err(e) => return Err(format!("target `{target}`: --warm failed: {e}")),
             }
         }
 
@@ -162,6 +185,7 @@ struct PerfArgs {
     runs: usize,
     bless: bool,
     no_php: bool,
+    warm: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
@@ -169,6 +193,7 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
     let mut runs = DEFAULT_RUNS;
     let mut bless = false;
     let mut no_php = false;
+    let mut warm = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -182,16 +207,17 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
             }
             "--bless" => bless = true,
             "--no-php" => no_php = true,
+            "--warm" => warm = true,
             other if other.starts_with("--") => {
-                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php])"));
+                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm])"));
             }
             dir => targets.push(dir.to_owned()),
         }
     }
     if targets.is_empty() {
-        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php]".to_owned());
+        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm]".to_owned());
     }
-    Ok(PerfArgs { targets, runs, bless, no_php })
+    Ok(PerfArgs { targets, runs, bless, no_php, warm })
 }
 
 /// The engine posture a measurement ran under (recorded in the baseline; the
@@ -386,6 +412,188 @@ fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
 
 fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
+}
+
+// ---------------------------------------------------------------------------
+// The warm half (issue #489): the generation lifecycle, measured
+// ---------------------------------------------------------------------------
+
+/// One warm rebuild's numbers, straight off the orchestrator's own report,
+/// plus the loaded/parsed file split the no-change oracle reads.
+struct WarmRun {
+    capture_ms: f64,
+    trees_ms: f64,
+    analyze_ms: f64,
+    persist_ms: f64,
+    loaded: usize,
+    parsed: usize,
+}
+
+/// What `--warm` measured for one target.
+struct WarmMeasurement {
+    /// The cold generation build + publish that seeded the store.
+    cold_build_ms: f64,
+    warm: Vec<WarmRun>,
+    /// Whether every generation run (cold and warm alike) hashed identically
+    /// to this invocation's measured cold baseline — the ADR-0092 §5 oracle,
+    /// asserted in-process.
+    matches: bool,
+    /// The first mismatch, when there was one.
+    mismatch: Option<String>,
+}
+
+/// Cold-build + publish a generation into a scratch store, then measure `runs`
+/// warm rebuilds over the untouched target. Runs on the same
+/// [`WORKER_STACK_SIZE`] worker as the cold measurement.
+fn measure_warm(
+    dir: &Path,
+    runs: usize,
+    posture: Posture,
+    cold: &Measurement,
+) -> Result<WarmMeasurement, String> {
+    let dir = dir.to_path_buf();
+    let cold_hash = cold.findings_sha256.clone();
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || measure_warm_on_worker(&dir, runs, posture, &cold_hash))
+        .expect("failed to spawn the perf warm worker thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn measure_warm_on_worker(
+    dir: &Path,
+    runs: usize,
+    posture: Posture,
+    cold_hash: &str,
+) -> Result<WarmMeasurement, String> {
+    // The store lives in a scratch directory, never in the measured tree.
+    let store = std::env::temp_dir().join(format!(
+        "steins-perf-warm-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&store).map_err(|e| format!("create scratch store: {e}"))?;
+    let result = measure_warm_in_store(dir, &store, runs, posture, cold_hash);
+    let _ = std::fs::remove_dir_all(&store);
+    result
+}
+
+fn measure_warm_in_store(
+    dir: &Path,
+    store: &Path,
+    runs: usize,
+    posture: Posture,
+    cold_hash: &str,
+) -> Result<WarmMeasurement, String> {
+    // The same file list and target-relative diagnostic paths as `cold_run`,
+    // so the canonical serialization (and therefore the hash) is comparable.
+    let mut files = Vec::new();
+    collect_php_files(dir, &mut files);
+    files.sort();
+    let rel: Vec<PathBuf> =
+        files.iter().map(|f| f.strip_prefix(dir).unwrap_or(f).to_path_buf()).collect();
+    let layout = composer::discover(&[dir.to_path_buf()], dir);
+    let partition = steins_db::partition::discover(&layout);
+    let plugins = PluginFacts::discover(&layout, None);
+    let effects = EffectsPolicy::none();
+    let params = GenerationParams {
+        store_root: store,
+        capture_root: dir,
+        files: &rel,
+        layout: &layout,
+        partition: &partition,
+        plugins: &plugins,
+        effects: &effects,
+        // `check_project`'s own defaults — what the cold measurement ran under.
+        warning_handler_abort: true,
+        final_keyword: FinalKeyword::Enforced,
+        php: matches!(posture, Posture::Php),
+    };
+
+    let check = |tag: &str, findings: Vec<Diagnostic>| -> Option<String> {
+        let hash = sha256::hex(canonical_serialization(findings).as_bytes());
+        (hash != cold_hash).then(|| {
+            format!("{tag} findings hash {hash} != measured cold hash {cold_hash}")
+        })
+    };
+
+    // Seed: one cold generation build + publish.
+    let t = Instant::now();
+    let outcome = generation_check(&params).map_err(|e| format!("cold generation build: {e}"))?;
+    let cold_build_ms = ms(t.elapsed());
+    if outcome.report.mode != GenerationMode::Cold {
+        return Err("the scratch store unexpectedly held a generation".to_owned());
+    }
+    let mut mismatch = check("cold generation build", outcome.findings);
+
+    let mut warm: Vec<WarmRun> = Vec::with_capacity(runs);
+    for i in 0..runs {
+        let outcome =
+            generation_check(&params).map_err(|e| format!("warm rebuild {}: {e}", i + 1))?;
+        if outcome.report.mode != GenerationMode::Warm {
+            return Err(format!("warm rebuild {} ran cold — no published generation", i + 1));
+        }
+        let (loaded, parsed) = outcome
+            .report
+            .packages
+            .iter()
+            .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
+        let t = outcome.report.timings;
+        warm.push(WarmRun {
+            capture_ms: t.capture_ms,
+            trees_ms: t.trees_ms,
+            analyze_ms: t.analyze_ms,
+            persist_ms: t.persist_ms,
+            loaded,
+            parsed,
+        });
+        if mismatch.is_none() {
+            mismatch = check(&format!("warm rebuild {}", i + 1), outcome.findings);
+        }
+    }
+
+    Ok(WarmMeasurement { cold_build_ms, warm, matches: mismatch.is_none(), mismatch })
+}
+
+/// Print the warm measurement under the cold block. Additive lines only; warm
+/// timings are never persisted (`--bless` records the cold numbers — warm
+/// baselines become meaningful in slice B).
+fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
+    println!("    warm (experimental generations, ADR-0092 §5):");
+    println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
+    for (i, run) in w.warm.iter().enumerate() {
+        println!(
+            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed), analyze {:.1} ms, persist {:.1} ms, total {:.1} ms",
+            i + 1,
+            run.capture_ms,
+            run.trees_ms,
+            run.loaded,
+            run.parsed,
+            run.analyze_ms,
+            run.persist_ms,
+            run.capture_ms + run.trees_ms + run.analyze_ms + run.persist_ms,
+        );
+    }
+    let total =
+        |r: &WarmRun| r.capture_ms + r.trees_ms + r.analyze_ms + r.persist_ms;
+    println!(
+        "      warm median: total {:.1} ms (cold median load+parse {:.1} ms + analyze {:.1} ms = {:.1} ms)",
+        median(w.warm.iter().map(total)),
+        cold.median.load_ms,
+        cold.median.analyze_ms,
+        cold.median.total_ms,
+    );
+    match &w.mismatch {
+        None => println!(
+            "      warm ≡ cold: OK — every generation run's findings hash equals the measured cold hash ({}…)",
+            &cold.findings_sha256[..12]
+        ),
+        Some(detail) => println!("      warm ≡ cold: FAILED — {detail}"),
+    }
 }
 
 /// The median of an iterator of milliseconds; the mean of the two middles on
