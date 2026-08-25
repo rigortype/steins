@@ -536,7 +536,8 @@ impl<'a> Cx<'a> {
     /// value carry follows, and a library-author lint ADR-0032 keeps thin. `site`
     /// is the `(file, offset)` the argument names were written against, carried so
     /// that a reader lifting one out of the declaration keeps it naming the class it
-    /// named.
+    /// named. The carry stores the file by its path — the stable identity (issue
+    /// #497) — so the per-run index handed in here does not outlive the mint.
     pub(crate) fn mint_declared_carry(
         &self,
         owner_fqn: &str,
@@ -550,7 +551,7 @@ impl<'a> Cx<'a> {
         Some(GenericCarry {
             owner: owner_fqn.to_owned(),
             args: args.iter().map(|t| CArg::Ty(steins_contract::lower(t))).collect(),
-            site: Some(site),
+            site: Some((self.units[site.0].path.to_owned(), site.1)),
         })
     }
 

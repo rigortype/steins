@@ -36,11 +36,12 @@ pub(crate) struct ThrowFact {
     pub(crate) class: String,
     /// Display for the throwing construct (`new RuntimeException`, `intdiv()`).
     pub(crate) origin: String,
-    /// The file the origin lives in (for cross-file position/provenance).
-    pub(crate) origin_file: usize,
-    /// The origin construct's span start in `origin_file`.
+    /// The origin construct's span start in the file `path` names.
     pub(crate) offset: u32,
     pub(crate) line: u32,
+    /// The origin file's diagnostic path — the fact's file identity (issue #497).
+    /// A consumer that needs the file's per-run units index (a `Cx` rebuild, the
+    /// unit-order emission sort) derives it through [`Index::file_index_of`].
     pub(crate) path: String,
 }
 
@@ -56,10 +57,8 @@ pub(crate) struct ThrowSet {
 /// Wire a resolved callback's throws into the throw graph (ADR-0033), filtered by
 /// the call site's `guards`: a closure/user callback is an edge; a builtin
 /// callback contributes its curated throws directly; an unknown callback taints.
-#[allow(clippy::too_many_arguments)]
 fn add_callback_throws(
     cx: &Cx,
-    file: usize,
     cbref: &steins_syntax::CallbackRef,
     span: steins_syntax::Span,
     guards: &[Vec<CatchClause>],
@@ -86,7 +85,6 @@ fn add_callback_throws(
                         let fact = ThrowFact {
                             class: (*c).to_owned(),
                             origin: format!("{}()", name.simple()),
-                            origin_file: file,
                             offset: span.start,
                             line,
                             path: cx.path().to_owned(),
@@ -233,15 +231,7 @@ pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, 
         let d = direct.entry(unit.sym.clone()).or_default();
         let e = edges.entry(unit.sym.clone()).or_default();
         let x = ex.entry(unit.sym.clone()).or_insert(true);
-        classify_throw_origins(
-            &cx,
-            unit.file,
-            unit.class_fqn.as_deref(),
-            unit.origins,
-            d,
-            e,
-            x,
-        );
+        classify_throw_origins(&cx, unit.class_fqn.as_deref(), unit.origins, d, e, x);
     }
 
     // Fixpoint: propagate callee throws through each call site's guards.
@@ -304,7 +294,6 @@ pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, 
 /// own verdict rather than a second opinion about what a throw is.
 pub(crate) fn classify_throw_origins(
     cx: &Cx,
-    file: usize,
     class_fqn: Option<&str>,
     origins: &[ThrowOrigin],
     d: &mut HashMap<ThrowFact, Certainty>,
@@ -319,7 +308,6 @@ pub(crate) fn classify_throw_origins(
         let fact = ThrowFact {
             class,
             origin,
-            origin_file: file,
             offset: span.start,
             line,
             path: cx.path().to_owned(),
@@ -370,7 +358,7 @@ pub(crate) fn classify_throw_origins(
             // guards (ADR-0033): a closure/user callback is an edge; a builtin
             // callback contributes its curated throws; unknown taints.
             ThrowKind::Callback { cbref } => {
-                add_callback_throws(cx, file, cbref, origin.span, &origin.guards, d, e, x);
+                add_callback_throws(cx, cbref, origin.span, &origin.guards, d, e, x);
             }
             ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
                 match cx.resolve_invoker_function(callee) {
@@ -380,7 +368,7 @@ pub(crate) fn classify_throw_origins(
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => add_callback_throws(
-                                    cx, file, cbref, origin.span, &origin.guards, d, e, x,
+                                    cx, cbref, origin.span, &origin.guards, d, e, x,
                                 ),
                                 None => *x = false,
                             }
@@ -477,8 +465,8 @@ pub(crate) fn throw_diagnostics(
 ) -> Vec<Diagnostic> {
     // Fast path: nothing to check without a `@throws` tag anywhere.
     let any_throws = units.iter().any(|u| {
-        let has = |d: Option<&str>| d.is_some_and(|t| t.contains("@throws") || t.contains("throws"));
-        u.tree.functions().iter().any(|f| f.docblock.as_deref().is_some_and(|t| t.contains("throws")))
+        let has = |d: Option<&str>| d.is_some_and(|t| t.contains("throws"));
+        u.tree.functions().iter().any(|f| has(f.docblock.as_deref()))
             || u.tree.classes().iter().any(|c| {
                 c.methods.iter().any(|m| has(m.docblock.as_deref()))
             })
@@ -538,9 +526,19 @@ fn emit_undeclared(
 ) {
     let Some(set) = throws.get(sym) else { return };
     let declared_list = declared.iter().map(|d| last_segment(d).to_owned()).collect::<Vec<_>>().join("|");
-    let mut facts: Vec<(&ThrowFact, Certainty)> = set.facts.iter().map(|(f, c)| (f, *c)).collect();
-    facts.sort_by(|a, b| (a.0.origin_file, a.0.offset, &a.0.class).cmp(&(b.0.origin_file, b.0.offset, &b.0.class)));
-    for (fact, cert) in facts {
+    // Each fact's origin file as its per-run units index, derived from the fact's
+    // path (issue #497) — for the unit-order sort below, the uncovered lookup, and
+    // the origin-file `Cx` rebuild.
+    let origin_unit = |f: &ThrowFact| {
+        index.file_index_of(&f.path).expect("a ThrowFact's path names a unit of this run")
+    };
+    let mut facts: Vec<(usize, &ThrowFact, Certainty)> =
+        set.facts.iter().map(|(f, c)| (origin_unit(f), f, *c)).collect();
+    // Sorted by the derived index, not the path string: unit order is what the
+    // embedded per-run index gave here before the path became the identity, so
+    // intermediate emission order is unchanged.
+    facts.sort_by(|a, b| (a.0, a.1.offset, &a.1.class).cmp(&(b.0, b.1.offset, &b.1.class)));
+    for (ofile, fact, cert) in facts {
         if cert != Certainty::Yes {
             continue; // Maybe-escape is silent (ADR-0040)
         }
@@ -562,7 +560,7 @@ fn emit_undeclared(
         let is_unhandled_match_error = fact.class.trim_start_matches('\\').eq_ignore_ascii_case("UnhandledMatchError");
         let checked = if is_unhandled_match_error {
             let uncovered_here = uncovered
-                .get(&fact.origin_file)
+                .get(&ofile)
                 .is_some_and(|spans| spans.contains(&fact.offset));
             if uncovered_here { Certainty::Yes } else { Certainty::No }
         } else {
@@ -576,7 +574,7 @@ fn emit_undeclared(
         if covered {
             continue; // Yes (covered) or Maybe (unproven) → silent
         }
-        let ocx = Cx::new(units, index, fact.origin_file);
+        let ocx = Cx::new(units, index, ofile);
         let pos = ocx.tree().position(fact.offset);
         let simple = last_segment(&fact.class);
         let msg = format!(
@@ -589,7 +587,7 @@ fn emit_undeclared(
         // a call edge). The origin offset is a unique file byte position and
         // `throw_origins` is scoped to this one declaration's body, so the
         // same-file-plus-own-origin test is exact even when a callee shares the file.
-        let origin = if fact.origin_file == cx.cur
+        let origin = if ofile == cx.cur
             && decl_origins.iter().any(|o| o.span.start == fact.offset)
         {
             Origin::Direct

@@ -20,7 +20,7 @@
 //!   mirroring the checker's own silence rule).
 //!
 //! Order is deterministic: classes appear in the source order of their first
-//! escaping origin (`(origin_file, offset, class)`, the same sort
+//! escaping origin (origin unit order, then offset, then class — the same sort
 //! `throw.undeclared` emission uses), deduplicated case-insensitively.
 
 use std::collections::HashMap;
@@ -132,15 +132,17 @@ fn decl_escapes(
     let declared = declared_throws(cx, offset, docblock);
 
     // Deterministic order: the same first-origin source sort `throw.undeclared`
-    // emission uses.
-    let mut facts: Vec<(&crate::throws::ThrowFact, Certainty)> =
-        set.facts.iter().map(|(f, c)| (f, *c)).collect();
-    facts.sort_by(|a, b| {
-        (a.0.origin_file, a.0.offset, &a.0.class).cmp(&(b.0.origin_file, b.0.offset, &b.0.class))
-    });
+    // emission uses — the origin file's per-run units index (derived from the
+    // fact's path, issue #497), then offset, then class.
+    let origin_unit = |f: &crate::throws::ThrowFact| {
+        cx.index.file_index_of(&f.path).expect("a ThrowFact's path names a unit of this run")
+    };
+    let mut facts: Vec<(usize, &crate::throws::ThrowFact, Certainty)> =
+        set.facts.iter().map(|(f, c)| (origin_unit(f), f, *c)).collect();
+    facts.sort_by(|a, b| (a.0, a.1.offset, &a.1.class).cmp(&(b.0, b.1.offset, &b.1.class)));
 
     let mut classes: Vec<EscapeClass> = Vec::new();
-    for (fact, cert) in facts {
+    for (_, fact, cert) in facts {
         let checked = throw_checked(cx, &fact.class);
         if checked == Certainty::No {
             continue; // Error/LogicException families never count (ADR-0007).

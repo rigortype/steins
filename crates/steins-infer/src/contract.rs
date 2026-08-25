@@ -91,13 +91,26 @@ pub(crate) struct GenericCarry {
     pub(crate) owner: String,
     /// One argument per declared template, in declaration order.
     pub(crate) args: Vec<CArg>,
-    /// The file whose namespace/`use` scope the argument *types* were written in,
-    /// with the offset that picks it — `None` for a value carry, which needs no
-    /// resolution context. Class names inside a [`CArg::Ty`] are resolved here.
-    pub(crate) site: Option<(usize, u32)>,
+    /// The file whose namespace/`use` scope the argument *types* were written in
+    /// — named by its diagnostic path, the stable file identity (issue #497) —
+    /// with the offset that picks it. `None` for a value carry, which needs no
+    /// resolution context. Class names inside a [`CArg::Ty`] are resolved here;
+    /// a consumer that needs the file's per-run units index derives it through
+    /// [`Self::site_index`].
+    pub(crate) site: Option<(String, u32)>,
 }
 
 impl GenericCarry {
+    /// [`Self::site`] with the file's per-run units index derived (issue #497),
+    /// in the shape the namespace-resolution consumers take. `None` for a value
+    /// carry — and for a path naming no unit of this run, which cannot happen for
+    /// a carry minted from it but reads as "no resolution context", the silent
+    /// side, if it ever did.
+    pub(crate) fn site_index(&self, cx: &Cx) -> Option<(usize, u32)> {
+        let (path, off) = self.site.as_ref()?;
+        Some((cx.index.file_index_of(path)?, *off))
+    }
+
     /// Whether every argument is a **declared** type ([`CArg::Ty`]) — an
     /// inheritance edge's `@extends Box<int>`, or a declared parameter's
     /// `@param Box<int> $b` (issue #388). Such a carry states what the author wrote
@@ -1756,7 +1769,7 @@ pub(crate) fn accepts_class_generic(
         }
         let one = match actual {
             CArg::Val(cv) => accepts(cx, cfile, coff, &declared.ty, cv),
-            CArg::Ty(cty) => accepts_carried_ty(cx, carry.site, &declared.ty, cty),
+            CArg::Ty(cty) => accepts_carried_ty(cx, carry.site_index(cx), &declared.ty, cty),
         };
         r = combine(r, one);
         if r == Tri::No {
