@@ -152,6 +152,14 @@ impl Drop for Scope {
     }
 }
 
+/// Whether a floor is installed for the current parse. Read by [`crate::memo`],
+/// which refuses to cache while one is: a walk the guard may truncate is no
+/// longer a pure function of the subtree it was launched on.
+#[inline]
+pub(crate) fn guarded() -> bool {
+    FLOOR.get() != 0
+}
+
 /// Whether the walkers must stop descending: one thread-local read on the
 /// common path, no control-flow change beyond the descent not taken.
 #[inline]
