@@ -4,6 +4,7 @@
 #   steins-syntax   syntax-tree contract + Mago parser backend (ADR-0003)
 #   steins-db       salsa demand-driven query database (ADR-0009)
 #   steins-catalog  builtin/extension catalog (ADR-0014/0021) — stub
+#   steins-gen      frozen-generation substrate: identity + artifact store (ADR-0092)
 #   steins-infer    inference engine / proof-layer checks (ADR-0001/0002)
 #   steins-sidecar  PHP sidecar IPC (ADR-0004/0024) — stub
 #   steins-cli      the `steins` binary (ADR-0020)
@@ -66,6 +67,9 @@ mago-span = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e224
 mago-database = { git = "https://github.com/rigortype/mago", rev = "237465ec7a36e22431da14935d9ec0fecad2d6a2" }
 
 salsa = "0.28"
+# Fingerprints in steins-gen (ADR-0092 §2). Already in the resolved graph via
+# the mago fork (mago-reporting), so this entry pins no new license row.
+blake3 = "1"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` is load-bearing for the committed document shapes: `check
 # --format json` and `--format sarif` both build a `serde_json::Value` and print
