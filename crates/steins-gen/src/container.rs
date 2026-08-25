@@ -1,0 +1,268 @@
+//! The payload-agnostic artifact container: one file per package, a section a
+//! named byte range. Layout, all integers little-endian:
+//!
+//! ```text
+//! magic      8 bytes   b"steinsgn"
+//! schema     u32       exact match against SCHEMA_VERSION, or miss
+//! count      u32       number of directory entries
+//! directory  count × { name 16 bytes (NUL-padded), offset u64, len u64 }
+//! sections   contiguous payload bytes, in directory order
+//! ```
+//!
+//! A reader seeks to one section without decoding any other; what the bytes
+//! *mean* is the payload owner's business and explicitly a cache format — no
+//! migration, no cross-version reads. Decoding is bounded: the per-file
+//! ceiling ([`DecodeBudget`]) is checked before any allocation, and every
+//! violation or parse failure is a [`Miss`], never a panic.
+
+use std::fmt;
+use std::fs::File;
+use std::io::{self, Read, Seek, SeekFrom, Write};
+use std::path::Path;
+
+use crate::names::{PackageName, SectionName};
+
+/// The artifact schema version. Covers everything this crate writes — the
+/// container layout, the manifest, `CURRENT` — and participates in the
+/// generation fingerprint, so bumping it obsoletes every stored generation at
+/// once. A mismatch is a miss; there is no migration path by design
+/// (ADR-0092 §2).
+pub const SCHEMA_VERSION: u32 = 1;
+
+const MAGIC: [u8; 8] = *b"steinsgn";
+const HEADER_LEN: u64 = 16;
+const DIR_ENTRY_LEN: u64 = 32;
+const NAME_FIELD_LEN: usize = 16;
+
+/// Why a read degraded to rebuild-from-source. Every variant means the same
+/// thing to the caller — rebuild; the standing invariant is that a miss may
+/// change cost, never meaning (ADR-0092 §2). The reasons exist so `doctor`
+/// can one day say *why* the cache did not serve.
+#[derive(Debug)]
+pub enum Miss {
+    Io(io::Error),
+    BadMagic,
+    SchemaMismatch { found: u32 },
+    Truncated,
+    Corrupt(&'static str),
+    OverBudget { need: u64, ceiling: u64 },
+    AbsentSection(SectionName),
+    AbsentPackage(PackageName),
+    AbsentGeneration,
+}
+
+impl fmt::Display for Miss {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Miss::Io(e) => write!(f, "io: {e}"),
+            Miss::BadMagic => f.write_str("not a steins-gen artifact (bad magic)"),
+            Miss::SchemaMismatch { found } => {
+                write!(f, "schema {found}, this build reads only {SCHEMA_VERSION}")
+            }
+            Miss::Truncated => f.write_str("truncated"),
+            Miss::Corrupt(what) => write!(f, "corrupt: {what}"),
+            Miss::OverBudget { need, ceiling } => {
+                write!(f, "{need} bytes exceeds the decode ceiling of {ceiling}")
+            }
+            Miss::AbsentSection(name) => write!(f, "no section named {name}"),
+            Miss::AbsentPackage(name) => write!(f, "no package named {name}"),
+            Miss::AbsentGeneration => f.write_str("the named generation is not in the store"),
+        }
+    }
+}
+
+impl std::error::Error for Miss {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Miss::Io(e) => Some(e),
+            _ => None,
+        }
+    }
+}
+
+impl From<io::Error> for Miss {
+    fn from(e: io::Error) -> Self {
+        match e.kind() {
+            io::ErrorKind::UnexpectedEof => Miss::Truncated,
+            _ => Miss::Io(e),
+        }
+    }
+}
+
+/// The per-file allocation ceiling, checked against a file's stat length
+/// before anything is read and hence before anything is allocated. A file
+/// over the ceiling is a miss, not an attempt.
+#[derive(Debug, Clone, Copy)]
+pub struct DecodeBudget {
+    pub max_file_bytes: u64,
+}
+
+impl Default for DecodeBudget {
+    /// 1 GiB — far above any artifact the builder writes today, low enough
+    /// that a corrupt length field cannot ask for the address space.
+    fn default() -> Self { Self { max_file_bytes: 1 << 30 } }
+}
+
+/// A section was added twice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DuplicateSection(pub SectionName);
+
+impl fmt::Display for DuplicateSection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "section {} added twice", self.0)
+    }
+}
+
+impl std::error::Error for DuplicateSection {}
+
+/// Accumulates sections in memory and writes the complete container in one
+/// pass — the file exists on disk only in its finished form, fsynced, so a
+/// torn write can never masquerade as a short artifact. (Torn *candidates*
+/// are the store's problem; see the in-progress marker.)
+#[derive(Default)]
+pub struct ArtifactBuilder {
+    sections: Vec<(SectionName, Vec<u8>)>,
+}
+
+impl ArtifactBuilder {
+    pub fn new() -> Self { Self::default() }
+
+    /// Add one section. Order is preserved on disk; names must be unique.
+    pub fn section(&mut self, name: SectionName, bytes: Vec<u8>) -> Result<(), DuplicateSection> {
+        if self.sections.iter().any(|(n, _)| *n == name) {
+            return Err(DuplicateSection(name));
+        }
+        self.sections.push((name, bytes));
+        Ok(())
+    }
+
+    /// Write the container to `path` and fsync it. The store calls this for
+    /// you via `Candidate::write_artifact`; it is public so tests and tools
+    /// can build containers anywhere.
+    pub fn write_to(&self, path: &Path) -> io::Result<()> {
+        let mut file = File::create(path)?;
+        let mut out = io::BufWriter::new(&mut file);
+        out.write_all(&MAGIC)?;
+        out.write_all(&SCHEMA_VERSION.to_le_bytes())?;
+        out.write_all(&(self.sections.len() as u32).to_le_bytes())?;
+        let mut offset = HEADER_LEN + DIR_ENTRY_LEN * self.sections.len() as u64;
+        for (name, bytes) in &self.sections {
+            let mut field = [0u8; NAME_FIELD_LEN];
+            field[..name.as_str().len()].copy_from_slice(name.as_str().as_bytes());
+            out.write_all(&field)?;
+            out.write_all(&offset.to_le_bytes())?;
+            out.write_all(&(bytes.len() as u64).to_le_bytes())?;
+            offset += bytes.len() as u64;
+        }
+        for (_, bytes) in &self.sections {
+            out.write_all(bytes)?;
+        }
+        out.flush()?;
+        drop(out);
+        file.sync_all()
+    }
+}
+
+struct DirEntry {
+    name: SectionName,
+    offset: u64,
+    len: u64,
+}
+
+/// Reads one artifact: validates the header and directory up front (strictly —
+/// sections must tile the file exactly as the writer laid them), then serves
+/// individual sections by seek + exact read.
+pub struct ArtifactReader {
+    file: File,
+    directory: Vec<DirEntry>,
+}
+
+impl ArtifactReader {
+    /// Open and validate. Everything that can be wrong — absent file, foreign
+    /// magic, schema drift, truncation, a directory that lies about its
+    /// offsets, a file over `budget` — comes back as a [`Miss`].
+    pub fn open(path: &Path, budget: DecodeBudget) -> Result<Self, Miss> {
+        let mut file = File::open(path)?;
+        let file_len = file.metadata()?.len();
+        if file_len > budget.max_file_bytes {
+            return Err(Miss::OverBudget { need: file_len, ceiling: budget.max_file_bytes });
+        }
+        let mut header = [0u8; HEADER_LEN as usize];
+        file.read_exact(&mut header)?;
+        if header[0..8] != MAGIC {
+            return Err(Miss::BadMagic);
+        }
+        let schema = u32::from_le_bytes(header[8..12].try_into().unwrap());
+        if schema != SCHEMA_VERSION {
+            return Err(Miss::SchemaMismatch { found: schema });
+        }
+        let count = u32::from_le_bytes(header[12..16].try_into().unwrap()) as u64;
+        // The directory allocation is bounded by this check: count entries
+        // must fit in what the stat length promised.
+        if HEADER_LEN + count * DIR_ENTRY_LEN > file_len {
+            return Err(Miss::Truncated);
+        }
+        let mut directory = Vec::with_capacity(count as usize);
+        let mut expected_offset = HEADER_LEN + count * DIR_ENTRY_LEN;
+        let mut raw = [0u8; DIR_ENTRY_LEN as usize];
+        for _ in 0..count {
+            file.read_exact(&mut raw)?;
+            let name = parse_name_field(&raw[..NAME_FIELD_LEN])?;
+            let offset = u64::from_le_bytes(raw[16..24].try_into().unwrap());
+            let len = u64::from_le_bytes(raw[24..32].try_into().unwrap());
+            if offset != expected_offset {
+                return Err(Miss::Corrupt("directory offsets do not tile the file"));
+            }
+            expected_offset =
+                offset.checked_add(len).ok_or(Miss::Corrupt("section length overflows"))?;
+            if directory.iter().any(|e: &DirEntry| e.name == name) {
+                return Err(Miss::Corrupt("duplicate section name"));
+            }
+            directory.push(DirEntry { name, offset, len });
+        }
+        if expected_offset != file_len {
+            return Err(Miss::Truncated);
+        }
+        Ok(Self { file, directory })
+    }
+
+    /// The section names, in on-disk order.
+    pub fn sections(&self) -> impl Iterator<Item = &SectionName> {
+        self.directory.iter().map(|e| &e.name)
+    }
+
+    pub fn has_section(&self, name: &SectionName) -> bool {
+        self.directory.iter().any(|e| e.name == *name)
+    }
+
+    /// A section's byte length, without reading it.
+    pub fn section_len(&self, name: &SectionName) -> Option<u64> {
+        self.directory.iter().find(|e| e.name == *name).map(|e| e.len)
+    }
+
+    /// Read one section's bytes: one seek, one exact read, nothing else
+    /// touched. The bytes are the payload owner's to decode — and the owner's
+    /// parse failures are misses too, by the same invariant.
+    pub fn section(&mut self, name: &SectionName) -> Result<Vec<u8>, Miss> {
+        let entry = self
+            .directory
+            .iter()
+            .find(|e| e.name == *name)
+            .ok_or_else(|| Miss::AbsentSection(name.clone()))?;
+        let len =
+            usize::try_from(entry.len).map_err(|_| Miss::Corrupt("section length overflows"))?;
+        let mut bytes = vec![0u8; len];
+        self.file.seek(SeekFrom::Start(entry.offset))?;
+        self.file.read_exact(&mut bytes)?;
+        Ok(bytes)
+    }
+}
+
+fn parse_name_field(field: &[u8]) -> Result<SectionName, Miss> {
+    let end = field.iter().position(|&b| b == 0).unwrap_or(field.len());
+    if field[end..].iter().any(|&b| b != 0) {
+        return Err(Miss::Corrupt("garbage after NUL in a section name"));
+    }
+    let name = str::from_utf8(&field[..end]).map_err(|_| Miss::Corrupt("section name not UTF-8"))?;
+    SectionName::new(name).map_err(|_| Miss::Corrupt("section name outside [a-z0-9_-]{1,16}"))
+}

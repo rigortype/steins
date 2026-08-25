@@ -1085,6 +1085,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "steins-gen"
+version = "0.1.6"
+dependencies = [
+ "blake3",
+]
+
+[[package]]
 name = "steins-infer"
 version = "0.1.6"
 dependencies = [
