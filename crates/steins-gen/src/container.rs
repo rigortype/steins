@@ -249,10 +249,44 @@ impl ArtifactReader {
             .iter()
             .find(|e| e.name == *name)
             .ok_or_else(|| Miss::AbsentSection(name.clone()))?;
-        let len =
-            usize::try_from(entry.len).map_err(|_| Miss::Corrupt("section length overflows"))?;
+        let (offset, len) = (entry.offset, entry.len);
+        self.read_range(offset, len)
+    }
+
+    /// Read `len` bytes at `offset` *within* the named section (offset 0 is
+    /// the section's first byte). The sub-range primitive a payload's own
+    /// nested index stands on (issue #487): the trace payload keeps a
+    /// per-file directory inside one section, and a reader after one file
+    /// must not pay for the rest. Still payload-agnostic — what this crate
+    /// serves is a bounded window into a named range, nothing about what the
+    /// window means. A range outside the section's extent is a [`Miss`].
+    pub fn section_slice(
+        &mut self,
+        name: &SectionName,
+        offset: u64,
+        len: u64,
+    ) -> Result<Vec<u8>, Miss> {
+        let entry = self
+            .directory
+            .iter()
+            .find(|e| e.name == *name)
+            .ok_or_else(|| Miss::AbsentSection(name.clone()))?;
+        let end = offset.checked_add(len).ok_or(Miss::Corrupt("sub-range overflows"))?;
+        if end > entry.len {
+            return Err(Miss::Corrupt("sub-range outside its section"));
+        }
+        let start = entry.offset + offset;
+        self.read_range(start, len)
+    }
+
+    /// One seek, one exact read of `len` bytes at the absolute `offset`.
+    /// Callers have already bounds-checked the range against the directory,
+    /// which `open` validated against the file's stat length (and hence the
+    /// decode budget), so the allocation here is budget-bounded.
+    fn read_range(&mut self, offset: u64, len: u64) -> Result<Vec<u8>, Miss> {
+        let len = usize::try_from(len).map_err(|_| Miss::Corrupt("section length overflows"))?;
         let mut bytes = vec![0u8; len];
-        self.file.seek(SeekFrom::Start(entry.offset))?;
+        self.file.seek(SeekFrom::Start(offset))?;
         self.file.read_exact(&mut bytes)?;
         Ok(bytes)
     }

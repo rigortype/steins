@@ -24,7 +24,8 @@
 //! deliberately so: the merge is partition-invariant (any grouping of the
 //! same files merges to the same tables — the differential-oracle tests pin
 //! this), so the heuristic only decides shard boundaries, never meaning.
-//! Shards stay in memory in this slice; #487 serializes them.
+//! The `persist` feature (issue #487) serializes shards into the `symbols`
+//! section of a package artifact — see the `persist` module.
 
 use std::collections::{HashMap, HashSet};
 
@@ -37,6 +38,7 @@ use steins_syntax::{ClassDecl, NameRef, RefKind, SourceTree};
 /// path, `FileUnit` slice order on the units path; the two are identical by
 /// construction) and the declaration's index in that file's decl list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ShardSite {
     pub file: usize,
     pub index: usize,
@@ -58,11 +60,15 @@ pub struct ShardSite {
 /// per-package tables the generation merge recomputes; `steins-infer` re-exports
 /// it unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct MagicObstacle {
     /// The declaring class-like's own FQN, lowercase-normalized
     /// ([`ClassDecl::fqn`]) — the class-like half of the A14 triple.
     pub class: String,
-    /// Which tag recorded it.
+    /// Which tag recorded it. Persisted by its canonical `label()` spelling —
+    /// the codec lives here, not in `steins-phpdoc`, so the zero-dep parser
+    /// crate stays dependency-free; an unknown spelling is a decode error.
+    #[cfg_attr(feature = "persist", serde(with = "crate::persist::magic_tag_kind"))]
     pub kind: MagicTagKind,
     /// The tag's subject as written: the method name, the property name (no `$`),
     /// the mixin target reference, the alias name. Empty when the tag's tail gave
@@ -80,6 +86,7 @@ pub struct MagicObstacle {
 /// asked. Built incrementally by [`PackageShard::add_file`]; global answers
 /// exist only on the [`MergedTables`] side.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct PackageShard {
     /// Function FQN (lowercase-normalized by the syntax layer) → its site,
     /// for FQNs this package defines exactly once.

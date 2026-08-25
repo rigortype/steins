@@ -18,3 +18,13 @@ mago-syntax.workspace = true
 mago-allocator.workspace = true
 mago-span.workspace = true
 mago-database.workspace = true
+# `persist` only (ADR-0092 §2, issue #487): Serialize/Deserialize on the owned
+# plain-data representation, so a generation's trace IR can be stored per file.
+# Optional so the wasm build's dependency surface does not grow (ADR-0065).
+serde = { workspace = true, optional = true }
+
+[features]
+# Serde derives on `SourceTree` and every plain-data type it carries — the
+# trace-IR half of the per-package artifacts (ADR-0092 §2, issue #487). The
+# derives change no semantics; the payload format is `steins-db`'s business.
+persist = ["dep:serde", "steins-domain/persist"]

@@ -19,6 +19,8 @@ mod lower_scope;
 mod lower_stmt;
 mod memo;
 mod names;
+#[cfg(feature = "persist")]
+mod persist;
 pub mod stack_guard;
 mod tree;
 
