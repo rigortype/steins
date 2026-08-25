@@ -213,7 +213,8 @@ impl ArtifactReader {
             if offset != expected_offset {
                 return Err(Miss::Corrupt("directory offsets do not tile the file"));
             }
-            expected_offset = offset.checked_add(len).ok_or(Miss::Corrupt("section length overflows"))?;
+            expected_offset =
+                offset.checked_add(len).ok_or(Miss::Corrupt("section length overflows"))?;
             if directory.iter().any(|e: &DirEntry| e.name == name) {
                 return Err(Miss::Corrupt("duplicate section name"));
             }
@@ -248,7 +249,8 @@ impl ArtifactReader {
             .iter()
             .find(|e| e.name == *name)
             .ok_or_else(|| Miss::AbsentSection(name.clone()))?;
-        let len = usize::try_from(entry.len).map_err(|_| Miss::Corrupt("section length overflows"))?;
+        let len =
+            usize::try_from(entry.len).map_err(|_| Miss::Corrupt("section length overflows"))?;
         let mut bytes = vec![0u8; len];
         self.file.seek(SeekFrom::Start(entry.offset))?;
         self.file.read_exact(&mut bytes)?;

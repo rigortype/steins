@@ -85,7 +85,11 @@ impl Store {
     /// build reads through — the same ones whose fingerprints went into `id`
     /// (this crate cannot enforce that linkage; the builder owes it) — and
     /// they are revalidated wholesale when the candidate publishes.
-    pub fn begin(&self, id: GenerationId, sources: Vec<SourceInventory>) -> io::Result<Candidate<'_>> {
+    pub fn begin(
+        &self,
+        id: GenerationId,
+        sources: Vec<SourceInventory>,
+    ) -> io::Result<Candidate<'_>> {
         let dir = self.gen_root.join(format!("{CANDIDATE_PREFIX}{}", nonce()));
         fs::create_dir(&dir)?;
         write_file_synced(&dir.join(MARKER), id.to_hex().as_bytes())?;
@@ -175,7 +179,8 @@ impl Candidate<'_> {
                 return Err(PublishError::Drift(drift));
             }
         }
-        write_file_synced(&self.dir.join(MANIFEST), manifest_text(&self.id, &self.packages).as_bytes())?;
+        let manifest = manifest_text(&self.id, &self.packages);
+        write_file_synced(&self.dir.join(MANIFEST), manifest.as_bytes())?;
         fs::remove_file(self.dir.join(MARKER))?;
         fsync_dir(&self.dir)?;
         let final_dir = self.store.gen_root.join(self.id.to_hex());
@@ -278,7 +283,8 @@ impl Generation {
 /// Artifact file names are derived from package names, not stored, so the
 /// manifest cannot point a package at someone else's bytes.
 fn manifest_text(id: &GenerationId, packages: &BTreeSet<PackageName>) -> String {
-    let mut text = format!("steins-gen manifest\nschema {SCHEMA_VERSION}\ngeneration {}\n", id.to_hex());
+    let mut text =
+        format!("steins-gen manifest\nschema {SCHEMA_VERSION}\ngeneration {}\n", id.to_hex());
     for package in packages {
         text.push_str("package ");
         text.push_str(package.as_str());
