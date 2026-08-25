@@ -19,6 +19,14 @@
 //! — cross-run persistence is ADR-0092's layer, not this one's — and no Mago
 //! type leaks: everything here is `pub(crate)` at most (the ADR-0003 hard rule).
 //!
+//! A **nested** parse (nothing does this today) clears the tables and leaves
+//! memoization off for the remainder of the outer parse rather than sharing
+//! them. Two live arenas cannot alias an address, but once the inner parse
+//! returns and its arena frees, the allocator can hand that memory to the
+//! outer arena's next chunk — and a stale key with the right shape tag would
+//! then answer for the wrong subtree. Deactivating on nesting closes that
+//! class outright; the cost is cache misses, never a wrong hit.
+//!
 //! # Key identity, and why it cannot collide
 //!
 //! A cached entry is keyed by [`NodeKey`]: the CST node's address in the parse
@@ -99,8 +107,10 @@ thread_local! {
 }
 
 /// Activates the memo for one parse, clears it on drop. Refuses to activate
-/// under a stack-guard floor (see the module doc) or inside another active
-/// scope, where it degrades to a no-op and the outer scope keeps its tables.
+/// under a stack-guard floor (see the module doc); entered while another scope
+/// is already active, it clears the tables and leaves memoization off for the
+/// remainder of the outer parse — see the module doc for why sharing tables
+/// across two arenas would be unsound.
 pub(crate) struct Scope {
     activated: bool,
 }
@@ -108,7 +118,14 @@ pub(crate) struct Scope {
 impl Scope {
     pub(crate) fn enter() -> Self {
         let activated = TABLES.with_borrow_mut(|t| {
-            if t.active || stack_guard::guarded() {
+            if t.active {
+                // Nested parse: drop the outer entries and deactivate (see the
+                // module doc). Keeping the outer tables live would let the two
+                // arenas' addresses cross once the inner one frees.
+                *t = Tables::default();
+                return false;
+            }
+            if stack_guard::guarded() {
                 return false;
             }
             t.active = true;
@@ -203,4 +220,42 @@ pub(crate) fn presence_leaf(
         }
     });
     fresh
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Synthetic keys stand in for arena addresses: the tables never dereference
+    // a key, so no CST needs to exist for the lifecycle to be tested.
+    #[test]
+    fn a_nested_scope_clears_the_tables_and_deactivates_instead_of_sharing_them() {
+        let key = NodeKey(0xdead_beef, 0);
+        let outer = Scope::enter();
+        opaque_store(key, Rc::new(Vec::new()));
+        assert!(opaque_lookup(key).is_some(), "the outer scope caches");
+        {
+            let inner = Scope::enter();
+            assert!(
+                opaque_lookup(key).is_none(),
+                "the nested enter must drop the outer entries — a freed inner arena's \
+                 addresses can be reused by the outer one"
+            );
+            opaque_store(key, Rc::new(Vec::new()));
+            assert!(opaque_lookup(key).is_none(), "stores are inert while deactivated");
+            drop(inner);
+        }
+        opaque_store(key, Rc::new(Vec::new()));
+        assert!(
+            opaque_lookup(key).is_none(),
+            "the outer parse stays deactivated for its remainder — misses, never a stale hit"
+        );
+        drop(outer);
+        // A later parse on this thread starts clean and can activate again.
+        let next = Scope::enter();
+        opaque_store(key, Rc::new(Vec::new()));
+        assert!(opaque_lookup(key).is_some(), "a fresh scope activates normally");
+        drop(next);
+        assert!(opaque_lookup(key).is_none(), "and its drop clears the tables");
+    }
 }
