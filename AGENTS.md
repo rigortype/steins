@@ -22,6 +22,10 @@ Two gates bite in ways the diff doesn't show: the `docs` job rejects a public do
 
 **Never run `cargo fmt` here.** The tree is hand-formatted, the policy with its numbers is in `rustfmt.toml`, and CI deliberately has no fmt gate — so a routine "tidy" rewrites the tree, nothing catches it, and it buries every later `git blame`.
 
+### Profiling
+
+Measure before optimizing, and read `docs/agents/profiling.md` before measuring — two things make a naive profile worthless here: `[profile.release]` strips symbols, so a stock release binary profiles as a wall of `???`, and every subcommand runs on one worker thread while the main thread sits in `pthread_join`, so an all-threads total buries the real work under `__ulock_wait`. That file also carries the current baseline (master `842f710`, 2026-08-25): the re-run subtree scans in `steins-syntax` are 45–57% of worker CPU, the whole type algebra is under 1% on real code, and interning type values the way phpstan-src#6261 does is ruled out on that evidence.
+
 ### Release
 
 Cutting a version is PR-gated and tag-driven: `.claude/skills/steins-release-prep/SKILL.md`. There is no crates.io channel — the rev-pinned Mago fork is a git dependency, so the channels are the GitHub Release binaries, the Homebrew tap, and `cargo install --git`. Pushing a branch or a tag needs the owner's explicit approval each time.
