@@ -255,6 +255,12 @@ pub struct RecordingEngine {
     /// The rows loaded from a published artifact — empty on a cold run, and
     /// emptied wholesale when the identity gate refuses ([`Self::warm`]).
     loaded: BTreeMap<String, serde_json::Value>,
+    /// Whether [`Self::loaded`] *is* a published artifact's table — true only
+    /// where [`Self::warm`]'s identity gate accepted. Distinguishes "the table
+    /// I loaded was empty" from "there was no table", which is the difference
+    /// between publishing the loaded artifact's bytes again and publishing
+    /// nothing at all ([`Self::table_unchanged`]).
+    adopted: bool,
     /// The rows this run consumed or newly asked — the next artifact's rows.
     recorded: BTreeMap<String, serde_json::Value>,
     /// The keys the live engine answered (in first-answer order): the misses.
@@ -268,7 +274,13 @@ impl RecordingEngine {
     /// recorded. The generation build's engine.
     #[must_use]
     pub fn cold(live: ProcessEngine) -> Self {
-        Self { live, loaded: BTreeMap::new(), recorded: BTreeMap::new(), fresh: Vec::new() }
+        Self {
+            live,
+            loaded: BTreeMap::new(),
+            adopted: false,
+            recorded: BTreeMap::new(),
+            fresh: Vec::new(),
+        }
     }
 
     /// A warm recording engine over a decoded artifact, **identity-gated**:
@@ -283,12 +295,27 @@ impl RecordingEngine {
             .call_raw("env", steins_sidecar::env_params())
             .and_then(|raw| steins_sidecar::parse_env_result(&raw))
             .map(|env| FoldTableIdentity::from_env(&env));
-        let loaded = if live_identity.as_ref() == Some(&artifact.identity) {
-            artifact.rows
-        } else {
-            BTreeMap::new()
-        };
-        Self { live, loaded, recorded: BTreeMap::new(), fresh: Vec::new() }
+        let adopted = live_identity.as_ref() == Some(&artifact.identity);
+        let loaded = if adopted { artifact.rows } else { BTreeMap::new() };
+        Self { live, loaded, adopted, recorded: BTreeMap::new(), fresh: Vec::new() }
+    }
+
+    /// Whether the artifact this run would publish is the artifact it loaded,
+    /// row for row and identity for identity — the licence to share the
+    /// published table's bytes with the next generation instead of writing
+    /// them again (issue #519).
+    ///
+    /// Row equality is the whole test, and it is exact rather than a proxy: the
+    /// published rows are the recorded ones, and the identity
+    /// [`Self::artifact`] publishes is read off the recorded `env` row, which
+    /// under equality *is* the loaded one — the same row the previous run
+    /// published its identity from. The loaded-from-an-artifact flag is what
+    /// stops an empty table from matching a refused one: an identity mismatch
+    /// drops every loaded row, and sharing the published bytes would then hand
+    /// on rows this run rejected.
+    #[must_use]
+    pub fn table_unchanged(&self) -> bool {
+        self.adopted && self.recorded == self.loaded
     }
 
     /// The rows this run consumed or newly asked, so far.
@@ -447,6 +474,13 @@ impl EngineFolder<RecordingEngine> {
     #[must_use]
     pub fn fresh_keys(&self) -> &[String] {
         self.engine.fresh_keys()
+    }
+
+    /// Whether the table this run would publish is the one it loaded
+    /// ([`RecordingEngine::table_unchanged`]).
+    #[must_use]
+    pub fn table_unchanged(&self) -> bool {
+        self.engine.table_unchanged()
     }
 
     /// The live engine's delivery ledger ([`RecordingEngine::posture`]).

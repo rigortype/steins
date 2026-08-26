@@ -145,10 +145,13 @@ value.
 The walk, environments, the object store, binding descent, the effect and throw
 fixpoints, name resolution, every diagnostic emitter, the diagnostic registry,
 inline suppression, and the dam. Also the generation orchestrator (ADR-0092
-§5) and the three artifact sections whose payloads are this crate's own
+§5) and the three sections whose payloads are this crate's own
 vocabulary rather than `steins-db`'s — `sources`, the provenance record the
 reuse decision reads; `summaries`, the per-file walk blocks a warm run replays
-instead of walking (issue #489); and `facts`, the per-file projection every
+instead of walking (issue #489), which since issue #519 live in the
+generation's own sidecar rather than in a package artifact, so that an artifact
+stays a function of its sources alone and can be shared with the next
+generation instead of rewritten; and `facts`, the per-file projection every
 whole-universe phase reads *instead of a tree* (issue #516: the dam row, the
 never-returning names, the parse-failure row, the affected set's footprint, the
 two fixpoints' own rows, the file's own shard contribution, and the three

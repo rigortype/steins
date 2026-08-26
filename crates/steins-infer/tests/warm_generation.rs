@@ -1048,18 +1048,16 @@ fn the_paranoid_verifier_names_a_planted_divergence() {
     let hex = cold.report.generation.clone().expect("the cold build publishes");
     assert!(!cold.findings.is_empty(), "the fixture must produce a finding to doctor");
 
-    // The artifact is a container of sections and the summaries payload is
-    // JSON inside one of them, so planting a divergence is a byte patch of a
-    // message string — no writer needed, and nothing else in the artifact
-    // moves. The sections are written in order and `summaries` is last, so the
-    // LAST occurrence of a message word is the persisted block's copy; an
-    // earlier one would be the trace or contract payload, where a patch would
-    // move the walk and the replay together and prove nothing. The word comes
-    // from app.php's `call.undefined-function` message — a *walk* finding, and
-    // so one a block actually holds (the effect and throw passes are
-    // whole-universe and are never persisted).
-    let artifact = tmp.dir.join(".steins").join("gen").join(&hex).join("__root__.pkg");
-    let bytes = std::fs::read(&artifact).expect("the root artifact is on disk");
+    // The walk blocks live in the generation's `summaries` sidecar (issue
+    // #519), one container holding one section, so planting a divergence is a
+    // byte patch of a message string — no writer needed, and nothing any
+    // *artifact* holds moves. Patching an artifact's own trace or contract
+    // payload instead would move the walk and the replay together and prove
+    // nothing. The word comes from app.php's `call.undefined-function`
+    // message — a *walk* finding, and so one a block actually holds (the effect
+    // and throw passes are whole-universe and are never persisted).
+    let artifact = tmp.dir.join(".steins").join("gen").join(&hex).join("summaries");
+    let bytes = std::fs::read(&artifact).expect("the generation sidecar is on disk");
     let needle = b"lateBound";
     let at = bytes
         .windows(needle.len())

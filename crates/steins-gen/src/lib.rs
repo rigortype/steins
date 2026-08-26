@@ -17,7 +17,10 @@
 //!   here they are ranges.
 //! - The store ([`Store`], [`Candidate`], [`Generation`]): a build writes a
 //!   private candidate and publishes atomically; a half-written candidate is
-//!   swept wholesale at the next open, never salvaged.
+//!   swept wholesale at the next open, never salvaged. An artifact another
+//!   generation already holds byte for byte is *shared* rather than rewritten
+//!   ([`share`], [`ShareKind`]) — a reflink where the filesystem offers one, a
+//!   hard link otherwise, a copy as the floor.
 //! - The sealed capture ([`SourceInventory`]): sources are captured once,
 //!   sealed, and revalidated immediately before publish, so a concurrent
 //!   edit rejects the whole candidate.
@@ -42,6 +45,7 @@ mod identity;
 mod inventory;
 mod names;
 mod partition;
+pub mod share;
 mod store;
 
 pub use container::{
@@ -52,4 +56,5 @@ pub use identity::{EnginePosture, GenerationId, GenerationInputs};
 pub use inventory::{DriftKind, SourceDrift, SourceEntry, SourceError, SourceInventory};
 pub use names::{NameError, PackageName, SectionName};
 pub use partition::{Package, PackageKind, PackageUniverse};
+pub use share::ShareKind;
 pub use store::{Candidate, Generation, PublishError, Store};

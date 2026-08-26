@@ -30,11 +30,13 @@ use crate::names::{PackageName, SectionName};
 ///
 /// It also covers what the payload owners write *inside* a section, because a
 /// stored generation is only useful if every reader agrees with every writer:
-/// `2` is the swap of the payload codec from serde_json to
-/// `steins_db::wire` (issue #504). Bumping it is the whole migration — an
-/// artifact of the previous schema becomes an ordinary [`Miss`] and one
-/// rebuild.
-pub const SCHEMA_VERSION: u32 = 2;
+/// `2` was the swap of the payload codec from serde_json to `steins_db::wire`
+/// (issue #504), and `3` is the split of the run-dependent walk blocks out of
+/// the artifact into a sidecar container (issue #519), which is what leaves an
+/// unmoved package's artifact byte-identical between generations and therefore
+/// shareable. Bumping it is the whole migration — an artifact of the previous
+/// schema becomes an ordinary [`Miss`] and one rebuild.
+pub const SCHEMA_VERSION: u32 = 3;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
@@ -126,6 +128,10 @@ impl std::error::Error for DuplicateSection {}
 /// pass — the file exists on disk only in its finished form, fsynced, so a
 /// torn write can never masquerade as a short artifact. (Torn *candidates*
 /// are the store's problem; see the in-progress marker.)
+///
+/// Not every artifact in a generation goes through here: one that another
+/// generation already holds byte for byte is shared rather than rebuilt
+/// (`Candidate::adopt_artifact`), which writes no bytes and needs no barrier.
 #[derive(Default)]
 pub struct ArtifactBuilder {
     sections: Vec<(SectionName, Vec<u8>)>,
@@ -146,8 +152,22 @@ impl ArtifactBuilder {
     /// Write the container to `path` and fsync it. The store calls this for
     /// you via `Candidate::write_artifact`; it is public so tests and tools
     /// can build containers anywhere.
+    ///
+    /// `path` must not exist: the open is `O_CREAT | O_EXCL`, so a write can
+    /// never truncate a name that is already there. That is what makes an
+    /// artifact *shared* with another generation (`crate::share`) safe to
+    /// alias — the only writer in this crate cannot reach an existing inode,
+    /// hard link or not — and it turns a double write into a loud
+    /// `AlreadyExists` rather than a silent overwrite.
+    ///
+    /// The fsync is the one durability barrier the store keeps, and it is here
+    /// rather than in the publish chain for a reason: section bytes are the
+    /// only thing in a generation whose loss could be *undetectable*. Every
+    /// other file the store writes is strictly parsed and self-identifying, so
+    /// a torn one is a [`Miss`] and a rebuild; a torn payload could in
+    /// principle decode. See `crate::store` for the full argument.
     pub fn write_to(&self, path: &Path) -> io::Result<()> {
-        let mut file = File::create(path)?;
+        let mut file = File::create_new(path)?;
         let mut out = io::BufWriter::new(&mut file);
         out.write_all(&MAGIC)?;
         out.write_all(&SCHEMA_VERSION.to_le_bytes())?;

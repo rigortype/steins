@@ -70,6 +70,11 @@ salsa = "0.28"
 # Fingerprints in steins-gen (ADR-0092 §2). Already in the resolved graph via
 # the mago fork (mago-reporting), so this entry pins no new license row.
 blake3 = "1"
+# The two copy-on-write clone syscalls steins-gen shares artifact bytes with
+# (macOS `clonefile`, Linux `FICLONE`); std has neither. Already in the
+# resolved graph through the mago fork, so this entry pins no new license row —
+# the same reasoning as `blake3` above.
+libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 # `preserve_order` is load-bearing for the committed document shapes: `check
 # --format json` and `--format sarif` both build a `serde_json::Value` and print
