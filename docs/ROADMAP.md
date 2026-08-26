@@ -352,11 +352,13 @@ runs** (#525, owner decision 2026-08-26): on by default, `--no-cache` to
 opt out, silent — a default run's output is byte-identical to what it was
 before the series — and the fp-gate now analyzes every corpus project
 twice through the orchestrator, cold then warm, requiring the two finding
-sets to match. **Still open**: bounding the store, which nothing prunes
-today (#529, and it should land before the next release); parallelism
-re-scoped by measurement from the generation build to `check_units`'
-per-file loop (#490); and the MCP server resident over published
-generations (#491), which still re-analyzes from scratch per call.
+sets to match. The store is **bounded at one generation** (#529): a
+publish sweeps what it superseded and every open collects what a crash
+left unreachable, so a day of editing costs one cached analysis rather
+than one per edit. **Still open**: parallelism re-scoped by measurement
+from the generation build to `check_units`' per-file loop (#490); and the
+MCP server resident over published generations (#491), which still
+re-analyzes from scratch per call.
 
 Exit criteria:
 

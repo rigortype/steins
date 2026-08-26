@@ -316,7 +316,8 @@ fn a_read_only_project_degrades_quietly_to_cold() {
     assert!(!tree.dir.join(".steins").exists(), "nothing was written into a read-only tree");
 }
 
-/// An edit republishes: a second generation appears beside the first, and the
+/// An edit republishes: `CURRENT` moves to a new generation, the one it
+/// replaced is swept (issue #529 — the store is bounded at one), and the
 /// findings follow the source rather than the cache.
 #[test]
 fn an_edit_publishes_a_new_generation_and_new_findings() {
@@ -347,4 +348,37 @@ fn an_edit_publishes_a_new_generation_and_new_findings() {
         Some(first.as_str()),
         "an edit publishes a new generation"
     );
+    assert_eq!(
+        generation_count(&tree.dir),
+        1,
+        "…and the generation it replaced goes with it (issue #529)"
+    );
+}
+
+/// The growth table of issue #529, through the binary: five edits to one file
+/// used to leave five generations and 26 MB. The store must stay at exactly
+/// one generation however long the editing goes on.
+#[test]
+fn repeated_edits_do_not_grow_the_store() {
+    let tree = TempDir::new("growth-tree");
+    let elsewhere = TempDir::new("growth-cwd");
+    write_fixture(&tree.dir);
+
+    check(&elsewhere.dir, &[tree.dir.as_path()], true);
+    let mut previous = current_generation(&tree.dir).expect("the cold run publishes");
+    for edit in 0..5 {
+        std::fs::write(
+            tree.dir.join("src/app.php"),
+            format!(
+                "<?php\n// edit {edit}\nfunction width(int $w): int {{ return $w; }}\nwidth(\"abc\");\n"
+            ),
+        )
+        .unwrap();
+        let run = check(&elsewhere.dir, &[tree.dir.as_path()], true);
+        assert!(!run.stdout.is_empty(), "the fixture still reports after edit {edit}");
+        let now = current_generation(&tree.dir).expect("each edit publishes");
+        assert_ne!(now, previous, "edit {edit} must publish a new generation");
+        assert_eq!(generation_count(&tree.dir), 1, "edit {edit} left a generation behind");
+        previous = now;
+    }
 }

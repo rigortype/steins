@@ -145,6 +145,29 @@ budget: the bytes are handed back one file at a time, so a caller that
 keeps every text pays what it was already paying for its text map and one
 file's contents beyond it.
 
+*2026-08-27 amendment (issue #529): the store keeps `CURRENT` and nothing
+else.* Publication said nothing about what happens to the generation it
+replaces, and the answer was "nothing" — so a store grew by a full artifact
+set per distinct source state, measured at ~6 MB an invocation over a 1.26 MB
+tree, without limit, inside the user's project. The bound is **one
+generation**: a publish sweeps every other one once the rename *and* the
+`CURRENT` swap have both succeeded, and `Store::open` sweeps whatever
+`CURRENT` does not name, which is what collects a generation orphaned by a
+crash between those two steps or left by a schema bump. Concurrency does not
+argue for keeping more. A reader holds an open descriptor for an artifact's
+whole life and POSIX unlinking does not disturb it, so a reader that has
+already opened one is untouched by a sweep; one that has not yet opened one
+gets a `Miss`, which is a rebuild — the standing invariant working rather
+than being bent, and a run whose generation is swept mid-flight reports the
+same findings for more work. Keeping the *previous* generation as well was
+considered and rejected: it doubles the store to buy less wasted work in a
+race, not correctness. Two rules bound the deletion itself, because it
+happens inside someone's project: it is last, so a failed publish removes
+nothing; and it takes only directories whose name is a generation id this
+crate would write, leaving anything it does not recognize alone. Candidate
+sweeping is untouched — its concurrent-process hazard is issue #491's, and a
+published generation, having no owner, is a different question.
+
 **Sharing an artifact between generations.** An artifact whose package did
 not move is byte-identical to the published generation's, so the new
 generation *shares* it — a reflink where the filesystem offers one (macOS
