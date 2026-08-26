@@ -156,7 +156,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     sections.push(config_section);
 
     sections.push(section_layout(&root, &cwd, &layout));
-    sections.push(section_generation_store(&root, &cwd, &layout));
+    sections.push(section_generation_store(&files, &cwd, &layout));
     sections.push(section_coverage(
         &root,
         &files,
@@ -565,11 +565,17 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
 /// Reads only: [`steins_gen::Store::open_existing`] never creates the layout
 /// the way `Store::open` does, because a posture report that materialized the
 /// thing it reports on would answer its own question.
-fn section_generation_store(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
+fn section_generation_store(files: &[ParsedFile], cwd: &Path, layout: &ProjectLayout) -> Section {
     let mut sec = Section::new("Generation store");
     // The same root `check` writes to (issue #506): the outermost governing
-    // manifest, or the analyzed tree when nothing governs it.
-    let store_root = crate::generation::store_root(layout, root);
+    // manifest, or — manifest-less — the directory the analyzed files share.
+    // Derived from the *files*, not from the path argument, because that is
+    // what `check` derives it from: a manifest-less tree whose `.php` lives one
+    // directory down keeps its store there, and a doctor that looked beside the
+    // path argument would report an absence that is not one.
+    let paths: Vec<PathBuf> = files.iter().map(|f| PathBuf::from(&f.path)).collect();
+    let store_root =
+        crate::generation::store_root(layout, &crate::generation::capture_root(&paths, cwd));
     let Some(store) = steins_gen::Store::open_existing(&store_root) else {
         line!(sec, "  store: absent under {}", display_path(cwd, &store_root.join(".steins")));
         if is_unwritable(&store_root) {

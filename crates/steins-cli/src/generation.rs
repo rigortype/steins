@@ -173,7 +173,12 @@ pub(crate) fn store_root(layout: &ProjectLayout, fallback: &Path) -> PathBuf {
 /// Components are compared as spelled, never normalized: the root must strip
 /// off the files' own leading components, so a `..` the caller wrote survives
 /// in both or in neither.
-fn capture_root(files: &[PathBuf], cwd: &Path) -> PathBuf {
+///
+/// `steins doctor` computes it the same way over the same walk, so the store
+/// it looks for is the store a check of the same tree would write — a
+/// manifest-less project whose `.php` files all live one directory down keeps
+/// its store there, and the two commands must agree about that.
+pub(crate) fn capture_root(files: &[PathBuf], cwd: &Path) -> PathBuf {
     if files.is_empty() || files.iter().any(|f| f.is_relative()) {
         return cwd.to_path_buf();
     }

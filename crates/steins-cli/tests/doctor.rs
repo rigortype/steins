@@ -1066,3 +1066,33 @@ fn doctor_reports_the_generation_store() {
         after.stdout
     );
 }
+
+/// Doctor looks for the store where `check` writes it, which — for a
+/// manifest-less tree — is the directory the analyzed files share, not the
+/// path argument. A project whose `.php` lives one level down is the case that
+/// separates the two (issue #506's capture root, issue #525's section).
+#[test]
+fn doctor_finds_a_store_one_directory_below_the_path_argument() {
+    let dir = workdir("gen-store-subdir");
+    let src = dir.join("src");
+    std::fs::create_dir_all(&src).expect("create src");
+    std::fs::write(src.join("a.php"), THREE_THROWS).expect("write fixture");
+    // No composer.json: nothing governs the tree, so the store follows the code.
+    let elsewhere = workdir("gen-store-subdir-cwd");
+    let target = dir.to_string_lossy().into_owned();
+
+    run_in(&elsewhere, &["check", "--no-php", &target]);
+    assert!(
+        src.join(".steins/gen/CURRENT").is_file(),
+        "the store belongs to the directory the files share"
+    );
+    assert!(!dir.join(".steins").exists(), "…and not to the path argument's own directory");
+
+    let r = run_in(&elsewhere, &["doctor", "--no-php", &target]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("current generation: "),
+        "doctor must find the store `check` wrote; stdout:\n{}",
+        r.stdout
+    );
+}
