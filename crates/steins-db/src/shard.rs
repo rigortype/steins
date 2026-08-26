@@ -156,10 +156,13 @@ impl PackageShard {
     /// class-like FQN (declared, or minted by a literal `class_alias`), `k:` a
     /// global constant.
     ///
-    /// **What it is for.** The warm path's name delta is the union of the key
-    /// sets of every changed package's old and new shards; a file whose own
-    /// name references miss that delta cannot have had a resolution move under
-    /// it. The set is deliberately *contribution*, not resolution: a name this
+    /// **What it is for.** The whole-shard reading of the warm path's name
+    /// delta — what a package contributes when *every* one of its files must
+    /// be presumed moved: a package that vanished between generations, or one
+    /// whose per-file identity could not be established. The ordinary case is
+    /// [`Self::contributed_names_from`], which asks the same question per file.
+    ///
+    /// The set is deliberately *contribution*, not resolution: a name this
     /// shard defines twice (and so demotes to ambiguous) is here exactly like
     /// one it defines once, because both sides of an ambiguity move the
     /// merged answer. Alias edges contribute both ends — the alias name,
@@ -174,24 +177,98 @@ impl PackageShard {
     pub fn contributed_names(&self) -> Vec<String> {
         let mut out = Vec::with_capacity(
             self.functions.len()
-                + self.ambiguous_functions.len()
                 + self.fn_by_simple.len()
                 + self.classes.len()
-                + self.ambiguous_classes.len()
-                + 2 * self.class_alias_edges.len()
-                + self.constants.len(),
+                + self.site_less_len(),
         );
         out.extend(self.functions.keys().map(|fqn| format!("f:{fqn}")));
-        out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
         out.extend(self.fn_by_simple.keys().map(|simple| format!("s:{simple}")));
         out.extend(self.classes.keys().map(|fqn| format!("c:{fqn}")));
+        self.site_less_names(&mut out);
+        out
+    }
+
+    /// The names this shard contributes **from the given files** (issue #510):
+    /// [`Self::contributed_names`] restricted to the declarations whose
+    /// [`ShardSite`] names a slot in `files`, plus — wholesale — the members
+    /// that carry no site at all.
+    ///
+    /// **Why this is the delta the warm path wants.** A name's merged answer
+    /// can only move if some *file's* contribution to it moved; if every file
+    /// declaring a name is byte-identical to what the published generation
+    /// held, the multiset of definitions under that name is unchanged and so
+    /// is every answer over it. Package granularity — the whole key set of any
+    /// package with one edited file — is sound but useless in the ordinary
+    /// shape of a project, where one package holds everything.
+    ///
+    /// **`files` are this shard's own slots.** Sites are universe slots, so an
+    /// *old* shard's sites index the *old* universe: the caller resolves them
+    /// through that shard's own [`Self::files`] map and compares paths, never
+    /// raw slot numbers across generations.
+    ///
+    /// **The site-less members ride wholesale**, deliberately: the per-package
+    /// ambiguity sets, the constants, and the `class_alias` edge list carry no
+    /// site today, so nothing here can tell which file contributed them.
+    /// Including a changed package's whole set of them is what keeps the leg
+    /// sound, and they are small — the ambiguity sets are empty in a project
+    /// that compiles, and constants and alias edges are rare next to classes
+    /// and functions. Giving `constants` and the alias edges their slots is a
+    /// small change here if a measurement ever asks for it.
+    ///
+    /// Call this only for a package that changed: with an empty `files` the
+    /// answer is the site-less members alone, which is the right answer for a
+    /// package whose only change was a *deleted* file (the deletion shows on
+    /// the old side) and the wrong question for a package that did not move.
+    #[must_use]
+    pub fn contributed_names_from(&self, files: &HashSet<usize>) -> Vec<String> {
+        let mut out = Vec::with_capacity(self.site_less_len());
+        out.extend(
+            self.functions
+                .iter()
+                .filter(|(_, site)| files.contains(&site.file))
+                .map(|(fqn, _)| format!("f:{fqn}")),
+        );
+        out.extend(
+            self.fn_by_simple
+                .iter()
+                .filter(|(_, sites)| sites.iter().any(|site| files.contains(&site.file)))
+                .map(|(simple, _)| format!("s:{simple}")),
+        );
+        out.extend(
+            self.classes
+                .iter()
+                .filter(|(_, site)| files.contains(&site.file))
+                .map(|(fqn, _)| format!("c:{fqn}")),
+        );
+        self.site_less_names(&mut out);
+        out
+    }
+
+    /// The package's file identity: every diagnostic path it holds, with the
+    /// universe slot its [`ShardSite`]s are keyed by. For a shard read back
+    /// from an artifact these are the *old* universe's slots, which is what
+    /// makes it the map an old-side delta resolves its sites through.
+    pub fn files(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.files.iter().map(|(path, &slot)| (path.as_str(), slot))
+    }
+
+    /// The contributed names no [`ShardSite`] can be asked for — see
+    /// [`Self::contributed_names_from`] for why they are wholesale.
+    fn site_less_names(&self, out: &mut Vec<String>) {
+        out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
         out.extend(self.ambiguous_classes.iter().map(|fqn| format!("c:{fqn}")));
         for (alias, target) in &self.class_alias_edges {
             out.push(format!("c:{alias}"));
             out.push(format!("c:{target}"));
         }
         out.extend(self.constants.iter().map(|key| format!("k:{key}")));
-        out
+    }
+
+    fn site_less_len(&self) -> usize {
+        self.ambiguous_functions.len()
+            + self.ambiguous_classes.len()
+            + 2 * self.class_alias_edges.len()
+            + self.constants.len()
     }
 }
 
@@ -439,6 +516,80 @@ mod tests {
         assert!(forward.property_writes.1, "the computed-name bit unions in");
         assert!(forward.property_writes.0.contains("w"));
         assert!(forward.constants.contains("K_A") && forward.constants.contains("K_B"));
+    }
+
+    /// The per-file delta (issue #510): one file's edit contributes only the
+    /// names *that file* sites, never its package's whole key set — plus the
+    /// site-less members, which no shard can attribute to a file and which
+    /// therefore ride the package's change wholesale.
+    #[test]
+    fn contributed_names_are_answerable_per_file() {
+        let s = shard_over(&[
+            (0, "src/edited.php", "<?php namespace App; function edited() {} class Edited {}"),
+            (1, "src/quiet.php", "<?php namespace App; function quiet() {} class Quiet {}"),
+            (2, "src/site_less.php", "<?php const K = 1; class_alias('app\\\\edited', 'shortcut');"),
+        ]);
+        let names = |slots: &[usize]| -> HashSet<String> {
+            s.contributed_names_from(&slots.iter().copied().collect()).into_iter().collect()
+        };
+
+        let edited = names(&[0]);
+        assert!(edited.contains("f:app\\edited"), "{edited:?}");
+        assert!(edited.contains("s:edited"));
+        assert!(edited.contains("c:app\\edited"));
+        assert!(!edited.contains("f:app\\quiet"), "the sibling file's names stay out: {edited:?}");
+        assert!(!edited.contains("s:quiet"));
+        assert!(!edited.contains("c:app\\quiet"));
+
+        // The site-less members are in whichever file is named, because no
+        // site can say which file they came from.
+        for slots in [&[0][..], &[1][..], &[][..]] {
+            let out = names(slots);
+            assert!(out.contains("k:K"), "constants ride wholesale: {out:?}");
+            assert!(out.contains("c:shortcut"), "both alias ends ride wholesale: {out:?}");
+            assert!(out.contains("c:app\\edited"));
+        }
+
+        // And the whole-shard reading is still the union over every file.
+        let mut whole: Vec<String> = s.contributed_names();
+        whole.sort();
+        whole.dedup();
+        let mut per_file: Vec<String> = names(&[0, 1, 2]).into_iter().collect();
+        per_file.sort();
+        assert_eq!(whole, per_file);
+    }
+
+    /// A name defined twice in one package has no site — the shard demoted it
+    /// to the ambiguity set — so it rides every file's answer. Both sides of
+    /// the ambiguity move the merged answer, and neither is attributable.
+    #[test]
+    fn an_ambiguous_name_rides_wholesale() {
+        let s = shard_over(&[
+            (0, "src/a.php", "<?php function dup() {}"),
+            (1, "src/b.php", "<?php function dup() {} function only_b() {}"),
+        ]);
+        let from_a: HashSet<String> =
+            s.contributed_names_from(&HashSet::from([0])).into_iter().collect();
+        assert!(from_a.contains("f:dup"), "{from_a:?}");
+        assert!(!from_a.contains("f:only_b"));
+        // The simple-name table keeps every site, so it *is* answerable.
+        assert!(from_a.contains("s:dup"));
+        assert!(!from_a.contains("s:only_b"));
+    }
+
+    /// The file map is the old side's slot→path bridge: it round-trips the
+    /// slots the shard's sites are keyed by.
+    #[test]
+    fn the_file_map_names_the_slots_the_sites_use() {
+        let s = shard_over(&[
+            (7, "src/a.php", "<?php function a() {}"),
+            (9, "src/b.php", "<?php function b() {}"),
+        ]);
+        let mut files: Vec<(&str, usize)> = s.files().collect();
+        files.sort_unstable();
+        assert_eq!(files, vec![("src/a.php", 7), ("src/b.php", 9)]);
+        assert_eq!(s.functions["a"].file, 7);
+        assert_eq!(s.functions["b"].file, 9);
     }
 
     /// The bucketing heuristic: deep vendor paths group by `<a>/<b>`, shallow

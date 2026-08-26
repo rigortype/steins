@@ -25,15 +25,7 @@
 //!   path line N"), so a file whose lines merely moved changes a caller's
 //!   message. Any byte moving in a file makes it changed.
 //! * **The merged index** (every absence verdict, every resolution) — the
-//!   `delta_names` leg. A name's answer can only move if some shard's
-//!   contribution to it moved, so the delta is the union of the key sets of
-//!   every changed package's old and new shards ([`PackageShard::contributed_names`]).
-//!   That covers promotion, demotion and absence alike: a cross-package
-//!   ambiguity demotion requires the name to be *defined* in the changed shard,
-//!   so the demoted name is in the delta by construction. A package the
-//!   published generation did not have contributes an empty old side; a package
-//!   it had and this run does not contributes an empty new side, which is how a
-//!   deleted package's vanished names reach the delta.
+//!   `delta_names` leg, whose completeness argument is *The name delta* below.
 //! * **Other files' trees**, through the binding descent — the call-graph leg.
 //! * **The whole-universe verdicts** (dam, purity oracle, never-returning set,
 //!   the PHP view, the property-write obstacle) — the digest, above.
@@ -42,6 +34,57 @@
 //! * **Fold answers** — identity-scoped by the fold table (#500) and by the
 //!   engine posture inside the stamp: the same key under the same engine is the
 //!   same answer.
+//!
+//! ## The name delta
+//!
+//! The delta is computed by the orchestrator and handed here as
+//! [`AffectedInputs::delta`]; what follows is the argument that a file whose
+//! footprint misses it cannot have had a resolution move under it.
+//!
+//! **Per file, not per package** (issue #510). A name's merged answer is a
+//! function of the multiset of declarations under it, and every declaration
+//! belongs to exactly one file. So the answer can only move if some *file's*
+//! contribution to that name moved — and a file whose bytes are identical to
+//! the ones the published generation held contributes exactly what it
+//! contributed then. The delta is therefore, over every changed package: the
+//! names its OLD shard sites in a file that changed, and the names its NEW
+//! shard sites in one ([`PackageShard::contributed_names_from`]). A package
+//! whose sources did not move contributes nothing at all — both its sides are
+//! the same set.
+//!
+//! The package-granular reading this replaces (the union of a changed
+//! package's whole old and new key sets) was sound and useless: one edited
+//! file put every name its package declares into the delta, so in a
+//! single-package project — a first-party repo with no vendor tree, the
+//! ordinary shape — every file's footprint intersected it and nothing
+//! replayed.
+//!
+//! **Both sides, and why.** Promotion and ambiguity demotion show on the new
+//! side; *demotion to absence* — a declaration deleted, a file emptied, a
+//! package removed — is visible only on the old side, because nothing in this
+//! run's universe names it any more. A cross-package ambiguity demotion needs
+//! the name to be *defined* in the changed file, so it is on one side or the
+//! other by construction. A package the published generation did not have
+//! contributes an empty old side; a package it had and this run does not
+//! contributes its whole old key set, since every file it held left it.
+//!
+//! **Old slots index the old universe.** A shard's sites are universe slots,
+//! and slot numbers are not stable across generations (the load path tracks
+//! this as `slots_stable`). The old side is therefore resolved through the old
+//! shard's own path→slot map: which old *paths* changed decides which old
+//! *slots* count, and a raw slot number is never compared across generations.
+//!
+//! **Unknowable falls back up, never down.** A file whose old slot cannot be
+//! determined — an unreadable trace index, a package whose artifact will not
+//! decode — makes its package's delta unknowable, and the answer is the
+//! wholesale set or, where not even that can be read, walking every file. The
+//! one direction that is never allowed is a *smaller* set.
+//!
+//! **The site-less shard members ride a changed package wholesale**: the
+//! per-package ambiguity sets, the constants and the `class_alias` edge list
+//! carry no site today, so no file can be blamed for them. They are small, and
+//! [`PackageShard::contributed_names_from`] records what giving them slots
+//! would take if a measurement ever asks.
 //!
 //! ## The footprint
 //!
@@ -80,10 +123,12 @@
 //! depth-bounded in the analysis — `magic_obstacles_in_reach` follows parents,
 //! interfaces and `@mixin` targets transitively, and the declared-receiver
 //! lane's descendant closure walks the *other* way — so an inheritance edge is
-//! closed **without a bound and in both directions**. Its cost is small in
-//! practice because the leg it joins is already package-granular: a first-party
-//! edit puts every first-party name in the delta, and a vendor class rarely
-//! inherits across the boundary.
+//! closed **without a bound and in both directions**. What it costs is a class
+//! hierarchy's whole connected component per edited class file, which is the
+//! price of an unbounded traversal being priced honestly; with the delta now
+//! file-granular it is also, in a deep hierarchy, the widest leg an ordinary
+//! edit fires. Narrowing it means bounding the analysis's own chain walks
+//! first, not the closure over them.
 //!
 //! ## What over-approximation costs, and why the direction is fixed
 //!
@@ -94,7 +139,7 @@
 //! ([`crate::generation::PARANOID_ENV`]) is what turns "we believe this closure
 //! is complete" into a number over a corpus.
 //!
-//! [`PackageShard::contributed_names`]: steins_db::PackageShard::contributed_names
+//! [`PackageShard::contributed_names_from`]: steins_db::PackageShard::contributed_names_from
 //! [`MAX_BINDING_DEPTH`]: crate::MAX_BINDING_DEPTH
 
 use std::collections::{HashMap, HashSet};
@@ -110,9 +155,10 @@ pub(crate) struct AffectedInputs<'a> {
     /// Slots whose bytes moved since the published generation — including
     /// every file the published generation did not have at all.
     pub(crate) changed: HashSet<usize>,
-    /// The name delta, in [`PackageShard::contributed_names`]'s namespaces.
+    /// The name delta, in [`PackageShard::contributed_names_from`]'s
+    /// namespaces — see the module docs for what belongs in it and why.
     ///
-    /// [`PackageShard::contributed_names`]: steins_db::PackageShard::contributed_names
+    /// [`PackageShard::contributed_names_from`]: steins_db::PackageShard::contributed_names_from
     pub(crate) delta: HashSet<String>,
 }
 

@@ -575,6 +575,190 @@ fn an_untouched_tree_replays_every_walk() {
 }
 
 // ---------------------------------------------------------------------------
+// Issue #510: the delta is file-granular, not package-granular.
+//
+// One package, four files, no vendor tree — the ordinary shape of a
+// first-party repo, and the shape where a package-granular delta degenerates:
+// any edit puts every name the package declares into the delta, so every file
+// that names anything at all is affected. `sibling.php` is the discriminator.
+// It names `otherFn` — a declaration of its own package, in a file that did
+// not move — so a package-granular delta walks it and a file-granular one does
+// not.
+// ---------------------------------------------------------------------------
+
+const DELTA_APP: &str = "<?php\n\
+    namespace App;\n\
+    function appMain(): string { return helper(\"x\"); }\n";
+
+const DELTA_HELPER: &str = "<?php\n\
+    namespace App;\n\
+    function helper(string $s): string { return strtoupper($s); }\n";
+
+/// Names `otherFn`, whose declaration is in another file of this same package
+/// and never moves — and `missingHere`, which nothing declares, so the block
+/// this file replays carries a real absence finding rather than nothing.
+const DELTA_SIBLING: &str = "<?php\n\
+    namespace App;\n\
+    function siblingMain(): int { missingHere(); return otherFn(); }\n";
+
+const DELTA_OTHER: &str = "<?php\n\
+    namespace App;\n\
+    function otherFn(): int { return 1; }\n";
+
+const DELTA_COMPOSER_JSON: &str =
+    r#"{"name": "fixture/delta", "autoload": {"psr-4": {"App\\": "src/"}}}"#;
+
+const DELTA_COMPOSER_LOCK: &str = r#"{"packages": [], "packages-dev": []}"#;
+
+/// Write the one-package fixture; returns the files in universe-slot order.
+fn write_delta_fixture(root: &Path) -> Vec<PathBuf> {
+    let write = |rel: &str, content: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("composer.json", DELTA_COMPOSER_JSON);
+    write("composer.lock", DELTA_COMPOSER_LOCK);
+    write("src/app.php", DELTA_APP);
+    write("src/helper.php", DELTA_HELPER);
+    write("src/other.php", DELTA_OTHER);
+    write("src/sibling.php", DELTA_SIBLING);
+    vec![
+        root.join("src/app.php"),
+        root.join("src/helper.php"),
+        root.join("src/other.php"),
+        root.join("src/sibling.php"),
+    ]
+}
+
+/// The tightening (issue #510). An edit to `helper.php` walks the file that
+/// changed and the file that names it — and **replays the two files of the
+/// same package that name only declarations which did not move**. That last
+/// clause is what a package-granular delta cannot do: `sibling.php` names
+/// `otherFn`, so the whole package's key set pulls it in, and in a one-package
+/// project the whole universe with it.
+#[test]
+fn an_edit_replays_a_sibling_naming_only_unmoved_declarations() {
+    if !spawn_or_skip("an_edit_replays_a_sibling_naming_only_unmoved_declarations") {
+        return;
+    }
+    let tmp = TempDir::new("delta-per-file");
+    let files = write_delta_fixture(&tmp.dir);
+    assert_eq!(files.len(), 4);
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    assert_eq!(cold.report.packages.len(), 1, "one package is the point of this fixture");
+    assert_eq!(cold.report.walk.walked, files.len());
+
+    // The whole universe is one package, so the fingerprint of every file's
+    // package moves; only helper.php's bytes do.
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
+    );
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    // helper.php walks because it changed, app.php because `f:app\helper` — a
+    // name the changed file sites — is in its footprint. other.php names
+    // nothing and sibling.php names only `otherFn` and `missingHere`, neither
+    // of which any changed file declares in either generation.
+    assert_eq!(
+        (warm.report.walk.walked, warm.report.walk.replayed),
+        (2, 2),
+        "notes: {:#?}",
+        warm.report.notes
+    );
+
+    let fresh_store = TempDir::new("delta-per-file-fresh");
+    assert_eq!(
+        canon(warm.findings),
+        canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+        "a replayed file diverged from a fresh cold run"
+    );
+}
+
+/// The other direction: an edit to a file **nothing names** walks that file
+/// alone. Under a package-granular delta the edit still moved every name the
+/// package declares, so `app.php` was walked for naming `helper` — a
+/// declaration in a file that did not move.
+#[test]
+fn an_edit_nothing_names_walks_only_the_edited_file() {
+    if !spawn_or_skip("an_edit_nothing_names_walks_only_the_edited_file") {
+        return;
+    }
+    let tmp = TempDir::new("delta-unnamed");
+    let files = write_delta_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+
+    // `siblingMain` is called by nothing, so no footprint and no call edge
+    // reaches this file.
+    rewrite(
+        &files[3],
+        "<?php\nnamespace App;\nfunction siblingMain(): int { missingHere(); return otherFn() + 1; }\n",
+    );
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(
+        (warm.report.walk.walked, warm.report.walk.replayed),
+        (1, 3),
+        "notes: {:#?}",
+        warm.report.notes
+    );
+    let fresh_store = TempDir::new("delta-unnamed-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
+}
+
+/// The tightened leg under the verifier: both edits re-run with every file
+/// walked anyway, every would-be skip graded against its fresh walk. A
+/// tightening is only worth having if this is what it grades to.
+#[test]
+fn the_paranoid_verifier_grades_the_tightened_delta_clean() {
+    if !spawn_or_skip("the_paranoid_verifier_grades_the_tightened_delta_clean") {
+        return;
+    }
+    let scenarios: [(&str, usize, &str); 3] = [
+        ("no-change", 1, DELTA_HELPER),
+        (
+            "named-callee",
+            1,
+            "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
+        ),
+        (
+            "unnamed-file",
+            3,
+            "<?php\nnamespace App;\nfunction siblingMain(): int { missingHere(); return otherFn() + 1; }\n",
+        ),
+    ];
+    for (tag, slot, content) in scenarios {
+        let tmp = TempDir::new(&format!("delta-paranoid-{tag}"));
+        let files = write_delta_fixture(&tmp.dir);
+        let cold = run_paranoid(&tmp.dir, &tmp.dir, &files);
+        assert!(cold.report.walk.divergences.is_empty(), "{tag}: cold");
+
+        rewrite(&files[slot], content);
+        let warm = run_paranoid(&tmp.dir, &tmp.dir, &files);
+        assert_eq!(warm.report.mode, GenerationMode::Warm, "{tag}");
+        assert_eq!(warm.report.walk.walked, files.len(), "{tag}: paranoid walks everything");
+        assert!(
+            warm.report.walk.divergences.is_empty(),
+            "{tag}: the tightened delta let a stale block through: {:#?}",
+            warm.report.walk.divergences
+        );
+        assert!(warm.report.walk.would_skip > 0, "{tag}: nothing was graded");
+        let fresh_store = TempDir::new(&format!("delta-paranoid-{tag}-fresh"));
+        assert_eq!(
+            canon(warm.findings),
+            canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+            "{tag}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
 // The paranoid verifier, over the same fixtures.
 // ---------------------------------------------------------------------------
 
