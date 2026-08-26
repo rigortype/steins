@@ -2,30 +2,45 @@
 
 **Status: implemented.**
 
-Ten workspace crates, plus `xtask` (the verification apparatus) and
+Twelve workspace crates, plus `xtask` (the verification apparatus) and
 `harness/phpdoc-oracle` (a PHP-side differential harness).
 
 ## Dependency direction
 
+Read off the manifests, not drawn by hand — `cargo metadata --no-deps` is the
+authority if this drifts again:
+
 ```text
 steins-cli
-  ├── steins-db ── steins-syntax ── [mago-* : pinned fork]
+  ├── steins-db ── steins-syntax ── steins-domain
+  │           └── steins-gen, steins-catalog, steins-phpdoc
   ├── steins-infer
   │     ├── steins-domain
   │     ├── steins-contract ── steins-domain, steins-phpdoc
   │     ├── steins-db, steins-syntax
+  │     ├── steins-gen          (native only — the generation store)
   │     ├── steins-catalog
   │     ├── steins-sidecar
   │     └── steins-phpdoc
-  └── steins-edit
-        └── steins-db, steins-syntax, steins-infer,
-            steins-domain, steins-contract, steins-phpdoc
+  ├── steins-edit
+  │     └── steins-db, steins-syntax, steins-infer,
+  │         steins-domain, steins-contract, steins-phpdoc
+  ├── steins-catalog, steins-syntax, steins-phpdoc, steins-sidecar
+
+steins-wasm (a separate artifact, not under the CLI)
+  └── steins-db, steins-infer, steins-syntax, steins-catalog
 ```
 
+Only `steins-syntax` sees the pinned `mago-*` fork (ADR-0003).
+
 Leaves with **no internal dependencies at all**: `steins-domain`,
-`steins-phpdoc`, `steins-catalog`, `steins-sidecar`. That is a deliberate
-property — each owns a self-contained body of knowledge and can be tested
-without an analyzer.
+`steins-phpdoc`, `steins-catalog`, `steins-sidecar`, `steins-gen`. That is a
+deliberate property — each owns a self-contained body of knowledge and can be
+tested without an analyzer.
+
+One oddity worth not rediscovering: `steins-db` carries a **dev-dependency on
+itself**, which is how its own tests enable the `persist` feature without any
+crate shipping it enabled (issue #487).
 
 ## What each crate owns, and what it defends
 
@@ -78,14 +93,35 @@ plus the lowering from the pinned Mago fork.
 only*, and **no Mago type appears in its public API**. This is the ADR-0003 seam
 that lets a parser backend be swapped without touching an analysis crate.
 
-### `steins-db` — the query graph
+### `steins-gen` — the frozen-generation substrate
+
+Generation identity (blake3 over tagged, length-prefixed fields), the
+payload-agnostic artifact container (named byte ranges behind a seekable
+directory), the candidate-then-publish store under `<project>/.steins/`, the
+sealed `SourceInventory`, and the Composer partition vocabulary
+(`Package`, `PackageKind`, `PackageUniverse`). ADR-0092 §2/§3.
+
+**Defends:** that a cache miss changes cost, never meaning. Every decode
+failure is a `Miss` the caller maps to rebuild-from-source; artifacts carry a
+schema version with no migration path by design. It knows nothing about what
+section bytes *mean* — that belongs to the payload owners, which is why it can
+stay a leaf.
+
+### `steins-db` — the query graph, the shards, the payloads
 
 The salsa database, the `SourceFile` / `Project` inputs, the syntax-level
-tracked queries (`parse`, `function_index`), and the whole-project symbol index.
+tracked queries (`parse`, `function_index`), the whole-project symbol index,
+the Composer partition builder, the per-package symbol shard and the
+per-generation merge (ADR-0092 §3), and the artifact payload codecs — what the
+`symbols` / `contracts` / `trace` sections mean, plus the read transaction and
+residency vocabulary (ADR-0092 §2).
 
-**Defends:** that semantic queries live *outside* this crate — downstream crates
-define tracked queries against the `Db` trait, so checking logic never lands in
-the engine crate.
+**Defends:** two things. That semantic queries live *outside* this crate —
+downstream crates define tracked queries against the `Db` trait, so checking
+logic never lands in the engine crate. And that the merge is
+**partition-invariant**: any grouping of the same files merges to the same
+tables, which is what lets shard boundaries be a persistence decision rather
+than a semantic one.
 
 ### `steins-sidecar` — PHP IPC
 
@@ -122,6 +158,15 @@ channel, output rendering.
 **Defends:** that a profile is *display data*. Nothing in the CLI changes
 inference behavior.
 
+### `steins-wasm` — the browser playground's artifact
+
+The C ABI (`sw_check`, `sw_annotate`, and their replay twins), the byte-buffer
+in / JSON envelope out protocol, and nothing else. ADR-0065/0066.
+
+**Defends:** that the browser runs the *same* analysis. It constructs no
+folder of its own beyond `NoFold` and the replay table, and no `std::process`
+— and therefore no generation store — enters its dependency graph.
+
 ## Layering rules
 
 1. **No analysis crate sees a Mago type.** Enforced by `steins-syntax`'s public
@@ -135,3 +180,9 @@ inference behavior.
    `steins-edit`.
 5. **Diagnostic ids are declared in `steins-infer`** and bound to their layers by
    a totality test — see [diagnostic-shape.md](diagnostic-shape.md).
+6. **`steins-gen` depends on no steins crate.** Identity, the container and the
+   store are payload-agnostic, so the crates that own payloads depend on it and
+   never the reverse (ADR-0092 §2).
+7. **The store never enters the wasm graph.** `steins-infer`'s dependency on
+   `steins-gen` is `cfg(not(target_arch = "wasm32"))`, the same discipline the
+   process fold transport follows.
