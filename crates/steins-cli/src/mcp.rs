@@ -42,6 +42,19 @@
 //! surface inherits: the reply document is what a client reads, and it says the
 //! same thing warm or cold).
 //!
+//! **`plan_transform`/`apply_plan` stay cold, on purpose.** Neither consults
+//! the generation store, and that is not a gap `check`'s warm path left open:
+//! the planners in `steins-edit` consume the salsa `Project` view, and the
+//! generation persists findings, traces and summaries — none of a planner's
+//! inputs, so there is nothing warm to hand them. The gate-2 post-check
+//! ([`crate::post_check`], ADR-0034 point 3a) is a deliberately symmetric
+//! before/after pair — same fresh database, same `NoFold`, same surface
+//! filtering — whose after side analyzes the plan applied to hypothetical
+//! texts that no generation holds (the dirty-buffer lane, ADR-0092 §6, issue
+//! #492). Substituting the store's findings for the before side would
+//! compare a folded warm run against an unfolded fresh one and measure that
+//! posture difference, not the edit (issue #491).
+//!
 //! **Transport, and why no MCP SDK.** MCP's stdio transport is JSON-RPC 2.0
 //! messages delimited by newlines — the same wire family the PHP sidecar
 //! speaks (ADR-0024), and the reason that ADR chose it. `serde_json` plus the

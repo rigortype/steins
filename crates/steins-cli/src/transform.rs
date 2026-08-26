@@ -362,6 +362,10 @@ impl PostCheckSurface {
 /// Re-analyze the edited project, report any diagnostic id whose count
 /// increased (ADR-0034 point 3a); vendor-filtered (ADR-0015). Shared by
 /// `transform` and `check --fix`. `surface` — see [`PostCheckSurface`].
+/// Deliberately cold on both sides: `before` and `after` must share one
+/// analysis posture or a regression here measures the posture gap, not the
+/// edit (why that rules out a warm `before` — see the `mcp` module docs,
+/// issue #491).
 pub(crate) fn post_check(
     db: &SteinsDatabase,
     project: Project,

@@ -355,10 +355,15 @@ twice through the orchestrator, cold then warm, requiring the two finding
 sets to match. The store is **bounded at one generation** (#529): a
 publish sweeps what it superseded and every open collects what a crash
 left unreachable, so a day of editing costs one cached analysis rather
-than one per edit. **Still open**: parallelism re-scoped by measurement
-from the generation build to `check_units`' per-file loop (#490); and the
-MCP server resident over published generations (#491), which still
-re-analyzes from scratch per call.
+than one per edit. Parallelism is **re-scoped and landed** (#490, #532):
+the per-file walk fans out one folder per worker, moved by measurement
+from the generation build to `check_units`' per-file loop. The MCP
+server (#491) is **landed** too: `check` answers from the published
+generation, warm ≡ cold asserted at the MCP surface (#534); the other two
+tools, `plan_transform` and `apply_plan`, analyze cold on every call by
+deliberate choice, since their post-check verifies the plan against
+hypothetical edited text no generation holds — the dirty-buffer lane
+(ADR-0092 §6, issue #492).
 
 Exit criteria:
 
