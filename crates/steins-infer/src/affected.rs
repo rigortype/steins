@@ -288,18 +288,19 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
     let mut affected: HashSet<usize> = inputs.changed.clone();
     let mut names: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut inherits: Vec<Vec<usize>> = vec![Vec::new(); n];
-    // Delta hits on a name **nothing declares any more** — see *The delta leg
-    // and the descent* below. Empty for every edit that only adds or modifies.
+    // Delta hits on a name **nothing declares any more** — the removal case of
+    // *The delta leg and the descent* in the module docs. Empty for every edit
+    // that only adds or modifies.
     let mut undeclared_hits: Vec<usize> = Vec::new();
     for (file, tree) in inputs.trees.iter().enumerate() {
         let mut edges: HashSet<usize> = HashSet::new();
         let mut hit = false;
-        let mut unreachable = false;
+        let mut undeclared = false;
         footprint(tree, &mut |key: &str| {
             let declaring = decls.files_of(key);
             if inputs.delta.contains(key) {
                 hit = true;
-                unreachable |= declaring.is_none();
+                undeclared |= declaring.is_none();
             }
             if let Some(files) = declaring {
                 edges.extend(files.iter().copied());
@@ -307,7 +308,7 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
         });
         if hit {
             affected.insert(file);
-            if unreachable {
+            if undeclared {
                 undeclared_hits.push(file);
             }
         }
