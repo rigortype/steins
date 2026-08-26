@@ -127,7 +127,7 @@ pub(crate) fn load_project(
 }
 
 /// Assemble a [`LoadedProject`] from texts already in hand — the experimental
-/// generation path (issue #489), whose sources were read through the sealed
+/// generation path (issue #489), whose sources came back from the sealed
 /// capture and whose trees are owned by the orchestrator. Builds the same salsa
 /// view [`load_project`] builds (so `--fix`'s post-check and the baseline
 /// machinery work unchanged) but triggers no parse and prints no notices: the

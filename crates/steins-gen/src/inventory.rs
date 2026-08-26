@@ -2,6 +2,13 @@
 //! this boundary, and every later read or check answers against the seal. A
 //! concurrent edit is detected at revalidation and rejects the whole
 //! candidate — the torn-read class dies here, wholesale, never per-file.
+//!
+//! "Captured once" is meant literally since issue #521: the capture hands each
+//! file's bytes back as it hashes them ([`SourceInventory::capture_keeping`]),
+//! so an analysis reads its universe once rather than twice. See
+//! [`SourceInventory`] for what that does to the seal's meaning — it makes the
+//! bytes analyzed and the bytes fingerprinted the same *by construction*, and
+//! leaves [`SourceInventory::read`] as the checked route for everything else.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -88,12 +95,46 @@ impl fmt::Display for SourceDrift {
 
 impl std::error::Error for SourceDrift {}
 
+/// One file as [`SourceInventory::capture_keeping`] saw it, at the instant it
+/// was hashed: where it sat in the caller's iteration order, the key it sealed
+/// under, what was sealed, and the very bytes [`SourceEntry::content`] is the
+/// hash of.
+///
+/// The `index` is a position in the `files` iterator rather than a sealed key
+/// because the caller's own indexing — universe slots, in the orchestrator's
+/// case — is the thing it needs back, and two spellings of one path (`a.php`
+/// and `./a.php`) collapse in the seal while staying two positions here.
+pub struct Captured<'a> {
+    /// The file's position in the `files` iterator, counted from 0.
+    pub index: usize,
+    /// The sealed key — the same normalization [`SourceInventory::capture`]
+    /// applies.
+    pub key: &'a str,
+    /// The entry this file contributes to the seal.
+    pub entry: &'a SourceEntry,
+    /// The bytes that were hashed. Moving them out is the point: the caller
+    /// keeps what it needs and drops the rest, so a whole capture never holds
+    /// more than one file's contents of its own.
+    pub bytes: Vec<u8>,
+}
+
 /// The sealed capture: `(relative path, size, mtime, content hash)` per file,
 /// taken at open. Sealed at construction — there is no mutation API — and
 /// checked by [`SourceInventory::revalidate`] immediately before a candidate
-/// publishes. Later slices read source *through* the seal
-/// ([`SourceInventory::read`]), which is what makes "what was analyzed" and
-/// "what was fingerprinted" the same bytes.
+/// publishes.
+///
+/// **What makes "what was analyzed" and "what was fingerprinted" the same
+/// bytes.** Two routes, and the difference between them is the strength of the
+/// claim. [`SourceInventory::capture_keeping`] hands each file's contents to
+/// the caller *at the moment it hashes them*, so the identity holds **by
+/// construction** — there is one read and one hash, and the bytes the caller
+/// analyzes are literally the bytes the fingerprint covers. Anything reading a
+/// file later — after the capture has moved on, or a file the seal does not
+/// hold — goes through [`SourceInventory::read`], which re-reads and
+/// re-verifies against the seal, so the identity holds **by check**. A run
+/// takes the first route for the universe it captured and the second for
+/// whatever it did not; neither weakens the seal, and both are backstopped by
+/// [`SourceInventory::revalidate`] before publication.
 pub struct SourceInventory {
     root: PathBuf,
     entries: BTreeMap<String, SourceEntry>,
@@ -104,13 +145,43 @@ impl SourceInventory {
     /// `root`) or relative to it; duplicates collapse. `root` itself is *not*
     /// part of the seal — the same tree captured from two checkouts
     /// fingerprints alike.
+    ///
+    /// The bytes read here are dropped; a caller that wants them should call
+    /// [`SourceInventory::capture_keeping`] rather than read every file a
+    /// second time.
     pub fn capture<I, P>(root: &Path, files: I) -> Result<Self, SourceError>
     where
         I: IntoIterator<Item = P>,
         P: AsRef<Path>,
     {
-        let mut entries = BTreeMap::new();
-        for file in files {
+        Self::capture_keeping(root, files, |_| {})
+    }
+
+    /// [`SourceInventory::capture`], handing each file's bytes to `keep` at the
+    /// instant they are hashed (issue #521).
+    ///
+    /// **Why this exists.** A caller that needs the sources it just sealed —
+    /// which every analysis is — otherwise reads and hashes the universe
+    /// twice: once here for the fingerprint, once through
+    /// [`SourceInventory::read`] for the text. Handing the bytes back removes
+    /// the second pass outright, and it *strengthens* the seal rather than
+    /// trading it away: see the type-level docs on the two routes.
+    ///
+    /// **Memory.** `keep` is called once per file, with that one file's bytes,
+    /// as the walk proceeds — never with the capture's accumulated contents.
+    /// A caller that keeps everything pays the universe's source size, a
+    /// caller that keeps nothing pays one file's, and the choice stays the
+    /// caller's. `keep` is called for **every** item of `files`, duplicates
+    /// included, so an index-keyed caller has no gaps to fill; the seal itself
+    /// still collapses them.
+    pub fn capture_keeping<I, P, F>(root: &Path, files: I, mut keep: F) -> Result<Self, SourceError>
+    where
+        I: IntoIterator<Item = P>,
+        P: AsRef<Path>,
+        F: FnMut(Captured<'_>),
+    {
+        let mut entries: BTreeMap<String, SourceEntry> = BTreeMap::new();
+        for (index, file) in files.into_iter().enumerate() {
             let rel = relative_key(root, file.as_ref())?;
             let abs = root.join(&rel);
             let io_err = |error| SourceError::Io { path: abs.clone(), error };
@@ -121,7 +192,8 @@ impl SourceInventory {
                 mtime: meta.modified().map_err(&io_err)?,
                 content: Fingerprint::of_bytes("steins-gen/file", &bytes),
             };
-            entries.insert(rel, entry);
+            let entry = entries.entry(rel).insert_entry(entry);
+            keep(Captured { index, key: entry.key(), entry: entry.get(), bytes });
         }
         Ok(Self { root: root.to_owned(), entries })
     }
@@ -162,8 +234,16 @@ impl SourceInventory {
         h.finish()
     }
 
-    /// Read one sealed file, verifying its bytes still hash to the seal. The
-    /// read path later slices go through; a mismatch is drift, not data.
+    /// Read one sealed file *now*, verifying its bytes still hash to the seal;
+    /// a mismatch is drift, not data.
+    ///
+    /// The route for everything the capture did not hand back
+    /// ([`SourceInventory::capture_keeping`]): a file wanted after the capture
+    /// has moved on, a caller that kept nothing, a path the seal does not hold
+    /// at all ([`DriftKind::Uncaptured`]). The verification is exactly what
+    /// makes the bytes as trustworthy as capture-time ones — it is the same
+    /// identity, established by check rather than by construction — so it stays
+    /// on this path whatever the other one does.
     pub fn read(&self, path: &str) -> Result<Vec<u8>, SourceDrift> {
         let drift = |kind| SourceDrift { path: path.to_owned(), kind };
         let entry = self.entries.get(path).ok_or_else(|| drift(DriftKind::Uncaptured))?;

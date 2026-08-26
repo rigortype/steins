@@ -1,11 +1,11 @@
-//! The sealed source capture: fingerprint stability, drift detection, and
-//! the read-through boundary.
+//! The sealed source capture: fingerprint stability, drift detection, the
+//! bytes the capture hands back, and the read-through boundary.
 
 use std::fs::File;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-use steins_gen::{DriftKind, SourceInventory};
+use steins_gen::{DriftKind, Fingerprint, SourceInventory};
 
 /// A throwaway directory under the OS temp dir, cleaned on drop.
 struct TempDir {
@@ -160,6 +160,70 @@ fn read_through_verifies_the_seal() {
     t.write("src/a.php", "<?php mutated();\n");
     assert_eq!(sealed.read("src/a.php").unwrap_err().kind, DriftKind::Changed);
     assert_eq!(sealed.read("src/nope.php").unwrap_err().kind, DriftKind::Uncaptured);
+}
+
+/// The capture hands each file's bytes back at the instant it hashes them
+/// (issue #521): the same contents `read` would have re-read, and — the point
+/// of the exercise — bytes that hash to the entry the seal recorded, so the
+/// identity holds by construction rather than by a second verification.
+#[test]
+fn capture_hands_back_the_bytes_it_hashed() {
+    let t = sample_tree("keeping");
+    let mut kept: Vec<(usize, String, Vec<u8>)> = Vec::new();
+    let mut verified = 0usize;
+    let sealed = SourceInventory::capture_keeping(
+        &t.dir,
+        ["src/a.php", "src/sub/b.php", "composer.json"],
+        |captured| {
+            assert_eq!(
+                Fingerprint::of_bytes("steins-gen/file", &captured.bytes),
+                captured.entry.content,
+                "the bytes handed back are not the bytes that were hashed"
+            );
+            assert_eq!(captured.entry.size as usize, captured.bytes.len());
+            verified += 1;
+            kept.push((captured.index, captured.key.to_owned(), captured.bytes));
+        },
+    )
+    .unwrap();
+    assert_eq!(verified, 3);
+    // Iteration order, not seal order: the caller indexes by its own position.
+    assert_eq!(
+        kept.iter().map(|(i, key, _)| (*i, key.as_str())).collect::<Vec<_>>(),
+        [(0, "src/a.php"), (1, "src/sub/b.php"), (2, "composer.json")]
+    );
+    for (_, key, bytes) in &kept {
+        assert_eq!(&sealed.read(key).unwrap(), bytes, "capture and read disagree about {key}");
+    }
+}
+
+/// Every item of `files` fires the sink, duplicates included, so a caller that
+/// keys by iteration position has no gaps to fill — while the seal itself
+/// still collapses them.
+#[test]
+fn capture_keeping_fires_for_every_item_including_duplicates() {
+    let t = sample_tree("keeping-dups");
+    let mut keys: Vec<String> = Vec::new();
+    let sealed =
+        SourceInventory::capture_keeping(&t.dir, ["src/a.php", "./src/a.php"], |captured| {
+            assert_eq!(captured.index, keys.len());
+            keys.push(captured.key.to_owned());
+        })
+        .unwrap();
+    assert_eq!(keys, ["src/a.php", "src/a.php"]);
+    assert_eq!(sealed.len(), 1);
+}
+
+/// `capture` is `capture_keeping` that keeps nothing: same seal, same
+/// fingerprint.
+#[test]
+fn capture_and_capture_keeping_seal_alike() {
+    let t = sample_tree("keeping-equal");
+    let plain = capture(&t);
+    let files = ["src/a.php", "src/sub/b.php", "composer.json"];
+    let keeping = SourceInventory::capture_keeping(&t.dir, files, |_| {}).unwrap();
+    assert_eq!(plain.fingerprint(), keeping.fingerprint());
+    assert_eq!(plain.len(), keeping.len());
 }
 
 #[test]

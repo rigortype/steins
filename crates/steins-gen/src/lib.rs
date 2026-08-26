@@ -23,7 +23,10 @@
 //!   hard link otherwise, a copy as the floor.
 //! - The sealed capture ([`SourceInventory`]): sources are captured once,
 //!   sealed, and revalidated immediately before publish, so a concurrent
-//!   edit rejects the whole candidate.
+//!   edit rejects the whole candidate. The capture hands each file's bytes
+//!   back as it hashes them ([`SourceInventory::capture_keeping`]), so an
+//!   analysis reads its universe once and analyzes the bytes the fingerprint
+//!   covers by construction.
 //! - The partition vocabulary ([`Package`], [`PackageKind`],
 //!   [`PackageUniverse`]): the Composer-package partition of the universe
 //!   and its reverse-dependency closure (ADR-0092 §3). Plain data — the
@@ -53,7 +56,9 @@ pub use container::{
 };
 pub use fingerprint::{FieldHasher, Fingerprint};
 pub use identity::{EnginePosture, GenerationId, GenerationInputs};
-pub use inventory::{DriftKind, SourceDrift, SourceEntry, SourceError, SourceInventory};
+pub use inventory::{
+    Captured, DriftKind, SourceDrift, SourceEntry, SourceError, SourceInventory,
+};
 pub use names::{NameError, PackageName, SectionName};
 pub use partition::{Package, PackageKind, PackageUniverse};
 pub use share::ShareKind;

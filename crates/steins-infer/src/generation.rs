@@ -265,12 +265,13 @@ pub struct GenerationParams<'a> {
 }
 
 /// What one gated run produced: the findings, plus everything the caller's
-/// downstream pipeline needs without re-parsing (texts read through the seal,
+/// downstream pipeline needs without re-parsing (the texts the capture sealed,
 /// the owned lowered trees in slot order), and the run's own ledger.
 pub struct GenerationOutcome {
     pub findings: Vec<Diagnostic>,
-    /// Diagnostic path → the file's text, read through the sealed capture, so
-    /// "what was analyzed" and "what was fingerprinted" are the same bytes.
+    /// Diagnostic path → the file's text, handed back by the capture that
+    /// hashed it (issue #521), so "what was analyzed" and "what was
+    /// fingerprinted" are the same bytes by construction.
     pub texts: HashMap<String, String>,
     /// `(diagnostic path, tree handle)` in universe-slot order. A handle, not
     /// a tree, since issue #516: a warm run decodes a file's tree only where
@@ -386,7 +387,8 @@ pub struct FoldReport {
 /// Wall-clock milliseconds per phase, for the perf harness's cold/warm split.
 #[derive(Debug, Clone, Copy)]
 pub struct PhaseTimings {
-    /// Store open + capture + fingerprints + reading texts through the seal.
+    /// Store open + capture: one read and one hash per file, with the texts
+    /// the analysis reads falling out of that same pass (issue #521).
     pub capture_ms: f64,
     /// Loading trees/shards from artifacts, or parsing — the phase the warm
     /// path exists to shrink.
@@ -614,25 +616,48 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     }
     let mut plans: Vec<Plan> = Vec::with_capacity(groups.len());
     let mut inventories: Vec<SourceInventory> = Vec::with_capacity(groups.len());
+    // The texts and the per-file content hashes, filled *by* the capture rather
+    // than by a second pass over the universe (issue #521). The capture already
+    // holds each file's bytes at the instant it hashes them, so it hands them
+    // straight to the analysis: one read and one hash per file, and "what was
+    // analyzed" is literally "what was fingerprinted" by construction rather
+    // than by a re-read that re-verifies. Nothing is accumulated on the way —
+    // each file's bytes become its `String` and are dropped — so the resident
+    // cost is the `texts` map this function has always built and one file's
+    // contents beyond it.
+    //
+    // (The per-file hashes are wanted for their own reason: issue #489 slice B
+    // needs to know which files of a *changed* package actually changed, which
+    // the package-level fingerprint cannot say.)
+    let mut texts: HashMap<String, Arc<String>> = HashMap::with_capacity(diag.len());
+    let mut contents: Vec<Option<Fingerprint>> = std::iter::repeat_n(None, diag.len()).collect();
     for (name, slots) in groups {
         let kind = p.partition.universe().get(&name).map_or(PackageKind::Root, |member| member.kind);
-        let inventory =
-            SourceInventory::capture(p.capture_root, slots.iter().map(|&s| p.files[s].as_path()))
-                .map_err(|error| GenerationError::Capture { package: name.to_string(), error })?;
+        let inventory = SourceInventory::capture_keeping(
+            p.capture_root,
+            slots.iter().map(|&s| p.files[s].as_path()),
+            |captured| {
+                let slot = slots[captured.index];
+                contents[slot] = Some(captured.entry.content);
+                texts.insert(diag[slot].clone(), Arc::new(text_of(captured.bytes)));
+            },
+        )
+        .map_err(|error| GenerationError::Capture { package: name.to_string(), error })?;
         let fingerprint = inventory.fingerprint();
         plans.push(Plan { name, kind, slots, fingerprint });
         inventories.push(inventory);
     }
 
-    // Texts through the seal: what is analyzed is what was fingerprinted. The
-    // per-file content hashes come off the same seal (issue #489 slice B needs
-    // to know which files of a *changed* package actually changed, which the
-    // package-level fingerprint cannot say).
-    let mut texts: HashMap<String, Arc<String>> = HashMap::with_capacity(diag.len());
-    let mut contents: Vec<Option<Fingerprint>> =
-        std::iter::repeat_n(None, diag.len()).collect();
+    // Sound-conservative: a slot the capture did not hand bytes back for is
+    // read through the seal exactly as it was before issue #521, verification
+    // and all. `capture_keeping` fires for every file of every package, so this
+    // is empty on every real run — it exists so that "the capture kept it" is
+    // never *assumed*, only used where it holds.
     for (plan, inventory) in plans.iter().zip(&inventories) {
         for &slot in &plan.slots {
+            if contents[slot].is_some() {
+                continue;
+            }
             let key = inventory.key_for(&p.files[slot]).ok_or_else(|| {
                 GenerationError::Sealed(SourceDrift {
                     path: diag[slot].clone(),
@@ -641,10 +666,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             })?;
             contents[slot] = inventory.entry(&key).map(|entry| entry.content);
             let bytes = inventory.read(&key).map_err(GenerationError::Sealed)?;
-            texts.insert(
-                diag[slot].clone(),
-                Arc::new(String::from_utf8_lossy(&bytes).into_owned()),
-            );
+            texts.insert(diag[slot].clone(), Arc::new(text_of(bytes)));
         }
     }
     let contents: Vec<Fingerprint> = contents
@@ -1766,6 +1788,20 @@ fn config_identity(p: &GenerationParams<'_>) -> Vec<(String, String)> {
         ));
     }
     config
+}
+
+/// One sealed file's bytes as the text the analysis reads — the same
+/// lossy-UTF-8 spelling `steins-cli`'s cold path produces, and the same one
+/// this function produced when it read through the seal.
+///
+/// Written as `from_utf8` with a lossy fallback rather than as
+/// `from_utf8_lossy(&bytes).into_owned()` so that the ordinary case — a valid
+/// UTF-8 source file — takes the buffer the capture already allocated instead
+/// of copying the universe a second time. The invalid case is byte-for-byte
+/// what it always was: `U+FFFD` per ill-formed sequence.
+fn text_of(bytes: Vec<u8>) -> String {
+    String::from_utf8(bytes)
+        .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
 fn ms(d: std::time::Duration) -> f64 {
