@@ -96,6 +96,41 @@
 //! alias no edit touched. [`PackageShard::contributed_names_from`] carries the
 //! reading.
 //!
+//! ## The delta leg and the descent
+//!
+//! The delta leg is per file, and a walk is not: G descends into F's
+//! declaration and re-derives F's body there, so a resolution that moved *under
+//! F* can move what G's walk concludes. F is a delta hit; G is not, and G's own
+//! footprint never mentions the name.
+//!
+//! Almost always the ordinary closure already answers for that, and the reason
+//! is worth stating because it is what keeps this leg cheap. A resolution moves
+//! because some file changed, and that file is the one *declaring* the name — so
+//! F, which names it, has an edge straight to it, and G reaches it through F at
+//! one hop more. An added declaration, a promotion, an ambiguity demotion: all
+//! of them leave the moved declaration standing in a changed file, and all of
+//! them are covered without a seed.
+//!
+//! The exception is **removal**. A deleted file has no slot in this run's
+//! universe at all, so it can never be in `changed`, and a name nothing declares
+//! any more is an edge to nowhere: F's own hit is the only trace of it, and G is
+//! invisible. So a delta hit seeds the descent closure when the key it hit on
+//! resolves to **no** declaring file at all — which is a deleted file, a deleted
+//! or renamed declaration, a removed package, and nothing else. It is empty for
+//! every edit that only adds or modifies, so the leg costs nothing until it is
+//! needed.
+//!
+//! **What it does not cover, stated rather than assumed**: a name declared
+//! *twice* that loses one copy still resolves, so its namer keeps an edge, but
+//! that edge may reach the surviving declaration rather than the departed one,
+//! and a caller one descent above is then missed. Seeding every delta hit closes
+//! that too and costs the whole leg: on `nikic/PHP-Parser` one permanently
+//! ambiguous class (`Internal\TokenPolyfill`, declared twice under a version
+//! guard) rides every edit's delta through the wholesale ambiguity concession,
+//! and seeding on it walked 313 of 341 files where this leg walks 14. The
+//! residue is the delta leg's own granularity, not this closure's, and belongs
+//! with issue #510's line of work rather than here.
+//!
 //! ## The footprint
 //!
 //! `footprint(F)` is a projection of F's loaded trace IR — never a walk, and no
@@ -251,19 +286,28 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
     let mut affected: HashSet<usize> = inputs.changed.clone();
     let mut names: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut inherits: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // Delta hits on a name **nothing declares any more** — see *The delta leg
+    // and the descent* below. Empty for every edit that only adds or modifies.
+    let mut undeclared_hits: Vec<usize> = Vec::new();
     for (file, tree) in inputs.trees.iter().enumerate() {
         let mut edges: HashSet<usize> = HashSet::new();
         let mut hit = false;
+        let mut unreachable = false;
         footprint(tree, &mut |key: &str| {
+            let declaring = decls.files_of(key);
             if inputs.delta.contains(key) {
                 hit = true;
+                unreachable |= declaring.is_none();
             }
-            if let Some(files) = decls.files_of(key) {
+            if let Some(files) = declaring {
                 edges.extend(files.iter().copied());
             }
         });
         if hit {
             affected.insert(file);
+            if unreachable {
+                undeclared_hits.push(file);
+            }
         }
         edges.remove(&file);
         names[file] = edges.into_iter().collect();
@@ -284,11 +328,11 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
     // * their **supertypes**, which a changed subtype does not move but which
     //   are what a descendant-enumerating file names — a seed rather than a
     //   target, so the file naming one is one hop away either way;
-    // * the delta hits, whose own answers moved under a resolution change and
-    //   which therefore move what a caller's descent into them produces.
+    // * the delta hits on a name this universe no longer declares — the
+    //   removal case, argued under *The delta leg and the descent*.
     let mut seeds = closure(&inherits, &inputs.changed, usize::MAX);
     seeds.extend(closure(&subtypes, &inputs.changed, usize::MAX));
-    seeds.extend(affected.iter().copied());
+    seeds.extend(undeclared_hits);
     affected.extend(seeds.iter().copied());
 
     // Then the descent closure, backwards, bounded by the depth the binding
@@ -906,9 +950,8 @@ mod tests {
         ]);
         // File 2 names only the alias; file 0 declares the body it reads.
         assert_eq!(affected(&t, &[0], &[]), vec![0, 1, 2]);
-        // And the delta leg reaches the aliasing file through either end — and
-        // through it, one descent hop further, the file that names the alias.
-        assert_eq!(affected(&t, &[], &["c:lib\\real"]), vec![1, 2]);
+        // And the delta leg reaches the aliasing file through either end.
+        assert_eq!(affected(&t, &[], &["c:lib\\real"]), vec![1]);
         assert_eq!(affected(&t, &[], &["c:shortcut"]), vec![1, 2]);
     }
 
@@ -976,6 +1019,23 @@ mod tests {
         assert_eq!(affected(&t, &[0], &[]), vec![0]);
         // …and the delta leg does not fire on prose either.
         assert_eq!(affected(&t, &[], &["c:report"]), Vec::<usize>::new());
+    }
+
+    /// A **removed** declaration is the one delta shape the ordinary closure
+    /// cannot answer for: a deleted file has no slot to be `changed`, so the
+    /// file naming it reaches nothing, and a caller descending into that file
+    /// sees the moved answer with no key of its own. Such a hit seeds the
+    /// descent closure — and a hit whose key still resolves to a changed file
+    /// does not, because the edge to that file already carries its callers.
+    #[test]
+    fn a_removed_declaration_seeds_the_descent_closure() {
+        let t = trees(&[
+            "<?php function user(): int { return helper(); }\n",
+            "<?php function top(): int { return user(); }\n",
+        ]);
+        // Nothing in this universe declares `helper` any more: the caller of
+        // `user()` must be walked too.
+        assert_eq!(affected(&t, &[], &["f:helper"]), vec![0, 1]);
     }
 
     /// `@mixin` targets are inheritance edges, and `@mixinFoo` is not `@mixin`.
