@@ -25,6 +25,15 @@
 //! for **that row** (ask live, and publish the fresh answer in its place); an
 //! unanswerable request widens exactly as a dead sidecar does. Nothing
 //! fabricates, and a recorded row cannot outlive the identity that scopes it.
+//!
+//! A run may hold **several** of these at once (issue #490): the run's own
+//! engine and one per parallel-walk worker. What they share is everything that
+//! is a property of the *run* — the live child, the loaded table, and the pool
+//! of what the run has already asked ([`RunEngine`]) — and what each keeps is
+//! its own ledger of the rows it served, folded back into one published table
+//! by [`RecordingEngine::absorb`]. That split is the whole design: the child
+//! and the tables are singular because the engine identity is, and the ledgers
+//! are plural because a worker must not need a lock to record what it consumed.
 
 use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;

@@ -262,13 +262,11 @@ mod tests {
 /// for block.
 ///
 /// In-crate rather than in `tests/` because the width has to be *chosen* — a
-/// fixture that relied on [`WalkWorkerBudget::read`] would grade whatever the
+/// fixture that relied on [`WorkerBudget::read`] would grade whatever the
 /// runner happened to export, and one that relied on the file count would
 /// grade the machine's core count. Here the budget is constructed, so the same
 /// universe is walked at every width from one to one-file-per-worker and every
 /// answer is compared against the sequential one.
-///
-/// [`WalkWorkerBudget::read`]: WorkerBudget::read
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod fan_out {
     use super::*;
