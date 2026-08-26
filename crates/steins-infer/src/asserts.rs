@@ -17,7 +17,8 @@ use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::predicates::{in_array_literals, type_predicate};
 use crate::refine::{clear_null, refine_fact, subtract_contract_lane};
 use crate::shapes::{
-    apply_shape_guard, array_all_any_predicate, array_guard_predicate, collect_shape_guards,
+    apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
+    array_guard_predicate, collect_shape_guards,
 };
 use crate::walk::{WalkCx, by_value_survivors};
 
@@ -525,6 +526,10 @@ fn assert_class_to_lane(
 /// this narrowing consumes and `Asserted` end to end (A-G9). A base mentioned
 /// anywhere else in the same condition keeps the old forgetting, since that
 /// other mention is what might mutate it.
+///
+/// What the exemption is *about* is the base: the arguments a pure guard reads
+/// to answer a question about that base are [`push_pure_guard_bases`]' concern,
+/// and never forgotten (issue #536).
 pub(crate) fn cond_invalidations(
     cx: &Cx,
     cond: &CondExpr,
@@ -558,11 +563,7 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
             if array_guard_predicate(cx, call).is_some()
                 || array_all_any_predicate(cx, call).is_some() =>
         {
-            for r in reads {
-                if !out.contains(r) {
-                    out.push(r.clone());
-                }
-            }
+            push_pure_guard_bases(cx, call, reads, out);
         }
         // A pure predicate keeps its exemption when it is *compared* rather than
         // tested (`array_is_list($x) === true`): position within the condition
@@ -575,11 +576,7 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
                 if array_guard_predicate(cx, call).is_some()
                     || array_all_any_predicate(cx, call).is_some()
                 {
-                    for r in invalidates {
-                        if !out.contains(r) {
-                            out.push(r.clone());
-                        }
-                    }
+                    push_pure_guard_bases(cx, call, invalidates, out);
                 }
             }
         }
@@ -589,6 +586,88 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
             collect_pure_guard_bases(cx, b, out);
         }
         _ => {}
+    }
+}
+
+/// The names a recognized presence guard forgets **inside the branches it
+/// decides, and nowhere else** (issue #536) — the keys of
+/// `array_key_exists($key, $x)`, minus anything [`cond_invalidations`] already
+/// forgets outright.
+///
+/// Neither branch of the guard has learned what `$key` is: the true branch
+/// knows it is a key OF `$x` and cannot yet say which type that makes it (issue
+/// #536's item 2), and the false branch knows only that it is not one. Until
+/// the narrowing exists, silence inside the branches is the conservative floor
+/// and reporting there would be a false positive. Past the join no branch is
+/// speaking any more, so the key is simply the `int|string` it always was — and
+/// an unconsumed call decides no branch at all, so it forgets nothing.
+///
+/// A key the condition also mentions elsewhere is excluded: that other mention
+/// is what might mutate it, and its forgetting is not this guard's to lift.
+pub(crate) fn cond_branch_scoped_invalidations(
+    cx: &Cx,
+    cond: &CondExpr,
+    invalidated: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_presence_guard_keys(cx, cond, &mut out);
+    out.retain(|v| !invalidated.contains(v));
+    out
+}
+
+/// Walk a condition for [`array_guard_key_var`]s, over the same shapes
+/// [`collect_pure_guard_bases`] recognizes a pure array guard in.
+fn collect_presence_guard_keys(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
+    let note = |call: &CallExpr, out: &mut Vec<String>| {
+        if let Some(k) = array_guard_key_var(cx, call)
+            && !out.contains(k)
+        {
+            out.push(k.clone());
+        }
+    };
+    match cond {
+        CondExpr::Call { call, .. } => note(call, out),
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            for operand in [lhs, rhs] {
+                if let CondOperand::Other { call: Some(call), .. } = operand {
+                    note(call, out);
+                }
+            }
+        }
+        CondExpr::Not(c) => collect_presence_guard_keys(cx, c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_presence_guard_keys(cx, a, out);
+            collect_presence_guard_keys(cx, b, out);
+        }
+        _ => {}
+    }
+}
+
+/// The names one recognized pure array call still owes the S4 forgetting.
+///
+/// For the presence/list family that is its **array argument alone** (issue
+/// #536): `array_key_exists($key, $values)` reads `$key` to answer a question
+/// ABOUT `$values`, and charging the forgetting to `$key` as well took its
+/// declared arms away on both branches of a guard that never narrowed them —
+/// and on the fall-through of a guard nobody even consumed. A base that is not
+/// a bare name (`array_key_exists($k, $o->p)`)
+/// keeps the blanket forgetting: with no name to tell the base from the key,
+/// telling them apart here would be guesswork.
+///
+/// `array_all`/`array_any` keep it too, unconditionally: their second argument
+/// is a **callback**, and what a callback does to the names this condition
+/// mentions is not a question the by-value signature answers.
+fn push_pure_guard_bases(cx: &Cx, call: &CallExpr, reads: &[String], out: &mut Vec<String>) {
+    if let Some(base) = array_guard_base(cx, call) {
+        if !out.contains(base) {
+            out.push(base.clone());
+        }
+        return;
+    }
+    for r in reads {
+        if !out.contains(r) {
+            out.push(r.clone());
+        }
     }
 }
 

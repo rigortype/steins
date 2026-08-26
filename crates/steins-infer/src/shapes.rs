@@ -116,6 +116,44 @@ pub(crate) fn array_guard_predicate(cx: &Cx, call: &CallExpr) -> Option<&'static
         .find(|p| callee.eq_ignore_ascii_case(p))
 }
 
+/// The bare variable an [`array_guard_predicate`] call tests — `$x` in
+/// `array_key_exists($k, $x)` and in `array_is_list($x)` — or `None` when the
+/// array position is an expression rather than a name.
+///
+/// The array position is the ONLY thing about such a call that is this guard's
+/// subject: `$k` is a value the guard reads and reports on, never something it
+/// touches (issue #536). Kept beside the recognizer so the two cannot drift
+/// about which argument is the array.
+pub(crate) fn array_guard_base<'c>(cx: &Cx, call: &'c CallExpr) -> Option<&'c String> {
+    let position = match array_guard_predicate(cx, call)? {
+        "array_key_exists" | "key_exists" if call.args.len() == 2 => 1,
+        "array_is_list" if call.args.len() == 1 => 0,
+        _ => return None,
+    };
+    match &call.args[position].value {
+        ArgValue::Var(v) => Some(v),
+        _ => None,
+    }
+}
+
+/// The bare variable an `array_key_exists`/`key_exists` call tests FOR — `$k`
+/// in `array_key_exists($k, $x)` — or `None` for a literal key, a key
+/// expression, or the keyless `array_is_list`.
+///
+/// The mirror of [`array_guard_base`], and the name a guard's forgetting must
+/// not outlive its own branches (issue #536).
+pub(crate) fn array_guard_key_var<'c>(cx: &Cx, call: &'c CallExpr) -> Option<&'c String> {
+    match array_guard_predicate(cx, call)? {
+        "array_key_exists" | "key_exists" if call.args.len() == 2 => {
+            match &call.args[0].value {
+                ArgValue::Var(v) => Some(v),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The recognized `array_all`/`array_any` name a guard call names (A8), through
 /// the same [`global_function_callee`] as [`array_guard_predicate`] — kept as a
 /// separate lookup because the two calls have a different arity (`$array,

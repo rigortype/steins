@@ -699,6 +699,13 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 /// * the **`mb_*` string family** (issue #41): excluded from [`foldable`] for
 ///   its encoding-dependent *result*, but all-by-value in its *arguments* —
 ///   independent questions that cost the same ~70 assertions when conflated.
+/// * the **array presence/list predicates** (issue #536): `array_key_exists`,
+///   its `key_exists` alias, and `array_is_list`. Not [`foldable`] — the
+///   allowlist refuses them for their *result* — but every parameter is by
+///   value, so an uncertified name was costing the KEY its declared arms at
+///   every `array_key_exists($key, $a);` site. `array_all`/`array_any` are
+///   deliberately absent: their second parameter is a callback, and what a
+///   callback does to the caller's variables is not a by-value question.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream.
@@ -724,6 +731,10 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "array_reverse",
         // Sibling `array_splice` takes `&$array` and has an `out_params` row.
         "array_slice",
+        // Array presence/list predicates (issue #536): both parameters by value.
+        "array_key_exists",
+        "key_exists",
+        "array_is_list",
         // String-producer family's non-foldable members (issue #41).
         // `escapeshellcmd` is here despite the transfer table refusing its
         // RESULT — that says nothing about ARGUMENT reachability.
@@ -1310,6 +1321,23 @@ mod tests {
             assert_eq!(by_value_arg("array_slice", p), Some(true), "array_slice position {p}");
         }
         assert_eq!(by_value_arg("array_splice", 0), Some(false), "array_splice is by ref");
+    }
+
+    /// Issue #536: the presence/list predicates are certified per NAME, so the
+    /// KEY position answers `true` as much as the array does — an uncertified
+    /// name made `array_key_exists($key, $a);` forget `$key`. The callback
+    /// family stays uncertified, deliberately.
+    #[test]
+    fn by_value_arg_certifies_the_array_presence_predicates() {
+        for f in ["array_key_exists", "key_exists"] {
+            for p in 0..2 {
+                assert_eq!(by_value_arg(f, p), Some(true), "{f} position {p} is by value");
+            }
+        }
+        assert_eq!(by_value_arg("array_is_list", 0), Some(true));
+        for f in ["array_all", "array_any"] {
+            assert_eq!(by_value_arg(f, 1), None, "{f} takes a callback; nothing is certified");
+        }
     }
 
     /// Issue #41 string-producer family: certified per NAME, so every

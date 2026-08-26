@@ -10,11 +10,14 @@ use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, MatchArmT,
 
 use crate::fold::Folder;
 use crate::annotate::LineFact;
-use crate::asserts::{apply_guard_asserts, cond_invalidations, guard_assert_kept_lanes};
+use crate::asserts::{
+    apply_guard_asserts, cond_branch_scoped_invalidations, cond_invalidations,
+    guard_assert_kept_lanes,
+};
 use crate::cond::{eval_cmp, eval_cond, operand_values};
 use crate::contract::ProjectIsa;
 use crate::descent::escape_and_sweep_calls;
-use crate::env::{Descent, Known, Store, Stratum, join_envs, val_of};
+use crate::env::{ContractArm, Descent, Known, Store, Stratum, join_envs, val_of};
 use crate::existence::existence_vouch;
 use crate::out_params::{check_preg_pattern, seed_out_params};
 use crate::predicates::apply_type_narrowing;
@@ -100,9 +103,23 @@ pub(crate) fn walk_if(
     // only for a variable the callee takes by value at the asserted position
     // (ADR-0070's gate); and only when no other call in the condition touches it.
     let kept_lanes = guard_assert_kept_lanes(w, cond, &guard_calls, env, store);
-    for v in cond_invalidations(w.cx, cond, env, store, poisoned) {
+    let invalidated = cond_invalidations(w.cx, cond, env, store, poisoned);
+    // The presence guard's key (issue #536): forgotten for the branches this
+    // guard decides, and handed back to each of them at its exit, so the
+    // forgetting never outlives the construct. The snapshot is taken BEFORE the
+    // drop below, which is the only place the pre-branch lanes still exist.
+    let branch_scoped = cond_branch_scoped_invalidations(w.cx, cond, &invalidated);
+    let restore: Vec<BranchScopedLanes> = branch_scoped
+        .iter()
+        .map(|v| (v.clone(), env.get(v).cloned(), store.contract.get(v).cloned()))
+        .collect();
+    for v in invalidated {
         env.remove(&v);
         store.unbind(&v);
+    }
+    for v in &branch_scoped {
+        env.remove(v);
+        store.unbind(v);
     }
     for (var, arms) in kept_lanes {
         store.contract.insert(var, arms);
@@ -152,6 +169,7 @@ pub(crate) fn walk_if(
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
+            restore_branch_scoped(&restore, &mut benv, &mut bclasses);
             fell.push((benv, bclasses));
         }
     }
@@ -190,6 +208,7 @@ pub(crate) fn walk_if(
         if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
+            restore_branch_scoped(&restore, &mut benv, &mut bclasses);
             fell.push((benv, bclasses));
         }
     }
@@ -202,6 +221,41 @@ pub(crate) fn walk_if(
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough
+}
+
+/// One name's pre-branch value and declared-arm lanes, held across the branches
+/// a guard decides so [`restore_branch_scoped`] can hand them back.
+type BranchScopedLanes = (String, Option<Known>, Option<Vec<ContractArm>>);
+
+/// Put back the lanes a branch-scoped guard forgetting took (issue #536), at
+/// the exit of a branch that falls through to the join.
+///
+/// Skipped for a name the branch **rebound itself**: whatever it holds now came
+/// from an assignment, and the pre-branch lanes describe a value that is gone.
+/// A branch that never falls through is never restored, which is the point —
+/// `if (array_key_exists($k, $a)) { return; }` leaves nothing to join from that
+/// side, and the surviving side carries the key it always had.
+///
+/// The two lanes are the two the forgetting cost: the value binding and the
+/// declared arms. Deliberately not the heap/`Member` lanes — a key tested by
+/// `array_key_exists` is a scalar, and [`guard_assert_kept_lanes`] scopes its
+/// own put-back the same way.
+fn restore_branch_scoped(
+    restore: &[BranchScopedLanes],
+    benv: &mut HashMap<String, Known>,
+    bstore: &mut Store,
+) {
+    for (var, known, arms) in restore {
+        if benv.contains_key(var) || bstore.contract.contains_key(var) {
+            continue;
+        }
+        if let Some(k) = known {
+            benv.insert(var.clone(), k.clone());
+        }
+        if let Some(a) = arms {
+            bstore.contract.insert(var.clone(), a.clone());
+        }
+    }
 }
 
 /// Walk the `else` side of an `if`: the `elseif` chain desugars to a nested

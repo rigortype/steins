@@ -479,3 +479,93 @@ fn a_guard_on_a_different_key_does_not_narrow_it() {
     let d = contract(&src);
     assert_eq!(d.len(), 1, "{d:?}");
 }
+
+
+// Issue #536: `array_key_exists($key, $values)` reads `$key` to answer a
+// question ABOUT `$values`. Recognizing it used to cost `$key` its declared
+// arms for the rest of the scope — statement position charged the blanket
+// by-ref forgetting to a builtin PHP declares all-by-value, and guard position
+// charged the S4 forgetting to every name the call read instead of to the array
+// it is about. Either way a later `$key` read had no fact left to report on.
+//
+// The forgetting is now scoped to the branches the guard decides, where it
+// stands in for the narrowing item 2 will bring; everywhere else the key keeps
+// what it had.
+
+
+/// The issue's own repro: the guard is not even consumed.
+#[test]
+fn a_bare_array_key_exists_leaves_its_key_the_fact_it_had() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { array_key_exists($key, $values); needString($key); }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("its int arm"), "{}", d[0].message);
+}
+
+/// The same call consumed as a guard, read on the fall-through: nothing about
+/// `$key` was learned by an `if` whose body ended.
+#[test]
+fn an_unconsumed_array_key_exists_guard_leaves_its_key_the_fact_it_had() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) {} needString($key); }\n",
+    );
+    assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
+}
+
+/// The control the issue compares against, and the shape this fix brings
+/// `array_key_exists` into line with: a type predicate is by value in PHP's own
+/// signature (DR2), so recognizing one never cost its subject anything.
+#[test]
+fn an_unconsumed_type_predicate_guard_leaves_its_subject_the_fact_it_had() {
+    let src = strict("function f(int|string $key): void { if (is_string($key)) {} needString($key); }\n");
+    assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
+}
+
+/// The consumed branch stays silent, and deliberately so. The guard proves the
+/// key is a key OF `$values`; issue #536's item 2 is what turns that into a
+/// type (`array<string, int>` makes it a `string`), and until it lands the
+/// branch has nothing to narrow with. Reporting the un-narrowed `int|string`
+/// here would be a false positive — php-typing-conformance's
+/// `assertions_array_key_exists_key_narrowing` scores this very line as `Q`, so
+/// firing on it would trade one scored failure for another. Silence is the
+/// conservative floor; item 2 replaces the forgetting with the narrowing.
+#[test]
+fn the_guarded_branch_stays_silent_until_the_guard_can_narrow_the_key() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) { needString($key); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+/// The other side of the same guard, for the same reason: the `else` knows only
+/// that the key is NOT a key of `$values`, which is no narrowing either.
+#[test]
+fn the_else_branch_of_the_guard_stays_silent_too() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) {} else { needString($key); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+/// And the forgetting stops at the join: past the `if`, no branch is speaking
+/// and the key is the `int|string` it always was. This is the pin that keeps
+/// the branch-scoped drop from silently becoming the old whole-scope one.
+#[test]
+fn an_early_return_guard_leaves_the_key_intact_after_the_if() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) { return; } needString($key); }\n",
+    );
+    assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
+}
+
+/// The blanket forgetting is intact where it is the only honest answer: a
+/// callee nothing certifies may write through `&$key`.
+#[test]
+fn a_call_with_no_known_signature_still_costs_the_key_its_fact() {
+    let src = strict(
+        "function f(int|string $key): void { unknownHelper($key); needString($key); }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
