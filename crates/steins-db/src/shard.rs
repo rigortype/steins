@@ -100,11 +100,11 @@ pub struct PackageShard {
     ambiguous_classes: HashSet<String>,
     /// Lowercased simple function name → every definition site in the package.
     fn_by_simple: HashMap<String, Vec<ShardSite>>,
-    /// Literal `class_alias` edges as written: `(alias_fqn, target_fqn)`.
-    /// Deliberately **unresolved** — an alias target may live in another
-    /// package, so resolution belongs to the merge, against the merged
-    /// textual snapshot (ADR-0049 §2).
-    class_alias_edges: Vec<(String, String)>,
+    /// Literal `class_alias` edges as written, in file order. Deliberately
+    /// **unresolved** — an alias target may live in another package, so
+    /// resolution belongs to the merge, against the merged textual snapshot
+    /// (ADR-0049 §2).
+    class_alias_edges: Vec<ShardAlias>,
     /// The A14 obstacle records with their declaring file's slot, in scan
     /// order. The slot is what lets the merge reproduce the whole-universe
     /// scan order for classes sharing one lowercase FQN across packages.
@@ -113,8 +113,14 @@ pub struct PackageShard {
     /// through a computed name (ADR-0078, issue #197).
     property_writes: (HashSet<String>, bool),
     /// Global constants the package declares (ADR-0078, issue #198), keyed by
-    /// `steins_syntax::normalize_const_fqn`'s spelling.
-    constants: HashSet<String>,
+    /// `steins_syntax::normalize_const_fqn`'s spelling, each with the slot of
+    /// a file that declares it.
+    ///
+    /// One slot, not a list, and that is sound: the merged answer for a
+    /// constant is set membership, so a name two files declare cannot move by
+    /// one of them changing — and a name only one file declares carries that
+    /// file's slot. Which of two declaring files wins is unobservable.
+    constants: HashMap<String, usize>,
     /// Diagnostic path → file slot for the package's files (issue #497).
     files: HashMap<String, usize>,
 }
@@ -134,7 +140,11 @@ impl PackageShard {
             insert_unique(&mut self.classes, &mut self.ambiguous_classes, &c.fqn, site);
         }
         for edge in tree.class_alias_edges() {
-            self.class_alias_edges.push((edge.alias_fqn.clone(), edge.target_fqn.clone()));
+            self.class_alias_edges.push(ShardAlias {
+                alias_fqn: edge.alias_fqn.clone(),
+                target_fqn: edge.target_fqn.clone(),
+                file: slot,
+            });
         }
         let mut buf: Vec<MagicObstacle> = Vec::new();
         for cd in tree.classes() {
@@ -143,7 +153,7 @@ impl PackageShard {
         }
         self.property_writes.0.extend(tree.property_write_names().iter().cloned());
         self.property_writes.1 |= tree.writes_computed_property_name();
-        self.constants.extend(tree.global_const_decls().iter().map(|d| d.fqn.clone()));
+        self.constants.extend(tree.global_const_decls().iter().map(|d| (d.fqn.clone(), slot)));
         let entry = self.files.entry(path.to_owned()).or_insert(slot);
         if slot > *entry {
             *entry = slot;
@@ -156,10 +166,13 @@ impl PackageShard {
     /// class-like FQN (declared, or minted by a literal `class_alias`), `k:` a
     /// global constant.
     ///
-    /// **What it is for.** The warm path's name delta is the union of the key
-    /// sets of every changed package's old and new shards; a file whose own
-    /// name references miss that delta cannot have had a resolution move under
-    /// it. The set is deliberately *contribution*, not resolution: a name this
+    /// **What it is for.** The whole-shard reading of the warm path's name
+    /// delta — what a package contributes when *every* one of its files must
+    /// be presumed moved: a package that vanished between generations, or one
+    /// whose per-file identity could not be established. The ordinary case is
+    /// [`Self::contributed_names_from`], which asks the same question per file.
+    ///
+    /// The set is deliberately *contribution*, not resolution: a name this
     /// shard defines twice (and so demotes to ambiguous) is here exactly like
     /// one it defines once, because both sides of an ambiguity move the
     /// merged answer. Alias edges contribute both ends — the alias name,
@@ -172,27 +185,114 @@ impl PackageShard {
     /// rest.
     #[must_use]
     pub fn contributed_names(&self) -> Vec<String> {
+        self.names(&|_| true)
+    }
+
+    /// The names this shard contributes **from the given files** (issue #510):
+    /// [`Self::contributed_names`] restricted to the declarations whose
+    /// [`ShardSite`] names a slot in `files`, plus — wholesale — the members
+    /// that carry no site at all.
+    ///
+    /// **Why this is the delta the warm path wants.** A name's merged answer
+    /// can only move if some *file's* contribution to it moved; if every file
+    /// declaring a name is byte-identical to what the published generation
+    /// held, the multiset of definitions under that name is unchanged and so
+    /// is every answer over it. Package granularity — the whole key set of any
+    /// package with one edited file — is sound but useless in the ordinary
+    /// shape of a project, where one package holds everything.
+    ///
+    /// **`files` are this shard's own slots.** Sites are universe slots, so an
+    /// *old* shard's sites index the *old* universe: the caller resolves them
+    /// through that shard's own [`Self::files`] map and compares paths, never
+    /// raw slot numbers across generations.
+    ///
+    /// **The ambiguity sets ride wholesale**, deliberately: a name this package
+    /// declares twice has no site *because* it has two, and the shard drops
+    /// both when it demotes. Including a changed package's whole ambiguity set
+    /// is what keeps the leg sound; they are empty in a project that compiles,
+    /// which is why they are not worth a site each.
+    ///
+    /// Everything else is sited, including the two members that were not when
+    /// issue #510 was filed. Measurement is why: on `nikic/PHP-Parser` the
+    /// site-less reading put 22 `class_alias` keys (the 5.x back-compat aliases
+    /// one file declares) and 3 constants into *every* edit's delta, and 61 of
+    /// the 341 files matched one of them — 18% of the universe walked for an
+    /// alias nothing about the edit touched.
+    ///
+    /// Call this only for a package that changed: with an empty `files` the
+    /// answer is the ambiguity sets alone, which is the right answer for a
+    /// package whose only change was a *deleted* file (the deletion shows on
+    /// the old side) and the wrong question for a package that did not move.
+    #[must_use]
+    pub fn contributed_names_from(&self, files: &HashSet<usize>) -> Vec<String> {
+        self.names(&|slot| files.contains(&slot))
+    }
+
+    /// The package's file identity: every diagnostic path it holds, with the
+    /// universe slot its [`ShardSite`]s are keyed by. For a shard read back
+    /// from an artifact these are the *old* universe's slots, which is what
+    /// makes it the map an old-side delta resolves its sites through.
+    pub fn files(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.files.iter().map(|(path, &slot)| (path.as_str(), slot))
+    }
+
+    /// The one implementation under both name queries: every contribution
+    /// whose site `keep` admits, plus the site-less ambiguity sets.
+    fn names(&self, keep: &dyn Fn(usize) -> bool) -> Vec<String> {
         let mut out = Vec::with_capacity(
-            self.functions.len()
-                + self.ambiguous_functions.len()
-                + self.fn_by_simple.len()
-                + self.classes.len()
-                + self.ambiguous_classes.len()
-                + 2 * self.class_alias_edges.len()
-                + self.constants.len(),
+            self.ambiguous_functions.len() + self.ambiguous_classes.len(),
         );
-        out.extend(self.functions.keys().map(|fqn| format!("f:{fqn}")));
-        out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
-        out.extend(self.fn_by_simple.keys().map(|simple| format!("s:{simple}")));
-        out.extend(self.classes.keys().map(|fqn| format!("c:{fqn}")));
-        out.extend(self.ambiguous_classes.iter().map(|fqn| format!("c:{fqn}")));
-        for (alias, target) in &self.class_alias_edges {
-            out.push(format!("c:{alias}"));
-            out.push(format!("c:{target}"));
+        out.extend(
+            self.functions
+                .iter()
+                .filter(|(_, site)| keep(site.file))
+                .map(|(fqn, _)| format!("f:{fqn}")),
+        );
+        out.extend(
+            self.fn_by_simple
+                .iter()
+                .filter(|(_, sites)| sites.iter().any(|site| keep(site.file)))
+                .map(|(simple, _)| format!("s:{simple}")),
+        );
+        out.extend(
+            self.classes
+                .iter()
+                .filter(|(_, site)| keep(site.file))
+                .map(|(fqn, _)| format!("c:{fqn}")),
+        );
+        // An alias edge is sited at the file whose `class_alias` call writes
+        // it, and contributes both ends: the alias name, which the merge may
+        // mint, and the target, whose demotion would unmint it. The other way
+        // this pair can move — the *target's* file changing under an untouched
+        // `class_alias` call — is not this leg's to catch and never was: the
+        // affected set's declaration table edges every file naming the alias to
+        // the target's own file, so the call-graph closure reaches it in one
+        // hop (`affected.rs`, *A literal `class_alias`*).
+        for edge in self.class_alias_edges.iter().filter(|edge| keep(edge.file)) {
+            out.push(format!("c:{}", edge.alias_fqn));
+            out.push(format!("c:{}", edge.target_fqn));
         }
-        out.extend(self.constants.iter().map(|key| format!("k:{key}")));
+        out.extend(
+            self.constants
+                .iter()
+                .filter(|(_, slot)| keep(**slot))
+                .map(|(key, _)| format!("k:{key}")),
+        );
+        out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
+        out.extend(self.ambiguous_classes.iter().map(|fqn| format!("c:{fqn}")));
         out
     }
+}
+
+/// One literal `class_alias(target, alias)` a file writes, kept as written and
+/// with the writing file's universe slot — the site that lets issue #510's
+/// per-file delta answer for it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+struct ShardAlias {
+    alias_fqn: String,
+    target_fqn: String,
+    file: usize,
 }
 
 /// Every global table, recomputed from the shards (ADR-0092 §3). Fields are
@@ -267,12 +367,12 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
     // nothing.
     let mut resolved: Vec<(String, ShardSite)> = Vec::new();
     for s in shards {
-        for (alias_fqn, target_fqn) in &s.class_alias_edges {
-            if m.ambiguous_classes.contains(target_fqn) {
+        for edge in &s.class_alias_edges {
+            if m.ambiguous_classes.contains(&edge.target_fqn) {
                 continue;
             }
-            if let Some(&target) = m.classes.get(target_fqn) {
-                resolved.push((alias_fqn.clone(), target));
+            if let Some(&target) = m.classes.get(&edge.target_fqn) {
+                resolved.push((edge.alias_fqn.clone(), target));
             }
         }
     }
@@ -294,7 +394,7 @@ pub fn merge_shards(shards: &[PackageShard]) -> MergedTables {
     for s in shards {
         m.property_writes.0.extend(s.property_writes.0.iter().cloned());
         m.property_writes.1 |= s.property_writes.1;
-        m.constants.extend(s.constants.iter().cloned());
+        m.constants.extend(s.constants.keys().cloned());
         for (path, &slot) in &s.files {
             let entry = m.files.entry(path.clone()).or_insert(slot);
             if slot > *entry {
@@ -439,6 +539,84 @@ mod tests {
         assert!(forward.property_writes.1, "the computed-name bit unions in");
         assert!(forward.property_writes.0.contains("w"));
         assert!(forward.constants.contains("K_A") && forward.constants.contains("K_B"));
+    }
+
+    /// The per-file delta (issue #510): one file's edit contributes only the
+    /// names *that file* sites, never its package's whole key set. Constants
+    /// and `class_alias` edges are sited too — the measurement that put them
+    /// there is in [`PackageShard::contributed_names_from`]'s docs.
+    #[test]
+    fn contributed_names_are_answerable_per_file() {
+        let s = shard_over(&[
+            (0, "src/edited.php", "<?php namespace App; function edited() {} class Edited {}"),
+            (1, "src/quiet.php", "<?php namespace App; function quiet() {} class Quiet {}"),
+            (2, "src/aliases.php", "<?php const K = 1; class_alias('app\\\\edited', 'shortcut');"),
+        ]);
+        let names = |slots: &[usize]| -> HashSet<String> {
+            s.contributed_names_from(&slots.iter().copied().collect()).into_iter().collect()
+        };
+
+        let edited = names(&[0]);
+        assert!(edited.contains("f:app\\edited"), "{edited:?}");
+        assert!(edited.contains("s:edited"));
+        assert!(edited.contains("c:app\\edited"));
+        assert!(!edited.contains("f:app\\quiet"), "the sibling file's names stay out: {edited:?}");
+        assert!(!edited.contains("s:quiet"));
+        assert!(!edited.contains("c:app\\quiet"));
+        assert!(!edited.contains("k:K"), "a constant another file declares: {edited:?}");
+        assert!(!edited.contains("c:shortcut"), "an alias another file writes: {edited:?}");
+
+        // The aliasing file's own edit contributes both ends of every edge it
+        // writes, and the constants it declares.
+        let aliases = names(&[2]);
+        assert!(aliases.contains("k:K"), "{aliases:?}");
+        assert!(aliases.contains("c:shortcut"), "the alias name it mints: {aliases:?}");
+        assert!(aliases.contains("c:app\\edited"), "the target it resolves against: {aliases:?}");
+        assert!(!aliases.contains("f:app\\edited"), "and nothing else: {aliases:?}");
+
+        // A file that declares nothing at all contributes nothing at all.
+        assert!(names(&[]).is_empty());
+
+        // And the whole-shard reading is still the union over every file.
+        let mut whole: Vec<String> = s.contributed_names();
+        whole.sort();
+        whole.dedup();
+        let mut per_file: Vec<String> = names(&[0, 1, 2]).into_iter().collect();
+        per_file.sort();
+        assert_eq!(whole, per_file);
+    }
+
+    /// A name defined twice in one package has no site — the shard demoted it
+    /// to the ambiguity set — so it rides every file's answer. Both sides of
+    /// the ambiguity move the merged answer, and neither is attributable.
+    #[test]
+    fn an_ambiguous_name_rides_wholesale() {
+        let s = shard_over(&[
+            (0, "src/a.php", "<?php function dup() {}"),
+            (1, "src/b.php", "<?php function dup() {} function only_b() {}"),
+        ]);
+        let from_a: HashSet<String> =
+            s.contributed_names_from(&HashSet::from([0])).into_iter().collect();
+        assert!(from_a.contains("f:dup"), "{from_a:?}");
+        assert!(!from_a.contains("f:only_b"));
+        // The simple-name table keeps every site, so it *is* answerable.
+        assert!(from_a.contains("s:dup"));
+        assert!(!from_a.contains("s:only_b"));
+    }
+
+    /// The file map is the old side's slot→path bridge: it round-trips the
+    /// slots the shard's sites are keyed by.
+    #[test]
+    fn the_file_map_names_the_slots_the_sites_use() {
+        let s = shard_over(&[
+            (7, "src/a.php", "<?php function a() {}"),
+            (9, "src/b.php", "<?php function b() {}"),
+        ]);
+        let mut files: Vec<(&str, usize)> = s.files().collect();
+        files.sort_unstable();
+        assert_eq!(files, vec![("src/a.php", 7), ("src/b.php", 9)]);
+        assert_eq!(s.functions["a"].file, 7);
+        assert_eq!(s.functions["b"].file, 9);
     }
 
     /// The bucketing heuristic: deep vendor paths group by `<a>/<b>`, shallow

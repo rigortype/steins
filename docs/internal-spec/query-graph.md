@@ -117,8 +117,9 @@ generations on disk, not a finer query DAG:
 - **Skipping the walk** of a file nothing could have changed is issue #489
   slice B: the `summaries` section persists per-file walk blocks, and a file
   replays its block unless it is in the affected set — its own bytes moved, its
-  name footprint meets the name delta of a changed package's shards, it reaches
-  a changed file in the file-level call graph within `MAX_BINDING_DEPTH`, or a
+  name footprint meets the name delta (the names the *changed files* of a
+  changed package site in its old or new shard, issue #510), it reaches a
+  changed file in the file-level call graph within `MAX_BINDING_DEPTH`, or a
   whole-universe verdict moved. The verifier
   (`STEINS_GENERATIONS_PARANOID=1`, `cargo xtask perf --warm --paranoid`) walks
   everything anyway and grades every would-be skip against its fresh walk.
@@ -132,10 +133,10 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
 
 ## Still open
 
-- **Tightening the affected set below the package.** `delta_names` is
-  package-granular (ADR-0092 §3's unit), so any edit inside a package puts
-  every one of its names into the delta; the persisted per-file content hashes
-  already make a per-file delta possible on the changed side. A later slice,
-  and only if measurement says the closure is too wide.
+- **Per-file trace reuse inside a changed package.** The artifact's tree load
+  is gated on the package fingerprint, so one edited file still costs its whole
+  package a reparse even though the trace index is already per file. The
+  sibling of issue #510's delta tightening, and what the warm-after-edit
+  numbers now spend their time on.
 - **Per-file walk parallelism** (issue #490, re-scoped to the file loop).
 - **The trace codec** (issue #504): artifacts run ~14x the analyzed source.

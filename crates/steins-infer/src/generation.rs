@@ -444,8 +444,12 @@ impl LoadRefusal {
 struct LoadedPkg {
     /// `(universe slot, tree)` for every file of the package.
     trees: Vec<(usize, SourceTree)>,
-    /// The decoded shard, when the persisted slots still match this universe.
-    shard: Option<PackageShard>,
+    /// Whether every persisted `(path, slot)` matches this run's universe. It
+    /// is also the licence to serve the *old* shard verbatim as this run's:
+    /// the shard's sites are universe slots, so it may only be reused when
+    /// every slot still names the same file. [`load_trees`] refuses the load
+    /// outright when the slots are stable and the shard did not decode, so the
+    /// caller may take the old shard on this bit alone.
     slots_stable: bool,
 }
 
@@ -520,24 +524,30 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // knowable here: it needs the run's whole-universe verdicts, which only
     // exist once the analysis has computed them.
     let mut published_summaries: Vec<Option<StoredSummaries>> = Vec::with_capacity(plans.len());
-    // The name delta's old side, per package, in load order. `None` means a
-    // package's old contribution to the name space could not be read, which
-    // makes the delta unknowable and walks the whole run: a name whose
-    // disappearance is invisible cannot be reasoned about.
-    let mut old_names: Vec<Option<Vec<String>>> = Vec::with_capacity(plans.len());
+    // The name delta's old side, per package, in load order. `None` means one
+    // of two things, and the delta loop below can tell them apart from the
+    // package's state: either the old shard could not be read — which makes
+    // the delta unknowable and walks the whole run, since a name whose
+    // disappearance is invisible cannot be reasoned about — or it was taken to
+    // serve as this run's shard verbatim, which only happens for a package
+    // whose sources did not move and which therefore contributes no delta.
+    let mut old_shards: Vec<Option<PackageShard>> = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let published = read_published(current.as_ref(), plan, &diag);
-        published_summaries.push(published.summaries);
-        old_names.push(published.old_names);
+        let mut published = read_published(current.as_ref(), plan, &diag);
+        published_summaries.push(published.summaries.take());
         match published.fresh {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
                 for (slot, tree) in loaded.trees {
                     tree_slots[slot] = Some(tree);
                 }
-                shards.push(match loaded.shard {
-                    Some(shard) => shard,
-                    None => build_shard(plan, &tree_slots, &diag),
+                shards.push(if slots_stable {
+                    published
+                        .old_shard
+                        .take()
+                        .expect("a stable load without a decoded shard is refused")
+                } else {
+                    build_shard(plan, &tree_slots, &diag)
                 });
                 states.push(PkgState {
                     loaded: plan.slots.len(),
@@ -565,27 +575,50 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 });
             }
         }
+        old_shards.push(published.old_shard);
     }
     let trees: Vec<SourceTree> =
         tree_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
     let replay_candidates: usize =
         published_summaries.iter().flatten().map(|s| s.rows().count()).sum();
 
-    // The name delta (issue #489 slice B): the union of the key sets of every
-    // changed package's OLD and NEW shards. An untouched package contributes
-    // nothing — both its sides are the same set — which is what makes the
-    // delta proportional to the edit rather than to the universe.
+    // Which files moved, and which persisted block each of the others could
+    // replay. Computed here rather than beside the walk plan because the name
+    // delta is a question about the *files* that changed (issue #510), not
+    // about the packages holding them.
+    let blocks = block_index(&plans, &diag, &published_summaries, &contents);
+    let changed: HashSet<usize> = (0..diag.len()).filter(|slot| blocks[*slot].is_none()).collect();
+
+    // The name delta (issue #489 slice B, tightened to file granularity by
+    // issue #510): over every changed package, the names its OLD shard sites
+    // in a file that changed, and the names its NEW shard sites in one. A
+    // package whose sources did not move contributes nothing — both its sides
+    // are the same set — and a package that moved contributes only what its
+    // moved *files* declare, which is what makes the delta proportional to the
+    // edit rather than to the package. The one member with no site to answer
+    // for it — a package's ambiguity set — rides a changed package wholesale;
+    // `PackageShard::contributed_names_from` says why.
+    let now: HashMap<&str, usize> =
+        diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
     let mut delta: HashSet<String> = HashSet::new();
     let mut delta_known = true;
     for (i, plan) in plans.iter().enumerate() {
         if states[i].parsed == 0 && !states[i].degraded {
             continue;
         }
-        match &old_names[i] {
-            Some(names) => delta.extend(names.iter().cloned()),
+        match &old_shards[i] {
+            // Old sites index the OLD universe, so they are resolved through
+            // the old shard's own file map and compared as paths.
+            Some(old) => {
+                let gone = old_changed_slots(old, &changed, &now);
+                delta.extend(old.contributed_names_from(&gone));
+            }
             None => {
                 // A name whose disappearance cannot be seen cannot be reasoned
-                // about, so the sound answer is to walk everything.
+                // about, so the sound answer is to walk everything. (The other
+                // reading of `None` — the shard was taken to serve this run
+                // verbatim — cannot reach here: taking it requires a load that
+                // parsed nothing and did not degrade, which this loop skips.)
                 delta_known = false;
                 notes.push(format!(
                     "package {}: its old symbols are unreadable; walking every file",
@@ -593,10 +626,14 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 ));
             }
         }
-        delta.extend(shards[i].contributed_names());
+        let moved: HashSet<usize> =
+            plan.slots.iter().copied().filter(|slot| changed.contains(slot)).collect();
+        delta.extend(shards[i].contributed_names_from(&moved));
     }
     // A package the published generation had and this run does not: its names
-    // vanished, and the files that referenced them must be walked.
+    // vanished, and the files that referenced them must be walked. Wholesale
+    // and deliberately so — every file it held left it, so no unchanged file
+    // of its own is left to narrow the set by.
     if let Some(generation) = current.as_ref() {
         let live: HashSet<&PackageName> = plans.iter().map(|plan| &plan.name).collect();
         let fold = fold_package();
@@ -678,12 +715,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // run's whole-universe verdicts are computed and before the first file is
     // walked; it decides per file whether the persisted block may be replayed.
     let paranoid = paranoid_enabled(p);
-    // Every file's persisted block, by slot, with the package that carries it
-    // — so the licensing check (which needs the universe digest) is the only
-    // thing left to do inside the planner.
-    let blocks = block_index(&plans, &diag, &published_summaries, &contents);
-    let changed: HashSet<usize> =
-        (0..diag.len()).filter(|slot| blocks[*slot].is_none()).collect();
+    // `blocks` — every file's persisted block, by slot, with the package that
+    // carries it — was built with the delta above, so the licensing check
+    // (which needs the universe digest) is all the planner has left to do.
     // Nothing may replay at all unless there is a published generation to
     // replay from and the name delta could be read.
     let replay_possible = current.is_some() && delta_known && replay_candidates > 0;
@@ -881,13 +915,14 @@ fn block_index<'a>(
     out
 }
 
-/// Everything the published generation can say about one package: the delta's
-/// old side, the walk blocks it carries, and the load attempt proper.
+/// Everything the published generation can say about one package: the old
+/// shard, the walk blocks it carries, and the load attempt proper.
 struct Published {
-    /// The names this package's OLD shard contributed, or `None` when the
-    /// artifact could not give them — which makes the name delta *unknowable*,
-    /// and the whole run walks (see [`generation_check`]).
-    old_names: Option<Vec<String>>,
+    /// This package's OLD shard — the delta's old side, and the verbatim
+    /// shard when the load reuses it. `None` when the artifact could not give
+    /// it, which makes the name delta *unknowable* and walks the whole run
+    /// (see [`generation_check`]).
+    old_shard: Option<PackageShard>,
     /// The package's persisted walk blocks, read whatever the source
     /// fingerprint said: a changed package's *unchanged* files may still
     /// replay, since each row carries its own file's content hash.
@@ -898,9 +933,29 @@ struct Published {
 impl Published {
     /// The shape for a package the published generation could not tell us
     /// anything about at all.
-    fn refused(refusal: LoadRefusal, old_names: Option<Vec<String>>) -> Self {
-        Self { old_names, summaries: None, fresh: Err(refusal) }
+    fn refused(refusal: LoadRefusal, old_shard: Option<PackageShard>) -> Self {
+        Self { old_shard, summaries: None, fresh: Err(refusal) }
     }
+}
+
+/// Which of a package's OLD file slots hold a file that moved — the old side
+/// of the file-granular delta (issue #510).
+///
+/// Old slots index the *old* universe, so the comparison goes through paths:
+/// the old shard's own file map names each old slot, and this run's `now` map
+/// says where (and whether) that path lives today. A path this run does not
+/// have at all — deleted, or reclassified into a package that reads it
+/// differently — counts as moved, which is how a vanished declaration's name
+/// reaches the delta and its callers get walked.
+fn old_changed_slots(
+    old: &PackageShard,
+    changed: &HashSet<usize>,
+    now: &HashMap<&str, usize>,
+) -> HashSet<usize> {
+    old.files()
+        .filter(|(path, _)| now.get(path).is_none_or(|slot| changed.contains(slot)))
+        .map(|(_, slot)| slot)
+        .collect()
 }
 
 /// Read what the published generation holds for one package. Any decode
@@ -915,12 +970,12 @@ fn read_published(
     let Some(generation) = generation else {
         // A cold run: the published universe is empty, which is a *known*
         // empty old side rather than an unknown one. Nothing replays anyway.
-        return Published::refused(LoadRefusal::NoGeneration, Some(Vec::new()));
+        return Published::refused(LoadRefusal::NoGeneration, Some(PackageShard::default()));
     };
     if !generation.has_package(&plan.name) {
         // A package the generation never had contributes no old names — again
         // known, not unknown, so its arrival is an ordinary delta.
-        return Published::refused(LoadRefusal::NotPublished, Some(Vec::new()));
+        return Published::refused(LoadRefusal::NotPublished, Some(PackageShard::default()));
     }
     let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
     let mut reader = match generation.artifact(&plan.name) {
@@ -930,20 +985,22 @@ fn read_published(
     // The old shard, always: it is the delta's old side whether or not the
     // sources moved, and it is the verbatim shard when they did not.
     let old_shard = read_shard(&mut reader).ok();
-    let old_names = old_shard.as_ref().map(PackageShard::contributed_names);
     // The walk blocks are never a load refusal: the trees are in hand either
     // way, and a package without them simply walks every file.
     let summaries = read_summaries(&mut reader).ok();
-    let fresh = load_trees(&mut reader, plan, diag, old_shard);
-    Published { old_names, summaries, fresh }
+    let fresh = load_trees(&mut reader, plan, diag, old_shard.is_some());
+    Published { old_shard, summaries, fresh }
 }
 
 /// The load proper: the provenance gate, then the per-file trace shards.
+/// `have_shard` says whether the artifact's symbols section decoded — the
+/// caller keeps the shard itself, because it is the delta's old side as much
+/// as it is the verbatim shard.
 fn load_trees(
     reader: &mut steins_gen::ArtifactReader,
     plan: &Plan,
     diag: &[String],
-    old_shard: Option<PackageShard>,
+    have_shard: bool,
 ) -> Result<LoadedPkg, LoadRefusal> {
     let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
     let (analyzer, stored) = read_sources(reader).map_err(miss)?;
@@ -969,12 +1026,10 @@ fn load_trees(
     // The shard's sites are universe slots; it may only serve verbatim when
     // every persisted slot still names the same file. Otherwise the caller
     // rebuilds it from the loaded trees — still no reparse.
-    let shard = if slots_stable {
-        Some(old_shard.ok_or(LoadRefusal::Miss("symbols section is not a shard".to_owned()))?)
-    } else {
-        None
-    };
-    Ok(LoadedPkg { trees: loaded, shard, slots_stable })
+    if slots_stable && !have_shard {
+        return Err(LoadRefusal::Miss("symbols section is not a shard".to_owned()));
+    }
+    Ok(LoadedPkg { trees: loaded, slots_stable })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.
