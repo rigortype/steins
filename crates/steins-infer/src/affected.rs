@@ -15,8 +15,9 @@
 //! The fourth leg is not here: it is the [`crate::walk_plan::UniverseVerdict`]
 //! digest, compared against the one the artifact carries, and a mismatch means
 //! the orchestrator never asks this module anything. What is here is the first
-//! three, plus one refinement the pinned list does not spell and soundness
-//! needs (see *Inheritance*).
+//! three, plus two refinements the pinned list does not spell and soundness
+//! needs: the inheritance closure (see *Inheritance*) and the removal seed (see
+//! *The delta leg and the descent*).
 //!
 //! ## What a walk of F reads, and which leg answers for it
 //!
@@ -32,7 +33,8 @@
 //!   never from which files happened to be parsed.
 //! * **The merged index** (every absence verdict, every resolution) — the
 //!   `delta_names` leg, whose completeness argument is *The name delta* below.
-//! * **Other files' trees**, through the binding descent — the call-graph leg.
+//! * **Other files' trees**, through the binding descent and through the class
+//!   chains it dispatches on — the call-graph and inheritance legs.
 //! * **The whole-universe verdicts** (dam, purity oracle, never-returning set,
 //!   the PHP view, the property-write obstacle) — the digest, above.
 //! * **Run config and engine identity** — the replay stamp, which gates the
