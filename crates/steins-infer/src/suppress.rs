@@ -68,6 +68,8 @@ use crate::CONSTANT_UNDEFINED_ID;
 use crate::{VARIABLE_MAYBE_UNDEFINED_ID, VARIABLE_UNDEFINED_ID};
 // unset pseudo-type (ADR-0087 §4, issue #396)
 use crate::PHPDOC_MAYBE_UNDEFINED_ID;
+// the hyphen reservation's diagnostic (ADR-0091 §6, issue #479)
+use crate::PHPDOC_UNKNOWN_VOCABULARY_ID;
 
 /// The registry id for an `@steins-ignore` whose diagnostic id matches nothing on
 /// its target line (ADR-0023 anti-rot). Exempt from suppression.
@@ -357,6 +359,39 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // definite question.
     (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // The hyphen reservation's diagnostic (ADR-0091 §6, issue #479).
+    // `Layer::Contract`: the premise is a docblock's own spelling, and the
+    // program runs either way.
+    //
+    // `Floor::Contracts` — the family floor, **ruled from measurement** at this
+    // slice's review (2026-08-27; §6 refuses to fix this floor in advance).
+    //
+    // §6 named one thing to calibrate: `KNOWN_UNENFORCED` exists because other
+    // tools have spellings Steins recognizes without enforcing, and the ones it
+    // has never heard of are exactly what this id would convict. Measured: the
+    // pinned public corpus reports ZERO over 6,670 files carrying 2,903
+    // hyphenated type-position sites in 13 distinct spellings, every one
+    // recognized; the private corpus reports exactly ONE, a misspelling of
+    // `non-empty-string` in a test docblock — a true positive of the class the
+    // id exists for. The anticipated FP source is measured absent everywhere it
+    // is measurable, so a proven-yield check does not sit behind a rung nobody
+    // reaches. The residual risk is unmeasured conjecture with three absorbers
+    // when it materializes: the spelling joins `KNOWN_UNENFORCED`, §4.1's plugin
+    // registration once it lands, and ADR-0022's baseline.
+    //
+    // NOT `Strict`: that rung asks a different question (is a weaker some-paths
+    // claim worth seeing?), and this judgment is definite.
+    //
+    // **The baseline moves with configuration, not only with code** (ADR-0091
+    // §4.1, §9). The allowlist is builtin tables ∪ plugin registrations, so the
+    // id is computed after plugin load and is plugin-set dependent: dropping a
+    // plugin introduces findings on every docblock that used its vocabulary.
+    // That is the correct answer — the vocabulary really did go away — but
+    // ADR-0022's baseline discipline is told here rather than left to discover
+    // it, because no code changed. The registration kind does not exist on the
+    // `steins-plugin.json` manifest yet, so the plugin half is empty for every
+    // project today; the coupling bites when it lands.
+    (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Contracts),
     (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),

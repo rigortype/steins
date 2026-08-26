@@ -35,6 +35,8 @@ use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPER
 use steins_infer::CONSTANT_UNDEFINED_ID;
 // untyped surface (ADR-0078, issue #200)
 use steins_infer::UNTYPED_CLASS_CONSTANT_ID;
+// the hyphen reservation's diagnostic (ADR-0091 §6, issue #479)
+use steins_infer::PHPDOC_UNKNOWN_VOCABULARY_ID;
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -327,6 +329,45 @@ fn the_declared_possibly_undefined_read_is_a_contract_id() {
 
 // end unset pseudo-type (ADR-0087 §4, issue #396)
 
+/// The hyphen reservation's diagnostic (ADR-0091 §6, issue #479) registers with
+/// an emitter behind it, on the contract family's **own** floor.
+///
+/// §6 refused to fix the floor in advance — the FP source is precise
+/// (vocabulary from tools Steins does not model) and only a measurement can
+/// place it. The measurement came back with that source **absent everywhere it
+/// is measurable**: zero over the pinned public corpus across 2,903 hyphenated
+/// type-position sites, and one hit on the private corpus that was a
+/// misspelling of known vocabulary — a true positive of the class the id exists
+/// for. This slice's review (2026-08-27) therefore put it at `Contracts` rather than
+/// behind a rung nobody reaches, which is what `floors_reproduce_the_pre_s6_
+/// layer_selection` now covers with no exception row.
+#[test]
+fn the_unknown_vocabulary_id_sits_on_the_measured_family_floor() {
+    assert_eq!(PHPDOC_UNKNOWN_VOCABULARY_ID, "phpdoc.unknown-vocabulary");
+    assert_eq!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Contract));
+    assert_eq!(
+        surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID),
+        Some(Floor::Contracts),
+        "the ruled floor: `contracts`, from measurement, not `pedantic`",
+    );
+    // The definite `phpdoc.*` siblings' floor, exactly — the question this id
+    // asks is definite too, so it must not drift onto the possibly grade.
+    assert_eq!(
+        surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID),
+        surface_floor(PARAM_MISMATCH_ID),
+    );
+
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+    assert!(emittable.contains(PHPDOC_UNKNOWN_VOCABULARY_ID), "the emitter landed with the id");
+    assert!(!pending.contains(PHPDOC_UNKNOWN_VOCABULARY_ID));
+
+    // `phpdoc.*` spans two layers (ADR-0078 §1.5). This one is contract, not
+    // the hygiene family's mechanics: the premise is a docblock's own spelling
+    // and nothing about the run is rotten, so it must never be red-on-sight.
+    assert_ne!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Mechanics));
+}
+
 /// The registered-ahead-of-emission list holds exactly the one id argued above and
 /// nothing else — the cardinality guard that makes a forgotten emitter visible.
 #[test]
@@ -461,6 +502,13 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         // `Contracts`, so a `contracts` run keeps its meaning.
         (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
         (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
+        // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479) is deliberately
+        // NOT listed here. §6 made its floor a measurement rather than a
+        // decision, and this slice's review (2026-08-27) read that measurement
+        // and put it on the contract family's own floor — so it is covered by
+        // the default expectation below, as an ordinary member of the family,
+        // and needs no exception. Its own row is
+        // `the_unknown_vocabulary_id_sits_on_the_measured_family_floor`.
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =

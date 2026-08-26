@@ -448,3 +448,85 @@ fn a_strict_baseline_entry_is_dormant_on_a_default_run() {
         default_run.stdout
     );
 }
+
+// ---------------------------------------------------------------------------
+// `phpdoc.unknown-vocabulary` on the contract rung, end to end (ADR-0091 §6 /
+// issue #479).
+//
+// The profile engine sits between an id and the user, and **nothing below the
+// CLI can observe it**: the library entry returns the finding whatever the
+// surface decides, so a library-level test passes while the product prints
+// nothing. This id shipped emitting and unreachable for one review round —
+// registered at `Floor::Pedantic`, which no rung admits, and not named in the
+// one `enable` list that reaches that floor — because this file had no case for
+// either. It now sits at `Floor::Contracts` by measurement (§6 made the floor a
+// measurement, not a decision), so the surface set below is the ordinary
+// contract-family one, and these tests are what keep it honest.
+// ---------------------------------------------------------------------------
+
+/// A docblock whose `@param` names a hyphenated spelling that is not vocabulary
+/// (ADR-0091 §6). Deliberately the plainest possible fixture: the finding is
+/// about the annotation, so nothing else in the file can affect it.
+const UNKNOWN_VOCABULARY: &str = "<?php\n\
+    /** @param non-empy-string $s */\n\
+    function f($s): void {}\n";
+
+/// Every profile at or above the `contracts` rung reports the id, and the bare
+/// `default` surface stays silent.
+///
+/// Both halves fail in opposite directions: without the first the id is
+/// unreachable through the product, and without the second a contract-layer
+/// finding has leaked onto the surface a bare `steins check` runs — which is the
+/// one surface that must stay proof-and-mechanics only.
+#[test]
+fn the_contract_rung_reports_unknown_vocabulary_and_default_stays_silent() {
+    let dir = workdir("vocab-surfaces");
+    write(&dir, "a.php", UNKNOWN_VOCABULARY);
+
+    for profile in ["contracts", "strict", "pedantic"] {
+        let r = run_in(&dir, &["check", "--no-php", "--profile", profile, "a.php"]);
+        assert!(
+            r.stdout.contains("phpdoc.unknown-vocabulary"),
+            "`{profile}` must report the id:\n{}",
+            r.stdout
+        );
+        assert!(r.stdout.contains("non-empy-string"), "`{profile}` stdout:\n{}", r.stdout);
+        assert_eq!(r.code, 1, "a reported finding fails the run (`{profile}`):\n{}", r.stdout);
+    }
+
+    // The bare default surface, pinned explicitly: `contracts` is an opt-up, so
+    // a docblock-premised finding must never reach a plain `steins check`.
+    let default_run = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert!(
+        !default_run.stdout.contains("phpdoc.unknown-vocabulary"),
+        "the default surface must stay silent on a contract-layer id:\n{}",
+        default_run.stdout
+    );
+    assert_eq!(default_run.code, 0, "stdout:\n{}", default_run.stdout);
+
+    // `throws-direct` branches off `default`, so it is silent for the same reason.
+    let td = run_in(&dir, &["check", "--no-php", "--profile", "throws-direct", "a.php"]);
+    assert!(!td.stdout.contains("phpdoc.unknown-vocabulary"), "stdout:\n{}", td.stdout);
+    assert_eq!(td.code, 0, "stdout:\n{}", td.stdout);
+}
+
+/// The contracts surface is **identical cold and warm** (ADR-0092 §5).
+///
+/// The fp-gate's own warm ≡ cold oracle runs over the corpus, where this id
+/// measured zero — so a corpus that never fires it cannot show that a replayed
+/// generation reproduces it. This is that coverage: run twice with the store on
+/// (the default — no `--no-cache`), and the second run must reproduce the first
+/// exactly.
+#[test]
+fn the_contracts_surface_is_identical_cold_and_warm() {
+    let dir = workdir("vocab-warm");
+    write(&dir, "a.php", UNKNOWN_VOCABULARY);
+
+    let cold = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
+    assert!(dir.join(".steins").is_dir(), "the store must exist, or this is cold twice");
+
+    let warm = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
+    assert_eq!(warm.stdout, cold.stdout, "warm run diverged from cold");
+    assert_eq!(warm.code, cold.code);
+    assert!(warm.stdout.contains("phpdoc.unknown-vocabulary"), "stdout:\n{}", warm.stdout);
+}

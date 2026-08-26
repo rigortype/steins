@@ -477,6 +477,61 @@ fn is_derived_operator(name: &str) -> bool {
     DERIVED_OPERATORS.contains(&name)
 }
 
+/// Vocabulary [`lower_generic`] models that [`lower_identifier`] has no arm
+/// for: a hyphenated base whose **bare** form states nothing and so never
+/// earned an identifier arm. Phan's `int-range<lo, hi>` is the whole list.
+///
+/// Recognition is arity-blind, as both tables above are: `int-range` written
+/// bare is a name Steins knows, exactly as `key-of` written bare is, and
+/// neither is a defect in the docblock. Without this entry the recognition
+/// answer would be read off the identifier table alone and convict a spelling
+/// the generic table implements.
+const GENERIC_ONLY_VOCABULARY: &[&str] = &["int-range"];
+
+/// Whether `name`, written in a phpdoc type position, is a hyphenated spelling
+/// that **denotes nothing** — the whole judgment behind ADR-0091 §6's
+/// `phpdoc.unknown-vocabulary` (issue #479), kept in the crate that owns the
+/// vocabulary tables so no second list can drift from them.
+///
+/// Two conditions, and both are load-bearing:
+///
+/// * **hyphenated**, so the reservation applies. PHP's compiler rejects `-` in
+///   a class-like name, which is what rules out the three readings that
+///   normally force silence on an unrecognized identifier (§4): it can be no
+///   class, and a hyphenated `@template` name or `@phpstan-type` alias is a
+///   refusal rather than a declaration. Outside the reserved space an
+///   unrecognized name is a class reference — a different question, judged by
+///   the caller's class machinery, and never this one's business.
+/// * **unrecognized**, against the builtin tables: `KNOWN_UNENFORCED`,
+///   `DERIVED_OPERATORS`, `GENERIC_ONLY_VOCABULARY`, and everything
+///   [`lower_identifier`] models (the refined-string grid included, since it is
+///   reached from that table's catch-all).
+///
+/// What survives both is the closed set of two ADR-0091 §5 names — a
+/// misspelling of vocabulary, or vocabulary from a tool Steins does not model.
+/// Neither can be a false claim about the *program*.
+///
+/// The allowlist this answers for is the **builtin** half. ADR-0091 §4.1 makes
+/// the full one *builtin ∪ plugin registrations*, and the plugin half is not
+/// this crate's to know — it arrives per project, after plugin load.
+#[must_use]
+pub fn is_unknown_vocabulary(name: &str) -> bool {
+    let norm = name.trim_start_matches('\\').to_ascii_lowercase();
+    norm.contains('-') && !is_known_vocabulary(&norm)
+}
+
+/// Whether a **normalized** hyphenated spelling is vocabulary the builtin
+/// tables recognize. Split out of [`is_unknown_vocabulary`] so the recognition
+/// question reads as one expression; not public, because it answers nothing
+/// meaningful outside the reserved space (a name with no `-` that reaches the
+/// class catch-all is not "unknown vocabulary", it is a class reference).
+fn is_known_vocabulary(norm: &str) -> bool {
+    KNOWN_UNENFORCED.contains(&norm)
+        || is_derived_operator(norm)
+        || GENERIC_ONLY_VOCABULARY.contains(&norm)
+        || !matches!(lower_identifier(norm), ContractTy::Opaque)
+}
+
 /// **The one identifier table**: what every phpdoc *keyword* spelled as a bare
 /// identifier means, lowered to a [`ContractTy`]. Both lanes read this table
 /// (ADR-0030's no-second-relation discipline, as [`shape_verdict`] applies it
@@ -2740,5 +2795,153 @@ mod hyphen_reservation_tests {
         }
         assert!(is_shadowable_pseudo_type("integer"));
         assert!(matches!(lower_identifier("TValue"), ContractTy::Class(_)));
+    }
+}
+
+/// **The recognition allowlist** ADR-0091 §6's `phpdoc.unknown-vocabulary`
+/// (issue #479) reads: which hyphenated spellings this crate knows, and which
+/// it will say denote nothing.
+///
+/// The tables are iterated rather than transcribed. A spelling added to one and
+/// forgotten here would be a finding raised on vocabulary Steins itself
+/// implements, which is the one false positive this id can produce.
+#[cfg(test)]
+mod unknown_vocabulary_tests {
+    use super::*;
+
+    /// Every entry of both allowlist tables is recognized, by iteration.
+    #[test]
+    fn no_table_entry_is_ever_unknown_vocabulary() {
+        for name in KNOWN_UNENFORCED {
+            assert!(!is_unknown_vocabulary(name), "KNOWN_UNENFORCED entry `{name}` convicted");
+        }
+        for name in DERIVED_OPERATORS {
+            assert!(!is_unknown_vocabulary(name), "DERIVED_OPERATORS entry `{name}` convicted");
+        }
+        for name in GENERIC_ONLY_VOCABULARY {
+            assert!(!is_unknown_vocabulary(name), "generic-only entry `{name}` convicted");
+        }
+    }
+
+    /// Every hyphenated spelling the identifier table models, and every
+    /// hyphenated base the generic table has an arm for. Hand-listed because
+    /// both are `match` arms rather than tables — the enumeration ADR-0091 §9's
+    /// bound is stated over, and the same roster
+    /// `every_modeled_hyphenated_spelling_denotes_what_it_did` pins denotations
+    /// for.
+    #[test]
+    fn no_modeled_spelling_is_ever_unknown_vocabulary() {
+        for name in [
+            "array-key",
+            "positive-int",
+            "negative-int",
+            "non-negative-int",
+            "non-positive-int",
+            "non-zero-int",
+            "non-empty-string",
+            "numeric-string",
+            "non-falsy-string",
+            "truthy-string",
+            "class-string",
+            "interface-string",
+            "enum-string",
+            "trait-string",
+            "literal-string",
+            "callable-string",
+            "numeric-int-string",
+            "decimal-int-string",
+            "non-decimal-int-string",
+            "non-empty-mixed",
+            "non-null-mixed",
+            "non-empty-scalar",
+            "open-resource",
+            "closed-resource",
+            "non-empty-array",
+            "non-empty-list",
+            "associative-array",
+            "non-empty-associative-array",
+            "never-return",
+            "no-return",
+            "callable-object",
+            "pure-callable",
+            "pure-closure",
+            "static-closure",
+            "static-pure-closure",
+            // The generic table's own bases, at any arity: recognition is
+            // arity-blind, so the bare spelling has to answer too.
+            "int-range",
+        ] {
+            assert!(!is_unknown_vocabulary(name), "modeled spelling `{name}` convicted");
+        }
+        // The refined-string grid, reached from the identifier table's catch-all.
+        for cell in [
+            "lowercase-string",
+            "uppercase-string",
+            "uncased-string",
+            "non-empty-lowercase-string",
+            "non-falsy-uppercase-string",
+            "non-falsy-numeric-string",
+            "numeric-uncased-string",
+        ] {
+            assert!(!is_unknown_vocabulary(cell), "grid cell `{cell}` convicted");
+        }
+    }
+
+    /// The closed set of two (ADR-0091 §5): a misspelling of vocabulary, and
+    /// vocabulary from a tool Steins does not model. Both are reported, and the
+    /// id draws no line between them — the edit-distance refinement is §6's
+    /// deliberately-optional second slice.
+    #[test]
+    fn a_misspelling_and_an_unmodeled_spelling_both_report() {
+        for name in [
+            "non-empy-string",
+            "positive-integer",
+            "int-mask-off",
+            "some-psalm-thing",
+            "foo-bar",
+        ] {
+            assert!(is_unknown_vocabulary(name), "`{name}` must report");
+        }
+    }
+
+    /// The same normalization the two lowering tables apply, so a qualified or
+    /// oddly-cased spelling cannot slip past the allowlist. Namespace
+    /// qualification is meaningless here by ADR-0091 §3.1 — there is no name to
+    /// resolve — so only the leading `\` is stripped, exactly as
+    /// `lower_identifier` strips it.
+    #[test]
+    fn recognition_normalizes_as_the_lowering_tables_do() {
+        assert!(!is_unknown_vocabulary("NON-EMPTY-STRING"));
+        assert!(!is_unknown_vocabulary("\\non-empty-string"));
+        assert!(!is_unknown_vocabulary("Int-Mask-Of"));
+        assert!(is_unknown_vocabulary("NON-EMPY-STRING"));
+    }
+
+    /// Outside the reserved space the question is not asked. An unrecognized
+    /// hyphen-free name is a class reference, judged by the caller's class
+    /// machinery against a registry this crate cannot see — so a `false` here
+    /// is "not my question", not "recognized".
+    #[test]
+    fn a_hyphen_free_name_is_never_this_ids_business() {
+        for name in ["int", "string", "Foo", "NonEmptyString", "unset", "void", "self", "TValue"] {
+            assert!(!is_unknown_vocabulary(name), "`{name}` carries no hyphen");
+        }
+    }
+
+    /// The value judgment is the reservation's, not this id's (#478's
+    /// guarantee, ADR-0091 §6): a reported spelling still lowers to `Opaque`
+    /// and still admits every value as `Maybe`. The id adds a finding and
+    /// removes none.
+    #[test]
+    fn reporting_a_spelling_does_not_change_what_it_denotes() {
+        for name in ["non-empy-string", "some-psalm-thing", "foo-bar"] {
+            assert!(is_unknown_vocabulary(name));
+            assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name}");
+            assert_eq!(
+                admits_val(&lower_identifier(name), &steins_domain::Val::Int(1)),
+                Certainty::Maybe,
+                "{name}",
+            );
+        }
     }
 }
