@@ -278,3 +278,52 @@ findings as regressions rather than as dormant entries, and the remedy is
 to recapture, not to suppress. The registration kind is not on the manifest
 yet, so the allowlist is builtin-only today and the coupling bites when it
 lands.
+
+## Bare `@assert-if-true` vs the vendor-prefixed assertion family
+
+PHPStan's and Psalm's assertion tags — `@phpstan-assert(-if-true|-if-false)`
+and their `@psalm-assert*` counterparts — exist only in vendor-prefixed form;
+neither tool defines a bare `@assert-if-true`. Steins' phpdoc scanner follows
+the same rule, generalized rather than special-cased: only `@phpstan-*` /
+`@psalm-*` prefixes carry a contract (ADR-0029), and the assertion family is
+recognized through that uniform prefix strip like every other tag — the same
+doctrine already on the registry as the vendor-prefixed-tags standing refusal
+(`type-specification/divergence-registry.md` entry 1). ADR-0074 §2, written
+for the unrelated `@psalm-trace` tag, states the assertion case as its own
+precedent verbatim: "`@phpstan-assert` / `@psalm-assert` exist, bare
+`@assert` does not." A bare `@assert-if-true` is therefore not a recognized
+tag at all, and narrows nothing.
+
+The 2026-08 conformance rescoring exercised this on
+`regressions_string_narrowing_assert_if_true`, whose fixture writes the bare
+spelling and expects the narrowing a prefixed tag would carry. Steins reports
+none, by the standing rule above — a recorded design decision, not a
+capability gap. Issue #266's queued "assert-tag consumption" work covers only
+the prefixed spellings (`@phpstan-assert`, `@phpstan-assert-if-true`,
+`@phpstan-assert-if-false`) and would not change this fixture's verdict when
+it lands.
+
+## An uncovered default-less `match` vs a standalone exhaustiveness finding
+
+For a `match` with no `default`, an exhaustiveness-minded tool can treat the
+uncovered residue as a finding in its own right. Steins computes the same
+fact — the arms do not exhaust the subject's Verified domain — but does not
+surface it that way. ADR-0088 §5 decided this exact surface: an uncovered
+default-less `match` throws `\UnhandledMatchError` when the missed value
+arrives, so it is a throw like any other and enters the throw accounting as
+an `origin = direct` contribution to the existing `throw.undeclared` id
+(`Layer::Contract` / `Floor::Contracts`). No new id: a bare `steins check`
+stays quiet — the `match` is reachable, not proven, and the crying-wolf
+constraint gives it no claim on the default surface — and only a project
+that has opted into throw accounting learns that the function can throw
+something it does not declare.
+
+The 2026-08 conformance rescoring measured this against
+`regressions_backed_enum_value_narrowing`: the fixture's scored half is a
+default-less `match` over a two-case backed enum, covering one case, with no
+`@throws` declared. Steins reports nothing without the throw-accounting
+opt-in, and `throw.undeclared` under it — never a standalone exhaustiveness
+finding on the default surface — which is the by-design verdict above, not a
+gap. The fixture's other half is unscored: `$s->value === 'H'`-style
+case-identity narrowing off a backed enum's value comparison is a real,
+separate capability, tracked in its own issue (#540).
