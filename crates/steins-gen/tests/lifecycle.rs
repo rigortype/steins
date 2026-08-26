@@ -305,9 +305,11 @@ fn open_collects_a_generation_current_does_not_name() {
     assert_eq!(*store.current().unwrap().unwrap().id(), published);
 }
 
-/// An unreadable `CURRENT` is not evidence that a generation is stale, so the
-/// sweep declines rather than guesses — but a `CURRENT` that is merely *absent*
-/// says plainly that nothing is reachable, and those bytes go.
+/// An *absent* `CURRENT` says plainly that nothing is reachable, so the
+/// generations under it are bytes with no reader and they go. (The other leg
+/// is a `CURRENT` that cannot be *read* — a permission, an I/O failure — which
+/// is no evidence that anything is stale, and there the sweep declines rather
+/// than guesses. Not testable portably without breaking the filesystem.)
 #[test]
 fn an_absent_current_makes_every_generation_unreachable() {
     let project = TempProject::new("no-current");

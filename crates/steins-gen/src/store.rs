@@ -569,8 +569,8 @@ enum Reachable {
     /// `CURRENT` names this generation; every other one is superseded.
     Generation(String),
     /// Nothing is reachable: no `CURRENT` at all, or one that names no
-    /// generation. Either reading is a rebuild for the next run, so every
-    /// generation on disk is bytes with no reader.
+    /// generation. Either way the next run rebuilds, so whatever is on disk is
+    /// bytes no reader will ever find.
     Nothing,
     /// `CURRENT` could not be read — a permission, an I/O failure. Whether
     /// anything is superseded is then unknown, and an unreadable pointer is no
