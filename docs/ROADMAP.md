@@ -12,7 +12,7 @@ position queries reachable — but they release after the checker is
 genuinely usable. The specifically protected LSP capability:
 type-directed member completion at a cursor position.
 
-## Current state (verified against the tree, 2026-08-25)
+## Current state (verified against the tree, 2026-08-26)
 
 Engine:
 
@@ -22,11 +22,18 @@ Engine:
   (ADR-0005/0018), object/method world complete (ADR-0043: trinary is-a
   over a 352-entry generated builtin hierarchy, native + phpdoc object
   acceptance, enums, `::class`).
-- salsa (ADR-0009) memoizes `parse`, `function_index`, and a monolithic
-  `project_index`; the check pass itself runs *outside* the query graph
-  (ADR-0028, folding impurity) — nothing of inference is memoized
-  across runs. Acceptable for batch CLI; the LSP prerequisite is
-  ADR-0048 §5.
+- **Frozen generations (ADR-0092) have landed**, superseding ADR-0009's
+  mechanism (its principles stand) and replacing ADR-0048 §5's
+  prerequisite list. A run captures its sources behind a seal, builds
+  per-Composer-package artifacts — symbol shards, declared contracts,
+  per-file trace IR, per-declaration own-rows and walk blocks — and
+  publishes them atomically; the next run reuses every package and every
+  file the content fingerprints say is unmoved, walks only the files an
+  edit could reach, and answers the rest from persisted diagnostics. Fold
+  results persist as one generation-level table keyed by engine identity
+  (ADR-0092 §4, over ADR-0066's replay seam). salsa still memoizes `parse`
+  within a run; the check pass still runs outside the query graph
+  (ADR-0028), which is now a placement rather than a limitation.
 - Diagnostic surface, through v0.1.6. Pre-existing: `type.argument-mismatch`,
   `type.return-mismatch`, `type.property-mismatch`, `call.on-null`,
   `readonly.reassigned`, `phpdoc.param-mismatch`,
@@ -88,28 +95,29 @@ Verification apparatus (ADR-0013):
   `Floor::Strict`) since ADR-0081 §8 scoped the strict-zero bar to
   the definite ids; triaged true positives among the definite ids are
   fingerprint-pinned (`EXPECTED_PROOF_FINDINGS`).
-- php-typing-conformance: 208/214 (re-measured 2026-08-09 after issues
-  #288 and #293; the suite grew past the 98-case denominator this line
-  used to carry). Three fails are registered refusals (ADR-0030), three
-  are absent machinery reducing to three capabilities — see M1's exit
-  criteria below, which state the standing in full.
-  **One row moved since that measurement, and the total has not been
-  re-run**: `regressions_unset_pseudo_type` went `unrecognized` →
-  `recognized` with the vocabulary (#395/#400) and its enforcement from
-  `partial` (3/5 — the three `// Q` guarded lines, silent for the right
-  reason) to **full 5/5** with the emitter (#396), which reports the two
-  `// E?` reads under `--profile contracts` and nothing else on the file.
-  Issue #397 changed no row: it decided that every position outside a
-  top-level inline `@var` is inert, which the fixture does not exercise.
-  The suite lives in the sibling php-typing-conformance repo, so the
-  denominator and the total pass count are to be re-measured there and
-  dated before this line is rewritten.
-- ~5,110 workspace tests; zero conformance regressions ever.
+- php-typing-conformance: **216/230, re-measured 2026-08-26** against the
+  sibling repo at `f8ed38b`. The verdicts are identical to the ones that
+  repo already records — zero newly failing, zero newly passing — so the
+  twenty-two-PR ADR-0092 series moved no conformance row, which is an
+  independent witness to its behaviour preservation alongside the fp-gate
+  and the warm ≡ cold oracle. Of the 14 fails, three are registered
+  refusals (ADR-0030 entries 1–2) and one is the `resource`-domain
+  deferral (entry 4); the other ten arrived with cases the suite added
+  after the 2026-08-09 measurement and cluster in narrowing
+  (`regressions_*_narrowing`, `regressions_string_narrowing_assert_if_true`),
+  properties, and `phpdoc_advanced_member_tag_undefined_type`. One row
+  moved *toward* Steins since that measurement:
+  `assertions_this_out_self_out` now passes, closing the generics leg M1's
+  exit criteria named. The suite lives in the sibling repo, so its
+  denominator moves without notice here; re-measure and date this line
+  rather than trusting it.
+- ~5,210 workspace tests; zero conformance regressions ever.
 
 CLI (ADR-0020, partially landed):
 
 - Landed: `check` (`--format text|json|github|sarif`, `--profile`,
-  `--no-php` sound subset, `--no-tolerated-effects` audit switch per
+  `--no-php` sound subset, `--no-cache` to skip the generation store
+  (ADR-0092; on by default since 2026-08-26), `--no-tolerated-effects` audit switch per
   ADR-0084, `--vendor-diagnostics`, `--fix`, baseline
   set/match/stale per ADR-0022), `annotate` (margin facts, `…?`
   non-exhaustiveness), `transform` (`phpdoc-to-native`,
@@ -193,12 +201,17 @@ names its milestone.
 9. **Ecosystem packs** (ADR-0044/0045: PSL, Serde, Valinor, PSR) —
    designed, not implemented; the mapper-boundary types they recover
    are exactly where legacy modernization needs truth. → M4
-10. **Performance and incrementality.** A full batch over the ~85k-file
-    mounted corpus is ~10 minutes on dev hardware
-    (`docs/agents/profiling.md` records where the time goes) and
-    CI-viable; there is no warm story and no cross-run persistence.
-    Not checker-release-blocking; LSP-blocking. The mechanism is
-    ADR-0092's frozen generations. → M5
+10. **Performance and incrementality. Largely CLOSED at M5.** The warm
+    path exists, persists across runs and is measured: on the ten pinned
+    corpus packages (6,670 files) a cold run is 7.70s and a rebuild that
+    walks nothing is 1.41s; on nikic/PHP-Parser with the engine on, cold
+    1.05s against 0.17s after a leaf-file edit (2 files walked, 339
+    replayed). `cargo xtask perf` carries the numbers and the warm ≡ cold
+    oracle, and `--paranoid` grades every would-be skip against a fresh
+    walk. What remains is the last exit criterion: at the ~30k-file scale
+    a zero-walk rebuild still straight-lines to roughly 6s, over the ≤2s
+    target, in phases that scale with the universe rather than the edit.
+    → M5
 11. **Adoption path.** Docs, install/distribution, licensing, public
     repo — USER gates G2/G3. → M3
 12. **Position queries** (LSP): constrained now by ADR-0048, built at
@@ -225,34 +238,31 @@ conditions, each corpus-triaged before its id ships.
 Exit criteria:
 
 - Every php-typing-conformance fail is a registered divergence
-  (ADR-0030) — zero absent-machinery fails. **Not met today.** The
-  suite has grown to 214 automated cases and Steins passes 209 of them
-  (measured 2026-08-09, after issue #288 closed the offset-read breadth
-  gap, issue #293 read template bounds as contracts, and issue #294 read
-  type arguments off inheritance edges); the two halves
-  of the criterion now part company. Three fails are registered standing refusals and are as
-  closed as they will ever be: `phpdoc_advanced_vendor_prefixed_param_phan`
-  (ADR-0030 conformance entry 1, tool-tag scope) and the two
-  declaration-coherence cases,
+  (ADR-0030) — zero absent-machinery fails. **Not met today**, and the
+  distance grew because the suite did. At the 2026-08-26 measurement
+  Steins passes 216 of 230 automated cases. Four fails are accounted
+  for: three registered standing refusals — `phpdoc_advanced_vendor_prefixed_param_phan`
+  (entry 1, tool-tag scope) and the two declaration-coherence cases
   `phpdoc_advanced_param_typehint_nullable_mismatch` and its
   `…_array_nullable_mismatch` variant (entry 2, a refusal PHPStan
-  shares). The other two are absent machinery, which is what the
-  criterion actually gates on, and they name exactly two capabilities.
-  The generics family is down to one leg: template bounds
-  read as upper-bound contracts (issue #293) took
-  `generics_template_bound_array`, offset-read breadth (issue #288)
-  took `regressions_list_destructure_string_key`, and type arguments on
-  inheritance edges (issue #294, under the ADR-0032 amendment) took
-  `generics_extends_implements`. What remains of that
-  family is carry through a variable binding
-  with its sweep (issue #295) for `assertions_this_out_self_out` — which
-  fails on the generics expectation, not on the `@…-self-out`
-  tag its name advertises. The second capability is a `resource` value
-  domain for `native_types_resource_argument`, the one absent-machinery
-  fail already registered, as the honest deferral in entry 4. No fail is an unregistered intentional
-  divergence, and none is a defect — every one is a silence, not a
-  wrong answer. The criterion closes when those two capabilities
-  land; the ceiling is then 211/214, set by the three refusals.
+  shares) — plus `native_types_resource_argument`, the `resource`
+  value domain deferred as entry 4. The generics leg this criterion
+  used to name **closed**: `assertions_this_out_self_out` passes, after
+  template bounds read as upper-bound contracts (#293), offset-read
+  breadth (#288), type arguments off inheritance edges (#294) and carry
+  through a variable binding (#295) took the family's other cases.
+  The remaining ten fails arrived with cases the suite added after
+  2026-08-09 and are not yet triaged into capabilities; they cluster in
+  narrowing (`regressions_class_string_negative_narrowing`,
+  `regressions_object_property_discriminant_narrowing`,
+  `regressions_string_narrowing_assert_if_true`,
+  `assertions_array_key_exists_key_narrowing` — the M1 gap-2 territory),
+  in properties (`properties_uninitialized_read`,
+  `properties_promoted_property_hook_body`), and in
+  `phpdoc_advanced_member_tag_undefined_type`. Triaging them into named
+  capabilities, the way the previous batch was, is the next step on this
+  criterion. No fail is an unregistered intentional divergence, and none
+  is a defect — every one is a silence, not a wrong answer.
 - fp-gate green over the full corpus; every tripwire movement triaged
   verbatim (5-sample minimum per class).
 - Issue #5 (the template-shadow FP) closed. Issues #1–4 (the template
@@ -329,28 +339,52 @@ ADR-0092's frozen generations land. (This milestone was rewritten
 2026-08-25 when ADR-0092 superseded the salsa-decomposition plan; the
 prior text is in history.)
 
-Work: perf harness under xtask (cold/warm, per-corpus, carrying the
-warm ≡ cold differential oracle); generation identity and
-candidate-then-publish (ADR-0092 §2); the Composer-package universe
-partition, reverse-closure invalidation, and per-generation global
-merges (§3); per-package artifacts — symbol shards, per-declaration
-summaries, trace-IR file shards, recorded fold tables (§2, §4);
-summary-seeded re-runs of the effect and throw fixpoints and the dam
-(§5); package-parallel generation builds; the MCP server resident over
-published generations.
+Work — **landed 2026-08-25/26**, tracked on issue #493: the perf harness
+with the warm ≡ cold oracle and the `--paranoid` verifier; generation
+identity and candidate-then-publish (§2); the Composer-package
+partition, reverse-closure invalidation and per-generation global merges
+(§3); per-package artifacts — symbol shards, contracts, per-file trace
+IR, per-declaration own-rows and walk blocks (§2, §4); the fold table as
+one generation-level recorded input (§4); the warm lifecycle and walk
+skipping (§5); a compact binary payload codec; artifact sharing between
+generations, and a cache's durability posture. The cache is now **how `steins check`
+runs** (#525, owner decision 2026-08-26): on by default, `--no-cache` to
+opt out, silent — a default run's output is byte-identical to what it was
+before the series — and the fp-gate now analyzes every corpus project
+twice through the orchestrator, cold then warm, requiring the two finding
+sets to match. **Still open**: bounding the store, which nothing prunes
+today (#529, and it should land before the next release); parallelism
+re-scoped by measurement from the generation build to `check_units`'
+per-file loop (#490); and the MCP server resident over published
+generations (#491), which still re-analyzes from scratch per call.
 
 Exit criteria:
 
 - Cold full-run within 10% of the pre-persistence batch time (the
-  persistence layer must not tax CI).
+  persistence layer must not tax CI). **Met** — cold reads no artifact,
+  and the measured cold path is unmoved.
 - Warm re-check after a single-file edit on the ~30k-file first-party
   scale: ≤ 2s p95 (provisional — the harness sets the final number
   from measured baselines, and the target is recorded in the harness,
-  not here).
+  not here). **Not met.** At 6,670 files a zero-walk rebuild is 1.41s,
+  which straight-lines to roughly 6s at 30k. Everything the edit reaches
+  is now proportional to the edit; what is left scales with the universe
+  (capture, and the phases #516/#519/#521 have been working down).
+  Judging this honestly needs a real first-party tree at that scale — a
+  synthetic multiple of the corpus measures a different shape, and once
+  measured one wrong (issue #523's retraction).
 - Warm ≡ cold: a warm generation's findings are byte-identical to a
   cold build of the same tree, pinned as a differential gate in the
-  harness (ADR-0092 §5).
+  harness (ADR-0092 §5). **Met and pinned.** The `--paranoid` verifier
+  additionally grades every file the affected set *would* have skipped
+  against a fresh walk of it; tens of thousands of such grades across
+  five corpus targets and every seeded edit shape have come back
+  byte-identical. Its limit is worth stating: it proves the answer, not
+  the reasoning, so a missed dependency whose findings happen to agree
+  passes — which is how two closure holes reached #515 unnoticed.
 - An unchanged vendor tree costs no vendor re-analysis on a warm run.
+  **Met** — an unmoved package neither parses nor walks, and #520 shares
+  its artifact rather than rewriting it.
 
 ### M6 — LSP preview
 
@@ -473,7 +507,11 @@ them.
   filter exist uncommitted in the user's php-typing-conformance
   working tree; committing is theirs. Affects M1 measurement
   convenience only.
-- **G5 — this roadmap's order.** M4-before-M5 (knowledge before
-  incrementality) is the recommendation, on the grounds that packs
-  move checker usefulness while decomposition moves only latency;
-  reversible on the user's call.
+- **G5 — this roadmap's order — OVERTAKEN BY EVENTS (2026-08-26).**
+  The recommendation was M4 before M5, on the grounds that packs move
+  checker usefulness while decomposition moves only latency. M5 ran
+  first anyway: ADR-0092 landed as one twenty-two-PR series and most of
+  the milestone is done. The reasoning behind the recommendation was
+  not wrong and still applies to what is left — M4 is now the larger
+  open milestone, and the remaining M5 items (#490, #491, #525) are
+  bounded.
