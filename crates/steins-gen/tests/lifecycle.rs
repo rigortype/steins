@@ -44,10 +44,14 @@ impl TempProject {
         self.dir.join(".steins").join("gen")
     }
 
+    /// Every name under `gen/` except `.lock` — the store's lock file (issue
+    /// #491) exists from the first open onward, so listing it would restate a
+    /// constant in every layout assertion.
     fn gen_entries(&self) -> Vec<String> {
         let mut names: Vec<String> = std::fs::read_dir(self.gen_root())
             .unwrap()
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n != ".lock")
             .collect();
         names.sort();
         names
@@ -321,9 +325,19 @@ fn an_absent_current_makes_every_generation_unreachable() {
     assert!(matches!(store.generation(&published), Err(Miss::AbsentGeneration)));
 }
 
+/// A crash simulated with `mem::forget` leaks the candidate's marker flock
+/// inside this very process, where a real crash has the kernel release it at
+/// process exit; re-creating the marker's inode sheds the leaked lock and
+/// leaves exactly what a dead process would have (issue #491).
+fn shed_leaked_marker_lock(marker: &Path) {
+    let bytes = std::fs::read(marker).unwrap();
+    std::fs::remove_file(marker).unwrap();
+    std::fs::write(marker, bytes).unwrap();
+}
+
 /// The torn-write rule: a candidate that never published — its in-progress
-/// marker still down — is swept wholesale at the next open, and what was
-/// published stays untouched.
+/// marker still down, its owning process dead — is swept wholesale at the
+/// next open, and what was published stays untouched.
 #[test]
 fn torn_candidate_is_swept_at_startup() {
     let project = TempProject::new("torn");
@@ -343,6 +357,7 @@ fn torn_candidate_is_swept_at_startup() {
         project.gen_root().join(&torn[0]).join("in-progress").exists(),
         "the marker is down while unpublished"
     );
+    shed_leaked_marker_lock(&project.gen_root().join(&torn[0]).join("in-progress"));
 
     let store = Store::open(&project.dir).unwrap();
     assert_eq!(project.gen_entries(), published_entries(&published));
@@ -618,10 +633,10 @@ fn a_torn_candidate_that_adopted_leaves_its_source_intact() {
     // keeps its Drop from tidying up, which is exactly a torn state on disk.
     std::mem::forget(candidate);
     drop(source);
-    assert!(
-        project.gen_entries().iter().any(|n| n.starts_with(".candidate-")),
-        "the torn candidate is on disk before recovery"
-    );
+    let torn: Vec<String> =
+        project.gen_entries().iter().filter(|n| n.starts_with(".candidate-")).cloned().collect();
+    assert_eq!(torn.len(), 1, "the torn candidate is on disk before recovery");
+    shed_leaked_marker_lock(&project.gen_root().join(&torn[0]).join("in-progress"));
 
     let store = Store::open(&project.dir).unwrap();
     assert_eq!(project.gen_entries(), published_entries(&published));
@@ -653,4 +668,60 @@ fn the_stores_budget_bounds_artifact_reads() {
         current.artifact(&pkg("__first_party__")),
         Err(Miss::OverBudget { ceiling: 512, .. })
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Candidate liveness (issue #491)
+// ---------------------------------------------------------------------------
+
+/// A live build in another process survives a concurrent open's sweep. The
+/// [`Candidate`] holds the marker's flock; the sweep try-locks the marker
+/// through a fresh `File::open`, which is its own open file description, so
+/// the refusal is observable even within one process — no child to spawn.
+#[test]
+fn a_live_candidates_build_survives_a_concurrent_open() {
+    let project = TempProject::new("live-candidate");
+    let store = Store::open(&project.dir).unwrap();
+    let sources = sample_sources(&project);
+    let mut candidate = store.begin(id_for(&sources, "v1"), vec![sources]).unwrap();
+    candidate.write_artifact(&pkg("__first_party__"), &artifact(b"mid-build")).unwrap();
+
+    // The concurrent run — a second process, in effect — opens and sweeps.
+    Store::open(&project.dir).unwrap();
+
+    let alive: Vec<String> =
+        project.gen_entries().iter().filter(|n| n.starts_with(".candidate-")).cloned().collect();
+    assert_eq!(alive.len(), 1, "the in-flight build was not distinguishable from an abandoned one");
+    candidate.abort();
+}
+
+/// A candidate whose owner died — marker on disk, flock long released with
+/// its process — is the abandoned case, and it goes.
+#[test]
+fn an_orphaned_candidate_is_swept() {
+    let project = TempProject::new("orphaned-candidate");
+    Store::open(&project.dir).unwrap();
+    let dir = project.gen_root().join(".candidate-orphan");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("in-progress"), "a1".repeat(32)).unwrap();
+    std::fs::write(dir.join("half.pkg"), b"half-written").unwrap();
+
+    Store::open(&project.dir).unwrap();
+    assert!(!dir.exists(), "an unlocked marker is proof of death, and the candidate goes");
+}
+
+/// A candidate-shaped directory with no marker at all offers no liveness
+/// verdict, and the sweep declines rather than guesses: stale bytes cost less
+/// than someone's build.
+#[test]
+fn a_markerless_candidate_directory_is_left_alone() {
+    let project = TempProject::new("markerless-candidate");
+    Store::open(&project.dir).unwrap();
+    let dir = project.gen_root().join(".candidate-torn");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("half.pkg"), b"half-written").unwrap();
+
+    Store::open(&project.dir).unwrap();
+    assert!(dir.is_dir(), "no marker means no verdict, and the sweep must decline");
+    assert_eq!(std::fs::read(dir.join("half.pkg")).unwrap(), b"half-written");
 }
