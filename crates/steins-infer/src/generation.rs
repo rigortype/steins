@@ -6,14 +6,32 @@
 //! **What the warm path reuses, and why it is sound.** Two layers, landed in
 //! that order.
 //!
-//! *Trees* (slice A). A package whose freshly captured source fingerprint
-//! matches the one stored in its artifact loads its lowered [`SourceTree`]s
-//! from the `trace` section and its symbol shard from the `symbols` section
-//! instead of re-parsing — the 45–57% cost `docs/agents/profiling.md` names.
-//! The fingerprint is blake3 over the captured bytes and parsing is
-//! deterministic, so a loaded tree *is* the reparse; everything downstream
-//! recomputes from those trees exactly as a cold run recomputes from freshly
-//! parsed ones.
+//! *Trees* (slice A, made per file by issue #512). A file whose captured
+//! content fingerprint matches the one its artifact row carries loads its
+//! lowered [`SourceTree`] from the `trace` section instead of re-parsing — the
+//! 45–57% cost `docs/agents/profiling.md` names. The fingerprint is blake3
+//! over the captured bytes and parsing is deterministic, so a loaded tree *is*
+//! the reparse; everything downstream recomputes from those trees exactly as a
+//! cold run recomputes from freshly parsed ones.
+//!
+//! The gate is per **file**, not per package, because the `trace` section is:
+//! it is a directory of independently addressable payloads, and a warm run
+//! already reads exactly the ones it wants. The package's own fingerprint
+//! survives as a *shortcut* — when it matches, every file of the package is
+//! unmoved and no row need be consulted — and the per-file fingerprint is the
+//! one the `summaries` rows already carry, so "which files changed" has one
+//! spelling that the load gate, the name delta and the walk plan all read (one
+//! predicate, `unmoved_rows`, is what all three call). A package with no
+//! matching artifact still parses everything, and so does any file whose
+//! stored fingerprint cannot be established.
+//!
+//! A package can therefore be genuinely **mixed** — some files loaded, some
+//! parsed — which the [`PackageReport`] disposition names and which forbids
+//! two economies the all-or-nothing gate could take: the persisted shard
+//! cannot serve verbatim (its sites are universe slots and its symbols are the
+//! *old* file's, so a package with any parsed file rebuilds its shard from the
+//! trees in hand — no reparse either way), and the artifact cannot be
+//! republished byte-for-byte.
 //!
 //! *Walks* (slice B). A file whose walk block nothing could have changed
 //! replays that block from the `summaries` section instead of walking. What
@@ -123,9 +141,10 @@ use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
 
 /// The section holding the package's provenance record: a JSON object with the
 /// analyzer version that built the artifact and the package's source
-/// fingerprint ([`SourceInventory::fingerprint`], hex). The warm path's whole
-/// reuse decision reads this section: a fingerprint match against the fresh
-/// capture licenses the load, anything else reparses.
+/// fingerprint ([`SourceInventory::fingerprint`], hex). The analyzer version
+/// gates the package's whole load; the fingerprint is the shortcut that says
+/// *every* file is unmoved, and when it does not match the load falls to the
+/// per-file gate rather than to reparsing the package.
 pub const SOURCES_SECTION: &str = "sources";
 
 fn sources_section() -> SectionName {
@@ -320,8 +339,20 @@ pub struct PackageReport {
     pub loaded: usize,
     /// Files re-parsed from source this run.
     pub parsed: usize,
-    /// Why, in one word ("loaded", "parsed (sources changed)", …).
+    /// Why, in one word: `"loaded"` (every file came from the artifact),
+    /// `"mixed (…)"` (issue #512 — some did and some did not, which is what an
+    /// edit inside a package looks like), or `"parsed (…)"` (none did, and the
+    /// parenthesis says why the artifact could not be read from at all).
     pub disposition: &'static str,
+}
+
+impl PackageReport {
+    /// Whether this package both loaded and parsed — the case the per-file
+    /// gate (issue #512) added to the vocabulary.
+    #[must_use]
+    pub fn is_mixed(&self) -> bool {
+        self.loaded > 0 && self.parsed > 0
+    }
 }
 
 /// What the fold table did this run (ADR-0092 §4 through #500's transport).
@@ -414,12 +445,24 @@ struct PkgState {
     /// Whether every persisted `(path, slot)` matches this run's universe, so
     /// the artifact's raw bytes may be copied into the next candidate.
     slots_stable: bool,
+    /// Whether the package's *whole* source fingerprint matched the published
+    /// one — that no file of it was added, removed or edited.
+    ///
+    /// This, and never `parsed == 0`, is what says a package contributes
+    /// nothing to the name delta. The per-file gate (issue #512) separated the
+    /// two: a package that lost a file has every *surviving* file loadable, so
+    /// it can parse nothing at all while the names of the file it lost are
+    /// gone from the universe — and those names must reach the delta, or the
+    /// callers that named them replay a stale absence.
+    sources_match: bool,
     /// A miss forced the reparse (as opposed to an expected change) — the
     /// republish-even-when-current trigger.
     degraded: bool,
 }
 
-/// Why a package did not load from the published generation.
+/// Why a package loaded **no** file at all from the published generation.
+/// A package that loaded some of its files and parsed the rest is not a
+/// refusal — it reports one of the `mixed` dispositions instead.
 enum LoadRefusal {
     NoGeneration,
     NotPublished,
@@ -440,17 +483,34 @@ impl LoadRefusal {
     }
 }
 
-/// What a successful load carries out of the artifact.
+/// What a load carries out of the artifact: the trees it could take, and the
+/// slots the caller must parse instead.
 struct LoadedPkg {
-    /// `(universe slot, tree)` for every file of the package.
+    /// `(universe slot, tree)` for the files whose own fingerprint matched.
     trees: Vec<(usize, SourceTree)>,
-    /// Whether every persisted `(path, slot)` matches this run's universe. It
-    /// is also the licence to serve the *old* shard verbatim as this run's:
-    /// the shard's sites are universe slots, so it may only be reused when
-    /// every slot still names the same file. [`load_trees`] refuses the load
-    /// outright when the slots are stable and the shard did not decode, so the
-    /// caller may take the old shard on this bit alone.
+    /// The package's other slots, in slot order: a file whose bytes moved, or
+    /// one whose stored tree could not be established. The caller parses them
+    /// — [`load_trees`] never sees the source text.
+    stale: Vec<usize>,
+    /// Whether every persisted `(path, slot)` matches this run's universe.
+    /// Together with an empty [`Self::stale`] it is the licence to serve the
+    /// *old* shard verbatim as this run's: the shard's sites are universe
+    /// slots and its symbols are the persisted files', so it may be reused
+    /// only when every slot still names the same file *and* every one of those
+    /// files came out of this same artifact. [`load_trees`] refuses the load
+    /// outright in exactly the case where the caller would then take the old
+    /// shard and find none, so the caller may take it on these three bits
+    /// alone.
     slots_stable: bool,
+    /// Whether the package's whole source fingerprint matched — see
+    /// [`PkgState::sources_match`], which is what reads it.
+    sources_match: bool,
+    /// How many files the artifact held a row for and still could not give a
+    /// tree: they parsed instead (a miss is cost, never meaning), and the
+    /// package republishes to repair the artifact.
+    missed: usize,
+    /// The first of those failures, for the note.
+    miss: Option<String>,
 }
 
 /// Run one generation lifecycle: open the store once, load `CURRENT` if it
@@ -533,28 +593,52 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // whose sources did not move and which therefore contributes no delta.
     let mut old_shards: Vec<Option<PackageShard>> = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let mut published = read_published(current.as_ref(), plan, &diag);
+        let mut published = read_published(current.as_ref(), plan, &diag, &contents);
         published_summaries.push(published.summaries.take());
         match published.fresh {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
+                // The old shard serves verbatim only for a package whose
+                // sources did not move at all, which took *every* one of its
+                // trees out of that same artifact, and whose slots still name
+                // the same files: a mixed package's shard would carry the
+                // pre-edit symbols of the file it just reparsed, and a package
+                // that lost one would carry the lost file's. The first
+                // conjunct is also what keeps the delta loop's reading of a
+                // taken (`None`) old shard exact.
+                let verbatim = loaded.sources_match && loaded.stale.is_empty() && slots_stable;
                 for (slot, tree) in loaded.trees {
                     tree_slots[slot] = Some(tree);
                 }
-                shards.push(if slots_stable {
+                for &slot in &loaded.stale {
+                    tree_slots[slot] = Some(SourceTree::parse(&texts[&diag[slot]]));
+                }
+                shards.push(if verbatim {
                     published
                         .old_shard
                         .take()
-                        .expect("a stable load without a decoded shard is refused")
+                        .expect("a whole stable load without a decoded shard is refused")
                 } else {
                     build_shard(plan, &tree_slots, &diag)
                 });
+                let parsed = loaded.stale.len();
+                if let Some(detail) = &loaded.miss {
+                    notes.push(format!(
+                        "package {}: {} file(s) unreadable in the artifact ({detail}); reparsed",
+                        plan.name, loaded.missed
+                    ));
+                }
                 states.push(PkgState {
-                    loaded: plan.slots.len(),
-                    parsed: 0,
-                    disposition: "loaded",
+                    loaded: plan.slots.len() - parsed,
+                    parsed,
+                    disposition: match (parsed, loaded.missed) {
+                        (0, _) => "loaded",
+                        (_, 0) => "mixed (changed files reparsed)",
+                        _ => "mixed (artifact miss)",
+                    },
                     slots_stable,
-                    degraded: false,
+                    sources_match: loaded.sources_match,
+                    degraded: loaded.missed > 0,
                 });
             }
             Err(refusal) => {
@@ -571,6 +655,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                     parsed: plan.slots.len(),
                     disposition: refusal.disposition(),
                     slots_stable: false,
+                    // A refused load establishes nothing about the sources, so
+                    // the package answers for its whole old and new key sets.
+                    sources_match: false,
                     degraded,
                 });
             }
@@ -598,12 +685,18 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // edit rather than to the package. The one member with no site to answer
     // for it — a package's ambiguity set — rides a changed package wholesale;
     // `PackageShard::contributed_names_from` says why.
+    //
+    // "Did not move" is the package's own source fingerprint and never "parsed
+    // nothing" (issue #512, `PkgState::sources_match`): under the per-file gate
+    // a package that *lost* a file loads every survivor and parses nothing at
+    // all, while the names the lost file declared are gone from the universe
+    // and must reach the delta.
     let now: HashMap<&str, usize> =
         diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
     let mut delta: HashSet<String> = HashSet::new();
     let mut delta_known = true;
     for (i, plan) in plans.iter().enumerate() {
-        if states[i].parsed == 0 && !states[i].degraded {
+        if states[i].sources_match && !states[i].degraded {
             continue;
         }
         match &old_shards[i] {
@@ -617,8 +710,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 // A name whose disappearance cannot be seen cannot be reasoned
                 // about, so the sound answer is to walk everything. (The other
                 // reading of `None` — the shard was taken to serve this run
-                // verbatim — cannot reach here: taking it requires a load that
-                // parsed nothing and did not degrade, which this loop skips.)
+                // verbatim — cannot reach here: taking it requires a load
+                // whose sources matched and which did not degrade, which is
+                // exactly what this loop skips.)
                 delta_known = false;
                 notes.push(format!(
                     "package {}: its old symbols are unreadable; walking every file",
@@ -892,7 +986,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
 /// caller's descent-provenance message, so *any* byte moving makes the file
 /// changed. It is also why a **changed package's unchanged files** can still
 /// replay — the package fingerprint says the package moved, the row says which
-/// of its files did.
+/// of its files did — and, since issue #512, why they can still *load*: one
+/// predicate, [`unmoved_rows`], answers both questions, so the load gate and
+/// the name delta cannot disagree about which files moved.
 fn block_index<'a>(
     plans: &[Plan],
     diag: &[String],
@@ -902,17 +998,40 @@ fn block_index<'a>(
     let mut out: Vec<Option<(usize, &FileWalk)>> = vec![None; diag.len()];
     for (package, (plan, summaries)) in plans.iter().zip(summaries).enumerate() {
         let Some(summaries) = summaries else { continue };
-        let rows: HashMap<&str, (&Fingerprint, &FileWalk)> =
-            summaries.rows().map(|(path, content, walk)| (path, (content, walk))).collect();
-        for &slot in &plan.slots {
-            if let Some((content, walk)) = rows.get(diag[slot].as_str())
-                && **content == contents[slot]
-            {
-                out[slot] = Some((package, walk));
-            }
+        for (slot, walk) in unmoved_rows(plan, diag, contents, summaries) {
+            out[slot] = Some((package, walk));
         }
     }
     out
+}
+
+/// One package's persisted rows whose file did not move: `(universe slot,
+/// block)` for every slot of `plan` the section holds a row for under the
+/// content fingerprint this run captured.
+///
+/// This is the project's one spelling of "this file is unchanged". Two callers
+/// read it and must never diverge: [`block_index`], which turns its complement
+/// into the `changed` set the name delta and the affected set are computed
+/// from, and [`read_published`], which hands the slots to [`load_trees`] as
+/// the licence to load their trees rather than parse them (issue #512). The
+/// fingerprint compared is the one the `summaries` row already carries — there
+/// is deliberately no second per-file fingerprint anywhere, because two of
+/// them could disagree.
+fn unmoved_rows<'a>(
+    plan: &Plan,
+    diag: &[String],
+    contents: &[Fingerprint],
+    summaries: &'a StoredSummaries,
+) -> Vec<(usize, &'a FileWalk)> {
+    let rows: HashMap<&str, (&Fingerprint, &FileWalk)> =
+        summaries.rows().map(|(path, content, walk)| (path, (content, walk))).collect();
+    plan.slots
+        .iter()
+        .filter_map(|&slot| {
+            let (content, walk) = rows.get(diag[slot].as_str())?;
+            (**content == contents[slot]).then_some((slot, *walk))
+        })
+        .collect()
 }
 
 /// Everything the published generation can say about one package: the old
@@ -925,7 +1044,8 @@ struct Published {
     old_shard: Option<PackageShard>,
     /// The package's persisted walk blocks, read whatever the source
     /// fingerprint said: a changed package's *unchanged* files may still
-    /// replay, since each row carries its own file's content hash.
+    /// replay — and, since issue #512, still load — because each row carries
+    /// its own file's content hash.
     summaries: Option<StoredSummaries>,
     fresh: Result<LoadedPkg, LoadRefusal>,
 }
@@ -966,6 +1086,7 @@ fn read_published(
     generation: Option<&Generation>,
     plan: &Plan,
     diag: &[String],
+    contents: &[Fingerprint],
 ) -> Published {
     let Some(generation) = generation else {
         // A cold run: the published universe is empty, which is a *known*
@@ -986,13 +1107,35 @@ fn read_published(
     // sources moved, and it is the verbatim shard when they did not.
     let old_shard = read_shard(&mut reader).ok();
     // The walk blocks are never a load refusal: the trees are in hand either
-    // way, and a package without them simply walks every file.
+    // way, and a package without them simply walks every file. They are read
+    // *before* the trees because their rows are also the per-file provenance
+    // gate (issue #512) — which files of this package the load may take.
     let summaries = read_summaries(&mut reader).ok();
-    let fresh = load_trees(&mut reader, plan, diag, old_shard.is_some());
+    let unmoved: HashSet<usize> = summaries
+        .as_ref()
+        .map(|s| unmoved_rows(plan, diag, contents, s).into_iter().map(|(slot, _)| slot).collect())
+        .unwrap_or_default();
+    let fresh = load_trees(&mut reader, plan, diag, &unmoved, old_shard.is_some());
     Published { old_shard, summaries, fresh }
 }
 
-/// The load proper: the provenance gate, then the per-file trace shards.
+/// The load proper: the provenance gate, then the per-file trace payloads.
+///
+/// The gate is per file (issue #512). `unmoved` is the set of this package's
+/// slots whose persisted `summaries` row carries the content fingerprint this
+/// run captured; a file in it loads its tree, and every other file of the
+/// package goes into [`LoadedPkg::stale`] for the caller to parse. The
+/// package-level fingerprint stays as the shortcut it always was: when it
+/// matches, *every* file is unmoved by construction and no row is consulted at
+/// all — so a package whose `summaries` section is absent or will not decode
+/// still loads whole, exactly as it did before this gate existed.
+///
+/// Sound-conservative in every direction: a file with no row, a row that does
+/// not match, a path the trace directory does not list, and a payload that
+/// will not decode all parse. A package that ends up loading *nothing* is
+/// reported as the refusal it would have been before, so the disposition
+/// vocabulary keeps its old spellings for the old cases.
+///
 /// `have_shard` says whether the artifact's symbols section decoded — the
 /// caller keeps the shard itself, because it is the delta's old side as much
 /// as it is the verbatim shard.
@@ -1000,6 +1143,7 @@ fn load_trees(
     reader: &mut steins_gen::ArtifactReader,
     plan: &Plan,
     diag: &[String],
+    unmoved: &HashSet<usize>,
     have_shard: bool,
 ) -> Result<LoadedPkg, LoadRefusal> {
     let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
@@ -1007,7 +1151,10 @@ fn load_trees(
     if analyzer != analyzer_version() {
         return Err(LoadRefusal::AnalyzerMoved);
     }
-    if stored != plan.fingerprint {
+    // The whole-package shortcut, and the one case where a file may load
+    // without a row of its own to vouch for it.
+    let whole = stored == plan.fingerprint;
+    if !whole && unmoved.is_empty() {
         return Err(LoadRefusal::Changed);
     }
     let trace = TraceIndex::open(reader).map_err(miss)?;
@@ -1015,21 +1162,44 @@ fn load_trees(
         trace.files().map(|(path, slot)| (path.to_owned(), slot)).collect();
     let mut slots_stable = persisted.len() == plan.slots.len();
     let mut loaded: Vec<(usize, SourceTree)> = Vec::with_capacity(plan.slots.len());
+    let mut stale: Vec<usize> = Vec::new();
+    let mut missed = 0usize;
+    let mut first_miss: Option<String> = None;
     for &slot in &plan.slots {
         let path = diag[slot].as_str();
         if persisted.get(path) != Some(&slot) {
             slots_stable = false;
         }
-        let tree = trace.read_tree(reader, path).map_err(miss)?;
-        loaded.push((slot, tree));
+        if !whole && !unmoved.contains(&slot) {
+            stale.push(slot);
+            continue;
+        }
+        match trace.read_tree(reader, path) {
+            Ok(tree) => loaded.push((slot, tree)),
+            Err(m) => {
+                // This file alone: the directory and every other payload still
+                // serve, and the caller parses this one.
+                missed += 1;
+                first_miss.get_or_insert_with(|| m.to_string());
+                stale.push(slot);
+            }
+        }
     }
+    if loaded.is_empty() {
+        return Err(first_miss.map_or(LoadRefusal::Changed, LoadRefusal::Miss));
+    }
+    // `whole` is a statement about the sources, not about what was loaded: a
+    // per-file miss can reparse a file of a package whose bytes never moved.
+    let sources_match = whole;
     // The shard's sites are universe slots; it may only serve verbatim when
-    // every persisted slot still names the same file. Otherwise the caller
-    // rebuilds it from the loaded trees — still no reparse.
-    if slots_stable && !have_shard {
+    // the sources did not move, every persisted slot still names the same
+    // file, and nothing was reparsed — the caller's `verbatim`, spelled the
+    // same way here so its `expect` cannot fire. Otherwise the caller rebuilds
+    // it from the trees in hand — still no reparse.
+    if sources_match && stale.is_empty() && slots_stable && !have_shard {
         return Err(LoadRefusal::Miss("symbols section is not a shard".to_owned()));
     }
-    Ok(LoadedPkg { trees: loaded, slots_stable })
+    Ok(LoadedPkg { trees: loaded, stale, slots_stable, sources_match, missed, miss: first_miss })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.
@@ -1060,8 +1230,9 @@ fn publish(
 ) -> Result<String, String> {
     let mut candidate = store.begin(id, inventories).map_err(|e| format!("begin: {e}"))?;
     for ((plan, state), shard) in plans.iter().zip(states).zip(shards) {
-        // An untouched package with stable slots republishes its exact bytes;
-        // anything else reassembles the sections from the trees in hand.
+        // A package that parsed nothing and kept its slots republishes its
+        // exact bytes; anything else — a mixed package included — reassembles
+        // the sections from the trees in hand.
         let copied = (state.parsed == 0 && state.slots_stable)
             .then(|| current.and_then(|generation| copy_artifact(generation, plan)))
             .flatten();
@@ -1143,13 +1314,21 @@ impl Summaries<'_> {
 
 /// Copy an untouched package's artifact bytes section-for-section into a new
 /// builder. `None` on any read failure — the caller rebuilds from trees.
+///
+/// The three source-derived sections are copied; the provenance record is
+/// written fresh from this run's own fingerprint rather than copied, so that a
+/// package that loaded every file one row at a time (issue #512) cannot
+/// republish a fingerprint describing a different capture. For the ordinary
+/// caller — a package whose fingerprint matched whole — the fresh record is
+/// byte-identical to the copied one.
 fn copy_artifact(generation: &Generation, plan: &Plan) -> Option<ArtifactBuilder> {
     let mut reader = generation.artifact(&plan.name).ok()?;
     let mut builder = ArtifactBuilder::new();
-    for section in [symbols_section(), contracts_section(), trace_section(), sources_section()] {
+    for section in [symbols_section(), contracts_section(), trace_section()] {
         let bytes = reader.section(&section).ok()?;
         builder.section(section, bytes).ok()?;
     }
+    builder.section(sources_section(), sources_payload(&plan.fingerprint)).ok()?;
     Some(builder)
 }
 

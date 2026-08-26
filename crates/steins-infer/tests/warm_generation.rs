@@ -392,7 +392,9 @@ fn a_first_party_edit_replays_an_unrelated_file_and_walks_the_caller() {
     assert_eq!(cold.report.walk.walked, files.len());
 
     // Change `helper.php`'s body only: the root package's fingerprint moves,
-    // so all three of its files reload — but only helper.php's bytes moved.
+    // so the package is no longer reusable whole — but only helper.php's bytes
+    // moved, so only helper.php re-parses (issue #512) and only helper.php is
+    // "changed" for the delta.
     rewrite(
         &files[1],
         "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
@@ -677,6 +679,137 @@ fn an_edit_replays_a_sibling_naming_only_unmoved_declarations() {
         canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
         "a replayed file diverged from a fresh cold run"
     );
+}
+
+/// Issue #512: the provenance gate is per **file**, so an edit to one file of
+/// a package leaves its siblings *loaded* while the edited file parses. Before
+/// the gate moved down a level this package reported `parsed == files` — one
+/// changed file refused the whole artifact and every file of the package
+/// re-parsed, which in a one-package project is the whole universe.
+#[test]
+fn an_edit_parses_the_edited_file_and_loads_its_siblings() {
+    if !spawn_or_skip("an_edit_parses_the_edited_file_and_loads_its_siblings") {
+        return;
+    }
+    let tmp = TempDir::new("per-file-load");
+    let files = write_delta_fixture(&tmp.dir);
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    assert_eq!(cold.report.packages.len(), 1, "one package is the point of this fixture");
+    assert_eq!(cold.report.packages[0].parsed, files.len(), "a cold build parses everything");
+
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
+    );
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    let pkg = &warm.report.packages[0];
+    assert_eq!(
+        (pkg.loaded, pkg.parsed),
+        (3, 1),
+        "only the edited file may re-parse; notes: {:#?}",
+        warm.report.notes
+    );
+    assert_eq!(pkg.loaded + pkg.parsed, pkg.files, "the counts must still tile the package");
+    assert!(pkg.is_mixed(), "a package that both loaded and parsed reports as mixed");
+    assert_eq!(pkg.disposition, "mixed (changed files reparsed)");
+    // And #511's tightening is undisturbed: the walk is still proportional to
+    // the edit, not to the package.
+    assert_eq!(
+        (warm.report.walk.walked, warm.report.walk.replayed),
+        (2, 2),
+        "notes: {:#?}",
+        warm.report.notes
+    );
+
+    let fresh_store = TempDir::new("per-file-load-fresh");
+    assert_eq!(
+        canon(warm.findings),
+        canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+        "a per-file load diverged from a fresh cold run"
+    );
+}
+
+/// A file **removed** from a package: every survivor loads (its own bytes did
+/// not move) and the package parses nothing at all — so the name delta cannot
+/// key on "this package parsed something". It keys on the package's own source
+/// fingerprint, which the removal moved, and the caller of the removed
+/// declaration is walked and loses its resolution.
+#[test]
+fn a_removed_file_walks_the_caller_though_the_package_parses_nothing() {
+    if !spawn_or_skip("a_removed_file_walks_the_caller_though_the_package_parses_nothing") {
+        return;
+    }
+    let tmp = TempDir::new("per-file-removal");
+    let all = write_delta_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &all);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    let names_absent = |findings: &[Diagnostic], needle: &str| {
+        findings.iter().any(|d| d.path.ends_with("sibling.php") && d.message.contains(needle))
+    };
+    assert!(!names_absent(&cold.findings, "otherFn"), "the tripwire is armed: {:#?}", cold.findings);
+
+    // `other.php` leaves the universe; `sibling.php`, which calls `otherFn()`,
+    // does not change a byte.
+    std::fs::remove_file(&all[2]).unwrap();
+    let files: Vec<PathBuf> = [&all[0], &all[1], &all[3]].into_iter().cloned().collect();
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    let pkg = &warm.report.packages[0];
+    assert_eq!(
+        (pkg.loaded, pkg.parsed),
+        (3, 0),
+        "every surviving file's own bytes are unmoved: {:#?}",
+        warm.report.notes
+    );
+    assert!(
+        names_absent(&warm.findings, "otherFn"),
+        "the removed declaration's caller replayed a stale resolution: {:#?}",
+        warm.findings
+    );
+    let fresh_store = TempDir::new("per-file-removal-fresh");
+    assert_eq!(
+        canon(warm.findings),
+        canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+        "a removal diverged from a fresh cold run"
+    );
+}
+
+/// The mixed package publishes an artifact the *next* run can load whole: the
+/// rebuilt shard, trace and provenance record describe the trees in hand, not
+/// the ones the edit invalidated. A second warm run over the settled tree is
+/// the check that a mixed publish left nothing stale behind.
+#[test]
+fn a_mixed_package_republishes_an_artifact_that_loads_whole() {
+    if !spawn_or_skip("a_mixed_package_republishes_an_artifact_that_loads_whole") {
+        return;
+    }
+    let tmp = TempDir::new("per-file-republish");
+    let files = write_delta_fixture(&tmp.dir);
+    run(&tmp.dir, &tmp.dir, &files);
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
+    );
+    let mixed = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!((mixed.report.packages[0].loaded, mixed.report.packages[0].parsed), (3, 1));
+
+    let settled = run(&tmp.dir, &tmp.dir, &files);
+    let pkg = &settled.report.packages[0];
+    assert_eq!(
+        (pkg.loaded, pkg.parsed),
+        (pkg.files, 0),
+        "the mixed run's artifact did not serve the next run: {:#?}",
+        settled.report.notes
+    );
+    assert_eq!(pkg.disposition, "loaded");
+    assert_eq!(settled.report.walk.walked, 0, "notes: {:#?}", settled.report.notes);
+    let fresh_store = TempDir::new("per-file-republish-fresh");
+    assert_eq!(canon(settled.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
 }
 
 /// The other direction: an edit to a file **nothing names** walks that file

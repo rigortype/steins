@@ -23,7 +23,13 @@
 //! * **F's own tree** — `changed_files`. Change is *file-level, not semantic*:
 //!   a descent diagnostic embeds the callee's position ("bound at f(1) call at
 //!   path line N"), so a file whose lines merely moved changes a caller's
-//!   message. Any byte moving in a file makes it changed.
+//!   message. Any byte moving in a file makes it changed. Since issue #512 the
+//!   same predicate — the file's captured content fingerprint against the one
+//!   its persisted row carries — also decides whether F's *tree* is loaded or
+//!   re-parsed. That is a cost decision on a value a loaded tree and a fresh
+//!   parse agree on byte for byte, so it leaves everything below untouched:
+//!   the set this module is handed is computed from the same one predicate,
+//!   never from which files happened to be parsed.
 //! * **The merged index** (every absence verdict, every resolution) — the
 //!   `delta_names` leg, whose completeness argument is *The name delta* below.
 //! * **Other files' trees**, through the binding descent — the call-graph leg.

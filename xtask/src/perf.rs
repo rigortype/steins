@@ -449,6 +449,9 @@ struct WarmRun {
     persist_ms: f64,
     loaded: usize,
     parsed: usize,
+    /// Packages that both loaded and parsed — the shape of an edit inside a
+    /// package under the per-file provenance gate (issue #512).
+    mixed: usize,
     /// The walk split of issue #489 slice B: files walked vs files that
     /// replayed a persisted block instead.
     walked: usize,
@@ -586,6 +589,7 @@ fn measure_warm_in_store(
             .packages
             .iter()
             .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
+        let mixed = outcome.report.packages.iter().filter(|pkg| pkg.is_mixed()).count();
         let t = outcome.report.timings;
         let w = &outcome.report.walk;
         divergences.extend(w.divergences.iter().map(ToString::to_string));
@@ -597,6 +601,7 @@ fn measure_warm_in_store(
             persist_ms: t.persist_ms,
             loaded,
             parsed,
+            mixed,
             walked: w.walked,
             replayed: w.replayed,
             would_skip: w.would_skip,
@@ -625,12 +630,17 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
     for (i, run) in w.warm.iter().enumerate() {
         println!(
-            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
+            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
             i + 1,
             run.capture_ms,
             run.trees_ms,
             run.loaded,
             run.parsed,
+            if run.mixed == 0 {
+                String::new()
+            } else {
+                format!(", {} package(s) partly reused", run.mixed)
+            },
             run.analyze_ms,
             run.walked,
             run.replayed,

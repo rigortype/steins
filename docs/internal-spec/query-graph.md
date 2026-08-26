@@ -101,10 +101,14 @@ generations on disk, not a finer query DAG:
 
 - **Cross-run reuse** is the generation store (`<project>/.steins/gen/`), built
   and read by `steins_infer::generation_check` behind
-  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489). A package whose captured
-  source fingerprint matches its artifact loads its lowered trees and its shard
-  instead of re-parsing (slice A), and a file nothing could have changed
-  replays its persisted walk instead of walking (slice B, below).
+  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489). A file whose captured
+  content fingerprint matches its artifact row loads its lowered tree instead
+  of re-parsing (slice A, made per file by issue #512 — the package
+  fingerprint survives as the shortcut that says every file is unmoved, and a
+  package whose files fall on both sides is *mixed*: it loads what it can,
+  parses the rest, and rebuilds its shard from the trees in hand), and a file
+  nothing could have changed replays its persisted walk instead of walking
+  (slice B, below).
 - **The per-package payloads** — `symbols`, `contracts`, `trace` — live in
   `steins_db::persist` (#487); `sources` and `summaries` live in
   `steins_infer` beside the orchestrator that reads them, because their
@@ -133,10 +137,11 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
 
 ## Still open
 
-- **Per-file trace reuse inside a changed package.** The artifact's tree load
-  is gated on the package fingerprint, so one edited file still costs its whole
-  package a reparse even though the trace index is already per file. The
-  sibling of issue #510's delta tightening, and what the warm-after-edit
-  numbers now spend their time on.
+- **The call graph saturates on common method names** (issue #513). The tree
+  load and the name delta are both proportional to the edit now, so what an
+  edit costs is decided by the backwards call closure — and a file declaring a
+  method name dozens of others also declare pulls them all in. Measured on
+  nikic/PHP-Parser: editing a leaf test file walks 2 files of 341, editing one
+  that declares `enterNode` walks 337.
 - **Per-file walk parallelism** (issue #490, re-scoped to the file loop).
 - **The trace codec** (issue #504): artifacts run ~14x the analyzed source.
