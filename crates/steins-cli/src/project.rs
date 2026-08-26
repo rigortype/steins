@@ -113,13 +113,14 @@ pub(crate) fn load_project(
     LoadedProject { db, project, inputs, texts, layout }
 }
 
-/// Assemble a [`LoadedProject`] from texts already in hand — the experimental
-/// generation path (issue #489), whose sources came back from the sealed
-/// capture and whose trees are owned by the orchestrator. Builds the same salsa
-/// view [`load_project`] builds (so `--fix`'s post-check and the baseline
-/// machinery work unchanged) but triggers no parse and prints no notices: the
-/// gated caller printed the channel notices itself, and the attribution check
-/// came back from the orchestrator without forcing a salsa parse.
+/// Assemble a [`LoadedProject`] from texts already in hand — the generation
+/// path (issue #489), whose sources came back from the sealed capture and whose
+/// trees are owned by the orchestrator. Builds the same salsa view
+/// [`load_project`] builds (so `--fix`'s post-check and the baseline machinery
+/// work unchanged) but triggers no parse and prints no notices: the caller
+/// collects the channel notices itself and prints them once the run is known
+/// to have succeeded (issue #525), and the attribution check came back from
+/// the orchestrator without forcing a salsa parse.
 ///
 /// `entries` must be in the orchestrator's universe-slot order, so the salsa
 /// project and the generation analysis agree on file identity.

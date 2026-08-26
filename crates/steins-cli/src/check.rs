@@ -184,7 +184,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // both directions — the cached arm prints the boundary notices the cold
     // arm prints and nothing more, and any degradation falls through to the
     // cold arm below with stderr still untouched.
-    let gated = if no_cache {
+    let cached = if no_cache {
         None
     } else {
         crate::generation::try_generation_check(
@@ -198,7 +198,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         )
     };
 
-    let (loaded, findings, gated_trees) = match gated {
+    let (loaded, findings, cached_trees) = match cached {
         Some(run) => {
             // Collected inside the lifecycle so a fallback could print them
             // once; printed here, in the order and at the point the cold arm
@@ -236,9 +236,9 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
 
     // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
     // inline). Baseline stays here: it's the CI ratchet, this command's own
-    // argument. The gated arm supplies the orchestrator's own trees so the
+    // argument. The cached arm supplies the orchestrator's own trees so the
     // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
-    let (inline, vendor_suppressed) = match &gated_trees {
+    let (inline, vendor_suppressed) = match &cached_trees {
         Some((trees, directive_files)) => {
             // Only the files the scan can say anything about (issue #516): the
             // ones a finding names, and the ones whose text spells a directive
