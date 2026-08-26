@@ -16,7 +16,7 @@
 //! stderr — see [`crate::generation`] for why that silence is a property
 //! rather than a preference.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -198,16 +198,12 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         )
     };
 
-    let (loaded, findings, cached_trees) = match cached {
-        Some(run) => {
-            // Collected inside the lifecycle so a fallback could print them
-            // once; printed here, in the order and at the point the cold arm
-            // prints its own.
-            for notice in &run.notices {
-                errln!("steins: {notice}");
-            }
-            (run.loaded, run.findings, Some((run.trees, run.directive_files)))
-        }
+    // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
+    // inline). Baseline stays out: it's the CI ratchet, this command's own
+    // argument. The cached arm supplies the orchestrator's own trees so the
+    // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
+    let (loaded, inline, vendor_suppressed) = match cached {
+        Some(run) => crate::generation::consume_cached_run(run, &surface, vendor_diagnostics),
         None => {
             // One folder for the whole run: owns the sidecar + fold memo, so repeated
             // calls across files never re-spawn or re-fold.
@@ -229,34 +225,12 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
                 postures.warning_handler_abort,
                 postures.final_keyword,
             );
-            (loaded, findings, None)
+            let (inline, vendor_suppressed) =
+                suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
+            (loaded, inline, vendor_suppressed)
         }
     };
     let (db, project, texts) = (&loaded.db, loaded.project, &loaded.texts);
-
-    // Suppression channels, ADR-0050 §6 order (vendor → surface → policy →
-    // inline). Baseline stays here: it's the CI ratchet, this command's own
-    // argument. The cached arm supplies the orchestrator's own trees so the
-    // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
-    let (inline, vendor_suppressed) = match &cached_trees {
-        Some((trees, directive_files)) => {
-            // Only the files the scan can say anything about (issue #516): the
-            // ones a finding names, and the ones whose text spells a directive
-            // at all. Every other file's tree stays undecoded — and its
-            // absence changes nothing, because `apply_inline_ignores` reads a
-            // file for exactly two reasons and neither applies.
-            let named: HashSet<&str> = findings.iter().map(|d| d.path.as_str()).collect();
-            let pairs: Vec<(String, &SourceTree)> = trees
-                .iter()
-                .filter(|(path, _)| {
-                    named.contains(path.as_str()) || directive_files.contains(path)
-                })
-                .map(|(path, tree)| (path.clone(), &**tree))
-                .collect();
-            suppression_over(&loaded.layout, pairs, findings, &surface, vendor_diagnostics)
-        }
-        None => suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics),
-    };
 
     // Baseline file (ADR-0022): `--set-baseline`/`--baseline` name one
     // explicitly, else the default auto-loads unless `--ignore-baseline`.
