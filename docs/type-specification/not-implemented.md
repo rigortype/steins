@@ -36,7 +36,7 @@ the semantic inventory.
 | `doctor` (full report) | 0054 | The **minimal** `doctor` (ADR-0054 C3 scope — index-bound posture report, runs no emitter) has **landed**, and so has `--format json` and part of the richer ADR-0054 C4 audit: Catalog (builtin catalog pin vs. analysis version, hierarchy/foldable table sizes) and Registry totality (emittable/pending id partition) sections. Deferred: the dump-site count (waits on the unlanded D3/D4 recognizer) and `contract_touches_class`'s project-wide count (needs a second, index-only entry point the checker does not expose yet). |
 | `check --fix` fix-its | 0010 | Autofix as a first-class diagnostic payload has **landed**: a finding may carry a `Fix` (a title plus byte-span `FixEdit`s), `--format json` shows it as an additive key, and `check --fix` pours a run's fixes into one atomic plan that writes only past the ADR-0034 dual-verification post-check — a refusal is named and nothing touches disk. One family ships: deleting a committed `\PHPStan\dumpType()` / `\PHPStan\dumpPhpDocType()` statement (`debug.type`, `debug.phpdoc-type`), the remedy ADR-0053 names. Deferred: every further fix family. `debug.var-dump` carries no fix by decision, not by deferral — deleting legal working PHP is the author's call. |
 | `lsp` | 0048, roadmap M6 | Position queries are *constrained* today (replay over retention, canonical entry states, no global-ordering dependence) but not built. The flagship capability is type-directed member completion. |
-| `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop has **landed** as `steins mcp`: an MCP server on stdio with four tools (`list_transforms`, `plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate, and a plan handle scoped to the serving process. Deferred: an `annotate` tool, MCP resources and prompts, and a tool that applies a finding's `fix` payload (the payload is returned; the agent applies it). |
+| `mcp` | 0010, roadmap M7 | The agent-driven dry-run → diff → approve → apply loop has **landed** as `steins mcp`: an MCP server on stdio with four tools (`list_transforms`, `plan_transform`, `apply_plan`, `check`), plan and apply deliberately separate, and a plan handle scoped to the serving process. Deferred: an `annotate` tool, MCP resources and prompts, and a tool that applies a finding's `fix` payload (the payload is returned; the agent applies it). Also deferred, and now the costly one: the server **re-analyzes from scratch on every `tools/call`**, so the one long-lived process in the system is the one that benefits least from ADR-0092's warm path (#491). |
 | `init` / config generators | 0020 | **Refused**, not deferred — zero-config is the banner. |
 
 ### Runtime knowledge
@@ -210,15 +210,69 @@ Their types are never parsed: only the subject is.
 
 ## Engine and performance
 
-- **No cross-run persistence and no warm path.** salsa memoizes `parse`,
-  `function_index`, and a monolithic `project_index`; the check pass itself runs
-  *outside* the query graph because folding is impure (ADR-0028). Nothing of
-  inference survives a run.
-- **`project_index` is monolithic** — any file edit invalidates it and
-  everything downstream. Acceptable for a batch CLI; the recorded plan is
-  per-symbol interning, which the LSP needs (ADR-0009).
-- **No perf harness.** Full batch over the ~99.3k-file corpus is CI-viable on
-  dev hardware; there is no measured cold/warm baseline under `xtask`.
+**Cross-run persistence and the warm path have landed** (ADR-0092, the
+issue-#493 series). A run seals its sources, builds per-Composer-package
+artifacts — symbol shards, declared contracts, per-file trace IR,
+per-declaration own-rows and per-file walk blocks — and publishes them
+atomically; the next run reuses every package and every file whose content
+fingerprint is unmoved, decodes a lowered tree only where a walk reaches
+it, walks only the files an edit could reach, and answers everything else
+from persisted diagnostics. Fold results persist as one generation-level
+table keyed by engine identity (§4, over ADR-0066's replay seam).
+`project_index` shards **per package** rather than per symbol — ADR-0092
+§3 replaced ADR-0009's interning plan — with every global table recomputed
+per generation from the shards, because PHP's autoloading is not a module
+system and a symbol added in one package can move a name's answer in
+another.
+
+What is not done, and what it costs:
+
+- **The last scale criterion is unmet.** On the ten pinned corpus packages
+  (6,670 files) a cold run is 7.70s and a rebuild that walks nothing is
+  1.41s, which straight-lines to roughly 6s at the ~30k-file scale
+  ROADMAP M5 names, over its ≤2s target. Everything an edit reaches is
+  proportional to the edit; what is left — capture, and the merge and
+  fixpoint work that survives — scales with the universe.
+- **Nothing prunes old generations** (#529). A publish never removes what
+  it replaced, so a store grows by roughly one artifact set per
+  invocation — five edits to one file of nikic/PHP-Parser leave five
+  generations and 26 MB against 1.26 MB of source. Artifact sharing does
+  not save it: sharing needs an *unchanged* package, and the ordinary
+  first-party shape is one package. `doctor` makes the size visible; the
+  bound does not exist yet, and sweeping is entangled with the same
+  concurrency question #491 has to answer.
+- **The analysis itself is single-threaded.** Parallelism was re-scoped by
+  measurement (#490) from the generation build to `check_units`' per-file
+  loop, which is where the remaining walk cost is; the walk threads
+  `&mut dyn Folder` and `&mut Vec<Diagnostic>` throughout, so the
+  conversion is one sidecar per worker and per-file diagnostic sinks
+  merged at the end.
+- **The affected set is sound-conservative, and two of its legs are
+  coarse.** A file is walked when it changed, when its footprint meets a
+  name whose resolution could have moved, when it reaches a changed file
+  within the descent depth, or when a whole-universe verdict moved. The
+  call-graph leg over-approximates where a walk's answer is not available,
+  so a core-file edit still walks more than an edit to a leaf (14 files of
+  341 on nikic/PHP-Parser, against 2 for a leaf); tightening further is
+  gated on measurement, not appetite.
+- **Artifacts cost about 4.3x the source they describe** after the binary
+  codec (#504 took them from 13.7x). The residue is the lowering genuinely
+  being larger than its text — spans, resolved names, per-node vectors —
+  rather than encoding overhead, so the next lever is per-package string
+  dedup, not another codec.
+- **The perf harness exists** (`cargo xtask perf`, with `--warm`,
+  `--edits` and `--paranoid`) and carries the warm ≡ cold oracle. Its
+  `--paranoid` mode walks every file and grades each would-be skip against
+  the fresh walk — the instrument that earns every tightening of the
+  affected set. Its limit is worth stating: it proves the answer, not the
+  reasoning, so a missed dependency whose findings happen to agree passes.
+- **Whole-corpus numbers taken before 2026-08-26 are suspect.** Until
+  #524, the file walk followed symlinks out of the analyzed tree and the
+  CLI and the harness disagreed about how far — the harness saw 220,110
+  files where there were 6,670 — which invalidated one measurement badly
+  enough to need a public retraction (#523). One collector now serves
+  both, a directory link is followed only into the named roots, and
+  `doctor` names what it skipped.
 
 ## Deliberate refusals
 
