@@ -36,7 +36,7 @@ whole surface to stderr and exits `2`:
 
 ```
 $ steins
-usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
+usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>
        steins annotate [--no-php] [--format text|json] <file.php>
        steins transform <phpdoc-to-native|phpdoc-honesty|throws-envelope|effects-envelope|loop-to-array-map> [--apply] [--format text|json] <paths...>
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
@@ -117,7 +117,7 @@ Analyze a tree and report findings. This is the command you run in CI.
 
 ```
 steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
-             [--vendor-diagnostics] [--fix] [--set-baseline]
+             [--no-cache] [--vendor-diagnostics] [--fix] [--set-baseline]
              [--baseline <path>] [--ignore-baseline]
              [--no-tolerated-effects] <paths...>
 ```
@@ -127,6 +127,7 @@ steins check [--format text|json|github|sarif] [--profile <name>] [--no-php]
 | `--format text\|json\|github\|sarif` | `text`, or `github` under GitHub Actions | Output mode — see [`--format github`](#--format-github) for the auto-detection rule. |
 | `--profile <name>` | `[check] profile`, else `default` | Select the display surface — a built-in stage or one named in `steins.toml`. |
 | `--no-php` | off | Skip the PHP sidecar and run the sound subset. |
+| `--no-cache` | off | Analyze from source, ignoring and not writing `.steins/` — see [the analysis cache](#the-analysis-cache). |
 | `--vendor-diagnostics` | off | Report findings inside vendor trees too. |
 | `--fix` | off | Apply the fixes findings carry, post-check-gated — see [`--fix`](#--fix). |
 | `--baseline <path>` | `.steins-baseline.jsonl` when it exists | Locate the baseline file. |
@@ -191,6 +192,38 @@ note: running as sound subset (no PHP sidecar) — findings that require executi
 > so it does not rot on unrelated edits, and there is no `--generate-baseline`
 > spelling — the same `--baseline` flag locates the file for reading and for
 > writing, and `--set-baseline` decides which.
+
+### The analysis cache
+
+`steins check` caches its analysis in `.steins/` beside the project — the
+outermost directory a `composer.json` governs, or the analyzed tree when
+none does. A second run over an unchanged tree reuses it; a run after an
+edit reuses everything the edit could not have reached. It is on by
+default, and there is nothing to configure.
+
+Three things follow from that, and all three are deliberate:
+
+- **It never changes a finding.** A cache miss costs time and nothing else.
+  If you ever see `--no-cache` report something the default run did not,
+  that is a bug worth an issue, not a workaround.
+- **It never says anything.** No per-run note, cold or warm, and none when
+  something goes wrong either: an unwritable project, a corrupt artifact, a
+  half-written cache all fall back to analyzing from source, silently,
+  reporting exactly what a machine without a cache reports. To see what is
+  actually cached, ask [`doctor`](#doctor) — its **Generation store**
+  section shows the published generation, its package count, its size on
+  disk, and the persistent reasons a run could not use it.
+- **It does not belong in git.** Creating the store writes
+  `.steins/.gitignore` holding `*`, the way Cargo does for `target/`, so
+  this is already handled unless you delete that file.
+
+`--no-cache` analyzes from source and neither reads nor writes `.steins/`.
+It is worth reaching for in exactly two situations: a sandbox where writing
+beside the project is unwelcome, and confirming that a finding you doubt is
+not the cache's fault. It is *not* needed in CI — a fresh runner has no
+store to reuse, so the cached and uncached runs do the same work.
+
+Deleting `.steins/` at any time is safe; the next run rebuilds it.
 
 ### `--fix`
 

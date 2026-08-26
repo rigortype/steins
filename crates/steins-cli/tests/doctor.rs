@@ -117,6 +117,7 @@ fn doctor_renders_all_sections_exit_zero() {
         "Runtime",
         "Config + active surface",
         "Layout",
+        "Generation store",
         "Coverage posture",
         "Envelopes",
         "Baseline",
@@ -859,6 +860,7 @@ fn doctor_format_json_renders_the_same_section_structure_as_text() {
             "Runtime",
             "Config + active surface",
             "Layout",
+            "Generation store",
             "Coverage posture",
             "Envelopes",
             "Baseline",
@@ -1021,4 +1023,46 @@ fn doctor_require_rejects_an_unknown_toml_key() {
     let r = run_in(&dir, &["doctor", "--no-php", "."]);
     assert_eq!(r.code, 1, "unknown [doctor] key → parse error → contradiction; stdout:\n{}", r.stdout);
     assert!(r.stdout.contains("PARSE ERROR"), "stdout:\n{}", r.stdout);
+}
+
+// Generation store (ADR-0092 §2, issue #525)
+
+/// Where the cache's disposition went when `check` went silent: doctor reports
+/// an absent store as an absence, and a published one by its own manifest.
+#[test]
+fn doctor_reports_the_generation_store() {
+    let dir = workdir("gen-store");
+    write(&dir, "a.php", THREE_THROWS);
+
+    let before = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(before.code, 0, "an absent store is a posture, not a contradiction");
+    assert!(
+        before.stdout.contains("store: absent"),
+        "no store yet → absent; stdout:\n{}",
+        before.stdout
+    );
+    // Doctor reads; it never creates what it reports on.
+    assert!(!dir.join(".steins").exists(), "doctor must not create a store");
+
+    // The cached run adds nothing to what the uncached run said — the whole
+    // point of the silence (ADR-0020 amendment): here that is the sound-subset
+    // notice `--no-php` prints, and nothing else.
+    let uncached = run_in(&dir, &["check", "--no-php", "--no-cache", "."]);
+    let check = run_in(&dir, &["check", "--no-php", "."]);
+    assert_eq!(check.stderr, uncached.stderr, "a cached check says nothing extra");
+    let current = std::fs::read_to_string(dir.join(".steins/gen/CURRENT"))
+        .expect("the check published a generation");
+
+    let after = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(after.code, 0);
+    assert!(
+        after.stdout.contains(current.trim()),
+        "the store section names the published generation; stdout:\n{}",
+        after.stdout
+    );
+    assert!(
+        after.stdout.contains("packages: ") && after.stdout.contains("on disk: "),
+        "the store section reports its package count and size; stdout:\n{}",
+        after.stdout
+    );
 }

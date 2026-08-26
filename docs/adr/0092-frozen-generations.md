@@ -102,6 +102,34 @@ working rather than a hole in it. Measured on nikic/PHP-Parser, that cut a
 warm edit's publish phase by roughly half on its own; the barriers, not the
 bytes, were the phase.
 
+*2026-08-26 amendment (issue #525): the store is the default posture, not an
+experiment.* The lifecycle reached `steins check` behind
+`STEINS_EXPERIMENTAL_GENERATIONS=1`; that gate is gone, the lifecycle is how a
+check runs, and `--no-cache` is the opt-out (the surface decision is ADR-0020's
+amendment). Three consequences belong here rather than there, because they are
+this ADR's invariant doing the work:
+
+- **The store writes `.steins/.gitignore` holding `*` when it creates the
+  layout.** A generation is multi-megabyte, specific to one analyzer version
+  and one machine's engine posture, and worthless in anyone else's checkout.
+- **Every degradation is silent.** §2's standing invariant — a miss changes
+  cost, never meaning — is exactly the argument: a complaint about an
+  unopenable store, a corrupt artifact or a lost publish would be a complaint
+  the reader can do nothing with, on a run whose answer is already right. A
+  read-only project therefore builds nothing, says nothing, and reports what it
+  always reported. The dispositions worth looking at deliberately are in
+  `steins doctor`'s store section.
+- **The zero-FP gate runs through the orchestrator.** `cargo xtask fp-gate`
+  called `check_project` directly and so had never once exercised the
+  generation path. It now builds each corpus project cold into a scratch store
+  and re-checks it warm, and a disagreement is RED — §5's warm ≡ cold oracle
+  promoted from a fixture property to a release gate over the whole corpus.
+  Measured on the 10-package pinned corpus (6,670 files, debug build, an M-series
+  laptop): 16.1s → 18.3s wall, of which the warm pass is 4.4s of summed
+  per-project time against the cold pass's 44.5s. The strong shape costs about
+  9% more than running the corpus through the generation path cold and nothing
+  else, which is not a price worth trading the property for.
+
 *2026-08-26 amendment (issue #521).* "Captured once" is now literal. The
 capture hands each file's bytes to the analysis at the instant it hashes
 them, rather than hashing them, dropping them, and reading the universe a

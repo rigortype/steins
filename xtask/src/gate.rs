@@ -8,16 +8,53 @@
 //! works; packages run in parallel (rayon). Parse-error files stay in the
 //! project (a partial tree can only silence, never add a false positive), but
 //! their own diagnostics are excluded from the gate count.
+//!
+//! # The gate runs the path the product runs (issue #525)
+//!
+//! Until the frozen-generation lifecycle became the default for `steins check`,
+//! this gate called `check_project` — the library entry — and so had never once
+//! run through the orchestrator the CLI actually uses. That was defensible
+//! while the lifecycle was opt-in and indefensible the moment it was not: a
+//! zero-false-positive release gate guarding a code path the product no longer
+//! takes is guarding nothing.
+//!
+//! So every project here is analyzed **twice through
+//! `steins_infer::generation_check`**, into a scratch store under `target/`
+//! that is wiped at the start of the run:
+//!
+//! 1. a **cold** pass — an empty store, every file parsed, one generation
+//!    published — whose findings are the gate's counts, and
+//! 2. a **warm** pass over that published generation, whose findings must
+//!    equal the cold pass's exactly.
+//!
+//! The second pass is ADR-0092 §5's warm ≡ cold oracle promoted from a fixture
+//! property to a release gate, over the whole corpus rather than over whatever
+//! a fixture happens to exercise. A disagreement is RED and is a soundness bug
+//! (the cache changed a finding), not a cost regression. An orchestration
+//! *failure* is RED too: the product degrades to cold silently and correctly,
+//! but a gate that accepted the degradation would be back to grading the path
+//! nobody runs.
+//!
+//! The store never lands in a corpus checkout (`corpus/` is a cached directory
+//! in CI, and a `.steins/` inside it would make the next run's "cold" pass a
+//! lie), and the corpus tree is only ever read.
+//!
+//! What this gate deliberately does NOT re-assert is `generation_check` ≡
+//! `check_project`: `cargo xtask perf --warm` already pins those two against
+//! one findings hash over a corpus target, and duplicating it here would buy a
+//! third full analysis per package for a property that already has an owner.
 
-use std::cell::RefCell;
 use std::collections::HashSet;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use rayon::prelude::*;
-use steins_db::{Project, SourceFile, SteinsDatabase, parse};
 use steins_db::composer;
-use steins_infer::{Diagnostic, Floor, Layer, SidecarFolder, check_project, layer, surface_floor};
+use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
+use steins_infer::{
+    Diagnostic, FinalKeyword, Floor, GenerationMode, GenerationParams, Layer, generation_check,
+    layer, surface_floor,
+};
 
 use crate::corpus::{PACKAGES, checkout_dir, collect_php_files, read_lock, repo_root};
 use crate::corpus_local::{self, LocalProject};
@@ -69,7 +106,42 @@ struct PackageReport {
     /// Whether the checkout carries uncommitted/untracked content (see
     /// [`WorktreeState`]).
     worktree: WorktreeState,
+    /// The cold generation build — the pass whose findings are counted above.
     elapsed: Duration,
+    /// The warm re-check over the generation the cold pass published: the
+    /// second-pass cost the module docs price, and zero only when the run
+    /// never got that far.
+    warm_elapsed: Duration,
+    /// Whether the two passes agreed (issue #525).
+    parity: Parity,
+}
+
+/// What the cold pass and the warm re-check made of each other.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Parity {
+    /// The warm pass found exactly what the cold pass found. The only verdict
+    /// that keeps the gate green.
+    Agreed,
+    /// The two passes disagreed — a cache that changed a finding, which is the
+    /// soundness bug this gate exists to catch, not a cost regression.
+    Diverged(String),
+    /// The orchestrator could not run at all. The shipped CLI degrades to cold
+    /// here, quietly and correctly; the gate must not, or it grades a path
+    /// nobody takes.
+    Failed(String),
+}
+
+impl Parity {
+    fn is_green(&self) -> bool { matches!(self, Parity::Agreed) }
+
+    /// The one-line verdict for the report, or `None` when there is nothing to
+    /// say.
+    fn note(&self) -> Option<&str> {
+        match self {
+            Parity::Agreed => None,
+            Parity::Diverged(detail) | Parity::Failed(detail) => Some(detail),
+        }
+    }
 }
 
 impl PackageReport {
@@ -1655,6 +1727,17 @@ pub fn run() -> Result<bool, String> {
     }
     let root = repo_root();
 
+    // Wipe every scratch store before the first pass: "cold" has to mean cold,
+    // and a store left by a previous run (or restored from a CI cache) would
+    // quietly make the gate measure a generation some other commit's analyzer
+    // built.
+    let stores = root.join("target").join("fp-gate-stores");
+    if let Err(e) = std::fs::remove_dir_all(&stores)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(format!("cannot clear {} for a cold first pass: {e}", stores.display()));
+    }
+
     // One project per package; packages analyzed in parallel.
     let reports: Result<Vec<PackageReport>, String> = PACKAGES
         .par_iter()
@@ -1703,10 +1786,13 @@ pub fn run() -> Result<bool, String> {
     );
 
     // RED on any proof-layer finding (package + local non-vendor diagnostics;
-    // vendor never gates, ADR-0015) OR any measurement-mode regression.
+    // vendor never gates, ADR-0015) OR any measurement-mode regression OR any
+    // project whose warm re-check did not reproduce its cold pass (issue #525).
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
+    let parity_ok = reports.iter().chain(local_reports.iter()).all(|r| r.parity.is_green());
     Ok(total_diags == 0
+        && parity_ok
         && regressions.is_empty()
         && throw_regressions.is_empty()
         && effect_regressions.is_empty()
@@ -1749,81 +1835,207 @@ fn measurement_regressions(
         .collect()
 }
 
-// Default posture (ADR-0004): the gate folds via the PHP sidecar. Each rayon
-// worker owns one resident `SidecarFolder` (thread-local), reused across the
-// packages it analyzes — which carries state between projects, so every use
-// must go through [`check_under_target`] (see its doc for what forgetting cost).
-thread_local! {
-    static FOLDER: RefCell<SidecarFolder> = RefCell::new(SidecarFolder::enabled());
+/// Where this run's generation stores live: one directory per project, under
+/// `target/` and never inside a corpus checkout.
+///
+/// Two reasons it is not the analyzed tree, and both bite in CI. `corpus/` is
+/// restored from an `actions/cache` keyed on `corpus.lock.toml`, so a
+/// `.steins/` written into it would survive into the *next* PR's run and make
+/// that run's "cold" pass a warm one — the gate would then be measuring a
+/// generation built by some other commit's analyzer. And the corpus is
+/// checked-out third-party source: the gate reads it, full stop.
+fn store_root(root: &Path, project: &str) -> PathBuf {
+    let slug: String = project
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    root.join("target").join("fp-gate-stores").join(slug)
 }
 
-/// Check `project` on the resident folder, configured for **this** project's
-/// declared PHP target (issue #28).
+/// What one project's two passes produced.
+struct GenerationOutcome {
+    /// The cold pass's findings — the gate's counts.
+    diagnostics: Vec<Diagnostic>,
+    /// Files whose tree carries a parse error, read off the cold pass's own
+    /// trees (they are all in hand there, so this costs no second parse).
+    parse_error_files: Vec<String>,
+    cold: Duration,
+    warm: Duration,
+    parity: Parity,
+}
+
+/// Analyze one project the way the shipped `steins check` analyzes one
+/// (ADR-0092 §5, issue #525): a cold generation build into a wiped scratch
+/// store, then a warm re-check over what it published, then the equality.
 ///
-/// RULE: this is the only way to reach `FOLDER`. A resident folder reused
-/// across projects keeps the previous project's `php_target`, which gates
-/// ADR-0056 curated-fact admission and the absence family, so skipping this
-/// call silently changes which facts get seeded. Issue #63 is exactly that:
-/// `analyze_local` judged each local project under whichever leftover target
-/// its rayon worker held, swinging the local corpus's `phpdoc.*` count
-/// 536↔483 run to run (invisible under `RAYON_NUM_THREADS=1`), and cost two
-/// sessions of triage before this was found to be the cause.
-fn check_under_target(
-    db: &SteinsDatabase,
-    project: Project,
-    php_target: Option<steins_db::PhpTarget>,
-) -> Vec<Diagnostic> {
-    FOLDER.with(|f| {
-        let mut folder = f.borrow_mut();
-        folder.set_php_target(php_target);
-        check_project(db, project, &mut *folder)
-    })
+/// `files` are spelled exactly as their diagnostic paths will read, and
+/// `capture_root` is the directory those spellings resolve against — the same
+/// pairing the CLI derives in `steins_cli::generation`.
+///
+/// The PHP target is NOT set here, and that is not an omission: the
+/// orchestrator reads it off the layout it is handed
+/// (`folder.set_php_target(p.layout.php_target())`) and builds its own engine
+/// per run, so the resident-folder hazard this function replaced cannot recur.
+/// It is worth naming what that hazard was, because it was expensive: a
+/// `SidecarFolder` reused across rayon-scheduled projects kept the previous
+/// project's `php_target`, which gates ADR-0056 curated-fact admission and the
+/// absence family, and issue #63 was two sessions of triage into a local
+/// `phpdoc.*` count that swung 536↔483 run to run (invisible under
+/// `RAYON_NUM_THREADS=1`) before that was found to be the cause.
+fn analyze_through_generations(
+    project_name: &str,
+    files: &[PathBuf],
+    capture_root: &Path,
+    layout: &ProjectLayout,
+    root: &Path,
+) -> GenerationOutcome {
+    let failed = |detail: String, cold: Duration, warm: Duration| GenerationOutcome {
+        diagnostics: Vec::new(),
+        parse_error_files: Vec::new(),
+        cold,
+        warm,
+        parity: Parity::Failed(detail),
+    };
+
+    let store = store_root(root, project_name);
+    let partition = steins_db::partition::discover(layout);
+    let plugins = PluginFacts::discover(layout, None);
+    // `check_project`'s own defaults, which is what the gate has always
+    // measured under: no `steins.toml` governs a corpus checkout.
+    let effects = EffectsPolicy::none();
+    let params = GenerationParams {
+        store_root: &store,
+        capture_root,
+        files,
+        layout,
+        partition: &partition,
+        plugins: &plugins,
+        effects: &effects,
+        warning_handler_abort: true,
+        final_keyword: FinalKeyword::Enforced,
+        php: true,
+        // The paranoid walk verifier stays environment-driven
+        // (`STEINS_GENERATIONS_PARANOID=1`) — it walks every file and would
+        // more than double the gate on every PR.
+        paranoid: false,
+    };
+
+    let t = Instant::now();
+    let cold = match generation_check(&params) {
+        Ok(outcome) => outcome,
+        Err(e) => return failed(format!("cold generation build failed: {e}"), t.elapsed(), Duration::ZERO),
+    };
+    let cold_elapsed = t.elapsed();
+    if cold.report.mode != GenerationMode::Cold {
+        return failed(
+            "the scratch store already held a generation — the cold pass was not cold".to_owned(),
+            cold_elapsed,
+            Duration::ZERO,
+        );
+    }
+    // Every tree is in hand on a cold pass (nothing was loaded from an
+    // artifact), so this reads them rather than decoding them.
+    let parse_error_files: Vec<String> = cold
+        .trees
+        .iter()
+        .filter(|(_, tree)| !tree.parse_errors().is_empty())
+        .map(|(path, _)| path.clone())
+        .collect();
+
+    let t = Instant::now();
+    let warm = match generation_check(&params) {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            return GenerationOutcome {
+                diagnostics: cold.findings,
+                parse_error_files,
+                cold: cold_elapsed,
+                warm: t.elapsed(),
+                parity: Parity::Failed(format!("warm re-check failed: {e}")),
+            };
+        }
+    };
+    let warm_elapsed = t.elapsed();
+    let parity = if warm.report.mode == GenerationMode::Warm {
+        compare_findings(&cold.findings, &warm.findings)
+    } else {
+        Parity::Failed(
+            "the second pass ran cold — the first pass published no generation to warm from"
+                .to_owned(),
+        )
+    };
+    GenerationOutcome {
+        diagnostics: cold.findings,
+        parse_error_files,
+        cold: cold_elapsed,
+        warm: warm_elapsed,
+        parity,
+    }
+}
+
+/// Warm ≡ cold over one project's whole finding set (ADR-0092 §5). Compares
+/// the fields a finding *means* — id, path, position, message — and names the
+/// first disagreement, because a corpus-scale divergence dumped whole is
+/// unreadable and the first one is where triage starts.
+fn compare_findings(cold: &[Diagnostic], warm: &[Diagnostic]) -> Parity {
+    let key = |d: &Diagnostic| (d.id, d.path.clone(), d.line, d.column, d.message.clone());
+    let mut a: Vec<_> = cold.iter().map(key).collect();
+    let mut b: Vec<_> = warm.iter().map(key).collect();
+    a.sort();
+    b.sort();
+    if a == b {
+        return Parity::Agreed;
+    }
+    let show = |(id, path, line, column, message): &(&str, String, u32, u32, String)| {
+        format!("{path}:{line}:{column} [{id}] {message}")
+    };
+    let first = a
+        .iter()
+        .zip(b.iter())
+        .find(|(x, y)| x != y)
+        .map_or_else(
+            || match a.len().cmp(&b.len()) {
+                std::cmp::Ordering::Greater => format!("cold-only: {}", show(&a[b.len()])),
+                std::cmp::Ordering::Less => format!("warm-only: {}", show(&b[a.len()])),
+                std::cmp::Ordering::Equal => "no first divergence (unreachable)".to_owned(),
+            },
+            |(x, y)| format!("cold: {} | warm: {}", show(x), show(y)),
+        );
+    Parity::Diverged(format!(
+        "warm ≢ cold — {} cold finding(s) vs {} warm; first divergence: {first}",
+        a.len(),
+        b.len()
+    ))
 }
 
 /// Analyze one package as a single project and time it.
 fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageReport {
-    let start = Instant::now();
-
     let files = collect_php_files(dir);
-
-    let db = SteinsDatabase::default();
-    let mut inputs: Vec<SourceFile> = Vec::with_capacity(files.len());
-    for f in &files {
-        let rel = f.strip_prefix(root).unwrap_or(f).to_string_lossy().into_owned();
-        let text = match std::fs::read(f) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(_) => String::new(), // unreadable → empty (parses clean, contributes nothing)
-        };
-        inputs.push(SourceFile::new(&db, rel, text));
-    }
-
-    // Identify parse-error files (their diagnostics are excluded from the
-    // count). ADR-0079 (#180): mostly redundant now (a failed-parse file emits
-    // only `syntax.unparsable`, nothing else to drop) but still a deliberate
-    // blind spot for that id — a pre-existing unparsable file can't red the
-    // gate on a remedy that lives elsewhere. What it does NOT drop: a
-    // non-vendor unparsable file dams the existence family for that package,
-    // only ever lowering counts.
-    let mut parse_error_files = Vec::new();
-    for &input in &inputs {
-        if !parse(&db, input).parse_errors().is_empty() {
-            parse_error_files.push(input.path(&db).to_owned());
-        }
-    }
-    let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
+    // Diagnostic paths are `root`-relative, as they have always been, and the
+    // seal keys them against `root` — the same spelling-plus-root pairing the
+    // CLI derives (issue #506).
+    let rel: Vec<PathBuf> =
+        files.iter().map(|f| f.strip_prefix(root).unwrap_or(f).to_path_buf()).collect();
 
     // Paths are `root`-relative above, so the layout resolves against `root`
     // (ADR-0015): the package's own `composer.json` decides what is vendor.
+    // Its `require.php` is the declared target PHP range (issue #28), which
+    // gates curated-fact admission and the absence family; the orchestrator
+    // reads it off this layout for itself.
     let layout = composer::discover(&[dir.to_path_buf()], root);
-    // The declared target PHP range (issue #28) gates the folder's absence
-    // family and curated-fact admission — the gate measures the analyzer as
-    // the CLI ships it, so each package's own `require.php` applies. The
-    // resident folder drops target-dependent memos on the change, keeping
-    // cross-package reuse sound.
-    let php_target = layout.php_target().cloned();
-    let plugins = steins_db::PluginFacts::discover(&layout, None);
-    let project = Project::new(&db, inputs, layout, plugins);
-    let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
+    let run = analyze_through_generations(name, &rel, root, &layout, root);
+
+    // Parse-error files: their diagnostics are excluded from the count.
+    // ADR-0079 (#180): mostly redundant now (a failed-parse file emits only
+    // `syntax.unparsable`, nothing else to drop) but still a deliberate blind
+    // spot for that id — a pre-existing unparsable file can't red the gate on
+    // a remedy that lives elsewhere. What it does NOT drop: a non-vendor
+    // unparsable file dams the existence family for that package, only ever
+    // lowering counts.
+    let parse_error_files = run.parse_error_files;
+    let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
+
+    let mut diags: Vec<Diagnostic> = run.diagnostics;
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
     diags.sort_by(|a, b| (&a.path, a.line, a.column).cmp(&(&b.path, b.line, b.column)));
     // Measurement-mode split (ADR-0050 §9): contract-layer findings are counted
@@ -1866,7 +2078,9 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
         recorded_revision: None,
         measured_revision: None,
         worktree: WorktreeState::Unknown,
-        elapsed: start.elapsed(),
+        elapsed: run.cold,
+        warm_elapsed: run.warm,
+        parity: run.parity,
     }
 }
 
@@ -1874,7 +2088,6 @@ fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageRep
 /// project-relative so the `vendor/` predicate and the report read cleanly.
 /// Vendor findings are split out of the gate count (ADR-0015).
 fn analyze_local(proj: &LocalProject) -> PackageReport {
-    let start = Instant::now();
     let root = Path::new(&proj.path);
 
     // Read the tree's state BEFORE walking it, so revision/cleanliness match
@@ -1884,20 +2097,14 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     let worktree = WorktreeState::from_dirty(corpus_local::checkout_is_dirty(root));
 
     let files = corpus_local::collect_php_files_in(root, &proj.paths, &proj.exclude);
+    // Project-relative paths (falling back to the full path if a file is not
+    // under `root`, which cannot normally happen). Keeps `vendor/` detection
+    // and the printed rows readable, and gives the seal its root.
+    let rel: Vec<PathBuf> =
+        files.iter().map(|f| f.strip_prefix(root).unwrap_or(f).to_path_buf()).collect();
 
-    let db = SteinsDatabase::default();
-    let mut inputs: Vec<SourceFile> = Vec::with_capacity(files.len());
-    for f in &files {
-        // Project-relative path (falls back to the full path if `f` is not under
-        // `root`, which cannot normally happen). Keeps `vendor/` detection and
-        // the printed rows readable.
-        let rel = f.strip_prefix(root).unwrap_or(f).to_string_lossy().into_owned();
-        let text = match std::fs::read(f) {
-            Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-            Err(_) => String::new(),
-        };
-        inputs.push(SourceFile::new(&db, rel, text));
-    }
+    let layout = composer::discover(&[root.to_path_buf()], root);
+    let run = analyze_through_generations(&proj.name, &rel, root, &layout, &repo_root());
 
     // Same exclusion/ADR-0079 reading as the corpus path above. Swept
     // 2026-08-08; the local root holds exactly three pre-existing unparsable
@@ -1912,21 +2119,10 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
     // by fixtures alone (`crates/steins-infer/tests/parse_failure_dam.rs`)
     // until a NON-vendor break appears here, at which point these counts can
     // only fall, never rise.
-    let mut parse_error_files = Vec::new();
-    for &input in &inputs {
-        if !parse(&db, input).parse_errors().is_empty() {
-            parse_error_files.push(input.path(&db).to_owned());
-        }
-    }
+    let parse_error_files = run.parse_error_files;
     let parse_err_set: HashSet<&str> = parse_error_files.iter().map(String::as_str).collect();
 
-    let layout = composer::discover(&[root.to_path_buf()], root);
-    // A local project declares a target like any other (issue #63): this used
-    // to go straight to the resident folder without setting it.
-    let php_target = layout.php_target().cloned();
-    let plugins = steins_db::PluginFacts::discover(&layout, None);
-    let project = Project::new(&db, inputs, layout.clone(), plugins);
-    let mut diags: Vec<Diagnostic> = check_under_target(&db, project, php_target);
+    let mut diags: Vec<Diagnostic> = run.diagnostics;
     diags.retain(|d| !parse_err_set.contains(d.path.as_str()));
 
     // Vendor default (ADR-0015): vendor code was fully indexed and inferred, but
@@ -1967,7 +2163,9 @@ fn analyze_local(proj: &LocalProject) -> PackageReport {
         recorded_revision: proj.revision.clone(),
         measured_revision,
         worktree,
-        elapsed: start.elapsed(),
+        elapsed: run.cold,
+        warm_elapsed: run.warm,
+        parity: run.parity,
     }
 }
 
@@ -2196,54 +2394,87 @@ fn print_report(
         .max()
         .unwrap_or(4)
         .max(7);
+    // Warm ≡ cold over the whole corpus (ADR-0092 §5, issue #525). Printed
+    // before the summary because a divergence explains every number above it:
+    // the counts are the cold pass's, and if the warm pass disagreed then the
+    // cache the shipped CLI uses is not reporting what the gate calibrated.
+    println!("\n=== generation parity (warm ≡ cold, ADR-0092 §5) ===\n");
+    let broken: Vec<&PackageReport> = rows().filter(|r| !r.parity.is_green()).collect();
+    if broken.is_empty() {
+        println!(
+            "parity: OK — all {} project(s) reproduced their cold findings from the published generation.",
+            rows().count()
+        );
+    } else {
+        println!("parity: BROKEN — {} project(s):", broken.len());
+        for r in &broken {
+            println!("    {} — {}", r.name, r.parity.note().unwrap_or("(no detail)"));
+        }
+    }
+
     println!("\n=== summary ===\n");
     println!(
-        "{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8}",
-        "package", "files", "parse-errors", "diagnostics", "time(s)"
+        "{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8}  {:>8}",
+        "package", "files", "parse-errors", "diagnostics", "cold(s)", "warm(s)"
     );
-    println!("{}", "-".repeat(name_w + 2 + 6 + 2 + 12 + 2 + 11 + 2 + 8));
+    println!("{}", "-".repeat(name_w + 2 + 6 + 2 + 12 + 2 + 11 + 2 + 8 + 2 + 8));
     let (mut tf, mut tp, mut td) = (0usize, 0usize, 0usize);
-    let mut ttime = 0.0f64;
+    let (mut tcold, mut twarm) = (0.0f64, 0.0f64);
     for r in rows() {
         let label = if r.local { format!("{} (local)", r.name) } else { r.name.clone() };
         println!(
-            "{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}",
+            "{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}  {:>8.2}",
             label,
             r.file_count,
             r.parse_error_files.len(),
             r.diagnostics.len(),
-            r.elapsed.as_secs_f64()
+            r.elapsed.as_secs_f64(),
+            r.warm_elapsed.as_secs_f64()
         );
         tf += r.file_count;
         tp += r.parse_error_files.len();
         td += r.diagnostics.len();
-        ttime += r.elapsed.as_secs_f64();
+        tcold += r.elapsed.as_secs_f64();
+        twarm += r.warm_elapsed.as_secs_f64();
     }
-    println!("{}", "-".repeat(name_w + 2 + 6 + 2 + 12 + 2 + 11 + 2 + 8));
-    println!("{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}", "TOTAL", tf, tp, td, ttime);
+    println!("{}", "-".repeat(name_w + 2 + 6 + 2 + 12 + 2 + 11 + 2 + 8 + 2 + 8));
+    println!(
+        "{:<name_w$}  {:>6}  {:>12}  {:>11}  {:>8.2}  {:>8.2}",
+        "TOTAL", tf, tp, td, tcold, twarm
+    );
 
     println!();
     let measurement_ok =
         regressions.is_empty() && throw_regressions.is_empty() && effect_regressions.is_empty();
-    match (td == 0, measurement_ok) {
-        (true, true) => {
+    match (td == 0, measurement_ok, broken.is_empty()) {
+        (true, true, true) => {
             println!(
                 "GATE GREEN — no proof-layer diagnostics on clean-parsing corpus code, \
-                 and no phpdoc.*/throw.* regression past the expected baselines."
+                 no phpdoc.*/throw.* regression past the expected baselines, and every \
+                 project's warm re-check reproduced its cold findings."
             );
         }
-        (false, _) => {
+        (false, _, _) => {
             println!(
                 "GATE RED — {td} proof-layer diagnostic(s) on clean code. Human FP triage required (ADR-0013)."
             );
         }
-        (true, false) => {
+        (true, false, _) => {
             println!(
                 "GATE RED — {} package(s) regressed past their expected phpdoc.*/throw.* baseline \
                  (see the tripwire lists above). Investigate the new finding(s); update \
                  PHPDOC_EXPECTED / THROW_EXPECTED in xtask/src/gate.rs only once the change is \
                  understood and intended.",
                 regressions.len() + throw_regressions.len()
+            );
+        }
+        (true, true, false) => {
+            println!(
+                "GATE RED — {} project(s) failed the warm ≡ cold parity check (see above). A \
+                 divergence is a SOUNDNESS bug in the generation cache, not a cost regression: \
+                 `steins check` ships that cache on by default, so a finding the warm pass \
+                 loses is a finding the product loses.",
+                broken.len()
             );
         }
     }
