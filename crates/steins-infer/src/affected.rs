@@ -80,11 +80,15 @@
 //! wholesale set or, where not even that can be read, walking every file. The
 //! one direction that is never allowed is a *smaller* set.
 //!
-//! **The site-less shard members ride a changed package wholesale**: the
-//! per-package ambiguity sets, the constants and the `class_alias` edge list
-//! carry no site today, so no file can be blamed for them. They are small, and
-//! [`PackageShard::contributed_names_from`] records what giving them slots
-//! would take if a measurement ever asks.
+//! **The ambiguity sets ride a changed package wholesale**: a name a package
+//! declares twice has no site because it has two, and the shard drops both
+//! when it demotes. They are empty in a project that compiles. The other two
+//! members that had no site when #510 was filed — the constants and the
+//! `class_alias` edge list — have one now, because the measurement asked:
+//! `nikic/PHP-Parser`'s back-compat aliases put 22 keys into *every* edit's
+//! delta and matched 61 of its 341 files, 18% of the universe walked for an
+//! alias no edit touched. [`PackageShard::contributed_names_from`] carries the
+//! reading.
 //!
 //! ## The footprint
 //!
@@ -116,6 +120,16 @@
 //! files, bounded by [`MAX_BINDING_DEPTH`], which is the bound the descent
 //! itself stops at.
 //!
+//! With the delta file-granular (issue #510) **this is now the widest leg by
+//! far**, and it saturates: editing `nikic/PHP-Parser`'s `Lexer.php` puts 17
+//! files in the delta leg and 337 of 341 in the affected set, because eight
+//! hops of "every file declaring a method of this name" reach a whole
+//! codebase through its ordinary method names. An edit whose file declares
+//! nothing widely named costs 4. Tightening this — resolved receivers, a
+//! smaller bound, a directional reading — is the closure work issue #489's
+//! design pin left out of scope until a measurement asked for it. This is that
+//! measurement; it is not this issue's change.
+//!
 //! ## Inheritance
 //!
 //! One refinement the pinned leg list does not spell, added because the
@@ -124,11 +138,10 @@
 //! interfaces and `@mixin` targets transitively, and the declared-receiver
 //! lane's descendant closure walks the *other* way — so an inheritance edge is
 //! closed **without a bound and in both directions**. What it costs is a class
-//! hierarchy's whole connected component per edited class file, which is the
-//! price of an unbounded traversal being priced honestly; with the delta now
-//! file-granular it is also, in a deep hierarchy, the widest leg an ordinary
-//! edit fires. Narrowing it means bounding the analysis's own chain walks
-//! first, not the closure over them.
+//! hierarchy's whole connected component per edited class file — the price of
+//! an unbounded traversal priced honestly, and on `nikic/PHP-Parser` one extra
+//! file per edit next to the call graph's hundreds. Narrowing it means
+//! bounding the analysis's own chain walks first, not the closure over them.
 //!
 //! ## What over-approximation costs, and why the direction is fixed
 //!
