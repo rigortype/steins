@@ -407,19 +407,24 @@ pub(crate) fn is_array_key_ty(ty: &ContractTy) -> bool {
 /// `properties-of<T>`, …). Checked by both catch-alls below (identifier and
 /// generic tables share one normalized-name space).
 ///
-/// Without this list these names fall to [`ContractTy::Class`], a
-/// nonexistent-class reference: acceptance's class leg answers a definite
-/// `No` for any non-object value — the same wrong-No hazard `key-of`/
-/// `value-of` solve (ADR-0062). The honest floor is [`ContractTy::Opaque`]
-/// (`Maybe`), never a manufactured `No`. `resource` and its state spellings
-/// left this list with ADR-0056 §8 — see [`ContractTy::Resource`].
+/// These names lower to [`ContractTy::Opaque`] (`Maybe`), the honest floor for
+/// vocabulary this crate holds no relation for. `resource` and its state
+/// spellings left this list with ADR-0056 §8 — see [`ContractTy::Resource`].
+///
+/// **The list is no longer what keeps them away from the class catch-all.**
+/// ADR-0091 §3 reserves the whole hyphenated space, so every entry carrying a
+/// `-` floors by the rule whether or not it is listed. What the list carries
+/// instead is **recognition** — the allowlist for the §6 unknown-vocabulary
+/// diagnostic (issue #479): the hyphenated spellings Steins knows about and
+/// declines to report. Its two hyphen-free entries (`hasoffset`,
+/// `hasoffsetvalue`) are outside the rule's reach, and for those the list is
+/// still the floor as well.
 ///
 /// The table is **arity-blind** — the name is checked before any argument
-/// count is — so a misspelled arity floors to `Opaque` too rather than
-/// falling through to the class catch-all it would otherwise reach.
+/// count is.
 ///
-/// Not "any unrecognized name": an unknown identifier still falls to
-/// `Class`, the signal both lanes' class machinery depends on.
+/// Not "any unrecognized name": an unknown identifier with no `-` in it still
+/// falls to `Class`, the signal both lanes' class machinery depends on.
 const KNOWN_UNENFORCED: &[&str] = &[
     // PHPStan's array accessory predicates (issue #238): beside an array arm
     // they fold via [`fold_array_accessories`] and never reach this table;
@@ -443,22 +448,19 @@ const KNOWN_UNENFORCED: &[&str] = &[
 ];
 
 /// The **derived type operators** (ADR-0089): vocabulary this crate *does*
-/// hold a relation for, at one arity each, and which must floor to
-/// [`ContractTy::Opaque`] at **every other** arity and as a bare identifier.
+/// hold a relation for, at one arity each. Every other arity, and the bare
+/// identifier, state nothing and floor to [`ContractTy::Opaque`].
 ///
 /// Distinct from `KNOWN_UNENFORCED`, which is for names with no relation at
 /// all — putting an operator there would floor it before [`lower_generic`]'s
-/// match could project it. What the two tables share is the property that
-/// matters: the name is decided **before** any argument count is, so a
-/// misspelled arity can never fall through to the class catch-all.
+/// match could project it.
 ///
-/// That fall-through was a live wrong-`No`. Before ADR-0089,
-/// `key-of<int, int>` lowered to `Class("key-of")` — a reference to a
-/// nonexistent class, whose acceptance leg answers a definite `No` for every
-/// non-object value — while `key-of<int>` correctly floored to `Opaque`. A
-/// wrong `No` is a false positive rather than lost precision (the
-/// closure-argument variance check raises findings on `No`), so `key-of` and
-/// `value-of` join the new names here rather than keeping the hazard.
+/// **The floor is not this table's job either** (ADR-0091 §3, §7): every
+/// operator is kebab-case, so `key-of<int, int>` floors as any unrecognized
+/// hyphenated spelling does and the class catch-all is unreachable for it. What
+/// the table still states is "this name carries a relation at arity N", which
+/// is allowlist information for the §6 diagnostic (issue #479) — the same job
+/// `KNOWN_UNENFORCED` now has, from the other side of the relation question.
 const DERIVED_OPERATORS: &[&str] = &[
     "key-of",
     "value-of",
@@ -486,6 +488,13 @@ fn is_derived_operator(name: &str) -> bool {
 /// machinery — the value domain has no object inhabitant (ADR-0035/0038), so
 /// this crate cannot host that judgment. `KNOWN_UNENFORCED` is checked
 /// first, since those names ARE keywords and must not reach class machinery.
+///
+/// **A name containing `-` never reaches it** (ADR-0091 §3): PHP's compiler
+/// rejects `-` in a class-like name, so such a spelling denotes no class and
+/// there is nothing for the class machinery to find. It is type vocabulary
+/// Steins does not model — [`ContractTy::Opaque`]. The rule applies to what
+/// survives the `@template` shadow, which runs over the parsed type before
+/// anything is lowered (§4), so a shadowed name never arrives here.
 #[must_use]
 pub fn lower_identifier(name: &str) -> ContractTy {
     let norm = name.trim_start_matches('\\').to_ascii_lowercase();
@@ -619,9 +628,15 @@ pub fn lower_identifier(name: &str) -> ContractTy {
         other if is_derived_operator(other) => ContractTy::Opaque,
         // The refined-string grid (issue #240), the last keyword rung before the
         // class catch-all: every cell the speller can emit lowers back to the set
-        // it was spelled from, and anything else is a class name as before.
+        // it was spelled from.
         other => match grid_str_preds(other) {
             Some(p) => ContractTy::StrWith(p),
+            // The hyphen reservation (ADR-0091 §3). Unrecognized *and*
+            // hyphenated is a closed set of two — a misspelling of vocabulary
+            // (`non-empy-string`) or another tool's spelling — and neither
+            // denotes a class, so the class reading would answer a definite
+            // `No` to every value the contract was written to accept.
+            None if other.contains('-') => ContractTy::Opaque,
             None => ContractTy::Class(norm),
         },
     }
@@ -736,9 +751,10 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
 /// reason — `steins-infer`'s proven-value lane reads it rather than restating
 /// the grammar. Its catch-all carries the same meaning: a base name that is
 /// not vocabulary lowers to [`ContractTy::Class`] (hand it to the caller's
-/// class-generic machinery), except a `KNOWN_UNENFORCED` base
-/// (`int-mask<...>`, `properties-of<T>`, …), which floors to
-/// [`ContractTy::Opaque`] for the same nonexistent-class-hazard reason.
+/// class-generic machinery), and the same two exceptions hold — a
+/// `KNOWN_UNENFORCED` base (`int-mask<...>`, `properties-of<T>`, …), and any
+/// **hyphenated** base, which is vocabulary and never a class-generic
+/// (ADR-0091 §3).
 #[must_use]
 pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> ContractTy {
     let norm = base.trim_start_matches('\\').to_ascii_lowercase();
@@ -813,9 +829,13 @@ pub fn lower_generic(base: &str, args: &[steins_phpdoc::ast::GenericArg]) -> Con
             &arg(1).expect("len checked"),
             ArmFilter::Extract,
         ),
-        // Every OTHER arity of a derived operator, checked before the class
-        // catch-all can manufacture a `No` out of it — see [`DERIVED_OPERATORS`].
+        // Every OTHER arity of a derived operator states nothing: the relation
+        // is held at one arity (ADR-0089 §4), and `Opaque` is the same floor
+        // ADR-0091 §3 gives the name for being hyphenated at all.
         (other, _) if is_derived_operator(other) => ContractTy::Opaque,
+        // The hyphen reservation (ADR-0091 §3) for a generic's base name: no
+        // class can carry it, so there is no class-generic to hand on.
+        (other, _) if other.contains('-') => ContractTy::Opaque,
         _ => ContractTy::Class(norm),
     }
 }
@@ -1948,16 +1968,19 @@ mod refined_string_grid_tests {
         assert_eq!(lower_identifier("class-string"), ContractTy::StrWith(cs));
     }
 
-    /// A name that merely ends in `-string` is not a cell: the class catch-all is
-    /// load-bearing and must still claim it.
+    /// A name that merely ends in `-string` is not a cell. It is hyphenated, so
+    /// the reservation (ADR-0091 §3) takes it rather than the class catch-all —
+    /// which is still load-bearing for a name PHP could actually carry.
     #[test]
-    fn a_non_cell_still_lowers_to_class() {
+    fn a_non_cell_is_not_a_grid_cell() {
         assert_eq!(grid_str_preds("foo-string"), None);
         assert_eq!(grid_str_preds("string"), None);
         assert_eq!(grid_str_preds("non-decimal-int-string"), None);
+        assert_eq!(lower_identifier("Non-Cell-String"), ContractTy::Opaque);
         assert_eq!(
-            lower_identifier("Non-Cell-String"),
-            ContractTy::Class("non-cell-string".to_owned())
+            lower_identifier("NonCellString"),
+            ContractTy::Class("noncellstring".to_owned()),
+            "no hyphen, so it is a name a class can carry"
         );
         // …and the family members with their own arms keep them.
         assert_eq!(lower_identifier("literal-string"), ContractTy::StrOpaque);
@@ -2467,26 +2490,30 @@ mod derived_operator_tests {
         }
     }
 
-    /// The refusals of ADR-0089 §6 are refusals, not omissions: they are
-    /// **not** vocabulary and keep the ordinary class reading, which is the
-    /// behaviour that was already there. Stated as an assertion so a later
-    /// reader does not mistake the absence for an oversight.
+    /// The refusals of ADR-0089 §6 are refusals, not omissions: this crate
+    /// holds no relation for them. Stated as an assertion so a later reader
+    /// does not mistake the absence for an oversight.
+    ///
+    /// What the refusal *reads as* is now split by spelling (ADR-0091 §3): a
+    /// kebab-case refusal is reserved vocabulary and floors, a hyphen-free one
+    /// is a name a class can carry and keeps the class reading.
     #[test]
     fn the_refused_utility_types_are_not_vocabulary() {
         for src in [
-            "record<string, int>",
-            "readonly<int>",
             "instance-type<int>",
             "no-infer<int>",
-            "awaited<int>",
             "this-type<int>",
             "this-parameter-type<int>",
             "omit-this-parameter<int>",
         ] {
             let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
+            assert_eq!(lowered, ContractTy::Opaque, "{src} is reserved vocabulary with no relation");
+        }
+        for src in ["record<string, int>", "readonly<int>", "awaited<int>"] {
+            let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
             assert!(
                 matches!(lowered, ContractTy::Class(_)),
-                "{src} is refused vocabulary and must stay a class name, got {lowered:?}",
+                "{src} carries no hyphen, so it stays a class name, got {lowered:?}",
             );
         }
     }
@@ -2503,5 +2530,215 @@ mod derived_operator_tests {
                 "{name} has a relation, so it must not be KNOWN_UNENFORCED",
             );
         }
+    }
+}
+
+/// **The hyphen reservation** (ADR-0091 §3): a phpdoc identifier in a type
+/// position that carries a `-` is type vocabulary, never a class reference.
+///
+/// PHP's compiler rejects `-` in a class, interface, trait or enum name, so the
+/// name denotes nothing to resolve. What the class reading produced instead was
+/// a contract that rejects every value it was written to accept — a wrong `No`,
+/// which is a false positive rather than lost precision (the closure-argument
+/// variance check raises findings on `No`, ADR-0071 §1).
+#[cfg(test)]
+mod hyphen_reservation_tests {
+    use super::*;
+    use steins_domain::Val;
+
+    /// The two spellings ADR-0091 §1 measured, plus a name that was never
+    /// vocabulary at all. Each lowered to `Class(…)` before this slice, and the
+    /// class arm answers a definite `No` for every non-object value:
+    ///
+    /// ```text
+    /// non-empy-string  => Class("non-empy-string")   admits Val::Str("x") = No
+    /// positive-integer => Class("positive-integer")  admits Val::Int(1)   = No
+    /// ```
+    #[test]
+    fn a_typo_is_silence_and_never_a_manufactured_no() {
+        for (name, val) in [
+            ("non-empy-string", Val::Str("x".into())),
+            ("positive-integer", Val::Int(1)),
+            ("foo-bar", Val::Str("x".into())),
+        ] {
+            let lowered = lower_identifier(name);
+            assert_eq!(lowered, ContractTy::Opaque, "{name} must floor to Opaque");
+            assert_eq!(
+                admits_val(&lowered, &val),
+                Certainty::Maybe,
+                "{name} admitted {val:?} as anything but Maybe — the pre-change wrong `No`",
+            );
+        }
+    }
+
+    /// The generic table says the same about a base name, whatever its
+    /// arguments: a wrong arity of known vocabulary (`key-of<int, int>`, the
+    /// ADR-0089 regression) and a base that is not vocabulary at all both floor.
+    #[test]
+    fn a_hyphenated_generic_base_floors_at_every_arity() {
+        for src in [
+            "key-of<int, int>",
+            "int-range<int>",
+            "positive-integer<int>",
+            "foo-bar<int, string>",
+            "some-psalm-thing<int>",
+        ] {
+            let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
+            assert_eq!(lowered, ContractTy::Opaque, "{src} must floor to Opaque");
+            assert_eq!(
+                admits_val(&lowered, &Val::Int(1)),
+                Certainty::Maybe,
+                "{src} must admit an int as Maybe, never the pre-change `No`",
+            );
+        }
+    }
+
+    /// **Namespace resolution is unreachable for a hyphenated name**, by
+    /// construction rather than by a second rule: `steins-infer` delegates to
+    /// `accepts_class_name` (which resolves against the file's namespace and
+    /// `use` imports) behind `matches!(cty, ContractTy::Class(_))`, and no
+    /// hyphenated spelling produces that variant from either table. Issue #472
+    /// and the cross-tool proposal both lean on this property.
+    #[test]
+    fn no_hyphenated_spelling_lowers_to_a_class_arm() {
+        for name in [
+            "non-empy-string",
+            "positive-integer",
+            "foo-bar",
+            "some-psalm-thing",
+            "int-range",
+            "key-of",
+            "int-mask",
+            "non-cell-string",
+            "\\Vendor\\Pkg\\int-range",
+            "NON-EMPY-STRING",
+        ] {
+            let lowered = lower_identifier(name);
+            assert!(
+                !matches!(lowered, ContractTy::Class(_)),
+                "{name} reached the class arm as {lowered:?}",
+            );
+        }
+        for src in [
+            "int-range<0, 255>",
+            "int-range<int>",
+            "key-of<int, int>",
+            "foo-bar<int>",
+            "\\Vendor\\Pkg\\int-range<0, 255>",
+        ] {
+            let lowered = lower_str(src).unwrap_or_else(|| panic!("{src} must lower"));
+            assert!(
+                !matches!(lowered, ContractTy::Class(_)),
+                "{src} reached the class arm as {lowered:?}",
+            );
+        }
+    }
+
+    /// The bound of ADR-0091 §9: no denotation changes for a name Steins
+    /// already models. Every spelling here is hyphenated, so each is a
+    /// candidate for being swallowed by the reservation, and none may be.
+    #[test]
+    fn every_modeled_hyphenated_spelling_denotes_what_it_did() {
+        let cases: Vec<(&str, ContractTy)> = vec![
+            ("array-key", array_key()),
+            ("positive-int", ContractTy::IntIn(IntRange::POSITIVE)),
+            ("negative-int", ContractTy::IntIn(IntRange::NEGATIVE)),
+            ("non-negative-int", ContractTy::IntIn(IntRange::NON_NEGATIVE)),
+            ("non-empty-string", ContractTy::StrWith(StrPreds::NON_EMPTY)),
+            ("numeric-string", ContractTy::StrWith(StrPreds::NUMERIC.close())),
+            ("non-falsy-string", ContractTy::StrWith(StrPreds::NON_FALSY.close())),
+            ("class-string", ContractTy::StrWith(StrPreds::CLASS_STRING.close())),
+            ("interface-string", ContractTy::StrWith(StrPreds::CLASS_STRING.close())),
+            ("literal-string", ContractTy::StrOpaque),
+            ("decimal-int-string", ContractTy::StrWith(StrPreds::DECIMAL_INT.close())),
+            ("non-decimal-int-string", ContractTy::StrWith(StrPreds::NON_DECIMAL_INT)),
+            ("non-empty-mixed", ContractTy::MixedMinus(MixedCut::Falsy)),
+            ("non-null-mixed", ContractTy::MixedMinus(MixedCut::Null)),
+            ("open-resource", ContractTy::Resource),
+            ("closed-resource", ContractTy::Resource),
+            ("non-empty-array", ContractTy::ArrayAny { non_empty: true }),
+            (
+                "non-empty-list",
+                ContractTy::ListOf { elem: Box::new(ContractTy::Mixed), non_empty: true },
+            ),
+            (
+                "associative-array",
+                ContractTy::MapOf {
+                    key: Box::new(array_key()),
+                    val: Box::new(ContractTy::Mixed),
+                    non_empty: false,
+                    not_list: true,
+                },
+            ),
+            ("never-return", ContractTy::Never),
+            ("no-return", ContractTy::Never),
+        ];
+        for (name, expect) in cases {
+            assert_eq!(lower_identifier(name), expect, "{name} changed denotation");
+        }
+        // The grid's compound cells are reached from the same catch-all the
+        // reservation sits in, so each must still parse as a cell.
+        for cell in [
+            "lowercase-string",
+            "uppercase-string",
+            "uncased-string",
+            "non-empty-lowercase-string",
+            "non-falsy-uppercase-string",
+            "non-falsy-numeric-string",
+            "numeric-uncased-string",
+        ] {
+            assert!(
+                matches!(lower_identifier(cell), ContractTy::StrWith(_)),
+                "{cell} is a grid cell, not reserved vocabulary",
+            );
+        }
+        // The generic table's own hyphenated vocabulary, at its own arities.
+        assert_eq!(
+            lower_str("int-range<0, 255>"),
+            lower_str("int<0, 255>"),
+            "int-range keeps the bounded-range lowering",
+        );
+        assert_eq!(
+            lower_str("class-string<Foo>"),
+            Some(ContractTy::StrWith(StrPreds::CLASS_STRING.close())),
+        );
+        assert_eq!(
+            lower_str("key-of<array{a: int, b: string}>"),
+            Some(ContractTy::Union(vec![
+                ContractTy::LitStr("a".into()),
+                ContractTy::LitStr("b".into()),
+            ])),
+        );
+        assert_eq!(
+            lower_str("non-empty-array<string, int>"),
+            Some(ContractTy::MapOf {
+                key: Box::new(ContractTy::Base(Base::String)),
+                val: Box::new(ContractTy::Base(Base::Int)),
+                non_empty: true,
+                not_list: false,
+            }),
+        );
+        // Both tables' allowlists keep answering for their own entries.
+        for name in KNOWN_UNENFORCED {
+            assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name}");
+        }
+        for name in DERIVED_OPERATORS {
+            assert_eq!(lower_identifier(name), ContractTy::Opaque, "{name}");
+        }
+    }
+
+    /// The ordering of ADR-0091 §4: the reservation speaks for what *survives*
+    /// the `@template` shadow. This crate's half of that is
+    /// [`is_shadowable_pseudo_type`], which answers `false` for a hyphenated
+    /// name because nothing can shadow it — the same rule read from the
+    /// shadowing side, and unchanged by this slice. A hyphen-free name stays
+    /// shadowable and still lowers to the class arm the shadow needs.
+    #[test]
+    fn the_shadow_decides_before_the_reservation_does() {
+        for name in ["non-empy-string", "positive-integer", "key-of", "int-range"] {
+            assert!(!is_shadowable_pseudo_type(name), "{name} cannot be shadowed");
+        }
+        assert!(is_shadowable_pseudo_type("integer"));
+        assert!(matches!(lower_identifier("TValue"), ContractTy::Class(_)));
     }
 }
