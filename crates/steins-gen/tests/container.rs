@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use steins_gen::{ArtifactBuilder, ArtifactReader, DecodeBudget, Miss, SectionName};
+use steins_gen::{
+    ArtifactBuilder, ArtifactReader, DecodeBudget, Miss, SCHEMA_VERSION, SectionName,
+};
 
 /// A throwaway directory under the OS temp dir, cleaned on drop.
 struct TempDir {
@@ -138,10 +140,11 @@ fn schema_mismatch_is_a_miss() {
     let dir = TempDir::new("schema");
     let path = sample_artifact(&dir, "a.pkg");
     let mut bytes = std::fs::read(&path).unwrap();
-    bytes[8..12].copy_from_slice(&2u32.to_le_bytes());
+    let foreign = SCHEMA_VERSION + 1;
+    bytes[8..12].copy_from_slice(&foreign.to_le_bytes());
     std::fs::write(&path, &bytes).unwrap();
     match ArtifactReader::open(&path, DecodeBudget::default()) {
-        Err(Miss::SchemaMismatch { found: 2 }) => {}
+        Err(Miss::SchemaMismatch { found }) if found == foreign => {}
         other => panic!("expected SchemaMismatch, got {:?}", other.map(|_| ())),
     }
 }
@@ -207,7 +210,7 @@ fn lying_directory_offsets_are_a_miss() {
     let path = dir.path("a.pkg");
     let mut bytes = Vec::new();
     bytes.extend_from_slice(b"steinsgn");
-    bytes.extend_from_slice(&1u32.to_le_bytes());
+    bytes.extend_from_slice(&SCHEMA_VERSION.to_le_bytes());
     bytes.extend_from_slice(&1u32.to_le_bytes());
     let mut name = [0u8; 16];
     name[..3].copy_from_slice(b"sym");

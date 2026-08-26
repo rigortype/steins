@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use steins_gen::{
     ArtifactBuilder, DecodeBudget, EnginePosture, GenerationId, GenerationInputs, Miss,
-    PackageName, PublishError, SectionName, SourceInventory, Store,
+    PackageName, PublishError, SCHEMA_VERSION, SectionName, SourceInventory, Store,
 };
 
 /// A throwaway project directory under the OS temp dir, cleaned on drop.
@@ -261,7 +261,10 @@ fn corrupt_manifest_is_a_miss() {
     let project = TempProject::new("bad-manifest");
     let id = publish_one(&project, "v1");
     let manifest = project.gen_root().join(id.to_hex()).join("manifest");
-    scribble(&manifest, "steins-gen manifest\nschema 1\ngeneration deadbeef\n");
+    scribble(
+        &manifest,
+        &format!("steins-gen manifest\nschema {SCHEMA_VERSION}\ngeneration deadbeef\n"),
+    );
     let store = Store::open(&project.dir).unwrap();
     assert!(matches!(store.current(), Err(Miss::Corrupt(_))));
 }
@@ -271,10 +274,13 @@ fn manifest_schema_drift_is_a_miss() {
     let project = TempProject::new("manifest-schema");
     let id = publish_one(&project, "v1");
     let manifest = project.gen_root().join(id.to_hex()).join("manifest");
-    let text = std::fs::read_to_string(&manifest).unwrap().replace("schema 1", "schema 2");
+    let foreign = SCHEMA_VERSION + 1;
+    let text = std::fs::read_to_string(&manifest)
+        .unwrap()
+        .replace(&format!("schema {SCHEMA_VERSION}"), &format!("schema {foreign}"));
     scribble(&manifest, &text);
     let store = Store::open(&project.dir).unwrap();
-    assert!(matches!(store.current(), Err(Miss::SchemaMismatch { found: 2 })));
+    assert!(matches!(store.current(), Err(Miss::SchemaMismatch { found }) if found == foreign));
 }
 
 /// A marker inside a published generation cannot happen through this crate;
