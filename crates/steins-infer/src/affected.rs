@@ -192,12 +192,34 @@ impl DeclTable {
                 }
             }
             for edge in tree.class_alias_edges() {
-                // The alias names whatever the target names; both spellings
-                // must reach the file whose declaration answers them.
                 add(format!("c:{}", edge.alias_fqn), file);
             }
             for d in tree.global_const_decls() {
                 add(format!("k:{}", d.fqn), file);
+            }
+        }
+        // Second pass for the literal `class_alias` edges (ADR-0049 §2, issue
+        // #36 — a literal alias mints an index edge rather than damming). The
+        // alias resolves to the *target's* declaration, so a file that names
+        // only the alias reads a class body in the target's file and needs an
+        // edge there. Mapping the alias to the aliasing file alone (which the
+        // first pass does, and which is also true — that file's `class_alias`
+        // call is what mints the name) would leave the body's own file
+        // unreachable and let its caller replay a stale finding.
+        let mut minted: Vec<(String, Vec<usize>)> = Vec::new();
+        for tree in trees {
+            for edge in tree.class_alias_edges() {
+                if let Some(targets) = files.get(&format!("c:{}", edge.target_fqn)) {
+                    minted.push((format!("c:{}", edge.alias_fqn), targets.clone()));
+                }
+            }
+        }
+        for (alias, targets) in minted {
+            let entry = files.entry(alias).or_default();
+            for target in targets {
+                if !entry.contains(&target) {
+                    entry.push(target);
+                }
             }
         }
         Self { files }
@@ -253,6 +275,15 @@ fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
     }
     for r in tree.hard_class_refs() {
         emit("c:", &tree.resolve_class_fqn(r).to_ascii_lowercase(), sink);
+    }
+    // A literal `class_alias('target', 'alias')` names both ends in string
+    // arguments, which no `NameRef` list carries. The aliasing file depends on
+    // both — on the target's declaration, which the alias resolves to, and on
+    // the alias name, whose minting the merge may refuse if the target went
+    // ambiguous — so both are its footprint and both are edges.
+    for edge in tree.class_alias_edges() {
+        emit("c:", &edge.alias_fqn, sink);
+        emit("c:", &edge.target_fqn, sink);
     }
     for r in tree.const_refs() {
         for candidate in const_candidates(tree, r) {
@@ -634,6 +665,24 @@ mod tests {
             "<?php namespace App; function help(): int { return 1; }\n",
         ]);
         assert_eq!(affected(&t, &[], &[]), Vec::<usize>::new());
+    }
+
+    /// A literal `class_alias` mints an index edge rather than damming (issue
+    /// #36), so a file that names only the alias reads a class body in the
+    /// *target's* file and must be walked when that file changes. Neither end
+    /// is a `NameRef`, so both legs are alias-specific.
+    #[test]
+    fn a_class_alias_reaches_the_target_declarations_file() {
+        let t = trees(&[
+            "<?php\nnamespace Lib;\nclass Real { public int $n = 1; }\n",
+            "<?php\nclass_alias('lib\\\\real', 'shortcut');\n",
+            "<?php\nfunction use_it(\\Shortcut $s): int { return $s->n; }\n",
+        ]);
+        // File 2 names only the alias; file 0 declares the body it reads.
+        assert_eq!(affected(&t, &[0], &[]), vec![0, 1, 2]);
+        // And the delta leg reaches the aliasing file through either end.
+        assert_eq!(affected(&t, &[], &["c:lib\\real"]), vec![1]);
+        assert_eq!(affected(&t, &[], &["c:shortcut"]), vec![1, 2]);
     }
 
     /// `@mixin` targets are inheritance edges, and `@mixinFoo` is not `@mixin`.
