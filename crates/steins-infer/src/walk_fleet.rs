@@ -54,10 +54,11 @@ pub const WALK_WORKERS_ENV: &str = "STEINS_WALK_WORKERS";
 
 /// Files one worker must be given before a second worker earns its keep.
 ///
-/// A worker is not free: it hires its own folder, and a folder over a live
-/// engine spawns its own `php` child. Below this many files per worker the
-/// spawn and the cold memos cost more than the walk they would overlap, which
-/// is why a 41-file package stays sequential and a 341-file one does not.
+/// A worker is not free: it hires a folder of its own, whose memos start cold
+/// and whose first questions therefore reach the transport that a longer-lived
+/// folder would have answered from memory. Below this many files per worker
+/// that costs more than the walk it would overlap, which is why a 41-file
+/// package stays sequential and a 341-file one does not.
 const FILES_PER_WORKER: usize = 32;
 
 /// The stack every walk thread gets — the same number and the same reason as
@@ -124,9 +125,9 @@ impl WorkerBudget {
     /// How wide a walk of `files` files actually fans out.
     ///
     /// Trimmed to the universe unless the operator named a width: a walk of
-    /// two files must not hire two folders (and so spawn two `php` children)
-    /// merely because the machine has the threads for it — which is exactly
-    /// what a small edit's rebuild looks like on an otherwise large project.
+    /// two files must not hire two folders merely because the machine has the
+    /// threads for it — which is exactly what a small edit's rebuild looks
+    /// like on an otherwise large project.
     #[must_use]
     pub(crate) fn width(self, files: usize) -> usize {
         let want = if self.named { files.max(1) } else { (files / FILES_PER_WORKER).max(1) };
@@ -183,9 +184,9 @@ impl<F: Folder, H: Send> WalkFleet for FolderFleet<'_, F, H> {
         let mut folder = (self.hire)();
         job(&mut folder);
         // Retired here rather than kept alive to the end of the run: a folder
-        // over a live engine holds a `php` child, and holding every worker's
-        // child until the merge would make the peak the *sum* of the fleet
-        // instead of the width of the fan-out.
+        // holds a run's worth of memos, and keeping every worker's alive until
+        // the merge would make the peak the *sum* of the fleet instead of the
+        // width of the fan-out.
         let harvest = (self.retire)(folder);
         self.harvests.lock().expect("the harvest lock is never poisoned").push((chunk, harvest));
     }
@@ -199,10 +200,9 @@ impl<F: Folder, H: Send> WalkFleet for FolderFleet<'_, F, H> {
 /// packages in parallel and each of them reaches this loop — and a second level
 /// of fan-out on the *same* pool would let one project's walk threads be
 /// counted as another's. One dedicated pool, sized once, bounds the total
-/// walk-thread count of the process no matter how many analyses are in flight:
-/// a chunk holds its folder (and so its `php` child) only while it is running,
-/// so the live-child count is bounded by this pool's width and not by the
-/// number of concurrent projects.
+/// walk-thread count of the process no matter how many analyses are in
+/// flight — and, because a chunk holds its folder only while it is running,
+/// bounds the live folder count with it.
 ///
 /// Built once and shared for the process lifetime, because its threads are
 /// expensive: [`WALK_STACK_SIZE`] each.
