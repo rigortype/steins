@@ -183,6 +183,11 @@ folder of its own beyond `NoFold` and the replay table, and no `std::process`
 6. **`steins-gen` depends on no steins crate.** Identity, the container and the
    store are payload-agnostic, so the crates that own payloads depend on it and
    never the reverse (ADR-0092 §2).
-7. **The store never enters the wasm graph.** `steins-infer`'s dependency on
-   `steins-gen` is `cfg(not(target_arch = "wasm32"))`, the same discipline the
-   process fold transport follows.
+7. **`steins-infer` reaches the store only on native targets** —
+   its `steins-gen` dependency is `cfg(not(target_arch = "wasm32"))`, the same
+   discipline the process fold transport follows. Note the rule is *not*
+   currently a whole-graph property: `steins-db` depends on `steins-gen`
+   unconditionally for the partition vocabulary, so `steins-gen` and `blake3`
+   do reach `steins-wasm`. That compiles and CI's wasm job is green; if the
+   playground's artifact size ever matters, splitting the partition types from
+   the store/fingerprint halves behind a feature is the remedy.
