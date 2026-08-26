@@ -89,13 +89,8 @@ const COLD_BUDGET_FRACTION: f64 = 0.10;
 pub fn run(args: &[String]) -> Result<bool, String> {
     let parsed = parse_args(args)?;
     if parsed.paranoid {
-        // SAFETY: set before any worker thread is spawned (`measure_target`
-        // and `measure_warm` both spawn theirs below), and this process reads
-        // its own environment only through `std::env::var`.
-        unsafe { std::env::set_var(steins_infer::PARANOID_ENV, "1") };
         println!(
-            "perf: paranoid walk verification ON ({}=1) — every file is walked and every would-be skip is graded",
-            steins_infer::PARANOID_ENV
+            "perf: paranoid walk verification ON — every file is walked and every would-be skip is graded"
         );
     }
     let runs = if parsed.runs < 2 {
@@ -133,7 +128,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         }
 
         if parsed.warm {
-            match measure_warm(Path::new(target), runs, posture, &m) {
+            match measure_warm(Path::new(target), runs, posture, parsed.paranoid, &m) {
                 Ok(w) => {
                     print_warm(&w, &m);
                     if !w.matches || !w.divergences.is_empty() {
@@ -487,13 +482,14 @@ fn measure_warm(
     dir: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold: &Measurement,
 ) -> Result<WarmMeasurement, String> {
     let dir = dir.to_path_buf();
     let cold_hash = cold.findings_sha256.clone();
     std::thread::Builder::new()
         .stack_size(WORKER_STACK_SIZE)
-        .spawn(move || measure_warm_on_worker(&dir, runs, posture, &cold_hash))
+        .spawn(move || measure_warm_on_worker(&dir, runs, posture, paranoid, &cold_hash))
         .expect("failed to spawn the perf warm worker thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -503,6 +499,7 @@ fn measure_warm_on_worker(
     dir: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold_hash: &str,
 ) -> Result<WarmMeasurement, String> {
     // The store lives in a scratch directory, never in the measured tree.
@@ -515,16 +512,18 @@ fn measure_warm_on_worker(
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&store).map_err(|e| format!("create scratch store: {e}"))?;
-    let result = measure_warm_in_store(dir, &store, runs, posture, cold_hash);
+    let result = measure_warm_in_store(dir, &store, runs, posture, paranoid, cold_hash);
     let _ = std::fs::remove_dir_all(&store);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_warm_in_store(
     dir: &Path,
     store: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold_hash: &str,
 ) -> Result<WarmMeasurement, String> {
     // The same file list and target-relative diagnostic paths as `cold_run`,
@@ -550,6 +549,7 @@ fn measure_warm_in_store(
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
         php: matches!(posture, Posture::Php),
+        paranoid,
     };
 
     let check = |tag: &str, findings: Vec<Diagnostic>| -> Option<String> {

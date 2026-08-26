@@ -49,6 +49,8 @@ mod fold_persist;
 #[cfg(not(target_arch = "wasm32"))]
 mod fold_process;
 #[cfg(not(target_arch = "wasm32"))]
+mod affected;
+#[cfg(not(target_arch = "wasm32"))]
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod summaries;

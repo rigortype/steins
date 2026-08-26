@@ -39,9 +39,6 @@ pub(crate) enum FilePlan {
     /// Walk the file — the cold behaviour, and what every ungated run does.
     Walk,
     /// Replay the file's persisted block instead of walking it.
-    // Constructed by the affected-set computation, which lands on top of this
-    // seam — the verifier is deliberately the earlier commit.
-    #[allow(dead_code)]
     Replay(FileWalk),
 }
 

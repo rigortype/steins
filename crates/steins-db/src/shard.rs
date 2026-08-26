@@ -149,6 +149,50 @@ impl PackageShard {
             *entry = slot;
         }
     }
+
+    /// Every name this shard contributes to the merged tables, in the key
+    /// namespaces a name reference is spelled in (ADR-0092 §5, issue #489
+    /// slice B): `f:` a function FQN, `s:` a function's simple name, `c:` a
+    /// class-like FQN (declared, or minted by a literal `class_alias`), `k:` a
+    /// global constant.
+    ///
+    /// **What it is for.** The warm path's name delta is the union of the key
+    /// sets of every changed package's old and new shards; a file whose own
+    /// name references miss that delta cannot have had a resolution move under
+    /// it. The set is deliberately *contribution*, not resolution: a name this
+    /// shard defines twice (and so demotes to ambiguous) is here exactly like
+    /// one it defines once, because both sides of an ambiguity move the
+    /// merged answer. Alias edges contribute both ends — the alias name,
+    /// which the merge may mint, and the target, whose demotion would unmint
+    /// it.
+    ///
+    /// Method names are deliberately absent: a shard carries no method table,
+    /// and a method added to or removed from a class moves that *class's*
+    /// answer, whose FQN is in the set. The file-level call graph closes the
+    /// rest.
+    #[must_use]
+    pub fn contributed_names(&self) -> Vec<String> {
+        let mut out = Vec::with_capacity(
+            self.functions.len()
+                + self.ambiguous_functions.len()
+                + self.fn_by_simple.len()
+                + self.classes.len()
+                + self.ambiguous_classes.len()
+                + 2 * self.class_alias_edges.len()
+                + self.constants.len(),
+        );
+        out.extend(self.functions.keys().map(|fqn| format!("f:{fqn}")));
+        out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
+        out.extend(self.fn_by_simple.keys().map(|simple| format!("s:{simple}")));
+        out.extend(self.classes.keys().map(|fqn| format!("c:{fqn}")));
+        out.extend(self.ambiguous_classes.iter().map(|fqn| format!("c:{fqn}")));
+        for (alias, target) in &self.class_alias_edges {
+            out.push(format!("c:{alias}"));
+            out.push(format!("c:{target}"));
+        }
+        out.extend(self.constants.iter().map(|key| format!("k:{key}")));
+        out
+    }
 }
 
 /// Every global table, recomputed from the shards (ADR-0092 §3). Fields are

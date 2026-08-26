@@ -65,7 +65,7 @@
 //! other's in-flight candidates. Single-process CLI use is fine; this function
 //! opens the store once per run and never re-opens it mid-run.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -86,6 +86,7 @@ use steins_gen::{
 pub use steins_gen::PackageKind;
 use steins_syntax::SourceTree;
 
+use crate::affected::{AffectedInputs, affected_files};
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
 use crate::project::{FileUnit, Index, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
@@ -137,8 +138,8 @@ pub const PARANOID_ENV: &str = "STEINS_GENERATIONS_PARANOID";
 /// every caller of the orchestrator (the CLI, `cargo xtask perf --warm
 /// --paranoid`, the MCP server of issue #491) gets it without a signature
 /// change, and CI — which never sets it — is unaffected.
-fn paranoid_enabled() -> bool {
-    std::env::var(PARANOID_ENV).is_ok_and(|v| v == "1")
+fn paranoid_enabled(p: &GenerationParams<'_>) -> bool {
+    p.paranoid || std::env::var(PARANOID_ENV).is_ok_and(|v| v == "1")
 }
 
 /// The run's whole-universe verdict digest: one fingerprint over every input
@@ -211,6 +212,11 @@ pub struct GenerationParams<'a> {
     pub final_keyword: FinalKeyword,
     /// Whether the PHP sidecar may run (the inverse of the CLI's `--no-php`).
     pub php: bool,
+    /// Run the paranoid walk verifier ([`PARANOID_ENV`]) whatever the
+    /// environment says. OR'd with the variable, so a caller that only wants
+    /// the environment to decide passes `false` — which every caller but a
+    /// test and `cargo xtask perf --paranoid` does.
+    pub paranoid: bool,
 }
 
 /// What one gated run produced: the findings, plus everything the caller's
@@ -413,10 +419,6 @@ struct LoadedPkg {
     /// The decoded shard, when the persisted slots still match this universe.
     shard: Option<PackageShard>,
     slots_stable: bool,
-    /// The package's persisted walk blocks, when the `summaries` section
-    /// decoded. `None` degrades this package to walking, never the run — an
-    /// artifact written before the section existed takes exactly this shape.
-    summaries: Option<StoredSummaries>,
 }
 
 /// Run one generation lifecycle: open the store once, load `CURRENT` if it
@@ -490,14 +492,18 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // knowable here: it needs the run's whole-universe verdicts, which only
     // exist once the analysis has computed them.
     let mut published_summaries: Vec<Option<StoredSummaries>> = Vec::with_capacity(plans.len());
+    // The name delta's old side, per package, in load order. `None` means a
+    // package's old contribution to the name space could not be read, which
+    // makes the delta unknowable and walks the whole run: a name whose
+    // disappearance is invisible cannot be reasoned about.
+    let mut old_names: Vec<Option<Vec<String>>> = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let attempt = current
-            .as_ref()
-            .map_or(Err(LoadRefusal::NoGeneration), |generation| try_load(generation, plan, &diag));
-        match attempt {
+        let published = read_published(current.as_ref(), plan, &diag);
+        published_summaries.push(published.summaries);
+        old_names.push(published.old_names);
+        match published.fresh {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
-                published_summaries.push(loaded.summaries);
                 for (slot, tree) in loaded.trees {
                     tree_slots[slot] = Some(tree);
                 }
@@ -514,7 +520,6 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 });
             }
             Err(refusal) => {
-                published_summaries.push(None);
                 for &slot in &plan.slots {
                     tree_slots[slot] = Some(SourceTree::parse(&texts[&diag[slot]]));
                 }
@@ -537,6 +542,48 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         tree_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
     let replay_candidates: usize =
         published_summaries.iter().flatten().map(|s| s.rows().count()).sum();
+
+    // The name delta (issue #489 slice B): the union of the key sets of every
+    // changed package's OLD and NEW shards. An untouched package contributes
+    // nothing — both its sides are the same set — which is what makes the
+    // delta proportional to the edit rather than to the universe.
+    let mut delta: HashSet<String> = HashSet::new();
+    let mut delta_known = true;
+    for (i, plan) in plans.iter().enumerate() {
+        if states[i].parsed == 0 && !states[i].degraded {
+            continue;
+        }
+        match &old_names[i] {
+            Some(names) => delta.extend(names.iter().cloned()),
+            None => {
+                // A name whose disappearance cannot be seen cannot be reasoned
+                // about, so the sound answer is to walk everything.
+                delta_known = false;
+                notes.push(format!(
+                    "package {}: its old symbols are unreadable; walking every file",
+                    plan.name
+                ));
+            }
+        }
+        delta.extend(shards[i].contributed_names());
+    }
+    // A package the published generation had and this run does not: its names
+    // vanished, and the files that referenced them must be walked.
+    if let Some(generation) = current.as_ref() {
+        let live: HashSet<&PackageName> = plans.iter().map(|plan| &plan.name).collect();
+        let fold = fold_package();
+        for gone in generation.packages().filter(|n| **n != fold && !live.contains(n)) {
+            match generation.artifact(gone).and_then(|mut r| read_shard(&mut r)) {
+                Ok(shard) => delta.extend(shard.contributed_names()),
+                Err(miss) => {
+                    delta_known = false;
+                    notes.push(format!(
+                        "removed package {gone}: its old symbols are unreadable ({miss}); walking every file"
+                    ));
+                }
+            }
+        }
+    }
     let trees_ms = ms(t_trees.elapsed());
 
     // The fold table (ADR-0092 §4): warm over the published artifact when it
@@ -602,24 +649,43 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // The walk plan (issue #489 slice B). The planner is asked once, after the
     // run's whole-universe verdicts are computed and before the first file is
     // walked; it decides per file whether the persisted block may be replayed.
-    let paranoid = paranoid_enabled();
+    let paranoid = paranoid_enabled(p);
+    // Every file's persisted block, by slot, with the package that carries it
+    // — so the licensing check (which needs the universe digest) is the only
+    // thing left to do inside the planner.
+    let blocks = block_index(&plans, &diag, &published_summaries, &contents);
+    let changed: HashSet<usize> =
+        (0..diag.len()).filter(|slot| blocks[*slot].is_none()).collect();
+    // Nothing may replay at all unless there is a published generation to
+    // replay from and the name delta could be read.
+    let replay_possible = current.is_some() && delta_known && replay_candidates > 0;
+    let affected = if replay_possible {
+        affected_files(&AffectedInputs { trees: &trees, changed, delta })
+    } else {
+        (0..diag.len()).collect()
+    };
     let mut universe: Option<Fingerprint> = None;
-    let mut licensed = 0usize;
     let mut planner = |verdict: &UniverseVerdict<'_>| -> Vec<FilePlan> {
         let digest = universe_digest(verdict);
         universe = Some(digest);
-        licensed = published_summaries
-            .iter()
-            .flatten()
-            .filter(|s| s.licensed_by(&stamp, &digest))
-            .map(|s| s.rows().count())
-            .sum();
-        // Slice B's affected-set computation lands on top of this seam. Until
-        // it does, the plan is empty, which `check_units_controlled` reads as
-        // "walk every file" — so the verifier below has nothing to grade and
-        // reports zero would-skips, exactly as an instrument built before its
-        // subject should.
-        Vec::new()
+        if !replay_possible {
+            return Vec::new();
+        }
+        (0..diag.len())
+            .map(|slot| match &blocks[slot] {
+                // The whole-universe leg: a moved verdict refuses every row of
+                // the section it stamped, so the file walks.
+                Some((package, block))
+                    if !affected.contains(&slot)
+                        && published_summaries[*package]
+                            .as_ref()
+                            .is_some_and(|s| s.licensed_by(&stamp, &digest)) =>
+                {
+                    FilePlan::Replay((*block).clone())
+                }
+                _ => FilePlan::Walk,
+            })
+            .collect()
     };
     let mut control = WalkControl::new(&mut planner, paranoid);
     let findings = crate::check_units_controlled(
@@ -653,7 +719,8 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     }
     if replay_candidates > 0 {
         notes.push(format!(
-            "{licensed}/{replay_candidates} persisted walk block(s) are replay-licensed by this run's identity and verdicts"
+            "{} file(s) replayed a persisted walk block, {} walked ({replay_candidates} block(s) were on offer)",
+            walk.replayed, walk.walked
         ));
     }
     if paranoid {
@@ -751,22 +818,113 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     })
 }
 
-/// Try to serve one package from the published generation. Any decode failure
-/// is a [`LoadRefusal::Miss`] for this package alone.
-fn try_load(generation: &Generation, plan: &Plan, diag: &[String]) -> Result<LoadedPkg, LoadRefusal> {
-    let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
-    if !generation.has_package(&plan.name) {
-        return Err(LoadRefusal::NotPublished);
+/// Per universe slot, the persisted walk block that file could replay and the
+/// package index carrying it — or `None`, which is this run's definition of a
+/// **changed file**.
+///
+/// A slot is `None` when the published generation had no row for its path, or
+/// when the row's content fingerprint differs from the one this run captured.
+/// That is the file-level notion of change the design pins, and it is
+/// deliberately not semantic: a callee whose lines merely moved changes a
+/// caller's descent-provenance message, so *any* byte moving makes the file
+/// changed. It is also why a **changed package's unchanged files** can still
+/// replay — the package fingerprint says the package moved, the row says which
+/// of its files did.
+fn block_index<'a>(
+    plans: &[Plan],
+    diag: &[String],
+    summaries: &'a [Option<StoredSummaries>],
+    contents: &[Fingerprint],
+) -> Vec<Option<(usize, &'a FileWalk)>> {
+    let mut out: Vec<Option<(usize, &FileWalk)>> = vec![None; diag.len()];
+    for (package, (plan, summaries)) in plans.iter().zip(summaries).enumerate() {
+        let Some(summaries) = summaries else { continue };
+        let rows: HashMap<&str, (&Fingerprint, &FileWalk)> =
+            summaries.rows().map(|(path, content, walk)| (path, (content, walk))).collect();
+        for &slot in &plan.slots {
+            if let Some((content, walk)) = rows.get(diag[slot].as_str())
+                && **content == contents[slot]
+            {
+                out[slot] = Some((package, walk));
+            }
+        }
     }
-    let mut reader = generation.artifact(&plan.name).map_err(miss)?;
-    let (analyzer, stored) = read_sources(&mut reader).map_err(miss)?;
+    out
+}
+
+/// Everything the published generation can say about one package: the delta's
+/// old side, the walk blocks it carries, and the load attempt proper.
+struct Published {
+    /// The names this package's OLD shard contributed, or `None` when the
+    /// artifact could not give them — which makes the name delta *unknowable*,
+    /// and the whole run walks (see [`generation_check`]).
+    old_names: Option<Vec<String>>,
+    /// The package's persisted walk blocks, read whatever the source
+    /// fingerprint said: a changed package's *unchanged* files may still
+    /// replay, since each row carries its own file's content hash.
+    summaries: Option<StoredSummaries>,
+    fresh: Result<LoadedPkg, LoadRefusal>,
+}
+
+impl Published {
+    /// The shape for a package the published generation could not tell us
+    /// anything about at all.
+    fn refused(refusal: LoadRefusal, old_names: Option<Vec<String>>) -> Self {
+        Self { old_names, summaries: None, fresh: Err(refusal) }
+    }
+}
+
+/// Read what the published generation holds for one package. Any decode
+/// failure is a [`LoadRefusal::Miss`] for this package alone; only the *old
+/// names* being unreadable is wider, because a name whose disappearance cannot
+/// be seen cannot be reasoned about.
+fn read_published(
+    generation: Option<&Generation>,
+    plan: &Plan,
+    diag: &[String],
+) -> Published {
+    let Some(generation) = generation else {
+        // A cold run: the published universe is empty, which is a *known*
+        // empty old side rather than an unknown one. Nothing replays anyway.
+        return Published::refused(LoadRefusal::NoGeneration, Some(Vec::new()));
+    };
+    if !generation.has_package(&plan.name) {
+        // A package the generation never had contributes no old names — again
+        // known, not unknown, so its arrival is an ordinary delta.
+        return Published::refused(LoadRefusal::NotPublished, Some(Vec::new()));
+    }
+    let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
+    let mut reader = match generation.artifact(&plan.name) {
+        Ok(reader) => reader,
+        Err(m) => return Published::refused(miss(m), None),
+    };
+    // The old shard, always: it is the delta's old side whether or not the
+    // sources moved, and it is the verbatim shard when they did not.
+    let old_shard = read_shard(&mut reader).ok();
+    let old_names = old_shard.as_ref().map(PackageShard::contributed_names);
+    // The walk blocks are never a load refusal: the trees are in hand either
+    // way, and a package without them simply walks every file.
+    let summaries = read_summaries(&mut reader).ok();
+    let fresh = load_trees(&mut reader, plan, diag, old_shard);
+    Published { old_names, summaries, fresh }
+}
+
+/// The load proper: the provenance gate, then the per-file trace shards.
+fn load_trees(
+    reader: &mut steins_gen::ArtifactReader,
+    plan: &Plan,
+    diag: &[String],
+    old_shard: Option<PackageShard>,
+) -> Result<LoadedPkg, LoadRefusal> {
+    let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
+    let (analyzer, stored) = read_sources(reader).map_err(miss)?;
     if analyzer != analyzer_version() {
         return Err(LoadRefusal::AnalyzerMoved);
     }
     if stored != plan.fingerprint {
         return Err(LoadRefusal::Changed);
     }
-    let trace = TraceIndex::open(&mut reader).map_err(miss)?;
+    let trace = TraceIndex::open(reader).map_err(miss)?;
     let persisted: HashMap<String, usize> =
         trace.files().map(|(path, slot)| (path.to_owned(), slot)).collect();
     let mut slots_stable = persisted.len() == plan.slots.len();
@@ -776,17 +934,18 @@ fn try_load(generation: &Generation, plan: &Plan, diag: &[String]) -> Result<Loa
         if persisted.get(path) != Some(&slot) {
             slots_stable = false;
         }
-        let tree = trace.read_tree(&mut reader, path).map_err(miss)?;
+        let tree = trace.read_tree(reader, path).map_err(miss)?;
         loaded.push((slot, tree));
     }
     // The shard's sites are universe slots; it may only serve verbatim when
     // every persisted slot still names the same file. Otherwise the caller
     // rebuilds it from the loaded trees — still no reparse.
-    let shard = if slots_stable { Some(read_shard(&mut reader).map_err(miss)?) } else { None };
-    // The walk blocks are *not* a load refusal when they fail: the trees are
-    // already in hand and every file of the package simply walks.
-    let summaries = read_summaries(&mut reader).ok();
-    Ok(LoadedPkg { trees: loaded, shard, slots_stable, summaries })
+    let shard = if slots_stable {
+        Some(old_shard.ok_or(LoadRefusal::Miss("symbols section is not a shard".to_owned()))?)
+    } else {
+        None
+    };
+    Ok(LoadedPkg { trees: loaded, shard, slots_stable })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.
