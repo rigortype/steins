@@ -1,13 +1,15 @@
 //! Project loading, shared by every subcommand: path validation, the `.php`
-//! walk and its real-identity dedup (issue #179), layout discovery (ADR-0015),
+//! walk (`steins_db::walk` — the one the harnesses walk too, issue #524),
+//! its real-identity dedup (issue #179), layout discovery (ADR-0015),
 //! the plugin channel (ADR-0068), and [`load_project`] — the single door
 //! through which `check`, `transform` and MCP (issue #117) build ONE salsa
 //! project (ADR-0009/0015) so cross-file calls, class chains and effects resolve.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use steins_db::walk::{self, Sources};
 use steins_db::{
     EffectsPolicy, PluginFacts, Project, ProjectLayout, Resolve, SourceFile, SteinsDatabase,
     composer, project_index,
@@ -45,32 +47,17 @@ pub(crate) fn missing_paths(paths: &[String]) -> Vec<&String> {
     paths.iter().filter(|p| !Path::new(p.as_str()).exists()).collect()
 }
 
-/// The `.php` files `paths` names, deduplicated to real identity (issue #179)
-/// — see [`dedup_canonical`] for the dedup key and surviving spelling.
+/// The `.php` files `paths` names — [`steins_db::walk`], the one walk the
+/// `steins` binary and the `xtask` harnesses share (issue #524). Callers that
+/// want the walk's posture too (`doctor`) take [`collect_sources`].
 pub(crate) fn collect_files(paths: &[String]) -> Vec<PathBuf> {
-    let mut files = Vec::new();
-    for p in paths {
-        collect_php_files(Path::new(p), &mut files);
-    }
-    dedup_canonical(files)
+    collect_sources(&paths.iter().map(PathBuf::from).collect::<Vec<_>>()).files
 }
 
-/// Deduplicate `files` by real identity, first spelling wins (push order).
-/// Issue #179: a symlinked dir made one tree reachable two ways; deduping by
-/// path STRING double-declared classes (ADR-0049 existence guard). Dedup KEY
-/// is [`Path::canonicalize`]; uncanonicalizable paths key on themselves.
-pub(crate) fn dedup_canonical(files: Vec<PathBuf>) -> Vec<PathBuf> {
-    let mut seen: HashSet<PathBuf> = HashSet::with_capacity(files.len());
-    let mut out = Vec::with_capacity(files.len());
-    for file in files {
-        let key = file.canonicalize().unwrap_or_else(|_| file.clone());
-        if seen.insert(key) {
-            out.push(file);
-        }
-    }
-    // Re-sort for determinism (read_dir order is fs-dependent); selection already done.
-    out.sort();
-    out
+/// [`collect_files`] keeping what the walk refused: the directory symlinks it
+/// would have had to leave the tree (or re-enter it) to follow.
+pub(crate) fn collect_sources(roots: &[PathBuf]) -> Sources {
+    walk::php_files(roots)
 }
 
 /// One analyzed project: salsa database, [`Project`] input, parsed file
@@ -194,65 +181,3 @@ fn attribution_notices(db: &SteinsDatabase, project: Project) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn collect_php_files(path: &Path, out: &mut Vec<PathBuf>) {
-    collect_php_files_inner(path, out, &mut HashSet::new());
-}
-
-/// The walk `collect_php_files` fronts, plus a symlink cycle guard (issue
-/// #179): `visited_dirs` resets per top-level call, so it stops loops but is
-/// NOT the file-level dedup — [`dedup_canonical`] collapses cross-argument duplicates.
-fn collect_php_files_inner(path: &Path, out: &mut Vec<PathBuf>, visited_dirs: &mut HashSet<PathBuf>) {
-    if path.is_dir() {
-        // Already-entered directory is a symlink cycle: stop. canonicalize()
-        // failure is walked uncached; read_dir fails harmlessly if unreadable.
-        if let Ok(canon) = path.canonicalize()
-            && !visited_dirs.insert(canon)
-        {
-            return;
-        }
-        let Ok(entries) = std::fs::read_dir(path) else { return };
-        for entry in entries.flatten() {
-            collect_php_files_inner(&entry.path(), out, visited_dirs);
-        }
-    } else if path.extension().is_some_and(|e| e == "php") {
-        out.push(path.to_path_buf());
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // ---- dedup_canonical (issue #179) --------------------------------------
-
-    /// Two spellings of one file collapse to one entry, first-pushed surviving.
-    /// E2e repro: `tests/symlink_dedup.rs`.
-    #[test]
-    fn dedup_canonical_collapses_two_spellings_keeping_the_first() {
-        let dir = std::env::temp_dir()
-            .join(format!("steins-dedup-canonical-unit-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(dir.join("real")).unwrap();
-        std::fs::write(dir.join("real/a.php"), "<?php\n").unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
-
-        let first = dir.join("real/a.php");
-        let second = dir.join("link/a.php"); // same file, symlinked spelling
-        let out = dedup_canonical(vec![first.clone(), second]);
-        assert_eq!(out, vec![first], "one real file survives, spelled as first pushed");
-
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A path whose `canonicalize()` fails is never dropped: keyed on its own
-    /// literal path (pre-#179 behavior).
-    #[test]
-    fn dedup_canonical_keeps_uncanonicalizable_paths() {
-        let a = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-a.php");
-        let b = PathBuf::from("/steins-dedup-canonical-unit-does-not-exist-b.php");
-        let out = dedup_canonical(vec![a.clone(), b.clone(), a.clone()]);
-        // `a` dedups against its own repeat but not against unrelated `b`.
-        assert_eq!(out, vec![a, b]);
-    }
-}

@@ -4,6 +4,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use steins_db::walk::Sources;
 
 /// One corpus package: its Packagist-style name and its GitHub clone URL. The
 /// list is fixed by ADR-0021 ("Initial FP-gate corpus").
@@ -106,18 +107,70 @@ pub fn checkout_dir(name: &str) -> PathBuf {
     repo_root().join("corpus").join(name.replace('/', "__"))
 }
 
-/// Recursively collect `.php` files under `dir`, skipping VCS metadata.
-pub fn collect_php_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == ".git") {
-                continue;
-            }
-            collect_php_files(&path, out);
-        } else if path.extension().is_some_and(|e| e == "php") {
-            out.push(path);
-        }
+/// The `.php` files under `dir`, sorted — **the walk the `steins` binary
+/// itself does** ([`steins_db::walk`], issue #524).
+///
+/// It is not a second collector that agrees with the product by inspection: it
+/// is the same code. Before #524 it was a second collector, and it disagreed —
+/// over a 6,670-file corpus containing a `corpus/corpus` self-link the CLI
+/// counted 13,340 files and this harness counted 220,110, so every whole-corpus
+/// number the perf harness produced was measuring a universe the product would
+/// never analyze. A harness that measures a different universe than the product
+/// cannot inform the decisions it exists for.
+pub fn collect_php_files(dir: &Path) -> Vec<PathBuf> {
+    php_sources(dir).files
+}
+
+/// [`collect_php_files`] keeping the walk's posture — the directory symlinks it
+/// refused, which a harness reports rather than silently walking past.
+pub fn php_sources(dir: &Path) -> Sources {
+    steins_db::walk::php_files(std::slice::from_ref(&dir.to_path_buf()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The harness's universe is the product's universe (issue #524).
+    ///
+    /// The fixture is the shape that broke the ADR-0092 measurements: a
+    /// directory symlink out of the tree, one back into it (`corpus/corpus`),
+    /// and a file symlink. A human counting `.php` files here says two —
+    /// `pkg/a.php` and `pkg/sub/b.php`, since `pkg/link.php` is `a.php` under
+    /// another name — and that is what both this harness and `steins` itself
+    /// must say. Before the fix this collector followed both directory links
+    /// until the OS's symlink limit stopped it (33 spellings of every file),
+    /// while the CLI's separate collector reported twice the tree.
+    ///
+    /// The CLI half of this pair is `crates/steins-cli/tests/symlink_walk.rs`,
+    /// which asserts the same universe through the binary.
+    #[cfg(unix)]
+    #[test]
+    fn the_harness_walks_the_tree_the_binary_walks() {
+        use std::os::unix::fs::symlink;
+
+        let dir = std::env::temp_dir().join(format!("steins-xtask-walk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(dir.join("outside")).unwrap();
+        std::fs::create_dir_all(dir.join("tree/pkg/sub")).unwrap();
+        std::fs::write(dir.join("outside/away.php"), "<?php\n").unwrap();
+        std::fs::write(dir.join("tree/pkg/a.php"), "<?php\n").unwrap();
+        std::fs::write(dir.join("tree/pkg/sub/b.php"), "<?php\n").unwrap();
+        symlink(dir.join("outside"), dir.join("tree/out")).unwrap();
+        symlink(dir.join("tree"), dir.join("tree/tree")).unwrap();
+        symlink(dir.join("tree/pkg/a.php"), dir.join("tree/pkg/link.php")).unwrap();
+
+        let sources = php_sources(&dir.join("tree"));
+        let names: Vec<String> = sources
+            .files
+            .iter()
+            .map(|f| f.strip_prefix(dir.join("tree")).unwrap().display().to_string())
+            .collect();
+        // Nothing under `out` or `tree/tree` is analyzed at all, and both are
+        // counted rather than passed over in silence.
+        assert_eq!(names, vec!["pkg/a.php", "pkg/sub/b.php"], "got {names:?}");
+        assert_eq!(sources.skip_counts(), (1, 1), "skipped: {:?}", sources.skipped_links);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

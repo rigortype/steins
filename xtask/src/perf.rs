@@ -43,7 +43,7 @@ use steins_infer::{
 };
 use steins_syntax::SourceTree;
 
-use crate::corpus::{collect_php_files, repo_root};
+use crate::corpus::{collect_php_files, php_sources, repo_root};
 use crate::sha256;
 
 /// Median-of-N default. Three is enough for a median that shrugs off one
@@ -305,6 +305,11 @@ pub struct RunTiming {
 /// hash), per-run and median timings, and the determinism verdict.
 pub struct Measurement {
     pub files: usize,
+    /// Directory symlinks the walk refused (issue #524). Printed when non-zero:
+    /// the instrument states the edge of the universe it measured, for the same
+    /// reason `doctor` does — a silently skipped path is how a walk that
+    /// measured the wrong tree went unnoticed for a whole ADR series.
+    pub skipped_links: usize,
     pub findings: usize,
     pub findings_sha256: String,
     pub timings: Vec<RunTiming>,
@@ -327,6 +332,7 @@ pub enum Determinism {
 /// One cold run's full result, kept only long enough to compare runs.
 struct ColdRun {
     files: usize,
+    skipped_links: usize,
     timing: RunTiming,
     serialized: String,
     id_counts: BTreeMap<&'static str, usize>,
@@ -384,6 +390,7 @@ fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measur
     let findings_sha256 = sha256::hex(cold[0].serialized.as_bytes());
     Ok(Measurement {
         files: cold[0].files,
+        skipped_links: cold[0].skipped_links,
         findings,
         findings_sha256,
         timings,
@@ -398,9 +405,8 @@ fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measur
 /// included, because the harness measures the analysis, not the gate policy.
 fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
     let t_load = Instant::now();
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let sources = php_sources(dir);
+    let files = sources.files;
     if files.is_empty() {
         return Err(format!("target `{}` holds no .php files", dir.display()));
     }
@@ -447,6 +453,7 @@ fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
     }
     Ok(ColdRun {
         files: files.len(),
+        skipped_links: sources.skipped_links.len(),
         timing: RunTiming { load_ms, analyze_ms, total_ms: load_ms + analyze_ms },
         serialized: canonical_serialization(diags),
         id_counts,
@@ -565,9 +572,7 @@ fn measure_warm_in_store(
 ) -> Result<WarmMeasurement, String> {
     // The same file list and target-relative diagnostic paths as `cold_run`,
     // so the canonical serialization (and therefore the hash) is comparable.
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let files = collect_php_files(dir);
     let rel: Vec<PathBuf> =
         files.iter().map(|f| f.strip_prefix(dir).unwrap_or(f).to_path_buf()).collect();
     let layout = composer::discover(&[dir.to_path_buf()], dir);
@@ -958,6 +963,12 @@ fn print_measurement(target: &str, posture: Posture, m: &Measurement) {
         posture.as_str(),
         m.timings.len()
     );
+    if m.skipped_links > 0 {
+        println!(
+            "    {} directory symlink(s) skipped — not followed out of the target tree, and not counted twice into it (issue #524)",
+            m.skipped_links
+        );
+    }
     for (i, t) in m.timings.iter().enumerate() {
         println!(
             "    run {}: load+parse {:.1} ms, analyze {:.1} ms, total {:.1} ms",
@@ -1083,7 +1094,17 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        // A directory symlink is not copied, because it is not walked either
+        // (`steins_db::walk`, issue #524): the copy must hold the same universe
+        // the measurement does. It also cannot be copied — `fs::copy` follows
+        // the link and refuses a directory, which is how `--edits` failed
+        // outright on a tree holding one. A link to a *file* is copied as its
+        // contents, which is what analyzing it amounts to.
+        if kind.is_symlink() && entry.path().is_dir() {
+            continue;
+        }
+        if kind.is_dir() {
             // `.git` is large and irrelevant to the analysis.
             if entry.file_name() == ".git" {
                 continue;
@@ -1103,9 +1124,7 @@ fn edit_scenarios(
     grade_store: &Path,
     posture: Posture,
 ) -> Result<Vec<EditRow>, String> {
-    let mut files = Vec::new();
-    collect_php_files(tree, &mut files);
-    files.sort();
+    let files = collect_php_files(tree);
     if files.len() < 3 {
         return Err("a seeded-edit run needs at least three files".to_owned());
     }
@@ -1265,9 +1284,7 @@ fn run_generation(
     posture: Posture,
     paranoid: bool,
 ) -> Result<(GenerationMode, Vec<Diagnostic>, steins_infer::GenerationReport), String> {
-    let mut files = Vec::new();
-    collect_php_files(tree, &mut files);
-    files.sort();
+    let files = collect_php_files(tree);
     let rel: Vec<PathBuf> =
         files.iter().map(|f| f.strip_prefix(tree).unwrap_or(f).to_path_buf()).collect();
     let layout = composer::discover(&[tree.to_path_buf()], tree);
@@ -1449,6 +1466,7 @@ mod tests {
         };
         let m = Measurement {
             files: 1,
+            skipped_links: 0,
             findings: 1,
             findings_sha256: "dd".repeat(32),
             timings: vec![],

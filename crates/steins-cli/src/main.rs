@@ -40,8 +40,8 @@ pub(crate) use config::{
     profiles_from_config, read_steins_config, runtime_from_config,
 };
 pub(crate) use project::{
-    collect_files, collect_php_files, dedup_canonical, load_project, missing_paths,
-    reject_missing_paths, resolve_layout,
+    collect_files, collect_sources, load_project, missing_paths, reject_missing_paths,
+    resolve_layout,
 };
 pub(crate) use transform::{plan_transform_run, post_check, transform_json};
 use annotate::run_annotate;

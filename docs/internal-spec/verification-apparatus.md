@@ -6,6 +6,15 @@ ADR-0013, ADR-0021, ADR-0026, ADR-0029, ADR-0059).
 The zero-FP bar is a claim, and a claim without an instrument is a slogan. This
 is the instrument.
 
+Every command here that walks a tree for `.php` files walks it with
+`steins_db::walk` — the walk the `steins` binary itself does. That is a rule,
+not a coincidence: the harness had its own collector until issue #524, when the
+two were found to disagree about how many files a corpus even holds (6,670
+against 220,110, over a tree containing a symlink to itself), and an instrument
+that measures a universe the product would never analyze cannot inform the
+decisions it exists for. A directory symlink is not followed out of the target
+tree or back into it, and `perf` prints how many it refused.
+
 ## `cargo xtask` commands
 
 | Command | Role |

@@ -10,9 +10,7 @@ use steins_db::{Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::effect_summaries_project;
 
 use crate::config::allow_list_from_disk;
-use crate::project::{
-    collect_php_files, dedup_canonical, load_plugins, reject_missing_paths, resolve_layout,
-};
+use crate::project::{collect_files, load_plugins, reject_missing_paths, resolve_layout};
 use crate::{Format, baseline, effect_baseline};
 
 /// `steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json]
@@ -73,11 +71,7 @@ pub(crate) fn run_effect_diff(args: &[String]) -> ExitCode {
         return code;
     }
 
-    let mut files = Vec::new();
-    for p in &paths {
-        collect_php_files(Path::new(p), &mut files);
-    }
-    let files = dedup_canonical(files);
+    let files = collect_files(&paths);
 
     // No sidecar, no folder: effect summaries are a pure static fixpoint, so this
     // command never needs `php` and takes no `--no-php`.

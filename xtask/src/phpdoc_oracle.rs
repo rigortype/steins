@@ -145,9 +145,7 @@ fn corpus_stage(root: &Path, harness: &Path, dump: &Path) -> Result<(), String> 
         return Ok(());
     }
 
-    let mut files = Vec::new();
-    collect_php_files(&corpus, &mut files);
-    files.sort();
+    let files = collect_php_files(&corpus);
     println!("\ncorpus: scanning {} .php files for docblock types…", files.len());
 
     // Extract unique type strings (dedup keeps the oracle batch small; we track

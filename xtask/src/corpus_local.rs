@@ -176,51 +176,36 @@ pub fn checkout_is_dirty(path: &Path) -> Option<bool> {
     Some(!out.stdout.iter().all(u8::is_ascii_whitespace))
 }
 
-/// Collect every `.php` file under `root`, skipping `.git` and any path matched
-/// by an `exclude` glob. Subtrees wholly excluded (`<prefix>/**` or `**`) are
-/// pruned without descent.
+/// Collect every `.php` file under `root`, skipping any path matched by an
+/// `exclude` glob. Subtrees wholly excluded (`<prefix>/**` or `**`) are pruned
+/// without descent.
 ///
 /// `subdirs` ([`LocalProject::paths`]) restricts the walk when non-empty; an
 /// **empty list walks the whole tree** (the pre-existing behaviour). The walk
 /// keeps `root` as glob origin either way, so `exclude` means the same thing
 /// under both settings.
+///
+/// The walk itself is [`steins_db::walk`] — the same one the `steins` binary
+/// does (issue #524) — with this function supplying only the exclude filter.
+/// The boundary stays `root` even when `subdirs` narrows the walk: a link from
+/// one listed subdirectory to another part of the same project has not left the
+/// project, and only a link out of the project counts as leaving.
 pub fn collect_php_files_in(root: &Path, subdirs: &[String], excludes: &[String]) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    if subdirs.is_empty() {
-        walk(root, root, excludes, &mut out);
-    } else {
-        for sub in subdirs {
-            let dir = root.join(sub);
-            if dir.is_dir() {
-                walk(root, &dir, excludes, &mut out);
-            }
-        }
-    }
-    out.sort();
-    out.dedup();
-    out
-}
+    // Project-relative, forward-slashed path — what an `exclude` glob matches.
+    let rel = |path: &Path| {
+        path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
+    };
+    let walk = steins_db::walk::Walk::new()
+        .confined_to(root)
+        .pruning(|dir: &Path| dir_excluded(&rel(dir), excludes))
+        .keeping(|file: &Path| !excludes.iter().any(|g| glob_match(g, &rel(file))));
 
-fn walk(root: &Path, dir: &Path, excludes: &[String], out: &mut Vec<PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        // Project-relative, forward-slashed path for glob matching.
-        let rel = path.strip_prefix(root).unwrap_or(&path).to_string_lossy().replace('\\', "/");
-        if path.is_dir() {
-            if path.file_name().is_some_and(|n| n == ".git") {
-                continue;
-            }
-            if dir_excluded(&rel, excludes) {
-                continue;
-            }
-            walk(root, &path, excludes, out);
-        } else if path.extension().is_some_and(|e| e == "php")
-            && !excludes.iter().any(|g| glob_match(g, &rel))
-        {
-            out.push(path);
-        }
-    }
+    let roots: Vec<PathBuf> = if subdirs.is_empty() {
+        vec![root.to_path_buf()]
+    } else {
+        subdirs.iter().map(|sub| root.join(sub)).filter(|dir| dir.is_dir()).collect()
+    };
+    walk.run(&roots).files
 }
 
 /// Whether a directory subtree can be pruned wholesale: `<prefix>/**` (or bare
