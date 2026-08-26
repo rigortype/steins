@@ -113,8 +113,11 @@ The salsa database, the `SourceFile` / `Project` inputs, the syntax-level
 tracked queries (`parse`, `function_index`), the whole-project symbol index,
 the Composer partition builder, the per-package symbol shard and the
 per-generation merge (ADR-0092 §3), and the artifact payload codecs — what the
-`symbols` / `contracts` / `trace` sections mean, plus the read transaction and
-residency vocabulary (ADR-0092 §2).
+`symbols` / `contracts` / `trace` sections mean, plus the per-file payload
+framing those last two share with `facts` (a length-prefixed directory then
+payloads tiling the rest, so a republish copies an unmoved file's bytes instead
+of re-encoding them), the read transaction and the residency vocabulary
+(ADR-0092 §2).
 
 **Defends:** two things. That semantic queries live *outside* this crate —
 downstream crates define tracked queries against the `Db` trait, so checking
@@ -137,12 +140,16 @@ value.
 The walk, environments, the object store, binding descent, the effect and throw
 fixpoints, name resolution, every diagnostic emitter, the diagnostic registry,
 inline suppression, and the dam. Also the generation orchestrator (ADR-0092
-§5) and the two artifact sections whose payloads are this crate's own
+§5) and the three artifact sections whose payloads are this crate's own
 vocabulary rather than `steins-db`'s — `sources`, the provenance record the
-reuse decision reads, and `summaries`, the per-file walk blocks a warm run
-replays instead of walking (issue #489). The line is the same one `steins-gen`
-draws one level up: a section's bytes belong to whoever knows what they mean,
-and `Diagnostic` / the diagnostic registry / `Facet` / `Fix` are not things
+reuse decision reads; `summaries`, the per-file walk blocks a warm run replays
+instead of walking (issue #489); and `facts`, the per-file projection every
+whole-universe phase reads *instead of a tree* (issue #516: the dam row, the
+never-returning names, the parse-failure row, the affected set's footprint, the
+two fixpoints' own rows, the file's own shard contribution, and the three
+reporting gates). The line is the same one `steins-gen` draws one level up: a
+section's bytes belong to whoever knows what they mean, and `Diagnostic` / the
+diagnostic registry / `Facet` / `Fix` / `EffectOwnRow` are not things
 `steins-db` knows.
 
 **Defends:** the zero-FP bar itself. This is where `Maybe` becomes silence —
