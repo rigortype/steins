@@ -12,7 +12,7 @@ use steins_syntax::{
 
 use crate::cx::Cx;
 use crate::descent::checkable_calls;
-use crate::project::{Diagnostic, FileUnit};
+use crate::project::Diagnostic;
 use crate::{TYPE_RETURN_MAYBE_MISSING_ID, TYPE_RETURN_MISSING_ID};
 
 // return missing (ADR-0078, issue #199)
@@ -123,32 +123,6 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
         // The top-level scope carries no return hint, so it never reaches here.
         ScopeOwner::TopLevel => ("the script".to_owned(), "{main}".to_owned()),
     }
-}
-
-/// The simple names of every function and method in the run that declares
-/// `: never` — the veto set for the never-returning-callee obstacle.
-///
-/// Read off `Scope::ret_hint`, covering exactly the bodies the analysis lowered.
-/// Names are lowercased (PHP names are case-insensitive) and are **simple**
-/// names, not resolved targets: a scope is vetoed when it calls something
-/// spelled like a never-returning callee. Deliberate over-silence — resolving
-/// each call's real target would need the receiver's exact class, and the cost
-/// of guessing wrong is a false `TypeError` accusation.
-pub(crate) fn never_returning_names(units: &[FileUnit]) -> HashSet<String> {
-    let mut names = HashSet::new();
-    for unit in units {
-        for scope in unit.tree.scopes() {
-            if scope.ret_hint.is_none_or(|h| h.kind != RetHintKind::Never) {
-                continue;
-            }
-            match &scope.owner {
-                ScopeOwner::Function(name) => names.insert(name.to_ascii_lowercase()),
-                ScopeOwner::Method { method, .. } => names.insert(method.to_ascii_lowercase()),
-                ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => continue,
-            };
-        }
-    }
-    names
 }
 
 /// Whether `scope` calls anything named in the never-returning veto set.

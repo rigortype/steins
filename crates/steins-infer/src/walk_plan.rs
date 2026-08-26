@@ -33,6 +33,7 @@ use std::fmt;
 
 use crate::Diagnostic;
 use crate::dam::DamFacts;
+use crate::facts::FileFacts;
 
 /// What one file's walk block should do this run.
 pub(crate) enum FilePlan {
@@ -153,6 +154,11 @@ pub(crate) struct WalkControl<'a> {
     /// hand. Returning a vector shorter than the universe is read as "walk the
     /// rest".
     pub(crate) planner: &'a mut dyn FnMut(&UniverseVerdict<'_>) -> Vec<FilePlan>,
+    /// This run's per-file facts, in unit order (issue #516) — what every
+    /// whole-universe phase reads instead of a tree. Present only here, on the
+    /// generation channel: every other entry point hands `check_units` no
+    /// control at all and each phase reads the tree exactly as it always did.
+    pub(crate) facts: &'a [FileFacts],
     /// Walk every file *anyway* and compare, instead of trusting the plan.
     pub(crate) paranoid: bool,
     /// Per file, in unit order: what this run's block produced — the rows the
@@ -208,9 +214,11 @@ impl<'a> WalkControl<'a> {
     pub(crate) fn new(
         planner: &'a mut dyn FnMut(&UniverseVerdict<'_>) -> Vec<FilePlan>,
         paranoid: bool,
+        facts: &'a [FileFacts],
     ) -> Self {
         Self {
             planner,
+            facts,
             paranoid,
             ledger: Vec::new(),
             walked: 0,

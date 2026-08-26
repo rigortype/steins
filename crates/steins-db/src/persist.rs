@@ -67,6 +67,16 @@ pub const CONTRACTS_SECTION: &str = "contracts";
 /// [`SourceTree`] per file.
 pub const TRACE_SECTION: &str = "trace";
 
+/// The section holding the package's per-file **facts** (issue #516): the
+/// projection of a file's tree that every whole-universe phase reads, so a
+/// warm run answers those phases without decoding a tree. Framed exactly like
+/// [`TRACE_SECTION`] — same nested directory, same per-file addressing, same
+/// byte-copy discipline on republish — because it is asked the same way: one
+/// file at a time, and never all of them at once for a package that did not
+/// move. The payload's *meaning* belongs to `steins-infer`, which owns every
+/// vocabulary in it; this crate owns only the framing.
+pub const FACTS_SECTION: &str = "facts";
+
 /// [`SYMBOLS_SECTION`] as a validated [`SectionName`].
 #[must_use]
 pub fn symbols_section() -> SectionName {
@@ -83,6 +93,12 @@ pub fn contracts_section() -> SectionName {
 #[must_use]
 pub fn trace_section() -> SectionName {
     SectionName::new(TRACE_SECTION).expect("the trace section name is valid")
+}
+
+/// [`FACTS_SECTION`] as a validated [`SectionName`].
+#[must_use]
+pub fn facts_section() -> SectionName {
+    SectionName::new(FACTS_SECTION).expect("the facts section name is valid")
 }
 
 /// The serde codec for [`steins_phpdoc::MagicTagKind`], by its canonical
@@ -241,10 +257,18 @@ pub struct TraceFile<'a> {
     pub tree: &'a SourceTree,
 }
 
-/// Frame already-serialized per-file payloads into the trace section's bytes.
-/// Split from [`trace_section_bytes`] so the doctoring tests can frame
-/// deliberately broken payloads through the one real writer.
-fn trace_section_from_parts(parts: &[(String, usize, Vec<u8>)]) -> Vec<u8> {
+/// Frame already-serialized per-file payloads into one section's bytes: a
+/// length-prefixed JSON directory, then the payloads tiling the rest exactly.
+///
+/// Three sections share this framing — `trace`, `contracts` and `facts` — and
+/// they share it for one reason: a warm rebuild must be able to *copy* an
+/// unmoved file's payload byte for byte instead of re-encoding it (issue
+/// #516). Re-encoding needs the value, the value needs the tree, and needing
+/// the tree is exactly what the warm path is trying to stop doing. The slot
+/// lives in the directory rather than in the payload, so a file whose universe
+/// slot moved republishes the same bytes under a new directory entry.
+#[must_use]
+pub fn payload_section_bytes(parts: &[(String, usize, Vec<u8>)]) -> Vec<u8> {
     let mut entries = Vec::with_capacity(parts.len());
     let mut offset = 0u64;
     for (path, slot, payload) in parts {
@@ -256,7 +280,7 @@ fn trace_section_from_parts(parts: &[(String, usize, Vec<u8>)]) -> Vec<u8> {
         });
         offset += payload.len() as u64;
     }
-    let directory = serde_json::to_vec(&entries).expect("a trace directory serializes");
+    let directory = serde_json::to_vec(&entries).expect("a payload directory serializes");
     let mut bytes =
         Vec::with_capacity(TRACE_PREFIX as usize + directory.len() + offset as usize);
     bytes.extend_from_slice(&(directory.len() as u64).to_le_bytes());
@@ -283,56 +307,56 @@ pub fn trace_section_bytes(files: &[TraceFile<'_>]) -> Vec<u8> {
             (f.path.to_owned(), f.slot, payload)
         })
         .collect();
-    trace_section_from_parts(&parts)
+    payload_section_bytes(&parts)
 }
 
-/// The trace section's decoded directory: which files the package carries and
-/// where each payload sits. Opening it reads and validates the directory only
-/// — no payload is touched until [`TraceIndex::read_tree`] asks for one.
+/// One section's decoded per-file directory: which files it carries and where
+/// each payload sits. Opening it reads and validates the directory only — no
+/// payload is touched until [`Self::payload`] asks for one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceIndex {
+pub struct PayloadIndex {
+    section: SectionName,
     entries: Vec<TraceEntry>,
 }
 
-impl TraceIndex {
+impl PayloadIndex {
     /// Read and validate the nested directory. Strict, mirroring the
     /// container's own directory checks: the length prefix must fit the
     /// section, the directory must be exactly the declared JSON shape, and
     /// the payloads must tile the payload area exactly. Anything else is a
     /// [`Miss`].
-    pub fn open(reader: &mut ArtifactReader) -> Result<Self, Miss> {
-        let section = trace_section();
+    pub fn open(reader: &mut ArtifactReader, section: SectionName) -> Result<Self, Miss> {
         let section_len =
             reader.section_len(&section).ok_or_else(|| Miss::AbsentSection(section.clone()))?;
         if section_len < TRACE_PREFIX {
-            return Err(Miss::Corrupt("trace section shorter than its length prefix"));
+            return Err(Miss::Corrupt("payload section shorter than its length prefix"));
         }
         let prefix = reader.section_slice(&section, 0, TRACE_PREFIX)?;
         let dir_len = u64::from_le_bytes(prefix.try_into().expect("eight bytes read"));
         if dir_len > section_len - TRACE_PREFIX {
-            return Err(Miss::Corrupt("trace directory longer than its section"));
+            return Err(Miss::Corrupt("payload directory longer than its section"));
         }
         let directory = reader.section_slice(&section, TRACE_PREFIX, dir_len)?;
         let entries: Vec<TraceEntry> = serde_json::from_slice(&directory)
-            .map_err(|_| Miss::Corrupt("trace directory is not a directory"))?;
+            .map_err(|_| Miss::Corrupt("payload directory is not a directory"))?;
         let payload_area = section_len - TRACE_PREFIX - dir_len;
         let mut expected = 0u64;
         for entry in &entries {
             if entry.offset != expected {
-                return Err(Miss::Corrupt("trace payloads do not tile the payload area"));
+                return Err(Miss::Corrupt("payloads do not tile the payload area"));
             }
             expected = entry
                 .offset
                 .checked_add(entry.len)
-                .ok_or(Miss::Corrupt("trace payload length overflows"))?;
+                .ok_or(Miss::Corrupt("payload length overflows"))?;
             if entries.iter().filter(|e| e.path == entry.path).count() != 1 {
-                return Err(Miss::Corrupt("duplicate path in the trace directory"));
+                return Err(Miss::Corrupt("duplicate path in the payload directory"));
             }
         }
         if expected != payload_area {
-            return Err(Miss::Corrupt("trace payloads do not tile the payload area"));
+            return Err(Miss::Corrupt("payloads do not tile the payload area"));
         }
-        Ok(Self { entries })
+        Ok(Self { section, entries })
     }
 
     /// Every file in the directory, `(path, slot)`, in on-disk order.
@@ -346,27 +370,63 @@ impl TraceIndex {
         self.entries.iter().any(|e| e.path == path)
     }
 
+    /// One file's payload bytes, verbatim: one bounded sub-range read of
+    /// exactly its payload — the other files' bytes are never touched. This is
+    /// also the republish path's copy source (issue #516).
+    pub fn payload(&self, reader: &mut ArtifactReader, path: &str) -> Result<Vec<u8>, Miss> {
+        let entry = self
+            .entries
+            .iter()
+            .find(|e| e.path == path)
+            .ok_or(Miss::Corrupt("no payload entry for the requested path"))?;
+        let dir_len = self.directory_len();
+        reader.section_slice(&self.section, TRACE_PREFIX + dir_len + entry.offset, entry.len)
+    }
+
+    /// The directory's serialized length, reconstructed the way the writer
+    /// framed it — the payload area starts right after.
+    fn directory_len(&self) -> u64 {
+        serde_json::to_vec(&self.entries).expect("a payload directory serializes").len() as u64
+    }
+}
+
+/// The trace section's decoded directory — [`PayloadIndex`] over
+/// [`TRACE_SECTION`], with the tree decode on top.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceIndex {
+    inner: PayloadIndex,
+}
+
+impl TraceIndex {
+    /// Read and validate the trace section's nested directory.
+    pub fn open(reader: &mut ArtifactReader) -> Result<Self, Miss> {
+        Ok(Self { inner: PayloadIndex::open(reader, trace_section())? })
+    }
+
+    /// Every file in the directory, `(path, slot)`, in on-disk order.
+    pub fn files(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.inner.files()
+    }
+
+    /// Whether the directory lists `path`.
+    #[must_use]
+    pub fn has_file(&self, path: &str) -> bool {
+        self.inner.has_file(path)
+    }
+
+    /// One file's payload bytes, verbatim — the republish copy source.
+    pub fn payload(&self, reader: &mut ArtifactReader, path: &str) -> Result<Vec<u8>, Miss> {
+        self.inner.payload(reader, path)
+    }
+
     /// Load one file's tree: one bounded sub-range read of exactly its
     /// payload, one decode — the other files' bytes are never touched. An
     /// unlisted path, or a payload that does not decode to a tree, is a
     /// [`Miss`] for this file alone; the directory (and every other payload)
     /// still serves.
     pub fn read_tree(&self, reader: &mut ArtifactReader, path: &str) -> Result<SourceTree, Miss> {
-        let entry = self
-            .entries
-            .iter()
-            .find(|e| e.path == path)
-            .ok_or(Miss::Corrupt("no trace entry for the requested path"))?;
-        let dir_len = self.directory_len();
-        let bytes =
-            reader.section_slice(&trace_section(), TRACE_PREFIX + dir_len + entry.offset, entry.len)?;
+        let bytes = self.inner.payload(reader, path)?;
         serde_json::from_slice(&bytes).map_err(|_| Miss::Corrupt("trace payload is not a tree"))
-    }
-
-    /// The directory's serialized length, reconstructed the way the writer
-    /// framed it — the payload area starts right after.
-    fn directory_len(&self) -> u64 {
-        serde_json::to_vec(&self.entries).expect("a trace directory serializes").len() as u64
     }
 }
 
@@ -381,16 +441,38 @@ impl TraceIndex {
 #[must_use]
 pub fn build_sections(
     shard: &PackageShard,
-    contracts: &[DeclContract],
-    files: &[TraceFile<'_>],
+    contracts: &[(String, usize, Vec<u8>)],
+    trace: &[(String, usize, Vec<u8>)],
 ) -> ArtifactBuilder {
     let mut builder = ArtifactBuilder::new();
     let symbols = serde_json::to_vec(shard).expect("a package shard serializes");
     builder.section(symbols_section(), symbols).expect("distinct section names");
-    let contracts = serde_json::to_vec(contracts).expect("a contract list serializes");
-    builder.section(contracts_section(), contracts).expect("distinct section names");
-    builder.section(trace_section(), trace_section_bytes(files)).expect("distinct section names");
     builder
+        .section(contracts_section(), payload_section_bytes(contracts))
+        .expect("distinct section names");
+    builder
+        .section(trace_section(), payload_section_bytes(trace))
+        .expect("distinct section names");
+    builder
+}
+
+/// One file's trace payload, ready for [`build_sections`]: the lowered tree,
+/// serialized. The slot lives in the directory, so these bytes are a function
+/// of the file alone and republish can copy them under a new slot.
+#[must_use]
+pub fn trace_payload(tree: &SourceTree) -> Vec<u8> {
+    // Infallible for the lowered representation: every map is string-keyed and
+    // floats travel as bits (see steins-syntax's `persist` codecs).
+    serde_json::to_vec(tree).expect("a lowered tree serializes")
+}
+
+/// One file's contract payload, ready for [`build_sections`]: the file's
+/// declarations at the **canonical slot 0**, so the bytes are a function of
+/// the file alone and republish can copy them whatever slot the file now
+/// holds. [`read_contracts`] puts the directory's slot back.
+#[must_use]
+pub fn contract_payload(tree: &SourceTree) -> Vec<u8> {
+    serde_json::to_vec(&decl_contracts(0, tree)).expect("a contract list serializes")
 }
 
 /// Decode the `symbols` section back into the [`PackageShard`] it was
@@ -403,9 +485,23 @@ pub fn read_shard(reader: &mut ArtifactReader) -> Result<PackageShard, Miss> {
 /// Decode the `contracts` section back into its [`DeclContract`] list. Any
 /// way the bytes can be wrong is a [`Miss`].
 pub fn read_contracts(reader: &mut ArtifactReader) -> Result<Vec<DeclContract>, Miss> {
-    let bytes = reader.section(&contracts_section())?;
-    serde_json::from_slice(&bytes)
-        .map_err(|_| Miss::Corrupt("contracts section is not a contract list"))
+    let index = PayloadIndex::open(reader, contracts_section())?;
+    let files: Vec<(String, usize)> =
+        index.files().map(|(path, slot)| (path.to_owned(), slot)).collect();
+    let mut out = Vec::new();
+    for (path, slot) in files {
+        let bytes = index.payload(reader, &path)?;
+        let decls: Vec<DeclContract> = serde_json::from_slice(&bytes)
+            .map_err(|_| Miss::Corrupt("contracts payload is not a contract list"))?;
+        // The payload is written at the canonical slot 0 so its bytes are a
+        // function of the file alone; the directory is what says where the
+        // file sits in *this* universe.
+        out.extend(decls.into_iter().map(|mut d| {
+            d.file = slot;
+            d
+        }));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -615,6 +711,8 @@ mod tests {
         key: String,
         shard: PackageShard,
         contracts: Vec<DeclContract>,
+        /// The same contracts as the per-file payloads the writer takes.
+        payloads: Vec<(String, usize, Vec<u8>)>,
         /// `(path, slot)` of every file in the package, in slot order.
         files: Vec<(String, usize)>,
     }
@@ -629,14 +727,16 @@ mod tests {
             .map(|(key, slots)| {
                 let mut shard = PackageShard::default();
                 let mut contracts = Vec::new();
+                let mut payloads = Vec::new();
                 let mut files = Vec::new();
                 for slot in slots {
                     let (path, tree) = &parsed[slot];
                     shard.add_file(slot, path, tree);
                     contracts.extend(decl_contracts(slot, tree));
+                    payloads.push(((*path).to_owned(), slot, contract_payload(tree)));
                     files.push(((*path).to_owned(), slot));
                 }
-                BuiltPackage { key, shard, contracts, files }
+                BuiltPackage { key, shard, contracts, payloads, files }
             })
             .collect()
     }
@@ -646,13 +746,13 @@ mod tests {
         parsed: &[(&'static str, SourceTree)],
         p: &BuiltPackage,
     ) -> PathBuf {
-        let trace: Vec<TraceFile<'_>> = p
+        let trace: Vec<(String, usize, Vec<u8>)> = p
             .files
             .iter()
-            .map(|(path, slot)| TraceFile { path, slot: *slot, tree: &parsed[*slot].1 })
+            .map(|(path, slot)| (path.clone(), *slot, trace_payload(&parsed[*slot].1)))
             .collect();
         let path = dir.path(&p.key.replace('/', "-"));
-        build_sections(&p.shard, &p.contracts, &trace).write_to(&path).unwrap();
+        build_sections(&p.shard, &p.payloads, &trace).write_to(&path).unwrap();
         path
     }
 
@@ -845,7 +945,7 @@ mod tests {
         ];
         let path = tmp.path("pkg");
         let mut builder = ArtifactBuilder::new();
-        builder.section(trace_section(), trace_section_from_parts(&parts)).unwrap();
+        builder.section(trace_section(), payload_section_bytes(&parts)).unwrap();
         builder.write_to(&path).unwrap();
 
         let mut reader = open(&path);
@@ -882,14 +982,14 @@ mod tests {
         let store = Store::open(&tmp.dir).unwrap();
         let mut candidate = store.begin(id, vec![]).unwrap();
         for p in &packages {
-            let trace: Vec<TraceFile<'_>> = p
+            let trace: Vec<(String, usize, Vec<u8>)> = p
                 .files
                 .iter()
-                .map(|(path, slot)| TraceFile { path, slot: *slot, tree: &parsed[*slot].1 })
+                .map(|(path, slot)| (path.clone(), *slot, trace_payload(&parsed[*slot].1)))
                 .collect();
             let name = PackageName::new(&p.key).unwrap();
             candidate
-                .write_artifact(&name, &build_sections(&p.shard, &p.contracts, &trace))
+                .write_artifact(&name, &build_sections(&p.shard, &p.payloads, &trace))
                 .unwrap();
         }
         let generation = candidate.publish().unwrap();

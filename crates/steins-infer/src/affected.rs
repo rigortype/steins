@@ -260,31 +260,34 @@ use std::collections::{HashMap, HashSet};
 
 use steins_syntax::{Callee, NameRef, RefKind, SourceTree, normalize_const_fqn};
 
+use crate::facts::{FileFacts, key_hash};
+
 use crate::MAX_BINDING_DEPTH;
 
 /// What the affected-set computation needs about this run.
 pub(crate) struct AffectedInputs<'a> {
-    /// The universe's lowered trees, in slot order.
-    pub(crate) trees: &'a [SourceTree],
+    /// The universe's per-file facts, in slot order — the name projections
+    /// below, and nothing else. Since issue #516 this is deliberately not the
+    /// trees: deciding *which* files are walked must not itself decode one.
+    pub(crate) facts: &'a [FileFacts],
     /// Slots whose bytes moved since the published generation — including
     /// every file the published generation did not have at all.
     pub(crate) changed: HashSet<usize>,
-    /// The name delta, in [`PackageShard::contributed_names_from`]'s
-    /// namespaces — see the module docs for what belongs in it and why.
-    ///
-    /// [`PackageShard::contributed_names_from`]: steins_db::PackageShard::contributed_names_from
-    pub(crate) delta: HashSet<String>,
+    /// The name delta, hashed the way the footprints are
+    /// ([`crate::facts::key_hash`]) — see the module docs for what belongs in
+    /// it and why.
+    pub(crate) delta: HashSet<u64>,
 }
 
 /// Which slots must be walked. Everything else may replay — subject to the
 /// caller's own gates (its package loaded, its summaries decoded, the stamp and
 /// the universe verdict unmoved).
 pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
-    let n = inputs.trees.len();
-    let decls = DeclTable::build(inputs.trees);
+    let n = inputs.facts.len();
+    let decls = DeclTable::build(inputs.facts);
 
     // One pass over every file: its footprint decides both the delta leg and
-    // its outgoing name edges, so the keys are never retained.
+    // its outgoing name edges.
     let mut affected: HashSet<usize> = inputs.changed.clone();
     let mut names: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut inherits: Vec<Vec<usize>> = vec![Vec::new(); n];
@@ -292,12 +295,12 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
     // *The delta leg and the descent* in the module docs. Empty for every edit
     // that only adds or modifies.
     let mut undeclared_hits: Vec<usize> = Vec::new();
-    for (file, tree) in inputs.trees.iter().enumerate() {
+    for (file, facts) in inputs.facts.iter().enumerate() {
         let mut edges: HashSet<usize> = HashSet::new();
         let mut hit = false;
         let mut undeclared = false;
-        footprint(tree, &mut |key: &str| {
-            let declaring = decls.files_of(key);
+        for key in &facts.footprint {
+            let declaring = decls.files_of(*key);
             if inputs.delta.contains(key) {
                 hit = true;
                 undeclared |= declaring.is_none();
@@ -305,7 +308,7 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
             if let Some(files) = declaring {
                 edges.extend(files.iter().copied());
             }
-        });
+        }
         if hit {
             affected.insert(file);
             if undeclared {
@@ -314,7 +317,14 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
         }
         edges.remove(&file);
         names[file] = edges.into_iter().collect();
-        inherits[file] = inheritance_edges(tree, &decls, file);
+        let mut up: HashSet<usize> = HashSet::new();
+        for key in &facts.inherits {
+            if let Some(files) = decls.files_of(*key) {
+                up.extend(files.iter().copied());
+            }
+        }
+        up.remove(&file);
+        inherits[file] = up.into_iter().collect();
     }
 
     // `inherits` points a file at the files declaring its supertypes, so its
@@ -375,35 +385,29 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
 // The declaration table: which files could satisfy a name reference.
 // ---------------------------------------------------------------------------
 
-/// Name key → the files declaring something under it. Rebuilt per run from the
-/// trees already in hand (loaded or freshly parsed), so it costs no
-/// persistence and cannot go stale.
+/// Name key → the files declaring something under it. Rebuilt per run from
+/// the per-file projections already in hand (persisted or freshly derived), so
+/// it costs no extra persistence and cannot go stale.
+///
+/// Keys are the 64-bit hashes of [`crate::facts::key_hash`] rather than the
+/// strings, because that is the form the persisted footprints take (issue
+/// #516): a string table would be the bulk of the per-file payload. A hash
+/// collision is one-sided — it can only make two distinct names look like one,
+/// which adds an edge or a delta hit and therefore walks a file that need not
+/// have been. It cannot hide one.
 struct DeclTable {
-    files: HashMap<String, Vec<usize>>,
+    files: HashMap<u64, Vec<usize>>,
 }
 
 impl DeclTable {
-    fn build(trees: &[SourceTree]) -> Self {
-        let mut files: HashMap<String, Vec<usize>> = HashMap::new();
-        let mut add = |key: String, file: usize| {
-            let entry: &mut Vec<usize> = files.entry(key).or_default();
-            if entry.last() != Some(&file) {
-                entry.push(file);
-            }
-        };
-        for (file, tree) in trees.iter().enumerate() {
-            for f in tree.functions() {
-                add(format!("f:{}", f.fqn), file);
-                add(format!("s:{}", f.name.to_ascii_lowercase()), file);
-            }
-            for c in tree.classes() {
-                add(format!("c:{}", c.fqn), file);
-            }
-            for edge in tree.class_alias_edges() {
-                add(format!("c:{}", edge.alias_fqn), file);
-            }
-            for d in tree.global_const_decls() {
-                add(format!("k:{}", d.fqn), file);
+    fn build(facts: &[FileFacts]) -> Self {
+        let mut files: HashMap<u64, Vec<usize>> = HashMap::new();
+        for (file, f) in facts.iter().enumerate() {
+            for key in &f.declares {
+                let entry: &mut Vec<usize> = files.entry(*key).or_default();
+                if entry.last() != Some(&file) {
+                    entry.push(file);
+                }
             }
         }
         // Second pass for the literal `class_alias` edges (ADR-0049 §2, issue
@@ -414,11 +418,11 @@ impl DeclTable {
         // first pass does, and which is also true — that file's `class_alias`
         // call is what mints the name) would leave the body's own file
         // unreachable and let its caller replay a stale finding.
-        let mut minted: Vec<(String, Vec<usize>)> = Vec::new();
-        for tree in trees {
-            for edge in tree.class_alias_edges() {
-                if let Some(targets) = files.get(&format!("c:{}", edge.target_fqn)) {
-                    minted.push((format!("c:{}", edge.alias_fqn), targets.clone()));
+        let mut minted: Vec<(u64, Vec<usize>)> = Vec::new();
+        for f in facts {
+            for (alias, target) in &f.alias_edges {
+                if let Some(targets) = files.get(target) {
+                    minted.push((*alias, targets.clone()));
                 }
             }
         }
@@ -433,8 +437,8 @@ impl DeclTable {
         Self { files }
     }
 
-    fn files_of(&self, key: &str) -> Option<&Vec<usize>> {
-        self.files.get(key)
+    fn files_of(&self, key: u64) -> Option<&Vec<usize>> {
+        self.files.get(&key)
     }
 }
 
@@ -459,6 +463,58 @@ impl DeclTable {
 /// already reach by naming its class.
 ///
 /// [`PackageShard::contributed_names_from`]: steins_db::PackageShard::contributed_names_from
+pub(crate) fn footprint_keys(tree: &SourceTree) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    footprint(tree, &mut |key: &str| out.push(key_hash(key)));
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The [`DeclTable`] keys this file *declares* — the other half of the name
+/// graph, and the same projection `DeclTable::build` used to take off a tree.
+pub(crate) fn declared_keys(tree: &SourceTree) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    let mut add = |key: &str| out.push(key_hash(key));
+    for f in tree.functions() {
+        add(&format!("f:{}", f.fqn));
+        add(&format!("s:{}", f.name.to_ascii_lowercase()));
+    }
+    for c in tree.classes() {
+        add(&format!("c:{}", c.fqn));
+    }
+    for edge in tree.class_alias_edges() {
+        add(&format!("c:{}", edge.alias_fqn));
+    }
+    for d in tree.global_const_decls() {
+        add(&format!("k:{}", d.fqn));
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// The literal `class_alias` edges as key pairs, `(alias, target)`.
+pub(crate) fn alias_key_edges(tree: &SourceTree) -> Vec<(u64, u64)> {
+    tree.class_alias_edges()
+        .iter()
+        .map(|edge| {
+            (key_hash(&format!("c:{}", edge.alias_fqn)), key_hash(&format!("c:{}", edge.target_fqn)))
+        })
+        .collect()
+}
+
+/// The class keys this file's class-likes inherit from — see
+/// [`inheritance_edges`] for the reading. The trait widening is folded in here
+/// rather than at lookup time, so the persisted list is self-contained.
+pub(crate) fn inherit_keys(tree: &SourceTree) -> Vec<u64> {
+    let mut out: Vec<u64> = Vec::new();
+    inheritance_refs(tree, &mut |fqn: &str| out.push(key_hash(&format!("c:{fqn}"))));
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
     let mut buf = String::with_capacity(64);
     let mut emit = |prefix: &str, name: &str, sink: &mut dyn FnMut(&str)| {
@@ -679,8 +735,8 @@ fn identifiers(text: &str) -> impl Iterator<Item = &str> {
         .filter(|t| !t.is_empty() && !t.chars().all(|c| c.is_ascii_digit()))
 }
 
-/// The files a file's class-likes inherit from, in the widest reading the
-/// lowering supports: `extends`, `implements`, `@mixin` targets, the
+/// Every class FQN a file's class-likes inherit from, in the widest reading
+/// the lowering supports: `extends`, `implements`, `@mixin` targets, the
 /// **anonymous** classes' edges, and — for a class that uses traits, whose
 /// trait names the lowering keeps only as a bit — every class-like this file
 /// names at all.
@@ -692,13 +748,7 @@ fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 /// otherwise be missed. Adding a `new class extends Report {}` in a file that
 /// declares nothing else would, without this leg, leave every reasoner about
 /// `Report`'s descendants replaying a stale answer.
-fn inheritance_edges(tree: &SourceTree, decls: &DeclTable, file: usize) -> Vec<usize> {
-    let mut out: HashSet<usize> = HashSet::new();
-    let mut add = |fqn: &str| {
-        if let Some(files) = decls.files_of(&format!("c:{fqn}")) {
-            out.extend(files.iter().copied());
-        }
-    };
+fn inheritance_refs(tree: &SourceTree, add: &mut dyn FnMut(&str)) {
     let mut any_trait_user = false;
     for c in tree.classes() {
         if let Some(parent) = &c.parent {
@@ -736,8 +786,6 @@ fn inheritance_edges(tree: &SourceTree, decls: &DeclTable, file: usize) -> Vec<u
             add(&tree.resolve_class_fqn(r).to_ascii_lowercase());
         }
     }
-    out.remove(&file);
-    out.into_iter().collect()
 }
 
 /// The `@mixin` targets a class docblock names (ADR-0049 A14's own tag), as
@@ -801,10 +849,15 @@ mod tests {
     }
 
     fn affected(trees: &[SourceTree], changed: &[usize], delta: &[&str]) -> Vec<usize> {
+        // The tests speak trees and name keys; the computation speaks per-file
+        // facts and hashed keys, so the fixture is projected the way a run
+        // projects it.
+        let facts: Vec<FileFacts> =
+            trees.iter().map(|tree| FileFacts::from_tree("t.php", tree)).collect();
         let inputs = AffectedInputs {
-            trees,
+            facts: &facts,
             changed: changed.iter().copied().collect(),
-            delta: delta.iter().map(|s| (*s).to_owned()).collect(),
+            delta: delta.iter().map(|s| key_hash(s)).collect(),
         };
         let mut out: Vec<usize> = affected_files(&inputs).into_iter().collect();
         out.sort_unstable();
@@ -1050,3 +1103,4 @@ mod tests {
         assert_eq!(mixin_targets("/** @mixin A\n * @mixin B */"), vec!["A", "B"]);
     }
 }
+

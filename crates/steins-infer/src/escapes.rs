@@ -101,7 +101,7 @@ pub fn sweep_escapes(db: &dyn Db, project: Project) -> EscapeSweep {
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
 
-    let throws = compute_throws(&units, &index);
+    let throws = compute_throws(&units, &index, &[]);
     let mut out = EscapeSweep::default();
     for fi in 0..units.len() {
         let cx = Cx::new(&units, &index, fi);

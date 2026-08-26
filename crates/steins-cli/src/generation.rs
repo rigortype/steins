@@ -14,12 +14,14 @@
 //! stderr notes and the `.steins/gen/` store, nothing else — and any
 //! orchestration failure degrades to the ordinary cold path with a note.
 
+use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
 use steins_db::EffectsPolicy;
-use steins_infer::{Diagnostic, GenerationMode, GenerationParams, generation_check};
-use steins_syntax::SourceTree;
+use steins_infer::{
+    Diagnostic, GenerationMode, GenerationParams, INLINE_IGNORE, LazyTree, generation_check,
+};
 
 use crate::config::RuntimePostures;
 use crate::project::{LoadedProject, assemble_loaded, load_plugins, resolve_layout};
@@ -31,7 +33,17 @@ use crate::project::{LoadedProject, assemble_loaded, load_plugins, resolve_layou
 pub(crate) struct GatedRun {
     pub(crate) loaded: LoadedProject,
     pub(crate) findings: Vec<Diagnostic>,
-    pub(crate) trees: Vec<(String, SourceTree)>,
+    /// The run's tree handles, in slot order. Handles rather than trees since
+    /// issue #516: a warm run decodes a file's tree only where something
+    /// reaches it, and the inline-suppression scan below reaches only the files
+    /// it has to.
+    pub(crate) trees: Vec<(String, LazyTree<'static>)>,
+    /// The paths whose text spells `@steins-ignore` at all. The inline scan
+    /// must visit those (they can carry `suppress.unknown` /
+    /// `suppress.unmatched` with no finding of their own) and the files a
+    /// finding names, and nothing else — which is what keeps a warm run from
+    /// decoding the whole universe on its way out.
+    pub(crate) directive_files: HashSet<String>,
 }
 
 /// Run the generation lifecycle for this check invocation, or `None` to fall
@@ -138,7 +150,18 @@ pub(crate) fn try_generation_check(
         .map(|(path, _)| (path.clone(), outcome.texts.get(path).cloned().unwrap_or_default()))
         .collect();
     let loaded = assemble_loaded(entries, layout, plugins, effects.clone());
-    Some(GatedRun { loaded, findings: outcome.findings, trees: outcome.trees })
+    let directive_files: HashSet<String> = outcome
+        .texts
+        .iter()
+        .filter(|(_, text)| text.contains(INLINE_IGNORE))
+        .map(|(path, _)| path.clone())
+        .collect();
+    Some(GatedRun {
+        loaded,
+        findings: outcome.findings,
+        trees: outcome.trees,
+        directive_files,
+    })
 }
 
 /// The directory the sealed capture keys `files` against: their common

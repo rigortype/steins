@@ -54,6 +54,8 @@ mod affected;
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod summaries;
+#[cfg(not(target_arch = "wasm32"))]
+mod facts;
 mod fold_table;
 mod foreach_check;
 mod generics;
@@ -103,7 +105,7 @@ pub use project::{
 use absence::{check_undefined_class, check_undefined_constant};
 use mechanics::{check_array_duplicate_keys, emit_parse_failure};
 use overrides::check_declaration_fatals;
-use return_missing::{check_return_missing, never_returning_names};
+use return_missing::check_return_missing;
 
 use arg_check::{implicit_null_accepted, is_type_error};
 use builtin_returns::fact_with_null;
@@ -129,9 +131,9 @@ pub use steins_contract::normalize::FinalKeyword;
 /// reads the classification without naming `steins-catalog`.
 pub use steins_catalog::RefusalAxis;
 pub use suppress::{
-    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, InlineOutcome, Layer, Origin,
-    SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores, declared_facet, layer,
-    pattern_is_known, pattern_matches, surface_floor,
+    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, INLINE_IGNORE, InlineOutcome,
+    Layer, Origin, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores,
+    declared_facet, layer, pattern_is_known, pattern_matches, surface_floor,
 };
 
 use std::collections::{HashMap, HashSet};
@@ -428,9 +430,24 @@ fn check_units_controlled(
     let mut passes = PassTimings::default();
     let t_facts = Instant::now();
 
+    // This run's per-file facts (issue #516), or an empty slice on every path
+    // but the generation orchestrator's. Where a file has them, the phases
+    // below read them instead of its tree; where it does not, they read the
+    // tree exactly as they always did — the two are the same value by
+    // construction, and `FileFacts::from_tree` is the one producer.
+    let facts: &[facts::FileFacts] = control.as_deref().map_or(&[], |c| c.facts);
+
     // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
     // every file's context. Consumed by the absence family's conditional-decl leg.
-    let dam = dam_facts(units, layout);
+    let dam_rows: Vec<crate::dam::DamRow> = units
+        .iter()
+        .enumerate()
+        .map(|(fi, u)| match facts.get(fi) {
+            Some(f) => (f.parse_error.clone(), f.dynamism.clone()),
+            None => (facts::parse_error_of(u.tree), facts::dam_candidates_of(u.path, u.tree)),
+        })
+        .collect();
+    let dam = crate::dam::dam_facts_from(units, layout, &dam_rows);
 
     // The analysis PHP view (issue #28): the TARGET the project declares
     // (`config.platform.php` / `require.php`, via the layout) is what
@@ -446,7 +463,10 @@ fn check_units_controlled(
     // moment any file declares a userland constant of that name — constant
     // resolution is otherwise unmodeled, so the conservative reading is the
     // only sound one.
-    let version_id = if units.iter().any(|u| u.tree.php_version_id_declared()) {
+    let version_id = if units.iter().enumerate().any(|(fi, u)| match facts.get(fi) {
+        Some(f) => f.version_id_declared,
+        None => u.tree.php_version_id_declared(),
+    }) {
         None
     } else {
         view.version_id
@@ -457,7 +477,7 @@ fn check_units_controlled(
     // consumer — the purity oracle, `effect_diagnostics`, `throw_diagnostics` —
     // reads the same result. Each consumer keeps its own cheap gate, so a
     // project spelling none of the triggering constructs still pays nothing.
-    let fixpoints = Fixpoints::new(units, index, plugins, policy);
+    let fixpoints = Fixpoints::new(units, index, plugins, policy, facts);
 
     // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
     // fixpoint, consulted by every file's context, and built only when some
@@ -478,17 +498,28 @@ fn check_units_controlled(
     // Vendor is NOT special here, only in the dam (§2.3): a broken vendor file
     // emits the finding too and it rides the CLI's ordinary vendor filter, exactly
     // as the ADR-0046 §2 presumption prescribes.
-    for u in units {
-        emit_parse_failure(u, dam.file_is_unparsable(u.path), &mut out);
+    for (fi, u) in units.iter().enumerate() {
+        emit_parse_failure(u.path, dam_rows[fi].0.as_ref(), dam.file_is_unparsable(u.path), &mut out);
     }
-    let unparsable: HashSet<&str> =
-        units.iter().filter(|u| !u.tree.parse_errors().is_empty()).map(|u| u.path).collect();
+    let unparsable: HashSet<&str> = units
+        .iter()
+        .enumerate()
+        .filter(|(fi, _)| dam_rows[*fi].0.is_some())
+        .map(|(_, u)| u.path)
+        .collect();
     // end parse failure (ADR-0079, issue #180)
 
     // return missing (ADR-0078, issue #199): the whole-run veto set, computed once
     // because a never-returning helper is routinely declared in a different file
     // from the body that calls it.
-    let never_returning = never_returning_names(units);
+    let never_returning: HashSet<String> = units
+        .iter()
+        .enumerate()
+        .flat_map(|(fi, u)| match facts.get(fi) {
+            Some(f) => f.never_returning.clone(),
+            None => facts::never_returning_of(u.tree),
+        })
+        .collect();
     // end return missing (ADR-0078, issue #199)
 
     // ADR-0088 §5 (issue #433): the dataflow walk's own verdict on which
@@ -609,7 +640,7 @@ fn check_units_controlled(
     passes.effects_ms = effects_ms;
     passes.throws_ms = throws_ms;
     passes.report_ms = (oracle_ms + ms(t_report.elapsed()) - effects_ms - throws_ms).max(0.0);
-    if let Some(control) = control.as_deref_mut() {
+    if let Some(control) = control {
         control.passes = passes;
     }
     out
@@ -865,7 +896,20 @@ fn dedup(out: &mut Vec<Diagnostic>) {
 
 /// A node in the unified project effect call graph — a free function (keyed by
 /// FQN) or a class method (keyed by class FQN + method name).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Which of the three whole-universe textual gates [`Fixpoints::any`] asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gate {
+    Purity,
+    Envelope,
+    Throws,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 enum Sym {
     Func(String),
     Method(String, String),
@@ -897,6 +941,11 @@ pub(crate) struct Fixpoints<'a> {
     index: &'a Index,
     plugins: &'a PluginFacts,
     policy: &'a EffectsPolicy,
+    /// This run's per-file facts, in unit order — empty on every path but the
+    /// generation orchestrator's (issue #516). Where a file has them, its own
+    /// rows come from there and its tree is never decoded; where it does not,
+    /// the classifier reads the tree exactly as it always did.
+    facts: &'a [facts::FileFacts],
     effects: std::cell::OnceCell<HashMap<Sym, purity::EffectSet>>,
     throws: std::cell::OnceCell<HashMap<Sym, throws::ThrowSet>>,
     /// Wall-clock milliseconds each fixpoint cost, recorded at the one place
@@ -912,12 +961,14 @@ impl<'a> Fixpoints<'a> {
         index: &'a Index,
         plugins: &'a PluginFacts,
         policy: &'a EffectsPolicy,
+        facts: &'a [facts::FileFacts],
     ) -> Self {
         Self {
             units,
             index,
             plugins,
             policy,
+            facts,
             effects: std::cell::OnceCell::new(),
             throws: std::cell::OnceCell::new(),
             spent: std::cell::Cell::new((0.0, 0.0)),
@@ -945,11 +996,57 @@ impl<'a> Fixpoints<'a> {
         self.policy
     }
 
+    /// Whether **any** declaration in the universe spells a purity-bearing
+    /// callable, an effect envelope or an interop one, or `@throws` — the three
+    /// cheap textual gates that decide whether a fixpoint runs at all.
+    ///
+    /// Read off the per-file facts where the run has them, so a project that
+    /// spells none of the three answers `false` without decoding a tree (issue
+    /// #516: this gate alone used to force the whole universe).
+    pub(crate) fn any(&self, gate: Gate) -> bool {
+        (0..self.units.len()).any(|fi| self.spells(fi, gate))
+    }
+
+    /// The same question for one file — what `throw_diagnostics` skips on.
+    pub(crate) fn spells(&self, fi: usize, gate: Gate) -> bool {
+        if let Some(facts) = self.facts.get(fi) {
+            return match gate {
+                Gate::Purity => facts.spells_purity,
+                Gate::Envelope => facts.spells_envelope,
+                Gate::Throws => facts.spells_throws,
+            };
+        }
+        let tree = self.units[fi].tree;
+        let doc = |doc: Option<&String>| match gate {
+            Gate::Purity => {
+                doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
+            }
+            Gate::Envelope => purity::spells_interop_envelope(doc),
+            Gate::Throws => doc.is_some_and(|t| t.contains("throws")),
+        };
+        let envelope = matches!(gate, Gate::Envelope);
+        tree.functions()
+            .iter()
+            .any(|f| doc(f.docblock.as_ref()) || (envelope && f.effect_envelope.is_some()))
+            || tree.classes().iter().any(|c| {
+                (envelope && purity::spells_interop_envelope(c.docblock.as_ref()))
+                    || c.methods.iter().any(|m| {
+                        doc(m.docblock.as_ref()) || (envelope && m.effect_envelope.is_some())
+                    })
+            })
+    }
+
     /// The effect fixpoint result, computed on first request.
     pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
         self.effects.get_or_init(|| {
             let t = std::time::Instant::now();
-            let out = purity::compute_effects(self.units, self.index, self.plugins, self.policy);
+            let out = purity::compute_effects(
+                self.units,
+                self.index,
+                self.plugins,
+                self.policy,
+                self.facts,
+            );
             let (_, throws) = self.spent.get();
             self.spent.set((t.elapsed().as_secs_f64() * 1000.0, throws));
             out
@@ -960,7 +1057,7 @@ impl<'a> Fixpoints<'a> {
     pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
         self.throws.get_or_init(|| {
             let t = std::time::Instant::now();
-            let out = throws::compute_throws(self.units, self.index);
+            let out = throws::compute_throws(self.units, self.index, self.facts);
             let (effects, _) = self.spent.get();
             self.spent.set((effects, t.elapsed().as_secs_f64() * 1000.0));
             out

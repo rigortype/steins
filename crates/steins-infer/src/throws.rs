@@ -16,8 +16,9 @@ use steins_syntax::{
 
 use crate::contract::parse_tag_type;
 use crate::cx::Cx;
+use crate::facts::FileFacts;
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
-use crate::{Fixpoints, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
+use crate::{Fixpoints, Gate, Sym, THROW_LISKOV_ID, THROW_UNDECLARED_ID};
 use crate::purity::resolve_effect_edge;
 use crate::suppress::{Facet, Origin};
 
@@ -30,7 +31,12 @@ use crate::suppress::{Facet, Origin};
 // ---------------------------------------------------------------------------
 
 /// One throw fact a unit can raise, with the provenance a `via` message needs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub(crate) struct ThrowFact {
     /// The thrown class, resolved to an FQN in its origin file's context.
     pub(crate) class: String,
@@ -54,6 +60,53 @@ pub(crate) struct ThrowSet {
     pub(crate) exhaustive: bool,
 }
 
+/// One `catch` clause with its caught class names already resolved to FQNs
+/// (issue #516).
+///
+/// The lowering hands a [`CatchClause`] whose classes are [`NameRef`]s, and a
+/// `NameRef` only means something against its own file's namespace and
+/// imports. Resolving at *propagation* time therefore made the throw fixpoint
+/// read the caller's tree — one of the whole-universe tree consumers issue
+/// #516 exists to remove, and the only one hiding inside a fixpoint rather
+/// than in plain sight. Resolving at *classification* time is where the tree
+/// is in hand anyway, and it makes the own row a self-contained value: the
+/// persisted form needs no file context to be read back.
+///
+/// Nothing about the verdict moves. `clause_absorbs` resolved exactly these
+/// names through exactly this file's context; the only change is when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
+pub(crate) struct ResolvedCatch {
+    /// The caught classes as project FQNs. Empty with [`Self::has_unresolvable`]
+    /// set means "caught, but we cannot name what".
+    pub(crate) classes: Vec<String>,
+    pub(crate) has_unresolvable: bool,
+}
+
+/// One call site's guard stack, innermost first, resolved.
+pub(crate) type Guards = Vec<Vec<ResolvedCatch>>;
+
+/// Resolve a lowered guard stack in `cx`'s file context — the one place a
+/// catch clause's names meet a tree.
+fn resolve_guards(cx: &Cx, guards: &[Vec<CatchClause>]) -> Guards {
+    guards
+        .iter()
+        .map(|guard| {
+            guard
+                .iter()
+                .map(|clause| ResolvedCatch {
+                    classes: clause.classes.iter().map(|cref| cx.class_fqn(cref)).collect(),
+                    has_unresolvable: clause.has_unresolvable,
+                })
+                .collect()
+        })
+        .collect()
+}
+
 /// One unit's **own** contribution to the throw fixpoint — everything
 /// [`classify_throw_origins`] proves about a declaration in isolation, before
 /// any propagation (issue #489). This is the propagation-independent half of
@@ -64,7 +117,7 @@ pub(crate) struct ThrowSet {
 /// The edges here are the *resolved* `Sym` edges of this run; the persisted
 /// form (the second half of #489) stores them unresolved and re-resolves
 /// against the generation's merged index.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ThrowOwnRow {
     /// The unit's own escaping throw facts, each at its best escape
     /// [`Certainty`] past the origin's enclosing guards (`No` never enters).
@@ -73,11 +126,27 @@ pub(crate) struct ThrowOwnRow {
     /// dynamic/unresolved. Propagation can only lower it further.
     pub(crate) exhaustive: bool,
     /// Guarded call edges: the resolved callee plus the ordered
-    /// (innermost-first) guard stacks the callee's throws must escape through.
-    pub(crate) edges: Vec<(Sym, Vec<Vec<CatchClause>>)>,
+    /// (innermost-first) guard stacks the callee's throws must escape through,
+    /// with the caught class names already resolved ([`ResolvedCatch`]).
+    pub(crate) edges: Vec<(Sym, Guards)>,
 }
 
 impl ThrowOwnRow {
+    /// Fold another row for the same [`Sym`] into this one — the twin of
+    /// [`crate::purity::EffectOwnRow::absorb`], and equal to classifying both
+    /// bodies into one row for the same reason: the fact map joins by
+    /// [`Certainty::or`] exactly as `classify_throw_origins` does, the edge
+    /// list concatenates (propagation is order-independent), and the
+    /// exhaustiveness bit only ever clears.
+    pub(crate) fn absorb(&mut self, other: &Self) {
+        for (fact, cert) in &other.facts {
+            let slot = self.facts.entry(fact.clone()).or_insert(Certainty::No);
+            *slot = slot.or(*cert);
+        }
+        self.exhaustive &= other.exhaustive;
+        self.edges.extend(other.edges.iter().cloned());
+    }
+
     /// The empty row: a unit with no origins raises nothing and is exhaustive.
     pub(crate) fn new() -> Self {
         Self { facts: HashMap::new(), exhaustive: true, edges: Vec::new() }
@@ -91,7 +160,7 @@ fn add_callback_throws(
     cx: &Cx,
     cbref: &steins_syntax::CallbackRef,
     span: steins_syntax::Span,
-    guards: &[Vec<CatchClause>],
+    guards: &[Vec<ResolvedCatch>],
     row: &mut ThrowOwnRow,
 ) {
     match cbref {
@@ -176,11 +245,10 @@ pub(crate) fn throw_checked(cx: &Cx, class: &str) -> Certainty {
 /// a caught member is provably a supertype; `Maybe` when a member might be (chain
 /// leaves known territory) or the clause has an unnameable caught member; `No`
 /// when no member can catch it.
-fn clause_absorbs(cx: &Cx, sub: &str, clause: &CatchClause) -> Certainty {
+fn clause_absorbs(cx: &Cx, sub: &str, clause: &ResolvedCatch) -> Certainty {
     let mut r = if clause.has_unresolvable { Certainty::Maybe } else { Certainty::No };
-    for cref in &clause.classes {
-        let d = cx.class_fqn(cref);
-        r = r.or(throw_subtype(cx, sub, &d));
+    for d in &clause.classes {
+        r = r.or(throw_subtype(cx, sub, d));
         if r == Certainty::Yes {
             return Certainty::Yes;
         }
@@ -191,7 +259,7 @@ fn clause_absorbs(cx: &Cx, sub: &str, clause: &CatchClause) -> Certainty {
 /// The escape [`Certainty`] of a `Yes`-arriving throw of `sub` past an ordered
 /// (innermost-first) guard stack: `No` once a guard provably absorbs it; `Maybe`
 /// if a guard might; else `Yes` (ADR-0040 damming, envelope-consumer side).
-fn escape_through_guards(cx: &Cx, sub: &str, guards: &[Vec<CatchClause>]) -> Certainty {
+fn escape_through_guards(cx: &Cx, sub: &str, guards: &[Vec<ResolvedCatch>]) -> Certainty {
     let mut maybe = false;
     for guard in guards {
         let mut absorb = Certainty::No;
@@ -216,8 +284,12 @@ fn escape_through_guards(cx: &Cx, sub: &str, guards: &[Vec<CatchClause>]) -> Cer
 /// futures (issue #489 / ADR-0092 §5): the rows become the persisted
 /// per-declaration summaries, while propagation re-runs from complete rows at
 /// every generation.
-pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, ThrowSet> {
-    let (syms, files, rows) = throw_own_rows(units, index);
+pub(crate) fn compute_throws(
+    units: &[FileUnit],
+    index: &Index,
+    facts: &[FileFacts],
+) -> HashMap<Sym, ThrowSet> {
+    let (syms, files, rows) = throw_own_rows(units, index, facts);
     propagate_throws(units, index, &syms, &files, &rows)
 }
 
@@ -228,6 +300,7 @@ pub(crate) fn compute_throws(units: &[FileUnit], index: &Index) -> HashMap<Sym, 
 fn throw_own_rows(
     units: &[FileUnit],
     index: &Index,
+    facts: &[FileFacts],
 ) -> (Vec<Sym>, HashMap<Sym, usize>, HashMap<Sym, ThrowOwnRow>) {
     struct Unit<'a> {
         sym: Sym,
@@ -235,8 +308,24 @@ fn throw_own_rows(
         class_fqn: Option<String>,
         origins: &'a [ThrowOrigin],
     }
+    // The files whose rows this run already holds (issue #516) — folded in
+    // without their trees being decoded, in the order the enumeration below
+    // would have produced.
+    let mut syms: Vec<Sym> = Vec::new();
+    let mut rows: HashMap<Sym, ThrowOwnRow> = HashMap::new();
+    let mut sym_file: HashMap<Sym, usize> = HashMap::new();
+    let mut persisted_order: Vec<(usize, Sym)> = Vec::new();
     let mut ulist: Vec<Unit> = Vec::new();
     for (fi, u) in units.iter().enumerate() {
+        if let Some(persisted) = facts.get(fi).and_then(|f| f.rows.as_ref()) {
+            syms.extend(persisted.syms.iter().cloned());
+            persisted_order.extend(persisted.syms.iter().map(|s| (fi, s.clone())));
+            for (sym, row) in &persisted.throws {
+                sym_file.insert(sym.clone(), fi);
+                rows.entry(sym.clone()).or_insert_with(ThrowOwnRow::new).absorb(row);
+            }
+            continue;
+        }
         for f in u.tree.functions() {
             ulist.push(Unit { sym: Sym::Func(f.fqn.clone()), file: fi, class_fqn: None, origins: &f.throw_origins });
         }
@@ -263,15 +352,25 @@ fn throw_own_rows(
         }
     }
 
-    let mut rows: HashMap<Sym, ThrowOwnRow> = HashMap::new();
-    let mut sym_file: HashMap<Sym, usize> = HashMap::new();
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         sym_file.insert(unit.sym.clone(), unit.file);
         let row = rows.entry(unit.sym.clone()).or_insert_with(ThrowOwnRow::new);
         classify_throw_origins(&cx, unit.class_fqn.as_deref(), unit.origins, row);
     }
-    (ulist.into_iter().map(|u| u.sym).collect(), sym_file, rows)
+    if syms.is_empty() {
+        return (ulist.into_iter().map(|u| u.sym).collect(), sym_file, rows);
+    }
+    let mut merged: Vec<Sym> = Vec::with_capacity(persisted_order.len() + ulist.len());
+    let mut fresh = ulist.into_iter().peekable();
+    for (fi, sym) in persisted_order {
+        while fresh.peek().is_some_and(|u| u.file < fi) {
+            merged.push(fresh.next().expect("peeked").sym);
+        }
+        merged.push(sym);
+    }
+    merged.extend(fresh.map(|u| u.sym));
+    (merged, sym_file, rows)
 }
 
 /// Fixpoint: propagate callee throws through each call site's guards, from the
@@ -365,17 +464,20 @@ pub(crate) fn classify_throw_origins(
         *slot = slot.or(cert);
     };
     for origin in origins {
+        // One resolution per origin, in the file whose tree is in hand — see
+        // [`ResolvedCatch`] for why this moved out of propagation.
+        let guards = resolve_guards(cx, &origin.guards);
         match &origin.kind {
             ThrowKind::New(class) => {
                 let d_fqn = cx.class_fqn(class);
-                let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
+                let esc = escape_through_guards(cx, &d_fqn, &guards);
                 let display = format!("new {}", last_segment(&d_fqn));
                 add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
             }
             ThrowKind::Rethrow { caught, has_unresolvable } => {
                 for cref in caught {
                     let d_fqn = cx.class_fqn(cref);
-                    let esc = escape_through_guards(cx, &d_fqn, &origin.guards);
+                    let esc = escape_through_guards(cx, &d_fqn, &guards);
                     let display = format!("rethrow {}", last_segment(&d_fqn));
                     add_fact(d_fqn, display, origin.span, esc, &mut row.facts);
                 }
@@ -385,12 +487,12 @@ pub(crate) fn classify_throw_origins(
             }
             ThrowKind::Call(name) => match cx.resolve_function(name) {
                 FnResolution::User(site) => {
-                    row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                    row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.clone()));
                 }
                 FnResolution::Builtin(builtin_name) => {
                     if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
                         for c in classes {
-                            let esc = escape_through_guards(cx, c, &origin.guards);
+                            let esc = escape_through_guards(cx, c, &guards);
                             add_fact((*c).to_owned(), format!("{}()", name.simple()), origin.span, esc, &mut row.facts);
                         }
                     }
@@ -399,7 +501,7 @@ pub(crate) fn classify_throw_origins(
             },
             ThrowKind::MethodCall { receiver, method } => {
                 match resolve_effect_edge(cx, class_fqn, receiver, method) {
-                    Some(callee) => row.edges.push((callee, origin.guards.clone())),
+                    Some(callee) => row.edges.push((callee, guards.clone())),
                     None => row.exhaustive = false,
                 }
             }
@@ -407,7 +509,7 @@ pub(crate) fn classify_throw_origins(
             // guards (ADR-0033): a closure/user callback is an edge; a builtin
             // callback contributes its curated throws; unknown taints.
             ThrowKind::Callback { cbref } => {
-                add_callback_throws(cx, cbref, origin.span, &origin.guards, row);
+                add_callback_throws(cx, cbref, origin.span, &guards, row);
             }
             ThrowKind::HigherOrder { callee, callbacks, arg_count } => {
                 match cx.resolve_invoker_function(callee) {
@@ -417,7 +519,7 @@ pub(crate) fn classify_throw_origins(
                         if shape.callback_param < *arg_count {
                             match callbacks.iter().find(|(p, _)| *p == shape.callback_param) {
                                 Some((_, cbref)) => add_callback_throws(
-                                    cx, cbref, origin.span, &origin.guards, row,
+                                    cx, cbref, origin.span, &guards, row,
                                 ),
                                 None => row.exhaustive = false,
                             }
@@ -425,12 +527,12 @@ pub(crate) fn classify_throw_origins(
                     }
                     FnResolution::User(_) | FnResolution::Unknown => match cx.resolve_function(callee) {
                         FnResolution::User(site) => {
-                            row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), origin.guards.clone()));
+                            row.edges.push((Sym::Func(cx.fn_decl(site).fqn.clone()), guards.clone()));
                         }
                         FnResolution::Builtin(builtin_name) => {
                             if let Some(classes) = steins_catalog::builtin_throws(&builtin_name) {
                                 for c in classes {
-                                    let esc = escape_through_guards(cx, c, &origin.guards);
+                                    let esc = escape_through_guards(cx, c, &guards);
                                     add_fact((*c).to_owned(), format!("{}()", callee.simple()), origin.span, esc, &mut row.facts);
                                 }
                             }
@@ -512,21 +614,23 @@ pub(crate) fn throw_diagnostics(
     uncovered: &HashMap<usize, HashSet<u32>>,
 ) -> Vec<Diagnostic> {
     let (units, index) = (fx.units(), fx.index());
-    // Fast path: nothing to check without a `@throws` tag anywhere.
-    let any_throws = units.iter().any(|u| {
-        let has = |d: Option<&str>| d.is_some_and(|t| t.contains("throws"));
-        u.tree.functions().iter().any(|f| has(f.docblock.as_deref()))
-            || u.tree.classes().iter().any(|c| {
-                c.methods.iter().any(|m| has(m.docblock.as_deref()))
-            })
-    });
-    if !any_throws {
+    // Fast path: nothing to check without a `@throws` tag anywhere. Read off
+    // the per-file facts where the run has them (issue #516) — this gate used
+    // to decode every tree in the universe to answer "no".
+    if !fx.any(Gate::Throws) {
         return Vec::new();
     }
 
     let throws = fx.throws();
     let mut out = Vec::new();
     for fi in 0..units.len() {
+        // Everything below is gated on `declared_throws` being non-empty —
+        // `emit_undeclared` is skipped outright and `emit_liskov` returns at
+        // its first line — so a file no declaration of which spells `@throws`
+        // contributes nothing, and its tree stays undecoded.
+        if !fx.spells(fi, Gate::Throws) {
+            continue;
+        }
         let cx = Cx::new(units, index, fi);
         for f in cx.tree().functions() {
             let declared = declared_throws(&cx, f.span.start, f.docblock.as_deref());

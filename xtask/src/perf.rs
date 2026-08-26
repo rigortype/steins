@@ -457,6 +457,9 @@ struct WarmRun {
     persist_ms: f64,
     loaded: usize,
     parsed: usize,
+    /// Files whose tree was actually decoded — issue #516's counter, and zero
+    /// is what a no-change warm run must report.
+    decoded: usize,
     /// Packages that both loaded and parsed — the shape of an edit inside a
     /// package under the per-file provenance gate (issue #512).
     mixed: usize,
@@ -592,11 +595,10 @@ fn measure_warm_in_store(
         if outcome.report.mode != GenerationMode::Warm {
             return Err(format!("warm rebuild {} ran cold — no published generation", i + 1));
         }
-        let (loaded, parsed) = outcome
-            .report
-            .packages
-            .iter()
-            .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
+        let (loaded, parsed, decoded) = outcome.report.packages.iter().fold(
+            (0usize, 0usize, 0usize),
+            |(l, p, d), pkg| (l + pkg.loaded, p + pkg.parsed, d + pkg.decoded),
+        );
         let mixed = outcome.report.packages.iter().filter(|pkg| pkg.is_mixed()).count();
         let t = outcome.report.timings;
         let w = &outcome.report.walk;
@@ -615,6 +617,7 @@ fn measure_warm_in_store(
             persist_ms: t.persist_ms,
             loaded,
             parsed,
+            decoded,
             mixed,
             walked: w.walked,
             replayed: w.replayed,
@@ -644,7 +647,7 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
     for (i, run) in w.warm.iter().enumerate() {
         println!(
-            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
+            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}, {} tree(s) decoded), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
             i + 1,
             run.capture_ms,
             run.trees_ms,
@@ -655,6 +658,7 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
             } else {
                 format!(", {} package(s) partly reused", run.mixed)
             },
+            run.decoded,
             run.analyze_ms,
             run.walked,
             run.replayed,

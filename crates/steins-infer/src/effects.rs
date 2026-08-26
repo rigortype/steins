@@ -109,7 +109,7 @@ pub fn sweep_effects(db: &dyn Db, project: Project) -> EffectSweep {
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
 
-    let effects = compute_effects(&units, &index, project.plugins(db), project.effects(db));
+    let effects = compute_effects(&units, &index, project.plugins(db), project.effects(db), &[]);
     let mut out = EffectSweep::default();
     for u in &units {
         for f in u.tree.functions() {

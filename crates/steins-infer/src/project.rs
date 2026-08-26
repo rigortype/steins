@@ -105,8 +105,8 @@ pub struct FileUnit<'a> {
 
 /// A lowered tree that may not have been decoded yet (issue #516).
 ///
-/// **Why this exists.** Before this seam, every entry point handed
-/// [`check_units`] a fully decoded [`SourceTree`] per file, so a warm run
+/// **Why this exists.** Before this seam, every entry point handed the project
+/// checking core a fully decoded [`SourceTree`] per file, so a warm run
 /// decoded the whole universe whatever the edit was — 40 ms of a 70 ms
 /// no-change rebuild on a 341-file target, and O(universe) by construction.
 /// The phases that forced that decode read only *summaries* of a tree (the
