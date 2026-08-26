@@ -102,6 +102,21 @@ working rather than a hole in it. Measured on nikic/PHP-Parser, that cut a
 warm edit's publish phase by roughly half on its own; the barriers, not the
 bytes, were the phase.
 
+*2026-08-26 amendment (issue #521).* "Captured once" is now literal. The
+capture hands each file's bytes to the analysis at the instant it hashes
+them, rather than hashing them, dropping them, and reading the universe a
+second time through the seal. This is not a relaxation of the seal but a
+strengthening of it: what is analyzed and what is fingerprinted are the
+same bytes *by construction*, where before they were the same bytes by a
+re-read that re-verified. The checked route survives for everything the
+capture did not hand back — a file wanted after the capture has moved on,
+a path the seal does not hold — and revalidation before publication is
+unchanged, so a concurrent edit still rejects the whole candidate. The
+memory question this raises is answered by the shape rather than by a
+budget: the bytes are handed back one file at a time, so a caller that
+keeps every text pays what it was already paying for its text map and one
+file's contents beyond it.
+
 **Sharing an artifact between generations.** An artifact whose package did
 not move is byte-identical to the published generation's, so the new
 generation *shares* it — a reflink where the filesystem offers one (macOS

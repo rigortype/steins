@@ -168,9 +168,16 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
   written (the artifact is 3.5x smaller), and changed nothing about the shape:
   publishing is still the largest phase of an edit, and still proportional to
   the package rather than to the edit. Making it incremental is the next thing.
-- **Capture hashes every file every run** (issue #516's second item). 13 ms of
-  a 30 ms no-change rebuild on nikic/PHP-Parser — the largest phase *there*,
-  but a quarter of an edit's cost, so it ranks behind publishing.
+- **Capture hashes every file every run** (issue #516's second item). It now
+  does so exactly once: issue #521 has the capture hand each file's bytes to
+  the analysis at the instant it hashes them, instead of hashing them, dropping
+  them, and reading the universe a second time through the seal. That took the
+  phase from ~19 to ~11 ms on a seeded leaf edit and from ~14 to ~8 ms on a
+  no-change rebuild of nikic/PHP-Parser, with peak RSS unchanged (measured
+  −0.9% over a 26,680-file tree, because the run already held every file's text
+  for its whole length). What remains is the one hash per file, which is the
+  phase's floor for as long as content is identity — an mtime economy would
+  trade the seal for a stat, which ADR-0092 §2 does not want.
 - **The reporting passes are gated, not summarized.** `throw_diagnostics` emits
   from a declaration's own docblock, so it is gated per file and costs the tree
   of every file spelling `@throws` (29 of 217 on Seldaek/monolog).
