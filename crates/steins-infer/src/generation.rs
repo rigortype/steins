@@ -499,14 +499,17 @@ struct LoadedPkg {
     /// only when every slot still names the same file *and* every one of those
     /// files came out of this same artifact. [`load_trees`] refuses the load
     /// outright in exactly the case where the caller would then take the old
-    /// shard and find none, so the caller may take it on those two bits alone.
+    /// shard and find none, so the caller may take it on these three bits
+    /// alone.
     slots_stable: bool,
     /// Whether the package's whole source fingerprint matched — see
     /// [`PkgState::sources_match`], which is what reads it.
     sources_match: bool,
-    /// The first per-file decode failure, if any: the file parsed instead (a
-    /// miss is cost, never meaning), and the package republishes to repair the
-    /// artifact.
+    /// How many files the artifact held a row for and still could not give a
+    /// tree: they parsed instead (a miss is cost, never meaning), and the
+    /// package republishes to repair the artifact.
+    missed: usize,
+    /// The first of those failures, for the note.
     miss: Option<String>,
 }
 
@@ -621,21 +624,21 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 let parsed = loaded.stale.len();
                 if let Some(detail) = &loaded.miss {
                     notes.push(format!(
-                        "package {}: artifact miss ({detail}); {parsed} file(s) reparsed",
-                        plan.name
+                        "package {}: {} file(s) unreadable in the artifact ({detail}); reparsed",
+                        plan.name, loaded.missed
                     ));
                 }
                 states.push(PkgState {
                     loaded: plan.slots.len() - parsed,
                     parsed,
-                    disposition: match (parsed, loaded.miss.is_some()) {
+                    disposition: match (parsed, loaded.missed) {
                         (0, _) => "loaded",
-                        (_, true) => "mixed (artifact miss)",
-                        (_, false) => "mixed (changed files reparsed)",
+                        (_, 0) => "mixed (changed files reparsed)",
+                        _ => "mixed (artifact miss)",
                     },
                     slots_stable,
                     sources_match: loaded.sources_match,
-                    degraded: loaded.miss.is_some(),
+                    degraded: loaded.missed > 0,
                 });
             }
             Err(refusal) => {
@@ -1160,6 +1163,7 @@ fn load_trees(
     let mut slots_stable = persisted.len() == plan.slots.len();
     let mut loaded: Vec<(usize, SourceTree)> = Vec::with_capacity(plan.slots.len());
     let mut stale: Vec<usize> = Vec::new();
+    let mut missed = 0usize;
     let mut first_miss: Option<String> = None;
     for &slot in &plan.slots {
         let path = diag[slot].as_str();
@@ -1175,6 +1179,7 @@ fn load_trees(
             Err(m) => {
                 // This file alone: the directory and every other payload still
                 // serve, and the caller parses this one.
+                missed += 1;
                 first_miss.get_or_insert_with(|| m.to_string());
                 stale.push(slot);
             }
@@ -1194,7 +1199,7 @@ fn load_trees(
     if sources_match && stale.is_empty() && slots_stable && !have_shard {
         return Err(LoadRefusal::Miss("symbols section is not a shard".to_owned()));
     }
-    Ok(LoadedPkg { trees: loaded, stale, slots_stable, sources_match, miss: first_miss })
+    Ok(LoadedPkg { trees: loaded, stale, slots_stable, sources_match, missed, miss: first_miss })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.
