@@ -73,6 +73,25 @@ pub const NEVER_PARAM_REACHABLE_ID: &str = "phpdoc.never-param-reachable";
 /// under contract acceptance.
 pub const RETURN_MISMATCH_ID: &str = "phpdoc.return-mismatch";
 
+/// The registry id for the **unknown-vocabulary** check (ADR-0091 §6, issue
+/// #479): a **hyphenated** identifier in a phpdoc type position that survives
+/// the `@template` shadow and is not recognized type vocabulary.
+///
+/// The hyphen is what makes this decidable where an unrecognized identifier
+/// normally forces silence. PHP's compiler rejects `-` in a class-like name, so
+/// the spelling can be no class; ADR-0091 §4.1 makes a hyphenated `@template`
+/// name or `@phpstan-type` alias a refusal rather than a declaration. All three
+/// readings that would otherwise demand silence are gone, and what is left is a
+/// closed set of two — a misspelling of vocabulary (`non-empy-string`), or
+/// vocabulary from a tool Steins does not model (`some-psalm-thing`). Neither
+/// can be a false claim about the *program*: the identifier provably denotes
+/// nothing.
+///
+/// It **adds** a finding and removes none. The value judgment is #478's and is
+/// untouched — the spelling still lowers to `ContractTy::Opaque`, still admits
+/// every value as `Maybe`.
+pub const PHPDOC_UNKNOWN_VOCABULARY_ID: &str = "phpdoc.unknown-vocabulary";
+
 /// The registry id for the branch-sensitive null-dereference proof (ADR-0031
 /// stage 1): a method call whose receiver variable is **proven `null`** on the
 /// current path (e.g. inside `if ($u === null) { $u->name(); }`) — a guaranteed
@@ -1166,6 +1185,8 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // sentinel parameter (ADR-0088 §4, issue #428): the never-declared carve-out
     // out of `phpdoc.param-mismatch`.
     NEVER_PARAM_REACHABLE_ID,
+    // the hyphen reservation's diagnostic (ADR-0091 §6, issue #479).
+    PHPDOC_UNKNOWN_VOCABULARY_ID,
 ];
 
 /// Ids **registered ahead of emission**: they exist in [`DIAGNOSTIC_REGISTRY`]

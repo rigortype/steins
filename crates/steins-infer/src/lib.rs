@@ -83,6 +83,7 @@ pub mod suppress;
 mod throws;
 mod transfers;
 mod undefined_var;
+mod unknown_vocabulary;
 mod untyped;
 mod walk;
 mod walk_fleet;
@@ -178,6 +179,7 @@ use docblock_hygiene::docblock_hygiene;
 use purity::{PurityOracle, effect_diagnostics};
 use throws::throw_diagnostics;
 use undefined_var::{check_phpdoc_maybe_undefined, check_undefined_variables};
+use unknown_vocabulary::{VocabularyAllowlist, unknown_vocabulary};
 use untyped::untyped_surface;
 
 /// The maximum depth of interprocedural argument-binding descent (Feature B).
@@ -571,6 +573,7 @@ fn check_units_controlled(
         version_id,
         purity: purity.as_ref(),
         layout,
+        plugins,
         never_returning: &never_returning,
     };
     // Which files this run actually walks. A replayed block is not walked —
@@ -741,6 +744,10 @@ struct WalkInputs<'a> {
     version_id: Option<(u32, Option<u32>)>,
     purity: Option<&'a PurityOracle<'a>>,
     layout: &'a ProjectLayout,
+    /// The loaded plugin channel (ADR-0068). Read by
+    /// `phpdoc.unknown-vocabulary`'s allowlist, which ADR-0091 §4.1 requires be
+    /// assembled after plugin load.
+    plugins: &'a PluginFacts,
     never_returning: &'a HashSet<String>,
 }
 
@@ -762,6 +769,7 @@ impl WalkInputs<'_> {
             self.version_id,
             self.purity,
             self.layout,
+            self.plugins,
             self.never_returning,
             &mut diagnostics,
         );
@@ -782,6 +790,7 @@ const _: () = {
     sync::<LazyTree<'_>>();
     sync::<[FileUnit<'_>]>();
     sync::<PurityOracle<'_>>();
+    sync::<PluginFacts>();
     sync::<WalkInputs<'_>>();
 };
 
@@ -877,6 +886,7 @@ fn walk_one_file(
     version_id: Option<(u32, Option<u32>)>,
     purity: Option<&PurityOracle<'_>>,
     layout: &ProjectLayout,
+    plugins: &PluginFacts,
     never_returning: &HashSet<String>,
     out: &mut Vec<Diagnostic>,
 ) -> Option<Vec<u32>> {
@@ -974,6 +984,15 @@ fn walk_one_file(
         // filter: an annotation that names a subject the code no longer has is rot
         // wherever it sits, including in a branch that never runs.
         docblock_hygiene(&cx, out);
+
+        // --- `phpdoc.unknown-vocabulary` (ADR-0091 §6 / issue #479): a
+        // hyphenated identifier in a type position that denotes nothing. Reads
+        // the docblock and the loaded plugin channel, nothing else — the claim
+        // is about what the annotation can possibly mean, so no env, no folder,
+        // no dead-region filter, exactly as the hygiene family above. The
+        // allowlist is assembled here because it is a per-project value: the
+        // question must be asked after plugin load (ADR-0091 §4.1).
+        unknown_vocabulary(&cx, &VocabularyAllowlist::for_project(plugins), out);
 
         // --- The untyped surface (ADR-0078 / issue #200): the contract-layer
         // `untyped.*` family. Declaration reading only — no env, no folder, no

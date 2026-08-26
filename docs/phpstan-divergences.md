@@ -228,3 +228,53 @@ parameter**), and the `\UnhandledMatchError` an uncovered `default`-less
 A dead arm whose body only terminates — the **defensive terminator** — is
 never reported by any of them, extending ADR-0019 §2's live-`exit` ruling
 to the dead case.
+
+## An unknown *class* vs unknown *vocabulary* in the hyphen space
+
+PHPStan, Psalm and Mago read an unrecognized phpdoc type identifier as a
+class reference and resolve it against the file's namespace, so
+`@param int-range<0, 255>` in a namespaced file becomes a reference to
+`Conformance\Tests\…\int-range` and the tools report an unknown class —
+Psalm and Mago additionally **over-reject** the valid calls, because a
+nonexistent class accepts nothing. ADR-0091 §2 measures 84 such
+over-rejected lines across 48 fixtures of the cross-tool conformance
+suite. Steins reserves the whole hyphen space instead (ADR-0091 §3): PHP's
+compiler rejects `-` in a class, interface, trait or enum name, so a
+hyphenated identifier in a type position **is type vocabulary and never a
+class reference** — no namespace resolution, no shadowing, and never a
+`ContractTy::Class`. What it lowers to is `Opaque`, which admits every
+value as `Maybe`, so the docblock rejects nothing it was written to accept.
+
+What Steins reports there is `phpdoc.unknown-vocabulary` (ADR-0091 §6): a
+hyphenated name that survives the `@template` shadow and is not recognized
+vocabulary. The claim is deliberately weaker than the one it replaces and
+therefore stronger: not "no such class exists", which nothing can prove
+from a docblock, but "this spelling denotes nothing" — which the compiler's
+own naming rules do prove. The remaining possibilities are a misspelling of
+vocabulary and vocabulary from a tool Steins does not model, and neither is
+a false claim about the program. PHPStan, notably, is not in the divergence
+on the resolution half: it reports `parameter.unresolvableType` and
+declines to manufacture a contract, which is the behavior this rule adopts
+and generalizes.
+
+Two consequences of §4.1's ruling ride with it. A user-defined type alias
+may be named `foo_bar` and may **not** be named `foo-bar`: phpstan/
+phpdoc-parser accepts `@phpstan-type foo-bar = int` and declares an alias
+by that name, and Steins refuses the declaration instead, because the
+hyphen space is reserved. And the space is reserved rather than frozen — a
+plugin registers utility types into it through the existing
+`steins-plugin.json` manifest (ADR-0039/0068), the way a PHPStan extension
+adds type resolution the core does not ship.
+
+That extension channel makes this id's finding set **plugin-set
+dependent**, which is a baseline that moves with *configuration* rather
+than with code, and ADR-0022's baseline discipline is told rather than left
+to discover it. The allowlist is builtin tables ∪ plugin registrations and
+is computed after plugin load; dropping a plugin from a project therefore
+introduces findings on every docblock that used its vocabulary, with no
+source change anywhere. That is the correct answer — the vocabulary really
+did go away — but a baseline captured before the change will show the new
+findings as regressions rather than as dormant entries, and the remedy is
+to recapture, not to suppress. The registration kind is not on the manifest
+yet, so the allowlist is builtin-only today and the coupling bites when it
+lands.

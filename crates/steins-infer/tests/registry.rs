@@ -35,6 +35,8 @@ use steins_infer::{CLASS_CONST_UNDEFINED_ID, PROPERTY_MAYBE_UNDEFINED_ID, PROPER
 use steins_infer::CONSTANT_UNDEFINED_ID;
 // untyped surface (ADR-0078, issue #200)
 use steins_infer::UNTYPED_CLASS_CONSTANT_ID;
+// the hyphen reservation's diagnostic (ADR-0091 §6, issue #479)
+use steins_infer::PHPDOC_UNKNOWN_VOCABULARY_ID;
 
 /// Totality, forward: every id an emitter can produce is registered *with* a layer.
 #[test]
@@ -327,6 +329,31 @@ fn the_declared_possibly_undefined_read_is_a_contract_id() {
 
 // end unset pseudo-type (ADR-0087 §4, issue #396)
 
+/// The hyphen reservation's diagnostic (ADR-0091 §6, issue #479) registers with
+/// an emitter behind it, and at a rung **no built-in profile reaches**.
+///
+/// The second half is the point of this row. §6 refuses to fix the floor in
+/// advance — the FP source is precise (vocabulary from tools Steins does not
+/// model) and only a measurement can place it — so the id ships reported but
+/// unreachable except by name, and the ruling that moves it to `contracts`
+/// moves this assertion with it.
+#[test]
+fn the_unknown_vocabulary_id_registers_off_every_built_in_rung() {
+    assert_eq!(PHPDOC_UNKNOWN_VOCABULARY_ID, "phpdoc.unknown-vocabulary");
+    assert_eq!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Contract));
+    assert_eq!(surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Floor::Pedantic));
+
+    let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
+    let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
+    assert!(emittable.contains(PHPDOC_UNKNOWN_VOCABULARY_ID), "the emitter landed with the id");
+    assert!(!pending.contains(PHPDOC_UNKNOWN_VOCABULARY_ID));
+
+    // `phpdoc.*` spans two layers (ADR-0078 §1.5). This one is contract, not
+    // the hygiene family's mechanics: the premise is a docblock's own spelling
+    // and nothing about the run is rotten, so it must never be red-on-sight.
+    assert_ne!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Mechanics));
+}
+
 /// The registered-ahead-of-emission list holds exactly the one id argued above and
 /// nothing else — the cardinality guard that makes a forgotten emitter visible.
 #[test]
@@ -461,6 +488,14 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         // `Contracts`, so a `contracts` run keeps its meaning.
         (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
         (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
+        // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479). The floor here
+        // is PROVISIONAL: §6 makes it a measurement against the fp-gate rather
+        // than a decision, and `Pedantic` — the rung no built-in reaches — is
+        // the conservative end to hold it at while that measurement is read.
+        // Not `Strict`, which asks a different question (is a weaker some-paths
+        // claim worth seeing?); this judgment is definite. Moving it to
+        // `Contracts` is a one-line change to the registry and to this row.
+        (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Pedantic),
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =
