@@ -1791,8 +1791,8 @@ fn config_identity(p: &GenerationParams<'_>) -> Vec<(String, String)> {
 }
 
 /// One sealed file's bytes as the text the analysis reads — the same
-/// lossy-UTF-8 spelling `steins-cli`'s cold path produces, and the same one
-/// this function produced when it read through the seal.
+/// lossy-UTF-8 spelling `steins-cli`'s cold path produces (`project.rs`), and
+/// the same one [`generation_check`] produced when it read through the seal.
 ///
 /// Written as `from_utf8` with a lossy fallback rather than as
 /// `from_utf8_lossy(&bytes).into_owned()` so that the ordinary case — a valid
