@@ -285,14 +285,12 @@ pub struct RecordingEngine {
     /// This run's own answers, shared by every engine of the run — the run's
     /// own engine and each of a parallel walk's workers ([`Self::worker`]).
     ///
-    /// **What it is for.** Every engine of a run has its own [`Self::live`]
-    /// child, and without this pool a question two workers both reach costs
-    /// two round trips to two children instead of one. Cross-worker duplicates
-    /// are the norm, not the exception — the policy memos above the transport
-    /// are per folder, and a builtin called in fifty files is called in every
-    /// worker's share of them — so a fan-out without a pool asks the engine up
-    /// to N times what a sequential run asks it, which is how a wider walk can
-    /// finish later than a narrow one.
+    /// **What it is for.** The policy memos that absorb a repeated question
+    /// live on the folder, and a parallel walk has one folder per worker — so
+    /// a builtin called in fifty files is asked once per worker's share of
+    /// them, and without this pool each of those asks is its own round trip
+    /// queued on the one child. The pool makes the run's answers the run's:
+    /// asked once, served to everyone.
     ///
     /// **Why it is sound.** A row is the engine's answer to an exact request,
     /// scoped by the engine identity — the very premise the persisted table
@@ -316,11 +314,6 @@ pub struct RecordingEngine {
     /// A warm run over an unchanged source records none — the differential
     /// oracle's second assertion.
     fresh: Vec<String>,
-    /// What retired workers delivered, folded in by [`Self::absorb`] — zero on
-    /// a sequential run. Kept apart from the live child's own ledger so
-    /// [`Self::posture`] can report the fleet's whole delivery without the
-    /// transport pretending it made those requests itself.
-    absorbed: FoldPosture,
 }
 
 impl RecordingEngine {
@@ -335,7 +328,6 @@ impl RecordingEngine {
             adopted: false,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
-            absorbed: FoldPosture::default(),
         }
     }
 
@@ -360,7 +352,6 @@ impl RecordingEngine {
             adopted,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
-            absorbed: FoldPosture::default(),
         }
     }
 
@@ -390,7 +381,6 @@ impl RecordingEngine {
             adopted: false,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
-            absorbed: FoldPosture::default(),
         }
     }
 
@@ -431,10 +421,14 @@ impl RecordingEngine {
     }
 
     /// Everything a retired worker recorded, for [`Self::absorb`].
+    ///
+    /// The rows and the misses, and deliberately not the posture: the child is
+    /// the run's, so what it delivered is already the run's ledger and a
+    /// worker has nothing of its own to hand back. Harvesting one would have
+    /// counted the same losses once per worker.
     #[must_use]
     pub fn harvest(self) -> FoldHarvest {
-        let posture = self.posture();
-        FoldHarvest { rows: self.recorded, fresh: self.fresh, posture }
+        FoldHarvest { rows: self.recorded, fresh: self.fresh }
     }
 
     /// Fold one retired worker's harvest into this engine's own ledger
@@ -460,7 +454,6 @@ impl RecordingEngine {
         let mut fresh: Vec<String> =
             harvest.fresh.into_iter().filter(|k| !seen.contains(k)).collect();
         self.fresh.append(&mut fresh);
-        self.absorbed = self.absorbed.merged(harvest.posture);
     }
 
     /// Whether the artifact this run would publish is the artifact it loaded,
@@ -514,12 +507,12 @@ impl RecordingEngine {
     /// table throughout has an unengaged posture, which is true (no child was
     /// needed) and is the warm path working, not a degradation.
     ///
-    /// Joined with whatever this run's retired workers delivered
-    /// ([`Self::absorb`]), so a fanned-out run reports the fleet's posture and
-    /// not just the one child this engine happens to hold.
+    /// One child per run means one ledger per run: a fanned-out walk's workers
+    /// all report through this same transport, so this is the fleet's posture
+    /// without anything having to be merged into it.
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
-        self.absorbed.merged(self.child().posture())
+        self.child().posture()
     }
 
     /// The identity of whatever answered this run's `env` row, without the
@@ -655,21 +648,19 @@ pub struct RunEngine {
     pool: Arc<std::sync::Mutex<BTreeMap<String, serde_json::Value>>>,
 }
 
-/// What one retired parallel-walk worker hands back (issue #490): its half of
-/// the run's fold table, the misses it had to ask live, and what its own child
-/// delivered.
+/// What one retired parallel-walk worker hands back (issue #490): its share of
+/// the run's fold table, and the misses it had to ask live.
 ///
-/// Deliberately data rather than a folder: a worker's folder holds a live `php`
-/// child, and keeping every worker's folder alive until the merge would make
-/// the run's peak the *sum* of the fleet. Harvesting retires the child at the
-/// end of its chunk and carries back only what the run still needs.
+/// Deliberately data rather than a folder: retiring a worker at the end of its
+/// chunk is what keeps the fleet's live folders bounded by the fan-out's width
+/// instead of by the whole run, and this is everything the run still needs
+/// from one. The posture is not here — see [`RecordingEngine::harvest`].
 pub struct FoldHarvest {
     /// The rows this worker consumed or newly asked.
     pub rows: BTreeMap<String, serde_json::Value>,
-    /// The keys this worker's live engine answered, in first-answer order.
+    /// The keys the live engine answered on this worker's behalf, in
+    /// first-answer order.
     pub fresh: Vec<String>,
-    /// What this worker's own child delivered over its chunk.
-    pub posture: FoldPosture,
 }
 
 /// The warm-path folder: the shared policy over the recording transport.

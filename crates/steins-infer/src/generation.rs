@@ -997,14 +997,12 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             .collect()
     };
     // The walk's fan-out (issue #490). Each worker hires a folder of its own —
-    // configured here, at the one place a worker's folder can be born, so the
-    // issue-#63 hazard of a folder carrying a previous run's `php_target`
-    // cannot recur — over the fold table this run's own engine already
-    // established. The engine underneath is a child of its own, opened lazily
-    // and only if that worker actually has to fold; its notices are the run's
-    // to print (`ProcessEngine::new(false)` is the enabled transport with the
-    // once-per-run notice latches already armed), because a fleet announcing
-    // the sound subset once per worker would say the same thing N times.
+    // configured *here*, at the one place a worker's folder can be born, so
+    // the issue-#63 hazard of a folder carrying some other run's `php_target`
+    // cannot recur — over the transport this run already established: the same
+    // child, the same loaded table, the same pool of what the run has asked.
+    // Per-worker folders and one shared transport is the whole shape, and each
+    // half of it is measured (see `RecordingEngine::live`).
     let shared = folder.shared_engine();
     let worker_target = p.layout.php_target().cloned();
     let hire = move || {
