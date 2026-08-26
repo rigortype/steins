@@ -583,8 +583,8 @@ pub(crate) fn suppression_pipeline(
 }
 
 /// The pipeline proper, over trees the caller already holds — the seam the
-/// experimental generation path (issue #489) comes through with the
-/// orchestrator's owned trees, so a warm run's inline scan re-parses nothing.
+/// generation path (issue #489) comes through with the orchestrator's owned
+/// trees, so a warm run's inline scan re-parses nothing.
 pub(crate) fn suppression_over(
     layout: &steins_db::ProjectLayout,
     file_pairs: Vec<(String, &SourceTree)>,
