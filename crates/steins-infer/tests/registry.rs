@@ -330,20 +330,32 @@ fn the_declared_possibly_undefined_read_is_a_contract_id() {
 // end unset pseudo-type (ADR-0087 §4, issue #396)
 
 /// The hyphen reservation's diagnostic (ADR-0091 §6, issue #479) registers with
-/// an emitter behind it, at a floor **no built-in rung reaches**.
+/// an emitter behind it, on the contract family's **own** floor.
 ///
-/// §6 refuses to fix the floor in advance — the FP source is precise (vocabulary
-/// from tools Steins does not model) and only a measurement can place it — so
-/// the id ships off every rung, reachable only because the `pedantic` profile
-/// names it. That last clause is not bookkeeping: `profile.rs`'s
-/// `every_pedantic_floor_id_is_reachable_from_the_pedantic_profile` is what
-/// keeps "registered at this floor" from meaning "on no surface at all". The
-/// ruling that moves the floor to `contracts` moves both assertions with it.
+/// §6 refused to fix the floor in advance — the FP source is precise
+/// (vocabulary from tools Steins does not model) and only a measurement can
+/// place it. The measurement came back with that source **absent everywhere it
+/// is measurable**: zero over the pinned public corpus across 2,903 hyphenated
+/// type-position sites, and one hit on the private corpus that was a
+/// misspelling of known vocabulary — a true positive of the class the id exists
+/// for. The 2026-08-27 ruling therefore put it at `Contracts` rather than
+/// behind a rung nobody reaches, which is what `floors_reproduce_the_pre_s6_
+/// layer_selection` now covers with no exception row.
 #[test]
-fn the_unknown_vocabulary_id_registers_off_every_built_in_rung() {
+fn the_unknown_vocabulary_id_sits_on_the_measured_family_floor() {
     assert_eq!(PHPDOC_UNKNOWN_VOCABULARY_ID, "phpdoc.unknown-vocabulary");
     assert_eq!(layer(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Layer::Contract));
-    assert_eq!(surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID), Some(Floor::Pedantic));
+    assert_eq!(
+        surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID),
+        Some(Floor::Contracts),
+        "the ruled floor: `contracts`, from measurement, not `pedantic`",
+    );
+    // The definite `phpdoc.*` siblings' floor, exactly — the question this id
+    // asks is definite too, so it must not drift onto the possibly grade.
+    assert_eq!(
+        surface_floor(PHPDOC_UNKNOWN_VOCABULARY_ID),
+        surface_floor(PARAM_MISMATCH_ID),
+    );
 
     let emittable: HashSet<&str> = ALL_EMITTABLE_IDS.iter().copied().collect();
     let pending: HashSet<&str> = REGISTERED_NOT_YET_EMITTED.iter().copied().collect();
@@ -490,14 +502,13 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         // `Contracts`, so a `contracts` run keeps its meaning.
         (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
         (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
-        // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479). The floor here
-        // is PROVISIONAL: §6 makes it a measurement against the fp-gate rather
-        // than a decision, and `Pedantic` — the rung no built-in reaches — is
-        // the conservative end to hold it at while that measurement is read.
-        // Not `Strict`, which asks a different question (is a weaker some-paths
-        // claim worth seeing?); this judgment is definite. Moving it to
-        // `Contracts` is a one-line change to the registry and to this row.
-        (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Pedantic),
+        // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479) is deliberately
+        // NOT listed here. §6 made its floor a measurement rather than a
+        // decision, and the 2026-08-27 ruling read that measurement and put it
+        // on the contract family's own `Contracts` floor — so it is covered by
+        // the default expectation below, as an ordinary member of the family,
+        // and needs no exception. Its own row is
+        // `the_unknown_vocabulary_id_sits_on_the_measured_family_floor`.
     ];
     for &(id, layer_of, floor) in DIAGNOSTIC_REGISTRY {
         if let Some(&(_, expected_layer, expected_floor)) =

@@ -450,16 +450,18 @@ fn a_strict_baseline_entry_is_dormant_on_a_default_run() {
 }
 
 // ---------------------------------------------------------------------------
-// The `pedantic` branch, end to end (ADR-0062 A-G10 / issue #479).
+// `phpdoc.unknown-vocabulary` on the contract rung, end to end (ADR-0091 §6 /
+// issue #479).
 //
-// `Floor::Pedantic` is reached by no rung, so an id there is on a built-in
-// surface only if the `pedantic` profile NAMES it in `enable`. That makes the
-// profile engine — not the emitter — the last thing standing between such an id
-// and the user, and **nothing below the CLI can observe it**: the library entry
-// returns the finding either way, so a library-level test passes while the
-// product prints nothing. `phpdoc.unknown-vocabulary` shipped emitting and
-// unreachable for one review round because this file had no `pedantic` case at
-// all; these two are that case.
+// The profile engine sits between an id and the user, and **nothing below the
+// CLI can observe it**: the library entry returns the finding whatever the
+// surface decides, so a library-level test passes while the product prints
+// nothing. This id shipped emitting and unreachable for one review round —
+// registered at `Floor::Pedantic`, which no rung admits, and not named in the
+// one `enable` list that reaches that floor — because this file had no case for
+// either. It now sits at `Floor::Contracts` by measurement (§6 made the floor a
+// measurement, not a decision), so the surface set below is the ordinary
+// contract-family one, and these tests are what keep it honest.
 // ---------------------------------------------------------------------------
 
 /// A docblock whose `@param` names a hyphenated spelling that is not vocabulary
@@ -469,58 +471,61 @@ const UNKNOWN_VOCABULARY: &str = "<?php\n\
     /** @param non-empy-string $s */\n\
     function f($s): void {}\n";
 
-/// `--profile pedantic` reports the id, and **no other built-in does**.
+/// Every profile at or above the `contracts` rung reports the id, and the bare
+/// `default` surface stays silent.
 ///
-/// Both halves matter and they fail in opposite directions: without the first
-/// the id ships unreachable, and without the second a `Pedantic`-floor id has
-/// leaked onto a surface somebody else's CI runs.
+/// Both halves fail in opposite directions: without the first the id is
+/// unreachable through the product, and without the second a contract-layer
+/// finding has leaked onto the surface a bare `steins check` runs — which is the
+/// one surface that must stay proof-and-mechanics only.
 #[test]
-fn pedantic_reports_unknown_vocabulary_and_no_other_builtin_does() {
-    let dir = workdir("pedantic-vocab");
+fn the_contract_rung_reports_unknown_vocabulary_and_default_stays_silent() {
+    let dir = workdir("vocab-surfaces");
     write(&dir, "a.php", UNKNOWN_VOCABULARY);
 
-    let pedantic = run_in(&dir, &["check", "--no-php", "--profile", "pedantic", "a.php"]);
-    assert!(
-        pedantic.stdout.contains("phpdoc.unknown-vocabulary"),
-        "pedantic must report the id — a Floor::Pedantic id is unreachable unless the \
-         profile names it in `enable`:\n{}",
-        pedantic.stdout
-    );
-    assert!(pedantic.stdout.contains("non-empy-string"), "stdout:\n{}", pedantic.stdout);
-    assert_eq!(pedantic.code, 1, "a reported finding fails the run:\n{}", pedantic.stdout);
-
-    for profile in [None, Some("contracts"), Some("strict"), Some("throws-direct")] {
-        let mut args = vec!["check", "--no-php"];
-        if let Some(p) = profile {
-            args.extend_from_slice(&["--profile", p]);
-        }
-        args.push("a.php");
-        let r = run_in(&dir, &args);
+    for profile in ["contracts", "strict", "pedantic"] {
+        let r = run_in(&dir, &["check", "--no-php", "--profile", profile, "a.php"]);
         assert!(
-            !r.stdout.contains("phpdoc.unknown-vocabulary"),
-            "`{profile:?}` must stay silent on a pedantic-floor id:\n{}",
+            r.stdout.contains("phpdoc.unknown-vocabulary"),
+            "`{profile}` must report the id:\n{}",
             r.stdout
         );
-        assert_eq!(r.code, 0, "`{profile:?}` stdout:\n{}", r.stdout);
+        assert!(r.stdout.contains("non-empy-string"), "`{profile}` stdout:\n{}", r.stdout);
+        assert_eq!(r.code, 1, "a reported finding fails the run (`{profile}`):\n{}", r.stdout);
     }
+
+    // The bare default surface, pinned explicitly: `contracts` is an opt-up, so
+    // a docblock-premised finding must never reach a plain `steins check`.
+    let default_run = run_in(&dir, &["check", "--no-php", "a.php"]);
+    assert!(
+        !default_run.stdout.contains("phpdoc.unknown-vocabulary"),
+        "the default surface must stay silent on a contract-layer id:\n{}",
+        default_run.stdout
+    );
+    assert_eq!(default_run.code, 0, "stdout:\n{}", default_run.stdout);
+
+    // `throws-direct` branches off `default`, so it is silent for the same reason.
+    let td = run_in(&dir, &["check", "--no-php", "--profile", "throws-direct", "a.php"]);
+    assert!(!td.stdout.contains("phpdoc.unknown-vocabulary"), "stdout:\n{}", td.stdout);
+    assert_eq!(td.code, 0, "stdout:\n{}", td.stdout);
 }
 
-/// The pedantic surface is **identical cold and warm** (ADR-0092 §5).
+/// The contracts surface is **identical cold and warm** (ADR-0092 §5).
 ///
-/// The fp-gate's warm ≡ cold oracle runs the gate's own surface and never
-/// `pedantic`, so this is the only coverage a pedantic-floor id gets against the
-/// generation store replaying a stale finding set. Run twice with the store on
-/// (the default — no `--no-cache`); the second run must reproduce the first
+/// The fp-gate's own warm ≡ cold oracle runs over the corpus, where this id
+/// measured zero — so a corpus that never fires it cannot show that a replayed
+/// generation reproduces it. This is that coverage: run twice with the store on
+/// (the default — no `--no-cache`), and the second run must reproduce the first
 /// exactly.
 #[test]
-fn the_pedantic_surface_is_identical_cold_and_warm() {
-    let dir = workdir("pedantic-warm");
+fn the_contracts_surface_is_identical_cold_and_warm() {
+    let dir = workdir("vocab-warm");
     write(&dir, "a.php", UNKNOWN_VOCABULARY);
 
-    let cold = run_in(&dir, &["check", "--no-php", "--profile", "pedantic", "a.php"]);
+    let cold = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
     assert!(dir.join(".steins").is_dir(), "the store must exist, or this is cold twice");
 
-    let warm = run_in(&dir, &["check", "--no-php", "--profile", "pedantic", "a.php"]);
+    let warm = run_in(&dir, &["check", "--no-php", "--profile", "contracts", "a.php"]);
     assert_eq!(warm.stdout, cold.stdout, "warm run diverged from cold");
     assert_eq!(warm.code, cold.code);
     assert!(warm.stdout.contains("phpdoc.unknown-vocabulary"), "stdout:\n{}", warm.stdout);

@@ -363,20 +363,24 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `Layer::Contract`: the premise is a docblock's own spelling, and the
     // program runs either way.
     //
-    // `Floor::Pedantic` is PROVISIONAL, and the rung no built-in reaches is the
-    // conservative end to hold it at while the floor is measured — reported by
-    // the `pedantic` profile, which names every id at this floor in its `enable`
-    // list, and by no other built-in. Registering the floor is not the same as
-    // shipping the id: without that entry this would emit and reach no surface
-    // at all, which is how it first shipped (issue #479's review). §6 states the
-    // one thing that has to be calibrated: `KNOWN_UNENFORCED` exists because
-    // other tools have spellings Steins recognizes without enforcing, and the
-    // ones it has never heard of are exactly what this id convicts. Whether the
-    // honest floor is `Contracts` or `Pedantic` is a measurement against the
-    // fp-gate, not a decision made in advance — see the slice's PR for the
-    // hit list it was measured on. NOT `Strict`: that rung asks a different
-    // question (is a weaker some-paths claim worth seeing?), and this judgment
-    // is definite.
+    // `Floor::Contracts` — the family floor, **ruled from measurement** (§6
+    // refuses to fix this floor in advance) on the 2026-08-27 owner ruling.
+    //
+    // §6 named one thing to calibrate: `KNOWN_UNENFORCED` exists because other
+    // tools have spellings Steins recognizes without enforcing, and the ones it
+    // has never heard of are exactly what this id would convict. Measured: the
+    // pinned public corpus reports ZERO over 6,670 files carrying 2,903
+    // hyphenated type-position sites in 13 distinct spellings, every one
+    // recognized; the private corpus reports exactly ONE, a misspelling of
+    // `non-empty-string` in a test docblock — a true positive of the class the
+    // id exists for. The anticipated FP source is measured absent everywhere it
+    // is measurable, so a proven-yield check does not sit behind a rung nobody
+    // reaches. The residual risk is unmeasured conjecture with three absorbers
+    // when it materializes: the spelling joins `KNOWN_UNENFORCED`, §4.1's plugin
+    // registration once it lands, and ADR-0022's baseline.
+    //
+    // NOT `Strict`: that rung asks a different question (is a weaker some-paths
+    // claim worth seeing?), and this judgment is definite.
     //
     // **The baseline moves with configuration, not only with code** (ADR-0091
     // §4.1, §9). The allowlist is builtin tables ∪ plugin registrations, so the
@@ -387,7 +391,7 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // it, because no code changed. The registration kind does not exist on the
     // `steins-plugin.json` manifest yet, so the plugin half is empty for every
     // project today; the coupling bites when it lands.
-    (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Pedantic),
+    (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Contracts),
     (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
     (THROW_LISKOV_ID, Layer::Contract, Floor::Contracts),

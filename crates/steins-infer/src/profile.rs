@@ -17,8 +17,8 @@
 //! * `contracts` — default plus the whole contract layer.
 //! * `strict` — contracts plus the strict-floor ids (ADR-0062 A-G10): the offset
 //!   family's `offset.undeclared` / `offset.maybe-missing` leg (issue #51).
-//! * `pedantic` — contracts plus the ids the `Pedantic` rung holds, named one by
-//!   one; a **branch off `contracts`**, not a rung above `strict` (see below).
+//! * `pedantic` — contracts plus the house-style asks, named one by one; a
+//!   **branch off `contracts`**, not a rung above `strict` (see below).
 //! * `boundary` is still **reserved** (ADR-0042): selecting or defining it is a
 //!   config error until its ADR lands.
 //!
@@ -31,7 +31,7 @@
 //! `Strict`).
 //!
 //! The built-ins are not one chain: `throws-direct` branches off `default`,
-//! `pedantic` off `contracts`, each reaching ids above its own rung via
+//! `pedantic` off `contracts`, each reaching one id above its own rung via
 //! `enable` — orthogonal to the ladder (rung = how far up the chain, `enable` =
 //! "and also this").
 //!
@@ -69,8 +69,7 @@ use std::fmt;
 use crate::project::Diagnostic;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
-    Facet, Floor, Layer, Origin, PHPDOC_UNKNOWN_VOCABULARY_ID, THROW_UNDECLARED_ID,
-    UNTYPED_CLASS_CONSTANT_ID, layer,
+    Facet, Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer,
     pattern_is_known, pattern_matches, surface_floor,
 };
 
@@ -241,15 +240,14 @@ impl Surface {
                 s.origin_direct_only = true;
                 Some(s)
             }
-            // contracts + every `Pedantic`-floor id by name, one `enable` line
-            // each (the `throws-direct` shape) — a branch, not a rung above
-            // `strict` (module doc: "pedantic branches on purpose"). A new id at
-            // that floor belongs here the day it registers, or it ships on no
-            // built-in surface at all.
+            // contracts + the house-style asks by name, one `enable` line per id
+            // (the `throws-direct` shape) — a branch, not a rung above `strict`
+            // (module doc: "pedantic branches on purpose"). Every id registered
+            // at `Floor::Pedantic` belongs here the day it registers, or it
+            // ships on no built-in surface at all.
             "pedantic" => {
                 let mut s = base(Floor::Contracts);
                 s.enable.push(UNTYPED_CLASS_CONSTANT_ID.to_owned());
-                s.enable.push(PHPDOC_UNKNOWN_VOCABULARY_ID.to_owned());
                 Some(s)
             }
             _ => None,

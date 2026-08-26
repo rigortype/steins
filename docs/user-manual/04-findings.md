@@ -545,9 +545,10 @@ src/Readonly.php:9:9: error[readonly.reassigned]: Cannot modify readonly propert
 
 ### `phpdoc.*` — declared contracts you wrote in a docblock
 
-Five ids, contract layer, `contracts` rung. PHP does not enforce PHPDoc at
-runtime, so nothing here breaks your program. What breaks is the promise the
-docblock makes to every reader and every tool downstream.
+Contract layer, `contracts` rung (one member opts up to `strict`; the section
+says so where it does). PHP does not enforce PHPDoc at runtime, so nothing here
+breaks your program. What breaks is the promise the docblock makes to every
+reader and every tool downstream.
 
 The acceptance relation is stricter than the runtime one. `"60"` satisfies a
 native `int` parameter under coercive mode and never satisfies a
@@ -712,6 +713,38 @@ silence one either. An arrow function's body keeps its own silence, unchanged.
 native declaration. There is no native syntax for "the argument may not be
 there", so the rewrite would delete what you wrote; the transform refuses it as
 `type-not-natively-representable`.
+
+#### `phpdoc.unknown-vocabulary` — a type name that denotes nothing
+
+**`phpdoc.unknown-vocabulary`** — a phpdoc type name containing a `-` that
+Steins does not recognize as type vocabulary.
+
+```
+src/Order.php:12:5: error[phpdoc.unknown-vocabulary]: `non-empy-string` is not type vocabulary — a class name cannot contain `-`, so the name denotes nothing
+```
+
+Normally an unrecognized type name buys silence, because Steins cannot rule out
+that it is a class it has not indexed, a `@template` parameter, or a
+`@phpstan-type` alias. **A hyphenated name can be none of those.** PHP's
+compiler rejects `-` in a class, interface, trait or enum name, so no such class
+can exist to be found, and a hyphenated `@template` or `@phpstan-type` name is
+refused rather than declared (ADR-0091 §4.1). Only two possibilities are left —
+you misspelled a keyword, or you wrote vocabulary from a tool Steins does not
+model — and neither says anything false about your program, which is why this
+one can report where its unhyphenated cousin cannot.
+
+**Nothing is rejected because of it.** The name still means "unknown", so the
+annotation accepts every value it always accepted; the finding is the *only*
+consequence. That is the fix for the older behavior, where `@param
+non-empy-string $s` was read as a reference to a class named `non-empy-string`
+and then refused every string you passed it.
+
+Steins knows the whole vocabulary it implements plus the spellings it recognizes
+without enforcing — `int-mask-of`, `properties-of`, `key-of`, `int-range`,
+`non-empty-string`, the `…-string` grid, and the rest — so none of those ever
+reports. If your project uses a hyphenated spelling from a tool Steins has not
+modeled, the finding is telling you the truth (Steins does not know that type),
+and a baseline entry or `@steins-ignore` is the way to carry it.
 
 ### `throw.*` — `@throws` envelopes
 
