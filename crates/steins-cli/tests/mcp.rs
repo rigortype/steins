@@ -54,6 +54,34 @@ impl TempProject {
     fn path(&self) -> &str {
         self.dir.to_str().unwrap()
     }
+
+    /// The generation `CURRENT` names and when it was last written — `None`
+    /// until a run publishes one. The stamp is how this file observes that a
+    /// replay re-parsed nothing without asking the server to say so: the
+    /// lifecycle keeps `CURRENT` exactly when the run parsed no file at all,
+    /// and republishes (rewriting it) otherwise.
+    fn generation(&self) -> Option<(String, std::time::SystemTime)> {
+        let current = self.dir.join(".steins/gen/CURRENT");
+        let id = std::fs::read_to_string(&current).ok()?.trim().to_owned();
+        let stamp = std::fs::metadata(&current).ok()?.modified().ok()?;
+        Some((id, stamp))
+    }
+
+    /// What `steins check --no-cache` reports over the same tree, as the JSON
+    /// report's own `findings` array — the same per-finding spelling the tool
+    /// reply carries, so the two compare directly.
+    fn cold_findings(&self) -> Value {
+        let out = steins_cmd()
+            .current_dir(&self.dir)
+            .args(["check", "--no-php", "--no-cache", "--format", "json"])
+            .arg(self.path())
+            .output()
+            .expect("run steins check");
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        let doc: Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("check --format json is not JSON ({e}): {stdout}"));
+        doc["findings"].clone()
+    }
 }
 
 impl Drop for TempProject {
@@ -165,6 +193,14 @@ impl Drop for Client {
 /// halves.
 const LIB: &str = "<?php\n/** @param int $x */\nfunction f($x) { return $x; }\n/** @param int $y */\nfunction g($y) { return $y; }\n";
 const MAIN: &str = "<?php\nf(1);\ng(\"nope\");\n";
+
+/// The generation fixture: two declared functions, called wrongly from a second
+/// file, so the sound subset alone reports and an edit adds a finding without
+/// moving the one already there.
+const DEFS: &str =
+    "<?php\nfunction width(int $w): int { return $w; }\nfunction area(int $a): int { return $a; }\n";
+const ONE_WRONG_CALL: &str = "<?php\nwidth(\"abc\");\n";
+const TWO_WRONG_CALLS: &str = "<?php\nwidth(\"abc\");\narea(null);\n";
 
 #[test]
 fn a_scripted_client_lists_tools_and_drives_plan_then_apply() {
@@ -366,6 +402,66 @@ fn the_asserted_subjects_opt_in_rides_the_plan_tool_and_is_fenced_to_its_transfo
     assert!(detail.contains("post-check cannot catch"), "label: {detail}");
     assert!(plan["plan_handle"].is_string(), "an admitted site is applyable: {plan}");
     assert!(proj.read("loop.php").contains("foreach"), "the dry run must not touch the tree");
+}
+
+/// `check` answers from the generation store (issue #491): the first call
+/// builds cold and publishes, the second replays the unchanged tree, and an
+/// edit is reported from the source rather than from the cache.
+///
+/// Every reply is compared against a `--no-cache` run over the same tree, which
+/// is the only property that would matter if it broke — a cache is allowed to
+/// change what a call costs and nothing else (ADR-0092 §2). Warmth itself is
+/// read off the store rather than off the reply: the surface says nothing about
+/// its own temperature, and issue #525's ruling is why.
+///
+/// `--no-php` throughout, so no sidecar is involved and the run is hermetic.
+#[test]
+fn check_answers_from_the_generation_store() {
+    let proj = TempProject::new("generation");
+    proj.write("lib.php", DEFS);
+    proj.write("app.php", ONE_WRONG_CALL);
+    let mut client = Client::start(proj.path());
+    let args = json!({ "paths": [proj.path()], "no_php": true });
+
+    // Cold: nothing to load from, so this call is the one that publishes.
+    let cold = client.call_ok("check", args.clone());
+    let (published, stamp) = proj.generation().expect("the first check publishes a generation");
+    assert_eq!(cold["findings"], proj.cold_findings(), "the reply is the uncached report");
+    assert_eq!(cold["findings"].as_array().expect("findings array").len(), 1);
+
+    // Warm: the same tree, so the same answer — and the store is left exactly
+    // as it was, which it only can be if the run parsed no file (a rebuild
+    // republishes, rewriting `CURRENT` even under an unchanged identity).
+    let warm = client.call_ok("check", args.clone());
+    assert_eq!(warm["findings"], cold["findings"], "a replay reports what the build reported");
+    assert_eq!(warm["profile"], cold["profile"]);
+    assert_eq!(warm["notices"], cold["notices"]);
+    assert_eq!(
+        proj.generation(),
+        Some((published.clone(), stamp)),
+        "an unchanged tree keeps its generation, untouched"
+    );
+
+    // An edit: the reply follows the source, and the store follows the reply.
+    proj.write("app.php", TWO_WRONG_CALLS);
+    let edited = client.call_ok("check", args);
+    let findings = edited["findings"].as_array().expect("findings array");
+    assert_eq!(findings.len(), 2, "the new call reports too: {edited}");
+    assert!(findings.iter().any(|f| f["line"] == 3), "the edited line reports: {edited}");
+    assert_eq!(
+        edited["findings"],
+        proj.cold_findings(),
+        "an edited tree is answered from the source, not the cache"
+    );
+    assert_ne!(
+        proj.generation().expect("the edit publishes").0,
+        published,
+        "an edit publishes a new generation"
+    );
+
+    // Nothing above wrote to the code it was asked about.
+    assert_eq!(proj.read("lib.php"), DEFS);
+    assert_eq!(proj.read("app.php"), TWO_WRONG_CALLS);
 }
 
 #[test]

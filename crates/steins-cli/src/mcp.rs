@@ -30,6 +30,17 @@
 //! `&mut Session`. Exactly one `Write` exists in [`TOOLS`] (a test pins that),
 //! and the module's only `std::fs::write` calls are inside it — "this tool does
 //! not touch the tree" is enforced by the compiler and the table, not a comment.
+//! What a read-only tool may still leave behind is the generation store beside
+//! the analyzed code (`check`, issue #491): a cache the command line writes on
+//! every run, addressed by the tree it caches and never by the user's source.
+//!
+//! **`check` answers from the store.** It comes through the same frozen-
+//! generation lifecycle `steins check` runs by default (ADR-0092 §5), resolved
+//! per request rather than per process — one server, many projects, each its
+//! own store — and degrades to the cold pipeline in silence, since a cache's
+//! disposition is cost and cost is not an answer (issue #525, whose ruling this
+//! surface inherits: the reply document is what a client reads, and it says the
+//! same thing warm or cold).
 //!
 //! **Transport, and why no MCP SDK.** MCP's stdio transport is JSON-RPC 2.0
 //! messages delimited by newlines — the same wire family the PHP sidecar
@@ -45,7 +56,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
-use steins_infer::{Diagnostic, SidecarFolder, check_project_with_runtime};
+use steins_infer::{Diagnostic, SidecarFolder, check_project_with_postures};
 
 use crate::profile;
 use crate::transform::TransformKind;
@@ -689,24 +700,50 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
         .resolve(selected)
         .map_err(|e| ToolError::new("unknown-profile", e.to_string()))?;
 
-    let mut folder = if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
     let files = crate::collect_files(&paths);
-    let loaded = crate::load_project(
+    let effects_policy = crate::effects_from_config(effects_cfg, false);
+    let (postures, runtime_notices) = crate::runtime_from_config(runtime_cfg);
+
+    // The frozen-generation lifecycle (ADR-0092 §5, issue #491), resolved from
+    // *this request's* paths: capture root and store root come out of the files
+    // named here, never out of the process, so a server asked about two
+    // projects answers each from that project's store. The `[runtime]`
+    // warnings are deliberately not handed to the collector — this surface
+    // carries them in the reply document below, where a cold answer carries
+    // them too, and stderr is the log channel rather than the answer.
+    let cached = crate::generation::try_generation_check(
         &files,
         &paths,
         plugin_allow.as_deref(),
-        crate::effects_from_config(effects_cfg, false),
+        &effects_policy,
+        &postures,
+        no_php,
+        &[],
     );
-    folder.set_php_target(loaded.layout.php_target().cloned());
-    let (postures, runtime_notices) = crate::runtime_from_config(runtime_cfg);
-    let findings = check_project_with_runtime(
-        &loaded.db,
-        loaded.project,
-        &mut folder,
-        postures.warning_handler_abort,
-    );
-    let (inline, vendor_suppressed) =
-        crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
+    let (_loaded, inline, vendor_suppressed) = match cached {
+        Some(run) => crate::generation::consume_cached_run(run, &surface, vendor_diagnostics),
+        None => {
+            let mut folder =
+                if no_php { SidecarFolder::new(true) } else { SidecarFolder::enabled() };
+            let loaded =
+                crate::load_project(&files, &paths, plugin_allow.as_deref(), effects_policy);
+            folder.set_php_target(loaded.layout.php_target().cloned());
+            // Both `[runtime]` postures, as `steins check` runs them: a warm
+            // arm and a cold arm must be one analysis, and the posture pair is
+            // part of the generation's identity — declaring one of them here
+            // and both of them there would key two stores over one tree.
+            let findings = check_project_with_postures(
+                &loaded.db,
+                loaded.project,
+                &mut folder,
+                postures.warning_handler_abort,
+                postures.final_keyword,
+            );
+            let (inline, vendor_suppressed) =
+                crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);
+            (loaded, inline, vendor_suppressed)
+        }
+    };
 
     let mut displayed = inline.kept;
     displayed.extend(inline.meta);

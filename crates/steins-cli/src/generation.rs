@@ -1,10 +1,19 @@
 //! CLI wiring for the frozen-generation lifecycle (ADR-0092 §5) — how `steins
-//! check` runs by default since issue #525. The orchestrator itself is
-//! library-shaped in `steins_infer::generation_check` (shared with `cargo xtask
-//! perf --warm`, `cargo xtask fp-gate` and, later, the MCP server per issue
-//! #491); this module is only the `steins check` glue: resolve the run's
+//! check` runs by default since issue #525, and how the MCP `check` tool
+//! answers since issue #491. The orchestrator itself is library-shaped in
+//! `steins_infer::generation_check` (shared with `cargo xtask perf --warm` and
+//! `cargo xtask fp-gate`); this module is only the glue: resolve the run's
 //! boundary inputs, call the orchestrator, and hand back what the unchanged
 //! downstream pipeline needs.
+//!
+//! **Two callers, one consumption.** [`try_generation_check`] resolves capture
+//! root and store root from the run's own files, so nothing here is process
+//! state: a resident MCP server pointed at two projects answers each from that
+//! project's store, because a store is addressed by the tree it caches. What
+//! the two callers do with a [`CachedRun`] is [`consume_cached_run`] — the
+//! inline scan over the orchestrator's trees, the suppression channels, the
+//! notice ordering — so a warm reply differs from its cold twin in cost and in
+//! nothing else.
 //!
 //! **The surface** (ADR-0020 amendment, issue #525). The lifecycle is on
 //! unless `--no-cache` turns it off. There is no environment variable and no
@@ -31,8 +40,11 @@ use std::path::{Component, Path, PathBuf};
 
 use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
 use steins_infer::{Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, generation_check};
+use steins_syntax::SourceTree;
 
+use crate::check::suppression_over;
 use crate::config::RuntimePostures;
+use crate::profile;
 use crate::project::{LoadedProject, assemble_loaded, resolve_layout};
 
 /// What the cached path hands the downstream pipeline: the same
@@ -58,6 +70,11 @@ pub(crate) struct CachedRun {
     /// vocabulary, attribution hygiene, `[runtime]` warnings. Collected rather
     /// than printed so a degradation prints them exactly once, from the cold
     /// path, instead of twice.
+    ///
+    /// A caller whose cold path routes some channel elsewhere must keep that
+    /// channel out of `runtime_warnings` when it calls in: the MCP surface
+    /// carries its `[runtime]` warnings in the reply document rather than on
+    /// stderr, so passing them here would say them twice, in two places.
     pub(crate) notices: Vec<String>,
 }
 
@@ -135,6 +152,40 @@ pub(crate) fn try_generation_check(
         directive_files,
         notices,
     })
+}
+
+/// Consume a cached run: print the notices it collected, then run the
+/// suppression channels over the orchestrator's own trees. Returns what both
+/// callers' cold arms hand their reports — the salsa view, the inline outcome,
+/// and the vendor count — so warm and cold meet at one shape.
+///
+/// The notices print here because here is where each caller's cold path prints
+/// its own: `load_project` says them while loading, before a finding is
+/// rendered either way. They were collected rather than printed so that a
+/// degraded run says them once, from the cold path.
+pub(crate) fn consume_cached_run(
+    run: CachedRun,
+    surface: &profile::Surface,
+    vendor_diagnostics: bool,
+) -> (LoadedProject, steins_infer::InlineOutcome, usize) {
+    let CachedRun { loaded, findings, trees, directive_files, notices } = run;
+    for notice in &notices {
+        errln!("steins: {notice}");
+    }
+    // Only the files the scan can say anything about (issue #516): the ones a
+    // finding names, and the ones whose text spells a directive at all. Every
+    // other file's tree stays undecoded — and its absence changes nothing,
+    // because `apply_inline_ignores` reads a file for exactly two reasons and
+    // neither applies.
+    let named: HashSet<&str> = findings.iter().map(|d| d.path.as_str()).collect();
+    let pairs: Vec<(String, &SourceTree)> = trees
+        .iter()
+        .filter(|(path, _)| named.contains(path.as_str()) || directive_files.contains(path))
+        .map(|(path, tree)| (path.clone(), &**tree))
+        .collect();
+    let (inline, vendor_suppressed) =
+        suppression_over(&loaded.layout, pairs, findings, surface, vendor_diagnostics);
+    (loaded, inline, vendor_suppressed)
 }
 
 /// Where a run's store lives: the outermost governing root, or — manifest-less
