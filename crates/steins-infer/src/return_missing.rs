@@ -120,6 +120,13 @@ fn return_missing_subject(cx: &Cx, scope: &Scope) -> (String, String) {
             let line = cx.tree().position(*def_offset).line;
             (format!("the closure on line {line}"), "{closure}".to_owned())
         }
+        // Only a `get` hook carries a return hint at all, and PHP names it exactly
+        // this way — witnessed 8.5.9: `public int $v { get { } }` read once raises
+        // `C::$v::get(): Return value must be of type int, none returned`.
+        ScopeOwner::PropertyHook { class, property, hook } => {
+            let qualified = format!("{class}::${property}::{}", hook.as_str());
+            (format!("the {} hook of {class}::${property}", hook.as_str()), qualified)
+        }
         // The top-level scope carries no return hint, so it never reaches here.
         ScopeOwner::TopLevel => ("the script".to_owned(), "{main}".to_owned()),
     }

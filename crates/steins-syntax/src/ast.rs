@@ -2021,6 +2021,44 @@ pub enum ScopeOwner {
     /// (the closure/`fn` keyword span start); an [`ArgValue::Closure`] naming this offset
     /// descends here. Params/effects/throws live on the [`Scope`] itself (no [`FunctionDecl`]).
     Closure { def_offset: u32 },
+    /// A PHP 8.4 property hook body (issue #544), plain or constructor-promoted. `class`
+    /// is the declaring class's case-preserved FQN, `property` the hooked name without
+    /// its `$`; the triple is unique within a file, which is how [`Scope`] lookups
+    /// address it.
+    ///
+    /// It runs in the declaring class's scope with `$this` bound, so it is a method body
+    /// in every way the walk cares about — but it is not a method: no [`MethodDecl`]
+    /// carries its signature, so, exactly as for a closure, the hook's parameters and
+    /// its native return type ride on the [`Scope`] itself.
+    PropertyHook { class: String, property: String, hook: HookKind },
+}
+
+/// Which of a hooked property's two hooks a [`ScopeOwner::PropertyHook`] scope is.
+///
+/// The engine names them `$prop::get` / `$prop::set` (witnessed 8.5.9, in the
+/// `TypeError` a hook raises), which is the spelling every diagnostic subject uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum HookKind {
+    /// `get` — takes nothing, and must return the property's declared type
+    /// (witnessed: falling off the end raises `C::$v::get(): Return value must be of
+    /// type int, none returned`).
+    Get,
+    /// `set` — takes exactly one parameter and returns nothing. Written explicitly
+    /// (`set(T $v)`) or left implicit, in which case the engine names it `$value` and
+    /// types it as the property (witnessed by `ReflectionProperty::getHooks()`).
+    Set,
+}
+
+impl HookKind {
+    /// The hook name as PHP writes it.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            HookKind::Get => "get",
+            HookKind::Set => "set",
+        }
+    }
 }
 
 /// A construct on the ADR-0001 whole-scope give-up list: code the analyzer parses and then
@@ -2161,13 +2199,17 @@ pub struct Scope {
     /// method-transform reverse sweep needs (ADR-0043 §6): a candidate method is safe to
     /// rewrite only when every reaching call is accounted for. `new` calls are omitted.
     pub method_calls: Vec<CallExpr>,
-    /// Parameters of a closure/arrow scope ([`ScopeOwner::Closure`]) — no [`FunctionDecl`]
-    /// to look them up on, so binding descent and native parameter seeding read them here.
-    /// Empty for function/method/top-level scopes (resolved via [`Self::owner`]).
+    /// Parameters of a closure/arrow scope ([`ScopeOwner::Closure`]) or a property-hook
+    /// scope ([`ScopeOwner::PropertyHook`]) — no [`FunctionDecl`] to look them up on, so
+    /// binding descent and native parameter seeding read them here. A `set` hook written
+    /// without a parameter list carries the engine's implicit one (`$value`, typed as the
+    /// property). Empty for function/method/top-level scopes (resolved via [`Self::owner`]).
     pub params: Vec<Param>,
-    /// Declared native return type of a closure/arrow scope ([`ScopeOwner::Closure`]) — no
-    /// [`FunctionDecl`] carries it, so the callable-signature variance check (issue #11)
-    /// reads the closure's `: R` here. `None` for no/unrepresentable hint or any non-closure scope.
+    /// Declared native return type of a closure/arrow scope ([`ScopeOwner::Closure`]) or a
+    /// `get` hook ([`ScopeOwner::PropertyHook`], where it is the property's own declared
+    /// type) — no [`FunctionDecl`] carries it, so the callable-signature variance check
+    /// (issue #11) reads the closure's `: R` here. `None` for no/unrepresentable hint, for
+    /// a `set` hook (which returns nothing), or for any other scope.
     pub ret_ty: Option<NativeType>,
     /// Effect-origin candidates of a closure/arrow body ([`ScopeOwner::Closure`]), so a
     /// closure can be an effect node in the fixpoint (ADR-0033 point 3); empty otherwise.

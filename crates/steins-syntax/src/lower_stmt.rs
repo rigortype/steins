@@ -382,7 +382,7 @@ fn loop_end(infinite: bool, node: &Node<'_, '_>) -> BodyEnd {
 /// Deliberately **not** counting `break`/`continue`: those leave a construct, never
 /// the function, and a `switch` full of `break`s is no evidence at all that the
 /// author meant to return something.
-fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
+pub(crate) fn subtree_has_function_exit(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Return(_)
         | Node::Throw(_)
@@ -449,7 +449,7 @@ pub(crate) fn expr_is_false(expr: &Expression<'_>) -> bool {
 ///
 /// A plain call answers [`BodyEnd::FallsThrough`]; see `stmt_end`'s recorded
 /// obstacle on never-returning callees for why, and where that refinement lives.
-fn expr_end(expr: &Expression<'_>) -> BodyEnd {
+pub(crate) fn expr_end(expr: &Expression<'_>) -> BodyEnd {
     match expr.unparenthesized() {
         Expression::Throw(_) => BodyEnd::Terminates,
         Expression::Construct(Construct::Exit(_) | Construct::Die(_)) => BodyEnd::Terminates,
@@ -1156,7 +1156,7 @@ fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
 }
 
 /// Lower an expression-statement to a trace entry.
-fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
+pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
     match expr.unparenthesized() {
         Expression::Assignment(a) => {
             if let Expression::Variable(Variable::Direct(dv)) = a.lhs.unparenthesized() {

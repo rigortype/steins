@@ -42,7 +42,9 @@ use crate::walk::{WalkCx, analyze_scope};
 /// The class FQN that lexically owns a method scope; `None` for function/top.
 pub(crate) fn scope_class(scope: &Scope) -> Option<&str> {
     match &scope.owner {
-        ScopeOwner::Method { class, .. } => Some(class),
+        // A property hook body runs in its declaring class's scope with `$this`
+        // bound (issue #544) — the same answer a method body gets, for the same reason.
+        ScopeOwner::Method { class, .. } | ScopeOwner::PropertyHook { class, .. } => Some(class),
         // A closure lexically inside a method captures `$this`, but the analyzer
         // does not thread the enclosing class into the closure scope (documented).
         ScopeOwner::TopLevel | ScopeOwner::Function(_) | ScopeOwner::Closure { .. } => None,

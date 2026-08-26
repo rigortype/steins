@@ -358,7 +358,11 @@ pub(crate) fn never_returning_of(tree: &SourceTree) -> Vec<String> {
         let name = match &scope.owner {
             ScopeOwner::Function(name) => name,
             ScopeOwner::Method { method, .. } => method,
-            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => continue,
+            // A hook writes no return type of its own (`get(): int` is a parse
+            // error), so no hook scope can ever carry a `: never` hint.
+            ScopeOwner::TopLevel
+            | ScopeOwner::Closure { .. }
+            | ScopeOwner::PropertyHook { .. } => continue,
         };
         let lower = name.to_ascii_lowercase();
         if !out.contains(&lower) {
