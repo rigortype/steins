@@ -111,8 +111,18 @@ fn stub_php_dir_mid_run() -> PathBuf {
 /// stub, not the host's real `php`. Per-request ADR-0024 timeouts for one
 /// foldable argument (`env()` plus one fold attempt, each its own respawn) stay
 /// under ten seconds; the 30-second bound below only guards an actual hang.
+///
+/// A `check` runs `--no-cache`: these fixtures are checked in, and a cached run
+/// would leave a `.steins/` in the repository for the next run of the suite to
+/// start warm from (issue #525 — see `tests/cli.rs`'s `uncached`, which states
+/// the rule in full). Nothing here is about the cache; it is about what a
+/// silent sidecar does to a run.
 fn run_against_stub(stub_dir: &Path, args: &[&str]) -> Run {
-    let out = steins_cmd().args(args).env("PATH", stub_dir).output().expect("run steins");
+    let mut args: Vec<&str> = args.to_vec();
+    if args.first() == Some(&"check") {
+        args.insert(1, "--no-cache");
+    }
+    let out = steins_cmd().args(&args).env("PATH", stub_dir).output().expect("run steins");
     let _ = std::fs::remove_dir_all(stub_dir);
     Run {
         code: out.status.code().unwrap_or(-1),

@@ -953,6 +953,12 @@ Layout
       vendor: vendor
       ours:   src
 
+Generation store
+  store: .steins/gen
+  current generation: 7fed4cf2dc714492f2256affc1ddf71219696b66e019cb7c3346da3a6ee4ac1e
+  packages: 2
+  on disk: 1.4 MB across 1 generation(s) (an artifact a republish shared counts once per generation, so the real cost is at most this)
+
 Coverage posture
   6 file(s), 16 scope(s), 0 poisoned (0.0%) — a poisoned scope knows no local's value (ADR-0001, ADR-0046 §1)
   opaque constructs: none — no scope is on the give-up list
