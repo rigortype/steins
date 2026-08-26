@@ -1807,3 +1807,29 @@ fn text_of(bytes: Vec<u8>) -> String {
 fn ms(d: std::time::Duration) -> f64 {
     d.as_secs_f64() * 1000.0
 }
+
+#[cfg(test)]
+mod tests {
+    use super::text_of;
+
+    /// The optimized spelling is the old one, byte for byte, on valid and
+    /// ill-formed input alike — the property the whole capture-once change
+    /// rests on being invisible to what is analyzed.
+    #[test]
+    fn text_of_equals_from_utf8_lossy() {
+        for case in [
+            b"<?php echo 1;\n".to_vec(),
+            Vec::new(),
+            "<?php // \u{3042}\u{3044}\n".as_bytes().to_vec(),
+            // A lone continuation byte, and a truncated three-byte sequence.
+            b"<?php \x80 \xe3\x81 end\n".to_vec(),
+            vec![0xff, 0xfe, 0xfd],
+        ] {
+            assert_eq!(
+                text_of(case.clone()),
+                String::from_utf8_lossy(&case).into_owned(),
+                "{case:?}"
+            );
+        }
+    }
+}
