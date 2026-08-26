@@ -85,19 +85,39 @@
 //! adds an edge or a delta hit and walks a file that need not have been. It
 //! cannot hide one.
 
+//! **Two halves, one file.** The *value* — the row types and the three
+//! projections a run without persisted facts still takes off a tree — compiles
+//! everywhere, because `dam.rs` and the fixpoints read it on every path. The
+//! *codec* and the whole-file derivation are native-only, like the rest of the
+//! persistence surface (ADR-0065: the wasm graph never sees the store).
+
+#[cfg(not(target_arch = "wasm32"))]
 use std::collections::HashMap;
 
+#[cfg(not(target_arch = "wasm32"))]
 use serde::{Deserialize, Serialize};
-use steins_db::{EffectsPolicy, PackageShard, PluginFacts};
+use steins_db::PackageShard;
+#[cfg(not(target_arch = "wasm32"))]
+use steins_db::{EffectsPolicy, PluginFacts};
+#[cfg(not(target_arch = "wasm32"))]
 use steins_domain::Certainty;
+#[cfg(not(target_arch = "wasm32"))]
 use steins_gen::Miss;
 use steins_syntax::{DynamismKind, IncludePath, RetHintKind, ScopeOwner, SourceTree};
 
+#[cfg(not(target_arch = "wasm32"))]
 use crate::affected::{alias_key_edges, declared_keys, footprint_keys, inherit_keys};
+use crate::purity::EffectOwnRow;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::purity::{EffectFinding, classify_effect_origins};
+#[cfg(not(target_arch = "wasm32"))]
 use crate::project::{FileUnit, Index};
-use crate::purity::{EffectFinding, EffectOwnRow, classify_effect_origins};
-use crate::throws::{ResolvedCatch, ThrowFact, ThrowOwnRow, classify_throw_origins};
-use crate::{Sym, cx::Cx};
+use crate::throws::ThrowOwnRow;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::throws::{ResolvedCatch, ThrowFact, classify_throw_origins};
+use crate::Sym;
+#[cfg(not(target_arch = "wasm32"))]
+use crate::cx::Cx;
 
 // ---------------------------------------------------------------------------
 // The key hash.
@@ -109,6 +129,7 @@ use crate::{Sym, cx::Cx};
 /// whose facts were just derived must agree — and across runs of the same
 /// analyzer version, which the replay stamp already pins. Deliberately not
 /// `DefaultHasher`: its output is explicitly not stable across releases.
+#[cfg(not(target_arch = "wasm32"))]
 #[must_use]
 pub(crate) fn key_hash(key: &str) -> u64 {
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
@@ -164,8 +185,12 @@ pub(crate) struct FileFacts {
 }
 
 /// A file's first parse error, as the parse-failure finding needs it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub(crate) struct ParseError {
     pub(crate) line: u32,
     pub(crate) column: u32,
@@ -178,8 +203,12 @@ pub(crate) struct ParseError {
 /// the include target already resolved against the file's own directory.
 /// Whether it *stands* is a merge-time question (the vendor presumption, the
 /// universe membership test), exactly as `dam.rs`'s own module doc says.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub(crate) struct DamCandidate {
     pub(crate) line: u32,
     pub(crate) column: u32,
@@ -190,8 +219,12 @@ pub(crate) struct DamCandidate {
 /// arm carries the *pre-resolved* normalized target — `None` for a path that
 /// can never be benign (unproven, or a relative literal), `Some(p)` for one
 /// that is benign exactly when the universe holds `p`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub(crate) enum CandidateKind {
     Eval,
     Include { target: Option<String> },
@@ -212,6 +245,7 @@ pub(crate) struct OwnRows {
     pub(crate) throws: Vec<(Sym, ThrowOwnRow)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl FileFacts {
     /// The tree-derived half: everything that is a function of the file's bytes
     /// alone. [`Self::rows`] is left `None` for [`fill_rows`] to complete,
@@ -349,6 +383,7 @@ fn include_target(ip: &IncludePath, from: &str) -> Option<String> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Fill in the own rows of every file whose facts do not carry them, from the
 /// merged index this run built (issue #516).
 ///
@@ -375,6 +410,7 @@ pub(crate) fn fill_rows(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// One file's own rows, in the enumeration order both fixpoints use:
 /// functions, then each class's methods, then the closure/arrow bodies
 /// (ADR-0033).
@@ -459,6 +495,7 @@ fn own_rows_of(
 // ---------------------------------------------------------------------------
 
 /// One file's facts payload, as the `facts` section carries it.
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredFacts {
@@ -479,6 +516,7 @@ struct StoredFacts {
     rows: StoredRows,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredRows {
@@ -487,6 +525,7 @@ struct StoredRows {
     throws: Vec<(Sym, StoredThrowRow)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredEffectRow {
@@ -497,6 +536,7 @@ struct StoredEffectRow {
     untainting: Vec<Sym>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredThrowRow {
@@ -506,6 +546,7 @@ struct StoredThrowRow {
     edges: Vec<(Sym, Vec<Vec<ResolvedCatch>>)>,
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// The three [`Certainty`] values as their wire bytes; anything else is a
 /// decode failure, so a doctored payload cannot invent a fourth.
 fn certainty_byte(c: Certainty) -> u8 {
@@ -516,6 +557,7 @@ fn certainty_byte(c: Certainty) -> u8 {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn certainty_of(b: u8) -> Option<Certainty> {
     match b {
         0 => Some(Certainty::No),
@@ -525,6 +567,7 @@ fn certainty_of(b: u8) -> Option<Certainty> {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Pack sorted key hashes into lowercase hex.
 fn pack(keys: &[u64]) -> String {
     let mut out = String::with_capacity(keys.len() * 16);
@@ -534,6 +577,7 @@ fn pack(keys: &[u64]) -> String {
     out
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Strict inverse of [`pack`]: the length must be a multiple of 16 and every
 /// character a hex digit.
 fn unpack(text: &str) -> Option<Vec<u64>> {
@@ -548,6 +592,7 @@ fn unpack(text: &str) -> Option<Vec<u64>> {
     Some(out)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Serialize one file's facts. Infallible: every field is plain data.
 #[must_use]
 pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
@@ -618,6 +663,7 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
     serde_json::to_vec(&stored).expect("a facts payload serializes")
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 /// Decode one file's facts. Every way the bytes can be wrong is a [`Miss`],
 /// which the caller degrades to reading the file's tree.
 pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
@@ -672,7 +718,7 @@ pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
     use super::*;
 

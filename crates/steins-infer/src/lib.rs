@@ -54,7 +54,6 @@ mod affected;
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod summaries;
-#[cfg(not(target_arch = "wasm32"))]
 mod facts;
 mod fold_table;
 mod foreach_check;
@@ -428,7 +427,7 @@ fn check_units_controlled(
     // generation orchestrator holds — every other entry point passes `None`
     // and pays two `Instant::now()` calls per run for the arithmetic.
     let mut passes = PassTimings::default();
-    let t_facts = Instant::now();
+    let t_facts = clock();
 
     // This run's per-file facts (issue #516), or an empty slice on every path
     // but the generation orchestrator's. Where a file has them, the phases
@@ -482,11 +481,11 @@ fn check_units_controlled(
     // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
     // fixpoint, consulted by every file's context, and built only when some
     // docblock actually spells a purity-bearing callable.
-    passes.facts_ms += ms(t_facts.elapsed());
-    let t_oracle = Instant::now();
+    passes.facts_ms += ms(t_facts);
+    let t_oracle = clock();
     let purity = PurityOracle::build(&fixpoints);
-    let oracle_ms = ms(t_oracle.elapsed());
-    let t_facts = Instant::now();
+    let oracle_ms = ms(t_oracle);
+    let t_facts = clock();
 
     // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
     // One finding per broken file at its first error, and then NOTHING else from
@@ -529,7 +528,7 @@ fn check_units_controlled(
     // back to the same CST `Match` node). Populated below, read by
     // `throw_diagnostics` at the end.
     let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
-    passes.facts_ms += ms(t_facts.elapsed());
+    passes.facts_ms += ms(t_facts);
 
     // The walk plan (issue #489 slice B). Every whole-universe verdict a walk
     // can read is in hand by now, so this is the one point at which the
@@ -556,7 +555,7 @@ fn check_units_controlled(
     };
     plan.resize_with(units.len(), || FilePlan::Walk);
 
-    let t_walk = Instant::now();
+    let t_walk = clock();
     for fi in 0..units.len() {
         let before = out.len();
         // A replayed file's block is appended verbatim, in the very position
@@ -616,8 +615,8 @@ fn check_units_controlled(
         }
     }
 
-    passes.walk_ms = ms(t_walk.elapsed());
-    let t_report = Instant::now();
+    passes.walk_ms = ms(t_walk);
+    let t_report = clock();
 
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
     out.extend(effect_diagnostics(&fixpoints));
@@ -639,16 +638,35 @@ fn check_units_controlled(
     let (effects_ms, throws_ms) = fixpoints.spent();
     passes.effects_ms = effects_ms;
     passes.throws_ms = throws_ms;
-    passes.report_ms = (oracle_ms + ms(t_report.elapsed()) - effects_ms - throws_ms).max(0.0);
+    passes.report_ms = (oracle_ms + ms(t_report) - effects_ms - throws_ms).max(0.0);
     if let Some(control) = control {
         control.passes = passes;
     }
     out
 }
 
-/// Milliseconds, the one spelling the phase ledger uses.
-fn ms(d: std::time::Duration) -> f64 {
-    d.as_secs_f64() * 1000.0
+/// A monotonic instant, or `None` where the target has no clock.
+///
+/// `wasm32-unknown-unknown` has no time source and `Instant::now` **panics**
+/// there, so the phase ledger — which is read by the generation orchestrator
+/// and by nothing else — must not reach for one. The browser build measures
+/// nothing and reports zeros, which is the honest answer for a target that
+/// cannot measure.
+fn clock() -> Option<Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+/// Milliseconds since `t`, the one spelling the phase ledger uses. Zero for a
+/// target with no clock.
+fn ms(t: Option<Instant>) -> f64 {
+    t.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// Collect an iterator of borrowed names into a sorted vector — the canonical
@@ -1039,7 +1057,7 @@ impl<'a> Fixpoints<'a> {
     /// The effect fixpoint result, computed on first request.
     pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
         self.effects.get_or_init(|| {
-            let t = std::time::Instant::now();
+            let t = clock();
             let out = purity::compute_effects(
                 self.units,
                 self.index,
@@ -1048,7 +1066,7 @@ impl<'a> Fixpoints<'a> {
                 self.facts,
             );
             let (_, throws) = self.spent.get();
-            self.spent.set((t.elapsed().as_secs_f64() * 1000.0, throws));
+            self.spent.set((ms(t), throws));
             out
         })
     }
@@ -1056,10 +1074,10 @@ impl<'a> Fixpoints<'a> {
     /// The throw fixpoint result, computed on first request.
     pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
         self.throws.get_or_init(|| {
-            let t = std::time::Instant::now();
+            let t = clock();
             let out = throws::compute_throws(self.units, self.index, self.facts);
             let (effects, _) = self.spent.get();
-            self.spent.set((effects, t.elapsed().as_secs_f64() * 1000.0));
+            self.spent.set((effects, ms(t)));
             out
         })
     }
