@@ -19,10 +19,11 @@
 //! already reads exactly the ones it wants. The package's own fingerprint
 //! survives as a *shortcut* — when it matches, every file of the package is
 //! unmoved and no row need be consulted — and the per-file fingerprint is the
-//! one the `summaries` rows already carry ([`block_index`]), so "which files
-//! changed" has one spelling that the load gate, the name delta and the walk
-//! plan all read. A package with no matching artifact still parses everything,
-//! and so does any file whose stored fingerprint cannot be established.
+//! one the `summaries` rows already carry, so "which files changed" has one
+//! spelling that the load gate, the name delta and the walk plan all read (one
+//! predicate, `unmoved_rows`, is what all three call). A package with no
+//! matching artifact still parses everything, and so does any file whose
+//! stored fingerprint cannot be established.
 //!
 //! A package can therefore be genuinely **mixed** — some files loaded, some
 //! parsed — which the [`PackageReport`] disposition names and which forbids
@@ -143,7 +144,7 @@ use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
 /// fingerprint ([`SourceInventory::fingerprint`], hex). The analyzer version
 /// gates the package's whole load; the fingerprint is the shortcut that says
 /// *every* file is unmoved, and when it does not match the load falls to the
-/// per-file gate ([`load_trees`]) rather than to reparsing the package.
+/// per-file gate rather than to reparsing the package.
 pub const SOURCES_SECTION: &str = "sources";
 
 fn sources_section() -> SectionName {
@@ -341,7 +342,7 @@ pub struct PackageReport {
     /// Why, in one word: `"loaded"` (every file came from the artifact),
     /// `"mixed (…)"` (issue #512 — some did and some did not, which is what an
     /// edit inside a package looks like), or `"parsed (…)"` (none did, and the
-    /// parenthesis says which [`LoadRefusal`] it was).
+    /// parenthesis says why the artifact could not be read from at all).
     pub disposition: &'static str,
 }
 
@@ -444,6 +445,16 @@ struct PkgState {
     /// Whether every persisted `(path, slot)` matches this run's universe, so
     /// the artifact's raw bytes may be copied into the next candidate.
     slots_stable: bool,
+    /// Whether the package's *whole* source fingerprint matched the published
+    /// one — that no file of it was added, removed or edited.
+    ///
+    /// This, and never `parsed == 0`, is what says a package contributes
+    /// nothing to the name delta. The per-file gate (issue #512) separated the
+    /// two: a package that lost a file has every *surviving* file loadable, so
+    /// it can parse nothing at all while the names of the file it lost are
+    /// gone from the universe — and those names must reach the delta, or the
+    /// callers that named them replay a stale absence.
+    sources_match: bool,
     /// A miss forced the reparse (as opposed to an expected change) — the
     /// republish-even-when-current trigger.
     degraded: bool,
@@ -490,6 +501,9 @@ struct LoadedPkg {
     /// outright in exactly the case where the caller would then take the old
     /// shard and find none, so the caller may take it on those two bits alone.
     slots_stable: bool,
+    /// Whether the package's whole source fingerprint matched — see
+    /// [`PkgState::sources_match`], which is what reads it.
+    sources_match: bool,
     /// The first per-file decode failure, if any: the file parsed instead (a
     /// miss is cost, never meaning), and the package republishes to repair the
     /// artifact.
@@ -581,11 +595,15 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         match published.fresh {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
-                // The old shard serves verbatim only for a package that took
-                // *every* one of its trees out of that same artifact: a mixed
-                // package's shard would carry the pre-edit symbols of the file
-                // it just reparsed.
-                let verbatim = loaded.stale.is_empty() && slots_stable;
+                // The old shard serves verbatim only for a package whose
+                // sources did not move at all, which took *every* one of its
+                // trees out of that same artifact, and whose slots still name
+                // the same files: a mixed package's shard would carry the
+                // pre-edit symbols of the file it just reparsed, and a package
+                // that lost one would carry the lost file's. The first
+                // conjunct is also what keeps the delta loop's reading of a
+                // taken (`None`) old shard exact.
+                let verbatim = loaded.sources_match && loaded.stale.is_empty() && slots_stable;
                 for (slot, tree) in loaded.trees {
                     tree_slots[slot] = Some(tree);
                 }
@@ -616,6 +634,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                         (_, false) => "mixed (changed files reparsed)",
                     },
                     slots_stable,
+                    sources_match: loaded.sources_match,
                     degraded: loaded.miss.is_some(),
                 });
             }
@@ -633,6 +652,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                     parsed: plan.slots.len(),
                     disposition: refusal.disposition(),
                     slots_stable: false,
+                    // A refused load establishes nothing about the sources, so
+                    // the package answers for its whole old and new key sets.
+                    sources_match: false,
                     degraded,
                 });
             }
@@ -660,12 +682,18 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // edit rather than to the package. The one member with no site to answer
     // for it — a package's ambiguity set — rides a changed package wholesale;
     // `PackageShard::contributed_names_from` says why.
+    //
+    // "Did not move" is the package's own source fingerprint and never "parsed
+    // nothing" (issue #512, `PkgState::sources_match`): under the per-file gate
+    // a package that *lost* a file loads every survivor and parses nothing at
+    // all, while the names the lost file declared are gone from the universe
+    // and must reach the delta.
     let now: HashMap<&str, usize> =
         diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
     let mut delta: HashSet<String> = HashSet::new();
     let mut delta_known = true;
     for (i, plan) in plans.iter().enumerate() {
-        if states[i].parsed == 0 && !states[i].degraded {
+        if states[i].sources_match && !states[i].degraded {
             continue;
         }
         match &old_shards[i] {
@@ -679,8 +707,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 // A name whose disappearance cannot be seen cannot be reasoned
                 // about, so the sound answer is to walk everything. (The other
                 // reading of `None` — the shard was taken to serve this run
-                // verbatim — cannot reach here: taking it requires a load that
-                // parsed nothing and did not degrade, which this loop skips.)
+                // verbatim — cannot reach here: taking it requires a load
+                // whose sources matched and which did not degrade, which is
+                // exactly what this loop skips.)
                 delta_known = false;
                 notes.push(format!(
                     "package {}: its old symbols are unreadable; walking every file",
@@ -1154,14 +1183,18 @@ fn load_trees(
     if loaded.is_empty() {
         return Err(first_miss.map_or(LoadRefusal::Changed, LoadRefusal::Miss));
     }
+    // `whole` is a statement about the sources, not about what was loaded: a
+    // per-file miss can reparse a file of a package whose bytes never moved.
+    let sources_match = whole;
     // The shard's sites are universe slots; it may only serve verbatim when
-    // every persisted slot still names the same file *and* nothing was
-    // reparsed. Otherwise the caller rebuilds it from the trees in hand —
-    // still no reparse.
-    if stale.is_empty() && slots_stable && !have_shard {
+    // the sources did not move, every persisted slot still names the same
+    // file, and nothing was reparsed — the caller's `verbatim`, spelled the
+    // same way here so its `expect` cannot fire. Otherwise the caller rebuilds
+    // it from the trees in hand — still no reparse.
+    if sources_match && stale.is_empty() && slots_stable && !have_shard {
         return Err(LoadRefusal::Miss("symbols section is not a shard".to_owned()));
     }
-    Ok(LoadedPkg { trees: loaded, stale, slots_stable, miss: first_miss })
+    Ok(LoadedPkg { trees: loaded, stale, slots_stable, sources_match, miss: first_miss })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.

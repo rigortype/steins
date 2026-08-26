@@ -733,6 +733,52 @@ fn an_edit_parses_the_edited_file_and_loads_its_siblings() {
     );
 }
 
+/// A file **removed** from a package: every survivor loads (its own bytes did
+/// not move) and the package parses nothing at all — so the name delta cannot
+/// key on "this package parsed something". It keys on the package's own source
+/// fingerprint, which the removal moved, and the caller of the removed
+/// declaration is walked and loses its resolution.
+#[test]
+fn a_removed_file_walks_the_caller_though_the_package_parses_nothing() {
+    if !spawn_or_skip("a_removed_file_walks_the_caller_though_the_package_parses_nothing") {
+        return;
+    }
+    let tmp = TempDir::new("per-file-removal");
+    let all = write_delta_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &all);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    let names_absent = |findings: &[Diagnostic], needle: &str| {
+        findings.iter().any(|d| d.path.ends_with("sibling.php") && d.message.contains(needle))
+    };
+    assert!(!names_absent(&cold.findings, "otherFn"), "the tripwire is armed: {:#?}", cold.findings);
+
+    // `other.php` leaves the universe; `sibling.php`, which calls `otherFn()`,
+    // does not change a byte.
+    std::fs::remove_file(&all[2]).unwrap();
+    let files: Vec<PathBuf> = [&all[0], &all[1], &all[3]].into_iter().cloned().collect();
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    let pkg = &warm.report.packages[0];
+    assert_eq!(
+        (pkg.loaded, pkg.parsed),
+        (3, 0),
+        "every surviving file's own bytes are unmoved: {:#?}",
+        warm.report.notes
+    );
+    assert!(
+        names_absent(&warm.findings, "otherFn"),
+        "the removed declaration's caller replayed a stale resolution: {:#?}",
+        warm.findings
+    );
+    let fresh_store = TempDir::new("per-file-removal-fresh");
+    assert_eq!(
+        canon(warm.findings),
+        canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+        "a removal diverged from a fresh cold run"
+    );
+}
+
 /// The mixed package publishes an artifact the *next* run can load whole: the
 /// rebuilt shard, trace and provenance record describe the trees in hand, not
 /// the ones the edit invalidated. A second warm run over the settled tree is
