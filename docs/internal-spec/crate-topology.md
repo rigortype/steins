@@ -117,7 +117,12 @@ per-generation merge (ADR-0092 §3), and the artifact payload codecs — what th
 framing those last two share with `facts` (a length-prefixed directory then
 payloads tiling the rest, so a republish copies an unmoved file's bytes instead
 of re-encoding them), the read transaction and the residency vocabulary
-(ADR-0092 §2).
+(ADR-0092 §2). The payload codec itself lives here too (`wire`): a compact
+binary serde format, no field names and no type tags, shared by every typed
+payload in a generation including `steins-infer`'s two. Its one deliberate
+incapacity draws the line between it and JSON — it cannot decode a value whose
+shape is not known statically, which is why the fold table's rows and the
+generation identity block, both dynamic `serde_json::Value`, stay JSON.
 
 **Defends:** two things. That semantic queries live *outside* this crate —
 downstream crates define tracked queries against the `Db` trait, so checking
