@@ -19,12 +19,12 @@
 //! # Scope
 //!
 //! Ten sections, ADR-0054 §9 order plus C4's additions: Runtime, Config +
-//! active surface, Layout (ADR-0015), Generation store (ADR-0092 §2 — what
-//! `check` has cached for this tree, and why a run could not use it; issue
-//! #525), Coverage posture (dam stats, opaque
-//! constructs, reflected class world — issue #269), Envelopes (G1-demote
-//! notice, §9.4), Baseline, Catalog (A11 pin skew), Registry totality,
-//! Require (§14). Two C4 lines are not rendered: dump-site count (ADR-0053
+//! active surface, Layout (ADR-0015), Generation store (what `check` has
+//! cached for this tree and why a run could not use it — ADR-0092 §2, issue
+//! #525), Coverage posture (dam stats, opaque constructs, reflected class
+//! world — issue #269), Envelopes (G1-demote notice, §9.4), Baseline, Catalog
+//! (A11 pin skew), Registry totality, Require (§14).
+//! Two C4 lines are not rendered: dump-site count (ADR-0053
 //! §13, unlanded D3/D4 recognizer) and `contract_touches_class`'s project
 //! count (ADR-0049 §11, blocked by issue #268's ban on a second inference
 //! pipeline); both land with their recognizer.
