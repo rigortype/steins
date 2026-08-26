@@ -277,6 +277,40 @@ fn an_untouched_tree_warm_rebuilds_with_zero_reparses() {
     );
 }
 
+/// The texts the orchestrator hands out are the sealed bytes, cold and warm
+/// alike (issue #521). Since the capture hands its own buffers to the analysis
+/// rather than re-reading them, this is the orchestrator-level statement of
+/// what `SourceInventory`'s seal means: what came out of the run is what is on
+/// disk, for every analyzed file and no other.
+#[test]
+fn the_outcome_texts_are_the_files_on_disk() {
+    if !spawn_or_skip("the_outcome_texts_are_the_files_on_disk") {
+        return;
+    }
+    let tmp = TempDir::new("texts");
+    let files = write_fixture(&tmp.dir);
+    let expected: Vec<(String, String)> = files
+        .iter()
+        .map(|f| {
+            let bytes = std::fs::read(f).expect("the fixture file is readable");
+            (f.to_string_lossy().into_owned(), String::from_utf8_lossy(&bytes).into_owned())
+        })
+        .collect();
+
+    for (temperature, outcome) in
+        [("cold", run(&tmp.dir, &tmp.dir, &files)), ("warm", run(&tmp.dir, &tmp.dir, &files))]
+    {
+        assert_eq!(outcome.texts.len(), expected.len(), "{temperature}: extra or missing texts");
+        for (path, text) in &expected {
+            assert_eq!(
+                outcome.texts.get(path),
+                Some(text),
+                "{temperature}: the text for {path} is not the file on disk"
+            );
+        }
+    }
+}
+
 /// Oracle (c): doctored artifact bytes degrade exactly that package to
 /// reparse — the counter shows it, the sibling package still loads, and the
 /// findings stay byte-identical. Under the unchanged identity the store keeps
