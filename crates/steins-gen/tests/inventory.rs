@@ -243,3 +243,34 @@ fn duplicates_collapse_and_entries_are_sorted() {
     let paths: Vec<&str> = sealed.files().map(|(p, _)| p).collect();
     assert_eq!(paths, ["composer.json", "src/a.php"]);
 }
+
+/// A capture-time path is normalized, not *resolved*: two spellings of one real
+/// file that differ by a directory symlink are two sealed keys, and the
+/// fingerprint therefore covers the same bytes twice under two names.
+///
+/// This is the seal behaving as designed — a key is a spelling relative to the
+/// root, and resolving one would cost a syscall per file and change what a
+/// sealed key means — but it is exactly why the `.php` walk
+/// (`steins_db::walk`, issue #524) must never hand two spellings of one file to
+/// a capture. Before #524 the perf harness did: it walked `corpus/`, followed
+/// `corpus/corpus -> corpus`, and sealed every file under as many spellings as
+/// the OS's symlink limit allowed, so a generation's identity moved with a link
+/// that contributes no code. The CLI never did, because its collector deduped
+/// by real identity first (#179).
+#[cfg(unix)]
+#[test]
+fn a_symlinked_spelling_is_a_second_sealed_entry() {
+    let t = sample_tree("symlinked-spelling");
+    std::os::unix::fs::symlink(t.dir.join("src"), t.dir.join("mirror")).unwrap();
+
+    let direct = SourceInventory::capture(&t.dir, ["src/a.php"]).unwrap();
+    let both = SourceInventory::capture(&t.dir, ["src/a.php", "mirror/a.php"]).unwrap();
+
+    assert_eq!(direct.len(), 1);
+    assert_eq!(both.len(), 2, "one real file, two spellings, two sealed entries");
+    assert_ne!(
+        both.fingerprint(),
+        direct.fingerprint(),
+        "the link moves the fingerprint although no code differs"
+    );
+}
