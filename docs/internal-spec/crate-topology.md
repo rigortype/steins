@@ -124,6 +124,16 @@ incapacity draws the line between it and JSON — it cannot decode a value whose
 shape is not known statically, which is why the fold table's rows and the
 generation identity block, both dynamic `serde_json::Value`, stay JSON.
 
+The IO boundary that turns a path argument into inputs sits here as well:
+Composer layout discovery, the plugin channel, and the `.php` file walk
+(`walk`) — **the** walk, the one the `steins` binary and every `xtask`
+harness share. They had separate collectors until issue #524, when they were
+found to disagree about how many files a corpus even holds; a harness that
+measures a different universe than the product cannot inform the decisions it
+exists for. The walk does not follow a directory symlink out of the roots it
+was given, enters each real directory once, and hands back what it refused so
+`doctor` can report it.
+
 **Defends:** two things. That semantic queries live *outside* this crate —
 downstream crates define tracked queries against the `Db` trait, so checking
 logic never lands in the engine crate. And that the merge is

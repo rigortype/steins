@@ -21,6 +21,16 @@ directories; a directory is walked recursively for `.php` files, and every
 path in one invocation forms a single project, so cross-file calls and class
 chains resolve.
 
+The walk stays inside the paths you named. A directory **symlink** found
+during that walk is followed only when its real target is under one of those
+paths and has not been walked already: a link out of your project is code you
+did not ask about, and a link back into it would analyze the same files twice
+and report every finding twice. A path you name yourself is always walked,
+symlink or not, and a symlinked *file* is analyzed — with a file reachable
+under two names analyzed once, reported under its real path. `steins doctor`
+prints how many paths a run skipped this way, and names them; `steins check`
+says nothing about them, because its output is findings.
+
 There is **no `--help`**. Run the binary with no arguments and it prints the
 whole surface to stderr and exits `2`:
 
