@@ -115,7 +115,7 @@ use dump::render_shape_fact;
 use env::{Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
-use walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
+use walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 pub use walk_plan::Divergence;
 
 use fold_args::effective_php_view;
@@ -135,6 +135,7 @@ pub use suppress::{
 };
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use steins_db::{
     Db, EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, parse, project_index,
@@ -410,6 +411,13 @@ fn check_units_controlled(
     mut control: Option<&mut WalkControl<'_>>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // Issue #516: the analysis phase was one number, and the whole first move
+    // of that issue is finding out which part of it is the wall. Each span is
+    // recorded where it runs and handed back on the control, which only the
+    // generation orchestrator holds — every other entry point passes `None`
+    // and pays two `Instant::now()` calls per run for the arithmetic.
+    let mut passes = PassTimings::default();
+    let t_facts = Instant::now();
 
     // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
     // every file's context. Consumed by the absence family's conditional-decl leg.
@@ -445,7 +453,11 @@ fn check_units_controlled(
     // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
     // fixpoint, consulted by every file's context, and built only when some
     // docblock actually spells a purity-bearing callable.
+    passes.facts_ms += ms(t_facts.elapsed());
+    let t_oracle = Instant::now();
     let purity = PurityOracle::build(&fixpoints);
+    let oracle_ms = ms(t_oracle.elapsed());
+    let t_facts = Instant::now();
 
     // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
     // One finding per broken file at its first error, and then NOTHING else from
@@ -477,6 +489,7 @@ fn check_units_controlled(
     // back to the same CST `Match` node). Populated below, read by
     // `throw_diagnostics` at the end.
     let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
+    passes.facts_ms += ms(t_facts.elapsed());
 
     // The walk plan (issue #489 slice B). Every whole-universe verdict a walk
     // can read is in hand by now, so this is the one point at which the
@@ -503,6 +516,7 @@ fn check_units_controlled(
     };
     plan.resize_with(units.len(), || FilePlan::Walk);
 
+    let t_walk = Instant::now();
     for fi in 0..units.len() {
         let before = out.len();
         // A replayed file's block is appended verbatim, in the very position
@@ -562,6 +576,9 @@ fn check_units_controlled(
         }
     }
 
+    passes.walk_ms = ms(t_walk.elapsed());
+    let t_report = Instant::now();
+
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
     out.extend(effect_diagnostics(&fixpoints));
 
@@ -576,7 +593,22 @@ fn check_units_controlled(
     }
 
     dedup(&mut out);
+    // The two fixpoints are lazy and forced from three places (the oracle
+    // above, and each reporting pass here), so their own cost is subtracted
+    // out of whichever span forced them rather than attributed to it.
+    let (effects_ms, throws_ms) = fixpoints.spent();
+    passes.effects_ms = effects_ms;
+    passes.throws_ms = throws_ms;
+    passes.report_ms = (oracle_ms + ms(t_report.elapsed()) - effects_ms - throws_ms).max(0.0);
+    if let Some(control) = control.as_deref_mut() {
+        control.passes = passes;
+    }
     out
+}
+
+/// Milliseconds, the one spelling the phase ledger uses.
+fn ms(d: std::time::Duration) -> f64 {
+    d.as_secs_f64() * 1000.0
 }
 
 /// Collect an iterator of borrowed names into a sorted vector — the canonical
@@ -858,6 +890,11 @@ pub(crate) struct Fixpoints<'a> {
     policy: &'a EffectsPolicy,
     effects: std::cell::OnceCell<HashMap<Sym, purity::EffectSet>>,
     throws: std::cell::OnceCell<HashMap<Sym, throws::ThrowSet>>,
+    /// Wall-clock milliseconds each fixpoint cost, recorded at the one place
+    /// each is computed (issue #516 asks where the warm run's remaining time
+    /// goes, and "analyze" was one undifferentiated number). Zero for a
+    /// fixpoint no consumer's gate ever forced.
+    spent: std::cell::Cell<(f64, f64)>,
 }
 
 impl<'a> Fixpoints<'a> {
@@ -874,7 +911,13 @@ impl<'a> Fixpoints<'a> {
             policy,
             effects: std::cell::OnceCell::new(),
             throws: std::cell::OnceCell::new(),
+            spent: std::cell::Cell::new((0.0, 0.0)),
         }
+    }
+
+    /// `(effects, throws)` fixpoint milliseconds — see [`Self::spent`].
+    pub(crate) fn spent(&self) -> (f64, f64) {
+        self.spent.get()
     }
 
     pub(crate) fn units(&self) -> &'a [FileUnit<'a>] {
@@ -895,13 +938,24 @@ impl<'a> Fixpoints<'a> {
 
     /// The effect fixpoint result, computed on first request.
     pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
-        self.effects
-            .get_or_init(|| purity::compute_effects(self.units, self.index, self.plugins, self.policy))
+        self.effects.get_or_init(|| {
+            let t = std::time::Instant::now();
+            let out = purity::compute_effects(self.units, self.index, self.plugins, self.policy);
+            let (_, throws) = self.spent.get();
+            self.spent.set((t.elapsed().as_secs_f64() * 1000.0, throws));
+            out
+        })
     }
 
     /// The throw fixpoint result, computed on first request.
     pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
-        self.throws.get_or_init(|| throws::compute_throws(self.units, self.index))
+        self.throws.get_or_init(|| {
+            let t = std::time::Instant::now();
+            let out = throws::compute_throws(self.units, self.index);
+            let (effects, _) = self.spent.get();
+            self.spent.set((effects, t.elapsed().as_secs_f64() * 1000.0));
+            out
+        })
     }
 }
 

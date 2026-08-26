@@ -375,8 +375,22 @@ pub struct PhaseTimings {
     /// Loading trees/shards from artifacts, or parsing — the phase the warm
     /// path exists to shrink.
     pub trees_ms: f64,
-    /// The merge + `check_units` proper.
+    /// The merge + `check_units` proper — the sum of the five splits below.
     pub analyze_ms: f64,
+    /// The shard merge (ADR-0092 §3), whole-universe by construction.
+    pub merge_ms: f64,
+    /// The whole-universe per-file facts a walk reads: the dam, the
+    /// never-returning veto set, the parse-failure sweep, the PHP view.
+    pub facts_ms: f64,
+    /// The effects fixpoint, when a consumer's gate forced it.
+    pub effects_ms: f64,
+    /// The throws fixpoint, likewise.
+    pub throws_ms: f64,
+    /// The per-file walk loop — walks and replays together.
+    pub walk_ms: f64,
+    /// The two project-wide reporting passes off the fixpoints, and the
+    /// attribution-notice sweep.
+    pub report_ms: f64,
     /// Candidate build + publish (or the decision to keep `CURRENT`).
     pub persist_ms: f64,
 }
@@ -803,6 +817,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // partition-invariant, so this equals the cold constructions exactly).
     let t_analyze = Instant::now();
     let index = Index::from_merged(merge_shards(&shards));
+    let merge_ms = ms(t_analyze.elapsed());
     let units: Vec<FileUnit<'_>> =
         diag.iter().zip(&trees).map(|(path, tree)| FileUnit { path, tree }).collect();
     // The walk plan (issue #489 slice B). The planner is asked once, after the
@@ -866,6 +881,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         divergences: std::mem::take(&mut control.divergences),
         divergence_count: control.divergence_count,
     };
+    let passes = control.passes;
     let ledger = std::mem::take(&mut control.ledger);
     // The control's borrow of the planner — and so the planner's of the two
     // values it writes — ends here; everything either produced is owned above.
@@ -969,7 +985,28 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 table_published: fold_table.is_some(),
             },
             walk,
-            timings: PhaseTimings { capture_ms, trees_ms, analyze_ms, persist_ms },
+            timings: PhaseTimings {
+                capture_ms,
+                trees_ms,
+                analyze_ms,
+                merge_ms,
+                facts_ms: passes.facts_ms,
+                effects_ms: passes.effects_ms,
+                throws_ms: passes.throws_ms,
+                walk_ms: passes.walk_ms,
+                // The attribution sweep runs after `check_units` returns, so
+                // it is this phase's residue rather than one of its spans.
+                report_ms: passes.report_ms
+                    + (analyze_ms
+                        - merge_ms
+                        - passes.facts_ms
+                        - passes.effects_ms
+                        - passes.throws_ms
+                        - passes.walk_ms
+                        - passes.report_ms)
+                        .max(0.0),
+                persist_ms,
+            },
             notes,
         },
     })

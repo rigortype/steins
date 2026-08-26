@@ -446,6 +446,14 @@ struct WarmRun {
     capture_ms: f64,
     trees_ms: f64,
     analyze_ms: f64,
+    /// The analyze split issue #516 asks for: merge, whole-universe facts,
+    /// each fixpoint, the walk loop, the reporting passes.
+    merge_ms: f64,
+    facts_ms: f64,
+    effects_ms: f64,
+    throws_ms: f64,
+    walk_ms: f64,
+    report_ms: f64,
     persist_ms: f64,
     loaded: usize,
     parsed: usize,
@@ -598,6 +606,12 @@ fn measure_warm_in_store(
             capture_ms: t.capture_ms,
             trees_ms: t.trees_ms,
             analyze_ms: t.analyze_ms,
+            merge_ms: t.merge_ms,
+            facts_ms: t.facts_ms,
+            effects_ms: t.effects_ms,
+            throws_ms: t.throws_ms,
+            walk_ms: t.walk_ms,
+            report_ms: t.report_ms,
             persist_ms: t.persist_ms,
             loaded,
             parsed,
@@ -646,6 +660,15 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
             run.replayed,
             run.persist_ms,
             run.capture_ms + run.trees_ms + run.analyze_ms + run.persist_ms,
+        );
+        println!(
+            "        analyze split: merge {:.1} ms, facts {:.1} ms, effects {:.1} ms, throws {:.1} ms, walk {:.1} ms, report {:.1} ms",
+            run.merge_ms,
+            run.facts_ms,
+            run.effects_ms,
+            run.throws_ms,
+            run.walk_ms,
+            run.report_ms,
         );
     }
     let total =

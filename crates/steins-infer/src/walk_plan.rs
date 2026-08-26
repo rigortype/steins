@@ -173,6 +173,30 @@ pub(crate) struct WalkControl<'a> {
     pub(crate) divergences: Vec<Divergence>,
     /// How many divergences there were in all, capped list or not.
     pub(crate) divergence_count: usize,
+    /// Where the analysis phase's time went, filled by [`check_units`] on its
+    /// way out (issue #516). `analyze` was one number, and the issue's whole
+    /// first move is to find out which part of it is the wall.
+    ///
+    /// [`check_units`]: crate::check_units
+    pub(crate) passes: PassTimings,
+}
+
+/// The analysis phase's time, split (issue #516). Wall-clock milliseconds,
+/// recorded at the one place each part runs; a part no gate ever forced reads
+/// zero, which is a fact about the run rather than a missing measurement.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct PassTimings {
+    /// The whole-universe per-file facts every walk reads: the dam, the
+    /// never-returning veto set, the parse-failure sweep.
+    pub(crate) facts_ms: f64,
+    /// The effects fixpoint, when some consumer's gate forced it.
+    pub(crate) effects_ms: f64,
+    /// The throws fixpoint, likewise.
+    pub(crate) throws_ms: f64,
+    /// The per-file walk loop — walks and replays together.
+    pub(crate) walk_ms: f64,
+    /// The two project-wide reporting passes that run off the fixpoints.
+    pub(crate) report_ms: f64,
 }
 
 /// How many divergences the verifier keeps the detail of. One is already a
@@ -194,6 +218,7 @@ impl<'a> WalkControl<'a> {
             would_skip: 0,
             divergences: Vec::new(),
             divergence_count: 0,
+            passes: PassTimings::default(),
         }
     }
 
