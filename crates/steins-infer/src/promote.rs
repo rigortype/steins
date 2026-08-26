@@ -20,7 +20,7 @@ use steins_syntax::{
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
 use crate::env::Store;
-use crate::project::{FileUnit, FnResolution, Index};
+use crate::project::{FileUnit, FnResolution, Index, LazyTree};
 
 /// One positional argument observed at a call site resolving uniquely to a target.
 #[derive(Debug, Clone)]
@@ -76,8 +76,15 @@ pub struct FreeFnSweep {
 #[must_use]
 pub fn sweep_free_functions(db: &dyn Db, project: Project) -> FreeFnSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -288,8 +295,15 @@ pub struct MethodSweep {
 #[must_use]
 pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();

@@ -96,7 +96,7 @@ pub use annotate::{
 };
 pub use assert_harness::{AssertObservation, SubjectFact, collect_assert_types, probe_subjects};
 pub use project::{
-    Diagnostic, FileUnit, Fix, FixEdit, MagicObstacle, is_vendor_path, magic_obstacles,
+    Diagnostic, FileUnit, Fix, FixEdit, LazyTree, MagicObstacle, is_vendor_path, magic_obstacles,
     magic_obstacles_reaching, resolves_to_user_function,
 };
 
@@ -210,8 +210,8 @@ pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering 
 /// subset — [`NoFold`], no PHP). Analyzes the file as a one-file project.
 #[salsa::tracked]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -229,8 +229,8 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// analyzed as a one-file project.
 #[must_use]
 pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -287,8 +287,15 @@ pub fn check_project_with_postures(
     final_keyword: FinalKeyword,
 ) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -322,7 +329,8 @@ pub fn check_with(
     folder: &mut dyn Folder,
 ) -> Vec<Diagnostic> {
     let _ = functions; // authoritative list comes from `tree.functions()`
-    let units = [FileUnit { path, tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -349,7 +357,8 @@ pub fn check_full(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
-    let units = [FileUnit { path, tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,

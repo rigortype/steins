@@ -130,7 +130,7 @@ use steins_syntax::SourceTree;
 
 use crate::affected::{AffectedInputs, affected_files};
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
-use crate::project::{FileUnit, Index, Res};
+use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
 use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
 use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
@@ -818,8 +818,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let t_analyze = Instant::now();
     let index = Index::from_merged(merge_shards(&shards));
     let merge_ms = ms(t_analyze.elapsed());
+    let lazy: Vec<LazyTree<'_>> = trees.iter().map(LazyTree::borrowed).collect();
     let units: Vec<FileUnit<'_>> =
-        diag.iter().zip(&trees).map(|(path, tree)| FileUnit { path, tree }).collect();
+        diag.iter().zip(&lazy).map(|(path, tree)| FileUnit { path, tree }).collect();
     // The walk plan (issue #489 slice B). The planner is asked once, after the
     // run's whole-universe verdicts are computed and before the first file is
     // walked; it decides per file whether the persisted block may be replayed.
@@ -871,6 +872,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         Some(&mut control),
     );
     drop(units);
+    drop(lazy);
     let attribution_notices = attribution_notices(&index, p.effects);
     let analyze_ms = ms(t_analyze.elapsed());
     let walk = WalkReport {

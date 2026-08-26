@@ -91,10 +91,118 @@ pub struct FixEdit {
 /// One file in the analyzed project: its diagnostic path and its lowered tree.
 /// The tree owns everything else the analysis needs (functions, classes,
 /// scopes, positions, namespace contexts).
+///
+/// The tree is a [`LazyTree`] rather than a [`SourceTree`] because issue #516's
+/// whole point is that a warm run must not decode one per file. Every use site
+/// reads it through `Deref`, so the analysis cannot tell the difference and
+/// nothing about a walk changes; what changes is *when* the bytes are decoded,
+/// and for a warm run the answer is "only where a walk actually reaches".
 #[derive(Clone, Copy)]
 pub struct FileUnit<'a> {
     pub path: &'a str,
-    pub tree: &'a SourceTree,
+    pub tree: &'a LazyTree<'a>,
+}
+
+/// A lowered tree that may not have been decoded yet (issue #516).
+///
+/// **Why this exists.** Before this seam, every entry point handed
+/// [`check_units`] a fully decoded [`SourceTree`] per file, so a warm run
+/// decoded the whole universe whatever the edit was — 40 ms of a 70 ms
+/// no-change rebuild on a 341-file target, and O(universe) by construction.
+/// The phases that forced that decode read only *summaries* of a tree (the
+/// dam row, the never-returning names, the affected set's footprint, the
+/// fixpoints' own rows), and those now persist per file. What is left needing
+/// a real tree is a **walk** — the file's own, plus whatever its binding
+/// descent and class-chain walks reach, which is not knowable in advance and
+/// is why the answer is laziness rather than a pre-computed load list.
+///
+/// **Deref, deliberately.** A file's tree is read from some 228 places in this
+/// crate, most of them `cx.units[file].tree.something()`. Making the load a
+/// `Deref` keeps every one of those spellings and makes it impossible to
+/// forget: there is no way to reach the tree that does not go through the
+/// load. The cost is that a load cannot report failure — which is right, since
+/// a payload that will not decode falls back to re-parsing the sealed text and
+/// a re-parse *is* the payload (parsing is a pure function of bytes).
+pub struct LazyTree<'a> {
+    /// A tree the caller already holds and only lends — the salsa path, whose
+    /// parses are owned by the database.
+    borrowed: Option<&'a SourceTree>,
+    /// A tree this handle owns: set up front by [`Self::ready`], or produced
+    /// on first use by [`Self::load`].
+    cell: std::sync::OnceLock<SourceTree>,
+    /// How to produce the tree on first use — decode the artifact payload, or
+    /// re-parse the sealed text if that fails. `None` for a tree already in
+    /// hand either way.
+    load: Option<Box<dyn Fn() -> SourceTree + Send + Sync + 'a>>,
+}
+
+impl<'a> LazyTree<'a> {
+    /// A tree the caller owns and lends — the salsa path.
+    #[must_use]
+    pub fn borrowed(tree: &'a SourceTree) -> Self {
+        Self { borrowed: Some(tree), cell: std::sync::OnceLock::new(), load: None }
+    }
+
+    /// A tree already in hand — the cold path, every test, every single-file
+    /// entry point. Decoding never happens because there is nothing to decode.
+    #[must_use]
+    pub fn ready(tree: SourceTree) -> Self {
+        let cell = std::sync::OnceLock::new();
+        let _ = cell.set(tree);
+        Self { borrowed: None, cell, load: None }
+    }
+
+    /// A tree that will be produced on first use. `load` must be
+    /// deterministic and total: it is called at most once, and its answer is
+    /// what the analysis sees.
+    #[must_use]
+    pub fn deferred(load: impl Fn() -> SourceTree + Send + Sync + 'a) -> Self {
+        Self { borrowed: None, cell: std::sync::OnceLock::new(), load: Some(Box::new(load)) }
+    }
+
+    /// Whether this handle was deferred and has since been produced — the
+    /// counter the no-change oracle reads ("a warm no-change run decodes zero
+    /// trees"). `false` for a tree that was never deferred: nothing was
+    /// decoded on its account either.
+    #[must_use]
+    pub fn was_loaded(&self) -> bool {
+        self.load.is_some() && self.cell.get().is_some()
+    }
+
+    /// Whether this handle is deferred and still unproduced — a tree the run
+    /// never needed.
+    #[must_use]
+    pub fn is_pending(&self) -> bool {
+        self.load.is_some() && self.cell.get().is_none()
+    }
+}
+
+impl From<SourceTree> for LazyTree<'_> {
+    fn from(tree: SourceTree) -> Self {
+        Self::ready(tree)
+    }
+}
+
+impl std::ops::Deref for LazyTree<'_> {
+    type Target = SourceTree;
+
+    fn deref(&self) -> &SourceTree {
+        if let Some(tree) = self.borrowed {
+            return tree;
+        }
+        self.cell.get_or_init(|| {
+            self.load.as_ref().expect("a LazyTree is borrowed, ready or deferred")()
+        })
+    }
+}
+
+impl std::fmt::Debug for LazyTree<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.cell.get() {
+            Some(tree) => f.debug_tuple("LazyTree").field(tree).finish(),
+            None => f.write_str("LazyTree(<not yet loaded>)"),
+        }
+    }
 }
 
 /// A declaration's position within the project view: the file's index in the
@@ -561,11 +669,13 @@ mod shard_oracle {
         ]
     }
 
-    fn parse_all(sources: &[(&'static str, &'static str)]) -> Vec<(&'static str, SourceTree)> {
-        sources.iter().map(|&(p, s)| (p, SourceTree::parse(s))).collect()
+    fn parse_all(
+        sources: &[(&'static str, &'static str)],
+    ) -> Vec<(&'static str, LazyTree<'static>)> {
+        sources.iter().map(|&(p, s)| (p, LazyTree::ready(SourceTree::parse(s)))).collect()
     }
 
-    fn units_of<'a>(parsed: &'a [(&'static str, SourceTree)]) -> Vec<FileUnit<'a>> {
+    fn units_of<'a>(parsed: &'a [(&'static str, LazyTree<'static>)]) -> Vec<FileUnit<'a>> {
         parsed.iter().map(|(p, t)| FileUnit { path: p, tree: t }).collect()
     }
 

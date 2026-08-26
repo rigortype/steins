@@ -35,7 +35,7 @@ use std::process::ExitCode;
 
 use steins_db::{PhpTarget, ProjectLayout};
 use steins_infer::{
-    ALL_EMITTABLE_IDS, DIAGNOSTIC_REGISTRY, DamKind, FileUnit, MONKEY_PATCH_EXTENSIONS,
+    ALL_EMITTABLE_IDS, DIAGNOSTIC_REGISTRY, DamKind, FileUnit, LazyTree, MONKEY_PATCH_EXTENSIONS,
     REGISTERED_NOT_YET_EMITTED, SAPI_PROVIDED_FUNCTIONS_EXACT, SAPI_PROVIDED_FUNCTION_PREFIXES,
     SOUND_SUBSET_NOTICE, THROW_UNDECLARED_ID, dam_facts,
 };
@@ -617,8 +617,9 @@ fn section_coverage(
 
     // The dam (ADR-0049 §2): same answer `check` computes, recomputed here,
     // independent of the counts above (`class_alias` dams without poisoning a scope).
+    let lazy: Vec<LazyTree<'_>> = files.iter().map(|f| LazyTree::borrowed(&f.tree)).collect();
     let units: Vec<FileUnit<'_>> =
-        files.iter().map(|f| FileUnit { path: &f.path, tree: &f.tree }).collect();
+        files.iter().zip(&lazy).map(|(f, tree)| FileUnit { path: &f.path, tree }).collect();
     let dam = dam_facts(&units, layout);
     if dam.is_empty() {
         line!(

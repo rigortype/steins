@@ -1258,7 +1258,7 @@ mod n4_carrier_tests {
     use super::*;
     use crate::FileUnit;
     use crate::fold_args::effective_php_view;
-    use crate::project::Index;
+    use crate::project::{Index, LazyTree};
     use steins_contract::normalize::FinalKeyword;
     use steins_syntax::SourceTree;
     use crate::fold_args::parse_php_minor;
@@ -1274,7 +1274,7 @@ mod n4_carrier_tests {
     /// the A11 version input; the skew flag is derived from it exactly as
     /// [`effective_php_view`] does with no declared target.
     fn with_cx<R>(src: &str, php_minor: Option<(u16, u16)>, f: impl FnOnce(&Cx) -> R) -> R {
-        let tree = SourceTree::parse(src);
+        let tree = LazyTree::ready(SourceTree::parse(src));
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
         let view = effective_php_view(php_minor, None);

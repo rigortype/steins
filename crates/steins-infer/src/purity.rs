@@ -24,7 +24,7 @@ use crate::throws::{
 };
 use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
-use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
+use crate::project::{Diagnostic, FileUnit, FnResolution, Index, LazyTree};
 use crate::{
     EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
 };
@@ -827,7 +827,8 @@ pub fn effect_summary(
     classes: &[ClassDecl],
 ) -> Vec<EffectSummary> {
     let _ = (functions, classes);
-    let units = [FileUnit { path: "", tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path: "", tree: &lazy }];
     let index = Index::from_units(&units);
     effect_summary_units(&units, &index, 0, &PluginFacts::none(), &EffectsPolicy::none())
 }
@@ -1025,8 +1026,15 @@ pub fn region_purity_project(
         return Vec::new();
     }
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();

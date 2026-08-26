@@ -34,7 +34,7 @@ use std::collections::HashSet;
 use steins_db::ProjectLayout;
 use steins_syntax::{DynamismKind, IncludePath};
 
-use crate::project::FileUnit;
+use crate::project::{FileUnit, LazyTree};
 
 /// The kind of a dam site (ADR-0049 §2), carried so triage/coverage surfaces
 /// can name it.
@@ -275,8 +275,8 @@ mod tests {
 
     /// Build owned trees, then borrow them into units (the trees must outlive the
     /// units, so the caller holds them).
-    fn tree(src: &str) -> SourceTree {
-        SourceTree::parse(src)
+    fn tree(src: &str) -> LazyTree<'static> {
+        LazyTree::ready(SourceTree::parse(src))
     }
 
     #[test]
