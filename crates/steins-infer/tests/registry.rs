@@ -330,13 +330,15 @@ fn the_declared_possibly_undefined_read_is_a_contract_id() {
 // end unset pseudo-type (ADR-0087 §4, issue #396)
 
 /// The hyphen reservation's diagnostic (ADR-0091 §6, issue #479) registers with
-/// an emitter behind it, and at a rung **no built-in profile reaches**.
+/// an emitter behind it, at a floor **no built-in rung reaches**.
 ///
-/// The second half is the point of this row. §6 refuses to fix the floor in
-/// advance — the FP source is precise (vocabulary from tools Steins does not
-/// model) and only a measurement can place it — so the id ships reported but
-/// unreachable except by name, and the ruling that moves it to `contracts`
-/// moves this assertion with it.
+/// §6 refuses to fix the floor in advance — the FP source is precise (vocabulary
+/// from tools Steins does not model) and only a measurement can place it — so
+/// the id ships off every rung, reachable only because the `pedantic` profile
+/// names it. That last clause is not bookkeeping: `profile.rs`'s
+/// `every_pedantic_floor_id_is_reachable_from_the_pedantic_profile` is what
+/// keeps "registered at this floor" from meaning "on no surface at all". The
+/// ruling that moves the floor to `contracts` moves both assertions with it.
 #[test]
 fn the_unknown_vocabulary_id_registers_off_every_built_in_rung() {
     assert_eq!(PHPDOC_UNKNOWN_VOCABULARY_ID, "phpdoc.unknown-vocabulary");

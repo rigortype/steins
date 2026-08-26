@@ -17,8 +17,8 @@
 //! * `contracts` — default plus the whole contract layer.
 //! * `strict` — contracts plus the strict-floor ids (ADR-0062 A-G10): the offset
 //!   family's `offset.undeclared` / `offset.maybe-missing` leg (issue #51).
-//! * `pedantic` — contracts plus the house-style asks; a **branch off
-//!   `contracts`**, not a rung above `strict` (see below).
+//! * `pedantic` — contracts plus the ids the `Pedantic` rung holds, named one by
+//!   one; a **branch off `contracts`**, not a rung above `strict` (see below).
 //! * `boundary` is still **reserved** (ADR-0042): selecting or defining it is a
 //!   config error until its ADR lands.
 //!
@@ -31,9 +31,18 @@
 //! `Strict`).
 //!
 //! The built-ins are not one chain: `throws-direct` branches off `default`,
-//! `pedantic` off `contracts`, each reaching one id above its own rung via
+//! `pedantic` off `contracts`, each reaching ids above its own rung via
 //! `enable` — orthogonal to the ladder (rung = how far up the chain, `enable` =
-//! "and also this"). `pedantic` branches on purpose: "demand explicit types" and
+//! "and also this").
+//!
+//! **`pedantic`'s `enable` list is what makes `Floor::Pedantic` reachable at
+//! all.** No rung admits that floor by design, so an id registered there and not
+//! named below is on **no** built-in surface — reportable only by a user's own
+//! `enable`. That is a real state (an id may be held back deliberately) and it is
+//! also the easy mistake: registering the floor is not the same as shipping the
+//! id, and nothing but this list can tell the two apart.
+//!
+//! `pedantic` branches on purpose: "demand explicit types" and
 //! "show weaker some-paths claims" are independent axes, so a rung above `strict`
 //! would force strict users to inherit pedantic asks too (why those ids stay off
 //! `strict`). No built-in means "everything on"; write `extends = "strict"` with
@@ -60,7 +69,8 @@ use std::fmt;
 use crate::project::Diagnostic;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DIAGNOSTIC_REGISTRY,
-    Facet, Floor, Layer, Origin, THROW_UNDECLARED_ID, UNTYPED_CLASS_CONSTANT_ID, layer,
+    Facet, Floor, Layer, Origin, PHPDOC_UNKNOWN_VOCABULARY_ID, THROW_UNDECLARED_ID,
+    UNTYPED_CLASS_CONSTANT_ID, layer,
     pattern_is_known, pattern_matches, surface_floor,
 };
 
@@ -231,12 +241,15 @@ impl Surface {
                 s.origin_direct_only = true;
                 Some(s)
             }
-            // contracts + the house-style asks by name, one `enable` line per id
-            // (the `throws-direct` shape) — a branch, not a rung above `strict`
-            // (module doc: "pedantic branches on purpose").
+            // contracts + every `Pedantic`-floor id by name, one `enable` line
+            // each (the `throws-direct` shape) — a branch, not a rung above
+            // `strict` (module doc: "pedantic branches on purpose"). A new id at
+            // that floor belongs here the day it registers, or it ships on no
+            // built-in surface at all.
             "pedantic" => {
                 let mut s = base(Floor::Contracts);
                 s.enable.push(UNTYPED_CLASS_CONSTANT_ID.to_owned());
+                s.enable.push(PHPDOC_UNKNOWN_VOCABULARY_ID.to_owned());
                 Some(s)
             }
             _ => None,
@@ -893,6 +906,31 @@ mod tests {
         for name in BUILTINS {
             let s = empty().resolve(Some(name)).unwrap();
             assert_ne!(s.rung(), Floor::Pedantic, "`{name}` must not rung at pedantic");
+        }
+    }
+
+    /// **Every `Pedantic`-floor id is named by the `pedantic` profile**, so
+    /// registering that floor cannot silently ship an id no built-in surface can
+    /// report.
+    ///
+    /// The failure this forbids is invisible from every other angle: the emitter
+    /// runs, the library entry returns the finding, the registry totality test
+    /// passes, and the CLI prints nothing — because no rung admits `Pedantic` and
+    /// only this `enable` list can. `phpdoc.unknown-vocabulary` shipped that way
+    /// for one review round (issue #479), which is why the invariant is derived
+    /// from the registry here rather than left to whoever adds the next id.
+    #[test]
+    fn every_pedantic_floor_id_is_reachable_from_the_pedantic_profile() {
+        let p = empty().resolve(Some("pedantic")).unwrap();
+        for &(id, _, floor) in DIAGNOSTIC_REGISTRY {
+            if floor != Floor::Pedantic {
+                continue;
+            }
+            assert!(
+                p.surfaces_id(id),
+                "`{id}` registers at Floor::Pedantic and NO built-in surface reports it — \
+                 add it to the `pedantic` profile's `enable` list",
+            );
         }
     }
 

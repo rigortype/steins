@@ -364,7 +364,11 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // program runs either way.
     //
     // `Floor::Pedantic` is PROVISIONAL, and the rung no built-in reaches is the
-    // conservative end to hold it at while the floor is measured. §6 states the
+    // conservative end to hold it at while the floor is measured — reported by
+    // the `pedantic` profile, which names every id at this floor in its `enable`
+    // list, and by no other built-in. Registering the floor is not the same as
+    // shipping the id: without that entry this would emit and reach no surface
+    // at all, which is how it first shipped (issue #479's review). §6 states the
     // one thing that has to be calibrated: `KNOWN_UNENFORCED` exists because
     // other tools have spellings Steins recognizes without enforcing, and the
     // ones it has never heard of are exactly what this id convicts. Whether the
