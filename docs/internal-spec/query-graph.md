@@ -113,7 +113,15 @@ generations on disk, not a finer query DAG:
   `steins_db::persist` (#487); `sources`, `summaries` and `facts` live in
   `steins_infer` beside the orchestrator that reads them, because their
   payloads are that crate's vocabulary; the container, identity and store live
-  in `steins-gen` (#485).
+  in `steins-gen` (#485). They are encoded by `steins_db::wire` (#504), a
+  compact binary serde format carrying no field names and no type tags —
+  measured, before the swap, at 53.9% field names and 11.6% punctuation of a
+  `trace` payload's JSON. The two sections whose payload is a dynamic
+  `serde_json::Value` (the fold table's rows, the generation identity block)
+  keep JSON, because a schema-carrying codec cannot encode a value whose shape
+  is not known statically. On nikic/PHP-Parser the artifact went 18.21 MB →
+  5.26 MB (15.2x → 4.4x the analyzed source), and publishing a one-file edit
+  went 85 ms → 39 ms.
 - **A tree is decoded only where a walk reaches it** (issue #516). Every
   whole-universe phase used to read something off every file's tree, so a warm
   no-change rebuild decoded the universe whatever the edit was. Those readings
@@ -155,13 +163,14 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
   out, it is what an edit costs. A generation is a directory of whole-file
   artifacts, so any edit rewrites every payload of the package holding it, and
   the ordinary first-party shape is one package holding everything. Measured on
-  nikic/PHP-Parser, a one-line leaf edit: capture 17 + trees 12 + analyze 5 +
-  **persist 78** ms. Unchanged by #516 (it was 76 ms before, re-encoding trees
-  rather than copying payloads) and now the largest single phase of a warm
-  rebuild by a factor of four.
+  nikic/PHP-Parser, a one-line leaf edit: capture 17 + trees 2 + analyze 5 +
+  **persist 39** ms. Issue #504 halved the constant by shrinking what is
+  written (the artifact is 3.5x smaller), and changed nothing about the shape:
+  publishing is still the largest phase of an edit, and still proportional to
+  the package rather than to the edit. Making it incremental is the next thing.
 - **Capture hashes every file every run** (issue #516's second item). 13 ms of
   a 30 ms no-change rebuild on nikic/PHP-Parser — the largest phase *there*,
-  but 15% of an edit's cost, so it ranks behind publishing.
+  but a quarter of an edit's cost, so it ranks behind publishing.
 - **The reporting passes are gated, not summarized.** `throw_diagnostics` emits
   from a declaration's own docblock, so it is gated per file and costs the tree
   of every file spelling `@throws` (29 of 217 on Seldaek/monolog).
@@ -175,4 +184,8 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
   nikic/PHP-Parser: editing a leaf test file walks 2 files of 341, editing one
   that declares `enterNode` walks 337.
 - **Per-file walk parallelism** (issue #490, re-scoped to the file loop).
-- **The trace codec** (issue #504): artifacts run ~14x the analyzed source.
+- **The payload shape**, if 4.4x ever needs to be lower. Issue #504 removed the
+  codec's overhead and nothing else. What remains is content — and in the split
+  that decided the swap, string content (names, spellings, docblocks) outweighs
+  every span, slot and discriminant put together by two to one. So the next
+  lever is deduplicating those strings per package, not another codec.

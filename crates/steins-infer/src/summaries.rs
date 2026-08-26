@@ -9,9 +9,11 @@
 //! [`DIAGNOSTIC_IDS`] registry, [`Facet`], [`Fix`] — and `steins-db` neither
 //! knows nor should know any of it. That is the same line the `sources` section
 //! already draws (it lives with the orchestrator that reads it); the house
-//! pattern the payload follows — serde_json inside the section,
-//! `deny_unknown_fields`, strict inverses, every decode failure a [`Miss`] the
-//! caller degrades to a walk — is `steins-db::persist`'s, unchanged.
+//! pattern the payload follows — [`steins_db::wire`] inside the section,
+//! strict inverses, every decode failure a [`Miss`] the caller degrades to a
+//! walk — is `steins-db::persist`'s, unchanged (issue #504 swapped both at
+//! once; the section is 1.4% of the artifact, and one codec across every typed
+//! payload is one fewer thing to remember).
 //!
 //! **What a row holds, and why that exactly.** A replayed file's diagnostics
 //! must be byte-identical to a walked file's, every field of every
@@ -47,8 +49,8 @@ use crate::suppress::{FACET_ORIGIN, Facet, Origin};
 use crate::walk_plan::FileWalk;
 use crate::{DIAGNOSTIC_IDS, REGISTERED_NOT_YET_EMITTED};
 
-/// The section holding the package's per-file walk blocks: a JSON object with
-/// the two stamps and one row per file.
+/// The section holding the package's per-file walk blocks: the two stamps and
+/// one row per file.
 pub const SUMMARIES_SECTION: &str = "summaries";
 
 /// [`SUMMARIES_SECTION`] as a validated [`SectionName`].
@@ -176,7 +178,7 @@ pub(crate) fn summaries_payload(
             .collect(),
     };
     // Infallible: every field is a string, a number, or a vector of those.
-    serde_json::to_vec(&payload).expect("a summaries payload serializes")
+    steins_db::wire::to_vec(&payload).expect("a summaries payload serializes")
 }
 
 /// Add the section to a builder under construction.
@@ -247,14 +249,14 @@ impl Summaries {
 }
 
 /// Decode the `summaries` section. Every way the bytes can be wrong — an
-/// absent section, bytes that are not JSON, a field this schema does not
-/// spell, a stamp that is not a fingerprint, a diagnostic id or fix title
+/// absent section, bytes that are not a summary set, a stamp that is not a
+/// fingerprint, a diagnostic id or fix title
 /// outside the compiled-in tables, a facet outside the closed vocabulary — is
 /// a [`Miss`], which the orchestrator degrades to walking that package.
 pub(crate) fn read_summaries(reader: &mut ArtifactReader) -> Result<Summaries, Miss> {
     let corrupt = || Miss::Corrupt("summaries section is not a summary set");
     let bytes = reader.section(&summaries_section())?;
-    let payload: SummariesPayload = serde_json::from_slice(&bytes).map_err(|_| corrupt())?;
+    let payload: SummariesPayload = steins_db::wire::from_slice(&bytes).map_err(|_| corrupt())?;
     let stamp = Fingerprint::from_hex(&payload.stamp).ok_or_else(corrupt)?;
     let universe = Fingerprint::from_hex(&payload.universe).ok_or_else(corrupt)?;
     let mut files = Vec::with_capacity(payload.files.len());

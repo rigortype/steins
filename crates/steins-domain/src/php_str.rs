@@ -199,21 +199,24 @@ impl PartialEq<&str> for PhpStr {
 }
 
 // The `persist` serde impls (ADR-0092 §2, issue #487). Hand-written, not
-// derived, for two reasons: the canonical-form invariant (the `Utf8` arm holds
-// exactly the values `from_utf8` admits) must survive deserialization, which a
-// derived `Deserialize` on the private enum would not guarantee; and the
-// common UTF-8 value should cost a JSON string, not an array of byte numbers.
-// A UTF-8 value serializes as a string, a non-UTF-8 one as a byte sequence,
-// and both deserialize through the canonicalizing constructors — so a
-// round-trip is byte-exact and always canonical. A cache format (no external
-// consumer): the artifact schema version governs its evolution.
+// derived, so the canonical-form invariant (the `Utf8` arm holds exactly the
+// values `from_utf8` admits) survives deserialization — which a derived
+// `Deserialize` on the private enum would not guarantee.
+//
+// A value travels as **bytes**, always, whatever its arm, and comes back
+// through the canonicalizing constructor: the round-trip is byte-exact and the
+// result is always canonical. The earlier impl wrote a UTF-8 value as a string
+// and a non-UTF-8 one as bytes, and read them back with `deserialize_any` —
+// which asks the format what it is holding. The artifact payload codec
+// (`steins_db::wire`, issue #504) cannot answer that question, because not
+// answering it is where its saving comes from, and under that codec a string
+// and a byte sequence are the same bytes anyway: one arm costs nothing over
+// two. A cache format (no external consumer): the artifact schema version
+// governs its evolution.
 #[cfg(feature = "persist")]
 impl serde::Serialize for PhpStr {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        match self.as_str() {
-            Some(s) => serializer.serialize_str(s),
-            None => serializer.serialize_bytes(self.as_bytes()),
-        }
+        serializer.serialize_bytes(self.as_bytes())
     }
 }
 
@@ -225,15 +228,15 @@ impl<'de> serde::Deserialize<'de> for PhpStr {
             type Value = PhpStr;
 
             fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-                f.write_str("a string or a byte sequence")
-            }
-
-            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<PhpStr, E> {
-                Ok(PhpStr::from(v))
+                f.write_str("a byte sequence")
             }
 
             fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<PhpStr, E> {
                 Ok(PhpStr::from_bytes(v))
+            }
+
+            fn visit_byte_buf<E: serde::de::Error>(self, v: Vec<u8>) -> Result<PhpStr, E> {
+                Ok(PhpStr::from_vec(v))
             }
 
             fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<PhpStr, A::Error> {
@@ -244,7 +247,7 @@ impl<'de> serde::Deserialize<'de> for PhpStr {
                 Ok(PhpStr::from_vec(bytes))
             }
         }
-        deserializer.deserialize_any(Visitor)
+        deserializer.deserialize_bytes(Visitor)
     }
 }
 

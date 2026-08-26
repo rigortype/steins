@@ -27,7 +27,14 @@ use crate::names::{PackageName, SectionName};
 /// generation fingerprint, so bumping it obsoletes every stored generation at
 /// once. A mismatch is a miss; there is no migration path by design
 /// (ADR-0092 §2).
-pub const SCHEMA_VERSION: u32 = 1;
+///
+/// It also covers what the payload owners write *inside* a section, because a
+/// stored generation is only useful if every reader agrees with every writer:
+/// `2` is the swap of the payload codec from serde_json to
+/// `steins_db::wire` (issue #504). Bumping it is the whole migration — an
+/// artifact of the previous schema becomes an ordinary [`Miss`] and one
+/// rebuild.
+pub const SCHEMA_VERSION: u32 = 2;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

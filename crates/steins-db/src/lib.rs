@@ -20,6 +20,8 @@ pub mod partition;
 pub mod persist;
 pub mod plugins;
 pub mod shard;
+#[cfg(feature = "persist")]
+pub mod wire;
 
 pub use effects::EffectsPolicy;
 pub use layout::{GoverningRoot, PhpTarget, PhpTargetSource, ProjectLayout, fallback_is_vendor};

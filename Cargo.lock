@@ -1473,6 +1473,7 @@ dependencies = [
  "steins-contract",
  "steins-db",
  "steins-domain",
+ "steins-gen",
  "steins-infer",
  "steins-phpdoc",
  "steins-sidecar",

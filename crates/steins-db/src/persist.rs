@@ -30,16 +30,26 @@
 //! should know any of it. Same discipline, one crate over — and the same line
 //! the orchestrator's own `sources` section already draws.
 //!
-//! Codec: serde_json inside every section — zero new dependencies, and the
-//! section boundary plus [`steins_gen::SCHEMA_VERSION`] make a later codec
-//! swap free (a cache, no migration ever). Every failure path is a
-//! [`Miss`] the caller maps to rebuild-from-source: absent sections, bytes
-//! that are not JSON, a directory that lies about its offsets, a payload
-//! deeper than serde_json's recursion ceiling. A *readable* payload that is
-//! semantically wrong (a shard whose tables contradict each other) is not
-//! detectable here — the same posture as the fold table's rows (ADR-0092 §4)
-//! — and is excluded by the schema version plus the generation fingerprint,
-//! which no artifact is read without.
+//! Codec: [`crate::wire`] inside every payload — a compact binary form of the
+//! same serde schema, no new dependency. It replaced serde_json here in issue
+//! #504, on the measurement that two thirds of the JSON encoding was field
+//! names and punctuation the reader already knows; the swap was free by
+//! construction, because the section boundary plus
+//! [`steins_gen::SCHEMA_VERSION`] make an artifact of the previous schema an
+//! ordinary [`Miss`] and one rebuild (a cache, no migration ever).
+//!
+//! The nested **directory** stays JSON, deliberately: it is framing rather
+//! than payload, it is a fifth of a percent of the section, and every reader's
+//! addressing is defined against it.
+//!
+//! Every failure path is a [`Miss`] the caller maps to rebuild-from-source:
+//! absent sections, bytes that are not a value of the expected type, a
+//! directory that lies about its offsets, a payload deeper than the decoder's
+//! recursion ceiling. A *readable* payload that is semantically wrong (a shard
+//! whose tables contradict each other) is not detectable here — the same
+//! posture as the fold table's rows (ADR-0092 §4) — and is excluded by the
+//! schema version plus the generation fingerprint, which no artifact is read
+//! without.
 
 use std::collections::BTreeMap;
 
@@ -300,10 +310,7 @@ pub fn trace_section_bytes(files: &[TraceFile<'_>]) -> Vec<u8> {
     let parts: Vec<(String, usize, Vec<u8>)> = files
         .iter()
         .map(|f| {
-            // Infallible for the lowered representation: every map is
-            // string-keyed and floats travel as bits (see steins-syntax's
-            // `persist` codecs), so nothing serde_json refuses can arrive.
-            let payload = serde_json::to_vec(f.tree).expect("a lowered tree serializes");
+            let payload = trace_payload(f.tree);
             (f.path.to_owned(), f.slot, payload)
         })
         .collect();
@@ -317,6 +324,11 @@ pub fn trace_section_bytes(files: &[TraceFile<'_>]) -> Vec<u8> {
 pub struct PayloadIndex {
     section: SectionName,
     entries: Vec<TraceEntry>,
+    /// The directory's on-disk length, as the section's own prefix declared
+    /// it — the payload area starts right after. Kept rather than recomputed:
+    /// a republish copies every unmoved payload, so re-serializing the whole
+    /// directory once per copy made the copy quadratic in the package.
+    directory_len: u64,
 }
 
 impl PayloadIndex {
@@ -356,7 +368,7 @@ impl PayloadIndex {
         if expected != payload_area {
             return Err(Miss::Corrupt("payloads do not tile the payload area"));
         }
-        Ok(Self { section, entries })
+        Ok(Self { section, entries, directory_len: dir_len })
     }
 
     /// Every file in the directory, `(path, slot)`, in on-disk order.
@@ -379,14 +391,11 @@ impl PayloadIndex {
             .iter()
             .find(|e| e.path == path)
             .ok_or(Miss::Corrupt("no payload entry for the requested path"))?;
-        let dir_len = self.directory_len();
-        reader.section_slice(&self.section, TRACE_PREFIX + dir_len + entry.offset, entry.len)
-    }
-
-    /// The directory's serialized length, reconstructed the way the writer
-    /// framed it — the payload area starts right after.
-    fn directory_len(&self) -> u64 {
-        serde_json::to_vec(&self.entries).expect("a payload directory serializes").len() as u64
+        reader.section_slice(
+            &self.section,
+            TRACE_PREFIX + self.directory_len + entry.offset,
+            entry.len,
+        )
     }
 }
 
@@ -426,7 +435,7 @@ impl TraceIndex {
     /// still serves.
     pub fn read_tree(&self, reader: &mut ArtifactReader, path: &str) -> Result<SourceTree, Miss> {
         let bytes = self.inner.payload(reader, path)?;
-        serde_json::from_slice(&bytes).map_err(|_| Miss::Corrupt("trace payload is not a tree"))
+        crate::wire::from_slice(&bytes).map_err(|_| Miss::Corrupt("trace payload is not a tree"))
     }
 }
 
@@ -445,7 +454,7 @@ pub fn build_sections(
     trace: &[(String, usize, Vec<u8>)],
 ) -> ArtifactBuilder {
     let mut builder = ArtifactBuilder::new();
-    let symbols = serde_json::to_vec(shard).expect("a package shard serializes");
+    let symbols = crate::wire::to_vec(shard).expect("a package shard serializes");
     builder.section(symbols_section(), symbols).expect("distinct section names");
     builder
         .section(contracts_section(), payload_section_bytes(contracts))
@@ -461,9 +470,10 @@ pub fn build_sections(
 /// of the file alone and republish can copy them under a new slot.
 #[must_use]
 pub fn trace_payload(tree: &SourceTree) -> Vec<u8> {
-    // Infallible for the lowered representation: every map is string-keyed and
-    // floats travel as bits (see steins-syntax's `persist` codecs).
-    serde_json::to_vec(tree).expect("a lowered tree serializes")
+    // Infallible for the lowered representation: every sequence and map has a
+    // known length and floats travel as bits (see steins-syntax's `persist`
+    // codecs), so nothing the codec refuses can arrive.
+    crate::wire::to_vec(tree).expect("a lowered tree serializes")
 }
 
 /// One file's contract payload, ready for [`build_sections`]: the file's
@@ -472,14 +482,14 @@ pub fn trace_payload(tree: &SourceTree) -> Vec<u8> {
 /// holds. [`read_contracts`] puts the directory's slot back.
 #[must_use]
 pub fn contract_payload(tree: &SourceTree) -> Vec<u8> {
-    serde_json::to_vec(&decl_contracts(0, tree)).expect("a contract list serializes")
+    crate::wire::to_vec(&decl_contracts(0, tree)).expect("a contract list serializes")
 }
 
 /// Decode the `symbols` section back into the [`PackageShard`] it was
 /// serialized from. Any way the bytes can be wrong is a [`Miss`].
 pub fn read_shard(reader: &mut ArtifactReader) -> Result<PackageShard, Miss> {
     let bytes = reader.section(&symbols_section())?;
-    serde_json::from_slice(&bytes).map_err(|_| Miss::Corrupt("symbols section is not a shard"))
+    crate::wire::from_slice(&bytes).map_err(|_| Miss::Corrupt("symbols section is not a shard"))
 }
 
 /// Decode the `contracts` section back into its [`DeclContract`] list. Any
@@ -491,7 +501,7 @@ pub fn read_contracts(reader: &mut ArtifactReader) -> Result<Vec<DeclContract>, 
     let mut out = Vec::new();
     for (path, slot) in files {
         let bytes = index.payload(reader, &path)?;
-        let decls: Vec<DeclContract> = serde_json::from_slice(&bytes)
+        let decls: Vec<DeclContract> = crate::wire::from_slice(&bytes)
             .map_err(|_| Miss::Corrupt("contracts payload is not a contract list"))?;
         // The payload is written at the canonical slot 0 so its bytes are a
         // function of the file alone; the directory is what says where the
@@ -696,8 +706,55 @@ mod tests {
                 "vendor/lib/b/src/dup.php",
                 "<?php\nnamespace Lib\\A;\nfunction dup(string $x): string { return $x . 'b'; }\n/** @mixin Widget */\nclass Same {}\ndefine('FLAG', true);\n$o->{$name} = 5;\n",
             ),
+            (
+                "vendor/lib/b/src/origins.php",
+                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n  }\n}\n",
+            ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
+    }
+
+    /// Which [`steins_syntax::EffectOrigin`] a value is. Exhaustive on
+    /// purpose: a new variant fails this match, which is the reminder that the
+    /// hand-written inverse in `steins-syntax::persist` needs the same variant
+    /// **in the same position** — the payload codec carries a variant by
+    /// index, so a twin that agrees on names and disagrees on order would
+    /// decode silently wrong.
+    fn origin_kind(origin: &steins_syntax::EffectOrigin) -> &'static str {
+        use steins_syntax::EffectOrigin as O;
+        match origin {
+            O::Call { .. } => "Call",
+            O::Output { .. } => "Output",
+            O::Exit { .. } => "Exit",
+            O::MethodCall { .. } => "MethodCall",
+            O::Opaque { .. } => "Opaque",
+            O::HigherOrder { .. } => "HigherOrder",
+            O::Callback { .. } => "Callback",
+        }
+    }
+
+    /// Every effect origin the parsed fixture carries, by variant.
+    fn fixture_origin_kinds(parsed: &[(&'static str, SourceTree)]) -> BTreeMap<&'static str, usize> {
+        let mut seen: BTreeMap<&'static str, usize> = BTreeMap::new();
+        for (_, tree) in parsed {
+            let mut note = |origins: &[steins_syntax::EffectOrigin]| {
+                for o in origins {
+                    *seen.entry(origin_kind(o)).or_default() += 1;
+                }
+            };
+            for f in tree.functions() {
+                note(&f.effect_origins);
+            }
+            for c in tree.classes() {
+                for m in &c.methods {
+                    note(&m.effect_origins);
+                }
+            }
+            for s in tree.scopes() {
+                note(&s.effect_origins);
+            }
+        }
+        seen
     }
 
     /// Parse the fixture and group it exactly as the production constructors
@@ -785,6 +842,16 @@ mod tests {
         let rendered = format!("{app:?}");
         assert!(rendered.contains("inf"), "the non-finite float literal survived lowering");
         assert!(app.functions()[0].docblock.is_some(), "a docblocked function");
+        // The payload codec carries an enum by variant index, and
+        // `EffectOrigin`'s inverse is the one hand-written twin in the graph
+        // (`steins-syntax::persist`), so its seven variants have to survive
+        // the disk boundary *by position*. They only can if they are here.
+        let kinds = fixture_origin_kinds(&parsed);
+        for variant in
+            ["Call", "Output", "Exit", "MethodCall", "Opaque", "HigherOrder", "Callback"]
+        {
+            assert!(kinds.contains_key(variant), "the fixture must carry an {variant} origin");
+        }
 
         for p in &packages {
             let path = write_package(&tmp, &parsed, p);
@@ -845,25 +912,42 @@ mod tests {
         assert!(*cold == warm, "the disk boundary changed the index");
     }
 
-    /// Acceptance (c) for the flat sections: bytes that are not JSON, JSON of
-    /// the wrong shape, JSON carrying a field this schema does not spell, and
-    /// an absent section are each a `Miss` — never a panic, never a partial
-    /// value.
+    /// Acceptance (c) for the flat sections: arbitrary bytes, a payload of the
+    /// previous codec, a truncated payload, one with bytes left over, and an
+    /// absent section are each a `Miss` — never a panic, never a partial
+    /// value. The truncation and trailing-byte cases are the ones a
+    /// length-prefixed codec needs: without them a doctored length would be a
+    /// *shorter* value rather than an error.
     #[test]
     fn a_doctored_flat_section_is_a_miss() {
         let tmp = TempDir::new("doctored-flat");
+        let real_shard = crate::wire::to_vec(&PackageShard::default()).unwrap();
+        let real_contracts = contract_payload(&SourceTree::parse("<?php function f() {}\n"));
+        let mut short_shard = real_shard.clone();
+        short_shard.truncate(real_shard.len() / 2);
+        let mut short_contracts = real_contracts.clone();
+        short_contracts.truncate(real_contracts.len() / 2);
+        let mut long_contracts = real_contracts.clone();
+        long_contracts.push(0);
+        // The contracts cases go through the framing the reader expects, so
+        // what they exercise is the *payload* codec and not the directory
+        // check every unframed byte string would trip first.
+        let framed = |payload: Vec<u8>| {
+            payload_section_bytes(&[("a.php".to_owned(), 0usize, payload)])
+        };
         let cases = vec![
-            ("symbols-not-json", vec![(symbols_section(), b"not json".to_vec())]),
-            ("symbols-wrong-shape", vec![(symbols_section(), b"[1, 2]".to_vec())]),
-            ("contracts-not-json", vec![(contracts_section(), b"}".to_vec())]),
-            ("contracts-wrong-shape", vec![(contracts_section(), b"{\"a\": 1}".to_vec())]),
+            ("symbols-arbitrary-bytes", vec![(symbols_section(), b"not a shard".to_vec())]),
+            // The previous codec's bytes: an artifact of an older schema never
+            // reaches a payload reader, but the reader must not be the reason
+            // for that.
             (
-                "contracts-strict-fields",
-                vec![(
-                    contracts_section(),
-                    br#"[{"file": 0, "owner": {"Function": {"index": 0}}, "fqn": "f", "name": "f", "span": {"start": 0, "end": 1}, "docblock": null, "params": [], "ret": null, "ctx": {"namespace": "", "class_imports": {}, "fn_imports": {}, "const_imports": {}}, "extra": 1}]"#.to_vec(),
-                )],
+                "symbols-previous-codec",
+                vec![(symbols_section(), serde_json::to_vec(&PackageShard::default()).unwrap())],
             ),
+            ("symbols-truncated", vec![(symbols_section(), short_shard)]),
+            ("contracts-arbitrary-bytes", vec![(contracts_section(), framed(b"}".to_vec()))]),
+            ("contracts-truncated", vec![(contracts_section(), framed(short_contracts))]),
+            ("contracts-trailing-bytes", vec![(contracts_section(), framed(long_contracts))]),
         ];
         for (tag, sections) in cases {
             let path = tmp.path(tag);
@@ -937,7 +1021,7 @@ mod tests {
     fn a_corrupt_file_payload_is_a_miss_for_that_file_alone() {
         let tmp = TempDir::new("one-bad-payload");
         let tree = SourceTree::parse("<?php function ok() {}\n");
-        let good = serde_json::to_vec(&tree).unwrap();
+        let good = trace_payload(&tree);
         let parts = vec![
             ("good.php".to_owned(), 0usize, good),
             ("bad.php".to_owned(), 1usize, b"not a tree".to_vec()),

@@ -75,15 +75,21 @@
 //!
 //! ## Codec
 //!
-//! serde_json inside a per-file payload of `steins-db`'s `facts` section, the
-//! same framing as `trace`: strict inverses, `deny_unknown_fields`, every
-//! decode failure a [`Miss`] the caller degrades to reading the tree. The name
-//! keys travel as 64-bit hashes rather than strings — the footprint is the bulk
-//! of the payload and a string table would undo the point (measured: 19,766
-//! deduplicated keys over `nikic/PHP-Parser`, 158 KB as hashes). A hash
-//! collision is one-sided: it can make two distinct names look like one, which
-//! adds an edge or a delta hit and walks a file that need not have been. It
-//! cannot hide one.
+//! [`steins_db::wire`] inside a per-file payload of `steins-db`'s `facts`
+//! section, the same framing and the same codec as `trace` (issue #504):
+//! strict inverses, every decode failure a [`Miss`] the caller degrades to
+//! reading the tree. The name keys travel as 64-bit hashes rather than strings
+//! — the footprint is the bulk of the payload and a string table would undo
+//! the point (measured: 19,766 deduplicated keys over `nikic/PHP-Parser`,
+//! 158 KB as hashes). A hash collision is one-sided: it can make two distinct
+//! names look like one, which adds an edge or a delta hit and walks a file that
+//! need not have been. It cannot hide one.
+//!
+//! The hashes travel as **packed little-endian bytes**, not as a sequence of
+//! integers: a key is uniformly random, so a varint spends nine bytes on it,
+//! and the key vectors are the payload's bulk. They were hex under the JSON
+//! codec for the same reason — one string beat an array of numbers — and hex
+//! is exactly half as good as bytes.
 
 //! **Two halves, one file.** The *value* — the row types and the three
 //! projections a run without persisted facts still takes off a tree — compiles
@@ -506,12 +512,17 @@ struct StoredFacts {
     spells_throws: bool,
     spells_envelope: bool,
     spells_purity: bool,
-    /// Hex of the packed little-endian key hashes — one string rather than a
-    /// JSON array of numbers, which is both smaller and faster to scan.
-    footprint: String,
-    declares: String,
-    inherits: String,
-    alias_edges: String,
+    /// The packed little-endian key hashes — one byte string rather than a
+    /// sequence of integers, which for uniformly random keys is both smaller
+    /// (eight bytes each, against a varint's nine) and faster to scan.
+    #[serde(with = "packed_keys")]
+    footprint: Vec<u64>,
+    #[serde(with = "packed_keys")]
+    declares: Vec<u64>,
+    #[serde(with = "packed_keys")]
+    inherits: Vec<u64>,
+    #[serde(with = "packed_keys")]
+    alias_edges: Vec<u64>,
     shard: PackageShard,
     rows: StoredRows,
 }
@@ -568,28 +579,55 @@ fn certainty_of(b: u8) -> Option<Certainty> {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-/// Pack sorted key hashes into lowercase hex.
-fn pack(keys: &[u64]) -> String {
-    let mut out = String::with_capacity(keys.len() * 16);
-    for key in keys {
-        out.push_str(&format!("{key:016x}"));
+/// The key-hash vectors' codec: eight little-endian bytes per key, packed into
+/// one byte string. The inverse is strict — a length that is not a whole
+/// number of keys is a decode failure, which the section reader degrades to a
+/// [`Miss`].
+mod packed_keys {
+    pub(super) fn pack(keys: &[u64]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(keys.len() * 8);
+        for key in keys {
+            out.extend_from_slice(&key.to_le_bytes());
+        }
+        out
     }
-    out
-}
 
-#[cfg(not(target_arch = "wasm32"))]
-/// Strict inverse of [`pack`]: the length must be a multiple of 16 and every
-/// character a hex digit.
-fn unpack(text: &str) -> Option<Vec<u64>> {
-    if !text.len().is_multiple_of(16) {
-        return None;
+    pub(super) fn unpack(bytes: &[u8]) -> Option<Vec<u64>> {
+        if !bytes.len().is_multiple_of(8) {
+            return None;
+        }
+        Some(
+            bytes
+                .chunks_exact(8)
+                .map(|c| u64::from_le_bytes(c.try_into().expect("eight bytes")))
+                .collect(),
+        )
     }
-    let mut out = Vec::with_capacity(text.len() / 16);
-    for chunk in text.as_bytes().chunks(16) {
-        let s = std::str::from_utf8(chunk).ok()?;
-        out.push(u64::from_str_radix(s, 16).ok()?);
+
+    pub(super) fn serialize<S: serde::Serializer>(
+        keys: &[u64],
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&pack(keys))
     }
-    Some(out)
+
+    pub(super) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Vec<u64>, D::Error> {
+        struct Visitor;
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = Vec<u64>;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a whole number of packed 64-bit keys")
+            }
+
+            fn visit_bytes<E: serde::de::Error>(self, v: &[u8]) -> Result<Vec<u64>, E> {
+                unpack(v).ok_or_else(|| E::custom("a partial packed key"))
+            }
+        }
+        deserializer.deserialize_bytes(Visitor)
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -610,10 +648,10 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
         spells_throws: facts.spells_throws,
         spells_envelope: facts.spells_envelope,
         spells_purity: facts.spells_purity,
-        footprint: pack(&facts.footprint),
-        declares: pack(&facts.declares),
-        inherits: pack(&facts.inherits),
-        alias_edges: pack(&alias),
+        footprint: facts.footprint.clone(),
+        declares: facts.declares.clone(),
+        inherits: facts.inherits.clone(),
+        alias_edges: alias,
         shard: facts.shard.clone(),
         rows: StoredRows {
             syms: rows.syms.clone(),
@@ -660,7 +698,7 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
                 .collect(),
         },
     };
-    serde_json::to_vec(&stored).expect("a facts payload serializes")
+    steins_db::wire::to_vec(&stored).expect("a facts payload serializes")
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -668,8 +706,8 @@ pub(crate) fn facts_payload(facts: &FileFacts) -> Vec<u8> {
 /// which the caller degrades to reading the file's tree.
 pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
     let corrupt = || Miss::Corrupt("facts payload is not a fact set");
-    let stored: StoredFacts = serde_json::from_slice(bytes).map_err(|_| corrupt())?;
-    let alias = unpack(&stored.alias_edges).ok_or_else(corrupt)?;
+    let stored: StoredFacts = steins_db::wire::from_slice(bytes).map_err(|_| corrupt())?;
+    let alias = stored.alias_edges;
     if !alias.len().is_multiple_of(2) {
         return Err(corrupt());
     }
@@ -689,9 +727,9 @@ pub(crate) fn read_facts(bytes: &[u8]) -> Result<FileFacts, Miss> {
         spells_throws: stored.spells_throws,
         spells_envelope: stored.spells_envelope,
         spells_purity: stored.spells_purity,
-        footprint: unpack(&stored.footprint).ok_or_else(corrupt)?,
-        declares: unpack(&stored.declares).ok_or_else(corrupt)?,
-        inherits: unpack(&stored.inherits).ok_or_else(corrupt)?,
+        footprint: stored.footprint,
+        declares: stored.declares,
+        inherits: stored.inherits,
         alias_edges: alias.chunks(2).map(|p| (p[0], p[1])).collect(),
         shard: stored.shard,
         rows: Some(OwnRows {
@@ -733,14 +771,16 @@ mod tests {
     }
 
     /// The packed key form is a strict inverse, and refuses anything that is
-    /// not a whole number of hex-spelled keys.
+    /// not a whole number of packed keys.
     #[test]
     fn packed_keys_round_trip_and_refuse_garbage() {
+        use packed_keys::{pack, unpack};
         let keys = vec![0u64, 1, u64::MAX, key_hash("f:x")];
+        assert_eq!(pack(&keys).len(), keys.len() * 8, "eight bytes a key, no more");
         assert_eq!(unpack(&pack(&keys)), Some(keys));
-        assert_eq!(unpack(""), Some(Vec::new()));
-        assert_eq!(unpack("abc"), None);
-        assert_eq!(unpack("zzzzzzzzzzzzzzzz"), None);
+        assert_eq!(unpack(b""), Some(Vec::new()));
+        assert_eq!(unpack(b"abc"), None);
+        assert_eq!(unpack(&[0u8; 15]), None);
     }
 
     /// Every field of a file's facts survives the disk boundary, own rows
@@ -768,20 +808,26 @@ mod tests {
         let decoded = read_facts(&facts_payload(&original)).expect("the payload decodes");
         assert_eq!(decoded, original);
 
-        for doctored in [
-            b"}".to_vec(),
-            br#"{"parse_error": null}"#.to_vec(),
-            {
-                let mut v = facts_payload(&original);
-                // A certainty byte outside the closed set.
-                if let Some(pos) = v.windows(9).position(|w| w == b"\"facts\":[") {
-                    v.splice(pos..pos, b"\"extra\":1,".iter().copied());
-                }
-                v
-            },
+        // Every way the bytes can be wrong under a length-prefixed codec:
+        // empty, arbitrary, truncated, extended — a `Miss`, never a partial
+        // value.
+        let payload = facts_payload(&original);
+        let mut truncated = payload.clone();
+        truncated.truncate(payload.len() / 2);
+        let mut extended = payload.clone();
+        extended.push(0);
+        for (tag, doctored) in [
+            ("empty", Vec::new()),
+            ("arbitrary", b"}".to_vec()),
+            ("truncated", truncated),
+            ("trailing bytes", extended),
         ] {
-            assert!(read_facts(&doctored).is_err(), "a doctored payload must miss");
+            assert!(read_facts(&doctored).is_err(), "{tag}: a doctored payload must miss");
         }
+        // The certainty byte is the one field whose vocabulary the schema
+        // cannot express, so the decoder checks it by hand and a fourth value
+        // cannot be invented.
+        assert!(certainty_of(3).is_none(), "the closed set is three values wide");
     }
 
     /// The include target is resolved at write time and the universe test is

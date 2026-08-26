@@ -32,6 +32,10 @@ steins-sidecar = { path = "../crates/steins-sidecar" }
 # hazard, so "this name was mined and carries nothing" is a recorded fact rather
 # than an absence a completeness test would read as agreement.
 steins-catalog = { path = "../crates/steins-catalog" }
+# The artifact container, for `artifact-bytes` (issue #504): the per-section
+# byte counts are read off a published generation's real artifacts, so the
+# measurement cannot drift from what the store actually writes.
+steins-gen = { path = "../crates/steins-gen" }
 
 rayon.workspace = true
 toml.workspace = true

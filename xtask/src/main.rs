@@ -3,6 +3,7 @@
 //! ```text
 //! cargo xtask <command>
 //!
+//!   artifact-bytes <DIR>…   where a package artifact's bytes go (issue #504)
 //!   corpus-sync [--update]   materialize the pinned FP-gate corpus into corpus/
 //!   fold-probe [--names …]   differential 32/64-bit width probe over the fold allowlist
 //!   fp-gate                  run the proof-layer pipeline over the corpus (gate)
@@ -20,6 +21,7 @@
 //! It links the analysis crates directly (never shells out to the `steins`
 //! binary) so it reads parse errors and call data straight off `SourceTree`.
 
+mod artifact_bytes;
 mod corpus;
 mod corpus_local;
 mod fold_probe;
@@ -61,6 +63,10 @@ fn main() -> ExitCode {
     }
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        Some("artifact-bytes") => match artifact_bytes::run(&args[1..]) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => fail(&e),
+        },
         Some("corpus-sync") => {
             let update = args[1..].iter().any(|a| a == "--update");
             match sync::run(update) {
@@ -128,11 +134,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | perf | phpdoc-oracle)"
+            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | perf | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }
