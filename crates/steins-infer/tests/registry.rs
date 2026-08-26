@@ -338,7 +338,7 @@ fn the_declared_possibly_undefined_read_is_a_contract_id() {
 /// is measurable**: zero over the pinned public corpus across 2,903 hyphenated
 /// type-position sites, and one hit on the private corpus that was a
 /// misspelling of known vocabulary — a true positive of the class the id exists
-/// for. The 2026-08-27 ruling therefore put it at `Contracts` rather than
+/// for. This slice's review (2026-08-27) therefore put it at `Contracts` rather than
 /// behind a rung nobody reaches, which is what `floors_reproduce_the_pre_s6_
 /// layer_selection` now covers with no exception row.
 #[test]
@@ -504,8 +504,8 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
         // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479) is deliberately
         // NOT listed here. §6 made its floor a measurement rather than a
-        // decision, and the 2026-08-27 ruling read that measurement and put it
-        // on the contract family's own `Contracts` floor — so it is covered by
+        // decision, and this slice's review (2026-08-27) read that measurement
+        // and put it on the contract family's own floor — so it is covered by
         // the default expectation below, as an ordinary member of the family,
         // and needs no exception. Its own row is
         // `the_unknown_vocabulary_id_sits_on_the_measured_family_floor`.

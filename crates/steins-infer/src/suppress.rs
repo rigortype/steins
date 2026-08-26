@@ -363,8 +363,8 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // `Layer::Contract`: the premise is a docblock's own spelling, and the
     // program runs either way.
     //
-    // `Floor::Contracts` — the family floor, **ruled from measurement** (§6
-    // refuses to fix this floor in advance) on the 2026-08-27 owner ruling.
+    // `Floor::Contracts` — the family floor, **ruled from measurement** at this
+    // slice's review (2026-08-27; §6 refuses to fix this floor in advance).
     //
     // §6 named one thing to calibrate: `KNOWN_UNENFORCED` exists because other
     // tools have spellings Steins recognizes without enforcing, and the ones it
