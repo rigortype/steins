@@ -49,7 +49,11 @@ mod fold_persist;
 #[cfg(not(target_arch = "wasm32"))]
 mod fold_process;
 #[cfg(not(target_arch = "wasm32"))]
+mod affected;
+#[cfg(not(target_arch = "wasm32"))]
 mod generation;
+#[cfg(not(target_arch = "wasm32"))]
+mod summaries;
 mod fold_table;
 mod foreach_check;
 mod generics;
@@ -80,6 +84,7 @@ mod transfers;
 mod undefined_var;
 mod untyped;
 mod walk;
+mod walk_plan;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
 pub use ids::*;
@@ -110,6 +115,8 @@ use dump::render_shape_fact;
 use env::{Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
+use walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
+pub use walk_plan::Divergence;
 
 use fold_args::effective_php_view;
 
@@ -150,8 +157,11 @@ pub use fold_process::{ProcessEngine, SidecarFolder};
 #[cfg(not(target_arch = "wasm32"))]
 pub use generation::{
     FoldReport, GenerationError, GenerationMode, GenerationOutcome, GenerationParams,
-    GenerationReport, PackageKind, PackageReport, PhaseTimings, SOURCES_SECTION, generation_check,
+    GenerationReport, PARANOID_ENV, PackageKind, PackageReport, PhaseTimings, SOURCES_SECTION,
+    WalkReport, generation_check,
 };
+#[cfg(not(target_arch = "wasm32"))]
+pub use summaries::SUMMARIES_SECTION;
 pub use fold_table::{TableEngine, TableFolder, request_key};
 // end return missing (ADR-0078, issue #199)
 
@@ -365,6 +375,40 @@ fn check_units(
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> Vec<Diagnostic> {
+    check_units_controlled(
+        units,
+        index,
+        folder,
+        warning_handler_abort,
+        final_keyword,
+        layout,
+        plugins,
+        policy,
+        None,
+    )
+}
+
+/// [`check_units`] with the walk plan seam of issue #489 slice B open.
+///
+/// `control` is `Some` only on the frozen-generation path, where the caller
+/// holds a published generation and may replay a file's persisted walk block
+/// instead of walking it (see [`walk_plan`] for why a block is the right unit
+/// and what makes replaying one sound). With `control` `None` — every other
+/// entry point, every ungated `steins check`, every test — the planner never
+/// runs, every file walks, and nothing is recorded: the default behaviour is
+/// byte-identical because it is the *same* code path, not a compared one.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn check_units_controlled(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+    layout: &ProjectLayout,
+    plugins: &PluginFacts,
+    policy: &EffectsPolicy,
+    mut control: Option<&mut WalkControl<'_>>,
+) -> Vec<Diagnostic> {
     let mut out = Vec::new();
 
     // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
@@ -434,25 +478,156 @@ fn check_units(
     // `throw_diagnostics` at the end.
     let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
 
+    // The walk plan (issue #489 slice B). Every whole-universe verdict a walk
+    // can read is in hand by now, so this is the one point at which the
+    // planner can be asked — and the plan it returns is per file, applied
+    // inside the loop below and nowhere else.
+    let mut plan: Vec<FilePlan> = match control.as_deref_mut() {
+        Some(control) => {
+            let verdict = UniverseVerdict {
+                dam: &dam,
+                unparsable: sorted(unparsable.iter().copied()),
+                purity: purity.as_ref().map(PurityOracle::impurity_answers),
+                never_returning: sorted(never_returning.iter().map(String::as_str)),
+                php_minor,
+                catalog_skew,
+                version_id,
+                property_writes: {
+                    let (names, computed) = index.property_write_table();
+                    (sorted(names.iter().map(String::as_str)), computed)
+                },
+            };
+            (control.planner)(&verdict)
+        }
+        None => Vec::new(),
+    };
+    plan.resize_with(units.len(), || FilePlan::Walk);
+
     for fi in 0..units.len() {
-        // parse failure (ADR-0079, issue #180): the broken file's own passes do not
-        // run at all. The project-wide passes below (effects, throws) are filtered
-        // by path instead — they walk the whole universe in one go, so there is no
-        // per-file switch to turn off there.
-        if unparsable.contains(units[fi].path) {
+        let before = out.len();
+        // A replayed file's block is appended verbatim, in the very position
+        // the walk would have appended it — which is what makes the whole
+        // vector (and so the tail's retain and dedup) indistinguishable.
+        // Paranoid mode walks anyway and keeps the walked answer; the replayed
+        // one is only ever the thing being graded.
+        let replayed = match &plan[fi] {
+            FilePlan::Walk => None,
+            FilePlan::Replay(block) => Some(block),
+        };
+        if let Some(block) = replayed
+            && !control.as_deref().is_some_and(|c| c.paranoid)
+        {
+            out.extend_from_slice(&block.diagnostics);
+            if let Some(uncovered) = &block.uncovered {
+                uncovered_matches.insert(fi, uncovered.iter().copied().collect());
+            }
+            if let Some(control) = control.as_deref_mut() {
+                control.replayed += 1;
+                control.would_skip += 1;
+                control.ledger.push(block.clone());
+            }
             continue;
         }
-        let cx = Cx::new_with(
+        let uncovered_entry = walk_one_file(
             units,
             index,
+            folder,
             fi,
             &dam,
+            &unparsable,
             warning_handler_abort,
             final_keyword,
             php_minor,
             catalog_skew,
             version_id,
             purity.as_ref(),
+            layout,
+            &never_returning,
+            &mut out,
+        );
+        if let Some(uncovered) = &uncovered_entry {
+            uncovered_matches.insert(fi, uncovered.iter().copied().collect());
+        }
+        if let Some(control) = control.as_deref_mut() {
+            let walked = FileWalk {
+                diagnostics: out[before..].to_vec(),
+                uncovered: uncovered_entry,
+            };
+            control.walked += 1;
+            if let Some(block) = replayed {
+                control.would_skip += 1;
+                control.verify(units[fi].path, block, &walked);
+            }
+            control.ledger.push(walked);
+        }
+    }
+
+    // --- Effects pass (ADR-0005), computed once over the whole project. ------
+    out.extend(effect_diagnostics(&fixpoints));
+
+    // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
+    out.extend(throw_diagnostics(&fixpoints, &uncovered_matches));
+
+    // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
+    // passes above attributed to a broken file. §2.4 is about the file, not about
+    // which pass produced the finding.
+    if !unparsable.is_empty() {
+        out.retain(|d| d.id == SYNTAX_UNPARSABLE_ID || !unparsable.contains(d.path.as_str()));
+    }
+
+    dedup(&mut out);
+    out
+}
+
+/// Collect an iterator of borrowed names into a sorted vector — the canonical
+/// form every whole-universe verdict is digested in.
+fn sorted<'a>(names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let mut out: Vec<&str> = names.collect();
+    out.sort_unstable();
+    out
+}
+
+/// One file's walk block, lifted out of [`check_units_controlled`]'s loop
+/// verbatim so the replay seam has something to be a peer of. Appends
+/// everything the block produces to `out` and returns the `uncovered_matches`
+/// entry it makes — `None` for an unparsable file, which makes none.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn walk_one_file(
+    units: &[FileUnit],
+    index: &Index,
+    folder: &mut dyn Folder,
+    fi: usize,
+    dam: &DamFacts,
+    unparsable: &HashSet<&str>,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+    php_minor: Option<(u16, u16)>,
+    catalog_skew: bool,
+    version_id: Option<(u32, Option<u32>)>,
+    purity: Option<&PurityOracle<'_>>,
+    layout: &ProjectLayout,
+    never_returning: &HashSet<String>,
+    out: &mut Vec<Diagnostic>,
+) -> Option<Vec<u32>> {
+    {
+        // parse failure (ADR-0079, issue #180): the broken file's own passes do not
+        // run at all. The project-wide passes below (effects, throws) are filtered
+        // by path instead — they walk the whole universe in one go, so there is no
+        // per-file switch to turn off there.
+        if unparsable.contains(units[fi].path) {
+            return None;
+        }
+        let cx = Cx::new_with(
+            units,
+            index,
+            fi,
+            dam,
+            warning_handler_abort,
+            final_keyword,
+            php_minor,
+            catalog_skew,
+            version_id,
+            purity,
             layout.php_target(),
         );
 
@@ -477,10 +652,15 @@ fn check_units(
                 Some(&mut uncovered_spans),
                 None,
                 None,
-                &mut out,
+                out,
             );
         }
-        uncovered_matches.insert(fi, uncovered_spans.iter().map(|s| s.start).collect());
+        // Sorted and deduplicated: the consumer builds a `HashSet` from this,
+        // so the canonical form costs nothing and makes the persisted row and
+        // the verifier's comparison order-free.
+        let mut uncovered_entry: Vec<u32> = uncovered_spans.iter().map(|s| s.start).collect();
+        uncovered_entry.sort_unstable();
+        uncovered_entry.dedup();
 
         // --- The `class.undefined` pass (ADR-0049 §5 / S4): the file's hard-error
         // class references, judged once each. A reference in a proven-dead region is
@@ -490,7 +670,7 @@ fn check_units(
             if in_dead(&dead_spans, r.offset) {
                 continue;
             }
-            check_undefined_class(&cx, folder, r, &mut out);
+            check_undefined_class(&cx, folder, r, out);
         }
 
         // --- The `constant.undefined` pass (ADR-0078, issue #198): the file's bare
@@ -500,7 +680,7 @@ fn check_units(
             if in_dead(&dead_spans, r.offset) {
                 continue;
             }
-            check_undefined_constant(&cx, folder, r, &mut out);
+            check_undefined_constant(&cx, folder, r, out);
         }
 
         // --- `array.duplicate-key` (ADR-0078, issue #187): every literal array
@@ -508,7 +688,7 @@ fn check_units(
         // passes above, this is a mechanics finding about how the literal is
         // WRITTEN, not a proof of a live runtime path, so it fires the same
         // whether or not the array is ever reached. -----------------------
-        check_array_duplicate_keys(&cx, &mut out);
+        check_array_duplicate_keys(&cx, out);
 
         // --- The declaration-fatal pass (ADR-0078 / issue #183): the file's own
         // class-like declarations, judged against the enumerated declaration graph.
@@ -516,26 +696,26 @@ fn check_units(
         // of a symbol) and dam-free (the immunity asymmetry — no runtime construct
         // adds a method to a declared class), so it runs beside the pass above
         // without borrowing its ladder. -------------------------------------------
-        check_declaration_fatals(&cx, &dead_spans, &mut out);
+        check_declaration_fatals(&cx, &dead_spans, out);
 
         // --- Docblock hygiene (ADR-0078 / issue #186): the mechanics-layer
         // anti-rot family. Textual premises only — no env, no folder, no dead-region
         // filter: an annotation that names a subject the code no longer has is rot
         // wherever it sits, including in a branch that never runs.
-        docblock_hygiene(&cx, &mut out);
+        docblock_hygiene(&cx, out);
 
         // --- The untyped surface (ADR-0078 / issue #200): the contract-layer
         // `untyped.*` family. Declaration reading only — no env, no folder, no
         // dead-region filter, no sidecar: a declaration that withholds its type
         // withholds it wherever it sits. -----------------------------------------
-        untyped_surface(&cx, &mut out);
+        untyped_surface(&cx, out);
 
         // --- `type.return-missing` (ADR-0078 / issue #199): the reachability
         // foundation's tracer. Declaration premise plus a structural terminality
         // verdict, so — like the two passes above — no env, no folder, no
         // dead-region filter: a body that runs off its end does so wherever it
         // sits, and the judgement is about the body's own shape.
-        check_return_missing(&cx, &never_returning, &mut out);
+        check_return_missing(&cx, never_returning, out);
 
         // --- `variable.undefined` (ADR-0078 / issue #194): every read of a name
         // its scope never binds. A per-scope textual/structural pass over the
@@ -543,8 +723,8 @@ fn check_units(
         // out-parameter subtraction. No dead-region filter and no folder: the
         // premise is that the scope's own text holds no binding form, which is
         // true wherever the read sits. -------------------------------------------
-        check_undefined_variables(&cx, &mut out);
-        check_phpdoc_maybe_undefined(&cx, &mut out);
+        check_undefined_variables(&cx, out);
+        check_phpdoc_maybe_undefined(&cx, out);
 
         // --- Direct pass: literal / array / `new` arguments at every function
         // call site (env-free; propagation adds `$var`/folded resolution). Native
@@ -616,7 +796,7 @@ fn check_units(
                         &empty_classes,
                         false,
                         false, // in_descent — the direct pass is never a descent
-                        &mut out,
+                        out,
                     );
                 }
                 // Callable-signature variance (issue #11): a closure / first-class
@@ -627,28 +807,13 @@ fn check_units(
                 if let ArgValue::Closure(closure) = &arg.value
                     && let Some(env) = &envelopes
                 {
-                    check_callable_arg(&cx, env, param, &decl.name, arg.span.start, closure, &mut out);
+                    check_callable_arg(&cx, env, param, &decl.name, arg.span.start, closure, out);
                 }
             }
         }
 
+        Some(uncovered_entry)
     }
-
-    // --- Effects pass (ADR-0005), computed once over the whole project. ------
-    out.extend(effect_diagnostics(&fixpoints));
-
-    // --- Throw system (ADR-0040/0007): `@throws` envelope + Liskov. ----------
-    out.extend(throw_diagnostics(&fixpoints, &uncovered_matches));
-
-    // parse failure (ADR-0079, issue #180): drop whatever the two project-wide
-    // passes above attributed to a broken file. §2.4 is about the file, not about
-    // which pass produced the finding.
-    if !unparsable.is_empty() {
-        out.retain(|d| d.id == SYNTAX_UNPARSABLE_ID || !unparsable.contains(d.path.as_str()));
-    }
-
-    dedup(&mut out);
-    out
 }
 
 /// Drop exact-duplicate diagnostics, preserving first-occurrence order.

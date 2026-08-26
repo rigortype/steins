@@ -109,23 +109,42 @@ fn write_fixture(root: &Path) -> Vec<PathBuf> {
     write("composer.lock", COMPOSER_LOCK);
     write("src/app.php", APP);
     write("vendor/acme/lib/src/lib.php", VENDOR_LIB);
+    let partition = steins_db::partition::discover(&composer::discover(
+        &[root.to_path_buf()],
+        root,
+    ));
+    assert_eq!(
+        partition
+            .universe()
+            .packages()
+            .iter()
+            .find(|p| p.name.as_str() == "acme/lib")
+            .map(|p| p.kind),
+        Some(PackageKind::Vendor),
+        "the lock classifies the package"
+    );
     vec![root.join("src/app.php"), root.join("vendor/acme/lib/src/lib.php")]
 }
 
 /// One full generation run over the fixture: the CLI's boundary resolution
 /// (layout, partition), the orchestrator, PHP on.
 fn run(root: &Path, store_root: &Path, files: &[PathBuf]) -> GenerationOutcome {
+    run_with(root, store_root, files, false)
+}
+
+/// [`run`] with the paranoid walk verifier forced on.
+fn run_paranoid(root: &Path, store_root: &Path, files: &[PathBuf]) -> GenerationOutcome {
+    run_with(root, store_root, files, true)
+}
+
+fn run_with(
+    root: &Path,
+    store_root: &Path,
+    files: &[PathBuf],
+    paranoid: bool,
+) -> GenerationOutcome {
     let layout = composer::discover(&[root.to_path_buf()], root);
     let partition = steins_db::partition::discover(&layout);
-    let member = |name: &str| {
-        partition
-            .universe()
-            .packages()
-            .iter()
-            .find(|p| p.name.as_str() == name)
-            .map(|p| p.kind)
-    };
-    assert_eq!(member("acme/lib"), Some(PackageKind::Vendor), "the lock classifies the package");
     let plugins = PluginFacts::none();
     let effects = EffectsPolicy::none();
     let params = GenerationParams {
@@ -139,6 +158,7 @@ fn run(root: &Path, store_root: &Path, files: &[PathBuf]) -> GenerationOutcome {
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
         php: true,
+        paranoid,
     };
     generation_check(&params).expect("the generation lifecycle runs")
 }
@@ -295,4 +315,389 @@ fn a_poisoned_package_artifact_degrades_that_package_alone() {
     let acme_again = package(&warm_again, "acme/lib");
     assert_eq!((acme_again.parsed, acme_again.loaded), (1, 0));
     assert_eq!(canon(warm_again.findings), cold_canon);
+}
+
+// ---------------------------------------------------------------------------
+// Slice B: the walk-skipping oracles.
+//
+// The fixture is deliberately wider than slice A's: three first-party files in
+// ONE package — so the package-granular fingerprint and the file-granular
+// content hash disagree, which is exactly the case a per-file row exists for —
+// plus the vendor package. `leaf.php` names nothing any other file declares,
+// so it is what every scenario expects to see replayed; `app.php` calls
+// `helper()`, so it is what every scenario expects to see walked.
+// ---------------------------------------------------------------------------
+
+/// Carries a finding of its own — a pure envelope violated transitively
+/// through the vendor package — so the replayed blocks are not all empty and
+/// the verifier has something to grade.
+const SKIP_APP: &str = "<?php\n\
+    namespace App;\n\
+    #[\\Steins\\Pure]\n\
+    function appMain(): string { return \\Acme\\emit(helper(\"x\")); }\n\
+    lateBound();\n";
+
+const SKIP_HELPER: &str = "<?php\n\
+    namespace App;\n\
+    function helper(string $s): string { return strtoupper($s); }\n";
+
+/// Self-contained on purpose: no reference to any name the project declares,
+/// and no comment, so its footprint cannot intersect a first-party delta.
+const SKIP_LEAF: &str = "<?php\n\
+    namespace Leaf;\n\
+    function leafOnly(): int { return 41 + 1; }\n";
+
+const SKIP_COMPOSER_JSON: &str =
+    r#"{"name": "fixture/skip", "require": {"acme/lib": "^1.0"}, "autoload": {"psr-4": {"App\\": "src/"}}}"#;
+
+/// Write the walk-skipping fixture; returns the files in universe-slot order.
+fn write_skip_fixture(root: &Path) -> Vec<PathBuf> {
+    let write = |rel: &str, content: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("composer.json", SKIP_COMPOSER_JSON);
+    write("composer.lock", COMPOSER_LOCK);
+    write("src/app.php", SKIP_APP);
+    write("src/helper.php", SKIP_HELPER);
+    write("src/leaf.php", SKIP_LEAF);
+    write("vendor/acme/lib/src/lib.php", VENDOR_LIB);
+    vec![
+        root.join("src/app.php"),
+        root.join("src/helper.php"),
+        root.join("src/leaf.php"),
+        root.join("vendor/acme/lib/src/lib.php"),
+    ]
+}
+
+fn rewrite(path: &Path, content: &str) {
+    std::fs::write(path, content).unwrap();
+}
+
+/// A first-party edit walks what could have seen it and replays the rest —
+/// including the *unchanged files of the changed package*, which is what a
+/// per-file content hash buys over the package fingerprint.
+#[test]
+fn a_first_party_edit_replays_an_unrelated_file_and_walks_the_caller() {
+    if !spawn_or_skip("a_first_party_edit_replays_an_unrelated_file_and_walks_the_caller") {
+        return;
+    }
+    let tmp = TempDir::new("skip-first-party");
+    let files = write_skip_fixture(&tmp.dir);
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    assert_eq!(cold.report.walk.replayed, 0, "a cold build replays nothing");
+    assert_eq!(cold.report.walk.walked, files.len());
+
+    // Change `helper.php`'s body only: the root package's fingerprint moves,
+    // so all three of its files reload — but only helper.php's bytes moved.
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n",
+    );
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    let (walked, replayed) = (warm.report.walk.walked, warm.report.walk.replayed);
+    assert!(replayed > 0, "nothing was replayed: {:#?}", warm.report.notes);
+    assert_eq!(walked + replayed, files.len());
+    // leaf.php and the untouched vendor file replay; helper.php (changed) and
+    // app.php (its footprint names the changed `helper`) walk.
+    assert_eq!((walked, replayed), (2, 2), "notes: {:#?}", warm.report.notes);
+
+    let fresh_store = TempDir::new("skip-first-party-fresh");
+    let fresh = run(&tmp.dir, &fresh_store.dir, &files);
+    assert_eq!(fresh.report.mode, GenerationMode::Cold);
+    assert_eq!(
+        canon(warm.findings),
+        canon(fresh.findings),
+        "a replayed file diverged from a fresh cold run"
+    );
+}
+
+/// The `delta_names` leg: a symbol **added** in one file moves an *untouched*
+/// file's absence finding. Nothing about app.php changed — only the name space
+/// under it — so a run without this leg would replay app.php's stale finding,
+/// which is the zero-FP violation walk skipping is capable of.
+#[test]
+fn a_symbol_addition_moves_an_untouched_files_absence_finding() {
+    if !spawn_or_skip("a_symbol_addition_moves_an_untouched_files_absence_finding") {
+        return;
+    }
+    let tmp = TempDir::new("skip-delta");
+    let files = write_skip_fixture(&tmp.dir);
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    let claims_absent = |findings: &[Diagnostic]| {
+        findings
+            .iter()
+            .any(|d| d.path.ends_with("app.php") && d.message.contains("lateBound"))
+    };
+    assert!(claims_absent(&cold.findings), "the tripwire is armed: {:#?}", cold.findings);
+
+    // Define the missing function — in a *different* file, leaving app.php's
+    // own bytes untouched.
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { return strtoupper($s); }\nfunction lateBound(): void {}\n",
+    );
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert!(
+        !claims_absent(&warm.findings),
+        "the absence finding survived the symbol that refutes it: {:#?}",
+        warm.findings
+    );
+    assert!(warm.report.walk.replayed > 0, "the run degraded to walking everything");
+
+    let fresh_store = TempDir::new("skip-delta-fresh");
+    let fresh = run(&tmp.dir, &fresh_store.dir, &files);
+    assert_eq!(canon(warm.findings), canon(fresh.findings));
+}
+
+/// The delta's OLD side, isolated. A symbol **removed** leaves no call edge
+/// behind — nothing resolves to the file any more — so only the old shard's
+/// key set can pull the caller back in. Asserted through the walk counters,
+/// because "which file walked" is what the leg decides.
+#[test]
+fn a_removed_symbol_walks_its_caller_through_the_old_shards_names() {
+    if !spawn_or_skip("a_removed_symbol_walks_its_caller_through_the_old_shards_names") {
+        return;
+    }
+    let tmp = TempDir::new("skip-delta-old");
+    let files = write_skip_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+
+    // helper.php keeps nothing: after this, no name resolves to it at all.
+    rewrite(&files[1], "<?php\nnamespace App;\n");
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    // helper.php walks because it changed; app.php walks because `f:app\helper`
+    // — a key only the OLD shard still carries — is in its footprint.
+    assert_eq!(
+        (warm.report.walk.walked, warm.report.walk.replayed),
+        (2, 2),
+        "notes: {:#?}",
+        warm.report.notes
+    );
+    let fresh_store = TempDir::new("skip-delta-old-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
+}
+
+/// Change is file-level, not semantic: a callee edit that moves only line
+/// numbers still walks its caller, and the caller's descent-provenance message
+/// follows the callee's new line. This is slice A's vendor-whitespace oracle,
+/// re-asserted with skipping active.
+#[test]
+fn a_line_only_callee_edit_still_walks_the_caller() {
+    if !spawn_or_skip("a_line_only_callee_edit_still_walks_the_caller") {
+        return;
+    }
+    let tmp = TempDir::new("skip-provenance");
+    let files = write_fixture(&tmp.dir);
+    let vendor_path = files[1].to_string_lossy().into_owned();
+    let names_origin = |findings: &[Diagnostic], line: u32| {
+        findings.iter().any(|d| {
+            d.path.ends_with("app.php")
+                && d.message.contains("via echo at ")
+                && d.message.contains(&format!("{vendor_path} line {line}"))
+        })
+    };
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert!(names_origin(&cold.findings, 3), "{:#?}", cold.findings);
+
+    // Whitespace only: every declaration and origin in the callee moves down a
+    // line, and nothing means anything different.
+    let text = std::fs::read_to_string(&files[1]).unwrap();
+    rewrite(&files[1], &text.replacen("<?php\n", "<?php\n\n", 1));
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert!(
+        names_origin(&warm.findings, 4),
+        "the caller replayed a message naming the callee's old line: {:#?}",
+        warm.findings
+    );
+    let fresh_store = TempDir::new("skip-provenance-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
+}
+
+/// A whole-universe verdict moving walks everything — priced coarsely on
+/// purpose. An `eval` appearing anywhere flips the dam's names-clear bit, which
+/// every absence ladder in every file reads.
+#[test]
+fn a_dam_flip_walks_every_file() {
+    if !spawn_or_skip("a_dam_flip_walks_every_file") {
+        return;
+    }
+    let tmp = TempDir::new("skip-dam");
+    let files = write_skip_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert!(cold.report.generation.is_some());
+
+    // Prove the fixture would otherwise skip: an untouched warm run replays.
+    let untouched = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(untouched.report.walk.replayed, files.len(), "the baseline must skip everything");
+
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nfunction helper(string $s): string { eval($s); return $s; }\n",
+    );
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(warm.report.walk.replayed, 0, "a dam flip must walk everything");
+    assert_eq!(warm.report.walk.walked, files.len());
+
+    let fresh_store = TempDir::new("skip-dam-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
+}
+
+/// An untouched tree skips every walk — the shape the M5 target is aimed at —
+/// and still produces the cold findings byte for byte.
+#[test]
+fn an_untouched_tree_replays_every_walk() {
+    if !spawn_or_skip("an_untouched_tree_replays_every_walk") {
+        return;
+    }
+    let tmp = TempDir::new("skip-no-change");
+    let files = write_skip_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(warm.report.walk.walked, 0, "notes: {:#?}", warm.report.notes);
+    assert_eq!(warm.report.walk.replayed, files.len());
+    assert_eq!(canon(warm.findings), canon(cold.findings));
+}
+
+// ---------------------------------------------------------------------------
+// The paranoid verifier, over the same fixtures.
+// ---------------------------------------------------------------------------
+
+/// Every skipping scenario re-run with the verifier on: every file is walked
+/// anyway, every would-be skip is graded against its fresh walk, and no
+/// divergence is found. This is the instrument a corpus run uses, exercised at
+/// fixture scale in CI — and the assertion that it *graded* something is as
+/// load bearing as the assertion that it found nothing.
+#[test]
+fn the_paranoid_verifier_grades_every_scenario_clean() {
+    if !spawn_or_skip("the_paranoid_verifier_grades_every_scenario_clean") {
+        return;
+    }
+    let scenarios: Vec<(&str, Option<(usize, &str)>)> = vec![
+        ("no-change", None),
+        (
+            "first-party-edit",
+            Some((1, "<?php\nnamespace App;\nfunction helper(string $s): string { return strtolower($s); }\n")),
+        ),
+        ("removed-symbol", Some((1, "<?php\nnamespace App;\n"))),
+        (
+            "line-shift",
+            Some((1, "<?php\n\nnamespace App;\nfunction helper(string $s): string { return strtoupper($s); }\n")),
+        ),
+        (
+            "new-symbol",
+            Some((2, "<?php\nnamespace Leaf;\nfunction leafOnly(): int { return 41 + 1; }\nfunction extra(): int { return 1; }\n")),
+        ),
+        (
+            "dam-flip",
+            Some((1, "<?php\nnamespace App;\nfunction helper(string $s): string { eval($s); return $s; }\n")),
+        ),
+    ];
+    for (tag, edit) in scenarios {
+        let tmp = TempDir::new(&format!("paranoid-{tag}"));
+        let files = write_skip_fixture(&tmp.dir);
+        let cold = run_paranoid(&tmp.dir, &tmp.dir, &files);
+        assert!(cold.report.walk.paranoid, "{tag}: the verifier did not run");
+        assert!(
+            cold.report.walk.divergences.is_empty(),
+            "{tag}: cold: {:#?}",
+            cold.report.walk.divergences
+        );
+
+        if let Some((slot, content)) = edit {
+            rewrite(&files[slot], content);
+        }
+        let warm = run_paranoid(&tmp.dir, &tmp.dir, &files);
+        assert_eq!(warm.report.mode, GenerationMode::Warm, "{tag}");
+        assert_eq!(warm.report.walk.walked, files.len(), "{tag}: paranoid walks everything");
+        assert_eq!(warm.report.walk.replayed, 0, "{tag}: paranoid keeps the walked answer");
+        assert!(
+            warm.report.walk.divergences.is_empty(),
+            "{tag}: the affected set let a stale block through: {:#?}",
+            warm.report.walk.divergences
+        );
+        // A verifier that graded nothing proved nothing about this scenario.
+        // The dam flip is the one shape where zero is the right answer: the
+        // whole-universe leg refuses every row before the affected set is
+        // consulted at all.
+        if tag == "dam-flip" {
+            assert_eq!(warm.report.walk.would_skip, 0, "{tag}");
+        } else {
+            assert!(warm.report.walk.would_skip > 0, "{tag}: nothing was graded");
+        }
+
+        // And a paranoid run's findings are still a cold run's findings.
+        let fresh_store = TempDir::new(&format!("paranoid-{tag}-fresh"));
+        assert_eq!(
+            canon(warm.findings),
+            canon(run(&tmp.dir, &fresh_store.dir, &files).findings),
+            "{tag}"
+        );
+    }
+}
+
+/// The verifier catches what it exists to catch. A persisted block doctored to
+/// carry a message the walk does not produce is exactly the shape a missing
+/// affected-set leg would have; paranoid mode names the file and the finding
+/// instead of shipping it, and the run's own findings stay the walked ones.
+#[test]
+fn the_paranoid_verifier_names_a_planted_divergence() {
+    if !spawn_or_skip("the_paranoid_verifier_names_a_planted_divergence") {
+        return;
+    }
+    let tmp = TempDir::new("paranoid-planted");
+    let files = write_skip_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    let hex = cold.report.generation.clone().expect("the cold build publishes");
+    assert!(!cold.findings.is_empty(), "the fixture must produce a finding to doctor");
+
+    // The artifact is a container of sections and the summaries payload is
+    // JSON inside one of them, so planting a divergence is a byte patch of a
+    // message string — no writer needed, and nothing else in the artifact
+    // moves. The sections are written in order and `summaries` is last, so the
+    // LAST occurrence of a message word is the persisted block's copy; an
+    // earlier one would be the trace or contract payload, where a patch would
+    // move the walk and the replay together and prove nothing. The word comes
+    // from app.php's `call.undefined-function` message — a *walk* finding, and
+    // so one a block actually holds (the effect and throw passes are
+    // whole-universe and are never persisted).
+    let artifact = tmp.dir.join(".steins").join("gen").join(&hex).join("__root__.pkg");
+    let bytes = std::fs::read(&artifact).expect("the root artifact is on disk");
+    let needle = b"lateBound";
+    let at = bytes
+        .windows(needle.len())
+        .rposition(|w| w == needle)
+        .expect("the persisted blocks carry the absence finding's message");
+    let mut doctored = bytes.clone();
+    doctored[at..at + needle.len()].copy_from_slice(b"lateBounD");
+    std::fs::write(&artifact, doctored).unwrap();
+
+    let warm = run_paranoid(&tmp.dir, &tmp.dir, &files);
+    assert!(
+        !warm.report.walk.divergences.is_empty(),
+        "the planted divergence went unnoticed: {:#?}",
+        warm.report.notes
+    );
+    let named = warm.report.walk.divergences[0].to_string();
+    assert!(named.contains("app.php"), "the divergence must name the file: {named}");
+    assert!(named.contains("lateBoun"), "the divergence must name the finding: {named}");
+    // The walked answer is what the run reports, so a poisoned block is a loud
+    // note and never a wrong finding.
+    let fresh_store = TempDir::new("paranoid-planted-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
 }

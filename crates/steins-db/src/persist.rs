@@ -23,8 +23,12 @@
 //!   container's own discipline one level down: a length-prefixed directory,
 //!   then payloads that tile the rest of the section exactly.
 //!
-//! The `summaries` section is deliberately absent: issue #489 owns that
-//! schema and lands its own section.
+//! The `summaries` section is deliberately absent *here*: issue #489 owns that
+//! schema, and it landed in `steins-infer` rather than beside these three,
+//! because its payload is that crate's vocabulary end to end (`Diagnostic`,
+//! the diagnostic-id registry, `Facet`, `Fix`) and this crate neither knows nor
+//! should know any of it. Same discipline, one crate over — and the same line
+//! the orchestrator's own `sources` section already draws.
 //!
 //! Codec: serde_json inside every section — zero new dependencies, and the
 //! section boundary plus [`steins_gen::SCHEMA_VERSION`] make a later codec

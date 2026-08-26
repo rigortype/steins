@@ -136,9 +136,20 @@ value.
 
 The walk, environments, the object store, binding descent, the effect and throw
 fixpoints, name resolution, every diagnostic emitter, the diagnostic registry,
-inline suppression, and the dam.
+inline suppression, and the dam. Also the generation orchestrator (ADR-0092
+§5) and the two artifact sections whose payloads are this crate's own
+vocabulary rather than `steins-db`'s — `sources`, the provenance record the
+reuse decision reads, and `summaries`, the per-file walk blocks a warm run
+replays instead of walking (issue #489). The line is the same one `steins-gen`
+draws one level up: a section's bytes belong to whoever knows what they mean,
+and `Diagnostic` / the diagnostic registry / `Facet` / `Fix` are not things
+`steins-db` knows.
 
-**Defends:** the zero-FP bar itself. This is where `Maybe` becomes silence.
+**Defends:** the zero-FP bar itself. This is where `Maybe` becomes silence —
+including across a generation: a file may only replay a persisted block when
+its own bytes, every name its footprint could resolve, every file it reaches,
+and every whole-universe verdict are unmoved, and every unknown resolves to
+walking.
 
 ### `steins-edit` — the transform engine
 

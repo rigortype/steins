@@ -101,28 +101,41 @@ generations on disk, not a finer query DAG:
 
 - **Cross-run reuse** is the generation store (`<project>/.steins/gen/`), built
   and read by `steins_infer::generation_check` behind
-  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489 slice A). A package whose
-  captured source fingerprint matches its artifact loads its lowered trees and
-  its shard instead of re-parsing.
+  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489). A package whose captured
+  source fingerprint matches its artifact loads its lowered trees and its shard
+  instead of re-parsing (slice A), and a file nothing could have changed
+  replays its persisted walk instead of walking (slice B, below).
 - **The per-package payloads** — `symbols`, `contracts`, `trace` — live in
-  `steins_db::persist` (#487); the container, identity and store live in
-  `steins-gen` (#485).
+  `steins_db::persist` (#487); `sources` and `summaries` live in
+  `steins_infer` beside the orchestrator that reads them, because their
+  payloads are that crate's vocabulary; the container, identity and store live
+  in `steins-gen` (#485).
 - **Fold results are recorded generation inputs** through the ADR-0066 table
   seam, keyed under the engine identity (#488).
 - **The perf harness** is `cargo xtask perf` (#483), with `--warm` measuring the
   lifecycle and asserting warm ≡ cold in-process (#489).
+- **Skipping the walk** of a file nothing could have changed is issue #489
+  slice B: the `summaries` section persists per-file walk blocks, and a file
+  replays its block unless it is in the affected set — its own bytes moved, its
+  name footprint meets the name delta of a changed package's shards, it reaches
+  a changed file in the file-level call graph within `MAX_BINDING_DEPTH`, or a
+  whole-universe verdict moved. The verifier
+  (`STEINS_GENERATIONS_PARANOID=1`, `cargo xtask perf --warm --paranoid`) walks
+  everything anyway and grades every would-be skip against its fresh walk.
 - **Per-declaration entry-state summaries** were *not* needed and are not
-  persisted: a warm run walks every file, so each recomputes its entry state
-  locally from the loaded trace. The ADR-0048 §3 constraint stands as a
-  constraint; it did not become an artifact.
+  persisted: a walked file recomputes its entry state locally from the loaded
+  trace, and a replayed one recomputes nothing at all. The ADR-0048 §3
+  constraint stands as a constraint; it did not become an artifact.
 
 What salsa still does is exactly what this document's first section describes —
 memoize `parse` within one run — and no new tracked semantic query is planned.
 
 ## Still open
 
-- **Skipping the walk of unchanged files** (issue #489 slice B). Warm runs
-  currently re-walk everything, which measurement says is 60–76% of a warm run
-  and the share grows with project size.
+- **Tightening the affected set below the package.** `delta_names` is
+  package-granular (ADR-0092 §3's unit), so any edit inside a package puts
+  every one of its names into the delta; the persisted per-file content hashes
+  already make a per-file delta possible on the changed side. A later slice,
+  and only if measurement says the closure is too wide.
 - **Per-file walk parallelism** (issue #490, re-scoped to the file loop).
 - **The trace codec** (issue #504): artifacts run ~14x the analyzed source.

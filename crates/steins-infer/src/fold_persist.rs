@@ -328,6 +328,20 @@ impl RecordingEngine {
         self.live.posture()
     }
 
+    /// The identity of whatever answered this run's `env` row, without the
+    /// rows themselves — [`Self::artifact`]'s first half.
+    ///
+    /// Split out for issue #489 slice B, whose replay gate needs the engine
+    /// posture *before* the first file is walked (a persisted finding may only
+    /// be replayed under the engine that produced it). Reads the same recorded
+    /// row `artifact` reads, so the two can never disagree; `None` until
+    /// something has asked, and for an engine that never describes itself.
+    #[must_use]
+    pub fn identity(&self) -> Option<FoldTableIdentity> {
+        let env = self.recorded.get(&request_key("env", &steins_sidecar::env_params()))?;
+        steins_sidecar::parse_env_result(env).map(|env| FoldTableIdentity::from_env(&env))
+    }
+
     /// Answer one request: the loaded table first, the live engine on a miss
     /// — including the malformed-row miss, where `parse` refuses the stored
     /// bytes — recording whatever answered.
@@ -439,6 +453,12 @@ impl EngineFolder<RecordingEngine> {
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
         self.engine.posture()
+    }
+
+    /// The engine identity behind this folder ([`RecordingEngine::identity`]).
+    #[must_use]
+    pub fn engine_identity(&self) -> Option<FoldTableIdentity> {
+        self.engine.identity()
     }
 }
 

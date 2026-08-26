@@ -1249,6 +1249,27 @@ impl<'a> PurityOracle<'a> {
             finding_groups(&e.findings, &[], self.policy).iter().any(|&(_, d)| !d)
         })
     }
+
+    /// Every symbol this oracle answers [`Self::provably_impure`] for, spelled
+    /// canonically and sorted — the oracle's *whole* answer surface, since
+    /// `provably_impure` is the only question it takes.
+    ///
+    /// The generation planner (issue #489 slice B) digests this to decide
+    /// whether the oracle moved between generations; the walk of any file may
+    /// consult any symbol, so nothing narrower would be sound. Paid only when
+    /// the oracle exists at all — i.e. when some docblock spells a
+    /// purity-bearing callable — and it reads the fixpoint the oracle already
+    /// borrowed, forcing nothing new.
+    pub(crate) fn impurity_answers(&self) -> Vec<String> {
+        let mut out: Vec<String> = self
+            .effects
+            .keys()
+            .filter(|sym| self.provably_impure(sym))
+            .map(|sym| format!("{sym:?}"))
+            .collect();
+        out.sort_unstable();
+        out
+    }
 }
 
 /// Effect-envelope diagnostics for the whole project (proven violations only).

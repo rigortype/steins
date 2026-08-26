@@ -86,6 +86,9 @@ pub(crate) fn try_generation_check(
         warning_handler_abort: postures.warning_handler_abort,
         final_keyword: postures.final_keyword,
         php: !no_php,
+        // The verifier is environment-driven here (`STEINS_GENERATIONS_PARANOID`),
+        // which `generation_check` reads for itself; the CLI never forces it.
+        paranoid: false,
     };
     let outcome = match generation_check(&params) {
         Ok(outcome) => outcome,
@@ -106,7 +109,7 @@ pub(crate) fn try_generation_check(
         .iter()
         .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
     errln!(
-        "steins: experimental generations: {} run, {} package(s), {} file(s) loaded from artifacts, {} parsed; generation {}",
+        "steins: experimental generations: {} run, {} package(s), {} file(s) loaded from artifacts, {} parsed; {} walked, {} replayed; generation {}",
         match report.mode {
             GenerationMode::Cold => "cold",
             GenerationMode::Warm => "warm",
@@ -114,6 +117,8 @@ pub(crate) fn try_generation_check(
         report.packages.len(),
         loaded_files,
         parsed_files,
+        report.walk.walked,
+        report.walk.replayed,
         report.generation.as_deref().unwrap_or("(unpublished)")
     );
     for note in &report.notes {

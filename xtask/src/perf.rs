@@ -66,10 +66,11 @@ const BASELINE_FILE: &str = "perf.local.toml";
 const COLD_BUDGET_FRACTION: f64 = 0.10;
 
 /// Entry point for `cargo xtask perf <target-dir>... [--runs N] [--bless]
-/// [--no-php] [--warm]`. Returns `Ok(true)` when green; `Ok(false)` on a
-/// determinism, baseline-hash, or warm ≡ cold failure; `Err` for operator
-/// mistakes (bad args, unreadable baseline, posture mismatch — a compare
-/// across postures is an error, not a number).
+/// [--no-php] [--warm] [--paranoid]`. Returns `Ok(true)` when green;
+/// `Ok(false)` on a determinism, baseline-hash, warm ≡ cold, or paranoid
+/// divergence failure; `Err` for operator mistakes (bad args, unreadable
+/// baseline, posture mismatch — a compare across postures is an error, not a
+/// number).
 ///
 /// `--warm` (issue #489, the warm half of ADR-0092 §5's oracle): per target,
 /// cold-build + publish a generation into a scratch store, then measure warm
@@ -78,8 +79,20 @@ const COLD_BUDGET_FRACTION: f64 = 0.10;
 /// lines are additive to the existing output; `--bless` still records the
 /// cold numbers only — warm baselines become meaningful in slice B, so warm
 /// timings are printed, never persisted.
+///
+/// `--paranoid` (issue #489 slice B) turns the walk verifier on for every
+/// generation run this invocation makes: each warm rebuild walks *every* file
+/// regardless of the affected set and asserts that each file it would have
+/// skipped replays byte-identically. Any divergence fails the invocation.
+/// Implies `--warm` — a cold-only run has nothing to skip — and costs the
+/// skipping back, which is the price of the measurement.
 pub fn run(args: &[String]) -> Result<bool, String> {
     let parsed = parse_args(args)?;
+    if parsed.paranoid {
+        println!(
+            "perf: paranoid walk verification ON — every file is walked and every would-be skip is graded"
+        );
+    }
     let runs = if parsed.runs < 2 {
         // The determinism oracle needs two runs to compare; a single run
         // measures nothing this slice is for.
@@ -115,10 +128,10 @@ pub fn run(args: &[String]) -> Result<bool, String> {
         }
 
         if parsed.warm {
-            match measure_warm(Path::new(target), runs, posture, &m) {
+            match measure_warm(Path::new(target), runs, posture, parsed.paranoid, &m) {
                 Ok(w) => {
                     print_warm(&w, &m);
-                    if !w.matches {
+                    if !w.matches || w.divergence_count > 0 {
                         green = false;
                     }
                 }
@@ -186,6 +199,7 @@ struct PerfArgs {
     bless: bool,
     no_php: bool,
     warm: bool,
+    paranoid: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
@@ -194,6 +208,7 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
     let mut bless = false;
     let mut no_php = false;
     let mut warm = false;
+    let mut paranoid = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -208,16 +223,23 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
             "--bless" => bless = true,
             "--no-php" => no_php = true,
             "--warm" => warm = true,
+            // Verifying skips only means something over a published
+            // generation, so the flag implies the warm half rather than
+            // erroring on an operator who asked for one and not the other.
+            "--paranoid" => {
+                paranoid = true;
+                warm = true;
+            }
             other if other.starts_with("--") => {
-                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm])"));
+                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid])"));
             }
             dir => targets.push(dir.to_owned()),
         }
     }
     if targets.is_empty() {
-        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm]".to_owned());
+        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid]".to_owned());
     }
-    Ok(PerfArgs { targets, runs, bless, no_php, warm })
+    Ok(PerfArgs { targets, runs, bless, no_php, warm, paranoid })
 }
 
 /// The engine posture a measurement ran under (recorded in the baseline; the
@@ -427,6 +449,13 @@ struct WarmRun {
     persist_ms: f64,
     loaded: usize,
     parsed: usize,
+    /// The walk split of issue #489 slice B: files walked vs files that
+    /// replayed a persisted block instead.
+    walked: usize,
+    replayed: usize,
+    /// Files the affected set would have skipped — under `--paranoid` these
+    /// were walked anyway and graded, so this is the verified population.
+    would_skip: usize,
 }
 
 /// What `--warm` measured for one target.
@@ -440,6 +469,12 @@ struct WarmMeasurement {
     matches: bool,
     /// The first mismatch, when there was one.
     mismatch: Option<String>,
+    /// Whether the paranoid verifier ran, the divergence samples it kept over
+    /// every generation run of this target, and how many there were in all
+    /// (zero is the pass).
+    paranoid: bool,
+    divergences: Vec<String>,
+    divergence_count: usize,
 }
 
 /// Cold-build + publish a generation into a scratch store, then measure `runs`
@@ -449,13 +484,14 @@ fn measure_warm(
     dir: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold: &Measurement,
 ) -> Result<WarmMeasurement, String> {
     let dir = dir.to_path_buf();
     let cold_hash = cold.findings_sha256.clone();
     std::thread::Builder::new()
         .stack_size(WORKER_STACK_SIZE)
-        .spawn(move || measure_warm_on_worker(&dir, runs, posture, &cold_hash))
+        .spawn(move || measure_warm_on_worker(&dir, runs, posture, paranoid, &cold_hash))
         .expect("failed to spawn the perf warm worker thread")
         .join()
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
@@ -465,6 +501,7 @@ fn measure_warm_on_worker(
     dir: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold_hash: &str,
 ) -> Result<WarmMeasurement, String> {
     // The store lives in a scratch directory, never in the measured tree.
@@ -477,16 +514,18 @@ fn measure_warm_on_worker(
             .unwrap_or(0)
     ));
     std::fs::create_dir_all(&store).map_err(|e| format!("create scratch store: {e}"))?;
-    let result = measure_warm_in_store(dir, &store, runs, posture, cold_hash);
+    let result = measure_warm_in_store(dir, &store, runs, posture, paranoid, cold_hash);
     let _ = std::fs::remove_dir_all(&store);
     result
 }
 
+#[allow(clippy::too_many_arguments)]
 fn measure_warm_in_store(
     dir: &Path,
     store: &Path,
     runs: usize,
     posture: Posture,
+    paranoid: bool,
     cold_hash: &str,
 ) -> Result<WarmMeasurement, String> {
     // The same file list and target-relative diagnostic paths as `cold_run`,
@@ -512,6 +551,7 @@ fn measure_warm_in_store(
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
         php: matches!(posture, Posture::Php),
+        paranoid,
     };
 
     let check = |tag: &str, findings: Vec<Diagnostic>| -> Option<String> {
@@ -528,6 +568,10 @@ fn measure_warm_in_store(
     if outcome.report.mode != GenerationMode::Cold {
         return Err("the scratch store unexpectedly held a generation".to_owned());
     }
+    let paranoid = outcome.report.walk.paranoid;
+    let mut divergences: Vec<String> =
+        outcome.report.walk.divergences.iter().map(ToString::to_string).collect();
+    let mut divergence_count = outcome.report.walk.divergence_count;
     let mut mismatch = check("cold generation build", outcome.findings);
 
     let mut warm: Vec<WarmRun> = Vec::with_capacity(runs);
@@ -543,6 +587,9 @@ fn measure_warm_in_store(
             .iter()
             .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
         let t = outcome.report.timings;
+        let w = &outcome.report.walk;
+        divergences.extend(w.divergences.iter().map(ToString::to_string));
+        divergence_count += w.divergence_count;
         warm.push(WarmRun {
             capture_ms: t.capture_ms,
             trees_ms: t.trees_ms,
@@ -550,13 +597,24 @@ fn measure_warm_in_store(
             persist_ms: t.persist_ms,
             loaded,
             parsed,
+            walked: w.walked,
+            replayed: w.replayed,
+            would_skip: w.would_skip,
         });
         if mismatch.is_none() {
             mismatch = check(&format!("warm rebuild {}", i + 1), outcome.findings);
         }
     }
 
-    Ok(WarmMeasurement { cold_build_ms, warm, matches: mismatch.is_none(), mismatch })
+    Ok(WarmMeasurement {
+        cold_build_ms,
+        warm,
+        matches: mismatch.is_none(),
+        mismatch,
+        paranoid,
+        divergences,
+        divergence_count,
+    })
 }
 
 /// Print the warm measurement under the cold block. Additive lines only; warm
@@ -567,13 +625,15 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
     for (i, run) in w.warm.iter().enumerate() {
         println!(
-            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed), analyze {:.1} ms, persist {:.1} ms, total {:.1} ms",
+            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
             i + 1,
             run.capture_ms,
             run.trees_ms,
             run.loaded,
             run.parsed,
             run.analyze_ms,
+            run.walked,
+            run.replayed,
             run.persist_ms,
             run.capture_ms + run.trees_ms + run.analyze_ms + run.persist_ms,
         );
@@ -593,6 +653,24 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
             &cold.findings_sha256[..12]
         ),
         Some(detail) => println!("      warm ≡ cold: FAILED — {detail}"),
+    }
+    if w.paranoid {
+        let graded: usize = w.warm.iter().map(|r| r.would_skip).sum();
+        if w.divergence_count == 0 {
+            println!(
+                "      paranoid: OK — {graded} would-be skip(s) graded across {} run(s), every one byte-identical to its fresh walk",
+                w.warm.len()
+            );
+        } else {
+            println!(
+                "      paranoid: FAILED — {} divergence(s) over {graded} graded would-be skip(s); first {} shown",
+                w.divergence_count,
+                w.divergences.len()
+            );
+            for line in &w.divergences {
+                println!("        {line}");
+            }
+        }
     }
 }
 
