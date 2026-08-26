@@ -669,7 +669,7 @@ fn measure_warm_in_store(
 /// timings are never persisted (`--bless` records the cold numbers — warm
 /// baselines become meaningful in slice B).
 fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
-    println!("    warm (experimental generations, ADR-0092 §5):");
+    println!("    warm (frozen generations, ADR-0092 §5):");
     println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
     for (i, run) in w.warm.iter().enumerate() {
         println!(
