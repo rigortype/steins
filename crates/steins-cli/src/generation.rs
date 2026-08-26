@@ -108,13 +108,19 @@ pub(crate) fn try_generation_check(
         .packages
         .iter()
         .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
+    // Packages that both loaded and parsed — the shape an edit inside a
+    // package has since the provenance gate went per file (issue #512), and
+    // the one the two totals alone cannot tell from several whole packages
+    // falling on either side.
+    let mixed = report.packages.iter().filter(|pkg| pkg.is_mixed()).count();
     errln!(
-        "steins: experimental generations: {} run, {} package(s), {} file(s) loaded from artifacts, {} parsed; {} walked, {} replayed; generation {}",
+        "steins: experimental generations: {} run, {} package(s){}, {} file(s) loaded from artifacts, {} parsed; {} walked, {} replayed; generation {}",
         match report.mode {
             GenerationMode::Cold => "cold",
             GenerationMode::Warm => "warm",
         },
         report.packages.len(),
+        if mixed == 0 { String::new() } else { format!(" ({mixed} partly reused)") },
         loaded_files,
         parsed_files,
         report.walk.walked,
