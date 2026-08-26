@@ -132,9 +132,7 @@ fn measure_on_worker(dir: &Path, php: bool) -> Result<Measurement, String> {
 }
 
 fn measure_in_store(dir: &Path, store: &Path, php: bool) -> Result<Measurement, String> {
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let files = collect_php_files(dir);
     let rel: Vec<PathBuf> =
         files.iter().map(|f| f.strip_prefix(dir).unwrap_or(f).to_path_buf()).collect();
 

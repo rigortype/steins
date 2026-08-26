@@ -20,6 +20,7 @@ pub mod partition;
 pub mod persist;
 pub mod plugins;
 pub mod shard;
+pub mod walk;
 #[cfg(feature = "persist")]
 pub mod wire;
 

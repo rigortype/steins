@@ -1784,9 +1784,7 @@ fn check_under_target(
 fn analyze_package(name: &str, tag: &str, dir: &Path, root: &Path) -> PackageReport {
     let start = Instant::now();
 
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let files = collect_php_files(dir);
 
     let db = SteinsDatabase::default();
     let mut inputs: Vec<SourceFile> = Vec::with_capacity(files.len());

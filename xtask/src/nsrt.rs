@@ -155,9 +155,7 @@ fn run_on_worker(dir_arg: Option<&str>) -> Result<(), String> {
         ));
     }
 
-    let mut files = Vec::new();
-    collect_php_files(&dir, &mut files);
-    files.sort();
+    let files = collect_php_files(&dir);
     if files.is_empty() {
         return Err(format!("no .php files under {}", dir.display()));
     }

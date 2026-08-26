@@ -398,9 +398,7 @@ fn measure_on_worker(dir: &Path, runs: usize, posture: Posture) -> Result<Measur
 /// included, because the harness measures the analysis, not the gate policy.
 fn cold_run(dir: &Path, posture: Posture) -> Result<ColdRun, String> {
     let t_load = Instant::now();
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let files = collect_php_files(dir);
     if files.is_empty() {
         return Err(format!("target `{}` holds no .php files", dir.display()));
     }
@@ -565,9 +563,7 @@ fn measure_warm_in_store(
 ) -> Result<WarmMeasurement, String> {
     // The same file list and target-relative diagnostic paths as `cold_run`,
     // so the canonical serialization (and therefore the hash) is comparable.
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
-    files.sort();
+    let files = collect_php_files(dir);
     let rel: Vec<PathBuf> =
         files.iter().map(|f| f.strip_prefix(dir).unwrap_or(f).to_path_buf()).collect();
     let layout = composer::discover(&[dir.to_path_buf()], dir);
@@ -1103,9 +1099,7 @@ fn edit_scenarios(
     grade_store: &Path,
     posture: Posture,
 ) -> Result<Vec<EditRow>, String> {
-    let mut files = Vec::new();
-    collect_php_files(tree, &mut files);
-    files.sort();
+    let files = collect_php_files(tree);
     if files.len() < 3 {
         return Err("a seeded-edit run needs at least three files".to_owned());
     }
@@ -1265,9 +1259,7 @@ fn run_generation(
     posture: Posture,
     paranoid: bool,
 ) -> Result<(GenerationMode, Vec<Diagnostic>, steins_infer::GenerationReport), String> {
-    let mut files = Vec::new();
-    collect_php_files(tree, &mut files);
-    files.sort();
+    let files = collect_php_files(tree);
     let rel: Vec<PathBuf> =
         files.iter().map(|f| f.strip_prefix(tree).unwrap_or(f).to_path_buf()).collect();
     let layout = composer::discover(&[tree.to_path_buf()], tree);

@@ -33,6 +33,7 @@
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use steins_db::walk::{LinkSkip, SkippedLink};
 use steins_db::{PhpTarget, ProjectLayout};
 use steins_infer::{
     ALL_EMITTABLE_IDS, DIAGNOSTIC_REGISTRY, DamKind, FileUnit, LazyTree, MONKEY_PATCH_EXTENSIONS,
@@ -142,7 +143,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     // One parse, one layout discovery; same `resolve_layout` every surface uses (#181).
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let layout = crate::resolve_layout(std::slice::from_ref(&root.to_string_lossy().into_owned()));
-    let files = parse_project(&root);
+    let (files, skipped_links) = parse_project(&root);
 
     let mut sections: Vec<Section> = Vec::new();
 
@@ -153,7 +154,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     let (config_section, config) = section_config(&mut contradiction);
     sections.push(config_section);
 
-    sections.push(section_layout(&root, &cwd, &layout));
+    sections.push(section_layout(&root, &cwd, &layout, &skipped_links));
     sections.push(section_coverage(
         &root,
         &files,
@@ -522,7 +523,12 @@ fn parse_env_minor(v: &str) -> Option<(u16, u16)> {
 /// deciding whether a finding is reported or a declaration is a transform
 /// candidate. Resolved from `composer.json`, falling back to the `vendor`
 /// directory-name floor when no manifest governs.
-fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
+fn section_layout(
+    root: &Path,
+    cwd: &Path,
+    layout: &ProjectLayout,
+    skipped: &[SkippedLink],
+) -> Section {
     let mut sec = Section::new("Layout");
     if layout.is_fallback() {
         line!(
@@ -530,15 +536,44 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
             "  no composer.json governs {} — vendor is the `vendor` directory-name floor, not a declared fact",
             root.display()
         );
-        return sec;
+    } else {
+        line!(sec, "  {} manifest(s) govern this tree:", layout.roots().len());
+        for r in layout.roots() {
+            line!(sec, "    {}", display_path(cwd, r.manifest()));
+            line!(sec, "      vendor: {}", join_paths(cwd, r.vendor_roots()));
+            line!(sec, "      ours:   {}", join_paths(cwd, r.first_party_roots()));
+        }
     }
-    line!(sec, "  {} manifest(s) govern this tree:", layout.roots().len());
-    for r in layout.roots() {
-        line!(sec, "    {}", display_path(cwd, r.manifest()));
-        line!(sec, "      vendor: {}", join_paths(cwd, r.vendor_roots()));
-        line!(sec, "      ours:   {}", join_paths(cwd, r.first_party_roots()));
-    }
+    skipped_links_lines(&mut sec, cwd, skipped);
     sec
+}
+
+/// Where the walk stopped (issue #524). A directory symlink is not followed —
+/// one out of the tree names code this run was never asked about, one back into
+/// it counts the same files twice — so what it would have reached is *not*
+/// analyzed, and an unreported omission is how that goes unnoticed for a
+/// release series. Silent when there is nothing to report: a project with one
+/// symlinked vendor directory should not read as if something were wrong.
+fn skipped_links_lines(sec: &mut Section, cwd: &Path, skipped: &[SkippedLink]) {
+    if skipped.is_empty() {
+        return;
+    }
+    /// Named individually; the rest are counted. Enough to recognize the tree.
+    const SHOWN: usize = 5;
+    let escaping = skipped.iter().filter(|s| s.reason == LinkSkip::Escapes).count();
+    line!(
+        sec,
+        "  {} path(s) skipped as symlinks ({} leaving the analyzed tree, {} re-entering it) — nothing under them was analyzed:",
+        skipped.len(),
+        escaping,
+        skipped.len() - escaping
+    );
+    for s in skipped.iter().take(SHOWN) {
+        line!(sec, "    {} — {}", display_path(cwd, &s.path), s.reason.reason());
+    }
+    if skipped.len() > SHOWN {
+        line!(sec, "    … and {} more", skipped.len() - SHOWN);
+    }
 }
 
 /// Section 4 — Coverage posture (ADR-0054 §9.2): what this run parsed and then
@@ -831,13 +866,14 @@ fn breakdown<const N: usize>(counts: &[usize; N], labels: [&str; N]) -> String {
         .join(", ")
 }
 
-/// Parse every `.php` file under `root` once. Unreadable files are skipped
-/// silently; a recovered parse tree still carries scopes and sites (ADR-0003).
-fn parse_project(root: &Path) -> Vec<ParsedFile> {
-    let mut files = Vec::new();
-    crate::collect_php_files(root, &mut files);
-    let files = crate::dedup_canonical(files);
-    files
+/// Parse every `.php` file under `root` once, and hand back what the walk
+/// refused (issue #524) for the Layout section to report. Unreadable files are
+/// skipped silently; a recovered parse tree still carries scopes and sites
+/// (ADR-0003).
+fn parse_project(root: &Path) -> (Vec<ParsedFile>, Vec<SkippedLink>) {
+    let sources = crate::collect_sources(std::slice::from_ref(&root.to_path_buf()));
+    let parsed = sources
+        .files
         .iter()
         .filter_map(|file| {
             let bytes = std::fs::read(file).ok()?;
@@ -847,7 +883,8 @@ fn parse_project(root: &Path) -> Vec<ParsedFile> {
                 tree: SourceTree::parse(&text),
             })
         })
-        .collect()
+        .collect();
+    (parsed, sources.skipped_links)
 }
 
 /// Path relative to `cwd` when underneath it, else absolute.

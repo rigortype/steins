@@ -70,6 +70,15 @@ pub fn discover(paths: &[PathBuf], cwd: &Path) -> ProjectLayout {
         let Ok(entries) = std::fs::read_dir(&dir) else { continue };
         for entry in entries.flatten() {
             let child = entry.path();
+            // A directory symlink is not descended (issue #524), for the same
+            // reason [`crate::walk`] does not: what is under it is either
+            // outside the analyzed tree — where a manifest governs nothing this
+            // run reads — or already reached by its real path. `seen` is keyed
+            // by spelling, so `corpus/corpus -> corpus` would otherwise enqueue
+            // the whole tree again under every depth of the link.
+            if entry.file_type().is_ok_and(|k| k.is_symlink()) {
+                continue;
+            }
             if !child.is_dir() || is_pruned(&child, &roots) {
                 continue;
             }

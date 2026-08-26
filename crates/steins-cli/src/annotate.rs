@@ -13,7 +13,7 @@ use steins_infer::{
 
 use crate::Format;
 use crate::config::{allow_list_from_disk, effects_policy_from_disk};
-use crate::project::{collect_php_files, dedup_canonical, load_plugins, resolve_layout};
+use crate::project::{collect_sources, load_plugins, resolve_layout};
 
 /// `steins annotate [--no-php] [--format text|json] <file.php>` — reprint one
 /// file with a right-margin column of proven facts (ADR-0020), or (JSON) the
@@ -99,9 +99,7 @@ pub(crate) fn run_annotate(args: &[String]) -> ExitCode {
     });
 
     let canon_target = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let mut project_files = Vec::new();
-    collect_php_files(&root, &mut project_files);
-    let project_files = dedup_canonical(project_files);
+    let project_files = collect_sources(std::slice::from_ref(&root)).files;
 
     let mut inputs: Vec<SourceFile> = Vec::new();
     let mut target: Option<SourceFile> = None;

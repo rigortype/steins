@@ -84,8 +84,7 @@ pub fn run() -> Result<(), String> {
 /// Returns the count map and the number of files seen.
 fn count_package(dir: &std::path::Path) -> (HashMap<String, u64>, usize) {
     let mut counts: HashMap<String, u64> = HashMap::new();
-    let mut files = Vec::new();
-    collect_php_files(dir, &mut files);
+    let files = collect_php_files(dir);
 
     let db = SteinsDatabase::default();
     let inputs: Vec<SourceFile> = files
