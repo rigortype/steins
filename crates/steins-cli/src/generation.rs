@@ -14,7 +14,8 @@
 //! stderr notes and the `.steins/gen/` store, nothing else — and any
 //! orchestration failure degrades to the ordinary cold path with a note.
 
-use std::path::PathBuf;
+use std::ffi::OsStr;
+use std::path::{Component, Path, PathBuf};
 
 use steins_db::EffectsPolicy;
 use steins_infer::{Diagnostic, GenerationMode, GenerationParams, generation_check};
@@ -60,14 +61,23 @@ pub(crate) fn try_generation_check(
         errln!("steins: {w}");
     }
 
-    // The store lives with the project: the outermost governing root, or the
-    // working directory for a manifest-less tree.
+    // Where the sealed capture keys this run's files from (issue #506). Not
+    // the layout root: a manifest-less tree has no governing root at all, and
+    // the two roots answer different questions anyway — the layout root says
+    // who governs the code, the capture root only says what prefix the seal's
+    // keys drop. The analyzed files are the only thing that always answers the
+    // second one.
+    let capture_root = capture_root(files, &cwd);
+    // The store lives with the project: the outermost governing root, or —
+    // manifest-less — beside the analyzed code rather than beside whoever
+    // happened to invoke us (issue #506: the cache belongs to the tree it
+    // caches, not to the caller's working directory).
     let store_root =
-        layout.roots().last().map_or_else(|| cwd.clone(), |root| root.dir().to_path_buf());
+        layout.roots().last().map_or_else(|| capture_root.clone(), |root| root.dir().to_path_buf());
     let partition = steins_db::partition::discover(&layout);
     let params = GenerationParams {
         store_root: &store_root,
-        capture_root: &cwd,
+        capture_root: &capture_root,
         files,
         layout: &layout,
         partition: &partition,
@@ -118,4 +128,114 @@ pub(crate) fn try_generation_check(
         .collect();
     let loaded = assemble_loaded(entries, layout, plugins, effects.clone());
     Some(GatedRun { loaded, findings: outcome.findings, trees: outcome.trees })
+}
+
+/// The directory the sealed capture keys `files` against: their common
+/// ancestor, or `cwd` when the run cannot use one.
+///
+/// `SourceInventory::capture` keys every file by `strip_prefix(root)` and
+/// reads it back as `root.join(key)`, so the root has to be a directory prefix
+/// of the *spellings the CLI resolved* — which is why passing `cwd` was wrong
+/// (issue #506): `steins check /some/tree` from anywhere else failed capture on
+/// its first file and dropped the whole lifecycle to the cold path.
+///
+/// The degenerate cases, deliberately:
+///
+/// * **No files.** A path argument that exists but holds no `.php` file
+///   reaches the gate with an empty universe (`check` only exits early on a
+///   *missing* path), and nothing is captured — `cwd`, exactly as before.
+/// * **One file.** Its parent directory; the key is the bare file name.
+/// * **Nothing shared but the filesystem root.** `/` — correct, only verbose
+///   in the keys, which are internal to the seal.
+/// * **A relative spelling anywhere in the set.** `cwd`, because a relative
+///   key is joined onto the root verbatim: the working directory is the only
+///   root that resolves it. That is also today's behavior and today's correct
+///   answer — `steins check .` and `steins check src/` are what produce
+///   relative spellings. A mixed invocation whose absolute member sits outside
+///   `cwd` still degrades to the cold path with a note, as it does today.
+///
+/// Components are compared as spelled, never normalized: the root must strip
+/// off the files' own leading components, so a `..` the caller wrote survives
+/// in both or in neither.
+fn capture_root(files: &[PathBuf], cwd: &Path) -> PathBuf {
+    if files.is_empty() || files.iter().any(|f| f.is_relative()) {
+        return cwd.to_path_buf();
+    }
+    /// The file's own directory. `parent()` is `None` only for a bare root,
+    /// which the `.php` walk never yields as a file.
+    fn dir_of(file: &Path) -> &Path { file.parent().unwrap_or(file) }
+
+    let mut common: Vec<&OsStr> = dir_of(&files[0]).components().map(Component::as_os_str).collect();
+    for file in &files[1..] {
+        let shared = dir_of(file)
+            .components()
+            .zip(&common)
+            .take_while(|(c, want)| c.as_os_str() == **want)
+            .count();
+        common.truncate(shared);
+    }
+    if common.is_empty() {
+        // No shared component at all (distinct Windows prefixes; unreachable
+        // where every path starts at `/`). Nothing better than today's answer.
+        return cwd.to_path_buf();
+    }
+    let mut root = PathBuf::new();
+    for part in common {
+        root.push(part);
+    }
+    root
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn root_of(files: &[&str], cwd: &str) -> String {
+        let files: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
+        capture_root(&files, Path::new(cwd)).to_string_lossy().into_owned()
+    }
+
+    /// The invocation the gate was written for keeps its root: relative
+    /// spellings only resolve against the directory they were spelled in.
+    #[test]
+    fn relative_spellings_keep_the_working_directory() {
+        assert_eq!(root_of(&["src/a.php", "src/b.php"], "/work"), "/work");
+        assert_eq!(root_of(&["a.php"], "/work"), "/work");
+        // Mixed: the relative member pins it, absolute members strip `/work`.
+        assert_eq!(root_of(&["src/a.php", "/work/lib/b.php"], "/work"), "/work");
+    }
+
+    /// Issue #506 proper: an absolute out-of-cwd target captures against
+    /// itself instead of failing `strip_prefix` on its first file.
+    #[test]
+    fn an_absolute_target_captures_against_its_own_tree() {
+        assert_eq!(root_of(&["/tree/src/a.php", "/tree/src/b.php"], "/elsewhere"), "/tree/src");
+        assert_eq!(root_of(&["/tree/src/a.php", "/tree/tests/b.php"], "/elsewhere"), "/tree");
+    }
+
+    /// A single file argument keys against its parent directory.
+    #[test]
+    fn a_single_file_captures_against_its_parent() {
+        assert_eq!(root_of(&["/tree/src/a.php"], "/elsewhere"), "/tree/src");
+        assert_eq!(root_of(&["/a.php"], "/elsewhere"), "/");
+    }
+
+    /// Nothing in common but the filesystem root: verbose keys, still correct.
+    #[test]
+    fn unrelated_trees_fall_back_to_the_filesystem_root() {
+        assert_eq!(root_of(&["/one/a.php", "/two/b.php"], "/elsewhere"), "/");
+    }
+
+    /// An empty universe never captures anything; keep the prior answer.
+    #[test]
+    fn an_empty_file_set_keeps_the_working_directory() {
+        assert_eq!(root_of(&[], "/work"), "/work");
+    }
+
+    /// A `..` the caller wrote is kept, so `strip_prefix` still matches the
+    /// spelling the seal is handed.
+    #[test]
+    fn a_dotdot_spelling_is_stripped_as_spelled() {
+        assert_eq!(root_of(&["/tree/src/../lib/a.php"], "/elsewhere"), "/tree/src/../lib");
+    }
 }
