@@ -255,7 +255,10 @@ impl PackageShard {
                 .map(|(simple, _)| format!("s:{simple}")),
         );
         out.extend(
-            self.classes.iter().filter(|(_, site)| keep(site.file)).map(|(fqn, _)| format!("c:{fqn}")),
+            self.classes
+                .iter()
+                .filter(|(_, site)| keep(site.file))
+                .map(|(fqn, _)| format!("c:{fqn}")),
         );
         // An alias edge is sited at the file whose `class_alias` call writes
         // it, and contributes both ends: the alias name, which the merge may
@@ -270,7 +273,10 @@ impl PackageShard {
             out.push(format!("c:{}", edge.target_fqn));
         }
         out.extend(
-            self.constants.iter().filter(|(_, slot)| keep(**slot)).map(|(key, _)| format!("k:{key}")),
+            self.constants
+                .iter()
+                .filter(|(_, slot)| keep(**slot))
+                .map(|(key, _)| format!("k:{key}")),
         );
         out.extend(self.ambiguous_functions.iter().map(|fqn| format!("f:{fqn}")));
         out.extend(self.ambiguous_classes.iter().map(|fqn| format!("c:{fqn}")));

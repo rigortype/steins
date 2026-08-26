@@ -595,9 +595,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // package whose sources did not move contributes nothing — both its sides
     // are the same set — and a package that moved contributes only what its
     // moved *files* declare, which is what makes the delta proportional to the
-    // edit rather than to the package. The site-less shard members (the
-    // ambiguity sets, the constants, the alias edges) ride a changed package
-    // wholesale; `PackageShard::contributed_names_from` says why.
+    // edit rather than to the package. The one member with no site to answer
+    // for it — a package's ambiguity set — rides a changed package wholesale;
+    // `PackageShard::contributed_names_from` says why.
     let now: HashMap<&str, usize> =
         diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
     let mut delta: HashSet<String> = HashSet::new();
