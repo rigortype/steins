@@ -1,7 +1,9 @@
 //! Candidate-then-publish: atomic publication, torn-write recovery, the seal
-//! rejecting a candidate whose sources moved, and the artifact sharing of
-//! issue #519 — what an adopted artifact is, and what happens to the other
-//! generation when one of them goes.
+//! rejecting a candidate whose sources moved, the artifact sharing of issue
+//! #519 — what an adopted artifact is, and what happens to the other
+//! generation when one of them goes — and the one-generation bound of issue
+//! #529, whose whole risk is that it deletes directories inside a user's
+//! project.
 
 use std::path::{Path, PathBuf};
 
@@ -134,8 +136,12 @@ fn empty_store_has_no_current() {
     assert!(store.current().unwrap().is_none());
 }
 
+/// `CURRENT` swaps to the new generation, and the one it replaced is gone —
+/// the bound of issue #529. Before it, a publish left what it superseded on
+/// disk forever: one full artifact set per distinct source state, measured at
+/// ~5 MB an invocation inside the user's project.
 #[test]
-fn current_swaps_between_generations_and_both_stay_readable() {
+fn a_publish_swaps_current_and_sweeps_what_it_replaced() {
     let project = TempProject::new("swap");
     let first = publish_one(&project, "v1");
     project.write("src/a.php", "<?php function a() { return 2; }\n");
@@ -143,7 +149,174 @@ fn current_swaps_between_generations_and_both_stay_readable() {
     assert_ne!(first, second);
     let store = Store::open(&project.dir).unwrap();
     assert_eq!(*store.current().unwrap().unwrap().id(), second);
-    assert_eq!(*store.generation(&first).unwrap().id(), first);
+    assert_eq!(project.gen_entries(), published_entries(&second));
+    assert!(
+        matches!(store.generation(&first), Err(Miss::AbsentGeneration)),
+        "the superseded generation is gone, and asking for it is an ordinary miss"
+    );
+}
+
+/// The growth table of issue #529, in miniature: edit, publish, repeat. The
+/// store stays at one generation however many times the source moves.
+#[test]
+fn repeated_edits_leave_the_store_at_one_generation() {
+    let project = TempProject::new("bounded");
+    let mut last = publish_one(&project, "v1");
+    for edit in 0..5 {
+        project.write("src/a.php", &format!("<?php function a() {{ return {edit}; }}\n"));
+        let id = publish_one(&project, "v1");
+        assert_ne!(id, last, "each edit is a distinct generation");
+        assert_eq!(
+            project.gen_entries(),
+            published_entries(&id),
+            "edit {edit} left something behind"
+        );
+        last = id;
+    }
+}
+
+/// **The concurrency argument, pinned.** A reader holds an open `File` for the
+/// artifact's whole life, and on POSIX unlinking a name does not disturb an
+/// open descriptor — the inode outlives the directory entry. So a sweep cannot
+/// harm a reader that has already opened an artifact: it reads on, through a
+/// name that no longer exists.
+///
+/// This is what makes bounding the store at one generation safe without any
+/// reference counting, and it is a *filesystem* property rather than one this
+/// crate enforces. A port to a filesystem without it must fail here, loudly,
+/// rather than start serving torn reads quietly.
+#[test]
+fn a_sweep_leaves_a_concurrently_open_reader_reading() {
+    let project = TempProject::new("open-reader");
+    let first = publish_one(&project, "v1");
+
+    // The concurrent run: it opened the published artifact and is still
+    // reading through it when a second run publishes over the top.
+    let store = Store::open(&project.dir).unwrap();
+    let generation = store.generation(&first).unwrap();
+    let mut reader = generation.artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");
+
+    project.write("src/a.php", "<?php function a() { return 2; }\n");
+    let second = publish_one(&project, "v1");
+    assert_ne!(first, second);
+    assert!(
+        !project.gen_root().join(first.to_hex()).exists(),
+        "the sweep really did unlink the generation being read"
+    );
+
+    // Same handle, after the directory entry is gone: still the same bytes.
+    assert_eq!(
+        reader.section(&sec("symbols")).unwrap(),
+        b"the payload",
+        "an open descriptor survives the unlink of its name"
+    );
+    // And a reader that had not opened yet gets the honest answer — a miss,
+    // which costs a rebuild and changes no finding (ADR-0092 §2).
+    assert!(matches!(
+        generation.artifact(&pkg("__first_party__")),
+        Err(Miss::Io(e)) if e.kind() == std::io::ErrorKind::NotFound
+    ));
+}
+
+/// **A failed publish removes nothing.** The sweep runs after the rename *and*
+/// the `CURRENT` swap, so a candidate rejected by the seal leaves the
+/// generation it would have replaced exactly where it was — still `CURRENT`,
+/// still readable, artifacts and all.
+#[test]
+fn a_failed_publish_sweeps_nothing() {
+    let project = TempProject::new("failed-publish");
+    let published = publish_one(&project, "v1");
+    let store = Store::open(&project.dir).unwrap();
+    let sources = sample_sources(&project);
+    let mut candidate = store.begin(id_for(&sources, "v2"), vec![sources]).unwrap();
+    candidate.write_artifact(&pkg("__first_party__"), &artifact(b"never published")).unwrap();
+    // The seal breaks under the candidate: publication is refused.
+    project.write("src/a.php", "<?php function a() { return 9; }\n");
+    assert!(matches!(candidate.publish(), Err(PublishError::Drift(_))));
+
+    assert_eq!(project.gen_entries(), published_entries(&published));
+    let store = Store::open(&project.dir).unwrap();
+    let current = store.current().unwrap().expect("the previous generation is still authoritative");
+    assert_eq!(*current.id(), published);
+    let mut reader = current.artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");
+}
+
+/// **Only names this crate writes.** We are deleting inside someone's project,
+/// so anything under `gen/` that is not a 64-lowercase-hex directory is left
+/// alone — by a publish's sweep and by the startup one alike.
+#[test]
+fn an_unrecognized_directory_under_gen_survives_a_sweep() {
+    let project = TempProject::new("unrecognized");
+    let first = publish_one(&project, "v1");
+    let gen_root = project.gen_root();
+    // Near misses on the recognizer, plus one plainly foreign name and a file.
+    // Spelled out rather than derived from the live id: on a case-insensitive
+    // filesystem an uppercasing of the real name would *be* the real name.
+    let strangers = [
+        "notes".to_owned(),
+        "A1".repeat(32),                  // uppercase: never what this crate writes
+        "d4".repeat(32)[..63].to_owned(), // 63 digits
+        format!("{}0", "e5".repeat(32)),  // 65
+        "g".repeat(64),                   // not hex
+    ];
+    for name in &strangers {
+        std::fs::create_dir(gen_root.join(name)).unwrap();
+        std::fs::write(gen_root.join(name).join("keep-me"), b"someone's bytes").unwrap();
+    }
+    // A *file* whose name is generation-shaped is not a generation either.
+    let decoy = "b7".repeat(32);
+    std::fs::write(gen_root.join(&decoy), b"not a directory").unwrap();
+
+    // A publish's sweep …
+    project.write("src/a.php", "<?php function a() { return 2; }\n");
+    let second = publish_one(&project, "v1");
+    // … and the startup one.
+    Store::open(&project.dir).unwrap();
+
+    assert!(!gen_root.join(first.to_hex()).exists(), "the superseded generation did go");
+    assert!(gen_root.join(second.to_hex()).is_dir(), "and the current one stayed");
+    for name in &strangers {
+        assert_eq!(
+            std::fs::read(gen_root.join(name).join("keep-me")).unwrap(),
+            b"someone's bytes",
+            "{name} is not a generation this crate wrote and must be untouched"
+        );
+    }
+    assert_eq!(std::fs::read(gen_root.join(&decoy)).unwrap(), b"not a directory");
+}
+
+/// A generation nothing names is collected at the next open — the crash
+/// between the rename and the `CURRENT` swap, and the older schema version's
+/// leftovers, are the same shape and get the same treatment.
+#[test]
+fn open_collects_a_generation_current_does_not_name() {
+    let project = TempProject::new("unreachable");
+    let published = publish_one(&project, "v1");
+    // A generation on disk that CURRENT does not point at: exactly what a
+    // crash after the rename leaves.
+    let orphan = "c3".repeat(32);
+    std::fs::create_dir(project.gen_root().join(&orphan)).unwrap();
+    std::fs::write(project.gen_root().join(&orphan).join("manifest"), b"stale").unwrap();
+
+    let store = Store::open(&project.dir).unwrap();
+    assert_eq!(project.gen_entries(), published_entries(&published));
+    assert_eq!(*store.current().unwrap().unwrap().id(), published);
+}
+
+/// An unreadable `CURRENT` is not evidence that a generation is stale, so the
+/// sweep declines rather than guesses — but a `CURRENT` that is merely *absent*
+/// says plainly that nothing is reachable, and those bytes go.
+#[test]
+fn an_absent_current_makes_every_generation_unreachable() {
+    let project = TempProject::new("no-current");
+    let published = publish_one(&project, "v1");
+    std::fs::remove_file(project.gen_root().join("CURRENT")).unwrap();
+    let store = Store::open(&project.dir).unwrap();
+    assert_eq!(project.gen_entries(), Vec::<String>::new());
+    assert!(store.current().unwrap().is_none());
+    assert!(matches!(store.generation(&published), Err(Miss::AbsentGeneration)));
 }
 
 /// The torn-write rule: a candidate that never published — its in-progress
@@ -380,9 +553,11 @@ fn adopting_an_absent_package_leaves_the_candidate_writable() {
 
 /// **The aliasing invariant.** Two generations may name the same bytes, so
 /// removing either one must leave the other whole — the property a hard link
-/// makes non-obvious and this test pins.
+/// makes non-obvious and this test pins. Since issue #529 the publish that
+/// adopts is also the publish that sweeps the generation it adopted from, so
+/// this is the bound leaning on the invariant directly.
 #[test]
-fn removing_one_generation_leaves_a_shared_artifact_readable() {
+fn sweeping_the_adopted_from_generation_leaves_the_artifact_readable() {
     let project = TempProject::new("share-unlink");
     let first = publish_one(&project, "v1");
     let store = Store::open(&project.dir).unwrap();
@@ -396,8 +571,11 @@ fn removing_one_generation_leaves_a_shared_artifact_readable() {
     candidate.publish().unwrap();
     drop(published);
 
-    // The older generation goes — eviction, a manual tidy-up, anything.
-    std::fs::remove_dir_all(project.gen_root().join(first.to_hex())).unwrap();
+    // The older generation went with the publish that superseded it.
+    assert!(
+        !project.gen_root().join(first.to_hex()).exists(),
+        "the sweep unlinked the generation the artifact was adopted from"
+    );
     let store = Store::open(&project.dir).unwrap();
     let mut reader = store.current().unwrap().unwrap().artifact(&pkg("__first_party__")).unwrap();
     assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");

@@ -201,7 +201,7 @@ none does. A second run over an unchanged tree reuses it; a run after an
 edit reuses everything the edit could not have reached. It is on by
 default, and there is nothing to configure.
 
-Three things follow from that, and all three are deliberate:
+Four things follow from that, and all four are deliberate:
 
 - **It never changes a finding.** A cache miss costs time and nothing else.
   If you ever see `--no-cache` report something the default run did not,
@@ -216,6 +216,10 @@ Three things follow from that, and all three are deliberate:
 - **It does not belong in git.** Creating the store writes
   `.steins/.gitignore` holding `*`, the way Cargo does for `target/`, so
   this is already handled unless you delete that file.
+- **It does not grow.** The store keeps one generation — the current one.
+  Each run's publish removes the generation it replaced, so editing all day
+  costs the size of one cached analysis, not one per edit. Nothing under
+  `.steins/gen/` is removed unless steins wrote it.
 
 `--no-cache` analyzes from source and neither reads nor writes `.steins/`.
 It is worth reaching for in exactly two situations: a sandbox where writing
@@ -957,7 +961,7 @@ Generation store
   store: .steins/gen
   current generation: 7fed4cf2dc714492f2256affc1ddf71219696b66e019cb7c3346da3a6ee4ac1e
   packages: 2
-  on disk: 1.4 MB across 1 generation(s) (an artifact a republish shared counts once per generation, so the real cost is at most this)
+  on disk: 1.4 MB across 1 generation(s)
 
 Coverage posture
   6 file(s), 16 scope(s), 0 poisoned (0.0%) — a poisoned scope knows no local's value (ADR-0001, ADR-0046 §1)

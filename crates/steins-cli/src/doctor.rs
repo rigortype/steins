@@ -643,11 +643,7 @@ fn section_generation_store(files: &[ParsedFile], cwd: &Path, layout: &ProjectLa
         }
     }
     let (bytes, generations) = store_size(store.gen_root());
-    line!(
-        sec,
-        "  on disk: {} across {generations} generation(s) (an artifact a republish shared counts once per generation, so the real cost is at most this)",
-        human_bytes(bytes)
-    );
+    line!(sec, "  on disk: {} across {generations} generation(s)", human_bytes(bytes));
     sec
 }
 
@@ -663,8 +659,11 @@ fn is_unwritable(dir: &Path) -> bool {
 
 /// Total bytes under `gen_root` and how many published generations it holds
 /// (directories whose name is a generation id; candidates are swept at the
-/// next open and never counted). Unreadable entries contribute nothing rather
-/// than failing the section.
+/// next open and never counted). The store is bounded at one generation
+/// (issue #529), so the count reads 1 on any settled store — it is still
+/// printed, because a crashed run can leave a second one until the next open
+/// collects it, and a size with no denominator would not say so.
+/// Unreadable entries contribute nothing rather than failing the section.
 fn store_size(gen_root: &Path) -> (u64, usize) {
     fn walk(dir: &Path, total: &mut u64) {
         let Ok(entries) = std::fs::read_dir(dir) else { return };

@@ -4,7 +4,8 @@
 //! ```text
 //! .gitignore                     `*` — written once, at creation (issue #525)
 //! gen/CURRENT                    hex generation id + newline; atomic-rename swap
-//! gen/<generation-hex>/          one published generation, immutable
+//! gen/<generation-hex>/          the published generation, immutable — and,
+//!                                bar a crash, the only one (issue #529)
 //!   manifest                     schema, id, package roster (this crate's format)
 //!   <mangled-package>.pkg        one artifact container per package
 //!   summaries                    the generation's run-dependent sidecar, if any
@@ -14,10 +15,52 @@
 //! ```
 //!
 //! Publication is: revalidate the sealed sources, write the manifest, drop
-//! the marker, rename the candidate into place, swap `CURRENT`. A candidate
-//! that never got that far is swept wholesale at the next [`Store::open`] —
-//! recovery is deliberately unclever, because the §2 invariant (a miss changes
-//! cost, never meaning) makes throwing a candidate away always correct.
+//! the marker, rename the candidate into place, swap `CURRENT`, sweep what was
+//! superseded. A candidate that never got that far is swept wholesale at the
+//! next [`Store::open`] — recovery is deliberately unclever, because the §2
+//! invariant (a miss changes cost, never meaning) makes throwing a candidate
+//! away always correct.
+//!
+//! # The bound: `CURRENT` and nothing else
+//!
+//! A publish used to rename its candidate into place and leave what it
+//! replaced behind, so the store grew by a full artifact set per distinct
+//! source state — measured at ~5 MB per invocation over a 1.26 MB source tree,
+//! without limit, inside the user's own project (issue #529). It is now
+//! bounded at **one** generation: a publish that fully succeeded sweeps every
+//! other one, and so does [`Store::open`], which is what collects the
+//! generations a crash or a schema bump left unreachable.
+//!
+//! **Why one is enough, concurrency included.** [`ArtifactReader`] holds an
+//! open `File` for the artifact's whole life, and on POSIX unlinking a name
+//! does not disturb an open descriptor — the inode outlives the directory
+//! entry, until the last handle closes. So a reader that has already opened an
+//! artifact cannot be harmed by a sweep at all. A reader that has *not* opened
+//! one yet gets `ENOENT`, which is a [`Miss`], which degrades that package to
+//! rebuild-from-source. That is the §2 invariant working rather than being
+//! bent: a run whose generation is swept mid-flight does more work and
+//! produces the same findings.
+//!
+//! Two rules keep a deletion inside someone's project honest, and the
+//! lifecycle tests pin both:
+//!
+//! * **After the publish, never before.** The sweep runs once the rename *and*
+//!   the `CURRENT` swap have both succeeded. A publish that failed anywhere —
+//!   drift under the seal, a filesystem error mid-flight — removes nothing,
+//!   and the generation it did not manage to replace stays authoritative.
+//! * **Only names this crate writes.** A directory is swept only when its name
+//!   is 64 lowercase hex digits, [`GenerationId::to_hex`]'s exact shape (the
+//!   test is [`GenerationId::from_hex`] itself, so the two cannot drift).
+//!   Anything else under `gen/` is left exactly where it is: a file, a
+//!   directory a person put there, a name from a layout this build does not
+//!   know. Being conservative about names we do not recognize costs a few
+//!   stale bytes; being liberal costs someone their data.
+//!
+//! Candidate directories are a separate question and stay exactly as they
+//! were. The `.candidate-*` sweep has a recorded concurrent-process hazard
+//! (issue #491) — a second process's in-flight build is not distinguishable
+//! from an abandoned one by name — and bounding *published* generations does
+//! not widen it, because a published generation has no owner to steal it from.
 //!
 //! # The artifacts and the sidecar, and why they are apart
 //!
@@ -55,6 +98,7 @@
 //! | the marker's *removal* | a marker inside a published generation | [`Miss::Corrupt`] |
 //! | the candidate's rename | `CURRENT` names nothing | [`Miss::AbsentGeneration`] |
 //! | `CURRENT` itself | not 64 hex digits, or a generation that is not there | [`Miss::Corrupt`] / [`Miss::AbsentGeneration`] |
+//! | the sweep of what it superseded | a generation nothing names | collected at the next [`Store::open`] |
 //!
 //! Every row degrades to rebuild-from-source. That is not luck: every file
 //! this module writes is strictly parsed and names its own generation, so a
@@ -88,9 +132,10 @@ const CANDIDATE_PREFIX: &str = ".candidate-";
 /// with any `<mangled-package>.pkg`.
 const SUMMARIES: &str = "summaries";
 
-/// One project's generation store, rooted at `<project>/.steins/`. Opening
-/// it creates the layout and sweeps orphaned candidates; there is no other
-/// startup recovery, by design.
+/// One project's generation store, rooted at `<project>/.steins/`. Opening it
+/// creates the layout, sweeps orphaned candidates, and drops every published
+/// generation `CURRENT` does not name; there is no other startup recovery, by
+/// design.
 pub struct Store {
     gen_root: PathBuf,
     budget: DecodeBudget,
@@ -118,8 +163,8 @@ impl Store {
     /// which is a posture ("nothing cached yet"), not an error.
     ///
     /// Deliberately not [`Self::open`]: that call creates the layout and
-    /// sweeps candidates, and a posture report that materializes the thing it
-    /// is reporting on would answer its own question.
+    /// sweeps, and a posture report that materialized — or tidied — the thing
+    /// it is reporting on would answer its own question.
     #[must_use]
     pub fn open_existing(project_root: &Path) -> Option<Self> {
         Self::open_existing_with_budget(project_root, DecodeBudget::default())
@@ -295,8 +340,13 @@ impl Candidate<'_> {
     }
 
     /// Publish: revalidate every sealed inventory, then manifest, marker off,
-    /// rename into place, swap `CURRENT`. Any drift rejects — and removes —
-    /// the whole candidate.
+    /// rename into place, swap `CURRENT`, sweep what was superseded. Any drift
+    /// rejects — and removes — the whole candidate.
+    ///
+    /// The sweep is last on purpose (issue #529): until both halves of the
+    /// swap are down, the generation this one replaces is still the one a
+    /// reader would find, and a publish that failed must leave it exactly
+    /// where it was.
     ///
     /// No durability barrier is taken here; the module docs table every step
     /// against what a crash before it would leave, and every one of them is a
@@ -326,6 +376,11 @@ impl Candidate<'_> {
         let tmp = self.store.gen_root.join(CURRENT_TMP);
         write_file(&tmp, format!("{}\n", self.id.to_hex()).as_bytes())?;
         fs::rename(&tmp, self.store.gen_root.join(CURRENT))?;
+        // Both halves of the swap are down: this generation is what a reader
+        // finds, and every other one is superseded. An artifact this candidate
+        // adopted is a second directory entry on the same inode, so dropping
+        // the first one drops a name and never the bytes.
+        sweep_superseded(&self.store.gen_root, Some(&self.id.to_hex()));
         Ok(Generation {
             dir: final_dir,
             id: self.id,
@@ -482,9 +537,11 @@ fn artifact_file_name(package: &PackageName) -> String {
     name
 }
 
-/// Startup recovery, whole: anything candidate-shaped goes, and a torn
-/// `CURRENT` swap loses its temp file. Published generations are never
-/// touched.
+/// Startup recovery, whole: anything candidate-shaped goes, a torn `CURRENT`
+/// swap loses its temp file, and every published generation `CURRENT` does not
+/// name goes with them — which is how a generation orphaned by a crash between
+/// the rename and the swap, or by a schema bump, is ever collected at all
+/// (issue #529).
 fn sweep(gen_root: &Path) -> io::Result<()> {
     for entry in fs::read_dir(gen_root)? {
         let entry = entry?;
@@ -499,7 +556,69 @@ fn sweep(gen_root: &Path) -> io::Result<()> {
             fs::remove_file(entry.path())?;
         }
     }
+    match reachable(gen_root) {
+        Reachable::Generation(keep) => sweep_superseded(gen_root, Some(&keep)),
+        Reachable::Nothing => sweep_superseded(gen_root, None),
+        Reachable::Unknown => {}
+    }
     Ok(())
+}
+
+/// What `CURRENT` names, as far as a sweep is concerned.
+enum Reachable {
+    /// `CURRENT` names this generation; every other one is superseded.
+    Generation(String),
+    /// Nothing is reachable: no `CURRENT` at all, or one that names no
+    /// generation. Either reading is a rebuild for the next run, so every
+    /// generation on disk is bytes with no reader.
+    Nothing,
+    /// `CURRENT` could not be read — a permission, an I/O failure. Whether
+    /// anything is superseded is then unknown, and an unreadable pointer is no
+    /// evidence that a generation is stale, so the sweep declines.
+    Unknown,
+}
+
+/// Read `CURRENT` for the sweep. Deliberately its own reader rather than
+/// [`Store::current`]: the sweep wants the *name* `CURRENT` holds and nothing
+/// else, and must not care whether the generation behind it opens.
+fn reachable(gen_root: &Path) -> Reachable {
+    match fs::read_to_string(gen_root.join(CURRENT)) {
+        Ok(raw) => match GenerationId::from_hex(raw.trim_end_matches('\n')) {
+            Some(id) => Reachable::Generation(id.to_hex()),
+            None => Reachable::Nothing,
+        },
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Reachable::Nothing,
+        Err(_) => Reachable::Unknown,
+    }
+}
+
+/// Remove every published generation but `keep` (`None` sweeps all of them) —
+/// the bound of issue #529, applied after a publish and again at every open.
+///
+/// **Only names this crate writes.** An entry is swept when it is a *directory*
+/// whose name [`GenerationId::from_hex`] accepts — 64 lowercase hex digits, the
+/// exact shape [`GenerationId::to_hex`] writes, so the recognizer and the
+/// writer cannot drift apart. Everything else under `gen/` is somebody else's
+/// and is left where it is. We are deleting inside a user's project directory:
+/// being conservative about a name we do not recognize costs a few stale
+/// bytes, and is the difference between a bug and an incident.
+///
+/// Best-effort throughout, and deliberately so. This is tidying, not
+/// publication: a removal that fails leaves bytes behind and the next open
+/// tries again, whereas failing the caller would turn a disk-space problem
+/// into a lost generation.
+fn sweep_superseded(gen_root: &Path, keep: Option<&str>) {
+    let Ok(entries) = fs::read_dir(gen_root) else { return };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else { continue };
+        if GenerationId::from_hex(name).is_none() || Some(name) == keep {
+            continue;
+        }
+        if entry.file_type().is_ok_and(|t| t.is_dir()) {
+            let _ = fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Drop a `.gitignore` holding `*` into `.steins/` the first time the store is
@@ -552,6 +671,24 @@ mod tests {
         assert_eq!(n("Upper"), "%55pper.pkg");
         assert_eq!(n("odd%byte"), "odd%25byte.pkg");
         assert_eq!(n("manifest"), "manifest.pkg");
+    }
+
+    /// What the sweep will and will not take by name (issue #529). The
+    /// recognizer *is* [`GenerationId::from_hex`], so this pins the shape the
+    /// sweep inherits rather than a second spelling of it: uppercase, short,
+    /// long and non-hex names are all somebody else's directory.
+    #[test]
+    fn only_a_generations_own_name_is_recognized_for_sweeping() {
+        let recognized = |n: &str| GenerationId::from_hex(n).is_some();
+        let hex = "a1".repeat(32);
+        assert_eq!(hex.len(), 64);
+        assert!(recognized(&hex));
+        assert!(!recognized(&hex.to_uppercase()), "the store never writes uppercase");
+        assert!(!recognized(&hex[..63]), "63 digits is not a generation");
+        assert!(!recognized(&format!("{hex}0")), "65 digits is not one either");
+        assert!(!recognized(&"g".repeat(64)), "not hex at all");
+        assert!(!recognized("notes"), "a directory somebody put there");
+        assert!(!recognized(CURRENT));
     }
 
     /// No package name can mangle onto one of the generation's own files: the

@@ -106,6 +106,14 @@
 //! directories, so two concurrent processes over one store can delete each
 //! other's in-flight candidates. Single-process CLI use is fine; this function
 //! opens the store once per run and never re-opens it mid-run.
+//!
+//! Published generations are swept too since issue #529 — the store holds
+//! `CURRENT` and nothing else — and that one is *not* a hazard for this
+//! function. Every artifact it serves from is opened here, before the publish
+//! that could sweep it, and an open descriptor outlives the unlink of its
+//! name; anything opened after would be a [`Miss`], which is a rebuild and the
+//! same findings. The published artifacts this run adopted from are hard links
+//! or clones by then, so dropping the old directory drops names, never bytes.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
