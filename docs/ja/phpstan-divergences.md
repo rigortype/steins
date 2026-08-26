@@ -227,3 +227,135 @@ PHPStan は呼び出しごとの戻り型計算とガード narrowing を実行�
 ひとつに分類され、輸入の優先度は conformance 表と corpus 頻度という
 計測が決める。六つ目の開いたフックはプラグイン契約と競合する第二の
 拡張機構になるため refuse である。
+
+## 「常に true と評価される」という arm 条件 vs 相補(complement)ペア
+
+PHPStan は網羅的な `match` / `if` 連鎖の最後の被覆 arm の条件を「常に
+true と評価される」と報告する。
+
+Steins は `condition.*` という診断ファミリーを一切登録せず、恒久的に
+何も報告しない(ADR-0088 §6)。subject の型が Verified である場合、
+その冗長性こそが網羅的連鎖の**目的**であり、この診断は著者に自分の
+安全網を削除させる方向に働く。Asserted である場合、その主張は実行時
+に検査されない docblock に依拠しており、これは上記の
+`treatPhpDocTypesAsCertain` の相違を arm 条件に適用したものにほかなら
+ない。
+
+Steins が代わりに報告するのは、PHPStan が沈黙している**補集合**である:
+連鎖が証明可能に使い尽くす `default` arm(`match.dead-default`、
+pedantic floor では `phpdoc.dead-default`)、網羅性を失った場合分け
+(`@param never` という**センチネルパラメータ**から読み取る
+`phpdoc.never-param-reachable`)、そして被覆のない `default` なし
+`match` が投げる `\UnhandledMatchError` を `throw.undeclared` への
+`origin = direct` の寄与として報告することである。本体が終端するだけの
+死んだ arm — **defensive terminator** — はこれらのいずれからも報告
+されない。これは ADR-0019 §2 の生きた `exit` に関する裁定を、死んだ
+場合にまで拡張したものである。
+
+## 未知の *クラス* vs ハイフン空間の未知の *語彙*
+
+PHPStan・Psalm・Mago は認識できない phpdoc 型識別子をクラス参照として
+読み、ファイルの名前空間に対して解決する。そのため名前空間付きファイル
+中の `@param int-range<0, 255>` は `Conformance\Tests\…\int-range` へ
+の参照になり、各ツールは未知のクラスを報告する — Psalm と Mago は
+さらに、存在しないクラスは何も受理しないため、正当な呼び出しまで
+**過剰拒否**する。ADR-0091 §2 はクロスツール conformance スイートの
+48 フィクスチャにわたり、この過剰拒否が 84 行に及ぶことを実測して
+いる。
+
+Steins はこれに代えてハイフン空間全体を予約する(ADR-0091 §3):
+PHP のコンパイラはクラス・interface・trait・enum の名前に `-` を許さ
+ないため、型位置のハイフン付き識別子は**型の語彙であり、決してクラス
+参照ではない** — 名前空間解決もシャドーイングも行わず、
+`ContractTy::Class` になることもない。この識別子が下がる先は `Opaque`
+であり、あらゆる値を `Maybe` として受理するため、docblock は元々受理
+するつもりだった呼び出しを何ひとつ拒否しない。
+
+Steins がそこで報告するのは `phpdoc.unknown-vocabulary`(ADR-0091 §6)
+である: `@template` によるシャドーを生き延び、なお認識された語彙では
+ないハイフン付き名前がこれに当たる。この主張は置き換え元の主張より
+意図的に弱く、それゆえにより強い — docblock からは決して証明できない
+「そのようなクラスは存在しない」ではなく、「この綴りは何も意味しない」
+という、コンパイラ自身の命名規則こそが証明できる主張である。残る可能性
+は語彙の綴り間違いか、Steins がモデル化していないツール由来の語彙で
+あり、いずれもプログラムについての偽の主張ではない。なお PHPStan は
+解決の半面についてはこの相違に含まれない: `parameter.unresolvableType`
+を報告して契約のでっち上げを拒むのであり、この規則はその挙動を採用し
+一般化したものである。
+
+§4.1 の裁定には二つの帰結が伴う。ユーザー定義の型エイリアスは
+`foo_bar` という名前は取れるが `foo-bar` という名前は取れない:
+phpstan/phpdoc-parser は `@phpstan-type foo-bar = int` を受理して
+その名前でエイリアスを宣言するが、Steins はハイフン空間が予約されて
+いるため、この宣言をむしろ拒否する。そしてこの空間は凍結ではなく
+予約である — プラグインは既存の `steins-plugin.json` マニフェスト
+(ADR-0039/0068)を通じてユーティリティ型をそこに登録できる。これは
+PHPStan の拡張がコア未搭載の型解決を追加するのと同じやり方である。
+
+この拡張チャネルにより、この id の finding 集合は**plugin-set 依存**
+になる — コードではなく設定とともに動く baseline であり、ADR-0022 の
+baseline 規律はこれを自ら発見させるのではなく明示的に告げている。
+allowlist は builtin テーブル ∪ プラグイン登録の和集合であり、プラグイン
+読み込み後に計算される。したがってプロジェクトからプラグインを外すと、
+ソースを一切変更していなくても、その語彙を使っていたすべての docblock
+に finding が生じる。これは正しい答えである — 語彙は実際に失われたの
+だから — が、変更前に採取された baseline は新しい finding を dormant
+エントリではなく regression として示してしまうため、対処は抑制ではなく
+再採取である。登録の種別はまだマニフェストに存在しないため、今日の
+allowlist は builtin のみであり、この結合は登録種別が実装された時点で
+効いてくる。
+
+## 裸の `@assert-if-true` vs vendor プレフィックス付き assertion ファミリー
+
+PHPStan と Psalm の assertion タグ — `@phpstan-assert(-if-true|-if-false)`
+とその `@psalm-assert*` 対応版 — は vendor プレフィックス付きの形でしか
+存在せず、どちらのツールも裸の `@assert-if-true` を定義していない。
+Steins の phpdoc スキャナも同じ規則に従うが、これは特別扱いではなく
+一般化されたものである: `@phpstan-*` / `@psalm-*` というプレフィックス
+のみが契約を運ぶ(ADR-0029)のであり、assertion ファミリーも他のあらゆる
+タグと同様、この一様なプレフィックス剥離を通して認識される — これは
+すでにレジストリにある vendor プレフィックス付きタグの standing refusal
+(`type-specification/divergence-registry.md` entry 1)と同じ教義で
+ある。無関係な `@psalm-trace` タグのために書かれた ADR-0074 §2 は、
+この assertion のケースをその先例そのものとして述べている:
+「`@phpstan-assert` / `@psalm-assert` は存在するが、裸の `@assert` は
+存在しない」。したがって裸の `@assert-if-true` はそもそも認識される
+タグではなく、何も narrow しない。
+
+2026-08 の conformance rescoring はこれを
+`regressions_string_narrowing_assert_if_true` で検証した。このフィク
+スチャは裸の綴りを書き、プレフィックス付きタグが運ぶはずの narrowing
+を期待している。Steins は上記の standing rule により何も報告しない —
+これは能力の欠落ではなく、記録済みの設計判断である。issue #266 で
+キューに入っている「assert タグの消費」作業はプレフィックス付きの綴り
+(`@phpstan-assert`、`@phpstan-assert-if-true`、
+`@phpstan-assert-if-false`)しか対象にしておらず、それが実装されても
+このフィクスチャの判定は変わらない。
+
+## `default` なしの被覆されない `match` vs 独立した exhaustiveness finding
+
+`default` を持たない `match` について、網羅性を意識するツールは被覆
+されない残余をそれ自体で一つの finding として扱いうる。Steins も同じ
+事実 — arm が subject の Verified ドメインを使い尽くしていない — を
+計算するが、それをそのような形では表出させない。ADR-0088 §5 はこの
+表出のされ方そのものを決定した: 被覆されない `default` なし `match`
+は、漏れた値が到着したときに `\UnhandledMatchError` を投げるのだから、
+それは他の throw と同じ throw であり、既存の `throw.undeclared` id へ
+の `origin = direct` の寄与として throw accounting に入る
+(`Layer::Contract` / `Floor::Contracts`)。新しい id は作らない: 素の
+`steins check` は沈黙したままである — その `match` は到達可能である
+にすぎず証明されたわけではなく、狼少年制約は default 面での主張権を
+与えない — そして throw accounting にオプトインしたプロジェクトだけ
+が、その関数が宣言していない何かを投げうることを知る。
+
+2026-08 の conformance rescoring はこれを
+`regressions_backed_enum_value_narrowing` で実測した: このフィクス
+チャの採点対象半分は、二 case の backed enum に対する `default` なし
+`match` で一方の case のみを被覆し、`@throws` は宣言されていない。
+Steins は throw-accounting のオプトインなしには何も報告せず、オプト
+インの下では `throw.undeclared` を報告する — default 面での独立した
+exhaustiveness finding は決して報告しない — これは上記の by-design な
+判定であり、能力の欠落ではない。このフィクスチャのもう半分は採点対象
+外である: `$s->value === 'H'` のような、backed enum の値比較による
+case-identity narrowing は実在する別の能力であり、それ自身の issue
+(#540)で追跡されている。
