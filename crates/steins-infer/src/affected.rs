@@ -15,8 +15,9 @@
 //! The fourth leg is not here: it is the [`crate::walk_plan::UniverseVerdict`]
 //! digest, compared against the one the artifact carries, and a mismatch means
 //! the orchestrator never asks this module anything. What is here is the first
-//! three, plus one refinement the pinned list does not spell and soundness
-//! needs (see *Inheritance*).
+//! three, plus two refinements the pinned list does not spell and soundness
+//! needs: the inheritance closure (see *Inheritance*) and the removal seed (see
+//! *The delta leg and the descent*).
 //!
 //! ## What a walk of F reads, and which leg answers for it
 //!
@@ -32,7 +33,8 @@
 //!   never from which files happened to be parsed.
 //! * **The merged index** (every absence verdict, every resolution) — the
 //!   `delta_names` leg, whose completeness argument is *The name delta* below.
-//! * **Other files' trees**, through the binding descent — the call-graph leg.
+//! * **Other files' trees**, through the binding descent and through the class
+//!   chains it dispatches on — the call-graph and inheritance legs.
 //! * **The whole-universe verdicts** (dam, purity oracle, never-returning set,
 //!   the PHP view, the property-write obstacle) — the digest, above.
 //! * **Run config and engine identity** — the replay stamp, which gates the
@@ -96,58 +98,151 @@
 //! alias no edit touched. [`PackageShard::contributed_names_from`] carries the
 //! reading.
 //!
+//! ## The delta leg and the descent
+//!
+//! The delta leg is per file, and a walk is not: G descends into F's
+//! declaration and re-derives F's body there, so a resolution that moved *under
+//! F* can move what G's walk concludes. F is a delta hit; G is not, and G's own
+//! footprint never mentions the name.
+//!
+//! Almost always the ordinary closure already answers for that, and the reason
+//! is worth stating because it is what keeps this leg cheap. A resolution moves
+//! because some file changed, and that file is the one *declaring* the name — so
+//! F, which names it, has an edge straight to it, and G reaches it through F at
+//! one hop more. An added declaration, a promotion, an ambiguity demotion: all
+//! of them leave the moved declaration standing in a changed file, and all of
+//! them are covered without a seed.
+//!
+//! The exception is **removal**. A deleted file has no slot in this run's
+//! universe at all, so it can never be in `changed`, and a name nothing declares
+//! any more is an edge to nowhere: F's own hit is the only trace of it, and G is
+//! invisible. So a delta hit seeds the descent closure when the key it hit on
+//! resolves to **no** declaring file at all — which is a deleted file, a deleted
+//! or renamed declaration, a removed package, and nothing else. It is empty for
+//! every edit that only adds or modifies, so the leg costs nothing until it is
+//! needed.
+//!
+//! **What it does not cover, stated rather than assumed**: a name declared
+//! *twice* that loses one copy still resolves, so its namer keeps an edge, but
+//! that edge may reach the surviving declaration rather than the departed one,
+//! and a caller one descent above is then missed. Seeding every delta hit closes
+//! that too and costs the whole leg: on `nikic/PHP-Parser` one permanently
+//! ambiguous class (`Internal\TokenPolyfill`, declared twice under a version
+//! guard) rides every edit's delta through the wholesale ambiguity concession,
+//! and seeding on it walked 313 of 341 files where this leg walks 14. The
+//! residue is the delta leg's own granularity, not this closure's, and belongs
+//! with issue #510's line of work rather than here.
+//!
 //! ## The footprint
 //!
 //! `footprint(F)` is a projection of F's loaded trace IR — never a walk, and no
-//! new persistence: call and method-call names, `hard_class_refs`, `const_refs`,
-//! and the identifier tokens of F's comments. Names are normalized the way the
-//! index keys them, and every spelling a resolution *could* take is emitted,
-//! not just the one it takes today: an unqualified call in a namespace tries
-//! `Ns\f` and then global `f`, and both candidates go in, because a definition
-//! appearing at either is a resolution that moved.
+//! new persistence: statically-named function references, `hard_class_refs`,
+//! `const_refs`, the `class_alias` ends, and the **type expressions** of F's
+//! comments. Names are normalized the way the index keys them, and every
+//! spelling a resolution *could* take is emitted, not just the one it takes
+//! today: an unqualified call in a namespace tries `Ns\f` and then global `f`,
+//! and both candidates go in, because a definition appearing at either is a
+//! resolution that moved.
+//!
+//! **No `m:` key at all** (issue #513). A method name is not a delta key — a
+//! shard carries no method table, by `PackageShard`'s own documented design —
+//! and it is not an edge either: every method resolution in the analyzer enters
+//! through `resolve_in_chain(start_fqn, method)`, so the class comes first and
+//! the name is looked up *within* it, and the merged index holds no by-name
+//! method table for anything to resolve against. A walk therefore cannot reach
+//! a declaration that its file does not already reach by naming the class.
 //!
 //! The comment leg is the one the pinned list does not name, and it is load
 //! bearing. `hard_class_refs` excludes docblock positions by design (it is the
 //! `class.undefined` firing set, and a docblock name is not a hard error), so
 //! without it a file whose only mention of a class is `@return Widget` has no
 //! edge to Widget's file — and a caller two hops away, descending through that
-//! return, would replay a stale finding. Tokenizing comments over-approximates
-//! wildly and that is fine: a token that names nothing resolves to no file and
-//! is in no delta, so it costs a hash lookup and nothing else.
+//! return, would replay a stale finding. What it reads is what the phpdoc
+//! scanners themselves delimit as a type: each tag's type text, the `@template`
+//! bounds, the inheritance type arguments, the magic-member subjects
+//! ([`docblock_type_texts`]). That is the whole of a docblock any name
+//! resolution in the analysis sees, so it is the whole of what a stale answer
+//! can hide in. It is still an over-approximation — `@return int the widget
+//! count` hands its trailing description along with its type — and that is the
+//! right side to err on.
+//!
+//! It replaces a tokenizer that ran over every identifier of every comment,
+//! whose cost the measurement in issue #513 finally priced: the word `param`
+//! appears in 164 of `nikic/PHP-Parser`'s files, and one comment's `gettype`
+//! met the 173 files declaring a `getType`, so prose alone edged most of that
+//! universe to most of it and a core-file edit walked 337 of 341 files. The
+//! same edit now walks 20.
 //!
 //! ## The call graph
 //!
-//! File-level, and derived from *resolved call sites* rather than from the
-//! effect/throw own-row edges, which answer a different question. Being coarser
-//! than the descent's real reach is sound; being finer is not — so a method
-//! call contributes an edge to **every** file declaring a method of that name,
-//! since which class the receiver resolves to is a walk's answer and not
-//! available here. The closure is the backwards reachability from the changed
-//! files, bounded by [`MAX_BINDING_DEPTH`], which is the bound the descent
-//! itself stops at.
+//! File-level, and derived from the names a file *references* rather than from
+//! the effect/throw own-row edges, which answer a different question. An edge
+//! `F → G` says the walk of F may read G's tree: F names a function, class,
+//! constant or alias G declares.
 //!
-//! With the delta file-granular (issue #510) **this is now the widest leg by
-//! far**, and it saturates: editing `nikic/PHP-Parser`'s `Lexer.php` puts 17
-//! files in the delta leg and 337 of 341 in the affected set, because eight
-//! hops of "every file declaring a method of this name" reach a whole
-//! codebase through its ordinary method names. An edit whose file declares
-//! nothing widely named costs 4. Tightening this — resolved receivers, a
-//! smaller bound, a directional reading — is the closure work issue #489's
-//! design pin left out of scope until a measurement asked for it. This is that
-//! measurement; it is not this issue's change.
+//! **Resolution is class-first and upward, and that is the whole design.** A
+//! call site's target is found by `resolve_call_target`, which turns every
+//! receiver shape into a class FQN — `$this`/`self` the enclosing class,
+//! `parent` its parent, `Foo::`/`new Foo`/`(new Foo)->` the named class, a
+//! variable receiver the class its heap object carries — and then walks that
+//! class's chain **upward** with `resolve_in_chain`. Nothing resolves downward:
+//! `resolve_guarded` refuses outright unless the method or its class is
+//! `final`/`private`, and `resolve_exact` is reached only where the runtime
+//! class is already exact. So the declarations a call site can reach are the
+//! named class's and its ancestors', and a method *name* buys nothing.
+//!
+//! That is why each hop of the backwards closure first closes its frontier
+//! **downwards** through the inheritance graph. Forwards, `F → G` reaches G's
+//! ancestors too; backwards, the origins of an affected file X are the files
+//! naming any class that descends from one of X's. The expansion costs no hop —
+//! a chain walk is not a descent — so it runs inside each of the
+//! [`MAX_BINDING_DEPTH`] hops rather than consuming them, and a call chain of
+//! length k is still covered at k hops however deep the class hierarchies under
+//! it are.
+//!
+//! **The receiver whose class is not named** is the shape this cannot resolve:
+//! `$w = make(); $w->render();` names neither `Widget` nor anything of its.
+//! It stays sound through the descent chain rather than through a name edge —
+//! the caller edges to `make()`'s file, `make()`'s own declaration names
+//! `Widget` (a return hint, a `new`, a docblock type; a class the walk knows
+//! about got into that store somehow, and the somewhere is a file this chain
+//! passes through), so the closure reaches Widget's file one hop later than a
+//! name edge would have. `an_untyped_receiver_still_reaches_the_class_its_walk_resolves`
+//! pins it.
 //!
 //! ## Inheritance
 //!
 //! One refinement the pinned leg list does not spell, added because the
-//! `MAX_BINDING_DEPTH` bound does not hold for it. Class-chain traversal is not
+//! `MAX_BINDING_DEPTH` bound does not hold for it: class-chain traversal is not
 //! depth-bounded in the analysis — `magic_obstacles_in_reach` follows parents,
 //! interfaces and `@mixin` targets transitively, and the declared-receiver
-//! lane's descendant closure walks the *other* way — so an inheritance edge is
-//! closed **without a bound and in both directions**. What it costs is a class
-//! hierarchy's whole connected component per edited class file — the price of
-//! an unbounded traversal priced honestly, and on `nikic/PHP-Parser` one extra
-//! file per edit next to the call graph's hundreds. Narrowing it means
-//! bounding the analysis's own chain walks first, not the closure over them.
+//! lane's descendant closure (ADR-0049 A4) walks the *other* way. So the
+//! inheritance graph is closed **without a bound**, in both directions, but as
+//! two separate legs rather than as one connected component:
+//!
+//! * **Subtypes of a changed file are affected.** Their own chain walks climb
+//!   through the changed declaration, with no descent in between.
+//! * **Supertypes of a changed file are seeds, not conclusions.** A superclass's
+//!   walk does not read its subclass's file; what reads it is the *descendant
+//!   enumeration* a third file performs, and that file names the superclass —
+//!   so seeding the supertype puts every namer of it one hop away, which is
+//!   exactly the reach that leg needs.
+//!
+//! **The two legs are coupled, deliberately.** The call graph's class edge lands
+//! on the class's own file and gets the chain above it from the per-hop subtype
+//! expansion; the descendant reach that a non-final receiver might suggest comes
+//! from the supertype seed instead of from a wider edge. Neither leg is sound
+//! without the other, and the reason the affected set's answer to "what about a
+//! subclass override?" differs from `resolve_effect_edge`'s (which gates on
+//! `is_final`, `private` and exactness) is that the two ask different questions:
+//! the effect graph asks whether a propagation *edge* exists, this asks which
+//! files a walk *reads*, and reading a class's declaration is an upward walk
+//! while enumerating its subclasses is a separate, seeded one.
+//!
+//! What the undirected connected-component reading this replaces cost was
+//! measured on `Seldaek/monolog`, where every handler and formatter shares one
+//! interface: editing `Logger.php` seeded **201 of 217 files** before a single
+//! call edge was considered. The two-leg reading seeds 4.
 //!
 //! ## What over-approximation costs, and why the direction is fixed
 //!
@@ -163,7 +258,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use steins_syntax::{Callee, NameRef, RefKind, SourceTree, StaticClass, normalize_const_fqn};
+use steins_syntax::{Callee, NameRef, RefKind, SourceTree, normalize_const_fqn};
 
 use crate::MAX_BINDING_DEPTH;
 
@@ -189,39 +284,90 @@ pub(crate) fn affected_files(inputs: &AffectedInputs<'_>) -> HashSet<usize> {
     let decls = DeclTable::build(inputs.trees);
 
     // One pass over every file: its footprint decides both the delta leg and
-    // its outgoing call-graph edges, so the keys are never retained.
+    // its outgoing name edges, so the keys are never retained.
     let mut affected: HashSet<usize> = inputs.changed.clone();
-    let mut callees: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut names: Vec<Vec<usize>> = vec![Vec::new(); n];
     let mut inherits: Vec<Vec<usize>> = vec![Vec::new(); n];
+    // Delta hits on a name **nothing declares any more** — the removal case of
+    // *The delta leg and the descent* in the module docs. Empty for every edit
+    // that only adds or modifies.
+    let mut undeclared_hits: Vec<usize> = Vec::new();
     for (file, tree) in inputs.trees.iter().enumerate() {
         let mut edges: HashSet<usize> = HashSet::new();
         let mut hit = false;
+        let mut undeclared = false;
         footprint(tree, &mut |key: &str| {
+            let declaring = decls.files_of(key);
             if inputs.delta.contains(key) {
                 hit = true;
+                undeclared |= declaring.is_none();
             }
-            if let Some(files) = decls.files_of(key) {
+            if let Some(files) = declaring {
                 edges.extend(files.iter().copied());
             }
         });
         if hit {
             affected.insert(file);
+            if undeclared {
+                undeclared_hits.push(file);
+            }
         }
         edges.remove(&file);
-        callees[file] = edges.into_iter().collect();
+        names[file] = edges.into_iter().collect();
         inherits[file] = inheritance_edges(tree, &decls, file);
     }
 
-    // Inheritance first, unbounded and undirected: a changed superclass moves
-    // its subclasses' answers, and a changed subclass moves what a declared
-    // supertype's descendant closure enumerates.
-    let seeds = closure(&undirected(&inherits, n), &inputs.changed, usize::MAX);
+    // `inherits` points a file at the files declaring its supertypes, so its
+    // reverse points a file at the files declaring its subtypes.
+    let subtypes = reverse(&inherits, n);
+    let callers = reverse(&names, n);
+
+    // The seeds — every file whose own walk reads a changed file with no
+    // descent in between (see *Inheritance* in the module docs):
+    //
+    // * the changed files themselves;
+    // * their **subtypes**, whose every chain walk climbs through the changed
+    //   declaration;
+    // * their **supertypes**, which a changed subtype does not move but which
+    //   are what a descendant-enumerating file names — a seed rather than a
+    //   target, so the file naming one is one hop away either way;
+    // * the delta hits on a name this universe no longer declares — the
+    //   removal case, argued under *The delta leg and the descent*.
+    let mut seeds = closure(&inherits, &inputs.changed, usize::MAX);
+    seeds.extend(closure(&subtypes, &inputs.changed, usize::MAX));
+    seeds.extend(undeclared_hits);
     affected.extend(seeds.iter().copied());
 
-    // Then the call graph, backwards from those seeds, bounded by the depth
-    // the binding descent itself stops at.
-    let reverse = reverse(&callees, n);
-    affected.extend(closure(&reverse, &seeds, MAX_BINDING_DEPTH));
+    // Then the descent closure, backwards, bounded by the depth the binding
+    // descent itself stops at. Each hop first closes its frontier **downwards**
+    // through the inheritance graph, because a file naming class `A` reads
+    // `A`'s whole ancestor chain: backwards from an affected file, the origins
+    // are the files naming any of its subtypes. That expansion costs no hop —
+    // a chain walk is not a descent — so it runs inside each one.
+    let mut targets: HashSet<usize> = HashSet::new();
+    let mut frontier: Vec<usize> = seeds.into_iter().collect();
+    for _ in 0..MAX_BINDING_DEPTH {
+        let mut fresh: Vec<usize> = Vec::new();
+        let mut stack = frontier;
+        while let Some(node) = stack.pop() {
+            if targets.insert(node) {
+                fresh.push(node);
+                stack.extend(subtypes[node].iter().copied());
+            }
+        }
+        let mut next: Vec<usize> = Vec::new();
+        for node in fresh {
+            for &caller in &callers[node] {
+                if affected.insert(caller) {
+                    next.push(caller);
+                }
+            }
+        }
+        if next.is_empty() {
+            break;
+        }
+        frontier = next;
+    }
     affected
 }
 
@@ -252,9 +398,6 @@ impl DeclTable {
             }
             for c in tree.classes() {
                 add(format!("c:{}", c.fqn), file);
-                for m in &c.methods {
-                    add(format!("m:{}", m.name.to_ascii_lowercase()), file);
-                }
             }
             for edge in tree.class_alias_edges() {
                 add(format!("c:{}", edge.alias_fqn), file);
@@ -303,8 +446,19 @@ impl DeclTable {
 /// on purpose: a key that names nothing is a hash lookup that finds nothing.
 ///
 /// Keys are built into one reused buffer rather than formatted per call. The
-/// footprint of a large universe runs to tens of millions of keys, and this is
-/// the difference between an allocation each and none.
+/// footprint of a large universe runs to millions of keys, and this is the
+/// difference between an allocation each and none.
+///
+/// **No `m:` key is emitted, and none is wanted** (issue #513). A method name
+/// is not a delta key — [`PackageShard::contributed_names_from`] carries no
+/// method table, by its own documented design — and it is not an edge either,
+/// because every method resolution in the analyzer enters through
+/// `resolve_in_chain(start_fqn, method)`: the class comes first and the name is
+/// looked up *within* it. The merged index holds no by-name method table to
+/// resolve against, so no walk can reach a declaration this file does not
+/// already reach by naming its class.
+///
+/// [`PackageShard::contributed_names_from`]: steins_db::PackageShard::contributed_names_from
 fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
     let mut buf = String::with_capacity(64);
     let mut emit = |prefix: &str, name: &str, sink: &mut dyn FnMut(&str)| {
@@ -313,6 +467,11 @@ fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
         buf.push_str(name);
         sink(&buf);
     };
+    // `SourceTree::calls()` is the file-wide **function**-call list: a method,
+    // static or constructor call lowers into the statement IR and never reaches
+    // here. That is not a gap — see the `m:` note above — and every class such
+    // a call names (`new X`, `X::m()`, `X::CONST`, `X::$prop`) is a
+    // `hard_class_refs` entry below.
     for call in tree.calls() {
         if let Some(r) = &call.callee_ref {
             for candidate in function_candidates(tree, r) {
@@ -320,22 +479,8 @@ fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
             }
             emit("s:", &r.simple().to_ascii_lowercase(), sink);
         }
-        match &call.receiver {
-            Callee::Function(name) => emit("s:", &name.to_ascii_lowercase(), sink),
-            Callee::Method { method, .. } => emit("m:", &method.to_ascii_lowercase(), sink),
-            Callee::Static { class, method } => {
-                emit("m:", &method.to_ascii_lowercase(), sink);
-                if let StaticClass::Named(r) = class {
-                    emit("c:", &tree.resolve_class_fqn(r).to_ascii_lowercase(), sink);
-                }
-            }
-            Callee::Construct { class } => {
-                emit("c:", &tree.resolve_class_fqn(class).to_ascii_lowercase(), sink);
-                // The constructor is a method like any other; a class that
-                // gains or loses one moves an arity answer.
-                emit("m:", "__construct", sink);
-            }
-            Callee::DynamicVar(_) | Callee::Dynamic => {}
+        if let Callee::Function(name) = &call.receiver {
+            emit("s:", &name.to_ascii_lowercase(), sink);
         }
     }
     for r in tree.hard_class_refs() {
@@ -355,21 +500,26 @@ fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
             emit("k:", &candidate, sink);
         }
     }
-    // The docblock leg (see the module docs): a class named only in a comment
-    // is invisible to `hard_class_refs` and still reachable by a descent. A
-    // docblock name is written against the file's own namespace and imports
-    // exactly like a code reference, so the bare spelling, the trailing segment
-    // and the namespace-qualified form all go in — resolving one properly would
-    // mean lowering every docblock here, for a key that costs one lookup.
+    // The docblock leg (see the module docs): a class named only in a comment is
+    // invisible to `hard_class_refs` and still reachable by a descent. What is
+    // read is the comment's **type expressions**, as the phpdoc scanners
+    // themselves delimit them ([`docblock_type_texts`]) — a docblock name is
+    // written against the file's own namespace and imports exactly like a code
+    // reference, so the bare spelling, the trailing segment and the
+    // namespace-qualified form all go in.
     let mut qualified = String::with_capacity(64);
     for comment in tree.comments() {
+        let types = docblock_type_texts(&comment.text);
+        if types.is_empty() {
+            continue;
+        }
         let ns = tree.ctx_at(comment.span.start).namespace.to_ascii_lowercase();
-        for token in identifiers(&comment.text) {
+        for token in types.iter().flat_map(|text| identifiers(text)) {
             let lower = token.trim_start_matches('\\').to_ascii_lowercase();
             if lower.is_empty() {
                 continue;
             }
-            for prefix in ["c:", "f:", "s:", "m:"] {
+            for prefix in ["c:", "f:", "s:"] {
                 emit(prefix, &lower, sink);
             }
             emit("k:", &normalize_const_fqn(token), sink);
@@ -390,10 +540,43 @@ fn footprint(tree: &SourceTree, sink: &mut dyn FnMut(&str)) {
                 let tail = lower[pos + 1..].to_owned();
                 emit("c:", &tail, sink);
                 emit("s:", &tail, sink);
-                emit("m:", &tail, sink);
             }
         }
     }
+}
+
+/// Every stretch of a comment the phpdoc scanners read as a **type
+/// expression**: each tag's type text (the text [`steins_phpdoc::parse_type`]
+/// is handed), the `@template` bounds, the `@extends`/`@implements`/`@use` type
+/// arguments, and the magic-member subjects — which is where `@mixin`'s target
+/// lives.
+///
+/// That is the whole of a docblock any name resolution in the analysis ever
+/// sees, which is why it is the whole of what the footprint reads. The
+/// tokenizer it replaces ran over every identifier of every comment, and
+/// measurement retired it (issue #513): on `nikic/PHP-Parser` the word `param`
+/// in 164 files' `@param` tags, and `gettype` in one comment against the 173
+/// files declaring a `getType`, edged most of the universe to most of the
+/// universe. Restricted to type expressions, the same edit's affected set falls
+/// from 337 of 341 files to 20.
+fn docblock_type_texts(text: &str) -> Vec<String> {
+    if !text.contains('@') {
+        return Vec::new();
+    }
+    let mut out: Vec<String> = steins_phpdoc::scan_docblock(text)
+        .into_iter()
+        .map(|tag| tag.type_text)
+        .filter(|text| !text.is_empty())
+        .collect();
+    out.extend(steins_phpdoc::scan_template_decls(text).into_iter().filter_map(|d| d.bound));
+    out.extend(steins_phpdoc::scan_inheritance_args(text));
+    out.extend(
+        steins_phpdoc::scan_magic_member_tags(text)
+            .into_iter()
+            .map(|tag| tag.subject)
+            .filter(|subject| !subject.is_empty()),
+    );
+    out
 }
 
 /// Every FQN an unqualified/qualified/fully-qualified **function** reference
@@ -588,15 +771,6 @@ fn reverse(edges: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
     out
 }
 
-/// An adjacency list plus its reverse, merged — the undirected reading.
-fn undirected(edges: &[Vec<usize>], n: usize) -> Vec<Vec<usize>> {
-    let mut out = reverse(edges, n);
-    for (from, tos) in edges.iter().enumerate() {
-        out[from].extend(tos.iter().copied());
-    }
-    out
-}
-
 /// Breadth-first closure of `seeds` over `edges`, at most `depth` hops.
 /// `usize::MAX` is the unbounded reading.
 fn closure(edges: &[Vec<usize>], seeds: &HashSet<usize>, depth: usize) -> HashSet<usize> {
@@ -782,6 +956,89 @@ mod tests {
         // And the delta leg reaches the aliasing file through either end.
         assert_eq!(affected(&t, &[], &["c:lib\\real"]), vec![1]);
         assert_eq!(affected(&t, &[], &["c:shortcut"]), vec![1, 2]);
+    }
+
+    /// The receiver shape this leg cannot resolve, pinned so a later tightening
+    /// cannot drop it (issue #513). `$w`'s class is named in *neither* the
+    /// calling file nor its docblocks — it arrives through `make()`'s return
+    /// type — and the walk still resolves `$w->render()` into `Widget`'s file.
+    /// The chain that keeps it sound is the descent one: the caller edges to
+    /// `make()`'s file, which names `Widget`, so the closure reaches it at the
+    /// second hop rather than the first.
+    #[test]
+    fn an_untyped_receiver_still_reaches_the_class_its_walk_resolves() {
+        let t = trees(&[
+            "<?php final class Widget { public function render(): int { return 1; } }\n",
+            "<?php function make(): Widget { return new Widget(); }\n",
+            "<?php function top(): int { $w = make(); return $w->render(); }\n",
+        ]);
+        assert_eq!(affected(&t, &[0], &[]), vec![0, 1, 2]);
+    }
+
+    /// A named receiver resolves *upwards*: `Impl::run()` runs `Base`'s body,
+    /// and the file naming `Impl` names neither `Base` nor `run`. The subtype
+    /// expansion inside each descent hop is what carries it — and it costs no
+    /// hop, so a two-deep call chain through two such receivers still lands
+    /// inside the budget.
+    #[test]
+    fn a_named_receiver_reaches_the_ancestor_that_declares_the_body() {
+        let t = trees(&[
+            "<?php class Base { public static function run(): int { return 1; } }\n",
+            "<?php class Impl extends Base {}\n",
+            "<?php class Mid { public static function go(): int { return Impl::run(); } }\n",
+            "<?php function top(): int { return Mid::go(); }\n",
+        ]);
+        let out = affected(&t, &[0], &[]);
+        assert!(out.contains(&2), "the file naming the subclass: {out:?}");
+        assert!(out.contains(&3), "and its own caller: {out:?}");
+    }
+
+    /// A subclass appearing or moving reaches every file that *names the
+    /// superclass*, because the declared-receiver lane enumerates the whole
+    /// descendant set — the seed leg the call graph cannot answer for.
+    #[test]
+    fn a_changed_subclass_reaches_the_files_naming_its_supertype() {
+        let t = trees(&[
+            "<?php namespace App; class Report {}\n",
+            "<?php namespace App; class Detailed extends Report {}\n",
+            "<?php namespace App; function consume(Report $r): int { return 1; }\n",
+        ]);
+        let out = affected(&t, &[1], &[]);
+        assert!(out.contains(&0), "the supertype's file: {out:?}");
+        assert!(out.contains(&2), "a file naming the supertype: {out:?}");
+    }
+
+    /// A name a comment merely *says* is not an edge. Method resolution is
+    /// class-first, so nothing can arrive at `Report::render` without naming
+    /// `Report`; the tokenizer this replaces edged every file whose prose
+    /// spelled `render` to every file declaring one (issue #513).
+    #[test]
+    fn a_name_in_comment_prose_is_not_an_edge() {
+        let t = trees(&[
+            "<?php class Report { public function render(): int { return 1; } }\n",
+            "<?php\n// Report: this helper renders nothing.\n/** A summary about Report. */\nfunction show(): int { return 1; }\n",
+            "<?php\n/** @return int Renders by calling render twice. */\nfunction count_it(): int { return 1; }\n",
+        ]);
+        assert_eq!(affected(&t, &[0], &[]), vec![0]);
+        // …and the delta leg does not fire on prose either.
+        assert_eq!(affected(&t, &[], &["c:report"]), Vec::<usize>::new());
+    }
+
+    /// A **removed** declaration is the one delta shape the ordinary closure
+    /// cannot answer for: a deleted file has no slot to be `changed`, so the
+    /// file naming it reaches nothing, and a caller descending into that file
+    /// sees the moved answer with no key of its own. Such a hit seeds the
+    /// descent closure — and a hit whose key still resolves to a changed file
+    /// does not, because the edge to that file already carries its callers.
+    #[test]
+    fn a_removed_declaration_seeds_the_descent_closure() {
+        let t = trees(&[
+            "<?php function user(): int { return helper(); }\n",
+            "<?php function top(): int { return user(); }\n",
+        ]);
+        // Nothing in this universe declares `helper` any more: the caller of
+        // `user()` must be walked too.
+        assert_eq!(affected(&t, &[], &["f:helper"]), vec![0, 1]);
     }
 
     /// `@mixin` targets are inheritance edges, and `@mixinFoo` is not `@mixin`.
