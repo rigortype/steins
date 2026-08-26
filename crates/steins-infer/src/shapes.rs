@@ -136,6 +136,24 @@ pub(crate) fn array_guard_base<'c>(cx: &Cx, call: &'c CallExpr) -> Option<&'c St
     }
 }
 
+/// The bare variable an `array_key_exists`/`key_exists` call tests FOR — `$k`
+/// in `array_key_exists($k, $x)` — or `None` for a literal key, a key
+/// expression, or the keyless `array_is_list`.
+///
+/// The mirror of [`array_guard_base`], and the name a guard's forgetting must
+/// not outlive its own branches (issue #536).
+pub(crate) fn array_guard_key_var<'c>(cx: &Cx, call: &'c CallExpr) -> Option<&'c String> {
+    match array_guard_predicate(cx, call)? {
+        "array_key_exists" | "key_exists" if call.args.len() == 2 => {
+            match &call.args[0].value {
+                ArgValue::Var(v) => Some(v),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
 /// The recognized `array_all`/`array_any` name a guard call names (A8), through
 /// the same [`global_function_callee`] as [`array_guard_predicate`] — kept as a
 /// separate lookup because the two calls have a different arity (`$array,

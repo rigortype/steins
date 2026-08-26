@@ -483,10 +483,14 @@ fn a_guard_on_a_different_key_does_not_narrow_it() {
 
 // Issue #536: `array_key_exists($key, $values)` reads `$key` to answer a
 // question ABOUT `$values`. Recognizing it used to cost `$key` its declared
-// arms — statement position charged the blanket by-ref forgetting to a builtin
-// PHP declares all-by-value, and guard position charged the S4 forgetting to
-// every name the call read instead of to the array it is about. Either way a
-// later `$key` read had no fact left to report on.
+// arms for the rest of the scope — statement position charged the blanket
+// by-ref forgetting to a builtin PHP declares all-by-value, and guard position
+// charged the S4 forgetting to every name the call read instead of to the array
+// it is about. Either way a later `$key` read had no fact left to report on.
+//
+// The forgetting is now scoped to the branches the guard decides, where it
+// stands in for the narrowing item 2 will bring; everywhere else the key keeps
+// what it had.
 
 
 /// The issue's own repro: the guard is not even consumed.
@@ -519,14 +523,39 @@ fn an_unconsumed_type_predicate_guard_leaves_its_subject_the_fact_it_had() {
     assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
 }
 
-/// The consumed branch, pinned as it stands: the guard proves the key is a key
-/// OF `$values`, and until issue #536's item 2 reads the array's key type back
-/// onto it, `$key` is still `int|string` here — so the possibly grade is what
-/// the branch honestly knows, not a fact that went missing.
+/// The consumed branch stays silent, and deliberately so. The guard proves the
+/// key is a key OF `$values`; issue #536's item 2 is what turns that into a
+/// type (`array<string, int>` makes it a `string`), and until it lands the
+/// branch has nothing to narrow with. Reporting the un-narrowed `int|string`
+/// here would be a false positive — php-typing-conformance's
+/// `assertions_array_key_exists_key_narrowing` scores this very line as `Q`, so
+/// firing on it would trade one scored failure for another. Silence is the
+/// conservative floor; item 2 replaces the forgetting with the narrowing.
 #[test]
-fn the_guarded_branch_reports_the_key_it_has_not_yet_narrowed() {
+fn the_guarded_branch_stays_silent_until_the_guard_can_narrow_the_key() {
     let src = strict(
         "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) { needString($key); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+/// The other side of the same guard, for the same reason: the `else` knows only
+/// that the key is NOT a key of `$values`, which is no narrowing either.
+#[test]
+fn the_else_branch_of_the_guard_stays_silent_too() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) {} else { needString($key); } }\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+/// And the forgetting stops at the join: past the `if`, no branch is speaking
+/// and the key is the `int|string` it always was. This is the pin that keeps
+/// the branch-scoped drop from silently becoming the old whole-scope one.
+#[test]
+fn an_early_return_guard_leaves_the_key_intact_after_the_if() {
+    let src = strict(
+        "/**\n * @param array<string, int> $values\n */\nfunction f(int|string $key, array $values): void { if (array_key_exists($key, $values)) { return; } needString($key); }\n",
     );
     assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
 }

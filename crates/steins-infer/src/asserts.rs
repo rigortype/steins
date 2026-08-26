@@ -17,8 +17,8 @@ use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::predicates::{in_array_literals, type_predicate};
 use crate::refine::{clear_null, refine_fact, subtract_contract_lane};
 use crate::shapes::{
-    apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_predicate,
-    collect_shape_guards,
+    apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
+    array_guard_predicate, collect_shape_guards,
 };
 use crate::walk::{WalkCx, by_value_survivors};
 
@@ -584,6 +584,60 @@ fn collect_pure_guard_bases(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
         CondExpr::And(a, b) | CondExpr::Or(a, b) => {
             collect_pure_guard_bases(cx, a, out);
             collect_pure_guard_bases(cx, b, out);
+        }
+        _ => {}
+    }
+}
+
+/// The names a recognized presence guard forgets **inside the branches it
+/// decides, and nowhere else** (issue #536) — the keys of
+/// `array_key_exists($key, $x)`, minus anything [`cond_invalidations`] already
+/// forgets outright.
+///
+/// Neither branch of the guard has learned what `$key` is: the true branch
+/// knows it is a key OF `$x` and cannot yet say which type that makes it (issue
+/// #536's item 2), and the false branch knows only that it is not one. Until
+/// the narrowing exists, silence inside the branches is the conservative floor
+/// and reporting there would be a false positive. Past the join no branch is
+/// speaking any more, so the key is simply the `int|string` it always was — and
+/// an unconsumed call decides no branch at all, so it forgets nothing.
+///
+/// A key the condition also mentions elsewhere is excluded: that other mention
+/// is what might mutate it, and its forgetting is not this guard's to lift.
+pub(crate) fn cond_branch_scoped_invalidations(
+    cx: &Cx,
+    cond: &CondExpr,
+    invalidated: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    collect_presence_guard_keys(cx, cond, &mut out);
+    out.retain(|v| !invalidated.contains(v));
+    out
+}
+
+/// Walk a condition for [`array_guard_key_var`]s, over the same shapes
+/// [`collect_pure_guard_bases`] recognizes a pure array guard in.
+fn collect_presence_guard_keys(cx: &Cx, cond: &CondExpr, out: &mut Vec<String>) {
+    let note = |call: &CallExpr, out: &mut Vec<String>| {
+        if let Some(k) = array_guard_key_var(cx, call)
+            && !out.contains(k)
+        {
+            out.push(k.clone());
+        }
+    };
+    match cond {
+        CondExpr::Call { call, .. } => note(call, out),
+        CondExpr::Cmp { lhs, rhs, .. } => {
+            for operand in [lhs, rhs] {
+                if let CondOperand::Other { call: Some(call), .. } = operand {
+                    note(call, out);
+                }
+            }
+        }
+        CondExpr::Not(c) => collect_presence_guard_keys(cx, c, out),
+        CondExpr::And(a, b) | CondExpr::Or(a, b) => {
+            collect_presence_guard_keys(cx, a, out);
+            collect_presence_guard_keys(cx, b, out);
         }
         _ => {}
     }
