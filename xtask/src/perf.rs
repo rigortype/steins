@@ -41,6 +41,7 @@ use steins_infer::{
     Diagnostic, FinalKeyword, GenerationMode, GenerationParams, SidecarFolder, check_project,
     generation_check,
 };
+use steins_syntax::SourceTree;
 
 use crate::corpus::{collect_php_files, repo_root};
 use crate::sha256;
@@ -139,6 +140,17 @@ pub fn run(args: &[String]) -> Result<bool, String> {
             }
         }
 
+        if parsed.edits {
+            match measure_edits(Path::new(target), posture) {
+                Ok(rows) => {
+                    if !print_edits(&rows) {
+                        green = false;
+                    }
+                }
+                Err(e) => return Err(format!("target `{target}`: --edits failed: {e}")),
+            }
+        }
+
         if parsed.bless {
             blessed.push(entry_from(target, posture, &m));
         } else {
@@ -200,6 +212,7 @@ struct PerfArgs {
     no_php: bool,
     warm: bool,
     paranoid: bool,
+    edits: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
@@ -209,6 +222,7 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
     let mut no_php = false;
     let mut warm = false;
     let mut paranoid = false;
+    let mut edits = false;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -230,16 +244,23 @@ fn parse_args(args: &[String]) -> Result<PerfArgs, String> {
                 paranoid = true;
                 warm = true;
             }
+            // Seeded edits need something published to rebuild from and the
+            // verifier to grade the rebuild, so the flag implies both.
+            "--edits" => {
+                edits = true;
+                paranoid = true;
+                warm = true;
+            }
             other if other.starts_with("--") => {
-                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid])"));
+                return Err(format!("unknown flag `{other}` (perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits])"));
             }
             dir => targets.push(dir.to_owned()),
         }
     }
     if targets.is_empty() {
-        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid]".to_owned());
+        return Err("usage: cargo xtask perf <target-dir>... [--runs N] [--bless] [--no-php] [--warm] [--paranoid] [--edits]".to_owned());
     }
-    Ok(PerfArgs { targets, runs, bless, no_php, warm, paranoid })
+    Ok(PerfArgs { targets, runs, bless, no_php, warm, paranoid, edits })
 }
 
 /// The engine posture a measurement ran under (recorded in the baseline; the
@@ -446,9 +467,20 @@ struct WarmRun {
     capture_ms: f64,
     trees_ms: f64,
     analyze_ms: f64,
+    /// The analyze split issue #516 asks for: merge, whole-universe facts,
+    /// each fixpoint, the walk loop, the reporting passes.
+    merge_ms: f64,
+    facts_ms: f64,
+    effects_ms: f64,
+    throws_ms: f64,
+    walk_ms: f64,
+    report_ms: f64,
     persist_ms: f64,
     loaded: usize,
     parsed: usize,
+    /// Files whose tree was actually decoded — issue #516's counter, and zero
+    /// is what a no-change warm run must report.
+    decoded: usize,
     /// Packages that both loaded and parsed — the shape of an edit inside a
     /// package under the per-file provenance gate (issue #512).
     mixed: usize,
@@ -584,11 +616,10 @@ fn measure_warm_in_store(
         if outcome.report.mode != GenerationMode::Warm {
             return Err(format!("warm rebuild {} ran cold — no published generation", i + 1));
         }
-        let (loaded, parsed) = outcome
-            .report
-            .packages
-            .iter()
-            .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
+        let (loaded, parsed, decoded) = outcome.report.packages.iter().fold(
+            (0usize, 0usize, 0usize),
+            |(l, p, d), pkg| (l + pkg.loaded, p + pkg.parsed, d + pkg.decoded),
+        );
         let mixed = outcome.report.packages.iter().filter(|pkg| pkg.is_mixed()).count();
         let t = outcome.report.timings;
         let w = &outcome.report.walk;
@@ -598,9 +629,16 @@ fn measure_warm_in_store(
             capture_ms: t.capture_ms,
             trees_ms: t.trees_ms,
             analyze_ms: t.analyze_ms,
+            merge_ms: t.merge_ms,
+            facts_ms: t.facts_ms,
+            effects_ms: t.effects_ms,
+            throws_ms: t.throws_ms,
+            walk_ms: t.walk_ms,
+            report_ms: t.report_ms,
             persist_ms: t.persist_ms,
             loaded,
             parsed,
+            decoded,
             mixed,
             walked: w.walked,
             replayed: w.replayed,
@@ -630,7 +668,7 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
     for (i, run) in w.warm.iter().enumerate() {
         println!(
-            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
+            "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}, {} tree(s) decoded), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
             i + 1,
             run.capture_ms,
             run.trees_ms,
@@ -641,11 +679,21 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
             } else {
                 format!(", {} package(s) partly reused", run.mixed)
             },
+            run.decoded,
             run.analyze_ms,
             run.walked,
             run.replayed,
             run.persist_ms,
             run.capture_ms + run.trees_ms + run.analyze_ms + run.persist_ms,
+        );
+        println!(
+            "        analyze split: merge {:.1} ms, facts {:.1} ms, effects {:.1} ms, throws {:.1} ms, walk {:.1} ms, report {:.1} ms",
+            run.merge_ms,
+            run.facts_ms,
+            run.effects_ms,
+            run.throws_ms,
+            run.walk_ms,
+            run.report_ms,
         );
     }
     let total =
@@ -957,6 +1005,327 @@ fn print_timing_delta(recorded: &BaselineEntry, median: &RunTiming) {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Seeded edits (issue #516): the warm path graded against a fresh cold run,
+// one edit shape at a time.
+// ---------------------------------------------------------------------------
+
+/// One seeded edit's verdict: what the warm rebuild did, whether the verifier
+/// found a divergence, and whether the findings equal a fresh cold run's over
+/// the same edited tree.
+struct EditRow {
+    shape: &'static str,
+    file: String,
+    walked: usize,
+    replayed: usize,
+    would_skip: usize,
+    parsed: usize,
+    decoded: usize,
+    warm_ms: f64,
+    capture_ms: f64,
+    trees_ms: f64,
+    analyze_ms: f64,
+    persist_ms: f64,
+    divergences: usize,
+    /// `None` when warm equalled the fresh cold run; the mismatch otherwise.
+    mismatch: Option<String>,
+}
+
+/// Copy `dir` into a scratch tree, publish a cold generation over it, then
+/// seed one edit shape at a time — each graded warm-with-paranoid against a
+/// fresh cold run of the *edited* tree.
+///
+/// The tree is copied because every shape mutates it; the corpus checkouts are
+/// never written to. Edits accumulate rather than reverting, which is both
+/// cheaper and closer to how a warm store is actually used: each rebuild
+/// publishes, and the next shape starts from that generation.
+fn measure_edits(dir: &Path, posture: Posture) -> Result<Vec<EditRow>, String> {
+    let dir = dir.to_path_buf();
+    std::thread::Builder::new()
+        .stack_size(WORKER_STACK_SIZE)
+        .spawn(move || measure_edits_on_worker(&dir, posture))
+        .expect("failed to spawn the perf edits worker thread")
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+}
+
+fn measure_edits_on_worker(dir: &Path, posture: Posture) -> Result<Vec<EditRow>, String> {
+    let scratch = std::env::temp_dir().join(format!(
+        "steins-perf-edits-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    std::fs::create_dir_all(&scratch).map_err(|e| format!("create scratch: {e}"))?;
+    let tree = scratch.join("tree");
+    // Two stores, fed the same edits: one measures what a warm rebuild costs,
+    // the other runs the verifier — which walks everything and so measures
+    // nothing but its own thoroughness.
+    let cost = scratch.join("cost");
+    let grade = scratch.join("grade");
+    std::fs::create_dir_all(&cost).map_err(|e| format!("create store: {e}"))?;
+    std::fs::create_dir_all(&grade).map_err(|e| format!("create store: {e}"))?;
+    let result = copy_tree(dir, &tree)
+        .map_err(|e| format!("copy the target: {e}"))
+        .and_then(|()| edit_scenarios(&tree, &cost, &grade, posture));
+    let _ = std::fs::remove_dir_all(&scratch);
+    result
+}
+
+fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let target = to.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            // `.git` is large and irrelevant to the analysis.
+            if entry.file_name() == ".git" {
+                continue;
+            }
+            copy_tree(&entry.path(), &target)?;
+        } else {
+            std::fs::copy(entry.path(), &target)?;
+        }
+    }
+    Ok(())
+}
+
+/// The five edit shapes, seeded in order over one accumulating tree.
+fn edit_scenarios(
+    tree: &Path,
+    cost: &Path,
+    grade_store: &Path,
+    posture: Posture,
+) -> Result<Vec<EditRow>, String> {
+    let mut files = Vec::new();
+    collect_php_files(tree, &mut files);
+    files.sort();
+    if files.len() < 3 {
+        return Err("a seeded-edit run needs at least three files".to_owned());
+    }
+    // Shape selection by a property of the *universe*, not by a file name, so
+    // the same five shapes land on any target.
+    //
+    // A leaf is a file nothing else names. Measured rather than guessed: one
+    // pass over every file's text builds an identifier frequency table, and a
+    // file's inbound weight is the frequency of the names it declares. A file
+    // that declares nothing, or whose declarations nobody spells, scores zero
+    // and is the leaf. (Prose counts as a mention here, which is the right
+    // side to err on for picking a fixture — a file the corpus never even
+    // *says* is a leaf by any reading.)
+    let texts: Vec<String> =
+        files.iter().map(|p| std::fs::read_to_string(p).unwrap_or_default()).collect();
+    let mut frequency: BTreeMap<String, usize> = BTreeMap::new();
+    for text in &texts {
+        for token in text.split(|c: char| !(c.is_alphanumeric() || c == '_')) {
+            if token.is_empty() {
+                continue;
+            }
+            *frequency.entry(token.to_ascii_lowercase()).or_default() += 1;
+        }
+    }
+    let parsed: Vec<SourceTree> = texts.iter().map(|t| SourceTree::parse(t)).collect();
+    let inbound = |i: usize| -> usize {
+        let tree = &parsed[i];
+        let names = tree
+            .classes()
+            .iter()
+            .map(|c| c.name.to_ascii_lowercase())
+            .chain(tree.functions().iter().map(|f| f.name.to_ascii_lowercase()));
+        names.map(|n| frequency.get(&n).copied().unwrap_or(0)).sum()
+    };
+    let pick = |by: &dyn Fn(usize) -> usize, most: bool| -> PathBuf {
+        let mut best = 0usize;
+        for i in 1..files.len() {
+            let better = if most { by(i) > by(best) } else { by(i) < by(best) };
+            if better {
+                best = i;
+            }
+        }
+        files[best].clone()
+    };
+    let leaf = pick(&inbound, false);
+    let core = pick(&inbound, true);
+    let declarer = pick(&|i| parsed[i].classes().len(), true);
+    let added = tree.join("steins_perf_added.php");
+    drop(parsed);
+
+    // Seed both stores with a cold build over the untouched copy.
+    let mut rows = Vec::new();
+    let _ = run_generation(tree, cost, posture, false)?;
+    let _ = run_generation(tree, grade_store, posture, true)?;
+
+    let comment = "\n// steins perf: seeded edit\n";
+    let append = |path: &Path| -> Result<(), String> {
+        let mut text = std::fs::read_to_string(path).map_err(|e| format!("read: {e}"))?;
+        text.push_str(comment);
+        std::fs::write(path, text).map_err(|e| format!("write: {e}"))
+    };
+
+    // 1. A leaf edit.
+    append(&leaf)?;
+    rows.push(grade(tree, cost, grade_store, posture, "leaf (least-named file)", &leaf)?);
+
+    // 2. A core edit.
+    append(&core)?;
+    rows.push(grade(tree, cost, grade_store, posture, "core (most-named file)", &core)?);
+
+    // 3. The declarer most classes live in.
+    append(&declarer)?;
+    rows.push(grade(
+        tree,
+        cost,
+        grade_store,
+        posture,
+        "declarer (most class-likes)",
+        &declarer,
+    )?);
+
+    // 4. A file addition.
+    std::fs::write(
+        &added,
+        "<?php\nnamespace SteinsPerf;\nclass Added {}\nfunction addedFn(): int { return 1; }\n",
+    )
+    .map_err(|e| format!("write the added file: {e}"))?;
+    rows.push(grade(tree, cost, grade_store, posture, "addition (a new file)", &added)?);
+
+    // 5. A file removal — the file just added, so the universe returns to the
+    //    shape the other four shapes left it in.
+    std::fs::remove_file(&added).map_err(|e| format!("remove: {e}"))?;
+    rows.push(grade(tree, cost, grade_store, posture, "removal (that file again)", &added)?);
+
+    Ok(rows)
+}
+
+/// One graded scenario: a warm rebuild with the verifier on, then a fresh cold
+/// run of the same tree in its own store, compared finding for finding.
+fn grade(
+    tree: &Path,
+    cost: &Path,
+    grade_store: &Path,
+    posture: Posture,
+    shape: &'static str,
+    file: &Path,
+) -> Result<EditRow, String> {
+    // The cost run: what a warm rebuild of this edit actually does.
+    let warm = run_generation(tree, cost, posture, false)?;
+    if warm.0 != GenerationMode::Warm {
+        return Err(format!("{shape}: the rebuild ran cold"));
+    }
+    // The graded run, in its own store: the verifier walks every file anyway
+    // and compares each would-be skip against its fresh walk.
+    let verified = run_generation(tree, grade_store, posture, true)?;
+    // And the oracle: a cold build of the same tree, in a store of its own.
+    let fresh_store = cost.with_extension("fresh");
+    let _ = std::fs::remove_dir_all(&fresh_store);
+    std::fs::create_dir_all(&fresh_store).map_err(|e| format!("create fresh store: {e}"))?;
+    let cold = run_generation(tree, &fresh_store, posture, false)?;
+    let _ = std::fs::remove_dir_all(&fresh_store);
+    let cold_hash = sha256::hex(canonical_serialization(cold.1).as_bytes());
+    let warm_hash = sha256::hex(canonical_serialization(warm.1).as_bytes());
+    let verified_hash = sha256::hex(canonical_serialization(verified.1).as_bytes());
+    let mismatch = if warm_hash != cold_hash {
+        Some(format!("warm {warm_hash} != fresh cold {cold_hash}"))
+    } else if verified_hash != cold_hash {
+        Some(format!("paranoid warm {verified_hash} != fresh cold {cold_hash}"))
+    } else {
+        None
+    };
+    let t = warm.2.timings;
+    Ok(EditRow {
+        shape,
+        file: file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+        walked: warm.2.walk.walked,
+        replayed: warm.2.walk.replayed,
+        would_skip: verified.2.walk.would_skip,
+        parsed: warm.2.packages.iter().map(|p| p.parsed).sum(),
+        decoded: warm.2.packages.iter().map(|p| p.decoded).sum(),
+        warm_ms: t.total_ms(),
+        capture_ms: t.capture_ms,
+        trees_ms: t.trees_ms,
+        analyze_ms: t.analyze_ms,
+        persist_ms: t.persist_ms,
+        divergences: verified.2.walk.divergence_count,
+        mismatch,
+    })
+}
+
+/// One generation run over `tree` against `store`, with the caller's own
+/// boundary resolution — the same one `measure_warm_in_store` performs.
+fn run_generation(
+    tree: &Path,
+    store: &Path,
+    posture: Posture,
+    paranoid: bool,
+) -> Result<(GenerationMode, Vec<Diagnostic>, steins_infer::GenerationReport), String> {
+    let mut files = Vec::new();
+    collect_php_files(tree, &mut files);
+    files.sort();
+    let rel: Vec<PathBuf> =
+        files.iter().map(|f| f.strip_prefix(tree).unwrap_or(f).to_path_buf()).collect();
+    let layout = composer::discover(&[tree.to_path_buf()], tree);
+    let partition = steins_db::partition::discover(&layout);
+    let plugins = PluginFacts::discover(&layout, None);
+    let effects = EffectsPolicy::none();
+    let params = GenerationParams {
+        store_root: store,
+        capture_root: tree,
+        files: &rel,
+        layout: &layout,
+        partition: &partition,
+        plugins: &plugins,
+        effects: &effects,
+        warning_handler_abort: true,
+        final_keyword: FinalKeyword::Enforced,
+        php: matches!(posture, Posture::Php),
+        paranoid,
+    };
+    let outcome = generation_check(&params).map_err(|e| e.to_string())?;
+    Ok((outcome.report.mode, outcome.findings, outcome.report))
+}
+
+/// Print the seeded-edit table; `false` when any shape diverged or disagreed
+/// with its fresh cold run.
+fn print_edits(rows: &[EditRow]) -> bool {
+    println!("    seeded edits (warm + paranoid, each graded against a fresh cold run):");
+    let mut green = true;
+    for row in rows {
+        println!(
+            "      {:<28} {:<26} {} walked / {} replayed, {} parsed, {} tree(s) decoded — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1} = {:.1} ms (verifier graded {})",
+            row.shape,
+            row.file,
+            row.walked,
+            row.replayed,
+            row.parsed,
+            row.decoded,
+            row.capture_ms,
+            row.trees_ms,
+            row.analyze_ms,
+            row.persist_ms,
+            row.warm_ms,
+            row.would_skip,
+        );
+        if row.divergences > 0 {
+            green = false;
+            println!("        paranoid: FAILED — {} divergence(s)", row.divergences);
+        }
+        if let Some(detail) = &row.mismatch {
+            green = false;
+            println!("        warm ≡ cold: FAILED — {detail}");
+        }
+    }
+    if green {
+        let graded: usize = rows.iter().map(|r| r.would_skip).sum();
+        println!(
+            "      OK — {graded} would-be skip(s) graded byte-identical across {} shape(s), every shape's findings equal to a fresh cold run",
+            rows.len()
+        );
+    }
+    green
+}
 
 #[cfg(test)]
 mod tests {

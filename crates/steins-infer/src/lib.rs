@@ -54,6 +54,7 @@ mod affected;
 mod generation;
 #[cfg(not(target_arch = "wasm32"))]
 mod summaries;
+mod facts;
 mod fold_table;
 mod foreach_check;
 mod generics;
@@ -96,14 +97,14 @@ pub use annotate::{
 };
 pub use assert_harness::{AssertObservation, SubjectFact, collect_assert_types, probe_subjects};
 pub use project::{
-    Diagnostic, FileUnit, Fix, FixEdit, MagicObstacle, is_vendor_path, magic_obstacles,
+    Diagnostic, FileUnit, Fix, FixEdit, LazyTree, MagicObstacle, is_vendor_path, magic_obstacles,
     magic_obstacles_reaching, resolves_to_user_function,
 };
 
 use absence::{check_undefined_class, check_undefined_constant};
 use mechanics::{check_array_duplicate_keys, emit_parse_failure};
 use overrides::check_declaration_fatals;
-use return_missing::{check_return_missing, never_returning_names};
+use return_missing::check_return_missing;
 
 use arg_check::{implicit_null_accepted, is_type_error};
 use builtin_returns::fact_with_null;
@@ -115,7 +116,7 @@ use dump::render_shape_fact;
 use env::{Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
-use walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
+use walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 pub use walk_plan::Divergence;
 
 use fold_args::effective_php_view;
@@ -129,12 +130,13 @@ pub use steins_contract::normalize::FinalKeyword;
 /// reads the classification without naming `steins-catalog`.
 pub use steins_catalog::RefusalAxis;
 pub use suppress::{
-    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, InlineOutcome, Layer, Origin,
-    SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores, declared_facet, layer,
-    pattern_is_known, pattern_matches, surface_floor,
+    DIAGNOSTIC_IDS, DIAGNOSTIC_REGISTRY, FACET_ORIGIN, Facet, Floor, INLINE_IGNORE, InlineOutcome,
+    Layer, Origin, SUPPRESS_UNKNOWN_ID, SUPPRESS_UNMATCHED_ID, apply_inline_ignores,
+    declared_facet, layer, pattern_is_known, pattern_matches, surface_floor,
 };
 
 use std::collections::{HashMap, HashSet};
+use std::time::Instant;
 
 use steins_db::{
     Db, EffectsPolicy, PluginFacts, Project, ProjectLayout, SourceFile, parse, project_index,
@@ -209,8 +211,8 @@ pub const SIDECAR_HANDSHAKE_NOTICE: &str = "note: PHP sidecar stopped answering 
 /// subset — [`NoFold`], no PHP). Analyzes the file as a one-file project.
 #[salsa::tracked]
 pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -228,8 +230,8 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
 /// analyzed as a one-file project.
 #[must_use]
 pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<Diagnostic> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -286,8 +288,15 @@ pub fn check_project_with_postures(
     final_keyword: FinalKeyword,
 ) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -321,7 +330,8 @@ pub fn check_with(
     folder: &mut dyn Folder,
 ) -> Vec<Diagnostic> {
     let _ = functions; // authoritative list comes from `tree.functions()`
-    let units = [FileUnit { path, tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -348,7 +358,8 @@ pub fn check_full(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
 ) -> Vec<Diagnostic> {
-    let units = [FileUnit { path, tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
     check_units(
         &units,
@@ -410,10 +421,32 @@ fn check_units_controlled(
     mut control: Option<&mut WalkControl<'_>>,
 ) -> Vec<Diagnostic> {
     let mut out = Vec::new();
+    // Issue #516: the analysis phase was one number, and the whole first move
+    // of that issue is finding out which part of it is the wall. Each span is
+    // recorded where it runs and handed back on the control, which only the
+    // generation orchestrator holds — every other entry point passes `None`
+    // and pays two `Instant::now()` calls per run for the arithmetic.
+    let mut passes = PassTimings::default();
+    let t_facts = clock();
+
+    // This run's per-file facts (issue #516), or an empty slice on every path
+    // but the generation orchestrator's. Where a file has them, the phases
+    // below read them instead of its tree; where it does not, they read the
+    // tree exactly as they always did — the two are the same value by
+    // construction, and `FileFacts::from_tree` is the one producer.
+    let facts: &[facts::FileFacts] = control.as_deref().map_or(&[], |c| c.facts);
 
     // The whole-universe dam fact (ADR-0049 §2): one query answer per run, shared by
     // every file's context. Consumed by the absence family's conditional-decl leg.
-    let dam = dam_facts(units, layout);
+    let dam_rows: Vec<crate::dam::DamRow> = units
+        .iter()
+        .enumerate()
+        .map(|(fi, u)| match facts.get(fi) {
+            Some(f) => (f.parse_error.clone(), f.dynamism.clone()),
+            None => (facts::parse_error_of(u.tree), facts::dam_candidates_of(u.path, u.tree)),
+        })
+        .collect();
+    let dam = crate::dam::dam_facts_from(units, layout, &dam_rows);
 
     // The analysis PHP view (issue #28): the TARGET the project declares
     // (`config.platform.php` / `require.php`, via the layout) is what
@@ -429,7 +462,10 @@ fn check_units_controlled(
     // moment any file declares a userland constant of that name — constant
     // resolution is otherwise unmodeled, so the conservative reading is the
     // only sound one.
-    let version_id = if units.iter().any(|u| u.tree.php_version_id_declared()) {
+    let version_id = if units.iter().enumerate().any(|(fi, u)| match facts.get(fi) {
+        Some(f) => f.version_id_declared,
+        None => u.tree.php_version_id_declared(),
+    }) {
         None
     } else {
         view.version_id
@@ -440,12 +476,16 @@ fn check_units_controlled(
     // consumer — the purity oracle, `effect_diagnostics`, `throw_diagnostics` —
     // reads the same result. Each consumer keeps its own cheap gate, so a
     // project spelling none of the triggering constructs still pays nothing.
-    let fixpoints = Fixpoints::new(units, index, plugins, policy);
+    let fixpoints = Fixpoints::new(units, index, plugins, policy, facts);
 
     // The callable-purity oracle (ADR-0063 P3): the shared whole-project effect
     // fixpoint, consulted by every file's context, and built only when some
     // docblock actually spells a purity-bearing callable.
+    passes.facts_ms += ms(t_facts);
+    let t_oracle = clock();
     let purity = PurityOracle::build(&fixpoints);
+    let oracle_ms = ms(t_oracle);
+    let t_facts = clock();
 
     // parse failure (ADR-0079, issue #180): `parse_errors()`'s first real consumer.
     // One finding per broken file at its first error, and then NOTHING else from
@@ -457,17 +497,28 @@ fn check_units_controlled(
     // Vendor is NOT special here, only in the dam (§2.3): a broken vendor file
     // emits the finding too and it rides the CLI's ordinary vendor filter, exactly
     // as the ADR-0046 §2 presumption prescribes.
-    for u in units {
-        emit_parse_failure(u, dam.file_is_unparsable(u.path), &mut out);
+    for (fi, u) in units.iter().enumerate() {
+        emit_parse_failure(u.path, dam_rows[fi].0.as_ref(), dam.file_is_unparsable(u.path), &mut out);
     }
-    let unparsable: HashSet<&str> =
-        units.iter().filter(|u| !u.tree.parse_errors().is_empty()).map(|u| u.path).collect();
+    let unparsable: HashSet<&str> = units
+        .iter()
+        .enumerate()
+        .filter(|(fi, _)| dam_rows[*fi].0.is_some())
+        .map(|(_, u)| u.path)
+        .collect();
     // end parse failure (ADR-0079, issue #180)
 
     // return missing (ADR-0078, issue #199): the whole-run veto set, computed once
     // because a never-returning helper is routinely declared in a different file
     // from the body that calls it.
-    let never_returning = never_returning_names(units);
+    let never_returning: HashSet<String> = units
+        .iter()
+        .enumerate()
+        .flat_map(|(fi, u)| match facts.get(fi) {
+            Some(f) => f.never_returning.clone(),
+            None => facts::never_returning_of(u.tree),
+        })
+        .collect();
     // end return missing (ADR-0078, issue #199)
 
     // ADR-0088 §5 (issue #433): the dataflow walk's own verdict on which
@@ -477,6 +528,7 @@ fn check_units_controlled(
     // back to the same CST `Match` node). Populated below, read by
     // `throw_diagnostics` at the end.
     let mut uncovered_matches: HashMap<usize, HashSet<u32>> = HashMap::new();
+    passes.facts_ms += ms(t_facts);
 
     // The walk plan (issue #489 slice B). Every whole-universe verdict a walk
     // can read is in hand by now, so this is the one point at which the
@@ -503,6 +555,7 @@ fn check_units_controlled(
     };
     plan.resize_with(units.len(), || FilePlan::Walk);
 
+    let t_walk = clock();
     for fi in 0..units.len() {
         let before = out.len();
         // A replayed file's block is appended verbatim, in the very position
@@ -562,6 +615,9 @@ fn check_units_controlled(
         }
     }
 
+    passes.walk_ms = ms(t_walk);
+    let t_report = clock();
+
     // --- Effects pass (ADR-0005), computed once over the whole project. ------
     out.extend(effect_diagnostics(&fixpoints));
 
@@ -576,7 +632,41 @@ fn check_units_controlled(
     }
 
     dedup(&mut out);
+    // The two fixpoints are lazy and forced from three places (the oracle
+    // above, and each reporting pass here), so their own cost is subtracted
+    // out of whichever span forced them rather than attributed to it.
+    let (effects_ms, throws_ms) = fixpoints.spent();
+    passes.effects_ms = effects_ms;
+    passes.throws_ms = throws_ms;
+    passes.report_ms = (oracle_ms + ms(t_report) - effects_ms - throws_ms).max(0.0);
+    if let Some(control) = control {
+        control.passes = passes;
+    }
     out
+}
+
+/// A monotonic instant, or `None` where the target has no clock.
+///
+/// `wasm32-unknown-unknown` has no time source and `Instant::now` **panics**
+/// there, so the phase ledger — which is read by the generation orchestrator
+/// and by nothing else — must not reach for one. The browser build measures
+/// nothing and reports zeros, which is the honest answer for a target that
+/// cannot measure.
+fn clock() -> Option<Instant> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Some(Instant::now())
+    }
+}
+
+/// Milliseconds since `t`, the one spelling the phase ledger uses. Zero for a
+/// target with no clock.
+fn ms(t: Option<Instant>) -> f64 {
+    t.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1000.0)
 }
 
 /// Collect an iterator of borrowed names into a sorted vector — the canonical
@@ -824,7 +914,20 @@ fn dedup(out: &mut Vec<Diagnostic>) {
 
 /// A node in the unified project effect call graph — a free function (keyed by
 /// FQN) or a class method (keyed by class FQN + method name).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// Which of the three whole-universe textual gates [`Fixpoints::any`] asks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Gate {
+    Purity,
+    Envelope,
+    Throws,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 enum Sym {
     Func(String),
     Method(String, String),
@@ -856,8 +959,18 @@ pub(crate) struct Fixpoints<'a> {
     index: &'a Index,
     plugins: &'a PluginFacts,
     policy: &'a EffectsPolicy,
+    /// This run's per-file facts, in unit order — empty on every path but the
+    /// generation orchestrator's (issue #516). Where a file has them, its own
+    /// rows come from there and its tree is never decoded; where it does not,
+    /// the classifier reads the tree exactly as it always did.
+    facts: &'a [facts::FileFacts],
     effects: std::cell::OnceCell<HashMap<Sym, purity::EffectSet>>,
     throws: std::cell::OnceCell<HashMap<Sym, throws::ThrowSet>>,
+    /// Wall-clock milliseconds each fixpoint cost, recorded at the one place
+    /// each is computed (issue #516 asks where the warm run's remaining time
+    /// goes, and "analyze" was one undifferentiated number). Zero for a
+    /// fixpoint no consumer's gate ever forced.
+    spent: std::cell::Cell<(f64, f64)>,
 }
 
 impl<'a> Fixpoints<'a> {
@@ -866,15 +979,23 @@ impl<'a> Fixpoints<'a> {
         index: &'a Index,
         plugins: &'a PluginFacts,
         policy: &'a EffectsPolicy,
+        facts: &'a [facts::FileFacts],
     ) -> Self {
         Self {
             units,
             index,
             plugins,
             policy,
+            facts,
             effects: std::cell::OnceCell::new(),
             throws: std::cell::OnceCell::new(),
+            spent: std::cell::Cell::new((0.0, 0.0)),
         }
+    }
+
+    /// `(effects, throws)` fixpoint milliseconds — see [`Self::spent`].
+    pub(crate) fn spent(&self) -> (f64, f64) {
+        self.spent.get()
     }
 
     pub(crate) fn units(&self) -> &'a [FileUnit<'a>] {
@@ -893,15 +1014,72 @@ impl<'a> Fixpoints<'a> {
         self.policy
     }
 
+    /// Whether **any** declaration in the universe spells a purity-bearing
+    /// callable, an effect envelope or an interop one, or `@throws` — the three
+    /// cheap textual gates that decide whether a fixpoint runs at all.
+    ///
+    /// Read off the per-file facts where the run has them, so a project that
+    /// spells none of the three answers `false` without decoding a tree (issue
+    /// #516: this gate alone used to force the whole universe).
+    pub(crate) fn any(&self, gate: Gate) -> bool {
+        (0..self.units.len()).any(|fi| self.spells(fi, gate))
+    }
+
+    /// The same question for one file — what `throw_diagnostics` skips on.
+    pub(crate) fn spells(&self, fi: usize, gate: Gate) -> bool {
+        if let Some(facts) = self.facts.get(fi) {
+            return match gate {
+                Gate::Purity => facts.spells_purity,
+                Gate::Envelope => facts.spells_envelope,
+                Gate::Throws => facts.spells_throws,
+            };
+        }
+        let tree = self.units[fi].tree;
+        let doc = |doc: Option<&String>| match gate {
+            Gate::Purity => {
+                doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
+            }
+            Gate::Envelope => purity::spells_interop_envelope(doc),
+            Gate::Throws => doc.is_some_and(|t| t.contains("throws")),
+        };
+        let envelope = matches!(gate, Gate::Envelope);
+        tree.functions()
+            .iter()
+            .any(|f| doc(f.docblock.as_ref()) || (envelope && f.effect_envelope.is_some()))
+            || tree.classes().iter().any(|c| {
+                (envelope && purity::spells_interop_envelope(c.docblock.as_ref()))
+                    || c.methods.iter().any(|m| {
+                        doc(m.docblock.as_ref()) || (envelope && m.effect_envelope.is_some())
+                    })
+            })
+    }
+
     /// The effect fixpoint result, computed on first request.
     pub(crate) fn effects(&self) -> &HashMap<Sym, purity::EffectSet> {
-        self.effects
-            .get_or_init(|| purity::compute_effects(self.units, self.index, self.plugins, self.policy))
+        self.effects.get_or_init(|| {
+            let t = clock();
+            let out = purity::compute_effects(
+                self.units,
+                self.index,
+                self.plugins,
+                self.policy,
+                self.facts,
+            );
+            let (_, throws) = self.spent.get();
+            self.spent.set((ms(t), throws));
+            out
+        })
     }
 
     /// The throw fixpoint result, computed on first request.
     pub(crate) fn throws(&self) -> &HashMap<Sym, throws::ThrowSet> {
-        self.throws.get_or_init(|| throws::compute_throws(self.units, self.index))
+        self.throws.get_or_init(|| {
+            let t = clock();
+            let out = throws::compute_throws(self.units, self.index, self.facts);
+            let (effects, _) = self.spent.get();
+            self.spent.set((effects, ms(t)));
+            out
+        })
     }
 }
 

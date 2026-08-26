@@ -21,6 +21,7 @@ use std::collections::BTreeMap;
 use steins_db::{GoverningRoot, PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
 use steins_infer::profile::{Level, ProfileConfigs, UserProfile};
 use steins_infer::{
+    LazyTree,
     ARRAY_DUPLICATE_KEY_ID, CALL_UNDEFINED_FUNCTION_ID, CALL_UNDEFINED_METHOD_ID, CLASS_UNDEFINED_ID,
     DamKind, Diagnostic, FileUnit, Folder, SYNTAX_UNPARSABLE_ID, check_project, dam_facts,
 };
@@ -175,7 +176,7 @@ fn the_message_names_the_project_wide_consequence_only_when_it_holds() {
 
 #[test]
 fn the_broken_file_is_a_dam_site_of_its_own_kind() {
-    let tree = SourceTree::parse(BROKEN);
+    let tree = LazyTree::ready(SourceTree::parse(BROKEN));
     let units = [FileUnit { path: "src/q.php", tree: &tree }];
     let facts = dam_facts(&units, &ProjectLayout::fallback());
     assert_eq!(facts.len(), 1, "{:?}", facts.sites());
@@ -296,7 +297,7 @@ fn a_broken_vendor_file_still_reports() {
 
 #[test]
 fn a_broken_vendor_file_is_not_a_dam_site() {
-    let tree = SourceTree::parse(BROKEN);
+    let tree = LazyTree::ready(SourceTree::parse(BROKEN));
     let units = [FileUnit { path: "vendor/pkg/q.php", tree: &tree }];
     assert!(dam_facts(&units, &ProjectLayout::fallback()).is_clear());
     // …and so the existence family keeps its findings.
@@ -323,7 +324,7 @@ fn the_presumption_follows_a_composer_declared_vendor_dir() {
     // `3rdparty/` isn't literally `vendor`; a bespoke literal check would miss it
     // and wrongly dam the project. Routed through `ProjectLayout::is_vendor` instead.
     let layout = composer_layout_with_vendor_dir("3rdparty");
-    let tree = SourceTree::parse(BROKEN);
+    let tree = LazyTree::ready(SourceTree::parse(BROKEN));
     let units = [FileUnit { path: "3rdparty/pkg/q.php", tree: &tree }];
     assert!(dam_facts(&units, &layout).is_clear(), "a declared vendor dir is not a dam site");
 
@@ -352,7 +353,7 @@ fn the_presumption_follows_the_steins_toml_no_manifest_vendor_dirs() {
     // No composer.json at all: `steins.toml [paths] vendor-dirs` is the only
     // reason `3rdparty/` reads as vendor here, and the dam has to agree with it.
     let layout = ProjectLayout::fallback().with_extra_vendor_dirs(vec!["3rdparty".to_owned()]);
-    let tree = SourceTree::parse(BROKEN);
+    let tree = LazyTree::ready(SourceTree::parse(BROKEN));
     let units = [FileUnit { path: "3rdparty/pkg/q.php", tree: &tree }];
     assert!(dam_facts(&units, &layout).is_clear());
 

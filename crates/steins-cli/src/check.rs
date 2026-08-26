@@ -9,7 +9,7 @@
 //! [`crate::transform`]. Rendering is the seam in [`crate::render`] (ADR-0054):
 //! ONE report, whichever format was selected.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -185,7 +185,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     };
 
     let (loaded, findings, gated_trees) = match gated {
-        Some(run) => (run.loaded, run.findings, Some(run.trees)),
+        Some(run) => (run.loaded, run.findings, Some((run.trees, run.directive_files))),
         None => {
             // One folder for the whole run: owns the sidecar + fold memo, so repeated
             // calls across files never re-spawn or re-fold.
@@ -217,9 +217,20 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // argument. The gated arm supplies the orchestrator's own trees so the
     // inline scan re-parses nothing; the cold arm reads the salsa parse memo.
     let (inline, vendor_suppressed) = match &gated_trees {
-        Some(trees) => {
-            let pairs: Vec<(String, &SourceTree)> =
-                trees.iter().map(|(path, tree)| (path.clone(), tree)).collect();
+        Some((trees, directive_files)) => {
+            // Only the files the scan can say anything about (issue #516): the
+            // ones a finding names, and the ones whose text spells a directive
+            // at all. Every other file's tree stays undecoded — and its
+            // absence changes nothing, because `apply_inline_ignores` reads a
+            // file for exactly two reasons and neither applies.
+            let named: HashSet<&str> = findings.iter().map(|d| d.path.as_str()).collect();
+            let pairs: Vec<(String, &SourceTree)> = trees
+                .iter()
+                .filter(|(path, _)| {
+                    named.contains(path.as_str()) || directive_files.contains(path)
+                })
+                .map(|(path, tree)| (path.clone(), &**tree))
+                .collect();
             suppression_over(&loaded.layout, pairs, findings, &surface, vendor_diagnostics)
         }
         None => suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics),

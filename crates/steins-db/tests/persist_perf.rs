@@ -11,7 +11,9 @@
 use std::path::PathBuf;
 
 use steins_db::PackageShard;
-use steins_db::persist::{TraceFile, TraceIndex, build_sections, decl_contracts, read_shard};
+use steins_db::persist::{
+    TraceIndex, build_sections, contract_payload, read_shard, trace_payload,
+};
 use steins_gen::{ArtifactReader, DecodeBudget};
 use steins_syntax::SourceTree;
 
@@ -70,22 +72,22 @@ fn perf_evidence() {
 
     let t = std::time::Instant::now();
     let mut shard = PackageShard::default();
-    let mut contracts = Vec::new();
+    let mut payloads = Vec::new();
     for (slot, (path, tree)) in parsed.iter().enumerate() {
         shard.add_file(slot, path, tree);
-        contracts.extend(decl_contracts(slot, tree));
+        payloads.push((path.clone(), slot, contract_payload(tree)));
     }
     let build_tables = t.elapsed();
 
-    let trace: Vec<TraceFile<'_>> = parsed
+    let trace: Vec<(String, usize, Vec<u8>)> = parsed
         .iter()
         .enumerate()
-        .map(|(slot, (path, tree))| TraceFile { path, slot, tree })
+        .map(|(slot, (path, tree))| (path.clone(), slot, trace_payload(tree)))
         .collect();
     let tmp = TempDir::new("perf");
     let path = tmp.dir.join("synth.pkg");
     let t = std::time::Instant::now();
-    build_sections(&shard, &contracts, &trace).write_to(&path).unwrap();
+    build_sections(&shard, &payloads, &trace).write_to(&path).unwrap();
     let serialize_write = t.elapsed();
     let artifact_len = std::fs::metadata(&path).unwrap().len();
     let src_len: usize = sources.iter().map(|(_, s)| s.len()).sum();

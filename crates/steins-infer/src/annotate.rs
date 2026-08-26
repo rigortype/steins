@@ -13,7 +13,7 @@ use steins_syntax::{ClassDecl, FunctionDecl, SourceTree};
 
 use crate::cx::Cx;
 use crate::env::Store;
-use crate::project::{Diagnostic, FileUnit, Index};
+use crate::project::{Diagnostic, FileUnit, Index, LazyTree};
 use crate::walk::analyze_scope;
 use crate::fold::Folder;
 use crate::check_units;
@@ -98,7 +98,8 @@ pub fn annotate_facts(
     folder: &mut dyn Folder,
 ) -> Vec<LineFact> {
     let _ = (functions, classes);
-    let units = [FileUnit { path, tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path, tree: &lazy }];
     let index = Index::from_units(&units);
     annotate_units(
         &units,
@@ -114,8 +115,8 @@ pub fn annotate_facts(
 /// Salsa-fed single-file annotate.
 #[must_use]
 pub fn annotate_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec<LineFact> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     annotate_units(
         &units,
@@ -139,8 +140,15 @@ pub fn annotate_project(
     folder: &mut dyn Folder,
 ) -> Vec<LineFact> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
@@ -166,8 +174,8 @@ pub fn annotate_project(
 /// of reading the `…?`-flattened margin string.
 #[must_use]
 pub fn effect_summaries_file(db: &dyn Db, file: SourceFile) -> Vec<EffectSummary> {
-    let tree = parse(db, file);
-    let units = [FileUnit { path: file.path(db), tree }];
+    let lazy = LazyTree::borrowed(parse(db, file));
+    let units = [FileUnit { path: file.path(db), tree: &lazy }];
     let index = Index::from_units(&units);
     effect_summary_units(&units, &index, 0, &PluginFacts::none(), &EffectsPolicy::none())
 }
@@ -182,8 +190,15 @@ pub fn effect_summaries_project(
     target: SourceFile,
 ) -> Vec<EffectSummary> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();

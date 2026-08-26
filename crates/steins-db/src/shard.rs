@@ -160,6 +160,66 @@ impl PackageShard {
         }
     }
 
+    /// Fold a shard built from **one file** into this one, re-slotting every
+    /// site to `slot` (issue #516).
+    ///
+    /// The one-file shard is the persisted form of [`Self::add_file`]: written
+    /// at the canonical slot 0 so its bytes are a function of the file alone,
+    /// and folded back in here under whatever slot the file holds now. That is
+    /// what lets a warm run rebuild a changed package's shard without decoding
+    /// the trees of the files that did not change — the reason `add_file` was
+    /// the last whole-universe tree consumer left in the load phase.
+    ///
+    /// Equal to `add_file` by construction, not by comparison: every table is
+    /// folded through the same `insert_unique` (so a name the *package*
+    /// declares twice demotes exactly as it would have), and the ones with no
+    /// per-file structure are unioned. `absorbing_a_file_shard_equals_adding_the_file`
+    /// pins it over a universe that exercises every table.
+    ///
+    /// # Panics
+    ///
+    /// Never: `one`'s sites are read, not indexed.
+    pub fn absorb_file(&mut self, one: &Self, slot: usize) {
+        let at = |site: &ShardSite| ShardSite { file: slot, index: site.index };
+        // `fn_by_simple` keeps every site; the merge sorts it, so the order
+        // this pushes in is not observable.
+        for (simple, sites) in &one.fn_by_simple {
+            self.fn_by_simple.entry(simple.clone()).or_default().extend(sites.iter().map(at));
+        }
+        for (fqn, site) in &one.functions {
+            insert_unique(&mut self.functions, &mut self.ambiguous_functions, fqn, at(site));
+        }
+        // A name the *file* already declared twice arrives demoted; demotion is
+        // absorbing, so it stays demoted whatever else the package holds.
+        for fqn in &one.ambiguous_functions {
+            self.functions.remove(fqn);
+            self.ambiguous_functions.insert(fqn.clone());
+        }
+        for (fqn, site) in &one.classes {
+            insert_unique(&mut self.classes, &mut self.ambiguous_classes, fqn, at(site));
+        }
+        for fqn in &one.ambiguous_classes {
+            self.classes.remove(fqn);
+            self.ambiguous_classes.insert(fqn.clone());
+        }
+        self.class_alias_edges.extend(one.class_alias_edges.iter().map(|edge| ShardAlias {
+            alias_fqn: edge.alias_fqn.clone(),
+            target_fqn: edge.target_fqn.clone(),
+            file: slot,
+        }));
+        self.magic_obstacles
+            .extend(one.magic_obstacles.iter().map(|(_, o)| (slot, o.clone())));
+        self.property_writes.0.extend(one.property_writes.0.iter().cloned());
+        self.property_writes.1 |= one.property_writes.1;
+        self.constants.extend(one.constants.keys().map(|key| (key.clone(), slot)));
+        for path in one.files.keys() {
+            let entry = self.files.entry(path.clone()).or_insert(slot);
+            if slot > *entry {
+                *entry = slot;
+            }
+        }
+    }
+
     /// Every name this shard contributes to the merged tables, in the key
     /// namespaces a name reference is spelled in (ADR-0092 §5, issue #489
     /// slice B): `f:` a function FQN, `s:` a function's simple name, `c:` a
@@ -500,6 +560,58 @@ mod tests {
             s.add_file(*slot, path, tree);
         }
         s
+    }
+
+    /// The persisted per-file shard folds back in exactly as the file itself
+    /// would have (issue #516): writing every file at the canonical slot 0 and
+    /// absorbing it under its real slot reproduces `add_file`, table for
+    /// table. The fixture exercises every one of them — a package-level
+    /// function and class demotion, a file-level one, alias edges, A14
+    /// obstacles, both property-write lanes, constants and the file map.
+    #[test]
+    fn absorbing_a_file_shard_equals_adding_the_file() {
+        let files: [(usize, &str, &str); 4] = [
+            (0, "src/a.php", "<?php function dup() {} function only_a() {} class C {} const K_A = 1;"),
+            (
+                1,
+                "src/b.php",
+                "<?php function dup() {} /** @method int m() */ class Twice {} class_alias('c', 'made'); $o->w = 1;",
+            ),
+            (
+                2,
+                "src/c.php",
+                "<?php function twice_here() {} function TWICE_HERE() {} class Dupe {} class Dupe {} define('K_B', 2); $q->{$n} = 5;",
+            ),
+            (3, "src/d.php", "<?php namespace N; class C {} function only_d() {}"),
+        ];
+        let direct = shard_over(&files);
+        let mut absorbed = PackageShard::default();
+        for &(slot, path, src) in &files {
+            let tree = SourceTree::parse(src);
+            let mut one = PackageShard::default();
+            // The canonical slot the payload is written at.
+            one.add_file(0, path, &tree);
+            absorbed.absorb_file(&one, slot);
+        }
+        // `fn_by_simple` is a vector per name and the merge sorts it, so the
+        // comparison is taken on the merged tables the analysis actually reads.
+        assert_eq!(
+            merge_shards(std::slice::from_ref(&direct)),
+            merge_shards(std::slice::from_ref(&absorbed)),
+        );
+        assert_eq!(
+            direct.files().collect::<std::collections::BTreeMap<_, _>>(),
+            absorbed.files().collect::<std::collections::BTreeMap<_, _>>(),
+        );
+        let mut a = direct.contributed_names();
+        let mut b = absorbed.contributed_names();
+        a.sort();
+        b.sort();
+        assert_eq!(a, b);
+        // The fixture is only honest if the demotions fired.
+        assert!(direct.ambiguous_functions.contains("dup"), "package-level demotion");
+        assert!(direct.ambiguous_functions.contains("twice_here"), "file-level demotion");
+        assert!(direct.ambiguous_classes.contains("dupe"), "file-level class demotion");
     }
 
     /// ADR-0048 §4 for the generation merge: handing the same shards over in

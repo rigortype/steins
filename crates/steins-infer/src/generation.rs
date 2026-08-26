@@ -111,11 +111,12 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use steins_db::persist::{
-    TraceFile, TraceIndex, build_sections, contracts_section, decl_contracts, read_shard,
-    symbols_section, trace_section,
+    PayloadIndex, TraceIndex, build_sections, contract_payload, contracts_section, facts_section,
+    payload_section_bytes, read_shard, symbols_section, trace_payload, trace_section,
 };
 use steins_db::{
     EffectsPolicy, PackagePartition, PackageShard, PluginFacts, ProjectLayout, merge_shards,
@@ -129,8 +130,9 @@ pub use steins_gen::PackageKind;
 use steins_syntax::SourceTree;
 
 use crate::affected::{AffectedInputs, affected_files};
+use crate::facts::{FileFacts, facts_payload, fill_rows, key_hash, read_facts};
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
-use crate::project::{FileUnit, Index, Res};
+use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
 use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
 use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
@@ -270,9 +272,13 @@ pub struct GenerationOutcome {
     /// Diagnostic path → the file's text, read through the sealed capture, so
     /// "what was analyzed" and "what was fingerprinted" are the same bytes.
     pub texts: HashMap<String, String>,
-    /// `(diagnostic path, lowered tree)` in universe-slot order — loaded or
-    /// freshly parsed, indistinguishable downstream by design.
-    pub trees: Vec<(String, SourceTree)>,
+    /// `(diagnostic path, tree handle)` in universe-slot order. A handle, not
+    /// a tree, since issue #516: a warm run decodes a file's tree only where
+    /// something reaches it, and forcing all of them to hand the caller owned
+    /// values would undo exactly that. Deref gives the tree; the caller should
+    /// touch only the files it needs (the CLI's inline-suppression scan reads
+    /// the files a finding names, and no others).
+    pub trees: Vec<(String, LazyTree<'static>)>,
     /// The `[effects.attribution]` keys naming no symbol (ADR-0084 §5),
     /// rendered exactly as `steins-cli`'s own notice — computed here because
     /// the gated path must not force a salsa parse just to print it.
@@ -335,10 +341,15 @@ pub struct PackageReport {
     pub name: String,
     pub kind: PackageKind,
     pub files: usize,
-    /// Files whose trees came from the published artifact.
+    /// Files whose trees are served by the published artifact.
     pub loaded: usize,
     /// Files re-parsed from source this run.
     pub parsed: usize,
+    /// Files whose tree was actually **decoded** — a subset of
+    /// [`Self::loaded`], and the counter issue #516 exists to drive to zero on
+    /// a no-change warm run. `loaded` says the artifact can serve the file;
+    /// this says something asked.
+    pub decoded: usize,
     /// Why, in one word: `"loaded"` (every file came from the artifact),
     /// `"mixed (…)"` (issue #512 — some did and some did not, which is what an
     /// edit inside a package looks like), or `"parsed (…)"` (none did, and the
@@ -375,8 +386,22 @@ pub struct PhaseTimings {
     /// Loading trees/shards from artifacts, or parsing — the phase the warm
     /// path exists to shrink.
     pub trees_ms: f64,
-    /// The merge + `check_units` proper.
+    /// The merge + `check_units` proper — the sum of the five splits below.
     pub analyze_ms: f64,
+    /// The shard merge (ADR-0092 §3), whole-universe by construction.
+    pub merge_ms: f64,
+    /// The whole-universe per-file facts a walk reads: the dam, the
+    /// never-returning veto set, the parse-failure sweep, the PHP view.
+    pub facts_ms: f64,
+    /// The effects fixpoint, when a consumer's gate forced it.
+    pub effects_ms: f64,
+    /// The throws fixpoint, likewise.
+    pub throws_ms: f64,
+    /// The per-file walk loop — walks and replays together.
+    pub walk_ms: f64,
+    /// The two project-wide reporting passes off the fixpoints, and the
+    /// attribution-notice sweep.
+    pub report_ms: f64,
     /// Candidate build + publish (or the decision to keep `CURRENT`).
     pub persist_ms: f64,
 }
@@ -483,14 +508,16 @@ impl LoadRefusal {
     }
 }
 
-/// What a load carries out of the artifact: the trees it could take, and the
+/// What a load carries out of the artifact: the files it can serve, and the
 /// slots the caller must parse instead.
 struct LoadedPkg {
-    /// `(universe slot, tree)` for the files whose own fingerprint matched.
-    trees: Vec<(usize, SourceTree)>,
+    /// `(universe slot, facts)` for the files whose own fingerprint matched
+    /// and whose facts payload decoded. Their trees are **not** decoded here —
+    /// the caller gives each one a deferred handle (issue #516).
+    loaded: Vec<(usize, FileFacts)>,
     /// The package's other slots, in slot order: a file whose bytes moved, or
-    /// one whose stored tree could not be established. The caller parses them
-    /// — [`load_trees`] never sees the source text.
+    /// one whose persisted facts could not be established. The caller parses
+    /// them — [`load_trees`] never sees the source text.
     stale: Vec<usize>,
     /// Whether every persisted `(path, slot)` matches this run's universe.
     /// Together with an empty [`Self::stale`] it is the licence to serve the
@@ -505,12 +532,57 @@ struct LoadedPkg {
     /// Whether the package's whole source fingerprint matched — see
     /// [`PkgState::sources_match`], which is what reads it.
     sources_match: bool,
-    /// How many files the artifact held a row for and still could not give a
-    /// tree: they parsed instead (a miss is cost, never meaning), and the
-    /// package republishes to repair the artifact.
+    /// How many files the artifact held a row for and still could not serve:
+    /// they parsed instead (a miss is cost, never meaning), and the package
+    /// republishes to repair the artifact.
     missed: usize,
     /// The first of those failures, for the note.
     miss: Option<String>,
+}
+
+/// One published package artifact kept open for the whole run.
+///
+/// Deferred tree loads happen wherever a walk reaches a file, which is long
+/// after the load phase has moved on, so the reader outlives that phase — and
+/// it sits behind a lock because the handle is shared by every file of the
+/// package. Reads are per-file bounded sub-ranges (`TraceIndex::read_tree`),
+/// so holding the lock is one `pread` and one decode.
+struct OpenArtifact {
+    reader: Mutex<steins_gen::ArtifactReader>,
+    trace: TraceIndex,
+    /// The per-file `contracts` and `facts` directories, when they decode —
+    /// the republish path's copy sources.
+    contracts: Option<PayloadIndex>,
+    facts: Option<PayloadIndex>,
+}
+
+impl OpenArtifact {
+    /// One file's payload from `index`, or `None` when the artifact cannot
+    /// give it. Used only by the republish path, where a `None` means "encode
+    /// it instead".
+    fn copy(&self, index: Option<&PayloadIndex>, path: &str) -> Option<Vec<u8>> {
+        let index = index?;
+        let mut reader = self.reader.lock().expect("the artifact lock is never poisoned");
+        index.payload(&mut reader, path).ok()
+    }
+}
+
+/// A handle that decodes one file's tree out of `open` on first use, and falls
+/// back to re-parsing the sealed text if the payload will not decode.
+///
+/// The fallback is what makes the handle total, which `Deref` requires — and it
+/// costs nothing in meaning: the payload was written from a parse of the very
+/// bytes this text is (the file's content fingerprint is what licensed the
+/// load), and parsing is a pure function of bytes. A payload miss here is
+/// therefore a cost, silently absorbed, exactly as an eager per-file miss was.
+fn deferred_tree(open: &Arc<OpenArtifact>, path: &str, text: &Arc<String>) -> LazyTree<'static> {
+    let open = Arc::clone(open);
+    let path = path.to_owned();
+    let text = Arc::clone(text);
+    LazyTree::deferred(move || {
+        let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
+        open.trace.read_tree(&mut reader, &path).unwrap_or_else(|_| SourceTree::parse(&text))
+    })
 }
 
 /// Run one generation lifecycle: open the store once, load `CURRENT` if it
@@ -551,7 +623,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // per-file content hashes come off the same seal (issue #489 slice B needs
     // to know which files of a *changed* package actually changed, which the
     // package-level fingerprint cannot say).
-    let mut texts: HashMap<String, String> = HashMap::with_capacity(diag.len());
+    let mut texts: HashMap<String, Arc<String>> = HashMap::with_capacity(diag.len());
     let mut contents: Vec<Option<Fingerprint>> =
         std::iter::repeat_n(None, diag.len()).collect();
     for (plan, inventory) in plans.iter().zip(&inventories) {
@@ -564,7 +636,10 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             })?;
             contents[slot] = inventory.entry(&key).map(|entry| entry.content);
             let bytes = inventory.read(&key).map_err(GenerationError::Sealed)?;
-            texts.insert(diag[slot].clone(), String::from_utf8_lossy(&bytes).into_owned());
+            texts.insert(
+                diag[slot].clone(),
+                Arc::new(String::from_utf8_lossy(&bytes).into_owned()),
+            );
         }
     }
     let contents: Vec<Fingerprint> = contents
@@ -574,11 +649,27 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let capture_ms = ms(t_capture.elapsed());
 
     // Load-or-parse, per package. Any miss degrades that one package.
+    //
+    // "Load" no longer means *decode* (issue #516). A file the artifact can
+    // serve gets a deferred [`LazyTree`] and its persisted [`FileFacts`]; the
+    // facts answer every whole-universe phase, and the tree is decoded only if
+    // something reaches it — a walk of the file, or a walk that descends into
+    // it. A file the artifact cannot serve is parsed here and its facts are
+    // derived from that parse, which is the same value by construction.
     let t_trees = Instant::now();
-    let mut tree_slots: Vec<Option<SourceTree>> =
+    let mut lazy_slots: Vec<Option<LazyTree<'static>>> =
         std::iter::repeat_with(|| None).take(diag.len()).collect();
+    let mut fact_slots: Vec<Option<FileFacts>> =
+        std::iter::repeat_with(|| None).take(diag.len()).collect();
+    // Per slot: whether this run's facts payload is the published one, so
+    // republishing may copy its bytes instead of re-encoding them. Cleared
+    // below for any file whose own rows this run recomputes.
+    let mut facts_copyable: Vec<bool> = vec![false; diag.len()];
     let mut states: Vec<PkgState> = Vec::with_capacity(plans.len());
     let mut shards: Vec<PackageShard> = Vec::with_capacity(plans.len());
+    // The open artifacts, kept for the run: a deferred tree load reads one
+    // whenever a walk reaches its file, so the reader outlives this loop.
+    let mut artifacts: Vec<Option<Arc<OpenArtifact>>> = Vec::with_capacity(plans.len());
     // Per package, the walk blocks the published generation carries — the
     // replay candidates. Whether any of them may actually be replayed is not
     // knowable here: it needs the run's whole-universe verdicts, which only
@@ -595,6 +686,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     for plan in &plans {
         let mut published = read_published(current.as_ref(), plan, &diag, &contents);
         published_summaries.push(published.summaries.take());
+        let artifact = published.artifact.take();
         match published.fresh {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
@@ -607,11 +699,16 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 // conjunct is also what keeps the delta loop's reading of a
                 // taken (`None`) old shard exact.
                 let verbatim = loaded.sources_match && loaded.stale.is_empty() && slots_stable;
-                for (slot, tree) in loaded.trees {
-                    tree_slots[slot] = Some(tree);
+                let open = artifact.as_ref().expect("a load keeps its artifact open");
+                for (slot, facts) in loaded.loaded {
+                    fact_slots[slot] = Some(facts);
+                    facts_copyable[slot] = true;
+                    lazy_slots[slot] = Some(deferred_tree(open, &diag[slot], &texts[&diag[slot]]));
                 }
                 for &slot in &loaded.stale {
-                    tree_slots[slot] = Some(SourceTree::parse(&texts[&diag[slot]]));
+                    let tree = SourceTree::parse(&texts[&diag[slot]]);
+                    fact_slots[slot] = Some(FileFacts::from_tree(&diag[slot], &tree));
+                    lazy_slots[slot] = Some(LazyTree::ready(tree));
                 }
                 shards.push(if verbatim {
                     published
@@ -619,7 +716,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                         .take()
                         .expect("a whole stable load without a decoded shard is refused")
                 } else {
-                    build_shard(plan, &tree_slots, &diag)
+                    build_shard(plan, &fact_slots)
                 });
                 let parsed = loaded.stale.len();
                 if let Some(detail) = &loaded.miss {
@@ -643,9 +740,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             }
             Err(refusal) => {
                 for &slot in &plan.slots {
-                    tree_slots[slot] = Some(SourceTree::parse(&texts[&diag[slot]]));
+                    let tree = SourceTree::parse(&texts[&diag[slot]]);
+                    fact_slots[slot] = Some(FileFacts::from_tree(&diag[slot], &tree));
+                    lazy_slots[slot] = Some(LazyTree::ready(tree));
                 }
-                shards.push(build_shard(plan, &tree_slots, &diag));
+                shards.push(build_shard(plan, &fact_slots));
                 let degraded = matches!(refusal, LoadRefusal::Miss(_));
                 if let LoadRefusal::Miss(detail) = &refusal {
                     notes.push(format!("package {}: artifact miss ({detail}); reparsed", plan.name));
@@ -662,10 +761,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 });
             }
         }
+        artifacts.push(artifact);
         old_shards.push(published.old_shard);
     }
-    let trees: Vec<SourceTree> =
-        tree_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
+    let lazy: Vec<LazyTree<'static>> =
+        lazy_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
+    let mut facts: Vec<FileFacts> =
+        fact_slots.into_iter().map(|f| f.expect("every slot is filled above")).collect();
     let replay_candidates: usize =
         published_summaries.iter().flatten().map(|s| s.rows().count()).sum();
 
@@ -693,7 +795,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // and must reach the delta.
     let now: HashMap<&str, usize> =
         diag.iter().enumerate().map(|(slot, path)| (path.as_str(), slot)).collect();
-    let mut delta: HashSet<String> = HashSet::new();
+    // Hashed the way the persisted footprints are (`facts::key_hash`), since
+    // that is the form the affected set now compares against.
+    let mut delta: HashSet<u64> = HashSet::new();
     let mut delta_known = true;
     for (i, plan) in plans.iter().enumerate() {
         if states[i].sources_match && !states[i].degraded {
@@ -704,7 +808,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             // the old shard's own file map and compared as paths.
             Some(old) => {
                 let gone = old_changed_slots(old, &changed, &now);
-                delta.extend(old.contributed_names_from(&gone));
+                delta.extend(old.contributed_names_from(&gone).iter().map(|k| key_hash(k)));
             }
             None => {
                 // A name whose disappearance cannot be seen cannot be reasoned
@@ -722,7 +826,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         }
         let moved: HashSet<usize> =
             plan.slots.iter().copied().filter(|slot| changed.contains(slot)).collect();
-        delta.extend(shards[i].contributed_names_from(&moved));
+        delta.extend(shards[i].contributed_names_from(&moved).iter().map(|k| key_hash(k)));
     }
     // A package the published generation had and this run does not: its names
     // vanished, and the files that referenced them must be walked. Wholesale
@@ -733,7 +837,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         let fold = fold_package();
         for gone in generation.packages().filter(|n| **n != fold && !live.contains(n)) {
             match generation.artifact(gone).and_then(|mut r| read_shard(&mut r)) {
-                Ok(shard) => delta.extend(shard.contributed_names()),
+                Ok(shard) => delta.extend(shard.contributed_names().iter().map(|k| key_hash(k))),
                 Err(miss) => {
                     delta_known = false;
                     notes.push(format!(
@@ -803,8 +907,9 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // partition-invariant, so this equals the cold constructions exactly).
     let t_analyze = Instant::now();
     let index = Index::from_merged(merge_shards(&shards));
+    let merge_ms = ms(t_analyze.elapsed());
     let units: Vec<FileUnit<'_>> =
-        diag.iter().zip(&trees).map(|(path, tree)| FileUnit { path, tree }).collect();
+        diag.iter().zip(&lazy).map(|(path, tree)| FileUnit { path, tree }).collect();
     // The walk plan (issue #489 slice B). The planner is asked once, after the
     // run's whole-universe verdicts are computed and before the first file is
     // walked; it decides per file whether the persisted block may be replayed.
@@ -815,11 +920,22 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // Nothing may replay at all unless there is a published generation to
     // replay from and the name delta could be read.
     let replay_possible = current.is_some() && delta_known && replay_candidates > 0;
-    let affected = if replay_possible {
-        affected_files(&AffectedInputs { trees: &trees, changed, delta })
+    let affected: HashSet<usize> = if replay_possible {
+        affected_files(&AffectedInputs { facts: &facts, changed, delta })
     } else {
         (0..diag.len()).collect()
     };
+    // The own rows of an affected file are the one part of its facts that this
+    // run must recompute: they are resolution-dependent, and `affected` is
+    // exactly the over-approximation of "some resolution this file makes could
+    // have moved" (see `facts.rs` for the argument, and why the tree-derived
+    // half of the same row is licensed by the content fingerprint alone). An
+    // affected file is walked, so its tree is in hand either way.
+    for slot in &affected {
+        facts[*slot].rows = None;
+        facts_copyable[*slot] = false;
+    }
+    fill_rows(&mut facts, &units, &index, p.plugins, p.effects);
     let mut universe: Option<Fingerprint> = None;
     let mut planner = |verdict: &UniverseVerdict<'_>| -> Vec<FilePlan> {
         let digest = universe_digest(verdict);
@@ -843,7 +959,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             })
             .collect()
     };
-    let mut control = WalkControl::new(&mut planner, paranoid);
+    let mut control = WalkControl::new(&mut planner, paranoid, &facts);
     let findings = crate::check_units_controlled(
         &units,
         &index,
@@ -866,6 +982,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         divergences: std::mem::take(&mut control.divergences),
         divergence_count: control.divergence_count,
     };
+    let passes = control.passes;
     let ledger = std::mem::take(&mut control.ledger);
     // The control's borrow of the planner — and so the planner's of the two
     // values it writes — ends here; everything either produced is owned above.
@@ -921,8 +1038,6 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             &plans,
             &states,
             &shards,
-            &trees,
-            &diag,
             current.as_ref(),
             fold_table.as_ref(),
             &Summaries {
@@ -931,6 +1046,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 diag: &diag,
                 contents: &contents,
                 ledger: &ledger,
+            },
+            &Payloads {
+                lazy: &lazy,
+                facts: &facts,
+                copyable: &facts_copyable,
+                artifacts: &artifacts,
+                diag: &diag,
             },
         ) {
             Ok(hex) => Some(hex),
@@ -951,13 +1073,21 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             files: plan.slots.len(),
             loaded: state.loaded,
             parsed: state.parsed,
+            decoded: plan.slots.iter().filter(|&&slot| lazy[slot].was_loaded()).count(),
             disposition: state.disposition,
         })
         .collect();
     Ok(GenerationOutcome {
         findings,
-        texts,
-        trees: diag.into_iter().zip(trees).collect(),
+        // Every deferred handle is dropped with `lazy` below, so the texts come
+        // back without a copy in the ordinary case.
+        texts: texts
+            .into_iter()
+            .map(|(path, text)| {
+                (path, Arc::try_unwrap(text).unwrap_or_else(|shared| (*shared).clone()))
+            })
+            .collect(),
+        trees: diag.into_iter().zip(lazy).collect(),
         attribution_notices,
         report: GenerationReport {
             mode,
@@ -969,7 +1099,28 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 table_published: fold_table.is_some(),
             },
             walk,
-            timings: PhaseTimings { capture_ms, trees_ms, analyze_ms, persist_ms },
+            timings: PhaseTimings {
+                capture_ms,
+                trees_ms,
+                analyze_ms,
+                merge_ms,
+                facts_ms: passes.facts_ms,
+                effects_ms: passes.effects_ms,
+                throws_ms: passes.throws_ms,
+                walk_ms: passes.walk_ms,
+                // The attribution sweep runs after `check_units` returns, so
+                // it is this phase's residue rather than one of its spans.
+                report_ms: passes.report_ms
+                    + (analyze_ms
+                        - merge_ms
+                        - passes.facts_ms
+                        - passes.effects_ms
+                        - passes.throws_ms
+                        - passes.walk_ms
+                        - passes.report_ms)
+                        .max(0.0),
+                persist_ms,
+            },
             notes,
         },
     })
@@ -1035,7 +1186,8 @@ fn unmoved_rows<'a>(
 }
 
 /// Everything the published generation can say about one package: the old
-/// shard, the walk blocks it carries, and the load attempt proper.
+/// shard, the walk blocks it carries, the artifact kept open for deferred tree
+/// loads, and the load attempt proper.
 struct Published {
     /// This package's OLD shard — the delta's old side, and the verbatim
     /// shard when the load reuses it. `None` when the artifact could not give
@@ -1047,6 +1199,10 @@ struct Published {
     /// replay — and, since issue #512, still load — because each row carries
     /// its own file's content hash.
     summaries: Option<StoredSummaries>,
+    /// The open artifact, kept alive for this run's deferred tree loads and
+    /// for the republish path's per-file byte copies. `Some` whenever the
+    /// artifact opened at all, even where the load was refused.
+    artifact: Option<Arc<OpenArtifact>>,
     fresh: Result<LoadedPkg, LoadRefusal>,
 }
 
@@ -1054,7 +1210,7 @@ impl Published {
     /// The shape for a package the published generation could not tell us
     /// anything about at all.
     fn refused(refusal: LoadRefusal, old_shard: Option<PackageShard>) -> Self {
-        Self { old_shard, summaries: None, fresh: Err(refusal) }
+        Self { old_shard, summaries: None, artifact: None, fresh: Err(refusal) }
     }
 }
 
@@ -1106,48 +1262,68 @@ fn read_published(
     // The old shard, always: it is the delta's old side whether or not the
     // sources moved, and it is the verbatim shard when they did not.
     let old_shard = read_shard(&mut reader).ok();
-    // The walk blocks are never a load refusal: the trees are in hand either
-    // way, and a package without them simply walks every file. They are read
-    // *before* the trees because their rows are also the per-file provenance
-    // gate (issue #512) — which files of this package the load may take.
+    // The walk blocks are never a load refusal: a package without them simply
+    // walks every file. They are read *before* anything else because their
+    // rows are also the per-file provenance gate (issue #512) — which files of
+    // this package the load may take.
     let summaries = read_summaries(&mut reader).ok();
     let unmoved: HashSet<usize> = summaries
         .as_ref()
         .map(|s| unmoved_rows(plan, diag, contents, s).into_iter().map(|(slot, _)| slot).collect())
         .unwrap_or_default();
-    let fresh = load_trees(&mut reader, plan, diag, &unmoved, old_shard.is_some());
-    Published { old_shard, summaries, fresh }
+    let (analyzer, stored) = match read_sources(&mut reader) {
+        Ok(sources) => sources,
+        Err(m) => return Published::refused(miss(m), old_shard),
+    };
+    let trace = match TraceIndex::open(&mut reader) {
+        Ok(trace) => trace,
+        Err(m) => return Published::refused(miss(m), old_shard),
+    };
+    let contracts = PayloadIndex::open(&mut reader, contracts_section()).ok();
+    let facts = PayloadIndex::open(&mut reader, facts_section()).ok();
+    let open = Arc::new(OpenArtifact { reader: Mutex::new(reader), trace, contracts, facts });
+    let fresh =
+        load_trees(&open, plan, diag, &unmoved, old_shard.is_some(), &analyzer, stored);
+    Published { old_shard, summaries, artifact: Some(open), fresh }
 }
 
-/// The load proper: the provenance gate, then the per-file trace payloads.
+/// The load proper: the provenance gate, then the per-file **facts** — never a
+/// tree (issue #516).
 ///
 /// The gate is per file (issue #512). `unmoved` is the set of this package's
 /// slots whose persisted `summaries` row carries the content fingerprint this
-/// run captured; a file in it loads its tree, and every other file of the
-/// package goes into [`LoadedPkg::stale`] for the caller to parse. The
+/// run captured; a file in it is served from the artifact, and every other file
+/// of the package goes into [`LoadedPkg::stale`] for the caller to parse. The
 /// package-level fingerprint stays as the shortcut it always was: when it
 /// matches, *every* file is unmoved by construction and no row is consulted at
 /// all — so a package whose `summaries` section is absent or will not decode
-/// still loads whole, exactly as it did before this gate existed.
+/// still loads whole, exactly as it did before that gate existed.
+///
+/// What is decoded here is the file's facts payload, which is small and which
+/// every whole-universe phase then reads instead of a tree. The tree itself
+/// gets a deferred handle in the caller. That is the whole of issue #516's
+/// first item: a file the artifact serves costs one facts decode, and a tree
+/// decode only if a walk reaches it.
 ///
 /// Sound-conservative in every direction: a file with no row, a row that does
-/// not match, a path the trace directory does not list, and a payload that
-/// will not decode all parse. A package that ends up loading *nothing* is
-/// reported as the refusal it would have been before, so the disposition
-/// vocabulary keeps its old spellings for the old cases.
+/// not match, a path the trace directory does not list, an absent facts
+/// directory and a facts payload that will not decode all parse. A package that
+/// ends up serving *nothing* is reported as the refusal it would have been
+/// before, so the disposition vocabulary keeps its old spellings for the old
+/// cases.
 ///
 /// `have_shard` says whether the artifact's symbols section decoded — the
 /// caller keeps the shard itself, because it is the delta's old side as much
 /// as it is the verbatim shard.
 fn load_trees(
-    reader: &mut steins_gen::ArtifactReader,
+    open: &Arc<OpenArtifact>,
     plan: &Plan,
     diag: &[String],
     unmoved: &HashSet<usize>,
     have_shard: bool,
+    analyzer: &str,
+    stored: Fingerprint,
 ) -> Result<LoadedPkg, LoadRefusal> {
-    let miss = |m: Miss| LoadRefusal::Miss(m.to_string());
-    let (analyzer, stored) = read_sources(reader).map_err(miss)?;
     if analyzer != analyzer_version() {
         return Err(LoadRefusal::AnalyzerMoved);
     }
@@ -1157,11 +1333,9 @@ fn load_trees(
     if !whole && unmoved.is_empty() {
         return Err(LoadRefusal::Changed);
     }
-    let trace = TraceIndex::open(reader).map_err(miss)?;
-    let persisted: HashMap<String, usize> =
-        trace.files().map(|(path, slot)| (path.to_owned(), slot)).collect();
+    let persisted: HashMap<&str, usize> = open.trace.files().collect();
     let mut slots_stable = persisted.len() == plan.slots.len();
-    let mut loaded: Vec<(usize, SourceTree)> = Vec::with_capacity(plan.slots.len());
+    let mut loaded: Vec<(usize, FileFacts)> = Vec::with_capacity(plan.slots.len());
     let mut stale: Vec<usize> = Vec::new();
     let mut missed = 0usize;
     let mut first_miss: Option<String> = None;
@@ -1174,8 +1348,24 @@ fn load_trees(
             stale.push(slot);
             continue;
         }
-        match trace.read_tree(reader, path) {
-            Ok(tree) => loaded.push((slot, tree)),
+        match open
+            .facts
+            .as_ref()
+            .ok_or(Miss::AbsentSection(facts_section()))
+            .and_then(|index| {
+                let mut reader = open.reader.lock().expect("the artifact lock is never poisoned");
+                index.payload(&mut reader, path)
+            })
+            .and_then(|bytes| read_facts(&bytes))
+        {
+            Ok(facts) if persisted.contains_key(path) => loaded.push((slot, facts)),
+            Ok(_) => {
+                // The facts are readable but the trace directory has no entry,
+                // so nothing could serve this file's tree if a walk asked.
+                missed += 1;
+                first_miss.get_or_insert_with(|| "no trace entry for the file".to_owned());
+                stale.push(slot);
+            }
             Err(m) => {
                 // This file alone: the directory and every other payload still
                 // serve, and the caller parses this one.
@@ -1195,19 +1385,27 @@ fn load_trees(
     // the sources did not move, every persisted slot still names the same
     // file, and nothing was reparsed — the caller's `verbatim`, spelled the
     // same way here so its `expect` cannot fire. Otherwise the caller rebuilds
-    // it from the trees in hand — still no reparse.
+    // it from the per-file shards in hand — still no reparse.
     if sources_match && stale.is_empty() && slots_stable && !have_shard {
         return Err(LoadRefusal::Miss("symbols section is not a shard".to_owned()));
     }
-    Ok(LoadedPkg { trees: loaded, stale, slots_stable, sources_match, missed, miss: first_miss })
+    Ok(LoadedPkg { loaded, stale, slots_stable, sources_match, missed, miss: first_miss })
 }
 
-/// Build one package's shard from its (loaded or fresh) trees.
-fn build_shard(plan: &Plan, tree_slots: &[Option<SourceTree>], diag: &[String]) -> PackageShard {
+/// Build one package's shard from its files' persisted-or-derived per-file
+/// shards (issue #516).
+///
+/// Before this, the rebuild called `PackageShard::add_file` over every file's
+/// *tree*, which is why an edit anywhere in a package decoded every tree it
+/// held — fatal in the ordinary first-party shape, where one package holds
+/// everything. [`PackageShard::absorb_file`] folds the same contribution in
+/// from the per-file shard the facts carry, re-slotted; the equality is pinned
+/// in `steins-db`.
+fn build_shard(plan: &Plan, facts: &[Option<FileFacts>]) -> PackageShard {
     let mut shard = PackageShard::default();
     for &slot in &plan.slots {
-        let tree = tree_slots[slot].as_ref().expect("the package's trees are in hand");
-        shard.add_file(slot, &diag[slot], tree);
+        let facts = facts[slot].as_ref().expect("the package's facts are in hand");
+        shard.absorb_file(&facts.shard, slot);
     }
     shard
 }
@@ -1222,23 +1420,30 @@ fn publish(
     plans: &[Plan],
     states: &[PkgState],
     shards: &[PackageShard],
-    trees: &[SourceTree],
-    diag: &[String],
     current: Option<&Generation>,
     fold_table: Option<&FoldTableArtifact>,
     summaries: &Summaries<'_>,
+    payloads: &Payloads<'_>,
 ) -> Result<String, String> {
     let mut candidate = store.begin(id, inventories).map_err(|e| format!("begin: {e}"))?;
-    for ((plan, state), shard) in plans.iter().zip(states).zip(shards) {
-        // A package that parsed nothing and kept its slots republishes its
-        // exact bytes; anything else — a mixed package included — reassembles
-        // the sections from the trees in hand.
-        let copied = (state.parsed == 0 && state.slots_stable)
+    for (package, ((plan, state), shard)) in plans.iter().zip(states).zip(shards).enumerate() {
+        // A package that parsed nothing, kept its slots and rebuilt none of its
+        // per-file facts republishes its exact bytes; anything else — a mixed
+        // package included — reassembles the sections per file.
+        //
+        // The third conjunct is issue #516's: an unmoved file whose own rows
+        // this run recomputed has *different* facts, and copying the artifact
+        // wholesale would republish the rows of an older universe under this
+        // generation's identity, where the next run would take them as its own.
+        let whole = state.parsed == 0
+            && state.slots_stable
+            && plan.slots.iter().all(|&slot| payloads.copyable[slot]);
+        let copied = whole
             .then(|| current.and_then(|generation| copy_artifact(generation, plan)))
             .flatten();
         let mut builder = match copied {
             Some(builder) => builder,
-            None => build_artifact(plan, shard, trees, diag),
+            None => build_artifact(plan, shard, package, payloads),
         };
         // The `summaries` section is always this run's, even where the other
         // four sections were byte-copied: the copied ones are functions of the
@@ -1258,21 +1463,73 @@ fn publish(
     Ok(generation.id().to_hex())
 }
 
-/// One package's artifact from scratch: the #503 sections plus the provenance
-/// record the warm path's reuse decision reads.
+/// What the republish path needs per file: the tree handle, the facts, whether
+/// the published payloads may be copied, and the artifacts to copy them from.
+struct Payloads<'a> {
+    lazy: &'a [LazyTree<'static>],
+    facts: &'a [FileFacts],
+    /// Per slot: whether this run's facts equal the published ones (an unmoved
+    /// file whose own rows this run did not recompute). Also what licenses
+    /// copying the file's `trace` and `contracts` payloads, which are the
+    /// weaker claim — a function of the bytes alone.
+    copyable: &'a [bool],
+    /// Per package, in plan order, the open artifact to copy from.
+    artifacts: &'a [Option<Arc<OpenArtifact>>],
+    diag: &'a [String],
+}
+
+/// One package's artifact: the #503 sections, the `facts` section of issue
+/// #516, and the provenance record the warm path's reuse decision reads.
+///
+/// **Per file, and copied where it can be.** A package that must be
+/// reassembled is not a package whose every file moved: an edit in one file of
+/// a 30k-file root package leaves 29,999 payloads identical, and re-encoding
+/// them would need their trees — the very decode this slice exists to avoid.
+/// So each of the three per-file sections takes the published payload verbatim
+/// for a file that did not move, and encodes only what did.
 fn build_artifact(
     plan: &Plan,
     shard: &PackageShard,
-    trees: &[SourceTree],
-    diag: &[String],
+    package: usize,
+    p: &Payloads<'_>,
 ) -> ArtifactBuilder {
-    let mut contracts = Vec::new();
-    let mut files: Vec<TraceFile<'_>> = Vec::with_capacity(plan.slots.len());
+    let old = p.artifacts[package].as_ref();
+    let mut contracts = Vec::with_capacity(plan.slots.len());
+    let mut trace = Vec::with_capacity(plan.slots.len());
+    let mut facts = Vec::with_capacity(plan.slots.len());
     for &slot in &plan.slots {
-        contracts.extend(decl_contracts(slot, &trees[slot]));
-        files.push(TraceFile { path: &diag[slot], slot, tree: &trees[slot] });
+        let path = &p.diag[slot];
+        let published = old.filter(|_| p.copyable[slot]);
+        contracts.push((
+            path.clone(),
+            slot,
+            published
+                .and_then(|open| open.copy(open.contracts.as_ref(), path))
+                .unwrap_or_else(|| contract_payload(&p.lazy[slot])),
+        ));
+        trace.push((
+            path.clone(),
+            slot,
+            published
+                .and_then(|open| {
+                    let mut reader =
+                        open.reader.lock().expect("the artifact lock is never poisoned");
+                    open.trace.payload(&mut reader, path).ok()
+                })
+                .unwrap_or_else(|| trace_payload(&p.lazy[slot])),
+        ));
+        facts.push((
+            path.clone(),
+            slot,
+            published
+                .and_then(|open| open.copy(open.facts.as_ref(), path))
+                .unwrap_or_else(|| facts_payload(&p.facts[slot])),
+        ));
     }
-    let mut builder = build_sections(shard, &contracts, &files);
+    let mut builder = build_sections(shard, &contracts, &trace);
+    builder
+        .section(facts_section(), payload_section_bytes(&facts))
+        .expect("distinct section names");
     builder
         .section(sources_section(), sources_payload(&plan.fingerprint))
         .expect("distinct section names");
@@ -1313,9 +1570,9 @@ impl Summaries<'_> {
 }
 
 /// Copy an untouched package's artifact bytes section-for-section into a new
-/// builder. `None` on any read failure — the caller rebuilds from trees.
+/// builder. `None` on any read failure — the caller rebuilds per file.
 ///
-/// The three source-derived sections are copied; the provenance record is
+/// The four source-derived sections are copied; the provenance record is
 /// written fresh from this run's own fingerprint rather than copied, so that a
 /// package that loaded every file one row at a time (issue #512) cannot
 /// republish a fingerprint describing a different capture. For the ordinary
@@ -1324,7 +1581,7 @@ impl Summaries<'_> {
 fn copy_artifact(generation: &Generation, plan: &Plan) -> Option<ArtifactBuilder> {
     let mut reader = generation.artifact(&plan.name).ok()?;
     let mut builder = ArtifactBuilder::new();
-    for section in [symbols_section(), contracts_section(), trace_section()] {
+    for section in [symbols_section(), contracts_section(), trace_section(), facts_section()] {
         let bytes = reader.section(&section).ok()?;
         builder.section(section, bytes).ok()?;
     }

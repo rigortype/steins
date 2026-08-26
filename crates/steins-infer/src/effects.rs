@@ -35,7 +35,7 @@ use steins_db::{Db, PluginFacts, Project, SourceFile, parse, project_index};
 use steins_phpdoc::EnvelopeTag;
 
 use crate::purity::{EffectSet, InteropTag, compute_effects, interop_tag};
-use crate::project::{FileUnit, Index};
+use crate::project::{FileUnit, Index, LazyTree};
 use crate::Sym;
 
 /// What the effect fixpoint proves about one function or method.
@@ -95,14 +95,21 @@ pub struct EffectSweep {
 #[must_use]
 pub fn sweep_effects(db: &dyn Db, project: Project) -> EffectSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
 
-    let effects = compute_effects(&units, &index, project.plugins(db), project.effects(db));
+    let effects = compute_effects(&units, &index, project.plugins(db), project.effects(db), &[]);
     let mut out = EffectSweep::default();
     for u in &units {
         for f in u.tree.functions() {

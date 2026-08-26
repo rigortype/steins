@@ -5,7 +5,7 @@
 use steins_syntax::duplicate_array_keys;
 
 use crate::cx::Cx;
-use crate::project::{Diagnostic, FileUnit};
+use crate::project::Diagnostic;
 use crate::{ARRAY_DUPLICATE_KEY_ID, SYNTAX_UNPARSABLE_ID};
 
 // ---------------------------------------------------------------------------
@@ -22,11 +22,14 @@ use crate::{ARRAY_DUPLICATE_KEY_ID, SYNTAX_UNPARSABLE_ID};
 /// re-derived here so the finding's own words cannot drift from the dam's
 /// behavior: a non-vendor break silences the existence family project-wide and
 /// the message says so; a vendor break does not.
-pub(crate) fn emit_parse_failure(unit: &FileUnit, dams: bool, out: &mut Vec<Diagnostic>) {
-    let errors = unit.tree.parse_errors();
-    let Some(first) = errors.first() else { return };
-    let pos = unit.tree.position(first.span.start);
-    let tail = match errors.len() - 1 {
+pub(crate) fn emit_parse_failure(
+    path: &str,
+    first: Option<&crate::facts::ParseError>,
+    dams: bool,
+    out: &mut Vec<Diagnostic>,
+) {
+    let Some(first) = first else { return };
+    let tail = match first.further {
         0 => String::new(),
         1 => " (and 1 further parse error in this file)".to_owned(),
         n => format!(" (and {n} further parse errors in this file)"),
@@ -38,9 +41,9 @@ pub(crate) fn emit_parse_failure(unit: &FileUnit, dams: bool, out: &mut Vec<Diag
     };
     out.push(Diagnostic {
         id: SYNTAX_UNPARSABLE_ID,
-        path: unit.path.to_owned(),
-        line: pos.line,
-        column: pos.column,
+        path: path.to_owned(),
+        line: first.line,
+        column: first.column,
         message: format!(
             "this file does not parse — {}{tail}; nothing else is reported from it{consequence}",
             first.message,

@@ -504,8 +504,8 @@ pub fn pattern_is_known(pattern: &str) -> bool {
 /// Extract the text following `@steins-ignore`, trimmed of `*/` and whitespace.
 /// `None` if the marker is absent.
 fn extract_directive(text: &str) -> Option<&str> {
-    let idx = text.find("@steins-ignore")?;
-    let mut rest = &text[idx + "@steins-ignore".len()..];
+    let idx = text.find(INLINE_IGNORE)?;
+    let mut rest = &text[idx + INLINE_IGNORE.len()..];
     if let Some(end) = rest.find("*/") {
         rest = &rest[..end];
     }
@@ -539,11 +539,16 @@ fn directives(tree: &SourceTree) -> Vec<Directive> {
     out
 }
 
+/// The inline-suppression marker, verbatim. Public so a caller can decide
+/// *whether* a file needs scanning without decoding its tree (issue #516): a
+/// file whose text does not contain this cannot carry a directive, and so can
+/// only take part in the scan as the subject of a finding.
+pub const INLINE_IGNORE: &str = "@steins-ignore";
+
 /// Apply inline `@steins-ignore` suppression to object-level `findings`. `files`
 /// pairs every analyzed file's diagnostic path with its parsed tree, so each
 /// finding's comments can be consulted. Findings whose path is not among `files`
 /// are kept untouched.
-#[must_use]
 pub fn apply_inline_ignores(
     findings: Vec<Diagnostic>,
     files: &[(String, &SourceTree)],

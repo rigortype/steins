@@ -30,7 +30,7 @@ use steins_domain::Certainty;
 
 use crate::throws::{compute_throws, declared_throws, throw_checked, throw_subtype};
 use crate::cx::Cx;
-use crate::project::{FileUnit, Index};
+use crate::project::{FileUnit, Index, LazyTree};
 use crate::Sym;
 
 /// One envelope-relevant escaping throw class of a declaration.
@@ -87,14 +87,21 @@ pub struct EscapeSweep {
 #[must_use]
 pub fn sweep_escapes(db: &dyn Db, project: Project) -> EscapeSweep {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
 
-    let throws = compute_throws(&units, &index);
+    let throws = compute_throws(&units, &index, &[]);
     let mut out = EscapeSweep::default();
     for fi in 0..units.len() {
         let cx = Cx::new(&units, &index, fi);

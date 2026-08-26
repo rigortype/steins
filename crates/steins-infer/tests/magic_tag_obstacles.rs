@@ -8,6 +8,7 @@
 //! is paired against the negative control: the same shape with the tag removed still fires.
 
 use steins_infer::{
+    LazyTree,
     CALL_UNDEFINED_METHOD_ID, Diagnostic, FileUnit, Folder, MagicObstacle,
     PHPDOC_UNDEFINED_METHOD_ID, check_with, magic_obstacles, magic_obstacles_reaching,
 };
@@ -64,7 +65,7 @@ fn s6(src: &str) -> Vec<Diagnostic> {
 }
 
 fn reach(src: &str, fqn: &str) -> Vec<MagicObstacle> {
-    let tree = SourceTree::parse(src);
+    let tree = LazyTree::ready(SourceTree::parse(src));
     let units = [FileUnit { path: "test.php", tree: &tree }];
     magic_obstacles_reaching(&units, fqn)
 }
@@ -227,9 +228,9 @@ fn a_descendant_carrying_a_tag_silences_the_declared_arm() {
 
 #[test]
 fn records_are_per_site_and_carry_their_subject() {
-    let tree = SourceTree::parse(
+    let tree = LazyTree::ready(SourceTree::parse(
         "<?php\nnamespace App;\nuse Vendor\\Query\\Builder;\n/**\n * @method int foo()\n * @method static self make()\n * @property-read string $name\n * @mixin Builder\n */\nclass Order {}\n",
-    );
+    ));
     let units = [FileUnit { path: "test.php", tree: &tree }];
     let recs = magic_obstacles(&units);
     assert_eq!(recs.len(), 4, "one record per tag site, not one flag per class: {recs:?}");

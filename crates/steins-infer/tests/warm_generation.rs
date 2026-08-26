@@ -1083,3 +1083,137 @@ fn the_paranoid_verifier_names_a_planted_divergence() {
     let fresh_store = TempDir::new("paranoid-planted-fresh");
     assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #516: a warm run decodes a tree only for a file something reaches.
+//
+// The fixture is deliberately free of the three things whose *reporting* pass
+// cannot be summarized — no `@throws`, no effect envelope, no purity-bearing
+// docblock — because those passes emit from a declaration's own docblock and
+// are therefore gated per file rather than answered from a summary. What it
+// does carry is a walk finding in every file, so the replay path has something
+// to replay and the counters are not trivially zero.
+// ---------------------------------------------------------------------------
+
+const QUIET_APP: &str = "<?php\n\
+    namespace App;\n\
+    function width(int $w): int { return $w; }\n\
+    function callIt(): int { return width(\"nope\"); }\n";
+
+const QUIET_HELPER: &str = "<?php\n\
+    namespace App;\n\
+    function helper(string $s): string { return \\strtoupper($s); }\n\
+    function alsoWrong(): int { return width(\"nope\"); }\n";
+
+const QUIET_LEAF: &str = "<?php\n\
+    namespace Leaf;\n\
+    function leafOnly(): int { return \\intdiv(41, \"1\"); }\n";
+
+fn write_quiet_fixture(root: &Path) -> Vec<PathBuf> {
+    let write = |rel: &str, content: &str| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("composer.json", SKIP_COMPOSER_JSON);
+    write("composer.lock", COMPOSER_LOCK);
+    write("src/app.php", QUIET_APP);
+    write("src/helper.php", QUIET_HELPER);
+    write("src/leaf.php", QUIET_LEAF);
+    write("vendor/acme/lib/src/lib.php", VENDOR_LIB);
+    vec![
+        root.join("src/app.php"),
+        root.join("src/helper.php"),
+        root.join("src/leaf.php"),
+        root.join("vendor/acme/lib/src/lib.php"),
+    ]
+}
+
+fn decoded(outcome: &GenerationOutcome) -> usize {
+    outcome.report.packages.iter().map(|pkg| pkg.decoded).sum()
+}
+
+/// **The point of the slice.** A warm rebuild over an untouched tree decodes
+/// ZERO trees: every whole-universe phase reads the persisted per-file facts
+/// instead, and no walk runs to reach one. The counters that already existed
+/// keep their meaning — every file is still "loaded", none is "parsed" — and
+/// `decoded` is what says the load never actually happened.
+#[test]
+fn a_warm_no_change_run_decodes_no_tree_at_all() {
+    if !spawn_or_skip("a_warm_no_change_run_decodes_no_tree_at_all") {
+        return;
+    }
+    let tmp = TempDir::new("no-decode");
+    let files = write_quiet_fixture(&tmp.dir);
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    assert!(!cold.findings.is_empty(), "the fixture must produce walk findings");
+
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(warm.report.walk.walked, 0, "notes: {:#?}", warm.report.notes);
+    assert_eq!(warm.report.walk.replayed, files.len());
+    for pkg in &warm.report.packages {
+        assert_eq!(pkg.parsed, 0, "package {} reparsed", pkg.name);
+        assert_eq!(pkg.loaded, pkg.files, "package {} did not serve from artifacts", pkg.name);
+    }
+    assert_eq!(decoded(&warm), 0, "a tree was decoded: {:#?}", warm.report.notes);
+    assert_eq!(canon(warm.findings), canon(cold.findings));
+}
+
+/// And an edit decodes only what it reaches: the edited file, and the files
+/// the affected set walks because of it. `leaf.php` names nothing any other
+/// file declares, so nothing else is affected — and the two untouched
+/// first-party files plus the vendor one keep their trees on disk.
+#[test]
+fn a_leaf_edit_decodes_only_the_files_it_reaches() {
+    if !spawn_or_skip("a_leaf_edit_decodes_only_the_files_it_reaches") {
+        return;
+    }
+    let tmp = TempDir::new("leaf-decode");
+    let files = write_quiet_fixture(&tmp.dir);
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+
+    rewrite(
+        &files[2],
+        "<?php\nnamespace Leaf;\nfunction leafOnly(): int { return \\intdiv(42, \"1\"); }\n",
+    );
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(warm.report.walk.walked, 1, "notes: {:#?}", warm.report.notes);
+    assert_eq!(warm.report.walk.replayed, files.len() - 1);
+    // The edited file is re-parsed rather than decoded (its bytes moved), so
+    // the decode counter stays at zero even here.
+    assert_eq!(decoded(&warm), 0, "a tree was decoded: {:#?}", warm.report.notes);
+
+    let fresh = TempDir::new("leaf-decode-fresh");
+    assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh.dir, &files).findings));
+}
+
+/// A file whose docblock spells `@throws` is the one shape a summary cannot
+/// answer for: the throw reporting pass emits from that docblock, so its tree
+/// is decoded — and only its tree. Pinned so the gate's cost stays visible and
+/// a later widening of it is a deliberate change.
+#[test]
+fn only_a_throws_declaring_file_costs_its_tree() {
+    if !spawn_or_skip("only_a_throws_declaring_file_costs_its_tree") {
+        return;
+    }
+    let tmp = TempDir::new("throws-decode");
+    let files = write_quiet_fixture(&tmp.dir);
+    std::fs::write(
+        &files[1],
+        "<?php\nnamespace App;\n/** @throws \\RuntimeException */\nfunction helper(string $s): string { throw new \\RuntimeException($s); }\n",
+    )
+    .unwrap();
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+    let warm = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(warm.report.mode, GenerationMode::Warm);
+    assert_eq!(warm.report.walk.walked, 0, "notes: {:#?}", warm.report.notes);
+    assert_eq!(decoded(&warm), 1, "exactly the `@throws` file: {:#?}", warm.report.notes);
+    assert_eq!(canon(warm.findings), canon(cold.findings));
+}

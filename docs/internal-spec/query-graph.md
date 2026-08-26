@@ -110,10 +110,24 @@ generations on disk, not a finer query DAG:
   nothing could have changed replays its persisted walk instead of walking
   (slice B, below).
 - **The per-package payloads** — `symbols`, `contracts`, `trace` — live in
-  `steins_db::persist` (#487); `sources` and `summaries` live in
+  `steins_db::persist` (#487); `sources`, `summaries` and `facts` live in
   `steins_infer` beside the orchestrator that reads them, because their
   payloads are that crate's vocabulary; the container, identity and store live
   in `steins-gen` (#485).
+- **A tree is decoded only where a walk reaches it** (issue #516). Every
+  whole-universe phase used to read something off every file's tree, so a warm
+  no-change rebuild decoded the universe whatever the edit was. Those readings
+  are all *summaries* of a tree, and the `facts` section persists them per
+  file; `FileUnit::tree` is a `LazyTree` that decodes on first use, so what
+  costs a decode is a walk — the file's own, plus whatever its binding descent
+  and class-chain walks reach. The own rows persist **resolved**, licensed by
+  the affected set rather than re-resolved at merge time: a row is a function
+  of the file's origins and of how the merged index resolves the names the file
+  references, and `F ∉ affected` is precisely the over-approximation of "some
+  resolution F makes could have moved" — the same judgement that already
+  licenses replaying F's whole diagnostic block, which is the stronger claim.
+  Measured on nikic/PHP-Parser, warm no-change: 70 ms → 30 ms, and one tree
+  decoded of 341 (the single file whose docblock spells `@throws`).
 - **Fold results are recorded generation inputs** through the ADR-0066 table
   seam, keyed under the engine identity (#488).
 - **The perf harness** is `cargo xtask perf` (#483), with `--warm` measuring the
@@ -137,6 +151,23 @@ memoize `parse` within one run — and no new tracked semantic query is planned.
 
 ## Still open
 
+- **Publishing is O(universe)** — and, since issue #516 took the tree decode
+  out, it is what an edit costs. A generation is a directory of whole-file
+  artifacts, so any edit rewrites every payload of the package holding it, and
+  the ordinary first-party shape is one package holding everything. Measured on
+  nikic/PHP-Parser, a one-line leaf edit: capture 17 + trees 12 + analyze 5 +
+  **persist 78** ms. Unchanged by #516 (it was 76 ms before, re-encoding trees
+  rather than copying payloads) and now the largest single phase of a warm
+  rebuild by a factor of four.
+- **Capture hashes every file every run** (issue #516's second item). 13 ms of
+  a 30 ms no-change rebuild on nikic/PHP-Parser — the largest phase *there*,
+  but 15% of an edit's cost, so it ranks behind publishing.
+- **The reporting passes are gated, not summarized.** `throw_diagnostics` emits
+  from a declaration's own docblock, so it is gated per file and costs the tree
+  of every file spelling `@throws` (29 of 217 on Seldaek/monolog).
+  `effect_diagnostics` is coarser: its Liskov leg reads a class's *ancestors'*
+  envelopes, so a project declaring an effect envelope anywhere decodes every
+  tree in that pass. Narrowing it needs a persisted class → envelope table.
 - **The call graph saturates on common method names** (issue #513). The tree
   load and the name delta are both proportional to the edit now, so what an
   edit costs is decided by the backwards call closure — and a file declaring a

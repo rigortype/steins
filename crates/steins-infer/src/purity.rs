@@ -24,9 +24,10 @@ use crate::throws::{
 };
 use crate::cx::Cx;
 use crate::dispatch::{Resolution, resolve_in_chain};
-use crate::project::{Diagnostic, FileUnit, FnResolution, Index};
+use crate::facts::FileFacts;
+use crate::project::{Diagnostic, FileUnit, FnResolution, Index, LazyTree};
 use crate::{
-    EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
+    EFFECT_ID, EFFECT_LISKOV_ID, Fixpoints, Gate, INTEROP_UNKNOWN_LABEL_ID, Sym, UNKNOWN_LABEL_ID,
 };
 
 // ---------------------------------------------------------------------------
@@ -35,7 +36,12 @@ use crate::{
 
 /// One proven effect a unit carries, with the provenance a transitive `via`
 /// message needs.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[cfg_attr(
+    not(target_arch = "wasm32"),
+    derive(serde::Serialize, serde::Deserialize),
+    serde(deny_unknown_fields)
+)]
 pub(crate) struct EffectFinding {
     pub(crate) label: String,
     origin: String,
@@ -112,7 +118,7 @@ pub(crate) struct EffectSet {
 /// against the generation's merged index. The unit's ADR-0084 attribution is
 /// deliberately NOT a field: it is a fact of the `[effects]` policy table,
 /// resolved by [`propagate_effects`] at propagation time.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct EffectOwnRow {
     /// The findings that arise in this unit's own body — with their attribution
     /// sets as full copies, never collapsed to labels (ADR-0084 §2).
@@ -132,6 +138,22 @@ pub(crate) struct EffectOwnRow {
 }
 
 impl EffectOwnRow {
+    /// Fold another row for the same [`Sym`] into this one — what a
+    /// declaration split across two files (one FQN, two definitions) produces,
+    /// and what a persisted row does when it rejoins the run's table.
+    ///
+    /// Equal to classifying both bodies into one row, which is what the
+    /// enumeration does: every lane is a union and the exhaustiveness bit is a
+    /// conjunction, because `classify_effect_origins` only ever inserts and
+    /// only ever clears the bit.
+    pub(crate) fn absorb(&mut self, other: &Self) {
+        self.findings.extend(other.findings.iter().cloned());
+        self.declared.extend(other.declared.iter().cloned());
+        self.exhaustive &= other.exhaustive;
+        self.edges.extend(other.edges.iter().cloned());
+        self.untainting.extend(other.untainting.iter().cloned());
+    }
+
     /// The empty row: a unit with no origins has no effects and is exhaustive.
     pub(crate) fn new() -> Self {
         Self {
@@ -345,8 +367,9 @@ pub(crate) fn compute_effects(
     index: &Index,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
+    facts: &[FileFacts],
 ) -> HashMap<Sym, EffectSet> {
-    let (syms, rows) = effect_own_rows(units, index, plugins, policy);
+    let (syms, rows) = effect_own_rows(units, index, plugins, policy, facts);
     propagate_effects(&syms, &rows, policy)
 }
 
@@ -358,6 +381,7 @@ fn effect_own_rows(
     index: &Index,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
+    facts: &[FileFacts],
 ) -> (Vec<Sym>, HashMap<Sym, EffectOwnRow>) {
     // Each effect unit with the file it lives in and its enclosing class FQN.
     struct Unit<'a> {
@@ -369,8 +393,21 @@ fn effect_own_rows(
         /// declared receiver (`EffectRecv::Var`).
         params: &'a [steins_syntax::Param],
     }
+    // The files whose rows this run already holds (issue #516): their
+    // declarations enter the sym list in the same order the enumeration below
+    // would have produced, and their rows are folded in without their trees
+    // being decoded. Every other file is enumerated as before.
+    let mut syms: Vec<Sym> = Vec::new();
+    let mut rows: HashMap<Sym, EffectOwnRow> = HashMap::new();
     let mut ulist: Vec<Unit> = Vec::new();
     for (fi, u) in units.iter().enumerate() {
+        if let Some(persisted) = facts.get(fi).and_then(|f| f.rows.as_ref()) {
+            syms.extend(persisted.syms.iter().cloned());
+            for (sym, row) in &persisted.effects {
+                rows.entry(sym.clone()).or_insert_with(EffectOwnRow::new).absorb(row);
+            }
+            continue;
+        }
         for f in u.tree.functions() {
             ulist.push(Unit {
                 sym: Sym::Func(f.fqn.clone()),
@@ -406,7 +443,6 @@ fn effect_own_rows(
         }
     }
 
-    let mut rows: HashMap<Sym, EffectOwnRow> = HashMap::new();
     for unit in &ulist {
         let cx = Cx::new(units, index, unit.file);
         let row = rows.entry(unit.sym.clone()).or_insert_with(EffectOwnRow::new);
@@ -420,7 +456,28 @@ fn effect_own_rows(
             row,
         );
     }
-    (ulist.into_iter().map(|u| u.sym).collect(), rows)
+    if syms.is_empty() {
+        return (ulist.into_iter().map(|u| u.sym).collect(), rows);
+    }
+    // A mixed run: the enumerated declarations join the persisted ones. Order
+    // is by file either way, and the enumeration above skipped exactly the
+    // files whose syms are already in `syms`.
+    let mut order: Vec<(usize, Sym)> = Vec::new();
+    for (fi, _) in units.iter().enumerate() {
+        if let Some(persisted) = facts.get(fi).and_then(|f| f.rows.as_ref()) {
+            order.extend(persisted.syms.iter().map(|s| (fi, s.clone())));
+        }
+    }
+    let mut merged: Vec<Sym> = Vec::with_capacity(order.len() + ulist.len());
+    let mut fresh = ulist.into_iter().peekable();
+    for (fi, sym) in order {
+        while fresh.peek().is_some_and(|u| u.file < fi) {
+            merged.push(fresh.next().expect("peeked").sym);
+        }
+        merged.push(sym);
+    }
+    merged.extend(fresh.map(|u| u.sym));
+    (merged, rows)
 }
 
 /// Fixpoint: effects(u) = own(u) ∪ ⋃ effects(callees); exhaustive taints, from
@@ -521,7 +578,7 @@ fn propagate_effects(
 /// the whole body is asked, through exactly the same code: the loop→`array_map`
 /// transform's purity precondition is the fixpoint's own verdict restricted to
 /// the loop body, never a second opinion about what an effect is.
-fn classify_effect_origins(
+pub(crate) fn classify_effect_origins(
     cx: &Cx,
     class_fqn: Option<&str>,
     params: &[steins_syntax::Param],
@@ -827,7 +884,8 @@ pub fn effect_summary(
     classes: &[ClassDecl],
 ) -> Vec<EffectSummary> {
     let _ = (functions, classes);
-    let units = [FileUnit { path: "", tree }];
+    let lazy = LazyTree::borrowed(tree);
+    let units = [FileUnit { path: "", tree: &lazy }];
     let index = Index::from_units(&units);
     effect_summary_units(&units, &index, 0, &PluginFacts::none(), &EffectsPolicy::none())
 }
@@ -841,8 +899,8 @@ pub(crate) fn effect_summary_units(
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
 ) -> Vec<EffectSummary> {
-    let effects = compute_effects(units, index, plugins, policy);
-    let throws = compute_throws(units, index);
+    let effects = compute_effects(units, index, plugins, policy, &[]);
+    let throws = compute_throws(units, index, &[]);
     let tree = units[target].tree;
     let sorted_labels = |sym: &Sym| -> Vec<String> {
         let mut labels: Vec<String> = effects
@@ -1025,15 +1083,22 @@ pub fn region_purity_project(
         return Vec::new();
     }
     let handles: Vec<SourceFile> = project.files(db).to_vec();
-    let units: Vec<FileUnit> =
-        handles.iter().map(|&f| FileUnit { path: f.path(db), tree: parse(db, f) }).collect();
+    // One `LazyTree` per file, borrowing the database's own parse: the salsa
+    // path holds every tree already, so nothing here is ever deferred.
+    let lazy: Vec<LazyTree<'_>> =
+        handles.iter().map(|&f| LazyTree::borrowed(parse(db, f))).collect();
+    let units: Vec<FileUnit> = handles
+        .iter()
+        .zip(&lazy)
+        .map(|(&f, tree)| FileUnit { path: f.path(db), tree })
+        .collect();
     let db_index = project_index(db, project);
     let pos: HashMap<SourceFile, usize> =
         handles.iter().enumerate().map(|(i, &f)| (f, i)).collect();
     let index = Index::from_db(db_index, &pos, &units);
     let plugins = project.plugins(db);
-    let effects = compute_effects(&units, &index, plugins, project.effects(db));
-    let throws = compute_throws(&units, &index);
+    let effects = compute_effects(&units, &index, plugins, project.effects(db), &[]);
+    let throws = compute_throws(&units, &index, &[]);
 
     regions
         .iter()
@@ -1208,17 +1273,7 @@ impl<'a> PurityOracle<'a> {
     /// vocabulary (`pure-callable`, `pure-closure`, `static-pure-closure`) contains
     /// one of the two literal substrings tested.
     pub(crate) fn build(fx: &'a Fixpoints<'a>) -> Option<Self> {
-        let spells_purity = |doc: Option<&String>| {
-            doc.is_some_and(|t| t.contains("pure-callable") || t.contains("pure-closure"))
-        };
-        let any = fx.units().iter().any(|u| {
-            u.tree.functions().iter().any(|f| spells_purity(f.docblock.as_ref()))
-                || u.tree
-                    .classes()
-                    .iter()
-                    .any(|c| c.methods.iter().any(|m| spells_purity(m.docblock.as_ref())))
-        });
-        if !any {
+        if !fx.any(Gate::Purity) {
             return None;
         }
         Some(PurityOracle { effects: fx.effects(), policy: fx.policy() })
@@ -1281,20 +1336,15 @@ pub(crate) fn effect_diagnostics(fx: &Fixpoints<'_>) -> Vec<Diagnostic> {
     // through [`docblock_envelope_tag`]'s own substring test — over-approximate
     // by design (a docblock merely *saying* "pure" opens the gate and then
     // resolves to no envelope), which costs a pass and can never lose a finding.
-    let any_envelope = units.iter().any(|u| {
-        u.tree
-            .functions()
-            .iter()
-            .any(|f| f.effect_envelope.is_some() || spells_interop_envelope(f.docblock.as_ref()))
-            || u.tree.classes().iter().any(|c| {
-                spells_interop_envelope(c.docblock.as_ref())
-                    || c.methods.iter().any(|m| {
-                        m.effect_envelope.is_some()
-                            || spells_interop_envelope(m.docblock.as_ref())
-                    })
-            })
-    });
-    if !any_envelope {
+    //
+    // Read off the per-file facts where the run has them (issue #516). The
+    // *loop* below is deliberately not gated per file the way the throw pass
+    // is: `emit_effect_liskov` reads a class's ancestors' envelopes, so a file
+    // declaring none can still emit, and narrowing that needs a persisted
+    // class → envelope table. A project that declares an envelope anywhere
+    // therefore decodes every tree here — recorded rather than hidden, and
+    // measured at zero on a corpus that declares none.
+    if !fx.any(Gate::Envelope) {
         return Vec::new();
     }
 
@@ -2639,7 +2689,7 @@ fn own_interop_envelope(
 /// Whether a docblock could possibly carry an interop-envelope tag — the same
 /// cheap substring gate [`docblock_envelope_tag`] opens with, exposed for the
 /// whole-project fast path that decides whether the effect fixpoint runs at all.
-fn spells_interop_envelope(docblock: Option<&String>) -> bool {
+pub(crate) fn spells_interop_envelope(docblock: Option<&String>) -> bool {
     docblock.is_some_and(|t| t.contains("pure"))
 }
 

@@ -1833,12 +1833,12 @@ mod oracle_tests {
     //! instanceof branch analysis (integration tests cover that path separately).
     use super::*;
     use crate::FileUnit;
-    use crate::project::Index;
+    use crate::project::{Index, LazyTree};
     use steins_syntax::SourceTree;
     use crate::contract::IsA;
 
     fn is_a(src: &str, sub: &str, sup: &str) -> IsA {
-        let tree = SourceTree::parse(src);
+        let tree = LazyTree::ready(SourceTree::parse(src));
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
         Cx::new(&units, &index, 0).is_a(sub, sup)
@@ -1948,14 +1948,15 @@ mod template_type_rewrite_tests {
     //! left byte-identical, because the carry readers (#362/#363) intercept exactly
     //! that spelling and a rewrite would erase it.
     use super::*;
-    use crate::project::{FileUnit, Index};
+    use crate::project::{FileUnit, Index, LazyTree};
     use steins_syntax::SourceTree;
     use steins_phpdoc::parse_type;
 
     /// `passes` applications of the rewrite to `spelling`, read in file `file` at
     /// offset `off` of a project made of `srcs`.
     fn rewritten_n(srcs: &[&str], file: usize, off: u32, spelling: &str, passes: usize) -> PType {
-        let trees: Vec<SourceTree> = srcs.iter().map(|s| SourceTree::parse(s)).collect();
+        let trees: Vec<LazyTree<'_>> =
+            srcs.iter().map(|s| LazyTree::ready(SourceTree::parse(s))).collect();
         let paths: Vec<String> = (0..srcs.len()).map(|i| format!("t{i}.php")).collect();
         let units: Vec<FileUnit> = trees
             .iter()
@@ -1985,7 +1986,7 @@ mod template_type_rewrite_tests {
     /// way every consumer builds one — [`Cx::envelopes_of`], so the declaration's
     /// own `@template` shadow has run before the rewrite, exactly as in production.
     fn envelope_return(src: &str) -> PType {
-        let tree = SourceTree::parse(src);
+        let tree = LazyTree::ready(SourceTree::parse(src));
         let units = [FileUnit { path: "t.php", tree: &tree }];
         let index = Index::from_units(&units);
         let cx = Cx::new(&units, &index, 0);

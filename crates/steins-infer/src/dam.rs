@@ -32,8 +32,10 @@
 use std::collections::HashSet;
 
 use steins_db::ProjectLayout;
-use steins_syntax::{DynamismKind, IncludePath};
 
+use crate::facts::{
+    CandidateKind, DamCandidate, ParseError, dam_candidates_of, parse_error_of,
+};
 use crate::project::FileUnit;
 
 /// The kind of a dam site (ADR-0049 §2), carried so triage/coverage surfaces
@@ -146,12 +148,37 @@ impl DamFacts {
 /// guess, since extending it to first-party code would silence real obstacles.
 #[must_use]
 pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
+    let rows: Vec<DamRow> = units
+        .iter()
+        .map(|u| (parse_error_of(u.tree), dam_candidates_of(u.path, u.tree)))
+        .collect();
+    dam_facts_from(units, layout, &rows)
+}
+
+/// One file's dam-relevant projection: its first parse error and its dam
+/// candidates. Either read off a persisted [`crate::facts::FileFacts`] or
+/// derived from the tree — the two are the same value by construction.
+pub(crate) type DamRow = (Option<ParseError>, Vec<DamCandidate>);
+
+/// [`dam_facts`] over the run's per-file facts rather than its trees (issue
+/// #516).
+///
+/// The split is exactly where ADR-0049's own module doc puts it: which
+/// constructs a file *holds* is a fact about the file, and whether one *stands*
+/// — the vendor presumption, the universe-membership test an include's
+/// resolved target faces — is a merge-time question. The first half is
+/// persisted per file; the second is recomputed here every run, over whatever
+/// universe this run has.
+pub(crate) fn dam_facts_from(
+    units: &[FileUnit],
+    layout: &ProjectLayout,
+    rows: &[DamRow],
+) -> DamFacts {
     // Every project + vendor file, path-normalized for include resolution.
     let universe: HashSet<String> = units.iter().map(|u| normalize_path(u.path)).collect();
 
     let mut sites = Vec::new();
-    for u in units {
-        let tree = u.tree;
+    for (u, (parse_error, dynamism)) in units.iter().zip(rows) {
         let vendor = layout.is_vendor(u.path);
         // parse failure (ADR-0079, issue #180)
         // One site per broken file at its first error — recovery cascades make
@@ -161,25 +188,26 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
         // Deferred (ADR-0079 §3): a position-aware refinement could spare a
         // recovery region provably inside a statement body, but needs the syntax
         // tree to expose recovery regions, which it does not yet.
-        if !vendor && let Some(first) = tree.parse_errors().first() {
-            let pos = tree.position(first.span.start);
+        if !vendor && let Some(first) = parse_error {
             sites.push(DamSite {
                 path: u.path.to_owned(),
-                line: pos.line,
-                column: pos.column,
+                line: first.line,
+                column: first.column,
                 kind: DamKind::Unparsable,
             });
         }
-        for site in tree.dynamism_sites() {
-            let pos = tree.position(site.span.start);
+        for site in dynamism {
             let kind = match &site.kind {
                 // Vendor presumption (ADR-0046 §2): autoload plumbing, presumed
                 // universe-internal.
-                DynamismKind::Eval if vendor => continue,
-                DynamismKind::Eval => DamKind::Eval,
-                DynamismKind::Include(_) if vendor => continue,
-                DynamismKind::Include(ip) => {
-                    if include_is_benign(ip, u.path, &universe) {
+                CandidateKind::Eval if vendor => continue,
+                CandidateKind::Eval => DamKind::Eval,
+                CandidateKind::Include { .. } if vendor => continue,
+                CandidateKind::Include { target } => {
+                    // A target the write side could not make benign at all is
+                    // `None`; one it could is benign exactly when this run's
+                    // universe holds it.
+                    if target.as_ref().is_some_and(|t| universe.contains(t)) {
                         continue;
                     }
                     DamKind::Include
@@ -187,53 +215,38 @@ pub fn dam_facts(units: &[FileUnit], layout: &ProjectLayout) -> DamFacts {
                 // Vendor presumption does not extend here: aliasing mints a
                 // project-visible name regardless of where it sits, so it dams even
                 // in vendor.
-                DynamismKind::ClassAlias => DamKind::ClassAlias,
+                CandidateKind::ClassAlias => DamKind::ClassAlias,
                 // Same reason as `class_alias`: a computed `define` mints a
                 // project-visible name wherever it sits, so it dams even in vendor.
-                DynamismKind::DefineDynamic => DamKind::DefineDynamic,
+                CandidateKind::DefineDynamic => DamKind::DefineDynamic,
             };
-            sites.push(DamSite { path: u.path.to_owned(), line: pos.line, column: pos.column, kind });
+            sites.push(DamSite {
+                path: u.path.to_owned(),
+                line: site.line,
+                column: site.column,
+                kind,
+            });
         }
     }
     DamFacts { sites }
-}
-
-/// Whether a proven include path resolves inside the analyzed universe (ADR-0049
-/// A5, amended). Only absolute literals and `__DIR__`-anchored concatenations can
-/// be benign, and only if they resolve to an indexed file. A bare-relative or
-/// `./`-prefixed literal is never benign — it resolves against `include_path` →
-/// script dir → CWD at runtime, so an in-universe neighbor proves nothing.
-fn include_is_benign(ip: &IncludePath, from: &str, universe: &HashSet<String>) -> bool {
-    match ip {
-        IncludePath::Unproven => false,
-        IncludePath::Literal(p) => {
-            // `./x` is `Literal("./x")` — not absolute, so it stays unproven (A5:
-            // `./` anchors to CWD, not the including file's directory).
-            is_absolute(p) && universe.contains(&normalize_path(p))
-        }
-        IncludePath::DirRelative(suffix) => {
-            let rel = suffix.strip_prefix('/').unwrap_or(suffix);
-            universe.contains(&normalize_path(&join(dir_of(from), rel)))
-        }
-    }
 }
 
 // Path helpers (POSIX-style, `/`-separated). Deliberately duplicated from the
 // transform-side obstacle scanner: A5 keeps the transform's rule byte-identical
 // in S1, so the checker owns this corrected copy rather than reaching across.
 
-fn is_absolute(p: &str) -> bool {
+pub(crate) fn is_absolute(p: &str) -> bool {
     p.starts_with('/') || p.starts_with('\\')
 }
 
-fn dir_of(path: &str) -> &str {
+pub(crate) fn dir_of(path: &str) -> &str {
     match path.rfind(['/', '\\']) {
         Some(i) => &path[..i],
         None => "",
     }
 }
 
-fn join(dir: &str, rel: &str) -> String {
+pub(crate) fn join(dir: &str, rel: &str) -> String {
     if dir.is_empty() {
         rel.to_owned()
     } else {
@@ -244,7 +257,7 @@ fn join(dir: &str, rel: &str) -> String {
 /// Normalize a `/`-separated path: fold `\` to `/`, drop `.` components, resolve
 /// `..` against the preceding component, preserve a leading `/` for absolute paths.
 /// Purely lexical — the universe is a known set, so no filesystem access.
-fn normalize_path(path: &str) -> String {
+pub(crate) fn normalize_path(path: &str) -> String {
     let absolute = is_absolute(path);
     let mut out: Vec<&str> = Vec::new();
     for comp in path.split(['/', '\\']) {
@@ -271,12 +284,13 @@ fn normalize_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::project::LazyTree;
     use steins_syntax::SourceTree;
 
     /// Build owned trees, then borrow them into units (the trees must outlive the
     /// units, so the caller holds them).
-    fn tree(src: &str) -> SourceTree {
-        SourceTree::parse(src)
+    fn tree(src: &str) -> LazyTree<'static> {
+        LazyTree::ready(SourceTree::parse(src))
     }
 
     #[test]
