@@ -100,8 +100,11 @@ of it landed *in the graph* — which is the point. Persistence is frozen
 generations on disk, not a finer query DAG:
 
 - **Cross-run reuse** is the generation store (`<project>/.steins/gen/`), built
-  and read by `steins_infer::generation_check` behind
-  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489). A file whose captured
+  and read by `steins_infer::generation_check` — which is how `steins check`
+  runs since issue #525, with `--no-cache` as the opt-out and no narration
+  either way (ADR-0020's amendment; the run's disposition is `steins doctor`'s
+  store section). `cargo xtask fp-gate` runs every corpus project through the
+  same orchestrator, cold then warm, and reds on any disagreement. A file whose captured
   content fingerprint matches its artifact row loads its lowered tree instead
   of re-parsing (slice A, made per file by issue #512 — the package
   fingerprint survives as the shortcut that says every file is unmoved, and a

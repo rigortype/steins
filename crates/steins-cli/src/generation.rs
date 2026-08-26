@@ -1,36 +1,45 @@
-//! CLI wiring for the experimental frozen-generation lifecycle (ADR-0092 §5,
-//! issue #489 slice A). The orchestrator itself is library-shaped in
-//! `steins_infer::generation_check` (shared with `cargo xtask perf --warm` and,
-//! later, the MCP server per issue #491); this module is only the `steins
-//! check` glue: resolve the run's boundary inputs, call the orchestrator, and
-//! hand back what the unchanged downstream pipeline needs.
+//! CLI wiring for the frozen-generation lifecycle (ADR-0092 §5) — how `steins
+//! check` runs by default since issue #525. The orchestrator itself is
+//! library-shaped in `steins_infer::generation_check` (shared with `cargo xtask
+//! perf --warm`, `cargo xtask fp-gate` and, later, the MCP server per issue
+//! #491); this module is only the `steins check` glue: resolve the run's
+//! boundary inputs, call the orchestrator, and hand back what the unchanged
+//! downstream pipeline needs.
 //!
-//! **The gate.** The lifecycle activates only when
-//! `STEINS_EXPERIMENTAL_GENERATIONS=1` is in the environment — read once in
-//! `run_check` and plumbed as a bool, deliberately not a CLI flag: flag
-//! promotion is an ADR-0020 surface decision the owner takes later. With the
-//! variable unset (every CI run), `steins check` is byte-identical to today.
-//! With it set, the product surface is still the same report — the gate adds
-//! stderr notes and the `.steins/gen/` store, nothing else — and any
-//! orchestration failure degrades to the ordinary cold path with a note.
+//! **The surface** (ADR-0020 amendment, issue #525). The lifecycle is on
+//! unless `--no-cache` turns it off. There is no environment variable and no
+//! per-run narration: the report a user reads is the same report either way,
+//! and a cache that announces itself on every invocation is noise on every
+//! invocation. Where the run's disposition genuinely wants looking at, that is
+//! `steins doctor`'s store section.
+//!
+//! **Silence is a property, not a preference.** Every way this path can
+//! degrade — an unopenable store, a source that moved under the seal, a
+//! corrupt artifact, a failed publish — is cost-only by ADR-0092 §2's standing
+//! invariant: a miss changes what a run *pays*, never what it *finds*. A
+//! complaint about one would therefore be a complaint the user can do nothing
+//! useful with, on a run whose answer is already correct. So this module
+//! prints nothing of its own, and a degradation falls back to the ordinary
+//! cold path whose stderr is then byte-for-byte the stderr of a run that never
+//! had a cache at all — which is why the boundary notices below are *collected*
+//! rather than printed: printing them before the orchestrator can fail is what
+//! would double them on the fallback.
 
 use std::collections::HashSet;
 use std::ffi::OsStr;
 use std::path::{Component, Path, PathBuf};
 
-use steins_db::EffectsPolicy;
-use steins_infer::{
-    Diagnostic, GenerationMode, GenerationParams, INLINE_IGNORE, LazyTree, generation_check,
-};
+use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
+use steins_infer::{Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, generation_check};
 
 use crate::config::RuntimePostures;
-use crate::project::{LoadedProject, assemble_loaded, load_plugins, resolve_layout};
+use crate::project::{LoadedProject, assemble_loaded, resolve_layout};
 
-/// What the gated path hands the downstream pipeline: the same
+/// What the cached path hands the downstream pipeline: the same
 /// [`LoadedProject`] shape the cold path builds (salsa view for `--fix` and
 /// the baseline machinery — no parse forced), the generation findings, and the
 /// orchestrator's owned trees so inline-ignore scanning re-parses nothing.
-pub(crate) struct GatedRun {
+pub(crate) struct CachedRun {
     pub(crate) loaded: LoadedProject,
     pub(crate) findings: Vec<Diagnostic>,
     /// The run's tree handles, in slot order. Handles rather than trees since
@@ -44,13 +53,18 @@ pub(crate) struct GatedRun {
     /// finding names, and nothing else — which is what keeps a warm run from
     /// decoding the whole universe on its way out.
     pub(crate) directive_files: HashSet<String>,
+    /// The boundary notices this run owes stderr, already `steins: `-less and
+    /// in the cold path's own order — plugin refusals, effect label
+    /// vocabulary, attribution hygiene, `[runtime]` warnings. Collected rather
+    /// than printed so a degradation prints them exactly once, from the cold
+    /// path, instead of twice.
+    pub(crate) notices: Vec<String>,
 }
 
 /// Run the generation lifecycle for this check invocation, or `None` to fall
-/// back to the ordinary cold path (with the reason already on stderr). Prints
-/// the same boundary notices `load_project` prints — plugin refusals, effect
-/// label vocabulary, `[runtime]` warnings, attribution hygiene — so the gated
-/// run's stderr carries everything the cold run's does.
+/// back to the ordinary cold path. Prints nothing at all — see the module docs
+/// — so a `None` leaves stderr untouched for `load_project` to fill exactly as
+/// it would have on a machine that never had a store.
 pub(crate) fn try_generation_check(
     files: &[PathBuf],
     paths: &[String],
@@ -59,19 +73,16 @@ pub(crate) fn try_generation_check(
     postures: &RuntimePostures,
     no_php: bool,
     runtime_warnings: &[String],
-) -> Option<GatedRun> {
-    let Ok(cwd) = std::env::current_dir() else {
-        errln!("steins: experimental generations: cannot resolve the working directory; running as today");
-        return None;
-    };
+) -> Option<CachedRun> {
+    let cwd = std::env::current_dir().ok()?;
     let layout = resolve_layout(paths);
-    let plugins = load_plugins(&layout, plugin_allow);
-    for notice in effects.label_notices(plugins.registry()) {
-        errln!("steins: {notice}");
-    }
-    for w in runtime_warnings {
-        errln!("steins: {w}");
-    }
+    let plugins = PluginFacts::discover(&layout, plugin_allow);
+    // The cold path's order, kept here so the two stderrs are one stderr:
+    // `load_project` prints plugin refusals, then the effect label vocabulary,
+    // then attribution hygiene; `run_check` prints the `[runtime]` warnings
+    // after it returns.
+    let mut notices: Vec<String> = plugins.notices().to_vec();
+    notices.extend(effects.label_notices(plugins.registry()));
 
     // Where the sealed capture keys this run's files from (issue #506). Not
     // the layout root: a manifest-less tree has no governing root at all, and
@@ -80,12 +91,7 @@ pub(crate) fn try_generation_check(
     // keys drop. The analyzed files are the only thing that always answers the
     // second one.
     let capture_root = capture_root(files, &cwd);
-    // The store lives with the project: the outermost governing root, or —
-    // manifest-less — beside the analyzed code rather than beside whoever
-    // happened to invoke us (issue #506: the cache belongs to the tree it
-    // caches, not to the caller's working directory).
-    let store_root =
-        layout.roots().last().map_or_else(|| capture_root.clone(), |root| root.dir().to_path_buf());
+    let store_root = store_root(&layout, &capture_root);
     let partition = steins_db::partition::discover(&layout);
     let params = GenerationParams {
         store_root: &store_root,
@@ -102,46 +108,12 @@ pub(crate) fn try_generation_check(
         // which `generation_check` reads for itself; the CLI never forces it.
         paranoid: false,
     };
-    let outcome = match generation_check(&params) {
-        Ok(outcome) => outcome,
-        Err(e) => {
-            // Degrade to the ordinary cold path. The fallback re-prints the
-            // channel notices through `load_project`; a duplicated stderr line
-            // on a failing experimental path is the cheap side of that trade.
-            errln!("steins: experimental generations unavailable ({e}); running as today");
-            return None;
-        }
-    };
-    for notice in &outcome.attribution_notices {
-        errln!("steins: {notice}");
-    }
-    let report = &outcome.report;
-    let (loaded_files, parsed_files) = report
-        .packages
-        .iter()
-        .fold((0usize, 0usize), |(l, p), pkg| (l + pkg.loaded, p + pkg.parsed));
-    // Packages that both loaded and parsed — the shape an edit inside a
-    // package has since the provenance gate went per file (issue #512), and
-    // the one the two totals alone cannot tell from several whole packages
-    // falling on either side.
-    let mixed = report.packages.iter().filter(|pkg| pkg.is_mixed()).count();
-    errln!(
-        "steins: experimental generations: {} run, {} package(s){}, {} file(s) loaded from artifacts, {} parsed; {} walked, {} replayed; generation {}",
-        match report.mode {
-            GenerationMode::Cold => "cold",
-            GenerationMode::Warm => "warm",
-        },
-        report.packages.len(),
-        if mixed == 0 { String::new() } else { format!(" ({mixed} partly reused)") },
-        loaded_files,
-        parsed_files,
-        report.walk.walked,
-        report.walk.replayed,
-        report.generation.as_deref().unwrap_or("(unpublished)")
-    );
-    for note in &report.notes {
-        errln!("steins: experimental generations: {note}");
-    }
+    // A failure here is cost, never meaning (ADR-0092 §2), so it degrades to
+    // the ordinary cold path in silence — and having printed nothing yet is
+    // what lets the cold path own stderr whole.
+    let outcome = generation_check(&params).ok()?;
+    notices.extend(outcome.attribution_notices);
+    notices.extend(runtime_warnings.iter().cloned());
 
     // The salsa view over the same sealed texts, in the same slot order.
     let entries: Vec<(String, String)> = outcome
@@ -156,12 +128,22 @@ pub(crate) fn try_generation_check(
         .filter(|(_, text)| text.contains(INLINE_IGNORE))
         .map(|(path, _)| path.clone())
         .collect();
-    Some(GatedRun {
+    Some(CachedRun {
         loaded,
         findings: outcome.findings,
         trees: outcome.trees,
         directive_files,
+        notices,
     })
+}
+
+/// Where a run's store lives: the outermost governing root, or — manifest-less
+/// — beside the analyzed code rather than beside whoever happened to invoke us
+/// (issue #506: the cache belongs to the tree it caches, not to the caller's
+/// working directory). `steins doctor` reports through this same function, so
+/// the store it looks for is the store `check` writes.
+pub(crate) fn store_root(layout: &ProjectLayout, fallback: &Path) -> PathBuf {
+    layout.roots().last().map_or_else(|| fallback.to_path_buf(), |root| root.dir().to_path_buf())
 }
 
 /// The directory the sealed capture keys `files` against: their common
@@ -191,7 +173,12 @@ pub(crate) fn try_generation_check(
 /// Components are compared as spelled, never normalized: the root must strip
 /// off the files' own leading components, so a `..` the caller wrote survives
 /// in both or in neither.
-fn capture_root(files: &[PathBuf], cwd: &Path) -> PathBuf {
+///
+/// `steins doctor` computes it the same way over the same walk, so the store
+/// it looks for is the store a check of the same tree would write — a
+/// manifest-less project whose `.php` files all live one directory down keeps
+/// its store there, and the two commands must agree about that.
+pub(crate) fn capture_root(files: &[PathBuf], cwd: &Path) -> PathBuf {
     if files.is_empty() || files.iter().any(|f| f.is_relative()) {
         return cwd.to_path_buf();
     }

@@ -25,6 +25,11 @@ path = "src/main.rs"
 # "catalog first, engine last" order the analysis uses.
 steins-catalog = { path = "../steins-catalog" }
 steins-db = { path = "../steins-db" }
+# The generation store, for `doctor`'s store section (issue #525): doctor reads
+# the published generation's own manifest rather than a second bookkeeping file,
+# so what it reports cannot drift from what `check` wrote. Read-only —
+# `Store::open_existing` creates nothing.
+steins-gen = { path = "../steins-gen" }
 steins-infer = { path = "../steins-infer" }
 steins-syntax = { path = "../steins-syntax" }
 steins-edit = { path = "../steins-edit" }

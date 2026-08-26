@@ -100,7 +100,7 @@ fn dispatch(args: &[String]) -> ExitCode {
         }
         None => {
             errln!(
-                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
+                "usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--fix] [--set-baseline] [--baseline <path>] [--ignore-baseline] <paths...>"
             );
             errln!("       steins annotate [--no-php] [--format text|json] <file.php>");
             errln!(
