@@ -38,8 +38,8 @@ use crate::fold::Folder;
 
 /// The worker count knob: `STEINS_WALK_WORKERS`.
 ///
-/// Unset (or `0`) means [`planned_workers`] decides from the machine and the
-/// universe. `1` is the sequential walk — the pre-issue-#490 code path, not an
+/// Unset (or `0`) means the width is decided from the machine and from the
+/// walk's own size. `1` is the sequential walk — the pre-issue-#490 path, not an
 /// imitation of it — which is both the escape hatch for a machine that cannot
 /// afford the parallel peak and the way a measurement pins the before/after.
 /// Any other value is taken literally, so an operator can trade wall clock for
@@ -254,5 +254,103 @@ mod tests {
         assert_eq!(budget.width(0), 1);
         assert_eq!(budget.width(10_000), 4);
         assert_eq!(WorkerBudget { ceiling: 1, named: true }.width(10_000), 1);
+    }
+}
+
+/// The oracle the fan-out exists to keep: a walk spread over N workers
+/// produces the run a walk in place produces, finding for finding and block
+/// for block.
+///
+/// In-crate rather than in `tests/` because the width has to be *chosen* — a
+/// fixture that relied on [`WalkWorkerBudget::read`] would grade whatever the
+/// runner happened to export, and one that relied on the file count would
+/// grade the machine's core count. Here the budget is constructed, so the same
+/// universe is walked at every width from one to one-file-per-worker and every
+/// answer is compared against the sequential one.
+///
+/// [`WalkWorkerBudget::read`]: WorkerBudget::read
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fan_out {
+    use super::*;
+
+    use steins_db::{EffectsPolicy, PluginFacts, ProjectLayout};
+    use steins_syntax::SourceTree;
+
+    use crate::project::{FileUnit, Index, LazyTree};
+    use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
+    use crate::{Diagnostic, FinalKeyword, NoFold};
+
+    /// One declaration file plus callers that each violate it — so every
+    /// caller's block is non-empty and the merge has something to get wrong,
+    /// and so the walk has to resolve across files rather than within one.
+    fn sources() -> Vec<(String, String)> {
+        let mut out = vec![(
+            "src/decl.php".to_owned(),
+            "<?php\nfunction takesInt(int $n): int { return $n; }\n".to_owned(),
+        )];
+        for i in 0..16 {
+            out.push((
+                format!("src/call{i:02}.php"),
+                format!("<?php\ntakesInt(\"nope{i}\");\ntakesInt({i}.5);\n"),
+            ));
+        }
+        out
+    }
+
+    /// Walk the fixture at `width`, returning the findings and the per-file
+    /// ledger, plus the width the loop actually used.
+    fn walk_at(width: usize, named: bool) -> (Vec<Diagnostic>, Vec<FileWalk>, usize) {
+        let sources = sources();
+        let trees: Vec<LazyTree<'static>> =
+            sources.iter().map(|(_, text)| LazyTree::ready(SourceTree::parse(text))).collect();
+        let units: Vec<FileUnit<'_>> = sources
+            .iter()
+            .zip(&trees)
+            .map(|((path, _), tree)| FileUnit { path, tree })
+            .collect();
+        let index = Index::from_units(&units);
+
+        let hire = || NoFold;
+        let retire = |_: NoFold| ();
+        let fleet = FolderFleet::new(WorkerBudget { ceiling: width, named }, &hire, &retire);
+        let mut planner = |_: &UniverseVerdict<'_>| -> Vec<FilePlan> { Vec::new() };
+        let mut control = WalkControl::new(&mut planner, false, &[], Some(&fleet));
+        let findings = crate::check_units_controlled(
+            &units,
+            &index,
+            &mut NoFold,
+            true,
+            FinalKeyword::Enforced,
+            &ProjectLayout::fallback(),
+            &PluginFacts::none(),
+            &EffectsPolicy::none(),
+            Some(&mut control),
+        );
+        (findings, std::mem::take(&mut control.ledger), control.workers)
+    }
+
+    #[test]
+    fn every_width_produces_the_sequential_run() {
+        let (expected, expected_ledger, workers) = walk_at(1, true);
+        assert_eq!(workers, 1, "a named width of one is the walk in place");
+        assert!(!expected.is_empty(), "the fixture actually reports something");
+        assert_eq!(expected_ledger.len(), sources().len(), "one block per file, in unit order");
+
+        for width in 2..=sources().len() {
+            let (findings, ledger, workers) = walk_at(width, true);
+            assert_eq!(workers, width, "the loop fanned out to the width it was given");
+            assert_eq!(findings, expected, "width {width} did not produce the sequential run");
+            assert_eq!(ledger, expected_ledger, "width {width} recorded a different ledger");
+        }
+    }
+
+    /// The universe bound applies to the *walk*, so a fixture this small is
+    /// sequential at the default budget however wide the machine is — the
+    /// property that keeps a small edit's rebuild from hiring a folder per
+    /// file.
+    #[test]
+    fn a_small_walk_stays_in_place_under_the_default_budget() {
+        let ceiling = WorkerBudget::read().ceiling;
+        assert_eq!(walk_at(ceiling, false).2, 1);
     }
 }

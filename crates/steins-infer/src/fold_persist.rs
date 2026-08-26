@@ -252,7 +252,18 @@ fn section_json(reader: &mut ArtifactReader, name: &SectionName) -> Result<serde
 ///
 /// [`TableEngine`]: crate::fold_table::TableEngine
 pub struct RecordingEngine {
-    live: ProcessEngine,
+    /// The run's live child, shared by every engine of the run.
+    ///
+    /// **Why one child and not one per worker.** A parallel walk's workers each
+    /// hold a folder of their own (issue #490) — the memos and the target gate
+    /// have to be per worker — but a `php` child is not policy, it is a
+    /// process. Measured on a 341-file cold build: ten children cost ~210 ms of
+    /// spawn and start-up against a 78 ms walk, so a fan-out that spawned per
+    /// worker finished *later* than the sequential walk it replaced, while the
+    /// same fan-out over one child is 2× faster. The lock is taken only where
+    /// the transport is (a request neither table can answer), and those were
+    /// already serial on one child before any of this.
+    live: Arc<std::sync::Mutex<ProcessEngine>>,
     /// The rows loaded from a published artifact — empty on a cold run, and
     /// emptied wholesale when the identity gate refuses ([`Self::warm`]).
     ///
@@ -262,6 +273,28 @@ pub struct RecordingEngine {
     /// so sharing it costs one pointer and saves every worker a copy of a
     /// table that is universe-sized on a warm run.
     loaded: Arc<BTreeMap<String, serde_json::Value>>,
+    /// This run's own answers, shared by every engine of the run — the run's
+    /// own engine and each of a parallel walk's workers ([`Self::worker`]).
+    ///
+    /// **What it is for.** Every engine of a run has its own [`Self::live`]
+    /// child, and without this pool a question two workers both reach costs
+    /// two round trips to two children instead of one. Cross-worker duplicates
+    /// are the norm, not the exception — the policy memos above the transport
+    /// are per folder, and a builtin called in fifty files is called in every
+    /// worker's share of them — so a fan-out without a pool asks the engine up
+    /// to N times what a sequential run asks it, which is how a wider walk can
+    /// finish later than a narrow one.
+    ///
+    /// **Why it is sound.** A row is the engine's answer to an exact request,
+    /// scoped by the engine identity — the very premise the persisted table
+    /// rests on (ADR-0092 §4), applied within one run instead of across two.
+    /// A sequential run has exactly one engine, where the pool is a memo of
+    /// what that engine already said: the same rows are recorded and the same
+    /// table is published, with fewer round trips paid for them.
+    ///
+    /// Locked only on a [`Self::loaded`] miss, so a warm run answering from
+    /// the table never touches it.
+    pool: Arc<std::sync::Mutex<BTreeMap<String, serde_json::Value>>>,
     /// Whether [`Self::loaded`] *is* a published artifact's table — true only
     /// where [`Self::warm`]'s identity gate accepted. Distinguishes "the table
     /// I loaded was empty" from "there was no table", which is the difference
@@ -287,8 +320,9 @@ impl RecordingEngine {
     #[must_use]
     pub fn cold(live: ProcessEngine) -> Self {
         Self {
-            live,
+            live: Arc::new(std::sync::Mutex::new(live)),
             loaded: Arc::new(BTreeMap::new()),
+            pool: Arc::default(),
             adopted: false,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
@@ -311,8 +345,9 @@ impl RecordingEngine {
         let adopted = live_identity.as_ref() == Some(&artifact.identity);
         let loaded = Arc::new(if adopted { artifact.rows } else { BTreeMap::new() });
         Self {
-            live,
+            live: Arc::new(std::sync::Mutex::new(live)),
             loaded,
+            pool: Arc::default(),
             adopted,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
@@ -320,28 +355,26 @@ impl RecordingEngine {
         }
     }
 
-    /// One parallel walk worker's engine (issue #490): a live child of its
-    /// own, over the table the run's own engine already established.
+    /// One parallel walk worker's engine (issue #490): a ledger of its own over
+    /// what the run already established — the same child, the same published
+    /// table, the same pool of this run's answers.
     ///
     /// **The identity gate is the run's, taken once.** [`Self::warm`] compared
-    /// the stored identity against a live boot surface before any of this
-    /// run's analysis began, and a worker's child is the same `php` on the
-    /// same `PATH` in the same process environment — the very things that
-    /// identity is made of. Re-gating per worker would buy nothing and cost
-    /// something real: it would let one worker's spawn hiccup drop the table
-    /// under *that* worker alone, so half the universe would fold against a
-    /// live engine and half against the table, which is exactly the partial
-    /// degradation that makes findings depend on the fan-out width.
+    /// the stored identity against a live boot surface before any of this run's
+    /// analysis began, and this worker asks that very child. There is no second
+    /// identity to establish, and so no way for one worker to be folding
+    /// against a table another worker's engine refused — the partial
+    /// degradation that would make findings depend on the fan-out width.
     ///
-    /// `loaded` is therefore taken from [`Self::loaded_table`], never
-    /// re-decoded, and the worker records only what it consumed or newly asked
-    /// — its half of the run's one generation-level table, folded back by
-    /// [`Self::absorb`].
+    /// What *is* the worker's own is the ledger: it records only the rows it
+    /// consumed or newly asked, its share of the run's one generation-level
+    /// table, folded back by [`Self::absorb`].
     #[must_use]
-    pub fn worker(live: ProcessEngine, loaded: Arc<BTreeMap<String, serde_json::Value>>) -> Self {
+    pub fn worker(shared: RunEngine) -> Self {
         Self {
-            live,
-            loaded,
+            live: shared.live,
+            loaded: shared.loaded,
+            pool: shared.pool,
             // Not this engine's question: whether the run may republish the
             // loaded bytes is decided on the run's own engine, after every
             // worker's rows are back ([`Self::table_unchanged`]).
@@ -352,11 +385,40 @@ impl RecordingEngine {
         }
     }
 
-    /// The table this engine answers from, for a worker to share
-    /// ([`Self::worker`]).
+    /// What a worker answers from: this run's live child, the published table
+    /// this engine loaded and gated, and the pool of what the run has since
+    /// asked ([`Self::worker`]).
     #[must_use]
-    pub fn loaded_table(&self) -> Arc<BTreeMap<String, serde_json::Value>> {
-        Arc::clone(&self.loaded)
+    pub fn shared(&self) -> RunEngine {
+        RunEngine {
+            live: Arc::clone(&self.live),
+            loaded: Arc::clone(&self.loaded),
+            pool: Arc::clone(&self.pool),
+        }
+    }
+
+    /// This run's live child. Held only for the one request being made — never
+    /// across a table lookup — so a walk that folds nothing never contends and
+    /// a walk that does queues exactly where the child was already serial.
+    fn child(&self) -> std::sync::MutexGuard<'_, ProcessEngine> {
+        self.live.lock().expect("the live engine lock is never poisoned")
+    }
+
+    /// This run's pooled answer for `key`, if some engine of the run already
+    /// has one.
+    fn pooled(&self, key: &str) -> Option<serde_json::Value> {
+        self.pool.lock().expect("the answer pool is never poisoned").get(key).cloned()
+    }
+
+    /// Offer an answer to the rest of the run. First writer wins, so a key two
+    /// engines raced on keeps one answer rather than flapping between two
+    /// spellings of the same one.
+    fn share(&self, key: &str, raw: &serde_json::Value) {
+        self.pool
+            .lock()
+            .expect("the answer pool is never poisoned")
+            .entry(key.to_owned())
+            .or_insert_with(|| raw.clone());
     }
 
     /// Everything a retired worker recorded, for [`Self::absorb`].
@@ -448,7 +510,7 @@ impl RecordingEngine {
     /// not just the one child this engine happens to hold.
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
-        self.absorbed.merged(self.live.posture())
+        self.absorbed.merged(self.child().posture())
     }
 
     /// The identity of whatever answered this run's `env` row, without the
@@ -465,9 +527,10 @@ impl RecordingEngine {
         steins_sidecar::parse_env_result(env).map(|env| FoldTableIdentity::from_env(&env))
     }
 
-    /// Answer one request: the loaded table first, the live engine on a miss
-    /// — including the malformed-row miss, where `parse` refuses the stored
-    /// bytes — recording whatever answered.
+    /// Answer one request: the loaded table first, then this run's own pool,
+    /// then the live engine — a miss at either table (including the malformed
+    /// -row miss, where `parse` refuses the stored bytes) falling through to
+    /// the next. Whatever answered is recorded.
     fn ask<T>(
         &mut self,
         method: &str,
@@ -482,11 +545,18 @@ impl RecordingEngine {
             self.recorded.insert(key, raw);
             return Some(answer);
         }
-        // No row, or a malformed one `parse` refused — either way a miss,
-        // for this key alone: ask live.
-        let raw = self.live.call_raw(method, params)?;
+        if let Some(raw) = self.pooled(&key)
+            && let Some(answer) = parse(&raw)
+        {
+            self.recorded.insert(key, raw);
+            return Some(answer);
+        }
+        // No row anywhere, or a malformed one `parse` refused — either way a
+        // miss, for this key alone: ask live.
+        let raw = self.child().call_raw(method, params)?;
         let answer = parse(&raw);
         self.fresh.push(key.clone());
+        self.share(&key, &raw);
         self.recorded.insert(key, raw);
         answer
     }
@@ -516,22 +586,29 @@ impl FoldEngine for RecordingEngine {
             return FoldResult::widen("unrepresentable argument");
         };
         let key = request_key("fold", &params);
-        if let Some(raw) = self.loaded.get(&key) {
-            // A recorded widen or throw is an ANSWER (the engine said so); only
-            // a shape `parse_fold_result` would mistake for one is a miss.
-            if steins_sidecar::fold_result_is_well_formed(raw) {
-                let raw = raw.clone();
-                let answer = steins_sidecar::parse_fold_result(&raw);
-                self.recorded.insert(key, raw);
-                return answer;
-            }
+        // A recorded widen or throw is an ANSWER (the engine said so); only a
+        // shape `parse_fold_result` would mistake for one is a miss. The
+        // published table first, then this run's own pool.
+        let stored = self
+            .loaded
+            .get(&key)
+            .filter(|raw| steins_sidecar::fold_result_is_well_formed(raw))
+            .cloned()
+            .or_else(|| {
+                self.pooled(&key).filter(steins_sidecar::fold_result_is_well_formed)
+            });
+        if let Some(raw) = stored {
+            let answer = steins_sidecar::parse_fold_result(&raw);
+            self.recorded.insert(key, raw);
+            return answer;
         }
         // The same decline a dead sidecar gives; a miss is not a row.
-        let Some(raw) = self.live.call_raw("fold", params) else {
+        let Some(raw) = self.child().call_raw("fold", params) else {
             return FoldResult::widen("no sidecar");
         };
         let answer = steins_sidecar::parse_fold_result(&raw);
         self.fresh.push(key.clone());
+        self.share(&key, &raw);
         self.recorded.insert(key, raw);
         answer
     }
@@ -552,8 +629,21 @@ impl FoldEngine for RecordingEngine {
     /// replaced mid-run, but the live child underneath can, and the policy's
     /// env-memo refresh must see that exactly as it does on the direct path.
     fn restarts(&self) -> u32 {
-        self.live.restarts()
+        self.child().restarts()
     }
+}
+
+/// What a parallel walk's worker answers from (issue #490): this run's live
+/// child, the published table its own engine loaded and gated, and the pool of
+/// answers the run has since collected.
+///
+/// Handed over as one value because it is one decision — a worker answers from
+/// what the run already knows, and asks the run's own child for the rest.
+#[derive(Clone)]
+pub struct RunEngine {
+    live: Arc<std::sync::Mutex<ProcessEngine>>,
+    loaded: Arc<BTreeMap<String, serde_json::Value>>,
+    pool: Arc<std::sync::Mutex<BTreeMap<String, serde_json::Value>>>,
 }
 
 /// What one retired parallel-walk worker hands back (issue #490): its half of
@@ -608,11 +698,11 @@ impl EngineFolder<RecordingEngine> {
         self.engine.identity()
     }
 
-    /// The table this folder answers from, for a worker to share
-    /// ([`RecordingEngine::loaded_table`]).
+    /// What this folder answers from, for a worker to share
+    /// ([`RecordingEngine::shared`]).
     #[must_use]
-    pub fn loaded_table(&self) -> Arc<BTreeMap<String, serde_json::Value>> {
-        self.engine.loaded_table()
+    pub fn shared_engine(&self) -> RunEngine {
+        self.engine.shared()
     }
 
     /// Retire this folder and hand back what its engine recorded

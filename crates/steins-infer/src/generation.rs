@@ -1005,13 +1005,10 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // to print (`ProcessEngine::new(false)` is the enabled transport with the
     // once-per-run notice latches already armed), because a fleet announcing
     // the sound subset once per worker would say the same thing N times.
-    let loaded_table = folder.loaded_table();
+    let shared = folder.shared_engine();
     let worker_target = p.layout.php_target().cloned();
-    let php = p.php;
     let hire = move || {
-        let live = ProcessEngine::new(!php);
-        let mut worker =
-            EngineFolder::with_engine(RecordingEngine::worker(live, Arc::clone(&loaded_table)));
+        let mut worker = EngineFolder::with_engine(RecordingEngine::worker(shared.clone()));
         worker.set_php_target(worker_target.clone());
         worker
     };

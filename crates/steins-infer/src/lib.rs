@@ -154,8 +154,8 @@ pub use fold::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_persist::{
-    FOLD_IDENTITY_SECTION, FOLD_PACKAGE, FOLD_ROWS_SECTION, FoldTableArtifact, FoldTableIdentity,
-    RecordingEngine, RecordingFolder, fold_package,
+    FOLD_IDENTITY_SECTION, FOLD_PACKAGE, FOLD_ROWS_SECTION, FoldHarvest, FoldTableArtifact,
+    FoldTableIdentity, RecordingEngine, RecordingFolder, RunEngine, fold_package,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_process::{ProcessEngine, SidecarFolder};
