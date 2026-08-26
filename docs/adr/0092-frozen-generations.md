@@ -88,6 +88,35 @@ behind a single boundary, sealed, and re-validated immediately before the
 candidate replaces the published generation, so a concurrent edit rejects
 the candidate rather than tearing it.
 
+*2026-08-26 amendment (issue #519).* Publication needs **atomicity**, which
+`rename(2)` gives, and not **durability**, which a cache cannot spend
+anything on: a generation lost to a power cut costs one cold rebuild, the
+same thing a schema bump costs by design. The store therefore takes exactly
+one durability barrier per artifact it *writes* — section bytes are the only
+thing in a generation whose loss could be undetectable, because a payload of
+stale blocks might decode to a value rather than to a miss. The manifest,
+`CURRENT`, the in-progress marker and the directory entries take none: every
+one of them is strictly parsed and names its own generation, so a torn or
+missing one is a `Miss` and a rebuild, which is the standing invariant
+working rather than a hole in it. Measured on nikic/PHP-Parser, that cut a
+warm edit's publish phase by roughly half on its own; the barriers, not the
+bytes, were the phase.
+
+**Sharing an artifact between generations.** An artifact whose package did
+not move is byte-identical to the published generation's, so the new
+generation *shares* it — a reflink where the filesystem offers one (macOS
+`clonefile`, Linux `FICLONE`), a hard link where it does not, a copy as the
+floor — instead of rewriting it. In the shape §3 is built for that is every
+package but the edited one, vendor included. Two properties keep the alias
+safe, and the first is structural: the only writer of an artifact opens with
+`O_CREAT | O_EXCL`, so no write can truncate a name that already exists; and
+unlinking is therefore all that ever happens to shared bytes, so removing one
+generation leaves the other whole. This is what fixes the *unit* of a
+republish, and it is why the run-dependent walk blocks of §5 moved out of the
+package artifacts into one generation-level sidecar: while they sat inside a
+container, no artifact was ever equal to its predecessor and nothing could be
+shared.
+
 **Per-package artifacts.** Each package persists: its symbol shard, its
 declared contracts, its per-declaration summaries (canonical entry state
 per ADR-0048 §3, own-effect row, own-throw row, per-file dam facts), its

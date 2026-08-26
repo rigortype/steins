@@ -116,15 +116,15 @@ use std::time::Instant;
 
 use steins_db::persist::{
     PayloadIndex, TraceIndex, build_sections, contract_payload, contracts_section, facts_section,
-    payload_section_bytes, read_shard, symbols_section, trace_payload, trace_section,
+    payload_section_bytes, read_shard, trace_payload,
 };
 use steins_db::{
     EffectsPolicy, PackagePartition, PackageShard, PluginFacts, ProjectLayout, merge_shards,
 };
 use steins_gen::{
     ArtifactBuilder, DriftKind, EnginePosture, FieldHasher, Fingerprint, Generation, GenerationId,
-    GenerationInputs, Miss, PackageName, SectionName, SourceDrift, SourceError, SourceInventory,
-    Store,
+    GenerationInputs, Miss, PackageName, SectionName, ShareKind, SourceDrift, SourceError,
+    SourceInventory, Store,
 };
 pub use steins_gen::PackageKind;
 use steins_syntax::SourceTree;
@@ -305,6 +305,11 @@ pub struct GenerationReport {
     pub fold: FoldReport,
     pub walk: WalkReport,
     pub timings: PhaseTimings,
+    /// Artifacts this publish **shared** with the published generation rather
+    /// than rewriting (issue #519) — reflinked, hard-linked or, on a
+    /// filesystem with neither, copied. Zero on a cold build, on a run that
+    /// republished nothing, and for every package the edit actually moved.
+    pub shared_artifacts: usize,
     /// Degradations and publication outcomes, human-readable, in order.
     pub notes: Vec<String>,
 }
@@ -670,11 +675,16 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // The open artifacts, kept for the run: a deferred tree load reads one
     // whenever a walk reaches its file, so the reader outlives this loop.
     let mut artifacts: Vec<Option<Arc<OpenArtifact>>> = Vec::with_capacity(plans.len());
-    // Per package, the walk blocks the published generation carries — the
-    // replay candidates. Whether any of them may actually be replayed is not
-    // knowable here: it needs the run's whole-universe verdicts, which only
-    // exist once the analysis has computed them.
-    let mut published_summaries: Vec<Option<StoredSummaries>> = Vec::with_capacity(plans.len());
+    // The walk blocks the published generation carries — the replay
+    // candidates, keyed by path over the whole universe (issue #519 moved them
+    // out of the per-package artifacts, which had to become a function of the
+    // sources alone to be shareable). Whether any of them may actually be
+    // replayed is not knowable here: it needs the run's whole-universe
+    // verdicts, which only exist once the analysis has computed them.
+    let published_summaries: Option<StoredSummaries> = current
+        .as_ref()
+        .and_then(|generation| generation.summaries().ok())
+        .and_then(|mut reader| read_summaries(&mut reader).ok());
     // The name delta's old side, per package, in load order. `None` means one
     // of two things, and the delta loop below can tell them apart from the
     // package's state: either the old shard could not be read — which makes
@@ -684,8 +694,8 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // whose sources did not move and which therefore contributes no delta.
     let mut old_shards: Vec<Option<PackageShard>> = Vec::with_capacity(plans.len());
     for plan in &plans {
-        let mut published = read_published(current.as_ref(), plan, &diag, &contents);
-        published_summaries.push(published.summaries.take());
+        let mut published =
+            read_published(current.as_ref(), published_summaries.as_ref(), plan, &diag, &contents);
         let artifact = published.artifact.take();
         match published.fresh {
             Ok(loaded) => {
@@ -769,13 +779,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let mut facts: Vec<FileFacts> =
         fact_slots.into_iter().map(|f| f.expect("every slot is filled above")).collect();
     let replay_candidates: usize =
-        published_summaries.iter().flatten().map(|s| s.rows().count()).sum();
+        published_summaries.as_ref().map_or(0, |s| s.rows().count());
 
     // Which files moved, and which persisted block each of the others could
     // replay. Computed here rather than beside the walk plan because the name
     // delta is a question about the *files* that changed (issue #510), not
     // about the packages holding them.
-    let blocks = block_index(&plans, &diag, &published_summaries, &contents);
+    let blocks = block_index(&plans, &diag, published_summaries.as_ref(), &contents);
     let changed: HashSet<usize> = (0..diag.len()).filter(|slot| blocks[*slot].is_none()).collect();
 
     // The name delta (issue #489 slice B, tightened to file granularity by
@@ -943,17 +953,16 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         if !replay_possible {
             return Vec::new();
         }
+        // The whole-universe leg: a moved verdict refuses every row of the
+        // sidecar it stamped, so every file walks. One sidecar, one licence
+        // check (issue #519).
+        let licensed = published_summaries
+            .as_ref()
+            .is_some_and(|s| s.licensed_by(&stamp, &digest));
         (0..diag.len())
-            .map(|slot| match &blocks[slot] {
-                // The whole-universe leg: a moved verdict refuses every row of
-                // the section it stamped, so the file walks.
-                Some((package, block))
-                    if !affected.contains(&slot)
-                        && published_summaries[*package]
-                            .as_ref()
-                            .is_some_and(|s| s.licensed_by(&stamp, &digest)) =>
-                {
-                    FilePlan::Replay((*block).clone())
+            .map(|slot| match blocks[slot] {
+                Some(block) if licensed && !affected.contains(&slot) => {
+                    FilePlan::Replay(block.clone())
                 }
                 _ => FilePlan::Walk,
             })
@@ -1014,6 +1023,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // Identity, honestly filled (see the module docs for in/out reasoning).
     let fold_table = folder.published_table();
     let fold_fresh = folder.fresh_keys().len();
+    let fold_unchanged = folder.table_unchanged();
     let inputs = GenerationInputs {
         packages: plans.iter().map(|plan| (plan.name.clone(), plan.fingerprint)).collect(),
         ..identity_inputs(p, composer_lock, engine_posture)
@@ -1027,6 +1037,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let any_degraded = states.iter().any(|s| s.degraded) || fold_degraded;
     let reuse =
         current.as_ref().is_some_and(|g| g.id() == &id) && total_parsed == 0 && !any_degraded;
+    let mut shared_artifacts = 0usize;
     let generation_hex = if reuse {
         notes.push("generation already current; nothing republished".to_owned());
         Some(id.to_hex())
@@ -1039,7 +1050,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             &states,
             &shards,
             current.as_ref(),
-            fold_table.as_ref(),
+            Fold { table: fold_table.as_ref(), unchanged: fold_unchanged },
             &Summaries {
                 stamp,
                 universe,
@@ -1055,7 +1066,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 diag: &diag,
             },
         ) {
-            Ok(hex) => Some(hex),
+            Ok((hex, shared)) => {
+                shared_artifacts = shared.total();
+                notes.extend(shared.note());
+                Some(hex)
+            }
             Err(detail) => {
                 notes.push(format!("publish failed ({detail}); this run's findings are unaffected"));
                 None
@@ -1121,6 +1136,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                         .max(0.0),
                 persist_ms,
             },
+            shared_artifacts,
             notes,
         },
     })
@@ -1143,14 +1159,14 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
 fn block_index<'a>(
     plans: &[Plan],
     diag: &[String],
-    summaries: &'a [Option<StoredSummaries>],
+    summaries: Option<&'a StoredSummaries>,
     contents: &[Fingerprint],
-) -> Vec<Option<(usize, &'a FileWalk)>> {
-    let mut out: Vec<Option<(usize, &FileWalk)>> = vec![None; diag.len()];
-    for (package, (plan, summaries)) in plans.iter().zip(summaries).enumerate() {
-        let Some(summaries) = summaries else { continue };
+) -> Vec<Option<&'a FileWalk>> {
+    let mut out: Vec<Option<&FileWalk>> = vec![None; diag.len()];
+    let Some(summaries) = summaries else { return out };
+    for plan in plans {
         for (slot, walk) in unmoved_rows(plan, diag, contents, summaries) {
-            out[slot] = Some((package, walk));
+            out[slot] = Some(walk);
         }
     }
     out
@@ -1186,19 +1202,14 @@ fn unmoved_rows<'a>(
 }
 
 /// Everything the published generation can say about one package: the old
-/// shard, the walk blocks it carries, the artifact kept open for deferred tree
-/// loads, and the load attempt proper.
+/// shard, the artifact kept open for deferred tree loads, and the load attempt
+/// proper.
 struct Published {
     /// This package's OLD shard — the delta's old side, and the verbatim
     /// shard when the load reuses it. `None` when the artifact could not give
     /// it, which makes the name delta *unknowable* and walks the whole run
     /// (see [`generation_check`]).
     old_shard: Option<PackageShard>,
-    /// The package's persisted walk blocks, read whatever the source
-    /// fingerprint said: a changed package's *unchanged* files may still
-    /// replay — and, since issue #512, still load — because each row carries
-    /// its own file's content hash.
-    summaries: Option<StoredSummaries>,
     /// The open artifact, kept alive for this run's deferred tree loads and
     /// for the republish path's per-file byte copies. `Some` whenever the
     /// artifact opened at all, even where the load was refused.
@@ -1210,7 +1221,7 @@ impl Published {
     /// The shape for a package the published generation could not tell us
     /// anything about at all.
     fn refused(refusal: LoadRefusal, old_shard: Option<PackageShard>) -> Self {
-        Self { old_shard, summaries: None, artifact: None, fresh: Err(refusal) }
+        Self { old_shard, artifact: None, fresh: Err(refusal) }
     }
 }
 
@@ -1240,6 +1251,7 @@ fn old_changed_slots(
 /// be seen cannot be reasoned about.
 fn read_published(
     generation: Option<&Generation>,
+    summaries: Option<&StoredSummaries>,
     plan: &Plan,
     diag: &[String],
     contents: &[Fingerprint],
@@ -1262,13 +1274,14 @@ fn read_published(
     // The old shard, always: it is the delta's old side whether or not the
     // sources moved, and it is the verbatim shard when they did not.
     let old_shard = read_shard(&mut reader).ok();
-    // The walk blocks are never a load refusal: a package without them simply
-    // walks every file. They are read *before* anything else because their
+    // The walk blocks are never a load refusal: a package the sidecar has no
+    // rows for simply walks every file. They are consulted here because their
     // rows are also the per-file provenance gate (issue #512) — which files of
-    // this package the load may take.
-    let summaries = read_summaries(&mut reader).ok();
+    // this package the load may take. They live in the generation's `summaries`
+    // sidecar rather than in the artifact (issue #519), because they are a
+    // function of the run and the artifact must stay a function of the sources
+    // to be shareable.
     let unmoved: HashSet<usize> = summaries
-        .as_ref()
         .map(|s| unmoved_rows(plan, diag, contents, s).into_iter().map(|(slot, _)| slot).collect())
         .unwrap_or_default();
     let (analyzer, stored) = match read_sources(&mut reader) {
@@ -1284,7 +1297,7 @@ fn read_published(
     let open = Arc::new(OpenArtifact { reader: Mutex::new(reader), trace, contracts, facts });
     let fresh =
         load_trees(&open, plan, diag, &unmoved, old_shard.is_some(), &analyzer, stored);
-    Published { old_shard, summaries, artifact: Some(open), fresh }
+    Published { old_shard, artifact: Some(open), fresh }
 }
 
 /// The load proper: the provenance gate, then the per-file **facts** — never a
@@ -1412,6 +1425,13 @@ fn build_shard(plan: &Plan, facts: &[Option<FileFacts>]) -> PackageShard {
 
 /// Assemble and publish the candidate. Every failure is one string for the
 /// caller's note — publication is a cache write, never the run's verdict.
+///
+/// Returns the published hex and how many packages were **shared** rather than
+/// written (issue #519): an artifact whose bytes this run would have
+/// reproduced exactly is taken from the published generation by reflink or
+/// hard link, which costs a directory entry instead of the package's bytes and
+/// its durability barrier. In the shape ADR-0092 §3 is built for that is every
+/// package but the edited one.
 #[allow(clippy::too_many_arguments)]
 fn publish(
     store: &Store,
@@ -1421,46 +1441,123 @@ fn publish(
     states: &[PkgState],
     shards: &[PackageShard],
     current: Option<&Generation>,
-    fold_table: Option<&FoldTableArtifact>,
+    fold: Fold<'_>,
     summaries: &Summaries<'_>,
     payloads: &Payloads<'_>,
-) -> Result<String, String> {
+) -> Result<(String, Shared), String> {
     let mut candidate = store.begin(id, inventories).map_err(|e| format!("begin: {e}"))?;
+    let mut shared = Shared::default();
     for (package, ((plan, state), shard)) in plans.iter().zip(states).zip(shards).enumerate() {
-        // A package that parsed nothing, kept its slots and rebuilt none of its
-        // per-file facts republishes its exact bytes; anything else — a mixed
-        // package included — reassembles the sections per file.
+        // A package that parsed nothing, kept its slots, rebuilt none of its
+        // per-file facts and whose whole source fingerprint still matches would
+        // republish the published artifact's exact bytes — so it takes them
+        // instead of rewriting them. Anything else — a mixed package included —
+        // reassembles the sections per file.
         //
         // The third conjunct is issue #516's: an unmoved file whose own rows
-        // this run recomputed has *different* facts, and copying the artifact
-        // wholesale would republish the rows of an older universe under this
-        // generation's identity, where the next run would take them as its own.
-        let whole = state.parsed == 0
+        // this run recomputed has *different* facts, and republishing the
+        // artifact wholesale would carry the rows of an older universe under
+        // this generation's identity, where the next run would take them as its
+        // own. The fourth is what makes the `sources` section equal too, so
+        // "the same bytes" covers every section rather than four of five.
+        let unmoved = state.parsed == 0
             && state.slots_stable
+            && state.sources_match
             && plan.slots.iter().all(|&slot| payloads.copyable[slot]);
-        let copied = whole
-            .then(|| current.and_then(|generation| copy_artifact(generation, plan)))
-            .flatten();
-        let mut builder = match copied {
-            Some(builder) => builder,
-            None => build_artifact(plan, shard, package, payloads),
-        };
-        // The `summaries` section is always this run's, even where the other
-        // four sections were byte-copied: the copied ones are functions of the
-        // sources alone, this one is a function of the whole run identity, and
-        // republishing a stale stamp would only refuse itself on the next run.
-        summaries.write(&mut builder, plan);
-        candidate
-            .write_artifact(&plan.name, &builder)
-            .map_err(|e| format!("write {}: {e}", plan.name))?;
+        let adopted = unmoved
+            .then_some(current)
+            .flatten()
+            .and_then(|generation| candidate.adopt_artifact(&plan.name, generation).ok());
+        match adopted {
+            Some(kind) => shared.count(kind),
+            None => {
+                let builder = build_artifact(plan, shard, package, payloads);
+                candidate
+                    .write_artifact(&plan.name, &builder)
+                    .map_err(|e| format!("write {}: {e}", plan.name))?;
+            }
+        }
     }
-    if let Some(table) = fold_table {
-        candidate
-            .write_artifact(&fold_package(), &table.to_builder())
-            .map_err(|e| format!("write {}: {e}", fold_package()))?;
+    // The walk blocks are always this run's, even where every artifact was
+    // shared: an artifact is a function of the sources alone, the sidecar is a
+    // function of the whole run identity, and republishing a stale stamp would
+    // only refuse itself on the next run. That split is exactly what leaves an
+    // unmoved package's artifact shareable at all — and one sidecar for the
+    // universe is one write and one barrier however many packages there are.
+    let mut sidecar = ArtifactBuilder::new();
+    summaries.write(&mut sidecar, plans);
+    candidate.write_summaries(&sidecar).map_err(|e| format!("write summaries: {e}"))?;
+    if let Some(table) = fold.table {
+        // The fold table gets the same treatment on the same terms: the engine
+        // says whether the table it would publish is the one it loaded, value
+        // for value, and only then are the published bytes taken.
+        let adopted = fold
+            .unchanged
+            .then_some(current)
+            .flatten()
+            .and_then(|generation| candidate.adopt_artifact(&fold_package(), generation).ok());
+        match adopted {
+            Some(kind) => shared.count(kind),
+            None => candidate
+                .write_artifact(&fold_package(), &table.to_builder())
+                .map_err(|e| format!("write {}: {e}", fold_package()))?,
+        }
     }
     let generation = candidate.publish().map_err(|e| e.to_string())?;
-    Ok(generation.id().to_hex())
+    Ok((generation.id().to_hex(), shared))
+}
+
+/// The fold table on its way to disk: what this run would publish, and whether
+/// that is the published generation's table unchanged.
+#[derive(Clone, Copy)]
+struct Fold<'a> {
+    table: Option<&'a FoldTableArtifact>,
+    unchanged: bool,
+}
+
+/// How many artifacts a publish shared instead of writing, by mechanism.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct Shared {
+    reflinked: usize,
+    hard_linked: usize,
+    copied: usize,
+}
+
+impl Shared {
+    fn count(&mut self, kind: ShareKind) {
+        match kind {
+            ShareKind::Reflink => self.reflinked += 1,
+            ShareKind::HardLink => self.hard_linked += 1,
+            ShareKind::Copy => self.copied += 1,
+        }
+    }
+
+    fn total(self) -> usize {
+        self.reflinked + self.hard_linked + self.copied
+    }
+
+    /// The run note, or `None` when nothing was shared. The mechanism is worth
+    /// saying: a store on a filesystem with no clone and no hard link is
+    /// silently paying the old price, and only this line would show it.
+    fn note(self) -> Option<String> {
+        (self.total() > 0).then(|| {
+            let mut how: Vec<String> = Vec::new();
+            for (n, kind) in [
+                (self.reflinked, ShareKind::Reflink),
+                (self.hard_linked, ShareKind::HardLink),
+                (self.copied, ShareKind::Copy),
+            ] {
+                if n > 0 {
+                    how.push(format!("{n} {}", kind.verb()));
+                }
+            }
+            format!(
+                "{} artifact(s) shared with the published generation rather than rewritten ({})",
+                self.total(),
+                how.join(", ")
+            )
+        })
+    }
 }
 
 /// What the republish path needs per file: the tree handle, the facts, whether
@@ -1548,14 +1645,14 @@ struct Summaries<'a> {
 }
 
 impl Summaries<'_> {
-    /// Add one package's rows to its artifact. A run whose ledger is short —
-    /// which cannot happen, since `check_units` records every unit — writes
-    /// the rows it has; the reader keys by path and a missing row simply
-    /// cannot be replayed.
-    fn write(&self, builder: &mut ArtifactBuilder, plan: &Plan) {
-        let rows: Vec<SummaryRow<'_>> = plan
-            .slots
+    /// Fill the generation's sidecar: every package's rows, in plan then slot
+    /// order. A run whose ledger is short — which cannot happen, since
+    /// `check_units` records every unit — writes the rows it has; the reader
+    /// keys by path and a missing row simply cannot be replayed.
+    fn write(&self, builder: &mut ArtifactBuilder, plans: &[Plan]) {
+        let rows: Vec<SummaryRow<'_>> = plans
             .iter()
+            .flat_map(|plan| plan.slots.iter())
             .filter_map(|&slot| {
                 Some(SummaryRow {
                     path: &self.diag[slot],
@@ -1567,26 +1664,6 @@ impl Summaries<'_> {
             .collect();
         write_summaries(builder, &self.stamp, &self.universe, &rows);
     }
-}
-
-/// Copy an untouched package's artifact bytes section-for-section into a new
-/// builder. `None` on any read failure — the caller rebuilds per file.
-///
-/// The four source-derived sections are copied; the provenance record is
-/// written fresh from this run's own fingerprint rather than copied, so that a
-/// package that loaded every file one row at a time (issue #512) cannot
-/// republish a fingerprint describing a different capture. For the ordinary
-/// caller — a package whose fingerprint matched whole — the fresh record is
-/// byte-identical to the copied one.
-fn copy_artifact(generation: &Generation, plan: &Plan) -> Option<ArtifactBuilder> {
-    let mut reader = generation.artifact(&plan.name).ok()?;
-    let mut builder = ArtifactBuilder::new();
-    for section in [symbols_section(), contracts_section(), trace_section(), facts_section()] {
-        let bytes = reader.section(&section).ok()?;
-        builder.section(section, bytes).ok()?;
-    }
-    builder.section(sources_section(), sources_payload(&plan.fingerprint)).ok()?;
-    Some(builder)
 }
 
 /// The `[effects.attribution]` config-hygiene notices, mirroring

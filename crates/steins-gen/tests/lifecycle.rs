@@ -1,5 +1,7 @@
-//! Candidate-then-publish: atomic publication, torn-write recovery, and the
-//! seal rejecting a candidate whose sources moved.
+//! Candidate-then-publish: atomic publication, torn-write recovery, the seal
+//! rejecting a candidate whose sources moved, and the artifact sharing of
+//! issue #519 — what an adopted artifact is, and what happens to the other
+//! generation when one of them goes.
 
 use std::path::{Path, PathBuf};
 
@@ -304,6 +306,153 @@ fn an_unlisted_package_is_a_miss() {
         current.artifact(&pkg("vendor/never")),
         Err(Miss::AbsentPackage(_))
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Artifact sharing (issue #519)
+// ---------------------------------------------------------------------------
+
+/// The generation-level sidecar: written independently of the package roster,
+/// read back whole, and absent (a miss) for a generation that never wrote one.
+#[test]
+fn the_summaries_sidecar_round_trips_and_is_optional() {
+    let project = TempProject::new("sidecar");
+    let store = Store::open(&project.dir).unwrap();
+    let sources = sample_sources(&project);
+    let id = id_for(&sources, "v1");
+    let mut candidate = store.begin(id, vec![sources]).unwrap();
+    candidate.write_artifact(&pkg("__first_party__"), &artifact(b"the payload")).unwrap();
+    candidate.write_summaries(&artifact(b"the walk blocks")).unwrap();
+    let published = candidate.publish().unwrap();
+    assert_eq!(
+        published.summaries().unwrap().section(&sec("symbols")).unwrap(),
+        b"the walk blocks"
+    );
+
+    // A generation with no sidecar is an ordinary miss, not a failure.
+    let other = TempProject::new("sidecar-none");
+    let id = publish_one(&other, "v1");
+    let store = Store::open(&other.dir).unwrap();
+    assert!(store.generation(&id).unwrap().summaries().is_err());
+}
+
+/// Adoption is the whole point: the second generation's artifact is the first
+/// generation's bytes, and the store says by which mechanism.
+#[test]
+fn an_adopted_artifact_is_the_published_bytes() {
+    let project = TempProject::new("adopt");
+    let first = publish_one(&project, "v1");
+    let store = Store::open(&project.dir).unwrap();
+    let published = store.generation(&first).unwrap();
+
+    // A second generation over the same sources, adopting rather than writing.
+    project.write("src/c.php", "<?php function c() {}\n");
+    let sources =
+        SourceInventory::capture(&project.dir, ["src/a.php", "src/b.php", "src/c.php"]).unwrap();
+    let second = id_for(&sources, "v1");
+    let mut candidate = store.begin(second, vec![sources]).unwrap();
+    candidate.adopt_artifact(&pkg("__first_party__"), &published).unwrap();
+    candidate.publish().unwrap();
+
+    let store = Store::open(&project.dir).unwrap();
+    let mut reader = store.generation(&second).unwrap().artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");
+}
+
+/// Adopting a package the source generation never had fails, and leaves the
+/// candidate free to write that package itself instead.
+#[test]
+fn adopting_an_absent_package_leaves_the_candidate_writable() {
+    let project = TempProject::new("adopt-absent");
+    let first = publish_one(&project, "v1");
+    let store = Store::open(&project.dir).unwrap();
+    let published = store.generation(&first).unwrap();
+    let sources = sample_sources(&project);
+    let mut candidate = store.begin(id_for(&sources, "v2"), vec![sources]).unwrap();
+    let err = candidate.adopt_artifact(&pkg("vendor/never"), &published).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+    // The failed adoption claimed nothing: the ordinary write still works.
+    candidate.write_artifact(&pkg("vendor/never"), &artifact(b"written instead")).unwrap();
+    let generation = candidate.publish().unwrap();
+    let mut reader = generation.artifact(&pkg("vendor/never")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"written instead");
+}
+
+/// **The aliasing invariant.** Two generations may name the same bytes, so
+/// removing either one must leave the other whole — the property a hard link
+/// makes non-obvious and this test pins.
+#[test]
+fn removing_one_generation_leaves_a_shared_artifact_readable() {
+    let project = TempProject::new("share-unlink");
+    let first = publish_one(&project, "v1");
+    let store = Store::open(&project.dir).unwrap();
+    let published = store.generation(&first).unwrap();
+    project.write("src/c.php", "<?php function c() {}\n");
+    let sources =
+        SourceInventory::capture(&project.dir, ["src/a.php", "src/b.php", "src/c.php"]).unwrap();
+    let second = id_for(&sources, "v1");
+    let mut candidate = store.begin(second, vec![sources]).unwrap();
+    candidate.adopt_artifact(&pkg("__first_party__"), &published).unwrap();
+    candidate.publish().unwrap();
+    drop(published);
+
+    // The older generation goes — eviction, a manual tidy-up, anything.
+    std::fs::remove_dir_all(project.gen_root().join(first.to_hex())).unwrap();
+    let store = Store::open(&project.dir).unwrap();
+    let mut reader = store.current().unwrap().unwrap().artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");
+}
+
+/// **The mutation invariant.** The only writer of an artifact refuses a name
+/// that already exists, so no later run can truncate bytes another generation
+/// is still naming.
+#[test]
+fn a_write_never_truncates_an_existing_artifact() {
+    let project = TempProject::new("no-truncate");
+    let id = publish_one(&project, "v1");
+    let path = project.gen_root().join(id.to_hex()).join("__first_party__.pkg");
+    let err = artifact(b"an overwrite").write_to(&path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+    let store = Store::open(&project.dir).unwrap();
+    let mut reader = store.current().unwrap().unwrap().artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(reader.section(&sec("symbols")).unwrap(), b"the payload");
+}
+
+/// **Crash safety with sharing.** A candidate that adopted a published
+/// artifact and then died mid-build is swept like any other, and the
+/// generation it borrowed from is untouched and still readable — the adopted
+/// name was a second directory entry, and losing it loses nothing.
+#[test]
+fn a_torn_candidate_that_adopted_leaves_its_source_intact() {
+    let project = TempProject::new("torn-adopt");
+    let published = publish_one(&project, "v1");
+    let store = Store::open(&project.dir).unwrap();
+    let source = store.generation(&published).unwrap();
+    project.write("src/c.php", "<?php function c() {}\n");
+    let sources =
+        SourceInventory::capture(&project.dir, ["src/a.php", "src/b.php", "src/c.php"]).unwrap();
+    let mut candidate = store.begin(id_for(&sources, "v2"), vec![sources]).unwrap();
+    candidate.adopt_artifact(&pkg("__first_party__"), &source).unwrap();
+    candidate.write_summaries(&artifact(b"half-written blocks")).unwrap();
+    // The crash: the process dies before publish. Forgetting the candidate
+    // keeps its Drop from tidying up, which is exactly a torn state on disk.
+    std::mem::forget(candidate);
+    drop(source);
+    assert!(
+        project.gen_entries().iter().any(|n| n.starts_with(".candidate-")),
+        "the torn candidate is on disk before recovery"
+    );
+
+    let store = Store::open(&project.dir).unwrap();
+    assert_eq!(project.gen_entries(), published_entries(&published));
+    let current = store.current().unwrap().unwrap();
+    assert_eq!(*current.id(), published);
+    let mut reader = current.artifact(&pkg("__first_party__")).unwrap();
+    assert_eq!(
+        reader.section(&sec("symbols")).unwrap(),
+        b"the payload",
+        "sweeping the candidate unlinked its name, never the bytes"
+    );
 }
 
 /// The store's budget flows down to artifact reads.

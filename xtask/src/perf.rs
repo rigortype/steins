@@ -1027,6 +1027,9 @@ struct EditRow {
     trees_ms: f64,
     analyze_ms: f64,
     persist_ms: f64,
+    /// Artifacts the publish shared with the previous generation rather than
+    /// rewriting (issue #519) — the multi-package half of the persist story.
+    shared: usize,
     divergences: usize,
     /// `None` when warm equalled the fresh cold run; the mismatch otherwise.
     mismatch: Option<String>,
@@ -1248,6 +1251,7 @@ fn grade(
         trees_ms: t.trees_ms,
         analyze_ms: t.analyze_ms,
         persist_ms: t.persist_ms,
+        shared: warm.2.shared_artifacts,
         divergences: verified.2.walk.divergence_count,
         mismatch,
     })
@@ -1294,7 +1298,7 @@ fn print_edits(rows: &[EditRow]) -> bool {
     let mut green = true;
     for row in rows {
         println!(
-            "      {:<28} {:<26} {} walked / {} replayed, {} parsed, {} tree(s) decoded — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1} = {:.1} ms (verifier graded {})",
+            "      {:<28} {:<26} {} walked / {} replayed, {} parsed, {} tree(s) decoded — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1}{} = {:.1} ms (verifier graded {})",
             row.shape,
             row.file,
             row.walked,
@@ -1305,6 +1309,11 @@ fn print_edits(rows: &[EditRow]) -> bool {
             row.trees_ms,
             row.analyze_ms,
             row.persist_ms,
+            if row.shared == 0 {
+                String::new()
+            } else {
+                format!(" ({} artifact(s) shared)", row.shared)
+            },
             row.warm_ms,
             row.would_skip,
         );
