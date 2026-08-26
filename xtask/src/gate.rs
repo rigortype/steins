@@ -37,7 +37,10 @@
 //!
 //! The store never lands in a corpus checkout (`corpus/` is a cached directory
 //! in CI, and a `.steins/` inside it would make the next run's "cold" pass a
-//! lie), and the corpus tree is only ever read.
+//! lie), and the corpus tree is only ever read. The scratch stores are wiped
+//! before the first pass and again after the last — the first because "cold"
+//! has to mean cold, the second because 131 MB over the pinned corpus is 131 MB
+//! CI would otherwise archive with `target/`.
 //!
 //! What this gate deliberately does NOT re-assert is `generation_check` ≡
 //! `check_project`: `cargo xtask perf --warm` already pins those two against
@@ -1791,6 +1794,14 @@ pub fn run() -> Result<bool, String> {
     let total_diags: usize = reports.iter().map(|r| r.diagnostics.len()).sum::<usize>()
         + local_reports.iter().map(|r| r.diagnostics.len()).sum::<usize>();
     let parity_ok = reports.iter().chain(local_reports.iter()).all(|r| r.parity.is_green());
+
+    // Take the stores back off disk. The next run wipes them anyway, so nothing
+    // depends on this — but 131 MB over the pinned corpus is 131 MB CI would
+    // otherwise hand to `Swatinem/rust-cache`, which archives `target/`, on
+    // every job that shares this one's cache key. Best-effort: a failure here
+    // is disk, not a verdict.
+    let _ = std::fs::remove_dir_all(&stores);
+
     Ok(total_diags == 0
         && parity_ok
         && regressions.is_empty()
