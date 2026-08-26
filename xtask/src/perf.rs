@@ -1094,7 +1094,17 @@ fn copy_tree(from: &Path, to: &Path) -> std::io::Result<()> {
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
+        let kind = entry.file_type()?;
+        // A directory symlink is not copied, because it is not walked either
+        // (`steins_db::walk`, issue #524): the copy must hold the same universe
+        // the measurement does. It also cannot be copied — `fs::copy` follows
+        // the link and refuses a directory, which is how `--edits` failed
+        // outright on a tree holding one. A link to a *file* is copied as its
+        // contents, which is what analyzing it amounts to.
+        if kind.is_symlink() && entry.path().is_dir() {
+            continue;
+        }
+        if kind.is_dir() {
             // `.git` is large and irrelevant to the analysis.
             if entry.file_name() == ".git" {
                 continue;
