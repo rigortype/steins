@@ -35,7 +35,13 @@ adopted behind this contract. It is not the contract owner.
   hook runs arbitrary code, so `PropertyDecl.hooked` marks it and it binds **no**
   value fact anywhere — the structural facts stay valid), and return-bound
   keywords (`self`/`static`/`parent`).
-- **Analysis scopes** (`Scope`) carrying the [trace IR](trace-ir.md).
+- **Analysis scopes** (`Scope`) carrying the [trace IR](trace-ir.md) — one per
+  function, concrete method, closure/arrow body, and concrete property-hook body
+  (`ScopeOwner::PropertyHook`), plus the top-level script. A hook body is a
+  function body: it runs in its declaring class's scope with `$this` bound, and
+  its parameters and return type ride on the `Scope` (as a closure's do) because
+  no declaration carries them — a short-form `set` gets the engine's implicit
+  `$value`, typed as the property, and a `get` returns the property's own type.
 - **Reference sites** (`NameRef`) tagged with how the name was written —
   fully-qualified, qualified, unqualified, or `namespace\`-relative (the
   ADR-0049 A8 `RefKind::Relative`, lowered as a distinct kind with its

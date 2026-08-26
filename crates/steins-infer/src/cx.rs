@@ -1428,6 +1428,13 @@ impl<'a> Cx<'a> {
                 })?;
                 Some(&s.params)
             }
+            // A property hook likewise carries its own (issue #544) — including the
+            // implicit `$value` of a short-form `set`, which no declaration spells.
+            // The owner triple is unique within a file, so it addresses the scope.
+            ScopeOwner::PropertyHook { .. } => {
+                let s = self.tree().scopes().iter().find(|s| s.owner == scope.owner)?;
+                Some(&s.params)
+            }
         }
     }
 
@@ -1440,8 +1447,11 @@ impl<'a> Cx<'a> {
         match &scope.owner {
             // Closures: `None` even though the scope may carry an adopted docblock
             // (issue #128 lit up `@return` only, via `scope_return_phpdoc`) —
-            // `@param`/`@throws` on closures stays dark.
-            ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => None,
+            // `@param`/`@throws` on closures stays dark. A property hook adopts no
+            // docblock at all yet (issue #544), so it is dark for the same reason.
+            ScopeOwner::TopLevel
+            | ScopeOwner::Closure { .. }
+            | ScopeOwner::PropertyHook { .. } => None,
             ScopeOwner::Function(name) => {
                 let f = self.tree().functions().iter().find(|f| f.name.eq_ignore_ascii_case(name))?;
                 self.envelopes_of(f.docblock.as_deref(), self.cur, f.span.start)
@@ -1463,6 +1473,17 @@ impl<'a> Cx<'a> {
     pub(crate) fn scope_template_shadow(&self, scope: &Scope) -> TemplateShadow {
         match &scope.owner {
             ScopeOwner::TopLevel | ScopeOwner::Closure { .. } => TemplateShadow::default(),
+            // A hook body sits inside the class declaration exactly as a method body
+            // does, so the class-level `@template` names shadow there too (issue #5);
+            // the hook itself adopts no docblock, so there is no second stage.
+            ScopeOwner::PropertyHook { class, .. } => self
+                .tree()
+                .classes()
+                .iter()
+                .find(|c| c.fqn.eq_ignore_ascii_case(class))
+                .map_or_else(TemplateShadow::default, |cd| {
+                    template_names_of(cd.docblock.as_deref())
+                }),
             ScopeOwner::Function(name) => self
                 .tree()
                 .functions()
@@ -1515,6 +1536,13 @@ impl<'a> Cx<'a> {
             ScopeOwner::Closure { .. } => {
                 scope.ret_ty.as_ref().map(|r| (r, "closure".to_owned()))
             }
+            // A `get` hook returns the property's own declared type, which rides on
+            // the scope for the same reason a closure's does — no declaration carries
+            // it (issue #544). A `set` hook has no `ret_ty` at all.
+            ScopeOwner::PropertyHook { class, property, hook } => scope
+                .ret_ty
+                .as_ref()
+                .map(|r| (r, format!("{class}::${property}::{}", hook.as_str()))),
         }
     }
 
@@ -1558,6 +1586,10 @@ impl<'a> Cx<'a> {
                     self.envelopes_of(scope.docblock.as_deref(), self.cur, *def_offset)?.ret?;
                 Some((ret, "closure".to_owned()))
             }
+            // A hooked property's docblock is the *property's*, and `@var` is what it
+            // spells — not `@return`. Adopting it as a `get` hook's return envelope is
+            // a separate question (issue #544 leaves it dark).
+            ScopeOwner::PropertyHook { .. } => None,
         }
     }
 }

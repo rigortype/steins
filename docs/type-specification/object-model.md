@@ -81,6 +81,13 @@ hooked property is also never `readonly` (the combination is a PHP fatal), so it
 is excluded from readonly tracking too. The absence of a fact is the honest
 floor; the property is simply opaque.
 
+The hook's **body**, on the other hand, is ordinary code and is walked as one
+(issue #544): it is a scope like any method body, with `$this` at the declaring
+class, a `set` hook's parameter bound (the written one, or the engine's implicit
+`$value` typed as the property), and a `get` hook's return checked against the
+property's declared type. What stays opaque is the property, not the code that
+guards it — the two are separate questions and the second one has a real answer.
+
 The read direction reaches **depth 1**: a `$var->prop` fetch in a dump argument
 or a call receiver reads the allocation-keyed heap property fact (alias-correct
 by construction). Deeper chains (`$a->b->c`) lower to an opaque form and never

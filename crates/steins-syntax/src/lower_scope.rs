@@ -8,12 +8,13 @@ use std::collections::HashSet;
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, ClassLikeMember, Construct, Expression, ExpressionStatement,
-    Hint, MethodBody, Node, PartialArgument, Program, Statement, UnaryPrefixOperator, Variable,
+    Hint, MethodBody, Node, PartialArgument, Program, Property, PropertyHookBody,
+    PropertyHookConcreteBody, Statement, UnaryPrefixOperator, Variable,
 };
 
 use crate::ast::{
-    BodyEnd, NsCtx, RetHint, RetHintKind, SUPERGLOBALS, Scope, ScopeOwner, Stmt, StmtKind,
-    UndefinedRead, UnusedCapture,
+    BodyEnd, HookKind, NsCtx, Param, RetHint, RetHintKind, SUPERGLOBALS, Scope, ScopeOwner, Stmt,
+    StmtKind, UndefinedRead, UnusedCapture,
 };
 use crate::lower_decl::{DocIndex, lower_hint, lower_params};
 use crate::lower_effect::{
@@ -23,8 +24,9 @@ use crate::lower_effect::{
 use crate::lower_expr::lower_arg_value;
 use crate::lower_presence::maybe_undefined_reads;
 use crate::lower_stmt::{
-    call_invalidation, lower_stmt, named_call, node_poisons, push_byref_captures,
-    scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
+    call_invalidation, expr_end, lower_expr_stmt, lower_stmt, named_call, node_poisons,
+    push_byref_captures, scan_guard_chain_no_default, scan_opaque, scan_string_contexts,
+    subtree_has_function_exit,
 };
 use crate::names::{RefResolver, ctx_of};
 use crate::stack_guard;
@@ -111,17 +113,47 @@ fn collect_scopes(
                 format!("{}\\{}", ctx.namespace, simple)
             };
             for member in c.members.iter() {
-                if let ClassLikeMember::Method(m) = member
-                    && let MethodBody::Concrete(block) = &m.body
-                {
-                    let method = bytes_to_string(m.name.value);
-                    let owner = ScopeOwner::Method { class: class_fqn.clone(), method };
-                    out.push(build_scope(
-                        owner,
-                        block.statements.as_slice(),
-                        ret_hint_of(m.return_type_hint.as_ref()),
-                        Some(&m.parameter_list),
-                    ));
+                match member {
+                    ClassLikeMember::Method(m) => {
+                        if let MethodBody::Concrete(block) = &m.body {
+                            let method = bytes_to_string(m.name.value);
+                            let owner =
+                                ScopeOwner::Method { class: class_fqn.clone(), method };
+                            out.push(build_scope(
+                                owner,
+                                block.statements.as_slice(),
+                                ret_hint_of(m.return_type_hint.as_ref()),
+                                Some(&m.parameter_list),
+                            ));
+                        }
+                        // A promoted parameter's hooks are the constructor's syntax but
+                        // the property's semantics (issue #544) — same scopes as the
+                        // class-body form below, and reached only from here because the
+                        // hook list hangs off the parameter.
+                        for p in m.parameter_list.parameters.iter() {
+                            if let Some(hooks) = &p.hooks {
+                                collect_hook_scopes(
+                                    &class_fqn,
+                                    &strip_dollar(bytes_to_string(p.variable.name)),
+                                    p.hint.as_ref(),
+                                    hooks,
+                                    rc,
+                                    out,
+                                );
+                            }
+                        }
+                    }
+                    ClassLikeMember::Property(Property::Hooked(h)) => {
+                        collect_hook_scopes(
+                            &class_fqn,
+                            &strip_dollar(bytes_to_string(h.item.variable().name)),
+                            h.hint.as_ref(),
+                            &h.hook_list,
+                            rc,
+                            out,
+                        );
+                    }
+                    _ => {}
                 }
             }
         }
@@ -247,7 +279,10 @@ fn build_scope_from(
     let poisoned = !opaque.is_empty();
     let function_name = match &owner {
         ScopeOwner::Function(name) => Some(name.clone()),
-        ScopeOwner::TopLevel | ScopeOwner::Method { .. } | ScopeOwner::Closure { .. } => None,
+        ScopeOwner::TopLevel
+        | ScopeOwner::Method { .. }
+        | ScopeOwner::Closure { .. }
+        | ScopeOwner::PropertyHook { .. } => None,
     };
     let vars = undefined_variable_reads(params, None, statements);
     Scope {
@@ -290,6 +325,182 @@ fn classify_ret_hint(hint: &Hint<'_>) -> RetHintKind {
         _ => RetHintKind::Other,
     }
 }
+
+// property hook bodies (issue #544)
+
+/// One scope per **concrete** hook body of a hooked property — plain or promoted,
+/// which differ only in where the hook list hangs (issue #544).
+///
+/// `hint` is the *property's* declared type, and it is the whole reason this is not
+/// simply another `build_scope` call: it is a `get` hook's return type and the type
+/// of a `set` hook's implicit parameter, so the two facts the walk needs about a
+/// hook body are facts about the property, not about the hook.
+///
+/// An abstract hook (`get;` on an interface or an `abstract` property) has no body
+/// and gets no scope, exactly as an abstract method does.
+fn collect_hook_scopes(
+    class_fqn: &str,
+    property: &str,
+    hint: Option<&Hint<'_>>,
+    hook_list: &mago_syntax::cst::PropertyHookList<'_>,
+    rc: &RefResolver,
+    out: &mut Vec<Scope>,
+) {
+    for hook in hook_list.hooks.iter() {
+        let name = bytes_to_string(hook.name.value);
+        let kind = if name.eq_ignore_ascii_case("get") {
+            HookKind::Get
+        } else if name.eq_ignore_ascii_case("set") {
+            HookKind::Set
+        } else {
+            // PHP declares exactly two hooks; any other spelling is a parse error
+            // upstream, and a recovered tree must not invent a scope for it.
+            continue;
+        };
+        let PropertyHookBody::Concrete(body) = &hook.body else { continue };
+        let owner = ScopeOwner::PropertyHook {
+            class: class_fqn.to_owned(),
+            property: property.to_owned(),
+            hook: kind,
+        };
+        // A `get` hook returns the property's own type; a `set` hook returns nothing
+        // (a `return <value>;` inside one is a PHP compile error, so there is no
+        // return position for the walk to check).
+        let (ret_hint, ret_ty) = match kind {
+            HookKind::Get => (
+                hint.map(|h| RetHint { kind: classify_ret_hint(h), span: to_span(h.span()) }),
+                hint.and_then(|h| lower_hint(h, rc)),
+            ),
+            HookKind::Set => (None, None),
+        };
+        let mut scope = match body {
+            PropertyHookConcreteBody::Block(block) => {
+                let refs: Vec<&Statement<'_>> = block.statements.iter().collect();
+                // The parameter list is handed on ONLY when the hook writes one:
+                // `undefined_variable_reads` reads `None` as "this scope cannot
+                // report at all", which is exactly right for the implicit-`$value`
+                // form, whose binding has no parameter node to be read off.
+                build_scope_from(owner, &refs, ret_hint, hook.parameter_list.as_ref())
+            }
+            PropertyHookConcreteBody::Expression(e) => {
+                build_hook_expr_scope(owner, kind, e.expression, ret_hint)
+            }
+        };
+        scope.params = hook_params(kind, hook, hint, rc);
+        scope.ret_ty = ret_ty;
+        out.push(scope);
+    }
+}
+
+/// A hook's parameters as the engine sees them.
+///
+/// A written list is lowered as any other. An omitted one means no parameters for
+/// `get`, and for `set` the engine's implicit `$value`, typed as the property —
+/// witnessed on 8.5.9 through `ReflectionProperty::getHooks()` (`set` reports
+/// `value:int` for `public int $v { set { … } }`) and through the `TypeError` a bad
+/// assignment raises (`A::$v::set(): Argument #1 ($value) must be of type int`).
+fn hook_params(
+    kind: HookKind,
+    hook: &mago_syntax::cst::PropertyHook<'_>,
+    hint: Option<&Hint<'_>>,
+    rc: &RefResolver,
+) -> Vec<Param> {
+    if let Some(list) = &hook.parameter_list {
+        return lower_params(list, rc);
+    }
+    if kind == HookKind::Get {
+        return Vec::new();
+    }
+    vec![Param {
+        name: "value".to_owned(),
+        ty: hint.and_then(|h| lower_hint(h, rc)),
+        hint_span: hint.map(|h| to_span(h.span())),
+        variadic: false,
+        by_ref: false,
+        has_null_default: false,
+        has_default: false,
+        default: None,
+        // The parameter is unwritten, so the hook's own name is the nearest thing
+        // to a declaration site a diagnostic can point at.
+        span: to_span(hook.name.span()),
+    }]
+}
+
+/// The scope of an arrow-bodied hook (`get => <expr>;` / `set => <expr>;`).
+///
+/// The two arrows are not the same construct. `get => e` is a `return e`, so it
+/// lowers to a return trace exactly as an arrow function's body does. `set => e`
+/// **assigns** `e` to the backing property (witnessed 8.5.9: `public int $n { set
+/// => "nope"; }` raises `Cannot assign string to property G::$n of type int`), so
+/// its expression is in statement position, and the assignment itself stays
+/// unmodelled — the same silence a written `$this->prop = …` inside a hook body
+/// already gets, hooked properties carrying no value fact at all (FP class 16).
+fn build_hook_expr_scope(
+    owner: ScopeOwner,
+    kind: HookKind,
+    expr: &Expression<'_>,
+    ret_hint: Option<RetHint>,
+) -> Scope {
+    let node = Node::Expression(expr);
+    let mut method_calls = Vec::new();
+    scan_method_calls(&node, &mut method_calls);
+    let mut opaque = Vec::new();
+    scan_opaque(&node, &mut opaque, false);
+    let mut guard_chain_no_default = Vec::new();
+    scan_guard_chain_no_default(&node, &mut guard_chain_no_default);
+    let mut string_contexts = Vec::new();
+    scan_string_contexts(&node, &mut string_contexts);
+    let stmt = match kind {
+        HookKind::Get => Stmt {
+            span: to_span(expr.span()),
+            kind: StmtKind::Return {
+                value: lower_arg_value(expr),
+                call: named_call(expr),
+                span: to_span(expr.span()),
+            },
+            invalidated: call_invalidation(&node),
+            string_contexts,
+            // The body IS the return, so the trace always terminates — which is why
+            // an arrow-bodied `get` can never be a `type.return-missing` site.
+            end: BodyEnd::Terminates,
+            has_terminator: true,
+        },
+        HookKind::Set => Stmt {
+            span: to_span(expr.span()),
+            string_contexts,
+            end: expr_end(expr),
+            has_terminator: subtree_has_function_exit(&node),
+            ..lower_expr_stmt(expr)
+        },
+    };
+    Scope {
+        function_name: None,
+        owner,
+        ret_hint,
+        is_generator: node_is_generator(&node),
+        // The flag IS the inventory being non-empty (never a second computation).
+        poisoned: !opaque.is_empty(),
+        opaque,
+        stmts: vec![stmt],
+        method_calls,
+        // Filled by the caller, which is the only place the property's type is known.
+        params: Vec::new(),
+        ret_ty: None,
+        effect_origins: Vec::new(),
+        throw_origins: Vec::new(),
+        guard_chain_no_default,
+        is_static: false,
+        docblock: None,
+        unused_captures: Vec::new(),
+        // An arrow body has no written parameter list to close the world over — the
+        // same reason the block form withholds these for an implicit `$value`.
+        undefined_reads: Vec::new(),
+        maybe_undefined_reads: Vec::new(),
+        ref_arg_candidates: Vec::new(),
+    }
+}
+
+// end property hook bodies (issue #544)
 
 /// Whether the subtree contains a `yield` / `yield from` that makes this scope a
 /// generator. Nested function/method/closure bodies are their own scopes and are

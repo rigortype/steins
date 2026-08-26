@@ -319,8 +319,14 @@ pub fn sweep_methods(db: &dyn Db, project: Project) -> MethodSweep {
 
         // (1) Resolve method calls per scope (owner gives enclosing class).
         for scope in tree.scopes() {
+            // A property hook body runs in its declaring class's scope too (issue
+            // #544), and naming it matters here: an unresolved `$this->m()` taints
+            // every method project-wide, so withholding the class would refuse
+            // transforms the hook does not actually obstruct.
             let enclosing = match &scope.owner {
-                ScopeOwner::Method { class, .. } => Some(class.as_str()),
+                ScopeOwner::Method { class, .. } | ScopeOwner::PropertyHook { class, .. } => {
+                    Some(class.as_str())
+                }
                 _ => None,
             };
             for call in &scope.method_calls {
