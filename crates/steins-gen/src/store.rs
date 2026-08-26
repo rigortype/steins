@@ -64,7 +64,7 @@
 //! owner is alive (issue #491). Liveness is advisory `flock(2)`, at two
 //! grains. Store-wide, `gen/.lock` is held — blocking, and only around the
 //! bookkeeping moments: [`Store::begin`], the startup sweep, and a publish's
-//! `CURRENT` swap — never for the store's lifetime, so a resident process and
+//! rename-and-swap — never for the store's lifetime, so a resident process and
 //! a concurrent CLI run serialize their bookkeeping and nothing else. Per
 //! candidate, [`Store::begin`] locks the `in-progress` marker and the
 //! [`Candidate`] holds that lock for the build's whole life; the kernel
@@ -402,6 +402,14 @@ impl Candidate<'_> {
         let manifest = manifest_text(&self.id, &self.packages);
         write_file(&self.dir.join(MANIFEST), manifest.as_bytes())?;
         fs::remove_file(self.dir.join(MARKER))?;
+        // The critical section starts at the rename (issue #491): a
+        // generation that exists but is not yet named by `CURRENT` is exactly
+        // what the superseded sweep collects, so the rename, the swap, and
+        // this publish's own sweep must be one atom under the store lock.
+        // The same lock keeps a concurrent open from deleting `CURRENT.tmp`
+        // between the write and the rename and failing this publish on a
+        // name that was ours.
+        let _lock = StoreLock::hold(&self.store.gen_root)?;
         let final_dir = self.store.gen_root.join(self.id.to_hex());
         self.defused = true;
         if final_dir.is_dir() {
@@ -411,11 +419,6 @@ impl Candidate<'_> {
         } else {
             fs::rename(&self.dir, &final_dir)?;
         }
-        // The swap and its sweep are one critical section under the store
-        // lock (issue #491): without it, a concurrent open's sweep could
-        // delete `CURRENT.tmp` between the write and the rename and fail
-        // this publish on a name that was ours.
-        let _lock = StoreLock::hold(&self.store.gen_root)?;
         let tmp = self.store.gen_root.join(CURRENT_TMP);
         write_file(&tmp, format!("{}\n", self.id.to_hex()).as_bytes())?;
         fs::rename(&tmp, self.store.gen_root.join(CURRENT))?;
@@ -722,9 +725,9 @@ fn write_file(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// The store-level critical-section lock: `gen/.lock`, flocked exclusively and
 /// blocking, released when this value drops (issue #491). Held only around
-/// bookkeeping — [`Store::begin`], the startup [`sweep`], a publish's swap —
-/// and never across a build, because a resident server must serialize its
-/// bookkeeping against a concurrent CLI run, not its analysis.
+/// bookkeeping — [`Store::begin`], the startup [`sweep`], a publish's
+/// rename-and-swap — and never across a build, because a resident server must
+/// serialize its bookkeeping against a concurrent CLI run, not its analysis.
 struct StoreLock {
     _file: File,
 }
