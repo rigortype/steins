@@ -35,11 +35,11 @@ use steins_infer::{Diagnostic, GenerationParams, INLINE_IGNORE, LazyTree, genera
 use crate::config::RuntimePostures;
 use crate::project::{LoadedProject, assemble_loaded, resolve_layout};
 
-/// What the gated path hands the downstream pipeline: the same
+/// What the cached path hands the downstream pipeline: the same
 /// [`LoadedProject`] shape the cold path builds (salsa view for `--fix` and
 /// the baseline machinery — no parse forced), the generation findings, and the
 /// orchestrator's owned trees so inline-ignore scanning re-parses nothing.
-pub(crate) struct GatedRun {
+pub(crate) struct CachedRun {
     pub(crate) loaded: LoadedProject,
     pub(crate) findings: Vec<Diagnostic>,
     /// The run's tree handles, in slot order. Handles rather than trees since
@@ -73,7 +73,7 @@ pub(crate) fn try_generation_check(
     postures: &RuntimePostures,
     no_php: bool,
     runtime_warnings: &[String],
-) -> Option<GatedRun> {
+) -> Option<CachedRun> {
     let cwd = std::env::current_dir().ok()?;
     let layout = resolve_layout(paths);
     let plugins = PluginFacts::discover(&layout, plugin_allow);
@@ -128,7 +128,7 @@ pub(crate) fn try_generation_check(
         .filter(|(_, text)| text.contains(INLINE_IGNORE))
         .map(|(path, _)| path.clone())
         .collect();
-    Some(GatedRun {
+    Some(CachedRun {
         loaded,
         findings: outcome.findings,
         trees: outcome.trees,
