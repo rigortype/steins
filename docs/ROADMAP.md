@@ -355,10 +355,10 @@ twice through the orchestrator, cold then warm, requiring the two finding
 sets to match. The store is **bounded at one generation** (#529): a
 publish sweeps what it superseded and every open collects what a crash
 left unreachable, so a day of editing costs one cached analysis rather
-than one per edit. **Still open**: parallelism
-re-scoped by measurement from the generation build to `check_units`'
-per-file loop (#490); and the MCP server resident over published
-generations (#491), which still re-analyzes from scratch per call.
+than one per edit. **Still open**: parallelism re-scoped by measurement
+from the generation build to `check_units`' per-file loop (#490); and the
+MCP server resident over published generations (#491), which still
+re-analyzes from scratch per call.
 
 Exit criteria:
 
