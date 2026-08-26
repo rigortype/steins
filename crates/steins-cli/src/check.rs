@@ -8,6 +8,13 @@
 //! ADR-0034's transformed-or-refused discipline, gated by the post-check in
 //! [`crate::transform`]. Rendering is the seam in [`crate::render`] (ADR-0054):
 //! ONE report, whichever format was selected.
+//!
+//! The analysis itself comes through the frozen-generation lifecycle by
+//! default (ADR-0092 §5, ADR-0020 amendment / issue #525) and through the
+//! plain cold pipeline under `--no-cache` or on any degradation. The two
+//! arms differ in cost and in nothing else: same findings, same channels, same
+//! stderr — see [`crate::generation`] for why that silence is a property
+//! rather than a preference.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -33,6 +40,7 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // (ADR-0054 §6), so a default here would defeat GitHub Actions detection.
     let mut format: Option<render::CheckFormat> = None;
     let mut no_php = false;
+    let mut no_cache = false;
     let mut no_tolerated_effects = false;
     let mut fix_requested = false;
     let mut set_baseline = false;
@@ -46,6 +54,15 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
         match args[i].as_str() {
             "--no-php" => {
                 no_php = true;
+                i += 1;
+            }
+            // The generation cache is on by default (ADR-0020 amendment, issue
+            // #525); this is the opt-out, spelled like `--no-php` because it
+            // switches off the same kind of thing — a capability the run would
+            // otherwise use. Cost-only in both directions: a run without the
+            // cache finds exactly what a run with it finds.
+            "--no-cache" => {
+                no_cache = true;
                 i += 1;
             }
             // ADR-0084 §1 audit switch: empties tolerance; attribution table unaffected.
@@ -162,15 +179,14 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
     // the same point it always was — and keeps the safe default).
     let (postures, runtime_warnings) = runtime_from_config(runtime_cfg);
 
-    // The experimental frozen-generation lifecycle (ADR-0092 §5, issue #489
-    // slice A): activated only by `STEINS_EXPERIMENTAL_GENERATIONS=1` in the
-    // environment — read once here, plumbed as a bool, deliberately no CLI
-    // flag (flag promotion is an ADR-0020 owner decision). With the variable
-    // unset — every CI run — this function is byte-identical to before the
-    // gate existed; any gated failure degrades to the ordinary arm below.
-    let experimental_generations =
-        std::env::var("STEINS_EXPERIMENTAL_GENERATIONS").is_ok_and(|v| v == "1");
-    let gated = if experimental_generations {
+    // The frozen-generation lifecycle (ADR-0092 §5): how a check runs unless
+    // `--no-cache` says otherwise (ADR-0020 amendment, issue #525). Silent in
+    // both directions — the cached arm prints the boundary notices the cold
+    // arm prints and nothing more, and any degradation falls through to the
+    // cold arm below with stderr still untouched.
+    let gated = if no_cache {
+        None
+    } else {
         crate::generation::try_generation_check(
             &files,
             &paths,
@@ -180,12 +196,18 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
             no_php,
             &runtime_warnings,
         )
-    } else {
-        None
     };
 
     let (loaded, findings, gated_trees) = match gated {
-        Some(run) => (run.loaded, run.findings, Some((run.trees, run.directive_files))),
+        Some(run) => {
+            // Collected inside the lifecycle so a fallback could print them
+            // once; printed here, in the order and at the point the cold arm
+            // prints its own.
+            for notice in &run.notices {
+                errln!("steins: {notice}");
+            }
+            (run.loaded, run.findings, Some((run.trees, run.directive_files)))
+        }
         None => {
             // One folder for the whole run: owns the sidecar + fold memo, so repeated
             // calls across files never re-spawn or re-fold.

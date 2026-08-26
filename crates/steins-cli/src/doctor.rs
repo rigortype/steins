@@ -18,8 +18,10 @@
 //!
 //! # Scope
 //!
-//! Nine sections, ADR-0054 §9 order plus C4's additions: Runtime, Config +
-//! active surface, Layout (ADR-0015), Coverage posture (dam stats, opaque
+//! Ten sections, ADR-0054 §9 order plus C4's additions: Runtime, Config +
+//! active surface, Layout (ADR-0015), Generation store (ADR-0092 §2 — what
+//! `check` has cached for this tree, and why a run could not use it; issue
+//! #525), Coverage posture (dam stats, opaque
 //! constructs, reflected class world — issue #269), Envelopes (G1-demote
 //! notice, §9.4), Baseline, Catalog (A11 pin skew), Registry totality,
 //! Require (§14). Two C4 lines are not rendered: dump-site count (ADR-0053
@@ -154,6 +156,7 @@ pub fn run_doctor(args: &[String]) -> ExitCode {
     sections.push(config_section);
 
     sections.push(section_layout(&root, &cwd, &layout));
+    sections.push(section_generation_store(&root, &cwd, &layout));
     sections.push(section_coverage(
         &root,
         &files,
@@ -541,7 +544,128 @@ fn section_layout(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
     sec
 }
 
-/// Section 4 — Coverage posture (ADR-0054 §9.2): what this run parsed and then
+/// Section 4 — Generation store (ADR-0092 §2, issue #525): what `steins check`
+/// has cached for this tree, and — where the store itself says so — why a run
+/// would not have been able to use it.
+///
+/// **Why doctor and not `check`.** Since the lifecycle became the default,
+/// `check` says nothing about it: every disposition a cache can have is
+/// cost-only, so narrating one on every invocation is noise on every
+/// invocation (see [`crate::generation`]). The visibility still has to live
+/// somewhere, and doctor is where a posture question is asked deliberately.
+///
+/// **What "degraded" can mean here.** Only the *persistent* reasons — the ones
+/// still true when doctor looks — are reportable, and they are the ones worth
+/// reporting: a store that cannot be created because the tree is read-only, a
+/// `CURRENT` that names nothing readable. A transient degradation (a source
+/// that moved under the seal mid-run, a publish that lost a race) leaves
+/// nothing behind by design and costs exactly one rebuild, so there is nothing
+/// to see and nothing to do.
+///
+/// Reads only: [`steins_gen::Store::open_existing`] never creates the layout
+/// the way `Store::open` does, because a posture report that materialized the
+/// thing it reports on would answer its own question.
+fn section_generation_store(root: &Path, cwd: &Path, layout: &ProjectLayout) -> Section {
+    let mut sec = Section::new("Generation store");
+    // The same root `check` writes to (issue #506): the outermost governing
+    // manifest, or the analyzed tree when nothing governs it.
+    let store_root = crate::generation::store_root(layout, root);
+    let Some(store) = steins_gen::Store::open_existing(&store_root) else {
+        line!(sec, "  store: absent under {}", display_path(cwd, &store_root.join(".steins")));
+        if is_unwritable(&store_root) {
+            line!(
+                sec,
+                "  the tree carries no write permission — every run rebuilds cold, quietly (a miss costs time, never meaning: ADR-0092 §2)"
+            );
+        } else {
+            line!(sec, "  nothing is cached yet; the next `steins check` builds and publishes one");
+        }
+        return sec;
+    };
+    line!(sec, "  store: {}", display_path(cwd, store.gen_root()));
+    match store.current() {
+        Ok(Some(generation)) => {
+            line!(sec, "  current generation: {}", generation.id().to_hex());
+            line!(sec, "  packages: {}", generation.packages().count());
+        }
+        Ok(None) => {
+            line!(
+                sec,
+                "  current generation: none published — the store exists but no build has completed here"
+            );
+        }
+        Err(miss) => {
+            line!(
+                sec,
+                "  current generation: UNREADABLE — {miss}; the next run rebuilds cold and republishes (exit stays 0, ADR-0092 §2)"
+            );
+        }
+    }
+    let (bytes, generations) = store_size(store.gen_root());
+    line!(
+        sec,
+        "  on disk: {} across {generations} generation(s) (an artifact a republish shared counts once per generation, so the real cost is at most this)",
+        human_bytes(bytes)
+    );
+    sec
+}
+
+/// Whether `dir` carries no write permission at all — the read-only-project
+/// leg of the store section. Deliberately a *permission* reading, not a probe:
+/// doctor writes nothing, and a tree with its write bits off is the case an
+/// operator can actually act on. A read-only *mount* under writable bits reads
+/// as writable here and degrades silently at run time, which is the same
+/// correct outcome with one less line of report.
+fn is_unwritable(dir: &Path) -> bool {
+    std::fs::metadata(dir).is_ok_and(|m| m.permissions().readonly())
+}
+
+/// Total bytes under `gen_root` and how many published generations it holds
+/// (directories whose name is a generation id; candidates are swept at the
+/// next open and never counted). Unreadable entries contribute nothing rather
+/// than failing the section.
+fn store_size(gen_root: &Path) -> (u64, usize) {
+    fn walk(dir: &Path, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else { return };
+        for entry in entries.flatten() {
+            match entry.file_type() {
+                Ok(t) if t.is_dir() => walk(&entry.path(), total),
+                Ok(_) => *total += entry.metadata().map_or(0, |m| m.len()),
+                Err(_) => {}
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(gen_root, &mut total);
+    let generations = std::fs::read_dir(gen_root).map_or(0, |entries| {
+        entries
+            .flatten()
+            .filter(|e| {
+                e.file_type().is_ok_and(|t| t.is_dir())
+                    && e.file_name().to_str().is_some_and(|n| {
+                        n.len() == 64 && n.bytes().all(|b| b.is_ascii_hexdigit())
+                    })
+            })
+            .count()
+    });
+    (total, generations)
+}
+
+/// Bytes as a person reads them. Binary units, one decimal above a kilobyte —
+/// the store's own scale is megabytes, and "41.8 MB" is the number an operator
+/// compares against a disk.
+fn human_bytes(bytes: u64) -> String {
+    #[allow(clippy::cast_precision_loss)]
+    let n = bytes as f64;
+    match bytes {
+        0..=1023 => format!("{bytes} B"),
+        1024..=1_048_575 => format!("{:.1} KB", n / 1024.0),
+        1_048_576..=1_073_741_823 => format!("{:.1} MB", n / 1_048_576.0),
+        _ => format!("{:.1} GB", n / 1_073_741_824.0),
+    }
+}
+
+/// Section 5 — Coverage posture (ADR-0054 §9.2): what this run parsed and then
 /// declined to reason about — the crying-wolf-required measurement of a quiet
 /// analyzer (`Scope::poisoned` marks eval-affected locals unknown, ADR-0046
 /// §1). None of these is a diagnostic (no registry id, baseline entry, or
@@ -863,7 +987,7 @@ fn join_paths(cwd: &Path, paths: &[PathBuf]) -> String {
     paths.iter().map(|p| display_path(cwd, p)).collect::<Vec<_>>().join(", ")
 }
 
-/// Section 5 — Envelopes (ADR-0054 §9.4, G1-amendment written-but-unchecked
+/// Section 6 — Envelopes (ADR-0054 §9.4, G1-amendment written-but-unchecked
 /// notice). Index scan, never the checker: count declarations with a written
 /// `@throws`, state whether the active surface checks them.
 fn section_envelopes(files: &[ParsedFile], surface: &profile::Surface) -> Section {
@@ -912,7 +1036,7 @@ fn declares_throws(docblock: Option<&str>) -> bool {
     docblock.is_some_and(|d| scan_docblock(d).iter().any(|t| t.kind == TagKind::Throws))
 }
 
-/// Section 6 — Baseline (ADR-0054 §9.5): capture surface versus active
+/// Section 7 — Baseline (ADR-0054 §9.5): capture surface versus active
 /// surface, and dormant-entry count (id outside active — kept, not stale).
 /// Accepts `--baseline <path>`, else the default file, else "none";
 /// unparseable = configuration contradiction (exit 1, §10). Returns the
@@ -1018,7 +1142,7 @@ enum CatalogSkew {
     Unconfirmed,
 }
 
-/// Section 7 — Catalog (ADR-0052 amendment A11): pinned php-src minor versus
+/// Section 8 — Catalog (ADR-0052 amendment A11): pinned php-src minor versus
 /// this run's version, plus hierarchy/foldable counts as freshness context.
 /// Mirrors `steins-infer`'s private skew rule: a declared TARGET is skewed
 /// unless exactly the pin; else the sidecar runtime minor; else "unconfirmed"
@@ -1084,7 +1208,7 @@ fn section_catalog(target: Option<&PhpTarget>, runtime_minor: Option<(u16, u16)>
     (sec, skew)
 }
 
-/// Section 8 — Registry totality (ADR-0054 §9.7): mechanics self-check.
+/// Section 9 — Registry totality (ADR-0054 §9.7): mechanics self-check.
 /// Registry ids must partition exactly into `ALL_EMITTABLE_IDS` and
 /// `REGISTERED_NOT_YET_EMITTED`. Redundant with `tests/registry.rs` today,
 /// until plugin registration adds ids at runtime.
@@ -1142,7 +1266,7 @@ struct RequireFacts {
 /// list is a hard config error (serde can't gate a string value).
 const KNOWN_ASSERTIONS: &[&str] = &["sidecar", "catalog-pin-match", "no-monkey-patch", "no-dormant-baseline"];
 
-/// Section 9 — Require (ADR-0054 §14): `[doctor] require = [...]` turns a
+/// Section 10 — Require (ADR-0054 §14): `[doctor] require = [...]` turns a
 /// posture line into an exit-1 assertion. Empty list renders "not configured",
 /// no contradiction. An unknown name is a config contradiction.
 fn section_require(names: Vec<String>, facts: &RequireFacts, contradiction: &mut bool) -> Section {

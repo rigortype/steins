@@ -14,6 +14,7 @@ authority if this drifts again:
 steins-cli
   ├── steins-db ── steins-syntax ── steins-domain
   │           └── steins-gen, steins-catalog, steins-phpdoc
+  ├── steins-gen          (read-only — `doctor`'s store section, issue #525)
   ├── steins-infer
   │     ├── steins-domain
   │     ├── steins-contract ── steins-domain, steins-phpdoc

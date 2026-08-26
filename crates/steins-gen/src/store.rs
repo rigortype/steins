@@ -1,7 +1,8 @@
 //! The candidate-then-publish store (ADR-0092 §2). On disk, under
-//! `<project>/.steins/gen/`:
+//! `<project>/.steins/`:
 //!
 //! ```text
+//! .gitignore                     `*` — written once, at creation (issue #525)
 //! gen/CURRENT                    hex generation id + newline; atomic-rename swap
 //! gen/<generation-hex>/          one published generation, immutable
 //!   manifest                     schema, id, package roster (this crate's format)
@@ -104,11 +105,36 @@ impl Store {
     /// Open with an explicit decode ceiling, applied to every artifact and
     /// manifest read through this store.
     pub fn open_with_budget(project_root: &Path, budget: DecodeBudget) -> io::Result<Self> {
-        let gen_root = project_root.join(".steins").join("gen");
+        let steins_root = project_root.join(".steins");
+        let gen_root = steins_root.join("gen");
         fs::create_dir_all(&gen_root)?;
+        write_ignore_file(&steins_root);
         sweep(&gen_root)?;
         Ok(Self { gen_root, budget })
     }
+
+    /// Look at an existing store without creating anything — the read-only
+    /// door `steins doctor` reports through. `None` when no store is there,
+    /// which is a posture ("nothing cached yet"), not an error.
+    ///
+    /// Deliberately not [`Self::open`]: that call creates the layout and
+    /// sweeps candidates, and a posture report that materializes the thing it
+    /// is reporting on would answer its own question.
+    #[must_use]
+    pub fn open_existing(project_root: &Path) -> Option<Self> {
+        Self::open_existing_with_budget(project_root, DecodeBudget::default())
+    }
+
+    /// [`Self::open_existing`] with an explicit decode ceiling.
+    #[must_use]
+    pub fn open_existing_with_budget(project_root: &Path, budget: DecodeBudget) -> Option<Self> {
+        let gen_root = project_root.join(".steins").join("gen");
+        gen_root.is_dir().then_some(Self { gen_root, budget })
+    }
+
+    /// Where this store's generations live (`<project>/.steins/gen`).
+    #[must_use]
+    pub fn gen_root(&self) -> &Path { &self.gen_root }
 
     /// The published generation `CURRENT` names, if any. `Ok(None)` means no
     /// generation was ever published; `Err(Miss)` means one was but cannot
@@ -474,6 +500,23 @@ fn sweep(gen_root: &Path) -> io::Result<()> {
         }
     }
     Ok(())
+}
+
+/// Drop a `.gitignore` holding `*` into `.steins/` the first time the store is
+/// created, the way Cargo does for `target/` (issue #525).
+///
+/// A cache the tool writes without being asked must not become a commit the
+/// user did not ask for: a published generation is multi-megabyte, specific to
+/// one analyzer version and one machine's engine posture, and worthless in
+/// anyone else's checkout. Best-effort by construction — an existing file is
+/// left exactly as the user left it, a failed write changes nothing, and no
+/// generation depends on the file being there.
+fn write_ignore_file(steins_root: &Path) {
+    let path = steins_root.join(".gitignore");
+    if path.exists() {
+        return;
+    }
+    let _ = write_file(&path, b"*\n");
 }
 
 /// The store's own metadata files — the marker, the manifest, `CURRENT.tmp`.
