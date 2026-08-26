@@ -1,19 +1,32 @@
-//! The generation orchestrator (ADR-0092 §5, issue #489 slice A): cold build →
+//! The generation orchestrator (ADR-0092 §5, issue #489): cold build →
 //! publish → warm rebuild, composed entirely from landed pieces — the store and
 //! sealed capture (#485), the Composer partition (#486), the per-package
 //! payloads (#503), and the recorded fold table (#500).
 //!
-//! **What the warm path reuses, and why it is sound.** Slice A re-walks every
-//! file; what it skips is parse + lowering (the 45–57% cost
-//! `docs/agents/profiling.md` names). A package whose freshly captured source
-//! fingerprint matches the one stored in its artifact loads its lowered
-//! [`SourceTree`]s from the `trace` section and its symbol shard from the
-//! `symbols` section instead of re-parsing; everything downstream — the global
-//! merges, the dam, both fixpoints, every walk — recomputes from those trees
-//! exactly as a cold run recomputes from freshly parsed ones. The fingerprint
-//! is blake3 over the captured bytes and parsing is deterministic, so a loaded
-//! tree *is* the reparse; warm ≡ cold holds by construction, and the
-//! `warm_generation.rs` oracles pin it byte-for-byte.
+//! **What the warm path reuses, and why it is sound.** Two layers, landed in
+//! that order.
+//!
+//! *Trees* (slice A). A package whose freshly captured source fingerprint
+//! matches the one stored in its artifact loads its lowered [`SourceTree`]s
+//! from the `trace` section and its symbol shard from the `symbols` section
+//! instead of re-parsing — the 45–57% cost `docs/agents/profiling.md` names.
+//! The fingerprint is blake3 over the captured bytes and parsing is
+//! deterministic, so a loaded tree *is* the reparse; everything downstream
+//! recomputes from those trees exactly as a cold run recomputes from freshly
+//! parsed ones.
+//!
+//! *Walks* (slice B). A file whose walk block nothing could have changed
+//! replays that block from the `summaries` section instead of walking. What
+//! "nothing could have changed" means is [`crate::affected`]'s whole subject;
+//! what a block is, and why replaying one reproduces the run, is
+//! [`crate::walk_plan`]'s. The two project-wide passes (effects, throws) are
+//! never replayed — they recompute whole-universe from own-rows every run,
+//! which is what makes the vendor-whitespace oracle pass by construction.
+//!
+//! Both layers hold warm ≡ cold by construction rather than by comparison, and
+//! `warm_generation.rs` pins it byte-for-byte. The skip layer additionally
+//! ships its own instrument: [`PARANOID_ENV`] walks everything anyway and
+//! grades every would-be skip against its fresh walk.
 //!
 //! The [`PackageKind`] axis (#486, `trusted_from_artifacts`) draws the line
 //! between *trust without revalidation* (a future economy the lock hash might
@@ -52,6 +65,17 @@
 //! baseline flags, output format, `--vendor-diagnostics` — and the fix-it
 //! machinery, none of which change what the analysis *finds*; and plugin
 //! *notices*, which report refusals rather than facts.
+//!
+//! **The same identity, minus the packages, is the replay stamp** (slice B).
+//! A tree fingerprint licenses loading a *parse*, because parsing is a pure
+//! function of bytes; replaying a *finding* needs every other input above to
+//! be unmoved too, and the per-package half is already gated per package by
+//! the `sources` section. So [`identity_inputs`] is filled once and used
+//! twice — with `packages` as the generation id, with `packages` emptied as
+//! the stamp the `summaries` section carries — and the two cannot drift. This
+//! is issue #489's closing re-audit answered: an under-covered input cost a
+//! stale *cache* while findings were never loaded, and would now cost a stale
+//! *finding*.
 //!
 //! Lives in `steins-infer` rather than `steins-cli` (where the CLI wiring
 //! stays) because the one analysis entry both temperatures must share —
@@ -275,10 +299,14 @@ pub struct WalkReport {
     pub would_skip: usize,
     /// Whether [`PARANOID_ENV`] was set for this run.
     pub paranoid: bool,
-    /// Every file whose replayed block did not equal its fresh walk. Non-empty
-    /// only under [`Self::paranoid`], and non-empty at all is a soundness bug
-    /// in the affected set, not a cost regression.
+    /// The first few files whose replayed block did not equal its fresh walk
+    /// — capped, so a systematically broken affected set over a corpus reports
+    /// a sample rather than exhausting memory. Non-empty only under
+    /// [`Self::paranoid`], and non-empty at all is a soundness bug in the
+    /// affected set, not a cost regression.
     pub divergences: Vec<Divergence>,
+    /// How many divergences there were in all, capped list or not.
+    pub divergence_count: usize,
 }
 
 /// One package's disposition — the counter the warm ≡ cold oracles read:
@@ -708,6 +736,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         would_skip: control.would_skip,
         paranoid,
         divergences: std::mem::take(&mut control.divergences),
+        divergence_count: control.divergence_count,
     };
     let ledger = std::mem::take(&mut control.ledger);
     // The control's borrow of the planner — and so the planner's of the two
@@ -732,7 +761,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             "paranoid: {} file(s) walked, {} would have been skipped, {} divergence(s); universe verdict {}",
             walk.walked,
             walk.would_skip,
-            walk.divergences.len(),
+            walk.divergence_count,
             universe.to_hex(),
         ));
     }

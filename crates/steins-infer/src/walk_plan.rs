@@ -166,9 +166,19 @@ pub(crate) struct WalkControl<'a> {
     /// Files the plan would have skipped — equal to `replayed` outside
     /// paranoid mode, and the population the verifier graded inside it.
     pub(crate) would_skip: usize,
-    /// Every file whose replayed block did not equal its fresh walk.
+    /// The first [`MAX_RECORDED_DIVERGENCES`] files whose replayed block did
+    /// not equal its fresh walk. Capped so a systematically broken affected
+    /// set over a 90k-file corpus reports a number and a sample rather than
+    /// exhausting memory; [`Self::divergence_count`] keeps the total.
     pub(crate) divergences: Vec<Divergence>,
+    /// How many divergences there were in all, capped list or not.
+    pub(crate) divergence_count: usize,
 }
+
+/// How many divergences the verifier keeps the detail of. One is already a
+/// soundness bug; the rest are for telling a systematic break from a local
+/// one, and twenty samples say that as well as twenty thousand.
+pub(crate) const MAX_RECORDED_DIVERGENCES: usize = 20;
 
 impl<'a> WalkControl<'a> {
     pub(crate) fn new(
@@ -183,6 +193,7 @@ impl<'a> WalkControl<'a> {
             replayed: 0,
             would_skip: 0,
             divergences: Vec::new(),
+            divergence_count: 0,
         }
     }
 
@@ -190,7 +201,10 @@ impl<'a> WalkControl<'a> {
     /// place they part. Called only under [`Self::paranoid`].
     pub(crate) fn verify(&mut self, path: &str, replayed: &FileWalk, walked: &FileWalk) {
         if let Some(detail) = first_divergence(replayed, walked) {
-            self.divergences.push(Divergence { path: path.to_owned(), detail });
+            self.divergence_count += 1;
+            if self.divergences.len() < MAX_RECORDED_DIVERGENCES {
+                self.divergences.push(Divergence { path: path.to_owned(), detail });
+            }
         }
     }
 }

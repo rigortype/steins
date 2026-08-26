@@ -131,7 +131,7 @@ pub fn run(args: &[String]) -> Result<bool, String> {
             match measure_warm(Path::new(target), runs, posture, parsed.paranoid, &m) {
                 Ok(w) => {
                     print_warm(&w, &m);
-                    if !w.matches || !w.divergences.is_empty() {
+                    if !w.matches || w.divergence_count > 0 {
                         green = false;
                     }
                 }
@@ -469,10 +469,12 @@ struct WarmMeasurement {
     matches: bool,
     /// The first mismatch, when there was one.
     mismatch: Option<String>,
-    /// Whether the paranoid verifier ran, and every divergence it found over
-    /// every generation run of this target (empty is the pass).
+    /// Whether the paranoid verifier ran, the divergence samples it kept over
+    /// every generation run of this target, and how many there were in all
+    /// (zero is the pass).
     paranoid: bool,
     divergences: Vec<String>,
+    divergence_count: usize,
 }
 
 /// Cold-build + publish a generation into a scratch store, then measure `runs`
@@ -569,6 +571,7 @@ fn measure_warm_in_store(
     let paranoid = outcome.report.walk.paranoid;
     let mut divergences: Vec<String> =
         outcome.report.walk.divergences.iter().map(ToString::to_string).collect();
+    let mut divergence_count = outcome.report.walk.divergence_count;
     let mut mismatch = check("cold generation build", outcome.findings);
 
     let mut warm: Vec<WarmRun> = Vec::with_capacity(runs);
@@ -586,6 +589,7 @@ fn measure_warm_in_store(
         let t = outcome.report.timings;
         let w = &outcome.report.walk;
         divergences.extend(w.divergences.iter().map(ToString::to_string));
+        divergence_count += w.divergence_count;
         warm.push(WarmRun {
             capture_ms: t.capture_ms,
             trees_ms: t.trees_ms,
@@ -609,6 +613,7 @@ fn measure_warm_in_store(
         mismatch,
         paranoid,
         divergences,
+        divergence_count,
     })
 }
 
@@ -651,17 +656,18 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     }
     if w.paranoid {
         let graded: usize = w.warm.iter().map(|r| r.would_skip).sum();
-        if w.divergences.is_empty() {
+        if w.divergence_count == 0 {
             println!(
                 "      paranoid: OK — {graded} would-be skip(s) graded across {} run(s), every one byte-identical to its fresh walk",
                 w.warm.len()
             );
         } else {
             println!(
-                "      paranoid: FAILED — {} divergence(s) over {graded} graded would-be skip(s)",
+                "      paranoid: FAILED — {} divergence(s) over {graded} graded would-be skip(s); first {} shown",
+                w.divergence_count,
                 w.divergences.len()
             );
-            for line in w.divergences.iter().take(20) {
+            for line in &w.divergences {
                 println!("        {line}");
             }
         }
