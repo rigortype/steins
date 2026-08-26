@@ -134,6 +134,7 @@ use crate::facts::{FileFacts, facts_payload, fill_rows, key_hash, read_facts};
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
 use crate::project::{FileUnit, Index, LazyTree, Res};
 use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
+use crate::walk_fleet::{FolderFleet, WorkerBudget};
 use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
 use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
 
@@ -328,6 +329,11 @@ pub struct WalkReport {
     /// [`Self::replayed`] outside paranoid mode, and the population the
     /// verifier graded inside it.
     pub would_skip: usize,
+    /// How many workers this run's walk fanned out over (issue #490); `1` is
+    /// the sequential walk. The width is trimmed to the walk's own size, so a
+    /// rebuild that walks a handful of files reports `1` on a machine that
+    /// would have allowed a dozen.
+    pub workers: usize,
     /// Whether [`PARANOID_ENV`] was set for this run.
     pub paranoid: bool,
     /// The first few files whose replayed block did not equal its fresh walk
@@ -990,7 +996,23 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             })
             .collect()
     };
-    let mut control = WalkControl::new(&mut planner, paranoid, &facts);
+    // The walk's fan-out (issue #490). Each worker hires a folder of its own —
+    // configured *here*, at the one place a worker's folder can be born, so
+    // the issue-#63 hazard of a folder carrying some other run's `php_target`
+    // cannot recur — over the transport this run already established: the same
+    // child, the same loaded table, the same pool of what the run has asked.
+    // Per-worker folders and one shared transport is the whole shape, and each
+    // half of it is measured (see `RecordingEngine::live`).
+    let shared = folder.shared_engine();
+    let worker_target = p.layout.php_target().cloned();
+    let hire = move || {
+        let mut worker = EngineFolder::with_engine(RecordingEngine::worker(shared.clone()));
+        worker.set_php_target(worker_target.clone());
+        worker
+    };
+    let retire = |worker: crate::RecordingFolder| worker.harvest();
+    let fleet = FolderFleet::new(WorkerBudget::read(), &hire, &retire);
+    let mut control = WalkControl::new(&mut planner, paranoid, &facts, Some(&fleet));
     let findings = crate::check_units_controlled(
         &units,
         &index,
@@ -1009,6 +1031,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         walked: control.walked,
         replayed: control.replayed,
         would_skip: control.would_skip,
+        workers: control.workers,
         paranoid,
         divergences: std::mem::take(&mut control.divergences),
         divergence_count: control.divergence_count,
@@ -1018,6 +1041,12 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // The control's borrow of the planner — and so the planner's of the two
     // values it writes — ends here; everything either produced is owned above.
     drop(control);
+    // The fan-out's tables, folded back into the run's one (ADR-0092 §4). In
+    // chunk order, so the merge is the same every run whatever the scheduler
+    // did; a sequential walk harvests nothing and this is a no-op.
+    for harvest in fleet.into_harvests() {
+        folder.absorb_worker(harvest);
+    }
     let universe = universe.expect("the planner runs before the first file is walked");
     for divergence in &walk.divergences {
         notes.push(format!("PARANOID DIVERGENCE {divergence}"));

@@ -85,6 +85,7 @@ mod transfers;
 mod undefined_var;
 mod untyped;
 mod walk;
+mod walk_fleet;
 mod walk_plan;
 
 pub use dam::{DamFacts, DamKind, DamSite, dam_facts};
@@ -116,6 +117,8 @@ use dump::render_shape_fact;
 use env::{Known, Store};
 use project::Index;
 use walk::{analyze_scope, in_dead};
+use walk_fleet::WalkFleet;
+pub use walk_fleet::WALK_WORKERS_ENV;
 use walk_plan::{FilePlan, FileWalk, PassTimings, UniverseVerdict, WalkControl};
 pub use walk_plan::Divergence;
 
@@ -151,8 +154,8 @@ pub use fold::{
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_persist::{
-    FOLD_IDENTITY_SECTION, FOLD_PACKAGE, FOLD_ROWS_SECTION, FoldTableArtifact, FoldTableIdentity,
-    RecordingEngine, RecordingFolder, fold_package,
+    FOLD_IDENTITY_SECTION, FOLD_PACKAGE, FOLD_ROWS_SECTION, FoldHarvest, FoldTableArtifact,
+    FoldTableIdentity, RecordingEngine, RecordingFolder, RunEngine, fold_package,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use fold_process::{ProcessEngine, SidecarFolder};
@@ -555,7 +558,52 @@ fn check_units_controlled(
     };
     plan.resize_with(units.len(), || FilePlan::Walk);
 
+    let paranoid = control.as_deref().is_some_and(|c| c.paranoid);
+    let inputs = WalkInputs {
+        units,
+        index,
+        dam: &dam,
+        unparsable: &unparsable,
+        warning_handler_abort,
+        final_keyword,
+        php_minor,
+        catalog_skew,
+        version_id,
+        purity: purity.as_ref(),
+        layout,
+        never_returning: &never_returning,
+    };
+    // Which files this run actually walks. A replayed block is not walked —
+    // except under the verifier, which walks everything precisely so it has a
+    // fresh answer to grade the replay against.
+    let order: Vec<usize> = (0..units.len())
+        .filter(|&fi| paranoid || matches!(plan[fi], FilePlan::Walk))
+        .collect();
+
     let t_walk = clock();
+    // Per-file sinks, filled either in place or by the fan-out (issue #490),
+    // and merged below in unit order either way. The merge — not the walk — is
+    // what decides the diagnostic vector, so the two paths produce the same
+    // bytes by construction rather than by comparison.
+    let mut sinks: Vec<Option<FileSink>> =
+        std::iter::repeat_with(|| None).take(units.len()).collect();
+    let fleet = control
+        .as_deref()
+        .and_then(|c| c.fleet)
+        .filter(|fleet| fleet.width(order.len()) > 1);
+    let workers = match fleet {
+        Some(fleet) => fan_out(&inputs, &order, fleet, &mut sinks),
+        None => {
+            for &fi in &order {
+                sinks[fi] = Some(inputs.walk(folder, fi));
+            }
+            1
+        }
+    };
+    if let Some(control) = control.as_deref_mut() {
+        control.workers = workers;
+    }
+
     for fi in 0..units.len() {
         let before = out.len();
         // A replayed file's block is appended verbatim, in the very position
@@ -568,7 +616,7 @@ fn check_units_controlled(
             FilePlan::Replay(block) => Some(block),
         };
         if let Some(block) = replayed
-            && !control.as_deref().is_some_and(|c| c.paranoid)
+            && !paranoid
         {
             out.extend_from_slice(&block.diagnostics);
             if let Some(uncovered) = &block.uncovered {
@@ -581,23 +629,9 @@ fn check_units_controlled(
             }
             continue;
         }
-        let uncovered_entry = walk_one_file(
-            units,
-            index,
-            folder,
-            fi,
-            &dam,
-            &unparsable,
-            warning_handler_abort,
-            final_keyword,
-            php_minor,
-            catalog_skew,
-            version_id,
-            purity.as_ref(),
-            layout,
-            &never_returning,
-            &mut out,
-        );
+        let sink = sinks[fi].take().expect("every walked file left a sink");
+        out.extend(sink.diagnostics);
+        let uncovered_entry = sink.uncovered;
         if let Some(uncovered) = &uncovered_entry {
             uncovered_matches.insert(fi, uncovered.iter().copied().collect());
         }
@@ -675,6 +709,153 @@ fn sorted<'a>(names: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
     let mut out: Vec<&str> = names.collect();
     out.sort_unstable();
     out
+}
+
+/// What one file's walk produced, before it is merged into the run's vector:
+/// the diagnostics the block appended and the `uncovered_matches` entry it
+/// made. The same two values [`FileWalk`] records — this is the in-flight form,
+/// held per file so the walk can run out of unit order and the merge can put it
+/// back in.
+struct FileSink {
+    diagnostics: Vec<Diagnostic>,
+    uncovered: Option<Vec<u32>>,
+}
+
+/// Everything one file's walk reads that is neither its own `&mut` state nor
+/// the file index: the run's shared, immutable inputs, gathered so the fan-out
+/// (issue #490) has exactly one thing to share and one thing to prove `Sync`.
+///
+/// Every field is a shared borrow or a `Copy` scalar. That is the whole
+/// argument for fanning the loop out: a walk mutates a [`Folder`] and a
+/// diagnostic sink, both of which the worker owns, and reads this — which no
+/// walk can change.
+struct WalkInputs<'a> {
+    units: &'a [FileUnit<'a>],
+    index: &'a Index,
+    dam: &'a DamFacts,
+    unparsable: &'a HashSet<&'a str>,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+    php_minor: Option<(u16, u16)>,
+    catalog_skew: bool,
+    version_id: Option<(u32, Option<u32>)>,
+    purity: Option<&'a PurityOracle<'a>>,
+    layout: &'a ProjectLayout,
+    never_returning: &'a HashSet<String>,
+}
+
+impl WalkInputs<'_> {
+    /// Walk unit `fi` on `folder`, into a sink of its own.
+    fn walk(&self, folder: &mut dyn Folder, fi: usize) -> FileSink {
+        let mut diagnostics = Vec::new();
+        let uncovered = walk_one_file(
+            self.units,
+            self.index,
+            folder,
+            fi,
+            self.dam,
+            self.unparsable,
+            self.warning_handler_abort,
+            self.final_keyword,
+            self.php_minor,
+            self.catalog_skew,
+            self.version_id,
+            self.purity,
+            self.layout,
+            self.never_returning,
+            &mut diagnostics,
+        );
+        FileSink { diagnostics, uncovered }
+    }
+}
+
+/// The shared inputs really are shared: if any of them ever grows interior
+/// mutability, the fan-out stops compiling here rather than racing at runtime.
+/// Named individually rather than only through [`WalkInputs`] so the failure
+/// says *which* input moved.
+const _: () = {
+    const fn sync<T: Sync + ?Sized>() {}
+    sync::<Index>();
+    sync::<DamFacts>();
+    sync::<ProjectLayout>();
+    sync::<SourceTree>();
+    sync::<LazyTree<'_>>();
+    sync::<[FileUnit<'_>]>();
+    sync::<PurityOracle<'_>>();
+    sync::<WalkInputs<'_>>();
+};
+
+/// Walk `order` across `fleet`'s workers, filling each file's own sink
+/// (issue #490).
+///
+/// The universe is cut into one contiguous chunk per worker rather than
+/// scheduled file by file, and that is deliberate on two counts: a chunk hires
+/// exactly one folder, so the fleet's live folders — and so its `php` children
+/// — are bounded by the fan-out's width whatever the scheduler does; and
+/// contiguous slots are mostly one package, so two workers rarely contend for
+/// the same artifact reader.
+///
+/// Nothing here decides the diagnostic vector: the caller merges the sinks in
+/// unit order afterwards, exactly where the sequential loop appended them.
+/// Returns the width it actually fanned out to, which the ledger reports.
+#[cfg(not(target_arch = "wasm32"))]
+fn fan_out(
+    inputs: &WalkInputs<'_>,
+    order: &[usize],
+    fleet: &dyn WalkFleet,
+    sinks: &mut [Option<FileSink>],
+) -> usize {
+    use rayon::prelude::*;
+
+    let Some(pool) = walk_fleet::walk_pool() else {
+        // No pool to be had. The caller's own folder is not reachable from
+        // here, so the honest answer is one of the fleet's own, walking the
+        // whole order on this thread — the sequential answer, one folder over.
+        fleet.run_chunk(0, &mut |folder| {
+            for &fi in order {
+                sinks[fi] = Some(inputs.walk(folder, fi));
+            }
+        });
+        return 1;
+    };
+    let workers = fleet.width(order.len());
+    let chunks: Vec<(usize, &[usize])> =
+        order.chunks(order.len().div_ceil(workers)).enumerate().collect();
+    let walked: Vec<Vec<(usize, FileSink)>> = pool.install(|| {
+        chunks
+            .into_par_iter()
+            .map(|(chunk, slots)| {
+                let mut produced = Vec::with_capacity(slots.len());
+                fleet.run_chunk(chunk, &mut |folder| {
+                    for &fi in slots {
+                        produced.push((fi, inputs.walk(folder, fi)));
+                    }
+                });
+                produced
+            })
+            .collect()
+    });
+    for (fi, sink) in walked.into_iter().flatten() {
+        sinks[fi] = Some(sink);
+    }
+    workers
+}
+
+/// The browser build has no threads and never carries a fleet, so the fan-out
+/// is a walk in place on the one folder a chunk is given.
+#[cfg(target_arch = "wasm32")]
+fn fan_out(
+    inputs: &WalkInputs<'_>,
+    order: &[usize],
+    fleet: &dyn WalkFleet,
+    sinks: &mut [Option<FileSink>],
+) -> usize {
+    fleet.run_chunk(0, &mut |folder| {
+        for &fi in order {
+            sinks[fi] = Some(inputs.walk(folder, fi));
+        }
+    });
+    1
 }
 
 /// One file's walk block, lifted out of [`check_units_controlled`]'s loop

@@ -152,6 +152,17 @@ generations on disk, not a finer query DAG:
   whole-universe verdict moved. The verifier
   (`STEINS_GENERATIONS_PARANOID=1`, `cargo xtask perf --warm --paranoid`) walks
   everything anyway and grades every would-be skip against its fresh walk.
+- **The walk that is left fans out** (issue #490). Only the orchestrator asks
+  for it — `check_project`, the salsa query and the wasm surface walk in place,
+  which is what the assertType harness and the loop-subject probe need, since
+  they collect through thread-local sinks. One folder per worker, retired at
+  the end of its chunk, over the run's one `php` child and one pool of what it
+  has answered; per-file sinks merged in unit order, so the diagnostic vector
+  is the sequential run's. The width is trimmed to the *walk* rather than the
+  universe, so an edit that walks a handful of files stays sequential;
+  `STEINS_WALK_WORKERS` names it instead (`=1` is the walk in place).
+  Measured over the ten pinned corpus packages, cold: walk 3026 ms → 1280 ms,
+  `steins check` 8.7 s → 6.8 s at +0.4% peak RSS, `fp-gate` 3.8 s → 3.0 s.
 - **Per-declaration entry-state summaries** were *not* needed and are not
   persisted: a walked file recomputes its entry state locally from the loaded
   trace, and a replayed one recomputes nothing at all. The ADR-0048 §3
