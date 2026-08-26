@@ -41,6 +41,11 @@ steins-db = { path = "../steins-db", features = ["persist"] }
 # job — the same house pattern `steins-db::persist` follows for the other three
 # sections. Target-gated with the rest of the persistence surface.
 serde.workspace = true
+# The per-file walk's fan-out (issue #490). Target-gated for the same reason as
+# the process transport above: the browser build has no threads to fan out
+# over, and the wasm graph stays as ADR-0065 left it. Already resolved in the
+# workspace through `xtask`, so this edge pins no new license row.
+rayon.workspace = true
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }

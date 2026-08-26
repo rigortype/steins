@@ -26,7 +26,8 @@
 //! unanswerable request widens exactly as a dead sidecar does. Nothing
 //! fabricates, and a recorded row cannot outlive the identity that scopes it.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 
 use steins_gen::{ArtifactBuilder, ArtifactReader, Miss, PackageName, SectionName};
 use steins_sidecar::{
@@ -254,7 +255,13 @@ pub struct RecordingEngine {
     live: ProcessEngine,
     /// The rows loaded from a published artifact — empty on a cold run, and
     /// emptied wholesale when the identity gate refuses ([`Self::warm`]).
-    loaded: BTreeMap<String, serde_json::Value>,
+    ///
+    /// Behind an [`Arc`] because a parallel walk's workers ([`Self::worker`])
+    /// read this same table: it is immutable for the run's whole life — the
+    /// identity gate has already decided, and nothing writes a loaded row —
+    /// so sharing it costs one pointer and saves every worker a copy of a
+    /// table that is universe-sized on a warm run.
+    loaded: Arc<BTreeMap<String, serde_json::Value>>,
     /// Whether [`Self::loaded`] *is* a published artifact's table — true only
     /// where [`Self::warm`]'s identity gate accepted. Distinguishes "the table
     /// I loaded was empty" from "there was no table", which is the difference
@@ -267,6 +274,11 @@ pub struct RecordingEngine {
     /// A warm run over an unchanged source records none — the differential
     /// oracle's second assertion.
     fresh: Vec<String>,
+    /// What retired workers delivered, folded in by [`Self::absorb`] — zero on
+    /// a sequential run. Kept apart from the live child's own ledger so
+    /// [`Self::posture`] can report the fleet's whole delivery without the
+    /// transport pretending it made those requests itself.
+    absorbed: FoldPosture,
 }
 
 impl RecordingEngine {
@@ -276,10 +288,11 @@ impl RecordingEngine {
     pub fn cold(live: ProcessEngine) -> Self {
         Self {
             live,
-            loaded: BTreeMap::new(),
+            loaded: Arc::new(BTreeMap::new()),
             adopted: false,
             recorded: BTreeMap::new(),
             fresh: Vec::new(),
+            absorbed: FoldPosture::default(),
         }
     }
 
@@ -296,8 +309,87 @@ impl RecordingEngine {
             .and_then(|raw| steins_sidecar::parse_env_result(&raw))
             .map(|env| FoldTableIdentity::from_env(&env));
         let adopted = live_identity.as_ref() == Some(&artifact.identity);
-        let loaded = if adopted { artifact.rows } else { BTreeMap::new() };
-        Self { live, loaded, adopted, recorded: BTreeMap::new(), fresh: Vec::new() }
+        let loaded = Arc::new(if adopted { artifact.rows } else { BTreeMap::new() });
+        Self {
+            live,
+            loaded,
+            adopted,
+            recorded: BTreeMap::new(),
+            fresh: Vec::new(),
+            absorbed: FoldPosture::default(),
+        }
+    }
+
+    /// One parallel walk worker's engine (issue #490): a live child of its
+    /// own, over the table the run's own engine already established.
+    ///
+    /// **The identity gate is the run's, taken once.** [`Self::warm`] compared
+    /// the stored identity against a live boot surface before any of this
+    /// run's analysis began, and a worker's child is the same `php` on the
+    /// same `PATH` in the same process environment — the very things that
+    /// identity is made of. Re-gating per worker would buy nothing and cost
+    /// something real: it would let one worker's spawn hiccup drop the table
+    /// under *that* worker alone, so half the universe would fold against a
+    /// live engine and half against the table, which is exactly the partial
+    /// degradation that makes findings depend on the fan-out width.
+    ///
+    /// `loaded` is therefore taken from [`Self::loaded_table`], never
+    /// re-decoded, and the worker records only what it consumed or newly asked
+    /// — its half of the run's one generation-level table, folded back by
+    /// [`Self::absorb`].
+    #[must_use]
+    pub fn worker(live: ProcessEngine, loaded: Arc<BTreeMap<String, serde_json::Value>>) -> Self {
+        Self {
+            live,
+            loaded,
+            // Not this engine's question: whether the run may republish the
+            // loaded bytes is decided on the run's own engine, after every
+            // worker's rows are back ([`Self::table_unchanged`]).
+            adopted: false,
+            recorded: BTreeMap::new(),
+            fresh: Vec::new(),
+            absorbed: FoldPosture::default(),
+        }
+    }
+
+    /// The table this engine answers from, for a worker to share
+    /// ([`Self::worker`]).
+    #[must_use]
+    pub fn loaded_table(&self) -> Arc<BTreeMap<String, serde_json::Value>> {
+        Arc::clone(&self.loaded)
+    }
+
+    /// Everything a retired worker recorded, for [`Self::absorb`].
+    #[must_use]
+    pub fn harvest(self) -> FoldHarvest {
+        let posture = self.posture();
+        FoldHarvest { rows: self.recorded, fresh: self.fresh, posture }
+    }
+
+    /// Fold one retired worker's harvest into this engine's own ledger
+    /// (issue #490).
+    ///
+    /// A run that fans out produces N tables where it produced one, and the
+    /// published artifact is one table (ADR-0092 §4). They merge by key union,
+    /// and a key two workers both asked cannot conflict: a row *is* the
+    /// engine's answer to that exact request, and the whole replay design
+    /// rests on that answer being a function of the request and the engine
+    /// identity — which every worker of a run shares. First writer wins so the
+    /// merge is a total order rather than a race, and the caller absorbs in
+    /// chunk order so the same run merges the same way every time.
+    ///
+    /// The `fresh` ledger is a *set* of keys the live engine answered, kept as
+    /// a vector for its first-answer order; merging dedupes, so two workers
+    /// independently asking one question count as the one miss it is.
+    pub fn absorb(&mut self, harvest: FoldHarvest) {
+        for (key, value) in harvest.rows {
+            self.recorded.entry(key).or_insert(value);
+        }
+        let seen: HashSet<&String> = self.fresh.iter().collect();
+        let mut fresh: Vec<String> =
+            harvest.fresh.into_iter().filter(|k| !seen.contains(k)).collect();
+        self.fresh.append(&mut fresh);
+        self.absorbed = self.absorbed.merged(harvest.posture);
     }
 
     /// Whether the artifact this run would publish is the artifact it loaded,
@@ -315,7 +407,7 @@ impl RecordingEngine {
     /// on rows this run rejected.
     #[must_use]
     pub fn table_unchanged(&self) -> bool {
-        self.adopted && self.recorded == self.loaded
+        self.adopted && self.recorded == *self.loaded
     }
 
     /// The rows this run consumed or newly asked, so far.
@@ -350,9 +442,13 @@ impl RecordingEngine {
     /// wrapped transport's own ledger, unchanged: a run that answered from the
     /// table throughout has an unengaged posture, which is true (no child was
     /// needed) and is the warm path working, not a degradation.
+    ///
+    /// Joined with whatever this run's retired workers delivered
+    /// ([`Self::absorb`]), so a fanned-out run reports the fleet's posture and
+    /// not just the one child this engine happens to hold.
     #[must_use]
     pub fn posture(&self) -> FoldPosture {
-        self.live.posture()
+        self.absorbed.merged(self.live.posture())
     }
 
     /// The identity of whatever answered this run's `env` row, without the
@@ -460,6 +556,23 @@ impl FoldEngine for RecordingEngine {
     }
 }
 
+/// What one retired parallel-walk worker hands back (issue #490): its half of
+/// the run's fold table, the misses it had to ask live, and what its own child
+/// delivered.
+///
+/// Deliberately data rather than a folder: a worker's folder holds a live `php`
+/// child, and keeping every worker's folder alive until the merge would make
+/// the run's peak the *sum* of the fleet. Harvesting retires the child at the
+/// end of its chunk and carries back only what the run still needs.
+pub struct FoldHarvest {
+    /// The rows this worker consumed or newly asked.
+    pub rows: BTreeMap<String, serde_json::Value>,
+    /// The keys this worker's live engine answered, in first-answer order.
+    pub fresh: Vec<String>,
+    /// What this worker's own child delivered over its chunk.
+    pub posture: FoldPosture,
+}
+
 /// The warm-path folder: the shared policy over the recording transport.
 pub type RecordingFolder = EngineFolder<RecordingEngine>;
 
@@ -493,6 +606,31 @@ impl EngineFolder<RecordingEngine> {
     #[must_use]
     pub fn engine_identity(&self) -> Option<FoldTableIdentity> {
         self.engine.identity()
+    }
+
+    /// The table this folder answers from, for a worker to share
+    /// ([`RecordingEngine::loaded_table`]).
+    #[must_use]
+    pub fn loaded_table(&self) -> Arc<BTreeMap<String, serde_json::Value>> {
+        self.engine.loaded_table()
+    }
+
+    /// Retire this folder and hand back what its engine recorded
+    /// ([`RecordingEngine::harvest`]).
+    #[must_use]
+    pub fn harvest(self) -> FoldHarvest {
+        self.engine.harvest()
+    }
+
+    /// Fold a retired worker's harvest into this folder's table
+    /// ([`RecordingEngine::absorb`]).
+    ///
+    /// Only the *engine's* ledger merges. A worker's policy memos are
+    /// deliberately dropped with the worker: they are per-run caches of what
+    /// the engine already answered, every one of those answers is now a row in
+    /// the table above, and a memo carries no information a row does not.
+    pub fn absorb_worker(&mut self, harvest: FoldHarvest) {
+        self.engine.absorb(harvest);
     }
 }
 

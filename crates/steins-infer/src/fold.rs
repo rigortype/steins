@@ -62,6 +62,25 @@ impl FoldPosture {
     pub fn sidecar_backed_throughout(&self) -> bool {
         self.engaged && self.losses == 0
     }
+
+    /// The posture of two transports that served one run — what a parallel
+    /// walk's workers report together (issue #490).
+    ///
+    /// Every field joins the way its own meaning demands: `engaged` and
+    /// `abandoned` are claims about the *run* (one child that spawned means
+    /// the run engaged one; one child that spent its respawn budget means part
+    /// of the run finished as the sound subset, and
+    /// [`Self::sidecar_backed_throughout`] must not read that as clean), while
+    /// `losses` and `restarts` are counts of edges and therefore add.
+    #[must_use]
+    pub fn merged(self, other: Self) -> Self {
+        Self {
+            engaged: self.engaged || other.engaged,
+            losses: self.losses.saturating_add(other.losses),
+            restarts: self.restarts.saturating_add(other.restarts),
+            abandoned: self.abandoned || other.abandoned,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

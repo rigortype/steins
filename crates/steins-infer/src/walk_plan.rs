@@ -34,6 +34,7 @@ use std::fmt;
 use crate::Diagnostic;
 use crate::dam::DamFacts;
 use crate::facts::FileFacts;
+use crate::walk_fleet::WalkFleet;
 
 /// What one file's walk block should do this run.
 pub(crate) enum FilePlan {
@@ -159,6 +160,18 @@ pub(crate) struct WalkControl<'a> {
     /// generation channel: every other entry point hands `check_units` no
     /// control at all and each phase reads the tree exactly as it always did.
     pub(crate) facts: &'a [FileFacts],
+    /// The per-worker folders the walk loop may fan out over (issue #490), or
+    /// `None` for a walk in place on the caller's own folder.
+    ///
+    /// It rides the control for the same reason `facts` does: only a caller
+    /// that can *make* folders — configured for this run, one per worker — may
+    /// ask for a fan-out, and the orchestrator is the one such caller. Every
+    /// other entry point passes no control at all and walks sequentially by
+    /// construction, which matters for two of them in particular: the
+    /// assertType harness and the loop-subject probe
+    /// ([`crate::assert_harness`]) collect through thread-local sinks that a
+    /// worker thread would not see.
+    pub(crate) fleet: Option<&'a dyn WalkFleet>,
     /// Walk every file *anyway* and compare, instead of trusting the plan.
     pub(crate) paranoid: bool,
     /// Per file, in unit order: what this run's block produced — the rows the
@@ -172,6 +185,11 @@ pub(crate) struct WalkControl<'a> {
     /// Files the plan would have skipped — equal to `replayed` outside
     /// paranoid mode, and the population the verifier graded inside it.
     pub(crate) would_skip: usize,
+    /// How many workers the walk loop actually fanned out over (issue #490);
+    /// `1` is the sequential walk. Reported rather than assumed: the width is
+    /// trimmed to the walk's own size, so a rebuild that walks two files stays
+    /// sequential on a machine that would have allowed twelve.
+    pub(crate) workers: usize,
     /// The first [`MAX_RECORDED_DIVERGENCES`] files whose replayed block did
     /// not equal its fresh walk. Capped so a systematically broken affected
     /// set over a 90k-file corpus reports a number and a sample rather than
@@ -215,15 +233,18 @@ impl<'a> WalkControl<'a> {
         planner: &'a mut dyn FnMut(&UniverseVerdict<'_>) -> Vec<FilePlan>,
         paranoid: bool,
         facts: &'a [FileFacts],
+        fleet: Option<&'a dyn WalkFleet>,
     ) -> Self {
         Self {
             planner,
             facts,
+            fleet,
             paranoid,
             ledger: Vec::new(),
             walked: 0,
             replayed: 0,
             would_skip: 0,
+            workers: 1,
             divergences: Vec::new(),
             divergence_count: 0,
             passes: PassTimings::default(),

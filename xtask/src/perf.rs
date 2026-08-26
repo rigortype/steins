@@ -38,8 +38,8 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use steins_db::{EffectsPolicy, PluginFacts, Project, SourceFile, SteinsDatabase, composer, parse};
 use steins_infer::{
-    Diagnostic, FinalKeyword, GenerationMode, GenerationParams, SidecarFolder, check_project,
-    generation_check,
+    Diagnostic, FinalKeyword, GenerationMode, GenerationParams, PhaseTimings, SidecarFolder,
+    check_project, generation_check,
 };
 use steins_syntax::SourceTree;
 
@@ -498,12 +498,22 @@ struct WarmRun {
     /// Files the affected set would have skipped — under `--paranoid` these
     /// were walked anyway and graded, so this is the verified population.
     would_skip: usize,
+    /// How many workers the walk fanned out over (issue #490); `1` is the
+    /// sequential walk, which is what a rebuild walking a handful of files
+    /// gets whatever the machine allows.
+    workers: usize,
 }
 
 /// What `--warm` measured for one target.
 struct WarmMeasurement {
     /// The cold generation build + publish that seeded the store.
     cold_build_ms: f64,
+    /// That build's own phase split and walk width — the cold half of the
+    /// lifecycle measured the way the warm rebuilds are. Without it, the one
+    /// run that walks the whole universe is the one run reported as a single
+    /// number, which is exactly the number a walk-loop change moves.
+    cold_build: PhaseTimings,
+    cold_build_workers: usize,
     warm: Vec<WarmRun>,
     /// Whether every generation run (cold and warm alike) hashed identically
     /// to this invocation's measured cold baseline — the ADR-0092 §5 oracle,
@@ -609,6 +619,8 @@ fn measure_warm_in_store(
         return Err("the scratch store unexpectedly held a generation".to_owned());
     }
     let paranoid = outcome.report.walk.paranoid;
+    let cold_build = outcome.report.timings;
+    let cold_build_workers = outcome.report.walk.workers;
     let mut divergences: Vec<String> =
         outcome.report.walk.divergences.iter().map(ToString::to_string).collect();
     let mut divergence_count = outcome.report.walk.divergence_count;
@@ -648,6 +660,7 @@ fn measure_warm_in_store(
             walked: w.walked,
             replayed: w.replayed,
             would_skip: w.would_skip,
+            workers: w.workers,
         });
         if mismatch.is_none() {
             mismatch = check(&format!("warm rebuild {}", i + 1), outcome.findings);
@@ -656,6 +669,8 @@ fn measure_warm_in_store(
 
     Ok(WarmMeasurement {
         cold_build_ms,
+        cold_build,
+        cold_build_workers,
         warm,
         matches: mismatch.is_none(),
         mismatch,
@@ -670,7 +685,24 @@ fn measure_warm_in_store(
 /// baselines become meaningful in slice B).
 fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
     println!("    warm (frozen generations, ADR-0092 §5):");
-    println!("      cold build+publish into a scratch store: {:.1} ms", w.cold_build_ms);
+    println!(
+        "      cold build+publish into a scratch store: {:.1} ms — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1}",
+        w.cold_build_ms,
+        w.cold_build.capture_ms,
+        w.cold_build.trees_ms,
+        w.cold_build.analyze_ms,
+        w.cold_build.persist_ms,
+    );
+    println!(
+        "        analyze split: merge {:.1} ms, facts {:.1} ms, effects {:.1} ms, throws {:.1} ms, walk {:.1} ms over {} worker(s), report {:.1} ms",
+        w.cold_build.merge_ms,
+        w.cold_build.facts_ms,
+        w.cold_build.effects_ms,
+        w.cold_build.throws_ms,
+        w.cold_build.walk_ms,
+        w.cold_build_workers,
+        w.cold_build.report_ms,
+    );
     for (i, run) in w.warm.iter().enumerate() {
         println!(
             "      warm run {}: capture {:.1} ms, trees {:.1} ms ({} loaded, {} parsed{}, {} tree(s) decoded), analyze {:.1} ms ({} walked, {} replayed), persist {:.1} ms, total {:.1} ms",
@@ -692,12 +724,13 @@ fn print_warm(w: &WarmMeasurement, cold: &Measurement) {
             run.capture_ms + run.trees_ms + run.analyze_ms + run.persist_ms,
         );
         println!(
-            "        analyze split: merge {:.1} ms, facts {:.1} ms, effects {:.1} ms, throws {:.1} ms, walk {:.1} ms, report {:.1} ms",
+            "        analyze split: merge {:.1} ms, facts {:.1} ms, effects {:.1} ms, throws {:.1} ms, walk {:.1} ms over {} worker(s), report {:.1} ms",
             run.merge_ms,
             run.facts_ms,
             run.effects_ms,
             run.throws_ms,
             run.walk_ms,
+            run.workers,
             run.report_ms,
         );
     }
@@ -1031,6 +1064,8 @@ struct EditRow {
     walked: usize,
     replayed: usize,
     would_skip: usize,
+    /// How many workers the cost run's walk fanned out over (issue #490).
+    workers: usize,
     parsed: usize,
     decoded: usize,
     warm_ms: f64,
@@ -1263,6 +1298,7 @@ fn grade(
         walked: warm.2.walk.walked,
         replayed: warm.2.walk.replayed,
         would_skip: verified.2.walk.would_skip,
+        workers: warm.2.walk.workers,
         parsed: warm.2.packages.iter().map(|p| p.parsed).sum(),
         decoded: warm.2.packages.iter().map(|p| p.decoded).sum(),
         warm_ms: t.total_ms(),
@@ -1315,10 +1351,11 @@ fn print_edits(rows: &[EditRow]) -> bool {
     let mut green = true;
     for row in rows {
         println!(
-            "      {:<28} {:<26} {} walked / {} replayed, {} parsed, {} tree(s) decoded — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1}{} = {:.1} ms (verifier graded {})",
+            "      {:<28} {:<26} {} walked over {} worker(s) / {} replayed, {} parsed, {} tree(s) decoded — capture {:.1} + trees {:.1} + analyze {:.1} + persist {:.1}{} = {:.1} ms (verifier graded {})",
             row.shape,
             row.file,
             row.walked,
+            row.workers,
             row.replayed,
             row.parsed,
             row.decoded,

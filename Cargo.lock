@@ -1102,6 +1102,7 @@ dependencies = [
 name = "steins-infer"
 version = "0.1.6"
 dependencies = [
+ "rayon",
  "salsa",
  "serde",
  "serde_json",
