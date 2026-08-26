@@ -36,6 +36,11 @@ steins-gen = { path = "../steins-gen" }
 # on. Target-gated like steins-gen above: the wasm graph keeps its surface
 # (ADR-0065) — nothing in the playground persists.
 steins-db = { path = "../steins-db", features = ["persist"] }
+# The `summaries` section's payload (issue #489 slice B) is derived rather than
+# hand-rolled, so `deny_unknown_fields` and the strict inverses are the compiler's
+# job — the same house pattern `steins-db::persist` follows for the other three
+# sections. Target-gated with the rest of the persistence surface.
+serde.workspace = true
 
 [dev-dependencies]
 steins-db = { path = "../steins-db" }

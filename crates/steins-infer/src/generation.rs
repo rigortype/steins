@@ -88,7 +88,8 @@ use steins_syntax::SourceTree;
 
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
 use crate::project::{FileUnit, Index, Res};
-use crate::walk_plan::{FilePlan, UniverseVerdict, WalkControl};
+use crate::summaries::{Summaries as StoredSummaries, SummaryRow, read_summaries, write_summaries};
+use crate::walk_plan::{FilePlan, FileWalk, UniverseVerdict, WalkControl};
 use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
 
 // ---------------------------------------------------------------------------
@@ -412,6 +413,10 @@ struct LoadedPkg {
     /// The decoded shard, when the persisted slots still match this universe.
     shard: Option<PackageShard>,
     slots_stable: bool,
+    /// The package's persisted walk blocks, when the `summaries` section
+    /// decoded. `None` degrades this package to walking, never the run — an
+    /// artifact written before the section existed takes exactly this shape.
+    summaries: Option<StoredSummaries>,
 }
 
 /// Run one generation lifecycle: open the store once, load `CURRENT` if it
@@ -448,8 +453,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         inventories.push(inventory);
     }
 
-    // Texts through the seal: what is analyzed is what was fingerprinted.
+    // Texts through the seal: what is analyzed is what was fingerprinted. The
+    // per-file content hashes come off the same seal (issue #489 slice B needs
+    // to know which files of a *changed* package actually changed, which the
+    // package-level fingerprint cannot say).
     let mut texts: HashMap<String, String> = HashMap::with_capacity(diag.len());
+    let mut contents: Vec<Option<Fingerprint>> =
+        std::iter::repeat_n(None, diag.len()).collect();
     for (plan, inventory) in plans.iter().zip(&inventories) {
         for &slot in &plan.slots {
             let key = inventory.key_for(&p.files[slot]).ok_or_else(|| {
@@ -458,10 +468,15 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                     kind: DriftKind::Uncaptured,
                 })
             })?;
+            contents[slot] = inventory.entry(&key).map(|entry| entry.content);
             let bytes = inventory.read(&key).map_err(GenerationError::Sealed)?;
             texts.insert(diag[slot].clone(), String::from_utf8_lossy(&bytes).into_owned());
         }
     }
+    let contents: Vec<Fingerprint> = contents
+        .into_iter()
+        .map(|c| c.expect("every captured file has a sealed content hash"))
+        .collect();
     let capture_ms = ms(t_capture.elapsed());
 
     // Load-or-parse, per package. Any miss degrades that one package.
@@ -470,6 +485,11 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         std::iter::repeat_with(|| None).take(diag.len()).collect();
     let mut states: Vec<PkgState> = Vec::with_capacity(plans.len());
     let mut shards: Vec<PackageShard> = Vec::with_capacity(plans.len());
+    // Per package, the walk blocks the published generation carries — the
+    // replay candidates. Whether any of them may actually be replayed is not
+    // knowable here: it needs the run's whole-universe verdicts, which only
+    // exist once the analysis has computed them.
+    let mut published_summaries: Vec<Option<StoredSummaries>> = Vec::with_capacity(plans.len());
     for plan in &plans {
         let attempt = current
             .as_ref()
@@ -477,6 +497,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         match attempt {
             Ok(loaded) => {
                 let slots_stable = loaded.slots_stable;
+                published_summaries.push(loaded.summaries);
                 for (slot, tree) in loaded.trees {
                     tree_slots[slot] = Some(tree);
                 }
@@ -493,6 +514,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 });
             }
             Err(refusal) => {
+                published_summaries.push(None);
                 for &slot in &plan.slots {
                     tree_slots[slot] = Some(SourceTree::parse(&texts[&diag[slot]]));
                 }
@@ -513,6 +535,8 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     }
     let trees: Vec<SourceTree> =
         tree_slots.into_iter().map(|t| t.expect("every slot is filled above")).collect();
+    let replay_candidates: usize =
+        published_summaries.iter().flatten().map(|s| s.rows().count()).sum();
     let trees_ms = ms(t_trees.elapsed());
 
     // The fold table (ADR-0092 §4): warm over the published artifact when it
@@ -539,6 +563,34 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     };
     let mut folder = EngineFolder::with_engine(engine);
     folder.set_php_target(p.layout.php_target().cloned());
+    // Force the engine's own `env` row now. `check_units` asks for it first
+    // thing anyway (`folder.php_minor()` is its second statement), so this is
+    // the same round trip at the same memo, moved earlier — and it is what
+    // makes the engine posture, and therefore the replay stamp, available
+    // before the first file is walked rather than after the last.
+    crate::Folder::php_minor(&mut folder);
+    let engine_posture = posture_of(folder.engine_identity().as_ref());
+    let composer_lock = p
+        .layout
+        .roots()
+        .last()
+        .and_then(|root| std::fs::read(root.dir().join("composer.lock")).ok())
+        .map(|bytes| Fingerprint::of_bytes("steins-gen/composer.lock", &bytes));
+    // The replay stamp: the generation identity with the per-package source
+    // fingerprints left out, because those are gated per package by the
+    // `sources` section already. Everything else — the analyzer version, the
+    // lock, the catalog pin, the plugin channel, the engine posture, the
+    // finding-relevant config — must be unmoved before one persisted finding
+    // may be replayed. (This is the re-audit the issue asks for: under slice A
+    // an under-covered input cost a stale *cache*; here it would cost a stale
+    // *finding*, so the gate is the whole identity rather than its package
+    // half.)
+    let stamp = *GenerationInputs {
+        packages: Vec::new(),
+        ..identity_inputs(p, composer_lock, engine_posture.clone())
+    }
+    .generation_id()
+    .as_fingerprint();
 
     // The analysis proper — the same `check_units` every entry point runs,
     // over an index merged from the loaded-or-rebuilt shards (the merge is
@@ -552,8 +604,16 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     // walked; it decides per file whether the persisted block may be replayed.
     let paranoid = paranoid_enabled();
     let mut universe: Option<Fingerprint> = None;
+    let mut licensed = 0usize;
     let mut planner = |verdict: &UniverseVerdict<'_>| -> Vec<FilePlan> {
-        universe = Some(universe_digest(verdict));
+        let digest = universe_digest(verdict);
+        universe = Some(digest);
+        licensed = published_summaries
+            .iter()
+            .flatten()
+            .filter(|s| s.licensed_by(&stamp, &digest))
+            .map(|s| s.rows().count())
+            .sum();
         // Slice B's affected-set computation lands on top of this seam. Until
         // it does, the plan is empty, which `check_units_controlled` reads as
         // "walk every file" — so the verifier below has nothing to grade and
@@ -583,8 +643,18 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         paranoid,
         divergences: std::mem::take(&mut control.divergences),
     };
+    let ledger = std::mem::take(&mut control.ledger);
+    // The control's borrow of the planner — and so the planner's of the two
+    // values it writes — ends here; everything either produced is owned above.
+    drop(control);
+    let universe = universe.expect("the planner runs before the first file is walked");
     for divergence in &walk.divergences {
         notes.push(format!("PARANOID DIVERGENCE {divergence}"));
+    }
+    if replay_candidates > 0 {
+        notes.push(format!(
+            "{licensed}/{replay_candidates} persisted walk block(s) are replay-licensed by this run's identity and verdicts"
+        ));
     }
     if paranoid {
         // Under the verifier, say which universe verdict this run computed:
@@ -596,42 +666,16 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             walk.walked,
             walk.would_skip,
             walk.divergences.len(),
-            universe.map_or_else(|| "(not computed)".to_owned(), |f| f.to_hex()),
+            universe.to_hex(),
         ));
     }
 
     // Identity, honestly filled (see the module docs for in/out reasoning).
     let fold_table = folder.published_table();
     let fold_fresh = folder.fresh_keys().len();
-    let engine_posture = match &fold_table {
-        Some(artifact) => EnginePosture::On {
-            php_version: artifact.identity.php_version.clone(),
-            // `None` (an engine that did not say) is encoded as 0 — a width no
-            // real engine reports, so it stays its own identity.
-            int_size: artifact.identity.int_size.and_then(|s| u8::try_from(s).ok()).unwrap_or(0),
-            extensions: artifact.identity.extensions.clone(),
-            fold_lane: artifact.identity.fold_lane.clone(),
-        },
-        None => EnginePosture::Off,
-    };
-    let composer_lock = p
-        .layout
-        .roots()
-        .last()
-        .and_then(|root| std::fs::read(root.dir().join("composer.lock")).ok())
-        .map(|bytes| Fingerprint::of_bytes("steins-gen/composer.lock", &bytes));
     let inputs = GenerationInputs {
-        analyzer_version: analyzer_version().to_owned(),
         packages: plans.iter().map(|plan| (plan.name.clone(), plan.fingerprint)).collect(),
-        composer_lock,
-        catalog_pin: format!(
-            "php-{}.{}",
-            steins_catalog::PINNED_PHP.0,
-            steins_catalog::PINNED_PHP.1
-        ),
-        plugins: plugin_identity(p.plugins),
-        engine: engine_posture,
-        config: config_identity(p),
+        ..identity_inputs(p, composer_lock, engine_posture)
     };
     let id = inputs.generation_id();
 
@@ -657,6 +701,13 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
             &diag,
             current.as_ref(),
             fold_table.as_ref(),
+            &Summaries {
+                stamp,
+                universe,
+                diag: &diag,
+                contents: &contents,
+                ledger: &ledger,
+            },
         ) {
             Ok(hex) => Some(hex),
             Err(detail) => {
@@ -732,7 +783,10 @@ fn try_load(generation: &Generation, plan: &Plan, diag: &[String]) -> Result<Loa
     // every persisted slot still names the same file. Otherwise the caller
     // rebuilds it from the loaded trees — still no reparse.
     let shard = if slots_stable { Some(read_shard(&mut reader).map_err(miss)?) } else { None };
-    Ok(LoadedPkg { trees: loaded, shard, slots_stable })
+    // The walk blocks are *not* a load refusal when they fail: the trees are
+    // already in hand and every file of the package simply walks.
+    let summaries = read_summaries(&mut reader).ok();
+    Ok(LoadedPkg { trees: loaded, shard, slots_stable, summaries })
 }
 
 /// Build one package's shard from its (loaded or fresh) trees.
@@ -759,6 +813,7 @@ fn publish(
     diag: &[String],
     current: Option<&Generation>,
     fold_table: Option<&FoldTableArtifact>,
+    summaries: &Summaries<'_>,
 ) -> Result<String, String> {
     let mut candidate = store.begin(id, inventories).map_err(|e| format!("begin: {e}"))?;
     for ((plan, state), shard) in plans.iter().zip(states).zip(shards) {
@@ -767,10 +822,15 @@ fn publish(
         let copied = (state.parsed == 0 && state.slots_stable)
             .then(|| current.and_then(|generation| copy_artifact(generation, plan)))
             .flatten();
-        let builder = match copied {
+        let mut builder = match copied {
             Some(builder) => builder,
             None => build_artifact(plan, shard, trees, diag),
         };
+        // The `summaries` section is always this run's, even where the other
+        // four sections were byte-copied: the copied ones are functions of the
+        // sources alone, this one is a function of the whole run identity, and
+        // republishing a stale stamp would only refuse itself on the next run.
+        summaries.write(&mut builder, plan);
         candidate
             .write_artifact(&plan.name, &builder)
             .map_err(|e| format!("write {}: {e}", plan.name))?;
@@ -803,6 +863,39 @@ fn build_artifact(
         .section(sources_section(), sources_payload(&plan.fingerprint))
         .expect("distinct section names");
     builder
+}
+
+/// This run's walk blocks on their way to disk: the two stamps that license
+/// replaying them, the per-file content hashes that say which files moved, and
+/// the ledger `check_units` filled in unit order.
+struct Summaries<'a> {
+    stamp: Fingerprint,
+    universe: Fingerprint,
+    diag: &'a [String],
+    contents: &'a [Fingerprint],
+    ledger: &'a [FileWalk],
+}
+
+impl Summaries<'_> {
+    /// Add one package's rows to its artifact. A run whose ledger is short —
+    /// which cannot happen, since `check_units` records every unit — writes
+    /// the rows it has; the reader keys by path and a missing row simply
+    /// cannot be replayed.
+    fn write(&self, builder: &mut ArtifactBuilder, plan: &Plan) {
+        let rows: Vec<SummaryRow<'_>> = plan
+            .slots
+            .iter()
+            .filter_map(|&slot| {
+                Some(SummaryRow {
+                    path: &self.diag[slot],
+                    slot,
+                    content: self.contents[slot],
+                    walk: self.ledger.get(slot)?,
+                })
+            })
+            .collect();
+        write_summaries(builder, &self.stamp, &self.universe, &rows);
+    }
 }
 
 /// Copy an untouched package's artifact bytes section-for-section into a new
@@ -842,6 +935,48 @@ fn attribution_notices(index: &Index, policy: &EffectsPolicy) -> Vec<String> {
             format!("steins.toml [effects.attribution]: \"{key}\" names no symbol this project defines")
         })
         .collect()
+}
+
+/// The engine posture from the run's own recorded boot surface, or
+/// [`EnginePosture::Off`] for an engine that never described itself
+/// (`--no-php`, a dead sidecar, an old runner).
+fn posture_of(identity: Option<&crate::FoldTableIdentity>) -> EnginePosture {
+    match identity {
+        Some(identity) => EnginePosture::On {
+            php_version: identity.php_version.clone(),
+            // `None` (an engine that did not say) is encoded as 0 — a width no
+            // real engine reports, so it stays its own identity.
+            int_size: identity.int_size.and_then(|s| u8::try_from(s).ok()).unwrap_or(0),
+            extensions: identity.extensions.clone(),
+            fold_lane: identity.fold_lane.clone(),
+        },
+        None => EnginePosture::Off,
+    }
+}
+
+/// Everything the generation identity covers except the per-package source
+/// fingerprints — see the module docs for what is in and what is deliberately
+/// out. Filled once and used twice: whole (plus the packages) as the
+/// generation id, and with `packages` emptied as the replay stamp of issue
+/// #489 slice B, so the two can never drift apart.
+fn identity_inputs(
+    p: &GenerationParams<'_>,
+    composer_lock: Option<Fingerprint>,
+    engine: EnginePosture,
+) -> GenerationInputs {
+    GenerationInputs {
+        analyzer_version: analyzer_version().to_owned(),
+        packages: Vec::new(),
+        composer_lock,
+        catalog_pin: format!(
+            "php-{}.{}",
+            steins_catalog::PINNED_PHP.0,
+            steins_catalog::PINNED_PHP.1
+        ),
+        plugins: plugin_identity(p.plugins),
+        engine,
+        config: config_identity(p),
+    }
 }
 
 /// The plugin channel's finding-relevant content as identity strings: the
