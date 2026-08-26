@@ -503,7 +503,7 @@ const GENERIC_ONLY_VOCABULARY: &[&str] = &["int-range"];
 ///   unrecognized name is a class reference — a different question, judged by
 ///   the caller's class machinery, and never this one's business.
 /// * **unrecognized**, against the builtin tables: `KNOWN_UNENFORCED`,
-///   `DERIVED_OPERATORS`, [`GENERIC_ONLY_VOCABULARY`], and everything
+///   `DERIVED_OPERATORS`, `GENERIC_ONLY_VOCABULARY`, and everything
 ///   [`lower_identifier`] models (the refined-string grid included, since it is
 ///   reached from that table's catch-all).
 ///
