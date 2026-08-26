@@ -27,12 +27,31 @@ struct Run {
 }
 
 fn run(args: &[&str]) -> Run {
-    let out = steins_cmd().args(args).output().expect("run steins");
+    let out = steins_cmd().args(uncached(args)).output().expect("run steins");
     Run {
         code: out.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
     }
+}
+
+/// `args` with `--no-cache` inserted after a `check` subcommand (issue #525).
+///
+/// This is a hermeticity rule, not a preference. The fixtures these tests
+/// analyze are **checked in**, so a cached run leaves a `.steins/` inside the
+/// repository — and the next run of the suite starts warm from it, possibly
+/// against a differently built analyzer that carries the same
+/// `CARGO_PKG_VERSION` and therefore the same generation identity. That is a
+/// very unpleasant flake to chase, and none of the properties on this page is
+/// about the cache: the findings are identical either way (ADR-0092 §2), and
+/// the cache's own behavior belongs to `tests/generation_capture_root.rs`,
+/// whose every fixture lives in a temp directory that dies with the test.
+fn uncached(args: &[&str]) -> Vec<String> {
+    let mut out: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+    if out.first().is_some_and(|a| a == "check") {
+        out.insert(1, "--no-cache".to_owned());
+    }
+    out
 }
 
 #[test]
