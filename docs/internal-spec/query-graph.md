@@ -1,7 +1,9 @@
 # The Query Graph
 
-**Status: partial** — the graph exists and memoizes the syntax level; inference
-deliberately runs outside it. ADR-0009, ADR-0028, ADR-0048.
+**Status: partial, and deliberately final at this size** — the graph exists and
+memoizes the syntax level within one run; inference runs outside it, and
+cross-run reuse is ADR-0092's generation store rather than a larger graph.
+ADR-0009 (as amended), ADR-0028, ADR-0048, ADR-0092.
 
 ## Inputs and queries
 
@@ -45,8 +47,10 @@ query, so *any* file edit invalidates it and everything downstream. That is
 acceptable for a batch CLI. ADR-0009 recorded per-symbol salsa interning as
 the plan; ADR-0092 §3 supersedes it — the index shards per *package*, with
 every global table merged per generation, and `project_index` already
-delegates to that shard builder (`steins_db::shard`, issue #486). What has
-not landed is persistence: the shards are rebuilt in memory each run.
+delegates to that shard builder (`steins_db::shard`, issue #486). The shards
+persist per package (#487) and a warm run loads an unchanged package's shard
+rather than rebuilding it; the merge itself is recomputed every generation,
+because PHP's symbol space makes ambiguity and `class_alias` global facts.
 
 ## What runs outside the graph
 
@@ -89,12 +93,36 @@ to it:
 
 Everything else about the LSP is M5/M6 work.
 
-## Not implemented
+## What the warm path is, and where it lives
 
-- **Per-declaration entry-state summaries as memoized queries** — the M5 slice.
-- **Sharded per-symbol `project_index`** — superseded by ADR-0092 §3's
-  per-package shards; the shard builder underneath `project_index` landed
-  (issue #486), its persistence has not (#487).
-- **Fold results as recorded inputs.**
-- **Any warm path or cross-run cache.** There is no on-disk cache at all.
-- **A perf harness.** Cold/warm baselines are not measured under `xtask`.
+Everything this section once listed as missing landed under ADR-0092, and none
+of it landed *in the graph* — which is the point. Persistence is frozen
+generations on disk, not a finer query DAG:
+
+- **Cross-run reuse** is the generation store (`<project>/.steins/gen/`), built
+  and read by `steins_infer::generation_check` behind
+  `STEINS_EXPERIMENTAL_GENERATIONS=1` (issue #489 slice A). A package whose
+  captured source fingerprint matches its artifact loads its lowered trees and
+  its shard instead of re-parsing.
+- **The per-package payloads** — `symbols`, `contracts`, `trace` — live in
+  `steins_db::persist` (#487); the container, identity and store live in
+  `steins-gen` (#485).
+- **Fold results are recorded generation inputs** through the ADR-0066 table
+  seam, keyed under the engine identity (#488).
+- **The perf harness** is `cargo xtask perf` (#483), with `--warm` measuring the
+  lifecycle and asserting warm ≡ cold in-process (#489).
+- **Per-declaration entry-state summaries** were *not* needed and are not
+  persisted: a warm run walks every file, so each recomputes its entry state
+  locally from the loaded trace. The ADR-0048 §3 constraint stands as a
+  constraint; it did not become an artifact.
+
+What salsa still does is exactly what this document's first section describes —
+memoize `parse` within one run — and no new tracked semantic query is planned.
+
+## Still open
+
+- **Skipping the walk of unchanged files** (issue #489 slice B). Warm runs
+  currently re-walk everything, which measurement says is 60–76% of a warm run
+  and the share grows with project size.
+- **Per-file walk parallelism** (issue #490, re-scoped to the file loop).
+- **The trace codec** (issue #504): artifacts run ~14x the analyzed source.
