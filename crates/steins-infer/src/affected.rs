@@ -432,9 +432,18 @@ fn identifiers(text: &str) -> impl Iterator<Item = &str> {
 }
 
 /// The files a file's class-likes inherit from, in the widest reading the
-/// lowering supports: `extends`, `implements`, `@mixin` targets, and — for a
-/// class that uses traits, whose trait names the lowering keeps only as a bit
-/// — every class-like this file names at all.
+/// lowering supports: `extends`, `implements`, `@mixin` targets, the
+/// **anonymous** classes' edges, and — for a class that uses traits, whose
+/// trait names the lowering keeps only as a bit — every class-like this file
+/// names at all.
+///
+/// Anonymous classes matter and are easy to miss: they enter no index and
+/// declare no name, so nothing can ever have a *call* edge to the file holding
+/// one, yet the declared-receiver lane's descendant closure (ADR-0049 A4) reads
+/// them precisely because an invisible descendant of a union member would
+/// otherwise be missed. Adding a `new class extends Report {}` in a file that
+/// declares nothing else would, without this leg, leave every reasoner about
+/// `Report`'s descendants replaying a stale answer.
 fn inheritance_edges(tree: &SourceTree, decls: &DeclTable, file: usize) -> Vec<usize> {
     let mut out: HashSet<usize> = HashSet::new();
     let mut add = |fqn: &str| {
@@ -462,6 +471,14 @@ fn inheritance_edges(tree: &SourceTree, decls: &DeclTable, file: usize) -> Vec<u
             }
         }
         any_trait_user |= c.uses_traits;
+    }
+    for edge in tree.anonymous_class_edges() {
+        if let Some(parent) = &edge.parent {
+            add(&tree.resolve_class_fqn(parent).to_ascii_lowercase());
+        }
+        for r in &edge.implements {
+            add(&tree.resolve_class_fqn(r).to_ascii_lowercase());
+        }
     }
     if any_trait_user {
         // `ClassDecl` records only *that* traits are used, so the trait names
@@ -665,6 +682,23 @@ mod tests {
             "<?php namespace App; function help(): int { return 1; }\n",
         ]);
         assert_eq!(affected(&t, &[], &[]), Vec::<usize>::new());
+    }
+
+    /// An anonymous class declares no name, so no call edge can ever reach the
+    /// file holding one — and the declared-receiver lane reads it anyway, as an
+    /// invisible descendant. The inheritance leg is what connects it.
+    #[test]
+    fn an_anonymous_subclass_is_an_inheritance_edge() {
+        let t = trees(&[
+            "<?php\nnamespace App;\nclass Report {}\n",
+            "<?php\nnamespace App;\n$r = new class extends Report {};\n",
+            "<?php\nnamespace App;\nfunction consume(Report $r): int { return 1; }\n",
+        ]);
+        // The file holding the anon subclass changed: everything reasoning
+        // about `Report`'s descendants must be walked.
+        let out = affected(&t, &[1], &[]);
+        assert!(out.contains(&0), "the parent's file: {out:?}");
+        assert!(out.contains(&2), "a file naming the parent: {out:?}");
     }
 
     /// A literal `class_alias` mints an index edge rather than damming (issue
