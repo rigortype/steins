@@ -308,6 +308,15 @@ impl Index {
         let (names, dynamic) = &self.property_writes;
         *dynamic || names.contains(prop)
     }
+
+    /// The whole obstacle table, for the generation planner's whole-universe
+    /// digest (issue #489 slice B). The ladders ask [`Self::property_write_obstacle`]
+    /// one name at a time; the digest needs the table itself, because the
+    /// pinned per-file footprint carries no property *reads* to intersect it
+    /// with.
+    pub(crate) fn property_write_table(&self) -> (&HashSet<String>, bool) {
+        (&self.property_writes.0, self.property_writes.1)
+    }
     // end member absence (ADR-0078, issue #197)
 
     pub(crate) fn resolve_function(&self, fqn: &str) -> Res {

@@ -79,7 +79,7 @@ use steins_db::{
     EffectsPolicy, PackagePartition, PackageShard, PluginFacts, ProjectLayout, merge_shards,
 };
 use steins_gen::{
-    ArtifactBuilder, DriftKind, EnginePosture, Fingerprint, Generation, GenerationId,
+    ArtifactBuilder, DriftKind, EnginePosture, FieldHasher, Fingerprint, Generation, GenerationId,
     GenerationInputs, Miss, PackageName, SectionName, SourceDrift, SourceError, SourceInventory,
     Store,
 };
@@ -88,7 +88,8 @@ use steins_syntax::SourceTree;
 
 use crate::fold_persist::{FoldTableArtifact, RecordingEngine, fold_package};
 use crate::project::{FileUnit, Index, Res};
-use crate::{Diagnostic, EngineFolder, FinalKeyword, ProcessEngine};
+use crate::walk_plan::{FilePlan, UniverseVerdict, WalkControl};
+use crate::{Diagnostic, Divergence, EngineFolder, FinalKeyword, ProcessEngine};
 
 // ---------------------------------------------------------------------------
 // The orchestrator's own section: which sources an artifact was built from.
@@ -109,6 +110,51 @@ fn sources_section() -> SectionName {
 /// steins crates, so the CLI and this crate spell one identity.
 fn analyzer_version() -> &'static str {
     env!("CARGO_PKG_VERSION")
+}
+
+/// The environment variable that turns the paranoid verifier on (issue #489
+/// slice B).
+///
+/// **Why an instrument and not only a test.** The failure mode walk skipping
+/// can have is a stale or missing finding — the zero-FP violation this project
+/// exists to prevent — and the warm ≡ cold oracle only catches what a fixture
+/// happens to exercise. Paranoid mode walks *every* file regardless of the
+/// affected set, keeps the walked answer, and asserts that each file the
+/// affected-set computation would have skipped replays byte-identically,
+/// naming the first divergence with its file and finding
+/// ([`GenerationReport::walk`]). Nothing about it is fixture-shaped: it holds
+/// one file's two answers at a time, so it runs over a whole corpus tree.
+///
+/// It was built and landed **before** any skip logic existed, where it
+/// trivially reports zero would-skips. That ordering is the point: an
+/// instrument written after the thing it measures grades its author's
+/// homework.
+pub const PARANOID_ENV: &str = "STEINS_GENERATIONS_PARANOID";
+
+/// Whether this process runs the paranoid verifier. Read once per run,
+/// deliberately from the environment rather than from [`GenerationParams`]:
+/// every caller of the orchestrator (the CLI, `cargo xtask perf --warm
+/// --paranoid`, the MCP server of issue #491) gets it without a signature
+/// change, and CI — which never sets it — is unaffected.
+fn paranoid_enabled() -> bool {
+    std::env::var(PARANOID_ENV).is_ok_and(|v| v == "1")
+}
+
+/// The run's whole-universe verdict digest: one fingerprint over every input
+/// a file's walk reads that is neither that file's tree, another file's tree,
+/// nor the merged index (ADR-0092 §5, issue #489 slice B).
+///
+/// This is the "a whole-universe verdict moved ⇒ walk everything" leg of the
+/// pinned affected set, made comparable across generations. The verdicts are
+/// streamed as tagged fields rather than concatenated into a string because
+/// two of them — the never-returning set and the property-write obstacle —
+/// are universe-sized.
+fn universe_digest(verdict: &UniverseVerdict<'_>) -> Fingerprint {
+    let mut h = FieldHasher::new("steins-infer/universe-verdict");
+    verdict.fields(&mut |tag, bytes| {
+        h.field(tag, bytes);
+    });
+    h.finish()
 }
 
 fn sources_payload(fingerprint: &Fingerprint) -> Vec<u8> {
@@ -201,9 +247,31 @@ pub struct GenerationReport {
     pub generation: Option<String>,
     pub packages: Vec<PackageReport>,
     pub fold: FoldReport,
+    pub walk: WalkReport,
     pub timings: PhaseTimings,
     /// Degradations and publication outcomes, human-readable, in order.
     pub notes: Vec<String>,
+}
+
+/// What the run's walks did (ADR-0092 §5, issue #489 slice B): how many files
+/// were walked, how many replayed a persisted block instead, and — under the
+/// paranoid verifier — whether the two ever disagreed.
+pub struct WalkReport {
+    /// Files this run actually walked.
+    pub walked: usize,
+    /// Files that replayed their persisted walk block. Always 0 under
+    /// [`Self::paranoid`], where the walk is what ran.
+    pub replayed: usize,
+    /// Files the affected-set computation would have skipped — equal to
+    /// [`Self::replayed`] outside paranoid mode, and the population the
+    /// verifier graded inside it.
+    pub would_skip: usize,
+    /// Whether [`PARANOID_ENV`] was set for this run.
+    pub paranoid: bool,
+    /// Every file whose replayed block did not equal its fresh walk. Non-empty
+    /// only under [`Self::paranoid`], and non-empty at all is a soundness bug
+    /// in the affected set, not a cost regression.
+    pub divergences: Vec<Divergence>,
 }
 
 /// One package's disposition — the counter the warm ≡ cold oracles read:
@@ -479,7 +547,22 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
     let index = Index::from_merged(merge_shards(&shards));
     let units: Vec<FileUnit<'_>> =
         diag.iter().zip(&trees).map(|(path, tree)| FileUnit { path, tree }).collect();
-    let findings = crate::check_units(
+    // The walk plan (issue #489 slice B). The planner is asked once, after the
+    // run's whole-universe verdicts are computed and before the first file is
+    // walked; it decides per file whether the persisted block may be replayed.
+    let paranoid = paranoid_enabled();
+    let mut universe: Option<Fingerprint> = None;
+    let mut planner = |verdict: &UniverseVerdict<'_>| -> Vec<FilePlan> {
+        universe = Some(universe_digest(verdict));
+        // Slice B's affected-set computation lands on top of this seam. Until
+        // it does, the plan is empty, which `check_units_controlled` reads as
+        // "walk every file" — so the verifier below has nothing to grade and
+        // reports zero would-skips, exactly as an instrument built before its
+        // subject should.
+        Vec::new()
+    };
+    let mut control = WalkControl::new(&mut planner, paranoid);
+    let findings = crate::check_units_controlled(
         &units,
         &index,
         &mut folder,
@@ -488,10 +571,34 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         p.layout,
         p.plugins,
         p.effects,
+        Some(&mut control),
     );
     drop(units);
     let attribution_notices = attribution_notices(&index, p.effects);
     let analyze_ms = ms(t_analyze.elapsed());
+    let walk = WalkReport {
+        walked: control.walked,
+        replayed: control.replayed,
+        would_skip: control.would_skip,
+        paranoid,
+        divergences: std::mem::take(&mut control.divergences),
+    };
+    for divergence in &walk.divergences {
+        notes.push(format!("PARANOID DIVERGENCE {divergence}"));
+    }
+    if paranoid {
+        // Under the verifier, say which universe verdict this run computed:
+        // over a corpus tree, two runs whose digests differ walked everything
+        // for that reason, and the auditor should see that rather than infer
+        // it from a would-skip count of zero.
+        notes.push(format!(
+            "paranoid: {} file(s) walked, {} would have been skipped, {} divergence(s); universe verdict {}",
+            walk.walked,
+            walk.would_skip,
+            walk.divergences.len(),
+            universe.map_or_else(|| "(not computed)".to_owned(), |f| f.to_hex()),
+        ));
+    }
 
     // Identity, honestly filled (see the module docs for in/out reasoning).
     let fold_table = folder.published_table();
@@ -586,6 +693,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
                 fresh_rows: fold_fresh,
                 table_published: fold_table.is_some(),
             },
+            walk,
             timings: PhaseTimings { capture_ms, trees_ms, analyze_ms, persist_ms },
             notes,
         },
