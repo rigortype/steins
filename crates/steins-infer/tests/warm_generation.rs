@@ -712,6 +712,71 @@ fn an_edit_nothing_names_walks_only_the_edited_file() {
     assert_eq!(canon(warm.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
 }
 
+/// The two members that had no site when #510 was filed — the constants and
+/// the `class_alias` edges — have one now, because measurement asked. So a
+/// file that names an alias and a constant replays through an edit elsewhere
+/// in their package, and still walks when the file that *writes* them moves.
+#[test]
+fn an_alias_and_a_constant_answer_for_the_file_that_writes_them() {
+    if !spawn_or_skip("an_alias_and_a_constant_answer_for_the_file_that_writes_them") {
+        return;
+    }
+    let tmp = TempDir::new("delta-sited-aliases");
+    let write = |rel: &str, content: &str| {
+        let path = tmp.dir.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, content).unwrap();
+    };
+    write("composer.json", DELTA_COMPOSER_JSON);
+    write("composer.lock", DELTA_COMPOSER_LOCK);
+    write("src/edited.php", "<?php\nnamespace App;\nfunction unrelated(): int { return 1; }\n");
+    write(
+        "src/legacy.php",
+        "<?php\nnamespace App;\nconst SIZE = 2;\nclass_alias('App\\\\Thing', 'App\\\\LegacyThing');\n",
+    );
+    write("src/thing.php", "<?php\nnamespace App;\nclass Thing { public int $n = 1; }\n");
+    write(
+        "src/user.php",
+        "<?php\nnamespace App;\nfunction useIt(\\App\\LegacyThing $t): int { return $t->n + SIZE; }\n",
+    );
+    let files: Vec<PathBuf> = ["edited", "legacy", "thing", "user"]
+        .iter()
+        .map(|name| tmp.dir.join(format!("src/{name}.php")))
+        .collect();
+
+    let cold = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(cold.report.mode, GenerationMode::Cold);
+
+    // The positive control: the file that writes the alias and the constant
+    // moves, so the file that names them is walked.
+    rewrite(
+        &files[1],
+        "<?php\nnamespace App;\nconst SIZE = 3;\nclass_alias('App\\\\Thing', 'App\\\\LegacyThing');\n",
+    );
+    let moved = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(
+        (moved.report.walk.walked, moved.report.walk.replayed),
+        (2, 2),
+        "notes: {:#?}",
+        moved.report.notes
+    );
+
+    // And the tightening: an edit elsewhere in the same package leaves that
+    // file replaying. Site-less, both the alias ends and `k:App\SIZE` would be
+    // in every edit's delta and user.php would walk with them.
+    rewrite(&files[0], "<?php\nnamespace App;\nfunction unrelated(): int { return 2; }\n");
+    let elsewhere = run(&tmp.dir, &tmp.dir, &files);
+    assert_eq!(
+        (elsewhere.report.walk.walked, elsewhere.report.walk.replayed),
+        (1, 3),
+        "notes: {:#?}",
+        elsewhere.report.notes
+    );
+
+    let fresh_store = TempDir::new("delta-sited-aliases-fresh");
+    assert_eq!(canon(elsewhere.findings), canon(run(&tmp.dir, &fresh_store.dir, &files).findings));
+}
+
 /// The tightened leg under the verifier: both edits re-run with every file
 /// walked anyway, every would-be skip graded against its fresh walk. A
 /// tightening is only worth having if this is what it grades to.
