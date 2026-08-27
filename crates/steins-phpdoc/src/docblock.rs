@@ -724,6 +724,30 @@ impl MagicTagKind {
         matches!(self, Self::Mixin)
     }
 
+    /// Whether the tag declares a **member** — a method or property that exists
+    /// at runtime and that the index cannot enumerate.
+    ///
+    /// This is the question ADR-0049 A14 records an obstacle on, and it is not
+    /// the same question as "is this a magic tag" (issue #471). A14 names its
+    /// set precisely — "the `@method` / `@property` / `@mixin` tags once they
+    /// are read" — and the type-alias pair is not in it, because
+    /// `@phpstan-type` / `@phpstan-import-type` declare **no member**. An alias
+    /// is a type abbreviation, visible entirely in the docblock that spells it,
+    /// so nothing about it makes a class unenumerable. A14's recording contract
+    /// makes the same point from the other side: an obstacle must be
+    /// dischargeable per subject by a plugin pack (ADR-0039), and there is no
+    /// member here for a pack to declare.
+    ///
+    /// The alias tags are still **parsed and recorded as tags** — this predicate
+    /// selects what becomes an obstacle, nothing else.
+    #[must_use]
+    pub const fn declares_member(self) -> bool {
+        match self {
+            Self::Method | Self::Property | Self::PropertyRead | Self::PropertyWrite | Self::Mixin => true,
+            Self::TypeAlias | Self::ImportedTypeAlias => false,
+        }
+    }
+
     /// Recognize a magic-member tag name, applying the ADR-0029 prefix rule.
     /// The type-alias pair is prefixed-only — bare `@type` is not a tag.
     fn from_name(name: &str) -> Option<Self> {
@@ -1612,6 +1636,26 @@ mod tests {
             [(MagicTagKind::ImportedTypeAlias, "UserRow".into())]
         );
         assert!(scan_magic_member_tags("/** @type int $x */").is_empty()); // bare not a tag
+    }
+
+    #[test]
+    fn only_the_member_declaring_kinds_are_obstacles() {
+        // Issue #471: the alias pair is scanned like any other magic tag and is
+        // NOT an ADR-0049 A14 obstacle — it declares no member. The two
+        // questions were one predicate before, and a class whose only docblock
+        // tag was `@phpstan-type` went silent for the whole absence family.
+        for k in [
+            MagicTagKind::Method,
+            MagicTagKind::Property,
+            MagicTagKind::PropertyRead,
+            MagicTagKind::PropertyWrite,
+            MagicTagKind::Mixin,
+        ] {
+            assert!(k.declares_member(), "{}", k.label());
+        }
+        for k in [MagicTagKind::TypeAlias, MagicTagKind::ImportedTypeAlias] {
+            assert!(!k.declares_member(), "{}", k.label());
+        }
     }
 
     #[test]
