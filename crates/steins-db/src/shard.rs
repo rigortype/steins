@@ -519,6 +519,15 @@ pub fn class_magic_obstacles(tree: &SourceTree, cd: &ClassDecl, out: &mut Vec<Ma
         return;
     }
     for tag in scan_magic_member_tags(doc) {
+        // Only a tag that declares a MEMBER is an obstacle (ADR-0049 A14, issue
+        // #471). `@phpstan-type` / `@phpstan-import-type` are scanned and
+        // returned like any other magic tag — giving them meaning is separate
+        // work — but a type alias declares nothing the index failed to
+        // enumerate, so recording one silenced the whole absence family over a
+        // class whose only docblock sin was naming its own row shape.
+        if !tag.kind.declares_member() {
+            continue;
+        }
         let mixin_target = (tag.kind.is_mixin() && !tag.subject.is_empty())
             .then(|| tree.resolve_class_fqn(&docblock_class_ref(&tag.subject, cd.span.start)));
         out.push(MagicObstacle {

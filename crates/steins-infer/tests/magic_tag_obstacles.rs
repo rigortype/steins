@@ -1,11 +1,16 @@
-//! ADR-0049 A14 / issue #195: `@method` / `@property*` / `@mixin` and the `@phpstan-type`
-//! pair are read as **silence obstacles**, never as member sources.
+//! ADR-0049 A14 / issue #195: `@method` / `@property*` / `@mixin` are read as
+//! **silence obstacles**, never as member sources.
+//!
+//! The `@phpstan-type` pair is NOT one of them (issue #471). A14 names the set by the
+//! question it asks — which tags declare a member the index cannot enumerate — and a
+//! type alias declares no member at all.
 //!
 //! A class-like carrying one anywhere in its resolved reach — parents, interfaces, `@mixin`
 //! targets followed transitively — is not enumerable for an absence proof, so both
 //! method-absence ladders (S2 `call.undefined-method`, S6 `phpdoc.undefined-method`) go
-//! silent exactly as for `__call`. This can only *remove* findings, so every fixture below
-//! is paired against the negative control: the same shape with the tag removed still fires.
+//! silent exactly as for `__call`. An obstacle can only *remove* findings, so every
+//! fixture below is paired against the negative control: the same shape with the tag
+//! removed still fires.
 
 use steins_infer::{
     LazyTree,
@@ -128,9 +133,26 @@ fn mixin_tag_silences_the_ladder() {
 }
 
 #[test]
-fn the_type_alias_pair_silences_the_ladder() {
+fn the_type_alias_pair_silences_nothing() {
+    // Issue #471. A14's obstacle set is the tags that declare a MEMBER, and a
+    // type alias declares none — it is a type abbreviation, spelled entirely in
+    // the docblock that carries it. Recording one used to silence the whole
+    // absence family over the class, which is over-suppression rather than lost
+    // precision: the proof ran and the finding was then discarded.
     for tag in ["@phpstan-type Row array{id: int}", "@psalm-import-type Row from Repo"] {
         let src = format!("<?php\n/** {tag} */\nclass Order {{}}\n(new Order())->anything();\n");
+        assert_eq!(s2(&src).len(), 1, "{tag}");
+    }
+}
+
+#[test]
+fn an_alias_beside_a_member_tag_is_still_silent_on_the_member_tag_alone() {
+    // The two kinds compose the way the A14 record does: one member tag is one
+    // obstacle, and the alias neither adds to it nor takes it away.
+    for tag in ["@method int foo()", "@property int $count", "@mixin Builder"] {
+        let src = format!(
+            "<?php\nclass Builder {{ public function where(): void {{}} }}\n             /**\n * @phpstan-type Row array{{id: int}}\n * {tag}\n */\nclass Order {{}}\n(new Order())->anything();\n"
+        );
         assert!(s2(&src).is_empty(), "{tag}");
     }
 }
