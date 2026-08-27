@@ -490,7 +490,14 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   family: the narrowing repair is its own slice, exactly as the four repairs
     //   issue #391's measurement forced were (§A6), and the count comes back down
     //   when it lands.
-    ("composer/composer", 34),
+    //
+    //   34 → 31 (-3), 2026-08-27 with issue #557: it landed, and the count came
+    //   back down. `Subtrahend::Falsy` gives the truthiness guard its own
+    //   subtrahend, so all three `Factory.php` rows are consumed by the `if ($x)`
+    //   that always excluded them. This row is back to what it was before the
+    //   #537 wave, and the seeds were the only thing that wave moved anywhere in
+    //   the public corpus — no other package's count changed in either direction.
+    ("composer/composer", 31),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
     //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and
