@@ -186,12 +186,12 @@ $ steins doctor --no-php .
 | `default` | — | — | 47 |
 | `throws-direct` | `default` | `throw.undeclared`, direct escapes only | 48 |
 | `contracts` | `default` | the contract layer, except the strict and pedantic rungs | 65 |
-| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch` | 71 |
+| `strict` | `contracts` | the some-paths-only claims — `offset.maybe-missing`, `variable.maybe-undefined`, `property.maybe-undefined`, `type.return-maybe-missing`, `type.maybe-argument-mismatch`, `phpdoc.maybe-argument-mismatch`, `type.maybe-return-mismatch`, `phpdoc.maybe-return-mismatch` | 73 |
 | `pedantic` | `contracts` | the house-style asks — `untyped.class-constant` | 66 |
 
 Only the `default` / `contracts` / `strict` rows nest. `throws-direct` and
 `pedantic` branch off their base, so neither contains nor is contained by
-`strict` — 66 and 71 are not steps on one scale, they are two different
+`strict` — 66 and 73 are not steps on one scale, they are two different
 supersets of the same 65.
 
 `boundary` is a reserved name (ADR-0050 §5, deferred to ADR-0042). Selecting

@@ -89,7 +89,7 @@ Verification apparatus (ADR-0013):
 - fp-gate: runtime layer zero-FP over ~85k corpus files (10 pinned
   OSS packages + phpstan-src and a private legacy monorepo injected
   via `corpus.local.toml`; those two are unpinned live checkouts, so
-  the total drifts with them). `phpdoc.*` (680), `throw.*` (44,333)
+  the total drifts with them). `phpdoc.*` (683), `throw.*` (44,333)
   and `effect.*` (4,442) are increase-tripwires in measurement mode,
   and so are the **possibly-grade** proof ids (`Layer::Proof` +
   `Floor::Strict`) since ADR-0081 §8 scoped the strict-zero bar to

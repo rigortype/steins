@@ -43,6 +43,33 @@ pub const PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID: &str = "phpdoc.maybe-argument-misma
 /// (trace-visible) `return <literal>;` statements provably raises a `TypeError`.
 pub const RETURN_ID: &str = "type.return-mismatch";
 
+/// The registry id for the **possibly-grade** return check on an all-`Verified`
+/// premise (ADR-0081 §8's 2026-08-27 amendment, issue #537): the returned
+/// variable's abstract fact has at least one arm — a scalar base, the `null`
+/// side-flag, or a subclass-free class — that the enclosing function's **native**
+/// return type rejects, and at least one it accepts, at the owning file's coercion
+/// mode.
+///
+/// [`TYPE_MAYBE_ARGUMENT_MISMATCH_ID`]'s judgment at the return seam: the same
+/// concrete-value relation, the same witness set, the same refusal to emit the
+/// all-arms-rejected verdict. PHP applies one coercion table to both boundaries —
+/// measured cell for cell at 8.5.9 by `harness/coercion-grid` in return position —
+/// so the two ids differ in where they look and in nothing else.
+pub const TYPE_MAYBE_RETURN_MISMATCH_ID: &str = "type.maybe-return-mismatch";
+
+/// The contract-layer twin of [`TYPE_MAYBE_RETURN_MISMATCH_ID`]: the same judgment
+/// where any arm of the premise is `Asserted` — a docblock claim or a curated
+/// refinement over a native envelope. ADR-0052 §5's consumption rule forbids an
+/// `Asserted` premise from reaching a `type.*` id, so the pair is two
+/// registrations of one judgment, exactly as the argument pair is.
+///
+/// `Floor::Strict` rather than the `phpdoc.*` family's `Contracts`, for
+/// [`PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID`]'s reason: the layer says whose claim it
+/// is, the floor says how sure it is, and the definite sibling
+/// ([`RETURN_MISMATCH_ID`]) keeps `Contracts` so a `contracts` run keeps its
+/// meaning.
+pub const PHPDOC_MAYBE_RETURN_MISMATCH_ID: &str = "phpdoc.maybe-return-mismatch";
+
 /// The registry id for the phpdoc declared-contract param check (ADR-0030 relation
 /// #1): a proven value flowing into a parameter with a `@param` phpdoc envelope
 /// that it provably does **not** inhabit under contract (set) acceptance — no
@@ -1182,6 +1209,9 @@ pub const ALL_EMITTABLE_IDS: &[&str] = &[
     // judgment, two ids, routed by the premise's minimum stratum.
     TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
     PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID,
+    // the same judgment at the return seam (ADR-0081 amendment, issue #537).
+    TYPE_MAYBE_RETURN_MISMATCH_ID,
+    PHPDOC_MAYBE_RETURN_MISMATCH_ID,
     // sentinel parameter (ADR-0088 §4, issue #428): the never-declared carve-out
     // out of `phpdoc.param-mismatch`.
     NEVER_PARAM_REACHABLE_ID,

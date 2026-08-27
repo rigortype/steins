@@ -297,13 +297,26 @@ impl<'a> Cx<'a> {
         (!cases.is_empty()).then_some(cases)
     }
 
+    /// Whether `class_fqn` can have **no subclass at all**: `final`, or an enum
+    /// (implicitly final). A class the index cannot uniquely resolve answers
+    /// `false` — an unseen declaration may extend it.
+    ///
+    /// The bit that turns a class *name* into a set of runtime values a proof may
+    /// quantify over. [`Cx::object_is_type_error`] decides an object of an **exact**
+    /// class, so a declared arm spelled `A` is only decidable through it where no
+    /// `A` subclass exists to answer differently — a subclass may implement an
+    /// interface the native type accepts (issue #537).
+    pub(crate) fn class_has_no_subclass(&self, class_fqn: &str) -> bool {
+        self.find_class(class_fqn).is_some_and(|(_, cd)| cd.is_final || cd.is_enum)
+    }
+
     /// Whether a `$this` seeded from enclosing class `class_fqn` is provably the
     /// **exact** runtime class (audit G1). A `final` class or an enum has no
     /// subclass, so its `$this` is exact; any other project class is only a lower
     /// bound (some subclass instance may be running the method). A class the index
     /// cannot uniquely resolve is conservatively *not* exact.
     pub(crate) fn this_class_exact(&self, class_fqn: &str) -> bool {
-        self.find_class(class_fqn).is_some_and(|(_, cd)| cd.is_final || cd.is_enum)
+        self.class_has_no_subclass(class_fqn)
     }
 
     /// The FQN of `class_fqn`'s parent, resolved in the parent's own file ctx.

@@ -96,6 +96,14 @@ one shape: the possibly-grade pair reads `$v`, `f(g($x))`, `f($o->m())` and
 `f($a['k'])` (issue #418) but not `f($o->prop)`, which has no condition-operand
 variant of its own to narrow through and so cannot be shipped guarded.
 
+The **return** seam's half of the same pair (issue #537) is capped narrower
+still: it reads `return $v;` and nothing else, so `return g();`,
+`return $o->m();` and `return $a['k'];` are silent there even though the
+argument seam reads all three. Its object arms carry their own cap — a class
+arm is judged only where the class can have no subclass (`final`, or an enum),
+because the acceptance oracle decides an *exact* class and an extensible one
+may have a subclass the return type accepts.
+
 **Generic type-argument carry drops conservatively past a variable binding**
 (issue #295, ADR-0032 stage 1). `$box = new MutableBox(1); f($box);` now
 judges the full `MutableBox<int>`, not just the class half — the direct-`new`
