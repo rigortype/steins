@@ -351,7 +351,7 @@ fn collect_cond_vars(cond: &CondExpr, out: &mut Vec<String>) {
             collect_cond_vars(b, out);
         }
         CondExpr::Call { reads, .. } | CondExpr::Opaque { reads } => out.extend(reads.iter().cloned()),
-        CondExpr::Isset { var, .. } => out.push(var.clone()),
+        CondExpr::Isset { var, .. } | CondExpr::IssetVar { var } => out.push(var.clone()),
     }
 }
 

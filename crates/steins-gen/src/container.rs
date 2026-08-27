@@ -34,9 +34,13 @@ use crate::names::{PackageName, SectionName};
 /// (issue #504), and `3` is the split of the run-dependent walk blocks out of
 /// the artifact into a sidecar container (issue #519), which is what leaves an
 /// unmoved package's artifact byte-identical between generations and therefore
-/// shareable. Bumping it is the whole migration — an artifact of the previous
-/// schema becomes an ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 3;
+/// shareable. `4` is the `CondExpr::IssetVar` variant (issue #414): the stored
+/// trace IR spells a bare `isset($x)` differently now, and a reader that
+/// disagrees with its writer about what that condition IS would answer from a
+/// forgetting an artifact recorded and this binary no longer performs. Bumping
+/// it is the whole migration — an artifact of the previous schema becomes an
+/// ordinary [`Miss`] and one rebuild.
+pub const SCHEMA_VERSION: u32 = 4;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

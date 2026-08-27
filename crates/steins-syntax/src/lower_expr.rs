@@ -867,11 +867,15 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
             ),
             None => CondExpr::Opaque { reads: cond_reads(expr) },
         },
-        // `isset($x['k'])` (ADR-0062 S4). Recognized ONLY when every operand is a
-        // depth-one constant-key projection; a multi-argument isset is a
-        // conjunction by PHP semantics and lowers to the matching `And` chain.
-        // Anything else — `isset($x)`, a property or dynamic key, a mixed list —
-        // lowers to `Opaque`.
+        // `isset($x['k'])` (ADR-0062 S4) and bare `isset($x)` (issue #414). A
+        // multi-argument isset is a conjunction by PHP semantics and lowers to the
+        // matching `And` chain, each operand taking whichever form fits it. Anything
+        // else — a property, a dynamic key — lowers to `Opaque`.
+        //
+        // The bare form is `CondExpr::IssetVar` rather than `Opaque` because `isset`
+        // is a construct and cannot mutate what it tests: sending it to `Opaque`
+        // charged its operand the by-reference conservatism an unmodellable
+        // condition owes, which discarded every fact the variable had.
         Expression::Construct(Construct::Isset(iss)) => {
             let operands: Option<Vec<CondExpr>> = iss
                 .values
@@ -879,6 +883,7 @@ pub(crate) fn lower_cond(expr: &Expression<'_>) -> CondExpr {
                 .map(|v| {
                     const_key_offset(v)
                         .map(|(var, key)| CondExpr::Isset { var, key: Box::new(key) })
+                        .or_else(|| bare_var_name(v).map(|var| CondExpr::IssetVar { var }))
                 })
                 .collect();
             match operands {
@@ -999,6 +1004,18 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
             collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
             CondExpr::Opaque { reads }
         }
+    }
+}
+
+/// A bare `$var` and nothing else — the operand shape `isset($var)` tests
+/// (issue #414). `None` for a property, an offset, a dynamic name, or any
+/// expression that is not exactly one direct variable.
+pub(crate) fn bare_var_name(expr: &Expression<'_>) -> Option<String> {
+    match expr.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            Some(strip_dollar(bytes_to_string(dv.name)))
+        }
+        _ => None,
     }
 }
 
