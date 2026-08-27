@@ -569,3 +569,41 @@ fn a_call_with_no_known_signature_still_costs_the_key_its_fact() {
     );
     assert!(family(&src).is_empty(), "{:?}", family(&src));
 }
+
+
+// Issue #559 — #536's sibling, one builtin over: the DR2 family in STATEMENT
+// position, where walk.rs asks `by_value_arg` rather than the guard-position
+// exemption asserts.rs enforces. An uncertified name read as "may write
+// through any argument" and cost the subject its fact.
+
+
+/// The issue's own repro: `is_string($key);` reads `$key` and writes nothing,
+/// so the later mismatch keeps its premise.
+#[test]
+fn a_bare_type_predicate_statement_leaves_its_subject_the_fact_it_had() {
+    let src = strict("function f(int|string $key): void { is_string($key); needString($key); }\n");
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("its int arm"), "{}", d[0].message);
+}
+
+/// `is_callable` is the family's rowed member, and the row answers per
+/// position: the one-argument spelling writes nothing.
+#[test]
+fn a_bare_is_callable_statement_leaves_its_subject_the_fact_it_had() {
+    let src =
+        strict("function f(int|string $key): void { is_callable($key); needString($key); }\n");
+    assert_eq!(proof(&src).len(), 1, "{:?}", proof(&src));
+}
+
+/// …and the same row keeps the gate honest at position 2: `&$callable_name`
+/// IS written, so the subject survives and the out-param does not.
+#[test]
+fn is_callable_costs_its_out_param_and_nothing_else() {
+    let src = strict(
+        "function f(int|string $key, int|string $name): void { is_callable($key, true, $name); needString($key); needString($name); }\n",
+    );
+    let d = proof(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+    assert!(d[0].message.contains("$key"), "the surviving premise is $key's: {}", d[0].message);
+}

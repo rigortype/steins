@@ -624,6 +624,9 @@ pub fn out_params(name: &str) -> Option<&'static [usize]> {
         // case: optional, so the arity leg does real work.
         "preg_match" | "preg_match_all" => Some(P2),
         "similar_text" => Some(P2),
+        // `is_callable(..., string &$callable_name = null)` — the one type
+        // predicate with a reference parameter (issue #559).
+        "is_callable" => Some(P2),
         "str_replace" | "str_ireplace" => Some(P3),
         "preg_replace_callback_array" => Some(P3),
         // `$count` is position **4**, not 3: the optional `$limit` sits between
@@ -706,6 +709,12 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 ///   every `array_key_exists($key, $a);` site. `array_all`/`array_any` are
 ///   deliberately absent: their second parameter is a callback, and what a
 ///   callback does to the caller's variables is not a by-value question.
+/// * the **type predicates** (issue #559): `is_string`, `is_int`, `is_array`,
+///   … with their aliases — the very family the DR2 exemption doc names as
+///   all-by-value and exempts in guard position, so leaving them uncertified
+///   made an unconsumed `is_string($key);` STATEMENT cost `$key` what the
+///   same call in an `if` never did. `is_callable` is the family's rowed
+///   member: `&$callable_name` puts it in [`out_params`] instead.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream.
@@ -735,6 +744,24 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "array_key_exists",
         "key_exists",
         "array_is_list",
+        // Type predicates (issue #559): the DR2 family asserts.rs already
+        // exempts in guard position, certified for the statement position too.
+        // `is_callable` is deliberately ABSENT — `&$callable_name` is by
+        // reference at position 2, so it is rowed in `out_params` instead.
+        "is_string",
+        "is_int",
+        "is_integer", // = is_int
+        "is_long",    // = is_int
+        "is_float",
+        "is_double",  // = is_float
+        "is_bool",
+        "is_array",
+        "is_null",
+        "is_object",
+        "is_scalar",
+        "is_numeric",
+        "is_iterable",
+        "is_countable",
         // String-producer family's non-foldable members (issue #41).
         // `escapeshellcmd` is here despite the transfer table refusing its
         // RESULT — that says nothing about ARGUMENT reachability.
@@ -1338,6 +1365,25 @@ mod tests {
         for f in ["array_all", "array_any"] {
             assert_eq!(by_value_arg(f, 1), None, "{f} takes a callback; nothing is certified");
         }
+    }
+
+    /// Issue #559: the DR2 family, certified per NAME so the statement
+    /// position answers what guard position always assumed. None becomes
+    /// foldable — the fold allowlist is about the RESULT, and stays as it was.
+    #[test]
+    fn by_value_arg_certifies_the_type_predicates() {
+        for f in ["is_string", "is_int", "is_integer", "is_long", "is_float", "is_double",
+                  "is_bool", "is_array", "is_null", "is_object", "is_scalar", "is_numeric",
+                  "is_iterable", "is_countable"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+        // `is_callable` is the family's rowed member: `&$callable_name` sits at
+        // position 2, so the row answers positionally like `preg_match`'s.
+        assert_eq!(by_value_arg("is_callable", 0), Some(true));
+        assert_eq!(by_value_arg("is_callable", 1), Some(true), "$syntax_only is by value");
+        assert_eq!(by_value_arg("is_callable", 2), Some(false), "$callable_name is by ref");
+        assert!(!foldable("is_callable"));
     }
 
     /// Issue #41 string-producer family: certified per NAME, so every
