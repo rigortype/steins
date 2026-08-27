@@ -838,12 +838,19 @@ fn collect_enum_identity<'a>(
 ///    because `bool` has no interior point to protect and every non-covering
 ///    subtrahend of it is the other literal ([`normalize::ArmFate::Narrows`]).
 ///
-/// Two neighbouring narrowings are deliberately NOT here: `Refine::Truthy` (`if
-/// ($pos)` over `int|false` — truthiness kills `0`/`''` too, not a value
-/// subtraction, PHPStan's classic `strpos` footgun needing its own subtrahend);
-/// and keep-only narrowing on the positive branch (`if ($x === false)` — the
-/// value lane's `Refine::Exact` already owns this, and the arm lane is a
-/// subtraction carrier by construction).
+/// 6. A bare truthiness test subtracts the falsy set from the contract lane on
+///    the branch where it holds ([`normalize::Subtrahend::Falsy`], issue #557):
+///    every arm all of whose inhabitants are falsy dies, so `string|false` under
+///    `if ($x)` is a `string` on the true branch. This is not a value
+///    subtraction — the guard excludes `0` and `''` alongside `false`, which is
+///    PHPStan's classic `strpos` footgun — so it is whole-arm deletion only, and
+///    a surviving arm is never refined within: an `int` arm still spells `int`
+///    where the guard did exclude `0`. Both readings are widenings of the truth.
+///
+/// One neighbouring narrowing is deliberately NOT here: keep-only narrowing on
+/// the positive branch (`if ($x === false)` — the value lane's `Refine::Exact`
+/// already owns this, and the arm lane is a subtraction carrier by
+/// construction).
 pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, store: &mut Store) {
     let oracle = ProjectIsa { cx: w.cx, demote_catalog: w.cx.a11_demote_catalog() };
 
@@ -866,9 +873,10 @@ pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, sto
         }
     }
 
-    // (3)/(4) `!== null` and `!== v` on this branch subtract from the contract
-    // lane. `collect_refine` already carries the branch polarity, so both spellings
-    // arrive as `Exclude`. `Refine::Exact`, `Truthy`, `IntRange` are the value
+    // (3)/(4)/(6) `!== null`, `!== v` and a bare truthiness test on this branch
+    // subtract from the contract lane. `collect_refine` already carries the branch
+    // polarity, so both exclusion spellings arrive as `Exclude` and truthiness
+    // arrives only where it holds. `Refine::Exact` and `IntRange` are the value
     // lane's — see the refusals above.
     let mut refs = Vec::new();
     collect_refine(cond, then, &mut refs, w.cx.php_minor);
@@ -884,6 +892,9 @@ pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, sto
                     &normalize::Subtrahend::Value(v.clone()),
                     &oracle,
                 );
+            }
+            Refine::Truthy(var) => {
+                subtract_contract_lane(store, var, &normalize::Subtrahend::Falsy, &oracle);
             }
             _ => {}
         }

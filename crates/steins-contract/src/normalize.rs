@@ -38,7 +38,7 @@
 use crate::{CField, CKey, ContractTy, MixedCut, admits_fact, admits_val};
 use steins_domain::{
     Base, Certainty, Fact, IntRange, Key, KeyClass, PhpStr, Presence, Refinement, ShapeFact,
-    StrPreds, Tail, Val,
+    StrPreds, Tail, Val, php_is_falsy,
 };
 
 /// The set a guard's negative information removes from an arm list (ADR-0052
@@ -81,6 +81,19 @@ pub enum Subtrahend {
         case: String,
         polarity: bool,
     },
+    /// The truthy branch of a bare truthiness guard (`if ($x)`, `$x && …`,
+    /// `$x ? … : …`, and the else of `if (!$x)`) — issue #557. The subtrahend
+    /// is the **falsy set**: every arm all of whose inhabitants PHP judges
+    /// falsy dies, which is what makes `string|false` under `if ($x)` a
+    /// `string` on that branch.
+    ///
+    /// This is deliberately whole-arm deletion and nothing finer. It does not
+    /// refine *within* a surviving arm — an `int` arm still spells `int` where
+    /// the guard has in fact excluded `0`, and a `bool` arm still spells `bool`
+    /// where the guard has excluded `false`. Both are widenings of the truth,
+    /// so the lane stays sound; the finer readings are neighbouring work
+    /// ([`ArmFate::Narrows`] is where they would land).
+    Falsy,
 }
 
 /// The is-a oracle for class-arm subtraction (ADR-0052 §2), a trait so
@@ -1368,7 +1381,41 @@ pub fn subtrahend_covers(sub: &Subtrahend, arm: &ContractTy, oracle: &dyn IsaOra
         Subtrahend::EnumCase { enum_fqn, case, polarity } => {
             enum_case_covers(enum_fqn, case, *polarity, arm, oracle)
         }
+        Subtrahend::Falsy => falsy_covers(arm),
     }
+}
+
+/// Whether every value the arm admits is falsy (issue #557) — the judgment
+/// [`Subtrahend::Falsy`] deletes an arm on.
+///
+/// The question is decidable over the whole arm vocabulary without a `Maybe`,
+/// and the reason is worth stating: an arm answers [`Certainty::No`] the moment
+/// it admits one truthy value, and every arm here that is not one of the falsy
+/// literal shapes below does. Objects are the case that looks like it should be
+/// undecidable and is not — PHP judges every object truthy, whatever its class,
+/// so an unresolvable class arm is still provably not covered. `Opaque` and
+/// `Mixed` admit truthy values by construction.
+///
+/// `Never` is the one arm this answers `No` about on a technicality: it is
+/// vacuously all-falsy, but it is also vacuously all-*anything*, and deleting
+/// an uninhabited arm buys nothing worth a special case.
+fn falsy_covers(arm: &ContractTy) -> Certainty {
+    use Certainty::{No, Yes};
+    let falsy = match arm {
+        ContractTy::Null => true,
+        ContractTy::LitBool(b) => !b,
+        ContractTy::LitInt(n) => *n == 0,
+        ContractTy::LitFloat(f) => *f == 0.0,
+        ContractTy::LitStr(s) => php_is_falsy(&Val::Str(s.clone())),
+        // A point interval at zero is `0` under another spelling. Any wider
+        // interval admits a non-zero int and is therefore not covered — the
+        // clipping an interval gets from a *value* subtrahend has no analogue
+        // here, because the falsy set removes an interior point of every
+        // interval that straddles zero and no arm can spell that gap.
+        ContractTy::IntIn(r) => r.lo() == 0 && r.hi() == 0,
+        _ => false,
+    };
+    if falsy { Yes } else { No }
 }
 
 /// The enum-case polarity asymmetry (issue #429), the [`class_covers`] mirror
