@@ -337,6 +337,42 @@ pub(crate) fn type_predicate(cx: &Cx, call: &CallExpr) -> Option<TypePred> {
     PREDS.iter().find(|(n, _)| callee.eq_ignore_ascii_case(n)).map(|(_, p)| *p)
 }
 
+/// The recognized **class-reflection** builtin a call names, or `None`.
+///
+/// These answer a question ABOUT a value and write nothing: every parameter is
+/// by value in PHP's own signature, the option flags included (`is_a`'s
+/// `bool $allow_string`, `is_subclass_of`'s the same). Issue #569 — an
+/// unrecognized name here cost the subject every fact it had, so
+/// `get_class($x) === A::class` answered `unknown` about `$x` on both branches
+/// while `$x::class === A::class` left the declared arms standing.
+///
+/// Recognition only. What these guards PROVE — `is_a` is `instanceof`'s
+/// function spelling, `is_subclass_of` is the proper-subclass one, and the
+/// `get_class(…) === C::class` comparison is exact-class identity — is #538's
+/// subtrahend work and none of it is claimed here.
+///
+/// The arity is deliberately not pinned: an optional argument changes what the
+/// call ANSWERS, never whether it writes, and this predicate is only asked the
+/// second question. `call.positional_only` still gates, since a named-argument
+/// call is not a shape the recognizers read.
+pub(crate) fn class_reflection_builtin(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only {
+        return None;
+    }
+    const NAMES: &[&str] = &[
+        "get_class",
+        "get_parent_class",
+        "get_debug_type",
+        "gettype",
+        "is_a",
+        "is_subclass_of",
+        "spl_object_id",
+        "spl_object_hash",
+    ];
+    NAMES.iter().copied().find(|n| callee.eq_ignore_ascii_case(n))
+}
+
 /// One type-vocabulary guard, resolved to a variable and a branch polarity.
 enum TypeGuard {
     /// `is_string($x)` and kin.
