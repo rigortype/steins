@@ -472,3 +472,93 @@ against its source in the PR body; nsrt headline non-decreasing;
 conformance and the fp-gate diffed with causes; the possibly-grade
 bucket's per-package baselines re-seeded for the proof half and the
 `phpdoc.*` baselines for the contract half.
+
+## Amendment (2026-08-27): the return seam joins the same pair (issue #537)
+
+**Status: PENDING ratification.** The 2026-08-16 amendment above built the
+argument side's possibly grade and named the seams it did not reach.
+This one is the `return` statement, and it is a re-registration
+rather than a new mechanism: same relation, same witness set, same
+minimum-stratum split, same §8 derivation into the gate's tripwire
+bucket. What it adds is one thing the argument seam never needed.
+
+### B1. Object arms, and the exactness they demand
+
+The shape the issue is about is `function f(A|B $x): B { return $x; }`
+with `A` and `B` unrelated. That has no `Fact` anywhere: the value
+domain is object-free (ADR-0035/0038/0043), so an object union exists
+only in the declared-arm lane. Every scalar shape the argument pair
+judges reaches the return seam unchanged, but the shape the issue
+names reaches it only if a class arm can be judged at all.
+
+`Cx::object_is_type_error` decides an object of an **exact** class. A
+declared arm spelled `A` denotes every instance of `A` *and of every
+subclass*, and a subclass may implement an interface the return type
+accepts — `is_a(A, I) == No` says nothing about `class C extends A
+implements I`. So a class arm is decidable exactly where the class can
+have no subclass: `final`, or an enum (implicitly final, which also
+settles the per-case arms an enum declaration seeds, §A of ADR-0088's
+issue #429 work). Every other class arm is **undecided**, and one
+undecided arm silences the whole position — "some rejected, some
+accepted" is a claim about the whole arm list, so a list with a hole in
+it supports neither half of it. That rule also swallows the `float`
+arm, which `steins_contract::to_fact` refuses to spell for reasons of
+its own, and it is why the return seam stays silent on `int|float`
+into `string` exactly as the argument seam does.
+
+The narrower rule is not the sharpest available one — `is_a(A, B) == No
+&& is_a(B, A) == No` with a non-interface `B` is also sound under
+single inheritance, and a full descendant closure (ADR-0049 §8) is
+sharper still — but neither is needed by the shapes this seam was
+opened for, and both are their own measurement.
+
+### B2. One coercion table, measured at the boundary it is used at
+
+The argument side's §A3 asserts nothing about `return`. PHP's return
+coercion was therefore re-measured rather than assumed: all 144
+return-position cells of `harness/coercion-grid`'s type × value grid
+(8 native types × 9 witness values × 2 modes) answer exactly as their
+parameter twins on PHP 8.5.9, and so do the object cells — a
+`__toString` object into `string` in coercive mode and nothing else.
+`is_type_error` therefore transfers verbatim, and a divergence would
+have to be measured before it could be modeled.
+
+### B3. Carrier, and what stays out
+
+`return $variable;` only. The nested-call carriers issue #418 opened on
+the argument side (`return g();`, `return $o->m();`, `return $a['k'];`)
+need that seam's same-expression guard-decline surface (issue #421)
+and their own corpus measurement; they are named, not shipped. Also
+out, each because there is nothing to judge: a generator (its declared
+type names the object the *call* yields — the guard `Cx::scope_return`
+has carried since issue #128), `void`/`never` (no `NativeType` at all),
+and the all-arms-rejected verdict, on §A1's own reasoning.
+
+A `get` hook's body **is** in: since issue #544 the property's declared
+type rides on the scope as the body's native return type, so the hook
+gets this check by riding the same path, which is also what PHP
+enforces there.
+
+### B4. Measurement owed
+
+Public corpus: the proof half at **zero**, the contract half **+3**,
+all three in one file and all three the same missing narrowing — a bare
+truthiness guard (`if ($x)`) subtracts nothing from a `T|false` arm
+lane, so the arm the `if` just excluded is still standing at the
+`return`. The argument side carries the identical gap and simply has no
+public-corpus site for it. Seeded into `PHPDOC_EXPECTED` with the
+triage beside it, on §A6's precedent: the narrowing repair is its own
+slice, and the count comes back down when it lands. nsrt: unmoved (this
+id changes no fact and no narrowing).
+
+Conformance: **unmoved, and for a reason worth recording.** At
+`--profile strict` the suite gains exactly four findings — the two
+scored `stillAB`/`stillUnion` lines this issue exists for, and the two
+guarded siblings `fromClassString`/`pick`, which stay noisy until
+`::class` negative-branch narrowing (#538) and object-property
+discriminant narrowing (#539) land. But `SteinsChecker` runs
+`--profile contracts`, and a `Strict`-floored id is off there, so
+neither the win nor the noise reaches the score. The score moves only
+if the suite's profile is raised or this pair is re-floored; the floor
+here follows §A2's split for the argument pair, and changing it is that
+suite's question, not this id's.

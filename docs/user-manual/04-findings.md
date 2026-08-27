@@ -164,7 +164,7 @@ facets, and suppression are in
 
 ## The catalogue
 
-The registry holds **73 ids**, 72 of them with a live emitter. It is a closed
+The registry holds **78 ids**, 77 of them with a live emitter. It is a closed
 set bound by a totality test, so an id that reaches your terminal is in it
 and an id outside it cannot be emitted (ADR-0022). Each id below is shown
 with the PHP that triggers it and the transcript it produces.
@@ -182,11 +182,12 @@ current build.
 
 ### `type.*` — native declared types, proven
 
-Four ids. The first three are proof layer on the default surface: each fires
+Five ids. The first three are proof layer on the default surface: each fires
 only when a folded value provably raises a `TypeError` against a *native*
-declaration under that file's own coercion mode. The fourth
-(`type.maybe-argument-mismatch`) is the same question asked one notch weaker,
-about a type rather than a value, and reaches only `strict`.
+declaration under that file's own coercion mode. The last two
+(`type.maybe-argument-mismatch`, `type.maybe-return-mismatch`) ask the same
+question one notch weaker, about a type rather than a value, and reach only
+`strict`.
 
 ```php
 <?php
@@ -325,6 +326,40 @@ judged at all, because the only honest source is the engine itself.
 
 One limit remains on the argument side: a `$o->prop` argument is not read.
 `f($v)`, `f(g($x))`, `f($o->m())` and `f($a['k'])` all are.
+
+**The same pair exists for `return`**, on the same rung and with the same
+split: **`type.maybe-return-mismatch`** where every arm came from a native
+declaration, **`phpdoc.maybe-return-mismatch`** where any arm came from a
+docblock. It reads a returned *variable* against the enclosing function's
+native return type, and it is where an object union finally gets an answer:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+final class Ok {}
+final class Err {}
+
+function unwrap(Ok|Err $result): Ok
+{
+    return $result;
+}
+```
+
+```
+$ steins check --profile strict src/Result.php
+src/Result.php:10:12: error[type.maybe-return-mismatch]: return value $result may not become Ok (return type of unwrap()) — $result is Ok|Err, and its Err arm raises a TypeError (strict mode)
+```
+
+An `instanceof` guard, an early `throw`, or any narrowing that deletes the
+rejected arm discharges it, exactly as on the argument side. Two bounds worth
+knowing: a class arm is judged only when the class can have **no subclass**
+(`final`, or an enum) — an extensible class may have a subclass the return
+type accepts, so Steins says nothing rather than guess — and only a plain
+`return $variable;` is read, not `return g();` or `return $a['k']`.
+A property `get` hook's body is judged against the property's own type, since
+that is what PHP enforces there.
 
 ### `call.*` — calls that cannot complete
 

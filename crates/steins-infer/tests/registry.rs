@@ -27,6 +27,8 @@ use steins_infer::{
 };
 // the argument side's possibly pair (ADR-0081 amendment, issue #391)
 use steins_infer::{PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID};
+// the return seam's possibly pair (ADR-0081 amendment, issue #537)
+use steins_infer::{PHPDOC_MAYBE_RETURN_MISMATCH_ID, TYPE_MAYBE_RETURN_MISMATCH_ID};
 // unset pseudo-type (ADR-0087 §4, issue #396)
 use steins_infer::PHPDOC_MAYBE_UNDEFINED_ID;
 // member absence (ADR-0078, issue #197)
@@ -502,6 +504,11 @@ fn floors_reproduce_the_pre_s6_layer_selection() {
         // `Contracts`, so a `contracts` run keeps its meaning.
         (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
         (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
+        // The same judgment at the return seam (issue #537), on the same split for
+        // the same two halves of the same reason. `type.return-mismatch` /
+        // `phpdoc.return-mismatch` are the definite siblings and keep their floors.
+        (TYPE_MAYBE_RETURN_MISMATCH_ID, Layer::Proof, Floor::Strict),
+        (PHPDOC_MAYBE_RETURN_MISMATCH_ID, Layer::Contract, Floor::Strict),
         // `phpdoc.unknown-vocabulary` (ADR-0091 §6, issue #479) is deliberately
         // NOT listed here. §6 made its floor a measurement rather than a
         // decision, and this slice's review (2026-08-27) read that measurement

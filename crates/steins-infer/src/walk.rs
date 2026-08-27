@@ -62,6 +62,7 @@ use crate::refine::{
     then_refinements,
 };
 use crate::return_arms::{bindable_args, fn_return_arms_at_call, native_arms};
+use crate::return_maybe::check_maybe_return_mismatch;
 use crate::shapes::{apply_offset_write, apply_shape_narrowing};
 use crate::string_context::check_string_contexts;
 
@@ -820,6 +821,26 @@ pub(crate) fn walk_trace(
                         ),
                     });
                 }
+            }
+            // The possibly-grade sibling (ADR-0081 §8's 2026-08-27 amendment, issue
+            // #537), placed where its argument twin is: after the native proof had
+            // its chance, so a definite No is never shadowed by the weaker claim
+            // about the same `return`. It rides beside the phpdoc contract check
+            // rather than behind it, since the two judge different declarations.
+            if !native_fired
+                && let Some((ret, display)) = w.ret_info
+            {
+                check_maybe_return_mismatch(
+                    cx,
+                    ret,
+                    display,
+                    value,
+                    env,
+                    store,
+                    scope.poisoned,
+                    span.start,
+                    out,
+                );
             }
         }
 

@@ -203,13 +203,27 @@ fn maybe_arg_witnesses(base: Base) -> Vec<ArgValue> {
     }
 }
 
+/// The base-level lift of [`is_type_error`]: does `ty` reject **every** value of
+/// scalar base `base`? Asked once per equivalence class of PHP's own coercion
+/// behaviour ([`maybe_arg_witnesses`]), never through a second table.
+///
+/// Shared with the return seam's possibly grade (issue #537). PHP applies the same
+/// coercion table at both boundaries — all 144 return-position cells of
+/// `harness/coercion-grid` agree with their parameter twins at 8.5.9 — so one lift
+/// answers for both, and a divergence would have to be measured before it could be
+/// modeled.
+pub(crate) fn native_rejects_base(cx: &Cx, ty: &NativeType, base: Base) -> bool {
+    maybe_arg_witnesses(base).iter().all(|w| is_type_error(cx, ty, w))
+}
+
 /// One abstract arm: a scalar base with the refinement (if any) carried with it.
 /// The `null` side-flag is never an arm — it rides beside the list, as in [`Fact`].
-type AbstractArm = (Base, Option<Refinement>);
+pub(crate) type AbstractArm = (Base, Option<Refinement>);
 
-/// How much of an abstract fact's denotation a native parameter rejects.
+/// How much of an abstract fact's denotation a native type rejects — the same
+/// three-way verdict at a parameter and at a return (issue #537).
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum MaybeArgVerdict {
+pub(crate) enum MaybeVerdict {
     /// Every arm rejected — the definite No of issue #291. Measured empty, and
     /// never emitted: see the module header above.
     Every,
@@ -235,7 +249,7 @@ fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<AbstractArm>, bool)> {
 
 /// Spell one abstract union arm the way [`describe_fact`] spells a whole fact —
 /// used to name the rejected arms in the message.
-fn spell_arm(arm: &AbstractArm) -> String {
+pub(crate) fn spell_arm(arm: &AbstractArm) -> String {
     let (base, refinement) = arm;
     let f = match refinement {
         Some(r) => Fact::refined(*base, *r, false),
@@ -259,52 +273,65 @@ fn spell_arm(arm: &AbstractArm) -> String {
 /// `false` for an array by construction, so admitting it here would smuggle in
 /// the second table this judgment refuses.
 ///
-/// `null_tolerated` is the internal-null coercive carve-out (ADR-0056 §9.3),
-/// `false` for every userland parameter: the `null` side-flag cannot be a rejected
-/// arm where PHP only deprecates it. See [`internal_null_tolerated`].
+/// `null_accepted` is the position's own reason to admit a `null` the type does not
+/// spell — the implicit-nullable default (`f(string $s = null)`, issue #391's second
+/// repair), which no return position has. `null_tolerated` is the internal-null
+/// coercive carve-out (ADR-0056 §9.3), `false` for every userland parameter: the
+/// `null` side-flag cannot be a rejected arm where PHP only deprecates it. See
+/// [`internal_null_tolerated`].
 ///
 /// Returns the verdict, the rejected bases, and whether the `null` side-flag is
 /// rejected. Spelling is the caller's, since the declared-arm lane can name an arm
 /// (`false`) more precisely than its base (`bool`).
+///
+/// Shared verbatim with the return seam (issue #537), which reaches it with both
+/// null flags `false`.
+pub(crate) fn maybe_fact_verdict(
+    cx: &Cx,
+    ty: &NativeType,
+    fact: &Fact,
+    null_accepted: bool,
+    null_tolerated: bool,
+) -> (MaybeVerdict, Vec<AbstractArm>, bool) {
+    let Some((arms, nullable)) = maybe_arg_arms(fact) else {
+        return (MaybeVerdict::Nothing, Vec::new(), false);
+    };
+    if arms.is_empty() {
+        return (MaybeVerdict::Nothing, Vec::new(), false);
+    }
+    let rejected: Vec<AbstractArm> =
+        arms.iter().filter(|arm| native_rejects_base(cx, ty, arm.0)).copied().collect();
+    let null_rejected = nullable
+        && is_type_error(cx, ty, &ArgValue::Null)
+        && !null_accepted
+        && !null_tolerated;
+    let total = arms.len() + usize::from(nullable);
+    let n = rejected.len() + usize::from(null_rejected);
+    let verdict = if n == total {
+        MaybeVerdict::Every
+    } else if n == 0 {
+        MaybeVerdict::Nothing
+    } else {
+        MaybeVerdict::Partial
+    };
+    (verdict, rejected, null_rejected)
+}
+
+/// [`maybe_fact_verdict`] at an argument position, where the parameter's own
+/// implicit-nullable default is part of what it accepts.
 fn maybe_arg_verdict(
     cx: &Cx,
     p: &Param,
     ty: &NativeType,
     fact: &Fact,
     null_tolerated: bool,
-) -> (MaybeArgVerdict, Vec<AbstractArm>, bool) {
-    let Some((arms, nullable)) = maybe_arg_arms(fact) else {
-        return (MaybeArgVerdict::Nothing, Vec::new(), false);
-    };
-    if arms.is_empty() {
-        return (MaybeArgVerdict::Nothing, Vec::new(), false);
-    }
-    let rejected: Vec<AbstractArm> = arms
-        .iter()
-        .filter(|arm| maybe_arg_witnesses(arm.0).iter().all(|w| is_type_error(cx, ty, w)))
-        .copied()
-        .collect();
-    // The implicit-nullable default is part of the parameter's acceptance, exactly
-    // as it is for a proven `null` (issue #391's second repair).
-    let null_rejected = nullable
-        && is_type_error(cx, ty, &ArgValue::Null)
-        && !implicit_null_accepted(p, &ArgValue::Null)
-        && !null_tolerated;
-    let total = arms.len() + usize::from(nullable);
-    let n = rejected.len() + usize::from(null_rejected);
-    let verdict = if n == total {
-        MaybeArgVerdict::Every
-    } else if n == 0 {
-        MaybeArgVerdict::Nothing
-    } else {
-        MaybeArgVerdict::Partial
-    };
-    (verdict, rejected, null_rejected)
+) -> (MaybeVerdict, Vec<AbstractArm>, bool) {
+    maybe_fact_verdict(cx, ty, fact, implicit_null_accepted(p, &ArgValue::Null), null_tolerated)
 }
 
 /// The bases (and the `null` flag) one declared-lane arm denotes, or `None` for an
 /// arm the value lattice has no scalar reading of (an array/callable/class arm).
-fn arm_base_set(ty: &ContractTy) -> Option<(Vec<Base>, bool)> {
+pub(crate) fn arm_base_set(ty: &ContractTy) -> Option<(Vec<Base>, bool)> {
     if matches!(ty, ContractTy::Null) {
         return Some((Vec::new(), true));
     }
@@ -586,7 +613,7 @@ pub(crate) fn check_maybe_argument_mismatch(
     };
     let (verdict, rejected, null_rejected) =
         maybe_arg_verdict(cx, param, ty, &fact, null_tolerated);
-    if verdict != MaybeArgVerdict::Partial {
+    if verdict != MaybeVerdict::Partial {
         return;
     }
     let id = if stratum == Stratum::Verified {

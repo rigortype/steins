@@ -471,7 +471,26 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   `JsonFile::parseJson(?string $json)` (JsonLoader.php:44); `json_encode()`
     //   into `new JsonManipulator(string $contents)`
     //   (Test/Json/JsonManipulatorTest.php:3231).
-    ("composer/composer", 31),
+    //
+    // The issue #537 wave (2026-08-27) is the same judgment at the RETURN seam,
+    // and it moves exactly one package. All three rows are `Asserted` (the arms
+    // come from `Platform::getEnv()`'s `@return string|false`), so they land on
+    // the contract id and the proof half stays at zero corpus-wide.
+    //
+    //   31 → 34 (+3), one shape three times, in `src/Composer/Factory.php`:
+    //   `$x = Platform::getEnv(…); if ($x) { return $x; }` inside `getHomeDir()`
+    //   (:62), `getCacheDir()` (:103) and `getDataDir()` (:148), each declaring
+    //   `: string`. **FALSE at the site, and all three for one missing narrowing**
+    //   — a bare truthiness guard on a `T|false` arm lane subtracts nothing, so
+    //   the `false` arm the `if` just excluded is still standing at the `return`.
+    //   The argument side carries the identical gap (`if ($h) { needString($h); }`
+    //   reports `phpdoc.maybe-argument-mismatch` on a fixture today); it simply has
+    //   no public-corpus site, so the return seam is where the corpus first shows
+    //   it. Seeded rather than suppressed, on ADR-0081 §8's posture for this
+    //   family: the narrowing repair is its own slice, exactly as the four repairs
+    //   issue #391's measurement forced were (§A6), and the count comes back down
+    //   when it lands.
+    ("composer/composer", 34),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
     //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and

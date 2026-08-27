@@ -31,6 +31,7 @@ use crate::{
     OFFSET_MISSING_ID,
     OFFSET_ON_UNSUPPORTED_ID, OFFSET_UNDECLARED_ID,
     PARAM_MISMATCH_ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID,
+    PHPDOC_MAYBE_RETURN_MISMATCH_ID, TYPE_MAYBE_RETURN_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
     RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
@@ -333,6 +334,13 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // §8 derivation, so the fp-gate routes it to the tripwire bucket with no list
     // to edit. Its ALL-arms-rejected sibling was measured empty and is not built.
     (TYPE_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Proof, Floor::Strict),
+    // The same judgment at the return seam (ADR-0081's 2026-08-27 amendment,
+    // issue #537): some arm of the returned variable's declared type is rejected
+    // by the enclosing function's native return type and some is accepted. Same
+    // layer and floor as its argument sibling above, so the fp-gate's tripwire
+    // bucket takes it by derivation with no list to edit; the all-arms-rejected
+    // verdict is not built here either.
+    (TYPE_MAYBE_RETURN_MISMATCH_ID, Layer::Proof, Floor::Strict),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     // Sentinel parameter (ADR-0088 §4, issue #428): the `never`-declared carve-out
@@ -359,6 +367,11 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // definite question.
     (PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, Layer::Contract, Floor::Strict),
     (RETURN_MISMATCH_ID, Layer::Contract, Floor::Contracts),
+    // The return seam's `Asserted`-premise half (issue #537), on the same split
+    // its argument sibling takes: `Contract` because a docblock arm is what the
+    // claim rests on, `Strict` because the question is a possibly-grade one and
+    // `phpdoc.return-mismatch` above keeps `Contracts` for the definite version.
+    (PHPDOC_MAYBE_RETURN_MISMATCH_ID, Layer::Contract, Floor::Strict),
     // The hyphen reservation's diagnostic (ADR-0091 §6, issue #479).
     // `Layer::Contract`: the premise is a docblock's own spelling, and the
     // program runs either way.
