@@ -297,3 +297,64 @@ function f(?string $v): void { %s \\PHPStan\\dumpType($v); }
     assert_eq!(compared, plain);
     assert_ne!(compared, "non-empty-string", "the envelope was applied to a comparison");
 }
+
+
+// The class-reflection family answers about a value and writes nothing (#569)
+
+
+/// Issue #569. `get_class`, `is_a`, `is_subclass_of` and kin declare every
+/// parameter by value in PHP's own signature, so a guard built from one cannot
+/// have rebound its subject. Before this they were unrecognized, and the operand
+/// rule charged the whole read set — so `get_class($x) === A::class` answered
+/// `unknown` about `$x` on BOTH branches, where the `$x::class` spelling of the
+/// same test left the declared arms standing.
+///
+/// What these guards PROVE is not claimed here and stays #538's: the arms are
+/// unnarrowed, they are merely still there.
+#[test]
+fn a_class_reflection_guard_keeps_its_subjects_facts() {
+    for guard in [
+        "\\get_class($x) === A::class",
+        "\\get_class($x) !== A::class",
+        "A::class === \\get_class($x)",
+        "\\is_a($x, A::class)",
+        "\\is_subclass_of($x, A::class)",
+        "\\get_parent_class($x) === A::class",
+        "\\get_debug_type($x) === 'A'",
+        "\\spl_object_id($x) === 1",
+    ] {
+        let src = format!(
+            "<?php\nfinal class A {{}}\nfinal class B {{}}\n\
+             /** @param A|B $x */\nfunction f($x): void {{ if ({guard}) {{ \\PHPStan\\dumpType($x); }} }}\n"
+        );
+        assert_eq!(dumps(&src), ["A|B (asserted)"], "{guard}");
+    }
+}
+
+/// The option flags are the half that could have been got wrong: they change
+/// what the call ANSWERS, never whether it writes, so every arity is exempt.
+#[test]
+fn the_option_flags_do_not_change_what_the_guard_forgets() {
+    for guard in [
+        "\\is_a($x, A::class, true)",
+        "\\is_a($x, A::class, false)",
+        "\\is_subclass_of($x, A::class, true)",
+        "\\is_subclass_of($x, A::class, false)",
+    ] {
+        let src = format!(
+            "<?php\nfinal class A {{}}\nfinal class B {{}}\n\
+             /** @param A|B $x */\nfunction f($x): void {{ if ({guard}) {{ \\PHPStan\\dumpType($x); }} }}\n"
+        );
+        assert_eq!(dumps(&src), ["A|B (asserted)"], "{guard}");
+    }
+}
+
+/// The control: a builtin that really does write an argument by reference still
+/// forgets it, in the identical operand position.
+#[test]
+fn a_by_reference_builtin_in_the_same_position_still_forgets() {
+    let src = "<?php\n\
+        /** @param A|B $x */\nfunction f($x, string $s): void {\n\
+        \\preg_match('/x/', $s, $x);\n  \\PHPStan\\dumpType($x);\n}\n";
+    assert_ne!(dumps(src), ["A|B (asserted)"]);
+}

@@ -793,6 +793,17 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "mb_trim",
         "mb_ltrim",
         "mb_rtrim",
+        // Class-reflection family (issue #569): every parameter by value,
+        // options included (`is_a`'s `bool $allow_string`, `is_subclass_of`'s
+        // the same). Each asks a question ABOUT a value and writes nothing.
+        "get_class",
+        "get_parent_class",
+        "get_debug_type",
+        "gettype",
+        "is_a",
+        "is_subclass_of",
+        "spl_object_id",
+        "spl_object_hash",
     ];
     match out_params(name) {
         Some(positions) => Some(!positions.contains(&position)),
@@ -1384,6 +1395,34 @@ mod tests {
         assert_eq!(by_value_arg("is_callable", 1), Some(true), "$syntax_only is by value");
         assert_eq!(by_value_arg("is_callable", 2), Some(false), "$callable_name is by ref");
         assert!(!foldable("is_callable"));
+    }
+
+    /// Issue #569: the class-reflection family, certified per NAME. The option
+    /// flags are the point — `is_a($x, $c, true)` and `is_subclass_of($x, $c,
+    /// false)` change what the call ANSWERS and not whether it writes, so every
+    /// position is by value at every arity.
+    #[test]
+    fn by_value_arg_certifies_the_class_reflection_family() {
+        for f in ["get_class", "get_parent_class", "get_debug_type", "gettype",
+                  "spl_object_id", "spl_object_hash"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+        }
+        // Certification is about the ARGUMENTS; the fold allowlist is about the
+        // RESULT, and the two answer independently. `gettype` was already
+        // foldable — a pure function of its argument's type — while the object
+        // identity ones are not, and neither fact moved here.
+        assert!(foldable("gettype"));
+        for f in ["get_class", "get_parent_class", "get_debug_type",
+                  "spl_object_id", "spl_object_hash"] {
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+        // The two that carry an option flag: subject, class, and the flag.
+        for f in ["is_a", "is_subclass_of"] {
+            for p in 0..3 {
+                assert_eq!(by_value_arg(f, p), Some(true), "{f} position {p} is by value");
+            }
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
     }
 
     /// Issue #41 string-producer family: certified per NAME, so every
