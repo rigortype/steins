@@ -10,9 +10,15 @@
 //! endpoint shrinks by one, while an interior point keeps it whole because a
 //! gap has no arm spelling (issue #90).
 //!
+//! Truthiness is the subtrahend next door (issue #557): `if ($x)` excludes `0`
+//! and `''` alongside `false`, so it is not a value subtraction at all, and
+//! `Subtrahend::Falsy` deletes every arm all of whose inhabitants are falsy. It
+//! deletes whole arms and refines none: a surviving `int` arm still spells
+//! `int` where the guard did exclude `0`.
+//!
 //! Two deliberate limits are pinned:
-//! * truthiness over `int|false` strips nothing because it excludes both `0` and
-//!   `false`, not one value;
+//! * the falsy branch of a truthiness test subtracts nothing — its complement
+//!   has no arm spelling;
 //! * the positive branch of `=== false` gains no keep-only arm narrowing because
 //!   the value lane's `Refine::Exact` owns it.
 //!
@@ -69,6 +75,20 @@ fn then_branch(decl: &str, cond: &str) -> String {
     one_type(&format!(
         "<?php\n/** @param {decl} $x */\nfunction f($x): void {{ if ({cond}) {{ \\PHPStan\\dumpType($x); }} }}\n"
     ))
+}
+
+/// `@param <decl> $x`, dumped under `$x && $y` — the short-circuit spelling of
+/// the same true branch (issue #557). `$y` is deliberately untyped; the second
+/// operand's only job is to make the `&&` real.
+fn and_branch(decl: &str) -> String {
+    let src = format!(
+        "<?php\n/** @param {decl} $x */\nfunction f($x, $y): void {{ if ($x && $y) {{ \\PHPStan\\dumpType($x); }} }}\n"
+    );
+    let tree = SourceTree::parse(&src);
+    let ds = check(&tree, &[], "t.php");
+    let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ty.len(), 1, "expected exactly one debug.type dump, got {ds:?}");
+    ty[0].message.clone()
 }
 
 /// `@param <decl> $x`, dumped on the FALSE branch of `<cond>`.
@@ -386,17 +406,72 @@ fn a_string_literal_exclusion_deletes_its_arm() {
 }
 
 
-// Refusal: truthiness is NOT a value subtraction
+// Truthiness: its own subtrahend, deleting whole arms only (issue #557)
 
 
 #[test]
-fn a_truthiness_guard_strips_no_arm() {
-    // `if ($pos)` is false for `0` as well as for `false`, so on the true branch the
-    // `false` arm is indeed impossible — but so is `0`, and the `0`-vs-`false`
-    // asymmetry is precisely PHPStan's `strpos` footgun. `Refine::Truthy` is
-    // deliberately not wired to the lane; when it is, it gets its own subtrahend.
-    assert_eq!(then_branch("int|false", "$x"), "dumped type: int|false (asserted)");
-    assert_eq!(then_branch("string|false", "$x"), "dumped type: string|false (asserted)");
+fn a_truthiness_guard_deletes_the_arms_it_proves_out() {
+    // `if ($pos)` is false for `0` as well as for `false`, so this was never a
+    // value subtraction — the `0`-vs-`false` asymmetry is PHPStan's classic
+    // `strpos` footgun. `Subtrahend::Falsy` is the subtrahend that owns it: the
+    // `false` arm is all-falsy and dies, and the `int` arm survives because it
+    // admits truthy values.
+    assert_eq!(then_branch("int|false", "$x"), "dumped type: int (asserted)");
+    assert_eq!(then_branch("string|false", "$x"), "dumped type: string (asserted)");
+    // The `string|false` builtin-return idiom is the shape the FP was measured
+    // on (issue #557, three sites in the public corpus), in each of the three
+    // spellings that reach the true branch.
+    assert_eq!(and_branch("string|false"), "dumped type: string (asserted)");
+    assert_eq!(else_branch("string|false", "!$x"), "dumped type: string (asserted)");
+    assert_eq!(after_assert("string|false", "$x"), "dumped type: string (asserted)");
+}
+
+#[test]
+fn every_all_falsy_arm_dies_and_no_other_does() {
+    // Arm by arm, against a `mixed`-free union that keeps one truthy anchor so an
+    // emptied lane never hides the answer.
+    for falsy in ["false", "null", "0", "''", "'0'", "0.0"] {
+        assert_eq!(
+            then_branch(&format!("\\DateTime|{falsy}"), "$x"),
+            "dumped type: DateTime (asserted)",
+            "the all-falsy arm `{falsy}` must die"
+        );
+    }
+    // A truthy literal arm is not touched.
+    assert_eq!(then_branch("string|true", "$x"), "dumped type: string|true (asserted)");
+    assert_eq!(then_branch("int|true", "$x"), "dumped type: int|true (asserted)");
+    assert_eq!(then_branch("int|1", "$x"), "dumped type: int|1 (asserted)");
+}
+
+#[test]
+fn a_surviving_arm_is_never_refined_within() {
+    // The deliberate bound (issue #557): whole-arm deletion, nothing finer. Each
+    // of these admits both falsy and truthy values, so the guard does exclude
+    // *some* of what the arm spells — and the arm still spells it. Widening the
+    // truth is sound; the finer readings are neighbouring work.
+    assert_eq!(then_branch("int", "$x"), "dumped type: int (asserted)");
+    assert_eq!(then_branch("bool", "$x"), "dumped type: bool (asserted)");
+    assert_eq!(then_branch("string", "$x"), "dumped type: string (asserted)");
+    // `array` is the one shape where the dump moves, and it is not this lane
+    // speaking: the value lane's own `truthy_narrow` has always added
+    // non-emptiness to an array fact under a truthiness guard. The ARM is
+    // untouched — `array` admits `[]` and survives whole.
+    assert_eq!(then_branch("array", "$x"), "dumped type: non-empty-array (asserted)");
+    // An interval that straddles zero keeps its interior point, exactly as a
+    // value subtrahend's interior point leaves an interval whole.
+    assert_eq!(then_branch("int<-1, 1>", "$x"), "dumped type: int<-1, 1> (asserted)");
+    // The point interval at zero IS `0` under another spelling, so it dies.
+    assert_eq!(then_branch("\\DateTime|int<0, 0>", "$x"), "dumped type: DateTime (asserted)");
+}
+
+#[test]
+fn the_falsy_branch_of_a_truthiness_test_subtracts_nothing() {
+    // `collect_refine` only yields `Refine::Truthy` where the test HOLDS: the
+    // falsy branch is the complement of a set the arm vocabulary cannot spell
+    // (`""`, `"0"`, `0`, `null`, `[]`), and inventing an arm for it is not this
+    // issue's business.
+    assert_eq!(else_branch("string|false", "$x"), "dumped type: string|false (asserted)");
+    assert_eq!(then_branch("string|false", "!$x"), "dumped type: string|false (asserted)");
 }
 
 

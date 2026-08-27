@@ -298,3 +298,53 @@ fn a_get_hook_body_is_judged_against_the_propertys_own_type() {
     assert_eq!(d.len(), 1, "{d:?}");
     assert!(d[0].message.contains("return type of H::$p::get()"), "{}", d[0].message);
 }
+
+
+// The truthiness guard the possibly grade must not report through (issue #557)
+
+
+/// The false-positive shape this check seeded into the public corpus when it
+/// landed: a `T|false` builtin-return idiom, guarded by a bare `if ($x)`, is a
+/// `T` on the branch the return sits in. Three sites in `composer/composer`
+/// (`Platform::getEnv(): string|false` behind `if ($x)`) were exactly this, and
+/// the defect was never the return seam's — the argument seam reported the same
+/// FP on the same fixture. The guard is consumed by `Subtrahend::Falsy` now.
+#[test]
+fn a_truthiness_guard_consumes_the_false_arm_before_the_return() {
+    let src = strict(
+        "function f(): string {\n    $v = \\realpath('/x');\n    if ($v) {\n        return $v;\n    }\n    return 'fallback';\n}\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
+
+/// The same guard, the same idiom, the argument seam — the pair that shows the
+/// defect belonged to the guard rather than to either check.
+#[test]
+fn the_argument_seam_is_quiet_on_the_same_fixture() {
+    let src = strict(
+        "function needString(string $s): void {}\n\
+         function f(): void {\n    $v = \\realpath('/x');\n    if ($v) {\n        needString($v);\n    }\n}\n",
+    );
+    let noisy: Vec<Diagnostic> =
+        run(&src).into_iter().filter(|d| d.id.ends_with("maybe-argument-mismatch")).collect();
+    assert!(noisy.is_empty(), "{noisy:?}");
+}
+
+/// The guard is what does it, not the assignment: without it the finding stands.
+/// Without this control the pair above would pass on a check that had simply
+/// stopped reporting.
+#[test]
+fn the_unguarded_return_still_reports() {
+    let src = strict("function f(): string {\n    $v = \\realpath('/x');\n    return $v;\n}\n");
+    let d = contract(&src);
+    assert_eq!(d.len(), 1, "{d:?}");
+}
+
+/// And the `!$v` early return, the other spelling of the same consumption.
+#[test]
+fn the_negated_early_return_consumes_it_too() {
+    let src = strict(
+        "function f(): string {\n    $v = \\realpath('/x');\n    if (!$v) {\n        return 'fallback';\n    }\n    return $v;\n}\n",
+    );
+    assert!(family(&src).is_empty(), "{:?}", family(&src));
+}
