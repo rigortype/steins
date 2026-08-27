@@ -1797,6 +1797,12 @@ fn identity_inputs(
 /// The plugin channel's finding-relevant content as identity strings: the
 /// registered labels and the accepted colorings. Hashed sorted by
 /// [`GenerationInputs::generation_id`], so the order here is immaterial.
+///
+/// A third row, `vocab:<name>`, is owed the moment ADR-0091 §4.1's vocabulary
+/// registration kind lands on the manifest — registered vocabulary is half of
+/// `phpdoc.unknown-vocabulary`'s allowlist, and a generation that omits it
+/// stays warm across a plugin-set change that moved the findings. See the
+/// note on the `PHPDOC_UNKNOWN_VOCABULARY_ID` registry entry (suppress.rs).
 fn plugin_identity(plugins: &PluginFacts) -> Vec<String> {
     let mut out: Vec<String> =
         plugins.registry().extensions().iter().map(|label| format!("label:{label}")).collect();

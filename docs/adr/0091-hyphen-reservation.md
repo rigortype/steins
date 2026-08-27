@@ -186,6 +186,18 @@ the correct answer — the vocabulary really did go away — but it means the id
 baseline moves with configuration rather than with code, which is a thing
 ADR-0022's baseline discipline has to be told about rather than discover.
 
+A second consequence moves a cache rather than a baseline. ADR-0092's
+generation fingerprint hashes the plugin channel's finding-relevant content —
+`plugin_identity` in `steins-infer`'s `generation.rs`, which today emits
+`label:` and `effect:` rows. Registered vocabulary is finding-relevant the
+moment it exists (it is the plugin half of §6's allowlist), so the registration
+kind must add a `vocab:<name>` row alongside the existing two. Without it, a
+project that adds or drops a vocabulary-registering plugin keeps a published
+generation whose findings were computed under the old allowlist, and §6's
+findings appear or disappear only on the next unrelated invalidation. The
+staleness is silent, and ADR-0092 §5's warm ≡ cold oracle cannot catch it,
+because both passes load the same plugin set.
+
 The one theoretical escape is a name that reaches the class table as a
 **string** rather than through the compiler — `class_alias` with an odd second
 argument, or an extension registering one. Such a class cannot be named by a

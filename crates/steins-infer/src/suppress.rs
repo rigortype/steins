@@ -403,7 +403,11 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // ADR-0022's baseline discipline is told here rather than left to discover
     // it, because no code changed. The registration kind does not exist on the
     // `steins-plugin.json` manifest yet, so the plugin half is empty for every
-    // project today; the coupling bites when it lands.
+    // project today; the coupling bites when it lands. When it does, it must
+    // also add a `vocab:<name>` row to `plugin_identity` (generation.rs): the
+    // allowlist is finding-relevant, so a published generation computed under a
+    // different plugin vocabulary is stale — silently, since ADR-0092 §5's
+    // warm ≡ cold oracle loads the same plugin set on both passes.
     (PHPDOC_UNKNOWN_VOCABULARY_ID, Layer::Contract, Floor::Contracts),
     (PHPDOC_PROP_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     (THROW_UNDECLARED_ID, Layer::Contract, Floor::Contracts),
