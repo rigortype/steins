@@ -979,6 +979,7 @@ fn arm_cond_is_bool_valued(cond: &CondExpr) -> bool {
         | CondExpr::And(..)
         | CondExpr::Or(..)
         | CondExpr::Isset { .. }
+        | CondExpr::IssetVar { .. }
         | CondExpr::Call { .. }
         | CondExpr::Opaque { .. } => true,
         CondExpr::Truthy(_) => false,

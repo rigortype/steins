@@ -1643,10 +1643,20 @@ pub enum CondExpr {
     Call { call: Box<CallExpr>, reads: Vec<String> },
     /// `isset($var[<literal>])` — a key-presence guard, depth exactly one (ADR-0062 S4).
     /// True branch promotes presence and strips `null` (PHP's own `isset` semantics); only
-    /// this exact form lowers — bare `isset($x)` and property/dynamic keys go to
-    /// [`Self::Opaque`]. `empty($x[<literal>])` lowers to `!isset(…) || !…`; multi-arg
+    /// this exact form lowers here — bare `isset($x)` is [`Self::IssetVar`] (issue #414)
+    /// and property/dynamic keys go to [`Self::Opaque`]. `empty($x[<literal>])` lowers to `!isset(…) || !…`; multi-arg
     /// `isset($a['x'],$b['y'])` lowers to an [`Self::And`] chain only when every operand fits.
     Isset { var: String, key: Box<ArgValue> },
+    /// `isset($var)` over a bare variable — a presence test with no offset (issue #414).
+    ///
+    /// It exists to keep this shape OUT of [`Self::Opaque`]. `isset` is a language
+    /// construct, not a call: it cannot mutate its operand, so charging its read set
+    /// the by-reference conservatism [`Self::Opaque`] owes an unmodellable condition
+    /// discarded every fact the variable had — inside the branch and after it. What
+    /// the variant claims is only that: nothing to forget. It evaluates to `Maybe`
+    /// and refines nothing, so a caller that wants the presence proof itself
+    /// (ADR-0087 §4's `|unset` read inside its own guard) has a place to put it.
+    IssetVar { var: String },
     /// A condition the lowering cannot model. `reads` lists every bare variable it mentions,
     /// so the excluded path still invalidates them (ADR-0027 read-set rule).
     Opaque { reads: Vec<String> },

@@ -219,3 +219,69 @@ fn a_prefixed_var_displaces_the_plain_one() {
     let src = "<?php\nfunction f(array $arr): void {\n  /**\n   * @phpstan-var array{a: int} $arr\n   * @var array{a: int, b: int} $arr\n   */\n  \\PHPStan\\dumpType(count($arr));\n}\n";
     assert_eq!(one_type(src), "dumped type: 1 (asserted)");
 }
+
+
+// `isset($x)` is a construct, not a call, so it forgets nothing (issue #414)
+
+
+/// A bare `isset($x)` used to lower to `CondExpr::Opaque`, whose contract is that
+/// an unmodellable condition may mutate by reference anything it reads — so the
+/// cast was discarded inside the guarded branch AND after it. `isset` cannot
+/// mutate its operand; `CondExpr::IssetVar` is the spelling that says so.
+#[test]
+fn an_isset_guard_keeps_the_cast_on_both_paths() {
+    let dumps = dump_types(
+        "<?php\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  if (isset($d)) { \\PHPStan\\dumpType($d); }\n  \\PHPStan\\dumpType($d);\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: DateTime (asserted)", "dumped type: DateTime (asserted)"]);
+}
+
+/// The early-return spelling of the same guard, and the statement-position one
+/// that never opens a branch at all — the second is the shape that showed the
+/// forgetting was not about the branch: it outlived the `if` entirely.
+#[test]
+fn the_negated_and_statement_position_spellings_keep_it_too() {
+    let dumps = dump_types(
+        "<?php\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  if (!isset($d)) { return; }\n  \\PHPStan\\dumpType($d);\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: DateTime (asserted)"]);
+
+    let dumps = dump_types(
+        "<?php\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  \\PHPStan\\dumpType($d);\n  if (isset($d)) {}\n  \\PHPStan\\dumpType($d);\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: DateTime (asserted)", "dumped type: DateTime (asserted)"]);
+}
+
+/// Multi-argument `isset` is a conjunction in PHP, and each operand takes
+/// whichever lowering fits it — so a bare variable beside an offset keeps the
+/// whole condition out of `Opaque`.
+#[test]
+fn a_multi_argument_isset_keeps_every_bare_operand() {
+    let dumps = dump_types(
+        "<?php\nfunction f($d, array $a): void {\n  /** @var \\DateTime $d */\n  if (isset($d, $a['k'])) { \\PHPStan\\dumpType($d); }\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: DateTime (asserted)"]);
+}
+
+/// The control, and the reason this is a narrow fix rather than a general one: a
+/// real call in guard position still forgets, because a call really can write its
+/// argument by reference. Nothing about `isset` generalizes to it.
+#[test]
+fn a_call_in_guard_position_still_forgets() {
+    let dumps = dump_types(
+        "<?php\nfunction g($x): bool { return true; }\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  if (g($d)) { \\PHPStan\\dumpType($d); }\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: unknown"]);
+}
+
+/// `empty($x)` has the identical defect and is deliberately NOT fixed here: it is
+/// `!isset($x) || !$x`, so it carries a truthiness half that this variant does not
+/// model, and lowering it soundly is its own decision. Pinned so the next reader
+/// sees the boundary was chosen.
+#[test]
+fn empty_still_forgets_and_that_is_deliberate() {
+    let dumps = dump_types(
+        "<?php\nfunction f($d): void {\n  /** @var \\DateTime $d */\n  if (empty($d)) {} else { \\PHPStan\\dumpType($d); }\n}\n",
+    );
+    assert_eq!(dumps, ["dumped type: unknown"]);
+}
