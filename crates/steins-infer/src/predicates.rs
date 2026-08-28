@@ -337,30 +337,37 @@ pub(crate) fn type_predicate(cx: &Cx, call: &CallExpr) -> Option<TypePred> {
     PREDS.iter().find(|(n, _)| callee.eq_ignore_ascii_case(n)).map(|(_, p)| *p)
 }
 
-/// The recognized **class-reflection** builtin a call names, or `None`.
+/// The recognized **pure-question** builtin a call names, or `None`.
 ///
-/// These answer a question ABOUT a value and write nothing: every parameter is
-/// by value in PHP's own signature, the option flags included (`is_a`'s
-/// `bool $allow_string`, `is_subclass_of`'s the same). Issue #569 — an
-/// unrecognized name here cost the subject every fact it had, so
-/// `get_class($x) === A::class` answered `unknown` about `$x` on both branches
-/// while `$x::class === A::class` left the declared arms standing.
+/// These answer a question ABOUT their arguments and write none of them: every
+/// parameter is by value in PHP's own signature, the option flags included
+/// (`is_a`'s `bool $allow_string`, `is_subclass_of`'s the same,
+/// `class_exists`'s `bool $autoload`). An unrecognized name here cost the
+/// subject every fact it had, which is the defect #536, #414, #569 and #571
+/// each fixed for one family; issue #575 measured the rest of the population
+/// against PHPStan's own type-specifying set, and this is it.
 ///
 /// Recognition only. What these guards PROVE — `is_a` is `instanceof`'s
-/// function spelling, `is_subclass_of` is the proper-subclass one, and the
-/// `get_class(…) === C::class` comparison is exact-class identity — is #538's
-/// subtrahend work and none of it is claimed here.
+/// function spelling, `str_starts_with` with a non-empty needle proves a
+/// non-empty string, `class_exists` proves a class-string — is separate work
+/// and none of it is claimed here.
 ///
-/// The arity is deliberately not pinned: an optional argument changes what the
+/// **Not on this list, deliberately.** `settype` takes `mixed &$var` and
+/// `preg_match` takes `array &$matches`: they really do write, and the tests
+/// pin that they still forget. `array_key_exists` is on the OTHER exemption —
+/// its branch-confined forgetting is a decision (#548), not this defect.
+///
+/// The arity is deliberately not pinned: an optional argument changes what a
 /// call ANSWERS, never whether it writes, and this predicate is only asked the
 /// second question. `call.positional_only` still gates, since a named-argument
 /// call is not a shape the recognizers read.
-pub(crate) fn class_reflection_builtin(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
+pub(crate) fn pure_question_builtin(cx: &Cx, call: &CallExpr) -> Option<&'static str> {
     let callee = global_function_callee(cx, call)?;
     if !call.positional_only {
         return None;
     }
     const NAMES: &[&str] = &[
+        // Class reflection (issue #569).
         "get_class",
         "get_parent_class",
         "get_debug_type",
@@ -369,6 +376,41 @@ pub(crate) fn class_reflection_builtin(cx: &Cx, call: &CallExpr) -> Option<&'sta
         "is_subclass_of",
         "spl_object_id",
         "spl_object_hash",
+        // String questions (issue #575). Already by-value certified for the
+        // statement position; guard position is what was missing.
+        "str_contains",
+        "str_starts_with",
+        "str_ends_with",
+        "strlen",
+        "mb_strlen",
+        // The `ctype_*` family: one `mixed $text` parameter, by value.
+        "ctype_alnum",
+        "ctype_alpha",
+        "ctype_cntrl",
+        "ctype_digit",
+        "ctype_graph",
+        "ctype_lower",
+        "ctype_print",
+        "ctype_punct",
+        "ctype_space",
+        "ctype_upper",
+        "ctype_xdigit",
+        // Existence questions: a name and an option flag, both by value.
+        // `class_exists` autoloads, which is an EFFECT and not an argument
+        // write — the effect lane owns that question and keeps it.
+        "class_exists",
+        "interface_exists",
+        "enum_exists",
+        "trait_exists",
+        "function_exists",
+        "method_exists",
+        "property_exists",
+        "defined",
+        // Haystack searches: needle, haystack and the strict flag, all by
+        // value. `in_array`'s literal-haystack form has its own recognizer for
+        // what it PROVES; this is only about what it does not write.
+        "in_array",
+        "array_search",
     ];
     NAMES.iter().copied().find(|n| callee.eq_ignore_ascii_case(n))
 }

@@ -302,7 +302,7 @@ function f(?string $v): void { %s \\PHPStan\\dumpType($v); }
 // The class-reflection family answers about a value and writes nothing (#569)
 
 
-/// Issue #569. `get_class`, `is_a`, `is_subclass_of` and kin declare every
+/// Issues #569 and #575. `get_class`, `is_a`, `is_subclass_of` and kin declare every
 /// parameter by value in PHP's own signature, so a guard built from one cannot
 /// have rebound its subject. Before this they were unrecognized, and the operand
 /// rule charged the whole read set — so `get_class($x) === A::class` answered
@@ -399,4 +399,68 @@ fn the_written_form_still_narrows() {
         /** @param A|B $v */\n\
         function f($v): void { if ($v instanceof A) { \\PHPStan\\dumpType($v); } else { \\PHPStan\\dumpType($v); } }\n";
     assert_eq!(dumps(src), ["A", "B (asserted)"]);
+}
+
+
+// The rest of the pure-question population, measured against PHPStan's set (#575)
+
+
+/// Issue #575 measured PHPStan's type-specifying function set against Steins and
+/// found the remaining names carrying the #569 defect. Each answers a question
+/// about its arguments and writes none of them, and each was destroying its
+/// subject on the branch it was written to refine.
+#[test]
+fn the_string_and_existence_questions_keep_their_subjects_facts() {
+    for guard in [
+        "\\str_contains($s, 'x')",
+        "\\str_starts_with($s, 'x')",
+        "\\str_ends_with($s, 'x')",
+        "\\ctype_digit($s)",
+        "\\ctype_alpha($s)",
+        "\\class_exists($s)",
+        "\\interface_exists($s)",
+        "\\enum_exists($s)",
+        "\\trait_exists($s)",
+        "\\function_exists($s)",
+        "\\defined($s)",
+        "\\strlen($s) === 0",
+    ] {
+        let src =
+            format!("<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n");
+        assert_eq!(dumps(&src), ["string"], "{guard}");
+    }
+}
+
+/// `in_array` and `array_search` over a **variable** haystack. The literal-haystack
+/// form had its own recognizer for what it PROVES; neither form writes anything,
+/// and only the literal one was exempt from forgetting.
+#[test]
+fn a_variable_haystack_search_keeps_the_haystack() {
+    for guard in ["\\in_array($n, $a, true)", "\\array_search($n, $a, true) !== false"] {
+        let src = format!(
+            "<?php\n/** @param list<string> $a */\n\
+             function f(array $a, string $n): void {{ if ({guard}) {{ \\PHPStan\\dumpType($a); }} }}\n"
+        );
+        assert_eq!(dumps(&src), ["list<string> (asserted)"], "{guard}");
+    }
+}
+
+/// Statement position agrees with guard position, which is the asymmetry #559
+/// found for the `is_*` family and this slice closes for the rest: an unconsumed
+/// `ctype_digit($s);` costs `$s` nothing.
+#[test]
+fn statement_position_agrees_with_guard_position() {
+    for call in ["\\ctype_digit($s);", "\\class_exists($s);", "\\strlen($s);", "\\str_contains($s, 'x');"] {
+        let src = format!("<?php\nfunction f(string $s): void {{ {call} \\PHPStan\\dumpType($s); }}\n");
+        assert_eq!(dumps(&src), ["string"], "{call}");
+    }
+}
+
+/// The controls. `settype` takes `mixed &$var` and `preg_match` takes
+/// `array &$matches` — they really do write, and they still forget. Neither is
+/// on the list, and this is what makes the list a claim rather than a blanket.
+#[test]
+fn the_by_reference_builtins_still_forget() {
+    let src = "<?php\nfunction f(string $s): void { if (\\settype($s, 'integer')) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(dumps(src), ["unknown"]);
 }
