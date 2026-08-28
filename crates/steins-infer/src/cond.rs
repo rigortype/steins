@@ -168,7 +168,9 @@ pub(crate) fn eval_cond(
             if let Some(v) = eval_version_id_cmp(w.cx, *op, lhs, rhs) {
                 return v;
             }
-            match (operand_values(lhs, env, poisoned), operand_values(rhs, env, poisoned)) {
+            let lv = cmp_operand_values(w, folder, lhs, env, poisoned);
+            let rv = cmp_operand_values(w, folder, rhs, env, poisoned);
+            match (lv, rv) {
                 (Some(lv), Some(rv)) => eval_cmp(*op, &lv, &rv, w.cx.php_minor),
                 _ => Certainty::Maybe,
             }
@@ -472,6 +474,47 @@ pub(crate) fn eval_ternary_fact(
 }
 
 /// The candidate values of a condition operand: the fact's value set for a known
+/// A comparison operand's candidate values in GUARD position, agreeing with what
+/// the same expression answers in VALUE position (issue #342).
+///
+/// [`operand_values`] is the pure half: a literal, or a variable whose fact has
+/// finite members. It answers `None` for every [`CondOperand::Other`], whatever
+/// produced it — a fold, a transfer rung, a constant function — so
+/// `strtoupper('a') === 'A'` decided in a `dumpType` and stayed `Maybe` one
+/// character away inside an `if`. `cmp_candidates_under` is documented as "the
+/// value-side twin of `operand_values`", and the two disagreed on exactly this
+/// operand.
+///
+/// The call is rebuilt as the [`ArgValue::Call`] the value seam reads. Only a
+/// **plain, positional, statically-named function call** converts: a method or
+/// static call carries a receiver this variant cannot spell, a named or spread
+/// argument is not a positional list, and each of those keeps today's `Maybe`.
+///
+/// `descent` and `out` are `None` deliberately. Resolution here answers a guard,
+/// and a guard is not a place to walk a callee body or emit a diagnostic — what
+/// this seam adds is the *value* of an operand, which is issue #158's own
+/// distinction in the other direction: that variant is unmodeled about its
+/// value, never about its effects, and the operand's invalidation set keeps
+/// doing its existing job untouched.
+fn cmp_operand_values(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    op: &CondOperand,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<Vec<ArgValue>> {
+    if let Some(vs) = operand_values(op, env, poisoned) {
+        return Some(vs);
+    }
+    let CondOperand::Other { call: Some(call), .. } = op else { return None };
+    if !call.positional_only || call.has_spread {
+        return None;
+    }
+    let name = call.callee.clone()?;
+    let args: Vec<ArgValue> = call.args.iter().map(|a| a.value.clone()).collect();
+    w.cx.cmp_candidates_under(&ArgValue::Call(name, args), env, poisoned, folder, None, None)
+}
+
 /// variable, the literal itself, else `None` (unknown → the caller yields `Maybe`).
 pub(crate) fn operand_values(
     op: &CondOperand,
