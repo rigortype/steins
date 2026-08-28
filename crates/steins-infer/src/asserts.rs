@@ -14,7 +14,7 @@ use crate::contract::{AssertSpec, ProjectIsa};
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
 use crate::env::{ContractArm, Known, Store, Stratum};
-use crate::predicates::{class_reflection_builtin, in_array_literals, type_predicate};
+use crate::predicates::{in_array_literals, pure_question_builtin, type_predicate};
 use crate::refine::{clear_null, refine_fact, subtract_contract_lane};
 use crate::shapes::{
     apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
@@ -801,7 +801,7 @@ fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &m
     if array_guard_predicate(cx, call).is_some()
         || array_all_any_predicate(cx, call).is_some()
         || type_predicate(cx, call).is_some()
-        || class_reflection_builtin(cx, call).is_some()
+        || pure_question_builtin(cx, call).is_some()
         || in_array_literals(cx, call, cx.php_minor).is_some()
     {
         return;

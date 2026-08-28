@@ -715,6 +715,16 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 ///   made an unconsumed `is_string($key);` STATEMENT cost `$key` what the
 ///   same call in an `if` never did. `is_callable` is the family's rowed
 ///   member: `&$callable_name` puts it in [`out_params`] instead.
+/// * the **pure-question families** (issues #569 and #575): class reflection
+///   (`get_class`, `is_a`, `is_subclass_of`, …), the `ctype_*` predicates, the
+///   `*_exists` / `defined` existence questions, and `array_search`. Each asks
+///   a question ABOUT its arguments and writes none of them — the option flags
+///   included, since `bool $allow_string` and `bool $autoload` change what a
+///   call ANSWERS and never whether it writes. None is [`foldable`]: a locale,
+///   an autoloader or the runtime's loaded set decides the RESULT, which says
+///   nothing about ARGUMENT reachability. The string questions of the same
+///   measurement (`str_contains`, `strlen`, …) were already certified through
+///   the folding allowlist and needed no row here.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream.
@@ -804,6 +814,34 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "is_subclass_of",
         "spl_object_id",
         "spl_object_hash",
+        // The `ctype_*` family (issue #575): one `mixed $text` parameter, by
+        // value. Not foldable — the runtime's locale decides the result.
+        "ctype_alnum",
+        "ctype_alpha",
+        "ctype_cntrl",
+        "ctype_digit",
+        "ctype_graph",
+        "ctype_lower",
+        "ctype_print",
+        "ctype_punct",
+        "ctype_space",
+        "ctype_upper",
+        "ctype_xdigit",
+        // Existence questions (issue #575): a name and an option flag, both by
+        // value. `class_exists` autoloads, which is an EFFECT and not an
+        // argument write — the effect lane owns that and keeps it.
+        "class_exists",
+        "interface_exists",
+        "enum_exists",
+        "trait_exists",
+        "function_exists",
+        "method_exists",
+        "property_exists",
+        "defined",
+        // `array_search` (issue #575): needle, haystack and the strict flag,
+        // all by value. Its sibling `in_array` is certified through the
+        // folding allowlist already.
+        "array_search",
     ];
     match out_params(name) {
         Some(positions) => Some(!positions.contains(&position)),
@@ -1422,6 +1460,38 @@ mod tests {
                 assert_eq!(by_value_arg(f, p), Some(true), "{f} position {p} is by value");
             }
             assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+    }
+
+    /// Issue #575: the rest of the pure-question population, measured against
+    /// PHPStan's type-specifying set. None is foldable — a locale, an
+    /// autoloader or the runtime's loaded set decides the RESULT — and that
+    /// says nothing about ARGUMENT reachability, which is the whole point of
+    /// keeping the two questions apart.
+    #[test]
+    fn by_value_arg_certifies_the_remaining_pure_questions() {
+        for f in ["ctype_alnum", "ctype_alpha", "ctype_cntrl", "ctype_digit", "ctype_graph",
+                  "ctype_lower", "ctype_print", "ctype_punct", "ctype_space", "ctype_upper",
+                  "ctype_xdigit", "class_exists", "interface_exists", "enum_exists",
+                  "trait_exists", "function_exists", "method_exists", "property_exists",
+                  "defined"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+        // The option flags: `class_exists($c, $autoload)` and the `*_exists`
+        // siblings carry one, and it is by value like everything else.
+        for f in ["class_exists", "interface_exists", "enum_exists", "trait_exists"] {
+            assert_eq!(by_value_arg(f, 1), Some(true), "{f}'s $autoload is by value");
+        }
+        // `array_search`: needle, haystack, strict flag.
+        for p in 0..3 {
+            assert_eq!(by_value_arg("array_search", p), Some(true), "array_search position {p}");
+        }
+        // The string questions of the same measurement needed no row: the
+        // folding allowlist already certifies them.
+        for f in ["str_contains", "str_starts_with", "str_ends_with", "strlen", "in_array"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+            assert!(foldable(f), "{f} is certified through the allowlist");
         }
     }
 
