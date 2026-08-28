@@ -40,12 +40,23 @@ impl Mock {
             ("json_decode", "mixed"),
             ("min", "mixed"),
             ("max", "mixed"),
+            ("array_key_exists", "bool"),
+            ("key_exists", "bool"),
         ] {
             types.insert(f.to_owned(), t.to_owned());
         }
         // `min(mixed $value, mixed ...$values)` at 8.5.8: variadic, 2 declared /
         // 1 required, via `ReflectionFunction::getNumberOfParameters()`.
-        let arities = HashMap::from([("min".to_owned(), (2, 1)), ("max".to_owned(), (2, 1))]);
+        let arities = HashMap::from([
+            ("min".to_owned(), (2, 1)),
+            ("max".to_owned(), (2, 1)),
+            // `array_key_exists(mixed $key, array $array)` at 8.5.8: two
+            // declared, two required. The arm reads its arguments positionally
+            // with the SUBJECT at index 1, so the arity leg is what keeps the
+            // read honest if php-src ever grows a parameter in front of it.
+            ("array_key_exists".to_owned(), (2, 2)),
+            ("key_exists".to_owned(), (2, 2)),
+        ]);
         // `var_export`'s `?string` envelope sits one rung below the transfer, so
         // the null-strip reads as a refinement, not an answer from nowhere.
         let mut facts = HashMap::new();
@@ -409,4 +420,93 @@ fn a_project_function_shadowing_the_name_declines() {
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1);
     assert_eq!(ty[0].message, "dumped type: unknown");
+}
+
+
+// `array_key_exists` read as a VALUE (issue #343)
+
+
+/// The pair has narrowed a shape's presence as a GUARD since ADR-0062 §4 and
+/// answered nothing sharper than `bool` when its result was READ — against a fact
+/// that carries the answer. The subject is argument **1**, which is why this is a
+/// DR3 arm and not a shape-projection one.
+#[test]
+fn a_declared_shape_decides_the_key_question() {
+    let decl = "/** @param array{p: 1, q: string} $z */\n";
+    // A required field is present in every realization the shape admits.
+    assert_eq!(
+        one_type_with(
+            &format!("<?php\n{decl}function f(array $z): void {{ \\PHPStan\\dumpType(\\array_key_exists('p', $z)); }}\n"),
+            &mut Mock::sidecar()
+        ),
+        "dumped type: true (asserted)"
+    );
+    // An undeclared key under a SEALED tail: sealed is exactly the claim that no
+    // undeclared key may be present.
+    assert_eq!(
+        one_type_with(
+            &format!("<?php\n{decl}function f(array $z): void {{ \\PHPStan\\dumpType(\\array_key_exists('zz', $z)); }}\n"),
+            &mut Mock::sidecar()
+        ),
+        "dumped type: false (asserted)"
+    );
+}
+
+/// A witnessed literal carries the same answer at the `Verified` stratum — the
+/// absent `(asserted)` marker is the whole difference, and it is what keeps
+/// ADR-0062 A-G9's corollary honest about which of the two may premise a
+/// proof-layer finding.
+#[test]
+fn a_witnessed_literal_decides_it_too_and_at_its_own_stratum() {
+    let src = "<?php\nfunction g(int $x): void {\n  $c = ['p' => 1, 'q' => $x];\n  \\PHPStan\\dumpType(\\array_key_exists('p', $c));\n}\n";
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: true");
+    let absent = "<?php\nfunction g(int $x): void {\n  $c = ['p' => 1, 'q' => $x];\n  \\PHPStan\\dumpType(\\array_key_exists('zz', $c));\n}\n";
+    assert_eq!(one_type_with(absent, &mut Mock::sidecar()), "dumped type: false");
+}
+
+/// The two genuinely undecided shapes keep `bool`. An optional field may or may
+/// not be there by definition, and an unsealed tail is the claim that undeclared
+/// keys are admitted — neither supports a verdict, and `Maybe` is the honest
+/// answer the arm lane gives everywhere else.
+#[test]
+fn an_optional_field_and_an_unsealed_tail_keep_bool() {
+    for (decl, key) in [("array{p?: int}", "p"), ("array{p: int, ...}", "zz")] {
+        let src = format!(
+            "<?php\n/** @param {decl} $o */\nfunction f(array $o): void {{ \\PHPStan\\dumpType(\\array_key_exists('{key}', $o)); }}\n"
+        );
+        assert_eq!(
+            one_type_with(&src, &mut Mock::sidecar()),
+            "dumped type: bool (asserted)",
+            "{decl}"
+        );
+    }
+}
+
+/// `array_key_exists` asks about PRESENCE, not about the value — a `null` value
+/// is still a present key. This is the half `isset` would answer differently, and
+/// the pin that says the two questions are not the same one.
+#[test]
+fn a_null_valued_field_is_still_present() {
+    let src = "<?php\n/** @param array{p: ?int} $n */\nfunction f(array $n): void { \\PHPStan\\dumpType(\\array_key_exists('p', $n)); }\n";
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: true (asserted)");
+}
+
+/// A key that is not a concrete literal names no field to look up, and guessing
+/// one from its type is a different rung.
+#[test]
+fn a_non_literal_key_decides_nothing() {
+    let src = "<?php\n/** @param array{p: int} $z */\nfunction f(array $z, string $k): void { \\PHPStan\\dumpType(\\array_key_exists($k, $z)); }\n";
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: bool (asserted)");
+}
+
+/// The declaration gate applies here as everywhere: a sidecar that does not
+/// report `bool` for the name declines the arm, and the verdict is not produced.
+/// What is left is the answer every other rung was already giving — which is the
+/// point of the gate, not a second answer from nowhere.
+#[test]
+fn the_declaration_gate_still_governs() {
+    let mut mock = Mock::sidecar();
+    mock.types.insert("array_key_exists".to_owned(), "int".to_owned());
+    let src = "<?php\n/** @param array{p: int} $z */\nfunction f(array $z): void { \\PHPStan\\dumpType(\\array_key_exists('p', $z)); }\n";
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: bool (asserted)");
 }
