@@ -987,7 +987,15 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
             if let Expression::Identifier(id) = b.rhs.unparenthesized() {
                 CondExpr::Instanceof { operand: lower_cond_operand(b.lhs), class_ref: name_ref(id) }
             } else {
-                CondExpr::Opaque { reads: cond_reads(b.lhs) }
+                // A dynamic class (issue #571). `instanceof` is an operator and
+                // writes neither side, so this must not become an `Opaque` whose
+                // read set is an invalidation set. `reads` rides along unchanged
+                // for `guard_chain_subject`, which is the field's other consumer.
+                CondExpr::InstanceofDyn {
+                    operand: lower_cond_operand(b.lhs),
+                    class: lower_cond_operand(b.rhs),
+                    reads: cond_reads(b.lhs),
+                }
             }
         }
         BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => {

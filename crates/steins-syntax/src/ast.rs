@@ -1647,6 +1647,28 @@ pub enum CondExpr {
     /// and property/dynamic keys go to [`Self::Opaque`]. `empty($x[<literal>])` lowers to `!isset(…) || !…`; multi-arg
     /// `isset($a['x'],$b['y'])` lowers to an [`Self::And`] chain only when every operand fits.
     Isset { var: String, key: Box<ArgValue> },
+    /// `operand instanceof <dynamic class>` — the class is an expression rather
+    /// than a written name (issue #571). `$v instanceof $class` is the common
+    /// spelling; `$v instanceof $this->cls` and kin land here too.
+    ///
+    /// It exists for the same reason [`Self::IssetVar`] does: `instanceof` is an
+    /// **operator** and cannot write either side, so sending this shape to
+    /// [`Self::Opaque`] charged the subject the by-reference conservatism an
+    /// unmodellable condition owes, and the guard destroyed the very fact it was
+    /// written to refine.
+    ///
+    /// `class` is carried rather than discarded so a later reader can ask what
+    /// the operand's own type says — a `class-string<T>` value proves `T` here
+    /// exactly as a written name does (issue #573). Nothing asks yet: this form
+    /// evaluates `Maybe` and refines nothing.
+    ///
+    /// `reads` is **not** an invalidation set — this condition invalidates
+    /// nothing. It is the over-inclusive variable mention set
+    /// `guard_chain_subject` reads, carried verbatim from what [`Self::Opaque`]
+    /// recorded for this shape so that subject selection is byte-identical
+    /// across the change. The two questions shared one field before, which is
+    /// why the cheap fix (an empty `Opaque` read set) was not available.
+    InstanceofDyn { operand: CondOperand, class: CondOperand, reads: Vec<String> },
     /// `isset($var)` over a bare variable — a presence test with no offset (issue #414).
     ///
     /// It exists to keep this shape OUT of [`Self::Opaque`]. `isset` is a language
