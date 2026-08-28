@@ -936,12 +936,6 @@ fn cmp_op_of(operator: &BinaryOperator<'_>) -> Option<CmpOp> {
     }
 }
 
-/// Is this operand a `count(…)` / `sizeof(…)` call **as written** (issue #272)?
-///
-/// A syntactic question, deliberately: the lowering decides only whether the
-/// comparison is worth carrying as a [`CondExpr::Cmp`], and the semantic
-/// question — does the name denote the global builtin here — belongs to the
-
 /// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
 fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     let op = cmp_op_of(&b.operator);
