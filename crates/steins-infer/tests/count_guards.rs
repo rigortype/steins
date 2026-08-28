@@ -267,15 +267,23 @@ fn an_unbounded_operand_declines() {
 }
 
 #[test]
-fn an_opaque_neighbour_still_falls_back_to_the_old_lowering() {
-    // The ordering-comparison fallback (`CondExpr::Opaque`) is lifted only for
-    // a `count()` operand: comparing a count against another opaque expression keeps it.
+fn an_opaque_neighbour_costs_the_narrowing_and_not_the_fact() {
+    // Comparing a count against an unbounded opaque expression narrows nothing —
+    // the interval is the declared floor, unmoved — which is the same decline
+    // `an_unbounded_operand_declines` pins one shape over.
+    //
+    // What it no longer costs is the SUBJECT'S FACT (issue #577). This read
+    // `int<0, max>` without the stratum marker until the ordering-comparison
+    // fallback was removed: the whole condition used to lower to
+    // `CondExpr::Opaque`, which forgot `$v`, so the count answered the bare
+    // envelope instead of the declared shape's. The `(asserted)` is the shape
+    // still being there.
     assert_eq!(
         one_type(
             "<?php\n/** @param array<int> $v */\n\
              function f(array $v, object $o): void { if (count($v) > $o->n) { \\PHPStan\\dumpType(count($v)); } }\n"
         ),
-        "dumped type: int<0, max>"
+        "dumped type: int<0, max> (asserted)"
     );
 }
 
