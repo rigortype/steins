@@ -359,21 +359,30 @@ fn in_array_intersects_with_what_is_already_known() {
 fn in_array_declines_the_loose_form() {
     // Loose `==` membership is neither type-reflexive nor transitive
     // (`in_array(0, ['a'])` was true before PHP 8; `in_array('1e2', ['100'])` is
-    // true today), so no sound identity set exists to mint — decline and keep
-    // the pre-existing retained-guard-call forgetting.
+    // true today), so no sound identity set exists to mint — decline.
+    //
+    // Declining to NARROW is not destroying (issue #575). `in_array` writes
+    // nothing, so the subject keeps the fact it arrived with; it simply gains
+    // none. These two assertions read `unknown` until the pure-question
+    // recognizer separated the questions.
     let src = "<?php\nfunction f(string $s): void {\n\
                if (in_array($s, ['a', 'b'])) { \\PHPStan\\dumpType($s); }\n}\n";
-    assert_eq!(dumps(src), vec!["unknown"]);
+    assert_eq!(dumps(src), vec!["string"]);
     let explicit = "<?php\nfunction f(string $s): void {\n\
                     if (in_array($s, ['a', 'b'], false)) { \\PHPStan\\dumpType($s); }\n}\n";
-    assert_eq!(dumps(explicit), vec!["unknown"]);
+    assert_eq!(dumps(explicit), vec!["string"]);
 }
 
 #[test]
 fn in_array_declines_a_non_literal_haystack() {
+    // A haystack whose members are unknown mints no identity set, so the needle
+    // gains nothing — and loses nothing either (issue #575): the call writes no
+    // argument, so the declared `string` survives the guard it could not use.
+    // Narrowing the needle to the haystack's ELEMENT type is a separate
+    // direction, and the one this fixture will move on when it lands.
     let src = "<?php\n/** @param list<string> $allowed */\nfunction f(string $s, array $allowed): void {\n\
                if (in_array($s, $allowed, true)) { \\PHPStan\\dumpType($s); }\n}\n";
-    assert_eq!(dumps(src), vec!["unknown"]);
+    assert_eq!(dumps(src), vec!["string"]);
 }
 
 // ---- `assert()` inherits the vocabulary for free ----------------------------
