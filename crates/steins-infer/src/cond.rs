@@ -218,9 +218,10 @@ pub(crate) fn eval_cond(
         // could decide it is a shape fact, which is `Asserted` — deciding here
         // would let a docblock claim silence the env-free pass on a live path.
         // Narrowing is the whole payoff; reachability stays proof-only.
-        CondExpr::Isset { .. } | CondExpr::IssetVar { .. } | CondExpr::Opaque { .. } => {
-            Certainty::Maybe
-        }
+        CondExpr::Isset { .. }
+        | CondExpr::IssetVar { .. }
+        | CondExpr::InstanceofDyn { .. }
+        | CondExpr::Opaque { .. } => Certainty::Maybe,
     }
 }
 

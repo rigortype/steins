@@ -358,3 +358,45 @@ fn a_by_reference_builtin_in_the_same_position_still_forgets() {
         \\preg_match('/x/', $s, $x);\n  \\PHPStan\\dumpType($x);\n}\n";
     assert_ne!(dumps(src), ["A|B (asserted)"]);
 }
+
+
+// `instanceof` with a dynamic class writes neither side either (#571)
+
+
+/// Issue #571, the last spelling of the same defect. `$v instanceof $class`
+/// fitted no case in the lowering — only a written `Identifier` right-hand side
+/// builds `CondExpr::Instanceof` — so the whole condition became `Opaque` and the
+/// subject was charged the by-reference conservatism an unmodellable condition
+/// owes. `instanceof` is an operator: it writes neither side.
+#[test]
+fn a_dynamic_class_instanceof_keeps_its_subjects_facts() {
+    for guard in ["$v instanceof $class", "!($v instanceof $class)"] {
+        let src = format!(
+            "<?php\nfinal class A {{}}\nfinal class B {{}}\n\
+             /** @param A|B $v @param class-string<A> $class */\n\
+             function f($v, string $class): void {{ if ({guard}) {{ \\PHPStan\\dumpType($v); }} }}\n"
+        );
+        assert_eq!(dumps(&src), ["A|B (asserted)"], "{guard}");
+    }
+}
+
+/// The class operand is carried rather than dropped, so the value that decides
+/// the guard survives to be read later (#573). Nothing reads it yet, which is
+/// what this pins: the subject is unnarrowed, merely intact.
+#[test]
+fn the_dynamic_form_narrows_nothing_yet() {
+    let src = "<?php\nfinal class A {}\nfinal class B {}\n\
+        /** @param A|B $v @param class-string<A> $class */\n\
+        function f($v, string $class): void { if ($v instanceof $class) { \\PHPStan\\dumpType($v); } else { \\PHPStan\\dumpType($v); } }\n";
+    assert_eq!(dumps(src), ["A|B (asserted)", "A|B (asserted)"]);
+}
+
+/// The written form is untouched — it narrows as it always did, which is the
+/// regression this variant could most easily have caused.
+#[test]
+fn the_written_form_still_narrows() {
+    let src = "<?php\nfinal class A {}\nfinal class B {}\n\
+        /** @param A|B $v */\n\
+        function f($v): void { if ($v instanceof A) { \\PHPStan\\dumpType($v); } else { \\PHPStan\\dumpType($v); } }\n";
+    assert_eq!(dumps(src), ["A", "B (asserted)"]);
+}

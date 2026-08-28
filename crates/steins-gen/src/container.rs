@@ -37,10 +37,11 @@ use crate::names::{PackageName, SectionName};
 /// shareable. `4` is the `CondExpr::IssetVar` variant (issue #414): the stored
 /// trace IR spells a bare `isset($x)` differently now, and a reader that
 /// disagrees with its writer about what that condition IS would answer from a
-/// forgetting an artifact recorded and this binary no longer performs. Bumping
-/// it is the whole migration — an artifact of the previous schema becomes an
+/// forgetting an artifact recorded and this binary no longer performs, and `5`
+/// is `CondExpr::InstanceofDyn` (issue #571) for the same reason one spelling
+/// over. Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 4;
+pub const SCHEMA_VERSION: u32 = 5;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
