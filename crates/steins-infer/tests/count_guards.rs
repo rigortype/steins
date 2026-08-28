@@ -389,13 +389,17 @@ fn a_surviving_literal_keeps_its_proven_value() {
         ),
         "dumped type: 2"
     );
-    // Outside it, the literal is refuted and what remains is the honest floor:
-    // an array whose entry count the guard proved.
-    assert_eq!(
-        one_type(
-            "<?php\nfunction f(): void { $v = [1, 2]; if (count($v) > 5) { \\PHPStan\\dumpType(count($v)); } }\n"
-        ),
-        "dumped type: int<6, max>"
+    // A guard the analyzer can DECIDE has no inside to describe (issue #342).
+    // `count([1, 2])` folds to `2`, `2 > 5` is false, and the branch is dead —
+    // so the dump never runs and there is nothing to assert a type about. This
+    // read `int<6, max>` while a call operand answered `Maybe` in guard position
+    // and the branch was therefore walked: the honest floor for a branch PHP
+    // never enters. The sharper answer is that it never enters.
+    let dead = "<?php\nfunction f(): void { $v = [1, 2]; if (count($v) > 5) { \\PHPStan\\dumpType(count($v)); } }\n";
+    let ds = diagnostics(dead);
+    assert!(
+        ds.iter().all(|d| d.id != DEBUG_TYPE_ID),
+        "the branch is dead, so the dump inside it never runs: {ds:?}"
     );
 }
 
