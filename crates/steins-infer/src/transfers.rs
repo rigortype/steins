@@ -4,11 +4,15 @@
 
 use std::collections::HashMap;
 
-use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, ShapeFact, StrPreds, Val};
+use steins_domain::{
+    Base, Certainty, Fact, IntRange, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
+};
 use steins_syntax::ArgValue;
 
 use crate::cx::Cx;
-use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
+use crate::env::{
+    ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact, val_of,
+};
 use crate::walk::value_stratum;
 use crate::fold::Folder;
 use crate::fact_is_int;
@@ -67,8 +71,28 @@ pub(crate) fn arg_dispatch_return_fact(
     /// assumed; a variadic reports the *declared* parameters, not a call's.
     const ARITY_MIN_MAX: Option<(u32, u32)> = Some((2, 1));
 
+    /// `array_key_exists`/`key_exists`: `bool`.
+    const BOOL: &[&str] = &["bool"];
+    /// The pair's live signature at `PINNED_PHP` (8.5.8): two parameters, both
+    /// required — `array_key_exists(mixed $key, array $array)`. Measured, not
+    /// assumed. The arm reads its arguments POSITIONALLY, with the subject at
+    /// index 1, so a php-src signature that grew a parameter in front of the
+    /// array would make the read stale while the `bool` declaration still held.
+    const ARITY_KEY_EXISTS: Option<(u32, u32)> = Some((2, 2));
+
     let lower = name.to_ascii_lowercase();
     let (out, declared, arity): (Fact, &[&str], Option<(u32, u32)>) = match lower.as_str() {
+        // `array_key_exists($key, $array)` in VALUE position (issue #343). The
+        // pair has narrowed a shape's presence as a GUARD since ADR-0062 §4, and
+        // answered nothing sharper than `bool` when its result was read — against
+        // a fact that carries the answer.
+        //
+        // The subject is argument **1**, which is why this lives here rather than
+        // with the shape-projection family: that rung binds a single subject at
+        // argument 0 by construction.
+        "array_key_exists" | "key_exists" => {
+            (key_exists_verdict(cx, folder, args, env, store)?, BOOL, ARITY_KEY_EXISTS)
+        }
         "explode" => (explode_transfer(cx, folder, args, env, store)?, ARRAY, None),
         "range" => (range_transfer(cx, folder, args, env, store)?, ARRAY, None),
         "preg_replace" => {
@@ -217,6 +241,61 @@ fn declared_arm_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
 /// **Two declines, both load-bearing.** An empty (or not-known-non-empty)
 /// separator declines — the `ValueError` form has no return value to describe.
 /// The three-argument form declines **because `$limit` breaks non-emptiness
+/// `array_key_exists($key, $array)` read as a VALUE (issue #343): the verdict the
+/// subject's shape already carries, or `None` to keep today's `bool`.
+///
+/// The rule, and the reason each leg is sound:
+///
+/// * a **required** field is present in every realization the shape admits, so
+///   the answer is `true` — whether the presence was declared or witnessed;
+/// * a field the shape proves **absent** (post-`unset`, the false branch of a
+///   guard) answers `false` for the same reason in reverse;
+/// * an undeclared key under a **sealed** tail answers `false`: sealed is
+///   exactly the claim that no undeclared key may be present;
+/// * an **optional** field and an undeclared key under an **unsealed** tail keep
+///   `bool`. Both are genuinely undecided, and `Maybe` is the honest answer the
+///   arm lane already gives elsewhere.
+///
+/// The key must be a concrete literal. A key that is itself a variable names no
+/// field to look up, and guessing from its type is a different rung.
+///
+/// **Stratum is the caller's business and it is already handled**: a shape read
+/// out of a `@param array{…}` enters `Asserted`, and `derivation_stratum` carries
+/// that through, so ADR-0062 A-G9's corollary keeps this fact out of every
+/// proof-layer premise exactly as it keeps every other shape-derived fact out.
+///
+/// `isset($array[$key])` is the same question one step stronger — it additionally
+/// needs the field's value provably non-null — and is NOT answered here: `isset`
+/// is a construct whose value lowering is `ArgValue::Other`, so it never reaches
+/// a call seam at all. That is its own slice.
+fn key_exists_verdict(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    let [key_arg, subject] = args else { return None };
+    // The array-key cast is PHP's, not ours: `$a[5]` and `$a["5"]` are one key,
+    // and `offset_key_of` is the same primitive the read and write sides use.
+    let key = crate::offsets::offset_key_of(&val_of(key_arg, cx.php_minor)?)?;
+    let Fact::Shape { shape, nullable: false } =
+        transfer_arg_fact(cx, folder, subject, env, store)?
+    else {
+        return None;
+    };
+    let verdict = match shape.field(&key).map(|(_, presence, _)| *presence) {
+        Some(Presence::Required { .. }) => true,
+        Some(Presence::Absent) => false,
+        Some(Presence::Optional) => return None,
+        None => match shape.tail {
+            Tail::Sealed => false,
+            Tail::Unsealed { .. } => return None,
+        },
+    };
+    Some(Fact::Singleton(Val::Bool(verdict)))
+}
+
 /// outright**: `explode(',', 'a,b,c', -5)` returns `array(0){}` at 8.5.8.
 fn explode_transfer(
     cx: &Cx,
