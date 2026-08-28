@@ -941,14 +941,6 @@ fn cmp_op_of(operator: &BinaryOperator<'_>) -> Option<CmpOp> {
 /// A syntactic question, deliberately: the lowering decides only whether the
 /// comparison is worth carrying as a [`CondExpr::Cmp`], and the semantic
 /// question — does the name denote the global builtin here — belongs to the
-/// consumer, which has the project view this crate does not.
-fn names_count_call(operand: &CondOperand) -> bool {
-    let CondOperand::Other { call: Some(call), .. } = operand else { return false };
-    call.callee.as_deref().is_some_and(|c| {
-        let bare = c.rsplit('\\').next().unwrap_or(c);
-        ["count", "sizeof"].iter().any(|n| bare.eq_ignore_ascii_case(n))
-    })
-}
 
 /// Lower a binary-operator condition (comparison / `instanceof` / `&&` / `||`).
 fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
@@ -956,29 +948,32 @@ fn lower_binary_cond(b: &Binary<'_>) -> CondExpr {
     if let Some(op) = op {
         let lhs = lower_cond_operand(b.lhs);
         let rhs = lower_cond_operand(b.rhs);
-        // Ordering comparisons (`<`/`<=`/`>`/`>=`) are only useful for guard
-        // refinement when one side is a bare variable and the other a literal, so
-        // an unrepresentable operand falls back to `Opaque` (collecting reads).
-        // Since issue #158 a `CondOperand::Other` no longer drops what it may
-        // write, so this arm is now about *refinement value*, not soundness —
-        // lifting it would let `preg_match($re, $s, $m) > 0` reach the
-        // out-parameter seed, a precision change of its own.
+        // Every comparison keeps its `Cmp` form, ordering included (issue #577).
         //
-        // **The count exception** (issue #272): an ordering comparison whose
-        // opaque side is a `count()`/`sizeof()` call keeps its `Cmp` form, so the
-        // shape-narrowing dispatcher can read it. Matched syntactically since this
-        // crate has no project view; whether it denotes the *global builtin* is
-        // settled on the consuming side (`count_subject`).
-        let ordering = matches!(op, CmpOp::Lt | CmpOp::Le | CmpOp::Gt | CmpOp::Ge);
-        let opaque_side = |o: &CondOperand| {
-            matches!(o, CondOperand::Other { .. }) && !names_count_call(o)
-        };
-        if ordering && (opaque_side(&lhs) || opaque_side(&rhs)) {
-            let mut reads = Vec::new();
-            collect_read_vars(&Node::Expression(b.lhs), &[], &mut reads);
-            collect_read_vars(&Node::Expression(b.rhs), &[], &mut reads);
-            return CondExpr::Opaque { reads };
-        }
+        // Ordering comparisons used to fall back to `Opaque` when either side was
+        // unrepresentable, with `count()`/`sizeof()` excepted so the
+        // shape-narrowing dispatcher could still read them (issue #272). That arm
+        // was never a soundness requirement — since issue #158 a
+        // `CondOperand::Other` carries what it may write — and its cost was that
+        // an ORDERING comparison forgot every variable the condition mentions
+        // while the identity spelling of the same test forgot nothing:
+        // `strlen($s) > 0` erased `$s` where `strlen($s) === 0` kept it.
+        //
+        // Dropping it costs no refinement. `collect_cmp_refine` needs a
+        // (variable, literal) pair and an opaque operand is not one, and
+        // `operand_values` answers `None` for a `CondOperand::Other`, so such a
+        // comparison evaluates `Maybe` either way. What it gains is that
+        // invalidation runs through the operand rule — ADR-0070's by-value gate
+        // and the pure-question exemption (#575) — instead of the read-set floor,
+        // which is the same policy every other condition position already uses.
+        //
+        // The comment this replaces predicted one further change — that
+        // `preg_match($re, $s, $m) > 0` would reach the out-parameter seed the
+        // identity spelling reaches. Measured: it does not. The seed is gated
+        // further in, so `=== 1` still seeds `$m` and `> 0` still does not, and
+        // this arm's removal is exactly the invalidation change and nothing
+        // else. Recorded here because the prediction was the reason the arm was
+        // kept, and it was wrong.
         return CondExpr::Cmp { op, lhs, rhs };
     }
     match b.operator {
