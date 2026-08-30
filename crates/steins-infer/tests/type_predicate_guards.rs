@@ -534,14 +534,28 @@ fn the_guard_threads_into_the_right_operand() {
 
 // ---- The declined family ----------------------------------------------------
 
+/// The dedicated measurement the decline was waiting on (issue #575).
+///
+/// The old pin declined the family for two named reasons. Both were checked
+/// rather than argued away.
+///
+/// **Locale sensitivity is real but does not reach these claims.** Across `C`,
+/// `en_US.UTF-8`, `de_DE.ISO-8859-1` and `tr_TR.UTF-8`: `ctype_digit` does not
+/// move at all (the Latin-1 superscript-two byte is rejected everywhere — POSIX
+/// fixes the digit class at 0-9), while `ctype_lower`/`ctype_upper` DO move (the
+/// Latin-1 e-acute byte is lowercase under `en_US.UTF-8` and not under `C`).
+/// The lowercase claim survives that movement because it is "no ASCII uppercase
+/// byte", and a locale can only widen which bytes count as lowercase — it cannot
+/// make `A` lowercase, since POSIX requires the two classes disjoint.
+///
+/// **The integer-argument reinterpretation does not reach them either.** A
+/// non-string fact is returned unchanged by the predicate application, so the
+/// `-128..=255` byte-value reading has no subject here to be wrong about.
 #[test]
-fn ctype_functions_are_declined_in_this_slice() {
-    // `ctype_digit` and kin look like `StrPreds::DECIMAL_INT` but are
-    // locale-sensitive AND (before PHP 8.1) reinterpreted int args in
-    // `-128..=255` as byte values — declined pending dedicated measurement.
+fn the_ctype_family_was_measured_rather_than_declined() {
     let src = "<?php\nfunction f(string $s): void {\n\
                if (ctype_digit($s)) { \\PHPStan\\dumpType($s); }\n}\n";
-    assert_ne!(dumps(src), vec!["numeric-string".to_owned()]);
+    assert_eq!(dumps(src), vec!["numeric-string".to_owned()]);
 }
 
 
@@ -643,5 +657,47 @@ fn the_other_existence_questions_prove_only_non_empty() {
 #[test]
 fn a_failed_existence_proves_nothing() {
     let src = "<?php\nfunction f(string $c): void { if (!class_exists($c)) { \\PHPStan\\dumpType($c); } }\n";
+    assert_eq!(dumps(src), vec!["string"]);
+}
+
+/// The `ctype_*` family, measured at 8.5.9 rather than read off the names. Not
+/// one member answers true for `""`, so every one proves non-empty; three prove
+/// a character class the string vocabulary can also spell.
+#[test]
+fn the_ctype_family_proves_non_empty_and_sometimes_more() {
+    for (guard, want) in [
+        ("ctype_digit($s)", "numeric-string"),
+        ("ctype_lower($s)", "non-empty-lowercase-string"),
+        ("ctype_upper($s)", "non-empty-uppercase-string"),
+        ("ctype_alpha($s)", "non-empty-string"),
+        ("ctype_alnum($s)", "non-empty-string"),
+        ("ctype_xdigit($s)", "non-empty-string"),
+        ("ctype_space($s)", "non-empty-string"),
+        ("ctype_punct($s)", "non-empty-string"),
+    ] {
+        let src = format!(
+            "<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        );
+        assert_eq!(dumps(&src), vec![want], "{guard}");
+    }
+}
+
+/// The predicate `ctype_digit` does NOT prove, and the reason it would be a lie:
+/// `ctype_digit('0')` is true at 8.5.9 and `'0'` is falsy. The implication runs
+/// the other way round (`NonFalsy ⇒ NonEmpty`), so claiming the stronger one
+/// here would be a false claim about a real string.
+#[test]
+fn a_ctype_proof_is_non_empty_and_never_non_falsy() {
+    let src = "<?php\nfunction f(string $s): void { if (ctype_digit($s)) { \\PHPStan\\dumpType($s); } }\n";
+    let got = dumps(src);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(!got[0].contains("non-falsy"), "'0' passes ctype_digit and is falsy: {got:?}");
+}
+
+/// The false branch proves nothing: a string failing `ctype_digit` may be
+/// anything, `''` included.
+#[test]
+fn a_failed_ctype_proves_nothing() {
+    let src = "<?php\nfunction f(string $s): void { if (!ctype_digit($s)) { \\PHPStan\\dumpType($s); } }\n";
     assert_eq!(dumps(src), vec!["string"]);
 }

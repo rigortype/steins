@@ -417,7 +417,7 @@ fn the_string_and_existence_questions_keep_their_subjects_facts() {
     // moving from one list to another is that work landing, not a regression.
     let cases: &[(&[&str], &str)] = &[
         // Keeping only: no proof shipped for these yet.
-        (&["\\ctype_digit($s)", "\\ctype_alpha($s)", "\\strlen($s) === 0"], "string"),
+        (&["\\strlen($s) === 0"], "string"),
         // A non-empty needle found in a haystack makes the haystack non-empty.
         (
             &[
@@ -426,9 +426,13 @@ fn the_string_and_existence_questions_keep_their_subjects_facts() {
                 "\\str_ends_with($s, 'x')",
                 "\\function_exists($s)",
                 "\\defined($s)",
+                "\\ctype_alpha($s)",
             ],
             "non-empty-string",
         ),
+        // A ctype predicate that proves a character class the string vocabulary
+        // can spell carries it too.
+        (&["\\ctype_digit($s)"], "numeric-string"),
         // A name the engine resolved to a class-like is a class-string.
         (
             &[
