@@ -7,13 +7,20 @@ All notable changes to Steins are recorded here. The format follows
 <!-- Maintainer and agent instructions:
 **This file is load-bearing, not decorative.** `.github/workflows/release.yml`
 extracts a version's section verbatim as the body of its GitHub Release, so what
-is written here is what users read. Two consequences:
+is written here is what users read. Consequences:
 
 - **Do not hard-wrap entries.** Each bullet and each summary paragraph is one
   physical line, however long. Wrapping renders badly on the Release page.
 - **Write release notes, not commit messages.** The audience is someone deciding
   whether to upgrade, not someone reading the diff. Internal refactors, test
   additions, and doc churn do not belong here.
+- **Write your own `[Unreleased]` entry; don't defer it.** This section merges
+  by union (`.gitattributes`), so two branches appending here no longer
+  conflict on insertion order — git keeps both. The one thing union cannot
+  resolve silently-and-correctly is two branches opening the same **new**
+  `###` heading: that merges into a duplicate heading with no conflict raised.
+  Prefer an existing heading when one applies; the release-prep skill's
+  sealing step checks for a duplicate before a release ships it.
 
 What counts as notable for an analyzer, concretely: a change to which findings are
 reported or suppressed, to the surface of a profile, to the exit-code contract, to
