@@ -487,7 +487,88 @@ fn string_proof_guard(cx: &Cx, call: &CallExpr) -> Option<(String, StrPreds)> {
     if ["function_exists", "defined"].iter().any(|n| named(n)) {
         return Some((var.clone(), StrPreds::NON_EMPTY));
     }
-    None
+    ctype_proof(&callee).map(|preds| (var.clone(), preds))
+}
+
+/// What a `ctype_*` predicate proves of its subject when it answers true, or
+/// `None` for a name outside the family.
+///
+/// **Every member proves non-empty**, and that is measured rather than read off
+/// the family's name: at 8.5.9 not one of them answers true for `""`.
+///
+/// Three prove more, and the table below is the measurement they come from
+/// (values the predicate accepted, out of `"" 0 0123 999 abc ABC ff " " "\t" 1.5 -1`):
+///
+/// ```text
+/// ctype_digit    '0', '0123', '999'                             → numeric too
+/// ctype_lower    'abc', 'ff'                                    → lowercase too
+/// ctype_upper    'ABC'                                          → uppercase too
+/// ctype_alpha    'abc', 'ABC', 'ff'
+/// ctype_alnum    '0', '0123', '999', 'abc', 'ABC', 'ff'
+/// ctype_xdigit   '0', '0123', '999', 'abc', 'ABC', 'ff'
+/// ctype_space    ' ', '\t'
+/// ctype_punct    (none of the sample)
+/// ```
+///
+/// `ctype_digit` proving **numeric** is cross-checked rather than assumed: every
+/// value it accepted is `is_numeric`, leading zeros included (`is_numeric('0123')`
+/// is true).
+///
+/// The predicate it does **not** prove is worth naming: `ctype_digit('0')` is
+/// true and `'0'` is falsy, so this is `NON_EMPTY` and never `NON_FALSY`. The
+/// implication runs the other way (`NonFalsy ⇒ NonEmpty`), and claiming the
+/// stronger one here would be a false claim about a real string.
+///
+/// `ctype_alpha`, `ctype_alnum`, `ctype_xdigit`, `ctype_space` and `ctype_punct`
+/// each prove a character class the string vocabulary cannot spell, so
+/// non-emptiness is all that survives the translation — the weaker answer is
+/// what the vocabulary allows, not a gap in the measurement.
+///
+/// # The locale question, which is what the old decline was waiting on
+///
+/// The fixture that pinned this family as declined named the reason: these are
+/// **locale-sensitive**. Measured across `C`, `en_US.UTF-8`, `de_DE.ISO-8859-1`
+/// and `tr_TR.UTF-8`, and the answer splits:
+///
+/// * **`ctype_digit` does not move.** The Latin-1 superscript-two byte is
+///   rejected under every locale tried, which is POSIX's rule rather than an
+///   accident — the digit class contains 0-9 and nothing else, in every locale.
+///   So the `numeric` claim is locale-stable.
+/// * **`ctype_lower` and `ctype_upper` DO move**: under `en_US.UTF-8` the
+///   Latin-1 e-acute byte counts as lowercase, and under `C` it does not.
+///
+/// The claims survive that movement anyway, and the reason is worth stating
+/// because it is not the obvious one. [`StrPreds::LOWERCASE`] means "no ASCII
+/// uppercase byte" (`strtolower` leaves it alone), and a locale can only ever
+/// WIDEN which bytes count as lowercase. It cannot make an ASCII uppercase byte
+/// count as lowercase, because POSIX requires the two classes to be disjoint —
+/// so `ctype_lower` answering true still implies no `A`-`Z` is present, in every
+/// locale. `ctype_upper` mirrors it.
+///
+/// The Turkish locale is the classic trap here and it is a trap for CONVERSION
+/// (`strtolower('I')`), not for classification: `I` is uppercase and `i` is
+/// lowercase under `tr_TR` as everywhere else, and these predicates classify.
+fn ctype_proof(callee: &str) -> Option<StrPreds> {
+    const FAMILY: &[(&str, Option<StrPreds>)] = &[
+        ("ctype_digit", Some(StrPreds::NUMERIC)),
+        ("ctype_lower", Some(StrPreds::LOWERCASE)),
+        ("ctype_upper", Some(StrPreds::UPPERCASE)),
+        ("ctype_alpha", None),
+        ("ctype_alnum", None),
+        ("ctype_xdigit", None),
+        ("ctype_space", None),
+        ("ctype_punct", None),
+        ("ctype_cntrl", None),
+        ("ctype_graph", None),
+        ("ctype_print", None),
+    ];
+    FAMILY
+        .iter()
+        .find(|(n, _)| callee.eq_ignore_ascii_case(n))
+        .map(|(_, extra)| match extra {
+            Some(p) => StrPreds::NON_EMPTY.union(*p),
+            None => StrPreds::NON_EMPTY,
+        })
 }
 
 /// The `(needle var, haystack literals)` of a **strict** `in_array` over a literal
