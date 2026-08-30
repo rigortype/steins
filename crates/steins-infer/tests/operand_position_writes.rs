@@ -412,9 +412,6 @@ fn the_written_form_still_narrows() {
 #[test]
 fn the_string_and_existence_questions_keep_their_subjects_facts() {
     for guard in [
-        "\\str_contains($s, 'x')",
-        "\\str_starts_with($s, 'x')",
-        "\\str_ends_with($s, 'x')",
         "\\ctype_digit($s)",
         "\\ctype_alpha($s)",
         "\\class_exists($s)",
@@ -428,6 +425,20 @@ fn the_string_and_existence_questions_keep_their_subjects_facts() {
         let src =
             format!("<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n");
         assert_eq!(dumps(&src), ["string"], "{guard}");
+    }
+    // The substring three kept their subject here first and have since been
+    // given a PROOF as well (issue #575's second group): a non-empty needle
+    // found in a haystack makes the haystack non-empty. They are listed
+    // separately rather than dropped, because keeping the fact is still the
+    // half this test is about — the refinement rides on top of it.
+    for guard in [
+        "\\str_contains($s, 'x')",
+        "\\str_starts_with($s, 'x')",
+        "\\str_ends_with($s, 'x')",
+    ] {
+        let src =
+            format!("<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n");
+        assert_eq!(dumps(&src), ["non-empty-string"], "{guard}");
     }
 }
 
