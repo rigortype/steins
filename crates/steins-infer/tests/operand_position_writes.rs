@@ -411,34 +411,42 @@ fn the_written_form_still_narrows() {
 /// subject on the branch it was written to refine.
 #[test]
 fn the_string_and_existence_questions_keep_their_subjects_facts() {
-    for guard in [
-        "\\ctype_digit($s)",
-        "\\ctype_alpha($s)",
-        "\\class_exists($s)",
-        "\\interface_exists($s)",
-        "\\enum_exists($s)",
-        "\\trait_exists($s)",
-        "\\function_exists($s)",
-        "\\defined($s)",
-        "\\strlen($s) === 0",
-    ] {
-        let src =
-            format!("<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n");
-        assert_eq!(dumps(&src), ["string"], "{guard}");
-    }
-    // The substring three kept their subject here first and have since been
-    // given a PROOF as well (issue #575's second group): a non-empty needle
-    // found in a haystack makes the haystack non-empty. They are listed
-    // separately rather than dropped, because keeping the fact is still the
-    // half this test is about — the refinement rides on top of it.
-    for guard in [
-        "\\str_contains($s, 'x')",
-        "\\str_starts_with($s, 'x')",
-        "\\str_ends_with($s, 'x')",
-    ] {
-        let src =
-            format!("<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n");
-        assert_eq!(dumps(&src), ["non-empty-string"], "{guard}");
+    // Every row below KEEPS its subject's fact, which is what this test is
+    // about. What each row's fact then READS is group 2's business, and the
+    // three lists say which guards have been given a proof so far — a row
+    // moving from one list to another is that work landing, not a regression.
+    let cases: &[(&[&str], &str)] = &[
+        // Keeping only: no proof shipped for these yet.
+        (&["\\ctype_digit($s)", "\\ctype_alpha($s)", "\\strlen($s) === 0"], "string"),
+        // A non-empty needle found in a haystack makes the haystack non-empty.
+        (
+            &[
+                "\\str_contains($s, 'x')",
+                "\\str_starts_with($s, 'x')",
+                "\\str_ends_with($s, 'x')",
+                "\\function_exists($s)",
+                "\\defined($s)",
+            ],
+            "non-empty-string",
+        ),
+        // A name the engine resolved to a class-like is a class-string.
+        (
+            &[
+                "\\class_exists($s)",
+                "\\interface_exists($s)",
+                "\\enum_exists($s)",
+                "\\trait_exists($s)",
+            ],
+            "class-string",
+        ),
+    ];
+    for (guards, want) in cases {
+        for guard in *guards {
+            let src = format!(
+                "<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n"
+            );
+            assert_eq!(dumps(&src), [*want], "{guard}");
+        }
     }
 }
 
