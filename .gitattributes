@@ -55,3 +55,23 @@
 # The shim's own tests. CI runs them from a checkout, never from the published
 # archive, so shipping them would only add weight to every `composer install`.
 /composer/tests/   export-ignore
+
+# ── Merge strategy: `## [Unreleased]` conflicts have no judgement in them ───
+#
+# Nearly every branch appends to this one section: across the last three
+# completed release cycles, CHANGELOG.md was touched by 55/221 (v0.1.4),
+# 19/126 (v0.1.5) and 44/307 (v0.1.6) of the cycle's commits — and the
+# standard workflow here runs several agents in parallel, each in its own
+# worktree, which is exactly the shape that collides on this file. Two
+# branches inserting a bullet at the same anchor conflict on insertion order
+# alone; the only correct resolution is "keep both", so `union` applies it
+# instead of stopping to ask. Prior art: rigortype/rigor#500, which measured
+# the same pattern in its own history before making this same change.
+#
+# Residual risk: when both sides open the SAME new `###` heading under
+# `[Unreleased]`, union keeps both copies silently rather than conflicting.
+# Steins has no automated check for a duplicated heading (rigor's equivalent
+# change is backed by a changelog conformance spec that happens to catch it);
+# the steins-release-prep skill's sealing step is the backstop instead — see
+# its "split merge artefacts" step.
+CHANGELOG.md merge=union

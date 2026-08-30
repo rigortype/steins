@@ -164,7 +164,13 @@ for.
    internal-only detail (private refactors, test additions, doc churn) outright.
    Ask of each entry: *would someone running `steins check` on their code notice?*
 4. Consolidate several commits into one user-recognisable change; split merge
-   artefacts.
+   artefacts. `CHANGELOG.md` is `merge=union` (`.gitattributes`), which trades
+   insertion-order conflicts for one artefact to look for here: a
+   **duplicated `###` heading**, where two branches each opened the same
+   section under `[Unreleased]`. Merge the two, keeping Keep a Changelog's
+   order — nothing else catches this, so it is on this pass alone. The same
+   silent fold can happen if the release branch gets rebased onto `master`
+   mid-prep; re-check for a duplicate heading after any such rebase.
 5. **Classify against the last released version, not against the diff.** This is
    the step the accumulate-as-you-go discipline cannot do for you, because each
    entry was written when its commit landed, without knowing what else the window
