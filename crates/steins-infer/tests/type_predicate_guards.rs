@@ -543,3 +543,63 @@ fn ctype_functions_are_declined_in_this_slice() {
                if (ctype_digit($s)) { \\PHPStan\\dumpType($s); }\n}\n";
     assert_ne!(dumps(src), vec!["numeric-string".to_owned()]);
 }
+
+
+// ---- substring guards prove a non-empty haystack (issue #575) --------------
+
+/// A haystack that contains a **non-empty** needle has at least that needle's
+/// length. The three spellings share one rule.
+#[test]
+fn a_substring_guard_proves_the_haystack_non_empty() {
+    for guard in [
+        "str_contains($s, 'x')",
+        "str_starts_with($s, 'x')",
+        "str_ends_with($s, 'xy')",
+    ] {
+        let src = format!(
+            "<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        );
+        assert_eq!(dumps(&src), vec!["non-empty-string"], "{guard}");
+    }
+}
+
+/// The empty needle is why the rule reads the literal instead of trusting the
+/// name. Measured on PHP 8.5.9, not assumed: `str_contains("", "")` is **true**,
+/// and so are the `str_starts_with` / `str_ends_with` pair — an empty needle is
+/// found in the empty string, so such a guard proves nothing at all.
+#[test]
+fn an_empty_needle_proves_nothing() {
+    for guard in ["str_contains($s, '')", "str_starts_with($s, '')", "str_ends_with($s, '')"] {
+        let src = format!(
+            "<?php\nfunction f(string $s): void {{ if ({guard}) {{ \\PHPStan\\dumpType($s); }} }}\n"
+        );
+        assert_eq!(dumps(&src), vec!["string"], "{guard}");
+    }
+}
+
+/// A needle that is not a literal may be `''`, and there is no rung here that
+/// proves it is not — so the guard declines rather than guessing.
+#[test]
+fn a_variable_needle_proves_nothing() {
+    let src = "<?php\nfunction f(string $s, string $n): void { if (str_contains($s, $n)) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(dumps(src), vec!["string"]);
+}
+
+/// Positive-only by construction: what these guards prove is an EXISTENCE, and
+/// the failure of an existence proves nothing about the subject. `''` and
+/// `'abc'` both fail `str_contains($s, 'x')`.
+#[test]
+fn the_false_branch_proves_nothing() {
+    let src = "<?php\nfunction f(string $s): void { if (!str_contains($s, 'x')) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(dumps(src), vec!["string"]);
+}
+
+/// The guard adds what it proved and takes nothing away — it is not a
+/// subtraction, so a lane that already knew more keeps it.
+#[test]
+fn an_existing_refinement_survives_the_proof() {
+    let src = "<?php\n/** @param numeric-string $s */\nfunction f(string $s): void { if (str_contains($s, '1')) { \\PHPStan\\dumpType($s); } }\n";
+    let got = dumps(src);
+    assert_eq!(got.len(), 1, "{got:?}");
+    assert!(got[0].contains("numeric-string"), "the guard must not erase what was known: {got:?}");
+}

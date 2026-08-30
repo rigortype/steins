@@ -421,6 +421,45 @@ enum TypeGuard {
     Pred { var: String, pred: TypePred, positive: bool },
     /// `in_array($x, [<literals>], true)` — the strict-only literal-haystack form.
     InArray { var: String, lits: Vec<Val>, positive: bool },
+    /// A guard that PROVES a string predicate of its subject on the branch where
+    /// it holds (issue #575's second group). Positive-only by construction: what
+    /// these prove is an existence, and the failure of an existence proves
+    /// nothing about the subject.
+    StrPred { var: String, preds: StrPreds },
+}
+
+/// The string predicate a **substring** guard proves of its haystack, or `None`.
+///
+/// `str_contains($s, 'x')`, `str_starts_with`, `str_ends_with`: a haystack that
+/// contains a **non-empty** needle has at least that needle's length, so the
+/// true branch proves `non-empty-string`.
+///
+/// The empty needle is the whole reason this reads the literal rather than
+/// trusting the name. Measured on PHP 8.5.9 rather than assumed:
+/// `str_contains("", "")` is **true**, and so are `str_starts_with("", "")` and
+/// `str_ends_with("", "")` — an empty needle is found in the empty string, so
+/// such a guard proves nothing. `str_contains("", "x")` is false, which is the
+/// other half of the same measurement and the one the rule stands on.
+///
+/// A needle that is not a literal is declined for the same reason: a variable
+/// needle may be `''`, and there is no rung here that proves it is not.
+fn substring_guard(cx: &Cx, call: &CallExpr) -> Option<(String, StrPreds)> {
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only || call.args.len() != 2 {
+        return None;
+    }
+    if !["str_contains", "str_starts_with", "str_ends_with"]
+        .iter()
+        .any(|n| callee.eq_ignore_ascii_case(n))
+    {
+        return None;
+    }
+    let ArgValue::Var(var) = &call.args[0].value else { return None };
+    let ArgValue::Str(needle) = &call.args[1].value else { return None };
+    if needle.as_bytes().is_empty() {
+        return None;
+    }
+    Some((var.clone(), StrPreds::NON_EMPTY))
 }
 
 /// The `(needle var, haystack literals)` of a **strict** `in_array` over a literal
@@ -469,6 +508,11 @@ pub(crate) fn in_array_literals(
 fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeGuard>) {
     match cond {
         CondExpr::Call { call, .. } => {
+            // A substring guard proves its haystack non-empty on the branch where
+            // it holds, and nothing on the other (issue #575).
+            if then && let Some((var, preds)) = substring_guard(cx, call) {
+                out.push(TypeGuard::StrPred { var, preds });
+            }
             if let Some(pred) = type_predicate(cx, call) {
                 if let ArgValue::Var(var) = &call.args[0].value {
                     out.push(TypeGuard::Pred { var: var.clone(), pred, positive: then });
@@ -536,6 +580,13 @@ pub(crate) fn apply_type_narrowing(
                     store.refs.remove(var);
                     store.members.remove(var);
                 }
+            }
+            TypeGuard::StrPred { var, preds } => {
+                // A proof, not a subtraction: the guard adds what it established
+                // and takes nothing away, so the arm lane is untouched and only
+                // the value lane moves. `add_str_preds` closes under implication,
+                // so a consumer asking the weaker predicate sees it too.
+                refine_fact(env, var, Stratum::Verified, |f| Some(add_str_preds(f, *preds)));
             }
             TypeGuard::InArray { var, lits, positive } => {
                 // The same composition question, one vocabulary over (issue #445):
