@@ -13,6 +13,7 @@ use crate::env::{Known, Store, Stratum, val_of};
 use crate::existence::global_function_callee;
 use crate::refine::{
     add_str_preds, arms_refute, clear_null, exclude_member, leave_empty_domain, refine_fact,
+    subtract_element_lane,
 };
 use crate::shapes::mint_collapsed_shape;
 
@@ -421,6 +422,11 @@ enum TypeGuard {
     Pred { var: String, pred: TypePred, positive: bool },
     /// `in_array($x, [<literals>], true)` — the strict-only literal-haystack form.
     InArray { var: String, lits: Vec<Val>, positive: bool },
+    /// The FALSE branch of a strict `in_array(<literal>, $haystack, true)`: the
+    /// haystack holds no value identical to the literal, so the literal leaves
+    /// its ELEMENT type (issue #565). Negative-only — the true branch proves an
+    /// element IS the literal, which the element type already admitted.
+    HaystackExcludes { var: String, needle: Val },
     /// A guard that PROVES a string predicate of its subject on the branch where
     /// it holds (issue #575's second group). Positive-only by construction: what
     /// these prove is an existence, and the failure of an existence proves
@@ -608,6 +614,36 @@ pub(crate) fn in_array_literals(
     Some((var.clone(), lits))
 }
 
+/// The `(haystack var, needle literal)` of a **strict** `in_array` whose needle
+/// is a literal and whose haystack is a bare variable — the mirror of
+/// [`in_array_literals`], which reads the other direction (issue #565).
+///
+/// What it is for: on the branch where such a test is FALSE, the haystack
+/// provably holds no value identical to that literal, which subtracts the
+/// literal from its ELEMENT type. The true branch proves the opposite —
+/// at least one element IS that literal — and subtracts nothing, since the
+/// element type already admitted it.
+///
+/// Strict only, for [`in_array_literals`]' reason: loose `==` membership is
+/// neither reflexive across types nor transitive, so no sound identity can be
+/// minted from it. A needle that is not a literal is declined too — proving a
+/// variable needle absent says nothing about a value the analyzer cannot name.
+fn in_array_haystack(cx: &Cx, call: &CallExpr, php_minor: Option<(u16, u16)>) -> Option<(String, Val)> {
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only || !callee.eq_ignore_ascii_case("in_array") || call.args.len() != 3 {
+        return None;
+    }
+    if !matches!(call.args[2].value, ArgValue::Bool(true)) {
+        return None;
+    }
+    let needle = val_of(&call.args[0].value, php_minor)?;
+    if matches!(needle, Val::Array(_)) {
+        return None;
+    }
+    let ArgValue::Var(haystack) = &call.args[1].value else { return None };
+    Some((haystack.clone(), needle))
+}
+
 /// Collect the type-vocabulary guards a condition establishes at polarity `then`.
 /// The polarity walk is [`collect_refine`]'s, verbatim in structure: `Not` flips,
 /// `And` contributes on the true path, `Or` on the false one (De Morgan) — so
@@ -621,6 +657,11 @@ fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeG
             // branch where it holds and nothing on the other (issue #575).
             if then && let Some((var, preds)) = string_proof_guard(cx, call) {
                 out.push(TypeGuard::StrPred { var, preds });
+            }
+            // The haystack's element subtraction, on the branch where the
+            // membership test FAILS (issue #565).
+            if !then && let Some((var, needle)) = in_array_haystack(cx, call, cx.php_minor) {
+                out.push(TypeGuard::HaystackExcludes { var, needle });
             }
             if let Some(pred) = type_predicate(cx, call) {
                 if let ArgValue::Var(var) = &call.args[0].value {
@@ -689,6 +730,16 @@ pub(crate) fn apply_type_narrowing(
                     store.refs.remove(var);
                     store.members.remove(var);
                 }
+            }
+            TypeGuard::HaystackExcludes { var, needle } => {
+                // Nothing here deletes an arm: the haystack is still an array,
+                // and what the guard proved is about what it may CONTAIN.
+                subtract_element_lane(
+                    store,
+                    var,
+                    &steins_contract::normalize::Subtrahend::Value(needle.clone()),
+                    &steins_contract::normalize::ReflexiveFloor,
+                );
             }
             TypeGuard::StrPred { var, preds } => {
                 // A proof, not a subtraction: the guard adds what it established

@@ -939,6 +939,41 @@ pub(crate) fn apply_class_narrowing(w: &WalkCx, cond: &CondExpr, then: bool, sto
 /// residue that every condition shaped from one that some condition never touched
 /// ([`subtract_no_match_path`]).
 ///
+/// Apply a subtrahend to the ELEMENT contract of `var`'s container arms, leaving
+/// the arms themselves in place (issue #565).
+///
+/// The sibling of [`subtract_contract_lane`] one level down. `!in_array(null,
+/// $xs, true)` proves nothing about `$xs` — it is still an array — and
+/// everything about what it may contain, so nothing here deletes an arm and the
+/// emptied-carrier rule the sibling implements has no analogue: an element list
+/// the subtraction would empty is left untouched by [`normalize::
+/// subtract_in_elements`], because a container of `Never` is a claim about the
+/// program that this guard did not make.
+///
+/// Strata are untouched for the same reason: no arm was removed, so no arm's
+/// premise changed. What moved is inside an arm the lane already held at
+/// whatever stratum it held it.
+///
+/// [`normalize::subtract_in_elements`]: steins_contract::normalize::subtract_in_elements
+pub(crate) fn subtract_element_lane(
+    store: &mut Store,
+    var: &str,
+    sub: &normalize::Subtrahend,
+    oracle: &dyn normalize::IsaOracle,
+) {
+    let Some(arms) = store.contract.get_mut(var) else { return };
+    let before: Vec<_> = arms.iter().map(|a| a.ty.clone()).collect();
+    let mut tys: Vec<_> = before.clone();
+    normalize::subtract_in_elements(&mut tys, sub, oracle);
+    if tys == before {
+        return;
+    }
+    for (arm, ty) in arms.iter_mut().zip(tys) {
+        arm.ty = ty;
+    }
+    store.narrowed.insert(var.to_owned());
+}
+
 /// [`subtract_no_match_path`]: crate::branch::subtract_no_match_path
 pub(crate) fn subtract_contract_lane(
     store: &mut Store,

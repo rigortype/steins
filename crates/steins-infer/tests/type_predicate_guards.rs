@@ -701,3 +701,72 @@ fn a_failed_ctype_proves_nothing() {
     let src = "<?php\nfunction f(string $s): void { if (!ctype_digit($s)) { \\PHPStan\\dumpType($s); } }\n";
     assert_eq!(dumps(src), vec!["string"]);
 }
+
+// ---- the haystack's element subtraction (issue #565) ------------------------
+
+/// The issue's own repro: a strict membership test that FAILS proves the
+/// haystack holds no value identical to the needle, which takes the needle out
+/// of its ELEMENT type. Nothing about the haystack itself moves — it is still an
+/// array — so this is the one subtrahend that reaches inside an arm.
+#[test]
+fn a_failed_membership_test_subtracts_from_the_element_type() {
+    let decl = "/** @param list<?string> $xs */\n";
+    for body in [
+        "\\assert(!in_array(null, $xs, true)); \\PHPStan\\dumpType($xs);",
+        "if (!in_array(null, $xs, true)) { \\PHPStan\\dumpType($xs); }",
+    ] {
+        let src = format!("<?php\n{decl}function f(array $xs): void {{ {body} }}\n");
+        assert_eq!(dumps(&src), vec!["list<string> (asserted)"], "{body}");
+    }
+}
+
+/// ADR-0052 §2's law, unchanged and applied one level in: an element arm dies
+/// only where the subtrahend COVERS it. The literal `1` does not cover `int`, so
+/// a `list<int|string>` keeps both arms — the same reason `!== 1` leaves an `int`
+/// lane whole at the top level.
+#[test]
+fn an_element_arm_the_literal_does_not_cover_survives() {
+    let src = "<?php\n/** @param list<int|string> $xs */\n\
+               function f(array $xs): void { if (!in_array(1, $xs, true)) { \\PHPStan\\dumpType($xs); } }\n";
+    assert_eq!(dumps(src), vec!["list<int|string> (asserted)"]);
+}
+
+/// Negative-only. The true branch proves at least one element IS the needle,
+/// which the element type already admitted — so it subtracts nothing.
+#[test]
+fn the_membership_branch_subtracts_nothing() {
+    let src = "<?php\n/** @param list<?string> $xs */\n\
+               function f(array $xs): void { if (in_array(null, $xs, true)) { \\PHPStan\\dumpType($xs); } }\n";
+    assert_eq!(dumps(src), vec!["list<string|null> (asserted)"]);
+}
+
+/// The two declines, each for the reason `in_array_literals` already records on
+/// the other direction: a variable needle names no value the analyzer can
+/// subtract, and loose `==` membership mints no sound identity.
+#[test]
+fn a_variable_needle_and_the_loose_form_subtract_nothing() {
+    let var_needle = "<?php\n/** @param list<?string> $xs */\n\
+        function f(array $xs, ?string $n): void { if (!in_array($n, $xs, true)) { \\PHPStan\\dumpType($xs); } }\n";
+    assert_eq!(dumps(var_needle), vec!["list<string|null> (asserted)"]);
+    let loose = "<?php\n/** @param list<?string> $xs */\n\
+        function f(array $xs): void { if (!in_array(null, $xs)) { \\PHPStan\\dumpType($xs); } }\n";
+    assert_eq!(dumps(loose), vec!["list<string|null> (asserted)"]);
+}
+
+/// A map's VALUES are its elements, and its keys are not touched.
+#[test]
+fn a_map_subtracts_from_its_values_and_not_its_keys() {
+    let src = "<?php\n/** @param array<string, int|null> $m */\n\
+               function f(array $m): void { if (!in_array(null, $m, true)) { \\PHPStan\\dumpType($m); } }\n";
+    assert_eq!(dumps(src), vec!["array<string, int> (asserted)"]);
+}
+
+/// An element list the subtraction would empty leaves the arm alone: a container
+/// of `Never` is a claim about the program this guard did not make, and an
+/// emptied lane is a no-fact signal in this vocabulary rather than a death one.
+#[test]
+fn an_element_type_the_subtraction_would_empty_is_left_whole() {
+    let src = "<?php\n/** @param list<null> $xs */\n\
+               function f(array $xs): void { if (!in_array(null, $xs, true)) { \\PHPStan\\dumpType($xs); } }\n";
+    assert_eq!(dumps(src), vec!["list<null> (asserted)"]);
+}

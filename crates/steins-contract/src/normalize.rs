@@ -1306,7 +1306,65 @@ pub fn subtract(arms: &mut Vec<ContractTy>, sub: &Subtrahend, oracle: &dyn IsaOr
     });
 }
 
-/// One arm's fate under a subtrahend — the per-arm judgment [`subtract`] runs.
+/// Apply a subtrahend to the **element** contract of every container arm, and
+/// leave every other arm alone (issue #565).
+///
+/// This is the one place a subtrahend reaches INSIDE an arm rather than
+/// deleting it. `!in_array(null, $xs, true)` proves nothing about `$xs` as a
+/// whole — the array is still an array — and everything about what it may
+/// contain, so the judgment belongs one level down.
+///
+/// The element contract is treated as an arm list of its own: a `Union` element
+/// is filtered member by member through the same [`subtract`], and a single
+/// element is judged by the same [`subtract_arm`]. That is what makes
+/// `list<?string>` become `list<string>` while `list<int|string>` minus the
+/// literal `1` stays whole — the `int` arm survives because `1` does not cover
+/// it, which is ADR-0052 §2's law unchanged, just applied one level in.
+///
+/// An element list the subtraction empties leaves the arm untouched rather than
+/// producing a container of `Never`: an emptied lane is a no-fact signal in this
+/// vocabulary and never a death signal, and a container whose element type is
+/// uninhabited is a claim about the program that this guard did not make.
+///
+/// The parameterized containers are the scope. A [`ContractTy::Shape`]'s fields
+/// are individually typed and a guard over its VALUES would have to reach each
+/// of them plus the tail; that is a real judgment and a separate one.
+pub fn subtract_in_elements(arms: &mut [ContractTy], sub: &Subtrahend, oracle: &dyn IsaOracle) {
+    for arm in arms.iter_mut() {
+        let elem = match arm {
+            ContractTy::ListOf { elem, .. } => elem,
+            ContractTy::MapOf { val, .. } | ContractTy::IterableOf { val, .. } => val,
+            _ => continue,
+        };
+        let Some(narrowed) = subtract_from_one(elem, sub, oracle) else { continue };
+        **elem = narrowed;
+    }
+}
+
+/// One element contract minus a subtrahend, or `None` when nothing moved or the
+/// result would be uninhabited. A `Union` is filtered member-wise; anything else
+/// is judged whole.
+fn subtract_from_one(
+    elem: &ContractTy,
+    sub: &Subtrahend,
+    oracle: &dyn IsaOracle,
+) -> Option<ContractTy> {
+    let mut members = match elem {
+        ContractTy::Union(ms) => ms.clone(),
+        other => vec![other.clone()],
+    };
+    let before = members.len();
+    subtract(&mut members, sub, oracle);
+    if members.len() == before || members.is_empty() {
+        return None;
+    }
+    Some(match members.len() {
+        1 => members.remove(0),
+        _ => ContractTy::Union(members),
+    })
+}
+
+/// One arm's fate under a subtrahend/// One arm's fate under a subtrahend — the per-arm judgment [`subtract`] runs.
 /// Public (with [`subtract_arm`]) so a caller carrying a **parallel** per-arm
 /// structure (steins-infer's stratified contract lane) can map arms in
 /// lockstep with the same judgment, no second copy of the polarity/endpoint law.
