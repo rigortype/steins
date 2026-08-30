@@ -603,3 +603,45 @@ fn an_existing_refinement_survives_the_proof() {
     assert_eq!(got.len(), 1, "{got:?}");
     assert!(got[0].contains("numeric-string"), "the guard must not erase what was known: {got:?}");
 }
+
+/// The existence questions prove what a true answer implies about the NAME.
+/// Measured at 8.5.9: `class_exists('')` and `class_exists('0')` are both false,
+/// so a name the engine resolved to a class-like is a `class-string`, which is
+/// the predicate covering class, interface, trait and enum together.
+#[test]
+fn the_class_existence_questions_prove_a_class_string() {
+    for guard in [
+        "class_exists($c)",
+        "interface_exists($c)",
+        "enum_exists($c)",
+        "trait_exists($c)",
+        "class_exists($c, false)",
+    ] {
+        let src = format!(
+            "<?php\nfunction f(string $c): void {{ if ({guard}) {{ \\PHPStan\\dumpType($c); }} }}\n"
+        );
+        assert_eq!(dumps(&src), vec!["class-string"], "{guard}");
+    }
+}
+
+/// `function_exists` and `defined` prove only NON-EMPTY, and naming them here
+/// rather than omitting them is the point: a function or constant name is not a
+/// class-string, so the weaker proof is a decision. Both answer false for `""`
+/// (measured), which is what the weaker proof stands on.
+#[test]
+fn the_other_existence_questions_prove_only_non_empty() {
+    for guard in ["function_exists($n)", "defined($n)"] {
+        let src = format!(
+            "<?php\nfunction f(string $n): void {{ if ({guard}) {{ \\PHPStan\\dumpType($n); }} }}\n"
+        );
+        assert_eq!(dumps(&src), vec!["non-empty-string"], "{guard}");
+    }
+}
+
+/// The false branch of an existence question proves nothing — a name that does
+/// not resolve may be anything, `''` included.
+#[test]
+fn a_failed_existence_proves_nothing() {
+    let src = "<?php\nfunction f(string $c): void { if (!class_exists($c)) { \\PHPStan\\dumpType($c); } }\n";
+    assert_eq!(dumps(src), vec!["string"]);
+}
