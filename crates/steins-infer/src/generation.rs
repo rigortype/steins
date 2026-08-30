@@ -162,10 +162,22 @@ fn sources_section() -> SectionName {
     SectionName::new(SOURCES_SECTION).expect("the sources section name is valid")
 }
 
-/// The analyzer's own version — the workspace version, identical across the
-/// steins crates, so the CLI and this crate spell one identity.
+/// The analyzer's own version — **a new Steins is a new universe**, and this is
+/// the value that has to make that true (issue #563).
+///
+/// The workspace version alone did not. Two builds of `0.1.6` shared a store, so
+/// the second could be served findings the first computed — which inverts
+/// ADR-0092 §2's standing invariant: a miss costs time and never changes an
+/// answer, and a hit was changing one. The exposed cases were every build that
+/// is not a tagged release (`cargo install --git`, a nightly, a local build) and
+/// every A/B a contributor runs in one working tree.
+///
+/// `STEINS_ANALYZER_FINGERPRINT` is a content hash of `crates/*/src`, stamped by
+/// this crate's build script; see it for why the sources rather than the git
+/// revision, and what the choice costs. A released binary has fixed sources and
+/// keeps a stable identity across rebuilds.
 fn analyzer_version() -> &'static str {
-    env!("CARGO_PKG_VERSION")
+    concat!(env!("CARGO_PKG_VERSION"), "+", env!("STEINS_ANALYZER_FINGERPRINT"))
 }
 
 /// The environment variable that turns the paranoid verifier on (issue #489
@@ -1853,6 +1865,25 @@ fn ms(d: std::time::Duration) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use super::analyzer_version;
+
+    /// Issue #563: the analyzer version has to make its own doc comment true —
+    /// "a new Steins is a new universe". `CARGO_PKG_VERSION` alone did not, so
+    /// two builds of one version shared a store and the second could be served
+    /// findings the first computed.
+    #[test]
+    fn the_analyzer_version_carries_more_than_the_package_version() {
+        let v = analyzer_version();
+        assert!(v.starts_with(env!("CARGO_PKG_VERSION")), "{v}");
+        assert_ne!(v, env!("CARGO_PKG_VERSION"), "the package version alone cannot separate builds");
+        let (_, fingerprint) = v.split_once('+').expect("version+fingerprint");
+        assert_eq!(fingerprint.len(), 16, "a 64-bit hash rendered as hex: {fingerprint}");
+        assert!(fingerprint.chars().all(|c| c.is_ascii_hexdigit()), "{fingerprint}");
+        // Not the degenerate hash: an empty source walk would leave the FNV-1a
+        // offset basis untouched, and a fingerprint that never moves is the bug
+        // this replaces wearing a longer string.
+        assert_ne!(fingerprint, "cbf29ce484222325", "the source walk found nothing to hash");
+    }
     use super::text_of;
 
     /// The optimized spelling is the old one, byte for byte, on valid and
