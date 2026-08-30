@@ -487,7 +487,7 @@ fn string_proof_guard(cx: &Cx, call: &CallExpr) -> Option<(String, StrPreds)> {
     if ["function_exists", "defined"].iter().any(|n| named(n)) {
         return Some((var.clone(), StrPreds::NON_EMPTY));
     }
-    ctype_proof(&callee).map(|preds| (var.clone(), preds))
+    ctype_proof(callee).map(|preds| (var.clone(), preds))
 }
 
 /// What a `ctype_*` predicate proves of its subject when it answers true, or
