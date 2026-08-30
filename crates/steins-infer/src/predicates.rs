@@ -428,7 +428,13 @@ enum TypeGuard {
     StrPred { var: String, preds: StrPreds },
 }
 
-/// The string predicate a **substring** guard proves of its haystack, or `None`.
+/// The string predicate a guard PROVES of its subject on the branch where it
+/// holds, or `None` (issue #575's second group).
+///
+/// Positive-only by construction for every member: what these prove is an
+/// EXISTENCE, and the failure of an existence proves nothing about the subject.
+///
+/// # The substring three
 ///
 /// `str_contains($s, 'x')`, `str_starts_with`, `str_ends_with`: a haystack that
 /// contains a **non-empty** needle has at least that needle's length, so the
@@ -439,27 +445,49 @@ enum TypeGuard {
 /// `str_contains("", "")` is **true**, and so are `str_starts_with("", "")` and
 /// `str_ends_with("", "")` — an empty needle is found in the empty string, so
 /// such a guard proves nothing. `str_contains("", "x")` is false, which is the
-/// other half of the same measurement and the one the rule stands on.
+/// other half of the same measurement and the one the rule stands on. A needle
+/// that is not a literal may be that empty string, and is declined for the same
+/// reason.
 ///
-/// A needle that is not a literal is declined for the same reason: a variable
-/// needle may be `''`, and there is no rung here that proves it is not.
-fn substring_guard(cx: &Cx, call: &CallExpr) -> Option<(String, StrPreds)> {
+/// # The existence questions
+///
+/// `class_exists($c)` proves `$c` is a **class-string**: measured at 8.5.9,
+/// `class_exists('')` and `class_exists('0')` are both false, and a name the
+/// engine resolves to a class-like is what [`StrPreds::CLASS_STRING`] denotes.
+/// `interface_exists` / `enum_exists` / `trait_exists` prove the same predicate,
+/// which covers class, interface, trait and enum together.
+///
+/// `function_exists($f)` and `defined($c)` prove only **non-empty**: both answer
+/// false for `""` (measured), and a function or constant name is not a
+/// class-string. Naming them here rather than omitting them is the point — the
+/// weaker proof is a decision, not an oversight.
+///
+/// The option flag (`class_exists($c, false)`) changes what the call ANSWERS,
+/// never what a true answer proves about the name, so the arity is not pinned.
+fn string_proof_guard(cx: &Cx, call: &CallExpr) -> Option<(String, StrPreds)> {
     let callee = global_function_callee(cx, call)?;
-    if !call.positional_only || call.args.len() != 2 {
-        return None;
-    }
-    if !["str_contains", "str_starts_with", "str_ends_with"]
-        .iter()
-        .any(|n| callee.eq_ignore_ascii_case(n))
-    {
+    if !call.positional_only || call.args.is_empty() {
         return None;
     }
     let ArgValue::Var(var) = &call.args[0].value else { return None };
-    let ArgValue::Str(needle) = &call.args[1].value else { return None };
-    if needle.as_bytes().is_empty() {
-        return None;
+    let named = |n: &str| callee.eq_ignore_ascii_case(n);
+
+    if ["str_contains", "str_starts_with", "str_ends_with"].iter().any(|n| named(n)) {
+        let [_, needle] = call.args.as_slice() else { return None };
+        let ArgValue::Str(needle) = &needle.value else { return None };
+        if needle.as_bytes().is_empty() {
+            return None;
+        }
+        return Some((var.clone(), StrPreds::NON_EMPTY));
     }
-    Some((var.clone(), StrPreds::NON_EMPTY))
+    if ["class_exists", "interface_exists", "enum_exists", "trait_exists"].iter().any(|n| named(n))
+    {
+        return Some((var.clone(), StrPreds::CLASS_STRING));
+    }
+    if ["function_exists", "defined"].iter().any(|n| named(n)) {
+        return Some((var.clone(), StrPreds::NON_EMPTY));
+    }
+    None
 }
 
 /// The `(needle var, haystack literals)` of a **strict** `in_array` over a literal
@@ -508,9 +536,9 @@ pub(crate) fn in_array_literals(
 fn collect_type_guards(cx: &Cx, cond: &CondExpr, then: bool, out: &mut Vec<TypeGuard>) {
     match cond {
         CondExpr::Call { call, .. } => {
-            // A substring guard proves its haystack non-empty on the branch where
-            // it holds, and nothing on the other (issue #575).
-            if then && let Some((var, preds)) = substring_guard(cx, call) {
+            // A guard that PROVES a string predicate of its subject, on the
+            // branch where it holds and nothing on the other (issue #575).
+            if then && let Some((var, preds)) = string_proof_guard(cx, call) {
                 out.push(TypeGuard::StrPred { var, preds });
             }
             if let Some(pred) = type_predicate(cx, call) {
