@@ -634,3 +634,146 @@ fn nested_descent_emits_callee_finding_exactly_once() {
     assert_eq!(mismatches.len(), 1, "exactly once: {mismatches:?}");
     assert_eq!(one_type(src), "dumped type: 'x'");
 }
+
+// The return reader's parity rungs (issue #590): `return <rvalue>` crosses the
+// same fact `$v = <rvalue>; return $v;` always did, because `return_value_fact`
+// now calls the assignment ladder's own rung functions. Each fixture pins the
+// return form against its assignment twin inside the same descent.
+
+/// The two `debug.type` message bodies of a two-dump source, in source order.
+fn two_types(src: &str) -> (String, String) {
+    let ds: Vec<Diagnostic> =
+        findings(src).into_iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ds.len(), 2, "expected exactly two debug.type dumps, got {ds:?}");
+    (ds[0].message.clone(), ds[1].message.clone())
+}
+
+#[test]
+fn coalesce_return_binds_like_its_assignment_twin() {
+    // `$n ?? 3` under a bound `$n = 5` is the coalesce evaluator's join
+    // (`clear_null(5) join 3`). The return form used to be a factless exit with no
+    // floor (untyped callee) — honest unknown — while the twin crossed via the
+    // bare-var rung.
+    let src = "<?php\n\
+        function viaReturn(int $t, ?int $n) { return $n ?? 3; }\n\
+        function viaAssign(int $t, ?int $n) { $v = $n ?? 3; return $v; }\n\
+        $a = viaReturn(1, 5);\n\
+        \\PHPStan\\dumpType($a);\n\
+        $b = viaAssign(1, 5);\n\
+        \\PHPStan\\dumpType($b);\n";
+    let (ret, asg) = two_types(src);
+    assert_eq!(ret, "dumped type: 3|5");
+    assert_eq!(ret, asg, "the return form and its assignment twin agree");
+}
+
+#[test]
+fn class_const_return_binds_the_fqn_literal() {
+    // `Foo::class` is compiler-resolved (issue #236): the written form crosses the
+    // FQN string literal, exactly as its assignment twin binds it.
+    let src = "<?php\n\
+        function viaReturn(int $t) { return \\DateTime::class; }\n\
+        function viaAssign(int $t) { $v = \\DateTime::class; return $v; }\n\
+        $a = viaReturn(1);\n\
+        \\PHPStan\\dumpType($a);\n\
+        $b = viaAssign(1);\n\
+        \\PHPStan\\dumpType($b);\n";
+    let (ret, asg) = two_types(src);
+    assert_eq!(ret, "dumped type: 'DateTime'");
+    assert_eq!(ret, asg, "the return form and its assignment twin agree");
+}
+
+#[test]
+fn relative_class_const_crosses_the_method_summary() {
+    // `static::class` in a method scope is the `class-string` refinement (the
+    // relative form refuses the literal — casing may differ). It crosses through
+    // the method summary the same way (issue #386's seam).
+    let src = "<?php\n\
+        class Rel {\n\
+            public function name(int $t) { return static::class; }\n\
+        }\n\
+        $r = new Rel();\n\
+        $x = $r->name(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "dumped type: class-string");
+}
+
+#[test]
+fn shape_read_return_crosses_the_declared_slot() {
+    // The base is an in-body partial literal — the `rand()` slot keeps `$a` on the
+    // abstract stratum — so `return $a['k']` is a constant-key shape read whose
+    // slot carries the assert-narrowed positive-int.
+    let src = "<?php\n\
+        function viaReturn(int $t, int $n) {\n\
+            assert($n > 0);\n\
+            $a = ['k' => $n, 'r' => rand()];\n\
+            return $a['k'];\n\
+        }\n\
+        function viaAssign(int $t, int $n) {\n\
+            assert($n > 0);\n\
+            $a = ['k' => $n, 'r' => rand()];\n\
+            $v = $a['k'];\n\
+            return $v;\n\
+        }\n\
+        $x = viaReturn(1, rand());\n\
+        \\PHPStan\\dumpType($x);\n\
+        $y = viaAssign(1, rand());\n\
+        \\PHPStan\\dumpType($y);\n";
+    let (ret, asg) = two_types(src);
+    assert_eq!(ret, "dumped type: int<1, max>");
+    assert_eq!(ret, asg, "the return form and its assignment twin agree");
+}
+
+#[test]
+fn full_literal_array_return_binds_the_list() {
+    // The issue's witness in its descendable form (zero-arg factories do not
+    // descend in T0, and `: array` refuses the summary — both pinned above): a
+    // fully-proven literal array crosses as a `Singleton` and binds whole.
+    let src = "<?php\n\
+        function retArray(int $t) { return [1, 2]; }\n\
+        $x = retArray(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "dumped type: list{1, 2}");
+}
+
+#[test]
+fn partial_array_return_still_degrades_at_the_binding() {
+    // A partly-proven literal crosses the exit as a `Fact::Shape` now, but the A1
+    // binding vocabulary (`summary_binds`) predates the array stratum and admits
+    // only `Singleton`/`OneOf`/`Refined` — the summary degrades at the binding,
+    // for the return form and its assignment twin ALIKE. Parity holds; the reach
+    // ends at the binding vocabulary, not at the return seam. This pin is the
+    // witness to flip when the summary vocabulary learns shapes.
+    let src = "<?php\n\
+        function viaReturn(int $t, int $n) { return [1, $n]; }\n\
+        function viaAssign(int $t, int $n) { $v = [1, $n]; return $v; }\n\
+        $a = viaReturn(1, rand());\n\
+        \\PHPStan\\dumpType($a);\n\
+        $b = viaAssign(1, rand());\n\
+        \\PHPStan\\dumpType($b);\n";
+    let (ret, asg) = two_types(src);
+    assert_eq!(ret, "dumped type: unknown");
+    assert_eq!(ret, asg, "the degrade is the same on both forms");
+}
+
+#[test]
+fn undecided_comparison_return_degrades_like_the_floor() {
+    // The comparison rung is total: an undecided `$n > 3` crosses the Verified
+    // `bool` floor, which carries nothing beyond the arms — `: bool` renders the
+    // floor, an untyped callee stays honestly unknown. A decided comparison
+    // crosses its verdict.
+    let untyped = "<?php\n\
+        function f(int $t, int $n) { return $n > 3; }\n\
+        $x = f(1, rand());\n\
+        \\PHPStan\\dumpType($x);\n";
+    let hinted = "<?php\n\
+        function f(int $t, int $n): bool { return $n > 3; }\n\
+        $x = f(1, rand());\n\
+        \\PHPStan\\dumpType($x);\n";
+    let decided = "<?php\n\
+        function f(int $t, ?int $n) { return $n === 5; }\n\
+        $x = f(1, 5);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(untyped), "dumped type: unknown");
+    assert_eq!(one_type(hinted), "dumped type: bool");
+    assert_eq!(one_type(decided), "dumped type: true");
+}
