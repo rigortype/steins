@@ -3,7 +3,8 @@
 //!
 //! Rules whose answer depends on an argument the S3/S7 rung cannot bind:
 //! `explode` separator, `range` bounds, `preg_replace` subject, `var_export`
-//! literal flag, `min`/`max` argument list. Each asserted both refined and
+//! literal flag, `min`/`max` argument list, and the arithmetic scalar-union
+//! family's `abs`/`pow` operands (issue #40). Each asserted both refined and
 //! declined — decline is first-class (ADR-0061 §1).
 //!
 //! `json_decode` only declines (bare `mixed`, six-base per-flag envelope, no
@@ -43,6 +44,13 @@ impl Mock {
             ("array_key_exists", "bool"),
             ("key_exists", "bool"),
             ("curl_getinfo", "mixed"),
+            // The arithmetic scalar-union family (issue #40). `abs` declares a
+            // union the value domain CAN spell, so its rule is the one the
+            // extensional half of the gate actually bites on; `pow` carries an
+            // `object` arm (`GMP`) that no `Fact` names, so its declaration
+            // pins the rule without bounding it.
+            ("abs", "int|float"),
+            ("pow", "object|int|float"),
         ] {
             types.insert(f.to_owned(), t.to_owned());
         }
@@ -60,6 +68,11 @@ impl Mock {
             // `curl_getinfo(CurlHandle $handle, ?int $option = null)` at 8.5.9:
             // two declared, one required (issue #594).
             ("curl_getinfo".to_owned(), (2, 1)),
+            // `abs(int|float $num)` and `pow(mixed $num, mixed $exponent)` at
+            // 8.5.9. Both rules read their arguments positionally, so both pin
+            // the signature they were written against (issue #40).
+            ("abs".to_owned(), (1, 1)),
+            ("pow".to_owned(), (2, 2)),
         ]);
         // `var_export`'s `?string` envelope sits one rung below the transfer, so
         // the null-strip reads as a refinement, not an answer from nowhere.
@@ -456,6 +469,142 @@ fn a_project_function_shadowing_curl_getinfo_declines() {
     let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
     assert_eq!(ty.len(), 1);
     assert_eq!(ty[0].message, "dumped type: unknown");
+}
+
+// abs: the argument's base, folded onto the non-negative half (issue #40)
+
+/// A bounded int interval is EXACT under `abs`: non-negative intervals pass
+/// through, all-negative ones come back reversed, straddling ones are floored at
+/// zero and capped by whichever end is further from it.
+#[test]
+fn abs_reflects_a_bounded_int_interval() {
+    assert_eq!(dump_doc("@param int<0, 123> $i", "int $i", "abs($i)"), "dumped type: int<0, 123> (asserted)");
+    assert_eq!(dump_doc("@param int<-456, -123> $i", "int $i", "abs($i)"), "dumped type: int<123, 456> (asserted)");
+    assert_eq!(dump_doc("@param int<-123, 123> $i", "int $i", "abs($i)"), "dumped type: int<0, 123> (asserted)");
+    assert_eq!(dump_doc("@param int<-20, 25> $i", "int $i", "abs($i)"), "dumped type: int<0, 25> (asserted)");
+    assert_eq!(dump_doc("@param positive-int $i", "int $i", "abs($i)"), "dumped type: int<1, max> (asserted)");
+    assert_eq!(dump_doc("@param non-negative-int $i", "int $i", "abs($i)"), "dumped type: int<0, max> (asserted)");
+    // A one-point interval spells the point.
+    assert_eq!(dump_doc("@param -1 $i", "int $i", "abs($i)"), "dumped type: 1 (asserted)");
+    assert_eq!(dump_doc("@param 0 $i", "int $i", "abs($i)"), "dumped type: 0 (asserted)");
+    // A finite union collapses through the same per-value rule.
+    assert_eq!(dump_doc("@param -2|2 $i", "int $i", "abs($i)"), "dumped type: 2 (asserted)");
+}
+
+/// **`abs(PHP_INT_MIN)` is a float** (`float(9.223372036854776E+18)` at 8.5.9),
+/// so an interval admitting it is not an int interval on the other side. The
+/// rule declines and the ADR-0069 floor's honest `int<0, max>|float` stands —
+/// which is exactly the `int<0, max>` that phpstan-src's own fixture asserts
+/// for `@var int` and cannot have.
+#[test]
+fn an_int_interval_admitting_php_int_min_declines() {
+    let floor = "dumped type: int<0, max>|float (asserted)";
+    assert_eq!(dump("int $i", "abs($i)"), floor);
+    assert_eq!(dump_doc("@param negative-int $i", "int $i", "abs($i)"), floor);
+    assert_eq!(dump_doc("@param int<min, 0> $i", "int $i", "abs($i)"), floor);
+    assert_eq!(dump_doc("@param int<min, -123> $i", "int $i", "abs($i)"), floor);
+}
+
+/// The float half is total, and the string half is the fold lane's
+/// engine-width question (ADR-0064 seam (i)), never this rung's.
+#[test]
+fn abs_answers_float_and_declines_a_string() {
+    assert_eq!(dump("float $f", "abs($f)"), "dumped type: float");
+    assert_eq!(dump("string $s", "abs($s)"), "dumped type: int<0, max>|float (asserted)");
+    assert_eq!(
+        dump_doc("@param numeric-string $s", "string $s", "abs($s)"),
+        "dumped type: int<0, max>|float (asserted)"
+    );
+    // Arity: `abs` takes exactly one argument, and a second one is not a call
+    // this rule was written against.
+    assert_eq!(dump_doc("@param int<1, 5> $i", "int $i", "abs($i, 2)"), "dumped type: int<0, max>|float (asserted)");
+}
+
+/// An int/float union keeps both arms, each mapped by its own rule — and where
+/// the int arm admits `PHP_INT_MIN` the overflow lands in the float arm the
+/// union already carries, so the whole answer stays expressible.
+#[test]
+fn abs_maps_an_int_float_union_arm_by_arm() {
+    let src = "<?php\n/** @param int<-20, -10> $i */\nfunction f(int $i, float $g, bool $c): void {\n\
+               $x = $c ? $i : $g;\n\\PHPStan\\dumpType(abs($x));\n}\n";
+    assert_eq!(one_type(src), "dumped type: int<10, 20>|float (asserted)");
+}
+
+// pow: `int|float`, sharpened where one operand pins the answer (issue #40)
+
+#[test]
+fn pow_of_two_numeric_operands_is_int_or_float() {
+    // The int/int case is an int until it overflows the word (`pow(2, 63)` is a
+    // float) — which one is a VALUE question, so the rung states the union.
+    assert_eq!(dump("int $i, int $j", "pow($i, $j)"), "dumped type: int|float");
+    assert_eq!(dump("int $i, string $s", "pow($i, $s)"), "dumped type: int|float");
+    assert_eq!(dump("bool $b, int $i", "pow($b, $i)"), "dumped type: int|float");
+}
+
+/// An exponent that numerifies to the integer 0 answers `1` — `1.0` for a float
+/// base (`pow(2.0, 0)` is `float(1)`), and `1|1.0` for a string base, since
+/// `pow("5.5", 0)` is `float(1)` and `pow("5", 0)` is `int(1)`.
+#[test]
+fn a_zero_exponent_answers_one_in_the_bases_own_shape() {
+    assert_eq!(dump("int $i", "pow($i, 0)"), "dumped type: 1");
+    assert_eq!(dump("int $i", "pow($i, false)"), "dumped type: 1");
+    assert_eq!(dump("float $f", "pow($f, 0)"), "dumped type: 1.0");
+    assert_eq!(dump("string $s", "pow($s, 0)"), "dumped type: 1|1.0");
+    assert_eq!(dump("bool $b", "pow($b, 0)"), "dumped type: 1");
+}
+
+/// An exponent that numerifies to the integer 1 answers the base numerified:
+/// `pow(2, true)` is `int(2)`, `pow(2.0, true)` is `float(2)`.
+#[test]
+fn a_one_exponent_answers_the_base_numerified() {
+    assert_eq!(dump("int $i", "pow($i, 1)"), "dumped type: int");
+    assert_eq!(dump("int $i", "pow($i, true)"), "dumped type: int");
+    assert_eq!(dump("float $f", "pow($f, 1)"), "dumped type: float");
+    assert_eq!(dump("bool $b", "pow($b, 1)"), "dumped type: int");
+    // A string base numerifies to an int OR a float, so the union stands.
+    assert_eq!(dump("string $s", "pow($s, 1)"), "dumped type: int|float");
+}
+
+/// php-src promotes the whole operation to a double as soon as one operand is
+/// one, so a float exponent takes an int base with it (`pow(2, 0.0)` is
+/// `float(1)` — which is why a float spelling is NOT read as the zero exponent).
+#[test]
+fn either_operand_being_a_float_makes_the_answer_a_float() {
+    assert_eq!(dump("int $i, float $f", "pow($i, $f)"), "dumped type: float");
+    assert_eq!(dump("float $f, int $i", "pow($f, $i)"), "dumped type: float");
+    assert_eq!(dump("int $i", "pow($i, 0.0)"), "dumped type: float");
+}
+
+/// An array operand is a `TypeError`, not a number, and an operand with no fact
+/// at all — an object, the `GMP` the `object` arm of `pow`'s declaration is
+/// about — never reaches the rule.
+#[test]
+fn pow_declines_an_array_or_factless_operand() {
+    assert_eq!(dump("int $i, array $a", "pow($i, $a)"), "dumped type: unknown");
+    assert_eq!(dump("int $i, array $a", "pow($a, $i)"), "dumped type: unknown");
+    assert_eq!(dump("int $i, \\DateTime $d", "pow($i, $d)"), "dumped type: unknown");
+    // Wrong arity: `pow($num, $exponent)` is exactly two operands.
+    assert_eq!(dump("int $i", "pow($i)"), "dumped type: unknown");
+    assert_eq!(dump("int $i", "pow($i, 2, 3)"), "dumped type: unknown");
+}
+
+/// The gate, on the family's two names: an engine whose declaration has moved
+/// withholds the rule, and what is left is what the lower rungs already said.
+#[test]
+fn a_moved_arithmetic_declaration_withholds_the_rule() {
+    let mut mock = Mock::sidecar();
+    // `int|false` is not `int|float`: the rule is stale and discarded, and the
+    // ADR-0069 floor speaks instead.
+    mock.types.insert("abs".to_owned(), "int|false".to_owned());
+    let src = "<?php\n/** @param int<0, 9> $i */\nfunction f(int $i): void { \\PHPStan\\dumpType(abs($i)); }\n";
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: int<0, max>|float (asserted)");
+
+    // The arity leg, independently: both rules read their operands
+    // positionally, so a signature that grew a parameter withholds them.
+    let mut mock = Mock::sidecar();
+    mock.arities.insert("pow".to_owned(), (3, 3));
+    let src = "<?php\nfunction f(int $i, int $j): void { \\PHPStan\\dumpType(pow($i, $j)); }\n";
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
 }
 
 // json_decode: the batch's measured decline
