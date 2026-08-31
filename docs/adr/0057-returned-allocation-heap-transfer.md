@@ -1321,3 +1321,165 @@ what crosses is the walk's knowledge and the walk knows nothing there.
   unmodelled, so the copy hands back what it was given (D4).
 - **A copy-back in value position** — the seam holds no write channel,
   ADR-0057 B5's limit one layer down (D6).
+
+## Amendment (2026-09-01, issue #596): A8 — the binding vocabulary learns the array stratum
+
+**Status: PENDING ratification.** Issue #596, the gate PR #591 (issue
+#590) measured and pinned. #590 gave `return_value_fact` the assignment
+ladder's rungs and its nsrt delta was exactly zero; the diagnosis, pinned
+as `partial_array_return_still_degrades_at_the_binding`, was that the
+proof crossed the *return seam* fine and died one step later, at A1's
+**binding** vocabulary. This amendment lifts that step.
+
+```php
+function f(int $t, int $n) { return [1, $n]; }
+$x = f(1, rand());   // before: unknown.  After: list{1, int}
+```
+
+### A8.1 What A1 decided, and what it did not
+
+A1 said the summary "IS the proven value" and consumption is "no new
+machinery — the call-result binding that today takes the arm facts takes
+the summary fact when one exists". A3 then carved out the one exception
+with a reason: a join that degraded to `General{base}` **is** the
+declared arm floor, so emitting it and emitting nothing are "observably
+equivalent" and the arms may as well stand.
+
+The implementation spelled that pair as a layer list —
+`Singleton | OneOf | Refined` binds, everything else does not — and the
+list was complete when it was written, because in 2026-07 those were the
+only layers a summary could carry. `Fact::Shape` arrived with ADR-0062
+(the array stratum) **after** T0 landed, and `Fact::Union` with issue
+#339. Neither was ever weighed against A3's test and refused; both
+simply fell outside a list that meant "sharper than the arms" and said
+"the layers T0 knew". **The filter was never load-bearing for the array
+stratum. It was a vocabulary that stopped growing.**
+
+A8 restates the test as its content rather than its enumeration and
+admits `Shape`:
+
+> A summary value fact binds when it is strictly sharper than what the
+> caller would otherwise stand on. `Singleton`, `OneOf`, `Refined` and
+> `Shape` are; a bare `General{base}` is not (A3, unchanged).
+
+### A8.2 Why aliasing is not the objection
+
+§1 built the heap component around **copy, not identity**: a caller
+rebinds a returned allocation as a fresh `AllocId` in its own heap so no
+callee-side name survives the boundary. The natural worry about letting a
+composite value cross is that it repeats the question — and for arrays it
+does not, because PHP arrays are **value types**. A returned array is a
+copy at the language level; there is no shared mutable cell for the two
+sides to disagree about, no `AllocId` to mint, and no escape bit to
+carry. ADR-0036's ObjRef discipline governs objects *inside* the array's
+slots, and those slots hold value-domain facts (ADR-0035), never
+references — so nothing the shape carries is aliasable either.
+
+This is why `Shape` rides the **value** component and not the heap one:
+its crossing is A1's rebind argument with the hard half deleted, not a
+second heap transfer.
+
+### A8.3 The stratum crosses; the corollary holds
+
+A4 is unchanged and is what makes the crossing safe for the finding
+layers. The summary carries the stratum its join assigned (`min` over
+exits, `min` over the literal's contributing elements per ADR-0061 §3),
+and the binding **copies** it — it does not mint one. So:
+
+- a shape whose elements the walk proved is `Verified` at the callee and
+  `Verified` at the caller, exactly as the same literal written one
+  statement later in the caller's own body already is (ADR-0062 C1: "a
+  literal over native elements is therefore `Verified`, and rightly");
+- a shape derived from a `@phpstan-assert`, a `@param array{…}` seed or a
+  `@return` docblock is `Asserted` at the callee and `Asserted` at the
+  caller, so ADR-0062 A-G9's corollary — shape facts of *declared*
+  provenance never premise proof-layer findings — is preserved across the
+  boundary rather than argued about at it.
+
+No laundering step exists on the path, for the same reason A4 gave: there
+is no step. The fixture is `shape_summary_keeps_the_stratum_it_was_joined_at`.
+
+### A8.4 Bounds: the boundary adds no growth vector
+
+The shape a summary carries is built by `array_literal_fact` under
+`SHAPE_SEED_MAX_DEPTH` (= the fold seam's `FOLD_ARRAY_MAX_DEPTH`) and
+canonicalized by `ShapeFact` under `SHAPE_WIDTH_LIMIT`, both **at
+construction inside the callee**. The binding clones a bounded value; it
+neither descends nor composes. Two checks were made rather than assumed.
+An array literal's element slots are filled by `transfer_arg_known`,
+which reads env facts and folded literals and **not** a nested call's
+summary — so a caller cannot nest one summary's shape inside another
+literal. And the one composition that does exist, `return g(…)` taking
+the inner call's summary as this exit's fact (§2.3), is a copy at the
+same depth, not a wrapping. A chain of summaries through memoized
+descents is therefore bounded by those same two constants and by
+`MAX_BINDING_DEPTH` (= 8, A5), and the memo stores one summary per
+`BindingKey` as it always did. Nothing here is a new recursion.
+
+### A8.5 `General` was measured, not inherited
+
+The comparison rung's undecided `bool` floor (issue #590) lands on the
+same filter, so #596 re-opened A3's exception and measured it instead of
+assuming it. Admitting `General` is **sound** — the body did prove that
+much — and it is still refused, because binding it **evicts** the arm
+lane, and for that layer the arms are the richer carrier:
+
+| witness | with `General` filtered | with `General` admitted |
+| --- | --- | --- |
+| nsrt `bug-3226.php:70` (`@return class-string` over a `: string` body) | `class-string` | `string` |
+| nsrt `offset-access.php:34-36` (`@return T[…]`, unlowerable) | `unknown` | `int` |
+
+Buckets moved by zero either way; the trade is one strict loss for three
+content improvements that stay `differ`. A3's claim was that a `General`
+summary and the arms are *equivalent*; the measurement says the arms can
+be **strictly better**, which strengthens the refusal rather than
+weakening it. The honest generalization — bind whichever of the two lanes
+is sharper — needs a predicate that can see the other lane, which
+`summary_binds` cannot; it is recorded here as the open question and left
+undone. `Union` is refused for the weaker reason: no measured consumer,
+and no lane of its own to be sharper than.
+
+### A8.6 What A8 does NOT touch: the `: array` envelope
+
+The issue's own witness is written `function f(int $n): array`, and that
+spelling still yields *unknown* — because it is stopped by a **second,
+independent** gate, one clause earlier. A2's oracle is the native return
+arms, and `: array` lowers to no `NativeType`, so `join_value_component`
+refuses the whole summary rather than rebind exits it cannot check
+(ADR-0075 review, pinned by `other_unlowerable_hints_still_refuse_the_summary`).
+A8 is downstream of that refusal and cannot see past it.
+
+Lifting it was probed before being deferred. Removing the refusal outright
+— the maximal, deliberately unsound upper bound over every unlowerable
+hint — moves nsrt by `differ` 10236 → 10230, `subsumed` 319 → 327 and
+`match` 2677 → **2674**: six rows gained, three lost, including
+`generics.php:1561` answering `list{1, 2, 3}` where `array<string>` was
+expected. An honest `: array` envelope is a real slice (an `ArrayAny`
+oracle, a `plain_array` value floor, a `RetHintKind` that can name the
+spelling), it belongs to A2 and not to A1, and the probe says it is worth
+approximately nothing on nsrt. It gets its own issue.
+
+### A8 refusals (each one line, each anchored)
+
+- **Admitting `General`** — sound but evicting; the arms are strictly
+  better on the measured witness (A8.5).
+- **Admitting `Union`** — no consumer, no lane to beat (A8.5).
+- **Giving the crossed shape a fresh `AllocId` or an escape bit** — PHP
+  arrays are values; there is nothing to alias (A8.2).
+- **Promoting a declared shape's stratum at the boundary because the
+  callee "proved" it** — the callee proved a docblock read; A4 copies,
+  never promotes (A8.3).
+- **Re-bounding the shape at the binding** — it was bounded where it was
+  built; a second clamp would only hide the first (A8.4).
+- **Lifting the `: array` summary refusal here** — a different clause,
+  different oracle, measured at ~zero (A8.6).
+
+### A8 open questions
+
+- Whether `summary_binds` should become a comparison against the caller's
+  fallback rather than a property of the fact — the shape A8.5's
+  measurement points at, and the only form in which `General` could ever
+  be admitted without a regression.
+- Whether the `: array` / `: object` envelope refusal (A8.6) is worth an
+  `ArrayAny`-oracle slice once a consumer measures it as more than six
+  nsrt rows.
