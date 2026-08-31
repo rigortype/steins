@@ -18,15 +18,17 @@ use crate::arg_check::{
     check_maybe_argument_mismatch, implicit_null_accepted, is_type_error, object_world_guard_blind,
     render_call,
 };
+use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
+use crate::cond::eval_binary_fact;
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
 use crate::env::{
     AllocId, BindingKey, ClosureTarget, ContractArm, Descent, ExitContribution, HeapObj,
     HeapSummary, Known, PropFact, ReturnSummary, Store, Stratum, SummaryValue, arg_of_fact_key,
-    arg_of_val, singleton_fact,
+    arg_of_val, array_literal_fact, class_const_class_fact, singleton_fact,
 };
 use crate::generics::{check_named_phpdoc_params, check_phpdoc_param};
 use crate::heap::{
@@ -34,6 +36,7 @@ use crate::heap::{
     simple_class,
 };
 use crate::method_call::{display_of_call, nullsafe_call, receiver_new_object, this_seed_of};
+use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Site};
 use crate::refine::refine_contract_arms;
 use crate::return_arms::{fn_return_arms, native_arms};
@@ -1966,9 +1969,15 @@ fn native_value_floor(ty: &NativeType) -> Option<Fact> {
 
 /// The returned expression's best value-domain fact and stratum at a returning exit
 /// (ADR-0057 amendment T0): a bare variable's env fact (covering the assert-narrowed
-/// `positive-int` case), else a literal/const/foldable `Singleton`, else a depth-1
-/// property fact. `None` for any exit the value domain cannot spell (an object, an
-/// unresolved call, an array offset) — a factless exit (A3).
+/// `positive-int` case), else a constant-key shape read, a `??` chain's join, or a
+/// value-position comparison, else a literal/const/foldable `Singleton`, else an
+/// array literal's shape, a `::class` fact, or a depth-1 property fact. `None` for
+/// any exit the value domain cannot spell (an object, an unresolved call) — a
+/// factless exit (A3).
+///
+/// Every rung is the assignment ladder's own function under the assignment ladder's
+/// gates (issue #590): the same rvalue crosses a `return` with the same fact it
+/// binds under `$x = <rvalue>`, so this reader adds no resolution logic of its own.
 pub(crate) fn return_value_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -1983,6 +1992,30 @@ pub(crate) fn return_value_fact(
     {
         return Some((fact, known.stratum));
     }
+    // A constant-key read against an abstract shape (ADR-0062 §4, S3): the declared
+    // field's value slot. Every no-fact outcome (optional field, unknown slot,
+    // declared absence) is a factless exit.
+    if let ArgValue::OffsetRead { base, key } = value
+        && let Some((read, strat)) = shape_read_at(base, key, env, poisoned, w.cx.php_minor)
+        && let Some(fact) = read.into_fact()
+    {
+        return Some((fact, strat));
+    }
+    // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
+    // left-to-right `¬isset` premise ladder. Above the literal rung since a `??`
+    // is never a literal the folder can reach.
+    if let ArgValue::Coalesce(a, b, _) = value
+        && let Some((fact, strat)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
+    {
+        return Some((fact, strat));
+    }
+    // A value-position comparison (issue #260): total, so lower rungs never see
+    // one — `true`/`false` when `eval_cmp` decides, the Verified `bool` floor when
+    // it doesn't. An undecided exit's `General` still degrades to the arm floor at
+    // the caller's binding, exactly as a factless exit does (A3).
+    if let ArgValue::Binary { op, lhs, rhs } = value {
+        return Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, Some(store), poisoned));
+    }
     // Stratum from the resolution itself (issue #127 review): a fold over an
     // Asserted project-call summary stays Asserted — never re-read from the
     // syntactic tree. Scratch sink: findings for nested fold args are owned by the
@@ -1991,6 +2024,24 @@ pub(crate) fn return_value_fact(
         && let Some(fact) = singleton_fact(&lit, w.cx.php_minor)
     {
         return Some((fact, strat));
+    }
+    // An array literal the rung above could not prove whole (issue #327): keys,
+    // count, and sealing are known even when an element's value is not, so the exit
+    // crosses a `Fact::Shape` — an untyped callee has no arm floor for A3 to
+    // degrade to, so without this rung one such exit killed the whole summary.
+    if let ArgValue::Array(items) = value
+        && let Some((fact, strat)) =
+            array_literal_fact(w.cx, folder, items, env, poisoned, Some(store))
+    {
+        return Some((fact, strat));
+    }
+    // The `::class` magic constant (issue #236): the FQN literal when written, the
+    // `class-string` refinement when relative. Verified — PHP's own guarantee, not
+    // a declaration's.
+    if let ArgValue::ClassConst(sc, name) = value
+        && let Some(fact) = class_const_class_fact(w.cx, w.scope, sc, name)
+    {
+        return Some((fact, Stratum::Verified));
     }
     if let ArgValue::PropFetch { var, prop } = value
         && !poisoned
