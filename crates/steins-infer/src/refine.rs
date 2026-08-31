@@ -1313,7 +1313,7 @@ mod n4_carrier_tests {
     use steins_syntax::ScopeOwner;
     use crate::cond::member_instanceof;
     use crate::cx::EMPTY_DAM;
-    use crate::env::{ContractArm, Member, Stratum, dedup_contract_arms, join_stores};
+    use crate::env::{ContractArm, Member, Stratum, dedup_contract_arms, join_envs, join_stores};
     use crate::refine::{seed_contract_arms, subtract_contract_lane};
 
     /// Build a `Cx` over a one-file project and run `f` against it. `php_minor` seeds
@@ -1640,6 +1640,140 @@ mod n4_carrier_tests {
         got.sort_by(|x, y| format!("{:?}", x.ty).cmp(&format!("{:?}", y.ty)));
         assert_eq!(got, vec![arm(cls("guest"), Stratum::Asserted), arm(cls("user"), Stratum::Asserted)]);
         assert_eq!(j.members.get("v"), None, "disjoint members intersect to empty → dropped");
+    }
+
+    // ---- the cross-lane env join (issue #589) --------------------------------
+
+    /// A one-variable env holding `fact` for `v` at `stratum`.
+    fn env_v(fact: Fact, stratum: Stratum) -> HashMap<String, Known> {
+        HashMap::from([("v".to_owned(), Known::value_strat(fact, 0, None, stratum))])
+    }
+    /// A store whose only carrier is `v`'s contract lane.
+    fn lane_v(arms: Vec<ContractArm>) -> Store {
+        let mut s = Store::default();
+        s.contract.insert("v".into(), arms);
+        s
+    }
+    fn lit(i: i64) -> ContractTy {
+        ContractTy::LitInt(i)
+    }
+
+    #[test]
+    fn join_reads_the_arm_lane_where_a_branch_holds_no_env_fact() {
+        // The issue #589 witness: `if ($i === 1) {}` over `@param 1|2`. The then
+        // branch holds `Singleton(1)` in the value lane with the arm lane unbound
+        // (`Refine::Exact`); the else branch holds the residue `2` in the arm lane
+        // with no env fact (a phpdoc-only parameter never seeds one). The join must
+        // read each branch's own carrier: `1|2`, `Asserted` (the lane arm is).
+        let then_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let else_b = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Asserted)]));
+        let (env, _) = join_envs(vec![then_b, else_b]);
+        let k = env.get("v").expect("the cross-lane claim must survive the join");
+        assert_eq!(k.fact, Some(Fact::OneOf(vec![Val::Int(1), Val::Int(2)])));
+        assert_eq!(k.stratum, Stratum::Asserted, "Verified ⊔ Asserted ⇒ Asserted");
+    }
+
+    #[test]
+    fn join_mirror_reads_the_first_branchs_lane() {
+        // `!==` mirrors the carriers: the FIRST fall-through branch is the
+        // lane-only one, so iterating only the first branch's env would miss the
+        // name entirely — the union-of-keys half of the #589 fix.
+        let then_b = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Asserted)]));
+        let else_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let (env, _) = join_envs(vec![then_b, else_b]);
+        let k = env.get("v").expect("the lane-only-first mirror must survive the join");
+        assert_eq!(k.fact, Some(Fact::OneOf(vec![Val::Int(1), Val::Int(2)])));
+        assert_eq!(k.stratum, Stratum::Asserted);
+    }
+
+    #[test]
+    fn join_rebind_never_resurrects_the_pre_branch_union() {
+        // `if ($a === 1) { $a = 5; }` over `@param 1|2`: the then branch's carrier
+        // is the NEW binding's `Singleton(5)`, the else branch's is the lane residue
+        // `2`. The join is `2|5` — never the pre-branch `1|2`, which no fall-through
+        // path still holds.
+        let then_b = (env_v(Fact::Singleton(Val::Int(5)), Stratum::Verified), Store::default());
+        let else_b = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Asserted)]));
+        let (env, _) = join_envs(vec![then_b, else_b]);
+        let k = env.get("v").expect("rebind joins with the sibling's lane residue");
+        assert_eq!(k.fact, Some(Fact::OneOf(vec![Val::Int(2), Val::Int(5)])));
+    }
+
+    #[test]
+    fn join_drops_a_name_whose_lane_does_not_lower() {
+        // A class arm has no fact form (`to_fact` declines), so the lane-only
+        // branch contributes nothing and the name drops — unchanged behavior.
+        let then_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let else_b = (HashMap::new(), lane_v(vec![arm(cls("user"), Stratum::Asserted)]));
+        let (env, _) = join_envs(vec![then_b, else_b]);
+        assert!(!env.contains_key("v"), "an unlowerable lane is no claim");
+    }
+
+    #[test]
+    fn join_lane_stratum_derives_from_its_arms() {
+        // The lane's own claim carries `Verified` only when EVERY arm does (the
+        // `seed_refined_scalar_fact` rule); one `Asserted` arm taints the claim,
+        // and the branch join's min carries the taint into the joined fact.
+        let all_verified = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Verified)]));
+        let fact_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let (env, _) = join_envs(vec![fact_b, all_verified]);
+        assert_eq!(env.get("v").expect("lowers").stratum, Stratum::Verified);
+
+        let tainted =
+            (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Verified), arm(lit(3), Stratum::Asserted)]));
+        let fact_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let (env, _) = join_envs(vec![fact_b, tainted]);
+        assert_eq!(env.get("v").expect("lowers").stratum, Stratum::Asserted);
+    }
+
+    #[test]
+    fn join_declines_where_the_lane_survives_every_branch() {
+        // Where EVERY branch still carries the lane, `join_stores`' arm union is
+        // the complete claim and arm-precise; a value fact minted beside it would
+        // outrank the lane at every fact read while holding only the arms' blur
+        // (the narrow-tagged-union rows of the #589 calibration). The fallback
+        // must decline and leave the name to the store.
+        let fact_b = (
+            env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified),
+            lane_v(vec![arm(lit(1), Stratum::Asserted)]),
+        );
+        let lane_b = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Asserted)]));
+        let (env, store) = join_envs(vec![fact_b, lane_b]);
+        assert!(!env.contains_key("v"), "a surviving lane outranks nothing — no env claim");
+        let mut got = store.contract.get("v").cloned().unwrap();
+        got.sort_by(|x, y| format!("{:?}", x.ty).cmp(&format!("{:?}", y.ty)));
+        assert_eq!(got, vec![arm(lit(1), Stratum::Asserted), arm(lit(2), Stratum::Asserted)]);
+    }
+
+    #[test]
+    fn join_declines_a_multi_array_arm_lane() {
+        // Two array arms keep their discrimination in the arm lane (A-G3, the
+        // `seed_shape_fact` rule): lowering would blur them into one shape.
+        let list_of = |elem: ContractTy| ContractTy::ListOf { elem: Box::new(elem), non_empty: false };
+        let then_b = (env_v(Fact::Singleton(Val::Int(1)), Stratum::Verified), Store::default());
+        let else_b = (
+            HashMap::new(),
+            lane_v(vec![
+                arm(list_of(ContractTy::Base(Base::Int)), Stratum::Asserted),
+                arm(list_of(ContractTy::Base(Base::String)), Stratum::Asserted),
+            ]),
+        );
+        let (env, _) = join_envs(vec![then_b, else_b]);
+        assert!(!env.contains_key("v"), "a shape∪shape lane is no ONE claim — dropped");
+    }
+
+    #[test]
+    fn join_leaves_a_lane_only_name_to_the_store() {
+        // A name with an env fact in NO branch stays out of the env: `join_stores`'
+        // arm-lane union already carries it, and minting a fact here would move the
+        // claim across lanes with no need.
+        let a = (HashMap::new(), lane_v(vec![arm(lit(1), Stratum::Asserted)]));
+        let b = (HashMap::new(), lane_v(vec![arm(lit(2), Stratum::Asserted)]));
+        let (env, store) = join_envs(vec![a, b]);
+        assert!(!env.contains_key("v"), "no branch held an env fact — no env claim is minted");
+        let mut got = store.contract.get("v").cloned().unwrap();
+        got.sort_by(|x, y| format!("{:?}", x.ty).cmp(&format!("{:?}", y.ty)));
+        assert_eq!(got, vec![arm(lit(1), Stratum::Asserted), arm(lit(2), Stratum::Asserted)]);
     }
 
     #[test]

@@ -1050,10 +1050,32 @@ pub(crate) struct Descent<'a> {
     pub(crate) memo: &'a mut HashMap<BindingKey, Option<ReturnSummary>>,
 }
 
-/// Join the fall-through envs of several live branches (ADR-0031/0035): a scalar
-/// fact survives only when present in *every* branch, folded through [`Fact::join`]
-/// (equal → Singleton; differing → OneOf; overflow → dropped). An exact-class fact
-/// survives only when every branch agrees on the class.
+/// Join the fall-through envs of several live branches (ADR-0031/0035). Each
+/// branch contributes ONE claim per name — its env value fact where it holds one,
+/// else the lowering of its own contract-arm lane ([`lane_claim`], issue #589) —
+/// and the claims fold through [`Fact::join`] (equal → Singleton; differing →
+/// OneOf; overflow → dropped) at `min` over the contributing strata. A branch with
+/// neither carrier, or whose lane does not lower, drops the name.
+///
+/// The cross-lane fallback exists because a guard moves the claim between lanes
+/// mid-construct: `if ($i === 1) {}` over `@param 1|2` leaves the then branch's
+/// knowledge in the value lane alone (`Refine::Exact` mints the singleton and
+/// unbinds the arm lane) and the else branch's in the arm lane alone (the
+/// subtraction's residue `2`; a phpdoc-only parameter never seeds an env fact), so
+/// a lane-local join dropped BOTH carriers. Sound: the joined fact covers the
+/// union of the per-branch claims, and each claim is that branch's own carrier —
+/// the same over-approximation the join always computed, no longer blind to one of
+/// the two lanes. Rebinding stays correct by construction: a rebound branch
+/// contributes the NEW binding's carrier, so `if ($a === 1) { $a = 5; }` joins `5`
+/// with the else lane's `2` into `2|5`, never resurrecting the pre-branch `1|2`.
+///
+/// The fallback fires only where the store join is about to DROP the lane (some
+/// branch no longer carries it — the witness's then branch unbound its own). A
+/// name whose lane survives in every branch, and one that is lane-only in every
+/// branch, both stay out of the env: [`join_stores`]' arm union already carries
+/// the whole claim there, arm-precise, and a value fact minted beside it would
+/// outrank the lane at every fact read (ADR-0037) while holding only the arms'
+/// blur.
 pub(crate) fn join_envs(
     branches: Vec<(HashMap<String, Known>, Store)>,
 ) -> (HashMap<String, Known>, Store) {
@@ -1068,48 +1090,122 @@ pub(crate) fn join_envs(
     for (name, k0) in &first_env {
         // A closure-only binding survives a join only when every branch binds the
         // SAME closure target (a differing/absent branch drops it — the safe side).
-        if let Some(cv0) = &k0.closure {
-            let all_same = rest.iter().all(|(be, _)| {
-                be.get(name)
-                    .and_then(|k| k.closure.as_ref())
-                    .is_some_and(|cv| closure_target_eq(&cv0.target, &cv.target))
-            });
-            if all_same {
-                env.insert(name.clone(), Known::closure(cv0.clone(), k0.line));
-            }
+        let Some(cv0) = &k0.closure else { continue };
+        let all_same = rest.iter().all(|(be, _)| {
+            be.get(name)
+                .and_then(|k| k.closure.as_ref())
+                .is_some_and(|cv| closure_target_eq(&cv0.target, &cv.target))
+        });
+        if all_same {
+            env.insert(name.clone(), Known::closure(cv0.clone(), k0.line));
+        }
+    }
+
+    // The value join iterates the union of the branches' facted names, not the
+    // first branch's env: under `!==` it is the FIRST fall-through branch whose
+    // claim lives only in the arm lane (issue #589's mirror case). Only names
+    // holding an env fact somewhere enter the set — a lane-only-everywhere name
+    // is `join_stores`' to carry.
+    let all: Vec<(&HashMap<String, Known>, &Store)> = std::iter::once((&first_env, &first_classes))
+        .chain(rest.iter().map(|(be, bs)| (be, bs)))
+        .collect();
+    let mut names: HashSet<&String> = HashSet::new();
+    for (be, _) in &all {
+        names.extend(be.iter().filter(|(_, k)| k.fact.is_some()).map(|(n, _)| n));
+    }
+    for name in names {
+        // A first-branch closure binding was ruled on above (kept or dropped);
+        // a sibling's scalar fact must not resurrect the name as a value.
+        if first_env.get(name).is_some_and(|k| k.closure.is_some()) {
             continue;
         }
-        let Some(mut fact) = k0.fact.clone() else { continue };
-        // Derivation clause: a branch join takes `min` over the joined arms' strata
-        // (Verified ⊔ Asserted ⇒ Asserted). The neutral start is `k0`'s own stratum.
-        let mut stratum = k0.stratum;
+        // The fallback rescues a claim the STORE join is about to drop. Where
+        // every branch still carries the lane, `join_stores`' arm union is the
+        // complete claim already — and arm-precise, where a value fact minted
+        // here would be the arms' blur and would OUTRANK the lane at every fact
+        // read (ADR-0037) — so a branch with no env fact contributes nothing
+        // there, exactly as before this fix.
+        let lane_survives = all.iter().all(|(_, bs)| bs.contract.contains_key(name.as_str()));
+        let mut fact: Option<Fact> = None;
+        // Derivation clause: a branch join takes `min` over the joined claims'
+        // strata (Verified ⊔ Asserted ⇒ Asserted); `Verified` is min's neutral
+        // element. Provenance (line/bound) comes from the first branch holding an
+        // env fact — the names set guarantees one exists.
+        let mut stratum = Stratum::Verified;
+        let mut provenance: Option<(u32, Option<String>)> = None;
         let mut ok = true;
-        for (be, _) in &rest {
-            match be.get(name) {
-                Some(k) if k.fact.is_some() => match fact.join(k.fact.as_ref().expect("checked")) {
-                    Some(joined) => {
-                        fact = joined;
-                        stratum = stratum.min(k.stratum);
+        for (be, bs) in &all {
+            let (f, s) = match be.get(name).filter(|k| k.fact.is_some()) {
+                Some(k) => {
+                    if provenance.is_none() {
+                        provenance = Some((k.line, k.bound.clone()));
                     }
+                    (k.fact.clone().expect("filtered"), k.stratum)
+                }
+                None if lane_survives => {
+                    ok = false;
+                    break;
+                }
+                None => match lane_claim(bs, name) {
+                    Some(claim) => claim,
                     None => {
                         ok = false;
                         break;
                     }
                 },
-                _ => {
-                    ok = false;
-                    break;
-                }
-            }
+            };
+            stratum = stratum.min(s);
+            fact = match fact.take() {
+                None => Some(f),
+                Some(prev) => match prev.join(&f) {
+                    Some(joined) => Some(joined),
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                },
+            };
         }
-        if ok {
-            env.insert(name.clone(), Known::value_strat(fact, k0.line, k0.bound.clone(), stratum));
+        if ok
+            && let Some(fact) = fact
+            && let Some((line, bound)) = provenance
+        {
+            env.insert(name.clone(), Known::value_strat(fact, line, bound, stratum));
         }
     }
 
     let rest_stores: Vec<&Store> = rest.iter().map(|(_, s)| s).collect();
     let store = join_stores(&first_classes, &rest_stores);
     (env, store)
+}
+
+/// The claim a branch's contract-arm lane makes for a name the branch holds no
+/// env fact for (issue #589): the lane's arms lowered as one union through
+/// [`steins_contract::to_fact`], at the lane's derived stratum — `Asserted` if any
+/// arm is (the [`seed_refined_scalar_fact`] rule). `None` where the branch carries
+/// no lane, an emptied one, or one the fact domain cannot express (class arms,
+/// float arms, multi-array-arm unions) — the caller then drops the name, exactly
+/// as an absent env fact always did.
+///
+/// [`seed_refined_scalar_fact`]: crate::refine::seed_refined_scalar_fact
+/// [`seed_shape_fact`]: crate::refine::seed_shape_fact
+fn lane_claim(store: &Store, name: &str) -> Option<(Fact, Stratum)> {
+    let arms = store.contract_arms(name)?;
+    // Two or more array arms stay in the arm lane (A-G3, the [`seed_shape_fact`]
+    // rule): `to_fact`'s union fold would blur them into ONE shape, and the value
+    // lane never holds the blur of a discrimination the arms still carry.
+    if arms.iter().filter(|a| steins_contract::to_shape_fact(&a.ty).is_some()).count() >= 2 {
+        return None;
+    }
+    let fact = steins_contract::to_fact(&ContractTy::Union(
+        arms.iter().map(|a| a.ty.clone()).collect(),
+    ))?;
+    let stratum = if arms.iter().any(|a| a.stratum == Stratum::Asserted) {
+        Stratum::Asserted
+    } else {
+        Stratum::Verified
+    };
+    Some((fact, stratum))
 }
 
 /// Join the heap stores of several fall-through branches (ADR-0036). A variable's
