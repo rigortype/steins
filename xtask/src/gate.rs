@@ -497,7 +497,28 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   that always excluded them. This row is back to what it was before the
     //   #537 wave, and the seeds were the only thing that wave moved anywhere in
     //   the public corpus — no other package's count changed in either direction.
-    ("composer/composer", 31),
+    //
+    // The issue #589 wave (2026-09-01, the cross-lane guard join): a `T|false`
+    // fact that used to be ERASED at the guard join now survives it, so the
+    // possibly-grade pair can finally read sites the erasure had been hiding.
+    // The join itself asserts nothing new — each restored claim is a branch's
+    // own carrier — so every row below is a pre-existing judgment reaching its
+    // site for the first time. Read against source, one row at a time:
+    //
+    //   31 → 34 (+3):
+    //   `Config/JsonConfigSource.php:405` (`phpdoc.maybe-argument-mismatch`) —
+    //   TRUE: `$contents = file_get_contents(...)` in the file-exists branch
+    //   flows into `new JsonManipulator(string $contents)` with the `false` arm
+    //   unguarded on that path.
+    //   `Util/Zip.php:52` (`phpdoc.maybe-return-mismatch`) — TRUE: `$content =
+    //   stream_get_contents($stream)` guards the STREAM, not the read; the
+    //   `false` arm reaches the `?string` return.
+    //   `Json/JsonFile.php:298` (`phpdoc.maybe-return-mismatch`) — FALSE:
+    //   `encode()` guards with `if (false === $json) { self::throwEncodeError(…) }`,
+    //   but the helper is declared `: void` and throws on every path, so pruning
+    //   the guarded branch needs the interprocedural always-throws discharge
+    //   issue #599 records (leg 2). The row comes back down when that leg lands.
+    ("composer/composer", 34),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
     //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and
@@ -527,7 +548,14 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   `getmypid()` into `posix_kill()` (end-to-end/_files/…/InterruptTest.php).
     //   A local 8.5 run therefore reads 51 here and stays under the tripwire; the
     //   seeded count is the CI engine's, which is the one the gate is calibrated on.
-    ("sebastianbergmann/phpunit", 55),
+    //   55 → 57 (+2), 2026-09-01 with issue #589 (see the composer entry for the
+    //   wave): `Util/PHP/JobRunner.php:244`, `$stdout` and `$stderr` into `new
+    //   Result(string …, string …)` (`phpdoc.maybe-argument-mismatch` ×2) — both
+    //   FALSE: the code guards with `assert($stdout !== false)`, but excluding
+    //   `false` from an abstract `Union{string, bool}` has no value-lane spelling
+    //   (`Refinement` carries Str/Int only), so the bool arm survives the assert.
+    //   Issue #600 records the domain gap; both rows come back down with it.
+    ("sebastianbergmann/phpunit", 57),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
@@ -548,7 +576,13 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // into `substr(string $string, …)` (Formatter/JsonFormatterTest.php:238).
     // `json_encode` really does answer `false` on malformed UTF-8, and `substr`
     // under `strict_types` really does fatal on it.
-    ("Seldaek/monolog", 6),
+    // 6 → 7 (+1), 2026-09-01 with issue #589 (see the composer entry for the
+    // wave): `Utils.php:140` (`phpdoc.maybe-return-mismatch`) — FALSE: the
+    // `false` arm is guarded by `if ($json === false) { self::throwEncodeError(…) }`,
+    // and `throwEncodeError` is declared `: never`, but a `: never` callee does
+    // not prune its branch the way a plain `throw` does. Issue #599 (leg 1)
+    // records the gap; the row comes back down when it lands.
+    ("Seldaek/monolog", 7),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
     // finding is a class-value contract: `new MountManager(['valid' => 'something
     // else'])` — a plain string in the `array<string, FilesystemOperator>` value
@@ -974,7 +1008,17 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // 1 — `PluginManager.php:525`, class 1.
     ("composer/composer", 1),
     // 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
-    ("sebastianbergmann/phpunit", 1),
+    // 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
+    // PHPDOC_EXPECTED's composer entry for the wave): a second class-4 row in the
+    // same file, `TextUI/Application.php:472` (`type.maybe-argument-mismatch`) —
+    // FALSE: `$configurationFile`'s `false` arm is guarded by
+    // `exitWithErrorMessage(): never` three lines up, and the `: never` callee
+    // does not prune its branch, so the arm reaches `realpath(string $path)`.
+    // The premise is all-`Verified` (a native declaration), which is what routes
+    // it here rather than to PHPDOC_EXPECTED. Issue #599 records the pruning gap
+    // (the class-4 deferral, ADR-0081 §9); both class-4 rows in this file come
+    // back down when it lands.
+    ("sebastianbergmann/phpunit", 2),
     // 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
     // `SymfonyStyle.php`; four class 5 in `Tests/`.
     ("symfony/console", 10),
