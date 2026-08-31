@@ -752,6 +752,16 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 ///   nothing about ARGUMENT reachability. The string questions of the same
 ///   measurement (`str_contains`, `strlen`, …) were already certified through
 ///   the folding allowlist and needed no row here.
+/// * the **arithmetic scalar-union family** (issue #40): `min`, `max`, `pow`,
+///   `array_sum`, `array_product`. Each computes a number FROM its arguments
+///   and writes none of them — `mixed $value, mixed ...$values` for the
+///   comparators, `mixed $num, mixed $exponent` for `pow`, `array $array` for
+///   the two folds, every parameter by value at `PINNED_PHP`. None is
+///   [`foldable`]: the machine word decides the RESULT of each of them
+///   (`array_sum([PHP_INT_MAX, PHP_INT_MAX])` is a float), which says nothing
+///   about ARGUMENT reachability. Leaving them uncertified is what the issue-40
+///   differ ranking was actually measuring: the SECOND `min($ints)` in a scope
+///   answered nothing, because the first had already forgotten `$ints`.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream.
@@ -869,6 +879,16 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         // all by value. Its sibling `in_array` is certified through the
         // folding allowlist already.
         "array_search",
+        // The arithmetic scalar-union family (issue #40): the comparators are
+        // variadic and by value at every position, `pow` reads two operands,
+        // and the two array folds read one array. `abs`, `intdiv`, `round`,
+        // `floor` and `ceil` are the family's members already certified
+        // through the folding allowlist.
+        "min",
+        "max",
+        "pow",
+        "array_sum",
+        "array_product",
     ];
     match out_params(name) {
         Some(positions) => Some(!positions.contains(&position)),
@@ -1554,6 +1574,27 @@ mod tests {
             assert!(!foldable(f), "{f} must NOT become foldable");
         }
         assert_eq!(by_value_arg("mb_internal_encoding", 0), None);
+    }
+
+    /// Issue #40: the arithmetic scalar-union family is certified per NAME, so
+    /// the variadic tail answers `true` as much as the first operand does —
+    /// `min($a, $b, $c)` keeps all three. None of them becomes foldable: the
+    /// machine word decides their results, which is a different question.
+    #[test]
+    fn by_value_arg_certifies_the_arithmetic_scalar_union_family() {
+        for f in ["min", "max", "pow", "array_sum", "array_product"] {
+            for p in 0..4 {
+                assert_eq!(by_value_arg(f, p), Some(true), "{f} position {p} is by value");
+            }
+            assert_eq!(by_value_arg(&f.to_uppercase(), 0), Some(true), "{f} folds case");
+            assert!(!foldable(f), "{f} must NOT become foldable");
+        }
+        // `abs` and the rounding family are the same wave's names, certified
+        // through the folding allowlist rather than by a row here.
+        for f in ["abs", "intdiv", "round", "floor", "ceil"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is certified by value");
+            assert!(foldable(f), "{f} is certified through the allowlist");
+        }
     }
 
     #[test]
