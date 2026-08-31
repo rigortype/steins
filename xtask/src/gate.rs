@@ -518,6 +518,9 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   but the helper is declared `: void` and throws on every path, so pruning
     //   the guarded branch needs the interprocedural always-throws discharge
     //   issue #599 records (leg 2). The row comes back down when that leg lands.
+    //   Still 34 after issue #599 leg 1 landed (2026-09-01), by construction: leg
+    //   1's premise is the callee's own NATIVE `: never`, and `throwEncodeError`
+    //   declares `: void`. Leg 2 stays open with this row as its witness.
     ("composer/composer", 34),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
@@ -582,7 +585,13 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // and `throwEncodeError` is declared `: never`, but a `: never` callee does
     // not prune its branch the way a plain `throw` does. Issue #599 (leg 1)
     // records the gap; the row comes back down when it lands.
-    ("Seldaek/monolog", 7),
+    // 7 → 6 (-1), 2026-09-01 with issue #599 leg 1: it landed, and the row came
+    // back down. `throwEncodeError(int $code, $data): never` is a `private
+    // static` method, so `self::` dispatch resolves it, and the branch now
+    // terminates the way the plain-`throw` spelling always did — the guard
+    // subtracts, and `$json` reaches `return` as `string`. Nothing else in this
+    // package moved in either direction.
+    ("Seldaek/monolog", 6),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
     // finding is a class-value contract: `new MountManager(['valid' => 'something
     // else'])` — a plain string in the `array<string, FilesystemOperator>` value
@@ -995,6 +1004,18 @@ fn effect_expected(name: &str) -> usize {
 ///    `stmt_end` reads a statement-position call as falling through because
 ///    deciding otherwise needs the project index; ADR-0081 §9 defers the refinement
 ///    to the emitter side, where the index lives.
+///
+///    **Half of this class closed, 2026-09-01 (issue #599 leg 1), and the split is
+///    worth naming**: one symptom, two seams. A `type.maybe-*` row is a WALK
+///    finding, and the walk holds the index, so a statement-position call to a
+///    resolved native `: never` callee terminates its branch there now and those
+///    rows are gone. A `variable.maybe-undefined` row is not: its firing set is
+///    `Scope::maybe_undefined_reads`, and `stmt_end` — quoted above — belongs to
+///    the binding-presence pass, which runs at lowering and is index-free by
+///    ADR-0081 §1. §9's deferral therefore still stands for exactly the rows it
+///    was written about, and discharging it still means what §9 says it means:
+///    publishing enough branch structure for `check_undefined_variables` to
+///    re-subtract an arm after the fact.
 /// 5. **A binding in an argument of a throwing call inside `try`** — FALSE. PHP
 ///    evaluates arguments before entering the callee, so the binding is done before
 ///    anything can throw; the pass weakens at statement granularity.
@@ -1018,11 +1039,35 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // it here rather than to PHPDOC_EXPECTED. Issue #599 records the pruning gap
     // (the class-4 deferral, ADR-0081 §9); both class-4 rows in this file come
     // back down when it lands.
-    ("sebastianbergmann/phpunit", 2),
+    // 2 → 1 (-1), 2026-09-01 with issue #599 leg 1. Only ONE of the two came
+    // down, and the split is the point: the class-4 taxonomy above names one
+    // symptom sitting on TWO seams.
+    //   `:472` clears. It is a walk finding, and the walk holds the project
+    //   index, so a statement-position `$this->exitWithErrorMessage(…)` on a
+    //   `private … : never` method now terminates its branch and the `false` arm
+    //   never reaches `realpath()`.
+    //   `:409` STAYS, and is expected to. `variable.maybe-undefined` fires off
+    //   `Scope::maybe_undefined_reads`, computed by the binding-presence pass at
+    //   LOWERING (`lower_presence.rs`), which is index-free by ADR-0081 §1 — its
+    //   `stmt_end` still reads the `catch` arm's never call as falling through,
+    //   so `$cliConfiguration` is `Maybe` at the `return`. §9's deferral is to
+    //   the EMITTER side (`check_undefined_variables`), and discharging it needs
+    //   the presence pass to publish enough branch structure for the checker to
+    //   re-subtract an arm after the fact — a slice of its own, unchanged here.
+    // The same seam split is why `symfony/process` and `briannesbitt/Carbon`
+    // below do not move either; see their entries.
+    ("sebastianbergmann/phpunit", 1),
     // 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
     // `SymfonyStyle.php`; four class 5 in `Tests/`.
     ("symfony/console", 10),
     // 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
+    // Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
+    // `variable.maybe-undefined` on the `$e` of a `try { …; $this->fail(…); }
+    // catch (X $e) {}` idiom, so it sits on the binding-presence seam leg 1 does
+    // not reach (see the phpunit entry). And the callee would decline anyway:
+    // the corpus checkout ships no `vendor/`, so `TestCase`'s chain leaves the
+    // project and dispatch answers nothing — whatever the shipped PHPUnit
+    // declares for `Assert::fail()` is not a fact this index holds.
     ("symfony/process", 6),
     // 2 — both class 4 (`markTestSkipped()` in the serialization tests).
     // 2 → 3, 2026-08-17 with issue #423 (ADR-0056 §9): the wave's one proof-layer
@@ -1036,6 +1081,11 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // `createFromFormat('H:i:s.v', null)` fatals on a released, strict-types
     // library. TRUE, unguarded, and reachable through the public API — exactly the
     // shape a builtin parameter surface exists to see.
+    // Unmoved by issue #599 leg 1 (2026-09-01), for the two reasons the
+    // `symfony/process` entry gives: the two class-4 rows are
+    // `variable.maybe-undefined` on the binding-presence seam, and
+    // `$this->markTestSkipped()` resolves to nothing anyway with no `vendor/` in
+    // the checkout. The `CarbonInterval.php:739` row is TRUE and untouched.
     ("briannesbitt/Carbon", 3),
     // 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
     // a binding claim at all: `type.maybe-argument-mismatch` on
