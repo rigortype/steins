@@ -280,6 +280,41 @@ throw — the pass weakens at statement granularity and cannot see inside), and
 textually identical `if (C)`), which is path feasibility and outside any
 reading this id is defined over.
 
+### 9.1 Amendment (2026-09-01, issue #599): the walk closed its half
+
+**Status: PENDING ratification.** §9 named one symptom, and the gate's class-4
+taxonomy inherited the name. It is two seams, and issue #599 leg 1 closed only
+the one that was never this pass's:
+
+- **The walk** (`walk_trace`) *does* hold the project index, so a
+  statement-position call whose callee resolves to a declaration writing a
+  **native** `: never` now terminates its trace there, as `throw`/`exit` do. The
+  possibly-grade rows that were walk findings — `type.maybe-argument-mismatch`,
+  and the contract-layer `phpdoc.maybe-*` siblings — are gone, and the branch
+  they rode contributes nothing to the join.
+- **This pass is unchanged.** `variable.maybe-undefined` fires off
+  `Scope::maybe_undefined_reads`, and `stmt_end` still answers `FallsThrough`
+  for every statement-position call, for the §1 reason unchanged by the above.
+  §9's obligation is therefore *not* discharged: `check_undefined_variables` is
+  still the place, and it still needs this pass to publish enough branch
+  structure to re-subtract an arm after the fact.
+
+Two constraints leg 1 records that any later discharge of §9 inherits, because
+this refinement SILENCES (ADR-0046) rather than reporting:
+
+1. **Native only.** A docblock's `@return never` is `Asserted` (ADR-0069); a
+   comment must not delete code from the analysis.
+2. **Resolution must be settled.** A dynamic callee, an unresolved receiver, a
+   `static::` late-bound target, a conditional declaration (ADR-0049 A2i) and a
+   namespaced bare name that matched only in the global namespace all decline.
+   An **overridable** method needs no extra guard once resolved: PHP's return
+   covariance admits only narrowing and `never` is the bottom type, so an
+   override of a `: never` method must itself declare `never`.
+
+Leg 2 — a `: void` helper that throws on every path — is out of scope for both
+seams and stays recorded on issue #599; it needs an interprocedural
+always-throws summary, not a resolution.
+
 ## Measurement
 
 Strict-profile yield on the legacy monorepo reported as a number before the

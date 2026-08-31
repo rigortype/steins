@@ -7,8 +7,8 @@ use std::collections::{HashMap, HashSet};
 use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::Type as PType;
 use steins_syntax::{
-    ArgValue, Callee, CondExpr, InvalidatedVar, NameRef, NamedArg, NativeType, Receiver, Scope,
-    Span, Stmt, StmtKind,
+    ArgValue, CallExpr, Callee, CondExpr, InvalidatedVar, NameRef, NamedArg, NativeType, Receiver,
+    RefKind, Scope, Span, Stmt, StmtKind,
 };
 
 use crate::fold::Folder;
@@ -34,6 +34,7 @@ use crate::descent::{
     ThisWriteBack, apply_call_escape_and_sweep, check_propagated_call, checkable_calls,
     handle_var_call, return_heap_object, return_value_fact, scope_class, try_descend_function,
 };
+use crate::dispatch::resolve_call_target;
 use crate::dump::{
     ASSERT_TYPE_FQN, adopted_trace_docblock, emit_asserts, emit_dumps, emit_trace_annotations,
     name_reaches_global_var_dump, resolved_fn_fqn,
@@ -328,11 +329,129 @@ fn this_exit_contribution(store: &Store) -> ExitContribution {
 }
 
 /// Whether a walked (sub-)trace runs off its end (its successor is reachable) or
-/// terminates (`return`/`throw`/`exit`, or an `if` where no branch falls through).
+/// terminates (`return`/`throw`/`exit`, a statement-position call to a `: never`
+/// callee, or an `if` where no branch falls through).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Flow {
     FellThrough,
     Terminated,
+}
+
+/// Whether a statement-position call **provably** never returns, so the trace stops
+/// at it exactly as a `throw` does (issue #599, ADR-0081 §9's leg 1).
+///
+/// The claim is the callee's own **native** `: never`, and nothing else. PHP fatals
+/// if a `never` function returns, so the declaration is a runtime-enforced contract
+/// — the `Verified` stratum ADR-0037 reserves for what the engine itself holds to,
+/// which is what entitles this to *silence* the code after the call (ADR-0046: this
+/// prunes findings, so the premise has to be the strong one).
+///
+/// Four declines, each a way the written name can mean something else at runtime:
+///
+/// * **A docblock's `@return never` is not read here.** It is `Asserted` (ADR-0069),
+///   a comment's claim, and pruning on it would let a lying comment delete real code
+///   from the analysis. `FunctionDecl::ret`/`MethodDecl::ret` cannot answer the
+///   question either — `never`, `void`, `array` and an absent hint all lower to
+///   `None` — so the hint is read back as WRITTEN off ADR-0078's `ret_span`, the
+///   same way `purity::returns_void` reads the one signature fact it needs.
+/// * **A conditional declaration declines** (ADR-0049 A2i, the
+///   `function_exists`-guarded polyfill shape): which body binds is a load-order
+///   fact, so the `never` on the one this index happens to hold proves nothing.
+///   Ungated by the dam on purpose — the arity check re-dams because it is deciding
+///   whether to *fire*, and this decides whether to go *quiet*.
+/// * **A namespaced unqualified name that resolved through PHP's GLOBAL fallback
+///   declines.** `namespace A; foo();` binds `A\foo` if anything defines it before
+///   the call and `\foo` otherwise, so a global match is the answer only until it
+///   is not. A `use function` import is compile-time and wins outright, so it is
+///   not this shape and is kept.
+/// * **Dispatch is the walk's existing machinery** ([`resolve_call_target`]): an
+///   unresolved receiver, a `static::` late bound target, a property-fetch
+///   receiver, a trait-using or off-project chain, an abstract declaration and a
+///   privately-invisible method all answer `None` there and therefore fall through
+///   here, exactly as they do today.
+///
+/// An **overridable** method's `never` is nevertheless trustworthy once resolved,
+/// and that is a property of the bottom type rather than of the resolution: PHP's
+/// return-type covariance admits only narrowing, and nothing is narrower than
+/// `never`, so every override of a `: never` method must itself declare `never`.
+/// The `final_or_private` guard [`resolve_call_target`] applies to `$this->`/`self::`
+/// is therefore stricter than this claim needs — kept anyway, because it is the
+/// dispatch rule the rest of the walk is calibrated on and loosening it here would
+/// be a second, unmeasured change.
+///
+/// Two catalog gates deliberately do **not** apply, both because no catalog is read:
+/// ADR-0052 A11's version-skew demotion ([`Cx::a11_demote_catalog`]) guards
+/// catalog-backed is-a edges, and the mined [`steins_catalog::declared_return`] table
+/// is `Asserted` by construction and could not premise a prune even if it carried a
+/// row. It carries none: reflected against PHP 8.5.9, `exit` and `die` are the only
+/// internal functions declaring `never`, and both lower to [`StmtKind::Exit`], a
+/// terminator already. The builtin arm of this predicate is therefore empty by
+/// measurement rather than by omission.
+///
+/// [`resolve_call_target`]: crate::dispatch::resolve_call_target
+fn call_never_returns(w: &WalkCx, call: &CallExpr, store: &Store) -> bool {
+    let cx = w.cx;
+    match &call.receiver {
+        Callee::Function(_) => {
+            let Some(r) = call.callee_ref.as_ref() else { return false };
+            let FnResolution::User(site) = cx.resolve_function(r) else { return false };
+            let decl = cx.fn_decl(site);
+            // The hint first, the resolution rule second: the hint is a span read
+            // and the rule allocates, and every call in the corpus that is not a
+            // `never` call stops at the read.
+            !decl.conditional
+                && declares_never(cx, site.file, decl.ret_span)
+                && namespace_binding_is_settled(cx, r, &decl.fqn)
+        }
+        Callee::Method { .. } | Callee::Static { .. } => {
+            let Some(t) = resolve_call_target(
+                cx,
+                &call.receiver,
+                store,
+                w.this_exact,
+                w.enclosing_class,
+                w.scope.poisoned,
+            ) else {
+                return false;
+            };
+            if t.declaring_class.conditional {
+                return false;
+            }
+            declares_never(cx, t.class_file, t.method.ret_span)
+        }
+        // A constructor cannot declare a return type at all, and a dynamic callee
+        // names no declaration to read.
+        Callee::Construct { .. } | Callee::DynamicVar(_) | Callee::Dynamic => false,
+    }
+}
+
+/// Whether the native return hint at `ret_span` is written `never` in `file`.
+///
+/// `None` — no hint written at all — is not `never`; see [`call_never_returns`] for
+/// why the docblock gets no say here.
+fn declares_never(cx: &Cx, file: usize, ret_span: Option<Span>) -> bool {
+    let Some(span) = ret_span else { return false };
+    cx.units[file].tree.text_at(span).is_some_and(|t| t.trim().eq_ignore_ascii_case("never"))
+}
+
+/// Whether an unqualified call reference inside a namespace bound to the function it
+/// resolved to for a reason that holds at every load order (see
+/// [`call_never_returns`]'s third decline).
+///
+/// True for everything but the one hazard: a bare name written inside a non-empty
+/// namespace, not covered by a `use function` import, that the project index matched
+/// only in the global namespace. `resolved_fqn` is the resolved declaration's own
+/// lowercase FQN, so the comparison is against what PHP would have preferred.
+fn namespace_binding_is_settled(cx: &Cx, r: &NameRef, resolved_fqn: &str) -> bool {
+    if r.kind != RefKind::Unqualified {
+        return true;
+    }
+    let ctx = cx.tree().ctx_at(r.offset);
+    let name = r.raw.to_ascii_lowercase();
+    if ctx.namespace.is_empty() || ctx.fn_imports.contains_key(&name) {
+        return true;
+    }
+    resolved_fqn == format!("{}\\{name}", ctx.namespace.to_ascii_lowercase())
 }
 
 /// The immutable context shared across a scope's recursive branch walk (ADR-0031).
@@ -972,6 +1091,20 @@ pub(crate) fn walk_trace(
                     }
                 }
                 Flow::FellThrough
+            }
+            // A statement-position call to a resolved `: never` callee is a
+            // terminator (issue #599), and the arm below is the `Throw`/`Exit` arm
+            // verbatim for that reason: the branch it ends contributes nothing to
+            // the join, so a guard whose arm ends in one subtracts, and the code
+            // after it stops being analyzed. Judged AFTER step 1, so the call is
+            // checked and descended exactly as it was before it terminated anything.
+            StmtKind::Call(call) if call_never_returns(w, call, store) => {
+                for v in &stmt.invalidated {
+                    env.remove(&v.name);
+                    store.unbind(&v.name);
+                }
+                emit_trace_annotations(w, folder, pending_trace.take(), stmt, env, store, out);
+                return Flow::Terminated;
             }
             StmtKind::Call(_) => Flow::FellThrough,
             // `assert($expr)` narrows the fall-through env with the guard's
