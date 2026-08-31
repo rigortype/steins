@@ -433,6 +433,14 @@ fn arm_lane_premise(arms: Vec<ContractArm>) -> Option<(Fact, Stratum, Option<Vec
 /// ([`call_return_arms_by_name`]/[`method_return_arms_by_callee`]) at their own
 /// stratum, through [`arm_lane_premise`] — an `Asserted` arm premises
 /// `phpdoc.maybe-argument-mismatch`, never the `type.*` sibling (ADR-0052 §5).
+/// Since issue #596 that summary may be a [`Fact::Shape`], and it arrives at the
+/// stratum the callee's join gave it rather than at the flat `Asserted` the
+/// `OffsetRead` lane below carries. Nothing is laundered: a witnessed literal shape
+/// is `Verified` inside the callee (ADR-0062 C1) and is already a proof premise on
+/// the `Var` lane one statement later, so `f(g($x))` and `$a = g($x); f($a)` premise
+/// the same finding at the same grade — which is the invariant this whole function
+/// exists to hold. A declaration-derived shape stays `Asserted` and stays out of the
+/// proof layer, A-G9's corollary unchanged.
 /// A **builtin** callee reads the builtin ladder instead (ADR-0056 §9): the
 /// reflected return fact, else the ADR-0069 declared floor, in the order the
 /// assignment path takes them, so `f(realpath($p))` and `$r = realpath($p);

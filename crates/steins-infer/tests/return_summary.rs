@@ -736,13 +736,13 @@ fn full_literal_array_return_binds_the_list() {
 }
 
 #[test]
-fn partial_array_return_still_degrades_at_the_binding() {
-    // A partly-proven literal crosses the exit as a `Fact::Shape` now, but the A1
-    // binding vocabulary (`summary_binds`) predates the array stratum and admits
-    // only `Singleton`/`OneOf`/`Refined` — the summary degrades at the binding,
-    // for the return form and its assignment twin ALIKE. Parity holds; the reach
-    // ends at the binding vocabulary, not at the return seam. This pin is the
-    // witness to flip when the summary vocabulary learns shapes.
+fn partial_array_return_binds_the_shape_at_the_binding() {
+    // The witness #591 pinned as "the one to flip" (issue #596). A partly-proven
+    // literal crosses the exit as a `Fact::Shape`, and the A1 binding vocabulary
+    // now admits that layer, so the shape survives the boundary instead of
+    // degrading to nothing — for the return form and its assignment twin ALIKE.
+    // The untyped callee has no arms to fall back to, which is exactly why the
+    // old refusal read as `unknown` rather than as a coarser array.
     let src = "<?php\n\
         function viaReturn(int $t, int $n) { return [1, $n]; }\n\
         function viaAssign(int $t, int $n) { $v = [1, $n]; return $v; }\n\
@@ -751,8 +751,79 @@ fn partial_array_return_still_degrades_at_the_binding() {
         $b = viaAssign(1, rand());\n\
         \\PHPStan\\dumpType($b);\n";
     let (ret, asg) = two_types(src);
-    assert_eq!(ret, "dumped type: unknown");
-    assert_eq!(ret, asg, "the degrade is the same on both forms");
+    assert_eq!(ret, "dumped type: list{1, int}");
+    assert_eq!(ret, asg, "the crossing is the same on both forms");
+}
+
+#[test]
+fn shape_summary_keeps_the_stratum_it_was_joined_at() {
+    // A4 across the array stratum: the binding copies the summary's stratum, it
+    // does not mint one. The element is narrowed by a `@phpstan-assert` helper, so
+    // the literal's own `min` (ADR-0061 §3) is `Asserted` — and the caller renders
+    // `(asserted)`, both for the whole shape and for the field projected out of it.
+    // That marker is what keeps ADR-0062 A-G9's corollary true across a boundary:
+    // an `Asserted` shape premises `phpdoc.maybe-*` and never the `type.*` sibling.
+    let src = "<?php\n\
+        /** @phpstan-assert positive-int $v */\n\
+        function assertPos($v): void {}\n\
+        function f(int $t, $n) { assertPos($n); return ['k' => $n]; }\n\
+        $a = f(1, rand());\n\
+        \\PHPStan\\dumpType($a);\n\
+        \\PHPStan\\dumpType($a['k']);\n";
+    let (whole, field) = two_types(src);
+    assert_eq!(whole, "dumped type: array{k: int<1, max>} (asserted)");
+    assert_eq!(field, "dumped type: int<1, max> (asserted)");
+}
+
+#[test]
+fn bound_shape_reaches_the_caller_s_shape_consumers() {
+    // The point of the crossing: what binds is the value lane every shape consumer
+    // reads (ADR-0062 §4), so a constant-key read and the `count` transfer answer
+    // at the call site exactly as they answer one statement later on the local
+    // twin. Parity is the assertion — a shape that crossed but read differently
+    // would be a second array vocabulary, which is what ADR-0071 forbids.
+    let src = "<?php\n\
+        function rows(int $t, int $n) { return ['a' => $n, 'b' => 2]; }\n\
+        function viaCall(int $n) {\n\
+            $r = rows(1, $n);\n\
+            \\PHPStan\\dumpType($r['b']);\n\
+            \\PHPStan\\dumpType(count($r));\n\
+        }\n\
+        function viaLocal(int $n) {\n\
+            $r = ['a' => $n, 'b' => 2];\n\
+            \\PHPStan\\dumpType($r['b']);\n\
+            \\PHPStan\\dumpType(count($r));\n\
+        }\n";
+    let ds: Vec<String> = findings(src)
+        .into_iter()
+        .filter(|d| d.id == DEBUG_TYPE_ID)
+        .map(|d| d.message)
+        .collect();
+    assert_eq!(ds.len(), 4, "expected four debug.type dumps, got {ds:?}");
+    assert_eq!(ds[0], "dumped type: 2", "the constant-key read projects the crossed slot");
+    assert_eq!(ds[..2], ds[2..], "the call site reads what the local twin reads");
+}
+
+#[test]
+fn general_summary_still_defers_to_the_arm_lane() {
+    // The `General` half of issue #596, decided by measurement and pinned so the
+    // measurement cannot rot. Admitting `General` into `summary_binds` is SOUND —
+    // the body really did prove `string` here — but it binds into a lane that
+    // EVICTS the arm lane, and for this layer the arms are the richer carrier: the
+    // `@return class-string` a body-proved `General{string}` would replace is
+    // strictly sharper than the fact replacing it. So `General` stays filtered and
+    // the docblock arm answers, exactly as before the shape layer joined — and it
+    // answers `(asserted)`, which is the whole trade in one rendering: a Verified
+    // `string` is not worth an Asserted `class-string`.
+    let src = "<?php\n\
+        class Holder {\n\
+            /** @return class-string */\n\
+            public function name(int $t, string $s): string { return $s; }\n\
+        }\n\
+        $h = new Holder();\n\
+        $x = $h->name(1, (string) rand());\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "dumped type: class-string (asserted)");
 }
 
 #[test]

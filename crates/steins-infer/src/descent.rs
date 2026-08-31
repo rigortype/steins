@@ -2121,9 +2121,45 @@ pub(crate) fn return_heap_object(
 }
 
 /// Whether a summary value fact is precise enough to bind as the call-result's value
-/// (ADR-0057 A3): a `Singleton`/`OneOf`/`Refined` fact is strictly more than the
-/// declared arm floor and binds; a bare `General{base}` (the degraded join) carries
-/// nothing beyond the arms — the arm floor stands, observably identical to no summary.
+/// (ADR-0057 A3, amended by A8): a `Singleton`/`OneOf`/`Refined`/`Shape` fact is
+/// strictly more than the declared arm floor and binds; a bare `General{base}` (the
+/// degraded join) carries nothing beyond the arms — the arm floor stands, observably
+/// identical to no summary.
+///
+/// `Shape` is here because the array stratum (ADR-0062) postdates the T0 vocabulary,
+/// not because anything ever decided against it (issue #596). The layer list was
+/// written when the value domain ended at `General`, and adding a fifth layer left
+/// this predicate spelling "the four layers T0 knew" while meaning "sharper than the
+/// arms". A shape is sharper than the arms twice over: an untyped callee has no arms
+/// at all, and a declared `array`/`@return array<…>` reaches the caller through
+/// `seed_returned_shape` at `Asserted` — coarser in stratum AND in content than a
+/// proven `list{1, int}`.
+///
+/// It is the same crossing the other four layers make, on the same three grounds:
+/// PHP arrays are values, so a returned array is a copy and no heap identity crosses
+/// (§1's rebind argument, which for an array needs no `AllocId` at all); the summary
+/// carries its own stratum and the binding keeps it (A4), so an `Asserted` shape
+/// stays out of the proof layer exactly as ADR-0062 A-G9's corollary requires; and
+/// the fact is already bounded where it was built (`array_literal_fact`'s
+/// `SHAPE_SEED_MAX_DEPTH`, `ShapeFact`'s `SHAPE_WIDTH_LIMIT`), so the boundary adds
+/// no growth vector of its own.
+///
+/// `General` stays out, and issue #596 measured why rather than inheriting it. A
+/// summary `General` is a sound claim, so the objection is not honesty — it is that
+/// binding it **displaces** the arm lane, which for that layer is the richer carrier:
+/// admitting it turned `Bar::__toString(): string` with `@return class-string<T>`
+/// from `class-string` into `string` (nsrt `bug-3226.php:70`), the body's `General`
+/// evicting the docblock arm it was never sharper than. The three rows it improved
+/// (`offset-access.php:34-36`, `unknown` → `int`) stayed in the same bucket, so the
+/// measured trade is one strict loss for no bucket gain. The honest generalization —
+/// bind whichever of summary and arms is sharper — needs a predicate that can see the
+/// *other* lane; this one is handed a fact and nothing else.
+///
+/// `Union` stays out too: no measured consumer asks for it, and unlike `Shape` it has
+/// no lane of its own at the binding to be sharper *than*.
 pub(crate) fn summary_binds(fact: &Fact) -> bool {
-    matches!(fact, Fact::Singleton(_) | Fact::OneOf(_) | Fact::Refined { .. })
+    matches!(
+        fact,
+        Fact::Singleton(_) | Fact::OneOf(_) | Fact::Refined { .. } | Fact::Shape { .. }
+    )
 }
