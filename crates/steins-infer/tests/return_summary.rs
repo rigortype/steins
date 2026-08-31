@@ -778,10 +778,13 @@ fn shape_summary_keeps_the_stratum_it_was_joined_at() {
 #[test]
 fn bound_shape_reaches_the_caller_s_shape_consumers() {
     // The point of the crossing: what binds is the value lane every shape consumer
-    // reads (ADR-0062 §4), so a constant-key read and the `count` transfer answer
-    // at the call site exactly as they answer one statement later on the local
-    // twin. Parity is the assertion — a shape that crossed but read differently
-    // would be a second array vocabulary, which is what ADR-0071 forbids.
+    // reads (ADR-0062 §4), so the consumers answer at the call site exactly what
+    // they answer one statement later on the local twin. PARITY is the assertion,
+    // not any particular answer — a shape that crossed but read differently would
+    // be a second array vocabulary, which is what ADR-0071 forbids. The read is
+    // pinned outright because it is the one this slice exists for; `count` rides
+    // along to prove the parity is not read-shaped, and whatever the shape-builtin
+    // rung answers there it answers identically on both sides.
     let src = "<?php\n\
         function rows(int $t, int $n) { return ['a' => $n, 'b' => 2]; }\n\
         function viaCall(int $n) {\n\
