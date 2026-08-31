@@ -649,6 +649,22 @@ pub enum WrittenWhen {
     /// **truthy**. Every falsy return — including one that means "the callee
     /// refused its inputs" — proves nothing about the argument.
     ReturnTruthy,
+    /// The write happened on **every path the call returns on at all** — the
+    /// callee has no "refused its inputs" return value, so there is no falsy
+    /// branch to exclude and control reaching the next statement is itself the
+    /// witness (issue #595).
+    ///
+    /// Strictly stronger than [`Self::ReturnTruthy`]: a truthy return is a
+    /// return, so a consumer that admits the weaker witness admits this one
+    /// too. The extra reach is the **statement** position, where a by-ref write
+    /// is otherwise only ever forgotten.
+    ///
+    /// The premise is a measured grid, not a reading of the stub: the row's own
+    /// doc on [`out_param_written_when`] names the pairs probed and the
+    /// non-returning outcomes the witness therefore says nothing about. A pair
+    /// the grid does not cover is not this witness's business — the *fact*
+    /// side declines it, and the caller's invalidation stands.
+    CallReturns,
 }
 
 /// The *written-when* witness for position `position` of `name`, or `None`
@@ -662,6 +678,16 @@ pub enum WrittenWhen {
 /// nothing; the zero-match write is indistinguishable from `false` on the
 /// falsy branch, so that side stays unseeded.
 ///
+/// `settype` position 0 (issue #595) — measured (PHP 8.5.9) across the whole
+/// (input value × type string) grid: the call answers `true` for **every** pair
+/// that returns at all, and there is no `false` return anywhere in the surface.
+/// The two outcomes that do not write are both *non-returns*: an unrecognized
+/// type string (`'real'`, `'foo'`, `' int'`, `''`) and `'resource'` raise a
+/// `ValueError`, and an object input under `'string'` raises an `Error`. Neither
+/// reaches the next statement, which is why the witness is
+/// [`WrittenWhen::CallReturns`] rather than a truthiness test the caller would
+/// have to perform.
+///
 /// Every other [`out_params`] row's contract deserves the same treatment but
 /// stays a decline until measured (ADR-0077 §4). A witness is not by itself a
 /// fact: it says *where* a seed would be sound.
@@ -670,6 +696,7 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
     match (name.to_ascii_lowercase().as_str(), position) {
         ("preg_match", 2) => Some(WrittenWhen::ReturnTruthy),
         ("preg_match_all", 2) => Some(WrittenWhen::ReturnTruthy),
+        ("settype", 0) => Some(WrittenWhen::CallReturns),
         _ => None,
     }
 }
@@ -1082,6 +1109,11 @@ mod tests {
         assert_eq!(out_param_written_when("preg_match", 2), Some(WrittenWhen::ReturnTruthy));
         assert_eq!(out_param_written_when("PREG_MATCH", 2), Some(WrittenWhen::ReturnTruthy));
         assert_eq!(out_param_written_when("preg_match_all", 2), Some(WrittenWhen::ReturnTruthy));
+        // The statement-position witness (issue #595): `settype` has no falsy
+        // return to exclude, so the write rides on the call returning at all.
+        assert_eq!(out_param_written_when("settype", 0), Some(WrittenWhen::CallReturns));
+        assert_eq!(out_param_written_when("SETTYPE", 0), Some(WrittenWhen::CallReturns));
+        assert_eq!(out_param_written_when("settype", 1), None, "the type string is by value");
         for p in [0, 1, 3, 4] {
             assert_eq!(out_param_written_when("preg_match", p), None, "position {p} is by value");
             assert_eq!(out_param_written_when("preg_match_all", p), None, "position {p} is by value");
@@ -1095,7 +1127,7 @@ mod tests {
 
     #[test]
     fn a_witness_never_appears_at_a_by_value_position() {
-        for f in ["preg_match", "preg_match_all", "sort", "str_replace", "similar_text"] {
+        for f in ["preg_match", "preg_match_all", "sort", "str_replace", "similar_text", "settype"] {
             for p in 0..6 {
                 if out_param_written_when(f, p).is_some() {
                     assert_eq!(by_value_arg(f, p), Some(false), "{f} argument {p}");
