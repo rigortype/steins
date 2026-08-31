@@ -1,17 +1,20 @@
 //! Out-parameter seeding: what a by-ref argument holds after the call, with the
 //! `preg_match` / `preg_match_all` `$matches` shapes read off the pattern (issue
-//! #156), the preg flag constants, and the `preg.invalid-pattern` entry points.
+//! #156), the `settype` cast write at statement position (issue #595), the preg
+//! flag constants, and the `preg.invalid-pattern` entry points.
 
 use std::collections::HashMap;
 
 use steins_domain::{
     Base, Certainty, Fact, PhpStr, Refinement, ShapeFact, StrPreds, Key as VKey, Val,
 };
-use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind};
+use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind, StmtKind};
 
 use crate::fold::Folder;
 use crate::PREG_INVALID_PATTERN_ID;
 use crate::asserts::guard_call_line;
+use crate::builtin_returns::transfer_declaration_admits;
+use crate::coerce::{CastTarget, php_cast_fact};
 use crate::cx::Cx;
 use crate::env::{Known, Store, Stratum};
 use crate::existence::global_function_callee;
@@ -19,6 +22,37 @@ use crate::project::Diagnostic;
 use crate::refine::collect_truthy_calls;
 use crate::transfers::list_transfer_fact;
 use crate::walk::WalkCx;
+
+/// **Where** an out-parameter seed is being asked for, which is the same
+/// question as *what the caller has proven about the call* (ADR-0077 §3.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SeedPosition {
+    /// A call in a condition whose result this branch proved **truthy**.
+    Guard,
+    /// A bare call **statement**, where all the caller proved is that control
+    /// reached the next statement — i.e. that the call returned at all.
+    Statement,
+}
+
+impl SeedPosition {
+    /// Whether a catalog witness is discharged at this position.
+    ///
+    /// [`WrittenWhen::CallReturns`] is strictly stronger than
+    /// [`WrittenWhen::ReturnTruthy`] — a truthy return is a return — so it is
+    /// admitted at the guard position too, where the branch proved more than it
+    /// needs. The converse never holds: a statement proves nothing about the
+    /// return value, so a truthiness witness stays a guard-only claim.
+    ///
+    /// [`WrittenWhen::CallReturns`]: steins_catalog::WrittenWhen::CallReturns
+    /// [`WrittenWhen::ReturnTruthy`]: steins_catalog::WrittenWhen::ReturnTruthy
+    fn admits(self, witness: steins_catalog::WrittenWhen) -> bool {
+        use steins_catalog::WrittenWhen::{CallReturns, ReturnTruthy};
+        match (self, witness) {
+            (_, CallReturns) | (SeedPosition::Guard, ReturnTruthy) => true,
+            (SeedPosition::Statement, ReturnTruthy) => false,
+        }
+    }
+}
 
 /// Seed the out-parameters of every call this branch proves returned truthy
 /// (ADR-0077), in source order.
@@ -40,9 +74,54 @@ pub(crate) fn seed_out_params(
     let mut calls = Vec::new();
     collect_truthy_calls(cond, then, w.cx.php_minor, &mut calls);
     for call in calls {
-        for (var, fact) in out_param_seed(w, folder, call, env) {
-            seed_out_param(&var, fact, guard_call_line(w, call), env, store);
+        let seeds = out_param_seed(w, folder, call, env, store, SeedPosition::Guard);
+        let line = guard_call_line(w, call);
+        for (var, fact, stratum) in seeds {
+            seed_out_param(&var, fact, stratum, OUT_PARAM_SEEDED, line, env, store);
         }
+    }
+}
+
+/// **The statement-position out-parameter seed** (issue #595), computed from the
+/// **pre-call** env and store and applied after the statement's by-ref
+/// invalidation has run.
+///
+/// **Reading and binding are two halves on purpose.** The input a cast consumes
+/// is what the variable held *before* the call, and by the time the walk reaches
+/// step 4 the name is already forgotten — a reader placed there would find
+/// nothing and decline every time. So this half runs on the entry env, and
+/// [`apply_stmt_out_param_seeds`] binds what it computed *after* the forgetting,
+/// which is how the written fact replaces the drop rather than racing it (the
+/// ADR-0077 §3.4 ordering, at the statement rung).
+///
+/// **A bare call statement only.** `checkable_calls` also yields the RHS call of
+/// an assignment, and there the seed would be a bug: `$v = settype($v, 'int')`
+/// evaluates the by-ref write *and then* overwrites `$v` with the call's `true`,
+/// so the last word is the assignment's, not the cast's. `return`/`echo`
+/// positions are left out with it rather than argued one at a time.
+pub(crate) fn stmt_out_param_seeds(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    kind: &StmtKind,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Vec<(String, Fact, Stratum, u32)> {
+    let StmtKind::Call(call) = kind else { return Vec::new() };
+    out_param_seed(w, folder, call, env, store, SeedPosition::Statement)
+        .into_iter()
+        .map(|(var, fact, stratum)| (var, fact, stratum, guard_call_line(w, call)))
+        .collect()
+}
+
+/// Bind what [`stmt_out_param_seeds`] computed, after the statement's by-ref
+/// invalidation forgot the same names.
+pub(crate) fn apply_stmt_out_param_seeds(
+    seeds: Vec<(String, Fact, Stratum, u32)>,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    for (var, fact, stratum, line) in seeds {
+        seed_out_param(&var, fact, stratum, OUT_PARAM_SEEDED_STMT, line, env, store);
     }
 }
 
@@ -51,6 +130,11 @@ pub(crate) fn seed_out_params(
 /// branch". Both halves of the claim are in it — the fact is the callee's, and it
 /// holds *here* because the branch proved the write happened.
 const OUT_PARAM_SEEDED: &str = "written by the guard call on this branch";
+
+/// [`OUT_PARAM_SEEDED`]'s statement-position twin (issue #595). The second half
+/// of the claim is weaker and says so: the write holds because the call
+/// *returned*, which is all a statement proves.
+const OUT_PARAM_SEEDED_STMT: &str = "written by the call at this statement";
 
 /// **The out-parameter seed** (ADR-0077): the by-ref arguments a guard call
 /// proved it wrote, paired with the fact its contract determines for each.
@@ -71,7 +155,9 @@ fn out_param_seed(
     folder: &mut dyn Folder,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-) -> Vec<(String, Fact)> {
+    store: &Store,
+    position_kind: SeedPosition,
+) -> Vec<(String, Fact, Stratum)> {
     // A poisoned scope (ADR-0046) has already lost the right to say which name a
     // binding is — `extract()` and variable-variables can rewrite the frame the
     // seed would land in. The same gate `apply_call_asserts` applies.
@@ -82,14 +168,14 @@ fn out_param_seed(
     let Some(positions) = steins_catalog::out_params(name) else { return Vec::new() };
     let mut seeds = Vec::new();
     for &position in positions {
-        // The witness leg (§3.2): only a *stated* written-when seeds, and the only
-        // condition the catalog can state is the one the caller just proved.
-        // Nothing is inferred from the mere existence of an `out_params` row.
-        let Some(steins_catalog::WrittenWhen::ReturnTruthy) =
-            steins_catalog::out_param_written_when(name, position)
-        else {
+        // The witness leg (§3.2): only a *stated* written-when seeds, and it must
+        // be one this position has proven ([`SeedPosition::admits`]). Nothing is
+        // inferred from the mere existence of an `out_params` row.
+        let admitted = steins_catalog::out_param_written_when(name, position)
+            .is_some_and(|w| position_kind.admits(w));
+        if !admitted {
             continue;
-        };
+        }
         // The arity leg: an argument the call never supplied was never written.
         let Some(arg) = call.args.get(position) else { continue };
         // The aliasing leg (§3.6): only a plain local variable. `$this->m`,
@@ -97,10 +183,12 @@ fn out_param_seed(
         // visible to callers this scope cannot see (ADR-0063 §2.3) and because
         // nothing here could name the target if it were.
         let ArgValue::Var(var) = &arg.value else { continue };
-        let Some(fact) = out_param_written_fact(w, folder, name, position, call, env) else {
+        let Some((fact, stratum)) =
+            out_param_written_fact(w, folder, name, position, call, env, store)
+        else {
             continue;
         };
-        seeds.push((var.clone(), fact));
+        seeds.push((var.clone(), fact, stratum));
     }
     seeds
 }
@@ -116,8 +204,16 @@ fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
 }
 
 /// The fact the callee's contract determines for the out-parameter at
-/// `position`, computed from **proven arguments only** (ADR-0077 §3.3). Two rows
-/// exist, dispatched by (name, position) — the key the witness is indexed by.
+/// `position`, computed from **proven arguments only** (ADR-0077 §3.3), paired
+/// with the trust stratum it is bound at. Three rows exist, dispatched by
+/// (name, position) — the key the witness is indexed by.
+///
+/// The two preg rows bind `Asserted` (§3.3): the shape rests on a declared
+/// contract plus proven inputs, never on observing a run. The `settype` row
+/// carries its **input's** stratum instead, because the fact it states is the
+/// input's own value put through a measured conversion — an `Asserted` phpdoc
+/// input stays `Asserted`, and a `Verified` one has nothing weaker to inherit
+/// (the grid itself is `Verified` engine behaviour).
 fn out_param_written_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -125,12 +221,104 @@ fn out_param_written_fact(
     position: usize,
     call: &CallExpr,
     env: &HashMap<String, Known>,
-) -> Option<Fact> {
+    store: &Store,
+) -> Option<(Fact, Stratum)> {
     match (name.to_ascii_lowercase().as_str(), position) {
-        ("preg_match", 2) => preg_match_written_fact(w, folder, call, env),
-        ("preg_match_all", 2) => preg_match_all_written_fact(w, folder, call, env),
+        ("preg_match", 2) => {
+            preg_match_written_fact(w, folder, call, env).map(|f| (f, Stratum::Asserted))
+        }
+        ("preg_match_all", 2) => {
+            preg_match_all_written_fact(w, folder, call, env).map(|f| (f, Stratum::Asserted))
+        }
+        ("settype", 0) => settype_written_fact(w, folder, call, env, store),
         _ => None,
     }
+}
+
+/// **What `settype($var, $type)` wrote into `$var`** (issue #595), for a call
+/// whose every premise is proven — else `None`, which leaves the caller's by-ref
+/// invalidation standing (the FP-safe floor).
+///
+/// Four premises, in the order that refuses cheapest-first:
+///
+/// 1. **The declaration pin** (ADR-0061 §2 through
+///    [`transfer_declaration_admits`]): the running engine must still declare
+///    `settype(): bool`, and — since the parameter this rule writes is declared
+///    `mixed`, which pins nothing on its own — its arity must still be the
+///    `(2, 2)` measured at `PINNED_PHP` (ADR-0064 Amendment B). A silent engine
+///    withholds rather than being trusted.
+/// 2. **A proven type string.** The second argument must resolve to a literal
+///    string through the fold gate every other reader here uses
+///    ([`Cx::resolve_literal`]) — an unproven variable declines. A byte string
+///    that is not valid UTF-8 declines with it: it names no type php-src accepts.
+/// 3. **A target the value domain can spell** ([`CastTarget::from_type_string`]):
+///    `'object'` writes a `stdClass`, which is not a [`Fact`], and every
+///    spelling php-src refuses raises a `ValueError` before writing anything.
+/// 4. **A pre-call claim about the input** ([`cast_input_claim`]) and a grid cell
+///    for it ([`php_cast_fact`]).
+///
+/// [`Cx::resolve_literal`]: crate::cx::Cx::resolve_literal
+fn settype_written_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Option<(Fact, Stratum)> {
+    if !transfer_declaration_admits(w.cx, folder, "settype", &["bool"], Some((2, 2))) {
+        return None;
+    }
+    let type_arg = &call.args.get(1)?.value;
+    let ArgValue::Str(spelling) = w.cx.resolve_literal(type_arg, env, w.scope.poisoned, folder)?
+    else {
+        return None;
+    };
+    let target = CastTarget::from_type_string(spelling.as_str()?)?;
+    let ArgValue::Var(var) = &call.args.first()?.value else { return None };
+    let (input, stratum) = cast_input_claim(env, store, var)?;
+    Some((php_cast_fact(&input, target)?, stratum))
+}
+
+/// The claim this walk holds about what `$var` **holds** on entry to the call,
+/// with its stratum — the cast's input.
+///
+/// Both lanes, in the order every fact read takes them (ADR-0037): the env value
+/// fact first, then the declared-arm lane lowered as one union
+/// ([`steins_contract::to_fact`], the issue-#589 `lane_claim` reading).
+///
+/// The lane fallback carries **one clause of its own**: a lane whose only arm is
+/// `float` lowers to `float` here, where `to_fact` floors it to nothing. The
+/// floor is about *slot admission* — a `float` declaration ACCEPTS an int
+/// (PHPStan core semantics), so a `Fact::General { base: Float }` would reject
+/// values the declaration admits. This reader asks the other question: what the
+/// slot HOLDS, which for a float-declared name is a float on every path PHP can
+/// reach it by (the boundary converts in coercive mode and fatals in strict).
+/// That is the same claim the dump surface already renders for such a name.
+fn cast_input_claim(
+    env: &HashMap<String, Known>,
+    store: &Store,
+    var: &str,
+) -> Option<(Fact, Stratum)> {
+    if let Some(known) = env.get(var)
+        && let Some(fact) = &known.fact
+    {
+        return Some((fact.clone(), known.stratum));
+    }
+    let arms = store.contract_arms(var)?;
+    let stratum = if arms.iter().any(|a| a.stratum == Stratum::Asserted) {
+        Stratum::Asserted
+    } else {
+        Stratum::Verified
+    };
+    let union =
+        steins_contract::ContractTy::Union(arms.iter().map(|a| a.ty.clone()).collect());
+    let fact = steins_contract::to_fact(&union).or_else(|| match arms {
+        [only] if only.ty == steins_contract::ContractTy::Base(Base::Float) => {
+            Some(Fact::General { base: Base::Float, nullable: false })
+        }
+        _ => None,
+    })?;
+    Some((fact, stratum))
 }
 
 /// The modeled `$flags` bits of the `preg_match` family, by **value** (issue
@@ -869,23 +1057,27 @@ fn preg_offset_pair(elem: Fact, unmatched_written: bool) -> Option<Fact> {
 ///
 /// The order is fixed, seed second: [`walk_if`] has already run
 /// [`cond_invalidations`] over the pre-branch env, so the name reaches this
-/// forgotten and this rebinds it — no race. The binding is `Asserted` (§3.3): it
-/// rests on a declared contract plus proven inputs, never on observing a run, so
-/// it may silence but never premise a proof.
+/// forgotten and this rebinds it — no race. The statement rung reaches the same
+/// arrangement by its own route ([`stmt_out_param_seeds`] reads first, then
+/// [`apply_stmt_out_param_seeds`] binds after step 4's forgetting).
+///
+/// `stratum` is the row's, not this function's: the preg rows bind `Asserted`
+/// (§3.3 — a declared contract plus proven inputs, never an observed run), the
+/// `settype` row inherits its input's. Either way a seed may silence but only a
+/// `Verified` one may premise a proof.
 ///
 /// [`walk_if`]: crate::branch::walk_if
 /// [`cond_invalidations`]: crate::asserts::cond_invalidations
 fn seed_out_param(
     var: &str,
     fact: Fact,
+    stratum: Stratum,
+    bound: &str,
     line: u32,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
 ) {
-    env.insert(
-        var.to_owned(),
-        Known::value_strat(fact, line, Some(OUT_PARAM_SEEDED.to_owned()), Stratum::Asserted),
-    );
+    env.insert(var.to_owned(), Known::value_strat(fact, line, Some(bound.to_owned()), stratum));
     // The callee assigned the whole variable, so the guard-derived class facts and
     // the declared-arm lane the old value earned are void — the same reasoning any
     // rebinding applies.
