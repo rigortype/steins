@@ -1457,7 +1457,9 @@ hint — moves nsrt by `differ` 10236 → 10230, `subsumed` 319 → 327 and
 expected. An honest `: array` envelope is a real slice (an `ArrayAny`
 oracle, a `plain_array` value floor, a `RetHintKind` that can name the
 spelling), it belongs to A2 and not to A1, and the probe says it is worth
-approximately nothing on nsrt. It gets its own issue.
+approximately nothing on nsrt. It gets its own issue: **#603**, filed
+with the probe attached so the next reader inherits the measurement
+rather than the intuition.
 
 ### A8 refusals (each one line, each anchored)
 
@@ -1480,6 +1482,8 @@ approximately nothing on nsrt. It gets its own issue.
   fallback rather than a property of the fact — the shape A8.5's
   measurement points at, and the only form in which `General` could ever
   be admitted without a regression.
-- Whether the `: array` / `: object` envelope refusal (A8.6) is worth an
+- Whether the `: array` envelope refusal (A8.6, issue #603) is worth an
   `ArrayAny`-oracle slice once a consumer measures it as more than six
-  nsrt rows.
+  nsrt rows. `: object` is not the same question: the heap component is
+  the carrier there, and A3's asymmetry says the value domain has no
+  object top to degrade into.
