@@ -281,19 +281,20 @@ fn php_float_to_int(f: f64) -> Option<i64> {
 /// A `settype` target type, as the literal type string names it — the column
 /// header of the probed cast grid ([`php_cast_fact`]).
 ///
-/// The recognized spellings are exactly php-src's, measured at PHP 8.5.9 by
-/// calling `settype($v, $t)` for every candidate: `'int'`/`'integer'`,
+/// The spellings php-src converts under are exactly these, measured at PHP
+/// 8.5.9 by calling `settype($v, $t)` for every candidate: `'int'`/`'integer'`,
 /// `'float'`/`'double'`, `'string'`, `'bool'`/`'boolean'`, `'array'`, `'null'`,
 /// and `'object'`. Matching is case-insensitive (`'Int'`, `'INT'` and
-/// `'BOOLEAN'` all convert), and nothing else is accepted — `'real'`,
+/// `'BOOLEAN'` all convert). Nothing else writes anything at all: `'real'`,
 /// `'binary'`, `' int'`, `'int '` and `''` each raise
 /// `ValueError: settype(): Argument #2 ($type) must be a valid type`, and
-/// `'resource'` raises `ValueError: Cannot convert to resource type`.
+/// `'resource'` is recognized only far enough to raise
+/// `ValueError: Cannot convert to resource type`.
 ///
-/// Two accepted spellings are deliberately **not** variants here: `'object'`
+/// One converting spelling is deliberately **not** a variant here: `'object'`
 /// writes a `stdClass`, which the four-layer value domain has no member for
-/// (its object stratum lives in the heap store), and `'resource'` never
-/// converts at all. Both leave the caller's invalidation standing.
+/// (its object stratum lives in the heap store). It leaves the caller's
+/// invalidation standing, exactly as the refused spellings do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum CastTarget {
     /// `'int'` / `'integer'`.
@@ -357,7 +358,7 @@ enum CastIn {
 /// | input | `'int'` | `'float'` | `'string'` | `'bool'` | `'array'` | `'null'` |
 /// | --- | --- | --- | --- | --- | --- | --- |
 /// | `int` | identity | `float` | `decimal-int-string` | truthiness | `list{int}` | `null` |
-/// | `float` | `int` | identity | `uppercase-string` | truthiness | `list{float}` | `null` |
+/// | `float` | `int` | identity | `uppercase-string&non-empty-string` | truthiness | `list{float}` | `null` |
 /// | `string` | `int` | `float` | identity | truthiness | `list{string}` | `null` |
 /// | `bool` | `0\|1` | `0.0\|1.0` | `'1'\|''` | identity | `list{bool}` | `null` |
 /// | `null` | `0` | `0.0` | `''` | `false` | `array{}` | `null` |
@@ -439,7 +440,7 @@ fn cast_input_classes(f: &Fact) -> Vec<CastIn> {
 }
 
 /// One cell of the grid: what `target` writes for a single input alternative.
-/// See [`php_cast_fact`] for the measured table and the two declining cells.
+/// See [`php_cast_fact`] for the measured table and the cell it declines.
 fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
     let one = |v: Val| Some(Fact::Singleton(v));
     let pair = |a: Val, b: Val| Fact::from_vals(vec![a, b]);
