@@ -716,10 +716,10 @@ fn abs_union(arms: &[(Base, Option<Refinement>)]) -> Option<Fact> {
 /// # The grid, probed at `PINNED_PHP` (8.5.9)
 ///
 /// ```text
-/// pow(2, 0)      int(1)    pow(2.0, 0)   float(1)   pow("5.5", 0)  float(1)
-/// pow(2, true)   int(2)    pow(2.0, true) float(2)  pow("5", true) int(5)
-/// pow(2, 0.0)    float(1)  pow(2, 62)    int(...)   pow(2, 63)     float(...)
-/// pow(null, 0)   int(1)    pow(null, 1)  int(0)     pow(-1, 5.5)   float(NAN)
+/// pow(2, 0)     int(1)    pow(2.0, 0)     float(1)  pow("5.5", 0)   float(1)
+/// pow(2, true)  int(2)    pow(2.0, true)  float(2)  pow("5", true)  int(5)
+/// pow(2, 0.0)   float(1)  pow(2, 62)      int(…)    pow(2, 63)      float(…)
+/// pow(null, 0)  int(1)    pow(null, 1)    int(0)    pow(-1, 5.5)    float(NAN)
 /// ```
 ///
 /// Four readings fall out, in the order the rule takes them:
@@ -727,8 +727,8 @@ fn abs_union(arms: &[(Base, Option<Refinement>)]) -> Option<Fact> {
 /// 1. **An exponent that numerifies to the integer 0** answers `1` — `1.0` for a
 ///    float base, and `1|1.0` for a *string* base, since a string numerifies to
 ///    an int or a float and the exponent-0 result follows it (`pow("5.5", 0)` is
-///    `float(1)`, not `int(1)`). That last row is why `abs.php`'s sibling
-///    assertion `pow($s, 0) === 1` is not winnable here.
+///    `float(1)`, not `int(1)`). That last row is why `pow.php`'s own assertion
+///    that `pow($s, 0)` is `1` is not winnable here.
 /// 2. **An exponent that numerifies to the integer 1** answers the base
 ///    numerified: `int` for an int/bool/null base, `float` for a float one.
 /// 3. **Either operand certainly a float** answers `float` — php-src promotes
@@ -747,9 +747,11 @@ fn abs_union(arms: &[(Base, Option<Refinement>)]) -> Option<Fact> {
 ///   rule could claim anything; it claims nothing, because an array operand
 ///   means the call was written by mistake and silence is the honest report.
 /// * **An operand with no fact** — the object case above, and `mixed`.
-/// * **A string EXPONENT spelling 0 or 1** is not read as one: `'0'` and `'1'`
-///   are exact, but reading a numeric string here would open the same
-///   engine-width question the fold lane refuses for `abs`, for two rows.
+/// * **A string EXPONENT spelling 0 or 1** is not read as one. `'0'` and `'1'`
+///   are exact, so the shortcut would be sound for those two spellings — and
+///   admitting a numeric string here at all is the engine-width question the fold
+///   lane refuses for `abs`, so the whole base stays out and the call takes the
+///   `int|float` below.
 fn pow_transfer(
     cx: &Cx,
     folder: &mut dyn Folder,
