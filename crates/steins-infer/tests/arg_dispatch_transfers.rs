@@ -575,6 +575,24 @@ fn either_operand_being_a_float_makes_the_answer_a_float() {
     assert_eq!(dump("int $i", "pow($i, 0.0)"), "dumped type: float");
 }
 
+/// A **nullable float** is the one operand nullability decides, and it decides
+/// it by declining: `pow(null, 2)` is `int(0)`, not a float, so a `?float`
+/// falls to the `int|float` that admits both halves — where a `?int` keeps
+/// every sharpening, since `null` numerifies to an int too.
+#[test]
+fn a_nullable_float_operand_pins_no_base() {
+    assert_eq!(dump("?float $f, int $i", "pow($f, $i)"), "dumped type: int|float");
+    assert_eq!(dump("int $i, ?float $f", "pow($i, $f)"), "dumped type: int|float");
+    // …including the exponent shortcuts, which would otherwise claim `1.0` and
+    // `float` for a call that answers `int(1)` and `int(0)` on the null half.
+    assert_eq!(dump("?float $f", "pow($f, 0)"), "dumped type: int|float");
+    assert_eq!(dump("?float $f", "pow($f, 1)"), "dumped type: int|float");
+    // The nullable int/bool/string halves keep theirs.
+    assert_eq!(dump("?int $i", "pow($i, 0)"), "dumped type: 1");
+    assert_eq!(dump("?int $i", "pow($i, 1)"), "dumped type: int");
+    assert_eq!(dump("?string $s", "pow($s, 0)"), "dumped type: 1|1.0");
+}
+
 /// An array operand is a `TypeError`, not a number, and an operand with no fact
 /// at all — an object, the `GMP` the `object` arm of `pow`'s declaration is
 /// about — never reaches the rule.
@@ -639,6 +657,10 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
         ("range(1, 3)", "array"),
         ("preg_replace('/a/', 'b', $s)", "string|null|array"),
         ("var_export($s, true)", "string|null"),
+        // The arithmetic family (issue #40). `abs` has an ADR-0069 floor row to
+        // fall to; `pow` has none, so a silent engine leaves it `unknown` — the
+        // sound subset, and what every `pow` call said before this wave.
+        ("abs(strlen($s))", "int<0, max>|float"),
     ] {
         let src =
             format!("<?php\nfunction f(string $s): void {{ \\PHPStan\\dumpType({expr}); }}\n");
@@ -648,6 +670,8 @@ fn without_the_reflected_declaration_every_transfer_is_withheld() {
             "no-PHP run must withhold the transfer for {expr} and fall to the floor"
         );
     }
+    let src = "<?php\nfunction f(int $i, int $j): void { \\PHPStan\\dumpType(pow($i, $j)); }\n";
+    assert_eq!(one_type_with(src, &mut NoPhp), "dumped type: unknown");
 }
 
 #[test]
