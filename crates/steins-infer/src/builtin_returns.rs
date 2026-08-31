@@ -558,6 +558,61 @@ pub(crate) fn transfer_declaration_admits(
     }
 }
 
+/// **The extensional leg of ADR-0061 §2's gate**, which the declaration pin
+/// above cannot carry on its own.
+///
+/// The pin says the engine still declares what the rule was written against. It
+/// says nothing about the rule's OUTPUT being *inside* that declaration — a
+/// second question, and the one ADR-0061 §2 actually names ("the output is an
+/// extensional subset of the reflected envelope"). Where the reflected
+/// declaration lowers to a value-domain [`Fact`], this asks it, through the same
+/// domain join ADR-0056 §1.2 runs over curated rows rather than a second copy of
+/// that machinery: `envelope ⊔ out == envelope`.
+///
+/// The scalar UNIONS are why this exists. [`envelope_fact`] refuses them for
+/// *seeding* — a coarse `int|float` envelope would shadow the sharper ADR-0069
+/// floor row — but refusing to seed a union is not refusing to *check against*
+/// one, and `abs`, `pow` and the two array folds all declare exactly such a
+/// union. The refusal that made the arithmetic family's envelope unusable as a
+/// seed is what makes it usable as a bound.
+///
+/// A declaration with no `Fact` form (`array`, `mixed`, `array|string|null`)
+/// leaves the pin standing alone, unchanged. That is ADR-0061 §2's recorded
+/// cost — "a builtin reflecting no representable envelope hosts no rung to
+/// refine within" — and not a bypass: the declaration and its arity still
+/// countersign the rule, which is the whole authority those rules ever had.
+pub(crate) fn transfer_envelope_admits(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    declared: &[&str],
+    arity: Option<(u32, u32)>,
+    out: &Fact,
+) -> bool {
+    if !transfer_declaration_admits(cx, folder, name, declared, arity) {
+        return false;
+    }
+    let Some(reflected) = folder.builtin_return_type(name) else { return false };
+    declared_envelope_admits(&reflected, out)
+}
+
+/// [`transfer_envelope_admits`]'s pure core — the subset check itself, over a
+/// reflected declaration STRING, so every leg of it is unit-testable without a
+/// sidecar (this module's standing discipline).
+///
+/// `true` when the declaration has no `Fact` form: nothing to be inside is not
+/// the same as being outside, and the declaration pin is what carries such a
+/// rule. See [`transfer_envelope_admits`] for why that is a recorded cost and
+/// not a bypass.
+pub(crate) fn declared_envelope_admits(reflected: &str, out: &Fact) -> bool {
+    let Some(envelope) =
+        steins_contract::lower_str(reflected).as_ref().and_then(contractty_to_fact)
+    else {
+        return true;
+    };
+    envelope.join(out).as_ref() == Some(&envelope)
+}
+
 #[cfg(test)]
 mod return_fact_admission_tests {
     //! ADR-0056 §1–2 — the pure admission-gate core ([`admit_return_fact`] and its
@@ -645,6 +700,46 @@ mod return_fact_admission_tests {
             admit_return_fact("int", Some("int<0, max>"), false),
             Some(Fact::General { base: Base::Int, nullable: false })
         );
+    }
+
+    /// Issue #40 — the extensional leg of the transfer gate, over the scalar
+    /// UNIONS the seeding path (`envelope_fact`) refuses. Refusing to *seed* a
+    /// coarse union is not refusing to *check against* one, and `abs`'s
+    /// `int|float` is the family's whole bound.
+    #[test]
+    fn a_transfer_output_is_checked_against_a_union_declaration() {
+        use crate::builtin_returns::declared_envelope_admits;
+        use steins_domain::{IntRange, Val};
+        let non_negative =
+            Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), false);
+        // Inside `int|float`: an int refinement, a float, and either finite layer.
+        assert!(declared_envelope_admits("int|float", &non_negative));
+        assert!(declared_envelope_admits(
+            "int|float",
+            &Fact::General { base: Base::Float, nullable: false }
+        ));
+        assert!(declared_envelope_admits("int|float", &Fact::Singleton(Val::Int(0))));
+        assert!(declared_envelope_admits("int|float", &Fact::Singleton(Val::Float(1.0))));
+        assert!(declared_envelope_admits(
+            "int|float",
+            &Fact::from_vals(vec![Val::Int(1), Val::Float(1.0)]).expect("two values")
+        ));
+        // OUTSIDE it: a string, a bool, and a nullable int — each an arm the
+        // engine's own declaration disowns, each discarded.
+        assert!(!declared_envelope_admits(
+            "int|float",
+            &Fact::General { base: Base::String, nullable: false }
+        ));
+        assert!(!declared_envelope_admits("int|float", &Fact::Singleton(Val::Bool(true))));
+        assert!(!declared_envelope_admits(
+            "int|float",
+            &Fact::refined(Base::Int, Refinement::Int(IntRange::NON_NEGATIVE), true)
+        ));
+        // A declaration with no `Fact` form leaves the pin alone — `pow`'s
+        // `object` arm and `min`'s bare `mixed` are the family's two.
+        assert!(declared_envelope_admits("object|int|float", &Fact::Singleton(Val::Bool(true))));
+        assert!(declared_envelope_admits("mixed", &Fact::Singleton(Val::Bool(true))));
+        assert!(declared_envelope_admits("array", &non_negative));
     }
 
     #[test]

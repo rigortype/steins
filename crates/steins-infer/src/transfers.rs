@@ -1,6 +1,7 @@
 //! The argument-dispatched transfers (ADR-0064 seam (iii)): per-builtin rungs that
 //! carry a fact through `explode`, `range`, `preg_replace`, `min` / `max`,
-//! `var_export`, the string predicates, `sprintf` and the list transfers.
+//! `abs`, `pow`, `var_export`, the string predicates, `sprintf` and the list
+//! transfers.
 
 use std::collections::HashMap;
 
@@ -16,7 +17,7 @@ use crate::env::{
 use crate::walk::value_stratum;
 use crate::fold::Folder;
 use crate::fact_is_int;
-use crate::builtin_returns::transfer_declaration_admits;
+use crate::builtin_returns::transfer_envelope_admits;
 use crate::shape_projection::{shape_fact, shape_value_union};
 
 /// **The argument-dispatched transfers** (ADR-0064 seam ii, the DR3 batch).
@@ -29,14 +30,16 @@ use crate::shape_projection::{shape_fact, shape_value_union};
 /// per-argument fact reader ([`transfer_arg_fact`]) — and every rule stays a
 /// plain `&[ArgValue] -> Option<Fact>` function behind the same gate.
 ///
-/// **The admission gate is [`shape_projection_fact`]'s, verbatim**: the running
-/// engine's own reflected *declaration* must be the one the rule was written
-/// against. These results are array/nullable-union facts the scalar envelope path
-/// (`envelope_fact`) cannot represent at all, so there is no envelope to be
-/// extensionally inside — the declaration itself countersigns them, carrying the
-/// same sidecar-presence and A9 monkey-patch legs. A run with no PHP, a
-/// monkey-patch extension, a project function shadowing the name, or an engine
-/// whose declaration has moved withholds the rule.
+/// **The admission gate is [`transfer_envelope_admits`]** — ADR-0061 §2 in both
+/// its legs. The running engine's own reflected *declaration* must be the one the
+/// rule was written against (carrying the sidecar-presence and A9 monkey-patch
+/// legs: a run with no PHP, a monkey-patch extension, a project function
+/// shadowing the name, or an engine whose declaration has moved withholds the
+/// rule), AND — where that declaration lowers to a value-domain fact — the rule's
+/// output must be extensionally inside it. The array/nullable-union results below
+/// have no `Fact` form to be inside, so for those the declaration stands alone,
+/// exactly as it did before the arithmetic family arrived with declarations
+/// (`int|float`) that do.
 ///
 /// **Stratum is ADR-0061 §3's derivation clause**: `min` over every argument the
 /// call passes — a transfer premised on a docblock-claimed separator is
@@ -86,6 +89,24 @@ pub(crate) fn arg_dispatch_return_fact(
     /// array would make the read stale while the `bool` declaration still held.
     const ARITY_KEY_EXISTS: Option<(u32, u32)> = Some((2, 2));
 
+    /// `abs`: the two-member scalar union, either rendering order. Unlike the
+    /// `mixed` pins above this one is a real bound — [`transfer_envelope_admits`]
+    /// checks the rule's output against it extensionally.
+    const INT_OR_FLOAT: &[&str] = &["int|float", "float|int"];
+    /// `abs`'s live signature at `PINNED_PHP` (8.5.9): one parameter, required —
+    /// `abs(int|float $num)`. Measured, and load-bearing: the rule reads argument
+    /// **0** positionally, so a php-src signature that grew a parameter in front
+    /// of `$num` would leave the read stale while `int|float` still held.
+    const ARITY_ABS: Option<(u32, u32)> = Some((1, 1));
+    /// `pow`: `object|int|float`, in the order the engine renders it. The
+    /// `object` arm is `GMP` (and any extension overloading `**`), which is
+    /// exactly why [`pow_transfer`] must prove both operands are NOT objects
+    /// before it answers.
+    const POW: &[&str] = &["object|int|float", "int|float|object"];
+    /// `pow`'s live signature at `PINNED_PHP` (8.5.9): two parameters, both
+    /// required — `pow(mixed $num, mixed $exponent)`.
+    const ARITY_POW: Option<(u32, u32)> = Some((2, 2));
+
     let lower = name.to_ascii_lowercase();
     let (out, declared, arity): (Fact, &[&str], Option<(u32, u32)>) = match lower.as_str() {
         // `array_key_exists($key, $array)` in VALUE position (issue #343). The
@@ -111,6 +132,8 @@ pub(crate) fn arg_dispatch_return_fact(
             (min_max_transfer(cx, folder, &lower, args, env, store)?, MIXED, ARITY_MIN_MAX)
         }
         "curl_getinfo" => (curl_getinfo_transfer(args)?, MIXED, ARITY_CURL_GETINFO),
+        "abs" => (abs_transfer(cx, folder, args, env, store)?, INT_OR_FLOAT, ARITY_ABS),
+        "pow" => (pow_transfer(cx, folder, args, env, store)?, POW, ARITY_POW),
         // `json_decode` is the batch's recorded DECLINE, not an omission: its
         // reflected declaration is bare `mixed`, and the soundest envelope any
         // flag combination admits — `$assoc = true` still allows
@@ -135,7 +158,7 @@ pub(crate) fn arg_dispatch_return_fact(
         !declared.iter().any(|d| d.eq_ignore_ascii_case("mixed")) || arity.is_some(),
         "{lower}: a `mixed` declaration pin requires the arity second leg"
     );
-    if !transfer_declaration_admits(cx, folder, name, declared, arity) {
+    if !transfer_envelope_admits(cx, folder, name, declared, arity, &out) {
         return None;
     }
     // ADR-0061 §3's derivation clause, over the facts the rules actually read: an
@@ -523,6 +546,296 @@ fn fact_int_range(f: &Fact) -> Option<IntRange> {
         }
         Fact::General { base: Base::Int, nullable: false } => Some(IntRange::FULL),
         _ => None,
+    }
+}
+
+/// `abs($num)` → **the argument's own base, folded onto the non-negative half of
+/// the axis** (issue #40 — the head of the arithmetic scalar-union family, and
+/// the family's whole ADR-0064 seam (ii) shape: the argument's TYPE decides the
+/// return, no value is computed by the analyzer).
+///
+/// # The load-bearing PHP fact, which is the one PHPStan's fixture gets wrong
+///
+/// `abs(int)` is *almost* `int<0, max>`, and the exception is why this rule
+/// declines where it does: `PHP_INT_MIN` has no positive counterpart in a 64-bit
+/// int, so the engine hands back a **float**. Witnessed at `PINNED_PHP` (8.5.9):
+///
+/// ```text
+/// abs(PHP_INT_MIN)      → float(9.223372036854776E+18)
+/// abs(PHP_INT_MIN + 1)  → int(9223372036854775807)
+/// abs(-1.0)             → float(1)
+/// abs(true) abs(false)  → int(1) int(0)
+/// abs(null)             → int(0)
+/// ```
+///
+/// `abs.php`'s unbounded rows (`@var int`, `@var negative-int`, `@var int<min,
+/// 0>`) assert `int<0, max>`, and that assertion is false at exactly one
+/// argument. So **an int interval admitting `PHP_INT_MIN` declines**, and the
+/// ADR-0069 floor's honest `int<0, max>|float` stands. A bounded interval — every
+/// interval a docblock writes with a finite lower bound — is exact.
+///
+/// # The declines, each for a stated reason
+///
+/// * **`PHP_INT_MIN` in the interval** — above. `Fact::General { Int }` is the
+///   full interval, so a plain `int $x` declines too.
+/// * **A string argument** — `abs('123')` is `int(123)` and
+///   `abs('3000000000')` is an int or a float *by the engine's own word size*.
+///   That is the recorded [`RefusalAxis::IntegerWidth`] row behind `abs`'s
+///   folding-allowlist refusal, and it is a VALUE question (ADR-0064 seam (i))
+///   the sidecar owns; a type rung that answered it would be reimplementing the
+///   fold in Rust.
+/// * **A nullable abstract argument** — `null` is a `TypeError` under
+///   `strict_types=1` and a deprecated coercion without it, and the two modes
+///   answer different things about the same call. The `null` VALUE is read
+///   (`abs(null)` is `int(0)` in every mode that returns at all), the nullable
+///   *envelope* is not.
+/// * **A union carrying a string or bool arm** — the string arm is the width
+///   question again; a `bool` arm would have to become an int arm, which is a
+///   base change this rule has no witness for beyond the finite layer.
+///
+/// One more decline is **not this rule's**, and is recorded here because it
+/// looks like one: a *declared* float (`@var 1.0 $x`) never reaches the rule at
+/// all. [`steins_contract::to_fact`] refuses `float` and float literals by
+/// design — `Base(Float)` admits ints under PHPStan's own semantics while
+/// `Fact::General { base: Float }` does not, so lowering would reject values the
+/// declaration admits. A NATIVE `float $x` parameter still seeds the value lane
+/// and is read here; only the declared spelling is silent.
+///
+/// [`RefusalAxis::IntegerWidth`]: steins_catalog::RefusalAxis::IntegerWidth
+fn abs_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    let [only] = args else { return None };
+    match transfer_arg_fact(cx, folder, only, env, store)? {
+        Fact::Singleton(v) => abs_val(&v).map(Fact::Singleton),
+        Fact::OneOf(ref vals) => {
+            let mapped = vals.iter().map(abs_val).collect::<Option<Vec<Val>>>()?;
+            Fact::from_vals(mapped)
+        }
+        Fact::Refined { base: Base::Int, refinement: Refinement::Int(r), nullable: false } => {
+            abs_range(r).map(|out| {
+                if out.lo() == out.hi() {
+                    Fact::Singleton(Val::Int(out.lo()))
+                } else {
+                    Fact::refined(Base::Int, Refinement::Int(out), false)
+                }
+            })
+        }
+        // The float half is total: `abs` maps every float to a float, including
+        // the infinities and `NAN`.
+        Fact::General { base: Base::Float, nullable: false } => {
+            Some(Fact::General { base: Base::Float, nullable: false })
+        }
+        Fact::Union { ref arms, nullable: false }
+            if arms.iter().all(|(b, _)| matches!(b, Base::Int | Base::Float)) =>
+        {
+            abs_union(arms)
+        }
+        _ => None,
+    }
+}
+
+/// `abs` of one concrete value, or `None` where the four-layer domain would have
+/// to guess which base comes back — see [`abs_transfer`] for each witness.
+fn abs_val(v: &Val) -> Option<Val> {
+    match v {
+        // `checked_abs` is `None` at exactly `PHP_INT_MIN`, which is exactly
+        // where the engine stops answering with an int.
+        Val::Int(i) => i.checked_abs().map(Val::Int),
+        Val::Float(f) => Some(Val::Float(f.abs())),
+        Val::Bool(b) => Some(Val::Int(i64::from(*b))),
+        // `abs(null)` is `int(0)` in weak mode and a `TypeError` in strict mode,
+        // and a throw is the ABSENCE of a return — so `0` is never wrong about a
+        // value this call produced.
+        Val::Null => Some(Val::Int(0)),
+        Val::Str(_) | Val::Array(_) => None,
+    }
+}
+
+/// The interval `abs` maps `r` onto, or `None` when `r` admits `PHP_INT_MIN` and
+/// the answer is therefore not an int interval at all.
+///
+/// Three arms, and the middle one is the reflection: an all-negative interval
+/// comes back *reversed* (`int<-456, -123>` → `int<123, 456>`), a straddling one
+/// is floored at zero and capped by whichever end is further from it.
+fn abs_range(r: IntRange) -> Option<IntRange> {
+    if r.lo() == i64::MIN {
+        return None;
+    }
+    let (lo, hi) = if r.lo() >= 0 {
+        (r.lo(), r.hi())
+    } else if r.hi() <= 0 {
+        (-r.hi(), -r.lo())
+    } else {
+        (0, r.hi().max(-r.lo()))
+    };
+    IntRange::new(lo, hi)
+}
+
+/// `abs` over an int/float union: each arm mapped by its own rule, and the
+/// `PHP_INT_MIN` overflow expressed rather than declined — an int arm that
+/// admits it widens to `int<0, max>` **and** contributes the float arm the
+/// overflow lands in, which the union can carry where a single-base fact could
+/// not.
+fn abs_union(arms: &[(Base, Option<Refinement>)]) -> Option<Fact> {
+    let mut out: Vec<(Base, Option<Refinement>)> = Vec::with_capacity(arms.len() + 1);
+    let overflow = |out: &mut Vec<(Base, Option<Refinement>)>| {
+        out.push((Base::Int, Some(Refinement::Int(IntRange::NON_NEGATIVE))));
+        out.push((Base::Float, None));
+    };
+    for (base, refinement) in arms {
+        match (base, refinement) {
+            (Base::Float, _) => out.push((Base::Float, None)),
+            (Base::Int, Some(Refinement::Int(r))) => match abs_range(*r) {
+                Some(a) => out.push((Base::Int, Some(Refinement::Int(a)))),
+                None => overflow(&mut out),
+            },
+            (Base::Int, None) => overflow(&mut out),
+            _ => return None,
+        }
+    }
+    Fact::union(out, false)
+}
+
+/// `pow($num, $exponent)` → **`int|float`, sharpened where one operand pins the
+/// answer** (issue #40).
+///
+/// # Why the rule may speak at all
+///
+/// `pow`'s reflected declaration is `object|int|float` — the `object` arm is
+/// `GMP` and anything else overloading `**`. A [`Fact`] describes scalars, `null`
+/// and arrays and *nothing else*, so an operand carrying a fact is provably not
+/// an object, and the `object` arm is discharged by the fact's own existence. An
+/// object-typed variable carries no fact, so `pow($gmpA, $gmpB)` declines one
+/// rung up without this rule ever seeing it.
+///
+/// # The grid, probed at `PINNED_PHP` (8.5.9)
+///
+/// ```text
+/// pow(2, 0)      int(1)    pow(2.0, 0)   float(1)   pow("5.5", 0)  float(1)
+/// pow(2, true)   int(2)    pow(2.0, true) float(2)  pow("5", true) int(5)
+/// pow(2, 0.0)    float(1)  pow(2, 62)    int(...)   pow(2, 63)     float(...)
+/// pow(null, 0)   int(1)    pow(null, 1)  int(0)     pow(-1, 5.5)   float(NAN)
+/// ```
+///
+/// Four readings fall out, in the order the rule takes them:
+///
+/// 1. **An exponent that numerifies to the integer 0** answers `1` — `1.0` for a
+///    float base, and `1|1.0` for a *string* base, since a string numerifies to
+///    an int or a float and the exponent-0 result follows it (`pow("5.5", 0)` is
+///    `float(1)`, not `int(1)`). That last row is why `abs.php`'s sibling
+///    assertion `pow($s, 0) === 1` is not winnable here.
+/// 2. **An exponent that numerifies to the integer 1** answers the base
+///    numerified: `int` for an int/bool/null base, `float` for a float one.
+/// 3. **Either operand certainly a float** answers `float` — php-src promotes
+///    the whole operation to a double, so a float exponent takes an int base with
+///    it (`pow(2, 0.0)` is `float(1)`).
+/// 4. **Otherwise** `int|float`: the int-base/int-exponent case is an int until
+///    it overflows the word, at which point it is a float (`pow(2, 63)`), and
+///    which one it is is a VALUE question — the sidecar's, not this rung's.
+///
+/// A non-integral float exponent (`pow(-1, 5.5)`) is `NAN`, which is a float and
+/// so already inside every answer above.
+///
+/// # The declines
+///
+/// * **Either operand an array** — `1 ** []` is a `TypeError`. Vacuously the
+///   rule could claim anything; it claims nothing, because an array operand
+///   means the call was written by mistake and silence is the honest report.
+/// * **An operand with no fact** — the object case above, and `mixed`.
+/// * **A string EXPONENT spelling 0 or 1** is not read as one: `'0'` and `'1'`
+///   are exact, but reading a numeric string here would open the same
+///   engine-width question the fold lane refuses for `abs`, for two rows.
+fn pow_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    let [num, exponent] = args else { return None };
+    let base = transfer_arg_fact(cx, folder, num, env, store)?;
+    let exp = transfer_arg_fact(cx, folder, exponent, env, store)?;
+    if !pow_numeric_operand(&base) || !pow_numeric_operand(&exp) {
+        return None;
+    }
+    let int_or_float = || Fact::union(vec![(Base::Int, None), (Base::Float, None)], false);
+    let base_kind = pow_operand_base(&base);
+    if pow_exponent_is(&exp, 0) {
+        return match base_kind {
+            Some(Base::Float) => Some(Fact::Singleton(Val::Float(1.0))),
+            Some(Base::Int | Base::Bool) => Some(Fact::Singleton(Val::Int(1))),
+            Some(Base::String) => Fact::from_vals(vec![Val::Int(1), Val::Float(1.0)]),
+            None => int_or_float(),
+        };
+    }
+    if pow_exponent_is(&exp, 1) {
+        return match base_kind {
+            Some(Base::Float) => Some(Fact::General { base: Base::Float, nullable: false }),
+            Some(Base::Int | Base::Bool) => {
+                Some(Fact::General { base: Base::Int, nullable: false })
+            }
+            Some(Base::String) | None => int_or_float(),
+        };
+    }
+    if base_kind == Some(Base::Float) || pow_operand_base(&exp) == Some(Base::Float) {
+        return Some(Fact::General { base: Base::Float, nullable: false });
+    }
+    int_or_float()
+}
+
+/// Whether an operand is one PHP's `**` numerifies rather than rejecting: every
+/// fact the domain spells EXCEPT an array. See [`pow_transfer`] for why an
+/// object never reaches here.
+fn pow_numeric_operand(f: &Fact) -> bool {
+    match f {
+        Fact::Shape { .. } | Fact::Singleton(Val::Array(_)) => false,
+        Fact::OneOf(vals) => !vals.iter().any(|v| matches!(v, Val::Array(_))),
+        _ => true,
+    }
+}
+
+/// The single base an operand numerifies as, or `None` when it spans more than
+/// one. `null` counts as `Int` — it numerifies to `int(0)` and nothing else.
+///
+/// Nullability is deliberately not a decline: a nullable int operand is an int
+/// or a `null`, and both numerify to an int.
+fn pow_operand_base(f: &Fact) -> Option<Base> {
+    let of = |v: &Val| match v {
+        Val::Null => Some(Base::Int),
+        other => other.base(),
+    };
+    match f {
+        Fact::Singleton(v) => of(v),
+        Fact::OneOf(vals) => {
+            let first = of(vals.first()?)?;
+            vals.iter().all(|v| of(v) == Some(first)).then_some(first)
+        }
+        Fact::Refined { base, .. } | Fact::General { base, .. } => Some(*base),
+        Fact::Union { .. } | Fact::Shape { .. } => None,
+    }
+}
+
+/// Whether an exponent is CERTAINLY the integer `want` (0 or 1), across the
+/// spellings PHP numerifies to it exactly — the int, the bool, and `null` for 0.
+/// A float spelling is excluded because it changes the RESULT's base
+/// (`pow(2, 0.0)` is `float(1)`), and a string spelling because reading one is
+/// the engine-width question the fold lane owns.
+fn pow_exponent_is(f: &Fact, want: i64) -> bool {
+    let one = |v: &Val| match v {
+        Val::Int(i) => *i == want,
+        Val::Bool(b) => i64::from(*b) == want,
+        Val::Null => want == 0,
+        Val::Float(_) | Val::Str(_) | Val::Array(_) => false,
+    };
+    match f {
+        Fact::Singleton(v) => one(v),
+        Fact::OneOf(vals) => vals.iter().all(one),
+        _ => false,
     }
 }
 
