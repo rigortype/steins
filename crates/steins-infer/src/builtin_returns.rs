@@ -572,15 +572,17 @@ pub(crate) fn transfer_declaration_admits(
 /// The scalar UNIONS are why this exists. [`envelope_fact`] refuses them for
 /// *seeding* — a coarse `int|float` envelope would shadow the sharper ADR-0069
 /// floor row — but refusing to seed a union is not refusing to *check against*
-/// one, and `abs`, `pow` and the two array folds all declare exactly such a
-/// union. The refusal that made the arithmetic family's envelope unusable as a
-/// seed is what makes it usable as a bound.
+/// one, and `abs`, `array_sum` and `array_product` declare exactly `int|float`.
+/// The refusal that made the arithmetic family's envelope unusable as a seed is
+/// what makes it usable as a bound.
 ///
-/// A declaration with no `Fact` form (`array`, `mixed`, `array|string|null`)
-/// leaves the pin standing alone, unchanged. That is ADR-0061 §2's recorded
-/// cost — "a builtin reflecting no representable envelope hosts no rung to
-/// refine within" — and not a bypass: the declaration and its arity still
-/// countersign the rule, which is the whole authority those rules ever had.
+/// A declaration with no `Fact` form leaves the pin standing alone, unchanged:
+/// `array` and `array|string|null` for the shape transfers, bare `mixed` for
+/// `min`/`max`, and — inside this very family — `pow`'s `object|int|float`,
+/// whose `object` arm no `Fact` names. That is ADR-0061 §2's recorded cost — "a
+/// builtin reflecting no representable envelope hosts no rung to refine
+/// within" — and not a bypass: the declaration and its arity still countersign
+/// the rule, which is the whole authority those rules ever had.
 pub(crate) fn transfer_envelope_admits(
     cx: &Cx,
     folder: &mut dyn Folder,
