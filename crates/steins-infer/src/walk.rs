@@ -54,7 +54,7 @@ use crate::offsets::{
     check_coalesce_final_arm, check_destructure_source, check_offset_read, check_shape_read,
 };
 use crate::operands::check_operand_sites;
-use crate::out_params::check_preg_pattern;
+use crate::out_params::{apply_stmt_out_param_seeds, check_preg_pattern, stmt_out_param_seeds};
 use crate::predicates::apply_type_narrowing;
 use crate::project::{Diagnostic, FnResolution};
 use crate::refine::{
@@ -623,6 +623,11 @@ pub(crate) fn walk_trace(
         // rather than a slot because an `echo` carries several calls, and because it
         // is the list that lets that step decline a pair naming one object.
         let mut stmt_this_backs: Vec<ThisWriteBack> = Vec::new();
+        // The statement-position out-parameter seeds (issue #595), read HERE and
+        // applied in step 5. The input a cast consumes is what the variable held
+        // before the call, and step 4 is about to forget exactly that — so the
+        // read has to happen while the entry env still holds it.
+        let stmt_out_seeds = stmt_out_param_seeds(w, folder, &stmt.kind, env, store);
         // 1. Check + descend every statically-named call this statement carries.
         for call in checkable_calls(&stmt.kind) {
             match &call.receiver {
@@ -1251,6 +1256,12 @@ pub(crate) fn walk_trace(
             env.remove(&v.name);
             store.unbind(&v.name);
         }
+
+        // 5. Rebind what a proven by-ref write left behind (issue #595), over the
+        // forgetting step 4 just did — the ADR-0077 §3.4 ordering at the statement
+        // rung: the callee's stated write REPLACES the conservative drop rather
+        // than racing it. Empty for every statement that carries no such call.
+        apply_stmt_out_param_seeds(stmt_out_seeds, env, store);
 
         // Flush the pending trace annotation at the iteration's common exit —
         // the statement's own effect (step 2), its assert narrowings (step 3)
