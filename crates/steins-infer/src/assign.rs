@@ -389,7 +389,13 @@ pub(crate) fn apply_assign(
                 // declared arms (A1): a bindable value fact binds as `var`'s value fact
                 // at its joined stratum, sitting where a folded literal would.
                 // Otherwise the summary degraded to the floor and the declared arms
-                // stand.
+                // stand. Since issue #596 a `Fact::Shape` is bindable, so this rung is
+                // also the sharp twin of [`seed_returned_shape`] below: the same lane,
+                // the same consumers, a proven shape instead of a declared one — and,
+                // crucially, the summary's own stratum instead of that seed's flat
+                // `Asserted`. No heap question arises for it: a returned array is a
+                // COPY (PHP value semantics), so unlike the heap rung above it needs no
+                // fresh `AllocId` and shares no identity with anything the callee kept.
                 _ => {
                     env.remove(var);
                     store.unbind(var);
