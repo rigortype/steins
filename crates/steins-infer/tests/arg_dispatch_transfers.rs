@@ -42,6 +42,7 @@ impl Mock {
             ("max", "mixed"),
             ("array_key_exists", "bool"),
             ("key_exists", "bool"),
+            ("curl_getinfo", "mixed"),
         ] {
             types.insert(f.to_owned(), t.to_owned());
         }
@@ -56,6 +57,9 @@ impl Mock {
             // read honest if php-src ever grows a parameter in front of it.
             ("array_key_exists".to_owned(), (2, 2)),
             ("key_exists".to_owned(), (2, 2)),
+            // `curl_getinfo(CurlHandle $handle, ?int $option = null)` at 8.5.9:
+            // two declared, one required (issue #594).
+            ("curl_getinfo".to_owned(), (2, 1)),
         ]);
         // `var_export`'s `?string` envelope sits one rung below the transfer, so
         // the null-strip reads as a refinement, not an answer from nowhere.
@@ -355,6 +359,103 @@ fn an_engine_that_answers_no_arity_withholds_min_and_max() {
     let mut mock = Mock::sidecar();
     mock.arities.insert("min".to_owned(), (3, 2));
     assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+}
+
+// curl_getinfo: a fixed per-constant table (issue #594)
+
+#[test]
+fn curl_getinfo_of_a_recognized_int_constant_is_int() {
+    // The issue's own witness.
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_HTTP_CODE)"), "dumped type: int");
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_FILETIME)"), "dumped type: int");
+}
+
+#[test]
+fn curl_getinfo_of_a_recognized_float_constant_is_float() {
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_TOTAL_TIME)"), "dumped type: float");
+}
+
+#[test]
+fn curl_getinfo_of_a_recognized_string_constant_is_string() {
+    // Verified apart from the `T|false` family: the C-level field coalesces an
+    // unset value to `''`, never `false` (module doc on `curl_getinfo_transfer`).
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_EFFECTIVE_URL)"), "dumped type: string");
+}
+
+#[test]
+fn curl_getinfo_declines_a_true_false_constant() {
+    // `CURLINFO_CONTENT_TYPE` is `string|false` — no `Fact` spells a two-base
+    // union, the same floor `min`/`json_decode` stand on.
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_CONTENT_TYPE)"), "dumped type: unknown");
+    // `CURLINFO_PRIVATE` echoes the caller's own `CURLOPT_PRIVATE` — `mixed`.
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_PRIVATE)"), "dumped type: unknown");
+}
+
+#[test]
+fn curl_getinfo_declines_the_zero_option_whole_array_form() {
+    // `array{…}|false` — a shape-typed result outside this scalar table.
+    assert_eq!(dump("$h", "curl_getinfo($h)"), "dumped type: unknown");
+}
+
+#[test]
+fn curl_getinfo_declines_a_non_constant_option() {
+    assert_eq!(dump("$h", "curl_getinfo($h, 'CURLINFO_HTTP_CODE')"), "dumped type: unknown");
+    assert_eq!(dump("$h, int $opt", "curl_getinfo($h, $opt)"), "dumped type: unknown");
+    assert_eq!(dump("$h", "curl_getinfo($h, null)"), "dumped type: unknown");
+}
+
+#[test]
+fn curl_getinfo_declines_an_unrecognized_constant() {
+    // A real constant, but not a `CURLINFO_*` one at all.
+    assert_eq!(dump("$h", "curl_getinfo($h, PHP_EOL)"), "dumped type: unknown");
+    // A `CURLINFO_*`-shaped name this table does not carry: `CURLINFO_SCHEME`
+    // measures `bool(false)` on an untouched handle exactly like the confirmed
+    // `T|false` rows (module doc), so it stays out rather than trusting
+    // php.net's plain `string` word against that measurement; the 8.4-only
+    // `CURLINFO_POSTTRANSFER_TIME_T` is excluded for the matching reason —
+    // its value is additionally gated on a libcurl version no PHP-minor pin
+    // can see.
+    assert_eq!(dump("$h", "curl_getinfo($h, CURLINFO_SCHEME)"), "dumped type: unknown");
+    assert_eq!(
+        dump("$h", "curl_getinfo($h, CURLINFO_POSTTRANSFER_TIME_T)"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn a_qualified_or_relative_constant_name_is_not_the_global_one() {
+    // `Foo\CURLINFO_HTTP_CODE` and `namespace\CURLINFO_HTTP_CODE` both denote a
+    // constant OTHER than the global `\CURLINFO_HTTP_CODE` — the same
+    // `FullyQualified`/`Unqualified`-only admission `cond.rs`'s
+    // `PHP_VERSION_ID` check applies.
+    assert_eq!(
+        dump("$h", "curl_getinfo($h, Foo\\CURLINFO_HTTP_CODE)"),
+        "dumped type: unknown"
+    );
+    let src = "<?php\nnamespace App;\nfunction f($h): void {\n\
+               \\PHPStan\\dumpType(curl_getinfo($h, namespace\\CURLINFO_HTTP_CODE));\n}\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
+fn an_engine_that_answers_no_arity_withholds_curl_getinfo() {
+    let mut mock = Mock::sidecar();
+    mock.arities.clear();
+    let src = "<?php\nfunction f($h): void { \\PHPStan\\dumpType(curl_getinfo($h, CURLINFO_HTTP_CODE)); }\n";
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    let mut mock = Mock::sidecar();
+    mock.arities.insert("curl_getinfo".to_owned(), (3, 1));
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+}
+
+#[test]
+fn a_project_function_shadowing_curl_getinfo_declines() {
+    let src = "<?php\nfunction curl_getinfo($h, $opt = null): mixed { return 'shadowed'; }\n\
+               function f($h): void { \\PHPStan\\dumpType(curl_getinfo($h, CURLINFO_HTTP_CODE)); }\n";
+    let ds = diagnostics_with(src, &mut Mock::sidecar());
+    let ty: Vec<&Diagnostic> = ds.iter().filter(|d| d.id == DEBUG_TYPE_ID).collect();
+    assert_eq!(ty.len(), 1);
+    assert_eq!(ty[0].message, "dumped type: unknown");
 }
 
 // json_decode: the batch's measured decline
