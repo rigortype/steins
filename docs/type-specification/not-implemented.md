@@ -189,6 +189,24 @@ the refuting direction only.
   declared or witnessed — they are implemented as guards, and the value transfer
   is unwritten.
 
+**`settype`'s cast grid states only cells a probe measured** (issue #595). The
+statement-position write is real, and the cells it declines are the honest
+remainder rather than unfinished work in most cases: `'object'` writes a
+`stdClass`, which the value domain has no member for; an array cast to
+`'string'` is the `E_WARNING` cell PHP fills with the literal `'Array'`; and a
+float's decimal spelling is `precision`-ini dependent, so the value answer is
+declined and even the abstract one is only `uppercase-string&non-empty-string`
+— never `numeric-string`, since `is_numeric('NAN')` is `false`. Two cells are
+genuinely deferred: a **non-numeric string's** integer value (`(int)'12abc'` is
+`12`, a leading-numeric-prefix rule this slice does not author, so the answer
+widens to `int`), and an **out-of-range float value's** truncation
+(`(int)1.0E+30` is the hardware's `5076964154930102272`, not the saturation the
+numeric-string path takes). Every declined cell leaves the by-ref invalidation
+standing, so the name is forgotten exactly as it was before the row existed.
+The vocabulary the row introduced (`WrittenWhen::CallReturns` plus the
+statement-position seed) is what `array_splice` and the other by-ref writers in
+the same bucket need, and none of them carries a witness yet.
+
 **Objects** ([object-model.md](object-model.md)):
 
 - `__get`/`__set` are not modeled; `__call` is an absence-proof obstacle.
