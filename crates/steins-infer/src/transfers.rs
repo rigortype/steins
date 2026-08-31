@@ -802,8 +802,12 @@ fn pow_numeric_operand(f: &Fact) -> bool {
 /// The single base an operand numerifies as, or `None` when it spans more than
 /// one. `null` counts as `Int` — it numerifies to `int(0)` and nothing else.
 ///
-/// Nullability is deliberately not a decline: a nullable int operand is an int
-/// or a `null`, and both numerify to an int.
+/// **A nullable FLOAT is the one base nullability decides**, and it decides it
+/// by declining: `pow(null, 2)` is `int(0)`, so a `?float` operand pins no base
+/// and the call falls to the plain `int|float` that admits both halves. `?int`,
+/// `?bool` and `?string` keep their base, because every answer those three
+/// produce already admits `null`'s `int(0)` — `1` for the zero exponent, `int`
+/// for the one exponent, `1|1.0` and `int|float` for the string arms.
 fn pow_operand_base(f: &Fact) -> Option<Base> {
     let of = |v: &Val| match v {
         Val::Null => Some(Base::Int),
@@ -815,7 +819,9 @@ fn pow_operand_base(f: &Fact) -> Option<Base> {
             let first = of(vals.first()?)?;
             vals.iter().all(|v| of(v) == Some(first)).then_some(first)
         }
-        Fact::Refined { base, .. } | Fact::General { base, .. } => Some(*base),
+        Fact::Refined { base, nullable, .. } | Fact::General { base, nullable } => {
+            (!(*nullable && *base == Base::Float)).then_some(*base)
+        }
         Fact::Union { .. } | Fact::Shape { .. } => None,
     }
 }
