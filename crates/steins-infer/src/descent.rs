@@ -21,7 +21,7 @@ use crate::arg_check::{
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
-use crate::cond::eval_binary_fact;
+use crate::cond::{eval_binary_fact, eval_isset_fact};
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -2015,6 +2015,11 @@ pub(crate) fn return_value_fact(
     // the caller's binding, exactly as a factless exit does (A3).
     if let ArgValue::Binary { op, lhs, rhs } = value {
         return Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, Some(store), poisoned));
+    }
+    // A value-position `isset(…)` (issue #579): total like the comparison above,
+    // so an exit crossing one carries a `bool` at worst rather than no fact.
+    if let ArgValue::Isset(ops) = value {
+        return Some(eval_isset_fact(w.cx, ops, env, poisoned));
     }
     // Stratum from the resolution itself (issue #127 review): a fold over an
     // Asserted project-call summary stays Asserted — never re-read from the
