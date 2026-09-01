@@ -1629,6 +1629,22 @@ impl CmpOp {
 pub enum ValueOp {
     /// A comparison `=== !== == != < <= > >=`. Its value is a `bool`.
     Cmp(CmpOp),
+    /// A bitwise or `|` (issue #615): a **flag combination**, `FILTER_A |
+    /// FILTER_B`. Carried structurally like the rest of this enum, and — unlike
+    /// [`Self::Cmp`] — it reaches **no** fact seam of its own.
+    ///
+    /// That asymmetry is deliberate, and it is why this variant exists rather
+    /// than a total `|` evaluator. `eval_binary_fact` is total for a comparison:
+    /// every caller binds its answer unconditionally, because a comparison is a
+    /// `bool` whatever its operands are. A bitwise `|` has no such floor —
+    /// `int|int` is an `int`, `string|string` is a `string`, and PHP's own GMP
+    /// extension overloads the operator to return a **GMP object**, so even
+    /// `int|string` would be an unsound claim. So the comparison seam keeps its
+    /// totality (its callers match [`Self::Cmp`] and take a [`CmpOp`]), and this
+    /// variant is read only where a rule can say what the combination means:
+    /// `filter_var`'s flags roster, which resolves by constant NAME and never
+    /// needs a value at all.
+    BitOr,
 }
 
 impl ValueOp {
@@ -1637,6 +1653,7 @@ impl ValueOp {
     pub const fn symbol(self) -> &'static str {
         match self {
             ValueOp::Cmp(op) => op.symbol(),
+            ValueOp::BitOr => "|",
         }
     }
 }

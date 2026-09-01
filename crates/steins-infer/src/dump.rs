@@ -9,6 +9,7 @@ use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, ShapeFact, Key 
 use steins_phpdoc::{TagKind, scan_docblock};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, Comment, NameRef, RefKind, SourceTree, Span, Stmt, StmtKind,
+    ValueOp,
 };
 
 use crate::fold::Folder;
@@ -708,10 +709,11 @@ fn best_dump_type(
         };
     }
 
-    // A value-position binary operator (issue #260): the operator's own fact, same
-    // placement reasoning as `??`. Total for a comparison, so lower rungs never see
-    // one — `true`/`false` when `eval_cmp` decides, `bool` when it doesn't.
-    if let ArgValue::Binary { op, lhs, rhs } = value {
+    // A value-position comparison (issue #260): the operator's own fact, same
+    // placement reasoning as `??`. Total, so lower rungs never see one —
+    // `true`/`false` when `eval_cmp` decides, `bool` when it doesn't. A
+    // `ValueOp::BitOr` (issue #615) has no floor and is not matched.
+    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         let (fact, stratum) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
         return DumpRendering {

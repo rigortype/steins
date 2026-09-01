@@ -9,7 +9,7 @@ use steins_contract::ContractTy;
 use steins_domain::{Base, Fact, PhpStr};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, NameRef, NamedArg, NativeType, Param, Receiver, RefKind,
-    RetHintKind, ScalarType, Scope, ScopeOwner, StaticClass, StmtKind, TypeMember,
+    RetHintKind, ScalarType, Scope, ScopeOwner, StaticClass, StmtKind, TypeMember, ValueOp,
 };
 
 use crate::fold::Folder;
@@ -2012,8 +2012,9 @@ pub(crate) fn return_value_fact(
     // A value-position comparison (issue #260): total, so lower rungs never see
     // one — `true`/`false` when `eval_cmp` decides, the Verified `bool` floor when
     // it doesn't. An undecided exit's `General` still degrades to the arm floor at
-    // the caller's binding, exactly as a factless exit does (A3).
-    if let ArgValue::Binary { op, lhs, rhs } = value {
+    // the caller's binding, exactly as a factless exit does (A3). A
+    // `ValueOp::BitOr` (issue #615) has no floor and is not matched.
+    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         return Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, Some(store), poisoned));
     }
     // A value-position `isset(…)` (issue #579): total like the comparison above,

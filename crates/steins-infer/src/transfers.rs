@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use steins_domain::{
     Base, Certainty, Fact, IntRange, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
 };
-use steins_syntax::{ArgValue, ArrayKey, RefKind};
+use steins_syntax::{ArgValue, ArrayKey, RefKind, ValueOp};
 
 use crate::coerce::{CastTarget, php_cast_fact};
 use crate::cx::Cx;
@@ -1154,14 +1154,15 @@ enum FilterKind {
 ///   is a PHP 8.5 constant whose whole point is to delete the failure arm — a
 ///   sharper answer than anything here, but one that needs a PHP-minor gate this
 ///   rung does not carry.
-/// * **A flags argument that is not a literal** — a variable (`$nullFilter =
-///   \FILTER_NULL_ON_FAILURE`) carries no proven value (issue #168), so the value
+/// * **A flags argument held in a variable** — `$nullFilter =
+///   \FILTER_NULL_ON_FAILURE` carries no proven value (issue #168), so the value
 ///   domain has nothing to hand back for it: `\PHPStan\dumpType($nullFilter)` on
 ///   that very assignment answers `unknown`, and reading the argument through
 ///   [`transfer_arg_fact`] the way the INPUT argument is read therefore resolves
 ///   nothing. That is a recorded decline waiting on issue #598 (the engine-constant
 ///   ruling), not an oversight: `filterVar.php` spends two rows per filter block on
-///   exactly this spelling.
+///   exactly this spelling. A `|` combination and a `?:` ternary over recognized
+///   constants ARE read — see [`filter_flag_alternatives`].
 /// * **A bare non-zero int literal in the flags position** — the rung keys on
 ///   constant NAMES, so `filter_var($x, FILTER_VALIDATE_INT, 134217728)` is not
 ///   recognized as `FILTER_NULL_ON_FAILURE`. A literal `0` is the documented
@@ -1224,13 +1225,27 @@ fn filter_var_transfer(
         _ => return None,
     };
     // An absent filter argument is `FILTER_DEFAULT` (php.net's own default).
-    let kind = match filter {
-        None => FilterKind::Raw,
-        Some(v) => filter_kind(v)?,
+    let kinds = match filter {
+        None => vec![FilterKind::Raw],
+        Some(v) => filter_kinds(v)?,
     };
-    let flags = filter_var_flags(options)?;
+    let flag_sets = filter_var_flags(options)?;
     let input = transfer_arg_fact(cx, folder, value, env, store);
-    filter_var_answer(kind, flags, input.as_ref())
+    // A ternary in either position contributes its arms as ALTERNATIVES, so the
+    // answer is the join over the cross product. The join declines whole, never
+    // per-arm: `?` picking between two flag sets whose answers the domain cannot
+    // unite is a call this rung has nothing to say about.
+    let mut acc: Option<Fact> = None;
+    for kind in &kinds {
+        for flags in &flag_sets {
+            let arm = filter_var_answer(*kind, *flags, input.as_ref())?;
+            acc = Some(match acc {
+                None => arm,
+                Some(prev) => prev.join(&arm)?,
+            });
+        }
+    }
+    acc
 }
 
 /// The answer for ONE `(filter, flags, input)` triple — the scalar rung
@@ -1378,8 +1393,23 @@ fn fact_only_base(f: &Fact, base: Base) -> bool {
     }
 }
 
-/// The [`FilterKind`] a filter-argument expression names, or `None` for anything
-/// this rung cannot key on.
+/// The [`FilterKind`]s a filter-argument expression may name — one for a constant,
+/// both arms for a ternary over two recognized ones (issue #615 leg (b)), `None`
+/// for anything this rung cannot key on.
+///
+/// A `|` is deliberately NOT walked here: filter ids are an enumeration, not a bit
+/// field, and `FILTER_VALIDATE_INT | FILTER_VALIDATE_IP` names no filter.
+fn filter_kinds(value: &ArgValue) -> Option<Vec<FilterKind>> {
+    if let ArgValue::Ternary { then_val, else_val, .. } = value {
+        let mut out = filter_kinds(then_val)?;
+        out.extend(filter_kinds(else_val)?);
+        return Some(out);
+    }
+    Some(vec![filter_kind(value)?])
+}
+
+/// The [`FilterKind`] a filter-argument CONSTANT names, or `None` for anything this
+/// rung cannot key on.
 ///
 /// Constants are case-sensitive (unlike PHP's function and class names), so the
 /// match is exact. A `Qualified`/`Relative` spelling never denotes the global
@@ -1434,33 +1464,85 @@ struct FilterFlags {
     require_array: bool,
 }
 
-/// The flags the third argument sets, or `None` when it is a spelling this rung
-/// refuses (which declines the whole rule — a flag it cannot read may be
-/// `FILTER_FLAG_STRIP_LOW`, which rewrites the string and makes `FILTER_DEFAULT`
-/// stop being the identity).
+impl FilterFlags {
+    /// The `|` of two flag sets, which is what PHP's own `|` does to the bits.
+    const fn union(self, other: FilterFlags) -> FilterFlags {
+        FilterFlags {
+            null_on_failure: self.null_on_failure || other.null_on_failure,
+            force_array: self.force_array || other.force_array,
+            require_array: self.require_array || other.require_array,
+        }
+    }
+}
+
+/// The flag sets the third argument may set — one entry per alternative a ternary
+/// introduces — or `None` when it is a spelling this rung refuses (which declines
+/// the whole rule — a flag it cannot read may be `FILTER_FLAG_STRIP_LOW`, which
+/// rewrites the string and makes `FILTER_DEFAULT` stop being the identity).
 ///
 /// Three accepted shapes, and only three: **absent**, a flag expression
-/// ([`filter_flag_set`]) written directly, and an **array literal** whose only key
-/// is a literal `'flags'` holding one. See [`filter_var_transfer`] for why every
-/// other spelling — a variable, a non-zero int literal, an `'options'` key — is
-/// refused.
-fn filter_var_flags(value: Option<&ArgValue>) -> Option<FilterFlags> {
-    let Some(value) = value else { return Some(FilterFlags::default()) };
+/// ([`filter_flag_alternatives`]) written directly, and an **array literal** whose
+/// only key is a literal `'flags'` holding one. See [`filter_var_transfer`] for why
+/// every other spelling — a variable, a non-zero int literal, an `'options'` key —
+/// is refused.
+fn filter_var_flags(value: Option<&ArgValue>) -> Option<Vec<FilterFlags>> {
+    let Some(value) = value else { return Some(vec![FilterFlags::default()]) };
     if let ArgValue::Array(items) = value {
-        let mut flags = FilterFlags::default();
+        let mut flags = vec![FilterFlags::default()];
         for (key, item) in items {
             let ArrayKey::Str(k) = key else { return None };
             if k.as_str() != Some("flags") {
                 return None;
             }
-            flags = filter_flag_set(item)?;
+            flags = filter_flag_alternatives(item)?;
         }
         return Some(flags);
     }
-    filter_flag_set(value)
+    filter_flag_alternatives(value)
 }
 
-/// One flag EXPRESSION as a [`FilterFlags`], or `None` for a spelling outside the
+/// How many alternative flag sets one flags expression may resolve to before the
+/// rung stops walking it. Two nested ternaries already exceed anything a fixture
+/// spells; the bound is here so a pathological expression cannot make the cross
+/// product in [`filter_var_transfer`] grow with the source.
+const FILTER_FLAG_ALTERNATIVE_CAP: usize = 8;
+
+/// One flags EXPRESSION as the alternatives it may take, resolved from the syntax
+/// (issue #615 leg (b)).
+///
+/// Two composers, and each is a different kind of combination:
+///
+/// * a **`|` chain** combines flags into ONE set — PHP's own `|` over the bits, and
+///   [`FilterFlags::union`] over the roster's booleans;
+/// * a **`?:` ternary** offers two sets as ALTERNATIVES, which the caller answers
+///   separately and joins.
+///
+/// **The roster resolves by constant NAME, never by value, and that is what makes
+/// this leg possible at all.** Reading the flags through the value domain the way
+/// the INPUT argument is read cannot work: `$nullFilter = \FILTER_NULL_ON_FAILURE`
+/// binds no fact (issue #168 — a global constant carries no proven value), so a
+/// const-valued local resolves to nothing and stays a decline until issue #598
+/// rules on engine constants. Keying on names also keeps `FILTER_FLAG_HOSTNAME`,
+/// `_IPV4` and `_EMAIL_UNICODE` — which share one engine value — distinguishable.
+fn filter_flag_alternatives(value: &ArgValue) -> Option<Vec<FilterFlags>> {
+    match value {
+        ArgValue::Ternary { then_val, else_val, .. } => {
+            let mut out = filter_flag_alternatives(then_val)?;
+            out.extend(filter_flag_alternatives(else_val)?);
+            (out.len() <= FILTER_FLAG_ALTERNATIVE_CAP).then_some(out)
+        }
+        ArgValue::Binary { op: ValueOp::BitOr, lhs, rhs } => {
+            let (ls, rs) = (filter_flag_alternatives(lhs)?, filter_flag_alternatives(rhs)?);
+            if ls.len() * rs.len() > FILTER_FLAG_ALTERNATIVE_CAP {
+                return None;
+            }
+            Some(ls.iter().flat_map(|l| rs.iter().map(|r| l.union(*r))).collect())
+        }
+        _ => Some(vec![filter_flag_set(value)?]),
+    }
+}
+
+/// One flag CONSTANT as a [`FilterFlags`], or `None` for a spelling outside the
 /// roster.
 ///
 /// The accepted list is the three answer-shaping flags plus the flags that restrict

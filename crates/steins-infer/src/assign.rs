@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Key as VKey};
-use steins_syntax::{ArgValue, CallExpr};
+use steins_syntax::{ArgValue, CallExpr, ValueOp};
 
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
@@ -90,8 +90,11 @@ pub(crate) fn apply_assign(
 
     // A comparison rvalue `$b = $x > 3;` (issue #260): the operator's fact, by the
     // same evaluator the dump surface reads, so the two can never disagree. Total
-    // for a comparison — the binding is `bool` at worst, never dropped.
-    if let ArgValue::Binary { op, lhs, rhs } = value {
+    // for a comparison — the binding is `bool` at worst, never dropped. A
+    // `ValueOp::BitOr` (issue #615) is deliberately not matched: it has no such
+    // floor, so it falls through and binds nothing, exactly as it did when a `|`
+    // lowered to `ArgValue::Other`.
+    if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         let (fact, strat) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
         if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
