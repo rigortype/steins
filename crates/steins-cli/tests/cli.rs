@@ -537,7 +537,7 @@ fn all_missing_paths_are_named_at_once() {
 /// about — still exit 0, still an empty report.
 #[test]
 fn existing_but_empty_dir_stays_clean() {
-    let dir = std::env::temp_dir().join("steins-empty-dir-test");
+    let dir = std::env::temp_dir().join(format!("steins-empty-dir-test-{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create empty dir");
 
     let r = run(&["check", dir.to_str().unwrap()]);
