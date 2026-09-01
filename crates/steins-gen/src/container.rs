@@ -41,10 +41,14 @@ use crate::names::{PackageName, SectionName};
 /// is `CondExpr::InstanceofDyn` (issue #571) for the same reason one spelling
 /// over. `6` is the offset-argument entry in `Stmt::invalidated` (issue #609):
 /// a stored trace of `sort($a[0])` from schema 5 carries no entry for `$a`, so
-/// replaying it would keep the stale array shape this binary now forgets.
+/// replaying it would keep the stale array shape this binary now forgets. `7` is
+/// the `ArgValue::Isset` value carrier (issue #579), the value-position twin of
+/// `4`'s reason: a schema-6 trace spells `$b = isset($a['k'])` as
+/// `ArgValue::Other`, so replaying it would answer `unknown` for a value this
+/// binary decides.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 6;
+pub const SCHEMA_VERSION: u32 = 7;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

@@ -874,7 +874,67 @@ pub enum ArgValue {
     /// structurally like [`Self::Concat`]/[`Self::Coalesce`] — not itself proven.
     /// Only [`ValueOp`]-representable operators reach here; others lower to [`Self::Other`].
     Binary { op: ValueOp, lhs: Box<ArgValue>, rhs: Box<ArgValue> },
+    /// `isset(<operand>, …)` in **value** position (issue #579): `$b =
+    /// isset($a['k']);`, `return isset($x);`, `f(isset($x))`.
+    ///
+    /// The condition side of this construct has had a representation since ADR-0062
+    /// S4 ([`CondExpr::Isset`]) and issue #414 ([`CondExpr::IssetVar`]); the value
+    /// side had none, so every read of an `isset` answered nothing — not even the
+    /// `bool` PHP guarantees. `isset` is a construct, not a call, so no call seam
+    /// could be asked for it either.
+    ///
+    /// **Total by construction, and that is the whole design.** `isset` evaluates
+    /// to a `bool` whatever it tests, so an operand this vocabulary cannot spell
+    /// must still arrive here as [`IssetOperand::Unmodelled`] rather than widen the
+    /// expression to [`Self::Other`] — widening is exactly the defect. The
+    /// operands are PHP's own conjunction (`isset($a, $b)` is `isset($a) &&
+    /// isset($b)`), and the fact seam answers them as one.
+    ///
+    /// `empty(…)` is deliberately NOT lowered here: its verdict wants a truthiness
+    /// reading of the operand's value stacked on the presence one, which is a
+    /// question this carrier does not ask.
+    Isset(Vec<IssetOperand>),
     Other,
+}
+
+/// One operand of a value-position [`ArgValue::Isset`] (issue #579).
+///
+/// Not [`CondExpr`] under another name, though the guard side spells the same two
+/// shapes: this vocabulary is **total** over what `isset` may be written with,
+/// because the value seam must answer every `isset` and the guard seam may
+/// decline one. `CondExpr::Opaque`'s read set has no counterpart here for the
+/// reason issue #414 gave [`CondExpr::IssetVar`] its own variant — `isset` is a
+/// construct and cannot write what it tests, so there is nothing to forget.
+#[derive(Debug, Clone, PartialEq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum IssetOperand {
+    /// `isset($var)` — the question about a **binding** rather than a key.
+    Var(String),
+    /// `isset($var[<key>])` — depth exactly one, over a bare-variable base.
+    ///
+    /// The key is whatever the value IR spells it as, NOT the concrete literal the
+    /// guard form requires: [`CondExpr::Isset`]'s literal-key restriction is
+    /// ADR-0062 A-G4's tag-discrimination scope, while this operand is read
+    /// through the offset family's own key resolution, which resolves a proven
+    /// variable key and declines an unproven one.
+    Offset { var: String, key: Box<ArgValue> },
+    /// An operand this vocabulary does not spell — a property (`$o->p`), a static
+    /// property, a deeper path (`$a['x']['y']`), a dynamic name. It contributes
+    /// `Maybe` to the conjunction, which is what keeps the whole expression at the
+    /// `bool` floor instead of `unknown`.
+    Unmodelled,
+}
+
+impl IssetOperand {
+    /// Render the operand as it appears in a diagnostic message.
+    #[must_use]
+    pub fn render(&self) -> String {
+        match self {
+            IssetOperand::Var(v) => format!("${v}"),
+            IssetOperand::Offset { var, key } => format!("${var}[{}]", key.render()),
+            IssetOperand::Unmodelled => "<expr>".to_owned(),
+        }
+    }
 }
 
 /// Identifies the target of an [`ArgValue::Closure`] (ADR-0033): an anonymous
@@ -1233,6 +1293,7 @@ impl std::hash::Hash for ArgValue {
                 case.hash(state);
             }
             ArgValue::GlobalConst(r) => r.hash(state),
+            ArgValue::Isset(ops) => ops.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -1309,6 +1370,10 @@ impl ArgValue {
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
             ArgValue::GlobalConst(r) => r.raw.clone(),
+            ArgValue::Isset(ops) => {
+                let parts: Vec<String> = ops.iter().map(IssetOperand::render).collect();
+                format!("isset({})", parts.join(", "))
+            }
             ArgValue::Other => "<expr>".to_owned(),
         }
     }
