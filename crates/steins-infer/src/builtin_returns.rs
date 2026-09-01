@@ -358,13 +358,13 @@ pub(crate) fn floor_target_admits(name: &str, target: Option<&steins_db::PhpTarg
 /// caller falls through to the argument-insensitive envelope rung.
 ///
 /// The rule fires only on a single-argument call whose one argument is a bare
-/// variable carrying a non-nullable [`Fact::Shape`] — or a [`Fact::Singleton`]
-/// array, lifted to a shape ([`ShapeFact::lift`]) once the value lane's own
-/// order-dependent projections (issue #118) have first refused the name, so a
-/// literal array is never worse off than a declared one. A nullable base
-/// declines, a second argument declines (`count($x, COUNT_RECURSIVE)` counts
-/// something else), and a project function shadowing the name declines through
-/// [`builtin_call_return_fact`]'s own check.
+/// variable or a depth-1 property fetch carrying a non-nullable [`Fact::Shape`]
+/// — or a [`Fact::Singleton`] array, lifted to a shape ([`ShapeFact::lift`])
+/// once the value lane's own order-dependent projections (issue #118) have
+/// first refused the name, so a literal array is never worse off than a
+/// declared one. A nullable base declines, a second argument declines
+/// (`count($x, COUNT_RECURSIVE)` counts something else), and a project function
+/// shadowing the name declines through [`builtin_call_return_fact`]'s own check.
 ///
 /// **The admission gate is ADR-0061 §2's, unweakened**: seeded only when the
 /// sidecar-backed envelope for this name exists AND the fact is extensionally
@@ -395,11 +395,15 @@ pub(crate) fn shape_builtin_return_fact(
         return Some(out);
     }
     // **The subject binds by what it resolves to, not by how it was spelled**
-    // (issue #328 L1). A bare variable reads the env; an array written *at the
-    // call site* resolves through the seeding ladder, so
-    // `count(['a' => $x, 'b' => $x])` is no worse than the two-statement spelling.
+    // (issue #328 L1). A bare variable reads the env; a property fetch reads the
+    // allocation-keyed heap (ADR-0036), the same single lookup the assignment
+    // form performs, so `count($o->p)` and `$v = $o->p; count($v)` cannot
+    // disagree (issue #610) — an unbound receiver, an unknown or swept prop each
+    // carry no fact and decline; an array written *at the call site* resolves
+    // through the seeding ladder, so `count(['a' => $x, 'b' => $x])` is no
+    // worse than the two-statement spelling.
     //
-    // Deliberately only these three forms — every other spelling would need
+    // Deliberately only these four forms — every other spelling would need
     // resolving to find out it is not an array, and most calls reaching this
     // rung are not in the family at all.
     //
@@ -411,6 +415,10 @@ pub(crate) fn shape_builtin_return_fact(
         [ArgValue::Var(var), ..] => {
             let known = env.get(var)?;
             (known.fact.as_ref()?, known.stratum)
+        }
+        [ArgValue::PropFetch { var, prop }, ..] => {
+            let store = store?;
+            (store.prop_fact(var, prop)?, store.prop_stratum(var, prop))
         }
         [ArgValue::Array(items), ..] => {
             seeded = cx
