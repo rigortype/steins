@@ -964,11 +964,13 @@ fn filter_var_declines_a_nullable_input_as_a_success_proof() {
 }
 
 #[test]
-fn filter_var_declines_the_array_shaping_flags() {
-    // `FILTER_REQUIRE_ARRAY`/`FILTER_FORCE_ARRAY` make the result an array —
-    // the `filter_var_array` slice's business, not this scalar rung's. A flag
-    // the rule cannot read declines the WHOLE call, never just that flag.
-    for flag in ["FILTER_REQUIRE_ARRAY", "FILTER_FORCE_ARRAY", "FILTER_REQUIRE_SCALAR"] {
+fn filter_var_declines_the_array_flags_on_an_input_that_may_be_an_array() {
+    // Issue #615 leg (a)'s load-bearing decline. Under either array flag the
+    // engine walks an array input RECURSIVELY — `filter_var([[1]],
+    // FILTER_VALIDATE_INT, ['flags' => FILTER_FORCE_ARRAY])` is `[[1]]`, not
+    // `[false]` — so for an input that may itself be an array the element fact
+    // would have to admit arrays at unbounded depth. No `Fact` spells that.
+    for flag in ["FILTER_REQUIRE_ARRAY", "FILTER_FORCE_ARRAY"] {
         assert_eq!(
             dump("$m", &format!("filter_var($m, FILTER_VALIDATE_INT, {flag})")),
             "dumped type: unknown",
@@ -979,7 +981,110 @@ fn filter_var_declines_the_array_shaping_flags() {
             "dumped type: unknown",
             "{flag}"
         );
+        // An `array<string, mixed>` map is the same decline for the same reason:
+        // its slots are `mixed`, so they may be arrays. Upstream asserts a flat
+        // `array<string, int|false>` here and is unsound (issue #40 / #594
+        // precedent — the measurement wins).
+        assert_eq!(
+            dump_doc(
+                "@param array<string, mixed> $map",
+                "array $map",
+                &format!("filter_var($map, FILTER_VALIDATE_INT, {flag})")
+            ),
+            "dumped type: unknown",
+            "{flag}"
+        );
     }
+    // `FILTER_REQUIRE_SCALAR` stays outside the roster in every position: it is a
+    // validity claim about the input, and measurably not a no-op
+    // (`FILTER_REQUIRE_SCALAR|FILTER_FORCE_ARRAY` over `17` is `[17]`).
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT, FILTER_REQUIRE_SCALAR)"),
+        "dumped type: unknown"
+    );
+    assert_eq!(
+        dump("int $i", "filter_var($i, FILTER_VALIDATE_INT, FILTER_REQUIRE_SCALAR)"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn filter_var_force_array_wraps_the_scalar_answer_over_a_proven_non_array() {
+    // Probed at `PINNED_PHP`: `filter_var(17, FILTER_VALIDATE_INT, ['flags' =>
+    // FILTER_FORCE_ARRAY])` is `[0 => 17]`. The wrapping never fails, so there is
+    // no outer failure arm — `array<17>`, not `array<17>|false`.
+    let src = "<?php\nfunction f(): void { \\PHPStan\\dumpType(filter_var(17, FILTER_VALIDATE_INT, ['flags' => FILTER_FORCE_ARRAY])); }\n";
+    assert_eq!(one_type(src), "dumped type: array<17>");
+    // A `Fact::General` input proves non-array just as well as a Singleton does.
+    assert_eq!(
+        dump("int $i", "filter_var($i, FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY)"),
+        "dumped type: array<int>"
+    );
+    assert_eq!(
+        dump("bool $b", "filter_var($b, FILTER_VALIDATE_BOOL, FILTER_FORCE_ARRAY)"),
+        "dumped type: array<bool>"
+    );
+    assert_eq!(
+        dump("string $s", "filter_var($s, FILTER_SANITIZE_EMAIL, FILTER_FORCE_ARRAY)"),
+        "dumped type: array<string>"
+    );
+}
+
+#[test]
+fn filter_var_force_array_element_declines_exactly_where_the_scalar_rung_does() {
+    // The wrapping is the ONLY new part: an element outcome the domain cannot
+    // spell declines the WHOLE call, never a partial answer and never a widening.
+    // `string|false` has no `Fact` (issue #600), so neither has `array<string|false>`.
+    assert_eq!(
+        dump("string $s", "filter_var($s, FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY)"),
+        "dumped type: unknown"
+    );
+    // …and where the scalar rung answers under `FILTER_NULL_ON_FAILURE`, so does
+    // the wrapped one. `bool|false` IS `bool`, the one union with a `Fact`.
+    assert_eq!(
+        dump("string $s", "filter_var($s, FILTER_VALIDATE_BOOL, FILTER_FORCE_ARRAY)"),
+        "dumped type: array<bool>"
+    );
+}
+
+#[test]
+fn filter_var_require_array_on_a_proven_non_array_is_the_failure_value_alone() {
+    // `filter_var(17, FILTER_VALIDATE_INT, ['flags' => FILTER_REQUIRE_ARRAY])` is
+    // `false` at `PINNED_PHP`: a proven non-array input can never satisfy the
+    // flag, so the call has NO success arm and no array is involved at all.
+    let src = "<?php\nfunction f(): void { \\PHPStan\\dumpType(filter_var(17, FILTER_VALIDATE_INT, ['flags' => FILTER_REQUIRE_ARRAY])); }\n";
+    assert_eq!(one_type(src), "dumped type: false");
+    // The filter and the input stop mattering once the flag has decided.
+    assert_eq!(
+        dump("string $s", "filter_var($s, FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY)"),
+        "dumped type: false"
+    );
+    assert_eq!(
+        dump("float $f", "filter_var($f, FILTER_VALIDATE_FLOAT, FILTER_REQUIRE_ARRAY)"),
+        "dumped type: false"
+    );
+}
+
+#[test]
+fn filter_var_a_fully_literal_array_input_is_a_singleton_not_a_shape() {
+    // The trap issue #615 names: a fully-literal array binds
+    // `Fact::Singleton(Val::Array(…))`, NOT `Fact::Shape`, so a resolver that
+    // matches only `Shape` would silently take the proven-non-array branch and
+    // answer `false` for a call that really maps. `fact_denotes_no_array` asks
+    // the values, so BOTH spellings decline here.
+    let lit = "<?php\nfunction f(): void { $a = [1, 2]; \\PHPStan\\dumpType(filter_var($a, FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY)); }\n";
+    assert_eq!(one_type(lit), "dumped type: unknown");
+    let lit = "<?php\nfunction f(): void { $a = [1, 2]; \\PHPStan\\dumpType(filter_var($a, FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY)); }\n";
+    assert_eq!(one_type(lit), "dumped type: unknown");
+    // The `Fact::Shape` spelling of the same input, for the same answer.
+    assert_eq!(
+        dump("array $a", "filter_var($a, FILTER_VALIDATE_INT, FILTER_REQUIRE_ARRAY)"),
+        "dumped type: unknown"
+    );
+    assert_eq!(
+        dump("array $a", "filter_var($a, FILTER_VALIDATE_INT, FILTER_FORCE_ARRAY)"),
+        "dumped type: unknown"
+    );
 }
 
 #[test]

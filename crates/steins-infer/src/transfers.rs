@@ -1141,10 +1141,12 @@ enum FilterKind {
 ///   moves the answer clean off this grid; `'min_range'`/`'max_range'` narrow the
 ///   success arm this rung does not read. One unrecognized key declines the whole
 ///   literal rather than being ignored.
-/// * **A flag outside the accepted list** — `FILTER_REQUIRE_ARRAY` /
-///   `FILTER_FORCE_ARRAY` make the result an array (the `filter_var_array` slice's
-///   business, not this scalar rung's) and `FILTER_REQUIRE_SCALAR` rides with
-///   them; `FILTER_FLAG_STRIP_LOW` / `_STRIP_HIGH` / `_STRIP_BACKTICK` /
+/// * **A flag outside the accepted list** — `FILTER_REQUIRE_SCALAR` refuses an
+///   array input outright and is not read here (it is a *validity* claim about the
+///   input, which is a different question from the answer's type — and measurably
+///   not a no-op: `filter_var(17, …, FILTER_REQUIRE_SCALAR|FILTER_FORCE_ARRAY)` is
+///   `[17]`, so it does not even dominate its neighbours);
+///   `FILTER_FLAG_STRIP_LOW` / `_STRIP_HIGH` / `_STRIP_BACKTICK` /
 ///   `_ENCODE_LOW` / `_ENCODE_HIGH` / `_ENCODE_AMP` / `_NO_ENCODE_QUOTES` rewrite
 ///   the string, so `FILTER_DEFAULT` stops being the identity;
 ///   `FILTER_FLAG_EMPTY_STRING_NULL` turns `''` into `null` on the SUCCESS path
@@ -1153,15 +1155,59 @@ enum FilterKind {
 ///   sharper answer than anything here, but one that needs a PHP-minor gate this
 ///   rung does not carry.
 /// * **A flags argument that is not a literal** — a variable (`$nullFilter =
-///   \FILTER_NULL_ON_FAILURE`) carries no proven value (issue #168), and a `|`
-///   combination of two constants lowers to [`ArgValue::Other`] because
-///   [`steins_syntax::ValueOp`] represents comparisons only. Both are recorded
-///   declines, not oversights: `filterVar.php` spends two rows per filter block on
-///   exactly these spellings.
+///   \FILTER_NULL_ON_FAILURE`) carries no proven value (issue #168), so the value
+///   domain has nothing to hand back for it: `\PHPStan\dumpType($nullFilter)` on
+///   that very assignment answers `unknown`, and reading the argument through
+///   [`transfer_arg_fact`] the way the INPUT argument is read therefore resolves
+///   nothing. That is a recorded decline waiting on issue #598 (the engine-constant
+///   ruling), not an oversight: `filterVar.php` spends two rows per filter block on
+///   exactly this spelling.
 /// * **A bare non-zero int literal in the flags position** — the rung keys on
 ///   constant NAMES, so `filter_var($x, FILTER_VALIDATE_INT, 134217728)` is not
 ///   recognized as `FILTER_NULL_ON_FAILURE`. A literal `0` is the documented
 ///   "no flags" and is accepted.
+///
+/// # The array flags (issue #615 leg (a))
+///
+/// `FILTER_FORCE_ARRAY` and `FILTER_REQUIRE_ARRAY` are read, and both answer
+/// through [`Fact::Shape`] — `ShapeFact::plain_array` with a typed tail IS plain
+/// `array<T>` (ADR-0062 §3, no array-`General` variant), so the scalar outcome
+/// [`filter_success`] already computes is exactly the element fact. The grid,
+/// every cell probed at `PINNED_PHP` (8.5.9):
+///
+/// | flags | input | answer | witness |
+/// | --- | --- | --- | --- |
+/// | `FORCE_ARRAY` | proven non-array | `array<outcome>` | `filter_var(17, INT, FORCE_ARRAY)` → `[0 => 17]` |
+/// | `FORCE_ARRAY` | may be an array | **decline** | the map recurses — see below |
+/// | `REQUIRE_ARRAY` | proven non-array | `false`, or `null` under `NULL_ON_FAILURE` | `filter_var(17, INT, REQUIRE_ARRAY)` → `false` |
+/// | `REQUIRE_ARRAY` | may be an array | **decline** | the answer's outer arm is `array\|false` (issue #600) |
+/// | `REQUIRE_ARRAY\|FORCE_ARRAY` | proven non-array | as `REQUIRE_ARRAY` alone | `REQUIRE_ARRAY` dominates: `filter_var(17, INT, RA\|FA)` → `false` |
+///
+/// **The decline on an input that may be an array is the load-bearing cell, and it
+/// refutes the reference implementation.** Under either array flag `filter_var`
+/// does not map the scalar filter over the input's slots — it walks the input
+/// *recursively*, and a slot that is itself an array stays an array:
+///
+/// ```text
+/// filter_var([[1]],        FILTER_VALIDATE_INT, ['flags' => FORCE_ARRAY]) === [0 => [0 => 1]]
+/// filter_var(['a'=>['b'=>'z']], FILTER_VALIDATE_INT, ['flags' => REQUIRE_ARRAY]) === ['a' => ['b' => false]]
+/// filter_var([[[[[1]]]]],  FILTER_VALIDATE_INT, ['flags' => FORCE_ARRAY]) === [[[[[1]]]]]
+/// ```
+///
+/// So for an input whose slots may be arrays — `mixed`, or an `array<string, mixed>`
+/// map — the true element fact is `int|false|array<…>` at unbounded depth, which no
+/// [`Fact`] spells. Upstream PHPStan asserts a flat `array<string, int|false>` for
+/// exactly that input and is unsound there; those rows stay `unknown` (the issue
+/// #40 / #594 precedent — when the fixture and the measurement disagree, the
+/// measurement wins). A shape whose slots are themselves proven non-array would map
+/// soundly, but no fixture row spells one, so the rung asks the simpler question.
+///
+/// **Not taken, deliberately.** Over a proven non-array input `FORCE_ARRAY` yields
+/// exactly ONE slot at key `0` (probed across every filter and both failure modes),
+/// so `list{outcome}` would be sound and strictly sharper than `array<outcome>`.
+/// That is a second claim — about the result's *cardinality* rather than its
+/// element type — and this rung's business is the element type; the sharpening is
+/// recorded here rather than made.
 ///
 /// [`php_cast_fact`]: crate::coerce::php_cast_fact
 fn filter_var_transfer(
@@ -1182,9 +1228,53 @@ fn filter_var_transfer(
         None => FilterKind::Raw,
         Some(v) => filter_kind(v)?,
     };
-    let null_on_failure = filter_var_flags(options)?;
+    let flags = filter_var_flags(options)?;
     let input = transfer_arg_fact(cx, folder, value, env, store);
-    let (success, proven) = filter_success(kind, input.as_ref());
+    filter_var_answer(kind, flags, input.as_ref())
+}
+
+/// The answer for ONE `(filter, flags, input)` triple — the scalar rung
+/// [`filter_success`] computes, plus issue #615 leg (a)'s array wrapping.
+fn filter_var_answer(kind: FilterKind, flags: FilterFlags, input: Option<&Fact>) -> Option<Fact> {
+    let scalar = filter_scalar_answer(kind, flags.null_on_failure, input);
+    if !flags.force_array && !flags.require_array {
+        return scalar;
+    }
+    // Both array flags read the input's array-ness first, and only a PROVEN
+    // non-array answers: the recursive map over an input that may be an array has
+    // no element fact (see [`filter_var_transfer`]).
+    if !input.is_some_and(fact_denotes_no_array) {
+        return None;
+    }
+    if flags.require_array {
+        // A proven non-array input can never satisfy `REQUIRE_ARRAY`, so the call
+        // has no success arm at all — the failure value stands alone, and both of
+        // its spellings are plain Singletons. `FORCE_ARRAY` riding along changes
+        // nothing (measured: `REQUIRE_ARRAY` dominates).
+        return Some(Fact::Singleton(if flags.null_on_failure { Val::Null } else { Val::Bool(false) }));
+    }
+    // `FORCE_ARRAY` over a proven non-array input wraps whatever the scalar rung
+    // answered; the wrapping itself never fails, so there is no outer arm.
+    Some(Fact::Shape { shape: Box::new(plain_array_of(scalar?)), nullable: false })
+}
+
+/// Plain `array<T>`: the degenerate shape (`ShapeFact::plain_array`) with `T` on
+/// its tail. ADR-0062 §3's A-G1 — no array-`General` variant, so this IS the
+/// abstract "array of `T`" and spells as `array<T>`.
+fn plain_array_of(elem: Fact) -> ShapeFact {
+    ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key: steins_domain::KeyClass::ArrayKey, value: Some(Box::new(elem)) },
+        Certainty::Maybe,
+        false,
+        Vec::new(),
+    )
+}
+
+/// The scalar answer — `filter_var`'s result with neither array flag set. The rule
+/// #608 landed, unchanged; leg (a) wraps its output rather than rewriting it.
+fn filter_scalar_answer(kind: FilterKind, null_on_failure: bool, input: Option<&Fact>) -> Option<Fact> {
+    let (success, proven) = filter_success(kind, input);
     if proven {
         return Some(success);
     }
@@ -1325,49 +1415,71 @@ fn filter_kind(value: &ArgValue) -> Option<FilterKind> {
     }
 }
 
-/// Whether the third argument sets `FILTER_NULL_ON_FAILURE`, or `None` when it is
-/// a spelling this rung refuses (which declines the whole rule — a flag it cannot
-/// read may be `FILTER_FORCE_ARRAY`).
+/// The flags [`filter_var_transfer`] reads out of the third argument — the three
+/// that change the ANSWER's shape. Every other accepted flag is a measured no-op
+/// here and contributes nothing but permission to proceed.
 ///
-/// Three accepted shapes, and only three: **absent**, a **literal `0`** or a
-/// single recognized flag **constant**, and an **array literal** whose only key is
-/// a literal `'flags'` holding one of those. See [`filter_var_transfer`] for why
-/// every other spelling — a variable, a `|` combination, a non-zero int literal,
-/// an `'options'` key — is refused.
-fn filter_var_flags(value: Option<&ArgValue>) -> Option<bool> {
-    let Some(value) = value else { return Some(false) };
+/// A set of booleans rather than the engine's flag integer, deliberately: the
+/// roster keys on constant NAMES (see [`filter_flag_set`]), so the rung never needs
+/// a global constant's *value* and stays clear of issue #598's engine-constant
+/// ruling. `FILTER_FLAG_HOSTNAME`, `_IPV4` and `_EMAIL_UNICODE` share one engine
+/// value, which a value-keyed reading could not tell apart at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FilterFlags {
+    /// `FILTER_NULL_ON_FAILURE` — the failure value is `null`, not `false`.
+    null_on_failure: bool,
+    /// `FILTER_FORCE_ARRAY` — a non-array input is wrapped, an array walked.
+    force_array: bool,
+    /// `FILTER_REQUIRE_ARRAY` — a non-array input is a plain failure.
+    require_array: bool,
+}
+
+/// The flags the third argument sets, or `None` when it is a spelling this rung
+/// refuses (which declines the whole rule — a flag it cannot read may be
+/// `FILTER_FLAG_STRIP_LOW`, which rewrites the string and makes `FILTER_DEFAULT`
+/// stop being the identity).
+///
+/// Three accepted shapes, and only three: **absent**, a flag expression
+/// ([`filter_flag_set`]) written directly, and an **array literal** whose only key
+/// is a literal `'flags'` holding one. See [`filter_var_transfer`] for why every
+/// other spelling — a variable, a non-zero int literal, an `'options'` key — is
+/// refused.
+fn filter_var_flags(value: Option<&ArgValue>) -> Option<FilterFlags> {
+    let Some(value) = value else { return Some(FilterFlags::default()) };
     if let ArgValue::Array(items) = value {
-        let mut flags = false;
+        let mut flags = FilterFlags::default();
         for (key, item) in items {
             let ArrayKey::Str(k) = key else { return None };
             if k.as_str() != Some("flags") {
                 return None;
             }
-            flags = filter_flag_bit(item)?;
+            flags = filter_flag_set(item)?;
         }
         return Some(flags);
     }
-    filter_flag_bit(value)
+    filter_flag_set(value)
 }
 
-/// One flag EXPRESSION: `true` for `FILTER_NULL_ON_FAILURE`, `false` for a literal
-/// `0` or an accepted type-neutral flag, `None` for everything else.
+/// One flag EXPRESSION as a [`FilterFlags`], or `None` for a spelling outside the
+/// roster.
 ///
-/// The accepted list is the flags that restrict which inputs *validate* without
-/// touching the result's type — measured no-ops for every cell of the grid on
-/// [`filter_var_transfer`]. `FILTER_FLAG_HOSTNAME`, `_IPV4` and `_EMAIL_UNICODE`
-/// share one engine value; keying on names rather than values costs nothing here,
-/// since all three are type-neutral.
-fn filter_flag_bit(value: &ArgValue) -> Option<bool> {
+/// The accepted list is the three answer-shaping flags plus the flags that restrict
+/// which inputs *validate* without touching the result's type — measured no-ops for
+/// every cell of the grid on [`filter_var_transfer`]. An unrecognized name declines
+/// the whole call rather than being ignored, and that invariant is load-bearing.
+fn filter_flag_set(value: &ArgValue) -> Option<FilterFlags> {
+    let none = FilterFlags::default();
     if let ArgValue::Int(0) = value {
-        return Some(false);
+        return Some(none);
     }
     let ArgValue::GlobalConst(r) = value else { return None };
     if !matches!(r.kind, RefKind::FullyQualified | RefKind::Unqualified) {
         return None;
     }
     match r.raw.as_str() {
-        "FILTER_NULL_ON_FAILURE" => Some(true),
+        "FILTER_NULL_ON_FAILURE" => Some(FilterFlags { null_on_failure: true, ..none }),
+        "FILTER_FORCE_ARRAY" => Some(FilterFlags { force_array: true, ..none }),
+        "FILTER_REQUIRE_ARRAY" => Some(FilterFlags { require_array: true, ..none }),
         "FILTER_FLAG_NONE"
         | "FILTER_FLAG_ALLOW_OCTAL"
         | "FILTER_FLAG_ALLOW_HEX"
@@ -1382,7 +1494,7 @@ fn filter_flag_bit(value: &ArgValue) -> Option<bool> {
         | "FILTER_FLAG_NO_RES_RANGE"
         | "FILTER_FLAG_GLOBAL_RANGE"
         | "FILTER_FLAG_PATH_REQUIRED"
-        | "FILTER_FLAG_QUERY_REQUIRED" => Some(false),
+        | "FILTER_FLAG_QUERY_REQUIRED" => Some(none),
         _ => None,
     }
 }
