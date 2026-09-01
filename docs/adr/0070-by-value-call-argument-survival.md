@@ -291,3 +291,47 @@ standing instrument.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation, alongside the ADR-0032 binding amendment it unblocks.
+
+## Amendment (2026-09-01): an offset-spelled argument records the chain's root (issue #609)
+
+The occurrence this ADR recognized was a bare `$v` argument. An argument
+spelled `$a[0]` recorded nothing — not a site, not an opaque entry — so
+`$a` never entered `Stmt::invalidated` at all, and the walk kept the
+array's pre-call shape past `sort($a[0])` and `settype($b[0], 'int')`.
+That is not the blanket drop being coarse; it is the invalidation channel
+being silent about a write PHP performs. The element's stated value was a
+false fact on every reachable path after the call — a false-positive
+source wherever a later check premised it, and the one soundness class
+this ADR's whole design exists to never trade for precision.
+
+**The rule.** A pure offset chain rooted at a direct variable (`$a[0]`,
+`$a['k'][1]`, …) records the ROOT under exactly the site/opaque rules a
+bare argument gets: a statically named callee at an all-positional call
+site yields a `(callee, position)` site, anything else marks the entry
+opaque. The gate then works unchanged — a certified by-value position
+(`count($a[0])`) copies the element out and the root survives with its
+whole shape, a by-ref or unresolvable one condemns the binding. The
+chain's keys are reads and record nothing (`sort($s[$i])` drops `$s`,
+never `$i`). `preg_match('/…/', $s, $m[0])` falls out of the same rule:
+`$m` drops at the out-parameter position while `$s` survives at its
+by-value one.
+
+**What does not follow.** A chain that passes through anything but
+offsets on its way to a variable (`$o->p[0]`, `$s[0]->p`, `f()[0]`)
+still records nothing here: what such a callee can reach is shared
+object state, which the ADR-0036 escape-and-sweep already covers — the
+local binding this channel forgets was never the carrier of that fact.
+Slot-precise forgetting — dropping only the written key and keeping the
+siblings — is deliberately not attempted; the whole-binding drop is the
+conservative floor, and sharpening it is a separate measured act.
+
+**The stored-trace consequence.** `Stmt::invalidated` is persisted trace
+IR, so a schema-5 artifact of `sort($a[0])` carries no entry for `$a` and
+replaying it would keep the stale shape this binary now forgets.
+`steins_gen::SCHEMA_VERSION` is 6 (the issue #414/#571 precedent): the
+old artifact is a miss and one rebuild.
+
+**Status: PENDING ratification.** Designed autonomously under the owner's
+standing delegation; noticed while landing issue #595, which refuses to
+write a cast through an offset but did not change what the offset call
+forgets.
