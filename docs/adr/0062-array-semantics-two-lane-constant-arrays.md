@@ -977,3 +977,74 @@ return the arm lane keeps out of the value lane (A-G3), and a literal
 invalidated by an intervening call. `SCHEMA_VERSION` 6 → 7, since `ArgValue` is
 persisted trace IR (ADR-0092 §2) and a schema-6 trace spells the construct
 `Other`.
+
+## Amendment I (2026-09-02): a transfer rung may CONSTRUCT an abstract array — PENDING ratification
+
+Issue #615 leg (a). Every producer of a `Fact::Shape` so far has been a *reader*:
+a literal the walk saw built, a `@param array{…}` the arm lane seeded, a
+projection over one of those. `filter_var($x, $filter, FILTER_FORCE_ARRAY)`
+is the first rung to **mint** one from a scalar it computed — the answer is an
+array the source never wrote and no declaration named.
+
+### I1. The carrier was already there, and A-G1 is why
+
+No new spelling was needed, and that is the amendment's whole point. A-G1 says
+the degenerate shape ([`ShapeFact::plain_array`]) *is* plain `array`, with no
+array-`General` variant beside it; put the element fact on that shape's tail and
+the result **is** the abstract `array<T>`, spelling through the same
+`spell_generic_array` a read-side shape uses. So a constructed answer and a read
+answer are the same object, and the dump surface cannot tell them apart — which
+is the property that makes minting safe rather than a second lane.
+
+The rung's own scalar outcome is the element fact unchanged. The wrapping never
+fails (`FORCE_ARRAY` always produces an array), so the constructed shape carries
+no outer failure arm, and `REQUIRE_ARRAY`'s own failure is a plain `Singleton`,
+not an array at all.
+
+### I2. The bound: a slot that may be an array
+
+The rule is confined to a **proven non-array input**, and the reason is
+measured, not conservative. `filter_var` under either array flag does not map
+its scalar filter over the input's slots — it walks the input *recursively*, and
+a slot that is itself an array stays an array. At PINNED_PHP 8.5.9:
+
+```text
+filter_var([[1]],              FILTER_VALIDATE_INT, ['flags' => FORCE_ARRAY])   === [0 => [0 => 1]]
+filter_var(['a'=>['b'=>'z']],  FILTER_VALIDATE_INT, ['flags' => REQUIRE_ARRAY]) === ['a' => ['b' => false]]
+```
+
+So over an input whose slots may be arrays — `mixed`, or an `array<string,
+mixed>` map — the true element fact is `int|false|array<…>` at unbounded depth.
+`Fact::Union`'s arms are scalar bases by construction (§3, and the union
+declines an array arm), so no `Fact` spells it and the rung declines. The
+reference implementation asserts a flat `array<string, int|false>` for exactly
+that input and is unsound there; those rows stay `unknown`, the #40/#594
+precedent applied once more.
+
+This generalizes past `filter_var`: **any** rung minting an `array<T>` owes a
+premise that `T` is expressible for every slot the input admits, and the
+premise is about the input's *element* domain, not its own layer. A shape whose
+slots are themselves proven non-array would map soundly; none is spelled by a
+fixture, so the implementation asks the simpler question and says so.
+
+The trap worth writing down, because it has now bitten three slices (#597's
+self-review, #579's offset resolver, and this one at design time): a
+fully-literal array binds `Fact::Singleton(Val::Array(…))`, **not**
+`Fact::Shape`. A premise about array-ness that matches only `Shape` silently
+takes the non-array branch for the most concrete input there is.
+`fact_denotes_no_array` asks the values, and both spellings are pinned by test.
+
+### I3. Not taken
+
+Over a proven non-array input `FORCE_ARRAY` yields exactly one slot at key `0`,
+so `list{outcome}` would be sound and strictly sharper. That is a claim about
+the result's **cardinality**, separable from the element-type claim this rung
+makes, and it is recorded rather than made — a rung that mints an array should
+mint the weakest one its evidence supports until a caller needs more.
+
+### I4. Measurement
+
+Leg (a) alone: 15 rows moved, 5 `differ → match` and 10 `differ → subsumed`, all
+in `filter-var.php` / `filterVar.php`; nsrt unknown-fall 6510 → 6495. No row
+regressed and nothing outside the two fixtures moved. Legs (a)+(b) together:
+6510 → 6407.

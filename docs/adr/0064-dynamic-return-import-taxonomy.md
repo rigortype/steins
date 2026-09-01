@@ -154,3 +154,62 @@ you must pin the signature.** The seam classification of neither name moved —
 `min`/`max` are seam (ii) argument-dispatched as surveyed, `array_slice` is seam
 (ii) shape-projection as surveyed. `json_decode` is unaffected: its decline was
 never about the pin.
+
+## Amendment C (2026-09-02): a seam-(ii) rung may read an argument's SYNTAX, and when it must — PENDING ratification
+
+Issue #615 leg (b). ADR-0070 institutionalized "ask the value domain, not the
+syntax" for arguments, and `filter_var`'s input argument obeys it through
+`transfer_arg_fact`. Its **flags** argument cannot, and the reason is a fact
+about the domain rather than a preference:
+
+> A global constant carries no proven value (issue #168). `$nullFilter =
+> \FILTER_NULL_ON_FAILURE;` binds no `Fact` at all — `\PHPStan\dumpType($nullFilter)`
+> on that very assignment answers `unknown` — so a rule that asks the value
+> domain for a flag receives nothing, for every spelling that is not a literal.
+
+So the roster keys on the constant's **name**, and the amendment records that
+this is the correct reading rather than a shortfall against ADR-0070:
+
+1. **A rule whose argument is drawn from a fixed engine vocabulary reads names.**
+   `FILTER_FLAG_HOSTNAME`, `_IPV4` and `_EMAIL_UNICODE` share one engine value, so
+   a value-keyed reading could not tell them apart even if #598 supplied values.
+   Names are also what makes the accepted list auditable.
+2. **The composers are read from the syntax, one per kind of combination.** A `|`
+   chain combines flags into one set (PHP's own `|` over the bits, a boolean union
+   over the roster); a `?:` ternary offers two sets as *alternatives*, which the
+   rung answers separately and joins — declining the whole call, never one arm,
+   when the domain cannot unite them.
+3. **An unrecognized term anywhere declines the whole call.** Load-bearing: an
+   unread flag may be `FILTER_FLAG_STRIP_LOW`, which rewrites the string and makes
+   `FILTER_DEFAULT` stop being the identity. A composer must poison, never drop.
+4. **A variable stays a decline**, recorded against issue #598 rather than fixed
+   here. That is the boundary: the seam reads syntax it can name, and a name it
+   must resolve through a *binding* is the value domain's question, unanswerable
+   until the engine-constant ruling lands.
+
+Stratum is unaffected and needs no new machinery: the seam already takes `min`
+over every argument's stratum, so an input read from a docblock-claimed lane
+floors an answer whose flags came from a `|` chain, exactly as ADR-0061 §3
+requires.
+
+**The IR cost, and the shape of the carrier.** The `|` chain needed a value form;
+`ValueOp` gained `BitOr` and `SCHEMA_VERSION` went 7 → 8 (`ArgValue` is persisted
+trace IR, ADR-0092 §2). The variant deliberately reaches **no fact seam**: a
+bitwise `|` has no total floor — `int|int` is an `int`, `string|string` a
+`string`, and PHP's GMP extension overloads the operator to return an object, so
+even `int|string` would be a lie — so `eval_binary_fact` keeps its totality by
+taking a `CmpOp`, and a `|` falls through saying nothing, as it did when it was
+`ArgValue::Other`. Carrying it is nonetheless what unlocked the leg, for a reason
+worth generalizing: **an `Other` element collapses its whole enclosing array
+literal to `Other`**, so `['flags' => A | B]` was not an array at all and no rule
+could read even its key. A form that answers nothing can still be worth its
+schema bump when it keeps a *container* representable.
+
+### Measurement
+
+Legs (a)+(b): nsrt unknown-fall 6510 → 6407 (−103), 42 `differ → match`, 60
+`differ → subsumed`, 1 `differ → differ` (a sound-but-wider `array<int|null>`
+where the fixture asserts `array<null>` — the rung cannot prove `'foo'` fails
+`FILTER_VALIDATE_INT`, the same class as the `filter-var.php:86` row #608 already
+shipped). Nothing outside `filter-var.php` / `filterVar.php` moved, so the new
+value form changed no answer of its own.
