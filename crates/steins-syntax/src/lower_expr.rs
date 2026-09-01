@@ -12,7 +12,7 @@ use steins_domain::PhpStr;
 
 use crate::ast::{
     Arg, ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, CmpOp, CondExpr, CondOperand, EffectRecv,
-    NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt, StmtKind, ValueOp,
+    IssetOperand, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt, StmtKind, ValueOp,
 };
 use crate::lower_effect::EffectScanCx;
 use crate::lower_scope::{
@@ -650,8 +650,46 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // Carried with its qualification kind so a consumer can apply the
         // engine-constant discipline (issue #29's `PHP_VERSION_ID` rules).
         Expression::ConstantAccess(ca) => ArgValue::GlobalConst(name_ref(&ca.name)),
+        // `isset(…)` in VALUE position (issue #579) — the twin of what issue #414
+        // did for the condition side. **Total**: every operand lowers, the two
+        // shapes this vocabulary spells to themselves and everything else to
+        // `IssetOperand::Unmodelled`, so the expression never widens to `Other`.
+        // Declining here would be the defect, not the safe side: `isset` returns a
+        // `bool` whatever it tests, and `Other` answers `unknown`.
+        //
+        // `empty(…)` is NOT lowered here. `lower_cond` models it as `!isset(e) ||
+        // !e`, whose second disjunct is a truthiness reading of the operand's
+        // value — a question this carrier does not carry, so the construct keeps
+        // its `Other` lowering until a slice asks it.
+        Expression::Construct(Construct::Isset(iss)) => {
+            ArgValue::Isset(iss.values.iter().map(|v| lower_isset_operand(v)).collect())
+        }
         _ => ArgValue::Other,
     }
+}
+
+/// One operand of a value-position `isset(…)` (issue #579). Total — an operand
+/// this vocabulary does not spell is [`IssetOperand::Unmodelled`], never a
+/// refusal.
+///
+/// The key of an offset operand is deliberately **not** required to be a concrete
+/// literal, unlike [`const_key_offset`]'s guard reading: A-G4 restricts the guard
+/// to a literal key because a tag discrimination is a claim about a written key,
+/// while this operand is resolved through the offset family's own key resolution,
+/// which proves a variable key or declines it.
+fn lower_isset_operand(expr: &Expression<'_>) -> IssetOperand {
+    if let Some(var) = bare_var_name(expr) {
+        return IssetOperand::Var(var);
+    }
+    if let Expression::ArrayAccess(aa) = expr.unparenthesized()
+        && let Expression::Variable(Variable::Direct(dv)) = aa.array.unparenthesized()
+    {
+        return IssetOperand::Offset {
+            var: strip_dollar(bytes_to_string(dv.name)),
+            key: Box::new(lower_arg_value(aa.index)),
+        };
+    }
+    IssetOperand::Unmodelled
 }
 
 /// Lower an array-literal element sequence to [`ArgValue::Array`], or
