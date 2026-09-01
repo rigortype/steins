@@ -8,8 +8,9 @@ use std::collections::HashMap;
 use steins_domain::{
     Base, Certainty, Fact, IntRange, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
 };
-use steins_syntax::{ArgValue, RefKind};
+use steins_syntax::{ArgValue, ArrayKey, RefKind};
 
+use crate::coerce::{CastTarget, php_cast_fact};
 use crate::cx::Cx;
 use crate::env::{
     ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact, val_of,
@@ -80,6 +81,14 @@ pub(crate) fn arg_dispatch_return_fact(
     /// documents.
     const ARITY_CURL_GETINFO: Option<(u32, u32)> = Some((2, 1));
 
+    /// `filter_var`'s live signature at `PINNED_PHP` (8.5.9): three parameters,
+    /// one required — `filter_var(mixed $value, int $filter = FILTER_DEFAULT,
+    /// array|int $options = 0)`. Measured (issue #597), and load-bearing twice
+    /// over: the rule reads all three POSITIONALLY, and the declaration it rides
+    /// on is a bare `mixed`, so Amendment B's second leg is the only thing
+    /// countersigning it.
+    const ARITY_FILTER_VAR: Option<(u32, u32)> = Some((3, 1));
+
     /// `array_key_exists`/`key_exists`: `bool`.
     const BOOL: &[&str] = &["bool"];
     /// The pair's live signature at `PINNED_PHP` (8.5.8): two parameters, both
@@ -132,6 +141,12 @@ pub(crate) fn arg_dispatch_return_fact(
             (min_max_transfer(cx, folder, &lower, args, env, store)?, MIXED, ARITY_MIN_MAX)
         }
         "curl_getinfo" => (curl_getinfo_transfer(args)?, MIXED, ARITY_CURL_GETINFO),
+        // `filter_var` ONLY (issue #597) — not `filter_var_array`, not
+        // `filter_input*`: those answer arrays, and an array result is a
+        // different rule's shape, not this scalar rung's fact.
+        "filter_var" => {
+            (filter_var_transfer(cx, folder, args, env, store)?, MIXED, ARITY_FILTER_VAR)
+        }
         "abs" => (abs_transfer(cx, folder, args, env, store)?, INT_OR_FLOAT, ARITY_ABS),
         "pow" => (pow_transfer(cx, folder, args, env, store)?, POW, ARITY_POW),
         // `json_decode` is the batch's recorded DECLINE, not an omission: its
@@ -1011,6 +1026,340 @@ fn curl_getinfo_transfer(args: &[ArgValue]) -> Option<Fact> {
         Some(Fact::General { base: Base::String, nullable: false })
     } else {
         None
+    }
+}
+
+/// What one recognized `FILTER_*` filter constant does to a value, as the grid on
+/// [`filter_var_transfer`] measures it. The constant NAME is the key; its value is
+/// never read (issue #168), exactly as in [`curl_getinfo_transfer`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FilterKind {
+    /// `FILTER_DEFAULT` / `FILTER_UNSAFE_RAW` (one engine value, two names) under
+    /// no string-modifying flag: the plain `(string)` cast, and it cannot fail
+    /// for any value the four-layer domain denotes.
+    Raw,
+    /// Every `FILTER_SANITIZE_*`: a `string`, always — the output is rewritten, so
+    /// nothing of the input's own predicates survives.
+    Sanitize,
+    /// `FILTER_VALIDATE_INT`.
+    Int,
+    /// `FILTER_VALIDATE_FLOAT`.
+    Float,
+    /// `FILTER_VALIDATE_BOOL` / `FILTER_VALIDATE_BOOLEAN`.
+    Bool,
+    /// The four validators whose every success value is a `non-falsy-string`.
+    NonFalsyString,
+    /// `FILTER_VALIDATE_DOMAIN`, whose success value is a plain `string` — `''`
+    /// and `'0'` both validate (measured; see [`filter_var_transfer`]).
+    PlainString,
+}
+
+/// `filter_var($value, FILTER_X, $flags)` → **the fact the (filter × flags × input)
+/// grid below proves**, for the combinations the four-layer domain can spell
+/// (issue #597). Every other combination declines.
+///
+/// # The expressibility rule, which is what shapes the whole rung
+///
+/// `filter_var` answers `success | failure`, and the failure value is `false` by
+/// default, `null` under `FILTER_NULL_ON_FAILURE`. `T|null` is a nullable fact and
+/// spells fine. **`T|false` has no `Fact` spelling unless `T` is `bool`** — the
+/// domain's [`Refinement`] axis is `Str`/`Int` only, so a `Fact::Union` of an
+/// `int` arm and a `bool` arm would be `int|bool`, a widening that claims `true`
+/// is possible when it is not. Those outcomes therefore decline outright rather
+/// than widen (ADR-0061 §1). The `T|false` half of this callee waits on issue
+/// #600's domain work; nothing here anticipates it.
+///
+/// So exactly three things are winnable, and the rung wins all three:
+///
+/// 1. **Every `FILTER_NULL_ON_FAILURE` combination** — `T|null` for whatever `T`
+///    the filter's success type is.
+/// 2. **`FILTER_VALIDATE_BOOL` with the default failure value** — `bool|false` IS
+///    `bool`, because `false` is *both* the failure value and a valid parse of
+///    `'false'`/`'off'`/`'no'`/`''`. Measured, not reasoned: the probe below shows
+///    `filter_var('off', FILTER_VALIDATE_BOOL)` and
+///    `filter_var('maybe', FILTER_VALIDATE_BOOL)` both answering `false`.
+/// 3. **Success-proven inputs** — where the input fact's WHOLE domain validates,
+///    the failure arm vanishes and the plain success type binds, with or without
+///    `FILTER_NULL_ON_FAILURE`.
+///
+/// # The grid, every cell `php -r`-measured at `PINNED_PHP` (8.5.9)
+///
+/// | filter (constant names) | success type | success-proven inputs |
+/// | --- | --- | --- |
+/// | `FILTER_DEFAULT` `FILTER_UNSAFE_RAW` | the `(string)` cast of the input | **every** fact-denoted input |
+/// | `FILTER_SANITIZE_*` (8 names) | `string` | every fact-denoted input |
+/// | `FILTER_VALIDATE_INT` | `int` | an `int` input — the identity |
+/// | `FILTER_VALIDATE_FLOAT` | `float` | an `int` input — the `(float)` cast |
+/// | `FILTER_VALIDATE_BOOL` `FILTER_VALIDATE_BOOLEAN` | `bool` | a `bool` input — the identity |
+/// | `FILTER_VALIDATE_EMAIL` `_URL` `_IP` `_MAC` | `non-falsy-string` | — |
+/// | `FILTER_VALIDATE_DOMAIN` | `string` | — |
+///
+/// The witnesses behind the cells that are not the obvious ones:
+///
+/// * **`FILTER_DEFAULT` is the `(string)` cast, exactly.** Over the cross product
+///   of 15 values (`''`, `'0'`, `"a\x01b`&"`, the `int` edges, both bools, `null`,
+///   `17.0`, `1e-50`) and all 14 accepted flags, both names, `filter_var` and
+///   `strval` never disagree. So the rung answers through the domain's own cast
+///   grid ([`php_cast_fact`]) rather than a second copy of it, which is where the
+///   `int` → `decimal-int-string` and `bool` → `''|'1'` rows come from.
+/// * **A `float` input under `FILTER_VALIDATE_FLOAT` is NOT proven, and NOT the
+///   identity.** `filter_var(NAN, …)`, `INF` and `-INF` all answer `false` (the
+///   value is coerced to a string first — the engine even emits "unexpected NAN
+///   value was coerced to string"), and `-0.0` comes back as `+0.0`. Upstream
+///   PHPStan's `filter-var.php` asserts a flat `float` for a `float` input; the
+///   probe refutes it, so that row is deliberately NOT won (the issue #40 / #594
+///   precedent — when the fixture and the measurement disagree, the measurement
+///   wins and the row stays `unknown`).
+/// * **`FILTER_VALIDATE_DOMAIN`'s success value is a plain `string`.**
+///   `filter_var('', FILTER_VALIDATE_DOMAIN)` is `''` and
+///   `filter_var('0', …)` is `'0'` — under every accepted flag. Upstream calls
+///   this `non-empty-string`; claiming that here would be unsound, so the rung
+///   states `string` and the fixture rows stay unwon.
+/// * **The four `non-falsy-string` validators.** `''` and `'0'` are PHP's only
+///   falsy strings, and neither validates as an email, URL, IP or MAC under any
+///   accepted flag (measured over the whole flag list). The shortest successes
+///   are `'::'`, `'a://b'`, `'a@b.c'` and a 17-byte MAC.
+/// * **The sanitizers never fail on a scalar.** Over the same 15 values and 14
+///   flags, all eight `FILTER_SANITIZE_*` names answer a `string` every time —
+///   `false` appears only for an `array` or `object` input, neither of which the
+///   value domain denotes. Their success type is nonetheless flat `string`:
+///   `filter_var('ä', FILTER_SANITIZE_EMAIL)` is `''`, so no input predicate
+///   survives.
+///
+/// # The declines, each for a stated reason
+///
+/// * **A dynamic filter argument, or an unrecognized constant name** — the table
+///   has nothing to key on. `FILTER_CALLBACK` is unrecognized by construction: its
+///   result is whatever the userland callback returns.
+/// * **`FILTER_VALIDATE_REGEXP`** — it needs a `'regexp'` entry in the options
+///   array, and an options array is itself a decline (below), so every call this
+///   rung could otherwise answer raises `ValueError: filter_var(): "regexp" option
+///   is missing` at 8.5.9 and returns nothing at all. A rule whose every reachable
+///   call throws states nothing.
+/// * **Any options ARRAY carrying a key other than `'flags'`** — `'options' =>
+///   ['default' => $x]` REPLACES the failure value with an arbitrary one, which
+///   moves the answer clean off this grid; `'min_range'`/`'max_range'` narrow the
+///   success arm this rung does not read. One unrecognized key declines the whole
+///   literal rather than being ignored.
+/// * **A flag outside the accepted list** — `FILTER_REQUIRE_ARRAY` /
+///   `FILTER_FORCE_ARRAY` make the result an array (the `filter_var_array` slice's
+///   business, not this scalar rung's) and `FILTER_REQUIRE_SCALAR` rides with
+///   them; `FILTER_FLAG_STRIP_LOW` / `_STRIP_HIGH` / `_STRIP_BACKTICK` /
+///   `_ENCODE_LOW` / `_ENCODE_HIGH` / `_ENCODE_AMP` / `_NO_ENCODE_QUOTES` rewrite
+///   the string, so `FILTER_DEFAULT` stops being the identity;
+///   `FILTER_FLAG_EMPTY_STRING_NULL` turns `''` into `null` on the SUCCESS path
+///   (measured), which no cell above accounts for; and `FILTER_THROW_ON_FAILURE`
+///   is a PHP 8.5 constant whose whole point is to delete the failure arm — a
+///   sharper answer than anything here, but one that needs a PHP-minor gate this
+///   rung does not carry.
+/// * **A flags argument that is not a literal** — a variable (`$nullFilter =
+///   \FILTER_NULL_ON_FAILURE`) carries no proven value (issue #168), and a `|`
+///   combination of two constants lowers to [`ArgValue::Other`] because
+///   [`steins_syntax::ValueOp`] represents comparisons only. Both are recorded
+///   declines, not oversights: `filterVar.php` spends two rows per filter block on
+///   exactly these spellings.
+/// * **A bare non-zero int literal in the flags position** — the rung keys on
+///   constant NAMES, so `filter_var($x, FILTER_VALIDATE_INT, 134217728)` is not
+///   recognized as `FILTER_NULL_ON_FAILURE`. A literal `0` is the documented
+///   "no flags" and is accepted.
+///
+/// [`php_cast_fact`]: crate::coerce::php_cast_fact
+fn filter_var_transfer(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Option<Fact> {
+    let (value, filter, options) = match args {
+        [value] => (value, None, None),
+        [value, filter] => (value, Some(filter), None),
+        [value, filter, options] => (value, Some(filter), Some(options)),
+        _ => return None,
+    };
+    // An absent filter argument is `FILTER_DEFAULT` (php.net's own default).
+    let kind = match filter {
+        None => FilterKind::Raw,
+        Some(v) => filter_kind(v)?,
+    };
+    let null_on_failure = filter_var_flags(options)?;
+    let input = transfer_arg_fact(cx, folder, value, env, store);
+    let (success, proven) = filter_success(kind, input.as_ref());
+    if proven {
+        return Some(success);
+    }
+    if null_on_failure {
+        return crate::fact_admitting_null(&success);
+    }
+    // The failure value is `false`, and `bool|false` IS `bool` — the one base for
+    // which the union has a `Fact`. Everything else declines (the doc's
+    // expressibility rule).
+    (kind == FilterKind::Bool).then_some(success)
+}
+
+/// The success type a filter produces, and whether the input fact PROVES the call
+/// takes that path — the two halves [`filter_var_transfer`] combines.
+///
+/// A `None` input is "nothing known", which is never proven and always falls to
+/// the filter's own general success type.
+fn filter_success(kind: FilterKind, input: Option<&Fact>) -> (Fact, bool) {
+    let general = |base| (Fact::General { base, nullable: false }, false);
+    match kind {
+        // The `(string)` cast, through the domain's own grid. A `Fact::Shape`
+        // input declines there (PHP writes `'Array'` with an `E_WARNING`), which
+        // is exactly the input class `filter_var` answers `false` for anyway.
+        FilterKind::Raw => match input.and_then(|f| php_cast_fact(f, CastTarget::String)) {
+            Some(cast) => (cast, true),
+            None => general(Base::String),
+        },
+        // A sanitizer rewrites its input, so only the *totality* survives: any
+        // value the domain denotes is a scalar or `null`, and every one of those
+        // sanitizes to a string.
+        FilterKind::Sanitize => match input {
+            Some(f) if !matches!(f, Fact::Shape { .. }) => {
+                (Fact::General { base: Base::String, nullable: false }, true)
+            }
+            _ => general(Base::String),
+        },
+        // `filter_var($int, FILTER_VALIDATE_INT)` is the identity, over the whole
+        // int range including both edges — so the input's own refinement rides
+        // through (`int<0, 9>` stays `int<0, 9>`).
+        FilterKind::Int => match input {
+            Some(f) if fact_only_base(f, Base::Int) => (f.clone(), true),
+            _ => general(Base::Int),
+        },
+        // An `int` input always validates as a float, and the value is the plain
+        // `(float)` cast. A `float` input is NOT proven — see the `NAN` row on
+        // [`filter_var_transfer`].
+        FilterKind::Float => match input {
+            Some(f) if fact_only_base(f, Base::Int) => {
+                php_cast_fact(f, CastTarget::Float).map_or_else(|| general(Base::Float), |c| (c, true))
+            }
+            _ => general(Base::Float),
+        },
+        FilterKind::Bool => match input {
+            Some(f) if fact_only_base(f, Base::Bool) => (f.clone(), true),
+            _ => general(Base::Bool),
+        },
+        FilterKind::NonFalsyString => (
+            Fact::refined(Base::String, Refinement::Str(StrPreds::NON_FALSY.close()), false),
+            false,
+        ),
+        FilterKind::PlainString => general(Base::String),
+    }
+}
+
+/// Does this fact admit ONLY values of `base` — no `null`, no second base, no
+/// array? The premise every success-proven row on [`filter_var_transfer`] needs:
+/// a `?int` is not an `int` input, because `filter_var(null, FILTER_VALIDATE_INT)`
+/// is `false`.
+fn fact_only_base(f: &Fact, base: Base) -> bool {
+    match f {
+        Fact::Singleton(v) => v.base() == Some(base),
+        Fact::OneOf(vals) => vals.iter().all(|v| v.base() == Some(base)),
+        Fact::Refined { base: b, nullable: false, .. } | Fact::General { base: b, nullable: false } => {
+            *b == base
+        }
+        _ => false,
+    }
+}
+
+/// The [`FilterKind`] a filter-argument expression names, or `None` for anything
+/// this rung cannot key on.
+///
+/// Constants are case-sensitive (unlike PHP's function and class names), so the
+/// match is exact. A `Qualified`/`Relative` spelling never denotes the global
+/// `FILTER_*` constant — the same `FullyQualified`/`Unqualified` split
+/// [`curl_getinfo_transfer`] applies.
+fn filter_kind(value: &ArgValue) -> Option<FilterKind> {
+    let ArgValue::GlobalConst(r) = value else { return None };
+    if !matches!(r.kind, RefKind::FullyQualified | RefKind::Unqualified) {
+        return None;
+    }
+    match r.raw.as_str() {
+        "FILTER_DEFAULT" | "FILTER_UNSAFE_RAW" => Some(FilterKind::Raw),
+        "FILTER_SANITIZE_EMAIL"
+        | "FILTER_SANITIZE_URL"
+        | "FILTER_SANITIZE_ENCODED"
+        | "FILTER_SANITIZE_SPECIAL_CHARS"
+        | "FILTER_SANITIZE_FULL_SPECIAL_CHARS"
+        | "FILTER_SANITIZE_NUMBER_INT"
+        | "FILTER_SANITIZE_NUMBER_FLOAT"
+        | "FILTER_SANITIZE_ADD_SLASHES"
+        // `FILTER_SANITIZE_STRING`/`FILTER_SANITIZE_STRIPPED` are deprecated
+        // since 8.1 and still behave: the deprecation is on the CONSTANT, and
+        // the measured answer is a `string` like the rest of the family.
+        | "FILTER_SANITIZE_STRING"
+        | "FILTER_SANITIZE_STRIPPED" => Some(FilterKind::Sanitize),
+        "FILTER_VALIDATE_INT" => Some(FilterKind::Int),
+        "FILTER_VALIDATE_FLOAT" => Some(FilterKind::Float),
+        "FILTER_VALIDATE_BOOL" | "FILTER_VALIDATE_BOOLEAN" => Some(FilterKind::Bool),
+        "FILTER_VALIDATE_EMAIL" | "FILTER_VALIDATE_URL" | "FILTER_VALIDATE_IP"
+        | "FILTER_VALIDATE_MAC" => Some(FilterKind::NonFalsyString),
+        "FILTER_VALIDATE_DOMAIN" => Some(FilterKind::PlainString),
+        _ => None,
+    }
+}
+
+/// Whether the third argument sets `FILTER_NULL_ON_FAILURE`, or `None` when it is
+/// a spelling this rung refuses (which declines the whole rule — a flag it cannot
+/// read may be `FILTER_FORCE_ARRAY`).
+///
+/// Three accepted shapes, and only three: **absent**, a **literal `0`** or a
+/// single recognized flag **constant**, and an **array literal** whose only key is
+/// a literal `'flags'` holding one of those. See [`filter_var_transfer`] for why
+/// every other spelling — a variable, a `|` combination, a non-zero int literal,
+/// an `'options'` key — is refused.
+fn filter_var_flags(value: Option<&ArgValue>) -> Option<bool> {
+    let Some(value) = value else { return Some(false) };
+    if let ArgValue::Array(items) = value {
+        let mut flags = false;
+        for (key, item) in items {
+            let ArrayKey::Str(k) = key else { return None };
+            if k.as_str() != Some("flags") {
+                return None;
+            }
+            flags = filter_flag_bit(item)?;
+        }
+        return Some(flags);
+    }
+    filter_flag_bit(value)
+}
+
+/// One flag EXPRESSION: `true` for `FILTER_NULL_ON_FAILURE`, `false` for a literal
+/// `0` or an accepted type-neutral flag, `None` for everything else.
+///
+/// The accepted list is the flags that restrict which inputs *validate* without
+/// touching the result's type — measured no-ops for every cell of the grid on
+/// [`filter_var_transfer`]. `FILTER_FLAG_HOSTNAME`, `_IPV4` and `_EMAIL_UNICODE`
+/// share one engine value; keying on names rather than values costs nothing here,
+/// since all three are type-neutral.
+fn filter_flag_bit(value: &ArgValue) -> Option<bool> {
+    if let ArgValue::Int(0) = value {
+        return Some(false);
+    }
+    let ArgValue::GlobalConst(r) = value else { return None };
+    if !matches!(r.kind, RefKind::FullyQualified | RefKind::Unqualified) {
+        return None;
+    }
+    match r.raw.as_str() {
+        "FILTER_NULL_ON_FAILURE" => Some(true),
+        "FILTER_FLAG_NONE"
+        | "FILTER_FLAG_ALLOW_OCTAL"
+        | "FILTER_FLAG_ALLOW_HEX"
+        | "FILTER_FLAG_ALLOW_FRACTION"
+        | "FILTER_FLAG_ALLOW_THOUSAND"
+        | "FILTER_FLAG_ALLOW_SCIENTIFIC"
+        | "FILTER_FLAG_IPV4"
+        | "FILTER_FLAG_IPV6"
+        | "FILTER_FLAG_HOSTNAME"
+        | "FILTER_FLAG_EMAIL_UNICODE"
+        | "FILTER_FLAG_NO_PRIV_RANGE"
+        | "FILTER_FLAG_NO_RES_RANGE"
+        | "FILTER_FLAG_GLOBAL_RANGE"
+        | "FILTER_FLAG_PATH_REQUIRED"
+        | "FILTER_FLAG_QUERY_REQUIRED" => Some(false),
+        _ => None,
     }
 }
 

@@ -44,6 +44,7 @@ impl Mock {
             ("array_key_exists", "bool"),
             ("key_exists", "bool"),
             ("curl_getinfo", "mixed"),
+            ("filter_var", "mixed"),
             // The arithmetic scalar-union family (issue #40). `abs` declares a
             // union the value domain CAN spell, so its rule is the one the
             // extensional half of the gate actually bites on; `pow` carries an
@@ -68,6 +69,11 @@ impl Mock {
             // `curl_getinfo(CurlHandle $handle, ?int $option = null)` at 8.5.9:
             // two declared, one required (issue #594).
             ("curl_getinfo".to_owned(), (2, 1)),
+            // `filter_var(mixed $value, int $filter = FILTER_DEFAULT,
+            // array|int $options = 0)` at 8.5.9: three declared, one required
+            // (issue #597). A bare `mixed` declaration, so this arity pin is
+            // the whole of what countersigns the rule.
+            ("filter_var".to_owned(), (3, 1)),
             // `abs(int|float $num)` and `pow(mixed $num, mixed $exponent)` at
             // 8.5.9. Both rules read their arguments positionally, so both pin
             // the signature they were written against (issue #40).
@@ -783,4 +789,347 @@ fn the_declaration_gate_still_governs() {
     mock.types.insert("array_key_exists".to_owned(), "int".to_owned());
     let src = "<?php\n/** @param array{p: int} $z */\nfunction f(array $z): void { \\PHPStan\\dumpType(\\array_key_exists('p', $z)); }\n";
     assert_eq!(one_type_with(src, &mut mock), "dumped type: bool (asserted)");
+}
+
+// filter_var: the (filter × flags × input) grid (issue #597)
+//
+// The winnable set is the one the four-layer domain can spell: every
+// `FILTER_NULL_ON_FAILURE` combination (`T|null`), the plain `bool` of
+// `FILTER_VALIDATE_BOOL`, and the success-proven inputs whose failure arm
+// vanishes. `T|false` with `T != bool` has no `Fact` and declines.
+
+#[test]
+fn filter_var_null_on_failure_is_the_issues_witness() {
+    // The issue's witness, exactly: `int|null`, where master answered `unknown`.
+    assert_eq!(
+        dump("string $s", "filter_var($s, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: int|null"
+    );
+}
+
+#[test]
+fn filter_var_null_on_failure_spells_every_filters_success_type() {
+    for (filter, want) in [
+        ("FILTER_VALIDATE_INT", "int|null"),
+        ("FILTER_VALIDATE_FLOAT", "float|null"),
+        ("FILTER_VALIDATE_BOOL", "bool|null"),
+        ("FILTER_VALIDATE_BOOLEAN", "bool|null"),
+        ("FILTER_VALIDATE_EMAIL", "non-falsy-string|null"),
+        ("FILTER_VALIDATE_URL", "non-falsy-string|null"),
+        ("FILTER_VALIDATE_IP", "non-falsy-string|null"),
+        ("FILTER_VALIDATE_MAC", "non-falsy-string|null"),
+        // `''` and `'0'` both validate as domains — measured, against upstream's
+        // `non-empty-string`. See the rule's own doc.
+        ("FILTER_VALIDATE_DOMAIN", "string|null"),
+        ("FILTER_SANITIZE_EMAIL", "string|null"),
+        ("FILTER_SANITIZE_URL", "string|null"),
+        ("FILTER_SANITIZE_NUMBER_INT", "string|null"),
+        ("FILTER_SANITIZE_FULL_SPECIAL_CHARS", "string|null"),
+        ("FILTER_DEFAULT", "string|null"),
+        ("FILTER_UNSAFE_RAW", "string|null"),
+    ] {
+        // A `mixed` subject: nothing is proven about the input, so the failure
+        // arm stands and `null` is what it spells.
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, {filter}, FILTER_NULL_ON_FAILURE)")),
+            format!("dumped type: {want}"),
+            "{filter}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_reads_the_flag_out_of_an_options_array_literal() {
+    // `['flags' => FILTER_NULL_ON_FAILURE]` is the documented spelling and the
+    // one `filterVar.php` uses once per filter block.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT, ['flags' => FILTER_NULL_ON_FAILURE])"),
+        "dumped type: int|null"
+    );
+    // An empty literal carries no flags at all — same as an absent argument.
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_BOOL, [])"), "dumped type: bool");
+}
+
+#[test]
+fn filter_var_validate_bool_is_plain_bool_without_the_null_flag() {
+    // `false` is BOTH the failure value and a valid parse of `'false'`/`'off'`,
+    // so `bool|false` IS `bool` — the one base whose `T|false` has a `Fact`.
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_BOOL)"), "dumped type: bool");
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_BOOLEAN)"), "dumped type: bool");
+    assert_eq!(dump("string $s", "filter_var($s, FILTER_VALIDATE_BOOL)"), "dumped type: bool");
+}
+
+#[test]
+fn filter_var_success_proven_inputs_lose_the_failure_arm() {
+    // `filter_var($int, FILTER_VALIDATE_INT)` is the identity over the whole int
+    // range, both edges included — so the input's own refinement rides through.
+    assert_eq!(dump("int $i", "filter_var($i, FILTER_VALIDATE_INT)"), "dumped type: int");
+    assert_eq!(
+        dump("int $i", "filter_var($i, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: int"
+    );
+    assert_eq!(dump("bool $b", "filter_var($b, FILTER_VALIDATE_BOOL)"), "dumped type: bool");
+    assert_eq!(
+        dump("bool $b", "filter_var($b, FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: bool"
+    );
+    // An `int` always validates as a float, and the value is the `(float)` cast.
+    assert_eq!(dump("int $i", "filter_var($i, FILTER_VALIDATE_FLOAT)"), "dumped type: float");
+    // A sanitizer cannot fail on a value the domain denotes (all scalars or null).
+    assert_eq!(dump("string $s", "filter_var($s, FILTER_SANITIZE_EMAIL)"), "dumped type: string");
+}
+
+#[test]
+fn filter_var_success_proven_inputs_keep_their_own_refinement() {
+    // `int<0, 9>` in, `int<0, 9>` out: the identity is the identity.
+    assert_eq!(
+        dump_doc("@param int<0, 9> $i", "int $i", "filter_var($i, FILTER_VALIDATE_INT)"),
+        "dumped type: int<0, 9> (asserted)"
+    );
+    // `FILTER_DEFAULT` is the `(string)` cast, so a `non-empty-string` survives it.
+    assert_eq!(
+        dump_doc("@param non-empty-string $s", "string $s", "filter_var($s, FILTER_DEFAULT)"),
+        "dumped type: non-empty-string (asserted)"
+    );
+}
+
+#[test]
+fn filter_var_default_is_the_string_cast_of_whatever_it_is_given() {
+    assert_eq!(dump("string $s", "filter_var($s)"), "dumped type: string");
+    assert_eq!(dump("string $s", "filter_var($s, FILTER_UNSAFE_RAW)"), "dumped type: string");
+    // The cast grid's own rows, reached through it rather than restated here.
+    assert_eq!(dump("int $i", "filter_var($i)"), "dumped type: numeric-uncased-string");
+    assert_eq!(dump("bool $b", "filter_var($b)"), "dumped type: ''|'1'");
+}
+
+#[test]
+fn filter_var_declines_a_true_false_outcome_rather_than_widening() {
+    // `int|false` has no `Fact`; a widened `int|bool` would claim `true` is
+    // possible. Every one of these is the `T|false` half, and every one stays
+    // `unknown` until issue #600 gives the domain a spelling for it.
+    for filter in [
+        "FILTER_VALIDATE_INT",
+        "FILTER_VALIDATE_FLOAT",
+        "FILTER_VALIDATE_EMAIL",
+        "FILTER_VALIDATE_URL",
+        "FILTER_VALIDATE_IP",
+        "FILTER_VALIDATE_MAC",
+        "FILTER_VALIDATE_DOMAIN",
+    ] {
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, {filter})")),
+            "dumped type: unknown",
+            "{filter}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_declines_a_float_input_under_validate_float() {
+    // NOT an omission: `filter_var(NAN, FILTER_VALIDATE_FLOAT)` is `false` (so is
+    // `INF`, so is `-INF`), and `-0.0` comes back `+0.0` — the value is coerced
+    // to a string first. Upstream's fixture asserts a flat `float` here; the
+    // probe refutes it, so the row is deliberately not won.
+    assert_eq!(dump("float $f", "filter_var($f, FILTER_VALIDATE_FLOAT)"), "dumped type: unknown");
+    assert_eq!(
+        dump("float $f", "filter_var($f, FILTER_VALIDATE_FLOAT, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: float|null"
+    );
+}
+
+#[test]
+fn filter_var_declines_a_nullable_input_as_a_success_proof() {
+    // `filter_var(null, FILTER_VALIDATE_INT)` is `false`, so a `?int` proves
+    // nothing — the failure arm stands and `int|false` has no spelling.
+    assert_eq!(dump("?int $i", "filter_var($i, FILTER_VALIDATE_INT)"), "dumped type: unknown");
+    assert_eq!(
+        dump("?int $i", "filter_var($i, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: int|null"
+    );
+}
+
+#[test]
+fn filter_var_declines_the_array_shaping_flags() {
+    // `FILTER_REQUIRE_ARRAY`/`FILTER_FORCE_ARRAY` make the result an array —
+    // the `filter_var_array` slice's business, not this scalar rung's. A flag
+    // the rule cannot read declines the WHOLE call, never just that flag.
+    for flag in ["FILTER_REQUIRE_ARRAY", "FILTER_FORCE_ARRAY", "FILTER_REQUIRE_SCALAR"] {
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, FILTER_VALIDATE_INT, {flag})")),
+            "dumped type: unknown",
+            "{flag}"
+        );
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, FILTER_VALIDATE_BOOL, ['flags' => {flag}])")),
+            "dumped type: unknown",
+            "{flag}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_declines_the_string_modifying_and_unmodeled_flags() {
+    // These rewrite the SUCCESS value (`FILTER_DEFAULT` stops being the
+    // identity), turn `''` into `null` on the success path, or delete the
+    // failure arm through an exception this rung has no PHP-minor gate for.
+    for flag in [
+        "FILTER_FLAG_STRIP_LOW",
+        "FILTER_FLAG_STRIP_HIGH",
+        "FILTER_FLAG_STRIP_BACKTICK",
+        "FILTER_FLAG_ENCODE_LOW",
+        "FILTER_FLAG_ENCODE_HIGH",
+        "FILTER_FLAG_ENCODE_AMP",
+        "FILTER_FLAG_NO_ENCODE_QUOTES",
+        "FILTER_FLAG_EMPTY_STRING_NULL",
+        "FILTER_THROW_ON_FAILURE",
+    ] {
+        assert_eq!(
+            dump("string $s", &format!("filter_var($s, FILTER_DEFAULT, {flag})")),
+            "dumped type: unknown",
+            "{flag}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_accepts_the_type_neutral_restricting_flags() {
+    // These only restrict which inputs validate; measured no-ops for every cell
+    // of the grid, so the answer is the one the flag-less call gives.
+    for flag in [
+        "FILTER_FLAG_NONE",
+        "FILTER_FLAG_ALLOW_OCTAL",
+        "FILTER_FLAG_ALLOW_HEX",
+        "FILTER_FLAG_IPV4",
+        "FILTER_FLAG_IPV6",
+        "FILTER_FLAG_HOSTNAME",
+        "FILTER_FLAG_EMAIL_UNICODE",
+        "FILTER_FLAG_NO_PRIV_RANGE",
+        "FILTER_FLAG_NO_RES_RANGE",
+        "FILTER_FLAG_GLOBAL_RANGE",
+        "FILTER_FLAG_PATH_REQUIRED",
+        "FILTER_FLAG_QUERY_REQUIRED",
+    ] {
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, FILTER_VALIDATE_BOOL, {flag})")),
+            "dumped type: bool",
+            "{flag}"
+        );
+        assert_eq!(
+            dump("int $i", &format!("filter_var($i, FILTER_VALIDATE_INT, {flag})")),
+            "dumped type: int",
+            "{flag}"
+        );
+    }
+    // A literal `0` is the documented "no flags".
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_BOOL, 0)"), "dumped type: bool");
+}
+
+#[test]
+fn filter_var_declines_an_unreadable_flags_argument() {
+    // A variable carries no proven value (issue #168) — `filterVar.php` spends a
+    // row per filter block on `$nullFilter = \FILTER_NULL_ON_FAILURE`.
+    assert_eq!(
+        dump("$m, int $flags", "filter_var($m, FILTER_VALIDATE_INT, $flags)"),
+        "dumped type: unknown"
+    );
+    // A `|` combination lowers to `Other`: the value lane represents comparisons
+    // only, so there is no bit-set to read.
+    assert_eq!(
+        dump(
+            "$m",
+            "filter_var($m, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4)"
+        ),
+        "dumped type: unknown"
+    );
+    // A bare non-zero int is not a recognized NAME.
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 134217728)"), "dumped type: unknown");
+    // An unrecognized flag constant declines like any other unreadable one.
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, PHP_EOL)"), "dumped type: unknown");
+}
+
+#[test]
+fn filter_var_declines_an_options_array_carrying_any_other_key() {
+    // `'default'` REPLACES the failure value with an arbitrary one; `min_range`
+    // narrows the success arm. One unrecognized key declines the whole literal.
+    for options in [
+        "['options' => ['default' => 0]]",
+        "['options' => ['min_range' => 1], 'flags' => FILTER_NULL_ON_FAILURE]",
+        "['flags' => FILTER_NULL_ON_FAILURE, 'options' => ['default' => 0]]",
+        "[FILTER_NULL_ON_FAILURE]",
+    ] {
+        assert_eq!(
+            dump("$m", &format!("filter_var($m, FILTER_VALIDATE_INT, {options})")),
+            "dumped type: unknown",
+            "{options}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_declines_an_unreadable_or_unrecognized_filter() {
+    // A dynamic filter has no name to key on.
+    assert_eq!(dump("$m, int $f", "filter_var($m, $f)"), "dumped type: unknown");
+    assert_eq!(dump("$m", "filter_var($m, 257)"), "dumped type: unknown");
+    // `FILTER_CALLBACK` returns whatever a userland callback returns.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_CALLBACK, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: unknown"
+    );
+    // `FILTER_VALIDATE_REGEXP` needs a `'regexp'` option, and an options array is
+    // itself a decline — so every call this rung could answer raises
+    // `ValueError: filter_var(): "regexp" option is missing` at 8.5.9.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_REGEXP, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: unknown"
+    );
+    // A `Qualified`/`Relative` spelling never denotes the global constant.
+    assert_eq!(
+        dump("$m", "filter_var($m, Foo\\FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn filter_var_is_the_only_name_in_the_family_this_rung_answers() {
+    // `filter_var_array` and `filter_input*` answer arrays; they are out of the
+    // rung's scope by construction, not by omission. Whatever each name's own
+    // floor already said is what it still says — this rung adds nothing, and
+    // above all never the `int|null` the `filter_var` spelling earns.
+    for call in [
+        "filter_var_array($m, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)",
+        "filter_input(INPUT_GET, 'k', FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)",
+        "filter_input_array(INPUT_GET, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)",
+    ] {
+        assert_ne!(dump("$m", call), "dumped type: int|null", "{call}");
+    }
+}
+
+#[test]
+fn filter_vars_declaration_and_arity_gates_still_govern() {
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(filter_var($s, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)); }\n";
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: int|null");
+    // A declaration that is no longer the bare `mixed` the rule was written
+    // against withholds it.
+    let mut mock = Mock::sidecar();
+    mock.types.insert("filter_var".to_owned(), "string|false".to_owned());
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    // So does a MOVED signature: the rule reads all three arguments positionally
+    // (ADR-0064 Amendment B's second leg, the only countersignature a `mixed`
+    // declaration leaves).
+    let mut mock = Mock::sidecar();
+    mock.arities.insert("filter_var".to_owned(), (4, 1));
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    // And an absent sidecar withholds it outright.
+    let mut mock = Mock::sidecar();
+    mock.types.remove("filter_var");
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+}
+
+/// The A9 monkey-patch leg: a project function sharing the simple name is what
+/// the call resolves to, so the builtin's grid says nothing about it.
+#[test]
+fn a_project_function_named_filter_var_shadows_the_rule() {
+    let src = "<?php\nfunction filter_var($v, $f = null, $o = null) { return 1; }\n\
+               function f(string $s): void { \\PHPStan\\dumpType(filter_var($s, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)); }\n";
+    assert_ne!(one_type_with(src, &mut Mock::sidecar()), "dumped type: int|null");
 }
