@@ -245,6 +245,24 @@ construction: its `'regexp'` option lives in the array shape that declines, so
 every call the rung could answer raises a `ValueError` instead of returning.
 `filter_var_array` and `filter_input*` answer arrays and have no rule at all.
 
+**`sscanf`'s `%u` and the whole of `fscanf`** (issue #617). The format-shaped
+return rule answers every specifier the four-layer domain can spell and declines
+the rest, both declines being the same domain gap `filter_var` hits above.
+`%u` reinterprets a negative value as unsigned and re-renders it, so
+`sscanf('-8', '%u')` is the *string* `'18446744073709551608'` and the slot is
+genuinely `int|string|null` — a two-base union no shape slot states — and one
+unreadable specifier declines the whole call rather than emit a `mixed` slot.
+`fscanf` shares the format table exactly and cannot use it: it reflects
+`array|int|false|null`, and a `Fact::Shape` carries a `nullable` side-flag and no
+`false` one, so the answer would be unsound rather than coarse. Two further rows
+are declines **against** upstream PHPStan's fixtures, because the engine refutes
+them: a width on `%s` is an *upper* bound, so `sscanf('0', '%2s')` is `['0']` and
+the `non-falsy-string` credited to `%2s`/`%3s` is being read off those rows'
+literal subjects; and `%c` is not a one-byte non-empty string, since
+`sscanf(' ', '%c')` is `['']`. Independently, the `list($a, $b) = sscanf(…)`
+rows stay unknown — the answer is available at the call now, and reading it
+through a destructuring pattern is the separate list-destructure slice.
+
 **Objects** ([object-model.md](object-model.md)):
 
 - `__get`/`__set` are not modeled; `__call` is an absence-proof obstacle.
