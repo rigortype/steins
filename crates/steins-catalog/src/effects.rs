@@ -762,6 +762,17 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
 ///   about ARGUMENT reachability. Leaving them uncertified is what the issue-40
 ///   differ ranking was actually measuring: the SECOND `min($ints)` in a scope
 ///   answered nothing, because the first had already forgotten `$ints`.
+/// * **`filter_var`** (issue #597): `mixed $value, int $filter, array|int
+///   $options`, all three by value at `PINNED_PHP` (`isPassedByReference()` is
+///   `false` for each). Not [`foldable`]: what a filter ACCEPTS depends on the
+///   engine's own parsers, which says nothing about argument reachability. The
+///   `FILTER_CALLBACK` filter hands the value to a userland callback — also by
+///   value, so the callback's own frame is where any write lands, never the
+///   caller's variable. Uncertified, this cost exactly what issue #40 measured:
+///   the second `filter_var($s, …)` in a scope answered nothing, because the
+///   first had already forgotten `$s`. `filter_var_array` and `filter_input*`
+///   are deliberately absent — `filter_input_array`'s own `&$result` argument
+///   is a different question, and neither name has a rule here to serve.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream.
@@ -889,6 +900,9 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         "pow",
         "array_sum",
         "array_product",
+        // `filter_var` (issue #597): value, filter and options, all by value.
+        // The family's array-answering names are NOT here — see the doc above.
+        "filter_var",
     ];
     match out_params(name) {
         Some(positions) => Some(!positions.contains(&position)),
@@ -1594,6 +1608,21 @@ mod tests {
         for f in ["abs", "intdiv", "round", "floor", "ceil"] {
             assert_eq!(by_value_arg(f, 0), Some(true), "{f} is certified by value");
             assert!(foldable(f), "{f} is certified through the allowlist");
+        }
+    }
+
+    /// Issue #597: `filter_var`'s three parameters are by value, so a scope may
+    /// read the same variable through it as many times as it likes. It does not
+    /// become foldable, and the family's array-answering names stay uncertified.
+    #[test]
+    fn by_value_arg_certifies_filter_var_and_not_its_family() {
+        for p in 0..3 {
+            assert_eq!(by_value_arg("filter_var", p), Some(true), "filter_var position {p}");
+        }
+        assert_eq!(by_value_arg("FILTER_VAR", 0), Some(true), "filter_var folds case");
+        assert!(!foldable("filter_var"), "filter_var must NOT become foldable");
+        for f in ["filter_var_array", "filter_input", "filter_input_array"] {
+            assert_eq!(by_value_arg(f, 0), None, "{f} stays uncertified");
         }
     }
 
