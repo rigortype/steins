@@ -49,10 +49,14 @@ use crate::names::{PackageName, SectionName};
 /// more and with a wider blast radius than the operator itself: a `|` used to
 /// lower to `ArgValue::Other`, and an `Other` ELEMENT collapses its whole
 /// enclosing array literal to `Other`, so a schema-7 trace spells
-/// `['flags' => FILTER_A | FILTER_B]` as no array at all.
+/// `['flags' => FILTER_A | FILTER_B]` as no array at all. `9` is the literal-spread
+/// flattening (issue #616): `f(1, ...[2, 3])` used to lower to `ArgValue::Other`
+/// with `has_spread` raised and now lowers to the three-argument call it names, so
+/// a schema-8 trace both spells the value differently and reports an argument count
+/// this binary no longer believes unproven.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 8;
+pub const SCHEMA_VERSION: u32 = 9;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
