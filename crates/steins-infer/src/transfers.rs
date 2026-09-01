@@ -1212,11 +1212,12 @@ fn filter_success(kind: FilterKind, input: Option<&Fact>) -> (Fact, bool) {
             Some(cast) => (cast, true),
             None => general(Base::String),
         },
-        // A sanitizer rewrites its input, so only the *totality* survives: any
-        // value the domain denotes is a scalar or `null`, and every one of those
-        // sanitizes to a string.
+        // A sanitizer rewrites its input, so only the *totality* survives: every
+        // scalar and `null` sanitizes to a string, and an array is the one input
+        // class the fact has to rule out (`filter_var([1], FILTER_SANITIZE_EMAIL)`
+        // is `false`).
         FilterKind::Sanitize => match input {
-            Some(f) if !matches!(f, Fact::Shape { .. }) => {
+            Some(f) if fact_denotes_no_array(f) => {
                 (Fact::General { base: Base::String, nullable: false }, true)
             }
             _ => general(Base::String),
@@ -1246,6 +1247,27 @@ fn filter_success(kind: FilterKind, input: Option<&Fact>) -> (Fact, bool) {
             false,
         ),
         FilterKind::PlainString => general(Base::String),
+    }
+}
+
+/// Does this fact denote only scalars and `null`, at every alternative it admits?
+///
+/// The premise the sanitizer row on [`filter_var_transfer`] needs, and the one
+/// place the ARRAY stratum has two spellings that both matter: a fully-known
+/// array is a `Fact::Singleton(Val::Array(…))`, not only a `Fact::Shape`, so this
+/// asks the values rather than the layer. The [`FilterKind::Raw`] row needs no
+/// such test of its own — [`php_cast_fact`] already refuses an array to `string`
+/// (PHP writes `'Array'` with an `E_WARNING`), which is the same refusal.
+///
+/// [`php_cast_fact`]: crate::coerce::php_cast_fact
+fn fact_denotes_no_array(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(v) => !matches!(v, Val::Array(_)),
+        Fact::OneOf(vals) => !vals.iter().any(|v| matches!(v, Val::Array(_))),
+        // The abstract layers are scalar strata by construction: `Fact::Union`'s
+        // own doc records that an array arm has no place in them.
+        Fact::Refined { .. } | Fact::General { .. } | Fact::Union { .. } => true,
+        Fact::Shape { .. } => false,
     }
 }
 
