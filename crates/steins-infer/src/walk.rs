@@ -1300,7 +1300,10 @@ pub(crate) fn walk_trace(
 ///    site on its [`steins_syntax::InvalidatedVar`] entry (an unprovable occurrence
 ///    makes the entry `opaque`, with no sites), and each callee resolves with a known
 ///    signature — project ([`Param::by_ref`]) or catalog builtin
-///    ([`steins_catalog::by_value_arg`]). An unknown callee refuses.
+///    ([`steins_catalog::by_value_arg`]). An unknown callee refuses. An occurrence is
+///    a bare `$v` argument or a pure offset chain rooted at one (`count($v[0])` —
+///    issue #609): a by-value position copies the element out and the root survives;
+///    a by-ref one writes through the chain into the root's binding and condemns it.
 /// 2. The argument is by value at that position (call-time pass-by-reference was
 ///    removed in PHP 8, so this is fixed by the declaration): a `&$x` parameter, an
 ///    argument past declared arity, or a variadic position refuses.

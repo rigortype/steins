@@ -2024,6 +2024,9 @@ impl StringContextKind {
 /// One local variable a statement hands to a call — its name plus ADR-0070 evidence. The
 /// syntax layer only guarantees completeness: `sites` lists EVERY occurrence in the
 /// statement's call arguments, or `opaque` is set and `sites` is empty — no third state.
+/// An occurrence is a bare `$v` argument or a pure offset chain rooted at one (`$v[0]`,
+/// issue #609) — the root is the name recorded, since a by-ref write through the chain
+/// lands in the root's binding.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct InvalidatedVar {

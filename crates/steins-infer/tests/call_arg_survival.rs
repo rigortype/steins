@@ -429,6 +429,80 @@ fn language_constructs_are_untouched_by_this_path() {
     assert_eq!(dump_after("$s = 'abc'; unset($s);"), "dumped type: unknown");
 }
 
+// The offset-argument spelling (issue #609): `f($a[0])` hands the ELEMENT to
+// the callee, so a by-ref parameter writes through the reference into `$a` —
+// the enclosing array's binding is what the statement may change. The chain's
+// root takes the same site/opaque rules a bare `$v` argument gets, and
+// `by_value_survivors` does the rest unchanged.
+
+#[test]
+fn a_by_ref_offset_argument_invalidates_the_enclosing_array() {
+    // The issue's own repro: `sort($s[0])` sorts the element in place; the
+    // pre-call shape is a false fact afterwards.
+    assert_eq!(dump_after("$s = ['x']; sort($s[0]);"), "dumped type: unknown");
+    // `settype`'s statement-position cast seed (issue #595) refuses offset
+    // targets, so nothing rebinds over the drop either.
+    assert_eq!(dump_after("$s = ['y']; settype($s[0], 'int');"), "dumped type: unknown");
+    // The entry records the chain's ROOT, whatever the depth.
+    assert_eq!(dump_after("$s = [['x']]; sort($s[0][0]);"), "dumped type: unknown");
+    // An out-param position spelled as a slot: `$s[0]` is `preg_match`'s
+    // `&$matches`, so the enclosing array drops while the subject survives.
+    assert_eq!(
+        dump_after("$s = [1]; preg_match('/a/', 'aaa', $s[0]);"),
+        "dumped type: unknown"
+    );
+    // A project declaration's by-ref bit is read exactly as for a bare `$v`.
+    let by_ref = "<?php\nfunction g(string &$x): void {}\n\
+                  function f(): void { $s = ['abc']; g($s[0]); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(by_ref), "dumped type: unknown");
+}
+
+#[test]
+fn a_by_value_offset_argument_keeps_the_enclosing_array() {
+    // The callee copies the element out; the array is never reachable from it,
+    // so the ADR-0070 survival applies to the root with no further evidence.
+    assert_eq!(dump_after("$s = ['ab']; strlen($s[0]);"), "dumped type: list{'ab'}");
+    assert_eq!(dump_after("$s = ['ab']; trim($s[0]);"), "dumped type: list{'ab'}");
+    let by_value = "<?php\nfunction g(string $x): void {}\n\
+                    function f(): void { $s = ['abc']; g($s[0]); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(by_value), "dumped type: list{'abc'}");
+}
+
+#[test]
+fn an_unprovable_offset_occurrence_drops_the_enclosing_array() {
+    // Unknown callee: silence is not a by-value promise — same as a bare `$s`.
+    assert_eq!(dump_after("$s = ['ab']; my_helper($s[0]);"), "dumped type: unknown");
+    // Method call: no site may vouch, the entry is opaque, the blanket drop stays.
+    let method = "<?php\nclass C { public function m(string $x): void {} }\n\
+                  function f(): void { $s = ['ab']; $c = new C(); $c->m($s[0]);\n\
+                  \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(method), "dumped type: unknown");
+}
+
+#[test]
+fn the_offset_spelling_shares_the_bare_variable_exceptions() {
+    // The key expression is a read, not an argument: `$i` survives untouched
+    // while the root drops.
+    let key = "<?php\nfunction f(): void { $i = 0; $s = ['x']; sort($s[$i]);\n\
+               \\PHPStan\\dumpType($i); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(
+        types(key),
+        vec!["dumped type: 0".to_owned(), "dumped type: unknown".to_owned()]
+    );
+    // A dump-family read binds nothing, offset spelling included — `var_dump`'s
+    // variadic position could never promise by-value, but a read needs no promise.
+    assert_eq!(dump_after("$s = ['x']; var_dump($s[0]);"), "dumped type: list{'x'}");
+    // A chain that leaves pure offsets on its way to the variable roots in a
+    // different carrier (the heap's), and records nothing here: the OBJECT
+    // handle in the element is shared either way, so its fact was never the
+    // array binding's to keep. The dump's element spelling is not the point —
+    // the pin is that it reads the same PAST the unknown callee.
+    let through_prop = "<?php\nclass C { public array $p = ['x']; }\n\
+                        function f(): void { $s = [new C()]; my_helper($s[0]->p[0]);\n\
+                        \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(through_prop), "dumped type: list{mixed}");
+}
+
 #[test]
 fn the_site_list_is_complete_or_absent_per_name() {
     // Syntax layer's invariant, observed through behavior: a name with even
