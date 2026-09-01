@@ -290,7 +290,7 @@ snapshot is that same component, read where the `new` site mints its object.
 
 The copy-back runs after the statement's escape-and-sweep pass, so the sweep is
 the **decline floor** for free: an unresolvable target, a guarded-refused one, a
-poisoned scope, named or spread arguments, the budget, a recursion pair, a
+poisoned scope, named or general-spread arguments, the budget, a recursion pair, a
 generator, a resolved static target (which carries no `$this` at all), an
 `Opaque` `may_return` exit and an exit at which `$this` is gone all leave it
 standing. Two statement-scoped guards decline a composition that cannot be
@@ -306,7 +306,7 @@ condition reads the bit off the object rather than off the walk's flavour, which
 is where the rule lives — `seed_this_object` pre-escapes every other `$this`.
 
 Where the descent declines — no constructor, abstract, unresolvable, poisoned on
-either side, a named or spread argument list, the depth budget, a recursion pair,
+either side, a named or general-spread argument list, the depth budget, a recursion pair,
 every path throwing, or an exit at which `$this` is gone — the site keeps the
 object `new_heap_object` builds under the ADR-0086 §4 lexical gate, unchanged.
 That gate is now the floor for undescended constructors and nothing else.

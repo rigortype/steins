@@ -822,6 +822,15 @@ not spell as a literal — keeps the refusal exactly as written. The flag
 therefore means what all six readers already asked it, and the deferred
 line is discharged for the case that can be answered syntactically.
 
+`CallExpr::positional_only` moves with the flag, and its reader set is the
+wider of the two — a flattened literal spread is a fully positional call, so
+every gate spelled "positional only" now admits one. That is the same
+soundness claim, not a second one: the list is complete and in order, which
+is exactly what those gates require. It does mean the surface is wider than
+the six `has_spread` readers, which is why the movement was measured rather
+than argued (conformance corpus: 19 rows changed, all 19 inside the 37
+unpacking rows, no collateral movement; seed ledger unchanged).
+
 The discharge is deliberately not the whole of the deferred line. "Proven
 `Singleton` arrays" also covers `$a = [1, 2]; f(...$a);`, where the proof
 arrives at the inference layer rather than the lowering seam; that needs a
