@@ -955,16 +955,25 @@ the same expression over `@param array{k: int}` answered `true`.
    declared-but-uninitialized one the heap does not answer, and **a path deeper
    than one offset**, which A-G4's depth-one projection does not reach. Both
    answer the `bool` floor.
-4. **`empty(…)`.** `lower_cond` models it as `!isset(e) || !e`; the second
+4. **A variable holding an object.** `$o = new C(); isset($o)` is `true` in PHP
+   and answers `bool` here: an object binding lives in the heap store's
+   reference table, not as an env `Fact`, and the store's binding record does not
+   on its own separate a proven allocation from a declared — possibly nullable —
+   receiver. Deciding it wants that distinction first.
+5. **`empty(…)`.** `lower_cond` models it as `!isset(e) || !e`; the second
    disjunct is a truthiness reading of the operand's value, a question this
    carrier does not carry. Its own slice, with its own measurement.
 
 ### H4. Measurement
 
 nsrt: 96 rows moved, every one an `isset` row or a variable bound from one, in
-exactly two buckets — 50 `differ → match` (42 `bool`, 7 `true`, 1 `false`) and 46
+exactly two buckets — 52 `differ → match` (42 `bool`, 7 `true`, 3 `false`) and 44
 `differ → differ`, all `unknown → bool`, a precision gain that does not reach the
-asserted verdict. Headline `match` 2892 → 2942, `differ` 9984 → 9934; `equal`,
+asserted verdict. Headline `match` 2892 → 2944, `differ` 9984 → 9932; `equal`,
 `subsumed`, `unsupported` and `skipped` unmoved, and no row regressed in any
-direction. `SCHEMA_VERSION` 6 → 7, since `ArgValue` is persisted trace IR
-(ADR-0092 §2) and a schema-6 trace spells the construct `Other`.
+direction. The 44 short rows are the deferrals above plus subjects whose own
+fact the walk does not carry — an array-union receiver, a two-array-arm declared
+return the arm lane keeps out of the value lane (A-G3), and a literal
+invalidated by an intervening call. `SCHEMA_VERSION` 6 → 7, since `ArgValue` is
+persisted trace IR (ADR-0092 §2) and a schema-6 trace spells the construct
+`Other`.

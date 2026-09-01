@@ -125,6 +125,19 @@ fn the_table_holds_over_a_witnessed_literal_without_the_asserted_marker() {
     assert_eq!(witnessed("isset($z['nope'])"), "false");
 }
 
+/// PHP's own array-key cast, through the same `offset_key_of` primitive the read
+/// and write sides use — so `$a[0]` and `$a["0"]` are one key here too, and a key
+/// outside a proven array is absent whatever its spelling.
+#[test]
+fn the_key_cast_over_a_proven_array_is_phps_own() {
+    let body = "    $z = [1, 2, 3];\n\
+         \\PHPStan\\dumpType(isset($z[0]));\n\
+         \\PHPStan\\dumpType(isset($z['0']));\n\
+         \\PHPStan\\dumpType(isset($z[5]));\n\
+         \\PHPStan\\dumpType(isset($z['string']));";
+    assert_eq!(dumps("function f(): void", body), vec!["true", "true", "false", "false"]);
+}
+
 /// The stratum half of #260's ruling, pinned separately from the verdict half so
 /// a later refactor cannot collapse them: the undecided answer is the
 /// construct's own guarantee and is Verified even where the subject is not.
