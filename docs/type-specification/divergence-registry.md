@@ -172,7 +172,7 @@ happen to be legible. Where PHPStan unifies `@param \Closure():T $t1` with
 supports**, and narrower-than-true is the direction this family refuses even at
 the Asserted grade, because contract arms feed narrowing and the dump surface.
 Two occurrences that disagree decline for the same reason, where PHPStan joins
-or errors. A named or spread argument list declines the whole call, because
+or errors. A named or general-spread argument list declines the whole call, because
 position stops naming a parameter. A **bounded**
 template reads its bound rather than the value carried at it — `@template T of
 int` under `@param Box<T>` handed `new Box(1)` reads `int`, where PHPStan reads

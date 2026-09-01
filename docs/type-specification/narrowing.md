@@ -82,7 +82,7 @@ copy and the caller's binding is untouchable; `array_first($a)` therefore leaves
    through this path at all.
 
 Anything else keeps the blanket drop, and so do the v1 exclusions: method,
-static and constructor calls, dynamic callees, named and spread arguments,
+static and constructor calls, dynamic callees, named and general-spread arguments,
 variadic positions, and the `Opaque` write set above. `preg_match($re, $s, $m)`
 is the shape of the whole rule — `$s` survives, `$m` does not. Survival and
 *assignment* are different questions: a name the drop condemns here can still be
@@ -339,7 +339,7 @@ The seed refuses, silently and with no finding of its own, whenever a premise is
 missing: a pattern that is not a proven `Singleton` string, a pattern the group
 reader declines, a flags argument that is not a proven `0` (`PREG_OFFSET_CAPTURE`
 and `PREG_UNMATCHED_AS_NULL` both change the entry shape and neither is
-modelled), a named or spread argument, a callee that does not denote the global
+modelled), a named or general-spread argument, a callee that does not denote the global
 `preg_match` (the rule under [Guards](#guards)), a poisoned scope, and an out-parameter argument that is anything but a plain
 local variable — `$this->m` and `$row['m']` are refused, because the write may
 be visible to callers this scope cannot see.
