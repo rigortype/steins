@@ -52,6 +52,10 @@ impl Mock {
             // pins the rule without bounding it.
             ("abs", "int|float"),
             ("pow", "object|int|float"),
+            // `sscanf` (issue #617): `array|int|null` at 8.5.9 — a three-member
+            // union with an array arm, so it lowers to no `Fact` and the
+            // declaration pin stands alone, as `explode`'s `array` does.
+            ("sscanf", "array|int|null"),
         ] {
             types.insert(f.to_owned(), t.to_owned());
         }
@@ -79,6 +83,12 @@ impl Mock {
             // the signature they were written against (issue #40).
             ("abs".to_owned(), (1, 1)),
             ("pow".to_owned(), (2, 2)),
+            // `sscanf(string $string, string $format, mixed &...$vars)` at
+            // 8.5.9: three declared, two required, variadic (issue #617). The
+            // declaration is not a bare `mixed`, so Amendment B does not force
+            // this leg — the rule carries it because it reads argument 1
+            // positionally and dispatches on the argument COUNT.
+            ("sscanf".to_owned(), (3, 2)),
         ]);
         // `var_export`'s `?string` envelope sits one rung below the transfer, so
         // the null-strip reads as a refinement, not an answer from nowhere.
@@ -1382,4 +1392,252 @@ fn a_project_function_named_filter_var_shadows_the_rule() {
     let src = "<?php\nfunction filter_var($v, $f = null, $o = null) { return 1; }\n\
                function f(string $s): void { \\PHPStan\\dumpType(filter_var($s, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE)); }\n";
     assert_ne!(one_type_with(src, &mut Mock::sidecar()), "dumped type: int|null");
+}
+
+// sscanf: the argument COUNT decides, then the literal format (issue #617).
+//
+// Every expectation below is a `php -r` measurement at PINNED_PHP (8.5.9), not a
+// transcription of `sscanf.php` — which the measurements refute in four places
+// (`%s`'s width, `%c`'s width, `%u`'s base, and bare `%s`'s emptiness).
+
+#[test]
+fn sscanf_dispatches_on_the_argument_count_before_it_reads_the_format() {
+    // Three or more arguments is the by-reference form, whose return is the
+    // COUNT of assigned conversions — the format never enters it. Measured:
+    // `sscanf('20-20', '%d-%d', $a, $b) === 2`, `sscanf('zz', '%d', $c) === 0`,
+    // `sscanf('', '%d', $d) === -1`.
+    assert_eq!(
+        dump("string $s", "sscanf('20-20', '%d-%d', $first, $second)"),
+        "dumped type: int|null"
+    );
+    // ...including when the format is NOT a literal, which is the whole point of
+    // keying on the count first.
+    assert_eq!(dump("string $s", "sscanf($s, $s, $first, $second)"), "dumped type: int|null");
+    // A single by-ref tail argument is still the by-reference form.
+    assert_eq!(dump("string $s", "sscanf($s, '%d', $only)"), "dumped type: int|null");
+}
+
+#[test]
+fn sscanf_below_two_arguments_declines_and_stays_declined() {
+    // Not a legal call, so there is no return to describe. This is also what
+    // keeps `call_arg_survival.rs`'s `sscanf($s)` pin green without an edit.
+    assert_eq!(dump("string $s", "sscanf($s)"), "dumped type: unknown");
+    assert_eq!(dump("", "sscanf()"), "dumped type: unknown");
+}
+
+#[test]
+fn sscanf_with_a_non_literal_format_proves_only_the_outer_arm() {
+    // Two arguments and nothing known about the conversions: `array|null`, and
+    // never a tuple.
+    assert_eq!(dump("string $s", "sscanf($s, $s)"), "dumped type: array|null");
+    assert_eq!(dump("string $s, string $f", "sscanf($s, $f)"), "dumped type: array|null");
+}
+
+#[test]
+fn sscanf_gives_one_nullable_slot_per_integer_conversion() {
+    // `%d` `%D` `%i` `%o` `%x` `%X` `%n` all measured `int|null`. `%D`, `%i` and
+    // `%X` are accepted by the engine and exercised by no fixture row; `%n`
+    // (characters consumed) still nulls when an earlier conversion fails.
+    for f in ["%d", "%D", "%i", "%o", "%x", "%X", "%n"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: list{int|null}|null",
+            "specifier {f}"
+        );
+    }
+}
+
+#[test]
+fn sscanf_gives_one_nullable_slot_per_float_conversion() {
+    // `%e` `%E` `%f` `%g` measured `float|null`. `%F` and `%G` are REJECTED by
+    // the engine — the roster is not symmetric in case — so they decline below.
+    for f in ["%e", "%E", "%f", "%g"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: list{float|null}|null",
+            "specifier {f}"
+        );
+    }
+    for f in ["%F", "%G"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: unknown",
+            "specifier {f} is not in the engine's roster"
+        );
+    }
+}
+
+#[test]
+fn sscanf_string_conversions_split_on_whether_they_can_be_empty() {
+    // `%s` and a scanset can never come back `''` — a conversion with nothing to
+    // read fails into a `null` slot instead (0 empties in 40,000 randomized
+    // trials). `%c` CAN: `sscanf(' ', '%c') === ['']`.
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%s')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%[a-z]')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    assert_eq!(dump("string $s", "sscanf($s, '%c')"), "dumped type: list{string|null}|null");
+}
+
+#[test]
+fn a_width_bounds_the_read_from_above_and_refines_nothing() {
+    // THE REFUTATION (issue #617 open question 2). A width means *at most* N, so
+    // `sscanf('0', '%2s') === ['0']` — a falsy string. The fixture's
+    // `non-falsy-string` for `%2s`/`%3s` is reading its LITERAL subject
+    // ("123456"), not the width. Every width answers `non-empty-string`.
+    for f in ["%0s", "%1s", "%2s", "%3s", "%20s"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: list{non-empty-string|null}|null",
+            "width on {f} must not sharpen past non-empty"
+        );
+    }
+    // A width on an integer conversion refines nothing at all.
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%2x%2x%2x')"),
+        "dumped type: list{int|null, int|null, int|null}|null"
+    );
+    // And `%c` stays plain `string` at every width (open question 3).
+    for f in ["%0c", "%1c", "%2c"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: list{string|null}|null",
+            "width on {f} must not sharpen"
+        );
+    }
+}
+
+#[test]
+fn suppressed_conversions_contribute_no_slot() {
+    // `%*…` composes with widths and scansets; all measured to yield no slot.
+    assert_eq!(dump("string $s", "sscanf($s, '%*s %d')"), "dumped type: list{int|null}|null");
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%*d %s')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    assert_eq!(dump("string $s", "sscanf($s, '%*[a-z]%d')"), "dumped type: list{int|null}|null");
+    assert_eq!(dump("string $s", "sscanf($s, '%*2[a-z]%d')"), "dumped type: list{int|null}|null");
+    assert_eq!(dump("string $s", "sscanf($s, '%*20s%d')"), "dumped type: list{int|null}|null");
+}
+
+#[test]
+fn a_percent_escape_contributes_no_slot_and_takes_no_star_or_width() {
+    // `sscanf('abc', '%%') === []`, and `%*%`, `%0%`, `%2%` all THROW, so a
+    // decorated escape declines the whole call.
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%d%%%d')"),
+        "dumped type: list{int|null, int|null}|null"
+    );
+    for f in ["%*%", "%0%", "%2%"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: unknown",
+            "{f} throws at PINNED_PHP"
+        );
+    }
+}
+
+#[test]
+fn a_format_with_no_conversion_is_the_empty_shape() {
+    // `sscanf('abc', 'xyz') === []` — measured, and the honest answer.
+    assert_eq!(dump("string $s", "sscanf($s, 'xyz')"), "dumped type: array{}|null");
+    assert_eq!(dump("string $s", "sscanf($s, '')"), "dumped type: array{}|null");
+}
+
+#[test]
+fn one_unreadable_specifier_declines_the_whole_call() {
+    // The `filter_var` invariant: a flag the rule cannot read withholds
+    // everything rather than contributing a `mixed` slot. Each of these is a
+    // hard `ValueError: Bad scan conversion character` at PINNED_PHP.
+    for f in ["%q", "%d %q", "%q %d", "%a", "%b", "%h", "%hd", "% d", "%+d", "%.2f", "%1$d"] {
+        assert_eq!(
+            dump("string $s", &format!("sscanf($s, '{f}')")),
+            "dumped type: unknown",
+            "{f} must decline the whole call"
+        );
+    }
+    // A trailing lone `%` and an unclosed scanset are the same story — the
+    // engine rejects both outright.
+    assert_eq!(dump("string $s", "sscanf($s, '%d%')"), "dumped type: unknown");
+    assert_eq!(dump("string $s", "sscanf($s, '%[a-z')"), "dumped type: unknown");
+}
+
+#[test]
+fn percent_u_declines_because_its_slot_is_not_an_int() {
+    // THE FOURTH REFUTATION, which issue #617 did not anticipate:
+    // `sscanf('-8', '%u') === ['18446744073709551608']` — a STRING. The value is
+    // reinterpreted as unsigned and re-rendered when it leaves the signed range,
+    // so the true slot is `int|string|null`, a two-base union no shape slot here
+    // spells. The fixture's `array{int|null}|null` is unsound; this is the
+    // slice's one deliberate non-win.
+    assert_eq!(dump("string $s", "sscanf($s, '%u')"), "dumped type: unknown");
+    // And it declines the WHOLE call, not just its own slot.
+    assert_eq!(dump("string $s", "sscanf($s, '%d %u')"), "dumped type: unknown");
+}
+
+#[test]
+fn a_scanset_reads_its_own_bracket_grammar() {
+    // A `]` in the FIRST member position is a member, not the terminator, and a
+    // leading `^` negates. `bug-7563.php`'s `'%[%[]'` edge case is the one that
+    // needs both halves of this right.
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%[]a-z]')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%[^0-9]')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%[%[]')"),
+        "dumped type: list{non-empty-string|null}|null"
+    );
+    // `'%s [%d] at %[^:]:%d: %[^[]]'` — five slots, the trailing `]` literal.
+    assert_eq!(
+        dump("string $s", "sscanf($s, '%s [%d] at %[^:]:%d: %[^[]]')"),
+        "dumped type: list{non-empty-string|null, int|null, non-empty-string|null, int|null, non-empty-string|null}|null"
+    );
+}
+
+#[test]
+fn the_sscanf_arm_rides_on_its_declaration_and_its_arity() {
+    let src = "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(sscanf($s, '%d')); }\n";
+    assert_eq!(one_type_with(src, &mut Mock::sidecar()), "dumped type: list{int|null}|null");
+    // A declaration that has moved off `array|int|null` withholds the rule.
+    let mut mock = Mock::sidecar();
+    mock.types.insert("sscanf".to_owned(), "array|false".to_owned());
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    // So does a MOVED signature: the rule reads argument 1 positionally and
+    // dispatches on the argument count, so a php-src signature that grew a
+    // parameter in front of `$format` would leave both reads stale while
+    // `array|int|null` still held.
+    let mut mock = Mock::sidecar();
+    mock.arities.insert("sscanf".to_owned(), (4, 3));
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+    // And an absent sidecar withholds it outright.
+    let mut mock = Mock::sidecar();
+    mock.types.remove("sscanf");
+    assert_eq!(one_type_with(src, &mut mock), "dumped type: unknown");
+}
+
+/// The A9 monkey-patch leg, as for `filter_var`: a project function sharing the
+/// simple name is what the call resolves to.
+#[test]
+fn a_project_function_named_sscanf_shadows_the_rule() {
+    let src = "<?php\nfunction sscanf($s, $f) { return 1; }\n\
+               function f(string $s): void { \\PHPStan\\dumpType(sscanf($s, '%d')); }\n";
+    assert_ne!(one_type_with(src, &mut Mock::sidecar()), "dumped type: list{int|null}|null");
+}
+
+/// `fscanf` is deliberately NOT on this rung (see `sscanf_transfer`): it reflects
+/// `array|int|false|null`, and that `false` arm is not spellable — `Fact::Shape`
+/// carries a `nullable` side-flag and no `false` one. Answering `array{…}|null`
+/// for it would be unsound, not merely coarse.
+#[test]
+fn fscanf_is_not_on_this_rung() {
+    assert_eq!(dump("$r", "fscanf($r, '%d')"), "dumped type: unknown");
 }
