@@ -188,6 +188,17 @@ the refuting direction only.
   and `isset` in **value** position are `bool`/unknown against any array fact,
   declared or witnessed — they are implemented as guards, and the value transfer
   is unwritten.
+- The array transfers bind a **property-fetch subject** now (issue #610):
+  `count($o->p)`, `array_is_list($o->p)` and the projections read the
+  allocation-keyed heap the assignment form reads, so the two spellings cannot
+  disagree. What a property answers is therefore exactly what the walk proved
+  in-trace — a surviving construction default, or a write this scope performed.
+  A property whose only description is its declared `@var`, with no in-trace
+  value (a parameter-declared object, `$this` with no in-method write), still
+  answers nothing: the heap holds no declaration-derived property facts
+  anywhere (`seed_declared_param_object` seeds no props by design), and a rung
+  reading a declaration the plain read next door refuses would split the
+  spellings. That contract lane is its own slice, not a remainder of #610.
 
 **`settype`'s cast grid states only cells a probe measured** (issue #595). The
 statement-position write is real, and the cells it declines are the honest
