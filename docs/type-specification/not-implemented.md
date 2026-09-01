@@ -207,6 +207,31 @@ The vocabulary the row introduced (`WrittenWhen::CallReturns` plus the
 statement-position seed) is what `array_splice` and the other by-ref writers in
 the same bucket need, and none of them carries a witness yet.
 
+**`filter_var`'s `T|false` half has no fact to be stated in** (issue #597, the
+remainder issue #600 owns). The transfer answers the combinations the
+four-layer domain spells — every `FILTER_NULL_ON_FAILURE` outcome (`T|null`),
+`FILTER_VALIDATE_BOOL`'s plain `bool`, and the success-proven inputs whose
+failure arm vanishes — and declines the rest rather than widening it: `int|false`
+would have to become `int|bool`, which claims `true` is possible when it is not.
+That is the largest single decline in the rung, and it is a *domain* gap rather
+than a `filter_var` one. The smaller ones are the rule's own: a flags argument
+that is not a literal constant (a variable carries no proven value, and a `|`
+combination lowers to an unrepresentable operand, since the value lane models
+comparisons only), an options array carrying any key but `'flags'` (`'options'
+=> ['default' => …]` replaces the failure value outright, and `min_range` /
+`max_range` narrow a success arm the rung does not read), the array-shaping and
+string-rewriting flags, and `FILTER_THROW_ON_FAILURE` — a PHP 8.5 constant that
+deletes the failure arm and so would answer *more* than anything here, but needs
+a PHP-minor gate the rung does not carry. Two cells are declines **against**
+upstream PHPStan's own fixtures, because the engine refutes them: a `float`
+input under `FILTER_VALIDATE_FLOAT` is not proven (`NAN`/`INF`/`-INF` answer
+`false`, and `-0.0` returns `+0.0`), and `FILTER_VALIDATE_DOMAIN`'s success
+value is a plain `string`, not `non-empty-string` (`filter_var('',
+FILTER_VALIDATE_DOMAIN)` is `''`). `FILTER_VALIDATE_REGEXP` is unreachable by
+construction: its `'regexp'` option lives in the array shape that declines, so
+every call the rung could answer raises a `ValueError` instead of returning.
+`filter_var_array` and `filter_input*` answer arrays and have no rule at all.
+
 **Objects** ([object-model.md](object-model.md)):
 
 - `__get`/`__set` are not modeled; `__call` is an absence-proof obstacle.
