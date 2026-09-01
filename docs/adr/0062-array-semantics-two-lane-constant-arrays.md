@@ -877,3 +877,94 @@ nsrt unmoved (headline 2444, admissible 2872, empty transition matrix) — the
 harness's array fixtures do not exercise the refined-string key classes, which
 is itself a finding about coverage rather than about this change. fp-gate GREEN
 with no baseline movement; proof layer 0. Tests 4471 → 4477.
+
+## Amendment H (2026-09-01): `isset` decides in value position and nothing in guard position — PENDING ratification
+
+Issue [#579](https://github.com/rigortype/steins/issues/579), the value-position
+twin of [#414](https://github.com/rigortype/steins/issues/414). S4 gave the
+`isset` **guard** a representation and A-G9's corollary gave it a stratum
+discipline; the value side had neither, because `isset` is a construct rather
+than a call and its value lowering was `ArgValue::Other`. Nothing declined it —
+nothing was asked. Measured on master before the change, every value-position
+`isset` answered `unknown`, weaker than the `bool` PHP guarantees, while
+`array_key_exists` beside it answered `true` on the rung Amendment-era work
+built.
+
+The rule is [#343](https://github.com/rigortype/steins/issues/343)'s with one
+conjunct added, and it needs no new machinery: `array_key_exists` asks for
+presence, `isset` asks for presence **and** a provably non-null value, which
+`Fact::is_null` already answers as a `Certainty`. `shape_read`'s four outcomes
+map straight onto it — `Present(Some(v))` conjoins with `¬is_null(v)`,
+`Present(None)` is undecided (A-G1a's honest floor says nothing about `null`),
+`DeclaredAbsent` is `false`, and `MaybeMissing`/`Tail` are undecided on presence
+alone, so the null question is never reached. A required field whose value is
+provably `null` therefore answers `false` where `array_key_exists` answers
+`true`, which is a row that table has no place for and this one produces
+without a special case.
+
+### H1. The two lanes answer differently, and that is the design
+
+`eval_cond` still answers `Maybe` for `CondExpr::Isset` and
+`CondExpr::IssetVar`. The line it draws is the one S4 wrote down: the only
+evidence that could decide an `isset` guard is a shape fact, which is `Asserted`,
+and deciding **reachability** from a docblock would let an author's claim silence
+the env-free pass on a live path. Narrowing is that guard's whole payoff.
+
+A *value* is not a reachability claim. It is a fact like any other, and it
+carries the stratum of what it was derived from — so the same `Asserted` shape
+that must not prune a branch may perfectly well say what an expression evaluates
+to, because A-G9's corollary then keeps that value out of every proof-layer
+premise. Two lanes, two answers, one reason. Worth recording precisely because
+the pair looks inconsistent until the premise is named.
+
+### H2. Totality, and why the floor is not silence
+
+The carrier is total: `ArgValue::Isset` holds every operand, with
+`IssetOperand::Unmodelled` for the shapes the vocabulary does not spell, and the
+expression never widens back to `Other`. That is not conservatism, it is the
+correction — `isset` evaluates to a `bool` whatever it tests, so `unknown` was
+never the safe side of anything. Multi-argument `isset` is PHP's own conjunction
+and folds through `Certainty::and`, so one operand proving `false` decides the
+whole expression past unmodelled siblings.
+
+The proven-whole-array leg runs before the abstract one and is exact rather than
+conservative, which is what makes the table hold over a witnessed literal and not
+only over a declared shape. It exists because a *fully* literal array binds a
+`Fact::Singleton` of the value while one with an unresolved element binds a
+`Fact::Shape` (the Amendment C ladder), and the offset resolver reads only the
+latter — so without it `$z = ['k' => 1]; isset($z['k'])` answered `bool` while
+the same expression over `@param array{k: int}` answered `true`.
+
+### H3. What is deferred, and why each is deferred rather than missing
+
+1. **A never-bound variable.** PHP answers `false`; the seam answers `bool`. The
+   definedness lanes (`Scope::undefined_reads` / `maybe_undefined_reads`) are
+   computed at lowering with `isset` operands **excluded by construction** —
+   that exclusion is exactly what keeps the guard from reporting — so there is no
+   witness at the value seam to read. Reaching it means giving the lowering a
+   second, guard-blind read set, which is its own slice.
+2. **`isset($var)` answering `true`.** Decided, but only from a `Verified` fact.
+   ADR-0087 §4 states that `@var T|unset $x` means reads of `$x` may find no
+   binding, and `ContractTy::is_unset` is filtered out of the arm list before it
+   reaches the store — so a `T|unset` declaration and a plain `T` one leave the
+   value lane identical. The stratum is the available discriminator: `Asserted`
+   is an author's claim about a value, `Verified` is the walk's own record of a
+   binding form. The `false` leg needs no such gate, because bound-and-null and
+   never-bound both make `isset` false.
+3. **A property or static-property operand**, whose binding question is the
+   declared-but-uninitialized one the heap does not answer, and **a path deeper
+   than one offset**, which A-G4's depth-one projection does not reach. Both
+   answer the `bool` floor.
+4. **`empty(…)`.** `lower_cond` models it as `!isset(e) || !e`; the second
+   disjunct is a truthiness reading of the operand's value, a question this
+   carrier does not carry. Its own slice, with its own measurement.
+
+### H4. Measurement
+
+nsrt: 96 rows moved, every one an `isset` row or a variable bound from one, in
+exactly two buckets — 50 `differ → match` (42 `bool`, 7 `true`, 1 `false`) and 46
+`differ → differ`, all `unknown → bool`, a precision gain that does not reach the
+asserted verdict. Headline `match` 2892 → 2942, `differ` 9984 → 9934; `equal`,
+`subsumed`, `unsupported` and `skipped` unmoved, and no row regressed in any
+direction. `SCHEMA_VERSION` 6 → 7, since `ArgValue` is persisted trace IR
+(ADR-0092 §2) and a schema-6 trace spells the construct `Other`.
