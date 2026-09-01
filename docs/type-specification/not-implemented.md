@@ -125,9 +125,11 @@ assignment form does — `takesString($b->unwrap())`, `dumpType($b->get())`,
 each because the carrier has no way to say it: a **dynamic** receiver or method
 name (`$o->$m()`, `$obj[0]->m()`, `$var::m()`), a receiver deeper than one
 property hop (`$a->b->c->m()` — depth 1 is a `Receiver::Prop`, which is
-carried and then declines as a dispatch target by ADR-0052 §7), a **spread**
-argument list at the call (`$o->m(...$args)`, and the same for a plain
-function call), a method **first-class callable** (`$o->m(...)`, which is a
+carried and then declines as a dispatch target by ADR-0052 §7), a **general
+spread** in the argument list (`$o->m(...$args)`, `$o->m(...f())`, and the same
+for a plain function call — a spread of an array *literal* flattens into the
+list instead and is carried, issue #616), a method **first-class callable**
+(`$o->m(...)`, which is a
 value and not a call), a `static::` static class (late static binding), and a
 `clone`/property/offset expression in receiver position. A **nullsafe** call is
 carried but never rebound, in any position (§3.1) — the receiver may be `null`

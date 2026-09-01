@@ -790,3 +790,66 @@ already legible from the reported line and column, and a position tag on
 every collected reference would buy wording variety at the cost of a
 wider lowering contract. It remains available if the corpus shows readers
 mis-locating the reference.
+
+## Amendment (2026-09-02): a literal spread is not an unpacking
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: issue #616. This amendment discharges one deferred
+line in point 6's call-site conditions and sharpens the flag those
+conditions are written in terms of; the ladder, the ids, the layer and
+the floor are untouched.
+
+### A17. The condition was "count proven", not "no `...` token"
+
+Point 6 conditions the arity family on "no argument unpacking (`...$args`
+makes the count unproven; counting proven `Singleton` arrays is deferred,
+one line)". The parenthesis names the right test and then the
+implementation took the token for the test: **any** `...` raised
+`CallExpr::has_spread`, and six readers — the arity check, the guard
+refinement, the return-arm walk, the condition lane, the dump lane and
+the descent — read the flag as "this argument count is not proven".
+
+For `...$args` those are the same statement. For `...[1, 2, 3]` they are
+not: the operand's cardinality, order and values are all written in the
+source, so the flattened list **is** the argument list the call site
+spells. ADR-0001's array-literal rule already licenses reading it — the
+same rule that lets `f([1, 2, 3])` carry a shape into the callee.
+
+**Decision: a spread whose operand is an array literal flattens into the
+positional list at its written position, and does not raise the flag.**
+Every other spread — a variable, a call result, anything the source does
+not spell as a literal — keeps the refusal exactly as written. The flag
+therefore means what all six readers already asked it, and the deferred
+line is discharged for the case that can be answered syntactically.
+
+The discharge is deliberately not the whole of the deferred line. "Proven
+`Singleton` arrays" also covers `$a = [1, 2]; f(...$a);`, where the proof
+arrives at the inference layer rather than the lowering seam; that needs a
+spread carrier in the value IR and stays deferred. Measured on the
+conformance corpus, the syntactic half reaches 20 of the 37 unpacking
+rows and the deferred half the other 17 — 16 of which spread a function
+**parameter**, whose cardinality no lowering can prove and which only a
+variadic-join extension could ever reach.
+
+### A18. Flattening is bounded by PHP's own unpacking rule, measured
+
+The flattened list is the operand's **normalized values in iteration
+order**, not its written elements: PHP discards integer keys when
+unpacking (`f(...[2 => 'a', 0 => 'b'])` passes `'a', 'b'`), and the
+array literal's own last-wins fold can drop an element before unpacking
+sees it. Three cases decline rather than flatten, each for a reason the
+vocabulary already carries:
+
+- A **string key** is a *named* argument, legal since PHP 8.1 and bound
+  by name (`named(...['y' => 2])` fills `$y`, not `$x`). `ArgValue::Call`
+  has no named slot, so named arguments keep their existing refusal and a
+  string-keyed literal is refused with them.
+- A **non-literal key** is unresolvable under every rule (issue #336).
+- A literal whose auto-key positions **depend on the PHP minor** (the 8.3
+  next-auto-index change for negative keys) is not one the source names
+  unambiguously; `normalize_array` is asked with an unknown minor so that
+  it declines those and answers for the rest.
+
+A plain positional argument after any unpacking stays unanalyzable: PHP
+rejects that source at compile time, so there is no call there to answer
+about.
