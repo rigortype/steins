@@ -72,14 +72,55 @@ fn an_unrepresentable_operand_stays_in_the_tree() {
 
 #[test]
 fn non_comparison_operators_still_widen() {
-    // The node carries only operators an evaluator answers (Certainty discipline).
-    for src in ["1 + 1", "1 - 1", "2 * 3", "7 / 2", "7 % 2", "2 ** 3", "5 & 3", "5 | 3", "5 ^ 3",
+    // The node carries only operators SOME consumer answers (Certainty
+    // discipline). `|` is the one non-comparison member (issue #615) and has its
+    // own row below.
+    for src in ["1 + 1", "1 - 1", "2 * 3", "7 / 2", "7 % 2", "2 ** 3", "5 & 3", "5 ^ 3",
                 "1 << 2", "8 >> 1", "true && false", "true || false", "1 <=> 2"] {
         assert_eq!(lowered(src), ArgValue::Other, "`{src}` must not lower to the node yet");
     }
     // `.` keeps its own dedicated variant (issue #59), and `??` keeps `Coalesce`.
     assert!(matches!(lowered("'a' . 'b'"), ArgValue::Concat(..)));
     assert!(matches!(lowered("$a ?? 1"), ArgValue::Coalesce(..)));
+}
+
+#[test]
+fn a_bitwise_or_lowers_to_the_node_and_answers_nothing_of_its_own() {
+    // Issue #615: `|` joined the node for the `filter_var` flags roster, which
+    // resolves flag CONSTANTS by name. It reaches no fact seam — a bitwise `|`
+    // has no total floor, since GMP overloads it to return an object — so the
+    // node is carried structurally and stays unproven, exactly like a comparison
+    // nobody decided.
+    match lowered("5 | 3") {
+        ArgValue::Binary { op: ValueOp::BitOr, lhs, rhs } => {
+            assert_eq!(*lhs, ArgValue::Int(5));
+            assert_eq!(*rhs, ArgValue::Int(3));
+        }
+        other => panic!("lowered to {other:?}"),
+    }
+    // Left-nested, matching PHP associativity, so a three-term flag chain is two
+    // nodes rather than a flat list.
+    match lowered("FILTER_A | FILTER_B | FILTER_C") {
+        ArgValue::Binary { op: ValueOp::BitOr, lhs, rhs } => {
+            assert!(matches!(*lhs, ArgValue::Binary { op: ValueOp::BitOr, .. }));
+            assert!(matches!(*rhs, ArgValue::GlobalConst(_)));
+        }
+        other => panic!("lowered to {other:?}"),
+    }
+    let v = lowered("5 | 3");
+    assert!(!v.is_literal(), "a `|` is never a proven value");
+    assert!(!v.is_concrete_value());
+    assert_eq!(ValueOp::BitOr.symbol(), "|");
+    // The reason it is carried at all: an `Other` ELEMENT collapses its whole
+    // enclosing array literal, so with `|` unrepresented `['flags' => A | B]`
+    // was not an array and no rule could read even its key.
+    match lowered("['flags' => FILTER_A | FILTER_B]") {
+        ArgValue::Array(items) => {
+            assert_eq!(items.len(), 1);
+            assert!(matches!(items[0].1, ArgValue::Binary { op: ValueOp::BitOr, .. }));
+        }
+        other => panic!("lowered to {other:?}"),
+    }
 }
 
 #[test]
