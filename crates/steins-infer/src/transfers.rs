@@ -1205,9 +1205,11 @@ fn filter_var_transfer(
 fn filter_success(kind: FilterKind, input: Option<&Fact>) -> (Fact, bool) {
     let general = |base| (Fact::General { base, nullable: false }, false);
     match kind {
-        // The `(string)` cast, through the domain's own grid. A `Fact::Shape`
-        // input declines there (PHP writes `'Array'` with an `E_WARNING`), which
-        // is exactly the input class `filter_var` answers `false` for anyway.
+        // The `(string)` cast, through the domain's own grid. An ARRAY input
+        // declines there — in both of its spellings, since the grid decomposes a
+        // fact into the alternatives PHP converts one at a time — because PHP
+        // writes `'Array'` with an `E_WARNING`; and that is exactly the input
+        // class `filter_var` answers `false` for anyway.
         FilterKind::Raw => match input.and_then(|f| php_cast_fact(f, CastTarget::String)) {
             Some(cast) => (cast, true),
             None => general(Base::String),
