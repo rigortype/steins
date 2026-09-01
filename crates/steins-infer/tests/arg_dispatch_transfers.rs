@@ -1634,6 +1634,32 @@ fn a_project_function_named_sscanf_shadows_the_rule() {
 }
 
 #[test]
+fn a_spread_must_never_let_the_count_dispatch_read_a_truncated_arity() {
+    // This rung is the first that dispatches on the argument COUNT, so #616's
+    // spread rule stops being a detail of the argument list and becomes a
+    // premise of the answer's BASE. A literal spread flattens, and the count it
+    // flattens to is the one the rule must see...
+    assert_eq!(
+        dump("string $s", "sscanf(...['20-20', '%d-%d'])"),
+        "dumped type: list{int|null, int|null}|null"
+    );
+    assert_eq!(
+        dump("string $s, $out", "sscanf('20-20', '%d-%d', ...[$out])"),
+        "dumped type: int|null"
+    );
+    assert_eq!(
+        dump("string $s", "sscanf($s, ...['%d%d'])"),
+        "dumped type: list{int|null, int|null}|null"
+    );
+    // ...and a GENERAL spread, whose cardinality is a runtime value, must
+    // decline the whole call rather than let the rule count the written prefix:
+    // reading `sscanf(...$args)` as a 1-argument call would answer `unknown` for
+    // the wrong reason, and as a 2-argument one would be an outright lie.
+    assert_eq!(dump("string $s, array $args", "sscanf(...$args)"), "dumped type: unknown");
+    assert_eq!(dump("string $s, array $args", "sscanf($s, ...$args)"), "dumped type: unknown");
+}
+
+#[test]
 fn a_format_past_the_shape_width_limit_degrades_to_the_tail_summary() {
     // A-G6, the same degradation `ShapeFact::lift` performs. No real format has
     // 256 conversions; a generated one might, and widening keeps it sound.
