@@ -45,10 +45,14 @@ use crate::names::{PackageName, SectionName};
 /// the `ArgValue::Isset` value carrier (issue #579), the value-position twin of
 /// `4`'s reason: a schema-6 trace spells `$b = isset($a['k'])` as
 /// `ArgValue::Other`, so replaying it would answer `unknown` for a value this
-/// binary decides.
+/// binary decides. `8` is `ValueOp::BitOr` (issue #615), the same reason once
+/// more and with a wider blast radius than the operator itself: a `|` used to
+/// lower to `ArgValue::Other`, and an `Other` ELEMENT collapses its whole
+/// enclosing array literal to `Other`, so a schema-7 trace spells
+/// `['flags' => FILTER_A | FILTER_B]` as no array at all.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 7;
+pub const SCHEMA_VERSION: u32 = 8;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

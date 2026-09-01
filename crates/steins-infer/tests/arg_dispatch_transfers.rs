@@ -1088,6 +1088,145 @@ fn filter_var_a_fully_literal_array_input_is_a_singleton_not_a_shape() {
 }
 
 #[test]
+fn filter_var_folds_a_pipe_chain_of_recognized_flag_constants() {
+    // Issue #615 leg (b): `FILTER_A | FILTER_B` is one flag SET, folded over the
+    // roster by name. Both positions — bare and inside the `'flags'` entry —
+    // and chains longer than two.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_DEFAULT, FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4)"),
+        "dumped type: string|null"
+    );
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_DEFAULT, ['flags' => FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4])"),
+        "dumped type: string|null"
+    );
+    assert_eq!(
+        dump(
+            "$m",
+            "filter_var($m, FILTER_VALIDATE_INT, ['flags' => FILTER_FLAG_ALLOW_HEX | FILTER_NULL_ON_FAILURE | FILTER_FLAG_ALLOW_OCTAL])"
+        ),
+        "dumped type: int|null"
+    );
+    // The array flags combine through the same fold, and `REQUIRE_ARRAY`
+    // dominates `FORCE_ARRAY` exactly as measured.
+    let src = "<?php\nfunction f(): void { \\PHPStan\\dumpType(filter_var(17, FILTER_VALIDATE_INT, ['flags' => FILTER_REQUIRE_ARRAY|FILTER_FORCE_ARRAY|FILTER_NULL_ON_FAILURE])); }\n";
+    assert_eq!(one_type(src), "dumped type: null");
+    let src = "<?php\nfunction f(): void { \\PHPStan\\dumpType(filter_var(17, FILTER_VALIDATE_INT, ['flags' => FILTER_FORCE_ARRAY|FILTER_NULL_ON_FAILURE])); }\n";
+    assert_eq!(one_type(src), "dumped type: array<17>");
+}
+
+#[test]
+fn filter_var_an_unrecognized_bit_anywhere_in_a_chain_declines_the_whole_call() {
+    // The load-bearing invariant of leg (b): a flag the rule cannot read may be
+    // `FILTER_FLAG_STRIP_LOW`, which rewrites the string and makes
+    // `FILTER_DEFAULT` stop being the identity. One unreadable term poisons the
+    // chain rather than being dropped from it.
+    for chain in [
+        "FILTER_NULL_ON_FAILURE | FILTER_FLAG_STRIP_LOW",
+        "FILTER_FLAG_STRIP_LOW | FILTER_NULL_ON_FAILURE",
+        "FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4 | FILTER_FLAG_ENCODE_AMP",
+        // A variable term is unreadable for issue #168's reason, and poisons the
+        // chain the same way.
+        "FILTER_NULL_ON_FAILURE | $flag",
+    ] {
+        assert_eq!(
+            dump("$m, int $flag", &format!("filter_var($m, FILTER_DEFAULT, {chain})")),
+            "dumped type: unknown",
+            "{chain}"
+        );
+    }
+}
+
+#[test]
+fn filter_var_reads_a_ternary_flag_as_two_alternatives_and_joins_them() {
+    // Issue #615 leg (b), the half needing no IR change at all: `$b ? A : B`
+    // already has an `ArgValue::Ternary`. The two arms are ALTERNATIVES, not a
+    // combination, so each is answered and the answers joined.
+    assert_eq!(
+        dump(
+            "$m, bool $b",
+            "filter_var($m, FILTER_VALIDATE_BOOL, ['flags' => $b ? FILTER_NULL_ON_FAILURE : FILTER_FLAG_NONE])"
+        ),
+        "dumped type: bool|null"
+    );
+    // A join the domain cannot express declines the WHOLE call — never one arm.
+    // `int|false` (the no-flag arm) has no `Fact` at all (issue #600).
+    assert_eq!(
+        dump(
+            "$m, bool $b",
+            "filter_var($m, FILTER_VALIDATE_INT, ['flags' => $b ? FILTER_NULL_ON_FAILURE : FILTER_FLAG_NONE])"
+        ),
+        "dumped type: unknown"
+    );
+    // An unreadable arm poisons the ternary just as it poisons a `|` chain.
+    assert_eq!(
+        dump(
+            "$m, bool $b",
+            "filter_var($m, FILTER_VALIDATE_BOOL, ['flags' => $b ? FILTER_NULL_ON_FAILURE : FILTER_FLAG_STRIP_LOW])"
+        ),
+        "dumped type: unknown"
+    );
+    // The FILTER ID takes the same reading — a ternary over two recognized
+    // filters answers when the two success types join.
+    assert_eq!(
+        dump("$m, bool $b", "filter_var($m, $b ? FILTER_VALIDATE_EMAIL : FILTER_VALIDATE_URL, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: non-falsy-string|null"
+    );
+    // …and a `|` is NOT walked for the filter id: filter ids are an enumeration,
+    // not a bit field.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT | FILTER_VALIDATE_BOOL, FILTER_NULL_ON_FAILURE)"),
+        "dumped type: unknown"
+    );
+}
+
+#[test]
+fn filter_var_a_flag_read_beside_an_asserted_input_answers_asserted() {
+    // ADR-0061 §3: the seam takes `min` over every argument's stratum, so an
+    // input read out of a docblock-claimed lane floors the whole answer —
+    // including one whose flags came from a `|` chain or a ternary.
+    assert_eq!(
+        dump_doc(
+            "@param non-empty-string $s",
+            "string $s",
+            "filter_var($s, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4)"
+        ),
+        "dumped type: int|null (asserted)"
+    );
+    assert_eq!(
+        dump_doc(
+            "@param non-empty-string $s",
+            "string $s",
+            "filter_var($s, FILTER_VALIDATE_BOOL, ['flags' => true ? FILTER_NULL_ON_FAILURE : FILTER_FLAG_NONE])"
+        ),
+        "dumped type: bool|null (asserted)"
+    );
+    // A proven-success input loses the failure arm even under the flag, so the
+    // `|` chain being READ is what this row shows, not the `null`.
+    assert_eq!(
+        dump_doc(
+            "@param non-empty-string $s",
+            "string $s",
+            "filter_var($s, FILTER_DEFAULT, FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4)"
+        ),
+        "dumped type: non-empty-string (asserted)"
+    );
+}
+
+#[test]
+fn filter_var_declines_a_flag_held_in_a_const_valued_local() {
+    // Recorded decline, waiting on issue #598. `$nullFilter =
+    // \FILTER_NULL_ON_FAILURE;` binds NO fact — a global constant carries no
+    // proven value (issue #168) — so the value domain has nothing to hand back
+    // and reading the argument the way the INPUT argument is read resolves
+    // nothing. The dump of the local itself is the witness.
+    let src = "<?php\nfunction f($m): void { $nf = \\FILTER_NULL_ON_FAILURE; \\PHPStan\\dumpType($nf); }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+    let src = "<?php\nfunction f($m): void { $nf = \\FILTER_NULL_ON_FAILURE; \\PHPStan\\dumpType(filter_var($m, FILTER_DEFAULT, ['flags' => $nf])); }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+}
+
+#[test]
 fn filter_var_declines_the_string_modifying_and_unmodeled_flags() {
     // These rewrite the SUCCESS value (`FILTER_DEFAULT` stops being the
     // identity), turn `''` into `null` on the success path, or delete the
@@ -1150,15 +1289,6 @@ fn filter_var_declines_an_unreadable_flags_argument() {
     // row per filter block on `$nullFilter = \FILTER_NULL_ON_FAILURE`.
     assert_eq!(
         dump("$m, int $flags", "filter_var($m, FILTER_VALIDATE_INT, $flags)"),
-        "dumped type: unknown"
-    );
-    // A `|` combination lowers to `Other`: the value lane represents comparisons
-    // only, so there is no bit-set to read.
-    assert_eq!(
-        dump(
-            "$m",
-            "filter_var($m, FILTER_VALIDATE_INT, FILTER_NULL_ON_FAILURE | FILTER_FLAG_IPV4)"
-        ),
         "dumped type: unknown"
     );
     // A bare non-zero int is not a recognized NAME.

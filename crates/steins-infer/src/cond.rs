@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use steins_contract::ContractTy;
 use steins_domain::{Base, Certainty, Fact, Val};
 use steins_syntax::{
-    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, NameRef, RefKind, Span, ValueOp,
+    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, NameRef, RefKind, Span,
 };
 
 use crate::fold::Folder;
@@ -323,14 +323,21 @@ fn cmp_operand_candidates(
     Some((vals, strat))
 }
 
-/// Evaluate a **value-position binary operator** (issue #260) to an env [`Fact`].
+/// Evaluate a **value-position comparison** (issue #260) to an env [`Fact`].
 ///
-/// For a comparison this is total, and that's the point: a PHP comparison
-/// operator evaluates to a `bool` whatever its operands are, so the honest floor
-/// for an undecided one is `bool`, not silence. `eval_cmp`'s three verdicts map
-/// straight onto three renderings: `Yes -> true`, `No -> false`, `Maybe -> bool`.
-/// The decision procedure is the condition path's, unchanged — only *where* it's
-/// asked from is new.
+/// This is total, and that's the point: a PHP comparison operator evaluates to a
+/// `bool` whatever its operands are, so the honest floor for an undecided one is
+/// `bool`, not silence. `eval_cmp`'s three verdicts map straight onto three
+/// renderings: `Yes -> true`, `No -> false`, `Maybe -> bool`. The decision
+/// procedure is the condition path's, unchanged — only *where* it's asked from is
+/// new.
+///
+/// It takes a [`CmpOp`] rather than the whole [`ValueOp`] precisely to keep that
+/// totality true of its type (issue #615): [`ValueOp::BitOr`] joined the enum for
+/// a carrier the `filter_var` flags roster reads by constant NAME, and a bitwise
+/// `|` has NO total floor — GMP overloads it to return an object, so even
+/// `int|string` would be a lie. So the four callers match [`ValueOp::Cmp`] and a
+/// `|` simply falls through to the lower rungs, which say nothing.
 ///
 /// # Stratum: the undecided arm is Verified, the decided arms are derived
 ///
@@ -350,14 +357,13 @@ fn cmp_operand_candidates(
 pub(crate) fn eval_binary_fact(
     cx: &Cx<'_>,
     folder: &mut dyn Folder,
-    op: ValueOp,
+    cop: CmpOp,
     lhs: &ArgValue,
     rhs: &ArgValue,
     env: &HashMap<String, Known>,
     store: Option<&Store>,
     poisoned: bool,
 ) -> (Fact, Stratum) {
-    let ValueOp::Cmp(cop) = op;
     let l = cmp_operand_candidates(cx, folder, lhs, env, store, poisoned);
     let r = cmp_operand_candidates(cx, folder, rhs, env, store, poisoned);
     // Derivation clause (ADR-0052 §5): a *decided* verdict consumes both operands'

@@ -625,13 +625,28 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         }
         // A comparison in VALUE position (issue #260): `$b = $x > 3;` rather than
         // `if ($x > 3)`. Structural like `.` and `??` above — the SAME `eval_cmp`
-        // that decides a guard decides this one. Arithmetic, bitwise and logical
-        // operators still widen to `Other` (Certainty discipline — an unimplemented
-        // arm declines).
+        // that decides a guard decides this one. Arithmetic and logical operators
+        // still widen to `Other` (Certainty discipline — an unimplemented arm
+        // declines).
         Expression::Binary(b) if cmp_op_of(&b.operator).is_some() => {
             let op = ValueOp::Cmp(cmp_op_of(&b.operator).expect("matched above"));
             ArgValue::Binary {
                 op,
+                lhs: Box::new(lower_arg_value(b.lhs)),
+                rhs: Box::new(lower_arg_value(b.rhs)),
+            }
+        }
+        // A bitwise or `|` (issue #615): a **flag combination** such as
+        // `FILTER_NULL_ON_FAILURE | FILTER_FORCE_ARRAY`. Structural like the
+        // comparison above, and — unlike it — reaching no fact seam: see
+        // [`ValueOp::BitOr`] for why a `|` has no honest total floor. It is
+        // lowered anyway because an operand this vocabulary cannot represent
+        // collapses the WHOLE enclosing array literal to `Other`, so with the
+        // combination unrepresented `['flags' => A | B]` was not an array at all
+        // and no rule could read even its key.
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::BitwiseOr(_)) => {
+            ArgValue::Binary {
+                op: ValueOp::BitOr,
                 lhs: Box::new(lower_arg_value(b.lhs)),
                 rhs: Box::new(lower_arg_value(b.rhs)),
             }
