@@ -938,6 +938,21 @@ fn filter_var_declines_a_float_input_under_validate_float() {
 }
 
 #[test]
+fn filter_var_declines_an_array_input_as_a_success_proof() {
+    // `filter_var([1, 2], FILTER_SANITIZE_EMAIL)` is `false` — an array is the one
+    // input class the sanitizer row has to rule out, and a fully-known array is a
+    // `Singleton(Val::Array(…))`, not only a `Fact::Shape`. Both spellings decline.
+    let src = "<?php\nfunction f(): void { $a = [1, 2]; \\PHPStan\\dumpType(filter_var($a, FILTER_SANITIZE_EMAIL)); }\n";
+    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(dump("array $a", "filter_var($a, FILTER_SANITIZE_EMAIL)"), "dumped type: unknown");
+    assert_eq!(dump("array $a", "filter_var($a, FILTER_DEFAULT)"), "dumped type: unknown");
+    // Under the flag the answer is the general one, which covers the `null` an
+    // array input really produces.
+    let src = "<?php\nfunction f(): void { $a = [1, 2]; \\PHPStan\\dumpType(filter_var($a, FILTER_SANITIZE_EMAIL, FILTER_NULL_ON_FAILURE)); }\n";
+    assert_eq!(one_type(src), "dumped type: string|null");
+}
+
+#[test]
 fn filter_var_declines_a_nullable_input_as_a_success_proof() {
     // `filter_var(null, FILTER_VALIDATE_INT)` is `false`, so a `?int` proves
     // nothing — the failure arm stands and `int|false` has no spelling.
