@@ -1330,13 +1330,21 @@ pub(crate) fn call_invalidation(node: &Node<'_, '_>) -> Vec<InvalidatedVar> {
     invalidated
 }
 
-/// The one walk behind [`Stmt::invalidated`]: exactly [`collect_call_vars`]'s
-/// shape — same four call nodes, same "bare `$v` argument" recognition, same
-/// descent — but recording each occurrence's evidence on the name's entry as it
-/// collects it, so the name set and its evidence are one answer by construction. A
-/// describable occurrence appends a `(callee, position)` site; an unprovable one
-/// marks the entry opaque, discarding every site it has and refusing it any future
-/// one.
+/// The one walk behind [`Stmt::invalidated`]: [`collect_call_vars`]'s shape —
+/// same four call nodes, same descent — but recording each occurrence's evidence
+/// on the name's entry as it collects it, so the name set and its evidence are
+/// one answer by construction. A describable occurrence appends a
+/// `(callee, position)` site; an unprovable one marks the entry opaque,
+/// discarding every site it has and refusing it any future one.
+///
+/// Beyond the bare `$v` argument the two walks share, this one also recognizes
+/// an argument spelled as a pure offset chain (`$v[0]`, `$v['k'][1]`, …) and
+/// records the chain's ROOT under the same site/opaque rules (issue #609): a
+/// by-ref parameter at that position writes through the reference into the
+/// element, so the enclosing array's binding is what the statement may change.
+/// `collect_call_vars` deliberately does not follow — its consumers (the
+/// `Opaque` write set, receiver/callback/rethrow conservatism) each cover the
+/// root through their own read or heap channels.
 ///
 /// Unprovable, and therefore opaque (kept on the blanket drop):
 ///
@@ -1386,8 +1394,13 @@ fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: 
             .iter()
             .all(|a| matches!(a, Argument::Positional(p) if p.ellipsis.is_none()));
         for (position, arg) in list.arguments.iter().enumerate() {
-            if let Expression::Variable(Variable::Direct(dv)) = arg.value().unparenthesized() {
-                let var = strip_dollar(bytes_to_string(dv.name));
+            let var = match arg.value().unparenthesized() {
+                Expression::Variable(Variable::Direct(dv)) => {
+                    Some(strip_dollar(bytes_to_string(dv.name)))
+                }
+                other => offset_argument_root(other),
+            };
+            if let Some(var) = var {
                 let site = match &callee {
                     Some(c) if all_positional && !nested => Some((c.clone(), position as u32)),
                     _ => None,
@@ -1398,6 +1411,31 @@ fn scan_invalidated(node: &Node<'_, '_>, out: &mut Vec<InvalidatedVar>, nested: 
     }
     for child in children(node) {
         scan_invalidated(&child, out, nested);
+    }
+}
+
+/// The direct-variable root of an argument spelled as a pure offset chain
+/// (`$v[0]`, `$v['k'][1]`, …), or `None` for any other expression (issue #609).
+///
+/// A by-ref parameter at such a position writes through the reference into the
+/// element, so the enclosing array's binding is what the statement may change;
+/// the chain's keys are reads and record nothing. A chain that passes through
+/// anything but offsets on its way to a variable (`$o->p[0]`, `f()[0]`,
+/// `$s[0]->p`) roots in a different carrier — the heap's, or nobody's — and
+/// stays unrecorded: the value such a callee can reach is shared object state,
+/// never the local binding this channel forgets.
+fn offset_argument_root(expr: &Expression<'_>) -> Option<String> {
+    let mut e = expr;
+    let mut through_offset = false;
+    while let Expression::ArrayAccess(aa) = e {
+        through_offset = true;
+        e = aa.array.unparenthesized();
+    }
+    match e {
+        Expression::Variable(Variable::Direct(dv)) if through_offset => {
+            Some(strip_dollar(bytes_to_string(dv.name)))
+        }
+        _ => None,
     }
 }
 
