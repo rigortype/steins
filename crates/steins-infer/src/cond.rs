@@ -17,7 +17,7 @@ use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
 use crate::existence::eval_existence_call;
-use crate::offsets::{ShapeRead, shape_read_at};
+use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
 use crate::transfers::transfer_arg_fact;
@@ -486,6 +486,16 @@ fn isset_operand_verdict(
         // never disagree about which field they mean — and it declines on a
         // poisoned scope, a nullable base and an unproven key for us.
         IssetOperand::Offset { var, key } => {
+            // A **proven whole** array answers exactly, and it has to be tried
+            // first: a fully-literal `['k' => 1]` binds a `Fact::Singleton` of the
+            // value itself, not a `Fact::Shape`, so the abstract rung below never
+            // sees it. The verdict is not an approximation here — the entries ARE
+            // the array, so an absent key is absent and a present one's value is
+            // known. This is the leg that makes the table hold over a *witnessed*
+            // literal and not only over a declared shape.
+            if let Some(decided) = proven_array_isset(cx, var, key, env, poisoned) {
+                return decided;
+            }
             let base = ArgValue::Var(var.clone());
             let Some((read, stratum)) = shape_read_at(&base, key, env, poisoned, cx.php_minor)
             else {
@@ -521,6 +531,41 @@ fn isset_operand_verdict(
             }
         }
     }
+}
+
+/// `isset($var[key])` where `$var` holds a **proven whole array** — the witnessed
+/// half of the table (issue #579). `None` where the base is not one, or the key is
+/// not a proven single value, leaving the abstract shape rung to answer.
+///
+/// Exact, not conservative: a `Fact::Singleton(Val::Array(..))` says the array IS
+/// those entries, so a key not among them is absent and a key among them has that
+/// value. Both halves of `isset` are then decided outright, which is why this arm
+/// never returns `Maybe`.
+///
+/// The key travels through the offset family's own resolution and PHP's own key
+/// cast, so `$a[5]` and `$a["5"]` are one key here as everywhere else.
+fn proven_array_isset(
+    cx: &Cx<'_>,
+    var: &str,
+    key: &ArgValue,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> Option<(Certainty, Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let Some(Fact::Singleton(key_val)) = offset_operand_fact(key, env, poisoned, cx.php_minor)
+    else {
+        return None;
+    };
+    let canon = offset_key_of(&key_val)?;
+    let known = env.get(var)?;
+    let Some(Fact::Singleton(Val::Array(entries))) = &known.fact else { return None };
+    let verdict = match entries.iter().find(|(k, _)| *k == canon) {
+        Some((_, v)) => Certainty::from_bool(*v != Val::Null),
+        None => Certainty::No,
+    };
+    Some((verdict, known.stratum))
 }
 
 /// Is a `??` left operand proven **set and non-null**, so PHP's own evaluation
