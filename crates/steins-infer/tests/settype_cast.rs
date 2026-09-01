@@ -237,15 +237,17 @@ fn a_property_argument_refuses() {
 
 #[test]
 fn an_array_offset_argument_refuses() {
-    // The same leg for `$a['k']`. The claim is that the CAST wrote nothing: the
-    // array still reads as the literal built it, with no `int` anywhere in it.
-    // That the enclosing binding survives the by-ref call at all is the
-    // statement-invalidation question (ADR-0063 §2.3) and predates this row.
+    // The same leg for `$a['k']`. The claim is that the CAST seeded nothing
+    // over the statement's own forgetting: since issue #609 the offset call
+    // invalidates the enclosing array (the stale `list{'x'}` this row used to
+    // read was the bug that issue fixed), and a seed writing through the
+    // offset would rebind a cast fact over that drop — `unknown` is exactly
+    // "refused seed + conservative forget", with no `int` anywhere.
     let d = dumps(
         "<?php\nfunction f(): void \
          { $a = ['x']; settype($a[0], 'int'); \\PHPStan\\dumpType($a); }\n",
     );
-    assert_eq!(d, vec!["list{'x'}".to_owned()]);
+    assert_eq!(d, vec!["unknown".to_owned()]);
 }
 
 #[test]
