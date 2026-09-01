@@ -39,9 +39,12 @@ use crate::names::{PackageName, SectionName};
 /// disagrees with its writer about what that condition IS would answer from a
 /// forgetting an artifact recorded and this binary no longer performs, and `5`
 /// is `CondExpr::InstanceofDyn` (issue #571) for the same reason one spelling
-/// over. Bumping it is the whole migration — an artifact of the previous schema becomes an
+/// over. `6` is the offset-argument entry in `Stmt::invalidated` (issue #609):
+/// a stored trace of `sort($a[0])` from schema 5 carries no entry for `$a`, so
+/// replaying it would keep the stale array shape this binary now forgets.
+/// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 5;
+pub const SCHEMA_VERSION: u32 = 6;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
