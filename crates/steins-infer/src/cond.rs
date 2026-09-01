@@ -6,7 +6,9 @@ use std::collections::HashMap;
 
 use steins_contract::ContractTy;
 use steins_domain::{Base, Certainty, Fact, Val};
-use steins_syntax::{ArgValue, CmpOp, CondExpr, CondOperand, NameRef, RefKind, Span, ValueOp};
+use steins_syntax::{
+    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, NameRef, RefKind, Span, ValueOp,
+};
 
 use crate::fold::Folder;
 use crate::asserts::cond_invalidations;
@@ -15,6 +17,7 @@ use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::env::{Known, Member, Store, Stratum, arg_of_val, singleton_fact};
 use crate::existence::eval_existence_call;
+use crate::offsets::{ShapeRead, shape_read_at};
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
 use crate::transfers::transfer_arg_fact;
@@ -376,6 +379,146 @@ pub(crate) fn eval_binary_fact(
         // whatever the operands' lanes were (see this function's doc comment).
         Certainty::Maybe => {
             (Fact::General { base: Base::Bool, nullable: false }, Stratum::Verified)
+        }
+    }
+}
+
+/// Evaluate a **value-position `isset(…)`** (issue #579) to an env [`Fact`].
+///
+/// Total, for the same reason [`eval_binary_fact`] is: `isset` evaluates to a
+/// `bool` whatever it tests, so the honest floor for an undecided one is `bool`,
+/// never silence. The operands are PHP's conjunction, folded through
+/// [`Certainty::and`], and the three verdicts map onto the three renderings the
+/// comparison node already uses: `Yes -> true`, `No -> false`, `Maybe -> bool`.
+///
+/// # The rule is issue #343's, one step stronger
+///
+/// `array_key_exists` asks whether the key is **present**; `isset` asks that AND
+/// that the value is not `null`, which [`Fact::is_null`] answers as a
+/// `Certainty`. So the presence verdict and the negated null verdict conjoin,
+/// which is the whole of the offset leg:
+///
+/// | shape | `array_key_exists` | `isset` |
+/// | --- | --- | --- |
+/// | required field, non-null value | `true` | `true` |
+/// | required field, `?int` value | `true` | `bool` |
+/// | proven-absent field, or undeclared key under a sealed tail | `false` | `false` |
+/// | optional field, or unsealed tail | `bool` | `bool` |
+///
+/// A required field whose value is provably `null` answers `false` — a row the
+/// table does not spell because `array_key_exists` has no such row, and the same
+/// conjunction produces it.
+///
+/// # Stratum: the undecided arm is Verified, the decided arms are derived
+///
+/// The issue #260 ruling, verbatim: `Maybe -> bool` is a claim about the
+/// **construct**, premised on no operand, so it is Verified always; `Yes`/`No`
+/// say *which* bool and rest on the subject's fact, so they carry its stratum —
+/// which for a shape read out of a `@param array{…}` is `Asserted`, and ADR-0062
+/// A-G9's corollary then keeps the verdict out of every proof-layer premise
+/// exactly as it keeps every other shape-derived fact out. A decided verdict
+/// takes the `min` over every operand rather than only the deciding one: less
+/// trust is always the safe side of this ledger.
+pub(crate) fn eval_isset_fact(
+    cx: &Cx<'_>,
+    ops: &[IssetOperand],
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    // `isset()` with no operand is not PHP, so the fold's neutral element is
+    // never the answer on its own — but `Yes` is still the right seed for a
+    // conjunction, and an empty list would answer `true` only for source no
+    // parser accepts.
+    let mut verdict = Certainty::Yes;
+    let mut derived = Stratum::Verified;
+    for op in ops {
+        let (c, s) = isset_operand_verdict(cx, op, env, poisoned);
+        verdict = verdict.and(c);
+        derived = derived.min(s);
+    }
+    match verdict {
+        Certainty::Yes => (Fact::Singleton(Val::Bool(true)), derived),
+        Certainty::No => (Fact::Singleton(Val::Bool(false)), derived),
+        Certainty::Maybe => {
+            (Fact::General { base: Base::Bool, nullable: false }, Stratum::Verified)
+        }
+    }
+}
+
+/// One operand's contribution to [`eval_isset_fact`]'s conjunction.
+///
+/// # Why the bare-variable leg decides `false` freely and `true` only from the walk
+///
+/// `isset($x)` is false when `$x` holds `null` **and** when `$x` has no binding
+/// at all, so a fact proving the value `null` decides `false` with no definedness
+/// premise whatsoever — both readings of "how did that fact get here" agree.
+///
+/// `true` is the leg that needs the binding, and a declaration cannot supply it.
+/// ADR-0087 §4 is the case in point: `@var \DateTime|unset $x` states that reads
+/// of `$x` may find no binding, and `ContractTy::is_unset` is filtered out of the
+/// arm list before it reaches the store — so a `T|unset` declaration and a plain
+/// `T` one leave the value lane in the same state, and answering `true` from that
+/// state would contradict the ADR's own reading of the guard. The stratum is the
+/// available discriminator: an `Asserted` fact came from an author's claim about
+/// the value, a `Verified` one from the walk's own record of a binding form. So
+/// the `true` leg reads only `Verified`, and the definedness questions a
+/// declaration raises are left where ADR-0087 left them.
+///
+/// Deliberately **deferred**, and each answers the `bool` floor: a never-bound
+/// variable (`isset($nope)` is `false` in PHP, but the lowering's own definedness
+/// lanes exclude an `isset` operand from the read sets by construction — that is
+/// what makes the guard silent — so the seam has no witness to read); a property
+/// or static-property operand, whose binding question is a declared-but-
+/// uninitialized one the heap does not answer; and a path deeper than one offset.
+fn isset_operand_verdict(
+    cx: &Cx<'_>,
+    op: &IssetOperand,
+    env: &HashMap<String, Known>,
+    poisoned: bool,
+) -> (Certainty, Stratum) {
+    /// The undecided contribution: the construct's own `bool`, premised on nothing.
+    const UNDECIDED: (Certainty, Stratum) = (Certainty::Maybe, Stratum::Verified);
+    match op {
+        IssetOperand::Unmodelled => UNDECIDED,
+        // The subject's shape already carries the presence answer (issue #343);
+        // `isset` conjoins the non-null one. `shape_read_at` is the offset
+        // family's own resolver, so this verdict and an `$var[key]` read can
+        // never disagree about which field they mean — and it declines on a
+        // poisoned scope, a nullable base and an unproven key for us.
+        IssetOperand::Offset { var, key } => {
+            let base = ArgValue::Var(var.clone());
+            let Some((read, stratum)) = shape_read_at(&base, key, env, poisoned, cx.php_minor)
+            else {
+                return UNDECIDED;
+            };
+            let verdict = match read {
+                ShapeRead::Present(Some(slot)) => slot.is_null().not(),
+                // A required field with no value slot is present but says nothing
+                // about `null` (A-G1a's honest floor), so the conjunction is Maybe.
+                ShapeRead::Present(None) => Certainty::Maybe,
+                ShapeRead::DeclaredAbsent => Certainty::No,
+                // An optional field and an unsealed tail are genuinely undecided
+                // on presence alone, so the null question never gets asked.
+                ShapeRead::MaybeMissing(_) | ShapeRead::Tail(_) => Certainty::Maybe,
+            };
+            match verdict {
+                Certainty::Maybe => UNDECIDED,
+                decided => (decided, stratum),
+            }
+        }
+        IssetOperand::Var(name) => {
+            if poisoned {
+                return UNDECIDED;
+            }
+            let Some(known) = env.get(name) else { return UNDECIDED };
+            let Some(fact) = &known.fact else { return UNDECIDED };
+            match fact.is_null() {
+                Certainty::Yes => (Certainty::No, known.stratum),
+                Certainty::No if known.stratum == Stratum::Verified => {
+                    (Certainty::Yes, known.stratum)
+                }
+                _ => UNDECIDED,
+            }
         }
     }
 }

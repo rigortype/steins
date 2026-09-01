@@ -13,7 +13,9 @@ use crate::builtin_returns::{
     CATALOG_FLOOR, builtin_call_return_fact, builtin_resource_arms, builtin_return_floor,
     floor_value_fact, shape_builtin_return_fact,
 };
-use crate::cond::{coalesce_lhs_proven_present, eval_binary_fact, eval_ternary_fact};
+use crate::cond::{
+    coalesce_lhs_proven_present, eval_binary_fact, eval_isset_fact, eval_ternary_fact,
+};
 use crate::descent::summary_binds;
 use crate::env::{
     ContractArm, HeapSummary, Known, ReturnSummary, Store, Stratum, array_literal_fact,
@@ -92,6 +94,23 @@ pub(crate) fn apply_assign(
     if let ArgValue::Binary { op, lhs, rhs } = value {
         let (fact, strat) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
+        return;
+    }
+
+    // An `isset(…)` rvalue `$b = isset($a['k']);` (issue #579): the construct's
+    // fact, by the same evaluator the dump surface reads — the assignment and the
+    // dump of the same expression can never disagree. Total, so the binding is
+    // `bool` at worst and never dropped.
+    if let ArgValue::Isset(ops) = value {
+        let (fact, strat) = eval_isset_fact(cx, ops, env, w.scope.poisoned);
         if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
             facts.push(LineFact {
                 line,

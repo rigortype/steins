@@ -78,6 +78,9 @@ pub(crate) fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Va
         // Likewise a value-position comparison (issue #260): it becomes a `Val`
         // only through `resolve_literal`/`eval_binary_fact`, which have the env.
         | ArgValue::Binary { .. }
+        // A value-position `isset(…)` (issue #579) is decided against the env by
+        // `eval_isset_fact`, which this seam does not see — so no `Val` here.
+        | ArgValue::Isset(_)
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)

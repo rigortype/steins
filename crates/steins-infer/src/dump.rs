@@ -21,7 +21,7 @@ use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
-use crate::cond::eval_binary_fact;
+use crate::cond::{eval_binary_fact, eval_isset_fact};
 use crate::cx::Cx;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
 use crate::env::{
@@ -714,6 +714,17 @@ fn best_dump_type(
     if let ArgValue::Binary { op, lhs, rhs } = value {
         let (fact, stratum) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A value-position `isset(…)` (issue #579), same placement reasoning as the
+    // comparison above and total for the same reason — `true`/`false` where the
+    // subject's shape or binding decides, `bool` where it does not.
+    if let ArgValue::Isset(ops) = value {
+        let (fact, stratum) = eval_isset_fact(cx, ops, env, poisoned);
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,
