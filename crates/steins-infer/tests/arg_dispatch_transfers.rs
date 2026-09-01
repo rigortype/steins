@@ -1633,6 +1633,17 @@ fn a_project_function_named_sscanf_shadows_the_rule() {
     assert_ne!(one_type_with(src, &mut Mock::sidecar()), "dumped type: list{int|null}|null");
 }
 
+#[test]
+fn a_format_past_the_shape_width_limit_degrades_to_the_tail_summary() {
+    // A-G6, the same degradation `ShapeFact::lift` performs. No real format has
+    // 256 conversions; a generated one might, and widening keeps it sound.
+    let wide = "%d".repeat(257);
+    assert_eq!(dump("string $s", &format!("sscanf($s, '{wide}')")), "dumped type: array|null");
+    // One slot below the limit still answers a sequence.
+    let ok = "%d".repeat(256);
+    assert!(dump("string $s", &format!("sscanf($s, '{ok}')")).starts_with("dumped type: list{"));
+}
+
 /// `fscanf` is deliberately NOT on this rung (see `sscanf_transfer`): it reflects
 /// `array|int|false|null`, and that `false` arm is not spellable — `Fact::Shape`
 /// carries a `nullable` side-flag and no `false` one. Answering `array{…}|null`
