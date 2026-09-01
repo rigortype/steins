@@ -469,7 +469,10 @@ pub(crate) fn eval_isset_fact(
 /// lanes exclude an `isset` operand from the read sets by construction — that is
 /// what makes the guard silent — so the seam has no witness to read); a property
 /// or static-property operand, whose binding question is a declared-but-
-/// uninitialized one the heap does not answer; and a path deeper than one offset.
+/// uninitialized one the heap does not answer; a path deeper than one offset; and
+/// a variable holding an OBJECT, whose binding lives in the heap store's
+/// reference table rather than as a `Fact` here — and that table does not on its
+/// own separate a proven allocation from a declared, possibly nullable, receiver.
 fn isset_operand_verdict(
     cx: &Cx<'_>,
     op: &IssetOperand,
