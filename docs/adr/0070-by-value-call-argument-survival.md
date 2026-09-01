@@ -186,10 +186,14 @@ The catalog's existing surfaces answer other questions. `effect_labels` says
 what a builtin *does*, `declared_return` what it *returns*, `foldable` whether
 it may be *executed*. None of them says whether an argument is by reference,
 and each would be the wrong widening if borrowed for it: `trim` has no
-out-param row and is fully described; `sscanf` has no row, no color, and must
-stay unknown. `by_value_arg` is a new question with its own membership
-discipline, so a name entering one table cannot silently change what another
-table's consumers conclude.
+out-param row and is fully described; `sscanf` has no row, no color, and its
+arguments must stay unknown. `by_value_arg` is a new question with its own
+membership discipline, so a name entering one table cannot silently change what
+another table's consumers conclude — which #617 then demonstrated from the other
+side: `sscanf` gained a seam-(ii) **return** rule without gaining a
+`by_value_arg` row, a `resolve_arg_function` entry, or one bit of change in what
+its by-reference tail's out-state says. A return rule is not an
+argument-survival statement.
 
 ## 6. Consequences
 

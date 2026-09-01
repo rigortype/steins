@@ -213,3 +213,96 @@ where the fixture asserts `array<null>` — the rung cannot prove `'foo'` fails
 `FILTER_VALIDATE_INT`, the same class as the `filter-var.php:86` row #608 already
 shipped). Nothing outside `filter-var.php` / `filterVar.php` moved, so the new
 value form changed no answer of its own.
+
+## Amendment D (2026-09-02): a rung may dispatch on the argument COUNT, and a name whose return type depends on it belongs here rather than in the declared-envelope floor — PENDING ratification
+
+Issue #617. `sscanf` is the first seam-(ii) rung whose answer's **base** — not
+its refinement — is decided by how many arguments the call passes:
+
+```php
+sscanf($s, '%d-%d')            // array{int|null, int|null}|null
+sscanf($s, '%d-%d', $a, $b)    // int|null
+```
+
+Both are the same function. The second form assigns through by-reference
+out-parameters and returns the *count* of assigned conversions; the first
+returns the conversions themselves. No fact about any argument distinguishes
+them — only the arity of the call site does.
+
+1. **The count is read before any argument is.** The rung's dispatch is
+   `args.len()` first, format second. Reading the format first and then
+   discovering the arity would be a wasted read at best and, for a format the
+   scanner declines, a wrong `None` at worst: a 4-argument `sscanf($s, $s, $a,
+   $b)` answers `int|null` while its format proves nothing at all.
+2. **This is why the name has no ADR-0069 declared-return floor, and that is
+   correct rather than an omission.** `declared_returns.toml` holds two alternate
+   signatures for `sscanf` that *disagree on the return type*, and the generated
+   catalog skips every such name. A floor is a single envelope; a name whose
+   return type genuinely depends on its argument count has no single envelope to
+   floor, and ADR-0064 §1's seam (ii) is exactly the machinery for it.
+3. **The arity pin is carried even where Amendment B does not force it.**
+   `sscanf` reflects `array|int|null`, not a bare `mixed`, so Amendment B's second
+   leg is silent. The rung pins `(3, 2)` regardless, because it reads argument 1
+   positionally *and* dispatches on the count — a php-src signature that grew a
+   parameter in front of `$format` would leave both reads stale while
+   `array|int|null` still held. Generalizing: **an arity pin is required whenever
+   the count is load-bearing, not only when the declaration is uninformative.**
+
+### The corollary that cost the most: a measurement may refute the fixture in the sharpening direction
+
+ADR-0061 §4 already requires every cell to come from a `php -r` probe, and the
+issue #40 / #594 precedent already covers a measurement refuting a fixture by
+being *weaker*. This slice adds the other direction, and both showed up in the
+same specifier:
+
+- **Weaker.** The fixture asserts `sscanf($s, '%2s')` yields a
+  `non-falsy-string`. A width bounds a `%s` read from *above*, so
+  `sscanf('0', '%2s') === ['0']` — falsy. Every fixture row carrying the claim has
+  a literal subject, so the refinement is being read off the subject, not the
+  width. Two rows are a deliberate non-win.
+- **Sharper.** The same probe proves `%s` can never yield `''` at any width
+  (0 empties in 40,000 randomized subject × format trials), so the rung answers
+  `non-empty-string` where the fixture says plain `string`. Two *other* rows
+  become non-wins for the opposite reason.
+
+The rule the amendment fixes: **the measurement is authored in both directions,
+and a fixture row lost to a sharper answer is as acceptable as one lost to a
+weaker one.** Trimming a proven refinement to match a fixture would be
+transcription with extra steps, and would leave the rung unable to explain its
+own table.
+
+`%u` is the same discipline at the decline: `sscanf('-8', '%u')` is the *string*
+`'18446744073709551608'`, so its true slot is `int|string|null` — a two-base union
+no shape slot spells — and the whole call declines rather than emit the fixture's
+unsound `int|null`. One unreadable specifier declining the *whole* call is the
+`filter_var` invariant (Amendment C leg 3) applied to a format string.
+
+### Two things deliberately not done
+
+**The fold route was priced and declined.** Seven rows carry a literal subject
+*and* a literal format, and folding `sscanf` would answer them exactly. It was
+not taken: the format table already wins five of the seven, the remaining two are
+precisely the rows the measurement says the fixture gets wrong, and `sscanf` is a
+variadic-by-reference name — putting it on the hand-picked allowlist means the
+folder invoking a function whose extra arguments the analyzed source names as
+out-parameters, which touches the boundary ADR-0070 §3 keeps closed. Recorded as
+available on its own evidence, not smuggled in on this slice's.
+
+**`fscanf` shares the format table and not the rung.** It reflects
+`array|int|false|null`; `Fact::Shape` carries a `nullable` side-flag and no
+`false` one, and `Fact::Union` admits no array arm by construction (ADR-0062 §3).
+Answering `array{…}|null` for it would be *unsound*, not coarse. The scanner is a
+free function so that the table is written once when a domain can spell that
+outer arm.
+
+### Measurement
+
+nsrt unknown-fall 6548 → 6523 (−25); admissible 3583 → 3605 (+22). 25 rows moved,
+every one an `sscanf` call: 3 `differ → match`, 12 `differ → equal`, 7
+`differ → subsumed`, 2 `differ → differ` (the refuted `non-falsy-string` rows),
+plus `bug-7563.php:25`, answered now but still differing because its explicit
+`null ===` guard does not narrow a `Fact::Shape`'s null arm — a pre-existing gap
+in shape-nullable narrowing, unrelated to this rung. 21 of the fixture's 22 rows
+left `unknown`; the 22nd is the `%u` decline. The six `list()`-destructuring rows
+downstream did **not** move, which pins that gap as genuinely separate: the answer
+is now available at the call, and the destructuring slice is what has to read it.
