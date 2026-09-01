@@ -13,6 +13,7 @@ use steins_domain::PhpStr;
 use crate::ast::{
     Arg, ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, CmpOp, CondExpr, CondOperand, EffectRecv,
     IssetOperand, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt, StmtKind, ValueOp,
+    flatten_spread_operand,
 };
 use crate::lower_effect::EffectScanCx;
 use crate::lower_scope::{
@@ -89,10 +90,18 @@ struct LoweredArgs {
 /// argument unpacking (ADR-0049 §6). A positional argument after a named/spread
 /// one is a PHP compile error; folded into `has_spread` (the "unanalyzable shape"
 /// signal) so the arity check stays silent on it.
+///
+/// A spread of an **array literal** flattens into `args` at its written position
+/// and leaves `has_spread` down (issue #616): the operand names its own
+/// cardinality, order and values, so the list stays a proven positional list.
+/// Every other spread keeps the flag raised. See [`flatten_spread_operand`].
 fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs {
     let mut positional_only = true;
     let mut has_spread = false;
     let mut seen_non_positional = false;
+    // Any `...` at all, flattened or not: what makes a *following* plain
+    // positional non-canonical, which a flattened spread must still record.
+    let mut seen_unpacking = false;
     let mut args = Vec::new();
     let mut named_args = Vec::new();
     let mut arg_conds: Vec<Option<CondExpr>> = Vec::new();
@@ -101,7 +110,7 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
             Argument::Positional(p) if p.ellipsis.is_none() => {
                 // A plain positional after a named/spread argument is non-canonical
                 // (a compile error) — mark the whole list unanalyzable.
-                if seen_non_positional {
+                if seen_non_positional || seen_unpacking {
                     has_spread = true;
                 }
                 args.push(Arg { value: lower_arg_value(p.value), span: to_span(p.value.span()) });
@@ -116,11 +125,37 @@ fn lower_argument_list(list: &mago_syntax::cst::ArgumentList<'_>) -> LoweredArgs
                     span: to_span(n.span()),
                 });
             }
-            // A spread `...$x` positional argument: unpacking, count unproven.
-            Argument::Positional(_) => {
-                positional_only = false;
-                has_spread = true;
-                seen_non_positional = true;
+            // A spread `...expr` positional argument. A literal operand names the
+            // arguments it contributes, so it flattens here; anything else leaves
+            // the count unproven. Flattening after a *declined* non-positional
+            // would misplace the values, so it is gated on the prefix being clean.
+            Argument::Positional(p) => {
+                seen_unpacking = true;
+                let flattened = if seen_non_positional {
+                    None
+                } else {
+                    flatten_spread_operand(&lower_arg_value(p.value))
+                };
+                match flattened {
+                    Some(values) => {
+                        // The elements have no spans of their own here: each
+                        // carries the operand's, which is where the argument is
+                        // written.
+                        let span = to_span(p.value.span());
+                        for value in values {
+                            args.push(Arg { value, span });
+                            // A flattened element is a value, not a guard reading
+                            // — declining claims nothing and keeps the parallel
+                            // vector aligned with `args`.
+                            arg_conds.push(None);
+                        }
+                    }
+                    None => {
+                        positional_only = false;
+                        has_spread = true;
+                        seen_non_positional = true;
+                    }
+                }
             }
         }
     }
@@ -373,8 +408,10 @@ pub(crate) fn lower_static_call(class: &Expression<'_>, selector: &ClassLikeMemb
 /// Lower a method/static call written in **value** position to
 /// [`ArgValue::MethodCall`] (issue #386), or [`ArgValue::Other`] when the callee
 /// is one no resolution reaches ([`Callee::Dynamic`]) or the argument list
-/// carries a **spread** — whose positional prefix is not the call that was
-/// written, so claiming it would be claiming a different call.
+/// carries a **general spread** — whose positional prefix is not the call that
+/// was written, so claiming it would be claiming a different call. A spread of an
+/// array literal is already flattened by [`lower_argument_list`] and leaves
+/// `has_spread` down (issue #616), so it arrives here as an ordinary list.
 fn method_call_arg_value(callee: Callee, list: &mago_syntax::cst::ArgumentList<'_>) -> ArgValue {
     if matches!(callee, Callee::Dynamic) {
         return ArgValue::Other;
@@ -509,14 +546,40 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
                 let name = bytes_to_string(id.last_segment());
                 let mut args = Vec::new();
                 let mut ok = true;
+                // Any `...` seen: a plain positional after one is a PHP compile
+                // error, so the list is not a call this vocabulary answers about.
+                let mut seen_unpacking = false;
                 for arg in fc.argument_list.arguments.iter() {
                     match arg {
                         Argument::Positional(p) if p.ellipsis.is_none() => {
+                            if seen_unpacking {
+                                ok = false;
+                                break;
+                            }
                             args.push(lower_arg_value(p.value));
                         }
-                        // Named or spread argument: not modeled — the call is
-                        // still recorded but with no resolvable arguments.
-                        _ => ok = false,
+                        // A spread: a literal operand names the arguments it
+                        // contributes and flattens at its written position
+                        // (issue #616); a general one leaves the count unproven,
+                        // and a prefix read as the whole list would be a
+                        // different call.
+                        Argument::Positional(p) => {
+                            seen_unpacking = true;
+                            match flatten_spread_operand(&lower_arg_value(p.value)) {
+                                Some(values) => args.extend(values),
+                                None => {
+                                    ok = false;
+                                    break;
+                                }
+                            }
+                        }
+                        // Named argument: not modeled — `ArgValue::Call` carries
+                        // no named slot, so the call is still recorded but with
+                        // no resolvable arguments.
+                        _ => {
+                            ok = false;
+                            break;
+                        }
                     }
                 }
                 if ok { ArgValue::Call(name, args) } else { ArgValue::Other }

@@ -763,9 +763,17 @@ pub struct ClassDecl {
 /// name ([`Callee::Dynamic`] — `$o->$m()`, `$obj[0]->m()`, `$var::m()`), a
 /// receiver deeper than one property hop (depth 1 is a [`Receiver::Prop`],
 /// carried here and declined as a dispatch target by ADR-0052 §7), an argument
-/// list carrying a **spread** (its positional prefix is not the call), and a
-/// method **first-class callable** (`$o->m(...)` is a value, not a call — see
-/// [`ClosureRef::FunctionName`], which carries the free-function form only).
+/// list carrying a **general spread** (its positional prefix is not the call),
+/// and a method **first-class callable** (`$o->m(...)` is a value, not a call —
+/// see [`ClosureRef::FunctionName`], which carries the free-function form only).
+///
+/// "General" is the whole of the spread reservation since issue #616: a spread
+/// of an **array literal** names the arguments it contributes — cardinality,
+/// order and values are all written in the source — so it flattens into the
+/// positional list at its written position and the call keeps its `Call` /
+/// `MethodCall` form. Reading the flattened list is reading the call that was
+/// written, which is what the reservation was protecting. See
+/// [`flatten_spread_operand`] for the rule and its `PINNED_PHP` measurements.
 #[derive(Debug, Clone, PartialEq)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub enum ArgValue {
@@ -1123,6 +1131,56 @@ pub fn normalize_array(
         // The rules agree on this literal, so either one resolves it.
         None => Some(normalize_array_with(items, NextIntRule::MaxPlusOne)),
     }
+}
+
+/// The positional arguments a **spread operand** contributes, or `None` when the
+/// operand does not name them (issue #616).
+///
+/// `...[1, 2, 3]` has provably three elements in a written order, so the spread
+/// **is** the arguments it flattens to and a caller may read them positionally.
+/// `...$args` does not: its cardinality is runtime-decided, and a rule that read
+/// the written prefix as the whole list would answer about a different call.
+/// Only [`ArgValue::Array`] — the array-literal lowering, whose keys are all
+/// literal-or-absent and whose elements all lower (ADR-0001) — can answer; every
+/// other operand declines.
+///
+/// # Unpacking semantics, measured at `PINNED_PHP` (8.5.9, `php -r`)
+///
+/// - **Integer keys are discarded**; the values become positional arguments in
+///   *iteration* order, contiguous or not, ascending or not:
+///   `f(...[2 => 'a', 0 => 'b'])` → `['a', 'b']`, `f(...[1 => 'a', 2 => 'b'])` →
+///   `['a', 'b']`. So the flattened list is the normalized array's **values**,
+///   and the keys matter only for the last-wins fold that decides which values
+///   survive and in what order.
+/// - **String keys are named arguments** (legal since PHP 8.1):
+///   `named(...['y' => 2])` binds `$y`, leaving `$x` at its default. This
+///   function therefore **declines** a literal carrying one — [`ArgValue::Call`]
+///   has no named-argument slot at all, so flattening it positionally would bind
+///   the wrong parameters. Named arguments keep their existing refusal.
+/// - A positional entry **after** a string-keyed one inside one spread is a
+///   runtime `Error` ("Cannot use positional argument after named argument
+///   during unpacking"); declining on any string key covers that too.
+/// - Key normalization is PHP's own, so `...[true => 1]` and `...["1" => 1]`
+///   both spread positionally — [`ArrayKey`] already folds them to `Int`.
+///
+/// The PHP minor is deliberately not a parameter: [`normalize_array`] is asked
+/// with `None`, which answers only for literals every supported minor resolves
+/// alike and declines the negative-key edge the 8.3 next-auto-index rule change
+/// splits. A spread that lands on a different position under a different minor
+/// is not one whose arguments the source names.
+///
+/// Shaped for reuse at the **array-literal** seam (`[1, 2, ...[3, 4, 5], 6]`),
+/// which flattens the same operand into an enclosing literal's entries rather
+/// than into an argument list; that seam is a separate slice and is not wired up
+/// here.
+#[must_use]
+pub fn flatten_spread_operand(operand: &ArgValue) -> Option<Vec<ArgValue>> {
+    let ArgValue::Array(items) = operand else { return None };
+    let normalized = normalize_array(items, None)?;
+    if normalized.iter().any(|(k, _)| matches!(k, NormKey::Str(_))) {
+        return None;
+    }
+    Some(normalized.into_iter().map(|(_, v)| v).collect())
 }
 
 // ---------------------------------------------------------------------------
@@ -1544,16 +1602,25 @@ pub struct CallExpr {
     /// The receiver dimension (function/method/static/constructor). For a plain
     /// function call, [`Callee::Function`] with the same name as [`Self::callee`].
     pub receiver: Callee,
-    /// **Positional** arguments in source order (spread `...$x` excluded — see
-    /// [`Self::has_spread`]). Full list when [`Self::positional_only`]; else the
+    /// **Positional** arguments in source order (a general spread `...$x`
+    /// excluded — see [`Self::has_spread`]; a **literal** spread `...[1, 2]`
+    /// flattened in at its written position, issue #616, each element carrying
+    /// the operand's span). Full list when [`Self::positional_only`]; else the
     /// positional prefix of a mixed call (`f(1, b: 2)` → `args=[1]`, `named_args=[b]`).
     pub args: Vec<Arg>,
     /// **Named** arguments (`name: <expr>`) in source order (ADR-0049 §6 arity);
     /// empty for a purely positional call, populated so arity can bind named args regardless.
     pub named_args: Vec<NamedArg>,
-    /// `true` when the call carries **argument unpacking** (`...$args`) —
-    /// spread's cardinality is runtime, so arity stays silent. Also set for
-    /// **non-canonical** order (positional after named — a compile error).
+    /// `true` when the call carries argument unpacking **whose cardinality is
+    /// not proven** (`...$args`, `...f()`) — a runtime count, so arity stays
+    /// silent. Also set for **non-canonical** order (a positional after a named
+    /// or unpacked argument — a compile error).
+    ///
+    /// Sharpened by issue #616 rather than redefined: a spread of an array
+    /// literal ([`flatten_spread_operand`]) leaves a provably complete positional
+    /// list in [`Self::args`] and so does **not** raise this flag, which is
+    /// exactly what every reader already asks it — "may I trust this argument
+    /// count?". A general spread still raises it.
     pub has_spread: bool,
     /// `false` if the call used a named or spread argument; existing checks
     /// skip such calls — equivalent to `named_args.is_empty() && !has_spread`,
