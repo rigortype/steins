@@ -1150,11 +1150,19 @@ fn sscanf_transfer(
         // A format nothing is known about still proves the OUTER arm.
         return Some(Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: true });
     };
-    let fields: Vec<_> = scanf_slot_facts(fmt.as_bytes())?
+    let slots = scanf_slot_facts(fmt.as_bytes())?;
+    // A-G6, the same width degradation [`ShapeFact::lift`] performs: past
+    // `SHAPE_WIDTH_LIMIT` slots the tail-only summary stands in for the sequence.
+    // Nothing in a real format reaches 256 conversions; a generated one might, and
+    // the answer stays sound because this only widens.
+    if slots.len() > steins_domain::SHAPE_WIDTH_LIMIT {
+        return Some(Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: true });
+    }
+    let fields: Vec<_> = slots
         .into_iter()
         .enumerate()
         .map(|(i, f)| {
-            let i = i64::try_from(i).expect("a format string's conversion count is bounded");
+            let i = i64::try_from(i).expect("shape width is bounded above");
             (VKey::Int(i), Presence::Required { witnessed: false }, Some(Box::new(f)))
         })
         .collect();
