@@ -1181,7 +1181,7 @@ enum FilterKind {
 /// | `FORCE_ARRAY` | proven non-array | `array<outcome>` | `filter_var(17, INT, FORCE_ARRAY)` → `[0 => 17]` |
 /// | `FORCE_ARRAY` | may be an array | **decline** | the map recurses — see below |
 /// | `REQUIRE_ARRAY` | proven non-array | `false`, or `null` under `NULL_ON_FAILURE` | `filter_var(17, INT, REQUIRE_ARRAY)` → `false` |
-/// | `REQUIRE_ARRAY` | may be an array | **decline** | the answer's outer arm is `array\|false` (issue #600) |
+/// | `REQUIRE_ARRAY` | may be an array | **decline** | the element, as above; and without `NULL_ON_FAILURE` the outer arm is `array\|false` too (issue #600 + no array arm in `Fact::Union`) |
 /// | `REQUIRE_ARRAY\|FORCE_ARRAY` | proven non-array | as `REQUIRE_ARRAY` alone | `REQUIRE_ARRAY` dominates: `filter_var(17, INT, RA\|FA)` → `false` |
 ///
 /// **The decline on an input that may be an array is the load-bearing cell, and it
