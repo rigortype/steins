@@ -22,7 +22,7 @@ use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
-use crate::cond::{eval_binary_fact, eval_isset_fact};
+use crate::cond::{eval_binary_fact, eval_isset_fact, eval_ternary_fact};
 use crate::cx::Cx;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
 use crate::env::{
@@ -32,7 +32,7 @@ use crate::env::{
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Fix, FixEdit, Res};
 use crate::return_arms::{call_return_arms_by_name, method_return_arms_by_callee};
-use crate::walk::WalkCx;
+use crate::walk::{WalkCx, value_stratum};
 
 // ---------------------------------------------------------------------------
 // The dump surface (ADR-0053): requested introspection — an "answered question".
@@ -691,6 +691,50 @@ fn best_dump_type(
         && let Some((read, stratum)) = shape_read_at(base, key, env, poisoned, cx.php_minor)
         && let Some(fact) = read.into_fact()
     {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A ternary `$c ? A : B` (ADR-0031, issue #625): the guard's verdict picks the
+    // taken arm's fact, an undecided guard joins both. Placed above the fold for
+    // the same reason the `??` below it is — a ternary is never a literal the
+    // folder can reach, so without this rung a fully-decided `true ? 1 : 2`
+    // dumped `unknown` while `$t = true ? 1 : 2;` bound `1`. That asymmetry is
+    // the defect issue #625 names: `eval_ternary_fact` existed and worked, and
+    // was wired into the assignment seam alone.
+    //
+    // The stratum is the assignment seam's, computed the same way (`min` over the
+    // arms — either could be the taken one under a `Maybe` verdict), so the two
+    // seams cannot disagree about `(asserted)` any more than they can about the
+    // fact itself.
+    //
+    // # This rung marks the untaken arm dead, and that is deliberate
+    //
+    // `eval_ternary_fact` records the untaken arm of a decided guard as proven
+    // unevaluated (ADR-0052 §6). The alternative considered was a non-marking
+    // variant for this seam, on the theory that the dump surface is a second
+    // reader and might double-mark. It is not needed and it would be wrong:
+    //
+    // - `emit_dumps` gates on `descent.is_none()`, so this runs exactly once per
+    //   dump site, in the plain per-scope walk — there is no second pass to
+    //   double-mark from.
+    // - The deadness is true of the source, not of the seam that noticed it. PHP
+    //   evaluates one arm of a ternary wherever it is written, so a finding
+    //   inside `dumpType($x === 2 ? f("bad") : 0)` with `$x` proven `1` is the
+    //   same false positive the assignment seam already suppresses. Declining to
+    //   mark here would reintroduce, for deadness, exactly the by-seam
+    //   disagreement this rung exists to remove.
+    // - The record is idempotent by construction: `w.dead` is read through
+    //   `in_dead`'s `any()` predicate, so a span pushed twice decides identically
+    //   to one pushed once. A duplicate would cost a `Span`, never a verdict.
+    if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value
+        && let Some(fact) =
+            eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
+    {
+        let stratum = value_stratum(then_val, env, Some(store))
+            .min(value_stratum(else_val, env, Some(store)));
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,
