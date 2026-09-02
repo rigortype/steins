@@ -1237,7 +1237,7 @@ because `array_unshift` keeps its list claim.
 The named witnesses: `list-type.php:88` and `:90` answer `list{'1'}` and
 `list{'1', '2'}` where they answered `unknown`, and `:92` — after
 `unset($list[0])` — answers `array{1: '2'}`, the fence visible in the corpus.
-`array-is-list-unset.php` moves six rows. `bug-9985.php:20`, the string-key
+`array-is-list-unset.php` moves seven rows, four of them to `match`. `bug-9985.php:20`, the string-key
 sibling this must not regress, is byte-identical.
 
 Across both legs of #636: `differ` 9779 → 9749, `match` 3193 → 3206.
