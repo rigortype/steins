@@ -2029,12 +2029,22 @@ pub enum StmtKind {
     /// Limitation: can't prove fall-through dead when every branch returns early, without
     /// reachability analysis.
     Opaque { writes: Vec<String>, reads: Vec<String>, poisons: bool, may_return: bool },
-    /// `$var[<lit>] = <rvalue>;` — constant-key offset write (ADR-0062 A-G8). A
+    /// `$var[<key>] = <rvalue>;` — offset write (ADR-0062 A-G8). A
     /// [`Self::Barrier`] plus one fact: after forgetting env/store, only the base binding's
     /// array shape re-establishes with the key promoted. `keys` has one or two entries
-    /// (depth 1, plus autovivification); append (`$x[]=`), dynamic keys, and `+=`/`.=` stay
+    /// (depth 1, plus autovivification). The **outermost** key need not be a literal
+    /// (issue #636) — `$x[$i] = v` lowers here and the walk takes ADR-0062 Amendment J's
+    /// weakest sound row; the inner key of a depth-two path still must be. `+=`/`.=` stay
     /// plain `Barrier`.
     OffsetWrite { base: String, keys: Vec<ArgValue>, value: ArgValue },
+    /// `$var[] = <rvalue>;` — the auto-index append (ADR-0062 Amendment K, issue #636).
+    /// A [`Self::Barrier`] plus one fact, like [`Self::OffsetWrite`], but with **no key
+    /// node to carry**: PHP picks the index itself, one past the largest integer key the
+    /// array has ever held. A separate variant rather than an optional entry in
+    /// `OffsetWrite::keys`, so the key path stays a path and the append's own algebra
+    /// stays out of the key loop. An append through anything but a plain local
+    /// (`$o->p[] = v`, `$a['k'][] = v`) stays a plain `Barrier`.
+    OffsetAppend { base: String, value: ArgValue },
     /// `unset($var[<lit>]);` — constant-key offset unset (A-G8), same containment as
     /// [`Self::OffsetWrite`] plus a `mark_absent` on the shape. Multi-target unset, dynamic
     /// keys, and `unset($var)` itself all stay plain `Barrier`.

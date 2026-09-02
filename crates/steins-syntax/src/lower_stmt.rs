@@ -18,7 +18,8 @@ use crate::ast::{
     Stmt, StmtKind, StringContextKind, StringContextSite, UnaryOperandOp,
 };
 use crate::lower_expr::{
-    assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads, lower_arg_value,
+    append_base, assert_stmt_cond, const_key_offset, const_key_offset_path, destructure_reads,
+    lower_arg_value,
     lower_array_key, lower_call, lower_cond, lower_cond_operand, lower_construct_call,
     lower_method_call, lower_opaque, lower_static_call, opaque_sets, prop_fetch_of,
 };
@@ -1182,6 +1183,16 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 let span = to_span(a.lhs.span());
                 let kind = StmtKind::PropAssign { target_var, prop, value, value_call, span };
                 Stmt::lowered(kind, invalidated)
+            } else if a.operator.is_assign()
+                && let Some(base) = append_base(a.lhs)
+            {
+                // `$var[] = …` (ADR-0062 Amendment K, issue #636). The index is
+                // not in the source at all — PHP picks it — so this carries no
+                // key and the walk computes the landing index from the base's
+                // own witnessed key sequence.
+                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let value = lower_arg_value(a.rhs);
+                Stmt::lowered(StmtKind::OffsetAppend { base, value }, invalidated)
             } else if a.operator.is_assign()
                 && let Some((base, keys)) = const_key_offset_path(a.lhs)
             {
