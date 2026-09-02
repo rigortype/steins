@@ -963,9 +963,50 @@ mod tests {
             panic!("a push states a shape");
         };
         assert!(out.non_empty, "an appended value proves the array is not empty");
-        assert_eq!(out.is_list, Certainty::Yes, "appending to a list leaves a list");
+        // Corrected by issue #636. This asserted `Yes` on the reading that
+        // appending to a list leaves a list; PHP says otherwise, because the
+        // append index is a high-water mark no list type constrains:
+        //
+        //   php -r '$x=[1,2,3]; unset($x[2]); var_dump(array_is_list($x));'
+        //     => true
+        //   php -r '$x=[1,2,3]; unset($x[2]); $x[]=99; var_dump(array_is_list($x));'
+        //     => false
+        assert_eq!(out.is_list, Certainty::Maybe, "an append does NOT preserve list-ness");
         let Tail::Unsealed { value: Some(v), .. } = &out.tail else { panic!("a bounded tail") };
         assert!(matches!(**v, Fact::Union { .. }), "the pushed string joined the int bound");
+    }
+
+    /// The other half of #636's correction: `array_unshift` renumbers every
+    /// integer key from `0`, so it rebuilds the array and a list input really
+    /// does come back a list. Same helper, opposite answer, on purpose.
+    ///
+    /// ```text
+    /// php -r '$x=[1,2,3]; unset($x[2]); array_unshift($x,99); var_dump(array_is_list($x));'
+    ///   => true
+    /// ```
+    #[test]
+    fn an_unshift_to_a_keyless_list_does_keep_list_ness() {
+        let ints = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Some(Box::new(Fact::General {
+                    base: steins_domain::Base::Int,
+                    nullable: false,
+                })),
+            },
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        let Fact::Shape { shape: out, .. } =
+            array_unshift_written_fact(&ints, &[Some(Fact::Singleton(Val::Int(9)))])
+                .expect("a shape")
+        else {
+            panic!("an unshift states a shape");
+        };
+        assert_eq!(out.is_list, Certainty::Yes, "a renumbering rebuild keeps the list");
+        assert!(out.non_empty);
     }
 
     #[test]
