@@ -22,8 +22,8 @@ use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
 use crate::cond::{
-    eval_binary_fact, eval_isset_fact, eval_logical_fact, eval_not_fact, eval_spaceship_fact,
-    eval_ternary_fact,
+    eval_binary_fact, eval_cast_fact, eval_isset_fact, eval_logical_fact, eval_not_fact,
+    eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::contract::IsA;
 use crate::cx::Cx;
@@ -2068,6 +2068,11 @@ pub(crate) fn return_value_fact(
     }
     if let ArgValue::Not(inner) = value {
         return Some(eval_not_fact(w, folder, inner, env, Some(store), poisoned));
+    }
+    // A value-position cast (issue #626): total like the group above, so an exit
+    // crossing one carries the target's base at worst rather than no fact.
+    if let ArgValue::Cast { target, operand } = value {
+        return Some(eval_cast_fact(w, folder, *target, operand, env, Some(store), poisoned));
     }
     // A value-position `isset(…)` (issue #579): total like the comparison above,
     // so an exit crossing one carries a `bool` at worst rather than no fact.

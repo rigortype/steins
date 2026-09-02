@@ -23,8 +23,8 @@ use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
 use crate::cond::{
-    eval_binary_fact, eval_isset_fact, eval_logical_fact, eval_not_fact, eval_spaceship_fact,
-    eval_ternary_fact,
+    eval_binary_fact, eval_cast_fact, eval_isset_fact, eval_logical_fact, eval_not_fact,
+    eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::cx::Cx;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
@@ -796,6 +796,19 @@ fn best_dump_type(
     }
     if let ArgValue::Not(inner) = value {
         let (fact, stratum) = eval_not_fact(w, folder, inner, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A value-position cast (issue #626): the `settype` grid of issue #595 read
+    // through the other syntax, and total for the same reason the group above is
+    // — a cast that produces a value produces one of its target's base, so the
+    // floor is that base and never `unknown`.
+    if let ArgValue::Cast { target, operand } = value {
+        let (fact, stratum) =
+            eval_cast_fact(w, folder, *target, operand, env, Some(store), poisoned);
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,

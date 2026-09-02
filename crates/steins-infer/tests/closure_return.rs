@@ -206,18 +206,26 @@ fn named_arg_first_class_callable_keeps_declared_floor() {
 fn asserted_capture_summary_stays_asserted() {
     // Regression: a capture snapshot must preserve stratum. If it re-seeds as
     // Verified, `$result = $f()` launders an Asserted 'hi' into a proof premise.
+    //
+    // The subject is an untyped PARAMETER, which is the shape the test needs: an
+    // `@phpstan-assert` claim deliberately never overwrites a Verified fact
+    // (`apply_assert_to_var`'s replace-if-weaker rule), so the assert must reach
+    // a variable that carries none. This fixture used to spell that as
+    // `$x = (string) rand();`, which stopped being factless when the cast grew a
+    // value lane (issue #626) and now binds a Verified `string`.
     let src = "<?php\n\
         /** @phpstan-assert 'hi' $v */\n\
         function claimHi($v): void {}\n\
         function takesInt(int $n): void {}\n\
-        $x = (string) rand();\n\
+        function outer($x): void {\n\
         claimHi($x);\n\
         $f = function () use ($x): string {\n\
             return $x;\n\
         };\n\
         $result = $f();\n\
         \\PHPStan\\dumpType($result);\n\
-        takesInt($result);\n";
+        takesInt($result);\n\
+        }\n";
     assert_eq!(one_type(src), "'hi' (asserted)");
     assert_eq!(
         count(src, ARG_MISMATCH_ID),
