@@ -21,7 +21,10 @@ use crate::arg_check::{
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
-use crate::cond::{eval_binary_fact, eval_isset_fact, eval_ternary_fact};
+use crate::cond::{
+    eval_binary_fact, eval_isset_fact, eval_logical_fact, eval_not_fact, eval_spaceship_fact,
+    eval_ternary_fact,
+};
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -2040,6 +2043,30 @@ pub(crate) fn return_value_fact(
     // `ValueOp::BitOr` (issue #615) has no floor and is not matched.
     if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         return Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, Some(store), poisoned));
+    }
+    // A value-position `<=>` (issue #625): total one layer up from the
+    // comparison — the `int<-1, 1>` floor at worst, never a factless exit.
+    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
+        return Some(eval_spaceship_fact(w.cx, folder, lhs, rhs, env, Some(store), poisoned));
+    }
+    // A value-position logical connective and its negation (issue #625): total
+    // for the strongest reason in this group — PHP has no operator overloading
+    // for `&& || and or xor !`.
+    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
+        return Some(eval_logical_fact(
+            w,
+            folder,
+            *op,
+            lhs,
+            rhs,
+            *rhs_span,
+            env,
+            Some(store),
+            poisoned,
+        ));
+    }
+    if let ArgValue::Not(inner) = value {
+        return Some(eval_not_fact(w, folder, inner, env, Some(store), poisoned));
     }
     // A value-position `isset(…)` (issue #579): total like the comparison above,
     // so an exit crossing one carries a `bool` at worst rather than no fact.

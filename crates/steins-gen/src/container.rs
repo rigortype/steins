@@ -53,10 +53,16 @@ use crate::names::{PackageName, SectionName};
 /// flattening (issue #616): `f(1, ...[2, 3])` used to lower to `ArgValue::Other`
 /// with `has_spread` raised and now lowers to the three-argument call it names, so
 /// a schema-8 trace both spells the value differently and reports an argument count
-/// this binary no longer believes unproven.
+/// this binary no longer believes unproven. `10` is the logical family (issue
+/// #625) — `ArgValue::Logical`, `ArgValue::Not` and `ValueOp::Spaceship`, bumped
+/// ONCE for all three because they land together — and it is the same reason a
+/// fourth time: a schema-9 trace spells `$a && $b`, `!$x` and `$a <=> $b` as
+/// `ArgValue::Other`, so replaying it would answer `unknown` for three values
+/// this binary now decides, and would miss the dead right operand of a decided
+/// `&&`/`||` that only the new carrier's span records.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

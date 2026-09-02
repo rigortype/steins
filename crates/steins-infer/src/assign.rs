@@ -14,7 +14,8 @@ use crate::builtin_returns::{
     floor_value_fact, shape_builtin_return_fact,
 };
 use crate::cond::{
-    coalesce_lhs_proven_present, eval_binary_fact, eval_isset_fact, eval_ternary_fact,
+    coalesce_lhs_proven_present, eval_binary_fact, eval_isset_fact, eval_logical_fact,
+    eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::descent::summary_binds;
 use crate::env::{
@@ -97,6 +98,64 @@ pub(crate) fn apply_assign(
     if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         let (fact, strat) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(&*store), w.scope.poisoned);
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
+        return;
+    }
+
+    // A `<=>` rvalue `$n = $a <=> $b;` (issue #625): the operator's fact, by the
+    // same evaluator the dump surface reads. Total one layer up from the
+    // comparison — `int<-1, 1>` at worst, never dropped.
+    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
+        let (fact, strat) =
+            eval_spaceship_fact(cx, folder, lhs, rhs, env, Some(&*store), w.scope.poisoned);
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
+        return;
+    }
+
+    // A logical rvalue `$b = $x && $y;` and its negation `$b = !$x;` (issue
+    // #625): the operator's fact, by the same evaluator the dump surface reads.
+    // Total — PHP has no operator overloading for these — so the binding is
+    // `bool` at worst and never dropped. A decided `&&`/`||` also records its
+    // unevaluated right operand dead here (ADR-0052 §6).
+    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
+        let (fact, strat) = eval_logical_fact(
+            w,
+            folder,
+            *op,
+            lhs,
+            rhs,
+            *rhs_span,
+            env,
+            Some(&*store),
+            w.scope.poisoned,
+        );
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
+        return;
+    }
+    if let ArgValue::Not(inner) = value {
+        let (fact, strat) =
+            eval_not_fact(w, folder, inner, env, Some(&*store), w.scope.poisoned);
         if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
             facts.push(LineFact {
                 line,

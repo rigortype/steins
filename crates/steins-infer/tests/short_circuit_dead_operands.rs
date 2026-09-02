@@ -191,3 +191,58 @@ fn a_dumped_ternarys_arms_control_fires_under_an_undecided_guard() {
     );
     assert_eq!(mismatches(&src), 2, "an undecided guard leaves both dumped arms live");
 }
+
+// `&&` / `||` in VALUE position (issue #625). Until the logical family lowered,
+// only the CONDITION side modelled these, so `if ($x === 2 && f("bad"))` was
+// already silent while `$y = $x === 2 && f("bad");` — the same test, one
+// character of syntax apart — reported inside a call PHP never makes. Each pair
+// below is the decided form and its undecided twin, as everywhere in this file.
+
+#[test]
+fn a_value_position_and_right_operand_is_not_evaluated_when_left_is_false() {
+    let src = format!("{HDR}function f(): void {{ $x = 1; $y = $x === 2 && takesInt(\"abc\"); }}");
+    assert_eq!(mismatches(&src), 0, "a proven-false left operand never evaluates the right");
+}
+
+#[test]
+fn a_value_position_and_control_fires_when_left_is_undecided() {
+    let src = format!("{HDR}function f(int $x): void {{ $y = $x === 2 && takesInt(\"abc\"); }}");
+    assert_eq!(mismatches(&src), 1, "an undecided left operand keeps the right one live");
+}
+
+#[test]
+fn a_value_position_or_right_operand_is_not_evaluated_when_left_is_true() {
+    let src = format!("{HDR}function f(): void {{ $x = 1; $y = $x === 1 || takesInt(\"abc\"); }}");
+    assert_eq!(mismatches(&src), 0, "a proven-true left operand never evaluates the right");
+}
+
+#[test]
+fn a_value_position_or_control_fires_when_left_is_undecided() {
+    let src = format!("{HDR}function f(int $x): void {{ $y = $x === 1 || takesInt(\"abc\"); }}");
+    assert_eq!(mismatches(&src), 1, "an undecided left operand keeps the `||` right operand live");
+}
+
+#[test]
+fn a_dumped_and_right_operand_is_not_evaluated_when_left_is_false() {
+    // The dump seam reads the same evaluator, so it suppresses the same span.
+    let src = format!(
+        "{HDR}function f(): void {{ $x = 1; \\PHPStan\\dumpType($x === 2 && takesInt(\"abc\")); }}"
+    );
+    assert_eq!(mismatches(&src), 0, "a dumped short-circuited operand never runs either");
+}
+
+#[test]
+fn xor_never_short_circuits_so_both_operands_stay_live() {
+    // PHP must evaluate both operands of an `xor` to know its answer, so neither
+    // is ever recorded dead — even when the left operand alone is decided.
+    let src = format!("{HDR}function f(): void {{ $x = 1; $y = $x === 1 xor takesInt(\"abc\"); }}");
+    assert_eq!(mismatches(&src), 1, "`xor` evaluates both operands, always");
+}
+
+#[test]
+fn a_nested_value_position_chain_suppresses_only_past_the_decided_point() {
+    let src = format!(
+        "{HDR}function f(): void {{ $x = 1; $y = $x === 1 && $x === 2 && takesInt(\"abc\"); }}"
+    );
+    assert_eq!(mismatches(&src), 0, "the chain short-circuits before the third operand");
+}

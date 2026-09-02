@@ -5,7 +5,7 @@
 //! the boundary — which operators the node carries, and that everything else
 //! still widens to `Other`.
 
-use steins_syntax::{ArgValue, CmpOp, SourceTree, StmtKind, ValueOp};
+use steins_syntax::{ArgValue, CmpOp, LogicalOp, SourceTree, StmtKind, ValueOp};
 
 /// The value assigned to `$var` by the first matching assignment.
 fn assigned_value<'a>(tree: &'a SourceTree, var: &str) -> Option<&'a ArgValue> {
@@ -71,17 +71,99 @@ fn an_unrepresentable_operand_stays_in_the_tree() {
 }
 
 #[test]
-fn non_comparison_operators_still_widen() {
+fn arithmetic_and_bitwise_operators_still_widen() {
     // The node carries only operators SOME consumer answers (Certainty
-    // discipline). `|` is the one non-comparison member (issue #615) and has its
-    // own row below.
-    for src in ["1 + 1", "1 - 1", "2 * 3", "7 / 2", "7 % 2", "2 ** 3", "5 & 3", "5 ^ 3",
-                "1 << 2", "8 >> 1", "true && false", "true || false", "1 <=> 2"] {
+    // discipline). Arithmetic and the bit-shifting family stay out under
+    // ADR-0028 §3 — reimplementing engine int width in Rust is the named hazard.
+    // `|` is the one arithmetic-family member that lowers (issue #615) and has
+    // its own row below.
+    for src in
+        ["1 + 1", "1 - 1", "2 * 3", "7 / 2", "7 % 2", "2 ** 3", "5 & 3", "5 ^ 3", "1 << 2",
+         "8 >> 1", "~5"]
+    {
         assert_eq!(lowered(src), ArgValue::Other, "`{src}` must not lower to the node yet");
     }
     // `.` keeps its own dedicated variant (issue #59), and `??` keeps `Coalesce`.
     assert!(matches!(lowered("'a' . 'b'"), ArgValue::Concat(..)));
     assert!(matches!(lowered("$a ?? 1"), ArgValue::Coalesce(..)));
+}
+
+#[test]
+fn the_logical_family_lowers_to_its_own_carriers() {
+    // Issue #625. `&&`/`and` and `||`/`or` differ in precedence, not semantics,
+    // so they share a `LogicalOp`; `xor` has only the low-precedence spelling.
+    //
+    // The low-precedence spellings are PARENTHESIZED here, and that is PHP's own
+    // rule rather than a convenience: `and`/`or`/`xor` bind LOWER than `=`, so
+    // `$x = true and false;` parses as `($x = true) and false` and the
+    // assignment's rvalue is the bare `true`. The parentheses restore the
+    // question this test is asking.
+    for (src, want) in [
+        ("true && false", LogicalOp::And),
+        ("(true and false)", LogicalOp::And),
+        ("true || false", LogicalOp::Or),
+        ("(true or false)", LogicalOp::Or),
+        ("(true xor false)", LogicalOp::Xor),
+    ] {
+        match lowered(src) {
+            ArgValue::Logical { op, lhs, rhs, .. } => {
+                assert_eq!(op, want, "`{src}`");
+                assert_eq!(*lhs, ArgValue::Bool(true));
+                assert_eq!(*rhs, ArgValue::Bool(false));
+            }
+            other => panic!("`{src}` lowered to {other:?}"),
+        }
+    }
+    match lowered("!true") {
+        ArgValue::Not(v) => assert_eq!(*v, ArgValue::Bool(true)),
+        other => panic!("lowered to {other:?}"),
+    }
+}
+
+#[test]
+fn the_logical_carriers_are_total_over_their_operands() {
+    // The property that separates them from `Binary`'s `|`: an operand this
+    // vocabulary cannot spell stays `Other` INSIDE the node instead of widening
+    // it, because PHP has no operator overloading for these — the result is a
+    // `bool` whatever the operands are.
+    match lowered("$a->b->c && $d->e->f") {
+        ArgValue::Logical { lhs, rhs, .. } => {
+            assert_eq!(*lhs, ArgValue::Other);
+            assert_eq!(*rhs, ArgValue::Other);
+        }
+        other => panic!("lowered to {other:?}"),
+    }
+    match lowered("!$a->b->c") {
+        ArgValue::Not(v) => assert_eq!(*v, ArgValue::Other),
+        other => panic!("lowered to {other:?}"),
+    }
+}
+
+#[test]
+fn a_logical_node_carries_its_right_operands_extent() {
+    // The reason this is a variant rather than a `ValueOp`: a decided `&&`/`||`
+    // proves its right operand never runs, and recording that needs the extent.
+    // `Coalesce` carries one for exactly the same reason.
+    match lowered("true && false") {
+        ArgValue::Logical { rhs_span, .. } => {
+            assert!(rhs_span.end > rhs_span.start, "the right operand has a real extent");
+        }
+        other => panic!("lowered to {other:?}"),
+    }
+}
+
+#[test]
+fn a_spaceship_lowers_to_the_node() {
+    // Issue #625. A `ValueOp` rather than a variant of its own, because a `<=>`
+    // evaluates both operands unconditionally, exactly as a comparison does.
+    match lowered("1 <=> 2") {
+        ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
+            assert_eq!(*lhs, ArgValue::Int(1));
+            assert_eq!(*rhs, ArgValue::Int(2));
+        }
+        other => panic!("lowered to {other:?}"),
+    }
+    assert_eq!(ValueOp::Spaceship.symbol(), "<=>");
 }
 
 #[test]
