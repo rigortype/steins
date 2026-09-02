@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use steins_domain::{CoverFlavor, Fact, ShapeFact, Key as VKey};
+use steins_domain::{CoverFlavor, Fact, ShapeFact, Val, Key as VKey};
 use steins_syntax::{ArgValue, CallExpr, Span, ValueOp};
 
 use crate::fold::Folder;
@@ -619,7 +619,11 @@ pub(crate) fn eval_coalesce_fact(
     let last = arms.len() - 1;
 
     let mut premises: Vec<(String, VKey)> = Vec::new();
-    let mut parts: Vec<(Fact, Stratum)> = Vec::with_capacity(arms.len());
+    // `Option<(Option<Fact>, Stratum)>`: the outer `None` is "the domain cannot
+    // spell this arm" and ends the whole expression; the INNER `None` is "PHP
+    // proves this arm falls through", which contributes no value and still
+    // contributes its stratum.
+    let mut parts: Vec<(Option<Fact>, Stratum)> = Vec::with_capacity(arms.len());
     for (i, (arm, rest)) in arms.iter().enumerate() {
         let projection = coalesce_projection(arm, env, poisoned, php_minor);
         let (part, settled) = match &projection {
@@ -638,7 +642,7 @@ pub(crate) fn eval_coalesce_fact(
                 }
                 (
                     arg_value_fact(w, folder, arm, env)
-                        .map(|f| (f, value_stratum(arm, env, store))),
+                        .map(|f| (Some(f), value_stratum(arm, env, store))),
                     settled,
                 )
             }
@@ -656,11 +660,16 @@ pub(crate) fn eval_coalesce_fact(
     }
 
     // Derivation clause (ADR-0052 §5): result is no stronger than the weakest arm.
-    let (mut acc, mut stratum) = parts.pop()?;
+    // The last arm is the value whenever everything left of it fell through, so it
+    // is the one arm that must carry a fact.
+    let (last_fact, mut stratum) = parts.pop()?;
+    let mut acc = last_fact?;
     while let Some((fact, s)) = parts.pop() {
         stratum = stratum.min(s);
-        // A provably-null arm (nothing survives `clear_null`) contributes nothing.
-        if let Some(nonnull) = clear_null(&fact) {
+        // A provably-absent arm (no fact) and a provably-null one (nothing survives
+        // `clear_null`) are the same law: PHP falls through both, so neither
+        // contributes a value — and both still contribute their stratum.
+        if let Some(nonnull) = fact.as_ref().and_then(clear_null) {
             acc = nonnull.join(&acc)?;
         }
     }
@@ -737,24 +746,61 @@ pub(crate) fn coalesce_projection(
 /// its left fell through, so it must be *proved* present: a `Required` field
 /// proves it outright; an optional one needs A-G11's cover discharge, with
 /// `absent` the accumulated `¬isset` ladder over this base.
+///
+/// # The base may be an order-witnessed VALUE, not only an abstract shape
+///
+/// A fully literal array binds `Fact::Singleton(Val::Array)`, never `Fact::Shape`,
+/// so `$array = [1, 2, 3]; $array['string'] ?? 0` used to decline on the base test
+/// alone — while `isset($array['string'])` on the very same binding answered
+/// `false`, because the `isset` lane reads a literal array directly. The base is
+/// **lifted** here for the same reason and by the same call the offset-write barrier
+/// uses ([`ShapeFact::lift`], issue #327): a witnessed value is strictly more
+/// precise than the shape it lifts to, so reading it through the shape law can only
+/// lose precision, never invent it.
+///
+/// # A provably-absent arm falls through; it does not silence the chain
+///
+/// `DeclaredAbsent` is a *proof* — a `Sealed` shape's non-field, or a field the
+/// declaration marks `Absent`. PHP's `??` skips such an arm and evaluates the next
+/// one, so the arm contributes **no fact** and the chain goes on. Returning `None`
+/// for it, which is what `taken_fact()` alone did, conflated "this arm is proven
+/// not to be the value" with "the domain cannot spell this arm" and let the first
+/// kill the whole expression. That is the same law the join loop already applies
+/// one level up to a provably-null arm.
+///
+/// The absent arm still contributes its **stratum**: the absence rests on the
+/// base's fact, so an `Asserted` shape's word about a missing key cannot buy a
+/// `Verified` answer.
 fn coalesce_arm_fact(
     var: &str,
     key: &VKey,
     env: &HashMap<String, Known>,
     premises: &[(String, VKey)],
     final_arm: bool,
-) -> Option<(Fact, Stratum, bool)> {
+) -> Option<(Option<Fact>, Stratum, bool)> {
     let known = env.get(var)?;
-    let Some(Fact::Shape { shape, nullable: false }) = &known.fact else { return None };
+    let lifted;
+    let shape: &ShapeFact = match &known.fact {
+        Some(Fact::Shape { shape, nullable: false }) => shape.as_ref(),
+        Some(Fact::Singleton(Val::Array(entries))) => {
+            lifted = ShapeFact::lift(entries);
+            &lifted
+        }
+        _ => return None,
+    };
     let read = shape_read(shape, key);
     // Present and non-null is exactly PHP's `isset` — same test in both positions,
     // harmless on the last arm and a short-circuit before it.
     let settled = matches!(&read, ShapeRead::Present(Some(f)) if f.is_null().is_no());
     if !final_arm {
-        return read.taken_fact().map(|f| (f, known.stratum, settled));
+        // Proven absent: PHP falls through, so no fact and no silence.
+        if matches!(read, ShapeRead::DeclaredAbsent) {
+            return Some((None, known.stratum, false));
+        }
+        return read.taken_fact().map(|f| (Some(f), known.stratum, settled));
     }
     if let ShapeRead::Present(Some(f)) = read {
-        return Some((f, known.stratum, settled));
+        return Some((Some(f), known.stratum, settled));
     }
     let absent: Vec<VKey> =
         premises.iter().filter(|(v, _)| v == var).map(|(_, k)| k.clone()).collect();
@@ -762,9 +808,9 @@ fn coalesce_arm_fact(
     let slot = shape.field(key).and_then(|(_, _, s)| s.as_deref().cloned())?;
     match flavor {
         // "at least one covered key is present AND non-null": this one carries it.
-        CoverFlavor::Isset => clear_null(&slot).map(|f| (f, known.stratum, true)),
+        CoverFlavor::Isset => clear_null(&slot).map(|f| (Some(f), known.stratum, true)),
         // "at least one covered key EXISTS", value possibly null (A-G11's table).
-        CoverFlavor::KeyExists => Some((slot, known.stratum, false)),
+        CoverFlavor::KeyExists => Some((Some(slot), known.stratum, false)),
     }
 }
 
