@@ -134,6 +134,92 @@ fn the_assignment_seam_and_the_dump_seam_agree() {
     assert_eq!(ts, vec!["'foo'", "'foo'"], "binding and dumping one `??` cannot disagree");
 }
 
+// (iv) A projection arm over an order-witnessed array VALUE (issue #630, commit
+// 2). A fully literal array binds `Fact::Singleton(Val::Array)`, never
+// `Fact::Shape`, so the projection arm used to decline on the base test alone —
+// while `isset()` on the very same binding answered from the literal directly.
+
+#[test]
+fn a_literal_array_base_answers_a_projection_arm() {
+    // `isset-coalesce-empty-type.php:437`. Measured at `PINNED_PHP` 8.5.9:
+    //
+    // ```
+    // php -r '$a=[1,2,3]; var_dump($a["string"] ?? 0);'
+    // int(0)
+    // ```
+    let src = "<?php\n\
+        function f(): void {\n\
+            $array = [1, 2, 3];\n\
+            \\PHPStan\\dumpType($array['string'] ?? 0);\n\
+            \\PHPStan\\dumpType($array[0] ?? 9);\n\
+        }\n";
+    assert_eq!(types(src), vec!["0", "1"]);
+}
+
+#[test]
+fn a_present_literal_key_settles_the_chain() {
+    // The lifted base makes the same settled test available: `$a[0]` is present and
+    // non-null, so nothing behind it is evaluated — including an arm the domain
+    // cannot spell.
+    let src = "<?php\n\
+        function g() {}\n\
+        function f(): void {\n\
+            $array = ['k' => 'v'];\n\
+            \\PHPStan\\dumpType($array['k'] ?? g());\n\
+        }\n";
+    assert_eq!(types(src), vec!["'v'"]);
+}
+
+#[test]
+fn a_proven_absent_arm_falls_through_instead_of_silencing_the_chain() {
+    // The partiality fix proper. `DeclaredAbsent` is a proof, not an absence of
+    // knowledge: PHP skips the arm and evaluates the next, so the arm contributes no
+    // fact and the chain goes on. Before, `taken_fact()`'s `None` for a proven
+    // absence was read as "the domain cannot spell this" and killed the expression.
+    let src = "<?php\n\
+        function f(): void {\n\
+            $empty = [];\n\
+            \\PHPStan\\dumpType($empty['nope'] ?? 'fallback');\n\
+        }\n";
+    assert_eq!(types(src), vec!["'fallback'"]);
+}
+
+#[test]
+fn a_proven_absent_arm_still_lets_the_arms_behind_it_join() {
+    let src = "<?php\n\
+        function f(bool $b): void {\n\
+            $a = ['k' => 1];\n\
+            $t = $b ? 'x' : 'y';\n\
+            \\PHPStan\\dumpType($a['nope'] ?? $t);\n\
+        }\n";
+    assert_eq!(types(src), vec!["'x'|'y'"], "the absent arm adds nothing and hides nothing");
+}
+
+#[test]
+fn a_nested_literal_array_slot_is_read_as_a_value_not_a_shape() {
+    // `isset-coalesce-empty-type.php:441`: the base is a list of lists, and the
+    // lift makes each entry a `Singleton` slot — strictly more precise than a
+    // nested shape, which is why the miss on `'string'` still reads as absent.
+    let src = "<?php\n\
+        function f(): void {\n\
+            $multiDimArray = [[1], [2], [3]];\n\
+            \\PHPStan\\dumpType($multiDimArray['string'] ?? 0);\n\
+        }\n";
+    assert_eq!(types(src), vec!["0"]);
+}
+
+#[test]
+fn an_unsealed_base_still_declines() {
+    // The control the lift must not swallow: a base whose keys were NOT observed
+    // proves nothing about a missing one, so the arm cannot fall through and the
+    // expression stays silent rather than answering the right arm.
+    let src = "<?php\n\
+        function f(array $a): void {\n\
+            \\PHPStan\\dumpType($a['nope'] ?? 'fallback');\n\
+        }\n";
+    assert_eq!(types(src), vec!["unknown"], "an unobserved base proves no absence");
+}
+
 #[test]
 fn the_dump_seam_settles_a_chain_the_assignment_seam_never_sees() {
     // The dump surface reaches `eval_coalesce_fact` directly (no binding in
