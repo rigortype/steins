@@ -253,6 +253,21 @@ fn the_literal_lane_and_the_fact_lane_agree() {
     );
 }
 
+#[test]
+fn a_non_numeric_string_casts_to_the_zero_it_actually_is() {
+    // Measured at `PINNED_PHP`: `(int)'blabla'` is `0` and `(float)'blabla'` is
+    // `0.0`, because the numeric PREFIX is empty. A string that could have a
+    // prefix is still declined to the base — `(int)'12abc'` is `12`, a rule this
+    // grid does not author.
+    assert_eq!(expr("(int)", "'blabla'"), "0");
+    assert_eq!(expr("(float)", "'blabla'"), "0.0");
+    assert_eq!(expr("(int)", "''"), "0");
+    assert_eq!(expr("(int)", "'  blabla'"), "0");
+    assert_eq!(expr("(int)", "'12abc'"), "int");
+    // A leading `.` cannot be claimed: `(float)'.5abc'` is `0.5`, not `0.0`.
+    assert_eq!(expr("(float)", "'.5abc'"), "float");
+}
+
 // Composition and stratum
 
 #[test]
