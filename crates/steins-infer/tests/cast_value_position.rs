@@ -268,6 +268,33 @@ fn a_non_numeric_string_casts_to_the_zero_it_actually_is() {
     assert_eq!(expr("(float)", "'.5abc'"), "float");
 }
 
+#[test]
+fn a_narrow_int_range_casts_to_the_literals_it_spells() {
+    // `(string)5` … `(string)10` are `'5'` … `'10'` at `PINNED_PHP`, so an
+    // interval that narrow IS a finite set of strings — and both syntaxes say so,
+    // being one grid.
+    let want = "'10'|'5'|'6'|'7'|'8'|'9'";
+    assert_eq!(
+        one_dump(
+            "<?php\n/** @param int<5, 10> $v */\nfunction f(int $v): void { \\PHPStan\\dumpType((string) $v); }\n"
+        ),
+        format!("{want} (asserted)")
+    );
+    assert_eq!(
+        one_dump(
+            "<?php\n/** @param int<5, 10> $v */\nfunction f(int $v): void { settype($v, 'string'); \\PHPStan\\dumpType($v); }\n"
+        ),
+        format!("{want} (asserted)")
+    );
+    // Above the cap it declines to the predicate rather than truncating.
+    assert_eq!(
+        one_dump(
+            "<?php\n/** @param int<1, 9> $v */\nfunction f(int $v): void { \\PHPStan\\dumpType((string) $v); }\n"
+        ),
+        "numeric-uncased-string (asserted)"
+    );
+}
+
 // Composition and stratum
 
 #[test]
