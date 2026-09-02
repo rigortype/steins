@@ -10,6 +10,7 @@ use steins_domain::{
 };
 use steins_syntax::{ArgValue, CallExpr, CmpOp, CondExpr, CondOperand, Span};
 
+use crate::array_out_state::array_push_written_fact;
 use crate::fold::Folder;
 use crate::cond::eval_cmp;
 use crate::cx::Cx;
@@ -986,18 +987,37 @@ pub(crate) fn apply_offset_write(
     // the end, leaves an existing key where it is, and `unset` removes one from
     // the sequence. Rebuilds below drop the witness; it is re-attached once, at
     // the end, from the sequence computed here.
-    let witnessed_order: Option<Vec<VKey>> = shape.order.as_ref().map(|order| {
-        let mut order: Vec<VKey> = order.clone();
-        match value {
-            None => order.retain(|k| *k != first),
-            Some(_) => {
-                if !order.contains(&first) {
-                    order.push(first.clone());
-                }
+    //
+    // **`unset` ends the witness** (issue #636). The sequence would survive an
+    // `unset` perfectly well *as an order* — the surviving keys really were
+    // built in that order — but the witness is also what licenses reading the
+    // next append index off it, and a removal breaks exactly that. PHP's next
+    // free index is a high-water mark that `unset` does not lower:
+    //
+    // ```text
+    // php -r '$a=[1,2,3]; unset($a[2]); $a[]=9; var_dump(array_keys($a));'
+    //   => 0, 1, 3        NOT max(0,1) + 1 = 2
+    // php -r '$a=[]; $a[5]=1; unset($a[5]); $a[]=2; var_dump(array_keys($a));'
+    //   => 6              from a shape with no integer key left at all
+    // ```
+    //
+    // So the invariant this drop establishes is the stronger one the append
+    // needs: a witnessed order is the build order of a sequence **nothing has
+    // been removed from**, and its maximum integer key is therefore the
+    // maximum key the array has ever held. Every other producer of a witness
+    // rebuilds the array by insertion — `array_pop`, `array_shift`,
+    // `array_splice` and `array_filter` all reset the counter, measured at
+    // 8.5.9 — so `unset` is the single exception, and it is fenced here.
+    let witnessed_order: Option<Vec<VKey>> = match value {
+        None => None,
+        Some(_) => shape.order.as_ref().map(|order| {
+            let mut order: Vec<VKey> = order.clone();
+            if !order.contains(&first) {
+                order.push(first.clone());
             }
-        }
-        order
-    });
+            order
+        }),
+    };
 
     let next = match value {
         None => {
@@ -1075,6 +1095,91 @@ pub(crate) fn apply_offset_write(
         base.to_owned(),
         Known::value_strat(
             Fact::Shape { shape: Box::new(next), nullable: *nullable },
+            known.line,
+            Some(SHAPE_REFINED.to_owned()),
+            known.stratum.min(slot_stratum),
+        ),
+    );
+    if let Some(arms) = arms {
+        store.contract.insert(base.to_owned(), arms);
+    }
+}
+
+/// `$var[] = v` — **the auto-index append** (ADR-0062 Amendment K, issue #636).
+///
+/// The same containment as [`apply_offset_write`]: barrier first, then one
+/// binding. What differs is that the source names no key, so the landing index
+/// is computed from the base's own key sequence rather than read.
+///
+/// `$a[] = v` and `array_push($a, v)` are the same operation, so this is
+/// [`array_push_written_fact`]'s rule verbatim rather than a second one — one
+/// place decides where an appended value lands, and the two spellings cannot
+/// drift. When that rule declines (no witnessed order and a shape whose fields
+/// it cannot fold into a tail), the floor is
+/// [`ShapeFact::write_at_unknown_key`] at `KeyClass::Int`: an append IS a write
+/// at some integer key, so the weakest row of Amendment J covers it.
+///
+/// **List-ness is not put back at that floor**, and the reason is measured:
+/// `php -r '$x=[1,2,3]; unset($x[2]); var_dump(array_is_list($x));'` is `true`
+/// and `php -r '$x=[1,2,3]; unset($x[2]); $x[]=99; var_dump(array_is_list($x));'`
+/// is `false`. A value a `list` type admits can stop being a list on its very
+/// next append, so only the witnessed leg — where the landing index is known
+/// and `normalize` re-derives the verdict from the real sequence — may say
+/// anything about it.
+///
+/// A **nullable** base declines. `$a = null; $a[] = 'x'` autovivifies to
+/// `[0 => 'x']` (PHP 8.5.9), which is an outcome the array shape alone does not
+/// describe, and a rule that answered from the array arm only would be stating
+/// something about a value it never saw.
+pub(crate) fn apply_offset_append(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    base: &str,
+    value: &ArgValue,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    let php_minor = w.cx.php_minor;
+    // Captured before the barrier clears everything, exactly as the write does.
+    let before = env.get(base).cloned();
+    let arms = store.contract.get(base).cloned();
+    let (slot, slot_stratum) = if w.scope.poisoned {
+        (
+            w.cx.resolve_literal(value, env, true, folder)
+                .and_then(|lit| singleton_fact(&lit, php_minor)),
+            Stratum::Verified,
+        )
+    } else {
+        match transfer_arg_known(w.cx, folder, value, env, Some(&*store)) {
+            Some((fact, s)) => (Some(fact), s),
+            None => (None, Stratum::Verified),
+        }
+    };
+
+    env.clear();
+    store.clear();
+
+    let Some(known) = before else { return };
+    let lifted;
+    let shape: &ShapeFact = match &known.fact {
+        Some(Fact::Shape { shape, nullable: false }) => shape.as_ref(),
+        Some(Fact::Singleton(Val::Array(entries))) => {
+            lifted = ShapeFact::lift(entries);
+            &lifted
+        }
+        _ => return,
+    };
+    let next = match array_push_written_fact(shape, std::slice::from_ref(&slot)) {
+        Some(fact) => fact,
+        None => {
+            let floored = shape.write_at_unknown_key(steins_domain::KeyClass::Int, slot.as_ref());
+            Fact::Shape { shape: Box::new(floored), nullable: false }
+        }
+    };
+    env.insert(
+        base.to_owned(),
+        Known::value_strat(
+            next,
             known.line,
             Some(SHAPE_REFINED.to_owned()),
             known.stratum.min(slot_stratum),

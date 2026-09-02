@@ -316,6 +316,32 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
 /// Index bookkeeping, not folded arithmetic on an operand (ADR-0028 §3): the
 /// keys are the shape's own, and `max + 1` at `i64::MAX` declines rather than
 /// wrapping.
+/// The key sequence an **append** may read its next index off, which is
+/// strictly less than [`determined_order`] will answer (issue #636).
+///
+/// `determined_order`'s second leg — a proven list under a sealed tail — is a
+/// sound claim about *order*, and ADR-0062 §7 sanctions it: list-ness is itself
+/// the order claim. It is **not** a sound premise for [`next_append_key`], and
+/// the difference is `unset`. PHP's next free index is a high-water mark that a
+/// removal does not lower, so `array{0: int, 1: int}` may denote an array built
+/// as `[0, 1, 2]` and then unset at `2`, whose next append lands on `3` and not
+/// on `2`:
+///
+/// ```text
+/// php -r '$a=[1,2,3]; unset($a[2]); $a[]=9; var_dump(array_keys($a));' => 0, 1, 3
+/// ```
+///
+/// Only an order **witness** carries the missing premise, because
+/// `apply_offset_write` drops the witness on `unset` precisely so that it does:
+/// a witnessed sequence is the build order of an array nothing was removed
+/// from, so its maximum integer key is the maximum the array has ever held.
+/// Every other producer of a witness rebuilds by insertion and resets the
+/// counter with PHP (`array_pop`, `array_shift`, `array_splice`,
+/// `array_filter`, all measured at 8.5.9).
+fn append_order(shape: &ShapeFact) -> Option<Vec<Key>> {
+    shape.witnessed_order().map(<[Key]>::to_vec)
+}
+
 fn next_append_key(keys: &[Key]) -> Option<i64> {
     let max = keys.iter().filter_map(|k| match k {
         Key::Int(n) => Some(*n),
@@ -349,7 +375,7 @@ pub(crate) fn array_push_written_fact(
     if values.is_empty() {
         return Some(shape_fact(shape.clone()));
     }
-    if let Some(order) = determined_order(shape) {
+    if let Some(order) = append_order(shape) {
         let mut fields: Vec<(Key, Presence, Option<Box<Fact>>)> = order
             .iter()
             .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
@@ -368,7 +394,7 @@ pub(crate) fn array_push_written_fact(
         }
         return Some(sealed_with_order(fields, new_order));
     }
-    general_append(shape, values)
+    general_append(shape, values, Certainty::Maybe)
 }
 
 /// **What `array_unshift($a, ...$values)` wrote into `$a`.**
@@ -422,7 +448,7 @@ pub(crate) fn array_unshift_written_fact(
         }
         return Some(sealed_with_order(fields, new_order));
     }
-    general_append(shape, values)
+    general_append(shape, values, shape.is_list)
 }
 
 /// **An append to an array with no declared key.** Nothing structural changes
@@ -433,7 +459,33 @@ pub(crate) fn array_unshift_written_fact(
 /// One unproven value is the unknown floor for the whole bound — the tail
 /// carries one fact for every undeclared key, so it cannot hold "this one
 /// entry is unknown" the way a field slot can.
-fn general_append(shape: &ShapeFact, values: &[Option<Fact>]) -> Option<Fact> {
+///
+/// **`is_list` is the caller's to state, and the two callers disagree** (issue
+/// #636). `array_unshift` renumbers every integer key from `0`, so it rebuilds
+/// the array and a list input really does come back a list — it passes
+/// `shape.is_list`. `array_push` and `$a[] = v` land at PHP's next free index,
+/// which is a high-water mark no list type constrains, so they pass
+/// [`Certainty::Maybe`]. The difference is measured, not argued:
+///
+/// ```text
+/// php -r '$x=[1,2,3]; unset($x[2]); var_dump(array_is_list($x));'
+///   => true
+/// php -r '$x=[1,2,3]; unset($x[2]); $x[]=99; var_dump(array_is_list($x));'
+///   => false        an append breaks it
+/// php -r '$x=[1,2,3]; unset($x[2]); array_unshift($x,99); var_dump(array_is_list($x));'
+///   => true         a renumbering rebuild does not
+/// ```
+///
+/// So ADR-0062 §4's original append row ("a Yes-list shape stays Yes — append
+/// preserves list-ness") is false as written, and Amendment K replaces it. Only
+/// a shape whose exact key sequence is witnessed ([`append_order`]) can name the
+/// landing index, and there `normalize` re-derives the verdict from the real
+/// sequence rather than carrying a flag.
+fn general_append(
+    shape: &ShapeFact,
+    values: &[Option<Fact>],
+    is_list: Certainty,
+) -> Option<Fact> {
     use steins_domain::KeyClass;
     if !shape.fields.iter().all(|(_, p, _)| matches!(p, Presence::Absent)) {
         return None;
@@ -458,7 +510,7 @@ fn general_append(shape: &ShapeFact, values: &[Option<Fact>]) -> Option<Fact> {
     Some(shape_fact(ShapeFact::normalize(
         Vec::new(),
         Tail::Unsealed { key, value: acc.map(Box::new) },
-        shape.is_list,
+        is_list,
         true,
         Vec::new(),
     )))
