@@ -168,7 +168,10 @@ fn every_cast_answers_a_base_for_an_operand_with_no_fact() {
 fn an_operand_the_vocabulary_cannot_spell_still_answers() {
     // Totality has to survive an operand that is `ArgValue::Other`, which is the
     // whole reason the lowering keeps the cast node instead of widening.
-    assert_eq!(one_dump("<?php\nfunction f($v): void { \\PHPStan\\dumpType((int) $v->a->b); }\n"), "int");
+    assert_eq!(
+        one_dump("<?php\nfunction f($v): void { \\PHPStan\\dumpType((int) $v->a->b); }\n"),
+        "int"
+    );
     assert_eq!(
         one_dump("<?php\nfunction f($v): void { \\PHPStan\\dumpType((string) $v->a->b); }\n"),
         "string"

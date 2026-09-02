@@ -955,9 +955,9 @@ pub enum ArgValue {
     ///
     /// # Which cast spellings reach here
     ///
-    /// Mago lexes thirteen cast tokens; the mapping is
-    /// [`lower_arg_value`]'s and is **not** the one [`CastTarget`]'s `settype`
-    /// spelling set gives — the two readers share the enum, not the vocabulary.
+    /// Mago lexes thirteen cast tokens; the mapping is the value lowering's and
+    /// is **not** the one [`CastTarget`]'s `settype` spelling set gives — the two
+    /// readers share the enum, not the vocabulary.
     /// `(int)`/`(integer)`, `(float)`/`(double)`, `(bool)`/`(boolean)`,
     /// `(string)`/`(binary)` and `(array)` carry a target; `(object)`,
     /// `(real)`, `(unset)` and `(void)` lower to [`Self::Other`] with the

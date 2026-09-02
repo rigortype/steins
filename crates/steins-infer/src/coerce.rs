@@ -446,7 +446,9 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
                 php_numeric_str(s)
                     .and_then(php_str_to_int)
                     .map(|i| Fact::Singleton(Val::Int(i)))
-                    .or_else(|| php_str_has_no_numeric_prefix(s).then(|| Fact::Singleton(Val::Int(0))))
+                    .or_else(|| {
+                        php_str_has_no_numeric_prefix(s).then_some(Fact::Singleton(Val::Int(0)))
+                    })
                     .unwrap_or(Fact::General { base: Base::Int, nullable: false }),
             ),
             CastIn::Val(Val::Bool(b)) => one(Val::Int(i64::from(*b))),
@@ -475,7 +477,7 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
                     .and_then(php_str_to_float)
                     .map(|f| Fact::Singleton(Val::Float(f)))
                     .or_else(|| {
-                        php_str_has_no_numeric_prefix(s).then(|| Fact::Singleton(Val::Float(0.0)))
+                        php_str_has_no_numeric_prefix(s).then_some(Fact::Singleton(Val::Float(0.0)))
                     })
                     .unwrap_or(Fact::General { base: Base::Float, nullable: false }),
             ),
@@ -749,7 +751,8 @@ mod cast_grid_tests {
         let decimal =
             Fact::refined(Base::String, Refinement::Str(StrPreds::DECIMAL_INT.close()), false);
         // The boundary, both sides of it: `CAP` members enumerate, `CAP + 1` do not.
-        assert!(matches!(cast(&ranged(1, 8), CastTarget::String), Some(Fact::OneOf(vs)) if vs.len() == CAP));
+        let eight = cast(&ranged(1, 8), CastTarget::String);
+        assert!(matches!(&eight, Some(Fact::OneOf(vs)) if vs.len() == CAP), "{eight:?}");
         assert_eq!(cast(&ranged(1, 9), CastTarget::String), Some(decimal.clone()));
         assert_eq!(cast(&general(Base::Int), CastTarget::String), Some(decimal.clone()));
         // The full interval must not overflow the width it is rejected by. (It
