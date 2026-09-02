@@ -621,8 +621,29 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Array(a) => lower_array_elements(a.elements.iter()),
         Expression::LegacyArray(a) => lower_array_elements(a.elements.iter()),
         // Full ternary `$c ? A : B` (ADR-0031): a conditional value the walk can
-        // evaluate. A short-ternary `?:` (`then` absent) widens to `Other` — it
-        // needs the value on the true side, a definedness fact not carried yet.
+        // evaluate. A short-ternary `?:` (`then` absent) widens to `Other`.
+        //
+        // The value on the true side is the left operand's own value MINUS its
+        // falsy members, and issue #625 measured what that subtraction is worth
+        // rather than leaving it a guess. Of the six `?:` rows in the reference
+        // corpus, a carrier here would win exactly ONE — `12 ?: null`, where the
+        // left operand is decided truthy and no subtraction happens at all. The
+        // other five are blocked behind two gaps that are not this operator's:
+        //
+        // * `int<min, -1>|int<1, max>` is a SPLIT integer range. `truthy_narrow`
+        //   already declines it in the guard path with the reason in place —
+        //   "nonzero is not an interval" — so `$integer ?: 12` would answer the
+        //   unsplit `int`, which is wider than the truth.
+        // * `12|non-falsy-string` needs a union that keeps a singleton int beside
+        //   a refined string. The domain holds the union but widens the int arm:
+        //   the same join written as a FULL ternary renders `int<12, 12>|string`
+        //   today, so the three `$string ?: 12`-shaped rows would still differ on
+        //   the rendering after the subtraction succeeded.
+        //
+        // One row does not pay for an IR carrier, a lowering, an evaluator and
+        // four seams; and both gaps belong to slices of their own, where fixing
+        // them lifts every consumer rather than this one operator. So `?:` keeps
+        // its refusal, now with a number attached.
         Expression::Conditional(cond) => match cond.then {
             Some(then_expr) => ArgValue::Ternary {
                 cond: Box::new(lower_cond(cond.condition)),
