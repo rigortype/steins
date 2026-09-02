@@ -688,6 +688,61 @@ pub enum WrittenWhen {
 /// [`WrittenWhen::CallReturns`] rather than a truthiness test the caller would
 /// have to perform.
 ///
+/// **The sort family** position 0 (issue #635) — twelve names whose only
+/// effect is the out-state. Every one of them *declares* `: true` at
+/// `PINNED_PHP`, so there is no falsy return to exclude and the witness is
+/// again [`WrittenWhen::CallReturns`]. Reflection, PHP 8.5.9:
+///
+/// ```text
+/// sort        req=1 tot=2 (&$array, $flags?)   : true
+/// rsort       req=1 tot=2 (&$array, $flags?)   : true
+/// asort       req=1 tot=2 (&$array, $flags?)   : true
+/// arsort      req=1 tot=2 (&$array, $flags?)   : true
+/// ksort       req=1 tot=2 (&$array, $flags?)   : true
+/// krsort      req=1 tot=2 (&$array, $flags?)   : true
+/// natsort     req=1 tot=1 (&$array)            : true
+/// natcasesort req=1 tot=1 (&$array)            : true
+/// shuffle     req=1 tot=1 (&$array)            : true
+/// usort       req=2 tot=2 (&$array, $callback) : true
+/// uasort      req=2 tot=2 (&$array, $callback) : true
+/// uksort      req=2 tot=2 (&$array, $callback) : true
+/// ```
+///
+/// The outcomes that do **not** return, probed one call at a time (PHP 8.5.9):
+///
+/// ```text
+/// sort($string)      THROWS TypeError: Argument #1 ($array) must be of type array
+/// rsort($int)        THROWS TypeError                 (likewise for every name)
+/// asort($null)       THROWS TypeError
+/// ksort($object)     THROWS TypeError
+/// usort($a, 'no_such_function_zzz')
+///                    THROWS TypeError: Argument #2 ($callback) must be a valid callback
+/// usort([2,1], fn () => throw new RuntimeException)
+///                    THROWS RuntimeException          (the comparator propagates)
+/// ```
+///
+/// Two probes that a reading of the stub would have got wrong, and that the
+/// *fact* side therefore relies on:
+///
+/// ```text
+/// sort([2,1], 999)   RETURNS true      an unrecognized $flags is NOT a ValueError
+/// sort([2,1], -1)    RETURNS true
+/// usort([2,1], fn ($p, $q) => 'x')     RETURNS true   a non-int comparator result
+/// usort([2,1], fn ($p, $q) => 0.5)     RETURNS true   is coerced, not refused
+/// $a = [3,1,2]; usort($a, function ($p, $q) use (&$a) { $a[] = 99; return $p <=> $q; });
+///                    $a === [1,2,3]    a comparator's own writes are DISCARDED,
+///                                      so the result rests on the input alone
+/// ```
+///
+/// **The pointer moves** `reset` / `end` position 0 (issue #635) — declared
+/// `: mixed`, and `false` on an empty array is a *value*, not a refusal: the
+/// array is unchanged either way (`$a = []; reset($a);` leaves `[]`), which is
+/// the whole fact. A non-array argument is the same `TypeError` non-return
+/// (`reset($string)`, `end($int)` both probed). `next` / `prev` share the
+/// contract exactly and stay unrowed: they have no observation in the corpus,
+/// so a row for them would be unattributable movement (issue #635's
+/// "what NOT to chase").
+///
 /// Every other [`out_params`] row's contract deserves the same treatment but
 /// stays a decline until measured (ADR-0077 §4). A witness is not by itself a
 /// fact: it says *where* a seed would be sound.
@@ -697,9 +752,29 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
         ("preg_match", 2) => Some(WrittenWhen::ReturnTruthy),
         ("preg_match_all", 2) => Some(WrittenWhen::ReturnTruthy),
         ("settype", 0) => Some(WrittenWhen::CallReturns),
+        (n, 0) if SORT_FAMILY.contains(&n) => Some(WrittenWhen::CallReturns),
+        ("reset" | "end", 0) => Some(WrittenWhen::CallReturns),
         _ => None,
     }
 }
+
+/// The twelve sort names whose argument 0 carries a [`WrittenWhen::CallReturns`]
+/// witness, lowercased — the probe table on [`out_param_written_when`] is this
+/// list, name for name.
+const SORT_FAMILY: &[&str] = &[
+    "sort",
+    "rsort",
+    "asort",
+    "arsort",
+    "ksort",
+    "krsort",
+    "natsort",
+    "natcasesort",
+    "shuffle",
+    "usort",
+    "uasort",
+    "uksort",
+];
 
 /// Whether argument `position` of the builtin `name` is passed **by value**
 /// (ADR-0070), three-valued: `Some(true)` certified by value (PHP copies into
@@ -1152,10 +1227,34 @@ mod tests {
             assert_eq!(out_param_written_when("preg_match", p), None, "position {p} is by value");
             assert_eq!(out_param_written_when("preg_match_all", p), None, "position {p} is by value");
         }
-        for f in ["similar_text", "str_replace", "sort", "array_pop"] {
+        for f in ["similar_text", "str_replace", "array_pop", "array_walk"] {
             for p in 0..5 {
                 assert_eq!(out_param_written_when(f, p), None, "{f} states no witness yet");
             }
+        }
+    }
+
+    #[test]
+    fn the_sort_family_and_the_pointer_moves_write_on_every_returning_path() {
+        for f in [
+            "sort", "rsort", "asort", "arsort", "ksort", "krsort", "natsort", "natcasesort",
+            "shuffle", "usort", "uasort", "uksort", "reset", "end",
+        ] {
+            assert_eq!(
+                out_param_written_when(f, 0),
+                Some(WrittenWhen::CallReturns),
+                "{f} declares no falsy return, so returning at all is the witness"
+            );
+            assert_eq!(out_params(f), Some(&[0][..]), "{f} writes argument 0");
+            for p in 1..5 {
+                assert_eq!(out_param_written_when(f, p), None, "{f} argument {p} is by value");
+            }
+        }
+        assert_eq!(out_param_written_when("SHUFFLE", 0), Some(WrittenWhen::CallReturns));
+        // `next`/`prev` share `reset`/`end`'s contract and stay unmeasured on
+        // purpose: no corpus observation would attribute their movement.
+        for f in ["next", "prev"] {
+            assert_eq!(out_param_written_when(f, 0), None, "{f} states no witness yet");
         }
     }
 

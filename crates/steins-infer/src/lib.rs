@@ -22,6 +22,7 @@ mod absence;
 mod annotate;
 mod arg_check;
 mod arity;
+mod array_out_state;
 mod assert_harness;
 mod asserts;
 mod assign;
