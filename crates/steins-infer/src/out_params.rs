@@ -13,10 +13,7 @@ use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind, St
 
 use crate::fold::Folder;
 use crate::PREG_INVALID_PATTERN_ID;
-use crate::array_out_state::{
-    byref_array_shape, pointer_move_written_fact, sort_rule, sort_written_fact,
-    unproven_input_pointer_move_fact, unproven_input_sort_fact,
-};
+use crate::array_out_state::{array_out_rule, byref_array_shape};
 use crate::asserts::guard_call_line;
 use crate::builtin_returns::transfer_declaration_admits;
 use crate::coerce::{CastTarget, php_cast_fact};
@@ -243,26 +240,26 @@ fn out_param_written_fact(
     }
 }
 
-/// **The array out-state rows** (issue #635): the sort family and the pointer
-/// moves, each of which rewrites argument 0 and returns something that says
-/// nothing about it.
+/// **The array out-state rows** (issue #635): the sort family, the pointer
+/// moves and the two queue ends, each of which rewrites argument 0 and returns
+/// something that says nothing about it.
 ///
-/// Three premises, refusing cheapest-first:
+/// Two premises, refusing cheapest-first:
 ///
 /// 1. **The declaration pin** (ADR-0061 §2): the running engine must still
 ///    declare the return the rule was written against — `true` for the twelve
-///    sorts, `mixed` for `reset`/`end` — *and* the arity measured at
+///    sorts, `mixed` for the other four — *and* the arity measured at
 ///    `PINNED_PHP`, since neither return spelling pins which parameter is the
 ///    array (ADR-0064 Amendment B).
-/// 2. **A rule that can state the result.** A pre-call claim about argument 0
-///    ([`out_param_input_claim`]) that [`byref_array_shape`] reads as an array
-///    gets the precise answer; with no such claim the rule falls to the floor
-///    the witness alone establishes ([`unproven_input_sort_fact`]) rather than
-///    declining, because a sort with *no* premise still leaves a list.
+/// 2. **A plain local variable at argument 0.** Everything after that is
+///    [`ArrayOutRule::written_fact`]'s business, and it does not decline: a
+///    claim it cannot use falls to the floor the witness alone establishes.
 ///
-/// The floor is bound `Verified`: it is the engine's own behaviour and inherits
-/// nothing from a claim that was never made. A precise answer carries the
-/// input's stratum instead, for the reason the `settype` row does.
+/// **Stratum.** A precise answer carries the input's own, for the reason the
+/// `settype` row does: it states the caller's array put through a measured
+/// rearrangement, so an `Asserted` phpdoc input stays `Asserted`. The floor is
+/// `Verified` — it is the engine's behaviour and inherits nothing from a claim
+/// that was never made.
 fn array_out_state_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -271,31 +268,18 @@ fn array_out_state_fact(
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> Option<(Fact, Stratum)> {
-    let pointer_move = matches!(name, "reset" | "end");
-    let (declared, arity): (&[&str], (u32, u32)) = if pointer_move {
-        (&["mixed"], (1, 1))
-    } else {
-        (&["true"], sort_rule(name)?.1)
-    };
-    if !transfer_declaration_admits(w.cx, folder, name, declared, Some(arity)) {
+    let rule = array_out_rule(name)?;
+    if !transfer_declaration_admits(w.cx, folder, name, rule.declared, Some(rule.arity)) {
         return None;
     }
     let ArgValue::Var(var) = &call.args.first()?.value else { return None };
     let claim = out_param_input_claim(env, store, var);
     let shape = claim.as_ref().and_then(|(input, _)| byref_array_shape(input));
-    match (pointer_move, shape) {
-        (true, Some(shape)) => {
-            Some((pointer_move_written_fact(&shape)?, claim.expect("a claim was read").1))
-        }
-        (true, None) => Some((unproven_input_pointer_move_fact(), Stratum::Verified)),
-        (false, Some(shape)) => Some((
-            sort_written_fact(sort_rule(name)?.0, &shape)?,
-            claim.expect("a claim was read").1,
-        )),
-        (false, None) => {
-            Some((unproven_input_sort_fact(sort_rule(name)?.0), Stratum::Verified))
-        }
-    }
+    let stratum = match &shape {
+        Some(_) => claim.as_ref().expect("a shape came from a claim").1,
+        None => Stratum::Verified,
+    };
+    Some((rule.written_fact(shape.as_ref()), stratum))
 }
 
 /// **What `settype($var, $type)` wrote into `$var`** (issue #595), for a call

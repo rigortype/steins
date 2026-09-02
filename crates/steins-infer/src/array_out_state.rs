@@ -20,7 +20,9 @@
 //!   writes **discarded**, so the result rests on the input alone and a
 //!   callback-invoking sort needs no callback analysis to state its out-state.
 
-use steins_domain::{Certainty, Fact, Presence, ShapeFact, Tail, Val};
+use steins_domain::{
+    Certainty, Fact, IntRange, Key, Presence, ShapeFact, Tail, Val, keys_are_a_list,
+};
 
 use crate::shape_projection::{shape_fact, shape_value_union};
 use crate::transfers::list_transfer_fact;
@@ -143,46 +145,228 @@ pub(crate) fn sort_written_fact(kind: SortKind, shape: &ShapeFact) -> Option<Fac
     })
 }
 
-/// **What a sort wrote when the input was never proven** — the floor the
-/// witness alone establishes, with no premise about the caller's variable at
-/// all.
+/// **The key sequence a rule may treat as the array's real iteration order**,
+/// or `None` when this shape's order is a guess.
 ///
-/// The reasoning is the witness's, taken one step further than
-/// [`byref_array_shape`] takes it. A non-array argument raises a `TypeError`
-/// (probed for every name), so *control reaching the next statement is itself
-/// the proof that the argument was an array* — and a sort leaves an array a
-/// list ([`SortKind::Renumbering`]) or an array ([`SortKind::KeyPreserving`]).
-/// Both are honest floors, and both are strictly more than the `unknown` the
-/// by-ref invalidation leaves.
+/// Two sources answer, and a *declared* order is neither. `@var array{a: 0,
+/// b: 1, c: 2}` states no order at all in this domain (ADR-0062 §7 — trusting a
+/// docblock's field order is phpstan/phpstan#14940's false-positive class), so
+/// `array-shift.php:36`'s `array{b: 1, c: 2}` is out of reach here on purpose.
 ///
-/// It says nothing about emptiness: an unproven input may be `[]`, and every
-/// sort leaves `[]` alone.
-pub(crate) fn unproven_input_sort_fact(kind: SortKind) -> Fact {
-    match kind {
-        SortKind::Renumbering => list_transfer_fact(false, None),
-        SortKind::KeyPreserving => shape_fact(ShapeFact::plain_array()),
+/// 1. **An observed build** ([`ShapeFact::witnessed_order`], issue #327): the
+///    literal was seen being constructed, so the sequence is the real one.
+/// 2. **A proven list**: `is_list == Yes` under a sealed tail with every field
+///    required and keys exactly `0..n-1` — list-ness *is* the order claim, so
+///    no separate witness is needed. This is the form a `count($items) === 3`
+///    narrowing leaves on a `list<int>` (`list-count.php`).
+fn determined_order(shape: &ShapeFact) -> Option<Vec<Key>> {
+    if let Some(order) = shape.witnessed_order() {
+        return Some(order.to_vec());
     }
+    let keys: Vec<Key> = shape.fields.iter().map(|(k, _, _)| k.clone()).collect();
+    let all_required = shape.fields.iter().all(|(_, p, _)| p.is_required());
+    (shape.is_list == Certainty::Yes
+        && matches!(shape.tail, Tail::Sealed)
+        && all_required
+        && keys_are_a_list(keys.iter()))
+    .then_some(keys)
 }
 
-/// [`unproven_input_sort_fact`]'s pointer-move twin: `reset`/`end` change
-/// nothing, so with no claim to hand back the floor is bare `array` — again
-/// the `TypeError` on a non-array argument doing the work.
-pub(crate) fn unproven_input_pointer_move_fact() -> Fact {
-    shape_fact(ShapeFact::plain_array())
+/// **What `array_shift($a)` wrote into `$a`.**
+///
+/// The ordered leg, when [`determined_order`] answers: drop the first key, keep
+/// the rest, and **renumber only the integer keys** — string keys stay exactly
+/// where they were. Measured at PHP 8.5.9:
+///
+/// ```text
+/// array_shift(['a'=>0, 'b'=>1, 'c'=>2])  => ['b'=>1, 'c'=>2]
+/// array_shift(['a'=>1, 5=>2, 6=>3])      => [0=>2, 1=>3]
+/// array_shift([5=>1, 'a'=>2, 9=>3])      => ['a'=>2, 0=>3]
+/// array_shift([3=>'a', 1=>'b', 2=>'c'])  => [0=>'b', 1=>'c']
+/// array_shift([0=>'a'])                  => []
+/// ```
+///
+/// The renumbering runs over the *sequence*, so the surviving integer keys take
+/// `0, 1, …` in iteration order and can never collide with a surviving string
+/// key. It is index bookkeeping, not arithmetic on an operand (ADR-0028 §3).
+///
+/// Otherwise the general leg ([`general_removal`]), which needs no order because
+/// it has no declared key to lose.
+pub(crate) fn array_shift_written_fact(shape: &ShapeFact) -> Option<Fact> {
+    if let Some(order) = determined_order(shape)
+        && let Some((_first, rest)) = order.split_first()
+    {
+        let mut next = 0i64;
+        let mut fields = Vec::with_capacity(rest.len());
+        let mut new_order = Vec::with_capacity(rest.len());
+        for key in rest {
+            let (_, presence, slot) = shape.field(key)?;
+            let renumbered = match key {
+                Key::Int(_) => {
+                    let k = Key::Int(next);
+                    next += 1;
+                    k
+                }
+                Key::Str(_) => key.clone(),
+            };
+            fields.push((renumbered.clone(), *presence, slot.clone()));
+            new_order.push(renumbered);
+        }
+        return Some(sealed_with_order(fields, new_order));
+    }
+    general_removal(shape)
 }
 
-/// **What `reset($a)` / `end($a)` wrote into argument 0: nothing.**
+/// **What `array_pop($a)` wrote into `$a`.**
 ///
-/// The internal array pointer is not part of the type, and the array itself is
-/// untouched — measured at PHP 8.5.9, `$a = [1, 2]; reset($a);` leaves
-/// `[0 => 1, 1 => 2]` and `$a = []; end($a);` leaves `[]` (returning `false`,
-/// which is a *value*, not a refusal). So the seed hands back the caller's own
-/// claim and the only thing it undoes is the invalidation.
+/// The ordered leg drops the *last* key and renumbers nothing — the surviving
+/// keys keep their own identities. Measured at PHP 8.5.9:
 ///
-/// It still goes through [`byref_array_shape`], for the reason that reader
-/// exists: a claim this rule cannot read as an array is one it must decline.
-pub(crate) fn pointer_move_written_fact(shape: &ShapeFact) -> Option<Fact> {
-    Some(shape_fact(shape.clone()))
+/// ```text
+/// array_pop(['a'=>1, 5=>2, 6=>3])  => ['a'=>1, 5=>2]
+/// array_pop([3=>'a', 1=>'b'])      => [3=>'a']
+/// array_pop(['a'=>1, 'b'=>2])      => ['a'=>1]
+/// ```
+///
+/// (The *next* append index does move — `$a = ['x','y']; array_pop($a); $a[] =
+/// 'z';` measures `[0=>'x', 1=>'z']` — but that is a fact about a later write,
+/// not about the value this call left behind.)
+pub(crate) fn array_pop_written_fact(shape: &ShapeFact) -> Option<Fact> {
+    if let Some(order) = determined_order(shape)
+        && let Some((_last, rest)) = order.split_last()
+    {
+        let fields = rest
+            .iter()
+            .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
+            .collect::<Option<Vec<_>>>()?;
+        return Some(sealed_with_order(fields, rest.to_vec()));
+    }
+    general_removal(shape)
+}
+
+/// The sealed shape a removal leaves, with its surviving order reattached.
+/// `is_list` is read off the surviving sequence rather than left to
+/// [`ShapeFact::normalize`]'s order-agnostic verdict: the sequence is known
+/// here, and `[0 => 'b', 1 => 'c']` in that order really is a list.
+fn sealed_with_order(fields: Vec<(Key, Presence, Option<Box<Fact>>)>, order: Vec<Key>) -> Fact {
+    let is_list = Certainty::from_bool(keys_are_a_list(order.iter()));
+    shape_fact(
+        ShapeFact::normalize(fields, Tail::Sealed, is_list, !order.is_empty(), Vec::new())
+            .with_order(order),
+    )
+}
+
+/// **A removal from an array with no declared key**: `non-empty-array<string>`
+/// becomes `array<string>`, `list<T>` stays `list<T>`, `array{}` stays
+/// `array{}`.
+///
+/// Everything structural rides along — the tail, its key class, the `is_list`
+/// verdict — because removing one entry changes none of them. Two things move:
+/// `non_empty` is cleared (the array may have held exactly one entry), and the
+/// count bound shifts down by one, floored at zero, which is also correct for
+/// the empty input the call leaves alone.
+///
+/// Declines the moment a key is declared: which key a removal takes is
+/// [`determined_order`]'s question, and if that declined then so must this.
+/// Covers are dropped rather than carried — a disjunctive-presence claim can
+/// name the very key that left.
+fn general_removal(shape: &ShapeFact) -> Option<Fact> {
+    if !shape.fields.iter().all(|(_, p, _)| matches!(p, Presence::Absent)) {
+        return None;
+    }
+    let count = shape.count_range();
+    let lo = count.lo().saturating_sub(1).max(0);
+    let hi = if count.hi() == i64::MAX { i64::MAX } else { (count.hi() - 1).max(0) };
+    let bound = IntRange::new(lo, hi)?;
+    Some(shape_fact(ShapeFact::normalize_counted(
+        shape.fields.clone(),
+        shape.tail.clone(),
+        shape.is_list,
+        false,
+        Vec::new(),
+        bound,
+    )))
+}
+
+/// **One array builtin's out-state contract**: what the running engine must
+/// still declare for the rule to apply, and which rewrite it performs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArrayOutRule {
+    /// The reflected return spellings ADR-0061 §2's pin accepts.
+    pub(crate) declared: &'static [&'static str],
+    /// `(total, required)` at `PINNED_PHP` — the order
+    /// [`crate::fold::Folder::builtin_param_counts`] answers in, and the leg
+    /// that carries the pin when the return spelling pins nothing.
+    pub(crate) arity: (u32, u32),
+    kind: RuleKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RuleKind {
+    Sort(SortKind),
+    /// `reset` / `end`: the internal pointer moves and the array does not.
+    PointerMove,
+    /// `array_shift`: the first entry leaves and the integer keys renumber.
+    Shift,
+    /// `array_pop`: the last entry leaves and nothing renumbers.
+    Pop,
+}
+
+/// The out-state rule for `name` (lowercased), or `None` for a name this slice
+/// has not measured.
+pub(crate) fn array_out_rule(name: &str) -> Option<ArrayOutRule> {
+    if let Some((kind, arity)) = sort_rule(name) {
+        // Every sort declares `: true` at `PINNED_PHP`, so there is no falsy
+        // return the fact would have to exclude.
+        return Some(ArrayOutRule { declared: &["true"], arity, kind: RuleKind::Sort(kind) });
+    }
+    let kind = match name {
+        "reset" | "end" => RuleKind::PointerMove,
+        "array_shift" => RuleKind::Shift,
+        "array_pop" => RuleKind::Pop,
+        _ => return None,
+    };
+    // All four declare `: mixed` and `(&$array)` — a spelling that excludes
+    // nothing, which is why the arity is the whole pin.
+    Some(ArrayOutRule { declared: &["mixed"], arity: (1, 1), kind })
+}
+
+impl ArrayOutRule {
+    /// **What this call left in argument 0**, given whatever the caller had
+    /// proven about it — `None` for no array claim at all.
+    ///
+    /// Never declines. A rule that cannot state a precise result falls back to
+    /// [`Self::floor`], which the witness alone establishes: every name here
+    /// raises a `TypeError` on a non-array argument (probed at PHP 8.5.9), so
+    /// control reaching the next statement is itself the proof that the
+    /// argument was an array, and the floor is what an array is left as. That
+    /// is strictly more than the `unknown` the by-ref invalidation leaves and
+    /// strictly less than any claim the rule could not prove.
+    pub(crate) fn written_fact(self, shape: Option<&ShapeFact>) -> Fact {
+        let precise = shape.and_then(|s| match self.kind {
+            RuleKind::Sort(kind) => sort_written_fact(kind, s),
+            // The pointer is not part of the type, so the caller's own claim
+            // comes straight back: `$a = [1, 2]; reset($a);` measures
+            // `$a === [1, 2]`, and `$a = []; end($a);` measures `$a === []`
+            // (returning `false`, which is a value and not a refusal).
+            RuleKind::PointerMove => Some(shape_fact(s.clone())),
+            RuleKind::Shift => array_shift_written_fact(s),
+            RuleKind::Pop => array_pop_written_fact(s),
+        });
+        precise.unwrap_or_else(|| self.floor())
+    }
+
+    /// The out-state this rule can state with **no** premise about the input.
+    ///
+    /// A renumbering sort leaves a list whatever it was given; everything else
+    /// leaves an array. Neither says anything about emptiness — an unproven
+    /// input may be `[]`, and every name here leaves `[]` alone.
+    fn floor(self) -> Fact {
+        match self.kind {
+            RuleKind::Sort(SortKind::Renumbering) => list_transfer_fact(false, None),
+            _ => shape_fact(ShapeFact::plain_array()),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -301,10 +485,123 @@ mod tests {
     #[test]
     fn a_pointer_move_hands_back_the_callers_own_claim() {
         let shape = lit(&[(Key::Int(0), i(1)), (Key::Int(1), i(2))]);
-        let Some(Fact::Shape { shape: out, .. }) = pointer_move_written_fact(&shape) else {
+        let rule = array_out_rule("reset").expect("a rule");
+        let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape)) else {
             panic!("a pointer move states a shape");
         };
         assert_eq!(*out, shape, "`reset`/`end` change nothing the type can see");
+    }
+
+    #[test]
+    fn a_shift_drops_the_first_key_and_renumbers_only_the_integers() {
+        // Probed: `array_shift([5=>1, 'a'=>2, 9=>3]) === ['a'=>2, 0=>3]`.
+        let shape = lit(&[
+            (Key::Int(5), i(1)),
+            (Key::Str("a".into()), i(2)),
+            (Key::Int(9), i(3)),
+        ]);
+        let Fact::Shape { shape: out, .. } = array_shift_written_fact(&shape).expect("a shape")
+        else {
+            panic!("a shift states a shape");
+        };
+        let keys: Vec<&Key> = out.fields.iter().map(|(k, _, _)| k).collect();
+        assert_eq!(keys, vec![&Key::Int(0), &Key::Str("a".into())]);
+        assert_eq!(out.field(&Key::Int(0)).and_then(|(_, _, s)| s.clone()).map(|s| *s),
+                   Some(Fact::Singleton(i(3))), "key 9's value took index 0");
+        assert_eq!(out.is_list, Certainty::No, "a surviving string key is not a list");
+    }
+
+    #[test]
+    fn a_shift_of_a_witnessed_list_stays_a_witnessed_list() {
+        // Probed: `array_shift([3=>'a', 1=>'b', 2=>'c']) === [0=>'b', 1=>'c']`.
+        let shape = lit(&[(Key::Int(0), i(1)), (Key::Int(1), i(2)), (Key::Int(2), i(3))]);
+        let Fact::Shape { shape: out, .. } = array_shift_written_fact(&shape).expect("a shape")
+        else {
+            panic!("a shift states a shape");
+        };
+        assert_eq!(out.is_list, Certainty::Yes);
+        assert_eq!(out.fields.len(), 2);
+        assert_eq!(out.witnessed_order(), Some(&[Key::Int(0), Key::Int(1)][..]));
+    }
+
+    #[test]
+    fn a_pop_drops_the_last_key_and_renumbers_nothing() {
+        // Probed: `array_pop(['a'=>1, 5=>2, 6=>3]) === ['a'=>1, 5=>2]`.
+        let shape = lit(&[
+            (Key::Str("a".into()), i(1)),
+            (Key::Int(5), i(2)),
+            (Key::Int(6), i(3)),
+        ]);
+        let Fact::Shape { shape: out, .. } = array_pop_written_fact(&shape).expect("a shape")
+        else {
+            panic!("a pop states a shape");
+        };
+        let keys: Vec<&Key> = out.fields.iter().map(|(k, _, _)| k).collect();
+        assert_eq!(keys, vec![&Key::Int(5), &Key::Str("a".into())], "sorted, but key 5 kept");
+    }
+
+    #[test]
+    fn a_removal_from_a_keyless_array_only_loses_non_emptiness() {
+        // `non-empty-array<string>` -> `array<string>`: the tail, its key class
+        // and the `is_list` verdict all ride along.
+        let non_empty = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed { key: KeyClass::ArrayKey, value: Some(Box::new(Fact::General {
+                base: steins_domain::Base::String,
+                nullable: false,
+            })) },
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        for rule in ["array_shift", "array_pop"] {
+            let out = array_out_rule(rule).expect("a rule").written_fact(Some(&non_empty));
+            let Fact::Shape { shape, .. } = out else { panic!("{rule} states a shape") };
+            assert!(!shape.non_empty, "{rule} may have taken the only entry");
+            assert_eq!(shape.tail, non_empty.tail, "{rule} does not touch the tail");
+        }
+    }
+
+    #[test]
+    fn a_declared_field_order_is_not_an_order() {
+        // `@var array{a: 0, b: 1, c: 2}` states no iteration order in this
+        // domain (ADR-0062 §7), so a removal cannot say which key left and the
+        // rule falls to its floor rather than guessing the docblock's order.
+        let declared = ShapeFact::normalize(
+            vec![
+                (Key::Str("a".into()), Presence::Required { witnessed: false }, Some(Box::new(Fact::Singleton(i(0))))),
+                (Key::Str("b".into()), Presence::Required { witnessed: false }, Some(Box::new(Fact::Singleton(i(1))))),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            true,
+            Vec::new(),
+        );
+        assert_eq!(determined_order(&declared), None);
+        assert!(array_shift_written_fact(&declared).is_none());
+        assert!(array_pop_written_fact(&declared).is_none());
+        let floored = array_out_rule("array_shift").expect("a rule").written_fact(Some(&declared));
+        assert_eq!(floored, shape_fact(ShapeFact::plain_array()));
+    }
+
+    #[test]
+    fn every_rule_answers_something_with_no_claim_at_all() {
+        for (name, want_list) in [
+            ("sort", true),
+            ("shuffle", true),
+            ("asort", false),
+            ("reset", false),
+            ("array_shift", false),
+            ("array_pop", false),
+        ] {
+            let Fact::Shape { shape, .. } = array_out_rule(name).expect("a rule").written_fact(None)
+            else {
+                panic!("{name} states a shape");
+            };
+            assert_eq!(shape.is_list == Certainty::Yes, want_list, "{name}");
+            assert!(!shape.non_empty, "{name} says nothing about emptiness");
+        }
+        assert_eq!(array_out_rule("array_walk"), None, "array_walk stays unmeasured");
     }
 
     #[test]

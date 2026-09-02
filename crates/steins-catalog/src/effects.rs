@@ -743,6 +743,24 @@ pub enum WrittenWhen {
 /// so a row for them would be unattributable movement (issue #635's
 /// "what NOT to chase").
 ///
+/// **The queue ends** `array_pop` / `array_shift` position 0 (issue #635) —
+/// declared `: mixed` at `PINNED_PHP`, `(&$array)`, one parameter required and
+/// one total. `mixed` excludes nothing, so the witness rests entirely on the
+/// probe that the empty case still *writes*:
+///
+/// ```text
+/// $a = [1, 2];  array_pop($a)    ret=2     $a === [0 => 1]
+/// $a = [];      array_pop($a)    ret=NULL  $a === []
+/// $a = [1, 2];  array_shift($a)  ret=1     $a === [0 => 2]
+/// $a = [];      array_shift($a)  ret=NULL  $a === []
+/// array_pop($string)             THROWS TypeError
+/// array_shift($null)             THROWS TypeError
+/// ```
+///
+/// The `NULL` is a *value*, not a refusal: an empty array stays empty, which is
+/// a fact about the argument exactly as `[0 => 1]` is. The only outcome that
+/// writes nothing is the `TypeError`, and it does not return.
+///
 /// Every other [`out_params`] row's contract deserves the same treatment but
 /// stays a decline until measured (ADR-0077 §4). A witness is not by itself a
 /// fact: it says *where* a seed would be sound.
@@ -754,6 +772,7 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
         ("settype", 0) => Some(WrittenWhen::CallReturns),
         (n, 0) if SORT_FAMILY.contains(&n) => Some(WrittenWhen::CallReturns),
         ("reset" | "end", 0) => Some(WrittenWhen::CallReturns),
+        ("array_pop" | "array_shift", 0) => Some(WrittenWhen::CallReturns),
         _ => None,
     }
 }
@@ -1227,9 +1246,23 @@ mod tests {
             assert_eq!(out_param_written_when("preg_match", p), None, "position {p} is by value");
             assert_eq!(out_param_written_when("preg_match_all", p), None, "position {p} is by value");
         }
-        for f in ["similar_text", "str_replace", "array_pop", "array_walk"] {
+        for f in ["similar_text", "str_replace", "array_walk"] {
             for p in 0..5 {
                 assert_eq!(out_param_written_when(f, p), None, "{f} states no witness yet");
+            }
+        }
+    }
+
+    #[test]
+    fn the_queue_ends_write_even_when_the_array_was_empty() {
+        // `array_pop([])` answers `NULL` and leaves `[]` — a value, not a
+        // refusal, so the witness is the same as for a non-empty pop.
+        for f in ["array_pop", "array_shift", "ARRAY_SHIFT"] {
+            assert_eq!(out_param_written_when(f, 0), Some(WrittenWhen::CallReturns), "{f}");
+        }
+        for f in ["array_pop", "array_shift"] {
+            for p in 1..5 {
+                assert_eq!(out_param_written_when(f, p), None, "{f} argument {p} is by value");
             }
         }
     }
