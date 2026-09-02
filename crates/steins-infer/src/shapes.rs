@@ -983,10 +983,10 @@ pub(crate) fn apply_offset_write(
     };
 
     // The order witness this write hands on, when the base had one (issue #327).
-    // A witnessed base stays witnessed through a write: PHP appends a new key at
-    // the end, leaves an existing key where it is, and `unset` removes one from
-    // the sequence. Rebuilds below drop the witness; it is re-attached once, at
-    // the end, from the sequence computed here.
+    // A witnessed base stays witnessed through a **write**: PHP appends a new
+    // key at the end and leaves an existing key where it is. It does NOT stay
+    // witnessed through an `unset` — see below. Rebuilds drop the witness; it is
+    // re-attached once, at the end, from the sequence computed here.
     //
     // **`unset` ends the witness** (issue #636). The sequence would survive an
     // `unset` perfectly well *as an order* — the surviving keys really were
