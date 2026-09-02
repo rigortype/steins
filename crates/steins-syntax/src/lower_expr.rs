@@ -1216,6 +1216,23 @@ pub(crate) fn const_key_offset(expr: &Expression<'_>) -> Option<(String, ArgValu
     key.is_concrete_value().then(|| (strip_dollar(bytes_to_string(dv.name)), key))
 }
 
+/// The plain local an **append lvalue** `$var[] = …` names (issue #636), or
+/// `None` for anything else.
+///
+/// Depth one and a direct variable only. `$o->p[] = v` and `$a['k'][] = v` are
+/// refused here and stay plain barriers: the first is the aliasing family's
+/// (ADR-0063 §2.3), and the second would be a nested-shape update, which
+/// [`const_key_offset_path`]'s own nested arm declines for the same reason.
+pub(crate) fn append_base(expr: &Expression<'_>) -> Option<String> {
+    let Expression::ArrayAppend(aa) = expr.unparenthesized() else { return None };
+    match aa.array.unparenthesized() {
+        Expression::Variable(Variable::Direct(dv)) => {
+            Some(strip_dollar(bytes_to_string(dv.name)))
+        }
+        _ => None,
+    }
+}
+
 /// The base and key path of an offset **lvalue**, depth one or two:
 /// `$var[<k>]` → `("var", [k])`, `$var[<lit>][<k>]` → `("var", [k1, k2])`.
 /// `None` for an append (`$var[] = …`), a deeper chain, or a non-variable base —

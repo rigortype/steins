@@ -963,6 +963,46 @@ mod tests {
         }
     }
 
+    /// **The `SCHEMA_VERSION` 10 → 11 payload** (issue #636): `$a[] = 1` lowers
+    /// to `StmtKind::OffsetAppend`, and the variant survives the trace codec
+    /// with its base and value intact.
+    ///
+    /// The variant sits *between* `OffsetWrite` and `OffsetUnset`, and the wire
+    /// codec carries an enum variant **by index**, so every neighbour's index
+    /// moved. That is exactly what the schema bump buys: a schema-10 artifact is
+    /// a [`Miss`] and rebuilds, rather than decoding an `OffsetAppend` as
+    /// something it never was.
+    #[test]
+    fn the_auto_index_append_round_trips_through_the_trace_payload() {
+        use steins_syntax::StmtKind;
+        let tree = SourceTree::parse(
+            "<?php\nfunction f(): void { $a = []; $a[] = 1; $a['k'] = 2; unset($a['k']); }\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let kinds = |t: &SourceTree| -> Vec<String> {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .map(|s| match &s.kind {
+                    StmtKind::OffsetAppend { base, value } => format!("append {base} {value:?}"),
+                    StmtKind::OffsetWrite { base, .. } => format!("write {base}"),
+                    StmtKind::OffsetUnset { base, .. } => format!("unset {base}"),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let got = kinds(&back);
+        assert_eq!(got, kinds(&tree), "the decoded body is the encoded one");
+        assert!(
+            got.iter().any(|k| k.starts_with("append a ")),
+            "`$a[] = 1` lowered to something else: {got:?}"
+        );
+        assert!(got.contains(&"write a".to_owned()), "the key path is still its own variant");
+        assert!(got.contains(&"unset a".to_owned()), "and so is the unset");
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),

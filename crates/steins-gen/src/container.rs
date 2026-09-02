@@ -60,9 +60,15 @@ use crate::names::{PackageName, SectionName};
 /// `ArgValue::Other`, so replaying it would answer `unknown` for three values
 /// this binary now decides, and would miss the dead right operand of a decided
 /// `&&`/`||` that only the new carrier's span records.
+/// `11` is the auto-index append (issue #636): `StmtKind::OffsetAppend`. A schema-10
+/// trace spells `$a[] = 1` as `StmtKind::Barrier` — a statement that clears the whole
+/// environment — so replaying one would answer `unknown` for every local from that
+/// line on, where this binary answers the extended array. The variant is new, not
+/// re-encoded, so an old trace cannot be misread as the new form; it simply states
+/// something weaker than the source does.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 10;
+pub const SCHEMA_VERSION: u32 = 11;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
