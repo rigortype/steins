@@ -14,8 +14,8 @@ use crate::builtin_returns::{
     floor_value_fact, shape_builtin_return_fact,
 };
 use crate::cond::{
-    coalesce_lhs_proven_present, eval_binary_fact, eval_isset_fact, eval_logical_fact,
-    eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
+    coalesce_lhs_proven_present, eval_binary_fact, eval_cast_fact, eval_isset_fact,
+    eval_logical_fact, eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::descent::summary_binds;
 use crate::env::{
@@ -156,6 +156,24 @@ pub(crate) fn apply_assign(
     if let ArgValue::Not(inner) = value {
         let (fact, strat) =
             eval_not_fact(w, folder, inner, env, Some(&*store), w.scope.poisoned);
+        if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
+            facts.push(LineFact {
+                line,
+                kind: FactKind::Value { var: var.to_owned(), rendered: render_val(lit) },
+            });
+        }
+        env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
+        store.unbind(var);
+        return;
+    }
+
+    // A cast rvalue `$n = (int) $x;` (issue #626): the grid's fact, by the same
+    // evaluator the dump surface reads — the assignment and the dump of the same
+    // expression can never disagree. Total, so the binding is the target's base
+    // at worst and never dropped.
+    if let ArgValue::Cast { target, operand } = value {
+        let (fact, strat) =
+            eval_cast_fact(w, folder, *target, operand, env, Some(&*store), w.scope.poisoned);
         if let (Fact::Singleton(lit), Some(facts)) = (&fact, facts.as_deref_mut()) {
             facts.push(LineFact {
                 line,

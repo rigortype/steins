@@ -21,13 +21,14 @@ use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat
 use crate::{ID, RETURN_ID, Sym};
 use crate::arg_check::render_call;
 use crate::builtin_returns::shape_builtin_return_fact;
+use crate::coerce::php_cast_fact;
 use crate::cond::{eval_cmp, spaceship_pole};
 use crate::contract::{
     CArg, CVal, Envelopes, GenericCarry, InheritanceEdge, IsA, TemplateShadow, template_names_of,
 };
 use crate::dam::DamFacts;
 use crate::descent::nested_call_singleton;
-use crate::env::{Descent, Known, Store, Stratum, arg_of_val, val_of};
+use crate::env::{Descent, Known, Store, Stratum, arg_of_val, singleton_fact, val_of};
 use crate::project::{Diagnostic, FileUnit, FnResolution, Index, Res, Site};
 use crate::purity::PurityOracle;
 use crate::return_arms::class_template_names;
@@ -1030,6 +1031,28 @@ impl<'a> Cx<'a> {
                 )?;
                 let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
                 spaceship_pole(&l, &r, self.php_minor).map(|n| (ArgValue::Int(n), strat))
+            }
+            // A cast in value position (issue #626): the SAME grid the fact seam
+            // runs, over the operand's own resolved literal — a cast of a proven
+            // value is a proven value, so `(int) 5.25` folds to `5` here rather
+            // than waiting for a fact to be rendered. Unlike the logical family
+            // above, this needs nothing from the walk: the grid is a pure
+            // function of the operand's value.
+            //
+            // An operand that does not resolve, and a grid cell that declines
+            // (`(string)` of an array), yield `None`; the base floor every cast
+            // deserves is minted one level up at the fact seam, since a literal
+            // cannot spell `int` and the floor is the operator's claim, not a
+            // value.
+            ArgValue::Cast { target, operand } => {
+                let (lit, strat) = self.resolve_literal_under(
+                    operand, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                let fact = singleton_fact(&lit, self.php_minor)?;
+                match php_cast_fact(&fact, *target)? {
+                    Fact::Singleton(v) => Some((arg_of_val(&v), strat)),
+                    _ => None,
+                }
             }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).

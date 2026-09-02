@@ -5,14 +5,15 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, Val};
+use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, ShapeFact, Val};
 use steins_syntax::{
-    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef, RefKind, Span,
-    ValueOp,
+    ArgValue, CastTarget, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef, RefKind,
+    Span, ValueOp,
 };
 
 use crate::fold::Folder;
 use crate::asserts::cond_invalidations;
+use crate::coerce::php_cast_fact;
 use crate::compare::{php_identical, php_loose_eq, php_truthy};
 use crate::contract::IsA;
 use crate::cx::Cx;
@@ -424,24 +425,47 @@ fn value_truthiness(
     store: Option<&Store>,
     poisoned: bool,
 ) -> (Certainty, Stratum) {
-    let (fact, strat) = match value {
+    match value_operand_fact(w, folder, value, env, store, poisoned) {
+        Some((fact, strat)) => (fact.truthy(), strat),
+        None => (Certainty::Maybe, value_stratum(value, env, store)),
+    }
+}
+
+/// **The fact a value-position expression denotes**, or `None` when nothing at
+/// all is known about it — the one reader the composed operator family shares
+/// ([`value_truthiness`] and [`eval_cast_fact`] both go through it).
+///
+/// The dispatch above the plain value lane is what makes the family
+/// **compositional**: a comparison, an `isset`, a connective, a negation and a
+/// cast each already answer for themselves, so `!isset($foo)`, `$a && ($b || $c)`
+/// and `(int) ($a === $b)` fold rather than bottoming out. Every other shape goes
+/// to [`transfer_arg_known`], the same argument-fact reader every transfer rule
+/// uses — which resolves a literal operand to its `Singleton` on the way down.
+fn value_operand_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> Option<(Fact, Stratum)> {
+    match value {
         ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } => {
-            eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, store, poisoned)
+            Some(eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, store, poisoned))
         }
         ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
-            eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
+            Some(eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned))
         }
-        ArgValue::Isset(ops) => eval_isset_fact(w.cx, ops, env, poisoned),
+        ArgValue::Isset(ops) => Some(eval_isset_fact(w.cx, ops, env, poisoned)),
         ArgValue::Logical { op, lhs, rhs, rhs_span } => {
-            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
+            Some(eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned))
         }
-        ArgValue::Not(inner) => eval_not_fact(w, folder, inner, env, store, poisoned),
-        _ => match transfer_arg_known(w.cx, folder, value, env, store) {
-            Some(pair) => pair,
-            None => return (Certainty::Maybe, value_stratum(value, env, store)),
-        },
-    };
-    (fact.truthy(), strat)
+        ArgValue::Not(inner) => Some(eval_not_fact(w, folder, inner, env, store, poisoned)),
+        ArgValue::Cast { target, operand } => {
+            Some(eval_cast_fact(w, folder, *target, operand, env, store, poisoned))
+        }
+        _ => transfer_arg_known(w.cx, folder, value, env, store),
+    }
 }
 
 /// Render a decided-or-not truthiness verdict as the family's [`Fact`], with the
@@ -545,6 +569,94 @@ pub(crate) fn eval_not_fact(
 ) -> (Fact, Stratum) {
     let (c, strat) = value_truthiness(w, folder, operand, env, store, poisoned);
     bool_verdict_fact(c.not(), strat)
+}
+
+/// Evaluate a **value-position cast** `(int) $x` (issue #626) to an env [`Fact`].
+///
+/// The semantics are not written here. [`php_cast_fact`] is the `settype` cast
+/// grid of issue #595, `php -r`-measured cell by cell at `PINNED_PHP`, and this
+/// is the second syntax over the same grid — so `settype($v, 'int')` and `(int)
+/// $v` answer identically by construction, which is the property
+/// `tests/cast_value_position.rs` pins. A cell the grid declines is a decline
+/// here too, and then the floor below answers.
+///
+/// # Every cast is total, `(string)` included
+///
+/// The issue this implements reads the grid's declined array cell as "`(string)`
+/// has no floor" and asks the slice to rule. **It has one, and the ruling is that
+/// it is the same total floor the other four have.** A cast that produces a value
+/// at all produces a value of its target's base — the only alternative is a
+/// thrown `Error`, which produces no value for anything downstream to be about.
+/// Measured at `PINNED_PHP` 8.5.9, `php -r`:
+///
+/// * `(string)[1, 2]` is `"Array"` (an `E_WARNING`, not an error — a string);
+/// * `(string)$resource` is `"Resource id #5"`; `(string)$objectWithToString` is
+///   that method's return, which PHP already forces to be a string;
+/// * `(string)new stdClass` **throws** `Error: Object of class stdClass could not
+///   be converted to string`, and so does an enum case — no value, so no claim;
+/// * `(int)new ArrayObject([1])` is `1` and `(bool)new stdClass` is `true`, both
+///   with a warning at most, so the other bases never even throw.
+///
+/// **The grid's array-to-string decline is untouched by this.** That cell refuses
+/// to state the *value* `'Array'` — "right and useless", and in `settype`
+/// position it keeps the by-ref invalidation — and it still refuses it here: the
+/// floor is a claim about the operator's base, minted by this function, never by
+/// [`php_cast_fact`], which continues to answer `None` for an array input and
+/// leaves `settype($v, 'string')` bit-for-bit as it was. The four rows the ruling
+/// wins (`(string) $mixed` under a `!==` guard) get `string` and no more.
+///
+/// # Stratum: the floor is the operator's, the grid's answer is the operand's
+///
+/// The #260 ruling, applied unchanged. A result that IS the floor is a claim
+/// about the cast operator, owed to no operand and no docblock — `Verified`,
+/// always. A result the grid computed from the operand's fact rests on that
+/// fact, so it carries the operand's own stratum: `(int) $rangedByParam` stays
+/// `Asserted` and can never premise a proof-layer finding (ADR-0061 §3).
+///
+/// Nothing here is width-sensitive arithmetic (ADR-0028 §3): `(int)` of a float
+/// truncates through the grid's own `is_finite`-gated reader, `(int)` of an int
+/// is the identity, and `(string)` of an int prints exactly.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_cast_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    target: CastTarget,
+    operand: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let floor = cast_floor(target);
+    let answered = value_operand_fact(w, folder, operand, env, store, poisoned)
+        .and_then(|(fact, strat)| Some((php_cast_fact(&fact, target)?, strat)));
+    match answered {
+        // The grid landing exactly on the floor is the operator's own guarantee
+        // reached the long way round, so it enters `Verified` like the short way.
+        Some((fact, _)) if fact == floor => (floor, Stratum::Verified),
+        Some(pair) => pair,
+        None => (floor, Stratum::Verified),
+    }
+}
+
+/// The base a cast guarantees whatever it converts — the floor
+/// [`eval_cast_fact`] states when the grid has nothing to say, and the reason no
+/// cast expression answers `unknown`.
+///
+/// [`CastTarget::Null`] has no cast syntax to reach it (`(null)1` is a parse
+/// error at `PINNED_PHP`); the row is `settype($v, 'null')`'s, whose grid cell
+/// never declines, so this arm is written for totality rather than for a caller.
+fn cast_floor(target: CastTarget) -> Fact {
+    let general = |base| Fact::General { base, nullable: false };
+    match target {
+        CastTarget::Int => general(Base::Int),
+        CastTarget::Float => general(Base::Float),
+        CastTarget::String => general(Base::String),
+        CastTarget::Bool => general(Base::Bool),
+        // The degenerate shape IS plain `array` (ADR-0062 §3) — there is no
+        // array arm of `Base` to take a `General` over.
+        CastTarget::Array => Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: false },
+        CastTarget::Null => Fact::Singleton(Val::Null),
+    }
 }
 
 /// The pole a `<=>` decides over two candidate sets, or `None` when it is
