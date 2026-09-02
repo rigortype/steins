@@ -86,6 +86,11 @@ pub(crate) fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Va
         // lacks — so no `Val` here either.
         | ArgValue::Logical { .. }
         | ArgValue::Not(_)
+        // A cast (issue #626): its operand's value is only known to the env this
+        // seam does not see, so `eval_cast_fact` / `resolve_literal` decide it —
+        // no `Val` here. A cast of a LITERAL arrives through `resolve_literal`
+        // already folded to its result.
+        | ArgValue::Cast { .. }
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)

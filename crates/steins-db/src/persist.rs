@@ -1003,6 +1003,62 @@ mod tests {
         assert!(got.contains(&"unset a".to_owned()), "and so is the unset");
     }
 
+    /// **The `SCHEMA_VERSION` 11 → 12 payload** (issue #626): `(int) $x` lowers
+    /// to `ArgValue::Cast`, and the variant survives the trace codec with its
+    /// target and operand intact.
+    ///
+    /// The variant sits immediately before `ArgValue::Other`, and the wire codec
+    /// carries an enum variant **by index**, so `Other`'s index moved — which is
+    /// the sharp half of the bump: without it a schema-11 artifact's `Other`
+    /// would decode as a `Cast` whose target and operand were never written.
+    #[test]
+    fn the_value_position_cast_round_trips_through_the_trace_payload() {
+        use steins_syntax::{ArgValue, CastTarget, StmtKind};
+        let tree = SourceTree::parse(
+            "<?php\nfunction f($x): void { $a = (int) $x; $b = (string) 5; $c = (object) $x; }\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let values = |t: &SourceTree| -> Vec<String> {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .filter_map(|s| match &s.kind {
+                    StmtKind::Assign { var, value, .. } => Some(format!("{var}={value:?}")),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert_eq!(values(&back), values(&tree), "the decoded body is the encoded one");
+        let assigned = |t: &SourceTree, want: &str| -> ArgValue {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .find_map(|s| match &s.kind {
+                    StmtKind::Assign { var, value, .. } if var == want => Some(value.clone()),
+                    _ => None,
+                })
+                .expect("an assignment")
+        };
+        match assigned(&back, "a") {
+            ArgValue::Cast { target, operand } => {
+                assert_eq!(target, CastTarget::Int);
+                assert_eq!(*operand, ArgValue::Var("x".to_owned()));
+            }
+            other => panic!("`(int) $x` decoded as {other:?}"),
+        }
+        match assigned(&back, "b") {
+            ArgValue::Cast { target, operand } => {
+                assert_eq!(target, CastTarget::String);
+                assert_eq!(*operand, ArgValue::Int(5));
+            }
+            other => panic!("`(string) 5` decoded as {other:?}"),
+        }
+        // The neighbour whose index moved: `(object)` still decodes as `Other`.
+        assert_eq!(assigned(&back, "c"), ArgValue::Other, "`(object) $x` is still `Other`");
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),

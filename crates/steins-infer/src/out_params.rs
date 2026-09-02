@@ -9,14 +9,16 @@ use std::collections::HashMap;
 use steins_domain::{
     Base, Certainty, Fact, PhpStr, Refinement, ShapeFact, StrPreds, Key as VKey, Val,
 };
-use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind, StmtKind};
+use steins_syntax::{
+    ArgValue, ArrayKey, CallExpr, CastTarget, CondExpr, NameRef, RefKind, StmtKind,
+};
 
 use crate::fold::Folder;
 use crate::PREG_INVALID_PATTERN_ID;
 use crate::array_out_state::{array_out_rule, byref_array_shape};
 use crate::asserts::guard_call_line;
 use crate::builtin_returns::transfer_declaration_admits;
-use crate::coerce::{CastTarget, php_cast_fact};
+use crate::coerce::{php_cast_fact, settype_cast_target};
 use crate::cx::Cx;
 use crate::env::{Known, Store, Stratum};
 use crate::existence::global_function_callee;
@@ -348,7 +350,7 @@ fn array_out_state_fact(
 ///    string through the fold gate every other reader here uses
 ///    ([`Cx::resolve_literal`]) — an unproven variable declines. A byte string
 ///    that is not valid UTF-8 declines with it: it names no type php-src accepts.
-/// 3. **A target the value domain can spell** ([`CastTarget::from_type_string`]):
+/// 3. **A target the value domain can spell** ([`settype_cast_target`]):
 ///    `'object'` writes a `stdClass`, which is not a [`Fact`], and every
 ///    spelling php-src refuses raises a `ValueError` before writing anything.
 /// 4. **A pre-call claim about the input** ([`out_param_input_claim`]) and a grid cell
@@ -379,7 +381,7 @@ fn settype_written_fact(
     else {
         return None;
     };
-    let target = CastTarget::from_type_string(spelling.as_str()?)?;
+    let target = settype_cast_target(spelling.as_str()?)?;
     let ArgValue::Var(var) = &call.args.first()?.value else { return None };
     if target == CastTarget::Null {
         return Some((Fact::Singleton(Val::Null), Stratum::Verified));

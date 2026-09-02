@@ -147,6 +147,10 @@ pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // a `bool` at worst, and a decided one arrives here already resolved.
         | ArgValue::Logical { .. }
         | ArgValue::Not(_)
+        // A cast (issue #626): the same reading once more. Its base is carried by
+        // the binding lane's fact, and a cast of a literal arrives here already
+        // resolved to the value it folds to.
+        | ArgValue::Cast { .. }
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)

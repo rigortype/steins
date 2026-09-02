@@ -7,7 +7,7 @@ use steins_domain::{
     Base, Certainty, Fact, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, Val,
     php_is_numeric,
 };
-use steins_syntax::{ArgValue, NativeType, ScalarType, TypeMember};
+use steins_syntax::{ArgValue, CastTarget, NativeType, ScalarType, TypeMember};
 
 use crate::cx::Cx;
 use crate::arg_check::is_type_error;
@@ -278,11 +278,14 @@ fn php_float_to_int(f: f64) -> Option<i64> {
 
 // ---- The explicit cast grid (issue #595) ----
 
-/// A `settype` target type, as the literal type string names it — the column
-/// header of the probed cast grid ([`php_cast_fact`]).
+/// The **`settype` spelling reader**: the target a proven type string names, or
+/// `None` for a spelling this grid states no fact for.
 ///
-/// The spellings php-src converts under are exactly these, measured at PHP
-/// 8.5.9 by calling `settype($v, $t)` for every candidate: `'int'`/`'integer'`,
+/// One of the two readers over [`CastTarget`] (the other is the cast-token map
+/// in `steins-syntax`, issue #626), and the two do not accept the same words —
+/// which is why the enum is shared and this function is not. The spellings
+/// php-src converts under are exactly these, measured at PHP 8.5.9 by calling
+/// `settype($v, $t)` for every candidate: `'int'`/`'integer'`,
 /// `'float'`/`'double'`, `'string'`, `'bool'`/`'boolean'`, `'array'`, `'null'`,
 /// and `'object'`. Matching is case-insensitive (`'Int'`, `'INT'` and
 /// `'BOOLEAN'` all convert). Nothing else writes anything at all: `'real'`,
@@ -291,40 +294,19 @@ fn php_float_to_int(f: f64) -> Option<i64> {
 /// `'resource'` is recognized only far enough to raise
 /// `ValueError: Cannot convert to resource type`.
 ///
-/// One converting spelling is deliberately **not** a variant here: `'object'`
-/// writes a `stdClass`, which the four-layer value domain has no member for
-/// (its object stratum lives in the heap store). It leaves the caller's
-/// invalidation standing, exactly as the refused spellings do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CastTarget {
-    /// `'int'` / `'integer'`.
-    Int,
-    /// `'float'` / `'double'`.
-    Float,
-    /// `'string'`.
-    String,
-    /// `'bool'` / `'boolean'`.
-    Bool,
-    /// `'array'`.
-    Array,
-    /// `'null'`.
-    Null,
-}
-
-impl CastTarget {
-    /// The target a proven type string names, or `None` for a spelling this
-    /// grid does not state a fact for — including the two accepted-but-declined
-    /// ones (see the type doc) and every spelling php-src refuses outright.
-    pub(crate) fn from_type_string(s: &str) -> Option<CastTarget> {
-        match s.to_ascii_lowercase().as_str() {
-            "int" | "integer" => Some(CastTarget::Int),
-            "float" | "double" => Some(CastTarget::Float),
-            "string" => Some(CastTarget::String),
-            "bool" | "boolean" => Some(CastTarget::Bool),
-            "array" => Some(CastTarget::Array),
-            "null" => Some(CastTarget::Null),
-            _ => None,
-        }
+/// `'object'` is a converting spelling with no variant to name — it writes a
+/// `stdClass`, which the four-layer value domain has no member for — so it
+/// declines here and leaves the caller's invalidation standing, exactly as the
+/// refused spellings do.
+pub(crate) fn settype_cast_target(s: &str) -> Option<CastTarget> {
+    match s.to_ascii_lowercase().as_str() {
+        "int" | "integer" => Some(CastTarget::Int),
+        "float" | "double" => Some(CastTarget::Float),
+        "string" => Some(CastTarget::String),
+        "bool" | "boolean" => Some(CastTarget::Bool),
+        "array" => Some(CastTarget::Array),
+        "null" => Some(CastTarget::Null),
+        _ => None,
     }
 }
 
@@ -620,23 +602,23 @@ mod cast_grid_tests {
 
     #[test]
     fn the_type_string_is_matched_case_insensitively_and_closed() {
-        assert_eq!(CastTarget::from_type_string("int"), Some(CastTarget::Int));
-        assert_eq!(CastTarget::from_type_string("integer"), Some(CastTarget::Int));
-        assert_eq!(CastTarget::from_type_string("INT"), Some(CastTarget::Int));
-        assert_eq!(CastTarget::from_type_string("Integer"), Some(CastTarget::Int));
-        assert_eq!(CastTarget::from_type_string("float"), Some(CastTarget::Float));
-        assert_eq!(CastTarget::from_type_string("double"), Some(CastTarget::Float));
-        assert_eq!(CastTarget::from_type_string("bool"), Some(CastTarget::Bool));
-        assert_eq!(CastTarget::from_type_string("BOOLEAN"), Some(CastTarget::Bool));
-        assert_eq!(CastTarget::from_type_string("string"), Some(CastTarget::String));
-        assert_eq!(CastTarget::from_type_string("array"), Some(CastTarget::Array));
-        assert_eq!(CastTarget::from_type_string("null"), Some(CastTarget::Null));
+        assert_eq!(settype_cast_target("int"), Some(CastTarget::Int));
+        assert_eq!(settype_cast_target("integer"), Some(CastTarget::Int));
+        assert_eq!(settype_cast_target("INT"), Some(CastTarget::Int));
+        assert_eq!(settype_cast_target("Integer"), Some(CastTarget::Int));
+        assert_eq!(settype_cast_target("float"), Some(CastTarget::Float));
+        assert_eq!(settype_cast_target("double"), Some(CastTarget::Float));
+        assert_eq!(settype_cast_target("bool"), Some(CastTarget::Bool));
+        assert_eq!(settype_cast_target("BOOLEAN"), Some(CastTarget::Bool));
+        assert_eq!(settype_cast_target("string"), Some(CastTarget::String));
+        assert_eq!(settype_cast_target("array"), Some(CastTarget::Array));
+        assert_eq!(settype_cast_target("null"), Some(CastTarget::Null));
         // Accepted by php-src but not expressible here: `'object'` writes a
         // `stdClass`, which is not a value-domain fact.
-        assert_eq!(CastTarget::from_type_string("object"), None);
+        assert_eq!(settype_cast_target("object"), None);
         // Refused by php-src with a `ValueError`, so nothing is written at all.
         for name in ["real", "resource", "binary", " int", "int ", "foo", ""] {
-            assert_eq!(CastTarget::from_type_string(name), None, "{name} is not a type");
+            assert_eq!(settype_cast_target(name), None, "{name} is not a type");
         }
     }
 

@@ -9,9 +9,9 @@ use steins_domain::{
     Base, Certainty, Fact, IntRange, Key as VKey, Presence, Refinement, ShapeFact, StrPreds, Tail,
     Val,
 };
-use steins_syntax::{ArgValue, ArrayKey, RefKind, ValueOp};
+use steins_syntax::{ArgValue, ArrayKey, CastTarget, RefKind, ValueOp};
 
-use crate::coerce::{CastTarget, php_cast_fact};
+use crate::coerce::php_cast_fact;
 use crate::cx::Cx;
 use crate::env::{
     ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact, val_of,
