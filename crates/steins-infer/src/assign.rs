@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_domain::{CoverFlavor, Fact, ShapeFact, Key as VKey};
-use steins_syntax::{ArgValue, CallExpr, ValueOp};
+use steins_syntax::{ArgValue, CallExpr, Span, ValueOp};
 
 use crate::fold::Folder;
 use crate::annotate::{FactKind, LineFact};
@@ -291,13 +291,12 @@ pub(crate) fn apply_assign(
         // certainty for a value it cannot spell. The join widens, so it can only
         // lose precision — the FP-safe side.
         ArgValue::Coalesce(a, b, rhs_span) => {
-            // `??` gates its right operand like a ternary gates an arm: a left
-            // operand proven set-and-non-null means PHP never evaluates the right.
-            if coalesce_lhs_proven_present(w, folder, a, env, store) {
-                mark_dead_span(w, *rhs_span);
-            }
-            // Stratum is the evaluator's own `min` over the spine's arms.
-            match eval_coalesce_fact(w, folder, a, b, env, Some(&*store)) {
+            // `??` gates its right operand like a ternary gates an arm: an arm
+            // proven set-and-non-null means PHP never evaluates what follows it.
+            // The evaluator owns that record now (issue #630) — it needs the same
+            // predicate to pick the value, and one predicate cannot disagree with
+            // itself. Stratum is the evaluator's own `min` over the spine's arms.
+            match eval_coalesce_fact(w, folder, a, b, *rhs_span, env, Some(&*store)) {
                 Some((fact, strat)) => {
                     env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                     store.unbind(var);
@@ -577,37 +576,76 @@ fn seed_returned_shape(
 /// write through a reference and make an earlier `¬isset` stale, so a non-projection
 /// arm contributes no premise and drops every accumulated one — why
 /// `$x['a'] ?? f() ?? $x['b']` discharges nothing.
+///
+/// # A non-projection arm settles the chain too (issue #630)
+///
+/// `settled` ends the spine at an arm PHP proves is the value, because nothing to
+/// its right is evaluated. It used to be computed **only** inside the projection
+/// branch, and the other branch hardcoded `false` — so a left arm that is a literal
+/// or a proven-non-null variable never settled and the join added an arm PHP never
+/// reaches: `'foo' ?? null` answered `'foo'|null`, `$scalar = 3; $scalar ?? 4`
+/// answered `3|4`. The predicate that branch wants is
+/// [`coalesce_lhs_proven_present`], which already stood next door in the assignment
+/// seam deciding the same question for deadness alone.
+///
+/// **This evaluator now owns the `mark_dead_span` record**, the choice issue #625's
+/// leg 1 made for [`eval_ternary_fact`]: one predicate decides the value and the
+/// deadness together, so no seam can answer `??` with a fact while disagreeing about
+/// which arms PHP ran. The assignment seam's separate call is gone. `rest` is the
+/// source extent to the right of each arm, threaded by
+/// [`flatten_coalesce_spans`].
+///
+/// The projection branch's `settled` deliberately does **not** mark. Its presence
+/// claim comes from a shape fact, which is `Asserted` — and reachability stays
+/// proof-only, the same line `coalesce_lhs_proven_present`'s own third refusal
+/// draws. A shape may say a key is `Required` on a docblock's word; that is enough
+/// to pick a value, never enough to prove code unreached.
+///
+/// [`eval_ternary_fact`]: crate::cond::eval_ternary_fact
+/// [`coalesce_lhs_proven_present`]: crate::cond::coalesce_lhs_proven_present
 pub(crate) fn eval_coalesce_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
     a: &ArgValue,
     b: &ArgValue,
+    rhs_span: Span,
     env: &HashMap<String, Known>,
     store: Option<&Store>,
 ) -> Option<(Fact, Stratum)> {
     let (poisoned, php_minor) = (w.scope.poisoned, w.cx.php_minor);
-    let mut arms: Vec<&ArgValue> = Vec::new();
-    flatten_coalesce(a, &mut arms);
-    flatten_coalesce(b, &mut arms);
+    let mut arms: Vec<(&ArgValue, Option<Span>)> = Vec::new();
+    flatten_coalesce_spans(a, Some(rhs_span), &mut arms);
+    flatten_coalesce_spans(b, None, &mut arms);
     let last = arms.len() - 1;
 
     let mut premises: Vec<(String, VKey)> = Vec::new();
     let mut parts: Vec<(Fact, Stratum)> = Vec::with_capacity(arms.len());
-    for (i, arm) in arms.iter().enumerate() {
+    for (i, (arm, rest)) in arms.iter().enumerate() {
         let projection = coalesce_projection(arm, env, poisoned, php_minor);
         let (part, settled) = match &projection {
             Some((var, key)) => {
                 let (f, s, settled) = coalesce_arm_fact(var, key, env, &premises, i == last)?;
                 (Some((f, s)), settled)
             }
-            None => (
-                arg_value_fact(w, folder, arm, env).map(|f| (f, value_stratum(arm, env, store))),
-                false,
-            ),
+            None => {
+                // Marked before the fact is demanded, so an arm proven present that
+                // the domain still cannot spell records the deadness it proves —
+                // exactly what the assignment seam did with its own call.
+                let settled = store
+                    .is_some_and(|s| coalesce_lhs_proven_present(w, folder, arm, env, s));
+                if settled && let Some(span) = rest {
+                    mark_dead_span(w, *span);
+                }
+                (
+                    arg_value_fact(w, folder, arm, env)
+                        .map(|f| (f, value_stratum(arm, env, store))),
+                    settled,
+                )
+            }
         };
         parts.push(part?);
-        // A projection arm the shape proves present and non-null is the value: `??`
-        // never evaluates anything to its right, so the chain ends here.
+        // An arm proven present and non-null is the value: `??` never evaluates
+        // anything to its right, so the chain ends here.
         if settled {
             break;
         }
@@ -639,6 +677,30 @@ pub(crate) fn flatten_coalesce<'a>(v: &'a ArgValue, out: &mut Vec<&'a ArgValue>)
             flatten_coalesce(b, out);
         }
         _ => out.push(v),
+    }
+}
+
+/// [`flatten_coalesce`] carrying, per arm, the source extent of everything to its
+/// **right** in the chain — the region `mark_dead_span` records when that arm
+/// settles (issue #630). `rest` is what lies to the right of `v` itself.
+///
+/// `ArgValue::Coalesce(a, b, rhs_span)` spans `b` with `rhs_span`, so on the
+/// ordinary right-associative nesting each arm gets exactly the extent the
+/// assignment seam used to mark for the head arm, and the arms after it get their
+/// own tighter ones. A left-nested chain `($x ?? $y) ?? $z` gives `$x` the extent of
+/// `$y` alone: `$z` is dead too, but recording a sub-extent only *under*-suppresses,
+/// which is the FP-safe side and the only side deadness may err on.
+fn flatten_coalesce_spans<'a>(
+    v: &'a ArgValue,
+    rest: Option<Span>,
+    out: &mut Vec<(&'a ArgValue, Option<Span>)>,
+) {
+    match v {
+        ArgValue::Coalesce(a, b, rhs_span) => {
+            flatten_coalesce_spans(a, Some(*rhs_span), out);
+            flatten_coalesce_spans(b, rest, out);
+        }
+        _ => out.push((v, rest)),
     }
 }
 

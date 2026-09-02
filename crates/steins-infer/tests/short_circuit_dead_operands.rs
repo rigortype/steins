@@ -120,6 +120,36 @@ fn coalesce_right_operand_control_fires_when_left_is_unknown() {
     assert_eq!(mismatches(&src), 1, "an undecided left operand keeps the `??` right operand live");
 }
 
+#[test]
+fn the_dump_seam_marks_the_coalesce_right_operand_dead_too() {
+    // Issue #630 moved the record from the assignment seam into
+    // `eval_coalesce_fact` itself, the choice issue #625's leg 1 made for
+    // `eval_ternary_fact`: every seam that names a `??` fact now agrees about
+    // which arms PHP ran. Before, a `??` with no binding in sight reported inside
+    // an operand a proven-present left never reaches.
+    let src = format!("{HDR}function f(): void {{ \\PHPStan\\dumpType(1 ?? takesInt(\"abc\")); }}");
+    assert_eq!(mismatches(&src), 0, "the dump seam reaches the same short-circuit proof");
+}
+
+#[test]
+fn the_dump_seam_control_fires_when_the_coalesce_left_is_unknown() {
+    let src = format!(
+        "{HDR}function f(?int $a): void {{ \\PHPStan\\dumpType($a ?? takesInt(\"abc\")); }}"
+    );
+    assert_eq!(mismatches(&src), 1, "an undecided left operand keeps the `??` right operand live");
+}
+
+#[test]
+fn a_settled_arm_kills_every_operand_behind_it_not_just_the_next() {
+    // The chain is right-associative, so `1 ?? f(a) ?? f(b)` is one spine of
+    // three: settling at the head must silence both tails, which is what threading
+    // the per-arm "everything to my right" extent buys.
+    let src = format!(
+        "{HDR}function f(): void {{ $y = 1 ?? takesInt(\"abc\") ?? takesInt(\"def\"); }}"
+    );
+    assert_eq!(mismatches(&src), 0, "a settled head arm reaches past the arm directly behind it");
+}
+
 // The stratum pin: reachability stays proof-only.
 
 #[test]
