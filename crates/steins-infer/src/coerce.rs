@@ -367,9 +367,13 @@ enum CastIn {
 ///   `'some-string'` casts to `true` and `'0'` to `false` by the same rule
 ///   every guard uses — never a second falsiness table.
 /// * **A string's numeric value is claimed only when PHP calls the string
-///   numeric.** `(int)'12abc'` is `12` and `(int)'abc'` is `0` — a
-///   leading-numeric-prefix rule this slice does not author — so a non-numeric
-///   string widens to the target's base instead of guessing a prefix.
+///   numeric, or when it provably has no numeric prefix at all.** `(int)'12abc'`
+///   is `12` — a leading-numeric-*prefix* rule this grid does not author, so such
+///   a string widens to the target's base rather than guessing the prefix. The
+///   other half is exact and is stated: a string whose first non-whitespace byte
+///   cannot begin a number has an EMPTY prefix, so `(int)'blabla'` is `0` and
+///   `(float)'blabla'` is `0.0` (see [`php_str_has_no_numeric_prefix`] for the
+///   measured byte set and why `.` is excluded from it).
 pub(crate) fn php_cast_fact(input: &Fact, target: CastTarget) -> Option<Fact> {
     // `'null'` overwrites whatever was there, and the bool cast is a question
     // about the WHOLE fact (the domain answers it once, three-valued) — neither
@@ -436,9 +440,9 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
             CastIn::Val(Val::Str(s)) => Some(
                 php_numeric_str(s)
                     .and_then(php_str_to_int)
-                    .map_or(Fact::General { base: Base::Int, nullable: false }, |i| {
-                        Fact::Singleton(Val::Int(i))
-                    }),
+                    .map(|i| Fact::Singleton(Val::Int(i)))
+                    .or_else(|| php_str_has_no_numeric_prefix(s).then(|| Fact::Singleton(Val::Int(0))))
+                    .unwrap_or(Fact::General { base: Base::Int, nullable: false }),
             ),
             CastIn::Val(Val::Bool(b)) => one(Val::Int(i64::from(*b))),
             CastIn::Val(Val::Null) | CastIn::Null => one(Val::Int(0)),
@@ -464,9 +468,11 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
             CastIn::Val(Val::Str(s)) => Some(
                 php_numeric_str(s)
                     .and_then(php_str_to_float)
-                    .map_or(Fact::General { base: Base::Float, nullable: false }, |f| {
-                        Fact::Singleton(Val::Float(f))
-                    }),
+                    .map(|f| Fact::Singleton(Val::Float(f)))
+                    .or_else(|| {
+                        php_str_has_no_numeric_prefix(s).then(|| Fact::Singleton(Val::Float(0.0)))
+                    })
+                    .unwrap_or(Fact::General { base: Base::Float, nullable: false }),
             ),
             CastIn::Val(Val::Bool(b)) => one(Val::Float(if *b { 1.0 } else { 0.0 })),
             CastIn::Val(Val::Null) | CastIn::Null => one(Val::Float(0.0)),
@@ -553,6 +559,35 @@ fn single_element_list(elem: Fact) -> Fact {
 /// readers below are written over a `&str` prefix (ADR-0080 §2.5).
 fn php_numeric_str(s: &PhpStr) -> Option<&str> {
     php_is_numeric(s).then(|| s.as_str()).flatten()
+}
+
+/// Whether a string PHP does not call numeric has **no leading numeric prefix
+/// either**, so its `(int)` is exactly `0` and its `(float)` exactly `0.0`
+/// ([`php_cast_fact`]'s last witness).
+///
+/// php-src reads a number by skipping leading whitespace and then requiring a
+/// sign, a digit or a `.`; a first non-whitespace byte outside that set can
+/// never begin one, so the prefix is empty and the conversion is the zero PHP
+/// writes for an empty prefix. The **prefix** case — `'12abc'`, whose `(int)` is
+/// `12` — is still declined: reading it is a leading-numeric-prefix rule this
+/// grid does not author, and `.` is in the set because `'  .5'` casts to `0` as
+/// an int but to `0.5` as a float.
+///
+/// Measured at `PINNED_PHP` 8.5.9, `php -r`: `(int)'blabla'`, `(int)'  blabla'`,
+/// `(int)"\tabc"`, `(int)'e5'`, `(int)'_5'`, `(int)''` and `(int)'   '` are all
+/// `0`, and each of their `(float)`s `0.0`. The whitespace set is php-src's own
+/// and wider than Rust's `trim_ascii_start` — `"\v5"` and `"\f5"` both cast to
+/// `5` — so it is spelled out here rather than borrowed.
+///
+/// Byte-safe by construction (ADR-0080 §2.5): it reads bytes, so a string that
+/// is not valid UTF-8 is answered rather than declined with the readers above.
+fn php_str_has_no_numeric_prefix(s: &PhpStr) -> bool {
+    const PHP_SPACE: [u8; 6] = [b' ', b'\t', b'\n', b'\r', 0x0B, 0x0C];
+    match s.as_bytes().iter().find(|b| !PHP_SPACE.contains(b)) {
+        Some(b) => !matches!(b, b'+' | b'-' | b'.' | b'0'..=b'9'),
+        // Empty, or nothing but whitespace: the prefix is empty either way.
+        None => true,
+    }
 }
 
 /// Truncate a float **value** toward zero to an int, or `None` when the result
@@ -652,16 +687,40 @@ mod cast_grid_tests {
     }
 
     #[test]
-    fn a_non_numeric_string_widens_to_the_base_rather_than_guessing_a_prefix() {
-        // Measured: `(int)'abc'` is 0 and `(int)'12abc'` is 12 — a leading-prefix
-        // rule this slice does not author, so the value-precise claim is dropped.
-        assert_eq!(cast(&s("abc"), CastTarget::Int), Some(general(Base::Int)));
+    fn a_string_with_no_numeric_prefix_casts_to_the_zero_it_actually_is() {
+        // Measured (issue #626): `(int)'abc'` is `0`, and the reason is that its
+        // numeric PREFIX is empty — nothing about `is_numeric` is in play. The
+        // whitespace skip is php-src's own: `(int)'  blabla'` and `(int)"\tabc"`
+        // are `0` too, and so are `(int)''` and `(int)'   '`.
+        assert_eq!(cast(&s("abc"), CastTarget::Int), Some(i(0)));
+        assert_eq!(cast(&s("abc"), CastTarget::Float), Some(f(0.0)));
+        assert_eq!(cast(&s("  blabla"), CastTarget::Int), Some(i(0)));
+        assert_eq!(cast(&s("\tabc"), CastTarget::Int), Some(i(0)));
+        assert_eq!(cast(&s(""), CastTarget::Int), Some(i(0)));
+        assert_eq!(cast(&s("   "), CastTarget::Float), Some(f(0.0)));
+        // `'INF'`/`'NAN'` are NOT numeric to PHP and have no numeric prefix
+        // either: `(float)'INF'` and `(float)'NAN'` are both `0.0`.
+        assert_eq!(cast(&s("INF"), CastTarget::Float), Some(f(0.0)));
+        assert_eq!(cast(&s("NAN"), CastTarget::Float), Some(f(0.0)));
+    }
+
+    #[test]
+    fn a_string_that_could_carry_a_prefix_still_widens_to_the_base() {
+        // `(int)'12abc'` is `12` — a leading-numeric-prefix rule this grid does
+        // not author, so the value-precise claim is dropped rather than guessed.
         assert_eq!(cast(&s("12abc"), CastTarget::Int), Some(general(Base::Int)));
-        assert_eq!(cast(&s("abc"), CastTarget::Float), Some(general(Base::Float)));
-        // `'INF'`/`'NAN'` are NOT numeric to PHP (`(float)'INF'` is 0.0), and the
-        // gate is `is_numeric`, so Rust's own float parser never sees them.
-        assert_eq!(cast(&s("INF"), CastTarget::Float), Some(general(Base::Float)));
-        assert_eq!(cast(&s("NAN"), CastTarget::Float), Some(general(Base::Float)));
+        // The dot and sign cases are what a first-byte rule written any wider
+        // would get wrong: `(float)'.5abc'` is `0.5`, not `0.0`, so a leading `.`
+        // can never be claimed even though `(int)'.5abc'` IS `0`. `'+x'` and
+        // `'-INF'` both cast to zero, and are declined for the same reason —
+        // being right by accident is not a rule.
+        assert_eq!(cast(&s(".5abc"), CastTarget::Float), Some(general(Base::Float)));
+        assert_eq!(cast(&s("+x"), CastTarget::Int), Some(general(Base::Int)));
+        assert_eq!(cast(&s("-INF"), CastTarget::Float), Some(general(Base::Float)));
+        // `'  .5'` is not this rule's business at all: PHP calls it numeric
+        // (leading whitespace is allowed), so the value-precise path answers it.
+        assert_eq!(cast(&s("  .5"), CastTarget::Float), Some(f(0.5)));
+        assert_eq!(cast(&s("  .5"), CastTarget::Int), Some(i(0)));
     }
 
     #[test]
