@@ -231,13 +231,27 @@ fn coalesce_equal_operands_is_singleton() {
 }
 
 #[test]
-fn coalesce_differing_operands_widens_and_is_silent() {
-    // Differing operands → widening OneOf, never one proven value → silent. FP-safe:
-    // `??` cannot narrow to a single bad value it isn't sure of.
+fn coalesce_differing_operands_take_the_settled_left() {
+    // A *proven* left operand is not one member of a widening — it is the answer.
+    // PHP evaluates the right arm of `??` only when the left is unset or null, so
+    // `$b` here is never reached and `$x` is exactly `"abc"`. Measured at
+    // `PINNED_PHP` 8.5.9 rather than reasoned:
+    //
+    // ```
+    // php -r '$a = "abc"; $b = 5; $x = $a ?? $b; var_dump($x);'
+    // string(3) "abc"
+    // php -r 'function side() { echo "RAN\n"; return 9; }
+    //         $a = "abc"; var_dump($a ?? side());'
+    // string(3) "abc"          // "RAN" never printed
+    // ```
+    //
+    // So `width($x)` fires, and the finding is a true positive. Before issue #630
+    // the settled short-circuit was computed only for a projection arm, this
+    // widened to `OneOf`, and the silence was accidental rather than FP-safe.
     let src = format!(
         "{HDR}function f(): void {{ $a = \"abc\"; $b = 5; $x = $a ?? $b; width($x); }}"
     );
-    assert_eq!(n(&src), 0, "\"abc\" ?? 5 → OneOf → silent (widening)");
+    assert_eq!(n(&src), 1, "\"abc\" ?? 5 → the left arm settles → Singleton(\"abc\") → flagged");
 }
 
 #[test]

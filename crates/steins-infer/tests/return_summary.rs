@@ -650,10 +650,18 @@ fn two_types(src: &str) -> (String, String) {
 
 #[test]
 fn coalesce_return_binds_like_its_assignment_twin() {
-    // `$n ?? 3` under a bound `$n = 5` is the coalesce evaluator's join
-    // (`clear_null(5) join 3`). The return form used to be a factless exit with no
-    // floor (untyped callee) — honest unknown — while the twin crossed via the
-    // bare-var rung.
+    // `$n ?? 3` under a bound `$n = 5`. The return form used to be a factless exit
+    // with no floor (untyped callee) — honest unknown — while the twin crossed via
+    // the bare-var rung.
+    //
+    // The answer is `5`, not the join `3|5`: `$n` is proven set and non-null, so
+    // PHP never evaluates the right arm at all (issue #630's settled
+    // short-circuit). At `PINNED_PHP` 8.5.9:
+    //
+    // ```
+    // php -r '$n = 5; var_dump($n ?? 3);'
+    // int(5)
+    // ```
     let src = "<?php\n\
         function viaReturn(int $t, ?int $n) { return $n ?? 3; }\n\
         function viaAssign(int $t, ?int $n) { $v = $n ?? 3; return $v; }\n\
@@ -662,7 +670,7 @@ fn coalesce_return_binds_like_its_assignment_twin() {
         $b = viaAssign(1, 5);\n\
         \\PHPStan\\dumpType($b);\n";
     let (ret, asg) = two_types(src);
-    assert_eq!(ret, "dumped type: 3|5");
+    assert_eq!(ret, "dumped type: 5");
     assert_eq!(ret, asg, "the return form and its assignment twin agree");
 }
 

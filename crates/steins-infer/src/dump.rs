@@ -747,8 +747,9 @@ fn best_dump_type(
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
     // left-to-right `¬isset` premise ladder, where a KeyCover discharges. Placed
     // above the fold since a `??` is never a literal the folder can reach.
-    if let ArgValue::Coalesce(a, b, _) = value
-        && let Some((fact, stratum)) = eval_coalesce_fact(w, folder, a, b, env, Some(store))
+    if let ArgValue::Coalesce(a, b, rhs_span) = value
+        && let Some((fact, stratum)) =
+            eval_coalesce_fact(w, folder, a, b, *rhs_span, env, Some(store))
     {
         return DumpRendering {
             text: render_dump_fact(&fact),
