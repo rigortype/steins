@@ -96,11 +96,37 @@ pub(crate) fn seed_out_params(
 /// which is how the written fact replaces the drop rather than racing it (the
 /// ADR-0077 §3.4 ordering, at the statement rung).
 ///
-/// **A bare call statement only.** `checkable_calls` also yields the RHS call of
-/// an assignment, and there the seed would be a bug: `$v = settype($v, 'int')`
-/// evaluates the by-ref write *and then* overwrites `$v` with the call's `true`,
-/// so the last word is the assignment's, not the cast's. `return`/`echo`
-/// positions are left out with it rather than argued one at a time.
+/// **A bare call statement, or an assignment that does not take the name back**
+/// (issue #635 widened the original issue-#595 rung).
+///
+/// The refusal this started as was `$v = settype($v, 'int')`: the call performs
+/// its by-ref write and the assignment *then* overwrites `$v` with the call's
+/// `true`, so the last word is the assignment's and a seed would state a value
+/// that never existed. But that argument is about the **target**, not about
+/// assignment: `$extract = array_splice($brr, 0, 0, 1)` writes `$brr` and binds
+/// `$extract`, two different names, and the write is the last word on `$brr`
+/// exactly as it is at a bare call statement. So the RHS of an assignment seeds
+/// every out-parameter *except* the one the assignment is about to rebind.
+///
+/// `return`/`echo` stay out: a `return` position's seed could only be read by a
+/// statement that does not run.
+///
+/// **A call nested inside another call's arguments stays out too** — the form
+/// `assertType('string', array_shift($arr));` takes, which is why
+/// `array-shift.php:15` is still unreached. The IR lowers such a call to
+/// [`ArgValue::Call`], which keeps only the name's **last segment**: nothing
+/// there can tell the global `array_shift` from a namespaced function of the
+/// same name, and [`global_function_callee`]'s whole job is to refuse that
+/// confusion. Reaching it needs a `NameRef` in `ArgValue::Call`, which is an IR
+/// change and a `SCHEMA_VERSION` bump — deliberately out of this slice.
+///
+/// **Reading and binding are two halves on purpose.** The input a cast consumes
+/// is what the variable held *before* the call, and by the time the walk reaches
+/// step 4 the name is already forgotten — a reader placed there would find
+/// nothing and decline every time. So this half runs on the entry env, and
+/// [`apply_stmt_out_param_seeds`] binds what it computed *after* the forgetting,
+/// which is how the written fact replaces the drop rather than racing it (the
+/// ADR-0077 §3.4 ordering, at the statement rung).
 pub(crate) fn stmt_out_param_seeds(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -108,9 +134,14 @@ pub(crate) fn stmt_out_param_seeds(
     env: &HashMap<String, Known>,
     store: &Store,
 ) -> Vec<(String, Fact, Stratum, u32)> {
-    let StmtKind::Call(call) = kind else { return Vec::new() };
+    let (call, rebound) = match kind {
+        StmtKind::Call(call) => (call, None),
+        StmtKind::Assign { var, call: Some(call), .. } => (call, Some(var.as_str())),
+        _ => return Vec::new(),
+    };
     out_param_seed(w, folder, call, env, store, SeedPosition::Statement)
         .into_iter()
+        .filter(|(var, _, _)| Some(var.as_str()) != rebound)
         .map(|(var, fact, stratum)| (var, fact, stratum, guard_call_line(w, call)))
         .collect()
 }
