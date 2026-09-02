@@ -333,7 +333,16 @@ fn array_out_state_fact(
 ///    `'object'` writes a `stdClass`, which is not a [`Fact`], and every
 ///    spelling php-src refuses raises a `ValueError` before writing anything.
 /// 4. **A pre-call claim about the input** ([`out_param_input_claim`]) and a grid cell
-///    for it ([`php_cast_fact`]).
+///    for it ([`php_cast_fact`]) — **except for `'null'`** (issue #635), which
+///    overwrites whatever was there and so needs no premise about it at all.
+///    Measured at PHP 8.5.9 over every input class php-src can hold — `int`,
+///    `float`, `string`, `bool`, `null`, `array`, `object`, a `Closure` and a
+///    `resource` — the call answers `true` and writes `NULL` for all nine and
+///    raises for none. So the one column with no input dependence stops
+///    pretending to have one: `settype($o, 'null')` on an `object`-declared
+///    parameter, whose claim this domain cannot spell, now answers `null`
+///    instead of declining. It is bound `Verified` — it is the engine's own
+///    behaviour and inherits nothing from a claim that was never read.
 ///
 /// [`Cx::resolve_literal`]: crate::cx::Cx::resolve_literal
 fn settype_written_fact(
@@ -353,6 +362,9 @@ fn settype_written_fact(
     };
     let target = CastTarget::from_type_string(spelling.as_str()?)?;
     let ArgValue::Var(var) = &call.args.first()?.value else { return None };
+    if target == CastTarget::Null {
+        return Some((Fact::Singleton(Val::Null), Stratum::Verified));
+    }
     let (input, stratum) = out_param_input_claim(env, store, var)?;
     Some((php_cast_fact(&input, target)?, stratum))
 }
