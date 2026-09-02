@@ -654,7 +654,9 @@ fn cast_floor(target: CastTarget) -> Fact {
         CastTarget::Bool => general(Base::Bool),
         // The degenerate shape IS plain `array` (ADR-0062 §3) — there is no
         // array arm of `Base` to take a `General` over.
-        CastTarget::Array => Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: false },
+        CastTarget::Array => {
+            Fact::Shape { shape: Box::new(ShapeFact::plain_array()), nullable: false }
+        }
         CastTarget::Null => Fact::Singleton(Val::Null),
     }
 }
