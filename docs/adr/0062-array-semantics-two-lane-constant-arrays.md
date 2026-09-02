@@ -116,7 +116,7 @@ so the spec becomes an inductive type with a size measure.
 | --- | --- | --- |
 | read `$x[k]` | exact entry; absence → `offset.missing` (proof layer, unchanged) | required field → its value arms; optional → unknown + the #51 strict leg when undischarged; undeclared key under a sealed tail → *declared-absence*, reported on the contract/strict surface only (sealed is `Asserted`-world evidence — never the proof layer) |
 | write `$x[k] = v` | entry replace/insert in order (builder semantics) | field update to `Required` with `v`'s fact; an undeclared key unseals the tail (sound); `is_list` recomputed denotationally |
-| append `$x[] = v` | A12 (concrete, version-aware) | tail widen; a Yes-list shape stays Yes (append preserves list-ness) |
+| append `$x[] = v` | A12 (concrete, version-aware) | the key `max(int keys) + 1` added when the sequence is *witnessed*, else a tail widen; `is_list` **never** carried (Amendment K corrects this row: append does not preserve list-ness) |
 | `unset($x[k])` | entry removal | `Required` demotes to absent-on-branch, `Optional` stays; `is_list` recomputed (a mid-list unset is No/Maybe by position knowledge) |
 | `isset` / `array_key_exists` guards | already narrow concrete bases | presence promotion to `Verified` (#51 L3); `isset` additionally strips null; disjunctions record a KeyCover fact (#51 L4); false branches demote/remove |
 | `?? ` | unchanged | right-most arm judged under ¬isset(left arms), consuming KeyCover (#51 L5) |
@@ -1138,3 +1138,109 @@ row, and it is the reason the leg's realized yield is 45 rather than 101.
 `steins check --profile strict --no-cache` over the pinned corpus produced 1,810
 lines byte-identical before and after: this row adds facts, and no finding moved
 on them.
+
+## Amendment K (2026-09-03): the auto-index append, and the row §4 got wrong — PENDING ratification
+
+Issue #636, leg A. `$a[] = v` is the most common array write PHP has, and it
+was the one form that never lowered: `const_key_offset_path` matches an
+`ArrayAccess`, an append has no index node at all, and so the statement fell to
+`StmtKind::Barrier`. It lowers to `StmtKind::OffsetAppend` now, which is why
+`SCHEMA_VERSION` moves 10 → 11.
+
+### K1. One rule, two spellings
+
+`$a[] = v` and `array_push($a, v)` are the same operation, so the walk calls
+`array_push_written_fact` rather than growing a second rule. Where an appended
+value lands is decided in one place, and the two spellings cannot drift.
+
+The landing index is `max(integer keys) + 1`, `0` when the array has no integer
+key, and it counts negative keys since PHP 8.3 — the table Amendment §4 of
+ADR-0077 already measured. This is index bookkeeping over the shape's own key
+sequence, not folded arithmetic on an operand: ADR-0028 §3's ban stands, and
+`$a[$i + 1] = v` still takes Amendment J's weak row.
+
+A **nullable** base declines. `php -r '$a=null; $a[]="x"; var_export($a);'`
+autovivifies to `[0 => 'x']`, an outcome the array arm alone does not describe.
+
+### K2. §4's append row was wrong, and the correction is the amendment's core
+
+§4 said: *"a Yes-list shape stays Yes (append preserves list-ness)"*. PHP
+refutes it directly:
+
+```
+$ php -r '$x=[1,2,3]; unset($x[2]); var_dump(array_is_list($x));'
+bool(true)
+$ php -r '$x=[1,2,3]; unset($x[2]); $x[]=99; var_dump(array_keys($x)); var_dump(array_is_list($x));'
+array(3) { [0]=> int(0) [1]=> int(1) [2]=> int(3) }
+bool(false)
+```
+
+A value `array_is_list` calls a list can stop being one on its very next append.
+The reason is that list-ness is a property of the key **set**, while the append
+index is PHP's `nNextFreeElement` — a **high-water mark** that records the
+largest integer key the array has ever held, and that `unset` does not lower:
+
+```
+$ php -r '$a=[]; $a[5]=1; unset($a[5]); $a[]=2; var_dump(array_keys($a));'
+array(1) { [0]=> int(6) }        an empty array whose next index is 6
+```
+
+No `list<T>`, `array_is_list()` verdict, or key set constrains that counter. So
+the only shape that may name an append's index is one whose **exact key
+sequence is witnessed** — and even there `is_list` is re-derived by `normalize`
+from the new sequence rather than carried.
+
+`unset` is the one operation that moves the counter off `max + 1`. Every other
+producer of a witnessed sequence rebuilds the array by insertion and resets the
+counter with PHP, measured at 8.5.9: `array_pop([1,2,3])` then append lands on
+`2`, `array_shift`, `array_splice` and `array_filter` likewise. So
+`apply_offset_write` **drops the order witness on `unset`**, and that single
+fence upgrades the witness's meaning from "this was the build order" to "this
+was the build order and nothing has been removed since" — which is exactly the
+premise `max + 1` needs.
+
+### K3. Two live claims this corrected
+
+Both were reachable before this slice, through `array_push`:
+
+- `array_push_written_fact` derived its key from `determined_order`, whose
+  second leg — a proven list under a sealed tail — is a sound claim about
+  *order* (§7's sanctioned second source) and an unsound premise for the *next
+  index*. It reads `append_order` now, which takes the witness alone.
+- `general_append` carried `shape.is_list` through for both its callers.
+  `array_unshift` renumbers every integer key from `0`, so it rebuilds and a
+  list input really does come back a list (`unset($x[2])` then
+  `array_unshift($x, 99)` is `array_is_list` true). `array_push` and `$a[] = v`
+  do not. The parameter is the caller's now, and the two answer differently.
+
+### K4. What still declines
+
+- `$o->p[] = v` — ADR-0063 §2.3's aliasing family, not this lane.
+- `$a['k'][] = v` — a nested-shape update, which A-G8 declines for `$a['k']['j']
+  = v` on the same grounds.
+- `$a[] = v` where the base is not an array fact at all; the barrier stands.
+
+### K5. Measurement
+
+PHP 8.5.9, against the Amendment J base (`differ` 9775 / `match` 3194).
+
+| | differ | match | equal | subsumed |
+| --- | ---: | ---: | ---: | ---: |
+| Amendment J base | 9775 | 3194 | 188 | 422 |
+| this amendment | **9749** | **3206** | **190** | **434** |
+
+26 rows left `differ` — 12 to `match`, 12 to `subsumed`, 2 to `equal` — and 82
+rows changed their answer in total. **No row regressed**, including the
+`array_push` rows K3's two corrections touch: `bug-13510.php:22` stays `match`
+because `array_unshift` keeps its list claim.
+
+The named witnesses: `list-type.php:88` and `:90` answer `list{'1'}` and
+`list{'1', '2'}` where they answered `unknown`, and `:92` — after
+`unset($list[0])` — answers `array{1: '2'}`, the fence visible in the corpus.
+`array-is-list-unset.php` moves six rows. `bug-9985.php:20`, the string-key
+sibling this must not regress, is byte-identical.
+
+Across both legs of #636: `differ` 9779 → 9749, `match` 3193 → 3206.
+
+`steins check --profile strict --no-cache` over the pinned corpus produced 1,810
+lines byte-identical before and after.
