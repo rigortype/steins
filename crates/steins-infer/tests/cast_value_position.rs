@@ -42,20 +42,37 @@ use steins_syntax::SourceTree;
 struct Mock;
 
 impl Folder for Mock {
+    /// `strlen` over a proven string, which is how the literal lane gets
+    /// OBSERVED: the fold resolves each argument through `resolve_literal`
+    /// first, so a cast that folds arrives here as an `ArgValue::Str` and one
+    /// that does not never reaches this function at all.
     fn fold(
         &mut self,
-        _name: &str,
-        _args: &[steins_syntax::ArgValue],
+        name: &str,
+        args: &[steins_syntax::ArgValue],
         _strict: bool,
     ) -> Option<steins_syntax::ArgValue> {
-        None
+        match (name, args) {
+            ("strlen", [steins_syntax::ArgValue::Str(s)]) => {
+                Some(steins_syntax::ArgValue::Int(i64::try_from(s.as_bytes().len()).ok()?))
+            }
+            _ => None,
+        }
     }
     fn builtin_return_type(&mut self, name: &str) -> Option<String> {
-        (name.eq_ignore_ascii_case("settype")).then(|| "bool".to_owned())
+        match name.to_ascii_lowercase().as_str() {
+            "settype" => Some("bool".to_owned()),
+            "strlen" => Some("int".to_owned()),
+            _ => None,
+        }
     }
     fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
         // `(total, required)` — the order that is a silent decline when reversed.
-        (name.eq_ignore_ascii_case("settype")).then_some((2, 2))
+        match name.to_ascii_lowercase().as_str() {
+            "settype" => Some((2, 2)),
+            "strlen" => Some((1, 1)),
+            _ => None,
+        }
     }
 }
 
@@ -99,10 +116,21 @@ fn declared(param: &str, cast: &str) -> String {
     ))
 }
 
-/// `dumpType(<cast> <expr>);` — the value-lane fixture, no environment at all.
+/// `dumpType(<e>);` — a whole expression, no environment at all.
+fn dumped(e: &str) -> String {
+    one_dump(&format!("<?php\nfunction f(): void {{ \\PHPStan\\dumpType({e}); }}\n"))
+}
+
+/// `dumpType(<cast> <value>);` — the value-lane fixture.
 fn expr(cast: &str, value: &str) -> String {
+    dumped(&format!("{cast} {value}"))
+}
+
+/// `function f(<param>): void { dumpType(<e>); }` — a whole expression over a
+/// declared `$v`.
+fn dumped_over(param: &str, e: &str) -> String {
     one_dump(&format!(
-        "<?php\nfunction f(): void {{ \\PHPStan\\dumpType({cast} {value}); }}\n"
+        "<?php\n/** @param {param} $v */\nfunction f(int $v): void {{ \\PHPStan\\dumpType({e}); }}\n"
     ))
 }
 
@@ -223,12 +251,14 @@ fn a_string_cast_floors_like_the_others_but_never_states_array() {
     assert_eq!(via_settype("array $v", "'string'"), "unknown");
 }
 
-// The two lanes agree
+// The grid over a proven operand
 
 #[test]
-fn the_literal_lane_and_the_fact_lane_agree() {
-    // Both seams answer the same value for a proven operand, which is what keeps
-    // a folded argument and a dumped expression from disagreeing.
+fn a_proven_operand_casts_value_precisely() {
+    // The dump surface's own answer for each literal row of the grid. This
+    // exercises the FACT seam only — `best_dump_type`'s `Cast` rung sits above
+    // the literal fold, so nothing here says anything about the literal lane;
+    // that is `the_literal_lane_folds_a_cast_into_what_reads_it`'s job.
     for (cast, value, want) in [
         ("(int)", "true", "1"),
         ("(int)", "false", "0"),
@@ -248,12 +278,45 @@ fn the_literal_lane_and_the_fact_lane_agree() {
     ] {
         assert_eq!(expr(cast, value), want, "`{cast} {value}`");
     }
-    // The folded value reaches an ARGUMENT too, not only a dump: the literal
-    // seam is what makes `strlen((string) 5)` a proven call.
+    // The assignment seam binds the same value the dump renders.
     assert_eq!(
         one_dump("<?php\nfunction f(): void { $x = (int) 5.25; \\PHPStan\\dumpType($x); }\n"),
         "5"
     );
+}
+
+#[test]
+fn the_literal_lane_folds_a_cast_into_what_reads_it() {
+    // What `Cx::resolve_literal_under`'s cast arm buys, stated as the difference
+    // it makes rather than as an agreement it shares.
+    //
+    // A dump of a cast proves NOTHING about this lane: `best_dump_type` matches
+    // `ArgValue::Cast` before it reaches any literal rung, so `dumpType((int)
+    // 5.25)` still answers `5` with the literal arm deleted. The lane is
+    // observable only where the folded VALUE is handed to something else — and
+    // there its absence is the difference between a value and a base type.
+    //
+    // Asserted as one table so a deletion reports every reader it breaks, not
+    // just the first:
+    //
+    // * a **call argument** — the fold resolves each argument through
+    //   `resolve_literal` first, so `(string) 12345` reaches the folder as
+    //   `'12345'` and `strlen` folds; without the arm the argument is unproven
+    //   and the call answers its declared `int`;
+    // * a **comparison operand** — `cmp_candidates_under` sends a non-variable
+    //   through this lane and nothing else, so a decided verdict is proof the
+    //   cast folded; without it the comparison is undecided and floors to `bool`;
+    // * a **ternary arm** — the chosen arm resolves through the same lane.
+    let cases = [
+        ("strlen((string) 12345)", "5"),
+        ("(int) '5' === 5", "true"),
+        ("(float) '5' === 5.0", "true"),
+        ("true ? (int) '5' : 0", "5"),
+    ];
+    let got: Vec<(&str, String)> = cases.iter().map(|(e, _)| (*e, dumped(e))).collect();
+    let want: Vec<(&str, String)> =
+        cases.iter().map(|(e, w)| (*e, (*w).to_owned())).collect();
+    assert_eq!(got, want);
 }
 
 #[test]
@@ -308,10 +371,39 @@ fn a_cast_composes_with_the_operator_family() {
     assert_eq!(expr("(string)", "(1 === 2)"), "''");
     assert_eq!(expr("(int)", "(int) 5.25"), "5");
     // And a cast is itself readable as a truthiness operand.
-    assert_eq!(
-        one_dump("<?php\nfunction f(): void { \\PHPStan\\dumpType(!(bool) 0); }\n"),
-        "true"
-    );
+    assert_eq!(dumped("!(bool) 0"), "true");
+}
+
+#[test]
+fn a_cast_is_readable_as_another_expressions_operand() {
+    // What `value_operand_fact`'s own `Cast` arm buys — the composition the
+    // three lines above cannot see, because every operand there is a LITERAL
+    // and the literal lane answers those whichever road is taken.
+    //
+    // Over a subject that carries a FACT and no value, only this arm can read
+    // an inner cast: without it the inner cast is not a `Var`, not an array and
+    // not a literal, so `transfer_arg_known` declines and the outer expression
+    // falls to its own floor.
+    //
+    // Asserted as one table, for the reason above:
+    //
+    // * a **truthiness** operand — `int<5, 10>` excludes `0`, so the `(bool)` is
+    //   decided and the negation decides with it; without the arm the negation
+    //   sees no fact and renders the `bool` floor;
+    // * another **cast's** operand, both ways round — without the arm each
+    //   answers the outer operator's own base instead;
+    // * a **connective's** operand, for the same reason.
+    let cases = [
+        ("!(bool) $v", "false (asserted)"),
+        ("(int) (string) $v", "5|6|7|8|9|10 (asserted)"),
+        ("(string) (int) $v", "'10'|'5'|'6'|'7'|'8'|'9' (asserted)"),
+        ("(bool) $v && true", "true (asserted)"),
+    ];
+    let got: Vec<(&str, String)> =
+        cases.iter().map(|(e, _)| (*e, dumped_over("int<5, 10>", e))).collect();
+    let want: Vec<(&str, String)> =
+        cases.iter().map(|(e, w)| (*e, (*w).to_owned())).collect();
+    assert_eq!(got, want);
 }
 
 #[test]
