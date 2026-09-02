@@ -876,7 +876,8 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
 // Write invalidation (ADR-0062 A-G8's table)
 // ---------------------------------------------------------------------------
 
-/// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`.
+/// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`, with `k` either a
+/// literal the walk can name or an expression it cannot (issue #636).
 ///
 /// **Barrier first, then one binding.** The walk still clears the whole env and
 /// store, exactly as the pre-S4 `Barrier` lowering did — an offset write can
@@ -923,6 +924,16 @@ pub(crate) fn apply_offset_write(
         },
     };
 
+    // The class an unnamed key can land in (issue #636), also resolved pre-clear.
+    // **Only `int` is derivable.** A `string` index is NOT `KeyClass::Str`: PHP
+    // normalizes a decimal-integer string key to an int key, so
+    // `$a[$s] = 1` with `string $s` can produce either class —
+    // `php -r '$a=[]; $a["5"]=1; var_dump(array_keys($a));'` prints `int(5)`.
+    let key_class = match keys.first().map(|k| transfer_arg_known(w.cx, folder, k, env, Some(&*store))) {
+        Some(Some((f, _))) if fact_is_integer(&f) => KeyClass::Int,
+        _ => KeyClass::ArrayKey,
+    };
+
     env.clear();
     store.clear();
 
@@ -941,7 +952,34 @@ pub(crate) fn apply_offset_write(
         }
         _ => return,
     };
-    let Some(first) = keys.first().and_then(|k| guard_key(k, php_minor)) else { return };
+    let first = match keys.first().and_then(|k| guard_key(k, php_minor)) {
+        Some(k) => k,
+        // **The write at a key nobody can name** (issue #636): `$x[$i] = v`.
+        // Lowering now hands the walk a non-literal key instead of a plain
+        // `Barrier`, and the shape lane answers with ADR-0062 §4's weakest
+        // sound row — see [`ShapeFact::write_at_unknown_key`]. `unset` at such
+        // a key is NOT in this lane: `mark_absent` at an unnamed key can only
+        // weaken, never remove, so it keeps the barrier it always had.
+        None => {
+            if value.is_none() {
+                return;
+            }
+            let next = shape.write_at_unknown_key(key_class, slot.as_ref());
+            env.insert(
+                base.to_owned(),
+                Known::value_strat(
+                    Fact::Shape { shape: Box::new(next), nullable: *nullable },
+                    known.line,
+                    Some(SHAPE_REFINED.to_owned()),
+                    known.stratum.min(slot_stratum),
+                ),
+            );
+            if let Some(arms) = arms {
+                store.contract.insert(base.to_owned(), arms);
+            }
+            return;
+        }
+    };
 
     // The order witness this write hands on, when the base had one (issue #327).
     // A witnessed base stays witnessed through a write: PHP appends a new key at
@@ -1044,6 +1082,22 @@ pub(crate) fn apply_offset_write(
     );
     if let Some(arms) = arms {
         store.contract.insert(base.to_owned(), arms);
+    }
+}
+
+/// Does this fact prove every value it admits is an `int`?
+///
+/// The one class an unnamed array key is derivable from (issue #636). Deliberately
+/// narrow: `bool` and `float` index expressions also key an array by integer, but
+/// through a conversion, and `KeyClass::ArrayKey` costs nothing over answering
+/// them precisely. A nullable arm disqualifies — `null` keys the empty string.
+fn fact_is_integer(f: &Fact) -> bool {
+    match f {
+        Fact::Singleton(Val::Int(_)) => true,
+        Fact::OneOf(vs) => vs.iter().all(|v| matches!(v, Val::Int(_))),
+        Fact::Refined { base: Base::Int, nullable: false, .. }
+        | Fact::General { base: Base::Int, nullable: false } => true,
+        _ => false,
     }
 }
 

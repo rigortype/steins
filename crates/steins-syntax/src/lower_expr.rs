@@ -1216,16 +1216,24 @@ pub(crate) fn const_key_offset(expr: &Expression<'_>) -> Option<(String, ArgValu
     key.is_concrete_value().then(|| (strip_dollar(bytes_to_string(dv.name)), key))
 }
 
-/// The base and constant-key path of an offset **lvalue**, depth one or two:
-/// `$var[<lit>]` → `("var", [lit])`, `$var[<lit>][<lit>]` → `("var", [k1, k2])`.
-/// `None` for an append (`$var[] = …`), a dynamic key, a deeper chain, or a
-/// non-variable base — each of which stays a plain barrier.
+/// The base and key path of an offset **lvalue**, depth one or two:
+/// `$var[<k>]` → `("var", [k])`, `$var[<lit>][<k>]` → `("var", [k1, k2])`.
+/// `None` for an append (`$var[] = …`), a deeper chain, or a non-variable base —
+/// each of which stays a plain barrier.
+///
+/// **The outermost key need not be concrete** (issue #636). `$var[$i] = …` and
+/// `$var['k'][$i] = …` lower here too, and the walk decides what an unnamed key
+/// costs: [`apply_offset_write`] takes ADR-0062 §4's weakest sound row when
+/// [`guard_key`] cannot name it, which is still far above the barrier this
+/// returned `None` for. The *inner* key of a depth-two path still must be
+/// concrete — it comes from [`const_key_offset`], which A-G4 keeps literal —
+/// so `$var[$i]['k'] = …` remains a barrier.
+///
+/// [`apply_offset_write`]: ../../steins_infer/shapes/fn.apply_offset_write.html
+/// [`guard_key`]: ../../steins_infer/shapes/fn.guard_key.html
 pub(crate) fn const_key_offset_path(expr: &Expression<'_>) -> Option<(String, Vec<ArgValue>)> {
     let Expression::ArrayAccess(aa) = expr.unparenthesized() else { return None };
     let key = lower_arg_value(aa.index);
-    if !key.is_concrete_value() {
-        return None;
-    }
     match aa.array.unparenthesized() {
         Expression::Variable(Variable::Direct(dv)) => {
             Some((strip_dollar(bytes_to_string(dv.name)), vec![key]))
