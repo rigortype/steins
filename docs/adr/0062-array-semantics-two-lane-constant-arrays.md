@@ -1048,3 +1048,93 @@ Leg (a) alone: 15 rows moved, 5 `differ → match` and 10 `differ → subsumed`,
 in `filter-var.php` / `filterVar.php`; nsrt unknown-fall 6510 → 6495. No row
 regressed and nothing outside the two fixtures moved. Legs (a)+(b) together:
 6510 → 6407.
+
+## Amendment J (2026-09-03): a write at a key nobody can name — PENDING ratification
+
+Issue #636, leg B. §4's write row assumed the key was *nameable*: "field update
+to `Required` with `v`'s fact". `$a[$i] = v` names nothing, and until now it did
+not reach this table at all — `const_key_offset_path` demanded a concrete key,
+so the statement lowered to `StmtKind::Barrier` and the environment went with
+it. The row below is what §4 says when the key is unknown.
+
+### J1. The row
+
+| base | `$a[$i] = v` yields |
+| --- | --- |
+| any `Fact::Shape`, or a `Singleton(Val::Array)` lifted to one | every same-class key's presence kept and its slot **joined** with `v`'s fact; a proven-`Absent` same-class key back to `Optional`; the tail unsealed to the index's key class carrying `v`; `non_empty` set; `is_list` re-derived; the order witness dropped; covers kept; the count floor kept and its ceiling raised by one |
+| anything else | decline — the barrier stands |
+
+The operator is `ShapeFact::write_at_unknown_key`, and its law is stated
+denotationally rather than component by component: for every array the receiver
+admits, every key of the given class and every value, the array with that key
+set to that value is still admitted. A test sweeps that law over the shape,
+array and key universes §4's other operators are checked on.
+
+Two components deserve their reason in prose.
+
+**`is_list` does not survive, whatever the base was.** The issue proposed
+`list<T>` → `non-empty-list<T|V>`, on the argument that a write at an integer
+index of a list either overwrites or appends. It does neither when the index is
+out of range, and out of range is exactly what an unnamed index cannot be ruled
+out of:
+
+```
+$ php -r '$a=[1,2,3]; $i=7; $a[$i]=99; var_dump(array_is_list($a));'
+bool(false)
+```
+
+So the row surrenders list-ness to `normalize`'s denotational recompute. This is
+§7's rule reaching a new case: an order claim survives only what cannot disturb
+the order, and a write at an unknown index can disturb it.
+
+**Only `KeyClass::Int` is derivable from the index's own fact.** A `string`
+index is *not* `KeyClass::Str`, because PHP normalizes a decimal-integer string
+key to an integer key:
+
+```
+$ php -r '$a=[]; $a["5"]=1; var_dump(array_keys($a));'
+array(1) { [0]=> int(5) }
+```
+
+A `string`-typed index can therefore land in either class, and answers
+`ArrayKey`. `bool` and `float` indices key by integer too, through a conversion;
+they are left at `ArrayKey` because answering them precisely buys nothing the
+corpus asks for.
+
+### J2. What this row is NOT
+
+- **`unset($a[$i])` is not in it.** `mark_absent` at a key nobody can name could
+  only weaken every presence, never remove one, and a rule whose whole content
+  is "forget slightly less than the barrier" is worth its own measurement rather
+  than a free ride on this one. `unset` lowers through `const_key_offset`, which
+  is untouched, so it keeps the barrier it always had.
+- **The index expression is never folded.** `$a[$i + 1] = v` takes this row, not
+  a sharper one computed from `$i`. Width-sensitive integer arithmetic stays out
+  under ADR-0028 §3.
+- **A depth-two path still needs a literal inner key.** `$a['k'][$i] = v` lowers
+  (the outer key is unnamed, and the nested arm already clears `'k'`'s slot to
+  unknown, which is exactly right); `$a[$i]['k'] = v` does not, because the
+  inner key comes from `const_key_offset`, which A-G4 keeps literal.
+- **Nothing about aliasing changes.** The barrier still runs first and clears
+  the whole environment and store; this row only decides what is put back.
+
+### J3. Measurement
+
+PHP 8.5.9, over the 15,643-observation nsrt run. 46 rows changed their answer,
+all of them out of `unknown`: 4 changed verdict (`differ` → `match` at
+`offset-value-after-assign.php:21`, `differ` → `equal` at `bug-14245.php:107`,
+`bug-14245.php:137` and `unsealed-array-shapes.php:119`), and 42 more moved from
+`unknown` to a shape that is still short of the assertion — overwhelmingly
+because the assertion wants `non-empty-list<int>` and this row can only prove
+`non-empty-array<int>`. Headline `differ` 9779 → 9775, `match` 3193 → 3194. No
+row regressed.
+
+Of the 101 computed-offset rows the issue counted, 45 moved and 56 did not. **43
+of the 56 are loop-carried** — the write is inside a `for`/`foreach` whose own
+fixpoint drops the binding before this row is ever consulted (`bug-12274.php`,
+`for-loop-expr.php`). That is §4's out-of-scope loop-carried paragraph, not this
+row, and it is the reason the leg's realized yield is 45 rather than 101.
+
+`steins check --profile strict --no-cache` over the pinned corpus produced 1,810
+lines byte-identical before and after: this row adds facts, and no finding moved
+on them.
