@@ -83,6 +83,10 @@ decline until measured: the flag-dependent shapes (`PREG_OFFSET_CAPTURE`,
 — `sort` and friends write their argument too, and their contracts are worth
 the same treatment, but none of them has been measured and none is seeded here.
 
+**Amended 2026-09-02 (issue #635).** Eighteen of those rows have now been
+measured and are seeded; the sentence above no longer describes them. The set
+is named in the amendment below, and what is still postponed is named with it.
+
 ## 5. Considered and rejected
 
 - **Seeding unconditionally at the call.** Unsound on the compile-failure path
@@ -233,3 +237,112 @@ admits one: sound, not complete. `array_udiff` takes its comparator at a
 variadic `mixed` tail and `preg_replace_callback_array` takes its callables as
 array *values*; neither is declared, and both are caught here only because they
 carry another hazard. The seam-side shape gate is the other half of issue #382.
+
+## Amendment (2026-09-02, issue #635): eighteen array rows are measured, and the seed reaches an assignment's right-hand side
+
+Status: PENDING ratification (autonomous design under the owner's
+post-hoc-ratification mode).
+
+§4 said every non-preg `out_params` row "stays a decline until measured". This
+amendment names the set that has now been measured, the three probes that
+refuted a plain reading of the php-src stub, and the one seam widening the
+measurement forced.
+
+### The measured set
+
+Eighteen names, every one at position 0, every one carrying
+`WrittenWhen::CallReturns` — none of them has a falsy return, and every outcome
+that writes nothing raises instead of returning.
+
+| family | names | what the fact says |
+| --- | --- | --- |
+| renumbering sorts | `sort` `rsort` `usort` `shuffle` | a list of the input's value union |
+| key-preserving sorts | `asort` `arsort` `uasort` `uksort` `ksort` `krsort` `natsort` `natcasesort` | the same shape with the order witness dropped |
+| pointer moves | `reset` `end` | the caller's own claim, unchanged |
+| queue ends | `array_shift` `array_pop` | one entry gone; `shift` renumbers the integer keys, `pop` renumbers nothing |
+| appends | `array_push` `array_unshift` | the values at the next integer key, or at `0..k-1` with the integer keys renumbered behind them |
+
+The witness for the twelve sorts is the declaration itself: each declares
+`: true` at `PINNED_PHP`. For the other six the declaration excludes nothing
+(`: mixed`, `: int`), and the witness rests on a probe that the *degenerate*
+call still writes — `array_pop([])` answers `NULL` and leaves `[]`, which is a
+fact about the argument exactly as `[0 => 1]` is, and `array_push($a)` with no
+values answers the unchanged count.
+
+### Three claims the probe refuted
+
+1. **`array_unshift` and `array_splice` preserve string keys.** Only the
+   *integer* keys renumber: `array_unshift(['a' => 1, 7 => 2], 0)` measures
+   `[0 => 0, 'a' => 1, 1 => 2]`, which is not a list. Issue #635's own contract
+   table asked for `non-empty-list<T|V>` unconditionally; list-ness is a claim
+   about the input and the rules state it that way.
+2. **A comparator's own writes are discarded.** `usort` over a comparator that
+   appends to the array under sort measures the sorted *input*, with the
+   appends gone. So a callback-invoking sort states its out-state with no
+   callback analysis at all.
+3. **The next append index counts negative keys.** `array_push([-3 => 1], 9)`
+   measures `[-3 => 1, -2 => 9]` at PHP 8.5.9 — `max + 1`, not `0`, since the
+   PHP 8.3 change. `max + 1` at `i64::MAX` declines rather than wrapping.
+
+### The rules do not decline; they floor
+
+§3.3's discipline was "decline on any premise you cannot prove, and the
+caller's invalidation stands". For this family the invalidation is *not* the
+best available answer, because the witness proves more than it was being asked
+for: every one of the eighteen raises a `TypeError` on a non-array argument, so
+control reaching the next statement is itself the proof that the argument was
+an array. A rule that cannot state a precise result therefore answers `list<T>`
+(a renumbering sort), `non-empty-array` (an append handed at least one value)
+or `array` — each strictly more than `unknown` and strictly less than any claim
+the rule could not prove. The floor is bound `Verified`; it is the engine's own
+behaviour and inherits nothing from a claim that was never read.
+
+### The seam widening: an assignment's right-hand side
+
+§3.4's statement rung refused an assignment's RHS outright, on an argument
+about `$v = settype($v, 'int')` — the call writes, the assignment then
+overwrites, and the last word is the assignment's. That argument is about the
+**target**, not about assignment. `$extract = array_splice($brr, 0, 0, 1)`
+writes `$brr` and binds `$extract`, and the write is the last word on `$brr`
+exactly as it is at a bare call statement. The rung now seeds an assignment's
+RHS for every out-parameter **except the one the assignment is about to
+rebind**, which is the original refusal stated as what it always meant.
+
+### What is still postponed, and why
+
+* **A call nested in another call's arguments** — `assertType('string',
+  array_shift($arr));`. The IR lowers such a call to `ArgValue::Call`, which
+  keeps only the name's last segment, so nothing there can tell the global
+  `array_shift` from a namespaced function of the same name. Reaching it needs
+  a `NameRef` in `ArgValue::Call`: an IR change and a `SCHEMA_VERSION` bump.
+* **A declared field order.** `@var array{a: 0, b: 1, c: 2}` states no
+  iteration order in this domain (ADR-0062 §7 — trusting a docblock's field
+  order is phpstan/phpstan#14940's false-positive class), so a removal cannot
+  say which key left. Two sources do answer: an observed build
+  (`ShapeFact::witnessed_order`, issue #327) and a proven list, where list-ness
+  *is* the order claim.
+* **`array_splice`.** Its replacement argument is array-cast by the engine
+  (`null` to `[]`, a scalar to a one-element list, an object to its public
+  properties), and its offset/length pair decides which keys leave. Both are
+  slices of their own; issue #635 already places the offset arithmetic out of
+  scope.
+* **`array_walk`.** Its out-state is whatever its callback wrote through
+  `&$value`, which is a callback-summary question rather than a table row.
+* **`next` / `prev`.** They share `reset`/`end`'s contract exactly and are left
+  unrowed because no corpus observation would attribute their movement — a row
+  is added where it can be measured, not where it can be guessed.
+* **`settype`'s `'object'` column.** It writes a `stdClass`, which is not a
+  `Fact` at all; its object stratum lives in the heap store. The `'null'`
+  column, by contrast, was found to need no input premise whatsoever and no
+  longer reads one.
+* **`str_replace` / `preg_replace*` `$count`, `similar_text` `$percent`,
+  `is_callable` `$callable_name`, and the variadic-by-reference family.** Rowed
+  for invalidation, unmeasured for facts, and with no corpus observation to
+  attribute a change to.
+
+### Adds facts, not findings
+
+Measured over the pinned nsrt corpus under `steins check --profile strict
+--no-cache`: 1,810 lines of output at the base commit and 1,810 byte-identical
+lines after every tranche. A seed can prove a finding as easily as it can
+silence one (§3.3), so the check is deliberate rather than assumed.
