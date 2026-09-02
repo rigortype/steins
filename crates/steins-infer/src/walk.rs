@@ -64,7 +64,7 @@ use crate::refine::{
 };
 use crate::return_arms::{bindable_args, fn_return_arms_at_call, native_arms};
 use crate::return_maybe::check_maybe_return_mismatch;
-use crate::shapes::{apply_offset_write, apply_shape_narrowing};
+use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
 use crate::string_context::check_string_contexts;
 
 /// Walk one scope's trace with a given initial environment.
@@ -1062,6 +1062,12 @@ pub(crate) fn walk_trace(
             }
             StmtKind::OffsetUnset { base, key } => {
                 apply_offset_write(w, folder, base, std::slice::from_ref(key), None, env, store);
+                Flow::FellThrough
+            }
+            // `$var[] = v` (issue #636): the same containment, with the landing
+            // key computed rather than read from the source.
+            StmtKind::OffsetAppend { base, value } => {
+                apply_offset_append(w, folder, base, value, env, store);
                 Flow::FellThrough
             }
             // `echo` assigns nothing on its own; anything it *can* mutate (embedded

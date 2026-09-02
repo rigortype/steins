@@ -369,6 +369,7 @@ pub(crate) fn check_operand_sites(
             | StmtKind::Throw { .. }
             | StmtKind::OffsetWrite { .. }
             | StmtKind::OffsetUnset { .. }
+            | StmtKind::OffsetAppend { .. }
     ) {
         return;
     }
