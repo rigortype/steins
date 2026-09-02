@@ -11,9 +11,9 @@ use mago_syntax::cst::{
 use steins_domain::PhpStr;
 
 use crate::ast::{
-    Arg, ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, CmpOp, CondExpr, CondOperand, EffectRecv,
-    IssetOperand, LogicalOp, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt,
-    StmtKind, ValueOp,
+    Arg, ArgValue, ArrayKey, CallExpr, Callee, CastTarget, ClosureRef, CmpOp, CondExpr, CondOperand,
+    EffectRecv, IssetOperand, LogicalOp, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass,
+    Stmt, StmtKind, ValueOp,
     flatten_spread_operand,
 };
 use crate::lower_effect::EffectScanCx;
@@ -684,14 +684,19 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         // vocabulary cannot spell arrives as `ArgValue::Other` inside the
         // negation rather than widening the whole expression — widening is what
         // made `!isset($foo)` answer `unknown` after issue #579 taught the inner
-        // half to answer `false`. Any other operator/operand widens: `~` is
-        // arithmetic and stays out under ADR-0028 §3.
+        // half to answer `false`. A **cast** carries the same way (issue #626),
+        // for the same reason and with its target attached ([`cast_target`]).
+        // Any other operator/operand widens: `~` is arithmetic and stays out
+        // under ADR-0028 §3.
         Expression::UnaryPrefix(u) => match (&u.operator, lower_arg_value(u.operand)) {
             (UnaryPrefixOperator::Negation(_), ArgValue::Int(i)) => ArgValue::Int(i.wrapping_neg()),
             (UnaryPrefixOperator::Negation(_), ArgValue::Float(f)) => ArgValue::Float(-f),
             (UnaryPrefixOperator::Plus(_), v @ (ArgValue::Int(_) | ArgValue::Float(_))) => v,
             (UnaryPrefixOperator::Not(_), v) => ArgValue::Not(Box::new(v)),
-            _ => ArgValue::Other,
+            (op, v) => match cast_target(op) {
+                Some(target) => ArgValue::Cast { target, operand: Box::new(v) },
+                None => ArgValue::Other,
+            },
         },
         // Null-coalescing `$a ?? $b` (ADR-0052 §6): a conditional value the walk
         // resolves to `clear_null(fact($a)) join fact($b)`. Lowered structurally;
@@ -1120,6 +1125,50 @@ fn logical_op_of(operator: &BinaryOperator<'_>) -> Option<LogicalOp> {
         BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => Some(LogicalOp::And),
         BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => Some(LogicalOp::Or),
         BinaryOperator::LowXor(_) => Some(LogicalOp::Xor),
+        _ => None,
+    }
+}
+
+/// The [`CastTarget`] a parsed unary-prefix operator denotes, or `None` when the
+/// operator is not a cast this vocabulary states a conversion for. The ONE place
+/// the cast-token map lives, for [`cmp_op_of`]'s reason.
+///
+/// Every spelling below is measured at `PINNED_PHP` (8.5.9), because the
+/// operator token set and `settype`'s type-string set are **not** the same
+/// vocabulary and reasoning from one to the other is wrong in both directions:
+///
+/// * `(binary)"a"` is `"a"` — a working string cast, warning only that it is
+///   "Non-canonical cast (binary) is deprecated, use the (string) cast instead"
+///   — while `settype($v, 'binary')` is a `ValueError`. It maps to
+///   [`CastTarget::String`]. `(integer)`, `(double)` and `(boolean)` carry the
+///   same deprecation and convert identically to their canonical spellings.
+/// * `(object)1` produces `object(stdClass)#1 { ["scalar"]=> int(1) }`, a value
+///   the four-layer domain has no member for, so it widens to [`ArgValue::Other`]
+///   exactly as `settype`'s `'object'` declines.
+/// * `(real)1` is a **parse error** ("The (real) cast has been removed, use
+///   (float) instead"), `(unset)1` a **fatal error** ("The (unset) cast is no
+///   longer supported"), and `(void)1` a parse error ("syntax error, unexpected
+///   token \"(void)\""). Mago lexes all three anyway, being the tolerant parser
+///   it is, so they need an arm here rather than being unreachable: source that
+///   spells one cannot run, so there is no behaviour to state and they widen.
+///
+/// There is no `(null)` cast to map: `(null)1` is a parse error too, which is
+/// why [`CastTarget::Null`] is reachable from `settype` alone.
+fn cast_target(operator: &UnaryPrefixOperator<'_>) -> Option<CastTarget> {
+    match operator {
+        UnaryPrefixOperator::IntCast(..) | UnaryPrefixOperator::IntegerCast(..) => {
+            Some(CastTarget::Int)
+        }
+        UnaryPrefixOperator::FloatCast(..) | UnaryPrefixOperator::DoubleCast(..) => {
+            Some(CastTarget::Float)
+        }
+        UnaryPrefixOperator::StringCast(..) | UnaryPrefixOperator::BinaryCast(..) => {
+            Some(CastTarget::String)
+        }
+        UnaryPrefixOperator::BoolCast(..) | UnaryPrefixOperator::BooleanCast(..) => {
+            Some(CastTarget::Bool)
+        }
+        UnaryPrefixOperator::ArrayCast(..) => Some(CastTarget::Array),
         _ => None,
     }
 }

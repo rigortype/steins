@@ -943,7 +943,85 @@ pub enum ArgValue {
     /// does not have — the discipline [`ValueOp::BitOr`] records from the other
     /// side.
     Not(Box<ArgValue>),
+    /// A **value-position cast** `(int) $x`, `(string) f()`, `(array) [1]`
+    /// (issue #626): the target the cast names, plus the expression it converts.
+    ///
+    /// **Total by construction, like [`Self::Isset`] and [`Self::Not`].** Every
+    /// target this variant can carry is a conversion PHP performs for *any*
+    /// operand it does not throw on, so an operand this vocabulary cannot spell
+    /// arrives here as [`Self::Other`] rather than widening the whole expression
+    /// — widening is the defect, since `Other` answers `unknown` for a value
+    /// whose base PHP guarantees.
+    ///
+    /// # Which cast spellings reach here
+    ///
+    /// Mago lexes thirteen cast tokens; the mapping is
+    /// [`lower_arg_value`]'s and is **not** the one [`CastTarget`]'s `settype`
+    /// spelling set gives — the two readers share the enum, not the vocabulary.
+    /// `(int)`/`(integer)`, `(float)`/`(double)`, `(bool)`/`(boolean)`,
+    /// `(string)`/`(binary)` and `(array)` carry a target; `(object)`,
+    /// `(real)`, `(unset)` and `(void)` lower to [`Self::Other`] with the
+    /// reasons recorded at the lowering.
+    ///
+    /// [`CastTarget::Null`] can never appear here: PHP has no `(null)` cast (it
+    /// is a parse error at `PINNED_PHP` 8.5.9), and the `(unset)` cast that once
+    /// meant it is refused outright. The variant exists for `settype($v,
+    /// 'null')`, which this carrier shares an enum with and not a spelling set.
+    Cast { target: CastTarget, operand: Box<ArgValue> },
     Other,
+}
+
+/// The **target of a cast**, whichever syntax named it — the column header of
+/// the probed conversion grid (`php_cast_fact` in `steins-infer`).
+///
+/// Two readers construct it and they do not accept the same words. The
+/// `settype($v, $t)` reader takes a **type string**: the spellings php-src
+/// converts under are exactly `'int'`/`'integer'`, `'float'`/`'double'`,
+/// `'string'`, `'bool'`/`'boolean'`, `'array'`, `'null'` and `'object'`,
+/// matched case-insensitively, and nothing else writes anything at all
+/// (`'real'`, `'binary'`, `' int'`, `'int '` and `''` each raise `ValueError:
+/// settype(): Argument #2 ($type) must be a valid type`). The **cast-expression**
+/// reader takes a token, and its set differs in both directions: `(binary)` is a
+/// working string cast where `'binary'` is a `ValueError`, and there is no
+/// `(null)` cast where `'null'` is a converting type string.
+///
+/// One converting `settype` spelling is deliberately **not** a variant here:
+/// `'object'` writes a `stdClass`, which the four-layer value domain has no
+/// member for (its object stratum lives in the heap store). It leaves the
+/// caller's invalidation standing, exactly as the refused spellings do — and the
+/// `(object)` cast lowers to [`ArgValue::Other`] for the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum CastTarget {
+    /// `(int)` / `(integer)`, or `settype`'s `'int'` / `'integer'`.
+    Int,
+    /// `(float)` / `(double)`, or `settype`'s `'float'` / `'double'`.
+    Float,
+    /// `(string)` / `(binary)`, or `settype`'s `'string'`.
+    String,
+    /// `(bool)` / `(boolean)`, or `settype`'s `'bool'` / `'boolean'`.
+    Bool,
+    /// `(array)`, or `settype`'s `'array'`.
+    Array,
+    /// `settype`'s `'null'` **only** — PHP has no `(null)` cast.
+    Null,
+}
+
+impl CastTarget {
+    /// The cast as written, for a rendered value expression. The canonical
+    /// spelling stands for both where PHP has two, and [`Self::Null`] renders
+    /// the `settype` type string it is only ever built from.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            CastTarget::Int => "(int)",
+            CastTarget::Float => "(float)",
+            CastTarget::String => "(string)",
+            CastTarget::Bool => "(bool)",
+            CastTarget::Array => "(array)",
+            CastTarget::Null => "(null)",
+        }
+    }
 }
 
 /// The connective half of an [`ArgValue::Logical`] (issue #625).
@@ -1430,6 +1508,10 @@ impl std::hash::Hash for ArgValue {
                 rhs.hash(state);
             }
             ArgValue::Not(v) => v.hash(state),
+            ArgValue::Cast { target, operand } => {
+                target.hash(state);
+                operand.hash(state);
+            }
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -1506,6 +1588,9 @@ impl ArgValue {
                 format!("({} {} {})", lhs.render(), op.symbol(), rhs.render())
             }
             ArgValue::Not(v) => format!("!{}", v.render()),
+            ArgValue::Cast { target, operand } => {
+                format!("{} {}", target.symbol(), operand.render())
+            }
             ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),

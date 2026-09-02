@@ -66,9 +66,13 @@ use crate::names::{PackageName, SectionName};
 /// line on, where this binary answers the extended array. The variant is new, not
 /// re-encoded, so an old trace cannot be misread as the new form; it simply states
 /// something weaker than the source does.
+/// `12` is the value-position cast carrier (issue #626): `ArgValue::Cast`. A schema-11
+/// trace spells `(int) $x` as `ArgValue::Other` — every cast expression did — so
+/// replaying one would answer `unknown` where this binary answers the conversion grid,
+/// or at worst the base type the cast operator guarantees.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 11;
+pub const SCHEMA_VERSION: u32 = 12;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;
