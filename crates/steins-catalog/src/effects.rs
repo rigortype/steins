@@ -761,6 +761,26 @@ pub enum WrittenWhen {
 /// a fact about the argument exactly as `[0 => 1]` is. The only outcome that
 /// writes nothing is the `TypeError`, and it does not return.
 ///
+/// **The appends** `array_push` / `array_unshift` position 0 (issue #635) —
+/// declared `: int` at `PINNED_PHP`, `(&$array, mixed ...$values)`, two
+/// parameters total and one required. The `int` is the new entry count, which
+/// is never a refusal value: `array_push($a)` with no values at all answers the
+/// unchanged count and leaves the array alone, and there is no return that
+/// means "I did not write".
+///
+/// ```text
+/// $a = [1];      array_push($a, 2, 3)     ret=3  $a === [1, 2, 3]
+/// $a = [1];      array_push($a)           ret=1  $a === [1]
+/// $a = [];       array_push($a, 2)        ret=1  $a === [0 => 2]
+/// $a = [1];      array_unshift($a, 0)     ret=2  $a === [0 => 0, 1 => 1]
+/// $a = [1];      array_unshift($a)        ret=1  $a === [1]
+/// array_push($string, 1)   THROWS TypeError: Argument #1 ($array) must be of type array
+/// array_unshift($int, 1)   THROWS TypeError
+/// ```
+///
+/// The only outcome that writes nothing is the `TypeError`, and it does not
+/// return — so `CallReturns` again.
+///
 /// Every other [`out_params`] row's contract deserves the same treatment but
 /// stays a decline until measured (ADR-0077 §4). A witness is not by itself a
 /// fact: it says *where* a seed would be sound.
@@ -773,6 +793,7 @@ pub fn out_param_written_when(name: &str, position: usize) -> Option<WrittenWhen
         (n, 0) if SORT_FAMILY.contains(&n) => Some(WrittenWhen::CallReturns),
         ("reset" | "end", 0) => Some(WrittenWhen::CallReturns),
         ("array_pop" | "array_shift", 0) => Some(WrittenWhen::CallReturns),
+        ("array_push" | "array_unshift", 0) => Some(WrittenWhen::CallReturns),
         _ => None,
     }
 }
@@ -1261,6 +1282,21 @@ mod tests {
             assert_eq!(out_param_written_when(f, 0), Some(WrittenWhen::CallReturns), "{f}");
         }
         for f in ["array_pop", "array_shift"] {
+            for p in 1..5 {
+                assert_eq!(out_param_written_when(f, p), None, "{f} argument {p} is by value");
+            }
+        }
+    }
+
+    #[test]
+    fn an_append_writes_even_when_it_was_given_no_values() {
+        // `array_push($a)` answers the unchanged count and leaves the array
+        // alone — the `int` return is never a refusal.
+        for f in ["array_push", "array_unshift", "ARRAY_PUSH"] {
+            assert_eq!(out_param_written_when(f, 0), Some(WrittenWhen::CallReturns), "{f}");
+        }
+        // The variadic tail is data, not a reference — only position 0 is rowed.
+        for f in ["array_push", "array_unshift"] {
             for p in 1..5 {
                 assert_eq!(out_param_written_when(f, p), None, "{f} argument {p} is by value");
             }

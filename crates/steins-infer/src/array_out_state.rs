@@ -288,6 +288,170 @@ fn general_removal(shape: &ShapeFact) -> Option<Fact> {
     )))
 }
 
+/// **The integer key PHP would hand the next appended value**, or `None` for a
+/// shape whose integer keys are not all known.
+///
+/// Measured at PHP 8.5.9, and the negative row is the one a reading of the
+/// manual gets wrong (PHP 8.3 changed it):
+///
+/// ```text
+/// array_push(['a'=>1], 9)   => ['a'=>1, 0=>9]    no integer key at all: 0
+/// array_push([5=>1], 9)     => [5=>1, 6=>9]      max + 1
+/// array_push([-3=>1], 9)    => [-3=>1, -2=>9]    max + 1, negatives included
+/// array_push([], 9)         => [0=>9]
+/// ```
+///
+/// Index bookkeeping, not folded arithmetic on an operand (ADR-0028 §3): the
+/// keys are the shape's own, and `max + 1` at `i64::MAX` declines rather than
+/// wrapping.
+fn next_append_key(keys: &[Key]) -> Option<i64> {
+    let max = keys.iter().filter_map(|k| match k {
+        Key::Int(n) => Some(*n),
+        Key::Str(_) => None,
+    });
+    match max.max() {
+        None => Some(0),
+        Some(n) => n.checked_add(1),
+    }
+}
+
+/// **What `array_push($a, ...$values)` wrote into `$a`.**
+///
+/// The ordered leg appends one witnessed key per value, each at the index
+/// [`next_append_key`] states, so `['foo' => 17, 'a', 'bar' => 18]` pushed with
+/// `19, 'baz', false` becomes `array{foo: 17, 0: 'a', bar: 18, 1: 19, 2: 'baz',
+/// 3: false}` — the append algebra `apply_offset_write` already performs for
+/// `$a[] = v`, read off the same order witness.
+///
+/// The general leg has no key to name: the tail's value bound joins each pushed
+/// value, its key class admits integers, and `non_empty` is set exactly when at
+/// least one value was supplied. `is_list` rides along — appending to a list
+/// leaves a list, and appending to a non-list cannot make one.
+///
+/// A value the walk could not prove (`None`) is the unknown floor for that slot
+/// alone; it costs the entry's type, never the key set or its siblings.
+pub(crate) fn array_push_written_fact(
+    shape: &ShapeFact,
+    values: &[Option<Fact>],
+) -> Option<Fact> {
+    if values.is_empty() {
+        return Some(shape_fact(shape.clone()));
+    }
+    if let Some(order) = determined_order(shape) {
+        let mut fields: Vec<(Key, Presence, Option<Box<Fact>>)> = order
+            .iter()
+            .map(|k| shape.field(k).map(|(k, p, s)| (k.clone(), *p, s.clone())))
+            .collect::<Option<Vec<_>>>()?;
+        let mut new_order = order.clone();
+        let mut next = next_append_key(&order)?;
+        for value in values {
+            let key = Key::Int(next);
+            next = next.checked_add(1)?;
+            fields.push((
+                key.clone(),
+                Presence::Required { witnessed: true },
+                value.clone().map(Box::new),
+            ));
+            new_order.push(key);
+        }
+        return Some(sealed_with_order(fields, new_order));
+    }
+    general_append(shape, values)
+}
+
+/// **What `array_unshift($a, ...$values)` wrote into `$a`.**
+///
+/// The new values take `0..k-1`, the surviving **integer** keys renumber from
+/// `k` in iteration order, and string keys stay exactly where they were.
+/// Measured at PHP 8.5.9:
+///
+/// ```text
+/// array_unshift([1], 0)              => [0=>0, 1=>1]
+/// array_unshift(['a'=>1, 7=>2], 0)   => [0=>0, 'a'=>1, 1=>2]
+/// array_unshift(['a'=>1], 9, 8)      => [0=>9, 1=>8, 'a'=>1]
+/// ```
+///
+/// The middle row is why issue #635's own contract table is wrong for this
+/// name: it asks for `non-empty-list<T|V>` unconditionally, and an input with a
+/// string key does not become a list. List-ness is a claim about the input.
+pub(crate) fn array_unshift_written_fact(
+    shape: &ShapeFact,
+    values: &[Option<Fact>],
+) -> Option<Fact> {
+    if values.is_empty() {
+        return Some(shape_fact(shape.clone()));
+    }
+    if let Some(order) = determined_order(shape) {
+        let mut fields: Vec<(Key, Presence, Option<Box<Fact>>)> = Vec::new();
+        let mut new_order: Vec<Key> = Vec::new();
+        let mut next = 0i64;
+        for value in values {
+            let key = Key::Int(next);
+            next += 1;
+            fields.push((
+                key.clone(),
+                Presence::Required { witnessed: true },
+                value.clone().map(Box::new),
+            ));
+            new_order.push(key);
+        }
+        for key in &order {
+            let (_, presence, slot) = shape.field(key)?;
+            let renumbered = match key {
+                Key::Int(_) => {
+                    let k = Key::Int(next);
+                    next += 1;
+                    k
+                }
+                Key::Str(_) => key.clone(),
+            };
+            fields.push((renumbered.clone(), *presence, slot.clone()));
+            new_order.push(renumbered);
+        }
+        return Some(sealed_with_order(fields, new_order));
+    }
+    general_append(shape, values)
+}
+
+/// **An append to an array with no declared key.** Nothing structural changes
+/// but the value bound and the key class: the appended values join the tail's
+/// bound, undeclared integer keys become possible, and the array is now
+/// certainly non-empty.
+///
+/// One unproven value is the unknown floor for the whole bound — the tail
+/// carries one fact for every undeclared key, so it cannot hold "this one
+/// entry is unknown" the way a field slot can.
+fn general_append(shape: &ShapeFact, values: &[Option<Fact>]) -> Option<Fact> {
+    use steins_domain::KeyClass;
+    if !shape.fields.iter().all(|(_, p, _)| matches!(p, Presence::Absent)) {
+        return None;
+    }
+    let (key, bound) = match &shape.tail {
+        Tail::Sealed => (KeyClass::Int, None),
+        Tail::Unsealed { key, value } => (key.join(KeyClass::Int), value.as_deref().cloned()),
+    };
+    let mut acc = match &shape.tail {
+        // A sealed, keyless shape is `array{}`: it has no entries to bound, so
+        // the appended values alone decide the value bound.
+        Tail::Sealed => None,
+        Tail::Unsealed { .. } => Some(bound?),
+    };
+    for value in values {
+        let one = value.clone()?;
+        acc = Some(match acc {
+            None => one,
+            Some(prev) => prev.join(&one)?,
+        });
+    }
+    Some(shape_fact(ShapeFact::normalize(
+        Vec::new(),
+        Tail::Unsealed { key, value: acc.map(Box::new) },
+        shape.is_list,
+        true,
+        Vec::new(),
+    )))
+}
+
 /// **One array builtin's out-state contract**: what the running engine must
 /// still declare for the rule to apply, and which rewrite it performs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -310,6 +474,19 @@ enum RuleKind {
     Shift,
     /// `array_pop`: the last entry leaves and nothing renumbers.
     Pop,
+    /// `array_push`: the values arrive at the end, at the next integer key.
+    Push,
+    /// `array_unshift`: the values arrive at the front and the integer keys
+    /// renumber behind them.
+    Unshift,
+}
+
+impl RuleKind {
+    /// Whether this rule reads the call's remaining arguments as values it
+    /// writes into the array — the two appends do, and nothing else does.
+    const fn consumes_values(self) -> bool {
+        matches!(self, RuleKind::Push | RuleKind::Unshift)
+    }
 }
 
 /// The out-state rule for `name` (lowercased), or `None` for a name this slice
@@ -319,6 +496,15 @@ pub(crate) fn array_out_rule(name: &str) -> Option<ArrayOutRule> {
         // Every sort declares `: true` at `PINNED_PHP`, so there is no falsy
         // return the fact would have to exclude.
         return Some(ArrayOutRule { declared: &["true"], arity, kind: RuleKind::Sort(kind) });
+    }
+    // The two appends declare `: int` and are variadic: `(&$array,
+    // mixed ...$values)` reflects as two parameters total, one required.
+    if let Some(kind) = match name {
+        "array_push" => Some(RuleKind::Push),
+        "array_unshift" => Some(RuleKind::Unshift),
+        _ => None,
+    } {
+        return Some(ArrayOutRule { declared: &["int"], arity: (2, 1), kind });
     }
     let kind = match name {
         "reset" | "end" => RuleKind::PointerMove,
@@ -332,8 +518,17 @@ pub(crate) fn array_out_rule(name: &str) -> Option<ArrayOutRule> {
 }
 
 impl ArrayOutRule {
+    /// Whether the caller must resolve the call's remaining arguments before
+    /// asking for the fact: the two appends write them into the array, and no
+    /// other rule reads past argument 0.
+    pub(crate) const fn consumes_values(self) -> bool {
+        self.kind.consumes_values()
+    }
+
     /// **What this call left in argument 0**, given whatever the caller had
-    /// proven about it — `None` for no array claim at all.
+    /// proven about it (`None` for no array claim at all) and about the values
+    /// it appends (empty for every rule but the two appends; one entry per
+    /// supplied value, `None` where the walk proved nothing).
     ///
     /// Never declines. A rule that cannot state a precise result falls back to
     /// [`Self::floor`], which the witness alone establishes: every name here
@@ -342,7 +537,11 @@ impl ArrayOutRule {
     /// argument was an array, and the floor is what an array is left as. That
     /// is strictly more than the `unknown` the by-ref invalidation leaves and
     /// strictly less than any claim the rule could not prove.
-    pub(crate) fn written_fact(self, shape: Option<&ShapeFact>) -> Fact {
+    pub(crate) fn written_fact(
+        self,
+        shape: Option<&ShapeFact>,
+        values: &[Option<Fact>],
+    ) -> Fact {
         let precise = shape.and_then(|s| match self.kind {
             RuleKind::Sort(kind) => sort_written_fact(kind, s),
             // The pointer is not part of the type, so the caller's own claim
@@ -352,18 +551,25 @@ impl ArrayOutRule {
             RuleKind::PointerMove => Some(shape_fact(s.clone())),
             RuleKind::Shift => array_shift_written_fact(s),
             RuleKind::Pop => array_pop_written_fact(s),
+            RuleKind::Push => array_push_written_fact(s, values),
+            RuleKind::Unshift => array_unshift_written_fact(s, values),
         });
-        precise.unwrap_or_else(|| self.floor())
+        precise.unwrap_or_else(|| self.floor(values))
     }
 
     /// The out-state this rule can state with **no** premise about the input.
     ///
     /// A renumbering sort leaves a list whatever it was given; everything else
-    /// leaves an array. Neither says anything about emptiness — an unproven
-    /// input may be `[]`, and every name here leaves `[]` alone.
-    fn floor(self) -> Fact {
+    /// leaves an array. Emptiness is claimed in exactly one place: an append
+    /// that was handed at least one value left a non-empty array however empty
+    /// the input was. Everywhere else an unproven input may be `[]`, and every
+    /// name here leaves `[]` alone.
+    fn floor(self, values: &[Option<Fact>]) -> Fact {
         match self.kind {
             RuleKind::Sort(SortKind::Renumbering) => list_transfer_fact(false, None),
+            RuleKind::Push | RuleKind::Unshift if !values.is_empty() => {
+                shape_fact(ShapeFact::plain_array().set_non_empty())
+            }
             _ => shape_fact(ShapeFact::plain_array()),
         }
     }
@@ -486,7 +692,7 @@ mod tests {
     fn a_pointer_move_hands_back_the_callers_own_claim() {
         let shape = lit(&[(Key::Int(0), i(1)), (Key::Int(1), i(2))]);
         let rule = array_out_rule("reset").expect("a rule");
-        let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape)) else {
+        let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[]) else {
             panic!("a pointer move states a shape");
         };
         assert_eq!(*out, shape, "`reset`/`end` change nothing the type can see");
@@ -555,7 +761,7 @@ mod tests {
             Vec::new(),
         );
         for rule in ["array_shift", "array_pop"] {
-            let out = array_out_rule(rule).expect("a rule").written_fact(Some(&non_empty));
+            let out = array_out_rule(rule).expect("a rule").written_fact(Some(&non_empty), &[]);
             let Fact::Shape { shape, .. } = out else { panic!("{rule} states a shape") };
             assert!(!shape.non_empty, "{rule} may have taken the only entry");
             assert_eq!(shape.tail, non_empty.tail, "{rule} does not touch the tail");
@@ -580,8 +786,122 @@ mod tests {
         assert_eq!(determined_order(&declared), None);
         assert!(array_shift_written_fact(&declared).is_none());
         assert!(array_pop_written_fact(&declared).is_none());
-        let floored = array_out_rule("array_shift").expect("a rule").written_fact(Some(&declared));
+        let floored = array_out_rule("array_shift").expect("a rule").written_fact(Some(&declared), &[]);
         assert_eq!(floored, shape_fact(ShapeFact::plain_array()));
+    }
+
+    #[test]
+    fn the_next_append_key_is_the_maximum_integer_key_plus_one() {
+        // Probed at PHP 8.5.9 — the negative row changed in PHP 8.3 and a
+        // reading of the older manual would have said `0`.
+        assert_eq!(next_append_key(&[]), Some(0));
+        assert_eq!(next_append_key(&[Key::Str("a".into())]), Some(0), "no integer key at all");
+        assert_eq!(next_append_key(&[Key::Int(5)]), Some(6));
+        assert_eq!(next_append_key(&[Key::Int(-3)]), Some(-2), "negatives included");
+        assert_eq!(next_append_key(&[Key::Int(0), Key::Int(7), Key::Int(2)]), Some(8));
+        assert_eq!(next_append_key(&[Key::Int(i64::MAX)]), None, "no wrap, a decline");
+    }
+
+    #[test]
+    fn a_push_appends_at_the_next_integer_key() {
+        // `array-push.php`'s subject: `['foo' => 17, 'a', 'bar' => 18]` pushed
+        // with `19, 'baz', false` measures
+        // `['foo'=>17, 0=>'a', 'bar'=>18, 1=>19, 2=>'baz', 3=>false]`.
+        let shape = lit(&[
+            (Key::Str("foo".into()), i(17)),
+            (Key::Int(0), Val::Str("a".into())),
+            (Key::Str("bar".into()), i(18)),
+        ]);
+        let values = vec![
+            Some(Fact::Singleton(i(19))),
+            Some(Fact::Singleton(Val::Str("baz".into()))),
+            Some(Fact::Singleton(Val::Bool(false))),
+        ];
+        let Fact::Shape { shape: out, .. } =
+            array_push_written_fact(&shape, &values).expect("a shape")
+        else {
+            panic!("a push states a shape");
+        };
+        assert_eq!(
+            out.witnessed_order(),
+            Some(
+                &[
+                    Key::Str("foo".into()),
+                    Key::Int(0),
+                    Key::Str("bar".into()),
+                    Key::Int(1),
+                    Key::Int(2),
+                    Key::Int(3),
+                ][..]
+            )
+        );
+        assert_eq!(
+            out.field(&Key::Int(3)).and_then(|(_, _, s)| s.clone()).map(|s| *s),
+            Some(Fact::Singleton(Val::Bool(false)))
+        );
+    }
+
+    #[test]
+    fn an_unshift_puts_the_values_first_and_renumbers_only_the_integers() {
+        // Probed: `array_unshift(['a'=>1, 7=>2], 0) === [0=>0, 'a'=>1, 1=>2]`.
+        // Issue #635's own table asks for `non-empty-list<T|V>` here; the probe
+        // refuses it, because the surviving string key is not a list's.
+        let shape = lit(&[(Key::Str("a".into()), i(1)), (Key::Int(7), i(2))]);
+        let Fact::Shape { shape: out, .. } =
+            array_unshift_written_fact(&shape, &[Some(Fact::Singleton(i(0)))]).expect("a shape")
+        else {
+            panic!("an unshift states a shape");
+        };
+        assert_eq!(
+            out.witnessed_order(),
+            Some(&[Key::Int(0), Key::Str("a".into()), Key::Int(1)][..])
+        );
+        assert_eq!(out.is_list, Certainty::No, "the string key survived");
+        assert_eq!(
+            out.field(&Key::Int(1)).and_then(|(_, _, s)| s.clone()).map(|s| *s),
+            Some(Fact::Singleton(i(2))),
+            "key 7's value took index 1"
+        );
+    }
+
+    #[test]
+    fn an_append_of_nothing_changes_nothing() {
+        // `array_push($a)` and `array_push($a, ...[])` both leave the array
+        // exactly as it was — and answer the unchanged count.
+        let shape = lit(&[(Key::Str("foo".into()), i(17))]);
+        for name in ["array_push", "array_unshift"] {
+            let rule = array_out_rule(name).expect("a rule");
+            assert!(rule.consumes_values(), "{name} writes its remaining arguments");
+            let Fact::Shape { shape: out, .. } = rule.written_fact(Some(&shape), &[]) else {
+                panic!("{name} states a shape");
+            };
+            assert_eq!(*out, shape, "{name} with no values is the identity");
+        }
+        assert!(!array_out_rule("sort").expect("a rule").consumes_values());
+    }
+
+    #[test]
+    fn an_append_to_a_keyless_array_joins_the_tail_and_proves_non_emptiness() {
+        let ints = ShapeFact::normalize(
+            Vec::new(),
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: Some(Box::new(Fact::General { base: steins_domain::Base::Int, nullable: false })),
+            },
+            Certainty::Yes,
+            false,
+            Vec::new(),
+        );
+        let Fact::Shape { shape: out, .. } =
+            array_push_written_fact(&ints, &[Some(Fact::Singleton(Val::Str("x".into())))])
+                .expect("a shape")
+        else {
+            panic!("a push states a shape");
+        };
+        assert!(out.non_empty, "an appended value proves the array is not empty");
+        assert_eq!(out.is_list, Certainty::Yes, "appending to a list leaves a list");
+        let Tail::Unsealed { value: Some(v), .. } = &out.tail else { panic!("a bounded tail") };
+        assert!(matches!(**v, Fact::Union { .. }), "the pushed string joined the int bound");
     }
 
     #[test]
@@ -593,8 +913,10 @@ mod tests {
             ("reset", false),
             ("array_shift", false),
             ("array_pop", false),
+            ("array_push", false),
+            ("array_unshift", false),
         ] {
-            let Fact::Shape { shape, .. } = array_out_rule(name).expect("a rule").written_fact(None)
+            let Fact::Shape { shape, .. } = array_out_rule(name).expect("a rule").written_fact(None, &[])
             else {
                 panic!("{name} states a shape");
             };

@@ -22,7 +22,7 @@ use crate::env::{Known, Store, Stratum};
 use crate::existence::global_function_callee;
 use crate::project::Diagnostic;
 use crate::refine::collect_truthy_calls;
-use crate::transfers::list_transfer_fact;
+use crate::transfers::{list_transfer_fact, transfer_arg_known};
 use crate::walk::WalkCx;
 
 /// **Where** an out-parameter seed is being asked for, which is the same
@@ -286,11 +286,18 @@ fn out_param_written_fact(
 ///    [`ArrayOutRule::written_fact`]'s business, and it does not decline: a
 ///    claim it cannot use falls to the floor the witness alone establishes.
 ///
+/// **The appended values** are read for the two names that write them
+/// ([`ArrayOutRule::consumes_values`]), through the same
+/// [`transfer_arg_known`] ladder every other argument reader uses — so a value
+/// that is abstract but known lands as its own fact, and one the walk proved
+/// nothing about is the unknown floor for that entry alone.
+///
 /// **Stratum.** A precise answer carries the input's own, for the reason the
 /// `settype` row does: it states the caller's array put through a measured
-/// rearrangement, so an `Asserted` phpdoc input stays `Asserted`. The floor is
-/// `Verified` — it is the engine's behaviour and inherits nothing from a claim
-/// that was never made.
+/// rearrangement, so an `Asserted` phpdoc input stays `Asserted`. An appended
+/// value can only lower it further (ADR-0061 §3: a binding cannot come out more
+/// trusted than what was written into it). The floor is `Verified` — it is the
+/// engine's behaviour and inherits nothing from a claim that was never made.
 fn array_out_state_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -306,11 +313,23 @@ fn array_out_state_fact(
     let ArgValue::Var(var) = &call.args.first()?.value else { return None };
     let claim = out_param_input_claim(env, store, var);
     let shape = claim.as_ref().and_then(|(input, _)| byref_array_shape(input));
-    let stratum = match &shape {
+    let mut stratum = match &shape {
         Some(_) => claim.as_ref().expect("a shape came from a claim").1,
         None => Stratum::Verified,
     };
-    Some((rule.written_fact(shape.as_ref()), stratum))
+    let mut values = Vec::new();
+    if rule.consumes_values() {
+        for arg in call.args.iter().skip(1) {
+            match transfer_arg_known(w.cx, folder, &arg.value, env, Some(store)) {
+                Some((fact, s)) => {
+                    stratum = stratum.min(s);
+                    values.push(Some(fact));
+                }
+                None => values.push(None),
+            }
+        }
+    }
+    Some((rule.written_fact(shape.as_ref(), &values), stratum))
 }
 
 /// **What `settype($var, $type)` wrote into `$var`** (issue #595), for a call
