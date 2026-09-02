@@ -1718,3 +1718,82 @@ floor, the object decline, compositionality, the seams, the spaceship),
 `crates/steins-infer/tests/ternary_value.rs` (the seam agreement leg 1
 restored), and the value-position pairs appended to
 `crates/steins-infer/tests/short_circuit_dead_operands.rs`.
+
+## Note (2026-09-02): §6's short-circuit is one predicate, and a proven absence is a fall-through (issue #630) — PENDING ratification
+
+Recorded here for the same reason the two notes above are: what it settles is
+an application of **§6's short-circuit clause** and of **§5's derivation
+clause**, not a new rule of either.
+
+### The short-circuit is one predicate, and it decides both answers
+
+`??` evaluates its right side only when the left is unset or null. §6 already
+says so, and `coalesce_lhs_proven_present` already decided it — but only for
+`mark_dead_span`, in the assignment seam. The evaluator that picks the *value*
+asked a different, narrower question: it computed a `settled` flag inside its
+array-projection branch and hardcoded `false` everywhere else. So the two
+answers could disagree, and did: `'foo' ?? null` was recorded as never
+evaluating `null` while its value was computed as `'foo'|null`.
+
+One predicate now decides both, inside the evaluator, which is the ownership
+choice issue #625's leg 1 made for `eval_ternary_fact`. The rule is general:
+**where a construct's value and its deadness rest on the same proof, the
+evaluator that computes the value owns the record.** A seam that reads the
+evaluator inherits the marking; the record is idempotent (`in_dead` reads it
+through an `any()` predicate), so a second reader can cost a `Span` and never a
+verdict.
+
+The predicate keeps its three refusals unchanged, and the third is the one that
+matters here: an operand whose fact is `Asserted` never settles. A shape's word
+that a key is `Required` is enough to pick a value and is **not** enough to
+prove code unreached — so the projection branch's `settled`, which rests on a
+shape fact, ends the chain for the value and marks nothing. Reachability stays
+proof-only, which is A-G9's corollary applied to deadness rather than to
+findings.
+
+### A proven absence falls through; it is not an absence of knowledge
+
+`ShapeRead::DeclaredAbsent` is a proof — a `Sealed` shape's non-field, or a
+field the declaration marks `Absent`. PHP's `??` skips such an arm and evaluates
+the next one, so the arm contributes **no value** and the chain continues.
+
+Reading that outcome as "the domain cannot spell this arm", which is what
+collapsing it into `taken_fact()`'s `None` did, let one provably-missing offset
+silence an entire expression. It is the same law §5's join loop already applied
+one level up to a provably-*null* arm, and the two are now spelled once:
+
+| arm | contributes | ends the chain |
+| --- | --- | --- |
+| proven present, non-null | its value | yes |
+| proven present, null | nothing (`clear_null` empties it) | no |
+| **proven absent** | **nothing** | **no** |
+| unspellable | — | the whole expression declines |
+
+A falling-through arm contributes no fact and **still contributes its
+stratum**: the absence rests on the base's own fact, so an `Asserted` shape's
+word about a missing key cannot buy a `Verified` answer. That is §5's
+derivation clause read exactly as written — the result is no stronger than the
+weakest arm, including an arm that supplied only a proof of its own irrelevance.
+
+### The base may be a value, not only a shape
+
+A fully literal array binds `Fact::Singleton(Val::Array)`, never `Fact::Shape`.
+The projection arm required the latter, so `$array = [1, 2, 3]; $array['string']
+?? 0` declined on the base test alone — while `isset($array['string'])` on the
+same binding answered `false`, because the `isset` lane reads a literal array
+directly. The base is now lifted through `ShapeFact::lift`, the same call the
+offset-write barrier uses (issue #327). A witnessed value is strictly more
+precise than the shape it lifts to, so reading it through the shape law can only
+lose precision, never invent it.
+
+### What this note does not settle
+
+The A-G11 premise ladder is still defined over `(var, VKey)` pairs and a
+non-projection arm still drops every accumulated premise. Nothing here extends
+the carrier to a path, so a depth-2 offset arm is unchanged and its soundness
+argument remains unwritten.
+
+Fixtures: `crates/steins-infer/tests/coalesce_value.rs` (the settled rule, the
+lifted base, the fall-through, the seam agreement and every control), and the
+`??` pairs appended to
+`crates/steins-infer/tests/short_circuit_dead_operands.rs`.
