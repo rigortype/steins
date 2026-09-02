@@ -1636,3 +1636,85 @@ file, the stratum gate in both directions, since every pre-existing pin there
 runs over a docblock-only lane and so exercises one side only:
 `a_verified_lane_exhausted_by_two_predicates_is_kept_empty` and
 `an_asserted_lane_exhausted_the_same_way_still_drops`.
+
+## Note (2026-09-02): the logical family shares the comparison's floor and its stratum split (issue #625) — PENDING ratification
+
+Recorded here for the same reason the issue #260 note above is: what it settles
+is an application of **§5's derivation clause** and of **§6's stand-down
+clause**, not a new rule of either.
+
+Issue #625 brought six more operators to the value seam — `&&`, `||`, `and`,
+`or`, `xor`, `!` and `<=>` — and each of them takes the two rulings already
+written above verbatim.
+
+### The floor, and why it is the strongest one in this family
+
+`eval_binary_fact`'s doc records the discipline: a comparison "evaluates to a
+`bool` whatever its operands are, so the honest floor for an undecided one is
+`bool`, not silence." The logical connectives have that floor for a **stronger**
+reason than a comparison does. PHP has no operator overloading for them: no
+extension can make `$a && $b` return anything but a `bool`, which is exactly why
+the reference corpus asserts `bool` for `Number || Number` while it asserts
+`BcMath\Number` for `Number + Number`. `<=>` has a floor one layer up — `int<-1,
+1>`, measured at PINNED_PHP 8.5.9 over every operand pairing PHP admits,
+arrays and objects included.
+
+Contrast `ValueOp::BitOr` (issue #615), which joined the operator node with
+**no** floor at all and reaches no fact seam: a bitwise `|` really can return a
+GMP object. The line between the two is whether PHP itself guarantees the result
+type, and this note does not move it.
+
+### The stratum split is the issue #260 ruling, unchanged
+
+`Yes → true` / `No → false` say *which* bool and rest on the operands, so they
+carry the operands' `min`. `Maybe → bool` is a claim about the operator,
+premised on no operand, so it is Verified always. `<=>`'s `int<-1, 1>` floor is
+Verified for the same reason and its decided poles carry the operands' `min`.
+
+One refinement the connectives add, and it is §6's rule rather than a new one: a
+**short-circuited** operand contributes no stratum, because PHP never evaluates
+it and an expression that never runs is not evidence for the verdict. So `$a &&
+$b` with `$a` proven falsy takes `$a`'s stratum alone. `xor` never
+short-circuits and always takes the `min` over both.
+
+### §6's stand-down clause reaches the value position
+
+§6 already covers "a `&&`/`||` operand the left side short-circuits past". Until
+this slice that clause was implemented only for the **condition** lowering, so
+`if ($x === 2 && f("bad"))` was silent while `$y = $x === 2 && f("bad");` — the
+same test one character of syntax apart — reported inside a call PHP never
+makes. The value carrier now records the short-circuited operand's extent and
+`mark_dead_span` takes it, closing a live false-positive class. This adds no
+rule; it delivers the one §6 already stated to a position that had no
+representation to deliver it to.
+
+The ternary half of §6 gained reach the same way: `eval_ternary_fact` had
+exactly one caller (the assignment ladder), so the untaken arm of a decided
+guard was recorded dead only there. The dump surface and the return-exit reader
+now read the same evaluator, and mark the same spans. The marking is correct at
+the dump seam rather than merely tolerable — the deadness is a fact about PHP's
+evaluation order, not about the seam that noticed it — and it cannot
+double-mark: `emit_dumps` gates on `descent.is_none()`, and `in_dead` reads the
+record through an `any()` predicate, so a duplicated span decides identically.
+
+### What the truthiness reading may NOT assume
+
+A measurement at PINNED_PHP 8.5.9 refuted the rung this slice was expected to
+need. **An object is not always truthy**: a `BcMath\Number` built from the
+string `"0"` casts to `false`, and so does a childless `SimpleXMLElement`. So no
+"a proven object is `Certainty::Yes`" rung exists, an object operand answers the
+`bool` floor, and the eight corpus rows that want `true` for `Number ||
+<object>` are declined with that measurement as the reason. The reference
+implementation disagrees on those rows; it is wrong about them, and the corpus
+agrees with the decline elsewhere — it asserts `bool`, not `true`, for `Number
+|| Number`.
+
+Truthiness itself is `Fact::truthy` and nothing else, and the verdicts fold
+through `Certainty::and`/`or`/`not`. No second falsiness table exists anywhere
+in the family, which is the precedent `php_cast_fact` set for the `bool` cast.
+
+Fixtures: `crates/steins-infer/tests/logical_value.rs` (the measured table, the
+floor, the object decline, compositionality, the seams, the spaceship),
+`crates/steins-infer/tests/ternary_value.rs` (the seam agreement leg 1
+restored), and the value-position pairs appended to
+`crates/steins-infer/tests/short_circuit_dead_operands.rs`.
