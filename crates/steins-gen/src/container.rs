@@ -69,7 +69,11 @@ use crate::names::{PackageName, SectionName};
 /// `12` is the value-position cast carrier (issue #626): `ArgValue::Cast`. A schema-11
 /// trace spells `(int) $x` as `ArgValue::Other` — every cast expression did — so
 /// replaying one would answer `unknown` where this binary answers the conversion grid,
-/// or at worst the base type the cast operator guarantees.
+/// or at worst the base type the cast operator guarantees. **And unlike `11`, this one
+/// would MISDECODE rather than merely under-answer**: the wire codec carries an enum
+/// variant by INDEX, and `Cast` is inserted *before* `Other` in `ArgValue`, so every
+/// schema-11 `Other` now names `Cast` — a variant whose target and operand were never
+/// written. That is the sharp half of the bump, and the reason it is not optional.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
 pub const SCHEMA_VERSION: u32 = 12;
