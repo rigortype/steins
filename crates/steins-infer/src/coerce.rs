@@ -4,7 +4,7 @@
 //! `settype` performs (issue #595), which rests on the same conversions.
 
 use steins_domain::{
-    Base, Certainty, Fact, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, Val,
+    Base, CAP, Certainty, Fact, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, Val,
     php_is_numeric,
 };
 use steins_syntax::{ArgValue, CastTarget, NativeType, ScalarType, TypeMember};
@@ -339,12 +339,17 @@ enum CastIn {
 ///
 /// | input | `'int'` | `'float'` | `'string'` | `'bool'` | `'array'` | `'null'` |
 /// | --- | --- | --- | --- | --- | --- | --- |
-/// | `int` | identity | `float` | `decimal-int-string` | truthiness | `list{int}` | `null` |
+/// | `int` | identity | `float` | `decimal-int-string`¹ | truthiness | `list{int}` | `null` |
 /// | `float` | `int` | identity | `uppercase-string&non-empty-string` | truthiness | `list{float}` | `null` |
 /// | `string` | `int` | `float` | identity | truthiness | `list{string}` | `null` |
 /// | `bool` | `0\|1` | `0.0\|1.0` | `'1'\|''` | identity | `list{bool}` | `null` |
 /// | `null` | `0` | `0.0` | `''` | `false` | `array{}` | `null` |
 /// | `array` | `0\|1` | `0.0\|1.0` | **declined** | truthiness | identity | `null` |
+///
+/// ¹ **unless the interval is narrow enough to enumerate**: an `int<5, 10>` casts
+/// to the six literals `'10'|'5'|'6'|'7'|'8'|'9'`, which the finite layer holds
+/// exactly. Capped at [`CAP`] and declining above it — see
+/// [`int_range_strings`].
 ///
 /// Witnesses for the rows that are not the obvious ones, each `php -r`-measured:
 ///
@@ -500,11 +505,16 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
                 Some(refinement) => Fact::refined(Base::String, *refinement, false),
                 None => Fact::General { base: Base::String, nullable: false },
             }),
-            CastIn::Base(Base::Int, _) => Some(Fact::refined(
-                Base::String,
-                Refinement::Str(StrPreds::DECIMAL_INT.close()),
-                false,
-            )),
+            // A small enough interval enumerates its own spellings; anything
+            // wider keeps the predicate ([`int_range_strings`]).
+            CastIn::Base(Base::Int, r) => match r.as_ref().and_then(int_range_strings) {
+                Some(vals) => Fact::from_vals(vals),
+                None => Some(Fact::refined(
+                    Base::String,
+                    Refinement::Str(StrPreds::DECIMAL_INT.close()),
+                    false,
+                )),
+            },
             CastIn::Base(Base::Bool, _) => {
                 pair(Val::Str(PhpStr::from("1")), Val::Str(PhpStr::new()))
             }
@@ -528,6 +538,31 @@ fn cast_one(class: &CastIn, target: CastTarget) -> Option<Fact> {
         // Answered above, before the decomposition.
         CastTarget::Bool | CastTarget::Null => None,
     }
+}
+
+/// The decimal spellings of every int an interval admits, or `None` when the
+/// interval holds more of them than the finite layer can carry.
+///
+/// The one refinement of the int-to-string cell (issue #626): `(string)` of an
+/// `int<5, 10>` is one of six literals, and six literals are a fact the domain
+/// holds exactly — `'10'|'5'|'6'|'7'|'8'|'9'` rather than the predicate the
+/// whole `int` base gets. Measured at `PINNED_PHP` 8.5.9: `(string)5` is `'5'`
+/// and `(string)10` is `'10'`, so the spelling is `i64::to_string`'s and needs
+/// no `precision` ini (the float row's problem is not this row's).
+///
+/// **The cap is [`CAP`] and it declines rather than truncates.** A truncated
+/// `OneOf` would be a set the value is not in, which is unsound in the one
+/// direction that matters; the predicate is merely wider. The counted width uses
+/// `i128` so the full interval (`int<min, max>`) cannot overflow the count it is
+/// being rejected by.
+fn int_range_strings(r: &Refinement) -> Option<Vec<Val>> {
+    let Refinement::Int(range) = r else { return None };
+    let (lo, hi) = (range.lo(), range.hi());
+    let width = i128::from(hi) - i128::from(lo) + 1;
+    if width < 1 || width > CAP as i128 {
+        return None;
+    }
+    Some((lo..=hi).map(|i| Val::Str(PhpStr::from(i.to_string()))).collect())
 }
 
 /// The string a float casts to, as coarsely as the measurement allows:
@@ -631,6 +666,9 @@ mod cast_grid_tests {
     fn general(base: Base) -> Fact {
         Fact::General { base, nullable: false }
     }
+    fn ranged(lo: i64, hi: i64) -> Fact {
+        Fact::refined(Base::Int, Refinement::Int(IntRange::new(lo, hi).unwrap()), false)
+    }
     fn cast(input: &Fact, target: CastTarget) -> Option<Fact> {
         php_cast_fact(input, target)
     }
@@ -684,6 +722,40 @@ mod cast_grid_tests {
         );
         assert_eq!(cast(&general(Base::String), CastTarget::Int), Some(general(Base::Int)));
         assert_eq!(cast(&general(Base::Float), CastTarget::Int), Some(general(Base::Int)));
+    }
+
+    #[test]
+    fn a_small_int_interval_enumerates_its_string_spellings() {
+        // Measured (issue #626): `(string)5` through `(string)10` are `'5'` …
+        // `'10'`, so an interval that narrow IS a six-member finite fact.
+        let want = Fact::from_vals(
+            (5..=10).map(|i: i64| Val::Str(PhpStr::from(i.to_string()))).collect(),
+        );
+        assert_eq!(cast(&ranged(5, 10), CastTarget::String), want);
+        // A point interval collapses to the one literal it names.
+        assert_eq!(cast(&ranged(7, 7), CastTarget::String), Some(s("7")));
+        // Negative spellings carry their sign: `(string)-1` is `'-1'`.
+        assert_eq!(
+            cast(&ranged(-1, 0), CastTarget::String),
+            Fact::from_vals(vec![Val::Str(PhpStr::from("-1")), Val::Str(PhpStr::from("0"))])
+        );
+    }
+
+    #[test]
+    fn an_interval_wider_than_the_cap_declines_instead_of_truncating() {
+        // The cap is `CAP`, and over it the answer is the PREDICATE, not a
+        // truncated set: a set the value is not in would be unsound, while the
+        // predicate is merely wider.
+        let decimal =
+            Fact::refined(Base::String, Refinement::Str(StrPreds::DECIMAL_INT.close()), false);
+        // The boundary, both sides of it: `CAP` members enumerate, `CAP + 1` do not.
+        assert!(matches!(cast(&ranged(1, 8), CastTarget::String), Some(Fact::OneOf(vs)) if vs.len() == CAP));
+        assert_eq!(cast(&ranged(1, 9), CastTarget::String), Some(decimal.clone()));
+        assert_eq!(cast(&general(Base::Int), CastTarget::String), Some(decimal.clone()));
+        // The full interval must not overflow the width it is rejected by. (It
+        // arrives as `General` — `Fact::refined`'s own invariant collapses a full
+        // interval — which is the same decline by the other road.)
+        assert_eq!(cast(&ranged(i64::MIN, i64::MAX), CastTarget::String), Some(decimal));
     }
 
     #[test]
