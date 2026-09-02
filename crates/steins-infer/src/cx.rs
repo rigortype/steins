@@ -21,7 +21,7 @@ use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat
 use crate::{ID, RETURN_ID, Sym};
 use crate::arg_check::render_call;
 use crate::builtin_returns::shape_builtin_return_fact;
-use crate::cond::eval_cmp;
+use crate::cond::{eval_cmp, spaceship_pole};
 use crate::contract::{
     CArg, CVal, Envelopes, GenericCarry, InheritanceEdge, IsA, TemplateShadow, template_names_of,
 };
@@ -1006,6 +1006,30 @@ impl<'a> Cx<'a> {
                     Certainty::No => Some((ArgValue::Bool(false), strat)),
                     Certainty::Maybe => None,
                 }
+            }
+            // A `<=>` in value position (issue #625): the same pole decision the
+            // fact seam runs, over the same candidate sets, so a decided
+            // spaceship IS the expression's value. Undecided yields `None`; the
+            // `int<-1, 1>` floor is minted one level up at the fact seam, since a
+            // literal cannot spell a range.
+            //
+            // `ArgValue::Logical` and `ArgValue::Not` are deliberately NOT here,
+            // following `ArgValue::Isset`'s precedent exactly: their evaluators
+            // need the walk context (a decided `&&`/`||` records its
+            // short-circuited operand dead) that this literal seam does not
+            // carry, so they decline here and answer at the fact seam. The cost
+            // is the same one `isset` already pays — an operator node used as a
+            // COMPARISON operand is undecided, so `isset($x) === true` is `bool`,
+            // and now `(true && true) === true` is too.
+            ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
+                let l = self.cmp_candidates_under(
+                    lhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                let r = self.cmp_candidates_under(
+                    rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
+                )?;
+                let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
+                spaceship_pole(&l, &r, self.php_minor).map(|n| (ArgValue::Int(n), strat))
             }
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).

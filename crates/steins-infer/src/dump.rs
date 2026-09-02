@@ -22,7 +22,10 @@ use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
-use crate::cond::{eval_binary_fact, eval_isset_fact, eval_ternary_fact};
+use crate::cond::{
+    eval_binary_fact, eval_isset_fact, eval_logical_fact, eval_not_fact, eval_spaceship_fact,
+    eval_ternary_fact,
+};
 use crate::cx::Cx;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
 use crate::env::{
@@ -760,6 +763,38 @@ fn best_dump_type(
     if let ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } = value {
         let (fact, stratum) =
             eval_binary_fact(cx, folder, *op, lhs, rhs, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A value-position `<=>` (issue #625): total one layer up from the
+    // comparison — `-1`/`0`/`1` where `eval_cmp` decides both poles, the
+    // `int<-1, 1>` floor where it does not.
+    if let ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } = value {
+        let (fact, stratum) =
+            eval_spaceship_fact(cx, folder, lhs, rhs, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A value-position logical connective and its negation (issue #625): total
+    // for the strongest reason in this group — PHP has no operator overloading
+    // for `&& || and or xor !`, so the answer is a `bool` whatever the operands
+    // are.
+    if let ArgValue::Logical { op, lhs, rhs, rhs_span } = value {
+        let (fact, stratum) =
+            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+    if let ArgValue::Not(inner) = value {
+        let (fact, stratum) = eval_not_fact(w, folder, inner, env, Some(store), poisoned);
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,

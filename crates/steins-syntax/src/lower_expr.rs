@@ -12,7 +12,8 @@ use steins_domain::PhpStr;
 
 use crate::ast::{
     Arg, ArgValue, ArrayKey, CallExpr, Callee, ClosureRef, CmpOp, CondExpr, CondOperand, EffectRecv,
-    IssetOperand, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt, StmtKind, ValueOp,
+    IssetOperand, LogicalOp, NameRef, NamedArg, Receiver, RefKind, Span, StaticClass, Stmt,
+    StmtKind, ValueOp,
     flatten_spread_operand,
 };
 use crate::lower_effect::EffectScanCx;
@@ -657,11 +658,18 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
             }
         }
         // Unary `-`/`+` on a numeric literal is itself a proven numeric literal
-        // (so `-5` is `Int(-5)`, not `Other`). Any other operator/operand widens.
+        // (so `-5` is `Int(-5)`, not `Other`). A `!` carries structurally and
+        // TOTALLY (issue #625): `!<anything>` is a `bool`, so an operand this
+        // vocabulary cannot spell arrives as `ArgValue::Other` inside the
+        // negation rather than widening the whole expression — widening is what
+        // made `!isset($foo)` answer `unknown` after issue #579 taught the inner
+        // half to answer `false`. Any other operator/operand widens: `~` is
+        // arithmetic and stays out under ADR-0028 §3.
         Expression::UnaryPrefix(u) => match (&u.operator, lower_arg_value(u.operand)) {
             (UnaryPrefixOperator::Negation(_), ArgValue::Int(i)) => ArgValue::Int(i.wrapping_neg()),
             (UnaryPrefixOperator::Negation(_), ArgValue::Float(f)) => ArgValue::Float(-f),
             (UnaryPrefixOperator::Plus(_), v @ (ArgValue::Int(_) | ArgValue::Float(_))) => v,
+            (UnaryPrefixOperator::Not(_), v) => ArgValue::Not(Box::new(v)),
             _ => ArgValue::Other,
         },
         // Null-coalescing `$a ?? $b` (ADR-0052 §6): a conditional value the walk
@@ -710,6 +718,35 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Binary(b) if matches!(b.operator, BinaryOperator::BitwiseOr(_)) => {
             ArgValue::Binary {
                 op: ValueOp::BitOr,
+                lhs: Box::new(lower_arg_value(b.lhs)),
+                rhs: Box::new(lower_arg_value(b.rhs)),
+            }
+        }
+        // A logical connective in VALUE position (issue #625): `$b = $x && $y;`
+        // rather than `if ($x && $y)`. Structural like the comparison above, and
+        // **total** — PHP has no operator overloading for these, so the result is
+        // a `bool` whatever the operands are, and an operand this vocabulary
+        // cannot spell stays `Other` INSIDE the connective instead of widening
+        // the whole expression.
+        //
+        // The right operand's extent travels with it, which is why this is
+        // `ArgValue::Logical` and not a `ValueOp`: a decided `&&`/`||` proves its
+        // right operand never runs (ADR-0052 §6) and the record needs that
+        // extent, exactly as `??` does. A comparison never needs one.
+        Expression::Binary(b) if logical_op_of(&b.operator).is_some() => ArgValue::Logical {
+            op: logical_op_of(&b.operator).expect("matched above"),
+            lhs: Box::new(lower_arg_value(b.lhs)),
+            rhs: Box::new(lower_arg_value(b.rhs)),
+            rhs_span: to_span(b.rhs.span()),
+        },
+        // A three-way comparison `<=>` in VALUE position (issue #625). A
+        // `ValueOp` rather than a variant of its own because it evaluates both
+        // operands unconditionally, as the comparisons above it do; its answer is
+        // `-1|0|1` for every operand pairing PHP admits, arrays and objects
+        // included (`PINNED_PHP` 8.5.9).
+        Expression::Binary(b) if matches!(b.operator, BinaryOperator::Spaceship(_)) => {
+            ArgValue::Binary {
+                op: ValueOp::Spaceship,
                 lhs: Box::new(lower_arg_value(b.lhs)),
                 rhs: Box::new(lower_arg_value(b.rhs)),
             }
@@ -1048,6 +1085,20 @@ fn cmp_op_of(operator: &BinaryOperator<'_>) -> Option<CmpOp> {
         BinaryOperator::LessThanOrEqual(_) => Some(CmpOp::Le),
         BinaryOperator::GreaterThan(_) => Some(CmpOp::Gt),
         BinaryOperator::GreaterThanOrEqual(_) => Some(CmpOp::Ge),
+        _ => None,
+    }
+}
+
+/// The [`LogicalOp`] a parsed binary operator denotes, or `None` when the operator
+/// is not a logical connective. The ONE place the syntax-to-[`LogicalOp`] map
+/// lives, for [`cmp_op_of`]'s reason: `&&`/`and` and `||`/`or` differ in
+/// precedence only, and a map written twice is a map that can disagree with
+/// itself about which spellings are the same operator.
+fn logical_op_of(operator: &BinaryOperator<'_>) -> Option<LogicalOp> {
+    match operator {
+        BinaryOperator::And(_) | BinaryOperator::LowAnd(_) => Some(LogicalOp::And),
+        BinaryOperator::Or(_) | BinaryOperator::LowOr(_) => Some(LogicalOp::Or),
+        BinaryOperator::LowXor(_) => Some(LogicalOp::Xor),
         _ => None,
     }
 }

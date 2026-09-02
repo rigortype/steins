@@ -81,6 +81,11 @@ pub(crate) fn val_of(arg: &ArgValue, php_minor: Option<(u16, u16)>) -> Option<Va
         // A value-position `isset(…)` (issue #579) is decided against the env by
         // `eval_isset_fact`, which this seam does not see — so no `Val` here.
         | ArgValue::Isset(_)
+        // A logical connective or a `!` (issue #625): decided by
+        // `eval_logical_fact` / `eval_not_fact`, which have the env this seam
+        // lacks — so no `Val` here either.
+        | ArgValue::Logical { .. }
+        | ArgValue::Not(_)
         // Object-world values (ADR-0043): not domain `Val`s — unproven, == Other.
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)

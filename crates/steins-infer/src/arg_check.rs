@@ -143,6 +143,10 @@ pub(crate) fn is_type_error(cx: &Cx, ty: &NativeType, arg: &ArgValue) -> bool {
         // An `isset(…)` argument (issue #579) is a `bool` at worst and never a
         // native scalar finding on its own; the binding lane carries its fact.
         | ArgValue::Isset(_)
+        // A logical connective or a `!` (issue #625): the same reading. Both are
+        // a `bool` at worst, and a decided one arrives here already resolved.
+        | ArgValue::Logical { .. }
+        | ArgValue::Not(_)
         // A closure value against a scalar/union param is never a scalar finding
         // (a `callable`/`Closure` param is not a native scalar type this checks).
         | ArgValue::Closure(_)

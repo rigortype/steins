@@ -5,9 +5,10 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{Base, Certainty, Fact, Val};
+use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, Val};
 use steins_syntax::{
-    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, NameRef, RefKind, Span,
+    ArgValue, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef, RefKind, Span,
+    ValueOp,
 };
 
 use crate::fold::Folder;
@@ -20,7 +21,7 @@ use crate::existence::eval_existence_call;
 use crate::offsets::{ShapeRead, offset_key_of, offset_operand_fact, shape_read_at};
 use crate::predicates::apply_type_narrowing;
 use crate::refine::{apply_refinements, collect_refine};
-use crate::transfers::transfer_arg_fact;
+use crate::transfers::{transfer_arg_fact, transfer_arg_known};
 use crate::walk::{WalkCx, mark_dead_cond_calls, mark_dead_span, value_stratum};
 
 // ---------------------------------------------------------------------------
@@ -386,6 +387,248 @@ pub(crate) fn eval_binary_fact(
         Certainty::Maybe => {
             (Fact::General { base: Base::Bool, nullable: false }, Stratum::Verified)
         }
+    }
+}
+
+/// The truthiness of a value-position expression, with the stratum the reading
+/// enters at (issue #625).
+///
+/// The one truthiness reader the logical family shares. It asks [`Fact::truthy`]
+/// and nothing else — `php_cast_fact` already set that precedent for the `bool`
+/// cast, "so `'some-string'` casts to `true` and `'0'` to `false` by the same
+/// rule every guard uses", and a second falsiness table here would be a second
+/// place for PHP's rules to be wrong.
+///
+/// The dispatch above the plain value lane is what makes the family
+/// **compositional**: a comparison, an `isset`, another connective and a
+/// negation each already answer a total `bool`, so `!isset($foo)` and `$a && ($b
+/// || $c)` fold rather than bottoming out at `Maybe`. Every other shape goes to
+/// [`transfer_arg_known`], the same argument-fact reader every transfer rule
+/// uses, and an expression with no fact at all is honestly `Maybe`.
+///
+/// # What this deliberately does not answer: an object
+///
+/// A variable the heap proves holds an object carries no value-domain fact, so
+/// it answers `Maybe` — and the tempting rung, "an object is truthy", is
+/// **refuted at `PINNED_PHP` 8.5.9**: a `BcMath\Number` built from the string
+/// `"0"` casts to `false`, and so does a childless `SimpleXMLElement`. Neither is
+/// exotic — the first is the very class the bcmath corpus rows are written
+/// against, and the corpus itself agrees, asserting `bool` (not `true`) for
+/// `Number || Number`. So the rung would be unsound in exactly the place it was
+/// proposed for, and `Maybe` — rendering the `bool` floor — is the honest answer.
+fn value_truthiness(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Certainty, Stratum) {
+    let (fact, strat) = match value {
+        ArgValue::Binary { op: ValueOp::Cmp(op), lhs, rhs } => {
+            eval_binary_fact(w.cx, folder, *op, lhs, rhs, env, store, poisoned)
+        }
+        ArgValue::Binary { op: ValueOp::Spaceship, lhs, rhs } => {
+            eval_spaceship_fact(w.cx, folder, lhs, rhs, env, store, poisoned)
+        }
+        ArgValue::Isset(ops) => eval_isset_fact(w.cx, ops, env, poisoned),
+        ArgValue::Logical { op, lhs, rhs, rhs_span } => {
+            eval_logical_fact(w, folder, *op, lhs, rhs, *rhs_span, env, store, poisoned)
+        }
+        ArgValue::Not(inner) => eval_not_fact(w, folder, inner, env, store, poisoned),
+        _ => match transfer_arg_known(w.cx, folder, value, env, store) {
+            Some(pair) => pair,
+            None => return (Certainty::Maybe, value_stratum(value, env, store)),
+        },
+    };
+    (fact.truthy(), strat)
+}
+
+/// Render a decided-or-not truthiness verdict as the family's [`Fact`], with the
+/// issue #260 stratum ruling applied verbatim (issue #625).
+///
+/// `Yes -> true` / `No -> false` say **which** bool and rest on the operands, so
+/// they keep the operands' `min`; `Maybe -> bool` is a claim about the operator,
+/// premised on no operand, so it is `Verified` always.
+fn bool_verdict_fact(verdict: Certainty, derived: Stratum) -> (Fact, Stratum) {
+    match verdict {
+        Certainty::Yes => (Fact::Singleton(Val::Bool(true)), derived),
+        Certainty::No => (Fact::Singleton(Val::Bool(false)), derived),
+        Certainty::Maybe => {
+            (Fact::General { base: Base::Bool, nullable: false }, Stratum::Verified)
+        }
+    }
+}
+
+/// Evaluate a **value-position logical connective** `&& || and or xor` (issue
+/// #625) to an env [`Fact`].
+///
+/// Total, for [`eval_binary_fact`]'s reason one step stronger: PHP has no
+/// operator overloading for these connectives, so `$a && $b` is a `bool` no
+/// matter what `$a` and `$b` are — which is exactly why `bcmath-number.php`
+/// asserts `bool` for `Number || Number` while it asserts `BcMath\Number` for
+/// `Number + Number`. The honest floor for an undecided one is `bool`, never
+/// silence.
+///
+/// The truthiness table is not written here. [`Certainty::and`] / [`Certainty::or`]
+/// / [`Certainty::not`] are Kleene-strong and already implement every cell of it,
+/// and [`value_truthiness`] answers each operand through [`Fact::truthy`]. `xor`
+/// has no `Certainty` method of its own and is composed as `(a || b) && !(a &&
+/// b)`, which reproduces Kleene's table exactly: `Yes xor Maybe` is
+/// `and(or(Yes, Maybe), not(and(Yes, Maybe)))` = `and(Yes, Maybe)` = `Maybe`.
+///
+/// # Short-circuiting: the decided operand is the only one consulted
+///
+/// PHP does not evaluate the right operand of a `&&` whose left is falsy, nor of
+/// a `||` whose left is truthy — the same rule ADR-0052 §6 already applies to a
+/// ternary's untaken arm — so such an operand is recorded dead through
+/// [`mark_dead_span`] and a finding inside it would be a false positive. It was
+/// one until this slice: `$y = $x === 2 && f("bad");` reported inside a call PHP
+/// never makes, while the `if ($x === 2 && f("bad"))` spelling of the same test
+/// was already silent, because only the CONDITION lowering modelled `&&`.
+///
+/// The short-circuited operand contributes no stratum either, for the same
+/// reason: an expression PHP never evaluates is not evidence for the verdict.
+/// `xor` never short-circuits, so both of its operands always count.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_logical_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    op: LogicalOp,
+    lhs: &ArgValue,
+    rhs: &ArgValue,
+    rhs_span: Span,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let (l, ls) = value_truthiness(w, folder, lhs, env, store, poisoned);
+    // The short-circuit legs, decided by the left operand alone.
+    match (op, l) {
+        (LogicalOp::And, Certainty::No) => {
+            mark_dead_span(w, rhs_span);
+            return bool_verdict_fact(Certainty::No, ls);
+        }
+        (LogicalOp::Or, Certainty::Yes) => {
+            mark_dead_span(w, rhs_span);
+            return bool_verdict_fact(Certainty::Yes, ls);
+        }
+        _ => {}
+    }
+    let (r, rs) = value_truthiness(w, folder, rhs, env, store, poisoned);
+    let verdict = match op {
+        LogicalOp::And => l.and(r),
+        LogicalOp::Or => l.or(r),
+        LogicalOp::Xor => l.or(r).and(l.and(r).not()),
+    };
+    bool_verdict_fact(verdict, ls.min(rs))
+}
+
+/// Evaluate a **value-position `!<operand>`** (issue #625) to an env [`Fact`].
+///
+/// Total for [`eval_logical_fact`]'s reason — `!` is a `bool` whatever it negates
+/// — and three-valued through [`Certainty::not`], so `Maybe` stays `Maybe` and
+/// renders the `bool` floor. `!` evaluates its operand always, so nothing here
+/// records deadness.
+///
+/// The row this makes decidable that no other slice could: `!isset($foo)`.
+/// Issue #579 taught the value seam to answer the inner `isset` and the negation
+/// around it still widened to `Other`, so the expression answered `unknown` while
+/// its own subexpression answered `false`.
+pub(crate) fn eval_not_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    operand: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let (c, strat) = value_truthiness(w, folder, operand, env, store, poisoned);
+    bool_verdict_fact(c.not(), strat)
+}
+
+/// The pole a `<=>` decides over two candidate sets, or `None` when it is
+/// undecided (issue #625).
+///
+/// The ONE place the spaceship's decision lives, so the fact seam
+/// ([`eval_spaceship_fact`]) and the literal seam ([`Cx::resolve_literal_under`])
+/// can never disagree about which pairings decide — the discipline `cmp_op_of`
+/// holds for the syntax-to-operator map, one layer down.
+///
+/// `-1`/`0`/`1` is exactly "less than / equal / greater than", so this is
+/// [`eval_cmp`] asked twice and nothing else: it inherits the whole comparison
+/// decision procedure and adds no ordering of its own. It never subtracts the
+/// operands — that is arithmetic, and ADR-0028 §3's engine-int-width trap.
+pub(crate) fn spaceship_pole(l: &[ArgValue], r: &[ArgValue], php_minor: Option<(u16, u16)>) -> Option<i64> {
+    match (eval_cmp(CmpOp::Lt, l, r, php_minor), eval_cmp(CmpOp::Gt, l, r, php_minor)) {
+        (Certainty::Yes, Certainty::No) => Some(-1),
+        (Certainty::No, Certainty::Yes) => Some(1),
+        // Provably neither less nor greater is provably equal. `Maybe` on either
+        // side leaves the pole open and takes the floor.
+        (Certainty::No, Certainty::No) => Some(0),
+        _ => None,
+    }
+}
+
+/// Evaluate a **value-position `<=>`** (issue #625) to an env [`Fact`].
+///
+/// Total, one layer up from [`eval_binary_fact`]'s `bool`: a spaceship's value is
+/// `-1`, `0` or `1` for **every** operand pairing PHP admits. Measured at
+/// `PINNED_PHP` 8.5.9 rather than recalled, with the exotic spellings among the
+/// probes: `[1,2] <=> [1,3]` is `-1`, `[1,2] <=> [1,2,3]` is `-1`, two fresh
+/// `stdClass` instances compare `0`, `[] <=> []` is `0`, `null <=> 0` is `0`.
+///
+/// So the undecided floor is the fixed three-point range `int<-1, 1>` — a
+/// [`Fact::refined`] over [`IntRange`], not a `Fact::OneOf([-1, 0, 1])`, which
+/// would render `-1|0|1` and claim a finite-member layer the operator does not
+/// justify.
+///
+/// # The decided arm reuses the comparison procedure and adds no ordering of its own
+///
+/// `-1`/`0`/`1` is exactly "less than / equal / greater than", so the verdict is
+/// [`eval_cmp`] asked twice over the candidate sets [`cmp_operand_candidates`]
+/// already produces. That inherits every ordering rule the guard path has and
+/// invents none — which also means it inherits the declines: `php_num_order`
+/// decides only for concrete numeric operands, so `'foo' <=> 'bar'` stays at the
+/// `int<-1, 1>` floor rather than folding to `1`. Widening string ordering to
+/// make that one row match is a comparison-family change, not a spaceship one.
+///
+/// **It is never decided by subtracting the operands.** That is arithmetic, it
+/// belongs to issue #260's sidecar operator arm, and ADR-0028 §3 names the
+/// engine-int-width trap it walks into. The answer is pinned to `-1|0|1` without
+/// it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_spaceship_fact(
+    cx: &Cx<'_>,
+    folder: &mut dyn Folder,
+    lhs: &ArgValue,
+    rhs: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let l = cmp_operand_candidates(cx, folder, lhs, env, store, poisoned);
+    let r = cmp_operand_candidates(cx, folder, rhs, env, store, poisoned);
+    let derived = l
+        .as_ref()
+        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+    let decided = match (l, r) {
+        (Some((l, _)), Some((r, _))) => spaceship_pole(&l, &r, cx.php_minor),
+        _ => None,
+    };
+    match decided {
+        Some(n) => (Fact::Singleton(Val::Int(n)), derived),
+        // The operator's own guarantee, premised on neither operand: Verified,
+        // by the issue #260 ruling this family shares.
+        None => (
+            Fact::refined(
+                Base::Int,
+                Refinement::Int(IntRange::new(-1, 1).expect("lo <= hi")),
+                false,
+            ),
+            Stratum::Verified,
+        ),
     }
 }
 

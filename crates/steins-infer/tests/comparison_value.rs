@@ -23,8 +23,10 @@
 //!    resting on the operands, so they keep the operands' `min` stratum. Both
 //!    halves are pinned so a later refactor cannot collapse them together.
 //!
-//! Arithmetic, bitwise and logical operators still widen to `ArgValue::Other`
-//! (`unimplemented_operators_still_decline`).
+//! Arithmetic and bitwise operators still widen to `ArgValue::Other`
+//! (`unimplemented_operators_still_decline`). The logical family left that list
+//! in issue #625, which gave `&& || and or xor !` and `<=>` total floors of
+//! their own; see `logical_value.rs`.
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, check};
 use steins_syntax::SourceTree;
@@ -216,9 +218,13 @@ fn an_unrepresentable_operand_still_yields_bool() {
 fn unimplemented_operators_still_decline() {
     // Certainty discipline: an operator with no value-position evaluation is
     // NOT carried, so it declines rather than claiming an uncomputed type.
+    // Arithmetic and bitwise stay out under ADR-0028 §3; `&&` left this list in
+    // issue #625, which gave the logical family its own total floor.
     assert_eq!(dumped("1 + 1"), "unknown");
     assert_eq!(dumped("5 & 3"), "unknown");
-    assert_eq!(dumped("true && false"), "unknown");
+    assert_eq!(dumped("5 ^ 3"), "unknown");
+    assert_eq!(dumped("1 << 2"), "unknown");
+    assert_eq!(dumped("~5"), "unknown");
 }
 
 #[test]

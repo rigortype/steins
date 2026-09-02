@@ -177,6 +177,8 @@ fn scalar_to_fold(v: &ArgValue) -> Option<FoldArg> {
         | ArgValue::Concat(..)
         | ArgValue::Binary { .. }
         | ArgValue::Isset(_)
+        | ArgValue::Logical { .. }
+        | ArgValue::Not(_)
         | ArgValue::ClassConst(..)
         | ArgValue::EnumCase(..)
         | ArgValue::GlobalConst(..)

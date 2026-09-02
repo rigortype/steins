@@ -902,7 +902,77 @@ pub enum ArgValue {
     /// reading of the operand's value stacked on the presence one, which is a
     /// question this carrier does not ask.
     Isset(Vec<IssetOperand>),
+    /// A logical connective `&& || and or xor` in **value** position (issue #625):
+    /// `$b = $x && $y;`, `return $a xor $b;`, `f($p || $q)`.
+    ///
+    /// **Total by construction, like [`Self::Isset`] and unlike [`Self::Binary`]'s
+    /// `|`.** PHP has no operator overloading for the logical connectives — no
+    /// extension can make `$a && $b` return anything but a `bool`, which is
+    /// exactly why `bcmath-number.php` asserts `bool` for `Number || Number`
+    /// while it asserts `BcMath\Number` for `Number + Number`. So an operand this
+    /// vocabulary cannot spell arrives here as [`Self::Other`] rather than
+    /// widening the expression: widening is the defect, since `Other` answers
+    /// `unknown` for a value PHP guarantees.
+    ///
+    /// # Why this is its own variant rather than a `ValueOp`
+    ///
+    /// [`Self::Binary`] carries no spans because a comparison and a bitwise `|`
+    /// evaluate **both** operands, always. `&&` and `||` do not: a decided left
+    /// operand proves the right one never runs (ADR-0052 §6), and recording that
+    /// needs the right operand's own extent — which is precisely why
+    /// [`Self::Coalesce`] carries one. Reusing `Binary` would have meant either a
+    /// span on every comparison that has no use for one, or a live false-positive
+    /// class: before this variant, `$y = $x === 2 && f("bad");` reported inside a
+    /// call PHP never makes, while the `if (…)` spelling of the same test was
+    /// already silent. Excluded from [`Hash`] for the span, as `Coalesce` is.
+    ///
+    /// `&&`/`and` and `||`/`or` differ in precedence, not semantics, so they share
+    /// a [`LogicalOp`]; the parser has already applied the precedence by the time
+    /// the tree is shaped.
+    Logical { op: LogicalOp, lhs: Box<ArgValue>, rhs: Box<ArgValue>, rhs_span: Span },
+    /// A logical negation `!<operand>` in **value** position (issue #625).
+    ///
+    /// Total for [`Self::Logical`]'s reason — `!` is a `bool` whatever it negates —
+    /// so the operand may be [`Self::Other`] and the expression still answers.
+    ///
+    /// A dedicated variant rather than a general `Unary { op, operand }` sibling,
+    /// because there is no unary family waiting to join it: `-`/`+` over a numeric
+    /// literal already fold into [`Self::Int`]/[`Self::Float`] at lowering time,
+    /// and `~` is arithmetic, which stays [`Self::Other`] under ADR-0028 §3. A
+    /// carrier generalized over one member would claim a roster this vocabulary
+    /// does not have — the discipline [`ValueOp::BitOr`] records from the other
+    /// side.
+    Not(Box<ArgValue>),
     Other,
+}
+
+/// The connective half of an [`ArgValue::Logical`] (issue #625).
+///
+/// Three members, not five: `&&` and `and` are one operator at two precedences,
+/// as are `||` and `or`, and the parser resolves the precedence before this
+/// lowering ever sees the tree. `xor` has only the low-precedence spelling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum LogicalOp {
+    /// `&&` / `and` — short-circuits on a falsy left operand.
+    And,
+    /// `||` / `or` — short-circuits on a truthy left operand.
+    Or,
+    /// `xor` — never short-circuits; both operands are always evaluated.
+    Xor,
+}
+
+impl LogicalOp {
+    /// The operator as written, for a rendered value expression. The
+    /// high-precedence spelling stands for both where PHP has two.
+    #[must_use]
+    pub const fn symbol(self) -> &'static str {
+        match self {
+            LogicalOp::And => "&&",
+            LogicalOp::Or => "||",
+            LogicalOp::Xor => "xor",
+        }
+    }
 }
 
 /// One operand of a value-position [`ArgValue::Isset`] (issue #579).
@@ -1352,6 +1422,14 @@ impl std::hash::Hash for ArgValue {
             }
             ArgValue::GlobalConst(r) => r.hash(state),
             ArgValue::Isset(ops) => ops.hash(state),
+            // The right operand's extent is excluded, as `Coalesce`'s is: it
+            // records where a short-circuited operand sits, not what the value is.
+            ArgValue::Logical { op, lhs, rhs, rhs_span: _ } => {
+                op.hash(state);
+                lhs.hash(state);
+                rhs.hash(state);
+            }
+            ArgValue::Not(v) => v.hash(state),
             ArgValue::Null | ArgValue::Other => {}
         }
     }
@@ -1424,6 +1502,10 @@ impl ArgValue {
             ArgValue::Binary { op, lhs, rhs } => {
                 format!("({} {} {})", lhs.render(), op.symbol(), rhs.render())
             }
+            ArgValue::Logical { op, lhs, rhs, .. } => {
+                format!("({} {} {})", lhs.render(), op.symbol(), rhs.render())
+            }
+            ArgValue::Not(v) => format!("!{}", v.render()),
             ArgValue::OffsetRead { base, key } => format!("{}[{}]", base.render(), key.render()),
             ArgValue::ClassConst(class, name) => format!("{}::{name}", class.render()),
             ArgValue::EnumCase(class, case) => format!("{class}::{case}"),
@@ -1712,6 +1794,22 @@ pub enum ValueOp {
     /// `filter_var`'s flags roster, which resolves by constant NAME and never
     /// needs a value at all.
     BitOr,
+    /// A three-way comparison `<=>` (issue #625). Its value is always `-1`, `0`
+    /// or `1` — for **every** operand pairing, arrays and objects included, as
+    /// `PINNED_PHP` 8.5.9 measures: `[1,2] <=> [1,3]` is `-1`, `new stdClass <=>
+    /// new stdClass` is `0`, `[1,2] <=> [1,2,3]` is `-1`. So it has a total floor
+    /// the way [`Self::Cmp`] does, one layer up from `bool`.
+    ///
+    /// It is a [`ValueOp`] rather than a variant of its own because a `<=>`
+    /// evaluates both operands unconditionally, exactly as a comparison does —
+    /// the property that let [`ArgValue::Binary`] stay span-free (see
+    /// [`ArgValue::Logical`] for the other side of that line).
+    ///
+    /// **It is never decided by subtracting its operands.** The spaceship's answer
+    /// is pinned to `-1|0|1` without arithmetic, and reaching for `$a - $b` would
+    /// walk straight into ADR-0028 §3's engine-int-width trap, which is issue
+    /// #260's sidecar-operator arm and not this one.
+    Spaceship,
 }
 
 impl ValueOp {
@@ -1721,6 +1819,7 @@ impl ValueOp {
         match self {
             ValueOp::Cmp(op) => op.symbol(),
             ValueOp::BitOr => "|",
+            ValueOp::Spaceship => "<=>",
         }
     }
 }
