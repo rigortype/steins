@@ -1,7 +1,8 @@
 //! Out-parameter seeding: what a by-ref argument holds after the call, with the
 //! `preg_match` / `preg_match_all` `$matches` shapes read off the pattern (issue
-//! #156), the `settype` cast write at statement position (issue #595), the preg
-//! flag constants, and the `preg.invalid-pattern` entry points.
+//! #156), the `settype` cast write at statement position (issue #595), the array
+//! out-state rows of [`crate::array_out_state`] (issue #635), the preg flag
+//! constants, and the `preg.invalid-pattern` entry points.
 
 use std::collections::HashMap;
 
@@ -12,6 +13,10 @@ use steins_syntax::{ArgValue, ArrayKey, CallExpr, CondExpr, NameRef, RefKind, St
 
 use crate::fold::Folder;
 use crate::PREG_INVALID_PATTERN_ID;
+use crate::array_out_state::{
+    byref_array_shape, pointer_move_written_fact, sort_rule, sort_written_fact,
+    unproven_input_pointer_move_fact, unproven_input_sort_fact,
+};
 use crate::asserts::guard_call_line;
 use crate::builtin_returns::transfer_declaration_admits;
 use crate::coerce::{CastTarget, php_cast_fact};
@@ -205,15 +210,17 @@ fn out_param_seed_callee<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
 
 /// The fact the callee's contract determines for the out-parameter at
 /// `position`, computed from **proven arguments only** (ADR-0077 §3.3), paired
-/// with the trust stratum it is bound at. Three rows exist, dispatched by
-/// (name, position) — the key the witness is indexed by.
+/// with the trust stratum it is bound at. Rows are dispatched by (name,
+/// position) — the key the witness is indexed by.
 ///
 /// The two preg rows bind `Asserted` (§3.3): the shape rests on a declared
 /// contract plus proven inputs, never on observing a run. The `settype` row
 /// carries its **input's** stratum instead, because the fact it states is the
 /// input's own value put through a measured conversion — an `Asserted` phpdoc
 /// input stays `Asserted`, and a `Verified` one has nothing weaker to inherit
-/// (the grid itself is `Verified` engine behaviour).
+/// (the grid itself is `Verified` engine behaviour). The issue-#635 array rows
+/// carry the input's stratum for exactly that reason: each states the caller's
+/// own array put through a measured rearrangement.
 fn out_param_written_fact(
     w: &WalkCx,
     folder: &mut dyn Folder,
@@ -231,7 +238,63 @@ fn out_param_written_fact(
             preg_match_all_written_fact(w, folder, call, env).map(|f| (f, Stratum::Asserted))
         }
         ("settype", 0) => settype_written_fact(w, folder, call, env, store),
+        (n, 0) => array_out_state_fact(w, folder, n, call, env, store),
         _ => None,
+    }
+}
+
+/// **The array out-state rows** (issue #635): the sort family and the pointer
+/// moves, each of which rewrites argument 0 and returns something that says
+/// nothing about it.
+///
+/// Three premises, refusing cheapest-first:
+///
+/// 1. **The declaration pin** (ADR-0061 §2): the running engine must still
+///    declare the return the rule was written against — `true` for the twelve
+///    sorts, `mixed` for `reset`/`end` — *and* the arity measured at
+///    `PINNED_PHP`, since neither return spelling pins which parameter is the
+///    array (ADR-0064 Amendment B).
+/// 2. **A rule that can state the result.** A pre-call claim about argument 0
+///    ([`out_param_input_claim`]) that [`byref_array_shape`] reads as an array
+///    gets the precise answer; with no such claim the rule falls to the floor
+///    the witness alone establishes ([`unproven_input_sort_fact`]) rather than
+///    declining, because a sort with *no* premise still leaves a list.
+///
+/// The floor is bound `Verified`: it is the engine's own behaviour and inherits
+/// nothing from a claim that was never made. A precise answer carries the
+/// input's stratum instead, for the reason the `settype` row does.
+fn array_out_state_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    name: &str,
+    call: &CallExpr,
+    env: &HashMap<String, Known>,
+    store: &Store,
+) -> Option<(Fact, Stratum)> {
+    let pointer_move = matches!(name, "reset" | "end");
+    let (declared, arity): (&[&str], (u32, u32)) = if pointer_move {
+        (&["mixed"], (1, 1))
+    } else {
+        (&["true"], sort_rule(name)?.1)
+    };
+    if !transfer_declaration_admits(w.cx, folder, name, declared, Some(arity)) {
+        return None;
+    }
+    let ArgValue::Var(var) = &call.args.first()?.value else { return None };
+    let claim = out_param_input_claim(env, store, var);
+    let shape = claim.as_ref().and_then(|(input, _)| byref_array_shape(input));
+    match (pointer_move, shape) {
+        (true, Some(shape)) => {
+            Some((pointer_move_written_fact(&shape)?, claim.expect("a claim was read").1))
+        }
+        (true, None) => Some((unproven_input_pointer_move_fact(), Stratum::Verified)),
+        (false, Some(shape)) => Some((
+            sort_written_fact(sort_rule(name)?.0, &shape)?,
+            claim.expect("a claim was read").1,
+        )),
+        (false, None) => {
+            Some((unproven_input_sort_fact(sort_rule(name)?.0), Stratum::Verified))
+        }
     }
 }
 
@@ -254,7 +317,7 @@ fn out_param_written_fact(
 /// 3. **A target the value domain can spell** ([`CastTarget::from_type_string`]):
 ///    `'object'` writes a `stdClass`, which is not a [`Fact`], and every
 ///    spelling php-src refuses raises a `ValueError` before writing anything.
-/// 4. **A pre-call claim about the input** ([`cast_input_claim`]) and a grid cell
+/// 4. **A pre-call claim about the input** ([`out_param_input_claim`]) and a grid cell
 ///    for it ([`php_cast_fact`]).
 ///
 /// [`Cx::resolve_literal`]: crate::cx::Cx::resolve_literal
@@ -275,7 +338,7 @@ fn settype_written_fact(
     };
     let target = CastTarget::from_type_string(spelling.as_str()?)?;
     let ArgValue::Var(var) = &call.args.first()?.value else { return None };
-    let (input, stratum) = cast_input_claim(env, store, var)?;
+    let (input, stratum) = out_param_input_claim(env, store, var)?;
     Some((php_cast_fact(&input, target)?, stratum))
 }
 
@@ -294,7 +357,7 @@ fn settype_written_fact(
 /// slot HOLDS, which for a float-declared name is a float on every path PHP can
 /// reach it by (the boundary converts in coercive mode and fatals in strict).
 /// That is the same claim the dump surface already renders for such a name.
-fn cast_input_claim(
+fn out_param_input_claim(
     env: &HashMap<String, Known>,
     store: &Store,
     var: &str,

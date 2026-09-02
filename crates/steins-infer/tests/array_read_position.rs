@@ -297,13 +297,32 @@ fn a_mutating_read_position_call_invalidates_the_argument_fact() {
     // `$z = [1, 2, 3]; array_pop($z); count($z) === 2` — the pre-call count must
     // not survive. Six of the ten take argument 0 by reference
     // (`steins_catalog::out_params`), so the walk drops the binding's fact at statement end.
-    for f in ["array_pop", "array_shift", "next", "prev", "reset", "end"] {
+    //
+    // `reset`/`end` are the two that got their out-state back (issue #635): they
+    // move the internal pointer and nothing else, so `$z = [1, 2, 3]; reset($z);`
+    // measures `$z === [1, 2, 3]` at PHP 8.5.9 and the count is *not* stale. They
+    // are asserted just below. `next`/`prev` share that contract and stay
+    // unmeasured, so they still drop — which is what keeps this loop honest about
+    // the difference between "does not change it" and "we did not look".
+    for f in ["array_pop", "array_shift", "next", "prev"] {
         let src = format!(
             "<?php\nfunction f(): void {{ $z = [1, 2, 3]; {f}($z); \\PHPStan\\dumpType(count($z)); }}\n"
         );
         let got = one_type_with(&src, &mut Mock::sidecar());
         assert_ne!(got, "dumped type: 3", "{f} must not leave the pre-call count standing");
         assert_eq!(got, "dumped type: int<0, max>", "{f} drops the argument's fact");
+    }
+    // A pointer move is not a mutation: the seed hands the caller's own claim
+    // straight back, so the count it already proved still stands.
+    for f in ["reset", "end"] {
+        let src = format!(
+            "<?php\nfunction f(): void {{ $z = [1, 2, 3]; {f}($z); \\PHPStan\\dumpType(count($z)); }}\n"
+        );
+        assert_eq!(
+            one_type_with(&src, &mut Mock::sidecar()),
+            "dumped type: 3",
+            "{f} leaves the array itself alone (probed, PHP 8.5.9)"
+        );
     }
     // The same, one layer up: the shape lane must not answer from a moved shape.
     let src = "<?php\n/** @param array{a: int, b: int} $v */\n\
