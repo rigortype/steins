@@ -1797,3 +1797,121 @@ Fixtures: `crates/steins-infer/tests/coalesce_value.rs` (the settled rule, the
 lifted base, the fall-through, the seam agreement and every control), and the
 `??` pairs appended to
 `crates/steins-infer/tests/short_circuit_dead_operands.rs`.
+
+## Note (2026-09-03): a cast has a floor, `(string)` included, and its stratum splits the same way (issue #626) — PENDING ratification
+
+Recorded here for the same reason the issue #260 and #625 notes above are: what
+it settles is an application of **§5's derivation clause** and of the value-seam
+floor discipline those two established, not a new rule of either.
+
+Issue #626 brought the cast expression to the value seam. The conversion
+semantics were already there — `php_cast_fact` is issue #595's `settype` grid,
+`php -r`-measured cell by cell at PINNED_PHP 8.5.9 — and nothing could reach
+them: every cast lowered to `ArgValue::Other`, which answers `unknown`. The
+slice is a lowering (`ArgValue::Cast`, `SCHEMA_VERSION` 11 → 12), an evaluator
+beside `eval_binary_fact`, and the same four seams the comparison node uses.
+
+### The ruling: every cast is total, and `(string)` is not the exception
+
+The issue asked the slice to decide whether `(string)` has a floor, reading the
+grid's declined array cell as evidence that it does not. **It has one, and it is
+the same total floor the other four targets have.** A cast that produces a value
+at all produces a value of its target's base; the only alternative is a thrown
+`Error`, which produces no value for anything downstream to be about. Measured
+at PINNED_PHP 8.5.9:
+
+| probe | result |
+| --- | --- |
+| `(string)[1, 2]` | `"Array"` — an `E_WARNING`, not an error |
+| `(string)$resource` | `"Resource id #5"` |
+| `(string)$objectWithToString` | that method's return, which PHP forces to be a string |
+| `(string)new stdClass` | **throws** `Error: Object of class stdClass could not be converted to string` |
+| `(int)new ArrayObject([1])` | `1`, with a warning |
+| `(bool)new stdClass` | `true` |
+
+So `string` is sound for every `(string)` cast that completes, and `int`,
+`float`, `bool` and `array` never even throw.
+
+**The grid's array-to-string decline is untouched by this, and the distinction
+is where the floor is minted.** `php_cast_fact` still answers `None` for an
+array input under the string target — it refuses to state the *value* `'Array'`,
+"right and useless" — so `settype($v, 'string')` on a proven array still keeps
+its by-ref invalidation, bit for bit. The floor is a claim about the **operator's
+base**, made by `eval_cast_fact` and by nothing in the grid, which is why the
+two lanes legitimately differ here: a cast expression has an operator to make
+the claim and a `settype` call does not. And the program that wrote `(string)
+$arr` keeps being reported — `string.array-conversion` has owned that site since
+issue #193 — so stating the base blesses nothing.
+
+### The stratum split is the issue #260 ruling, unchanged
+
+A result that **is** the floor is a claim about the cast operator, owed to no
+operand and no docblock: Verified, always. A result the grid computed from the
+operand's fact rests on that fact and carries the operand's own stratum, so
+`(int)` of an `@param int<5, 10>` stays Asserted and can never premise a
+proof-layer finding (ADR-0061 §3). The check is an equality against the floor,
+so a grid answer that happens to land on the base — `(int)` of a `string` — is
+recognized as the operator's guarantee reached the long way round.
+
+### Two named grid refinements, both measured, both shared by `settype`
+
+* **A string with no numeric prefix casts to the zero it is.** The grid widened
+  every non-numeric string to the base, on the ground that reading a leading
+  numeric *prefix* is a rule it does not author. Half of that is right. A string
+  whose first non-whitespace byte cannot begin a number has an **empty** prefix,
+  and PHP writes exactly `0` for it: `(int)` of `'blabla'`, `'  blabla'`,
+  `"\tabc"`, `'e5'`, `'_5'`, `''` and `'   '` are all `0`. The whitespace set is
+  php-src's own and wider than Rust's `trim_ascii_start` (`"\v5"` and `"\f5"`
+  both cast to `5`), so it is spelled out rather than borrowed. The prefix case
+  stays declined, and a leading `.` can never be claimed: `(float)'.5abc'` is
+  `0.5` while `(int)'.5abc'` is `0`.
+* **A narrow int interval enumerates its string spellings.** `(string)` of an
+  `int<5, 10>` is one of six literals, which the finite layer holds exactly.
+  Capped at `Fact`'s own `CAP` and **declining above it rather than
+  truncating** — a truncated `OneOf` is a set the value is not in, which is
+  unsound in the one direction that matters, while the predicate is merely
+  wider. The width is counted in `i128` so `int<min, max>` cannot overflow the
+  count that rejects it.
+
+Both cells live in the grid, so both syntaxes moved: the `settype` fixtures gain
+the same rows the cast expression does. That is the property the slice exists to
+keep — one grid, two syntaxes.
+
+### What this note declines, each with its reason
+
+* **The float-printing rows.** `(string)` of a float is
+  `uppercase-string&non-empty-string` and stays there. A **value**-precise answer
+  is `precision`-ini dependent, which the source report for this slice denied:
+  at PINNED_PHP 8.5.9, `(string)(1/3)` is `'0.33333333333333'` and
+  `(string)(0.1+0.2)` is `'0.3'` — `precision=14` formatting, not
+  shortest-roundtrip, which would give `'0.3333333333333333'` and
+  `'0.30000000000000004'`. No Rust float→string printer is added; those rows go
+  through the sidecar or nowhere.
+* **`(object)`, and `(array)` of an object.** `(object)1` writes a `stdClass`,
+  which the four-layer domain has no member for, so the cast is not carried at
+  all and answers `unknown` rather than a wrong base. `(array)` of an object
+  wants PHP's NUL-mangled private/protected key encoding across the inheritance
+  chain, a second measured table over a property set that lives in the heap
+  store.
+* **`(bool)` of a proven object.** Objects are usually truthy but not always
+  (the issue #625 note's measurement), and the knowledge that a variable holds
+  one lives in `Store::is_exact`, not in a `Fact`, so `Fact::truthy` cannot be
+  asked. The `bool` floor answers.
+* **`decimal-int-string&non-falsy-string` from a signed int range.** The
+  predicate bits exist; `preds_keyword` has no `decimal-int` rung, so a
+  perfectly-computed answer spells *wider* than the assertion. That is an
+  ADR-0030 vocabulary decision, not a cast one.
+* **The truthiness-narrowed `mixed` rows.** `if ($m)` on an untyped parameter
+  wants a truthiness refinement on a variable with no prior fact. That is the
+  narrowing lane's question; a cast slice building a complement carrier for it
+  would be the wrong crate.
+
+Nothing here folds width-sensitive integer arithmetic: `(int)` of a float
+truncates through the grid's own `is_finite`-gated reader, `(int)` of an int is
+the identity, and `(string)` of an int prints exactly. ADR-0028 §3 is untouched.
+
+Fixtures: `crates/steins-syntax/tests/cast_value.rs` (the token map and the
+node's totality), `crates/steins-infer/tests/cast_value_position.rs` (the
+one-grid-two-syntaxes property, the floors, the `(string)` ruling, the two
+lanes, the stratum split), the cast-grid unit tests in `coerce.rs`, and the
+`SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.
