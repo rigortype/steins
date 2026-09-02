@@ -160,3 +160,34 @@ fn a_dead_operand_does_not_silence_the_same_call_elsewhere() {
     );
     assert_eq!(mismatches(&src), 1, "suppression is per-span; the live call still fires");
 }
+
+// The ternary at the DUMP seam (issue #625 leg 1). `\PHPStan\dumpType($c ? A :
+// B)` reads the same evaluator the assignment above does, and marks the untaken
+// arm the same way — the deadness is a fact about PHP's evaluation order, not
+// about which seam noticed it, so declining to mark here would make the same
+// expression report differently for being written inside a dump.
+
+#[test]
+fn a_dumped_ternarys_else_arm_is_not_evaluated_under_a_true_guard() {
+    let src = format!(
+        "{HDR}function f(): void {{ $x = 1; \\PHPStan\\dumpType($x === 1 ? false : takesInt(\"abc\")); }}"
+    );
+    assert_eq!(mismatches(&src), 0, "a dumped ternary's untaken arm never runs either");
+}
+
+#[test]
+fn a_dumped_ternarys_then_arm_is_not_evaluated_under_a_false_guard() {
+    let src = format!(
+        "{HDR}function f(): void {{ $x = 1; \\PHPStan\\dumpType($x === 2 ? takesInt(\"abc\") : false); }}"
+    );
+    assert_eq!(mismatches(&src), 0, "a dumped ternary's untaken arm never runs either");
+}
+
+#[test]
+fn a_dumped_ternarys_arms_control_fires_under_an_undecided_guard() {
+    // The pair's other half: the dump seam suppresses the decision, not the arms.
+    let src = format!(
+        "{HDR}function f(bool $b): void {{ \\PHPStan\\dumpType($b ? takesInt(\"abc\") : takesInt(\"def\")); }}"
+    );
+    assert_eq!(mismatches(&src), 2, "an undecided guard leaves both dumped arms live");
+}

@@ -21,7 +21,7 @@ use crate::arg_check::{
 use crate::assign::eval_coalesce_fact;
 use crate::builtin_returns::store_holds_resource;
 use crate::coerce::{coerce_fact_to_native, coerce_into_param};
-use crate::cond::{eval_binary_fact, eval_isset_fact};
+use crate::cond::{eval_binary_fact, eval_isset_fact, eval_ternary_fact};
 use crate::contract::IsA;
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
@@ -40,7 +40,7 @@ use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Site};
 use crate::refine::refine_contract_arms;
 use crate::return_arms::{fn_return_arms, native_arms};
-use crate::walk::{WalkCx, analyze_scope};
+use crate::walk::{WalkCx, analyze_scope, value_stratum};
 
 /// The class FQN that lexically owns a method scope; `None` for function/top.
 pub(crate) fn scope_class(scope: &Scope) -> Option<&str> {
@@ -1999,6 +1999,30 @@ pub(crate) fn return_value_fact(
         && let Some((read, strat)) = shape_read_at(base, key, env, poisoned, w.cx.php_minor)
         && let Some(fact) = read.into_fact()
     {
+        return Some((fact, strat));
+    }
+    // A ternary `return $c ? A : B;` (ADR-0031, issue #625): the guard's verdict
+    // picks the taken arm's fact, an undecided guard joins both. Above the literal
+    // rung for the reason the `??` below it is — a ternary is never a literal the
+    // folder can reach — and present here because a returned rvalue crosses a
+    // `return` with the fact `$x = <rvalue>` binds (issue #590's rule), which for
+    // a ternary it did not: the evaluator was wired into the assignment seam
+    // alone.
+    //
+    // The stratum is the assignment seam's, `min` over the arms: either could be
+    // the taken one under a `Maybe` verdict.
+    //
+    // This rung's `mark_dead_span` side effect is discarded, and correctly so:
+    // `return_value_fact` runs under a binding descent whose `WalkCx` owns its own
+    // `dead` vec and whose `dead_out` sink is `None` (only the plain per-scope
+    // walk's regions are universal truths — a descent's are dead for that binding
+    // only). So the marking discipline needs nothing from this call site.
+    if let ArgValue::Ternary { cond, then_val, then_span, else_val, else_span } = value
+        && let Some(fact) =
+            eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
+    {
+        let strat = value_stratum(then_val, env, Some(store))
+            .min(value_stratum(else_val, env, Some(store)));
         return Some((fact, strat));
     }
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the
