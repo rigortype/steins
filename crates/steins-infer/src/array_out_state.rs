@@ -4,12 +4,21 @@
 //!
 //! The witness says the write happened; nothing here re-argues that. Each rule
 //! below answers only the second question — given what the caller's variable
-//! held *before* the call, what does it hold after — and **declines** (`None`)
-//! on any premise it cannot prove, which leaves ADR-0063 §2.3's by-ref
-//! invalidation standing as the FP-safe floor.
+//! held *before* the call, what does it hold after.
+//!
+//! **A rule that cannot prove a premise floors rather than declining**, which
+//! is where this family departs from ADR-0077 §3.3's "decline and let the
+//! invalidation stand". The witness proves more than §3.3 was asking it for:
+//! every name here raises a `TypeError` on a non-array argument, so control
+//! reaching the next statement is itself the proof that the argument was an
+//! array. [`ArrayOutRule::floor`] is what an array is left as — still strictly
+//! more than the `unknown` the invalidation leaves, and strictly less than any
+//! claim the rule could not prove. The per-rule functions keep returning
+//! `Option` so each one says for itself which premises it needs; the floor is
+//! applied once, at [`ArrayOutRule::written_fact`].
 //!
 //! Every row is transcribed from a `php -r` at `PINNED_PHP` (8.5.9), quoted in
-//! the rule's own doc (ADR-0061 §4). Two of those probes contradict a plain
+//! the rule's own doc (ADR-0061 §4). Three of those probes contradict a plain
 //! reading of the php-src stub, and the rules are shaped by the probe:
 //!
 //! * `array_unshift` and `array_splice` **preserve string keys** — only the
@@ -19,6 +28,9 @@
 //! * a comparator that writes to the array under `usort`/`uasort` has its
 //!   writes **discarded**, so the result rests on the input alone and a
 //!   callback-invoking sort needs no callback analysis to state its out-state.
+//! * the next append index counts **negative** keys since PHP 8.3:
+//!   `array_push([-3 => 1], 9)` measures `[-3 => 1, -2 => 9]`, not `[..., 0 =>
+//!   9]` ([`next_append_key`]).
 
 use steins_domain::{
     Certainty, Fact, IntRange, Key, Presence, ShapeFact, Tail, Val, keys_are_a_list,
