@@ -854,6 +854,68 @@ impl ShapeFact {
         )
     }
 
+    /// **The write at a key nobody can name** (issue #636): `$x[$i] = v`, where
+    /// the index expression does not resolve to a literal key. `key` bounds the
+    /// class the index can land in and `value` is the written value's fact
+    /// (`None` for unknown).
+    ///
+    /// The result admits every array reachable from an admitted array by
+    /// setting **one** key of class `key` to a value `value` admits. That is
+    /// weaker than [`ShapeFact::promote_present`]'s named write in every
+    /// component that depends on *which* key moved, and stronger than the
+    /// barrier in every component that does not:
+    ///
+    /// - **presence** — a write never removes, so `Required` stays `Required`
+    ///   and `Optional` stays `Optional`. A proven `Absent` key the class
+    ///   admits weakens to `Optional`: the write may have been exactly that
+    ///   key. An `Absent` key of the other class keeps its proof.
+    /// - **slots** — every slot the class admits joins with `value`, because
+    ///   any one of them may be the slot that was overwritten. Slots of the
+    ///   other class are untouched.
+    /// - **tail** — unseals to `key`, since the write may have landed on a key
+    ///   the shape never declared. An already-unsealed tail joins instead.
+    /// - **`non_empty`** — `true` unconditionally: whether the write added a
+    ///   key or overwrote one, an entry is there afterwards.
+    /// - **`is_list`** — surrendered to `normalize`'s denotational recompute.
+    ///   Carrying it would be unsound in both directions: `[1, 2, 3]` written
+    ///   at index `7` is no longer a list, and a non-list can become one.
+    /// - **count** — the floor survives (nothing was removed); the ceiling
+    ///   rises by exactly one (at most one key was added).
+    /// - **covers** — survive untouched. A cover claims at least one of its
+    ///   keys is present, and a write can only add keys.
+    /// - **order** — dropped by `normalize_counted`, correctly: an appended
+    ///   key goes to the end and an overwrite changes nothing, and the write
+    ///   does not say which happened.
+    #[must_use]
+    pub fn write_at_unknown_key(&self, key: KeyClass, value: Option<&Fact>) -> ShapeFact {
+        let written: Option<Box<Fact>> = value.cloned().map(Box::new);
+        let fields: Vec<Field> = self
+            .fields
+            .iter()
+            .map(|(k, p, slot)| {
+                if !key.admits_key(k) {
+                    return (k.clone(), *p, slot.clone());
+                }
+                let p = match p {
+                    Presence::Absent => Presence::Optional,
+                    other => *other,
+                };
+                (k.clone(), p, join_slots(slot, &written))
+            })
+            .collect();
+        let tail = join_tails(&self.tail, &Tail::Unsealed { key, value: written });
+        let count_bound = IntRange::new(self.count_bound.lo(), self.count_bound.hi().saturating_add(1))
+            .unwrap_or(IntRange::NON_NEGATIVE);
+        ShapeFact::normalize_counted(
+            fields,
+            tail,
+            Certainty::Maybe,
+            true,
+            self.covers.clone(),
+            count_bound,
+        )
+    }
+
     /// **The `is_list` flag flip** (RFC #14939's C1): `array_is_list($x)`
     /// narrows to [`Certainty::Yes`]/[`Certainty::No`] — a pure flag flip, no
     /// structural surgery.
@@ -2325,6 +2387,136 @@ mod tests {
                 }
             }
         }
+    }
+
+    // write_at_unknown_key (`$x[$i] = v`, issue #636)
+
+    /// The operator's whole law: for every admitted `v`, every key the class
+    /// admits and every value, `v` with that key set is still admitted. This is
+    /// the exhaustive check that the weakenings on presence, slots, tail,
+    /// `is_list` and count are each big enough.
+    #[test]
+    fn write_at_unknown_key_admits_every_member_with_any_one_key_set() {
+        let written = [Val::Int(1), Val::Int(9), Val::Str("z".into()), Val::Null];
+        for s in &operator_shape_universe() {
+            for v in &operator_array_universe() {
+                if !s.admits(v) {
+                    continue;
+                }
+                for class in [KeyClass::Int, KeyClass::Str, KeyClass::ArrayKey] {
+                    for key in operator_key_universe().iter().filter(|k| class.admits_key(k)) {
+                        for w in &written {
+                            let mut after: Vec<(Key, Val)> = v.clone();
+                            match after.iter_mut().find(|(ek, _)| ek == key) {
+                                Some(slot) => slot.1 = w.clone(),
+                                None => after.push((key.clone(), w.clone())),
+                            }
+                            let got = s.write_at_unknown_key(class, None);
+                            assert!(
+                                got.admits(&after),
+                                "{s:?} written at {key:?} = {w:?} left {after:?}, rejected by {got:?}"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn write_at_unknown_key_is_non_empty_and_unsealed() {
+        let s = sealed(vec![(ks("a"), req(), int_slot(1))]);
+        let n = s.write_at_unknown_key(KeyClass::ArrayKey, None);
+        assert!(n.non_empty, "a write leaves at least the key it wrote");
+        assert!(matches!(n.tail, Tail::Unsealed { key: KeyClass::ArrayKey, .. }));
+        // The key that was there is still there — a write never removes.
+        assert_eq!(n.field(&ks("a")).map(|(_, p, _)| *p), Some(req()));
+        // …but its value may be the one that was just written.
+        assert!(n.admits(&arr(vec![(ks("a"), Val::Str("x".into()))])));
+    }
+
+    /// `[1, 2, 3]` written at an index nobody can name is no longer a list:
+    /// `php -r '$a=[1,2,3]; $i=7; $a[$i]=99; var_dump(array_is_list($a));'`
+    /// prints `false`.
+    #[test]
+    fn write_at_unknown_key_surrenders_list_ness() {
+        let list = sealed(vec![
+            (k(0), req(), int_slot(1)),
+            (k(1), req(), int_slot(2)),
+            (k(2), req(), int_slot(3)),
+        ]);
+        assert_eq!(list.set_is_list(Certainty::Yes).is_list, Certainty::Yes);
+        let n = list.write_at_unknown_key(KeyClass::Int, None);
+        assert_ne!(n.is_list, Certainty::Yes);
+        assert!(n.admits(&arr(vec![
+            (k(0), Val::Int(1)),
+            (k(1), Val::Int(2)),
+            (k(2), Val::Int(3)),
+            (k(7), Val::Int(99)),
+        ])));
+    }
+
+    /// A key of the other class keeps its proof: `$a[$i] = v` with `int $i`
+    /// cannot have resurrected `'a'`, and cannot have touched its slot.
+    #[test]
+    fn write_at_unknown_key_spares_the_other_key_class() {
+        let s = unsealed(
+            vec![(ks("a"), Presence::Absent, None), (ks("b"), req(), int_slot(2))],
+            KeyClass::ArrayKey,
+            None,
+        );
+        let n = s.write_at_unknown_key(KeyClass::Int, slot(Fact::Singleton(Val::Str("w".into()))).as_deref());
+        assert_eq!(n.field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Absent));
+        assert_eq!(n.field(&ks("b")).and_then(|(_, _, s)| s.clone()), int_slot(2));
+        // The same write under `ArrayKey` can have been either of them.
+        let m = s.write_at_unknown_key(KeyClass::ArrayKey, None);
+        assert_eq!(m.field(&ks("a")).map(|(_, p, _)| *p), Some(Presence::Optional));
+        assert_eq!(m.field(&ks("b")).and_then(|(_, _, s)| s.clone()), None);
+    }
+
+    /// The written value is what a same-class slot may now hold — the join,
+    /// not the unknown floor. `array<int, int>` written with an `int` is still
+    /// `non-empty-array<int, int>`.
+    #[test]
+    fn write_at_unknown_key_joins_the_written_value_into_the_tail() {
+        let s = unsealed(
+            Vec::new(),
+            KeyClass::Int,
+            slot(Fact::General { base: Base::Int, nullable: false }),
+        );
+        let n = s.write_at_unknown_key(
+            KeyClass::Int,
+            Some(&Fact::Singleton(Val::Int(7))),
+        );
+        assert!(n.non_empty);
+        assert_eq!(
+            n.tail,
+            Tail::Unsealed {
+                key: KeyClass::Int,
+                value: slot(Fact::General { base: Base::Int, nullable: false }),
+            }
+        );
+    }
+
+    /// A cover survives: it claims at least one of its keys is present, and a
+    /// write can only add keys. The count floor survives for the same reason;
+    /// the ceiling rises by the one key the write may have added.
+    #[test]
+    fn write_at_unknown_key_keeps_covers_and_relaxes_the_ceiling_by_one() {
+        let s = ShapeFact::normalize_counted(
+            vec![
+                (ks("a"), Presence::Optional, int_slot(1)),
+                (ks("b"), Presence::Optional, int_slot(2)),
+            ],
+            Tail::Sealed,
+            Certainty::Maybe,
+            false,
+            vec![Cover::new(vec![ks("a"), ks("b")], CoverFlavor::Isset)],
+            IntRange::new(1, 2).expect("valid"),
+        );
+        let n = s.write_at_unknown_key(KeyClass::Str, None);
+        assert_eq!(n.covers, s.covers);
+        assert_eq!(n.count_bound, IntRange::new(1, 3).expect("valid"));
     }
 
     // record_cover / cover_proves (A-G8 recording, A-G11 discharge) — S5
