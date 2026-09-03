@@ -1915,3 +1915,137 @@ node's totality), `crates/steins-infer/tests/cast_value_position.rs` (the
 one-grid-two-syntaxes property, the floors, the `(string)` ruling, the two
 lanes, the stratum split), the cast-grid unit tests in `coerce.rs`, and the
 `SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.
+
+## Note (2026-09-04): concatenation has the same floor, and its predicate table is measured, not derived (issue #627) — PENDING ratification
+
+Recorded beside the issue #626 note above, and for the same reason: what it
+settles is an application of **§5's derivation clause** and of the value-seam
+floor discipline, not a new rule of either.
+
+Issue #627 brought `.` to the value seam. Unlike the cast, the carrier had been
+in the IR since issue #59 — `ArgValue::Concat`, lowered structurally and
+left-nested — but only `Cx::resolve_literal_under` ever read it, and only when
+BOTH operands folded to a literal. One unproven operand and the expression
+answered `unknown`, not even the `string` the operator guarantees. The slice is
+an evaluator (`eval_concat_fact`) at the same four seams, an interpolation
+lowering, and `SCHEMA_VERSION` 12 → 13.
+
+### The floor is the cast note's ruling, unchanged
+
+`.` is total on exactly the operands `(string)` is total on, and for the same
+reason. Measured at PINNED_PHP 8.5.9:
+
+```
+$ php -r 'var_dump([1,2] . "");'          Warning: Array to string conversion
+                                          string(5) "Array"
+$ php -r '$f=fopen("php://memory","r"); var_dump($f . "");'
+                                          string(14) "Resource id #5"
+$ php -r 'echo new stdClass . "a";'       Error: Object of class stdClass could
+                                          not be converted to string
+```
+
+A concatenation that completes yields a `string`; the only escape is a throw,
+which yields no value for a floor to be wrong about. So `string` is the floor
+and no `.` answers `unknown`. **The grid's refusal to state `'Array'` stands**:
+the operand's string is read through `php_cast_fact`, which still declines an
+array input, so the floor is minted by the evaluator as the *operator's* claim
+and the value `'Array'` is never spoken.
+
+### The operand columns are read from the cast grid, never restated
+
+Each operand's contribution is `value_operand_fact` composed with
+`php_cast_fact(…, CastTarget::String)` — the same table `settype($v, 'string')`
+and `(string) $v` read. `int` therefore contributes `DECIMAL_INT.close()` and
+`float` contributes `float_string_fact()` (`UPPERCASE ∧ NON_EMPTY`, never
+`NUMERIC` because `is_numeric('NAN')` is false, and never a value because the
+spelling is `precision`-ini dependent). Three syntaxes, one table, no drift.
+
+### The predicate table, and the two rules the corpus killed
+
+Every cell was brute-forced against the engine over a 62-string corpus — all
+3,844 ordered pairs per candidate rule — rather than derived on paper. Four
+rules survived:
+
+| bit | rule |
+| --- | --- |
+| `NON_EMPTY` | `ne(a) ∨ ne(b)` |
+| `NON_FALSY` | `nf(a) ∨ nf(b) ∨ (ne(a) ∧ ne(b))` |
+| `LOWERCASE` | `lc(a) ∧ lc(b)` |
+| `UPPERCASE` | `uc(a) ∧ uc(b)` |
+
+Two did not, and the issue asserts one of them. **`NUMERIC` does not compose**:
+`'0' . '-1'` is `'0-1'`, so two numeric — even two decimal-int — operands need
+not concatenate to a numeric string, because a decimal-int string may carry a
+sign the bitset does not record. **Neither does the array-key-cast pair**:
+`'0' . '0'` is `'00'`, numeric but not decimal-int, and `'-' . '9223372036854775808'`
+is a decimal-int string built from two operands that are not. phpstan-src's own
+`bug-11129.php` agrees on both counts.
+
+What is sound for `NUMERIC` is one-sided and needs the right operand's bytes:
+every decimal-int string is an optional `-` then a digit run, so `a . b` scans
+under PHP's numeric grammar exactly as `'1' . b` does. `dec(a)` plus
+`is_numeric('1' . b)`, asked of the engine's own `is_numeric` for each member of
+`b`'s finite value set, decides it. The mirror rung — `'0' . $positiveInt` is
+numeric because a positive int prints unsigned — is **not** built: it needs a
+sign bit `StrPreds` does not have, and adding one is issue #600's territory with
+ADR-0059's Lean lockstep attached. `Refinement` and `StrPreds` are unchanged.
+
+### The identity is a rung, not a cell
+
+`'' . $x` IS `$x`'s string projection, and the table cannot say so: "empty" is
+the *absence* of `NON_EMPTY`, and an implication-closed bitset of positive
+literals has no negative literal to express it. So the identity sits above the
+table. Without it the two spellings of one law disagree — `$i . ''` kept
+`NUMERIC` through the rule above while `'' . $i` lost it.
+
+### The union product is bounded before it is built
+
+`CAP` is 8 and the bound is charged on the **combination count**, before any
+pair is concatenated, and it **declines** above it — ADR-0028 §3's ruling for
+the issue #74 fold, for the reason that carries over unchanged: a value set
+missing a member is wrong, where a predicate is merely wider. Charging it on the
+finished list would be a different rule, because an overlapping product collapses
+under dedup: `('a'|'aa'|'aaa') . ('a'|'aa'|'aaa')` is nine combinations and five
+distinct values, and a post-hoc bound would admit it.
+
+### Interpolation is the same node, and that is what moves the schema
+
+`"a $v"` is desugared concatenation and now lowers to the same left-nested
+chain, seeded with `''` so that `"$v"` keeps the string cast `$v` alone does not
+have. A heredoc (`CompositeString::Document`) and a backtick string
+(`ShellExecute`) deliberately do not lower: the first applies closing-marker
+indentation stripping the part values do not record, the second runs a shell
+command. Legs 1 and 2 are pure inference and move no schema; this lowering is
+what takes `SCHEMA_VERSION` to 13, and it is the *under-answer* kind of bump —
+no variant is added or re-ordered, so an old payload still decodes and merely
+states something weaker.
+
+### What this note declines, each with its reason
+
+* **The nine `bcmath-number.php` rows.** Two objects concatenating through
+  `__toString`; the object lane's business, and the file gates on PHP ≥ 8.4.
+* **The two float literal folds** (`1.0 . 'b'`, `1.0 . 2.0`). PHP's
+  float-to-string follows the `precision` ini directive — `(1/3) . ''` is
+  `'0.33333333333333'` at the default 14, neither shortest-roundtrip nor
+  environment-independent — so no Rust float printer is added. `coerce.rs`'s
+  float row already records the same finding.
+* **`decimal-int-string&non-falsy-string`.** Computed correctly, spelled wider:
+  `preds_keyword` has no `decimal-int` rung, which is the ADR-0030 vocabulary
+  decision the cast note routed the same rows to.
+* **`literal-string`.** Provenance, not a value property; ADR-0038 excludes it
+  and the floor answers the rows that mattered.
+* **`.=`.** Still `ArgValue::Other`. Lowering `$s .= $x` as `$s = $s . $x` is
+  right for a bare variable and wrong for a by-ref or property left-hand side;
+  one nsrt row does not buy that generalization.
+
+Nothing here folds width-sensitive arithmetic: `.` joins bytes and the int→string
+direction prints exactly, so ADR-0028 §3 is untouched. The one place it could
+have entered — deciding `NUMERIC` for two integers by reasoning about their
+magnitude — is exactly the rule the corpus refuted.
+
+Fixtures: `crates/steins-infer/tests/concat_value_position.rs` (one test per
+table cell, each pinned by a rendering only that cell decides; the identity, the
+cap's decline, the four seams, the interpolation lowering and the stratum split),
+`crates/steins-infer/tests/concat.rs` (the refusals, restated as the widened fact
+they now render), and the `SCHEMA_VERSION` round-trip in
+`crates/steins-db/src/persist.rs`.
