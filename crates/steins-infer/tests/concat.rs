@@ -204,11 +204,11 @@ fn float_operand_widens() {
         let got = dumped(src);
         assert_eq!(got, "non-falsy-string", "{src}");
         assert!(!got.contains('\''), "a float value leaked into `{src}`: {got}");
-        // **The lane that actually holds `concat_cast`.** The three assertions
+        // **The lane that actually holds `concat_cast`.** The two assertions
         // above are answered by the cast grid one rung higher up and stay green
         // even if `concat_cast` starts admitting floats; only argument position
-        // still reaches it. `int` is `strlen`'s declared return with no fold
-        // behind it — any integer here means a float value was invented.
+        // still reaches it. `int<0, max>` is `strlen`'s own contract with no fold
+        // behind it — a bare integer here means a float value was invented.
         assert_eq!(strlen_of(src), "int<0, max> (asserted)", "the literal lane folded `{src}`");
     }
     // Why the refusal exists, in one measurement: PHP prints this float under
