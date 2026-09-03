@@ -8,7 +8,7 @@ use std::rc::Rc;
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, AssignmentOperator, BinaryOperator, Call, Construct, Expression,
-    Node, Statement, StringPart, UnaryPrefixOperator, Variable,
+    Node, Statement, StringPart, UnaryPrefixOperator, Variable, While,
 };
 
 use crate::ast::{
@@ -102,10 +102,13 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // ends in break/return/throw/exit (no fall-through); else it stays
         // `Opaque` like the loop constructs below.
         Statement::Switch(sw) => lower_switch(sw).unwrap_or_else(|| lower_opaque(s)),
+        // A `while` is structured (ADR-0027 amendment, issue #649): the sets an
+        // `Opaque` carries, plus its condition and its body as a sub-trace.
+        Statement::While(wh) => lower_while(s, wh),
         // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
-        // the walk forgets only its write/read set, not the whole env.
-        Statement::While(_)
-        | Statement::For(_)
+        // the walk forgets only its write/read set, not the whole env. The three
+        // remaining loop forms join `while` in issue #650.
+        Statement::For(_)
         | Statement::Foreach(_)
         | Statement::DoWhile(_)
         | Statement::Try(_) => lower_opaque(s),
@@ -647,6 +650,24 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
         .collect();
     let else_trace = body.else_statements().map(lower_trace);
     Stmt::lowered(StmtKind::If { cond, then_trace, elseifs, else_trace }, Vec::new())
+}
+
+/// Lower a `while` to [`StmtKind::While`] (ADR-0027 amendment, issue #649). The
+/// sets come from [`opaque_sets`] over the whole construct, unchanged — the
+/// condition is part of that subtree, so every name the header mentions is
+/// already forgotten before the walk applies the header's own narrowing. The body
+/// lowers by the same statement rules as any other sub-trace, so a nested `if`
+/// recurses and a nested `try` appears as an `Opaque` within it.
+///
+/// A condition [`lower_cond`] cannot represent becomes [`CondExpr::Opaque`],
+/// which narrows nothing — the body still lowers and still walks. There is no
+/// refusal path here for that reason: unlike `switch`, no part of a `while` is
+/// unrepresentable enough to cost the whole construct its body.
+fn lower_while(s: &Statement<'_>, wh: &While<'_>) -> Stmt {
+    let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
+    let cond = lower_cond(wh.condition);
+    let body = lower_trace(wh.body.statements());
+    Stmt::lowered(StmtKind::While { cond, body, writes, reads, poisons, may_return }, Vec::new())
 }
 
 /// Lower a borrowed statement list to a sub-trace (a branch body). Shares the

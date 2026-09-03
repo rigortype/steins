@@ -738,7 +738,9 @@ fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
 }
 
 /// Collect every structurally-visible `return <value>`, recursing into `if`/`match`
-/// sub-traces — a return inside an `Opaque` loop/try is not modeled here or there.
+/// sub-traces — a return inside a loop or a `try` is not modeled here. A structured
+/// `while` (issue #649) carries its body, but a return inside it is reached only on
+/// an iteration that may never happen, so it stays as invisible as an `Opaque`'s.
 fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     for s in stmts {
         match &s.kind {
@@ -767,9 +769,14 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
 
 /// Whether the list contains control flow the trace doesn't model (`Opaque`/
 /// `Barrier`); recurses into modeled `if`/`match` sub-traces.
+///
+/// A structured `while` (issue #649) answers `true` with its `Opaque` predecessor.
+/// Carrying a body the walk can enter buys findings inside it; it does not model
+/// the construct's data flow — what a loop-carried binding holds on the second
+/// iteration is still unknown — and this predicate is asked the latter question.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
-        StmtKind::Opaque { .. } | StmtKind::Barrier => true,
+        StmtKind::Opaque { .. } | StmtKind::While { .. } | StmtKind::Barrier => true,
         StmtKind::If { then_trace, elseifs, else_trace, .. } => {
             contains_opaque(then_trace)
                 || elseifs.iter().any(|(_, b)| contains_opaque(b))
