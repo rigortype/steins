@@ -870,9 +870,17 @@ pub enum ArgValue {
     /// A string concatenation `$a . $b` (issue #59). Lowered **structurally**,
     /// not folded — operands commonly include a [`Self::Var`] whose value only
     /// the walk knows. Left-nested (`a . b . c` is `Concat(Concat(a, b), c)`),
-    /// matching PHP associativity. Not itself proven — resolves only when both
-    /// operands' string cast is *total and environment-independent* (see
-    /// `concat_cast`; `float` excluded). A compound `.=` lowers to [`Self::Other`].
+    /// matching PHP associativity. Not itself proven — the LITERAL seam resolves
+    /// it only when both operands' string cast is *total and
+    /// environment-independent* (see `concat_cast`; `float` excluded). Since
+    /// issue #627 the FACT seam (`eval_concat_fact`) answers the rest: a
+    /// predicate set over `StrPreds`, or the `string` floor the operator
+    /// guarantees. A compound `.=` lowers to [`Self::Other`].
+    ///
+    /// **An interpolated string is this node too** (issue #627): `"a $v"` is
+    /// desugared concatenation and lowers to the same chain, seeded with `''` so
+    /// that `"$v"` keeps the string cast `$v` alone would not have. A heredoc and
+    /// a backtick string are not — see `lower_interpolation`.
     Concat(Box<ArgValue>, Box<ArgValue>),
     /// A bare **global-constant fetch** (`PREG_SET_ORDER`, `SOME_CONST`) in value
     /// position (issue #168), **unproven** like [`ArgValue::ClassConst`] — PHP

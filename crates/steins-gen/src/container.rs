@@ -81,9 +81,20 @@ use crate::names::{PackageName, SectionName};
 /// the bump buys; on top of that it spells every `while` as an `Opaque` and every
 /// `break`/`continue` as a `Barrier`, replaying silence for a body this binary
 /// judges and an erased env where it now keeps one.
+/// `14` is interpolation lowering (issue #627): `"a $v"` used to lower to
+/// `ArgValue::Other` and now lowers to the left-nested `ArgValue::Concat` chain it
+/// desugars to, so a schema-13 trace answers `unknown` for a value this binary
+/// decides — the string PHP guarantees at worst, the folded literal at best. This
+/// is the **under-answer** kind of bump, like `11` and unlike either of the two
+/// entries above it: no `ArgValue` variant is added or re-ordered — the change is a
+/// lowering and a doc — so a schema-13 payload still decodes correctly and merely
+/// states something weaker than the source does. It neither misdecodes the way
+/// `12` does nor shifts a variant index the way `13` does. The reach is wider than
+/// the row count suggests, because an `Other` element collapses its enclosing array
+/// literal: a schema-13 trace spells `['k' => "$a/$b"]` as no array at all.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 13;
+pub const SCHEMA_VERSION: u32 = 14;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

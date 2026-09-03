@@ -5,8 +5,9 @@
 use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, ArrayElement, Binary, BinaryOperator, Call, ClassLikeConstantSelector,
-    ClassLikeMemberSelector, Construct, DeclareItem, Expression, FunctionCall, Instantiation,
-    Literal, Node, PartialApplication, Statement, UnaryPrefixOperator, Variable,
+    ClassLikeMemberSelector, CompositeString, Construct, DeclareItem, Expression, FunctionCall,
+    Instantiation, Literal, Node, PartialApplication, Sequence, Statement, StringPart,
+    UnaryPrefixOperator, Variable,
 };
 use steins_domain::PhpStr;
 
@@ -720,6 +721,17 @@ pub(crate) fn lower_arg_value(expr: &Expression<'_>) -> ArgValue {
         Expression::Binary(b) if b.operator.is_concatenation() => {
             ArgValue::Concat(Box::new(lower_arg_value(b.lhs)), Box::new(lower_arg_value(b.rhs)))
         }
+        // An interpolated double-quoted string `"a $v b"` (issue #627).
+        // Interpolation IS desugared concatenation, so it lowers to the same
+        // left-nested `Concat` chain the `.` arm above builds and rides every rung
+        // of `eval_concat_fact` for free. Only the `Interpolated` form: a heredoc
+        // (`CompositeString::Document`) applies closing-marker indentation
+        // stripping that the part values do not record, and a backtick string
+        // (`ShellExecute`) runs a shell command and is not a concatenation at all.
+        // Both keep widening to [`ArgValue::Other`].
+        Expression::CompositeString(CompositeString::Interpolated(is)) if is.prefix.is_none() => {
+            lower_interpolation(&is.parts)
+        }
         // A comparison in VALUE position (issue #260): `$b = $x > 3;` rather than
         // `if ($x > 3)`. Structural like `.` and `??` above — the SAME `eval_cmp`
         // that decides a guard decides this one. Arithmetic and logical operators
@@ -965,6 +977,34 @@ fn lower_int_literal(raw: &[u8]) -> ArgValue {
         }
         Err(_) => ArgValue::Other,
     }
+}
+
+/// An interpolated string's parts as a left-nested [`ArgValue::Concat`] chain
+/// (issue #627), matching PHP's own left-to-right join.
+///
+/// **The empty-string seed is load-bearing, not a tidy start value.** `"$a"` is
+/// not `$a` — it is `(string) $a`, so a one-expression interpolation must still
+/// cross a concatenation for the string cast to happen. Seeding with `''` says
+/// exactly that with no special case, and the evaluator's identity rung collapses
+/// the node again on the way out.
+///
+/// A literal part whose escape decoding failed declines the whole string rather
+/// than dropping a part — a chain missing a part would be a *wrong* value, not a
+/// wider one.
+fn lower_interpolation(parts: &Sequence<'_, StringPart<'_>>) -> ArgValue {
+    let mut acc = ArgValue::Str(PhpStr::new());
+    for part in parts.iter() {
+        let part = match part {
+            StringPart::Literal(l) => match l.value {
+                Some(bytes) => ArgValue::Str(PhpStr::from_bytes(bytes)),
+                None => return ArgValue::Other,
+            },
+            StringPart::Expression(e) => lower_arg_value(e),
+            StringPart::BracedExpression(b) => lower_arg_value(b.expression),
+        };
+        acc = ArgValue::Concat(Box::new(acc), Box::new(part));
+    }
+    acc
 }
 
 fn lower_literal(lit: &Literal<'_>) -> ArgValue {

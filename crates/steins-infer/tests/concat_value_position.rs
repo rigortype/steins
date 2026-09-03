@@ -407,6 +407,54 @@ fn the_literal_lane_reads_the_fold_the_value_lane_would() {
 }
 
 // ---------------------------------------------------------------------------
+// Interpolation is the same node
+// ---------------------------------------------------------------------------
+
+#[test]
+fn an_interpolated_string_is_the_concatenation_it_desugars_to() {
+    // `binary.php:517` — a proven operand inside an interpolation, which used to
+    // not lower at all.
+    assert_eq!(
+        one_dump(
+            "<?php\nfunction f(): void { $foo = 'foo'; \\PHPStan\\dumpType(\"$foo bar\"); }\n"
+        ),
+        "'foo bar'"
+    );
+    // Every rung above reaches it: the floor, the table, and the cross product
+    // (`constant-string-unions.php:55`, a 2 × 2 inside the cap).
+    assert_eq!(over("string $s", "\"Hello $s\""), "non-falsy-string");
+    assert_eq!(over("int $i", "\"{$i}0\""), "non-falsy-numeric-uncased-string");
+    assert_eq!(
+        over_doc(&["@param 'a'|'b' $u", "@param 0|1 $n"], "$u, $n", "\".$u.$n.\""),
+        "'.a.0.'|'.a.1.'|'.b.0.'|'.b.1.' (asserted)"
+    );
+}
+
+#[test]
+fn a_one_expression_interpolation_still_casts_to_string() {
+    // `"$i"` is NOT `$i` — it is `(string) $i`, which is what the empty-string
+    // seed in `lower_interpolation` buys. Without it this would answer `int`.
+    assert_eq!(over("int $i", "\"$i\""), over("int $i", "(string) $i"));
+    assert_eq!(over("int $i", "\"$i\""), "numeric-uncased-string");
+    // And an array interpolates to a string without the value `'Array'` being
+    // stated, exactly as the `.` spelling does.
+    assert_eq!(over("array $a", "\"$a\""), "string");
+}
+
+#[test]
+fn a_heredoc_and_a_backtick_string_are_not_lowered() {
+    // A heredoc applies closing-marker indentation stripping that the parser's
+    // part values do not record, and a backtick string runs a shell command. Both
+    // keep widening rather than claiming a concatenation's answer.
+    assert_eq!(
+        one_dump(
+            "<?php\nfunction f(string $s): void { \\PHPStan\\dumpType(<<<EOT\n  x $s\n  EOT); }\n"
+        ),
+        "unknown"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Stratum
 // ---------------------------------------------------------------------------
 
