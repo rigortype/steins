@@ -21,3 +21,55 @@ sound floor. This is how "the program works outranks the worst-case
 reading" becomes an implementation strategy rather than a slogan: we never
 guess and then patch false positives away; we widen first and prove our way
 narrower.
+
+## Amendment (2026-09-03): a `while` body is a sub-trace, entered under its own header — PENDING ratification
+
+Issue #649. The ratchet above forgets a construct's write and read sets and
+keeps the rest of the env; that is what it does *to the code after* the
+construct. What went unstated is what it does to the code *inside* one:
+nothing at all, because the body never lowered. `while`, `for`, `foreach`,
+`do`/`while` and `try` all became `StmtKind::Opaque`, a variant with sets
+and no statements, so the walk had no body to enter and every trace-borne
+finding inside a loop was silence. The same `call.undefined-method` fixture
+fires at the top level and inside an `if` and said nothing inside a `while`;
+scope-level families reading the CST (`variable.undefined`) fired in there
+regardless, so the surface was inconsistent as well as incomplete.
+
+`while` now lowers to `StmtKind::While`, carrying its condition and its body
+as a sub-trace. The sets are unchanged and land exactly as before, so the
+construct's effect on its successor is byte-identical. What they leave
+standing is then also the body's **entry env**, narrowed by the header's
+true-side refinements — the same application an `if`'s then-branch takes,
+for the same reason: PHP evaluates the header immediately before every entry
+to the body.
+
+**No fixpoint, and this is the load-bearing part.** The entry env is not the
+previous iteration's exit; it is the post-forget env, in which every name the
+body can touch is already ⊤. Nothing in it is specific to an iteration, so
+it is valid for all of them, the first included — and a body whose last
+statement reassigns the very subject the header narrowed on re-derives the
+fact at the next entry rather than losing it. That shape is the motivating one: an AST
+traversal walking a parent pointer types its subject from the loop header and
+from nowhere else, because the accessor it calls is untyped.
+
+The body contributes **findings, not facts**. Its exit env is discarded, so
+what a loop computes cannot reach the code after it, and the negated
+condition does not ride the fall-through — a `break` leaves a loop without
+falsifying its header, so that is a separate question with a separate gate
+(issue #651). A header the walk decides false leaves its body unwalked; the
+region is not marked dead, since withdrawing what the env-free direct pass
+already reports there is a separate judgment from adding what the walk now
+reports.
+
+Two costs stay, both deliberate. The write set is still the coarse
+over-approximation `Opaque` uses — every variable handed to any call in the
+subtree is in it — so a binding the body merely passes to a call arrives
+unknown even where the header could not have changed it; recovering those is
+ADR-0070's by-value survivor rule applied to a construct's sets rather than a
+statement's, which moves every `Opaque`'s fall-through too. And `for`,
+`foreach` and `do`/`while` are still body-less (issue #650); `do`/`while`
+will need the entry narrowing **withheld** when it arrives, its first
+iteration running before its condition is ever evaluated.
+
+`StmtKind::While` sits before `Opaque` in the enum and the wire codec carries
+a variant by index, so `SCHEMA_VERSION` moves 11 → 12.
