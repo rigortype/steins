@@ -790,16 +790,25 @@ impl Store {
         }
     }
 
-    /// Sweep the `$this` object's non-readonly props and value carries (ADR-0057 C5) —
-    /// what a call running with the same `$this` may have written behind this walk's
-    /// back. A no-op where `$this` is unbound.
-    pub(crate) fn sweep_this(&mut self) {
-        if let Some(id) = self.refs.get("this").copied()
+    /// Sweep the object `var` refers to: its non-readonly props and its value
+    /// generic carries go, its class and its readonly props stay. What a call this
+    /// walk cannot see through may have written to it — the mutable half of an
+    /// object, named by a variable rather than reached through the escape set. A
+    /// no-op where `var` refers to no object.
+    pub(crate) fn sweep_object(&mut self, var: &str) {
+        if let Some(id) = self.refs.get(var).copied()
             && let Some(o) = self.heap.get_mut(&id)
         {
             o.sweep_nonreadonly();
             o.sweep_targs();
         }
+    }
+
+    /// Sweep the `$this` object's non-readonly props and value carries (ADR-0057 C5) —
+    /// what a call running with the same `$this` may have written behind this walk's
+    /// back. A no-op where `$this` is unbound.
+    pub(crate) fn sweep_this(&mut self) {
+        self.sweep_object("this");
     }
 
     /// Replace the object `var` refers to with a descent's `$this` snapshot
