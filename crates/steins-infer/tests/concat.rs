@@ -11,25 +11,47 @@
 //! follows the `precision` ini directive, so a folded `"" . 0.1` would depend
 //! on runtime configuration — exactly what this crate must not invent.
 //! `oracle_agrees_on_every_admitted_cast` pins the admitted cells against the
-//! real engine; `float_operand_widens` pins the refusal.
+//! real engine; `float_operand_widens` pins the refusal — **through
+//! [`strlen_of`], not through the dump surface**. See below for why the
+//! distinction is the whole point.
 //!
-//! # What "widens" means since issue #627
+//! # What "widens" means since issue #627, and which lane still asks `concat_cast`
 //!
 //! Every refusal below used to render `unknown`, because the literal seam was
 //! the only reader of a `Concat`. It is no longer: `eval_concat_fact` answers
-//! the predicate table and, failing that, the `string` floor. The refusals are
-//! unchanged in the only sense that matters — **no declined value is ever
-//! stated** — so each one now asserts the widened *fact* and, beside it, that
-//! the value it declines is still absent.
+//! the predicate table and, failing that, the `string` floor. The refusals hold
+//! in the only sense that matters — **no declined value is ever stated** — so
+//! each one asserts the widened *fact* as well.
+//!
+//! **But a dump of a `Concat` no longer reaches `concat_cast` at all.**
+//! `dump.rs` matches `ArgValue::Concat` *above* `Cx::resolve_literal_strat`, and
+//! `eval_concat_fact` projects each operand through `php_cast_fact`, which
+//! declines a float and an array by itself. So an assertion like
+//! `dumped("\"f=\" . 1.5") == "non-falsy-string"` pins the **cast grid's** float
+//! row and stays green even if `concat_cast` starts spelling floats. That was
+//! measured, not reasoned: adding `ArgValue::Float(f) => Some(format!("{f}"))`
+//! to `concat_cast` left this whole file green while
+//! `dumpType(strlen("f=" . 1e100))` rendered `103` against PHP's `10`.
+//!
+//! `concat_cast` now lives only in the **literal lane** — argument position,
+//! `switch`/`match` subjects, `in_array` — which still resolves through
+//! `Cx::resolve_literal`. [`strlen_of`] is how these fixtures observe it, and
+//! every refusal carries one.
 
 use std::process::Command;
 
 use steins_infer::{DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with};
 use steins_syntax::{ArgValue, SourceTree};
 
-/// A canned folder for the two allowlisted builtins the flagship needs. The real
+/// A canned folder for the allowlisted builtins these fixtures need. The real
 /// fold runs on the project's PHP; the mock only has to prove a concatenation
 /// **reaches** the gate as a resolved literal.
+///
+/// `strlen` is the observer the refusals below need. It folds only when its
+/// argument arrives as an `ArgValue::Str`, so a concatenation that `concat_cast`
+/// declined never reaches it and the call falls back to `strlen`'s own contract
+/// (`int<0, max>`) — which makes that refinement versus a bare integer the
+/// visible difference between the refusal holding and leaking.
 struct Mock;
 
 impl Folder for Mock {
@@ -39,9 +61,42 @@ impl Folder for Mock {
             ("str_repeat", [ArgValue::Str(s), ArgValue::Int(n)]) => {
                 Some(ArgValue::Str(s.as_str()?.repeat(usize::try_from(*n).ok()?).into()))
             }
+            ("strlen", [ArgValue::Str(s)]) => {
+                Some(ArgValue::Int(i64::try_from(s.as_bytes().len()).ok()?))
+            }
             _ => None,
         }
     }
+    fn builtin_return_type(&mut self, name: &str) -> Option<String> {
+        match name.to_ascii_lowercase().as_str() {
+            "strlen" => Some("int".to_owned()),
+            "strtoupper" | "str_repeat" => Some("string".to_owned()),
+            _ => None,
+        }
+    }
+    fn builtin_param_counts(&mut self, name: &str) -> Option<(u32, u32)> {
+        // `(total, required)` — the order that is a silent decline when reversed.
+        match name.to_ascii_lowercase().as_str() {
+            "strlen" | "strtoupper" => Some((1, 1)),
+            "str_repeat" => Some((2, 2)),
+            _ => None,
+        }
+    }
+}
+
+/// `dumpType(strlen(<expr>));` — the **literal lane**, which is the only lane
+/// `concat_cast` still sits in (issue #627 review).
+///
+/// The dump surface stopped reaching `concat_cast` when `eval_concat_fact` was
+/// wired above `resolve_literal_strat` in `dump.rs`: the fact seam declines a
+/// float or array operand by itself, through `php_cast_fact`. So a refusal
+/// asserted on the dump surface pins the *cast grid's* row and says nothing
+/// about `concat_cast`. Argument position still resolves through
+/// `Cx::resolve_literal`, so `strlen` observes the fold that did or did not
+/// happen: `int<0, max> (asserted)` — the declared contract, unfolded — is the
+/// refusal holding, and a bare integer is it leaking.
+fn strlen_of(expr: &str) -> String {
+    one_folded(&format!("<?php\n\\PHPStan\\dumpType(strlen({expr}));\n"))
 }
 
 fn findings(src: &str, folder: Option<&mut dyn Folder>) -> Vec<Diagnostic> {
@@ -149,7 +204,18 @@ fn float_operand_widens() {
         let got = dumped(src);
         assert_eq!(got, "non-falsy-string", "{src}");
         assert!(!got.contains('\''), "a float value leaked into `{src}`: {got}");
+        // **The lane that actually holds `concat_cast`.** The three assertions
+        // above are answered by the cast grid one rung higher up and stay green
+        // even if `concat_cast` starts admitting floats; only argument position
+        // still reaches it. `int` is `strlen`'s declared return with no fold
+        // behind it — any integer here means a float value was invented.
+        assert_eq!(strlen_of(src), "int<0, max> (asserted)", "the literal lane folded `{src}`");
     }
+    // Why the refusal exists, in one measurement: PHP prints this float under
+    // the `precision` ini directive, so `php -r 'var_dump(strlen("f=" . 1e100));'`
+    // is `int(10)` for `"f=1.0E+100"`. A Rust `{}` formatter writes all 101
+    // digits and `strlen` would fold to 103 — right-looking and wrong.
+    assert_eq!(strlen_of(r#""f=" . 1e100"#), "int<0, max> (asserted)");
 }
 
 #[test]
@@ -167,9 +233,12 @@ fn array_operand_widens() {
     // PHP yields "Array" plus a warning; that is a diagnosis, not a value to fold.
     // The #627 floor says the result is a `string` — which it is — without ever
     // naming `'Array'`, because the cast grid keeps declining an array input.
-    let got = dumped(r#""a=" . [1, 2]"#);
-    assert_eq!(got, "non-falsy-string");
-    assert!(!got.contains("Array"), "the array's string cast leaked: {got}");
+    assert_eq!(dumped(r#""a=" . [1, 2]"#), "non-falsy-string");
+    // And the same lane split as the float row above: argument position is the
+    // only one still asking `concat_cast`, so this is the assertion that fails
+    // if it starts admitting arrays.
+    assert_eq!(strlen_of(r#""a=" . [1, 2]"#), "int<0, max> (asserted)");
+    assert_eq!(strlen_of(r#""a=" . []"#), "int<0, max> (asserted)");
 }
 
 #[test]
