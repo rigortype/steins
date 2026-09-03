@@ -1194,7 +1194,14 @@ pub(crate) fn walk_trace(
                 emit_trace_annotations(w, folder, pending_trace.take(), stmt, env, store, out);
                 return Flow::Terminated;
             }
-            StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
+            // `break`/`continue` end the block they sit in, so they end this
+            // sub-trace: the statements after one are unreachable, and a branch
+            // ending in one contributes nothing to its `if`'s join. Identical to
+            // the `Throw`/`Exit` arm for that reason — and NOT the `Barrier` these
+            // used to lower to, which fell through with a cleared env and so
+            // erased, through the join, everything the rest of a loop body knew
+            // (issue #649).
+            StmtKind::LoopJump { .. } | StmtKind::Throw { .. } | StmtKind::Exit { .. } => {
                 for v in &stmt.invalidated {
                     env.remove(&v.name);
                     store.unbind(&v.name);

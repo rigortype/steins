@@ -776,7 +776,10 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
 /// iteration is still unknown — and this predicate is asked the latter question.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
-        StmtKind::Opaque { .. } | StmtKind::While { .. } | StmtKind::Barrier => true,
+        StmtKind::Opaque { .. }
+        | StmtKind::While { .. }
+        | StmtKind::LoopJump { .. }
+        | StmtKind::Barrier => true,
         StmtKind::If { then_trace, elseifs, else_trace, .. } => {
             contains_opaque(then_trace)
                 || elseifs.iter().any(|(_, b)| contains_opaque(b))

@@ -2093,6 +2093,23 @@ pub enum StmtKind {
     /// `throw <expr>;` — a trace terminator; `span` points at the `throw`. The thrown
     /// expression is not modeled, only the terminating control effect.
     Throw { span: Span },
+    /// `break;` / `continue;`, with or without a level — a **sub-trace terminator**
+    /// (issue #649). `span` points at the statement.
+    ///
+    /// Both leave the block they are written in, so the statements after one are
+    /// unreachable and the branch containing one contributes nothing to its `if`'s
+    /// join — exactly what [`Self::Return`] and [`Self::Throw`] mean to a walker,
+    /// and the reason this is not [`Self::Barrier`]. A `Barrier` *falls through*
+    /// with a cleared env, so a guarded `break` used to hand an empty env to the
+    /// join and erase what the rest of the body knew. That cost nothing while loop
+    /// bodies were unwalked; it is the first thing a real body hits now that they
+    /// are.
+    ///
+    /// Which loop a `break 2;` leaves is still unmodelled, and does not need to be:
+    /// a walker only asks whether the code after it in THIS block is reachable, and
+    /// the answer is no for every level. The statement after the loop stays
+    /// reachable either way — the loop can also end by its own condition.
+    LoopJump { span: Span },
     /// `exit;` / `die;` (as an expression-statement) — a trace terminator; `span` points at it.
     Exit { span: Span },
     /// A structured `while` (ADR-0027 amendment, issue #649): everything

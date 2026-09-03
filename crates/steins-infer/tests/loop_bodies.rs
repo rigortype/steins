@@ -147,6 +147,80 @@ function unrolled(Return_ $node): bool {{
 }
 
 #[test]
+fn a_guarded_break_or_continue_does_not_erase_the_body() {
+    // `break`/`continue` end the block they sit in, so the branch holding one
+    // contributes nothing to its `if`'s join — the same thing `return` means, and
+    // the reason they lower to `StmtKind::LoopJump` rather than `Barrier`. As a
+    // `Barrier` they fell through with a *cleared* env, so a guarded jump handed
+    // the join an empty env and the rest of the body knew nothing. Cost-free while
+    // loop bodies were unwalked; the first thing a real body hits now.
+    let after_a_guarded = |jump: &str| {
+        let src = format!(
+            "<?php
+{NODES}
+function f(Node $node): void {{
+    $x = $node->getAttribute('parent');
+    while ($x instanceof Node) {{
+        if ($x instanceof ClassMethod) {{ {jump} }}
+        \\PHPStan\\dumpType($x);
+        $x = $x->getAttribute('parent');
+    }}
+}}
+"
+        );
+        dumps(&src)
+    };
+    for jump in ["break;", "continue;", "return;"] {
+        assert_eq!(
+            after_a_guarded(jump),
+            vec!["13: dumped type: Node".to_owned()],
+            "`{jump}` must leave the header's narrowing standing for the rest of the body"
+        );
+    }
+}
+
+#[test]
+fn the_statements_after_a_break_are_unreachable() {
+    // The other half of the same terminator: a `break` ends the block, so what
+    // follows it there is not walked at all.
+    let src = "<?php
+function f(int $n): void {
+    while ($n > 0) {
+        break;
+        \\PHPStan\\dumpType($n);
+    }
+}
+";
+    assert!(dumps(src).is_empty(), "a statement after `break` was walked: {:#?}", dumps(src));
+}
+
+#[test]
+fn a_switch_case_still_ends_on_its_own_break() {
+    // The regression guard for the terminator change: a trailing `break` in a
+    // `switch` case is stripped before the arm body is lowered, so nothing here
+    // reaches `LoopJump` and the arms join exactly as they did.
+    let src = "<?php
+function f(string $k): void {
+    $v = 'abc';
+    switch ($k) {
+        case 'a': \\PHPStan\\dumpType($v); break;
+        default: \\PHPStan\\dumpType($v); break;
+    }
+    \\PHPStan\\dumpType($v);
+}
+";
+    assert_eq!(
+        dumps(src),
+        vec![
+            "5: dumped type: 'abc'".to_owned(),
+            "6: dumped type: 'abc'".to_owned(),
+            "8: dumped type: 'abc'".to_owned(),
+        ],
+        "the switch arms and their join are untouched"
+    );
+}
+
+#[test]
 fn a_true_positive_inside_a_while_body_is_reported() {
     // The finding that was lost inside a loop. It fires at the top level, inside an
     // `if`, and now inside a `while` body; a `foreach` body is still out of reach
@@ -166,8 +240,8 @@ fn a_true_positive_inside_a_while_body_is_reported() {
 /// One placement slot for the same undefined call, so the placements differ in
 /// nothing but the construct wrapped around the statement. The call is on line 4.
 const PLACEMENT: &str = "<?php
-class Order {}
-function f(int $n, array $xs): void {
+final class Order {}
+function f(Order $o, int $n, array $xs): void {
     STMT
 }
 ";
@@ -247,32 +321,48 @@ fn a_header_decided_false_leaves_its_body_unwalked() {
     // A body that runs zero times contributes no findings. The region is not marked
     // dead — withdrawing what the env-free direct pass already reports in there is
     // a separate judgment from adding what the walk now reports.
-    let src = "<?php
-function f(): void {
+    //
+    // The `while (true)` sibling is the positive control: the two differ in the
+    // header alone, so a silent `while (false)` is the skip and not some other
+    // reason the body went quiet.
+    let body = |header: &str| {
+        format!(
+            "<?php
+function f(): void {{
     $s = 'abc';
-    while (false) {
+    while ({header}) {{
         \\PHPStan\\dumpType($s);
-    }
-}
-";
-    assert!(dumps(src).is_empty(), "a zero-iteration body is not walked: {:#?}", dumps(src));
+    }}
+}}
+"
+        )
+    };
+    assert!(dumps(&body("false")).is_empty(), "a zero-iteration body is not walked");
+    assert_eq!(
+        dumps(&body("true")),
+        vec!["5: dumped type: unknown".to_owned()],
+        "the same body under a live header IS walked — the dump answers"
+    );
 }
 
 // ---- What the entry env still costs ----------------------------------------
 
 #[test]
-fn a_subject_any_call_in_the_body_touches_is_forgotten_at_entry() {
-    // The write set is an over-approximation shared with `Opaque`: every variable
-    // handed to any call in the subtree is in it, by-ref conservatism. So a binding
-    // the body merely passes to a call arrives unknown, even when the call cannot
-    // rebind it and even when the code before the loop proved it. The header can
-    // re-derive what it narrows on — which is why the motivating shape works — and
-    // nothing else survives.
+fn a_name_the_body_mentions_at_all_arrives_unknown() {
+    // The entry env is the construct's post-forget env, and that forgetting takes
+    // BOTH sets: `writes` (by-ref conservatism — every variable handed to any call
+    // in the subtree) and `reads` (everything else the subtree mentions). So a
+    // binding the body merely reads arrives unknown, even where the loop provably
+    // could not change it and the code before it proved what it holds. Only what
+    // the header narrows on is re-derived, which is why the traversal above works
+    // and this does not.
     //
-    // Recovering these is the ADR-0070 by-value survivor rule applied to a
-    // construct's sets rather than a statement's, which changes the fall-through of
-    // every `Opaque` too and is therefore not this slice.
-    let src = "<?php
+    // The `reads` half of that is over-conservative *for an entry env* — a name the
+    // loop cannot write holds its value on every iteration — and recovering it is
+    // its own slice (#653): the value and declared lanes can stay, the referenced
+    // object's mutable properties cannot, since a method call the body makes can
+    // change them without the receiver ever entering `writes`.
+    let arg = "<?php
 function f(int $n): void {
     $s = 'abc';
     while ($n > 0) {
@@ -282,9 +372,23 @@ function f(int $n): void {
 }
 ";
     assert_eq!(
-        dumps(src),
+        dumps(arg),
         vec!["5: dumped type: unknown".to_owned()],
-        "`$s` is a call argument inside the body, so the write set has already taken it"
+        "a call argument inside the body: the `writes` half took it"
+    );
+
+    // A receiver is not an argument, so `$o` is in `reads`, not `writes` — and is
+    // forgotten all the same. The `if` twin below is what the loop is measured
+    // against: same statement, same proof available, one answers and one does not.
+    let receiver = |wrap: &str| PLACEMENT.replace("STMT", wrap);
+    assert_eq!(
+        undefined_method_lines(&receiver("if ($n > 0) { $o->tyop(); }")),
+        vec![4],
+        "`if` body: the parameter's own class answers"
+    );
+    assert!(
+        undefined_method_lines(&receiver("while ($n > 0) { $o->tyop(); $n--; }")).is_empty(),
+        "`while` body: the same receiver arrives unknown (#653)"
     );
 }
 
