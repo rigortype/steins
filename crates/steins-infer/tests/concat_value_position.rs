@@ -178,15 +178,36 @@ fn non_falsy_comes_from_two_non_empty_operands() {
 }
 
 #[test]
-fn casing_is_conjunctive_and_each_axis_is_separable() {
-    // A lowercase-only literal keeps `LOWERCASE` and drops `UPPERCASE`; an
-    // uppercase-only literal does the mirror. Either cell deleted collapses its
-    // dump to `non-falsy-string`, so the two axes are pinned apart.
+fn lowercase_is_conjunctive() {
+    // A lowercase-only literal keeps `LOWERCASE` and drops `UPPERCASE`, so this
+    // dump is decided by the `LOWERCASE` cell alone; without it, `non-falsy-string`.
     assert_eq!(over("int $i", "$i . 'a'"), "non-falsy-lowercase-string");
+}
+
+#[test]
+fn uppercase_is_conjunctive() {
+    // The mirror, pinned apart from `LOWERCASE` so deleting either cell fails
+    // exactly one test.
     assert_eq!(over("int $i", "$i . 'A'"), "non-falsy-uppercase-string");
-    // And it is identity under the case function, not "has letters": an int's
-    // decimal spelling is both, so two of them are `uncased-`.
+}
+
+#[test]
+fn casing_is_identity_under_the_case_function_not_having_letters() {
+    // `''` and `'123'` are both lowercase AND uppercase (`preds.rs:43-49`), so
+    // two int spellings compose to `uncased-`, not to nothing.
     assert_eq!(over("int $i, int $j", "$i . $j"), "non-falsy-uncased-string");
+}
+
+#[test]
+fn an_empty_operand_leaves_the_other_operands_projection_alone() {
+    // The identity law, and the reason it is a rung rather than a table cell:
+    // "empty" is the absence of `NON_EMPTY`, which a positive-literal bitset
+    // cannot state. Both spellings must agree, and both must equal the cast.
+    for e in ["$v . ''", "'' . $v"] {
+        assert_eq!(over("int $v", e), over("int $v", "(string) $v"), "{e}");
+    }
+    assert_eq!(over("int $v", "'' . $v"), "numeric-uncased-string");
+    assert_eq!(over("string $v", "'' . $v"), "string");
 }
 
 #[test]

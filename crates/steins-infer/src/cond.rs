@@ -680,8 +680,13 @@ fn cast_floor(target: CastTarget) -> Fact {
 /// `unknown` — not even the `string` the operator guarantees. This is the fact
 /// rung that was missing.
 ///
-/// # Three rungs, most precise first
+/// # Four rungs, most precise first
 ///
+/// 0. **The identity.** An operand projecting to exactly `''` leaves the other
+///    operand's fact untouched — `'' . $x` IS `$x`'s string projection. It sits
+///    above the table because the table cannot express it: "empty" is the
+///    *absence* of `NON_EMPTY`, and an implication-closed bitset of positive
+///    literals has no way to say a predicate fails.
 /// 1. **The value product.** Both operands' string projections are finite value
 ///    sets, so the concatenation is the cross product — `'0' . ('0'|'1'|'2')` is
 ///    `'00'|'01'|'02'`. Bounded by [`CAP`] **before** the product is built and
@@ -780,10 +785,21 @@ pub(crate) fn eval_concat_fact(
         .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
         .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
     let (lf, rf) = (l.as_ref().map(|(f, _)| f), r.as_ref().map(|(f, _)| f));
-    if let (Some(a), Some(b)) = (lf, rf)
-        && let Some(fact) = concat_value_product(a, b)
-    {
-        return (fact, derived);
+    if let (Some(a), Some(b)) = (lf, rf) {
+        // The identity law, above every rung: `'' . $x` and `$x . ''` ARE `$x`'s
+        // string projection. The table below cannot see it, because an *empty*
+        // operand is the ABSENCE of `NON_EMPTY` and this bitset has no negative
+        // literals — so without this the two spellings of the identity disagree
+        // (`$i . ''` kept `NUMERIC`, `'' . $i` lost it).
+        if is_empty_str(a) {
+            return (b.clone(), derived);
+        }
+        if is_empty_str(b) {
+            return (a.clone(), derived);
+        }
+        if let Some(fact) = concat_value_product(a, b) {
+            return (fact, derived);
+        }
     }
     let preds = concat_preds(
         lf.map_or_else(StrPreds::empty, string_fact_preds),
@@ -812,6 +828,12 @@ fn concat_operand_string(
 ) -> Option<(Fact, Stratum)> {
     let (fact, strat) = value_operand_fact(w, folder, value, env, store, poisoned)?;
     Some((php_cast_fact(&fact, CastTarget::String)?, strat))
+}
+
+/// Whether a projected operand is exactly the empty string — the one operand
+/// concatenation is the identity over.
+fn is_empty_str(f: &Fact) -> bool {
+    matches!(f, Fact::Singleton(Val::Str(s)) if s.as_bytes().is_empty())
 }
 
 /// The finite set of strings a projected operand admits, or `None` when it is
