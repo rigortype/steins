@@ -1990,6 +1990,19 @@ numeric because a positive int prints unsigned — is **not** built: it needs a
 sign bit `StrPreds` does not have, and adding one is issue #600's territory with
 ADR-0059's Lean lockstep attached. `Refinement` and `StrPreds` are unchanged.
 
+**A consequence worth stating rather than discovering later: the rule does not
+survive re-association.** `.` is left-associative, so `$i . '5' . '5'` is
+`($i . '5') . '5'`, and the inner result carries `NUMERIC` but *not*
+`DECIMAL_INT` — correctly, since `'15'` is a decimal-int string but `'05'` is
+not. The one-sided rule needs `dec(a)`, so it cannot fire twice and the chain
+answers `non-falsy-uncased-string`. Parenthesised the other way,
+`$i . ('5' . '5')`, the right operand folds to the literal `'55'` first, the rule
+fires once, and the answer is `non-falsy-numeric-uncased-string`. PHP computes
+the same string either way — `1 . '5' . '5'` and `1 . ('5' . '5')` are both
+`'155'` — so this is a precision asymmetry, not a correctness one, and the weaker
+answer is a widening. Closing it means the sign bit above, not a special case
+here.
+
 ### The identity is a rung, not a cell
 
 `'' . $x` IS `$x`'s string projection, and the table cannot say so: "empty" is
@@ -2015,7 +2028,15 @@ chain, seeded with `''` so that `"$v"` keeps the string cast `$v` alone does not
 have. A heredoc (`CompositeString::Document`) and a backtick string
 (`ShellExecute`) deliberately do not lower: the first applies closing-marker
 indentation stripping the part values do not record, the second runs a shell
-command. Legs 1 and 2 are pure inference and move no schema; this lowering is
+command.
+
+A **prefixed** interpolation declines too — the arm is guarded on
+`is.prefix.is_none()`, so `b"x $s"` and `B"x $s"` answer `unknown` where
+`"x $s"` answers `non-falsy-string`. PHP treats the `b`/`B` prefix as a no-op
+(`b"x y" === "x y"` is `true`), so this is conservative rather than necessary:
+the guard exists because the prefix field is open-ended in the parser and a
+future prefix that is *not* a no-op would otherwise be lowered as if it were.
+Dropping the guard is a one-line change if a row ever wants it. Legs 1 and 2 are pure inference and move no schema; this lowering is
 what takes `SCHEMA_VERSION` to 13, and it is the *under-answer* kind of bump —
 no variant is added or re-ordered, so an old payload still decodes and merely
 states something weaker.
@@ -2043,9 +2064,25 @@ direction prints exactly, so ADR-0028 §3 is untouched. The one place it could
 have entered — deciding `NUMERIC` for two integers by reasoning about their
 magnitude — is exactly the rule the corpus refuted.
 
+### Adding a fact rung moves which lane a fixture observes
+
+Worth recording because the review caught it and the diff did not show it.
+`dump.rs` matches `ArgValue::Concat` **above** `Cx::resolve_literal_strat`, and
+`eval_concat_fact` projects each operand through `php_cast_fact`, which declines
+a float and an array by itself. So every pre-existing refusal fixture that
+asserted on the dump surface silently stopped observing `concat_cast` and
+started observing the cast grid instead: patching `concat_cast` to admit floats
+left `tests/concat.rs` entirely green while `strlen("f=" . 1e100)` rendered `103`
+against PHP's `10`. `concat_cast` now lives only in the literal lane — argument
+position, `switch`/`match` subjects, `in_array` — so the refusals are pinned
+there, through a `strlen` observer that folds only on an `ArgValue::Str`. The
+general rule for the next slice in this family: when a new rung is wired above an
+existing seam, re-derive which lane each existing fixture reaches; a green suite
+after the wiring is not evidence that it still pins what its name says.
+
 Fixtures: `crates/steins-infer/tests/concat_value_position.rs` (one test per
 table cell, each pinned by a rendering only that cell decides; the identity, the
-cap's decline, the four seams, the interpolation lowering and the stratum split),
-`crates/steins-infer/tests/concat.rs` (the refusals, restated as the widened fact
-they now render), and the `SCHEMA_VERSION` round-trip in
-`crates/steins-db/src/persist.rs`.
+floor's stratum normalization, the cap's decline, the four seams and the
+interpolation lowering), `crates/steins-infer/tests/concat.rs` (the refusals,
+pinned in the literal lane and asserting the widened fact beside it), and the
+`SCHEMA_VERSION` round-trip in `crates/steins-db/src/persist.rs`.
