@@ -471,3 +471,20 @@ fn the_floor_is_verified_and_a_derived_answer_keeps_the_operands_stratum() {
         "non-falsy-string (asserted)"
     );
 }
+
+#[test]
+fn a_projection_landing_on_the_floor_enters_verified_however_it_got_there() {
+    // The floor is the operator's claim **however it was reached** — the
+    // normalization `eval_cast_fact` has and the identity rung was missing.
+    // `int|string` projects to exactly `string`, so an Asserted operand would
+    // otherwise carry `(asserted)` into a fact owed to no operand, and the two
+    // spellings of one law would disagree with the cast they are supposed to
+    // equal. The native-typed operands the other identity tests use never
+    // project onto the bare floor, which is why this needs its own fixture.
+    for e in ["'' . $u", "$u . ''", "(string) $u"] {
+        assert_eq!(over_doc(&["@param int|string $u"], "$u", e), "string", "{e}");
+    }
+    // The union product's own exit takes the same normalization, so a `mixed`
+    // operand beside a proven one is `string`, not `string (asserted)`.
+    assert_eq!(over_doc(&["@param mixed $m"], "$m", "$m . ''"), "string");
+}

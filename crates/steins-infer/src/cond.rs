@@ -792,13 +792,13 @@ pub(crate) fn eval_concat_fact(
         // literals — so without this the two spellings of the identity disagree
         // (`$i . ''` kept `NUMERIC`, `'' . $i` lost it).
         if is_empty_str(a) {
-            return (b.clone(), derived);
+            return concat_answer(b.clone(), derived);
         }
         if is_empty_str(b) {
-            return (a.clone(), derived);
+            return concat_answer(a.clone(), derived);
         }
         if let Some(fact) = concat_value_product(a, b) {
-            return (fact, derived);
+            return concat_answer(fact, derived);
         }
     }
     let preds = concat_preds(
@@ -806,10 +806,30 @@ pub(crate) fn eval_concat_fact(
         rf.map_or_else(StrPreds::empty, string_fact_preds),
         rf.and_then(string_fact_vals).as_deref(),
     );
-    if preds.is_empty() {
-        return (Fact::General { base: Base::String, nullable: false }, Stratum::Verified);
-    }
-    (Fact::refined(Base::String, Refinement::Str(preds), false), derived)
+    // A contentless predicate set collapses to the General layer inside
+    // [`Fact::refined`], so the floor needs no branch of its own — it is the
+    // empty-table case, normalized by the one exit below.
+    concat_answer(Fact::refined(Base::String, Refinement::Str(preds), false), derived)
+}
+
+/// The `string` every concatenation that completes produces.
+fn concat_floor() -> Fact {
+    Fact::General { base: Base::String, nullable: false }
+}
+
+/// The single exit of [`eval_concat_fact`], with the issue #260 stratum ruling
+/// applied to every rung alike.
+///
+/// A result that IS the floor is a claim about the operator, owed to no operand,
+/// **however it was reached** — so it enters `Verified` even when an operand
+/// projected onto it. This is [`eval_cast_fact`]'s `fact == floor` normalization,
+/// and without it the identity rung broke the rule this function's doc states:
+/// for `/** @param int|string $u */`, `'' . $u` answered `string (asserted)`
+/// while `(string) $u` answered `string`, because the projection landed exactly
+/// on the floor and carried the operand's stratum with it. Anything narrower
+/// than the floor does rest on the operands, and keeps their `min`.
+fn concat_answer(fact: Fact, derived: Stratum) -> (Fact, Stratum) {
+    if fact == concat_floor() { (fact, Stratum::Verified) } else { (fact, derived) }
 }
 
 /// One operand's contribution to a concatenation, as a `string`-based [`Fact`].
