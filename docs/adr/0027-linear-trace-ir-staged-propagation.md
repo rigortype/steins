@@ -48,9 +48,10 @@ previous iteration's exit; it is the post-forget env, in which every name the
 body can touch is already ⊤. Nothing in it is specific to an iteration, so
 it is valid for all of them, the first included — and a body whose last
 statement reassigns the very subject the header narrowed on re-derives the
-fact at the next entry rather than losing it. That shape is the motivating one: an AST
-traversal walking a parent pointer types its subject from the loop header and
-from nowhere else, because the accessor it calls is untyped.
+fact at the next entry rather than losing it. That shape is the motivating
+one: an AST traversal walking a parent pointer types its subject from the
+loop header and from nowhere else, because the accessor it calls is
+untyped.
 
 The body contributes **findings, not facts**. Its exit env is discarded, so
 what a loop computes cannot reach the code after it, and the negated
@@ -61,15 +62,32 @@ region is not marked dead, since withdrawing what the env-free direct pass
 already reports there is a separate judgment from adding what the walk now
 reports.
 
-Two costs stay, both deliberate. The write set is still the coarse
-over-approximation `Opaque` uses — every variable handed to any call in the
-subtree is in it — so a binding the body merely passes to a call arrives
-unknown even where the header could not have changed it; recovering those is
-ADR-0070's by-value survivor rule applied to a construct's sets rather than a
-statement's, which moves every `Opaque`'s fall-through too. And `for`,
+`break` and `continue` had to stop being `Barrier`s for any of this to be
+worth having. A `Barrier` *falls through* with a cleared env, so a guarded
+`break` handed its `if`'s join an empty env and erased what the rest of the
+body knew — free while bodies were unwalked, and the first thing a real body
+hits now. They lower to `StmtKind::LoopJump`, a terminator: the statements
+after one are unreachable and the branch holding one contributes nothing to
+the join, exactly as a `return` does. Which loop a `break 2;` leaves stays
+unmodelled and need not be modelled — the question a walker asks is whether
+the code after it in *this* block is reachable, and the answer is no at every
+level.
+
+Two costs stay, both deliberate, and the first is larger than it looks. The
+entry env forgets **both** sets, and while forgetting `writes` is the by-ref
+conservatism, forgetting `reads` is over-strong for an entry: a name the loop
+neither assigns nor hands to a call holds its value on every iteration, and
+the paragraph above says as much. So a binding the body merely mentions —
+including a method receiver, which is not an argument — arrives unknown, and
+only what the header narrows on is re-derived. That is why the traversal
+above works and a declared parameter used inside the same loop proves nothing
+(issue #653: the value, declared-arm and class lanes can stay; the referenced
+object's mutable properties cannot, since a method call the body makes
+changes them without the receiver ever entering `writes`). Second, `for`,
 `foreach` and `do`/`while` are still body-less (issue #650); `do`/`while`
 will need the entry narrowing **withheld** when it arrives, its first
 iteration running before its condition is ever evaluated.
 
-`StmtKind::While` sits before `Opaque` in the enum and the wire codec carries
-a variant by index, so `SCHEMA_VERSION` moves 11 → 12.
+`StmtKind::While` and `StmtKind::LoopJump` both sit before `Opaque` in the
+enum and the wire codec carries a variant by index, so `SCHEMA_VERSION` moves
+11 → 12.
