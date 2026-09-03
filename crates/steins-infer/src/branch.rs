@@ -234,7 +234,7 @@ fn apply_cond_side(
 /// stays the separate question it is (issue #651).
 ///
 /// The entry env needs no fixpoint. Nothing in it is specific to one iteration —
-/// every name the body can touch is forgotten in it and the mutable state of every
+/// every name the loop can rebind is forgotten in it and the mutable state of every
 /// object it still names has been swept — and PHP evaluates the header before
 /// **every** entry to the body, the first included, so the true-side application is
 /// exactly as sound here as it is on an `if`'s then-branch. A body whose last
