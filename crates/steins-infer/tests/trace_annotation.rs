@@ -410,15 +410,32 @@ fn a_nested_declaration_statement_is_inert() {
 
 #[test]
 fn a_loop_body_annotation_mirrors_the_dump_surface() {
-    // A `while` body is `Opaque` because loop control flow is unmodeled
-    // (ADR-0027), so both trace and dump surfaces are silent.
-    let trace_src = "<?php\n$x = 1;\nwhile ($x < 3) {\n/** @psalm-trace $x */\n$y = 2;\n}\n";
-    let dump_src = "<?php\n$x = 1;\nwhile ($x < 3) {\n$y = 2;\n\\PHPStan\\dumpType($x);\n}\n";
+    // A `while` body is walked now (issue #649), so both surfaces answer inside
+    // one and the parity claim has something to say. The subject is written by
+    // the body deliberately: the mirror spells its question `dumpType($x)`, which
+    // hands `$x` to a call and so puts it in the loop's write set (issue #653) —
+    // a subject the body did NOT write would be forgotten in the dump source and
+    // kept in the trace source, and the two would differ over the fixture rather
+    // than over the surfaces.
+    let trace_src =
+        "<?php\n$x = 1;\nwhile ($x < 3) {\n/** @psalm-trace $x */\n$x = $x + 1;\n}\n";
+    let dump_src =
+        "<?php\n$x = 1;\nwhile ($x < 3) {\n$x = $x + 1;\n\\PHPStan\\dumpType($x);\n}\n";
     assert_eq!(
         rendered_facts(trace_src, DEBUG_TRACE_ID),
         rendered_facts(dump_src, DEBUG_TYPE_ID),
         "the trace's list and the dump mirror's list are byte-equal"
     );
+}
+
+#[test]
+fn a_loop_body_annotation_reads_what_the_loop_cannot_change() {
+    // The other half of the entry env (issue #653), on this surface: a subject
+    // the loop neither assigns nor hands to a call keeps its binding at the top
+    // of the body, so the annotation answers with it. There is no dump mirror for
+    // this one — asking `dumpType($x)` would itself put `$x` in the write set.
+    let src = "<?php\n$x = 1;\nwhile (rand()) {\n/** @psalm-trace $x */\n$y = 2;\n}\n";
+    assert_eq!(one_trace(src).message, "traced type of $x: 1");
 }
 
 #[test]
