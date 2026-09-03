@@ -587,6 +587,50 @@ fn forget_construct_sets(
     }
 }
 
+/// The env a structured loop's **body** starts each iteration in (issue #653) —
+/// what the loop provably cannot change, which is not what its fall-through keeps.
+///
+/// The construct's fall-through forgets both ADR-0027 sets, and only the `writes`
+/// half of that is right for an entry. `writes` is the by-ref conservatism — every
+/// name assigned in the subtree and every name handed to any call in it — so a name
+/// in it may hold something else on iteration 2 and has to go. `reads` is everything
+/// the subtree merely mentions: nothing in the loop assigns such a name and no call
+/// in the loop can rebind it, so its binding is the same on iteration 40 as on
+/// iteration 1. Forgetting it is right for the fall-through, where a construct that
+/// reads and branches may have early-returned, and wrong here — it is what made a
+/// method receiver, which is not an argument, arrive unknown, and what cost the
+/// subtractive guards (`!== null`, truthiness) the base they subtract from.
+///
+/// What a kept name may **not** keep is the mutable state of the object it points
+/// at: a method call the body makes writes through a receiver that never enters
+/// `writes`, so iteration 2 would otherwise read iteration 1's properties. Every
+/// object a kept name refers to therefore takes the sweep an escaping call already
+/// performs ([`Store::sweep_object`]) — the class and the readonly props survive it,
+/// the rest does not. This is why the rule is not simply "forget less".
+///
+/// `poisons` clears everything, exactly as it does for the fall-through: a scope
+/// that aliases, `extract`s or `eval`s has no binding worth carrying anywhere.
+fn loop_entry_forget(
+    writes: &[String],
+    reads: &[String],
+    poisons: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    if poisons {
+        env.clear();
+        store.clear();
+        return;
+    }
+    for v in writes {
+        env.remove(v);
+        store.unbind(v);
+    }
+    for v in reads {
+        store.sweep_object(v);
+    }
+}
+
 /// Walk an ordered statement (sub-)trace against a mutable env, threading the same
 /// findings sink, descent, and facts. Returns whether the trace falls through.
 /// Statements after a terminator are unreachable and are **not** walked (ADR-0031
@@ -1126,16 +1170,19 @@ pub(crate) fn walk_trace(
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
                 Flow::FellThrough
             }
-            // A structured `while` (ADR-0027 amendment, issue #649). Its effect on
-            // the code AFTER it is an `Opaque`'s, unchanged — the sets land first
-            // and nothing the body computes is allowed past them. What the sets
-            // leave standing is then also the body's entry env, because a name the
-            // loop can touch is forgotten in it and one it cannot is as true on
-            // iteration 40 as on iteration 1. Narrowed by the header, that env is
-            // where the body walks.
+            // A structured `while` (ADR-0027 amendment, issues #649 and #653). Its
+            // effect on the code AFTER it is an `Opaque`'s, unchanged — the same
+            // sets, forgotten the same way, and nothing the body computes is
+            // allowed past them. The body's entry env is a SEPARATE answer to a
+            // separate question: what the loop cannot change, which keeps the
+            // `reads` half those sets drop. Both are built from the env as it
+            // stands here, and neither can see the other.
             StmtKind::While { cond, body, writes, reads, poisons, may_return } => {
+                let mut benv = env.clone();
+                let mut bstore = store.clone();
+                loop_entry_forget(writes, reads, *poisons, &mut benv, &mut bstore);
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
-                walk_while_body(w, folder, cond, body, env, store, descent, facts, out);
+                walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
                 Flow::FellThrough
             }
             // A statement-position call to a resolved `: never` callee is a

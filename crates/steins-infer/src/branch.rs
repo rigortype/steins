@@ -226,41 +226,43 @@ fn apply_cond_side(
 
 /// Walk a structured `while` body (ADR-0027 amendment, issue #649).
 ///
-/// `env`/`store` are the construct's own post-forget pair — the caller has already
-/// applied the write/read sets — and this reads them without writing back: a loop
-/// body contributes **findings**, never facts. The body's exit env is discarded,
-/// so the code after the loop sees exactly what the sets alone left standing, and
-/// carrying the negated condition out of a break-free loop stays the separate
-/// question it is (issue #651).
+/// `benv`/`bstore` are the body's **entry** pair, built by the caller from what the
+/// loop provably cannot change (`loop_entry_forget`), and this consumes them: a
+/// loop body contributes **findings**, never facts. The body's exit env is
+/// discarded, so the code after the loop sees exactly what the construct's own
+/// sets left standing, and carrying the negated condition out of a break-free loop
+/// stays the separate question it is (issue #651).
 ///
-/// The entry env needs no fixpoint. Every name the body can touch is forgotten in
-/// the pair handed in, so nothing in it is specific to one iteration; and PHP
-/// evaluates the header before **every** entry to the body, the first included, so
-/// the true-side application is exactly as sound here as it is on an `if`'s
-/// then-branch. A body whose last statement reassigns the subject the header
-/// narrowed — the parent-pointer traversal that motivated the slice — is therefore
-/// no obstacle: the next iteration's entry re-derives the fact from the header.
+/// The entry env needs no fixpoint. Nothing in it is specific to one iteration —
+/// every name the body can touch is forgotten in it and the mutable state of every
+/// object it still names has been swept — and PHP evaluates the header before
+/// **every** entry to the body, the first included, so the true-side application is
+/// exactly as sound here as it is on an `if`'s then-branch. A body whose last
+/// statement reassigns the subject the header narrowed — the parent-pointer
+/// traversal that motivated the slice — is therefore no obstacle: the next
+/// iteration's entry re-derives the fact from the header.
 ///
 /// A header the walk decides is false runs its body zero times, so the body is not
-/// walked. The region is not marked dead: the env-free direct pass reports there
-/// today, and withdrawing those findings is a separate judgment from adding these.
+/// walked. That reading is taken in the entry env for the same reason the narrowing
+/// is: the env holds at every evaluation of the header, so a `No` there is a `No`
+/// at all of them. The region is not marked dead: the env-free direct pass reports
+/// there today, and withdrawing those findings is a separate judgment from adding
+/// these.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn walk_while_body(
     w: &WalkCx,
     folder: &mut dyn Folder,
     cond: &CondExpr,
     body: &[Stmt],
-    env: &HashMap<String, Known>,
-    store: &Store,
+    mut benv: HashMap<String, Known>,
+    mut bstore: Store,
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
 ) {
-    if eval_cond(w, folder, cond, env, store, w.scope.poisoned) == Certainty::No {
+    if eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned) == Certainty::No {
         return;
     }
-    let mut benv = env.clone();
-    let mut bstore = store.clone();
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
     // The body's own `Flow` is discarded: a body that terminates on every path
     // terminates an ITERATION, and a `while` whose condition is not decided may run

@@ -1,10 +1,12 @@
-//! What a loop body is worth to the walk — the structured `while` (issue #649)
-//! and the three forms still behind the ADR-0027 ratchet.
+//! What a loop body is worth to the walk — the structured `while` (issues #649
+//! and #653) and the three forms still behind the ADR-0027 ratchet.
 //!
 //! A `while` lowers to `StmtKind::While`, which carries its condition and its body
 //! as a sub-trace. The construct's effect on the code after it is unchanged — the
-//! same write/read sets an `Opaque` applies — and what the sets leave standing is
-//! also the body's entry env, narrowed by the header. `for`, `foreach` and
+//! same write/read sets an `Opaque` applies — and its body's **entry** env is a
+//! separate answer to a separate question: what the loop provably cannot change.
+//! That drops `writes`, keeps `reads`, sweeps the mutable state of every object a
+//! kept name refers to, and is then narrowed by the header. `for`, `foreach` and
 //! `do`/`while` still lower to `StmtKind::Opaque`, whose body no statement of the
 //! walk ever reaches (issue #650), so this file is where the two states are told
 //! apart.
@@ -21,9 +23,10 @@
 //! ```
 //!
 //! Two properties carry the entry env's soundness, and both are pinned below: the
-//! env is iteration-count-agnostic (every name the body can touch is forgotten
-//! before the header applies, so a body that reassigns the subject it was narrowed
-//! on is no obstacle), and nothing the body computes escapes it.
+//! env is iteration-count-agnostic (every name the loop can rebind is forgotten
+//! and every object it can mutate is swept before the header applies, so a body
+//! that reassigns the subject it was narrowed on is no obstacle), and nothing the
+//! body computes escapes it.
 
 use steins_infer::{CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with};
 use steins_syntax::SourceTree;
@@ -345,24 +348,161 @@ function f(): void {{
     );
 }
 
+// ---- What the entry env keeps ----------------------------------------------
+
+#[test]
+fn a_name_the_loop_cannot_change_keeps_its_value_at_the_body_entry() {
+    // The `reads` half of the ADR-0027 sets (issue #653). Nothing in the loop
+    // assigns `$s` and no call in it can rebind it, so its binding is the same on
+    // iteration 40 as on iteration 1 and the entry env keeps it. The construct's
+    // FALL-THROUGH still forgets it, which is the separate judgment: a construct
+    // that reads and branches may have early-returned, so the tail must exclude
+    // the value even where the body may not.
+    //
+    // The dump is spelled through a cast because `dumpType($s)` would hand `$s` to
+    // a call and put it in `writes` — the one thing this test must not do.
+    let src = "<?php
+function f(int $n): void {
+    $s = 'abc';
+    while ($n > 0) {
+        \\PHPStan\\dumpType((string) $s);
+        $n--;
+    }
+    \\PHPStan\\dumpType((string) $s);
+}
+";
+    assert_eq!(
+        dumps(src),
+        vec!["5: dumped type: 'abc'".to_owned(), "8: dumped type: string".to_owned()],
+        "line 5 is the body entry, line 8 the unchanged fall-through — `string` there \
+         is the cast's own total floor, all that is left once the sets have run"
+    );
+}
+
+#[test]
+fn a_receiver_answers_inside_the_body_as_it_does_inside_an_if() {
+    // The measured cost of the old rule, and the acceptance criterion of the new
+    // one. A receiver is not an argument, so `$o` lands in `reads` — and forgetting
+    // `reads` meant the same statement, with the same proof available, was named
+    // inside an `if` and silent inside a `while`.
+    let receiver = |wrap: &str| PLACEMENT.replace("STMT", wrap);
+    assert_eq!(
+        undefined_method_lines(&receiver("if ($n > 0) { $o->tyop(); }")),
+        vec![4],
+        "`if` body: the parameter's own class answers"
+    );
+    assert_eq!(
+        undefined_method_lines(&receiver("while ($n > 0) { $o->tyop(); $n--; }")),
+        vec![4],
+        "`while` body: the same receiver, the same answer"
+    );
+}
+
+#[test]
+fn a_subtractive_header_narrows_a_read_only_subject() {
+    // What the old entry env cost the guard vocabulary. `instanceof` and the `is_*`
+    // family MINT a fact and so narrowed a loop header even from nothing; `!== null`
+    // and truthiness SUBTRACT from a declared lane, and a forgotten lane leaves them
+    // nothing to subtract from. Both spellings must now read the same inside the
+    // loop as inside the `if` twin.
+    let subject = |stmt: &str| {
+        let src = format!(
+            "<?php
+final class Node {{}}
+function f(?Node $x): void {{
+    {stmt}
+}}
+"
+        );
+        undefined_method_lines(&src)
+    };
+    assert_eq!(subject("if ($x !== null) { $x->tyop(); }"), vec![4], "`if`, `!== null`");
+    assert_eq!(subject("while ($x !== null) { $x->tyop(); }"), vec![4], "`while`, `!== null`");
+    assert_eq!(subject("if ($x) { $x->tyop(); }"), vec![4], "`if`, truthiness");
+    assert_eq!(subject("while ($x) { $x->tyop(); }"), vec![4], "`while`, truthiness");
+}
+
+#[test]
+fn a_kept_object_s_mutable_state_is_swept_at_every_entry() {
+    // The part of #653 that is NOT a simple keep. The binding survives, because the
+    // loop cannot rebind it; the object's non-readonly properties do not, because a
+    // method call the body makes writes through a receiver that never enters
+    // `writes` — so iteration 2 would otherwise read iteration 1's `$seen`.
+    //
+    // One fixture pins both halves. The `call.undefined-method` says `$c` is bound
+    // and classed at the body entry, so the silence beside it is a sweep and not a
+    // forgotten binding; the dump says the property is gone. The `if` twin, whose
+    // properties are not swept, answers `7` at the same position.
+    let placed = |construct: &str| {
+        format!(
+            "<?php
+final class Counter {{
+    public int $seen = 0;
+    public function bump(): void {{ $this->seen = $this->seen + 1; }}
+}}
+function f(int $n): void {{
+    $c = new Counter();
+    $c->seen = 7;
+    {construct}
+}}
+"
+        )
+    };
+    let in_if = placed("if ($n > 0) { \\PHPStan\\dumpType($c->seen); $c->bump(); }");
+    let in_while =
+        placed("while ($n > 0) { \\PHPStan\\dumpType($c->seen); $c->tyop(); $c->bump(); $n--; }");
+
+    assert_eq!(
+        dumps(&in_if),
+        vec!["9: dumped type: 7".to_owned()],
+        "the `if` reads the property the statement before it wrote"
+    );
+    assert_eq!(
+        dumps(&in_while),
+        vec!["9: dumped type: unknown".to_owned()],
+        "the loop body reads nothing about it — `bump()` runs before the next entry"
+    );
+    assert_eq!(
+        undefined_method_lines(&in_while),
+        vec![9],
+        "…and the receiver whose property was swept is still bound and classed"
+    );
+}
+
+#[test]
+fn a_poisoned_loop_keeps_nothing_at_its_body_entry() {
+    // `poisons` is untouched by any of this: a subtree that `extract`s, `eval`s,
+    // aliases or captures by reference has no binding worth carrying anywhere, and
+    // the entry env clears exactly as the fall-through does. The same loop without
+    // the `extract` is the positive control, two tests above.
+    let src = "<?php
+function f(int $n, array $a): void {
+    $s = 'abc';
+    while ($n > 0) {
+        extract($a);
+        \\PHPStan\\dumpType((string) $s);
+        $n--;
+    }
+}
+";
+    assert_eq!(
+        dumps(src),
+        vec!["6: dumped type: string".to_owned()],
+        "a poisoned subtree leaves the entry env nothing but the cast's own floor"
+    );
+}
+
 // ---- What the entry env still costs ----------------------------------------
 
 #[test]
-fn a_name_the_body_mentions_at_all_arrives_unknown() {
-    // The entry env is the construct's post-forget env, and that forgetting takes
-    // BOTH sets: `writes` (by-ref conservatism — every variable handed to any call
-    // in the subtree) and `reads` (everything else the subtree mentions). So a
-    // binding the body merely reads arrives unknown, even where the loop provably
-    // could not change it and the code before it proved what it holds. Only what
-    // the header narrows on is re-derived, which is why the traversal above works
-    // and this does not.
-    //
-    // The `reads` half of that is over-conservative *for an entry env* — a name the
-    // loop cannot write holds its value on every iteration — and recovering it is
-    // its own slice (#653): the value and declared lanes can stay, the referenced
-    // object's mutable properties cannot, since a method call the body makes can
-    // change them without the receiver ever entering `writes`.
-    let arg = "<?php
+fn a_name_the_body_hands_to_a_call_still_arrives_unknown() {
+    // The `writes` half stays exactly as strong as it was: every variable handed to
+    // any call in the subtree is in it, whether or not the callee takes it by
+    // reference, so `$s` arrives unknown here even though nothing can have changed
+    // it. Recovering these is ADR-0070's by-value survivor rule applied to a
+    // construct's sets rather than a statement's, which moves every `Opaque`'s
+    // fall-through too.
+    let src = "<?php
 function f(int $n): void {
     $s = 'abc';
     while ($n > 0) {
@@ -372,23 +512,9 @@ function f(int $n): void {
 }
 ";
     assert_eq!(
-        dumps(arg),
+        dumps(src),
         vec!["5: dumped type: unknown".to_owned()],
         "a call argument inside the body: the `writes` half took it"
-    );
-
-    // A receiver is not an argument, so `$o` is in `reads`, not `writes` — and is
-    // forgotten all the same. The `if` twin below is what the loop is measured
-    // against: same statement, same proof available, one answers and one does not.
-    let receiver = |wrap: &str| PLACEMENT.replace("STMT", wrap);
-    assert_eq!(
-        undefined_method_lines(&receiver("if ($n > 0) { $o->tyop(); }")),
-        vec![4],
-        "`if` body: the parameter's own class answers"
-    );
-    assert!(
-        undefined_method_lines(&receiver("while ($n > 0) { $o->tyop(); $n--; }")).is_empty(),
-        "`while` body: the same receiver arrives unknown (#653)"
     );
 }
 
