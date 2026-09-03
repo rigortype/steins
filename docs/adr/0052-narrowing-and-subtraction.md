@@ -1928,7 +1928,7 @@ left-nested — but only `Cx::resolve_literal_under` ever read it, and only when
 BOTH operands folded to a literal. One unproven operand and the expression
 answered `unknown`, not even the `string` the operator guarantees. The slice is
 an evaluator (`eval_concat_fact`) at the same four seams, an interpolation
-lowering, and `SCHEMA_VERSION` 12 → 13.
+lowering, and `SCHEMA_VERSION` 13 → 14.
 
 ### The floor is the cast note's ruling, unchanged
 
@@ -2036,10 +2036,14 @@ A **prefixed** interpolation declines too — the arm is guarded on
 (`b"x y" === "x y"` is `true`), so this is conservative rather than necessary:
 the guard exists because the prefix field is open-ended in the parser and a
 future prefix that is *not* a no-op would otherwise be lowered as if it were.
-Dropping the guard is a one-line change if a row ever wants it. Legs 1 and 2 are pure inference and move no schema; this lowering is
-what takes `SCHEMA_VERSION` to 13, and it is the *under-answer* kind of bump —
-no variant is added or re-ordered, so an old payload still decodes and merely
-states something weaker.
+Dropping the guard is a one-line change if a row ever wants it.
+
+Legs 1 and 2 are pure inference and move no schema; this lowering is what takes
+`SCHEMA_VERSION` to 14, and it is the *under-answer* kind of bump — no
+`ArgValue` variant is added or re-ordered, so an old payload still decodes and
+merely states something weaker. It is therefore unlike both of the bumps it
+follows: #626's 12 misdecodes an old `Other` as a `Cast`, and #649's 13 shifts
+every variant index after `StmtKind::While`.
 
 ### What this note declines, each with its reason
 
