@@ -74,9 +74,16 @@ use crate::names::{PackageName, SectionName};
 /// variant by INDEX, and `Cast` is inserted *before* `Other` in `ArgValue`, so every
 /// schema-11 `Other` now names `Cast` — a variant whose target and operand were never
 /// written. That is the sharp half of the bump, and the reason it is not optional.
+/// `13` is the structured `while` (issue #649): `StmtKind::While` carries the loop's
+/// condition and its body as a sub-trace, and it sits *before* `Opaque` in the enum,
+/// so — the wire codec carrying a variant by index — every later variant's index
+/// moved. A schema-12 artifact must therefore miss rather than decode, which is what
+/// the bump buys; on top of that it spells every `while` as an `Opaque` and every
+/// `break`/`continue` as a `Barrier`, replaying silence for a body this binary
+/// judges and an erased env where it now keeps one.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 12;
+pub const SCHEMA_VERSION: u32 = 13;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

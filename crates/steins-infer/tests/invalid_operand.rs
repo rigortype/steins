@@ -414,11 +414,24 @@ fn fires_inside_a_closure_body_on_its_own_proof() {
 }
 
 #[test]
-fn silent_inside_an_unmodelled_loop_body() {
-    // A `while` body is an ADR-0027 `Opaque` construct: the entry env isn't the env
-    // its statements run under, so no site inside it is judged — out of reach.
-    let src = "<?php\n$x = 1;\nwhile (rand()) {\n    $x = [];\n    $y = $x + 1;\n}\n";
-    assert!(diags(src).is_empty(), "a loop body is out of reach: {:#?}", diags(src));
+fn fires_in_a_while_body_exactly_once() {
+    // A `while` body is walked (issue #649), so a site inside it is judged on the
+    // same terms as one in an `if` branch — including the once-only discipline: the
+    // env-free direct pass owns its own families here, and must not report this one
+    // a second time behind the walk.
+    let src = "<?php\nfunction f(): void {\n    $x = 1;\n    while (rand()) {\n        $x = [];\n        $y = $x + 1;\n    }\n}\n";
+    let d = diags(src);
+    assert_eq!(d.len(), 1, "exactly one report, from the body's own statement: {d:#?}");
+    assert_eq!(d[0].line, 6, "{d:#?}");
+}
+
+#[test]
+fn silent_inside_a_still_unmodelled_loop_body() {
+    // `for`/`foreach`/`do`-`while` are still ADR-0027 `Opaque` constructs (issue
+    // #650): the entry env isn't the env their statements run under, so no site
+    // inside one is judged — out of reach, exactly as `while` was.
+    let src = "<?php\n$x = 1;\nforeach ([1] as $i) {\n    $x = [];\n    $y = $x + 1;\n}\n";
+    assert!(diags(src).is_empty(), "a foreach body is out of reach: {:#?}", diags(src));
 }
 
 #[test]

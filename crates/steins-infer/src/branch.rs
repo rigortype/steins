@@ -135,37 +135,7 @@ pub(crate) fn walk_if(
     if verdict != Certainty::No {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        // The DR2 type vocabulary runs first of the four: it's the only one that
-        // can mint a fact over an unfacted binding, which the scalar refinements
-        // below must then see — `if (is_string($v) && $v !== '')` narrows to
-        // `non-empty-string` only in this order.
-        apply_type_narrowing(w.cx, cond, true, &mut benv, &mut bclasses);
-        let refs = then_refinements(cond, w.cx.php_minor);
-        apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
-        apply_class_narrowing(w, cond, true, &mut bclasses);
-        apply_shape_narrowing(w.cx, cond, true, &mut benv, &mut bclasses, true);
-        // Same-expression call guards (issue #421): a call has no binding to
-        // narrow, so this records the guard rather than a fact — only on the
-        // branch where the "not null"/"not false" reading actually holds, so a
-        // sibling branch that never tested the expression does not inherit it
-        // through the join (`join_stores` intersects, same as `vouched`).
-        let mut then_guards = Vec::new();
-        collect_same_expr_call_guards(cond, true, &mut then_guards);
-        for v in then_guards {
-            bclasses.guard_call(v);
-        }
-        let mut then_calls = Vec::new();
-        collect_guard_calls(cond, true, &mut then_calls);
-        for (call, returns_true) in then_calls {
-            let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
-            apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // Guard-respect leg (ADR-0049 §4): a positive existence guard vouches its
-            // symbol on the branch where it holds true.
-            if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
-                bclasses.vouch(v);
-            }
-        }
-        seed_out_params(w, folder, cond, true, &mut benv, &mut bclasses);
+        apply_cond_side(w, folder, cond, true, &mut benv, &mut bclasses);
         if walk_trace(w, folder, then_trace, &mut benv, &mut bclasses, descent, facts, true, out)
             == Flow::FellThrough
         {
@@ -177,34 +147,7 @@ pub(crate) fn walk_if(
     if verdict != Certainty::Yes {
         let mut benv = env.clone();
         let mut bclasses = store.clone();
-        apply_type_narrowing(w.cx, cond, false, &mut benv, &mut bclasses);
-        let refs = else_refinements(cond, w.cx.php_minor);
-        apply_refinements(&refs, &mut benv, &mut bclasses, Stratum::Verified);
-        apply_class_narrowing(w, cond, false, &mut bclasses);
-        apply_shape_narrowing(w.cx, cond, false, &mut benv, &mut bclasses, true);
-        // Same-expression call guards, the false-branch twin (issue #421) — the
-        // "not null"/"not false" reading a `false`-polarity condition proves,
-        // e.g. `if ($e === null) {} else { <here> }`.
-        let mut else_guards = Vec::new();
-        collect_same_expr_call_guards(cond, false, &mut else_guards);
-        for v in else_guards {
-            bclasses.guard_call(v);
-        }
-        let mut else_calls = Vec::new();
-        collect_guard_calls(cond, false, &mut else_calls);
-        for (call, returns_true) in else_calls {
-            let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
-            apply_guard_asserts(w, call, kind, &mut benv, &mut bclasses);
-            // Guard-respect leg (ADR-0049 §4): the negated-guard branch where the
-            // predicate holds true (`if (!method_exists(...)) {} else <here>`) vouches too.
-            if returns_true && let Some(v) = existence_vouch(w.cx, &bclasses, call) {
-                bclasses.vouch(v);
-            }
-        }
-        // Same seed on the other side, for the same reason: `if (!preg_match($re,
-        // $s, $m)) { return; }` reaches its else-branch with the call proven
-        // truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
-        seed_out_params(w, folder, cond, false, &mut benv, &mut bclasses);
+        apply_cond_side(w, folder, cond, false, &mut benv, &mut bclasses);
         if walk_else(w, folder, elseifs, else_trace, chain, &mut benv, &mut bclasses, descent, facts, out)
             == Flow::FellThrough
         {
@@ -221,6 +164,108 @@ pub(crate) fn walk_if(
     *env = jenv;
     *store = jclasses;
     Flow::FellThrough
+}
+
+/// Apply one side of a decided-or-not condition to an env/store pair: everything
+/// a branch taken under `then` polarity knows because that condition held.
+///
+/// Extracted from [`walk_if`]'s two branch blocks, which is where the ordering
+/// constraints below were established; a `while` header's body entry ([`walk_while`])
+/// takes the same true-side application, for the same reason an `if`'s then-branch
+/// does — the condition was evaluated true immediately before the code that follows.
+///
+/// The four vocabularies run in a fixed order. The DR2 type vocabulary is first
+/// because it is the only one that can mint a fact over an unfacted binding, which
+/// the scalar refinements must then see — `is_string($v) && $v !== ''` narrows to
+/// `non-empty-string` only in this order.
+fn apply_cond_side(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    then: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    apply_type_narrowing(w.cx, cond, then, env, store);
+    let refs = if then {
+        then_refinements(cond, w.cx.php_minor)
+    } else {
+        else_refinements(cond, w.cx.php_minor)
+    };
+    apply_refinements(&refs, env, store, Stratum::Verified);
+    apply_class_narrowing(w, cond, then, store);
+    apply_shape_narrowing(w.cx, cond, then, env, store, true);
+    // Same-expression call guards (issue #421): a call has no binding to narrow, so
+    // this records the guard rather than a fact — only on the side where the "not
+    // null"/"not false" reading actually holds, so a sibling branch that never
+    // tested the expression does not inherit it through the join (`join_stores`
+    // intersects, same as `vouched`). The `false` polarity is the twin reading,
+    // `if ($e === null) {} else { <here> }`.
+    let mut guards = Vec::new();
+    collect_same_expr_call_guards(cond, then, &mut guards);
+    for v in guards {
+        store.guard_call(v);
+    }
+    let mut calls = Vec::new();
+    collect_guard_calls(cond, then, &mut calls);
+    for (call, returns_true) in calls {
+        let kind = if returns_true { AssertKind::IfTrue } else { AssertKind::IfFalse };
+        apply_guard_asserts(w, call, kind, env, store);
+        // Guard-respect leg (ADR-0049 §4): an existence guard vouches its symbol on
+        // the side where it holds true — including the negated-guard else-branch,
+        // `if (!method_exists(...)) {} else <here>`.
+        if returns_true && let Some(v) = existence_vouch(w.cx, store, call) {
+            store.vouch(v);
+        }
+    }
+    // The out-parameter seed on both sides, for the same reason: `if
+    // (!preg_match($re, $s, $m)) { return; }` reaches its else-branch with the call
+    // proven truthy (ADR-0077 §3.1) — the polarity the witness survives under decides.
+    seed_out_params(w, folder, cond, then, env, store);
+}
+
+/// Walk a structured `while` body (ADR-0027 amendment, issue #649).
+///
+/// `env`/`store` are the construct's own post-forget pair — the caller has already
+/// applied the write/read sets — and this reads them without writing back: a loop
+/// body contributes **findings**, never facts. The body's exit env is discarded,
+/// so the code after the loop sees exactly what the sets alone left standing, and
+/// carrying the negated condition out of a break-free loop stays the separate
+/// question it is (issue #651).
+///
+/// The entry env needs no fixpoint. Every name the body can touch is forgotten in
+/// the pair handed in, so nothing in it is specific to one iteration; and PHP
+/// evaluates the header before **every** entry to the body, the first included, so
+/// the true-side application is exactly as sound here as it is on an `if`'s
+/// then-branch. A body whose last statement reassigns the subject the header
+/// narrowed — the parent-pointer traversal that motivated the slice — is therefore
+/// no obstacle: the next iteration's entry re-derives the fact from the header.
+///
+/// A header the walk decides is false runs its body zero times, so the body is not
+/// walked. The region is not marked dead: the env-free direct pass reports there
+/// today, and withdrawing those findings is a separate judgment from adding these.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_while_body(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    body: &[Stmt],
+    env: &HashMap<String, Known>,
+    store: &Store,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) {
+    if eval_cond(w, folder, cond, env, store, w.scope.poisoned) == Certainty::No {
+        return;
+    }
+    let mut benv = env.clone();
+    let mut bstore = store.clone();
+    apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
+    // The body's own `Flow` is discarded: a body that terminates on every path
+    // terminates an ITERATION, and a `while` whose condition is not decided may run
+    // none at all, so the successor stays reachable either way.
+    let _ = walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out);
 }
 
 /// One name's pre-branch value and declared-arm lanes, held across the branches

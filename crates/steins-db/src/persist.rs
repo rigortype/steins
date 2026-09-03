@@ -1059,6 +1059,45 @@ mod tests {
         assert_eq!(assigned(&back, "c"), ArgValue::Other, "`(object) $x` is still `Other`");
     }
 
+    /// **The `SCHEMA_VERSION` 12 → 13 payload** (issue #649): a `while` lowers to
+    /// `StmtKind::While`, and the variant survives the trace codec with its
+    /// condition and its body's statements intact.
+    ///
+    /// The variant sits *before* `Opaque`, and the wire codec carries an enum
+    /// variant **by index**, so every later variant's index moved — the same
+    /// reason the append's and the cast's bumps existed. On top of that a
+    /// schema-12 trace spells every `while` as an `Opaque`, whose body is not
+    /// carried at all, so replaying one would answer silence for a body this
+    /// binary judges.
+    #[test]
+    fn the_structured_while_round_trips_through_the_trace_payload() {
+        use steins_syntax::StmtKind;
+        let tree = SourceTree::parse(
+            "<?php\nfunction f(int $n): void { while ($n > 0) { $s = 'abc'; $n--; } }\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let kinds = |t: &SourceTree| -> Vec<String> {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .map(|s| match &s.kind {
+                    StmtKind::While { cond, body, writes, .. } => {
+                        format!("while {cond:?} body={} writes={writes:?}", body.len())
+                    }
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let got = kinds(&back);
+        assert_eq!(got, kinds(&tree), "the decoded body is the encoded one");
+        assert!(
+            got.iter().any(|k| k.starts_with("while ") && k.contains("body=2")),
+            "the `while` lost its condition or its body: {got:?}"
+        );
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),

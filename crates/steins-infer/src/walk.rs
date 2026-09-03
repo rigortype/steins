@@ -26,7 +26,7 @@ use crate::arity::{check_arity, check_printf_arity};
 use crate::assert_harness::{ASSERT_SINK, record_subject_probe};
 use crate::asserts::apply_stmt_asserts;
 use crate::assign::apply_assign;
-use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_match};
+use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_match, walk_while_body};
 use crate::contract::accepts;
 use crate::cx::Cx;
 use crate::declared_receiver::check_phpdoc_undefined_method;
@@ -543,6 +543,48 @@ pub(crate) fn mark_dead_cond_calls(w: &WalkCx, cond: &CondExpr) {
 /// Whether a byte position falls inside any proven-dead region.
 pub(crate) fn in_dead(dead: &[Span], pos: u32) -> bool {
     dead.iter().any(|s| s.start <= pos && pos < s.end)
+}
+
+/// Apply a control-flow construct's write/read sets and hidden-exit floor — the
+/// whole of what [`StmtKind::Opaque`] does, and the whole of what a structured
+/// [`StmtKind::While`] does to the code that follows it (ADR-0027 ratchet: forget
+/// only touched/branched variables, not the whole env).
+///
+/// When the subtree may `return`, a summary walk contributes the declared floor so
+/// hidden exits join the visible ones (ADR-0057 A3; ADR-0075/#126 — without this a
+/// sibling `return null` alone pins `Singleton(null)` and manufactures
+/// `call.on-null` FPs). A walked `while` body keeps contributing it: what that walk
+/// sees is a return read off a forgotten env, which is no stronger than the floor
+/// and must not be mistaken for the whole exit set.
+fn forget_construct_sets(
+    w: &WalkCx,
+    writes: &[String],
+    reads: &[String],
+    poisons: bool,
+    may_return: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    if poisons {
+        env.clear();
+        store.clear();
+    } else {
+        for v in writes.iter().chain(reads) {
+            env.remove(v);
+            store.unbind(v);
+        }
+    }
+    if may_return
+        && let Some(sc) = &w.summary
+    {
+        sc.exits.borrow_mut().push(ExitContribution::Floor);
+        // …and the same floor on the `$this` channel (ADR-0057 C2/D3): a hidden exit
+        // is an exit whose `$this` this walk never saw, so it ends the component
+        // exactly as an unbound `$this` does.
+        if let Some(te) = &sc.this_exits {
+            te.borrow_mut().push(ExitContribution::Floor);
+        }
+    }
 }
 
 /// Walk an ordered statement (sub-)trace against a mutable env, threading the same
@@ -1081,26 +1123,19 @@ pub(crate) fn walk_trace(
             // (ADR-0057 A3; ADR-0075/#126 — without this a sibling `return null`
             // alone pins Singleton(null) and manufactures call.on-null FPs).
             StmtKind::Opaque { writes, reads, poisons, may_return } => {
-                if *poisons {
-                    env.clear();
-                    store.clear();
-                } else {
-                    for v in writes.iter().chain(reads) {
-                        env.remove(v);
-                        store.unbind(v);
-                    }
-                }
-                if *may_return
-                    && let Some(sc) = &w.summary
-                {
-                    sc.exits.borrow_mut().push(ExitContribution::Floor);
-                    // …and the same floor on the `$this` channel (ADR-0057 C2/D3): a
-                    // hidden exit is an exit whose `$this` this walk never saw, so it
-                    // ends the component exactly as an unbound `$this` does.
-                    if let Some(te) = &sc.this_exits {
-                        te.borrow_mut().push(ExitContribution::Floor);
-                    }
-                }
+                forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+                Flow::FellThrough
+            }
+            // A structured `while` (ADR-0027 amendment, issue #649). Its effect on
+            // the code AFTER it is an `Opaque`'s, unchanged — the sets land first
+            // and nothing the body computes is allowed past them. What the sets
+            // leave standing is then also the body's entry env, because a name the
+            // loop can touch is forgotten in it and one it cannot is as true on
+            // iteration 40 as on iteration 1. Narrowed by the header, that env is
+            // where the body walks.
+            StmtKind::While { cond, body, writes, reads, poisons, may_return } => {
+                forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+                walk_while_body(w, folder, cond, body, env, store, descent, facts, out);
                 Flow::FellThrough
             }
             // A statement-position call to a resolved `: never` callee is a

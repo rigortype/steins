@@ -2095,7 +2095,32 @@ pub enum StmtKind {
     Throw { span: Span },
     /// `exit;` / `die;` (as an expression-statement) — a trace terminator; `span` points at it.
     Exit { span: Span },
-    /// A recognized control-flow construct (`while`/`for`/`foreach`/`switch`/`match`-stmt/
+    /// A structured `while` (ADR-0027 amendment, issue #649): everything
+    /// [`Self::Opaque`] is, plus the two things that make a loop body analyzable —
+    /// the header condition and the body as a sub-trace.
+    ///
+    /// The sets carry the same over-approximation and the same meaning they do for
+    /// [`Self::Opaque`]; a walker applies them exactly as it would there. What it
+    /// gains is a `body` to walk afterwards, from that same forgotten env narrowed
+    /// by `cond`. That entry env needs no fixpoint: every name the body can touch
+    /// is already forgotten, and `cond` was evaluated true immediately before every
+    /// entry to the body, the first included — so the narrowing holds under any
+    /// iteration count, including a body that reassigns the subject it was narrowed
+    /// on. What the body computes stays inside it: the construct's own fall-through
+    /// is whatever the sets alone leave standing.
+    ///
+    /// `for`, `foreach` and `do`-`while` still lower to [`Self::Opaque`] (issue
+    /// #650), and `do`-`while` will need the entry narrowing withheld when they
+    /// arrive: its first iteration runs before its condition is ever evaluated.
+    While {
+        cond: CondExpr,
+        body: Vec<Stmt>,
+        writes: Vec<String>,
+        reads: Vec<String>,
+        poisons: bool,
+        may_return: bool,
+    },
+    /// A recognized control-flow construct (`for`/`foreach`/`switch`/`do`-`while`/
     /// `try`/nested block) whose data-flow isn't modeled, but whose write/read sets are
     /// (ADR-0027 ratchet: forgets only touched/branched variables, not all known values).
     ///
