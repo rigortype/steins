@@ -310,6 +310,15 @@ fn a_product_over_the_cap_declines_to_the_predicate_answer() {
         over_doc(&["@param 'a'|'b'|'c' $t"], "$t", "$t . $t"),
         "non-falsy-lowercase-string (asserted)"
     );
+    // The sharp case, and the reason "before" is not a stylistic preference: an
+    // OVERLAPPING product collapses under dedup, so a bound charged on the
+    // finished list would let these nine combinations through as the five
+    // distinct values `'aa'|'aaa'|'aaaa'|'aaaaa'|'aaaaaa'`. The bound is on the
+    // combination count, so it declines instead.
+    assert_eq!(
+        over_doc(&["@param 'a'|'aa'|'aaa' $t"], "$t", "$t . $t"),
+        "non-falsy-lowercase-string (asserted)"
+    );
     // Exactly at the cap it still enumerates, so the bound is `> CAP` and not
     // `>= CAP`: 2 × 4 is 8.
     assert_eq!(
