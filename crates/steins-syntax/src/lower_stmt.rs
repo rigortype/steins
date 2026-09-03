@@ -105,6 +105,13 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         // A `while` is structured (ADR-0027 amendment, issue #649): the sets an
         // `Opaque` carries, plus its condition and its body as a sub-trace.
         Statement::While(wh) => lower_while(s, wh),
+        // `break;` / `continue;` terminate the block they sit in (issue #649).
+        // A trailing `break` in a `switch` case never reaches here —
+        // `strip_trailing_break` takes it before the arm body is lowered — so this
+        // is the mid-block form, the one a guarded `break` inside a loop body is.
+        Statement::Break(_) | Statement::Continue(_) => {
+            Stmt::lowered(StmtKind::LoopJump { span: stmt_span }, Vec::new())
+        }
         // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
         // the walk forgets only its write/read set, not the whole env. The three
         // remaining loop forms join `while` in issue #650.
