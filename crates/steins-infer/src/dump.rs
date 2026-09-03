@@ -23,8 +23,8 @@ use crate::builtin_returns::{
     builtin_call_return_fact, builtin_return_floor, shape_builtin_return_fact,
 };
 use crate::cond::{
-    eval_binary_fact, eval_cast_fact, eval_isset_fact, eval_logical_fact, eval_not_fact,
-    eval_spaceship_fact, eval_ternary_fact,
+    eval_binary_fact, eval_cast_fact, eval_concat_fact, eval_isset_fact, eval_logical_fact,
+    eval_not_fact, eval_spaceship_fact, eval_ternary_fact,
 };
 use crate::cx::Cx;
 use crate::descent::{project_call_summary, project_method_summary, summary_binds};
@@ -809,6 +809,18 @@ fn best_dump_type(
     if let ArgValue::Cast { target, operand } = value {
         let (fact, stratum) =
             eval_cast_fact(w, folder, *target, operand, env, Some(store), poisoned);
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
+        };
+    }
+
+    // A value-position concatenation (issue #627): the predicate table and the
+    // `string` floor, above the literal fold the lower rungs already did. Total
+    // for the same reason the cast above is — a `.` that produces a value
+    // produces a `string`, so the floor is `string` and never `unknown`.
+    if let ArgValue::Concat(lhs, rhs) = value {
+        let (fact, stratum) = eval_concat_fact(w, folder, lhs, rhs, env, Some(store), poisoned);
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,
