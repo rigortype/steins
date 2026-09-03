@@ -12,6 +12,15 @@
 //! on runtime configuration — exactly what this crate must not invent.
 //! `oracle_agrees_on_every_admitted_cast` pins the admitted cells against the
 //! real engine; `float_operand_widens` pins the refusal.
+//!
+//! # What "widens" means since issue #627
+//!
+//! Every refusal below used to render `unknown`, because the literal seam was
+//! the only reader of a `Concat`. It is no longer: `eval_concat_fact` answers
+//! the predicate table and, failing that, the `string` floor. The refusals are
+//! unchanged in the only sense that matters — **no declined value is ever
+//! stated** — so each one now asserts the widened *fact* and, beside it, that
+//! the value it declines is still absent.
 
 use std::process::Command;
 
@@ -131,26 +140,36 @@ fn non_string_scalars_take_their_php_cast() {
 fn float_operand_widens() {
     // NOT `'f=1.5'`. PHP's float-to-string is `precision`-dependent, so the value is
     // the runtime's to state, not ours. `strval` stays on the allowlist for this.
-    assert_eq!(dumped(r#""f=" . 1.5"#), "unknown");
-    assert_eq!(dumped(r#""f=" . 0.1"#), "unknown");
-    // A float by *promotion* rather than by spelling (issue #62) takes the same
-    // refusal — the admission rule reads the value, not how it was written.
-    assert_eq!(dumped(r#""f=" . 9223372036854775808"#), "unknown");
+    // Since #627 the widening is the predicate answer rather than `unknown`; what
+    // the refusal forbids is a *value*, and none of these states one.
+    for src in [r#""f=" . 1.5"#, r#""f=" . 0.1"#, r#""f=" . 9223372036854775808"#] {
+        // The last is a float by *promotion* rather than by spelling (issue #62)
+        // and takes the same refusal — the admission rule reads the value, not
+        // how it was written.
+        let got = dumped(src);
+        assert_eq!(got, "non-falsy-string", "{src}");
+        assert!(!got.contains('\''), "a float value leaked into `{src}`: {got}");
+    }
 }
 
 #[test]
 fn an_unresolved_operand_widens_the_whole_concat() {
-    // No partial strings: one unknown operand and the result is unknown, not a
-    // prefix. `rand()` is not foldable and `$u` is never bound.
-    assert_eq!(dumped(r#""u=" . rand()"#), "unknown");
+    // No partial strings: one unresolved operand and the result is the operator's
+    // widened fact, never the resolved prefix. `rand()` is not foldable and `$u`
+    // is never bound, so `'u='` and `'a'` must not survive as values.
+    assert_eq!(dumped(r#""u=" . rand()"#), "non-falsy-string");
     let src = "<?php\n$y = \"a\" . $undefined;\n\\PHPStan\\dumpType($y);\n";
-    assert_eq!(types(src), vec!["unknown"]);
+    assert_eq!(types(src), vec!["non-falsy-string"]);
 }
 
 #[test]
 fn array_operand_widens() {
     // PHP yields "Array" plus a warning; that is a diagnosis, not a value to fold.
-    assert_eq!(dumped(r#""a=" . [1, 2]"#), "unknown");
+    // The #627 floor says the result is a `string` — which it is — without ever
+    // naming `'Array'`, because the cast grid keeps declining an array input.
+    let got = dumped(r#""a=" . [1, 2]"#);
+    assert_eq!(got, "non-falsy-string");
+    assert!(!got.contains("Array"), "the array's string cast leaked: {got}");
 }
 
 #[test]

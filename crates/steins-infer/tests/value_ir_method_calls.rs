@@ -316,10 +316,13 @@ fn an_object_result_is_not_rendered_in_value_position() {
 #[test]
 fn the_store_less_fold_road_sees_no_method() {
     // `resolve_literal_under` has no store in its signature, so the fold and concat
-    // lanes decline a method call outright — recorded, not accidental.
+    // lanes decline a method call outright — recorded, not accidental. Since issue
+    // #627 the concatenation still answers its own operator fact (`'b'` is
+    // non-falsy, so the result is), but the method's `'a'` never becomes a value:
+    // `'ab'` is the leak this pins against.
     let src = "<?php\nfinal class C { public function m(): mixed { return 'a'; } }\n\
         $c = new C();\n$s = $c->m() . 'b';\n\\PHPStan\\dumpType($s);";
-    assert_eq!(dumped(src), "dumped type: unknown");
+    assert_eq!(dumped(src), "dumped type: non-falsy-string");
 }
 
 #[test]
