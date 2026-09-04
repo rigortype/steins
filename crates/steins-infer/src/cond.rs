@@ -5,7 +5,10 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{Base, Certainty, Fact, IntRange, Refinement, ShapeFact, Val};
+use steins_domain::{
+    Base, CAP, Certainty, Fact, IntRange, PhpStr, Refinement, ShapeFact, StrPreds, Val,
+    php_is_numeric,
+};
 use steins_syntax::{
     ArgValue, CastTarget, CmpOp, CondExpr, CondOperand, IssetOperand, LogicalOp, NameRef, RefKind,
     Span, ValueOp,
@@ -464,6 +467,13 @@ fn value_operand_fact(
         ArgValue::Cast { target, operand } => {
             Some(eval_cast_fact(w, folder, *target, operand, env, store, poisoned))
         }
+        // A nested concatenation (issue #627). `a . b . c` lowers left-nested, so
+        // without this arm the inner `Concat` would be the one operand of the
+        // outer one that knows nothing — the compositionality the whole family
+        // rests on, spelled for `.`.
+        ArgValue::Concat(lhs, rhs) => {
+            Some(eval_concat_fact(w, folder, lhs, rhs, env, store, poisoned))
+        }
         _ => transfer_arg_known(w.cx, folder, value, env, store),
     }
 }
@@ -659,6 +669,295 @@ fn cast_floor(target: CastTarget) -> Fact {
         }
         CastTarget::Null => Fact::Singleton(Val::Null),
     }
+}
+
+/// Evaluate a **value-position concatenation** `$a . $b` (issue #627) to an env
+/// [`Fact`].
+///
+/// `ArgValue::Concat` has carried the syntax since issue #59, but only
+/// [`Cx::resolve_literal_under`] ever read it, and only when BOTH operands
+/// folded to a literal. One unproven operand and the whole expression answered
+/// `unknown` — not even the `string` the operator guarantees. This is the fact
+/// rung that was missing.
+///
+/// # Four rungs, most precise first
+///
+/// 0. **The identity.** An operand projecting to exactly `''` leaves the other
+///    operand's fact untouched — `'' . $x` IS `$x`'s string projection. It sits
+///    above the table because the table cannot express it: "empty" is the
+///    *absence* of `NON_EMPTY`, and an implication-closed bitset of positive
+///    literals has no way to say a predicate fails.
+/// 1. **The value product.** Both operands' string projections are finite value
+///    sets, so the concatenation is the cross product — `'0' . ('0'|'1'|'2')` is
+///    `'00'|'01'|'02'`. Bounded by [`CAP`] **before** the product is built and
+///    **declined** above it, never truncated: a `OneOf` missing a member is a
+///    wrong value domain, not a wider one (ADR-0028 §3, the issue #74 bound).
+/// 2. **The predicate table** below, over [`StrPreds`].
+/// 3. **The `string` floor**, which is why no concatenation answers `unknown`.
+///
+/// # The operand's string is read from the cast grid, not restated here
+///
+/// Each operand goes through [`value_operand_fact`] and then
+/// [`php_cast_fact`]`(…, CastTarget::String)` — the grid issue #595 measured for
+/// `settype` and issue #626 pointed `(string)` at. So `int` contributes
+/// `DECIMAL_INT.close()`, `float` contributes `UPPERCASE ∧ NON_EMPTY` and never
+/// a value (`precision`-ini, ADR-0004), and `bool` contributes `'1'|''` — each
+/// in exactly one place, so `.`, `(string)` and `settype` cannot drift apart. An
+/// operand the grid declines (an array) or that has no fact at all (an object)
+/// contributes the empty predicate set, which is a widening and never a lie.
+///
+/// # The measured table
+///
+/// Every cell is authored from `php -r` at `PINNED_PHP` 8.5.9 (ADR-0061 §4), by
+/// brute force over a 62-string corpus rather than on paper — the corpus is what
+/// killed two of the candidates below.
+///
+/// | bit | rule | why, and the witness |
+/// | --- | --- | --- |
+/// | `NON_EMPTY` | `ne(a) ∨ ne(b)` | `.` only ever appends bytes |
+/// | `NON_FALSY` | `nf(a) ∨ nf(b) ∨ (ne(a) ∧ ne(b))` | a non-falsy operand is a prefix or suffix of the result, and `''`/`'0'` admit neither; two non-empty operands make a result of length ≥ 2 |
+/// | `LOWERCASE` | `lc(a) ∧ lc(b)` | `strtolower` is byte-wise, so identity under it is conjunctive. It is *identity*, not "has letters": `''` and `'123'` are both |
+/// | `UPPERCASE` | `uc(a) ∧ uc(b)` | same |
+/// | `NUMERIC` | `dec(a) ∧ is_numeric('1' . v)` for every `v` in `b`'s finite value set | see below |
+/// | `DECIMAL_INT` | never | `'0' . '0'` is `'00'` |
+/// | `NON_DECIMAL_INT` | never | `'-' . '9223372036854775808'` is `'-9223372036854775808'` |
+/// | `CLASS_STRING` | never | contextual, and a concatenation of two class names names no class |
+///
+/// **`NON_FALSY` does not follow from `NON_EMPTY` on one side**: `'' . '0'` is
+/// `'0'`, non-empty on the right and falsy.
+///
+/// # `NUMERIC` does not compose, and the issue is wrong about how
+///
+/// The issue proposes that "a decimal-int operand concatenated with a
+/// decimal-int operand is decimal-int". **Both halves are false**, and
+/// phpstan-src's own `bug-11129.php` agrees: `'0' . '-1'` is `'0-1'`, which is
+/// not numeric at all, and `'0' . '0'` is `'00'`, which is numeric but not a
+/// decimal-int string. A decimal-int operand may carry a sign, and the bitset
+/// cannot say which.
+///
+/// What IS sound is one-sided and needs the right operand's actual bytes. Every
+/// decimal-int string is an optional `-` then a digit run, so `a . b` parses
+/// under PHP's numeric grammar exactly as `'1' . b` does — the leading digits are
+/// interchangeable and a leading `-` transfers. So `dec(a)` plus
+/// `is_numeric('1' . b)` decides it, for each `b` the finite value set admits.
+/// That is [`concat_tail_keeps_numeric`], and it is what wins `$i . '0'`,
+/// `$i . '10E3'` (numeric) while correctly declining `$i . '-1'` and
+/// `$i . '10eE3'`.
+///
+/// The mirror rung — `'0' . $positiveInt` is numeric because a positive int
+/// prints without a sign — is **not** built: `DECIMAL_INT` does not record the
+/// sign, and inventing a bit for it is issue #600's territory and ADR-0059's
+/// Lean lockstep (see the slice's report).
+///
+/// # The floor, and the operand that throws
+///
+/// Same ruling as [`eval_cast_fact`]'s, on the same measurements. `.` completes
+/// to a `string` for every operand it completes on — `[1, 2] . ''` is `'Array'`
+/// with an `E_WARNING`, `$resource . ''` is `'Resource id #5'` — and the only
+/// escape is a throw (`new stdClass . 'a'` and an enum case both raise `Error:
+/// … could not be converted to string`), which produces no value for a floor to
+/// be wrong about. The `'Array'` **value** is still never stated: the grid keeps
+/// declining an array input, so the floor is minted here as the operator's
+/// claim, not there as the value's.
+///
+/// # Stratum
+///
+/// The #260 ruling, as [`eval_cast_fact`] applies it. The bare floor is a claim
+/// about the operator, owed to no operand — `Verified`, always. A value or a
+/// predicate set rests on the operands' facts, so it carries their `min`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn eval_concat_fact(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    lhs: &ArgValue,
+    rhs: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> (Fact, Stratum) {
+    let l = concat_operand_string(w, folder, lhs, env, store, poisoned);
+    let r = concat_operand_string(w, folder, rhs, env, store, poisoned);
+    // Derivation clause (ADR-0052 §5), read the way `eval_binary_fact` reads it:
+    // an operand the grid could not project contributes the stratum its own value
+    // lane would.
+    let derived = l
+        .as_ref()
+        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+    let (lf, rf) = (l.as_ref().map(|(f, _)| f), r.as_ref().map(|(f, _)| f));
+    if let (Some(a), Some(b)) = (lf, rf) {
+        // The identity law, above every rung: `'' . $x` and `$x . ''` ARE `$x`'s
+        // string projection. The table below cannot see it, because an *empty*
+        // operand is the ABSENCE of `NON_EMPTY` and this bitset has no negative
+        // literals — so without this the two spellings of the identity disagree
+        // (`$i . ''` kept `NUMERIC`, `'' . $i` lost it).
+        if is_empty_str(a) {
+            return concat_answer(b.clone(), derived);
+        }
+        if is_empty_str(b) {
+            return concat_answer(a.clone(), derived);
+        }
+        if let Some(fact) = concat_value_product(a, b) {
+            return concat_answer(fact, derived);
+        }
+    }
+    let preds = concat_preds(
+        lf.map_or_else(StrPreds::empty, string_fact_preds),
+        rf.map_or_else(StrPreds::empty, string_fact_preds),
+        rf.and_then(string_fact_vals).as_deref(),
+    );
+    // A contentless predicate set collapses to the General layer inside
+    // [`Fact::refined`], so the floor needs no branch of its own — it is the
+    // empty-table case, normalized by the one exit below.
+    concat_answer(Fact::refined(Base::String, Refinement::Str(preds), false), derived)
+}
+
+/// The `string` every concatenation that completes produces.
+fn concat_floor() -> Fact {
+    Fact::General { base: Base::String, nullable: false }
+}
+
+/// The single exit of [`eval_concat_fact`], with the issue #260 stratum ruling
+/// applied to every rung alike.
+///
+/// A result that IS the floor is a claim about the operator, owed to no operand,
+/// **however it was reached** — so it enters `Verified` even when an operand
+/// projected onto it. This is [`eval_cast_fact`]'s `fact == floor` normalization,
+/// and without it the identity rung broke the rule this function's doc states:
+/// for `/** @param int|string $u */`, `'' . $u` answered `string (asserted)`
+/// while `(string) $u` answered `string`, because the projection landed exactly
+/// on the floor and carried the operand's stratum with it. Anything narrower
+/// than the floor does rest on the operands, and keeps their `min`.
+fn concat_answer(fact: Fact, derived: Stratum) -> (Fact, Stratum) {
+    if fact == concat_floor() { (fact, Stratum::Verified) } else { (fact, derived) }
+}
+
+/// One operand's contribution to a concatenation, as a `string`-based [`Fact`].
+///
+/// The whole of the operand semantics is [`value_operand_fact`] (so a nested
+/// concatenation, comparison, cast or `isset` answers for itself) composed with
+/// the string column of the cast grid. `None` is "nothing is known", which the
+/// table reads as the empty predicate set.
+fn concat_operand_string(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> Option<(Fact, Stratum)> {
+    let (fact, strat) = value_operand_fact(w, folder, value, env, store, poisoned)?;
+    Some((php_cast_fact(&fact, CastTarget::String)?, strat))
+}
+
+/// Whether a projected operand is exactly the empty string — the one operand
+/// concatenation is the identity over.
+fn is_empty_str(f: &Fact) -> bool {
+    matches!(f, Fact::Singleton(Val::Str(s)) if s.as_bytes().is_empty())
+}
+
+/// The finite set of strings a projected operand admits, or `None` when it is
+/// not finite (the predicate rung's case).
+fn string_fact_vals(f: &Fact) -> Option<Vec<PhpStr>> {
+    let str_of = |v: &Val| match v {
+        Val::Str(s) => Some(s.clone()),
+        _ => None,
+    };
+    match f {
+        Fact::Singleton(v) => str_of(v).map(|s| vec![s]),
+        Fact::OneOf(vs) => vs.iter().map(str_of).collect(),
+        _ => None,
+    }
+}
+
+/// The predicate summary of a projected operand — the finite layers compute it
+/// from the strings themselves, the refined layer already carries it, and every
+/// other shape knows nothing.
+fn string_fact_preds(f: &Fact) -> StrPreds {
+    match f {
+        Fact::Singleton(Val::Str(s)) => StrPreds::of(s),
+        // A member the projection did not spell as a string knows nothing, and
+        // the intersection carries that through.
+        Fact::OneOf(vs) => vs
+            .iter()
+            .map(|v| match v {
+                Val::Str(s) => StrPreds::of(s),
+                _ => StrPreds::empty(),
+            })
+            .reduce(StrPreds::intersect)
+            .unwrap_or_else(StrPreds::empty),
+        Fact::Refined { base: Base::String, refinement: Refinement::Str(p), nullable: false } => *p,
+        _ => StrPreds::empty(),
+    }
+}
+
+/// The cross product of two finite string sets, or `None` when either side is
+/// not finite or the product would exceed [`CAP`].
+///
+/// The bound is charged **before** any pair is built and it **declines** rather
+/// than truncating — ADR-0028 §3's ruling for the issue #74 union fold, for the
+/// reason that carries over unchanged: a value set missing a member is wrong,
+/// not merely wider, so the predicate rung below is the fallback rather than a
+/// shortened list.
+fn concat_value_product(a: &Fact, b: &Fact) -> Option<Fact> {
+    let (la, lb) = (string_fact_vals(a)?, string_fact_vals(b)?);
+    if la.len().checked_mul(lb.len())? > CAP {
+        return None;
+    }
+    let mut out = Vec::with_capacity(la.len() * lb.len());
+    for x in &la {
+        for y in &lb {
+            // `.` joins bytes (ADR-0080): two invalid-UTF-8 halves can still
+            // concatenate to a valid string, so the join re-canonicalizes.
+            let mut bytes = x.as_bytes().to_vec();
+            bytes.extend_from_slice(y.as_bytes());
+            out.push(Val::Str(PhpStr::from_vec(bytes)));
+        }
+    }
+    Fact::from_vals(out)
+}
+
+/// The predicate-propagation table of [`eval_concat_fact`], one cell per bit.
+///
+/// `rhs_vals` is the right operand's finite value set when it has one — the
+/// `NUMERIC` rung is the only cell that needs actual bytes, and it is the only
+/// cell that reads it.
+fn concat_preds(a: StrPreds, b: StrPreds, rhs_vals: Option<&[PhpStr]>) -> StrPreds {
+    let (ne_a, ne_b) = (a.contains_all(StrPreds::NON_EMPTY), b.contains_all(StrPreds::NON_EMPTY));
+    let mut out = StrPreds::empty();
+    if ne_a || ne_b {
+        out = out.union(StrPreds::NON_EMPTY);
+    }
+    if a.contains_all(StrPreds::NON_FALSY) || b.contains_all(StrPreds::NON_FALSY) || (ne_a && ne_b) {
+        out = out.union(StrPreds::NON_FALSY);
+    }
+    if a.contains_all(StrPreds::LOWERCASE) && b.contains_all(StrPreds::LOWERCASE) {
+        out = out.union(StrPreds::LOWERCASE);
+    }
+    if a.contains_all(StrPreds::UPPERCASE) && b.contains_all(StrPreds::UPPERCASE) {
+        out = out.union(StrPreds::UPPERCASE);
+    }
+    if a.contains_all(StrPreds::DECIMAL_INT)
+        && rhs_vals.is_some_and(|vs| !vs.is_empty() && vs.iter().all(concat_tail_keeps_numeric))
+    {
+        out = out.union(StrPreds::NUMERIC);
+    }
+    out
+}
+
+/// Whether appending `tail` to **any** decimal-int string leaves an
+/// `is_numeric` string.
+///
+/// A decimal-int string is an optional `-` then a digit run with no redundant
+/// leading zero, so under PHP's numeric grammar `d . tail` scans exactly as
+/// `'1' . tail` does: the digit run's length and digits are immaterial to what
+/// follows it, and a leading `-` transfers through unchanged. One probe against
+/// the engine's own `is_numeric` therefore decides the whole family, and the
+/// decision is the engine's rather than a re-derived grammar.
+fn concat_tail_keeps_numeric(tail: &PhpStr) -> bool {
+    let mut probe = vec![b'1'];
+    probe.extend_from_slice(tail.as_bytes());
+    php_is_numeric(&probe)
 }
 
 /// The pole a `<=>` decides over two candidate sets, or `None` when it is

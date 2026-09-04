@@ -1098,6 +1098,60 @@ mod tests {
         );
     }
 
+    /// **The `SCHEMA_VERSION` 13 → 14 payload** (issue #627): an interpolated
+    /// string lowers to the `ArgValue::Concat` chain it desugars to, and the
+    /// chain survives the trace codec.
+    ///
+    /// Unlike the two bumps above it — 11 → 12's misdecode and 12 → 13's shifted
+    /// variant index — this adds and re-orders nothing, so a schema-13 payload
+    /// still *decodes*; it simply spells `"a $v"` as `ArgValue::Other` and
+    /// answers `unknown` for a value this binary decides. The two shapes asserted
+    /// here are the ones that decide the lowering: the `''` seed that keeps
+    /// `"$v"` a string cast, and the heredoc that is deliberately NOT lowered.
+    #[test]
+    fn an_interpolated_string_round_trips_as_the_concat_chain() {
+        use steins_syntax::{ArgValue, StmtKind};
+        let tree = SourceTree::parse(
+            "<?php\nfunction f($v): void { $a = \"x $v\"; $b = \"$v\"; \
+             $c = <<<EOT\n  y $v\n  EOT; }\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let assigned = |t: &SourceTree, want: &str| -> ArgValue {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .find_map(|s| match &s.kind {
+                    StmtKind::Assign { var, value, .. } if var == want => Some(value.clone()),
+                    _ => None,
+                })
+                .expect("an assignment")
+        };
+        assert_eq!(assigned(&back, "a"), assigned(&tree, "a"), "the decoded chain is the encoded one");
+        // `"x $v"` is `Concat(Concat('', 'x '), $v)` — the seed, then the parts.
+        match assigned(&back, "a") {
+            ArgValue::Concat(head, tail) => {
+                assert_eq!(*tail, ArgValue::Var("v".to_owned()));
+                assert!(matches!(*head, ArgValue::Concat(..)), "the seed nests: {head:?}");
+            }
+            other => panic!("`\"x $v\"` decoded as {other:?}"),
+        }
+        // `"$v"` is NOT `$v` — it is a concatenation, which is what makes it a
+        // string cast. (The parser emits an empty literal part of its own here,
+        // so the head is a nested chain of empty strings rather than one `Str`;
+        // what matters is that the variable never stands alone.)
+        match assigned(&back, "b") {
+            ArgValue::Concat(head, tail) => {
+                assert_eq!(*tail, ArgValue::Var("v".to_owned()));
+                assert!(!matches!(*head, ArgValue::Var(_)), "the seed vanished: {head:?}");
+            }
+            other => panic!("`\"$v\"` decoded as {other:?}"),
+        }
+        // A heredoc still widens — its indentation stripping is not in the parts.
+        assert_eq!(assigned(&back, "c"), ArgValue::Other, "a heredoc is still `Other`");
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),
