@@ -62,3 +62,17 @@ Filenames are `YYYYMMDD-<slug>.md`, dated to authorship.
   ~twenty-id project. Ranks the classes onto existing Steins machinery, names
   member reach as the precondition, and records what is deliberately not
   ported.
+
+- [TSTyche as a reference for type testing: what it does, and what PHPStan and Steins lack](20260907-tstyche-type-testing-survey.md)
+  — TSTyche 7.2.4 read from its source (never executes a test file, rejects a
+  collapsed `any`/`never` by default, counts diagnostics for its ability
+  matchers), PHPStan's `assertType` family measured in user land, Steins'
+  dump lanes probed on the same fixtures, and the three ideas that transfer:
+  reject a collapsed subject, a type lane, ability matchers over "expect an
+  error". Candidate slices inherit ADR-0053 point 9.
+- [A PHPDoc-vs-value contract checker, independent of any analyzer](20260907-phpdoc-runtime-contract-checker.md)
+  — a 400-line spike on `phpstan/phpdoc-parser` alone: trinary verdicts over
+  values, real calls observed against `@param`/`@return` (conditional return
+  types and `@template` decide at runtime), and `@param` as a generator with
+  type-preserving shrinking. Design sketch with its own property engine and
+  PHPUnit / Pest integration; open decisions listed.

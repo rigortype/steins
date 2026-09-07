@@ -19,3 +19,15 @@ produced them — `extract_hierarchy.py`, `hierarchy.toml`, `throws.toml`,
 `failure_arms.toml`, `return_facts.toml`, and `crosscheck.txt`. Those are data,
 not prose; they are read by the catalog generator (`cargo xtask gen-catalog`),
 and only the audit above is written to be read directly.
+
+## PHPDoc runtime check
+
+A feasibility spike for a runtime checker of PHPDoc types against values,
+built on `phpstan/phpdoc-parser` only — the evidence behind
+[the 2026-09-07 note](../notes/20260907-phpdoc-runtime-contract-checker.md).
+
+- **[`phpdoc-runtime-check/spike.php`](phpdoc-runtime-check/spike.php)** —
+  the interpreter (trinary verdict), the contract reader, the generator and
+  the shrinker in one file. Run with `composer require phpstan/phpdoc-parser`
+  next to it, or `PHPDOC_PARSER_AUTOLOAD=<vendor/autoload.php> php spike.php`;
+  the output is deterministic (seed 7).
