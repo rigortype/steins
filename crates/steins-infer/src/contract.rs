@@ -404,6 +404,13 @@ pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> 
     let mut table =
         AliasTable { entries: HashMap::new(), shadow: template_names_of(Some(text)), site: (file, off) };
     for decl in steins_phpdoc::scan_type_aliases(text) {
+        if !steins_contract::is_shadowable_pseudo_type(&decl.name) {
+            // `@phpstan-type int ShouldNotHappen` binds nothing. An alias name
+            // lives in the same space a class name lives in, so it answers the
+            // same question `is_shadowable_pseudo_type` answers for a class: the
+            // built-in vocabulary is not shadowable, and `@param int` stays `int`.
+            continue;
+        }
         let body = match decl.body {
             steins_phpdoc::TypeAliasBody::Local(text) => {
                 parse_tag_type(&text).map_or(AliasBody::Floor, AliasBody::Local)

@@ -273,6 +273,28 @@ the docblock says nothing about the program, and ADR-0091 §6's
 `phpdoc.unknown-vocabulary` already speaks at the *use* site, where the
 truncation would otherwise have hidden it.
 
+**18. An unresolvable type alias is `Opaque`, not the class its name spells.**
+Entry 12's rule, applied to the second pre-lowering rewrite (issue #472). PHPStan
+resolves an invalid `@phpstan-import-type` — an owner that is not a class, an
+owner it cannot find, a name the owner does not export — to an object type named
+after the alias, and reports the import. Steins floors it, along with an
+unparsable body, a cycle, and a body still naming an alias at the one-level
+bound. The rows are named because they cost headline agreement: phpstan-src's
+`type-aliases.php` lines 127–129 assert
+`TypeAliasesDataset\ImportedAliasFromNonClass` and its two siblings, which Steins
+answered *by accident* before #472 (an unread alias name fell through to
+`lower_identifier`'s class catch-all) and answers `unknown` now, on purpose. The
+accident was the hazard `KNOWN_UNENFORCED` exists for: a class contract over a
+name that is not a class answers a definite `No` for every non-object value, held
+back only by `Cx::is_known_class`'s valve.
+
+One precedence call in the same file goes the other way and is **not** a floor.
+`@phpstan-type Baz never` on a class-like where a class `Baz` is also in scope:
+PHPStan gives the alias precedence and answers `never`; Steins gives the
+in-project declaration precedence and answers `Baz`, which is the
+pseudo-type/class rule (entry 15's shape) applied to the same question. The row
+diverged before #472 and diverges after it, for a different reason.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

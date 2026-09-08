@@ -241,6 +241,22 @@ fn an_in_project_class_wins_over_a_same_named_alias() {
 }
 
 #[test]
+fn built_in_vocabulary_cannot_be_aliased() {
+    // phpstan-src's own `type-aliases.php` writes `@phpstan-type int
+    // ShouldNotHappen` and then asserts that `@param int` is still `int`. A name
+    // no class could shadow is a name no alias may bind either — one predicate,
+    // `is_shadowable_pseudo_type`, answers both.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type int ShouldNotHappen", "int")),
+        "dumped phpdoc type: int (asserted)"
+    );
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type array array{id: int}", "array")),
+        "dumped phpdoc type: array (asserted)"
+    );
+}
+
+#[test]
 fn a_template_name_is_not_captured_by_a_same_named_alias() {
     // The ordering claim, from the outside: aliases expand *after* both `@template`
     // shadow stages, so by then a declared template name is no longer an identifier
