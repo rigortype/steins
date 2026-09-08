@@ -806,7 +806,15 @@ pub fn scan_magic_member_tags(text: &str) -> Vec<MagicMemberTag> {
     tags
 }
 
-fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<MagicMemberTag> {
+/// Recognize the magic tag on one physical line, returning its kind, the `@`
+/// offset, and the trimmed tail bounds. Shared by [`scan_magic_line`] and
+/// [`scan_type_alias_line`] so both read the same tag vocabulary and the same
+/// notion of "the tail", `*/` closer included.
+fn magic_tag_head(
+    text: &str,
+    line_start: usize,
+    line_end: usize,
+) -> Option<(MagicTagKind, usize, usize, usize)> {
     let bytes = text.as_bytes();
     let i = skip_gutter(bytes, line_start, line_end);
     if i >= line_end || bytes[i] != b'@' {
@@ -840,6 +848,12 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
             rest_end -= 1;
         }
     }
+    Some((kind, at_offset, rest_start, rest_end))
+}
+
+fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<MagicMemberTag> {
+    let bytes = text.as_bytes();
+    let (kind, at_offset, rest_start, rest_end) = magic_tag_head(text, line_start, line_end)?;
 
     let subject = match kind {
         MagicTagKind::Method => magic_method_name(text, bytes, rest_start, rest_end),
@@ -858,6 +872,112 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
         subject,
         tag_span: Span::new(at_offset as u32, rest_end as u32),
     })
+}
+
+/// What one type-alias declaration binds its name to, as the tag spells it.
+/// Raw text throughout: this scanner recovers the declaration, it does not parse
+/// the type (that is the consumer's job, at the position the alias is used).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeAliasBody {
+    /// `@phpstan-type Name <type>` / `@psalm-type Name = <type>` — the tail after
+    /// the name and Psalm's optional `=`, trimmed. Empty when the tag gave none.
+    Local(String),
+    /// `@phpstan-import-type Name from Other [as Local]` — the alias `name` to
+    /// look up on `owner`. `owner` is empty when the tail carried no `from`
+    /// clause, which is a declaration the consumer must floor rather than drop.
+    Imported { owner: String, name: String },
+}
+
+/// One `@phpstan-type` / `@psalm-type` / `@phpstan-import-type` /
+/// `@psalm-import-type` declaration, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeAliasDecl {
+    /// The name the alias is used under **in this docblock's own scope**: the
+    /// declared name, or an import's `as` rename when it carries one. Case
+    /// preserved.
+    pub name: String,
+    pub body: TypeAliasBody,
+}
+
+/// Scan a class-like docblock for its type-alias declarations, in source order
+/// (issue #472). Sibling of [`scan_template_names`]: both recover a *name
+/// binding* a class-like puts in force over its own member docblocks, and both
+/// leave the meaning of that binding to the consumer.
+///
+/// One physical line per declaration, matching [`scan_magic_member_tags`]'s
+/// scanner — a body wrapped across lines is not recovered, and the truncated
+/// half floors rather than resolving to something the author did not write.
+///
+/// A malformed tail still yields a declaration (with an empty body or an empty
+/// owner). That is deliberate: the *name* is what makes an identifier an alias
+/// rather than a class, and a consumer that dropped the entry would send the
+/// name back to the class catch-all — the wrong-`No` hazard issue #472 exists to
+/// close.
+#[must_use]
+pub fn scan_type_aliases(text: &str) -> Vec<TypeAliasDecl> {
+    let bytes = text.as_bytes();
+    let mut decls = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        if let Some(decl) = scan_type_alias_line(text, line_start, line_end) {
+            decls.push(decl);
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    decls
+}
+
+fn scan_type_alias_line(text: &str, line_start: usize, line_end: usize) -> Option<TypeAliasDecl> {
+    let bytes = text.as_bytes();
+    let (kind, _, rest_start, rest_end) = magic_tag_head(text, line_start, line_end)?;
+    let name = read_identifier(text, bytes, rest_start, rest_end);
+    if name.is_empty() {
+        return None; // `@phpstan-type` with no name binds nothing.
+    }
+    let mut j = skip_blanks(bytes, rest_start + name.len(), rest_end);
+    match kind {
+        MagicTagKind::TypeAlias => {
+            // Psalm writes `Name = <type>`, PHPStan writes `Name <type>`; the two
+            // spellings are one dialect here (both prefixes reach both arms).
+            if j < rest_end && bytes[j] == b'=' {
+                j = skip_blanks(bytes, j + 1, rest_end);
+            }
+            Some(TypeAliasDecl { name, body: TypeAliasBody::Local(text[j..rest_end].to_owned()) })
+        }
+        MagicTagKind::ImportedTypeAlias => {
+            let mut owner = String::new();
+            let mut local = None;
+            if read_identifier(text, bytes, j, rest_end) == "from" {
+                j = skip_blanks(bytes, j + 4, rest_end);
+                owner = read_class_ref(text, bytes, j, rest_end);
+                j = skip_blanks(bytes, j + owner.len(), rest_end);
+                if read_identifier(text, bytes, j, rest_end) == "as" {
+                    j = skip_blanks(bytes, j + 2, rest_end);
+                    let renamed = read_identifier(text, bytes, j, rest_end);
+                    if !renamed.is_empty() {
+                        local = Some(renamed);
+                    }
+                }
+            }
+            Some(TypeAliasDecl {
+                name: local.unwrap_or_else(|| name.clone()),
+                body: TypeAliasBody::Imported { owner, name },
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Skip spaces and tabs from `i` up to `end`.
+fn skip_blanks(bytes: &[u8], mut i: usize, end: usize) -> usize {
+    while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i
 }
 
 /// The method name in an `@method` tail: the identifier before the first
@@ -1656,6 +1776,80 @@ mod tests {
         for k in [MagicTagKind::TypeAlias, MagicTagKind::ImportedTypeAlias] {
             assert!(!k.declares_member(), "{}", k.label());
         }
+    }
+
+    // ---- Type-alias declarations (issue #472) ------------------------------
+
+    fn aliases(doc: &str) -> Vec<(String, TypeAliasBody)> {
+        scan_type_aliases(doc).into_iter().map(|d| (d.name, d.body)).collect()
+    }
+
+    fn local(text: &str) -> TypeAliasBody {
+        TypeAliasBody::Local(text.into())
+    }
+
+    #[test]
+    fn scans_both_local_alias_spellings() {
+        // PHPStan writes no `=`, Psalm writes one; either prefix takes either.
+        for doc in [
+            "/** @phpstan-type UserRow array{id: int} */",
+            "/** @psalm-type UserRow = array{id: int} */",
+            "/** @phpstan-type UserRow  =  array{id: int} */",
+        ] {
+            assert_eq!(aliases(doc), [("UserRow".into(), local("array{id: int}"))], "{doc}");
+        }
+    }
+
+    #[test]
+    fn scans_an_import_with_and_without_a_rename() {
+        assert_eq!(
+            aliases("/** @phpstan-import-type UserRow from UserRepo */"),
+            [(
+                "UserRow".into(),
+                TypeAliasBody::Imported { owner: "UserRepo".into(), name: "UserRow".into() }
+            )]
+        );
+        // `as` renames the *local* name; the owner still exports the original.
+        assert_eq!(
+            aliases("/** @psalm-import-type UserRow from \\App\\UserRepo as Row */"),
+            [(
+                "Row".into(),
+                TypeAliasBody::Imported { owner: "\\App\\UserRepo".into(), name: "UserRow".into() }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_malformed_tail_still_declares_the_name() {
+        // The name is what makes an identifier an alias rather than a class, so a
+        // tail the scanner cannot read must not drop the entry (issue #472).
+        assert_eq!(aliases("/** @phpstan-type UserRow */"), [("UserRow".into(), local(""))]);
+        assert_eq!(
+            aliases("/** @phpstan-import-type UserRow */"),
+            [(
+                "UserRow".into(),
+                TypeAliasBody::Imported { owner: String::new(), name: "UserRow".into() }
+            )]
+        );
+        // No name at all binds nothing, and `from`/`as` are matched whole.
+        assert!(scan_type_aliases("/** @phpstan-type */").is_empty());
+        assert_eq!(
+            aliases("/** @phpstan-import-type Row fromage Geo */"),
+            [(
+                "Row".into(),
+                TypeAliasBody::Imported { owner: String::new(), name: "Row".into() }
+            )]
+        );
+    }
+
+    #[test]
+    fn alias_scan_reads_the_tail_the_magic_scanner_reads() {
+        // One tag vocabulary, one notion of "the tail" — the closing `*/` on the
+        // same line is gutter, not type text.
+        let doc = "/**\n * @phpstan-type Row array{id: int}\n * @template T\n * @param int $n\n */";
+        assert_eq!(aliases(doc), [("Row".into(), local("array{id: int}"))]);
+        assert!(scan_type_aliases("/** @type Row = int */").is_empty()); // bare not a tag
+        assert!(scan_type_aliases("/** @mixin Row */").is_empty());
     }
 
     #[test]

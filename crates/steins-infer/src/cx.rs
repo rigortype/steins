@@ -25,6 +25,7 @@ use crate::coerce::php_cast_fact;
 use crate::cond::{eval_cmp, spaceship_pole};
 use crate::contract::{
     CArg, CVal, Envelopes, GenericCarry, InheritanceEdge, IsA, TemplateShadow, template_names_of,
+    type_aliases_of,
 };
 use crate::dam::DamFacts;
 use crate::descent::nested_call_singleton;
@@ -1521,6 +1522,12 @@ impl<'a> Cx<'a> {
                 let m = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method))?;
                 let mut env = self.envelopes_of(m.docblock.as_deref(), self.cur, m.span.start)?;
                 env.shadow_templates(&template_names_of(cd.docblock.as_deref()));
+                env.resolve_aliases(
+                    self,
+                    &type_aliases_of(cd.docblock.as_deref(), self.cur, cd.span.start),
+                    self.cur,
+                    m.span.start,
+                );
                 Some(env)
             }
         }
@@ -1633,6 +1640,13 @@ impl<'a> Cx<'a> {
                 // Class-level `@template` names shadow in this method's `@return` too
                 // (issue #5) — the idempotent class-level stage.
                 env.shadow_templates(&template_names_of(cd.docblock.as_deref()));
+                // …and the class-like's type aliases expand after it (issue #472).
+                env.resolve_aliases(
+                    self,
+                    &type_aliases_of(cd.docblock.as_deref(), self.cur, cd.span.start),
+                    self.cur,
+                    m.span.start,
+                );
                 let ret = env.ret?;
                 Some((ret, format!("{}::{}", cd.name, m.name)))
             }

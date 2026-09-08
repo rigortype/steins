@@ -242,6 +242,37 @@ impl Envelopes {
             cx.resolve_template_types(&mut s.ty, file, off);
         }
     }
+
+    /// Expand every in-scope type alias in every envelope (issue #472), over the
+    /// same three places [`Self::shadow_templates`] rewrites.
+    ///
+    /// **Runs last, after both `@template` shadow stages**, and that order is the
+    /// whole of the template-versus-alias precedence question: by the time this
+    /// runs, every declared template name — the member's own from
+    /// [`parse_envelopes`], the class-like's from the member-check site — has
+    /// already been rewritten to its bound or to an opaque node, so there is no
+    /// identifier left for a same-named alias to capture. A `@template T` beside a
+    /// `@phpstan-type T` is the template, without the table needing to know that
+    /// templates exist.
+    ///
+    /// Nothing later re-reads what this plants: the two rewrites a substituted body
+    /// still owes — the declaring class-like's template shadow, and `template-type`
+    /// resolution — are applied to the body itself, at its declaring site
+    /// ([`Cx::expand_alias`]).
+    pub(crate) fn resolve_aliases(&mut self, cx: &Cx, table: &AliasTable, file: usize, off: u32) {
+        if table.is_empty() {
+            return;
+        }
+        for (_, t) in &mut self.params {
+            cx.resolve_aliases(t, table, file, off);
+        }
+        if let Some(t) = &mut self.ret {
+            cx.resolve_aliases(t, table, file, off);
+        }
+        for s in &mut self.asserts {
+            cx.resolve_aliases(&mut s.ty, table, file, off);
+        }
+    }
 }
 
 /// The lowercased set of `@template` names a docblock declares — the *shadow set*
@@ -313,6 +344,86 @@ impl TemplateShadow {
         self.bounds.extend(other.bounds);
     }
 }
+
+/// What a class-like binds one type-alias name to (issue #472). Three arms,
+/// because "declared but unusable" is a different answer from "not an alias" and
+/// confusing the two is the wrong-`No` hazard: an alias name that fell out of the
+/// table goes back to [`steins_contract::lower`]'s class catch-all.
+#[derive(Debug, Clone)]
+enum AliasBody {
+    /// `@phpstan-type Name <type>` with a body that parsed.
+    Local(PType),
+    /// `@phpstan-import-type Name from Other` — resolved against `Other`'s own
+    /// table, at the site the alias is used.
+    Imported { owner: String, name: String },
+    /// Declared, and nothing usable came of it: an unparsable body, an
+    /// `Unsupported` node, a `from` clause that named no owner. Floors to
+    /// `Opaque` — never to a class.
+    Floor,
+}
+
+/// The type aliases a class-like's docblock puts in force over its own member
+/// docblocks (issue #472), keyed by the **lowercased** name.
+///
+/// **Case-insensitive by decision**, for the same reason [`template_names_of`]
+/// folds case: the identifier pipeline normalizes to lowercase anyway, and
+/// over-matching an alias can only replace a name that would otherwise have been
+/// read as a class — the side ADR-0029 calls safe.
+///
+/// Carries the declaring site with the entries, because a body is text written in
+/// *that* docblock: the `use` scope that resolves its class names, and the
+/// `@template` names that shadow inside it, are the declaring class-like's, not
+/// the using member's.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct AliasTable {
+    entries: HashMap<String, AliasBody>,
+    /// The declaring class-like's `@template` shadow, applied to a substituted
+    /// body so the invariant "no template name survives as a class" holds inside
+    /// an alias exactly as it does outside one.
+    shadow: TemplateShadow,
+    /// The declaring class-like's `(file, offset)` — the namespace and `use`
+    /// scope a body's class names resolve in.
+    site: (usize, u32),
+}
+
+impl AliasTable {
+    /// Whether this class-like declares no alias at all — the overwhelmingly
+    /// common case, and the one every alias stage short-circuits on.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+}
+
+/// The [`AliasTable`] a class-like docblock declares, read at `(file, off)`.
+///
+/// A redeclaration is ignored rather than overwriting: `aliases_local_type`
+/// spells `@phpstan-type` and `@psalm-type` for one name side by side, and
+/// first-wins keeps that pair reading as the single declaration the author meant.
+pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> AliasTable {
+    let Some(text) = docblock else { return AliasTable::default() };
+    let mut table =
+        AliasTable { entries: HashMap::new(), shadow: template_names_of(Some(text)), site: (file, off) };
+    for decl in steins_phpdoc::scan_type_aliases(text) {
+        let body = match decl.body {
+            steins_phpdoc::TypeAliasBody::Local(text) => {
+                parse_tag_type(&text).map_or(AliasBody::Floor, AliasBody::Local)
+            }
+            steins_phpdoc::TypeAliasBody::Imported { owner, name } if !owner.is_empty() => {
+                AliasBody::Imported { owner, name }
+            }
+            steins_phpdoc::TypeAliasBody::Imported { .. } => AliasBody::Floor,
+        };
+        table.entries.entry(decl.name.to_ascii_lowercase()).or_insert(body);
+    }
+    table
+}
+
+/// How many substitutions deep the alias rewrite goes. One for the use site,
+/// one for an alias body that names another alias — the "one level, no walk"
+/// bound ADR-0032's amendment set for `template-type` and issue #472 restates.
+/// A name still standing at the bound floors, which is also what terminates a
+/// cycle.
+const ALIAS_DEPTH: u32 = 2;
 
 /// A `@template` bound Steins is willing to substitute for the template: one whose
 /// text parses whole and lowers to a **vocabulary** contract — `array`, `int`,
@@ -794,6 +905,102 @@ impl<'a> Cx<'a> {
             // over a union subject's class names; Steins declines in this slice.
             _ => Projection::Declined,
         }
+    }
+
+    /// Rewrite every **bare, unqualified** identifier naming an in-scope type
+    /// alias to the type that alias names (issue #472), in place. The `@template`
+    /// shadow's sibling: same walk, same "a `\`-qualified reference is never
+    /// touched" rule, and the same reason for existing — a name that means
+    /// something other than a class must not reach the class catch-all.
+    ///
+    /// Three things can happen to a name the table knows, and only the first is a
+    /// resolution:
+    ///
+    /// - **A class of that name is in scope.** The alias loses: an alias name
+    ///   colliding with a real class is the pseudo-type/class precedence question
+    ///   again, and the in-project declaration wins (ADR-0029). The identifier is
+    ///   left exactly as written, so it lowers to that class as it always did.
+    /// - **The alias expands.** The node becomes the body, re-spelled for where it
+    ///   landed, with one more level of alias expansion inside it.
+    /// - **Anything else floors** to an opaque node: an unparsable body, an import
+    ///   whose owner is unknown or does not declare the name, a body still naming
+    ///   an alias at [`ALIAS_DEPTH`] — which is also what makes a cycle terminate.
+    ///   Never `ContractTy::Class`, which is the whole point.
+    pub(crate) fn resolve_aliases(&self, ty: &mut PType, table: &AliasTable, file: usize, off: u32) {
+        self.resolve_aliases_at(ty, table, file, off, 0);
+    }
+
+    fn resolve_aliases_at(
+        &self,
+        ty: &mut PType,
+        table: &AliasTable,
+        file: usize,
+        off: u32,
+        depth: u32,
+    ) {
+        if let PKind::Identifier(name) = &ty.kind {
+            if name.contains('\\') {
+                return;
+            }
+            let Some(body) = table.entries.get(&name.to_ascii_lowercase()) else { return };
+            if self.is_known_class(&self.resolve_pclass(file, off, name)) {
+                return; // the in-project class wins.
+            }
+            match self.expand_alias(body, table, depth) {
+                Some(expanded) => ty.kind = expanded.kind,
+                None => {
+                    let PKind::Identifier(raw) = &mut ty.kind else { unreachable!() };
+                    ty.kind = PKind::Unsupported(std::mem::take(raw));
+                }
+            }
+            return;
+        }
+        for_each_child_type_mut(ty, &mut |child| {
+            self.resolve_aliases_at(child, table, file, off, depth);
+        });
+    }
+
+    /// The type one [`AliasBody`] expands to, ready to be spliced in at a use site,
+    /// or `None` when it floors.
+    ///
+    /// The body is text of the *declaring* docblock, so it is finished there before
+    /// it travels: the declaring class-like's `@template` shadow and the
+    /// declared-side `template-type` rewrite are applied at the declaring site (the
+    /// two stages [`Cx::envelopes_of`] and the member-check sites run for an
+    /// ordinary envelope), and its class names are made fully qualified the way an
+    /// inheritance edge's argument is (issue #361) so an imported alias still names
+    /// the same classes in the importing file.
+    fn expand_alias(&self, body: &AliasBody, table: &AliasTable, depth: u32) -> Option<PType> {
+        if depth >= ALIAS_DEPTH {
+            return None;
+        }
+        // The table the body is *written against* — the owner's for an import, this
+        // one otherwise.
+        let mut imported_from = None;
+        let mut ty = match body {
+            AliasBody::Floor => return None,
+            AliasBody::Local(ty) => ty.clone(),
+            AliasBody::Imported { owner, name } => {
+                let owner_fqn = self.resolve_pclass(table.site.0, table.site.1, owner);
+                let (ofile, od) = self.find_class(&owner_fqn)?;
+                let owner_table = type_aliases_of(od.docblock.as_deref(), ofile, od.span.start);
+                let ty = match owner_table.entries.get(&name.to_ascii_lowercase())? {
+                    // One hop across the class boundary, not a chain of imports:
+                    // re-importing an import is the walk ADR-0032 declines.
+                    AliasBody::Local(ty) => ty.clone(),
+                    AliasBody::Imported { .. } | AliasBody::Floor => return None,
+                };
+                imported_from = Some(owner_table);
+                ty
+            }
+        };
+        let owner_table = imported_from.as_ref().unwrap_or(table);
+        let (dfile, doff) = owner_table.site;
+        neutralize_templates(&mut ty, &owner_table.shadow);
+        self.resolve_template_types(&mut ty, dfile, doff);
+        self.resolve_aliases_at(&mut ty, owner_table, dfile, doff, depth + 1);
+        self.qualify_class_names(&mut ty, dfile, doff);
+        Some(ty)
     }
 
     /// Re-spell every class name in a type lifted out of *another* declaration's

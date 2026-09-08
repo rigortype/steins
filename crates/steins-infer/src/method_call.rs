@@ -12,7 +12,7 @@ use crate::arg_check::{
     check_maybe_argument_mismatch, implicit_null_accepted, is_type_error, object_world_guard_blind,
 };
 use crate::builtin_returns::store_holds_resource;
-use crate::contract::{TemplateShadow, template_names_of};
+use crate::contract::{AliasTable, TemplateShadow, template_names_of, type_aliases_of};
 use crate::cx::Cx;
 use crate::descent::{ThisSeed, ThisWriteBack, descend, project_method_summary, runs_with_same_this};
 use crate::dispatch::resolve_call_target;
@@ -114,6 +114,11 @@ pub(crate) fn handle_method_call(
 
     let callee_name = format!("{}::{}", target.declaring_class.name, target.method.name);
     let class_templates = template_names_of(target.declaring_class.docblock.as_deref());
+    let class_aliases = type_aliases_of(
+        target.declaring_class.docblock.as_deref(),
+        target.class_file,
+        target.declaring_class.span.start,
+    );
     // Runs for every argument shape — positional prefix and named arguments
     // (Gap A: `new Foo(n: 0)` / `$o->m(n: 0)` were previously skipped wholesale
     // by the `positional_only` guard below).
@@ -123,6 +128,7 @@ pub(crate) fn handle_method_call(
         target.method,
         target.class_file,
         &class_templates,
+        &class_aliases,
         &callee_name,
         call,
         env,
@@ -312,6 +318,7 @@ fn check_method_args(
     method: &MethodDecl,
     class_file: usize,
     class_templates: &TemplateShadow,
+    class_aliases: &AliasTable,
     callee_name: &str,
     call: &CallExpr,
     env: &HashMap<String, Known>,
@@ -329,6 +336,8 @@ fn check_method_args(
     // docblock of the class-like (issue #5) — the second, idempotent shadow stage.
     if let Some(e) = &mut envelopes {
         e.shadow_templates(class_templates);
+        // …then the class-like's type aliases expand, last (issue #472).
+        e.resolve_aliases(cx, class_aliases, class_file, method.span.start);
     }
     for (i, arg) in call.args.iter().enumerate() {
         let Some(param) = method.params.get(i) else { break };
