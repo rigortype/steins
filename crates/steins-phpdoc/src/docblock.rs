@@ -938,7 +938,16 @@ fn scan_type_alias_line(text: &str, line_start: usize, line_end: usize) -> Optio
     if name.is_empty() {
         return None; // `@phpstan-type` with no name binds nothing.
     }
-    let mut j = skip_blanks(bytes, rest_start + name.len(), rest_end);
+    let mut j = rest_start + name.len();
+    if j < rest_end && bytes[j] == b'-' {
+        // ADR-0091 §4.1: the hyphen space is reserved for vocabulary, so an alias
+        // may be named `foo_bar` and may not be named `foo-bar`. phpstan/
+        // phpdoc-parser declares the alias; Steins refuses the declaration whole
+        // rather than binding the truncated `foo`, which is a name the author
+        // never wrote (divergence-registry entry 17).
+        return None;
+    }
+    j = skip_blanks(bytes, j, rest_end);
     match kind {
         MagicTagKind::TypeAlias => {
             // Psalm writes `Name = <type>`, PHPStan writes `Name <type>`; the two
@@ -1833,6 +1842,9 @@ mod tests {
         );
         // No name at all binds nothing, and `from`/`as` are matched whole.
         assert!(scan_type_aliases("/** @phpstan-type */").is_empty());
+        // A hyphenated name is refused whole, not truncated (ADR-0091 §4.1).
+        assert!(scan_type_aliases("/** @phpstan-type foo-bar = int */").is_empty());
+        assert!(scan_type_aliases("/** @psalm-import-type foo-bar from X */").is_empty());
         assert_eq!(
             aliases("/** @phpstan-import-type Row fromage Geo */"),
             [(

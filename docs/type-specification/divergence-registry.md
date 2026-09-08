@@ -259,6 +259,20 @@ Not offered upstream. `key-of` and `value-of` came *from* PHPStan; this roster
 comes from TypeScript by way of a request, and whether any of it belongs
 upstream is a separate question with separate evidence.
 
+**17. A hyphenated type-alias name is refused, not declared.**
+phpstan/phpdoc-parser accepts `@phpstan-type foo-bar = int` and declares an
+alias by that name; Steins refuses the declaration whole. ADR-0091 §4.1's owner
+ruling reserves the hyphen space for vocabulary, and the reservation is what
+makes an unrecognized hyphenated identifier a *provable* docblock defect rather
+than an undecidable one — an alias able to occupy the space would reopen the
+third possibility the rule closes. Refusing whole rather than truncating at the
+hyphen is the load-bearing half: `foo` is a name the author did not write, and
+since issue #472 a bound name is a rewrite, so binding it would silence a
+`@param foo` elsewhere in the class-like. Registered here rather than reported:
+the docblock says nothing about the program, and ADR-0091 §6's
+`phpdoc.unknown-vocabulary` already speaks at the *use* site, where the
+truncation would otherwise have hidden it.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run
