@@ -558,7 +558,25 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   `false` from an abstract `Union{string, bool}` has no value-lane spelling
     //   (`Refinement` carries Str/Int only), so the bool arm survives the assert.
     //   Issue #600 records the domain gap; both rows come back down with it.
-    ("sebastianbergmann/phpunit", 57),
+    //   57 → 88 (+31), 2026-09-09 with issue #472 (type-alias resolution). One
+    //   defect, thirty-one call sites: `src/TextUI/Configuration/Value/Source.php`
+    //   declares `@phpstan-type DeprecationTriggers array{functions:
+    //   list<non-empty-string>, methods: list<non-empty-string>,
+    //   ignoreUndefinedTriggers: bool}` and `Source::__construct(@param
+    //   DeprecationTriggers $deprecationTriggers)`, while every construction in
+    //   `tests/` passes `['functions' => [], 'methods' => []]` — the required
+    //   third key is absent, under a sealed shape. TRUE, and never checked by
+    //   anything before: phpunit's own `phpstan.neon` reads `paths: - src`, so
+    //   upstream PHPStan resolves this alias and never looks at the call sites,
+    //   and Steins read the alias as a bare class name until this issue. The
+    //   code's own reader is `deprecationTriggers()['ignoreUndefinedTriggers'] ??
+    //   false` (TextUI/Application.php:893), so the honest repair is `?` on the
+    //   alias key rather than a third key at 31 call sites — either way the
+    //   declaration as written is violated. Finding-level diff against the
+    //   same-day `fee437c` baseline: exactly these rows, nothing removed.
+    //   As with the 51 → 55 row, the seeded count is the CI engine's (8.4); a
+    //   local 8.5 run reads 84 and stays under the tripwire.
+    ("sebastianbergmann/phpunit", 88),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
@@ -600,7 +618,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // `@phpstan-ignore-next-line`. A TRUE no-coercion violation the test documents.
     // 2 → 3 (+1), 2026-08-16, issue #391: `file_get_contents()` into
     // `computeFingerPrint(string $publicKey)` (SftpConnectionProviderTest.php:189).
-    ("thephpleague/flysystem", 3),
+    // 3 → 4 (+1), 2026-09-09 with issue #472 (type-alias resolution):
+    // `AdapterTestUtilities/ToxiproxyManagement.php:62`. The file declares
+    // `@phpstan-type Attributes array{latency?: int, jitter?: int, rate?: int,
+    // delay?: int}` and `@phpstan-type Toxic array{…, attributes: Attributes}`,
+    // and `resetPeerOnRequest()` — the method directly above `addToxic(@param
+    // Toxic $configuration)` — builds `'attributes' => ['timeout' => $ms]`.
+    // `timeout` is not a key `Attributes` names, and the shape is sealed: a TRUE
+    // disagreement between the alias and the code beside it. It needs the
+    // one-level alias-names-alias rule to be visible at all, since `Toxic`'s body
+    // names `Attributes`. Finding-level diff against the same-day `fee437c`
+    // baseline: exactly this row.
+    ("thephpleague/flysystem", 4),
     // 0 → 1 (+1) with ADR-0043 stage 4. `ChoiceQuestionTest` passes a literal array
     // `[..., null]` to `ChoiceQuestion::__construct(@param array<string|bool|int|
     // float|\Stringable> $choices)`; `null` is a member of none of the union arms —
