@@ -326,6 +326,14 @@ fn an_alias_body_wrapped_across_lines_is_reassembled() {
         )),
         0
     );
+    // The invariant, stated independently of what any one body lowers to: a
+    // wrapped declaration and the same declaration on one line agree. An
+    // intersection of two shapes floors either way — that is the body's answer,
+    // not the scanner's, and before the join the two spellings disagreed.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{id: int}\n *   &array{x: int}", "Row")),
+        one_dump(&probe(" * @phpstan-type Row array{id: int}&array{x: int}", "Row"))
+    );
     // A wrap that upstream declares invalid (a dangling `|`) floors rather than
     // being completed across it.
     assert_eq!(
