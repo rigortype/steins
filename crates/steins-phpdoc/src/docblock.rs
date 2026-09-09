@@ -1062,9 +1062,13 @@ fn read_hyphenated_end(bytes: &[u8], mut j: usize, end: usize) -> usize {
 /// * or the next line **opens with a composition operator** (`|string`,
 ///   `&array{x: int}`), which continues a finished type.
 ///
-/// Everything else ends the body — a blank gutter line, a new `@tag`, the `*/`
-/// closer, and prose, which upstream also leaves out of the type. A tail ending
-/// in a dangling `|` or `&` is where upstream declares the tag invalid, and the
+/// Everything else ends the body — a new `@tag`, the `*/` closer, and prose,
+/// which upstream also leaves out of the type. A **blank gutter line does not**:
+/// `TypeParser::parse` consumes every `PHPDOC_EOL` after an atomic before it
+/// looks for `|`/`&`, so `int` / `*` / `|string` is one union upstream and
+/// stopping at the blank would bind the narrower half. A tail ending in a
+/// dangling `|` or `&` is where upstream declares the tag invalid — there
+/// `parseUnion` does *not* skip the newline before the next atomic — and the
 /// body floors here rather than being completed across the wrap.
 fn join_alias_body(text: &str, start: usize, end: usize, line_end: usize) -> String {
     let bytes = text.as_bytes();
@@ -1087,33 +1091,48 @@ fn join_alias_body(text: &str, start: usize, end: usize, line_end: usize) -> Str
 /// The continuation text of the line after `line_end`, with the end of that
 /// line, or `None` when it does not continue a tail: blank after the gutter, a
 /// new `@tag`, or the `*/` closer.
-fn next_continuation(bytes: &[u8], line_end: usize) -> Option<(usize, usize, usize)> {
-    if line_end >= bytes.len() {
-        return None;
-    }
-    let line_start = line_end + 1;
-    let next = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
-    let mut i = skip_blanks(bytes, line_start, next);
-    // Not `skip_gutter`: the `*` of a closing `*/` is not gutter, it is the
-    // closer, and consuming it would leave a `/` that reads as continuation.
-    while i < next && bytes[i] == b'*' && !(i + 1 < next && bytes[i + 1] == b'/') {
-        i += 1;
-    }
-    i = skip_blanks(bytes, i, next);
-    let mut e = next;
-    while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t' || bytes[e - 1] == b'\r') {
-        e -= 1;
-    }
-    if e >= i + 2 && &bytes[e - 2..e] == b"*/" {
-        e -= 2;
-        while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t') {
+fn next_continuation(bytes: &[u8], mut line_end: usize) -> Option<(usize, usize, usize)> {
+    loop {
+        if line_end >= bytes.len() {
+            return None;
+        }
+        let line_start = line_end + 1;
+        let next = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        let mut i = skip_blanks(bytes, line_start, next);
+        // Not `skip_gutter`: the `*` of a closing `*/` is not gutter, it is the
+        // closer, and consuming it would leave a `/` that reads as continuation.
+        while i < next && bytes[i] == b'*' && !(i + 1 < next && bytes[i + 1] == b'/') {
+            i += 1;
+        }
+        i = skip_blanks(bytes, i, next);
+        let mut e = next;
+        while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t' || bytes[e - 1] == b'\r') {
             e -= 1;
         }
+        // Whether this line closed the comment, remembered *before* the closer is
+        // stripped: an empty line and the closer both leave `i >= e`, and they are
+        // not the same answer (see below).
+        let closes = e >= i + 2 && &bytes[e - 2..e] == b"*/";
+        if closes {
+            e -= 2;
+            while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t') {
+                e -= 1;
+            }
+        }
+        if i < e {
+            return (bytes[i] != b'@').then_some((i, e, next));
+        }
+        // Nothing on this line. The closer ends the docblock; a **blank gutter
+        // line does not end the type**, because phpstan/phpdoc-parser's
+        // `TypeParser::parse` consumes every `PHPDOC_EOL` after an atomic before
+        // it looks for `|`/`&`, blank lines included. Stopping here would bind the
+        // half before the blank — narrower than the author wrote, which is the
+        // defect this whole function exists to prevent.
+        if closes {
+            return None;
+        }
+        line_end = next;
     }
-    if i >= e || bytes[i] == b'@' {
-        return None;
-    }
-    Some((i, e, next))
 }
 
 /// Whether a partial type text still has a bracket open — the syntactic half of
