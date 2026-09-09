@@ -259,6 +259,57 @@ Not offered upstream. `key-of` and `value-of` came *from* PHPStan; this roster
 comes from TypeScript by way of a request, and whether any of it belongs
 upstream is a separate question with separate evidence.
 
+**17. A hyphenated type-alias name is refused, not declared.**
+phpstan/phpdoc-parser accepts `@phpstan-type foo-bar = int` and declares an
+alias by that name; Steins refuses the declaration whole. ADR-0091 §4.1's owner
+ruling reserves the hyphen space for vocabulary, and the reservation is what
+makes an unrecognized hyphenated identifier a *provable* docblock defect rather
+than an undecidable one — an alias able to occupy the space would reopen the
+third possibility the rule closes. Refusing whole rather than truncating at the
+hyphen is the load-bearing half: `foo` is a name the author did not write, and
+since issue #472 a bound name is a rewrite, so binding it would silence a
+`@param foo` elsewhere in the class-like. The refusal is **reported**, per the
+same owner ruling: `phpdoc.unknown-vocabulary` (ADR-0091 §6) fires on the
+declaration line as well as at every use site. A silent refusal would leave the
+author a name that resolves nowhere and no reason why, and the reading is
+provable for the reason the reservation is airtight — since the alias never
+binds, the name is still an identifier that denotes nothing.
+
+**18. An unresolvable type alias is `Opaque`, not the class its name spells.**
+Entry 12's rule, applied to the second pre-lowering rewrite (issue #472). PHPStan
+resolves an invalid `@phpstan-import-type` — an owner that is not a class, an
+owner it cannot find, a name the owner does not export — to an object type named
+after the alias, and reports the import. Steins floors it, along with an
+unparsable body, a cycle, and a body still naming an alias at the one-level
+bound. The rows are named because they cost headline agreement: phpstan-src's
+`type-aliases.php` lines 127–129 assert
+`TypeAliasesDataset\ImportedAliasFromNonClass` and its two siblings, which Steins
+answered *by accident* before #472 (an unread alias name fell through to
+`lower_identifier`'s class catch-all) and answers `unknown` now, on purpose. The
+accident was the hazard `KNOWN_UNENFORCED` exists for: a class contract over a
+name that is not a class answers a definite `No` for every non-object value, held
+back only by `Cx::is_known_class`'s valve.
+
+One precedence call in the same file goes the other way and is **not** a floor.
+`@phpstan-type Baz never` on a class-like where a class `Baz` is also in scope:
+PHPStan gives the alias precedence and answers `never`; Steins gives the
+in-project declaration precedence and answers `Baz`, which is the
+pseudo-type/class rule (entry 15's shape) applied to the same question. The row
+diverged before #472 and diverges after it, for a different reason.
+
+**This one is not a silence, and it is the only entry here that is not.** Where
+a class `Row` and `@phpstan-type Row int` are both in scope, `m(1)` is a
+`phpdoc.param-mismatch` under Steins' reading and is *accepted* under PHPStan's
+— which reports the collision (`typeAlias.duplicate`) and then resolves the
+alias anyway. So the tie-break convicts a value the oracle admits, which no
+other row in this section does. Two things keep it registered rather than
+changed: issue #472's "Refusals to keep" states the rule, and the conviction is
+not new — before #472 the unread alias name reached the class catch-all and
+convicted the same call for a worse reason. The zero-FP answer to a genuine
+collision is a third one neither tool gives — floor to `Opaque`, since the
+author has written two meanings for one name and neither is provable — and it is
+one line in `resolve_aliases_at` plus a test if the owner prefers it.
+
 ## Conformance-suite divergences (intentional silences)
 
 Steins runs `php-typing-conformance`. Standing at the last recorded run

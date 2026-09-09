@@ -13,6 +13,7 @@ use steins_syntax::{ArgValue, CallExpr, Callee, NativeType, Param, ScalarType, T
 use crate::fold::Folder;
 use crate::contract::{
     CArg, CVal, Envelopes, TemplateShadow, declared_carrier, for_each_child_type, template_names_of,
+    type_aliases_of,
 };
 use crate::cx::Cx;
 use crate::descent::value_lane_fn_site;
@@ -596,6 +597,19 @@ fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractAr
     }
     if let Some(e) = &mut envelopes {
         e.shadow_templates(&template_names_of(target.declaring_class.docblock.as_deref()));
+        // …and the class-like's type aliases expand after it (issue #472), which is
+        // also after the carry read above: an alias body is a *declaration*, so it
+        // can never be the template subject #362 intercepts.
+        e.resolve_aliases(
+            cx,
+            &type_aliases_of(
+                target.declaring_class.docblock.as_deref(),
+                file,
+                target.declaring_class.span.start,
+            ),
+            file,
+            off,
+        );
     }
     let phpdoc = envelopes.and_then(|e| e.ret);
     let resolve = |n: &str| {

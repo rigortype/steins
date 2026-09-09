@@ -234,3 +234,32 @@ fn the_value_judgment_is_identical_with_the_id_and_without_it() {
     assert_eq!(rs.iter().filter(|d| d.id == PHPDOC_UNKNOWN_VOCABULARY_ID).count(), 1);
     assert!(!rs.iter().any(|d| d.id == RETURN_MISMATCH_ID), "{rs:?}");
 }
+
+/// The declaration side of the reservation (ADR-0091 §4.1, issue #472).
+///
+/// A hyphenated alias name binds nothing — refused whole rather than truncated
+/// to the `foo` an identifier read would take from `foo-bar` — and the owner
+/// ruling is that the refusal is *reported*. Before #472 the declaration was
+/// silent and only its use site spoke, which left the author a name that
+/// resolved nowhere and no reason why.
+#[test]
+fn a_hyphenated_alias_declaration_is_reported() {
+    let src = "<?php\n/**\n * @phpstan-type foo-bar int\n */\nclass C {}\n";
+    let msgs = vocab(src);
+    assert_eq!(msgs.len(), 1, "the declaration alone reports once: {msgs:?}");
+    assert!(msgs[0].contains("`foo-bar`"), "the whole spelling travels: {msgs:?}");
+    // The import spelling is the same refusal.
+    assert_eq!(
+        vocab("<?php\n/**\n * @psalm-import-type foo-bar from X\n */\nclass C {}\n")
+            .len(),
+        1
+    );
+    // A legal alias name is silent, declaration and use alike.
+    assert!(
+        vocab(
+            "<?php\n/**\n * @phpstan-type foo_bar int\n */\nclass C {\n\
+             /** @param foo_bar $v */\n public function m($v): void {}\n}\n"
+        )
+        .is_empty()
+    );
+}

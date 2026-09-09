@@ -801,6 +801,33 @@ pub fn is_shadowable_pseudo_type(name: &str) -> bool {
     )
 }
 
+/// Whether an identifier **already means something** in the type vocabulary —
+/// the question a user *declaration* of that name has to answer, as opposed to
+/// the precedence question [`is_shadowable_pseudo_type`] answers for a *use*.
+///
+/// The two are not the same question and confusing them is a soundness bug
+/// (issue #472): a class may shadow `integer`, so `is_shadowable_pseudo_type`
+/// says `true` for it, but `@phpstan-type integer array{x: int}` binds nothing
+/// — PHPStan rejects the alias name and keeps reading `@param integer` as
+/// `int`. Taking the shadowing predicate for this one made every non-reserved
+/// pseudo-type (`integer`, `number`, `list`, `scalar`, …) aliasable, and the
+/// alias then convicted values the declaration accepts.
+///
+/// The answer is the catch-all of the two lowering tables: a name is free for a
+/// declaration exactly when it reaches [`ContractTy::Class`], the "not
+/// vocabulary, hand it to the class machinery" signal. Everything else — every
+/// [`lower_identifier`] arm, `KNOWN_UNENFORCED`, the derived operators, the
+/// generic-only names, and every hyphenated spelling (which is reserved space,
+/// ADR-0091 §3) — is vocabulary and is not the caller's to rebind.
+#[must_use]
+pub fn is_type_vocabulary(name: &str) -> bool {
+    let norm = name.trim_start_matches('\\').to_ascii_lowercase();
+    KNOWN_UNENFORCED.contains(&norm.as_str())
+        || is_derived_operator(&norm)
+        || GENERIC_ONLY_VOCABULARY.contains(&norm.as_str())
+        || !matches!(lower_identifier(&norm), ContractTy::Class(_))
+}
+
 /// **The one generic table**: parameterized phpdoc vocabulary, lowered to a
 /// [`ContractTy`]. Companion of [`lower_identifier`], public for the same
 /// reason — `steins-infer`'s proven-value lane reads it rather than restating

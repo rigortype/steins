@@ -120,6 +120,22 @@ pub(crate) fn unknown_vocabulary(cx: &Cx, allow: &VocabularyAllowlist, out: &mut
             let mut seen: Vec<String> = Vec::new();
             walk_type(cx, allow, offset, &ty, &mut seen, out);
         }
+        // The *declaration* side of the same reservation (ADR-0091 §4.1, issue
+        // #472). A hyphenated alias name is refused whole rather than bound as
+        // the `foo` an identifier read would truncate `foo-bar` to — and the
+        // owner ruling is that the refusal is **reported**, not silent, because
+        // a silent one leaves the author with a name that resolves nowhere and
+        // no reason why. The refusal is what makes the reading provable: since
+        // the alias never binds, the name is still an identifier that denotes
+        // nothing, which is exactly what the walk above reports at the use site.
+        for decl in steins_phpdoc::scan_type_aliases(&comment.text) {
+            if !decl.refused {
+                continue;
+            }
+            let offset = comment.span.start + decl.at_offset;
+            let mut seen: Vec<String> = Vec::new();
+            report(cx, allow, offset, &decl.name, &mut seen, out);
+        }
     }
 }
 

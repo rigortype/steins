@@ -340,9 +340,14 @@ exception of the `@steins-ignore` suppression comment
 universe** in the declaring docblock's own types (issue #5; see
 [contract-types.md](contract-types.md)) — but no call-site template solver
 exists (ADR-0032), and template scope transfer (ADR-0051) is designed and
-unimplemented. `@method`,
-`@property`, `@mixin`, `@phpstan-type` aliases, and `@phpstan-import-type`
-are not recognized. See [not-implemented.md](not-implemented.md).
+unimplemented. `@method`, `@property` and `@mixin` are not recognized as member
+sources. The `@phpstan-type` / `@psalm-type` pair and `@phpstan-import-type` /
+`@psalm-import-type` **are** read (issue #472): a class-like's declarations
+become an alias table, and a bare identifier naming one is rewritten to the type
+it names where envelopes are built — the same seam and the same walk the
+`@template` shadow uses, one level deep, flooring to `Opaque` rather than to a
+class wherever it cannot resolve. The positions that stay dark are listed in
+[not-implemented.md](not-implemented.md).
 
 The two **conditional-purity** tags *are* read (ADR-0063 §2 decision 2), in the
 spelling merged upstream in `phpstan/phpdoc-parser` 2.3.3 — bare or

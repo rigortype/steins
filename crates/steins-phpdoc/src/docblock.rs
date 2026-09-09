@@ -806,7 +806,22 @@ pub fn scan_magic_member_tags(text: &str) -> Vec<MagicMemberTag> {
     tags
 }
 
-fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<MagicMemberTag> {
+/// The magic tag one physical line opens, as [`magic_tag_head`] recognizes it.
+struct TagHead {
+    kind: MagicTagKind,
+    /// Which vendor prefix spelled the tag — see [`AliasDialect`].
+    dialect: AliasDialect,
+    /// Offset of the `@`.
+    at_offset: usize,
+    /// Trimmed tail bounds, `*/` closer excluded.
+    rest_start: usize,
+    rest_end: usize,
+}
+
+/// Recognize the magic tag on one physical line. Shared by [`scan_magic_line`]
+/// and [`scan_type_alias_line`] so both read the same tag vocabulary and the
+/// same notion of "the tail", `*/` closer included.
+fn magic_tag_head(text: &str, line_start: usize, line_end: usize) -> Option<TagHead> {
     let bytes = text.as_bytes();
     let i = skip_gutter(bytes, line_start, line_end);
     if i >= line_end || bytes[i] != b'@' {
@@ -818,7 +833,13 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
     while j < line_end && (bytes[j].is_ascii_alphabetic() || bytes[j] == b'-') {
         j += 1;
     }
-    let kind = MagicTagKind::from_name(&text[name_start..j])?;
+    let name = &text[name_start..j];
+    let kind = MagicTagKind::from_name(name)?;
+    let dialect = if name.starts_with("phpstan-") {
+        AliasDialect::PhpStan
+    } else {
+        AliasDialect::Psalm
+    };
 
     let mut rest_start = j;
     while rest_start < line_end && (bytes[rest_start] == b' ' || bytes[rest_start] == b'\t') {
@@ -840,6 +861,13 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
             rest_end -= 1;
         }
     }
+    Some(TagHead { kind, dialect, at_offset, rest_start, rest_end })
+}
+
+fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<MagicMemberTag> {
+    let bytes = text.as_bytes();
+    let TagHead { kind, at_offset, rest_start, rest_end, .. } =
+        magic_tag_head(text, line_start, line_end)?;
 
     let subject = match kind {
         MagicTagKind::Method => magic_method_name(text, bytes, rest_start, rest_end),
@@ -858,6 +886,276 @@ fn scan_magic_line(text: &str, line_start: usize, line_end: usize) -> Option<Mag
         subject,
         tag_span: Span::new(at_offset as u32, rest_end as u32),
     })
+}
+
+/// What one type-alias declaration binds its name to, as the tag spells it.
+/// Raw text throughout: this scanner recovers the declaration, it does not parse
+/// the type (that is the consumer's job, at the position the alias is used).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeAliasBody {
+    /// `@phpstan-type Name <type>` / `@psalm-type Name = <type>` — the tail after
+    /// the name and Psalm's optional `=`, trimmed. Empty when the tag gave none.
+    Local(String),
+    /// `@phpstan-import-type Name from Other [as Local]` — the alias `name` to
+    /// look up on `owner`. `owner` is empty when the tail carried no `from`
+    /// clause, which is a declaration the consumer must floor rather than drop.
+    Imported { owner: String, name: String },
+}
+
+/// Which vendor prefix spelled a type-alias tag. PHPStan's `PhpDocNodeResolver`
+/// reads the `@psalm-` spellings into its alias map first and lets the
+/// `@phpstan-` ones overwrite them, so one name declared under both prefixes
+/// takes its `@phpstan-` body whatever the source order says.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AliasDialect {
+    PhpStan,
+    Psalm,
+}
+
+/// One `@phpstan-type` / `@psalm-type` / `@phpstan-import-type` /
+/// `@psalm-import-type` declaration, as written.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeAliasDecl {
+    /// The name the alias is used under **in this docblock's own scope**: the
+    /// declared name, or an import's `as` rename when it carries one. Case
+    /// preserved.
+    pub name: String,
+    pub body: TypeAliasBody,
+    pub dialect: AliasDialect,
+    /// Offset of the tag's `@` within the scanned text — where a [`Self::refused`]
+    /// declaration is reported.
+    pub at_offset: u32,
+    /// Whether the declaration is **refused**: ADR-0091 §4.1 reserves the hyphen
+    /// space for type vocabulary, so `@phpstan-type foo-bar = int` binds nothing
+    /// and `name` carries the whole spelling the author wrote (not the `foo` an
+    /// identifier read would truncate it to) so the refusal can be reported.
+    pub refused: bool,
+}
+
+/// Scan a class-like docblock for its type-alias declarations, in source order
+/// (issue #472). Sibling of [`scan_template_names`]: both recover a *name
+/// binding* a class-like puts in force over its own member docblocks, and both
+/// leave the meaning of that binding to the consumer.
+///
+/// A **local** alias body is reassembled from the physical lines it wraps
+/// across; an import clause is read from the declaration
+/// line alone, since its tail is keywords rather than a type.
+///
+/// A malformed tail still yields a declaration (with an empty body or an empty
+/// owner). That is deliberate: the *name* is what makes an identifier an alias
+/// rather than a class, and a consumer that dropped the entry would send the
+/// name back to the class catch-all — the wrong-`No` hazard issue #472 exists to
+/// close.
+#[must_use]
+pub fn scan_type_aliases(text: &str) -> Vec<TypeAliasDecl> {
+    let bytes = text.as_bytes();
+    let mut decls = Vec::new();
+    let mut line_start = 0usize;
+    while line_start <= bytes.len() {
+        let line_end = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        if let Some(decl) = scan_type_alias_line(text, line_start, line_end) {
+            decls.push(decl);
+        }
+        if line_end == bytes.len() {
+            break;
+        }
+        line_start = line_end + 1;
+    }
+    decls
+}
+
+fn scan_type_alias_line(text: &str, line_start: usize, line_end: usize) -> Option<TypeAliasDecl> {
+    let bytes = text.as_bytes();
+    let TagHead { kind, dialect, at_offset, rest_start, rest_end } =
+        magic_tag_head(text, line_start, line_end)?;
+    let name = read_identifier(text, bytes, rest_start, rest_end);
+    if name.is_empty() {
+        return None; // `@phpstan-type` with no name binds nothing.
+    }
+    let mut j = rest_start + name.len();
+    let at_offset = at_offset as u32;
+    if j < rest_end && bytes[j] == b'-' {
+        // ADR-0091 §4.1: the hyphen space is reserved for vocabulary, so an alias
+        // may be named `foo_bar` and may not be named `foo-bar`. phpstan/
+        // phpdoc-parser declares the alias; Steins refuses the declaration whole
+        // rather than binding the truncated `foo`, which is a name the author
+        // never wrote (divergence-registry entry 17). The refusal is *reported*,
+        // not silent, so the whole spelling travels with it.
+        let end = read_hyphenated_end(bytes, j, rest_end);
+        return Some(TypeAliasDecl {
+            name: text[rest_start..end].to_owned(),
+            body: TypeAliasBody::Local(String::new()),
+            dialect,
+            at_offset,
+            refused: true,
+        });
+    }
+    j = skip_blanks(bytes, j, rest_end);
+    match kind {
+        MagicTagKind::TypeAlias => {
+            // Psalm writes `Name = <type>`, PHPStan writes `Name <type>`; the two
+            // spellings are one dialect here (both prefixes reach both arms).
+            if j < rest_end && bytes[j] == b'=' {
+                j = skip_blanks(bytes, j + 1, rest_end);
+            }
+            Some(TypeAliasDecl {
+                name,
+                body: TypeAliasBody::Local(join_alias_body(text, j, rest_end, line_end)),
+                dialect,
+                at_offset,
+                refused: false,
+            })
+        }
+        MagicTagKind::ImportedTypeAlias => {
+            let mut owner = String::new();
+            let mut local = None;
+            if read_identifier(text, bytes, j, rest_end) == "from" {
+                j = skip_blanks(bytes, j + 4, rest_end);
+                owner = read_class_ref(text, bytes, j, rest_end);
+                j = skip_blanks(bytes, j + owner.len(), rest_end);
+                if read_identifier(text, bytes, j, rest_end) == "as" {
+                    j = skip_blanks(bytes, j + 2, rest_end);
+                    let renamed = read_identifier(text, bytes, j, rest_end);
+                    if !renamed.is_empty() {
+                        local = Some(renamed);
+                    }
+                }
+            }
+            Some(TypeAliasDecl {
+                name: local.unwrap_or_else(|| name.clone()),
+                body: TypeAliasBody::Imported { owner, name },
+                dialect,
+                at_offset,
+                refused: false,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// End of a hyphenated tag-position name starting at the hyphen `j`: the
+/// continuation bytes phpstan/phpdoc-parser's `TOKEN_IDENTIFIER` would have
+/// taken, so a refusal names what the author wrote.
+fn read_hyphenated_end(bytes: &[u8], mut j: usize, end: usize) -> usize {
+    while j < end && (is_ident_byte(bytes[j]) || bytes[j] == b'-') {
+        j += 1;
+    }
+    j
+}
+
+/// The body of a local alias declaration, reassembled from the physical lines it
+/// wraps across (issue #472).
+///
+/// A one-line scanner is safe for `@param` by accident — a wrapped `@param`
+/// loses its `$name` and is dropped — and it is **not** safe here: an alias tail
+/// has no trailing anchor, so a wrap at `|`, `&`, or after a complete element
+/// leaves a first line that is itself a valid type, and reading it as the whole
+/// body binds a *narrower* type than the author wrote. That is a manufactured
+/// definite `No`, which is the one outcome issue #472 exists to prevent, so the
+/// lines are joined instead.
+///
+/// Joining follows the token-level reading phpstan/phpdoc-parser gives, in the
+/// two shapes a line scanner can see:
+///
+/// * the tail so far is **unclosed** (`array{`, `array{id: int,`), so the type
+///   is not finished and the next line finishes it;
+/// * or the next line **opens with a composition operator** (`|string`,
+///   `&array{x: int}`), which continues a finished type.
+///
+/// Everything else ends the body — a new `@tag`, the `*/` closer, and prose,
+/// which upstream also leaves out of the type. A **blank gutter line does not**:
+/// `TypeParser::parse` consumes every `PHPDOC_EOL` after an atomic before it
+/// looks for `|`/`&`, so `int` / `*` / `|string` is one union upstream and
+/// stopping at the blank would bind the narrower half. A tail ending in a
+/// dangling `|` or `&` is where upstream declares the tag invalid — there
+/// `parseUnion` does *not* skip the newline before the next atomic — and the
+/// body floors here rather than being completed across the wrap.
+fn join_alias_body(text: &str, start: usize, end: usize, line_end: usize) -> String {
+    let bytes = text.as_bytes();
+    let mut body = text[start..end].to_owned();
+    let mut at = line_end;
+    while let Some((s, e, next)) = next_continuation(bytes, at) {
+        if body.ends_with('|') || body.ends_with('&') {
+            return String::new();
+        }
+        if !(is_unclosed(&body) || matches!(bytes[s], b'|' | b'&')) {
+            break;
+        }
+        body.push(' ');
+        body.push_str(&text[s..e]);
+        at = next;
+    }
+    body
+}
+
+/// The continuation text of the line after `line_end`, with the end of that
+/// line, or `None` when it does not continue a tail: blank after the gutter, a
+/// new `@tag`, or the `*/` closer.
+fn next_continuation(bytes: &[u8], mut line_end: usize) -> Option<(usize, usize, usize)> {
+    loop {
+        if line_end >= bytes.len() {
+            return None;
+        }
+        let line_start = line_end + 1;
+        let next = memchr(bytes, line_start, b'\n').unwrap_or(bytes.len());
+        let mut i = skip_blanks(bytes, line_start, next);
+        // Not `skip_gutter`: the `*` of a closing `*/` is not gutter, it is the
+        // closer, and consuming it would leave a `/` that reads as continuation.
+        while i < next && bytes[i] == b'*' && !(i + 1 < next && bytes[i + 1] == b'/') {
+            i += 1;
+        }
+        i = skip_blanks(bytes, i, next);
+        let mut e = next;
+        while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t' || bytes[e - 1] == b'\r') {
+            e -= 1;
+        }
+        // Whether this line closed the comment, remembered *before* the closer is
+        // stripped: an empty line and the closer both leave `i >= e`, and they are
+        // not the same answer (see below).
+        let closes = e >= i + 2 && &bytes[e - 2..e] == b"*/";
+        if closes {
+            e -= 2;
+            while e > i && (bytes[e - 1] == b' ' || bytes[e - 1] == b'\t') {
+                e -= 1;
+            }
+        }
+        if i < e {
+            return (bytes[i] != b'@').then_some((i, e, next));
+        }
+        // Nothing on this line. The closer ends the docblock; a **blank gutter
+        // line does not end the type**, because phpstan/phpdoc-parser's
+        // `TypeParser::parse` consumes every `PHPDOC_EOL` after an atomic before
+        // it looks for `|`/`&`, blank lines included. Stopping here would bind the
+        // half before the blank — narrower than the author wrote, which is the
+        // defect this whole function exists to prevent.
+        if closes {
+            return None;
+        }
+        line_end = next;
+    }
+}
+
+/// Whether a partial type text still has a bracket open — the syntactic half of
+/// [`join_alias_body`]'s continuation rule. Nesting only: what is inside the
+/// brackets is the type parser's business.
+fn is_unclosed(body: &str) -> bool {
+    let mut depth = 0i32;
+    for b in body.bytes() {
+        match b {
+            b'{' | b'[' | b'(' | b'<' => depth += 1,
+            b'}' | b']' | b')' | b'>' => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0
+}
+
+/// Skip spaces and tabs from `i` up to `end`.
+fn skip_blanks(bytes: &[u8], mut i: usize, end: usize) -> usize {
+    while i < end && (bytes[i] == b' ' || bytes[i] == b'\t') {
+        i += 1;
+    }
+    i
 }
 
 /// The method name in an `@method` tail: the identifier before the first
@@ -1656,6 +1954,95 @@ mod tests {
         for k in [MagicTagKind::TypeAlias, MagicTagKind::ImportedTypeAlias] {
             assert!(!k.declares_member(), "{}", k.label());
         }
+    }
+
+    // ---- Type-alias declarations (issue #472) ------------------------------
+
+    /// The declarations that *bind*, which is what a consumer reads.
+    fn aliases(doc: &str) -> Vec<(String, TypeAliasBody)> {
+        scan_type_aliases(doc)
+            .into_iter()
+            .filter(|d| !d.refused)
+            .map(|d| (d.name, d.body))
+            .collect()
+    }
+
+    /// The names refused for carrying a hyphen, as written.
+    fn refused(doc: &str) -> Vec<String> {
+        scan_type_aliases(doc).into_iter().filter(|d| d.refused).map(|d| d.name).collect()
+    }
+
+    fn local(text: &str) -> TypeAliasBody {
+        TypeAliasBody::Local(text.into())
+    }
+
+    #[test]
+    fn scans_both_local_alias_spellings() {
+        // PHPStan writes no `=`, Psalm writes one; either prefix takes either.
+        for doc in [
+            "/** @phpstan-type UserRow array{id: int} */",
+            "/** @psalm-type UserRow = array{id: int} */",
+            "/** @phpstan-type UserRow  =  array{id: int} */",
+        ] {
+            assert_eq!(aliases(doc), [("UserRow".into(), local("array{id: int}"))], "{doc}");
+        }
+    }
+
+    #[test]
+    fn scans_an_import_with_and_without_a_rename() {
+        assert_eq!(
+            aliases("/** @phpstan-import-type UserRow from UserRepo */"),
+            [(
+                "UserRow".into(),
+                TypeAliasBody::Imported { owner: "UserRepo".into(), name: "UserRow".into() }
+            )]
+        );
+        // `as` renames the *local* name; the owner still exports the original.
+        assert_eq!(
+            aliases("/** @psalm-import-type UserRow from \\App\\UserRepo as Row */"),
+            [(
+                "Row".into(),
+                TypeAliasBody::Imported { owner: "\\App\\UserRepo".into(), name: "UserRow".into() }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_malformed_tail_still_declares_the_name() {
+        // The name is what makes an identifier an alias rather than a class, so a
+        // tail the scanner cannot read must not drop the entry (issue #472).
+        assert_eq!(aliases("/** @phpstan-type UserRow */"), [("UserRow".into(), local(""))]);
+        assert_eq!(
+            aliases("/** @phpstan-import-type UserRow */"),
+            [(
+                "UserRow".into(),
+                TypeAliasBody::Imported { owner: String::new(), name: "UserRow".into() }
+            )]
+        );
+        // No name at all binds nothing, and `from`/`as` are matched whole.
+        assert!(scan_type_aliases("/** @phpstan-type */").is_empty());
+        // A hyphenated name binds nothing, and is carried whole so the refusal
+        // can name what the author wrote (ADR-0091 §4.1).
+        assert!(aliases("/** @phpstan-type foo-bar = int */").is_empty());
+        assert_eq!(refused("/** @phpstan-type foo-bar = int */"), ["foo-bar"]);
+        assert_eq!(refused("/** @psalm-import-type foo-bar from X */"), ["foo-bar"]);
+        assert_eq!(
+            aliases("/** @phpstan-import-type Row fromage Geo */"),
+            [(
+                "Row".into(),
+                TypeAliasBody::Imported { owner: String::new(), name: "Row".into() }
+            )]
+        );
+    }
+
+    #[test]
+    fn alias_scan_reads_the_tail_the_magic_scanner_reads() {
+        // One tag vocabulary, one notion of "the tail" — the closing `*/` on the
+        // same line is gutter, not type text.
+        let doc = "/**\n * @phpstan-type Row array{id: int}\n * @template T\n * @param int $n\n */";
+        assert_eq!(aliases(doc), [("Row".into(), local("array{id: int}"))]);
+        assert!(scan_type_aliases("/** @type Row = int */").is_empty()); // bare not a tag
+        assert!(scan_type_aliases("/** @mixin Row */").is_empty());
     }
 
     #[test]
