@@ -396,31 +396,49 @@ impl AliasTable {
 
 /// The [`AliasTable`] a class-like docblock declares, read at `(file, off)`.
 ///
-/// A redeclaration is ignored rather than overwriting: `aliases_local_type`
-/// spells `@phpstan-type` and `@psalm-type` for one name side by side, and
-/// first-wins keeps that pair reading as the single declaration the author meant.
+/// **Redeclaration follows PHPStan's resolution order, not source order.** Its
+/// `PhpDocNodeResolver` reads the `@psalm-` spellings into the alias map and
+/// then lets the `@phpstan-` ones overwrite, so one name declared under both
+/// prefixes takes its `@phpstan-` body wherever the two lines sit — which is
+/// also why `aliases_local_type`, where the pair agrees, reads as the single
+/// declaration its author meant. Within one prefix the later line wins, the
+/// same overwrite upstream performs.
 pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> AliasTable {
     let Some(text) = docblock else { return AliasTable::default() };
-    let mut table =
-        AliasTable { entries: HashMap::new(), shadow: template_names_of(Some(text)), site: (file, off) };
-    for decl in steins_phpdoc::scan_type_aliases(text) {
-        if !steins_contract::is_shadowable_pseudo_type(&decl.name) {
-            // `@phpstan-type int ShouldNotHappen` binds nothing. An alias name
-            // lives in the same space a class name lives in, so it answers the
-            // same question `is_shadowable_pseudo_type` answers for a class: the
-            // built-in vocabulary is not shadowable, and `@param int` stays `int`.
-            continue;
+    let decls = steins_phpdoc::scan_type_aliases(text);
+    let mut table = AliasTable { entries: HashMap::new(), shadow: TemplateShadow::default(), site: (file, off) };
+    for dialect in [steins_phpdoc::AliasDialect::Psalm, steins_phpdoc::AliasDialect::PhpStan] {
+        for decl in decls.iter().filter(|d| d.dialect == dialect) {
+            // A refused declaration binds nothing: its name is reported where the
+            // docblock is walked (`unknown_vocabulary`), not silently rebound.
+            if decl.refused {
+                continue;
+            }
+            if steins_contract::is_type_vocabulary(&decl.name) {
+                // `@phpstan-type int ShouldNotHappen` — and `integer`, `number`,
+                // `list`, every other name the vocabulary already owns — binds
+                // nothing, so `@param integer` stays `int`. NOT the shadowing
+                // question (`is_shadowable_pseudo_type`): a class may shadow
+                // `integer`, an alias declaration may not rebind it.
+                continue;
+            }
+            let body = match &decl.body {
+                steins_phpdoc::TypeAliasBody::Local(text) => {
+                    parse_tag_type(text).map_or(AliasBody::Floor, AliasBody::Local)
+                }
+                steins_phpdoc::TypeAliasBody::Imported { owner, name } if !owner.is_empty() => {
+                    AliasBody::Imported { owner: owner.clone(), name: name.clone() }
+                }
+                steins_phpdoc::TypeAliasBody::Imported { .. } => AliasBody::Floor,
+            };
+            table.entries.insert(decl.name.to_ascii_lowercase(), body);
         }
-        let body = match decl.body {
-            steins_phpdoc::TypeAliasBody::Local(text) => {
-                parse_tag_type(&text).map_or(AliasBody::Floor, AliasBody::Local)
-            }
-            steins_phpdoc::TypeAliasBody::Imported { owner, name } if !owner.is_empty() => {
-                AliasBody::Imported { owner, name }
-            }
-            steins_phpdoc::TypeAliasBody::Imported { .. } => AliasBody::Floor,
-        };
-        table.entries.entry(decl.name.to_ascii_lowercase()).or_insert(body);
+    }
+    // The shadow is only ever read to neutralize templates inside a substituted
+    // body, so a class-like that binds no alias pays no second `@template` scan
+    // — the overwhelmingly common case [`AliasTable::is_empty`] names.
+    if !table.is_empty() {
+        table.shadow = template_names_of(Some(text));
     }
     table
 }
@@ -946,6 +964,11 @@ impl<'a> Cx<'a> {
         depth: u32,
     ) {
         if let PKind::Identifier(name) = &ty.kind {
+            // `\Row` names a class, whatever the docblock aliases. Unreachable
+            // today — the table is keyed by bare lowercased names, so a
+            // qualified spelling misses it anyway — and kept as the statement of
+            // the invariant: a key normalization that ever stripped the leading
+            // `\` would otherwise turn a class reference into an alias silently.
             if name.contains('\\') {
                 return;
             }

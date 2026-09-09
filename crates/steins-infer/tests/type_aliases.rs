@@ -243,9 +243,7 @@ fn an_in_project_class_wins_over_a_same_named_alias() {
 #[test]
 fn built_in_vocabulary_cannot_be_aliased() {
     // phpstan-src's own `type-aliases.php` writes `@phpstan-type int
-    // ShouldNotHappen` and then asserts that `@param int` is still `int`. A name
-    // no class could shadow is a name no alias may bind either — one predicate,
-    // `is_shadowable_pseudo_type`, answers both.
+    // ShouldNotHappen` and then asserts that `@param int` is still `int`.
     assert_eq!(
         one_dump(&probe(" * @phpstan-type int ShouldNotHappen", "int")),
         "dumped phpdoc type: int (asserted)"
@@ -253,6 +251,91 @@ fn built_in_vocabulary_cannot_be_aliased() {
     assert_eq!(
         one_dump(&probe(" * @phpstan-type array array{id: int}", "array")),
         "dumped phpdoc type: array (asserted)"
+    );
+    // The reserved words are the easy half. These three are **not** reserved —
+    // a class may be named `Integer`, `Number` or `List`, so the shadowing
+    // predicate says `true` for all three — and binding them anyway was a
+    // manufactured `No`: PHPStan rejects the alias name and keeps reading
+    // `@param integer` as `int`, where Steins convicted `1` against
+    // `array{x: int}`. The declaration question is "does the vocabulary already
+    // own this name", which is `is_type_vocabulary`.
+    for (name, spelling) in
+        [("integer", "int"), ("number", "int|float"), ("list", "list<mixed>")]
+    {
+        assert_eq!(
+            one_dump(&probe(&format!(" * @phpstan-type {name} array{{x: int}}"), name)),
+            format!("dumped phpdoc type: {spelling} (asserted)"),
+            "`{name}` is vocabulary and must not be rebound by an alias"
+        );
+    }
+}
+
+#[test]
+fn a_redeclared_name_takes_its_phpstan_body_whatever_the_order() {
+    // PHPStan's `PhpDocNodeResolver` reads the `@psalm-` spellings into the alias
+    // map and lets the `@phpstan-` ones overwrite, so the prefix decides and the
+    // source order does not. Two DIFFERENT bodies are what makes the rule
+    // observable at all — `aliases_local_type` spells an agreeing pair.
+    assert_eq!(
+        one_dump(&probe(
+            " * @psalm-type Row = string\n * @phpstan-type Row int",
+            "Row"
+        )),
+        "dumped phpdoc type: int (asserted)"
+    );
+    // Same pair, opposite order: still the `@phpstan-` body.
+    assert_eq!(
+        one_dump(&probe(
+            " * @phpstan-type Row int\n * @psalm-type Row = string",
+            "Row"
+        )),
+        "dumped phpdoc type: int (asserted)"
+    );
+    // Within one prefix the later line wins, the same overwrite upstream does.
+    assert_eq!(
+        one_dump(&probe(
+            " * @phpstan-type Row int\n * @phpstan-type Row string",
+            "Row"
+        )),
+        "dumped phpdoc type: string (asserted)"
+    );
+}
+
+#[test]
+fn an_alias_body_wrapped_across_lines_is_reassembled() {
+    // A one-line scanner is safe for `@param` by accident (a wrapped one loses
+    // its `$name` and is dropped) and unsafe here: an alias tail has no trailing
+    // anchor, so a wrap at `|` leaves a first line that is itself a valid type.
+    // Reading it as the whole body bound `int` for a `int|string` the author
+    // wrote — narrower than the declaration, i.e. a manufactured `No`.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int\n *   |string", "Row")),
+        "dumped phpdoc type: int|string (asserted)"
+    );
+    // The other wrap a line scanner can see: the tail is still unclosed.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{id: int,\n *   name: string}", "Row")),
+        "dumped phpdoc type: array{id: int, name: string} (asserted)"
+    );
+    // `'str'` is admitted by the reassembled union — the conviction this test
+    // exists to prevent.
+    assert_eq!(
+        param_count(&format!(
+            "{}\n(new Probe())->m('str');\n",
+            probe(" * @phpstan-type Row int\n *   |string", "Row")
+        )),
+        0
+    );
+    // A wrap that upstream declares invalid (a dangling `|`) floors rather than
+    // being completed across it.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int|\n *   string", "Row")),
+        "dumped phpdoc type: no declared contract"
+    );
+    // Prose after a finished body is not part of the type.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int\n *\n * Some prose.", "Row")),
+        "dumped phpdoc type: int (asserted)"
     );
 }
 
