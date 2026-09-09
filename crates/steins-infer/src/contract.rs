@@ -396,19 +396,29 @@ impl AliasTable {
 
 /// The [`AliasTable`] a class-like docblock declares, read at `(file, off)`.
 ///
-/// **Redeclaration follows PHPStan's resolution order, not source order.** Its
-/// `PhpDocNodeResolver` reads the `@psalm-` spellings into the alias map and
-/// then lets the `@phpstan-` ones overwrite, so one name declared under both
-/// prefixes takes its `@phpstan-` body wherever the two lines sit — which is
-/// also why `aliases_local_type`, where the pair agrees, reads as the single
-/// declaration its author meant. Within one prefix the later line wins, the
-/// same overwrite upstream performs.
+/// **Redeclaration follows PHPStan's resolution order, not source order**, and
+/// that order has two axes, not one. `ClassReflection` merges the maps as
+/// `array_merge($importedAliases, $localAliases)`, so a **local declaration
+/// always beats an import** of the same name whatever the prefixes or the line
+/// order; within each kind `PhpDocNodeResolver` reads the `@psalm-` spellings
+/// and lets the `@phpstan-` ones overwrite. Hence the four passes below, in
+/// that order — which is also why `aliases_local_type`, where the pair agrees,
+/// reads as the single declaration its author meant. Within one prefix and kind
+/// the later line wins, the same overwrite upstream performs.
 pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> AliasTable {
     let Some(text) = docblock else { return AliasTable::default() };
     let decls = steins_phpdoc::scan_type_aliases(text);
     let mut table = AliasTable { entries: HashMap::new(), shadow: TemplateShadow::default(), site: (file, off) };
-    for dialect in [steins_phpdoc::AliasDialect::Psalm, steins_phpdoc::AliasDialect::PhpStan] {
-        for decl in decls.iter().filter(|d| d.dialect == dialect) {
+    for (imported, dialect) in [
+        (true, steins_phpdoc::AliasDialect::Psalm),
+        (true, steins_phpdoc::AliasDialect::PhpStan),
+        (false, steins_phpdoc::AliasDialect::Psalm),
+        (false, steins_phpdoc::AliasDialect::PhpStan),
+    ] {
+        for decl in decls.iter().filter(|d| {
+            d.dialect == dialect
+                && matches!(d.body, steins_phpdoc::TypeAliasBody::Imported { .. }) == imported
+        }) {
             // A refused declaration binds nothing: its name is reported where the
             // docblock is walked (`unknown_vocabulary`), not silently rebound.
             if decl.refused {
@@ -423,9 +433,16 @@ pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> 
                 continue;
             }
             let body = match &decl.body {
-                steins_phpdoc::TypeAliasBody::Local(text) => {
-                    parse_tag_type(text).map_or(AliasBody::Floor, AliasBody::Local)
-                }
+                // NOT `parse_tag_type`: that one tolerates a trailing remainder,
+                // which is right for `@return int description` and wrong here.
+                // `parseTypeAliasTagValue` requires the type to run to the end of
+                // the tag, so `@phpstan-type Row int the row` declares nothing
+                // upstream — prefix-parsing it to `int` would bind a type the
+                // author did not write and reject what the alias admits.
+                steins_phpdoc::TypeAliasBody::Local(text) => steins_phpdoc::parse_type(text)
+                    .ok()
+                    .filter(|p| p.at_end && !type_has_unsupported(&p.ty))
+                    .map_or(AliasBody::Floor, |p| AliasBody::Local(p.ty)),
                 steins_phpdoc::TypeAliasBody::Imported { owner, name } if !owner.is_empty() => {
                     AliasBody::Imported { owner: owner.clone(), name: name.clone() }
                 }

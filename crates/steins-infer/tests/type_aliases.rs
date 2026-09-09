@@ -425,3 +425,62 @@ fn an_alias_is_not_in_force_outside_the_class_like_that_declares_it() {
         /** @param Row $v */\nfunction m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n";
     assert_eq!(one_dump(src), "dumped phpdoc type: row (asserted)");
 }
+
+#[test]
+fn a_blank_gutter_line_does_not_end_a_wrapped_body() {
+    // `TypeParser::parse` consumes every `PHPDOC_EOL` after an atomic before it
+    // looks for `|`, blank lines included, so this is one union upstream.
+    // Stopping at the blank bound `int` and convicted every string.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int\n *\n *   |string", "Row")),
+        "dumped phpdoc type: int|string (asserted)"
+    );
+    // Inside brackets too.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{id: int,\n *\n *   name: string}", "Row")),
+        "dumped phpdoc type: array{id: int, name: string} (asserted)"
+    );
+    // The closer still ends it — an empty line and `*/` both leave nothing on
+    // the line, and they are not the same answer.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int", "Row")),
+        "dumped phpdoc type: int (asserted)"
+    );
+}
+
+#[test]
+fn a_local_declaration_beats_an_import_of_the_same_name() {
+    // `ClassReflection` merges as `array_merge($imported, $local)`, so the local
+    // wins whatever the prefixes or the line order. Keyed on dialect alone, an
+    // import beat a local and convicted `1` against the imported `string`.
+    let src = |tags: &str| {
+        format!(
+            "<?php\n/** @phpstan-type Row string */\nclass Owner {{}}\n/**\n{tags}\n */\nclass Probe {{\n\
+             /** @param Row $v */\n\
+             public function m($v): void {{ \\PHPStan\\dumpPhpDocType($v); }}\n}}\n"
+        )
+    };
+    assert_eq!(
+        one_dump(&src(" * @phpstan-import-type Row from Owner\n * @psalm-type Row = int")),
+        "dumped phpdoc type: int (asserted)"
+    );
+    assert_eq!(
+        one_dump(&src(" * @phpstan-type Row int\n * @phpstan-import-type Row from Owner")),
+        "dumped phpdoc type: int (asserted)"
+    );
+}
+
+#[test]
+fn a_body_with_a_trailing_remainder_declares_nothing() {
+    // `parseTypeAliasTagValue` requires the type to run to the end of the tag —
+    // unlike `@return int description`, an alias body has no description slot.
+    // Prefix-parsing bound `int` and rejected what the alias admits.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int the row", "Row")),
+        "dumped phpdoc type: no declared contract"
+    );
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row int\n *   |string the second half", "Row")),
+        "dumped phpdoc type: no declared contract"
+    );
+}
