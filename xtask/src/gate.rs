@@ -609,7 +609,15 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // terminates the way the plain-`throw` spelling always did — the guard
     // subtracts, and `$json` reaches `return` as `string`. Nothing else in this
     // package moved in either direction.
-    ("Seldaek/monolog", 6),
+    // 6 → 7 (+1), 2026-09-09 with issue #472's multi-line alias bodies. TRUE, and
+    // the test says so itself: `PHPConsoleHandlerTest::testWrongOptionsThrowsException`
+    // sets `expectException` and calls `new PHPConsoleHandler(['xxx' => 1])`, where
+    // the constructor's `@phpstan-param InputOptions $options` names a sealed
+    // 20-key optional shape that has no `xxx`. Nothing could see it before: the
+    // `@phpstan-type InputOptions array{…}` declaring that shape is wrapped across
+    // 22 physical lines, so reading a body off one line left it unresolvable, and
+    // reading the *first* line off would have been worse than silence.
+    ("Seldaek/monolog", 7),
     // 1 → 2 (+1) with ADR-0043 stage 4 (phpdoc-side class contracts). The new
     // finding is a class-value contract: `new MountManager(['valid' => 'something
     // else'])` — a plain string in the `array<string, FilesystemOperator>` value
