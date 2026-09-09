@@ -268,10 +268,12 @@ than an undecidable one — an alias able to occupy the space would reopen the
 third possibility the rule closes. Refusing whole rather than truncating at the
 hyphen is the load-bearing half: `foo` is a name the author did not write, and
 since issue #472 a bound name is a rewrite, so binding it would silence a
-`@param foo` elsewhere in the class-like. Registered here rather than reported:
-the docblock says nothing about the program, and ADR-0091 §6's
-`phpdoc.unknown-vocabulary` already speaks at the *use* site, where the
-truncation would otherwise have hidden it.
+`@param foo` elsewhere in the class-like. The refusal is **reported**, per the
+same owner ruling: `phpdoc.unknown-vocabulary` (ADR-0091 §6) fires on the
+declaration line as well as at every use site. A silent refusal would leave the
+author a name that resolves nowhere and no reason why, and the reading is
+provable for the reason the reservation is airtight — since the alias never
+binds, the name is still an identifier that denotes nothing.
 
 **18. An unresolvable type alias is `Opaque`, not the class its name spells.**
 Entry 12's rule, applied to the second pre-lowering rewrite (issue #472). PHPStan
@@ -294,6 +296,19 @@ PHPStan gives the alias precedence and answers `never`; Steins gives the
 in-project declaration precedence and answers `Baz`, which is the
 pseudo-type/class rule (entry 15's shape) applied to the same question. The row
 diverged before #472 and diverges after it, for a different reason.
+
+**This one is not a silence, and it is the only entry here that is not.** Where
+a class `Row` and `@phpstan-type Row int` are both in scope, `m(1)` is a
+`phpdoc.param-mismatch` under Steins' reading and is *accepted* under PHPStan's
+— which reports the collision (`typeAlias.duplicate`) and then resolves the
+alias anyway. So the tie-break convicts a value the oracle admits, which no
+other row in this section does. Two things keep it registered rather than
+changed: issue #472's "Refusals to keep" states the rule, and the conviction is
+not new — before #472 the unread alias name reached the class catch-all and
+convicted the same call for a worse reason. The zero-FP answer to a genuine
+collision is a third one neither tool gives — floor to `Opaque`, since the
+author has written two meanings for one name and neither is provable — and it is
+one line in `resolve_aliases_at` plus a test if the owner prefers it.
 
 ## Conformance-suite divergences (intentional silences)
 
