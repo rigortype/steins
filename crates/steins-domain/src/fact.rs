@@ -1123,9 +1123,49 @@ mod tests {
         assert_eq!(with(ArmKnown::Bool(true)).truthy(), Certainty::Yes);
         assert_eq!(with(ArmKnown::Whole).truthy(), Certainty::Maybe);
         // The array-key grid's bool row at one inhabitant: `true` is the key `1`,
-        // so the union's key is the int side alone.
+        // so the union's key is the int side alone. The whole base would key as
+        // `0|1` and drag `0` into the hull, which is the difference the literal
+        // makes here.
         let key = with(ArmKnown::Bool(true)).array_key_cast().expect("both arms key");
         assert!(key.admits(&Val::Int(1)) && !key.admits(&Val::Bool(true)));
+        assert!(!key.admits(&Val::Int(0)), "`true` keys as `1`, not as `bool`: {key:?}");
+    }
+
+    #[test]
+    fn a_literal_arm_is_not_a_string_and_is_not_an_int() {
+        // A base that is neither answers `No`, and `all_of` carries that verdict
+        // out of the union: a literal arm decides its own row rather than
+        // abstaining, so the whole fact is refuted rather than left `Maybe`.
+        let ne = Refinement::Str(StrPreds::NON_EMPTY);
+        let strs = Fact::union(
+            vec![(Base::String, ArmKnown::Refined(ne)), (Base::Bool, ArmKnown::Bool(true))],
+            false,
+        )
+        .expect("a union");
+        assert_eq!(strs.satisfies_str(StrPreds::NON_EMPTY), Certainty::No);
+        let ints = Fact::union(
+            vec![
+                (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::POSITIVE))),
+                (Base::Bool, ArmKnown::Bool(true)),
+            ],
+            false,
+        )
+        .expect("a union");
+        assert_eq!(ints.int_in(IntRange::POSITIVE), Certainty::No);
+    }
+
+    #[test]
+    fn the_union_constructor_never_returns_a_lone_literal_arm() {
+        // The one-arm collapse widens a bool literal to its base rather than
+        // dropping into the finite layer: the spec's `finiteMembers_mkUnion` says
+        // this constructor returns no finite fact, and the two sides of ADR-0059
+        // must agree on it. No caller reaches this branch — a union has two arms
+        // or more and at most one of them is `bool` — so the constructor's own
+        // contract is what pins it.
+        assert_eq!(
+            Fact::union(vec![(Base::Bool, ArmKnown::Bool(true))], false),
+            Some(Fact::General { base: Base::Bool, nullable: false })
+        );
     }
 
     #[test]

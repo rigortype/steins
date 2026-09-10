@@ -426,3 +426,21 @@ fn the_stratum_is_the_operands_when_the_grid_answered_and_the_operators_when_it_
         "float"
     );
 }
+
+#[test]
+fn a_bool_literal_arm_casts_as_the_value_it_is() {
+    // ADR-0093 §2: a union arm over `bool` that carries one inhabitant denotes
+    // exactly one value, so the grid reads it through the rows that already carry
+    // a literal. The whole base would read the `bool` row instead and answer both
+    // inhabitants, dragging into every cell the value the arm excludes: a `0`
+    // into the int hull, an empty string into the string set, and a `false` into
+    // the truthiness the arm decides.
+    let with_literal = |cast: &str| {
+        one_dump(&format!(
+            "<?php\n/** @param int<7, 9>|true $v */\nfunction f($v): void {{ \\PHPStan\\dumpType({cast} $v); }}\n"
+        ))
+    };
+    assert_eq!(with_literal("(int)"), "int<1, 9> (asserted)");
+    assert_eq!(with_literal("(string)"), "'1'|'7'|'8'|'9' (asserted)");
+    assert_eq!(with_literal("(bool)"), "true (asserted)");
+}
