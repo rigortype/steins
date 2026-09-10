@@ -585,7 +585,21 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   same-day `fee437c` baseline: exactly these rows, nothing removed.
     //   As with the 51 → 55 row, the seeded count is the CI engine's (8.4); a
     //   local 8.5 run reads 84 and stays under the tripwire.
-    ("sebastianbergmann/phpunit", 88),
+    //   88 → 86 (-2), 2026-09-10 with issue #600 and ADR-0093 §2: the two
+    //   `Util/PHP/JobRunner.php:244` rows seeded above come back down. The union
+    //   arm over `bool` now carries its literal member set, so `assert($stdout
+    //   !== false)` subtracts in the value lane and the guarded argument reaches
+    //   `new Result(string …, string …)` with no rejected arm left to report.
+    //   Measured finding-level on a local 8.5 run against the branch point: 84 → 82,
+    //   and the two rows that leave are exactly these two, byte-identical
+    //   otherwise, with no other package moving in either direction. Both counts
+    //   are the local engine's; the seeded 88 → 86 carries the same -2 to the
+    //   CI 8.4 engine this line is calibrated on, whose four extra rows (the
+    //   51 → 55 entry above) are elsewhere in the package.
+    //   The mechanism is pinned independently of the corpus in
+    //   `crates/steins-infer/tests/bool_literal_narrowing.rs`
+    //   (`a_guarded_false_arm_no_longer_reaches_a_string_parameter`).
+    ("sebastianbergmann/phpunit", 86),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)

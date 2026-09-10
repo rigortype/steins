@@ -6,7 +6,7 @@
 //! fixture wasn't regenerated — fix via `cargo xtask lean-check --bless`.
 
 use steins_domain::{
-    Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, PhpStr, Presence,
+    ArmKnown, Base, Certainty, Cover, CoverFlavor, Fact, IntRange, Key, KeyClass, PhpStr, Presence,
     Refinement, ShapeFact, StrPreds, Tail, Val, array_is_list, php_is_falsy,
 };
 
@@ -207,9 +207,11 @@ fn render_fact(f: &Fact) -> String {
         Fact::Union { arms, nullable } => {
             let rendered: Vec<String> = arms
                 .iter()
-                .map(|(b, r)| match r {
-                    Some(r) => format!("{}:{}", render_base(*b), render_refinement(r)),
-                    None => render_base(*b).to_owned(),
+                .map(|(b, k)| match k {
+                    ArmKnown::Refined(r) => format!("{}:{}", render_base(*b), render_refinement(r)),
+                    ArmKnown::Whole => render_base(*b).to_owned(),
+                    // A bool literal arm (ADR-0093 §2) renders as the inhabitant itself.
+                    ArmKnown::Bool(v) => format!("{}:{}", render_base(*b), render_val(&Val::Bool(*v))),
                 })
                 .collect();
             format!("U({},{})", rendered.join("|"), render_nullable(*nullable))
@@ -406,6 +408,7 @@ fn facts() -> Vec<Fact> {
     for v in [
         Val::Null,
         Val::Bool(false),
+        Val::Bool(true),
         Val::Int(0),
         Val::Int(1),
         Val::Int(9),

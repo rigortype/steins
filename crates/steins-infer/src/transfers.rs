@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, Key as VKey, Presence, Refinement, ShapeFact, StrPreds, Tail,
-    Val,
+    ArmKnown, Base, Certainty, Fact, IntRange, Key as VKey, Presence, Refinement, ShapeFact,
+    StrPreds, Tail, UnionArm, Val,
 };
 use steins_syntax::{ArgValue, ArrayKey, CastTarget, RefKind, ValueOp};
 
@@ -712,20 +712,20 @@ fn abs_range(r: IntRange) -> Option<IntRange> {
 /// admits it widens to `int<0, max>` **and** contributes the float arm the
 /// overflow lands in, which the union can carry where a single-base fact could
 /// not.
-fn abs_union(arms: &[(Base, Option<Refinement>)]) -> Option<Fact> {
-    let mut out: Vec<(Base, Option<Refinement>)> = Vec::with_capacity(arms.len() + 1);
-    let overflow = |out: &mut Vec<(Base, Option<Refinement>)>| {
-        out.push((Base::Int, Some(Refinement::Int(IntRange::NON_NEGATIVE))));
-        out.push((Base::Float, None));
+fn abs_union(arms: &[UnionArm]) -> Option<Fact> {
+    let mut out: Vec<UnionArm> = Vec::with_capacity(arms.len() + 1);
+    let overflow = |out: &mut Vec<UnionArm>| {
+        out.push((Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::NON_NEGATIVE))));
+        out.push((Base::Float, ArmKnown::Whole));
     };
-    for (base, refinement) in arms {
-        match (base, refinement) {
-            (Base::Float, _) => out.push((Base::Float, None)),
-            (Base::Int, Some(Refinement::Int(r))) => match abs_range(*r) {
-                Some(a) => out.push((Base::Int, Some(Refinement::Int(a)))),
+    for (base, known) in arms {
+        match (base, known) {
+            (Base::Float, _) => out.push((Base::Float, ArmKnown::Whole)),
+            (Base::Int, ArmKnown::Refined(Refinement::Int(r))) => match abs_range(*r) {
+                Some(a) => out.push((Base::Int, ArmKnown::Refined(Refinement::Int(a)))),
                 None => overflow(&mut out),
             },
-            (Base::Int, None) => overflow(&mut out),
+            (Base::Int, ArmKnown::Whole) => overflow(&mut out),
             _ => return None,
         }
     }
@@ -796,7 +796,7 @@ fn pow_transfer(
     if !pow_numeric_operand(&base) || !pow_numeric_operand(&exp) {
         return None;
     }
-    let int_or_float = || Fact::union(vec![(Base::Int, None), (Base::Float, None)], false);
+    let int_or_float = || Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::Float, ArmKnown::Whole)], false);
     let base_kind = pow_operand_base(&base);
     if pow_exponent_is(&exp, 0) {
         return match base_kind {

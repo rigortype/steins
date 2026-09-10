@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{Base, Fact, Refinement};
+use steins_domain::{ArmKnown, Base, Fact};
 use steins_sidecar::BuiltinParam;
 use steins_syntax::{ArgValue, CallExpr, NativeType, Param, ScalarType, Span, TypeMember};
 
@@ -227,9 +227,9 @@ pub(crate) fn native_rejects_base(cx: &Cx, ty: &NativeType, base: Base) -> bool 
     maybe_arg_witnesses(base).iter().all(|w| is_type_error(cx, ty, w))
 }
 
-/// One abstract arm: a scalar base with the refinement (if any) carried with it.
+/// One abstract arm: a scalar base with what is known of it ([`ArmKnown`]).
 /// The `null` side-flag is never an arm — it rides beside the list, as in [`Fact`].
-pub(crate) type AbstractArm = (Base, Option<Refinement>);
+pub(crate) type AbstractArm = steins_domain::UnionArm;
 
 /// How much of an abstract fact's denotation a native type rejects — the same
 /// three-way verdict at a parameter and at a return (issue #537).
@@ -250,9 +250,9 @@ pub(crate) enum MaybeVerdict {
 fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<AbstractArm>, bool)> {
     match fact {
         Fact::Refined { base, refinement, nullable } => {
-            Some((vec![(*base, Some(*refinement))], *nullable))
+            Some((vec![(*base, ArmKnown::Refined(*refinement))], *nullable))
         }
-        Fact::General { base, nullable } => Some((vec![(*base, None)], *nullable)),
+        Fact::General { base, nullable } => Some((vec![(*base, ArmKnown::Whole)], *nullable)),
         Fact::Union { arms, nullable } => Some((arms.clone(), *nullable)),
         Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
     }
@@ -261,10 +261,15 @@ fn maybe_arg_arms(fact: &Fact) -> Option<(Vec<AbstractArm>, bool)> {
 /// Spell one abstract union arm the way [`describe_fact`] spells a whole fact —
 /// used to name the rejected arms in the message.
 pub(crate) fn spell_arm(arm: &AbstractArm) -> String {
-    let (base, refinement) = arm;
-    let f = match refinement {
-        Some(r) => Fact::refined(*base, *r, false),
-        None => Fact::General { base: *base, nullable: false },
+    let (base, known) = arm;
+    let f = match known {
+        ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
+        ArmKnown::Whole => Fact::General { base: *base, nullable: false },
+        // A bool-literal arm (ADR-0093 §2) IS one value, and the message names it
+        // that way: `false`, not `bool`. Spelled here rather than as a
+        // `Fact::Singleton`, because [`describe_fact`] answers `"value"` for the
+        // finite layers — its callers gate them out before they reach it.
+        ArmKnown::Bool(b) => return if *b { "true" } else { "false" }.to_owned(),
     };
     describe_fact(&f).trim_start_matches("a value of type ").to_owned()
 }

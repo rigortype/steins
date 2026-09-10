@@ -2158,7 +2158,7 @@ mod refined_string_grid_tests {
 #[cfg(test)]
 mod shape_fact_lowering_tests {
     use super::*;
-    use steins_domain::Tail;
+    use steins_domain::{ArmKnown, Tail};
 
     fn shape_of(src: &str) -> ShapeFact {
         let ty = lower_str(src).unwrap_or_else(|| panic!("{src} failed to lower"));
@@ -2323,7 +2323,7 @@ mod shape_fact_lowering_tests {
         // now has a two-base form, so the slot carries the union.
         assert_eq!(
             slot(&s, "d"),
-            Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+            Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
         );
         // …nor does `class-string` (issue #236): a string refinement now,
         // it carries the predicate.
@@ -2347,7 +2347,7 @@ mod shape_fact_lowering_tests {
         // still floors (it accepts an int, so the base alone isn't acceptance).
         assert_eq!(
             fact_of("int|string"),
-            Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+            Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
         );
         assert_eq!(fact_of("float"), None);
     }

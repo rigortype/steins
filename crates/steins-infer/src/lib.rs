@@ -175,7 +175,7 @@ pub use fold_table::{TableEngine, TableFolder, request_key};
 // end return missing (ADR-0078, issue #199)
 
 use steins_phpdoc::ast::TypeKind as PKind;
-use steins_domain::{Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
+use steins_domain::{ArmKnown, Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
 use steins_phpdoc::Type as PType;
 
 use docblock_hygiene::docblock_hygiene;
@@ -1475,10 +1475,18 @@ fn describe_fact(f: &Fact) -> String {
         Fact::Union { arms, nullable } => {
             let spelled: Vec<String> = arms
                 .iter()
-                .map(|(base, refinement)| {
-                    let arm = match refinement {
-                        Some(r) => Fact::refined(*base, *r, false),
-                        None => Fact::General { base: *base, nullable: false },
+                .map(|(base, known)| {
+                    // A bool-literal arm is one value (ADR-0093 §2), and the message
+                    // names it: `string|true`, not `string|bool`. It is spelled here
+                    // rather than through a `Fact`, because the finite layers do not
+                    // reach this speller at all — its callers gate on
+                    // `finite_members`, and the arm below answers `"value"`.
+                    let arm = match known {
+                        ArmKnown::Bool(b) => {
+                            return if *b { "true" } else { "false" }.to_owned();
+                        }
+                        ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
+                        ArmKnown::Whole => Fact::General { base: *base, nullable: false },
                     };
                     describe_fact(&arm)
                         .trim_start_matches("a value of type ")

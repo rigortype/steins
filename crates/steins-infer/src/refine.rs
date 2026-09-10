@@ -1239,6 +1239,11 @@ pub(crate) fn exclude_member(f: &Fact, val: &Val) -> Option<Fact> {
             {
                 Some(add_str_preds(f, StrPreds::NON_EMPTY))
             }
+            // `!== false` / `!== true` on an abstract fact (ADR-0093 §2): the value
+            // lane can spell the result since the union arm carries the literal
+            // member set, so the subtraction lands here at the stratum of the fact
+            // it narrows — the mirror of the arm-lane rule of issue #443.
+            (_, Val::Bool(b)) => f.exclude_bool(*b),
             _ => Some(f.clone()),
         },
     }

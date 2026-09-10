@@ -152,3 +152,13 @@ verdict twice rather than the gate admitting what the encoder refuses.
 So `array_key_first([$decimalIntString => null])` is `int`, and
 `array_key_first([$string => null])` is `int|string` — the second being the
 union doing the work the `KeyClass` floor could not.
+
+## Note (2026-09-11): the `∪ false` family spells `int|false` now (issue #600)
+
+§5 and §6 record `int|bool` as the answer where `int|false` was the truth,
+because a union arm over `bool` had no way to hold one of its two members.
+ADR-0093 §2 gives the arm a literal member set — `{true}` or `{false}`
+beside the whole base — so `next($shape)` and the rest of the `∪ false`
+family answer `int|false`, and `assert($v !== false)` subtracts the literal
+in the value lane. The coarseness this addendum accepted is discharged; the
+one-arm-per-base and 2..=4-arm invariants of §3 are unchanged.
