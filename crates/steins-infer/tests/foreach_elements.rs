@@ -6,8 +6,8 @@
 //! construct's `writes` — the entry forgetting drops them first — and the binding is
 //! applied to the forgotten env afterwards, from the subject as that env holds it.
 //! That order is the soundness: the entry stays iteration-count-agnostic, a body
-//! that reassigns `$v` cannot reach the next entry through it, and the code after
-//! the loop is untouched (issue #651 owns that half).
+//! that reassigns `$v` cannot reach the next entry through it, and the bound `$v`
+//! does not ride the fall-through (issue #651 owns what does).
 //!
 //! Two lanes answer, in ADR-0037's trust order. A proven array answers exactly, at
 //! its own stratum. A declared one answers from its arms, at the arms' — `Asserted`
@@ -346,9 +346,10 @@ fn a_nullable_declared_subject_still_binds_its_element() {
 
 #[test]
 fn the_fall_through_after_the_loop_is_unchanged() {
-    // The boundary issue #651 owns. Nothing the body computes escapes it, and the
+    // The boundary issue #651 drew. Nothing the body computes escapes it, and the
     // binding is part of the body's entry env, not the construct's fall-through: `$v`
     // is in `writes`, so after the loop it is exactly what the write set leaves it.
+    // The **subject** is the other case and survives — that is #651's own fixture.
     let src = subject(
         "list<int>",
         "    foreach ($xs as $v) {\n    }\n    \\PHPStan\\dumpType($v);",
