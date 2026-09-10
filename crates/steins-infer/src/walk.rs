@@ -1616,10 +1616,25 @@ pub(crate) fn walk_trace(
             env.remove(&v.name);
             store.unbind(&v.name);
         }
-        // A kept object handle that went through a by-value call site keeps the
-        // handle and loses the mutable state (`by_value_survivors`' second set).
+        // A kept object handle that reached a by-value call site OTHER than as a
+        // direct argument — an offset root, `strstr($a['k'], …)` on an `ArrayAccess`
+        // receiver — keeps the handle and loses the mutable state
+        // (`by_value_survivors`' second set). A direct object argument is the
+        // ADR-0036 escape rule's, which sweeps only for a callee that can reach
+        // the object and keeps the carry through one that provably cannot; this
+        // sweep must not second-guess it.
+        let direct: HashSet<&str> = checkable_calls(&stmt.kind)
+            .iter()
+            .flat_map(|c| c.args.iter())
+            .filter_map(|a| match &a.value {
+                ArgValue::Var(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
         for v in object_kept {
-            store.sweep_object(v);
+            if !direct.contains(v) {
+                store.sweep_object(v);
+            }
         }
 
         // 5. Rebind what a proven by-ref write left behind (issue #595), over the
