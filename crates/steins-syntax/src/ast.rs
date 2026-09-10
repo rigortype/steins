@@ -282,7 +282,7 @@ pub enum RefTarget {
 
 /// The nine PHP superglobals. A by-ref write whose root is one of these is an
 /// interpreter-global write however local the syntax looks.
-pub(crate) const SUPERGLOBALS: &[&str] = &[
+pub const SUPERGLOBALS: &[&str] = &[
     "GLOBALS", "_SERVER", "_GET", "_POST", "_FILES", "_COOKIE", "_SESSION", "_REQUEST", "_ENV",
 ];
 

@@ -1244,3 +1244,49 @@ Across both legs of #636: `differ` 9779 → 9749, `match` 3193 → 3206.
 
 `steins check --profile strict --no-cache` over the pinned corpus produced 1,810
 lines byte-identical before and after.
+
+## Amendment L (2026-09-11): a frame-private write does not invalidate the frame — PENDING ratification
+
+Issue #641. A-G8's invalidation clause reads, of the shape fact, "rebinding
+clears everything; by-ref exposure and by-ref builtins (`sort` &c.) havoc the
+fact (v1)". What it never said — because it is a statement about *one* binding's
+fact — is what an offset write does to every **other** binding in the scope. The
+implementation answered "erases them", unconditionally: `apply_offset_write` and
+`apply_offset_append` opened with `env.clear(); store.clear();` and put back
+exactly one name, the base. Amendment J narrowed what that restore *says*;
+Amendment K gave the append its own algebra; neither touched the clear.
+
+This amendment records the missing row.
+
+> **Extent of an offset write.** `$a[k] = v`, `$a[] = v` and `unset($a[k])`
+> invalidate the base's own fact per §4 and the rows above. They invalidate a
+> **different** binding's fact only where the write could have been observed
+> through it — ADR-0063 §2.3's target and exposure legs, both proving
+> `RefTarget::Local`. Where either leg declines — a superglobal or by-ref-param
+> root, or a frame carrying any ADR-0001 give-up-list construct — the write
+> invalidates the whole scope exactly as before.
+
+The soundness argument is PHP's own, probed at `PINNED_PHP` 8.5.10:
+
+```
+$ php -r '$a = [1,2,3]; $b = $a; $a[0] = 9; var_dump($b[0]);'
+int(1)                                             # a copy is not aliased
+$ php -r '$o = new stdClass; $o->p = "foo"; $c = $o->p; $o->p[0] = "X"; var_dump($c);'
+string(3) "foo"                                    # nor is a property read
+$ php -r '$a = 1; $b = ["key" => &$a]; $b["key"] = 42; var_dump($a);'
+int(42)                                            # a reference is
+```
+
+An offset write is observable through exactly one channel. The exposure leg is
+the enumeration of that channel's spellings, and issue #641's leg 1 had to close
+two holes in it first (an array-literal element and a by-ref `foreach` binding
+produced no give-up site at all) — see the ADR-0063 amendment of the same date,
+and `SCHEMA_VERSION` 18.
+
+**Three things this row does not say.** The alias map, the heap, the guard-bound
+`Member` lane and the narrowing marks are still cleared on every offset write,
+frame-private or not — `$b['k'] = $v` on an `ArrayAccess` receiver runs
+`offsetSet`, and no reachability argument bounds that body. A plain
+`StmtKind::Barrier` names no target and keeps the total clear. And the base's own
+update is unchanged: this row is about the barrier's *width*, and widens neither
+Amendment J's weak row nor A-G8's decline of a nested-shape update.

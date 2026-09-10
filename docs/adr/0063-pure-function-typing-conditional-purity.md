@@ -135,3 +135,92 @@ carrying the tag falls back to the plain edge. Widening the effects pass's
 notion of a catalogued builtin (so `preg_match`/`sort` resolve as builtins at
 all) was scoped to that pass: the same widening would change how the *throws*
 pass classifies those names, which is a real gap and a different baseline.
+
+## Amendment (2026-09-11): the exposure leg, and a second consumer of the same classification — PENDING ratification
+
+Issue #641. The 2026-07-30 amendment above recorded that conditionality "needed
+a second catalog axis, not a wider label set", and resolved `out_params(name)`
+per call site against two legs: **arity** and **target**, the target leg being
+`RefTarget` with the frame-locality claim "additionally gated on the frame
+carrying no ADR-0001 give-up-list construct". This amendment carries the same
+pair from *colouring a write* to **bounding a write's observable extent**, and
+records that the value lane now reads the classification the effects pass ships.
+
+Nothing in the effect vocabulary changes. What changes is who consults it.
+
+### The two legs, restated as extent
+
+- **The target leg** — what the write names. `RefTarget` unchanged: a
+  superglobal root is interpreter-global surface, a by-ref parameter's cell
+  belongs to the caller (and two by-ref parameters can be one cell, `f($x, $x)`
+  into `function f(&$p, &$q)`), and only a plain local continues.
+- **The exposure leg** — which of the frame's *other* bindings could observe the
+  write. Today that is the single whole-frame bit `frame_aliased`, and it stays
+  whole-frame: "which names survive an aliased frame" is a dataflow question the
+  structural scan does not ask, exactly as the earlier amendment says.
+
+The consumer is `apply_offset_write`/`apply_offset_append`, which used to clear
+the whole environment and store on every `$a[$k] = v`, `$a[] = v` and
+`unset($a['k'])` and put back the one base it wrote through. Both legs proving
+`Local` now narrows that clear to the target alone; either leg declining leaves
+the total clear that stood before, so the barrier remains the floor everywhere.
+
+The soundness argument is PHP's, probed at `PINNED_PHP` 8.5.10 (ADR-0061 §4): an
+offset write is observable through exactly one channel, a reference.
+
+```
+$ php -r '$a = [1,2,3]; $b = $a; $a[0] = 9; var_dump($b[0]);'
+int(1)                                          # a copy is not aliased
+$ php -r '$s = "foo"; $t = $s; $s[0] = "X"; var_dump($t);'
+string(3) "foo"                                 # nor is a string copy
+$ php -r '$a = 1; $b = ["key" => &$a]; $b["key"] = 42; var_dump($a);'
+int(42)                                         # a reference is
+```
+
+### The hole the exposure leg had, and its closure
+
+`frame_aliased` is documented as "exactly the ADR-0001 give-up list", and it was
+not. `scan_opaque_walk` recognised a reference only as
+`Node::Assignment(a) if a.rhs.is_reference()`, and `Expression::is_reference()`
+is a top-level test, so two spellings produced no `OpaqueSite` at all:
+
+```
+$ php -r '$a = 1; $c = "test"; $b = [&$a, "normal", &$c]; $b[0] = 2; $b[2] = "bar"; var_dump($a, $c);'
+int(2)   string(3) "bar"                        # `['k' => &$a]` has an Array rhs
+$ php -r '$r = [[1],[2]]; foreach ($r as &$v) {} $v[] = 9; var_dump($r[1]);'
+array(2) { [0]=> int(2) [1]=> int(9) }          # and the alias outlives the loop
+```
+
+Both are now `OpaqueConstruct::ReferenceBinding`, recorded by one arm — since
+PHP 8 removed call-time pass-by-reference, an array-literal element and a
+`foreach` value binding are the only two places a `&` stands in expression
+position that the closure arm does not already take.
+
+This is a correction to `mutate.local` as much as to the value lane:
+`function f(&$p) { foreach ($p as &$r) { sort($r); } }` classified `$r` as
+`RefTarget::Local` and coloured the `sort` `mutate.local`, while the write lands
+in the caller's array. It costs precision — a frame with a by-ref `foreach` is
+now poisoned outright, and by-ref `foreach` is common — and it wins nothing on
+its own. It lands first because the extent rule above is unsound without it.
+
+`SCHEMA_VERSION` moves 17 → 18 for it: `Scope::opaque` is persisted, so a
+schema-17 artifact records as unaliased a frame this binary records as aliased,
+and replaying one would narrow a barrier that must stay total. That is a miss
+that changes *meaning*, which ADR-0092 §2 forbids.
+
+### What the extent rule still refuses
+
+- **`store.refs`, `heap`, `members` and `narrowed` are cleared either way.**
+  `refs` is the alias map the test is reasoning about; `heap` and `members`
+  reach objects whose identity the value lane does not track, and `$b['k'] = $v`
+  on an `ArrayAccess` receiver runs `offsetSet`, which nothing here bounds.
+  Retaining them is a second soundness claim needing its own reachability
+  argument, and it is not made here.
+- **A plain `StmtKind::Barrier` and `StmtKind::Destructure` still clear
+  totally.** `Barrier` is a unit variant: the lowering throws the lvalue away on
+  the way in, so there is no target to classify — and it is also the arm for
+  constructs the lowering could not classify at all, which must stay total
+  whatever else happens. `Destructure` names an unbounded target set the
+  lowering deliberately does not model (issue #288).
+- **The gate stays whole-frame**, per the earlier amendment, and per-variable
+  exposure is not attempted.
