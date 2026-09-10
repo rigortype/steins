@@ -595,6 +595,59 @@ mod tests {
         spell_arms(&summarize_vals(vals)?)
     }
 
+    fn cls(n: &str) -> ContractTy {
+        ContractTy::Class(n.to_owned())
+    }
+
+    /// ADR-0093 §3's own examples, in the order PHPStan writes them: a class arm
+    /// follows a constant scalar, precedes a non-constant string keyword, and
+    /// precedes `false`/`null`. The nsrt normalizer sorts a union's atoms before
+    /// comparing, so this pins what a *reader* sees, not what the harness scores.
+    #[test]
+    fn a_class_arm_takes_phpstans_position_among_the_scalars() {
+        let f = ContractTy::LitBool(false);
+        assert_eq!(spell_arms(&[cls("DateTime"), f.clone()]).unwrap(), "DateTime|false");
+        assert_eq!(
+            spell_arms(&[f, cls("stdClass"), ContractTy::Null]).unwrap(),
+            "stdClass|false|null"
+        );
+        // A constant string is a constant scalar: it comes FIRST.
+        assert_eq!(
+            spell_arms(&[cls("stdClass"), ContractTy::LitStr("foo".into())]).unwrap(),
+            "'foo'|stdClass"
+        );
+        // A refined-string keyword is not: it comes AFTER.
+        assert_eq!(
+            spell_arms(&[
+                ContractTy::StrWith(StrPreds::NON_FALSY.close()),
+                cls(r"FilterVar\Analyser"),
+            ])
+            .unwrap(),
+            r"FilterVar\Analyser|non-falsy-string"
+        );
+        // Nested in the array vocabulary, through the one speller.
+        assert_eq!(
+            spell_arms(&[ContractTy::MapOf {
+                key: Box::new(ContractTy::Base(Base::Int)),
+                val: Box::new(ContractTy::Union(vec![
+                    cls("Analyser"),
+                    ContractTy::Base(Base::String),
+                ])),
+                non_empty: false,
+                not_list: false,
+            }])
+            .unwrap(),
+            "array<int, Analyser|string>"
+        );
+    }
+
+    /// Candidate B stays deferred (ADR-0093 §3): `object` names no class, so it
+    /// has no spelling here and the whole list refuses.
+    #[test]
+    fn a_bare_object_arm_still_refuses() {
+        assert_eq!(spell_arms(&[ContractTy::ObjectAny, ContractTy::LitBool(false)]), None);
+    }
+
     #[test]
     fn int_and_numeric_strings_render_the_canonical_union() {
         assert_eq!(spell_vals(&[i(1), s("12"), s("34")]).unwrap(), "int|numeric-string");
