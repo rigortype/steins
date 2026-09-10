@@ -108,9 +108,18 @@ use crate::names::{PackageName, SectionName};
 /// variant's payload gains fields, and the wire codec reads a struct variant's
 /// fields positionally, so a schema-15 payload would read the old `body` where the
 /// new `subject` is.
+/// `17` is the post-loop condition (issue #651): `StmtKind::While` and
+/// `StmtKind::For` grow `break_free` — whether any jump can leave the body, which is
+/// what licenses narrowing the fall-through by the negated header — and
+/// `StmtKind::DoWhile` grows both `break_free` and the `cond` the previous slice
+/// deliberately withheld. The **misdecode** kind, for schema 16's reason exactly:
+/// three struct variants gain fields and the wire codec reads a struct variant's
+/// fields positionally, so a schema-16 `DoWhile` would read its old `body` where the
+/// new `cond` is. On top of that it spells every loop as one nothing is known after,
+/// replaying `unknown` where this binary answers the negated condition.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 16;
+pub const SCHEMA_VERSION: u32 = 17;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

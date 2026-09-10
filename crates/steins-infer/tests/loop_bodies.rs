@@ -120,8 +120,9 @@ function traverse(Return_ $node): bool {{
             "13: dumped type: Node".to_owned(),
             "18: dumped type: unknown".to_owned(),
         ],
-        "line 13 is inside the body; line 18 shows the fall-through unchanged \
-         (carrying the negated condition out is issue #651)"
+        "line 13 is inside the body; line 18 is the fall-through, where the negated \
+         header (issue #651) has no lane left to subtract `Node` from — the body \
+         rewrote `$parent`, so its lanes went with the write set"
     );
 }
 
@@ -368,9 +369,11 @@ fn a_name_the_loop_cannot_change_keeps_its_value_at_the_body_entry() {
     // The `reads` half of the ADR-0027 sets (issue #653). Nothing in the loop
     // assigns `$s` and no call in it can rebind it, so its binding is the same on
     // iteration 40 as on iteration 1 and the entry env keeps it. The construct's
-    // FALL-THROUGH still forgets it, which is the separate judgment: a construct
-    // that reads and branches may have early-returned, so the tail must exclude
-    // the value even where the body may not.
+    // FALL-THROUGH keeps it too, since issue #651: the argument does not stop at
+    // the closing brace — a name the body cannot rebind holds after the loop what
+    // it held before it, under any iteration count including zero. (It was
+    // forgotten there until then, on the `Opaque` rule for a construct whose
+    // control flow is unmodelled.)
     //
     // The dump is spelled through a cast because `dumpType($s)` would hand `$s` to
     // a call and put it in `writes` — the one thing this test must not do.
@@ -386,9 +389,8 @@ function f(int $n): void {
 ";
     assert_eq!(
         dumps(src),
-        vec!["5: dumped type: 'abc'".to_owned(), "8: dumped type: string".to_owned()],
-        "line 5 is the body entry, line 8 the unchanged fall-through — `string` there \
-         is the cast's own total floor, all that is left once the sets have run"
+        vec!["5: dumped type: 'abc'".to_owned(), "8: dumped type: 'abc'".to_owned()],
+        "line 5 is the body entry and line 8 the fall-through; both keep a read"
     );
 }
 
@@ -652,8 +654,8 @@ function f(int $n): void {{
 
 #[test]
 fn an_empty_for_header_walks_its_body_unguarded() {
-    // `for (;;)` has no condition to test; it lowers to `CondExpr::Opaque`, which
-    // decides nothing and narrows nothing, so the body is walked as-is.
+    // `for (;;)` has no condition to test; it lowers as the literal `true` PHP
+    // evaluates there, which narrows nothing, so the body is walked as-is.
     let src = "<?php
 final class Order {}
 function f(): void {
@@ -722,8 +724,9 @@ function f(): void {
 
 #[test]
 fn a_do_while_condition_narrows_nothing_at_the_body_entry() {
-    // The soundness pin, second half, and the reason `StmtKind::DoWhile` does not
-    // carry its condition at all. The first iteration runs BEFORE the header is ever
+    // The soundness pin, second half, and the reason no ENTRY reader may consult
+    // `StmtKind::DoWhile`'s condition (the exit does, issue #651). The first
+    // iteration runs BEFORE the header is ever
     // evaluated, so `$x instanceof Order` is not a fact there: `$x` still holds the
     // `null` the statement above it wrote, `$x->ship()` is a guaranteed runtime
     // `Error`, and the `call.on-null` that says so is a true positive the `while`

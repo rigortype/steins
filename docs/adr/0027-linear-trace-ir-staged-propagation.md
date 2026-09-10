@@ -163,8 +163,9 @@ every iteration, which is the loop-carried kind of write exactly, so their
 targets are forgotten with the rest of `writes`; the increment expressions
 themselves are not walked, since the env they run in is the body's exit, which
 this construct discards. The tested condition is the **last** one PHP evaluates;
-a `for (;;)` carries `CondExpr::Opaque`, which decides nothing and narrows
-nothing, so its body walks unguarded.
+a `for (;;)` carries the literal `true` PHP evaluates there, which narrows
+nothing, so its body walks unguarded (and, per the 2026-09-11 amendment,
+never falls through when no jump can leave it).
 
 **`foreach`.** A header that binds rather than tests, so there is no condition
 and nothing to narrow by. `$k` and `$v` are ordinary members of `writes` — the
@@ -248,3 +249,102 @@ and stay writes alone; a plain `$k` beside either still binds. `Traversable` and
 `StmtKind::Foreach`'s payload gains fields and the wire codec reads a struct
 variant's fields positionally, so `SCHEMA_VERSION` moves 15 → 16: a schema-15
 payload must miss rather than read the old `body` where the new `subject` is.
+
+## Amendment (2026-09-11): the statement after a break-free loop knows the header is false — PENDING ratification
+
+Issue #651. Every amendment above ends by saying the fall-through is
+byte-identical to the `Opaque` the construct replaces, and names this issue
+as where that stops being true. It does, in two independent ways.
+
+**The negated header.** A loop is left in exactly two ways: its condition
+went false, or a jump left the body. When no jump can, the condition is
+false at the statement after the loop, so its **else**-refinements hold
+there — the mirror of the entry narrowing, through the same carrier
+(`apply_cond_side`, false polarity) at the same strata (ADR-0052 §5: a
+`Verified` test refines at `Verified`, an `Asserted` envelope at `Asserted`,
+and nothing launders). `while`, `for` and `do`/`while` all qualify. A
+`foreach` does not and cannot: it exits on exhaustion, not on a lowered
+`CondExpr`, so there is nothing to negate.
+
+**`do`/`while` takes it, and this is not a reversal.** The amendment above
+withholds the *entry* narrowing there and withholds the condition field with
+it. The exit is the opposite case for the identical reason: the condition is
+evaluated **after** the body and **immediately before** the fall-through, so
+a fact read off it is untested at the entry and freshly tested at the exit.
+`StmtKind::DoWhile` therefore carries `cond` after all, with the one legal
+reading written on the field.
+
+**A header that can never fail, with no jump to leave by, never falls
+through.** The header's verdict on the entry env is the verdict of every
+test the loop makes, since that env holds at each of them. `Yes` plus
+`break_free` therefore proves the successor unreachable — `while (true)
+{ …; return; }` is the `if (true) { return; }` twin `walk_if` already
+terminates — and the `while`/`for` arms answer `Flow::Terminated` rather
+than walking dead code the old `Opaque` washed out by forgetting `reads`.
+A `do`-`while` is not this question (issue #679).
+
+**The order is the soundness, and it is the part worth reading twice.** The
+negation is applied to the **post-forget** env — `writes` gone, `reads` kept
+— which is the entry env minus the `for`'s `carried`: `init` is walked into
+the body env only, so an init-only name is forgotten at the fall-through
+like any other write (recoverable, out of scope here). So it never states what a name held *before* the loop; it states
+what the failing test proves about what the name holds *now*, and the exit
+is reached only through a failing test of exactly that value. Both readings
+fall out of the order without a special case:
+
+* a name the loop **rewrote** arrives with its lanes gone, so only a
+  refinement that mints its own fact can say anything about it — `while ($x
+  !== null) { $x = $x->parent(); }` proves `$x === null` at the exit, which
+  is the issue's own shape, while `while ($x instanceof Node) { $x =
+  $x->parent(); }` has no base to subtract `Node` from and answers silence.
+  That silence is a precision residue, not an unsoundness: `$x` genuinely is
+  not a `Node` there, and the domain has no lane to spell it in once the
+  binding is gone.
+* a name the loop **did not write** arrives with its lanes intact, so a
+  subtractive negation has its base — `while ($i < 10)` over a declared
+  parameter leaves `int<10, max>`.
+
+**The gate is syntactic, and levels are counted.** `break_free` is computed
+on the CST body at lowering, because the lowered trace cannot answer it: a
+nested `switch` becomes an `Opaque` whose `break 2` is invisible, and
+`StmtKind::LoopJump` deliberately records neither the keyword nor the level
+(the #649 amendment's ruling, which stands — the *reachability* question it
+answers still needs neither). Counting the loops and `switch`es between a
+jump and the body's top level as `depth`: a `break N` targets this loop when
+`N > depth`, so a bare `break;` inside a nested `switch` is the switch's and
+a `break 2;` in the same place is this loop's; a `continue N` targets this
+loop at `N == depth + 1`, which re-tests the header and is harmless, and
+anything larger targets a loop outside this one and disqualifies. Any `goto`
+disqualifies — its label is unbounded. A non-literal level (`break $n`,
+which PHP has rejected since 5.4) is read as the worst case. `return`,
+`throw` and `exit` disqualify nothing: they do not reach the fall-through,
+so what holds there is not their business.
+
+**The fall-through keeps `reads`.** The second way the fall-through stops
+being an `Opaque`'s, and the one that moves every loop rather than only the
+break-free ones. Forgetting `reads` is right for an `Opaque`, whose control
+flow is unmodelled: a subtree that reads and branches may have early-
+returned, so the tail must exclude the value it branched on. A **loop** does
+not have that shape — a name in `reads` is assigned by nothing in the body
+and handed to no call in it, so it holds at the fall-through exactly what it
+held at the construct, under any iteration count including zero. That is the
+2026-09-04 amendment's argument for the body's entry, verbatim, and it is as
+true after the loop as inside it. A kept name takes the same
+`Store::sweep_object` the entry gives it, for the same reason: the loop can
+mutate the object it points at even though it cannot rebind the name.
+
+Measured, that is what capped issue #652 at one loop per subject: a `foreach`
+subject is a read, so `foreach ($xs as $v) {}` left `$xs` unknown and a second
+`foreach` over the same declared subject bound nothing. `writes` is untouched
+and stays the real cost it always was.
+
+`StmtKind::While` and `StmtKind::For` gain `break_free`; `StmtKind::DoWhile`
+gains `break_free` and `cond`. The wire codec reads a struct variant's fields
+positionally, so `SCHEMA_VERSION` moves 16 → 17: a schema-16 payload would
+read a `do`/`while`'s old `body` where the new `cond` is, and would in any
+case replay `unknown` after every loop.
+
+Fixtures: `crates/steins-infer/tests/loop_exit_condition.rs` — the shape and
+its `if`/`else` twin, both post-forget readings, the four loop forms, the
+`break`/`break 2`/nested-`switch`/nested-loop level matrix, `continue` and
+`continue 2`, `goto`, and the `foreach` subject surviving into a second loop.

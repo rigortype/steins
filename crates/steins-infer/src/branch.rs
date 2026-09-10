@@ -224,14 +224,56 @@ fn apply_cond_side(
     seed_out_params(w, folder, cond, then, env, store);
 }
 
+/// Apply a break-free loop's **negated header** to its fall-through env
+/// (issue #651) — the mirror of the entry narrowing, and the same carrier.
+///
+/// A loop is left in exactly two ways: its condition went false, or a jump left the
+/// body. `break_free` is the lowering's answer to whether the second is possible
+/// (`StmtKind::While`'s docs carry the rule), and when it is not, the condition was
+/// evaluated **false immediately before** the statement that follows — with nothing
+/// running in between. That is a stronger position than an `if`'s else-branch, which
+/// takes the identical application for the identical reason, so [`apply_cond_side`]
+/// is used verbatim at the same strata (ADR-0052 §5: a `Verified` test refines at
+/// `Verified`, an `Asserted` envelope at `Asserted`, and nothing launders).
+///
+/// **It is applied to the post-forget env**, after [`loop_fallthrough_forget`], and
+/// that order is the soundness. The loop may have rewritten the very name the header
+/// tests, so the negation may not be read as refining what the name held *before*
+/// the loop; it refines what it holds *now*, which is precisely the value whose
+/// failing test ended the loop. Both halves of that fall out of the order: a name
+/// the loop wrote arrives here with its lanes gone, so only a refinement that mints
+/// its own fact (`while ($x !== null)` proving `$x === null`) can say anything about
+/// it, and a name the loop did not write arrives with its lanes intact, so a
+/// subtractive negation (`while ($x instanceof Node)`) has the base it subtracts
+/// from. Neither reading can state iteration 1's value as the exit's.
+///
+/// A `CondExpr::Opaque` — a `for (;;)`, or any header the lowering could not read —
+/// refines nothing and needs no gate of its own: it is the same inert value at the
+/// exit that it is at the entry.
+///
+/// [`loop_fallthrough_forget`]: crate::walk
+pub(crate) fn apply_loop_exit_negation(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    cond: &CondExpr,
+    break_free: bool,
+    env: &mut HashMap<String, Known>,
+    store: &mut Store,
+) {
+    if !break_free {
+        return;
+    }
+    apply_cond_side(w, folder, cond, false, env, store);
+}
+
 /// Walk a structured `while` body (ADR-0027 amendment, issue #649).
 ///
 /// `benv`/`bstore` are the body's **entry** pair, built by the caller from what the
 /// loop provably cannot change (`loop_entry_forget`), and this consumes them: a
 /// loop body contributes **findings**, never facts. The body's exit env is
-/// discarded, so the code after the loop sees exactly what the construct's own
-/// sets left standing, and carrying the negated condition out of a break-free loop
-/// stays the separate question it is (issue #651).
+/// discarded, so the code after the loop sees what the construct's own sets left
+/// standing, plus the one thing the body did not compute: the negated header, when
+/// no jump can leave the body ([`apply_loop_exit_negation`], issue #651).
 ///
 /// The entry env needs no fixpoint. Nothing in it is specific to one iteration —
 /// every name the loop can rebind is forgotten in it and the mutable state of every
@@ -259,12 +301,18 @@ pub(crate) fn walk_while_body(
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
-) {
-    if eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned) == Certainty::No {
-        return;
+) -> Certainty {
+    // The verdict is on the ENTRY env, which holds at every header evaluation, so
+    // it is the verdict of every test the loop ever makes: `No` skips the body,
+    // and `Yes` is what the caller reads as "no failing test can ever leave this
+    // loop" (issue #651's reachability half).
+    let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
+    if verdict == Certainty::No {
+        return verdict;
     }
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
     walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+    verdict
 }
 
 /// Walk a structured loop body from an entry pair the header has already had its

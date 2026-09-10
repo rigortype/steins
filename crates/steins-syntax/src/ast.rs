@@ -2137,9 +2137,18 @@ pub enum StmtKind {
     /// The other three loop forms join it in issue #650, each with the one
     /// difference its own semantics forces: [`Self::For`], [`Self::Foreach`] and
     /// [`Self::DoWhile`].
+    ///
+    /// `break_free` is the **exit** half (issue #651): a loop is left in exactly two
+    /// ways, its condition going false or a jump leaving the body, so a body no jump
+    /// can leave is a loop whose condition is false at the statement after it. It is
+    /// `true` when the body contains no `break` targeting THIS loop (a `break` of a
+    /// nested loop or `switch` is that construct's), no `continue` targeting a level
+    /// outside it, and no `goto` at all. A syntactic property of the body, computed
+    /// where the body is still a CST; what a walker does with it is its own rule.
     While {
         cond: CondExpr,
         body: Vec<Stmt>,
+        break_free: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,
@@ -2166,13 +2175,17 @@ pub enum StmtKind {
     /// makes forgetting them at the entry sound.
     ///
     /// `cond` is the **last** condition expression — the one PHP tests. A `for` with
-    /// no condition at all (`for (;;)`) carries [`CondExpr::Opaque`], which narrows
-    /// nothing and decides nothing, so its body walks as an unguarded one.
+    /// no condition at all (`for (;;)`) carries the literal `true`, which is what PHP
+    /// evaluates there: its body walks as an unguarded one, it negates to nothing at
+    /// the exit, and with no jump to leave by it never falls through (issue #651).
+    ///
+    /// `break_free` means what it means on [`Self::While`], read off this body.
     For {
         init: Vec<Stmt>,
         cond: CondExpr,
         body: Vec<Stmt>,
         carried: Vec<String>,
+        break_free: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,
@@ -2213,20 +2226,28 @@ pub enum StmtKind {
         poisons: bool,
         may_return: bool,
     },
-    /// A structured `do`-`while` (issue #650) — [`Self::While`] with the entry
-    /// narrowing **withheld**, and the condition therefore not carried at all.
+    /// A structured `do`-`while` (issue #650, amended by #651) — [`Self::While`]
+    /// with the **entry** narrowing withheld.
     ///
     /// The body's first iteration runs before the condition is ever evaluated, so a
     /// fact read off the condition does not hold at the entry to that iteration.
-    /// Taking the `while` rule here would be unsound in both directions at once: it
+    /// Taking the `while` rule there would be unsound in both directions at once: it
     /// would narrow the first iteration by a test that has not happened, and it
     /// would skip the body of a `do { … } while (false)` — a loop whose body always
     /// runs exactly once.
     ///
+    /// The **exit** is the opposite case, and it is why `cond` is carried after all
+    /// (issue #651): the condition is evaluated immediately before the fall-through,
+    /// exactly as a `while`'s is, so a break-free `do`-`while` leaves its negation
+    /// standing there on the same terms. One reading, spelled out — a reader that
+    /// consults this field at the body's entry is wrong for the paragraph above.
+    ///
     /// A walker still gets everything else a `while` gives it: the same sets, the
-    /// same entry forgetting, and a body to walk.
+    /// same entry forgetting, `break_free`, and a body to walk.
     DoWhile {
+        cond: CondExpr,
         body: Vec<Stmt>,
+        break_free: bool,
         writes: Vec<String>,
         reads: Vec<String>,
         poisons: bool,
