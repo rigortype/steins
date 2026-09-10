@@ -480,11 +480,22 @@ fn render_declared_returns(
     let _ = writeln!(s, "//   {:>5}    RICHER than a single-base envelope (the #79 and ADR-0071 reach)", counts.admitted_rich);
     s.push_str(
         "//\n\
-         // Skipped methods and the object bucket remain deferred (ADR-0069 §5 as\n\
-         // amended 2026-08-01, ADR-0071 §2.3): object/class-name/callable/resource arms\n\
-         // have no denotation, so the countersign could only answer `Maybe`, which\n\
-         // ADR-0069 §3 refuses. The shaped-array bucket is empty since ADR-0071 gave\n\
-         // `array`/`list<T>`/`array<K, V>`/`array{…}` a structural denotation.\n\
+         // The object half of that bucket is no longer deferred. ADR-0071 emptied the\n\
+         // shaped-array bucket by giving `array`/`list<T>`/`array<K, V>`/`array{…}` a\n\
+         // structural denotation, and the same move reached the class rows through\n\
+         // `subsumes_class`'s reflexivity — a row naming the class the engine names\n\
+         // countersigns on that alone, a row naming a different one stays `Maybe` and is\n\
+         // refused. What ADR-0093 §3 then added is the missing half: those rows now\n\
+         // SPELL, so `date_create` dumps `DateTime|false` instead of `unknown`, under\n\
+         // §3.1's sourcing rule (an object arm enters the contract lane only from a\n\
+         // declaration — this table is one). ADR-0069 §5 / ADR-0071 §2.3 lift for the\n\
+         // object rows on that ruling (ADR-0093 is PENDING ratification).\n\
+         //\n\
+         // Still deferred, and for the reason §5 gave: the skipped methods (issue #673\n\
+         // is the class-method table), and what is LEFT in the bucket the count names —\n\
+         // `callable`, the intersections, `resource` and `void`. Those have no\n\
+         // extensional denotation the countersign could use, so it could only answer\n\
+         // `Maybe`, which ADR-0069 §3 refuses.\n\
          //\n\
          // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2) — it\n\
          // reaches the dump surface and contracts-tier reasoning, but the proof\n\

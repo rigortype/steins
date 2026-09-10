@@ -488,35 +488,51 @@ fn int_range_keyword(r: IntRange) -> String {
 }
 
 /// Render a narrowed contract-fact arm list (ADR-0052 §1 carrier) for the dump
-/// surface. Scalar arms spell through [`steins_contract::spell::spell_arms`]; a
-/// pure class/`null` arm list renders each class's source-cased FQN (via
-/// [`Cx::class_display_fqn`], matching PHPStan); anything else has no faithful
-/// spelling (`None` — caller falls to honest unknown).
+/// surface, or `None` when the list has no faithful spelling (the caller falls to
+/// honest unknown).
+///
+/// One speller now, [`steins_contract::spell::spell_arms`], for scalar arms and
+/// class arms alike — including the **mixed** lists ADR-0093 §3 adopted:
+/// `DateTime|false`, `'foo'|stdClass`, `stdClass|false|null`. Before that ruling
+/// this function kept a second loop for the *pure* class/`null` case and refused
+/// every mixture, so `date_create($s)` dumped `unknown` while its `DateTime|false`
+/// arms sat in the lane, spellable, fifty lines away.
+///
+/// Two things this side owns that the speller cannot, both needing the class
+/// index: the whole-enum collapse below, and **source casing** — a class arm
+/// stores a normalized (lowercased) FQN, and PHPStan prints what the declaration
+/// wrote, so each class-shaped arm is re-cased through [`Cx::class_display_fqn`]
+/// on the way in. A class nested inside an array arm (`array<DateTime>`) is not
+/// re-cased, and — the larger caveat — not **resolved** either: `resolve_class_arms`
+/// walks `Class` and `Inter`, not the element of a `ListOf`/`MapOf`, so the
+/// nested name is the docblock's own spelling lowercased, unqualified in its
+/// namespace. That was so before mixed lists spelled (issue #699 tracks it); this
+/// side only stops hiding it behind `None`.
 ///
 /// An enum whose cases are ALL still present collapses back to the enum's own
 /// name first (issue #429): the expanded case set and the declaration denote the
 /// same thing, and a reader who narrowed nothing must be shown what they wrote.
 pub(crate) fn render_contract_arms(cx: &Cx, arms: &[ContractArm]) -> Option<String> {
-    let tys: Vec<ContractTy> = collapse_whole_enums(cx, arms.iter().map(|a| a.ty.clone()));
-    if let Some(scalar) = steins_contract::spell::spell_arms(&tys) {
-        return Some(scalar);
-    }
-    let mut parts = Vec::new();
-    for ty in &tys {
-        match ty {
-            ContractTy::Class(n) => parts.push(cx.class_display_fqn(n)),
-            // `Suit::Hearts`, PHPStan's own spelling, with the enum's declared
-            // casing recovered the way a class arm's is (issue #429).
-            ContractTy::EnumCase { enum_fqn, case } => {
-                parts.push(format!("{}::{case}", cx.class_display_fqn(enum_fqn)));
-            }
-            ContractTy::Null => parts.push("null".to_owned()),
-            // An array/generic/shape/callable/intersection arm has no faithful plain
-            // spelling here — honest unknown rather than a guess (§7).
-            _ => return None,
+    let tys: Vec<ContractTy> = collapse_whole_enums(cx, arms.iter().map(|a| a.ty.clone()))
+        .into_iter()
+        .map(|ty| source_cased(cx, ty))
+        .collect();
+    steins_contract::spell::spell_arms(&tys)
+}
+
+/// Recover a class-shaped arm's DECLARED casing (`datetime` → `DateTime`), the
+/// one thing [`render_contract_arms`] must do before handing the list to a
+/// speller that has no class index. Everything else passes through untouched.
+fn source_cased(cx: &Cx, ty: ContractTy) -> ContractTy {
+    match ty {
+        ContractTy::Class(n) => ContractTy::Class(cx.class_display_fqn(&n)),
+        // `Suit::Hearts`, PHPStan's own spelling, with the enum's declared casing
+        // recovered the way a class arm's is (issue #429).
+        ContractTy::EnumCase { enum_fqn, case } => {
+            ContractTy::EnumCase { enum_fqn: cx.class_display_fqn(&enum_fqn), case }
         }
+        other => other,
     }
-    (!parts.is_empty()).then(|| parts.join("|"))
 }
 
 /// The dump spelling of a declared lane the branch's guards NARROWED (issue #429),

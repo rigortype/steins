@@ -100,7 +100,7 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
     let source_spelled = candidates.values().filter(|r| r.source_spelled).count();
     println!(
         "mine-function-map: {} carriable by the arm lane ({} of them richer than an envelope, \
-         {} spelled from source because `spell_arms` declined); \
+         {} spelled from source because the row names a class or `spell_arms` declined); \
          {} dropped ({} shaped arrays/lists, {} multi-base unions, {} scalar refinements, \
          {} object/resource, {} void/never/mixed, {} unparseable)",
         candidates.len(),
@@ -204,9 +204,10 @@ struct Row {
     /// pair. The complement is the #79 population, counted separately.
     envelope: bool,
     /// Whether [`Self::canon`] is the raw source spelling rather than `spell_arms`' canonical
-    /// one, because the speller declined the arms — always true for a class arm. Such a row
-    /// still countersigns and lowers correctly (the source string lowers by construction);
-    /// only the dump surface's rendering differs.
+    /// one — because the speller declined the arms, or because the row names a class and only
+    /// the source string remembers its casing ([`arm_names_a_class`]). Such a row still
+    /// countersigns and lowers correctly (the source string lowers by construction); only the
+    /// dump surface's rendering differs.
     source_spelled: bool,
 }
 
@@ -392,6 +393,29 @@ fn arm_is_carriable(ty: &ContractTy) -> bool {
     )
 }
 
+/// Does this arm carry a class NAME whose source casing only the raw functionMap
+/// string preserves? Top-level and nested alike (`list<GdFont>`), since a nested
+/// class arm respells through the same case-folded [`ContractTy::Class`].
+fn arm_names_a_class(ty: &ContractTy) -> bool {
+    match ty {
+        ContractTy::Class(_) | ContractTy::EnumCase { .. } => true,
+        ContractTy::ListOf { elem, .. } => arm_names_a_class(elem),
+        ContractTy::MapOf { key, val, .. } | ContractTy::IterableOf { key, val } => {
+            arm_names_a_class(key) || arm_names_a_class(val)
+        }
+        ContractTy::Shape { fields, unsealed, .. } => {
+            fields.iter().any(|f| arm_names_a_class(&f.ty))
+                || unsealed.as_ref().is_some_and(|(k, v)| {
+                    k.as_ref().is_some_and(|k| arm_names_a_class(k)) || arm_names_a_class(v)
+                })
+        }
+        ContractTy::Union(members) | ContractTy::Inter(members) => {
+            members.iter().any(arm_names_a_class)
+        }
+        _ => false,
+    }
+}
+
 /// Whether an arm list is the #73-shaped **envelope** — a bare scalar base, or that base
 /// paired with `null`. Used only for counting: the envelope rows are the #73 population, and
 /// the complement is what issue #79 added.
@@ -413,7 +437,17 @@ fn floor_row(ty: &str) -> Option<Row> {
     if arms.is_empty() || !arms.iter().all(arm_is_carriable) {
         return None;
     }
-    let spelled = steins_contract::spell::spell_arms(&arms).filter(|s| round_trips(s, &arms));
+    // ADR-0093 §3 taught `spell_arms` to spell a class arm, and a mined row is the
+    // one caller that must NOT take that spelling: `ContractTy::Class` case-folds,
+    // so a canonical respelling would write `gdfont` into the shipped table and
+    // lose php-src's own `GdFont`. The source string lowers to the countersigned
+    // arms by construction, so keeping it costs nothing and preserves the casing
+    // (`Cx::class_display_fqn` recovers it on the dump surface either way, but
+    // only for a name the builtin display table knows).
+    let spelled = (!arms.iter().any(arm_names_a_class))
+        .then(|| steins_contract::spell::spell_arms(&arms))
+        .flatten()
+        .filter(|s| round_trips(s, &arms));
     let source_spelled = spelled.is_none();
     let canon = spelled.unwrap_or_else(|| ty.to_owned());
     let envelope = is_envelope(&arms);
@@ -587,11 +621,12 @@ fn render(
          # and seeds the resulting arms Asserted — one lowering, two provenances\n\
          # (ADR-0069 §2). The spelling is `spell_arms` over the lowered arms and is\n\
          # verified at generation time to re-lower to the arms that were countersigned.\n\
-         # Where `spell_arms` declines the arms outright — it has no faithful spelling\n\
-         # for a class arm — the row keeps functionMap's OWN string, which lowers back\n\
-         # to the countersigned arms by construction and, unlike a canonical respelling,\n\
-         # preserves the class's source casing (`ContractTy::Class` case-folds and could\n\
-         # not restate it). That is why a few rows read `__benevolent<...>`: it is\n\
+         # Where a row NAMES A CLASS, or `spell_arms` declines the arms outright, the\n\
+         # row keeps functionMap's OWN string, which lowers back to the countersigned\n\
+         # arms by construction and, unlike a canonical respelling, preserves the\n\
+         # class's source casing (`ContractTy::Class` case-folds and could not restate\n\
+         # it — ADR-0093 §3 gave the speller a class spelling, not a case memory).\n\
+         # That is why a few rows read `__benevolent<...>`: it is\n\
          # PHPStan's spelling of a plain union, and the parser expands it to one.\n",
     );
     let _ = writeln!(s, "[declared]");
