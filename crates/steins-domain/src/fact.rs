@@ -275,11 +275,12 @@ impl Fact {
                     ArmKnown::Whole => Fact::General { base, nullable },
                     // A lone bool-literal arm **widens to its base**, deliberately.
                     // The finite layer would say `true` exactly, but this
-                    // constructor never lands in a finite layer — the spec rests on
-                    // that ("a union is not a finite fact", `summarize_finite` in
-                    // `spike/lean-domain`), and no caller can reach here anyway: a
-                    // union has two arms or more and at most one of them is `bool`,
-                    // so the collapse to one arm always keeps a non-bool one.
+                    // constructor never returns a finite fact — the spec's
+                    // `finiteMembers_mkUnion` (`spike/lean-domain`) states it and
+                    // the two sides must agree. A caller CAN reach here: filtering
+                    // a union's arms by a native type (`coerce_fact_to_native`) may
+                    // keep the bool literal alone, and that caller mints the
+                    // `Singleton` itself rather than accept the widening.
                     ArmKnown::Bool(_) => Fact::General { base, nullable },
                 })
             }

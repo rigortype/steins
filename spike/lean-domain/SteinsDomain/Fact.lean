@@ -105,10 +105,10 @@ def mkUnion (arms : List (Base × ArmKnown)) (nullable : Bool) : Option Fact :=
       | .refined r => mkRefined b r nullable
       | .whole => .general b nullable
       -- A lone bool-literal arm **widens to its base**, deliberately. The finite
-      -- layer would say `true` exactly, but this constructor never lands in a
-      -- finite layer and `summarize_finite` rests on that; no caller can reach
-      -- here anyway, since a union has two arms or more and at most one of them
-      -- is `bool`.
+      -- layer would say `true` exactly, but this constructor never returns a
+      -- finite fact (`finiteMembers_mkUnion`), and Rust's `Fact::union` agrees.
+      -- It IS reachable — Rust's `coerce_fact_to_native` can filter a union down
+      -- to the literal alone — and that caller mints the singleton itself.
       | .bool _ => .general b nullable)
   | _ => some (.union merged nullable)
 

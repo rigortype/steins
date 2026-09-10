@@ -127,10 +127,18 @@ pub(crate) fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact>
             coerced.and_then(Fact::from_vals)
         }
         // A union keeps only the arms the native type admits (the parameter is
-        // the gate). Losing every arm is no fact rather than an empty one.
+        // the gate). Losing every arm is no fact rather than an empty one. A bool
+        // literal kept alone is the value it names: `Fact::union` would widen it
+        // to `bool` (a union never returns a finite fact, ADR-0093 §2), so the
+        // singleton is minted here, where the finite layer is the right answer.
         Fact::Union { arms, nullable } => {
             let kept: Vec<UnionArm> =
                 arms.into_iter().filter(|(b, _)| native_has_base(ty, *b)).collect();
+            if let [(Base::Bool, ArmKnown::Bool(b))] = kept.as_slice()
+                && !nullable
+            {
+                return Some(Fact::Singleton(Val::Bool(*b)));
+            }
             Fact::union(kept, nullable)
         }
         Fact::Refined { base, refinement, nullable } => {
@@ -952,6 +960,47 @@ mod cast_grid_tests {
         assert_eq!(
             cast(&mixed, CastTarget::String),
             Fact::from_vals(vec![Val::Str(PhpStr::from("0")), Val::Str(PhpStr::from("7"))])
+        );
+    }
+}
+
+#[cfg(test)]
+mod native_gate_tests {
+    //! `coerce_fact_to_native` over a union arm that carries a bool literal
+    //! (ADR-0093 §2): filtering by the parameter's type may keep that arm alone.
+
+    use super::*;
+
+    fn native_bool() -> NativeType {
+        NativeType { members: vec![TypeMember::Scalar(ScalarType::Bool)], nullable: false }
+    }
+
+    #[test]
+    fn a_bool_literal_kept_alone_by_the_gate_is_the_value_it_names() {
+        // `string|true` into a `bool` parameter: the string arm is gone and the
+        // literal is the whole answer. `Fact::union` would widen the lone arm to
+        // `bool` — a union never returns a finite fact — so the gate mints the
+        // singleton itself.
+        let fact = Fact::union(
+            vec![(Base::String, ArmKnown::Whole), (Base::Bool, ArmKnown::Bool(true))],
+            false,
+        )
+        .expect("two arms");
+        assert_eq!(coerce_fact_to_native(&native_bool(), fact), Some(Fact::Singleton(Val::Bool(true))));
+    }
+
+    #[test]
+    fn a_nullable_bool_literal_kept_alone_keeps_the_null() {
+        // The singleton has no null slot, so the nullable case takes the union's
+        // own widening rather than dropping the `null` the fact still admits.
+        let fact = Fact::union(
+            vec![(Base::String, ArmKnown::Whole), (Base::Bool, ArmKnown::Bool(false))],
+            true,
+        )
+        .expect("two arms");
+        assert_eq!(
+            coerce_fact_to_native(&native_bool(), fact),
+            Some(Fact::General { base: Base::Bool, nullable: true })
         );
     }
 }

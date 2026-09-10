@@ -408,6 +408,7 @@ fn facts() -> Vec<Fact> {
     for v in [
         Val::Null,
         Val::Bool(false),
+        Val::Bool(true),
         Val::Int(0),
         Val::Int(1),
         Val::Int(9),

@@ -336,7 +336,7 @@ private def oneOfSeeds : List (List Val) :=
 
 def facts : List Fact :=
   let singles : List Fact :=
-    [Val.null, .bool false, .int 0, .int 1, .int 9, .str 0, .str 4, .float 1, .arr 0].map
+    [Val.null, .bool false, .bool true, .int 0, .int 1, .int 9, .str 0, .str 4, .float 1, .arr 0].map
       Fact.singleton
   let oneOfs : List Fact := oneOfSeeds.filterMap (Fact.fromVals vecModel)
   let refs : List Fact :=
