@@ -2759,8 +2759,17 @@ mod tests {
     #[test]
     fn an_enum_case_arm_spells_as_phpstan_spells_it() {
         assert_eq!(crate::spell::spell_nested_for_test(&ecase("suit", "Hearts")), "suit::Hearts");
-        // The scalar speller declines it, as it declines every object arm.
-        assert!(crate::spell::spell_arms(&[ecase("suit", "Hearts")]).is_none());
+        // Both spellers, one spelling (ADR-0093 §3): the arm speller stopped
+        // declining object arms, and it must not invent a second word for this one.
+        assert_eq!(
+            crate::spell::spell_arms(&[ecase("suit", "Hearts")]),
+            Some("suit::Hearts".to_owned())
+        );
+        // Mixed with a scalar — the case the ruling is about. `null` last.
+        assert_eq!(
+            crate::spell::spell_arms(&[ecase("suit", "Hearts"), ContractTy::Null]),
+            Some("suit::Hearts|null".to_owned())
+        );
     }
 
     // ---- inhabitance under the `[runtime] final-keyword` posture (issue #234) --

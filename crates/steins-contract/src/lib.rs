@@ -1807,16 +1807,16 @@ mod object_intersection_tests {
     }
 
     /// Spellable: `spell_nested` joins arms with `&`, round-tripping the same
-    /// conjunction. [`spell::spell_arms`] still refuses it, for the same
-    /// reason it refuses a bare `Class` arm (no faithful *scalar* spelling).
+    /// conjunction. A bare `Class` arm now spells in [`spell::spell_arms`] too
+    /// (ADR-0093 §3), but the **conjunction** still refuses there: that arm's
+    /// `Inter` branch folds string predicates, and a class pair is not one.
     #[test]
     fn an_object_intersection_is_spellable() {
         let ty = inter("ArrayAccess&stdClass");
         assert_eq!(spell::spell_nested_for_test(&ty), "arrayaccess&stdclass");
         assert_eq!(lower_str(&spell::spell_nested_for_test(&ty)), Some(ty));
-        // The scalar speller's refusal is the arms', not the conjunction's.
         let one = ContractTy::Class("stdclass".to_owned());
-        assert_eq!(spell::spell_arms(std::slice::from_ref(&one)), None);
+        assert_eq!(spell::spell_arms(std::slice::from_ref(&one)), Some("stdclass".to_owned()));
         assert_eq!(spell::spell_arms(&[inter("ArrayAccess&stdClass")]), None);
     }
 

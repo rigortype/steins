@@ -21,6 +21,31 @@ use crate::{is_array_key_ty, shape_is_list, CallableObl, CField, CKey, ContractT
 /// String literals spell as a literal, or (≤ [`CAP`]) a literal union, else
 /// widen to the tightest refined-string keyword. Unlike the docblock
 /// renderer, never widens for the `*/`/newline hazard.
+///
+/// # Mixed class-and-scalar lists (ADR-0093 §3)
+///
+/// A `Class`/`EnumCase` arm spells here, beside the scalars: `DateTime|false`,
+/// `'foo'|stdClass`, `stdClass|false|null`. That is the whole of candidate C —
+/// an object is spelled in the **contract lane**, and the value domain still has
+/// no object inhabitant (the spec's "No object values." stands verbatim). What
+/// may *put* such an arm into the lane is §3.1's sourcing rule, enforced by the
+/// producers, not here: this function spells whatever the lane already holds.
+///
+/// The class arm's position is PHPStan's union order for the shapes that
+/// motivated the slice — after a constant scalar (`'foo'|stdClass`), before a
+/// non-constant string keyword (`FilterVar\Analyser|non-falsy-string`), before
+/// `false` and `null` (`stdClass|false|null`). It is *not* PHPStan's full
+/// `strcasecmp` sort over non-constant members: `int|DateTime` would be
+/// `DateTime|int` upstream, and reordering the existing scalar ladder to match
+/// would rewrite every other spelling this module owns for no measured gain —
+/// `xtask nsrt`'s normalizer sorts a union's atoms before comparing, so arm
+/// order is not what the harness scores.
+///
+/// The name spells as [`ContractTy::Class`] stores it — normalized (lowercased,
+/// leading `\` stripped). A caller with a class index re-cases the arm before
+/// calling (`steins-infer`'s `render_contract_arms` does, via
+/// `Cx::class_display_fqn`); a class nested inside an array arm keeps the
+/// normalized spelling, as it did before this slice.
 #[must_use]
 pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     let mut has_int = false;
@@ -37,6 +62,9 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
     let mut string_lits: Vec<&PhpStr> = Vec::new();
     // Array-vocabulary arms (ADR-0062 §6): appended after scalars, never blocking them.
     let mut array_members: Vec<String> = Vec::new();
+    // Class / enum-case arms (ADR-0093 §3): the contract lane is where an object
+    // is spelled, so these no longer refuse the whole list.
+    let mut class_members: Vec<String> = Vec::new();
     // Resource leaf (ADR-0056 §8.4): only reachable via the contract-arm surface
     // (no `Val` is a resource); lets a resource dump as `resource`, not `unknown`.
     let mut has_resource = false;
@@ -59,6 +87,12 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
             ContractTy::LitInt(i) => int_lits.push(*i),
             ContractTy::LitFloat(f) => float_lits.push(*f),
             ContractTy::Resource => has_resource = true,
+            ContractTy::Class(name) => class_members.push(name.clone()),
+            // PHPStan's own spelling for the case type (issue #429), the same one
+            // [`spell_nested`] writes.
+            ContractTy::EnumCase { enum_fqn, case } => {
+                class_members.push(format!("{enum_fqn}::{case}"));
+            }
             ContractTy::ArrayAny { .. }
             | ContractTy::ListOf { .. }
             | ContractTy::MapOf { .. }
@@ -81,10 +115,17 @@ pub fn spell_arms(arms: &[ContractTy]) -> Option<String> {
         members.push("float".to_owned());
     }
     members.extend(float_lits.iter().map(|f| float_literal(*f)));
+    // A summarized set yields the keyword or the literals, never both, and the
+    // class arms sit between them: after a constant string, before a keyword
+    // (see the mixed-list note above).
     if let Some(kw) = string_keyword {
+        members.append(&mut class_members);
         members.push(kw);
-    } else if let Some(spelled) = spell_string_literals(&string_lits) {
-        members.extend(spelled);
+    } else {
+        if let Some(spelled) = spell_string_literals(&string_lits) {
+            members.extend(spelled);
+        }
+        members.append(&mut class_members);
     }
     if let Some(b) = bool_member {
         members.push(b.to_owned());

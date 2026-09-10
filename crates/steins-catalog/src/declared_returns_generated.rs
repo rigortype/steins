@@ -28,11 +28,22 @@
 //    1711  ADMITTED (the table below), of which
 //     792    RICHER than a single-base envelope (the #79 and ADR-0071 reach)
 //
-// Skipped methods and the object bucket remain deferred (ADR-0069 §5 as
-// amended 2026-08-01, ADR-0071 §2.3): object/class-name/callable/resource arms
-// have no denotation, so the countersign could only answer `Maybe`, which
-// ADR-0069 §3 refuses. The shaped-array bucket is empty since ADR-0071 gave
-// `array`/`list<T>`/`array<K, V>`/`array{…}` a structural denotation.
+// The object half of that bucket is no longer deferred. ADR-0071 emptied the
+// shaped-array bucket by giving `array`/`list<T>`/`array<K, V>`/`array{…}` a
+// structural denotation, and the same move reached the class rows through
+// `subsumes_class`'s reflexivity — a row naming the class the engine names
+// countersigns on that alone, a row naming a different one stays `Maybe` and is
+// refused. What ADR-0093 §3 then added is the missing half: those rows now
+// SPELL, so `date_create` dumps `DateTime|false` instead of `unknown`, under
+// §3.1's sourcing rule (an object arm enters the contract lane only from a
+// declaration — this table is one). ADR-0069 §5 / ADR-0071 §2.3 lift for the
+// object rows on that ruling (ADR-0093 is PENDING ratification).
+//
+// Still deferred, and for the reason §5 gave: the skipped methods (issue #673
+// is the class-method table), and what is LEFT in the bucket the count names —
+// `callable`, the intersections, `resource` and `void`. Those have no
+// extensional denotation the countersign could use, so it could only answer
+// `Maybe`, which ADR-0069 §3 refuses.
 //
 // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2) — it
 // reaches the dump surface and contracts-tier reasoning, but the proof

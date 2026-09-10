@@ -594,7 +594,10 @@ fn a_class_row_renders_the_casing_php_src_declares() {
 #[test]
 fn a_nullable_class_row_keeps_its_null_arm_and_subtracts_it_under_a_guard() {
     // `?Collator` is carriable per ARM (`Null`+`Class`) — no special-case mining/lowering.
-    assert_eq!(probe("collator_create($s)"), "dumped type: null|Collator (asserted)");
+    // `null` prints last now that one speller owns the order (ADR-0093 §3): the
+    // arm-order-preserving fallback loop that wrote `null|Collator` is gone, and
+    // last is where PHPStan puts it.
+    assert_eq!(probe("collator_create($s)"), "dumped type: Collator|null (asserted)");
     // `!== null` subtracts the null arm — wired, unlike scalar-literal
     // subtraction (see `a_rich_floor_row_behaves_exactly_like_a_declared_one_under_guards`).
     let src = "<?php\nfunction f(string $s): void {\n\
@@ -632,14 +635,27 @@ fn a_class_row_seeds_no_value_fact_at_all() {
 }
 
 #[test]
-fn a_class_row_mixed_with_a_non_class_arm_is_inert_on_the_dump_surface() {
-    // `render_contract_arms` spells a PURE class/`null` arm list only, falling
-    // to unknown rather than guessing — inert on the RENDERER, not dropped from the lane.
-    assert_eq!(probe("simplexml_load_string($s)"), "dumped type: unknown");
-    assert_eq!(probe("stream_bucket_new($h, $s)"), "dumped type: unknown");
+fn a_class_row_mixed_with_a_non_class_arm_spells_on_the_dump_surface() {
+    // ADR-0093 §3, the whole slice in three lines: a MIXED class-and-scalar arm
+    // list spells. These rows were always in the lane — `render_contract_arms`
+    // refused them, so a `T|false` object row dumped `unknown` while its arms sat
+    // there spellable. Class first, `false` last, PHPStan's own order.
+    assert_eq!(probe("simplexml_load_string($s)"), "dumped type: SimpleXMLElement|false (asserted)");
+    assert_eq!(probe("date_create($s)"), "dumped type: DateTime|false (asserted)");
     // `curl_init` wears PHPStan's `__benevolent<CurlHandle|false>`, expanded to
     // `CurlHandle|false` by the phpdoc parser before lowering.
-    assert_eq!(probe("curl_init()"), "dumped type: unknown");
+    assert_eq!(probe("curl_init()"), "dumped type: CurlHandle|false (asserted)");
+    // The grade is untouched: `(asserted)` on every one, so ADR-0069 §2's
+    // all-Verified premise rule still keeps them out of the proof layer.
+}
+
+#[test]
+fn a_bare_object_row_stays_refused() {
+    // ADR-0093 §3 adopted candidate C and DEFERRED candidate B: `object` names no
+    // class, so spelling it would answer wider than the oracle does and the nsrt
+    // harness refuses reverse subsumption. `ObjectAny` therefore stays out of the
+    // arm speller — the refusal is deliberate, not an oversight.
+    assert_eq!(probe("stream_bucket_new($h, $s)"), "dumped type: unknown");
 }
 
 #[test]
