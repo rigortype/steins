@@ -191,3 +191,60 @@ The three variants sit after `While` and the wire codec carries a variant by
 index, so `SCHEMA_VERSION` moves 14 → 15: a stored trace of the previous schema
 must miss rather than decode, and would in any case spell all three constructs
 as `Opaque`, replaying silence for bodies this analyzer judges.
+
+## Amendment (2026-09-11): a `foreach` binds its targets from the subject's element type — PENDING ratification
+
+Issue #652. The amendment above walks a `foreach` body and leaves `$k`/`$v`
+defined but untyped. They are now bound from the subject's own element type,
+which is a fact the engine already holds: `untyped.iterable-value` exists
+precisely to demand it of an author, and the argument and return lanes already
+carry it. No new inference happens — every answer is a projection of a
+declaration or a witnessed array.
+
+**The header is carried on the variant.** `StmtKind::Foreach` grows `subject`,
+`key_var`, `value_var` and `by_ref`, each purely syntactic and each read by the
+same two readers `ForeachSite` uses, so the trace variant and the ADR-0076 site
+cannot disagree about what the header says. A subject or target that is not a
+plain `$var` is `None`: it names nothing the env can be asked about.
+
+**The binding is applied AFTER the entry forgetting, never instead of it.** Both
+targets are ordinary members of `writes`, so the forgetting drops them first and
+the element fact is put back from the subject *as the entry env holds it*. That
+order is the whole of the iteration-count-agnosticism: a body that reassigns
+`$v` writes into an env the construct discards, and a body that rebinds the
+**subject** removes it from the entry env, so nothing is bound at all rather
+than iteration 1's element type being stated as every iteration's. The
+fall-through is untouched — `$v` after the loop is what the write set leaves it,
+and carrying it out is still issue #651's question.
+
+**Two lanes, in ADR-0037's trust order.** A witnessed array answers first and
+exactly, at its own stratum, so `foreach ([1, 2] as $v)` may premise a proof.
+Failing that the subject's declared arms answer, at the arms' stratum — a
+docblock `@param list<int>` is `Asserted`, so the element fact can never premise
+a proof-layer finding (ADR-0052 §5, the A-G9 corollary). `list<T>` gives
+`int<0, max>` keys, `array<K, V>`/`T[]`/`iterable<K, V>` give what they state, a
+**sealed** shape gives the union of its keys and of its values, and a typed tail
+joins as one more alternative. Two array arms decline for A-G3's reason: the
+element of a blur is the element of neither arm. A class element (`array<string,
+Foo>`) has no `Fact` to be (ADR-0035/0043), so it is bound in the arm lane and
+the two lanes are populated together, exactly as a declared parameter's are.
+
+**What states no element type binds nothing.** A bare `array`, an unsealed shape
+with an untyped tail, an empty witnessed array, a `mixed` binding: each leaves
+both targets defined but untyped. Inventing a fact here is the thing
+`untyped.iterable-value` exists to ask an author to fix, and ADR-0002's silence
+is the correct answer until they do.
+
+**Two refusals, both silent.** `as &$v` writes *through* the subject, and the
+trace models neither that write nor the alias it installs (issue #677) — typing
+`$v` would let iteration 2 read an element iteration 1 overwrote, so the by-ref
+form binds nothing. A destructuring target (`as [$a, $b]`, `as list(...)`) and a
+property/offset target (`as $this->x`) bind names the variant does not resolve,
+and stay writes alone; a plain `$k` beside either still binds. `Traversable` and
+`Generator` value types are out of scope by the issue's own ruling — they ride
+`@implements`/`@extends` template arguments, a lane of their own. A declared
+`iterable<K, V>` is not that case and is read like the map it spells.
+
+`StmtKind::Foreach`'s payload gains fields and the wire codec reads a struct
+variant's fields positionally, so `SCHEMA_VERSION` moves 15 → 16: a schema-15
+payload must miss rather than read the old `body` where the new `subject` is.

@@ -681,12 +681,13 @@ function f(): void {
 }
 
 #[test]
-fn a_foreach_binds_its_key_and_value_defined_but_untyped() {
+fn a_bare_array_subject_binds_its_key_and_value_defined_but_untyped() {
     // `$k` and `$v` are ordinary members of the construct's `writes` — the
     // `foreach`-binding row `collect_assign_writes` has always had — so the entry
-    // forgetting leaves them defined but untyped, and a dump on either answers
-    // rather than staying absent. Typing them from the subject's own value type is
-    // issue #652 and is deliberately not done here.
+    // forgetting drops them and the #652 binding puts back only what the subject
+    // supports. A native `array` states no element type, so nothing is put back:
+    // both answer, and both answer `unknown`. Inventing a fact here is exactly what
+    // `untyped.iterable-value` exists to ask an author for.
     let src = "<?php
 function f(array $xs): void {
     foreach ($xs as $k => $v) {
@@ -698,7 +699,7 @@ function f(array $xs): void {
     assert_eq!(
         dumps(src),
         vec!["4: dumped type: unknown".to_owned(), "5: dumped type: unknown".to_owned()],
-        "both loop variables answer"
+        "both loop variables answer, and neither is invented"
     );
 }
 
