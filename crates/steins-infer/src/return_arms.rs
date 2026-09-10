@@ -17,8 +17,8 @@ use crate::contract::{
 };
 use crate::cx::Cx;
 use crate::descent::value_lane_fn_site;
-use crate::dispatch::{CallTarget, resolve_call_target};
-use crate::env::{ContractArm, Known, Store};
+use crate::dispatch::{CallTarget, resolve_call_target, resolve_declaration_target};
+use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::generics::{
     CarriedArg, carg_contract_ty, get_template_type, names_unknown_class, template_arg_carries,
 };
@@ -127,9 +127,40 @@ pub(crate) fn method_return_arms_by_callee(
     if nullsafe_call(callee) {
         return None;
     }
-    let target = resolve_call_target(cx, callee, store, this_exact, enclosing_class, poisoned)?;
+    // The declaration-only fallback (ADR-0049 A16, issue #619): where dispatch
+    // refuses because the receiver's runtime class is unproven, the *declaration*
+    // its declared chain names still binds the return, PHP enforcing covariance
+    // over every descendant. Second, never first — a proven target keeps every
+    // sharper answer it had (its exactness, its receiver variable, its carries).
+    let (target, receiver_stratum) =
+        match resolve_call_target(cx, callee, store, this_exact, enclosing_class, poisoned) {
+            Some(t) => (t, Stratum::Verified),
+            None => resolve_declaration_target(
+                cx,
+                callee,
+                store,
+                this_exact,
+                enclosing_class,
+                poisoned,
+            )?,
+        };
     let bindable: Vec<&ArgValue> = args.iter().collect();
-    method_return_arms_at_call(cx, folder, &target, &bindable, env, store, poisoned)
+    let arms = method_return_arms_at_call(cx, folder, &target, &bindable, env, store, poisoned)?;
+    Some(demote_arms(arms, receiver_stratum))
+}
+
+/// Lower every arm to `stratum` when the premise it rests on is the weaker one
+/// (ADR-0049 A13/A17): a return envelope read through an `Asserted` receiver
+/// carrier is itself `Asserted`, however native the return hint was. A `Verified`
+/// receiver leaves the list untouched, which is every call the dispatch resolver
+/// already answered.
+fn demote_arms(mut arms: Vec<ContractArm>, stratum: Stratum) -> Vec<ContractArm> {
+    if stratum == Stratum::Asserted {
+        for a in &mut arms {
+            a.stratum = Stratum::Asserted;
+        }
+    }
+    arms
 }
 
 /// The declared-return contract arms of the project function at `site` — the shared

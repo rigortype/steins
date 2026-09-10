@@ -8,7 +8,8 @@ use steins_syntax::{Callee, ClassDecl, MethodDecl, Receiver, StaticClass, Visibi
 
 use crate::contract::GenericCarry;
 use crate::cx::Cx;
-use crate::env::Store;
+use crate::declared_receiver::declared_receiver_conjuncts;
+use crate::env::{Store, Stratum};
 use crate::inaccessible::private_invisible;
 
 // ---------------------------------------------------------------------------
@@ -29,10 +30,42 @@ pub(crate) enum Resolution<'a> {
     Unknown,
 }
 
+/// What a chain walk is being asked for (ADR-0049 A18).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ChainMode {
+    /// **Dispatch**: the declaration whose body the runtime will run. An abstract
+    /// declaration has no body, and a trait-using class resolves names through
+    /// machinery this analyzer does not lower — both are `Unknown`.
+    Dispatch,
+    /// **Declaration only** (ADR-0049 A16): the declaration whose *return envelope*
+    /// binds the runtime one. PHP enforces return covariance at class-declaration
+    /// time, so an abstract declaration's envelope is a sound upper bound under
+    /// every implementation, and so is a parent's under a trait-imported override.
+    /// A name that resolves nowhere on the class or its parents while a trait is in
+    /// play stays `Unknown`: the trait could be declaring it (A18).
+    Declaration,
+}
+
 /// Walk `start_fqn`'s project inheritance chain for a concrete `method`.
 pub(crate) fn resolve_in_chain<'a>(cx: &Cx<'a>, start_fqn: &str, method: &str) -> Resolution<'a> {
+    resolve_in_chain_mode(cx, start_fqn, method, ChainMode::Dispatch)
+}
+
+/// [`resolve_in_chain`] under an explicit [`ChainMode`] — the walk both resolvers
+/// share, differing only in the two refusals ADR-0049 A18 re-examined.
+pub(crate) fn resolve_in_chain_mode<'a>(
+    cx: &Cx<'a>,
+    start_fqn: &str,
+    method: &str,
+    mode: ChainMode,
+) -> Resolution<'a> {
     let mut cur = start_fqn.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
+    // A18: a trait anywhere on the walked prefix means "not found here" is not
+    // "absent" — the trait may be what provides the name. Recorded rather than
+    // refused on sight, so a name the class or a parent *does* declare still
+    // answers under `Declaration`.
+    let mut passed_trait_user = false;
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return Resolution::Unknown;
@@ -41,16 +74,20 @@ pub(crate) fn resolve_in_chain<'a>(cx: &Cx<'a>, start_fqn: &str, method: &str) -
             return Resolution::Unknown; // chain leaves the project
         };
         if cd.uses_traits {
-            return Resolution::Unknown;
+            if mode == ChainMode::Dispatch {
+                return Resolution::Unknown;
+            }
+            passed_trait_user = true;
         }
         if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
-            return if m.is_abstract {
+            return if m.is_abstract && mode == ChainMode::Dispatch {
                 Resolution::Unknown
             } else {
                 Resolution::Found(ResolvedMethod { method: m, declaring_class: cd, class_file: cfile })
             };
         }
         match &cd.parent {
+            None if passed_trait_user => return Resolution::Unknown,
             None => return Resolution::NotFoundChainComplete,
             Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
         }
@@ -226,6 +263,178 @@ pub(crate) fn resolve_exact<'a>(
         }),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// The resolve-for-declaration path (ADR-0049 A16-A18, issue #619).
+// ---------------------------------------------------------------------------
+
+/// Resolve a call to the **declaration** its receiver's declared chain names, for
+/// the return-envelope readers and nothing else (ADR-0049 A16).
+///
+/// [`resolve_call_target`] answers `None` for every receiver whose runtime class is
+/// not proven — a non-`final` class, an overridable method, `$this` in an open
+/// class — and that refusal is right for every consumer that *acts on* the resolved
+/// method: [`descend`] walks its body, [`promote`] rewrites its call site,
+/// [`apply_call_asserts`] applies its `@phpstan-assert` tags, and an override may
+/// run instead of any of them. It is wrong for the one consumer that only asks
+/// *what the call returns*: PHP enforces return covariance at class-declaration
+/// time — a child cannot widen the parent's promise, and [`override_return_widens`]
+/// already convicts the attempt — so the declaring method's return envelope is a
+/// sound upper bound under every descendant. That is a membership-direction claim
+/// about the result, which ADR-0049 A1 point 8 permits without the exactness bit.
+///
+/// So the two questions get two resolvers, and this is the second one. It is
+/// reached only from [`method_return_arms_by_callee`], only after
+/// [`resolve_call_target`] has declined, and what it yields is deliberately
+/// impoverished: no exactness claim, no `this_exact`, no `receiver_var`, and no
+/// carries beyond the ones the receiver's *declaration* states. Nothing here can
+/// widen what a body-walking consumer sees, because no body-walking consumer calls
+/// it.
+///
+/// The second return is the **receiver lane's minimum stratum** (A17/A13): a native
+/// `C $o` is runtime-enforced and stays `Verified`, a docblock or `instanceof`-fact
+/// carrier is `Asserted` and demotes the whole answer with it.
+///
+/// Two refusals are kept, both stated rather than incidental:
+///
+/// * **`@return static` / late static binding is deferred** (A19). Binding `static`
+///   to the declared class is sound as an upper bound but spells the same as
+///   `self`, losing the *calling* receiver's identity that `@return static` exists
+///   to carry; the right mechanism is template binding over the receiver's arms,
+///   which is not a dispatch question. [`override_return_widens`] already goes
+///   silent on [`MethodDecl::ret_bound_keyword`] and this does the same.
+/// * **A poisoned scope** answers nothing, exactly as the dispatch resolver does.
+///
+/// [`descend`]: crate::descent::descend
+/// [`promote`]: crate::promote
+/// [`apply_call_asserts`]: crate::asserts
+/// [`override_return_widens`]: crate::overrides
+/// [`method_return_arms_by_callee`]: crate::return_arms::method_return_arms_by_callee
+pub(crate) fn resolve_declaration_target<'a>(
+    cx: &Cx<'a>,
+    receiver: &Callee,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<(CallTarget<'a>, Stratum)> {
+    if poisoned {
+        return None;
+    }
+    let (class, method, stratum, carries) = match receiver {
+        Callee::Construct { class } => {
+            (cx.class_fqn(class), "__construct".to_owned(), Stratum::Verified, Vec::new())
+        }
+        Callee::Method { receiver: Receiver::New { class, .. }, method, .. } => {
+            (cx.class_fqn(class), method.clone(), Stratum::Verified, Vec::new())
+        }
+        Callee::Method { receiver: Receiver::Var(v), method, .. } => {
+            let (class, stratum) = declared_receiver_class(cx, store, v)?;
+            // Only the receiver's **declared** carries travel, as in the dispatch
+            // resolver's non-exact arm (issue #388): a carry names the class that
+            // declares the templates, not the runtime class.
+            let carries = store.obj_of(v).map(|o| o.declared_targs()).unwrap_or_default();
+            (class, method.clone(), stratum, carries)
+        }
+        // A `$this` whose exactness is unproven still names its enclosing class as a
+        // declared lower bound — the same fact `resolve_guarded` reads, minus the
+        // finality guard. An exact `$this` never reaches here: `resolve_call_target`
+        // answered it, or its chain walk refused for a reason the mode lift below
+        // re-examines.
+        Callee::Method { receiver: Receiver::This, method, .. } => {
+            let class = this_exact.unwrap_or(enclosing_class?).to_owned();
+            (class, method.clone(), Stratum::Verified, Vec::new())
+        }
+        Callee::Static { class: StaticClass::SelfKw, method } => {
+            (enclosing_class?.to_owned(), method.clone(), Stratum::Verified, Vec::new())
+        }
+        Callee::Static { class: StaticClass::Parent, method } => {
+            (cx.parent_fqn(enclosing_class?)?, method.clone(), Stratum::Verified, Vec::new())
+        }
+        Callee::Static { class: StaticClass::Named(name), method } => {
+            (cx.class_fqn(name), method.clone(), Stratum::Verified, Vec::new())
+        }
+        // `static::` names no class here either (A19's question, from the receiver
+        // side); a depth-1 property fetch is ADR-0052 §7's limit, untouched.
+        Callee::Static { class: StaticClass::Static, .. }
+        | Callee::Method { receiver: Receiver::Prop { .. }, .. }
+        | Callee::Function(_)
+        | Callee::DynamicVar(_)
+        | Callee::Dynamic => return None,
+    };
+    let Resolution::Found(r) = resolve_in_chain_mode(cx, &class, &method, ChainMode::Declaration)
+    else {
+        return None;
+    };
+    if private_blocked(&r, enclosing_class) {
+        return None;
+    }
+    // A19: `static`/`self`/`parent` return bounds are deferred with the reason.
+    if r.method.ret_bound_keyword.is_some() {
+        return None;
+    }
+    let target = CallTarget {
+        method: r.method,
+        declaring_class: r.declaring_class,
+        class_file: r.class_file,
+        this_exact: None,
+        receiver_carries: carries,
+        receiver_var: None,
+    };
+    Some((target, stratum))
+}
+
+/// The class a `$var` receiver is **declared** to be, and the stratum that
+/// declaration rides at (ADR-0049 A17): the declared-receiver lane's carrier, not a
+/// heap object.
+///
+/// The heap object is the first refusal of the three #619 measured — the dispatch
+/// resolver's non-exact arm opens `store.obj_of(v)?`, and
+/// [`seed_declared_param_object`] declines a `?C` hint, a union, an `@param object`,
+/// and every `@param` spelling other than a plain class. A17 lifts it by reading the
+/// receiver the way S6 does, in the order that prefers the narrowest fact:
+///
+/// 1. an **allocation-proven** class (`class_exact`) — `Verified`, and the only
+///    reason it reaches this function at all is a chain walk A18 re-examines;
+/// 2. the **`instanceof` fact** bound by branch analysis when it names exactly one
+///    class — the `@param object $foo` witness. Read at `Asserted`: [`Member`]
+///    carries no stratum of its own, and an `assert($foo instanceof Foo)` narrowing
+///    is `Asserted` by ADR-0052 §5, so the whole carrier takes the weaker grade
+///    rather than guessing per site;
+/// 3. the **narrowed contract-arm lane**, when what survives is a single class arm
+///    — a `?Reservation` parameter past its null guard is exactly this — at the
+///    lane's own minimum stratum (A13);
+/// 4. a **declared heap object**, which is what the dispatch resolver already had.
+///
+/// A surviving lane of two or more class arms declines: the answer would be the
+/// union of two declarations' return envelopes, and a [`CallTarget`] names one
+/// method. That is a floor this slice does not build, not a soundness limit.
+///
+/// [`seed_declared_param_object`]: crate::heap::seed_declared_param_object
+/// [`Member`]: crate::env::Member
+fn declared_receiver_class(cx: &Cx, store: &Store, var: &str) -> Option<(String, Stratum)> {
+    if let Some(obj) = store.obj_of(var)
+        && obj.class_exact
+    {
+        return Some((obj.class.clone(), Stratum::Verified));
+    }
+    if let Some(m) = store.members.get(var)
+        && let [only] = m.yes.as_slice()
+    {
+        return Some((only.clone(), Stratum::Asserted));
+    }
+    if let Some(arms) = store.contract_arms(var) {
+        if let Some(lane) = declared_receiver_conjuncts(cx, arms)
+            && let [conjuncts] = lane.as_slice()
+            && let [only] = conjuncts.as_slice()
+        {
+            let stratum = arms.iter().fold(Stratum::Verified, |acc, a| acc.min(a.stratum));
+            return Some((only.clone(), stratum));
+        }
+        return None;
+    }
+    store.obj_of(var).map(|o| (o.class.clone(), Stratum::Verified))
 }
 
 /// Resolve a `$this->`/`self::` call under the override guard.
