@@ -100,7 +100,7 @@ pub fn run(checkout: Option<&str>) -> Result<(), String> {
     let source_spelled = candidates.values().filter(|r| r.source_spelled).count();
     println!(
         "mine-function-map: {} carriable by the arm lane ({} of them richer than an envelope, \
-         {} spelled from source because `spell_arms` declined); \
+         {} spelled from source because the row names a class or `spell_arms` declined); \
          {} dropped ({} shaped arrays/lists, {} multi-base unions, {} scalar refinements, \
          {} object/resource, {} void/never/mixed, {} unparseable)",
         candidates.len(),
