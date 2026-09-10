@@ -61,11 +61,6 @@ pub(crate) fn resolve_in_chain_mode<'a>(
 ) -> Resolution<'a> {
     let mut cur = start_fqn.to_owned();
     let mut seen: HashSet<String> = HashSet::new();
-    // A18: a trait anywhere on the walked prefix means "not found here" is not
-    // "absent" — the trait may be what provides the name. Recorded rather than
-    // refused on sight, so a name the class or a parent *does* declare still
-    // answers under `Declaration`.
-    let mut passed_trait_user = false;
     loop {
         if !seen.insert(cur.to_ascii_lowercase()) {
             return Resolution::Unknown;
@@ -73,11 +68,12 @@ pub(crate) fn resolve_in_chain_mode<'a>(
         let Some((cfile, cd)) = cx.find_class(&cur) else {
             return Resolution::Unknown; // chain leaves the project
         };
-        if cd.uses_traits {
-            if mode == ChainMode::Dispatch {
-                return Resolution::Unknown;
-            }
-            passed_trait_user = true;
+        // A18: under `Declaration` a trait user is walked rather than refused on
+        // sight, so a name the class or a parent *declares* still answers. A name
+        // only a trait provides is still refused — it is nowhere on the walk, so
+        // the chain runs out and the caller gets nothing either way.
+        if cd.uses_traits && mode == ChainMode::Dispatch {
+            return Resolution::Unknown;
         }
         if let Some(m) = cd.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) {
             return if m.is_abstract && mode == ChainMode::Dispatch {
@@ -87,7 +83,6 @@ pub(crate) fn resolve_in_chain_mode<'a>(
             };
         }
         match &cd.parent {
-            None if passed_trait_user => return Resolution::Unknown,
             None => return Resolution::NotFoundChainComplete,
             Some(pref) => cur = cx.units[cfile].tree.resolve_class_fqn(pref),
         }
