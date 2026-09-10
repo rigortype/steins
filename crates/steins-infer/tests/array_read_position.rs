@@ -184,10 +184,11 @@ fn next_and_prev_add_false_even_to_a_non_empty_shape() {
         );
     }
     // Where values are abstract, `∪ false` was unspellable (`int|false` is two
-    // bases) and the rule declined. `Fact::Union` (issue #339) answers instead,
-    // as `int|bool` not `int|false` — `false` widens to its base entering a
-    // union arm: sound but coarser, recorded in ADR-0085 §5.
-    assert_eq!(dump("array{a: int, b: int}", "next($v)"), "dumped type: int|bool (asserted)");
+    // bases) and the rule declined. `Fact::Union` (issue #339) answered instead,
+    // but as `int|bool`: `false` widened to its base entering a union arm, the
+    // coarsening ADR-0085 §5 recorded. ADR-0093 §2's literal member set removes
+    // it — the arm carries `{false}`, so the answer is the one the rule means.
+    assert_eq!(dump("array{a: int, b: int}", "next($v)"), "dumped type: int|false (asserted)");
     assert_eq!(dump("array{a: int, b: int}", "current($v)"), "dumped type: int (asserted)");
 }
 
@@ -215,9 +216,9 @@ fn a_possibly_empty_shape_adds_false_to_the_pointer_half() {
             "{f} of a possibly-empty shape admits false"
         );
     }
-    // Same `int|bool` widening as above, for `current`'s pointer form
-    // (issue #339, ADR-0085 §5) — a lost refinement, not a wrong one.
-    assert_eq!(dump("array<string, int>", "current($v)"), "dumped type: int|bool (asserted)");
+    // Same literal member set as above, for `current`'s pointer form: the
+    // refinement ADR-0085 §5 recorded as lost is back (ADR-0093 §2).
+    assert_eq!(dump("array<string, int>", "current($v)"), "dumped type: int|false (asserted)");
 }
 
 #[test]

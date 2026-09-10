@@ -408,8 +408,10 @@ fn an_offset_read_is_judged_too() {
     // this takes the same base-spelling fallback the prop carrier does.
     let d = contract(&src);
     assert_eq!(d.len(), 1, "{d:?}");
-    assert!(d[0].message.contains("is string|bool"), "{}", d[0].message);
-    assert!(d[0].message.contains("its bool arm"), "{}", d[0].message);
+    // ADR-0093 §2: the arm carries `{false}`, so the message names the literal
+    // rather than widening it back to its base.
+    assert!(d[0].message.contains("is string|false"), "{}", d[0].message);
+    assert!(d[0].message.contains("its false arm"), "{}", d[0].message);
     assert!(
         proof(&src).is_empty(),
         "a shape fact is always Asserted — never `type.*`: {:?}",

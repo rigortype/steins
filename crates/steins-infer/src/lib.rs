@@ -1476,12 +1476,17 @@ fn describe_fact(f: &Fact) -> String {
             let spelled: Vec<String> = arms
                 .iter()
                 .map(|(base, known)| {
+                    // A bool-literal arm is one value (ADR-0093 §2), and the message
+                    // names it: `string|true`, not `string|bool`. It is spelled here
+                    // rather than through a `Fact`, because the finite layers do not
+                    // reach this speller at all — its callers gate on
+                    // `finite_members`, and the arm below answers `"value"`.
                     let arm = match known {
+                        ArmKnown::Bool(b) => {
+                            return if *b { "true" } else { "false" }.to_owned();
+                        }
                         ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
                         ArmKnown::Whole => Fact::General { base: *base, nullable: false },
-                        // A bool-literal arm is one value (ADR-0093 §2): the message
-                        // names `true`, which is what the guard actually left.
-                        ArmKnown::Bool(b) => Fact::Singleton(Val::Bool(*b)),
                     };
                     describe_fact(&arm)
                         .trim_start_matches("a value of type ")

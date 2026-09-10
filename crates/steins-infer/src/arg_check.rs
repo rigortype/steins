@@ -265,9 +265,11 @@ pub(crate) fn spell_arm(arm: &AbstractArm) -> String {
     let f = match known {
         ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
         ArmKnown::Whole => Fact::General { base: *base, nullable: false },
-        // A bool-literal arm (ADR-0093 §2) IS one value, and the finite layer
-        // spells it the way the message wants to name it: `true`, not `bool`.
-        ArmKnown::Bool(b) => Fact::Singleton(Val::Bool(*b)),
+        // A bool-literal arm (ADR-0093 §2) IS one value, and the message names it
+        // that way: `false`, not `bool`. Spelled here rather than as a
+        // `Fact::Singleton`, because [`describe_fact`] answers `"value"` for the
+        // finite layers — its callers gate them out before they reach it.
+        ArmKnown::Bool(b) => return if *b { "true" } else { "false" }.to_owned(),
     };
     describe_fact(&f).trim_start_matches("a value of type ").to_owned()
 }
