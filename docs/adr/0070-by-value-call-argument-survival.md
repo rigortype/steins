@@ -425,16 +425,43 @@ triage event, not a win.
 
 ### 4. Measurement
 
-Recorded with the implementation (issue #637): the nsrt harness over
-phpstan-src's corpus moves **1,742 → 1,873 matches** (+131) with `differ`
-11,286 → 11,153 and no other verdict class regressing; not one row moves from
-`match` to `differ`. The three join witnesses the issue names
-(`non-empty-string-file-functions.php:175`,
-`non-empty-string-str-containing-fns.php:112`,
-`non-empty-string-strstr-specifying.php:100`) are among them. The guard-body
-rows asking `non-empty-string` / `non-falsy-string` stay `differ`, as predicted:
-they need the specifier, not the survival. The fp-gate's public half stays green
-with no ledger movement.
+Recorded with the implementation (issue #637), nsrt over phpstan-src at
+`ed7ca75` against the same tree with this amendment, 16,700 measured rows:
+
+```text
+verdict        before    after
+match           3,412    3,497   (+85)
+equal             206      207   (+1)
+subsumed          477      479   (+2)
+unsupported     2,017    2,017
+differ         10,588   10,500   (−88)
+```
+
+Eighty-eight rows move and every one of them moves **forward**: no row leaves
+`match`, and no verdict class regresses. Two of the issue's three named join
+witnesses are among them (`non-empty-string-str-containing-fns.php:112`,
+`non-empty-string-strstr-specifying.php:100`), each `unknown` → `string`.
+
+The residue is attributed rather than counted:
+
+* **77 rows are the specifier half** — guard-body assertions asking
+  `non-empty-string` / `non-falsy-string` where the join beside them now
+  answers. Predicted, and #575/#266's to move.
+* **29 rows sit downstream of one name the mining build did not have.**
+  `non-empty-string-file-functions.php` walks forty guards over one parameter;
+  `chroot` is the third, it does not exist on the mining platform at all
+  (`function_exists('chroot')` is `false` there), so that one guard forgets `$s`
+  and every assertion after it in the function reads `unknown`. The table
+  answering `None` for a name its build lacks is the rule, not a defect —
+  ADR-0094 §2's extension set — and the fix, if the rows are wanted, is where
+  the table is mined, not a hand entry beside it. The third named witness
+  (`non-empty-string-file-functions.php:175`) is in this group.
+* **5 rows are a comparison shape the operand path does not record sites for**
+  (`strchr(...) == ''`, and a comparison in an assignment's right-hand side).
+  Not this amendment's question.
+
+The fp-gate's public half stays green over all ten pinned packages, with no
+ledger movement in either direction.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation.
