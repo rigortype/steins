@@ -1398,19 +1398,13 @@ enum FilterKind {
 ///   is a PHP 8.5 constant whose whole point is to delete the failure arm — a
 ///   sharper answer than anything here, but one that needs a PHP-minor gate this
 ///   rung does not carry.
-/// * **A flags argument held in a variable** — `$nullFilter =
-///   \FILTER_NULL_ON_FAILURE` carries no proven value (issue #168), so the value
-///   domain has nothing to hand back for it: `\PHPStan\dumpType($nullFilter)` on
-///   that very assignment answers `unknown`, and reading the argument through
-///   [`transfer_arg_fact`] the way the INPUT argument is read therefore resolves
-///   nothing. That is a recorded decline waiting on issue #598 (the engine-constant
-///   ruling), not an oversight: `filterVar.php` spends two rows per filter block on
-///   exactly this spelling. A `|` combination and a `?:` ternary over recognized
-///   constants ARE read — see [`filter_flag_alternatives`].
-/// * **A bare non-zero int literal in the flags position** — the rung keys on
-///   constant NAMES, so `filter_var($x, FILTER_VALIDATE_INT, 134217728)` is not
-///   recognized as `FILTER_NULL_ON_FAILURE`. A literal `0` is the documented
-///   "no flags" and is accepted.
+/// * **A flags argument whose value is not PROVEN** — a declared `int $flags`
+///   parameter has no bits to decompose. A flags argument held in a
+///   const-valued local is no longer among these: ADR-0094 §2 gives
+///   `$nullFilter = \FILTER_NULL_ON_FAILURE` a value, and
+///   [`filter_flag_alternatives`] reads the integer when no flag NAME is spelled
+///   — which is what `filterVar.php` spends two rows per filter block on. A `|`
+///   combination and a `?:` ternary over recognized constants are read too.
 ///
 /// # The array flags (issue #615 leg (a))
 ///
@@ -1818,13 +1812,13 @@ const FILTER_FLAG_ALTERNATIVE_CAP: usize = 8;
 /// * a **`?:` ternary** offers two sets as ALTERNATIVES, which the caller answers
 ///   separately and joins.
 ///
-/// **The roster resolves by constant NAME, never by value, and that is what makes
-/// this leg possible at all.** Reading the flags through the value domain the way
-/// the INPUT argument is read cannot work: `$nullFilter = \FILTER_NULL_ON_FAILURE`
-/// binds no fact (issue #168 — a global constant carries no proven value), so a
-/// const-valued local resolves to nothing and stays a decline until issue #598
-/// rules on engine constants. Keying on names also keeps `FILTER_FLAG_HOSTNAME`,
-/// `_IPV4` and `_EMAIL_UNICODE` — which share one engine value — distinguishable.
+/// **The roster resolves by constant NAME first, and by VALUE when no name is
+/// spelled.** The name reading comes first because it keeps `FILTER_FLAG_HOSTNAME`,
+/// `_IPV4` and `_EMAIL_UNICODE` — which share one engine value — distinguishable,
+/// and because it carries the constant's own shadow discipline. The value reading
+/// is what ADR-0094 §2 made possible: `$nullFilter = \FILTER_NULL_ON_FAILURE`
+/// binds a fact now, where it bound none under issue #168, so a const-valued local
+/// is read instead of declining — and so is the bare integer PHP itself sees.
 fn filter_flag_alternatives(
     cx: &Cx,
     folder: &mut dyn Folder,
