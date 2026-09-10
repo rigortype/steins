@@ -675,9 +675,9 @@ pub(crate) fn walk_trace(
             record_subject_probe(cx, stmt, env);
             // 0a-bis. `foreach.non-iterable` (ADR-0078, issue #192), judged from the
             // same entry env the probe above just read (nothing has touched `env`
-            // for this construct yet). The trace has no per-construct discriminant
-            // for `foreach` vs its `Opaque` siblings, so the match is by span
-            // against the ADR-0076 site enumeration.
+            // for this construct yet). `StmtKind::Foreach` names the construct since
+            // issue #650, but it carries no **subject**, which is what this proof is
+            // about — so the match stays by span against the ADR-0076 enumeration.
             if let Some(site) = cx.tree().foreach_sites().iter().find(|s| s.span == stmt.span) {
                 check_foreach_subject(cx, site, env, scope.poisoned, out);
             }
