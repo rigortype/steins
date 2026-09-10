@@ -217,9 +217,15 @@ fn binding_descent_two_hop_this_private() {
 #[test]
 fn exact_class_fact_survives_method_call_while_literal_dies() {
     // An intervening *method call* (`$x->other()`) can't rebind $x, so `$x->m("abc")` still
-    // resolves; `$n` passed to `touch($z)` by value likewise can't rebind (ADR-0070), so
+    // resolves; `$n` passed to `observe($z)` by value likewise can't rebind (ADR-0070), so
     // `width($n)` is a second proven TypeError.
-    let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch($z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
+    //
+    // The helper was spelled `touch()` until issue #637, which is a global function PHP
+    // already has — redeclaring one is a fatal error, and once the mined table knew the
+    // name the shadow resolved AMBIGUOUS (issue #279) and the fixture measured the
+    // shadowing rule instead of the by-value one. Renamed rather than pinned: the
+    // shadow's own behavior has its own test.
+    let src = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe($z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n";
     let f = findings(src);
     assert_eq!(f.len(), 2, "the class fact AND the by-value literal survive: {f:#?}");
     assert!(f[0].message.contains("to width()"), "{}", f[0].message);
@@ -229,9 +235,9 @@ fn exact_class_fact_survives_method_call_while_literal_dies() {
 
     // …and the literal DOES die by reference — the half this pin's by-value reading must
     // never launder.
-    let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction touch(&$z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\ntouch($n);\nwidth($n);\n$x->m(\"abc\");\n";
+    let by_ref = "<?php\nclass Foo { public function m(int $w): void {} public function other(): void {} }\nfunction observe(&$z): void {}\nfunction width(int $w): void {}\n$x = new Foo();\n$n = \"abc\";\n$x->other();\nobserve($n);\nwidth($n);\n$x->m(\"abc\");\n";
     let f = findings(by_ref);
-    assert_eq!(f.len(), 1, "a by-ref touch() still kills the literal fact: {f:#?}");
+    assert_eq!(f.len(), 1, "a by-ref observe() still kills the literal fact: {f:#?}");
     assert!(f[0].message.contains("to Foo::m()"), "{}", f[0].message);
     assert_eq!(f[0].line, 10);
 }

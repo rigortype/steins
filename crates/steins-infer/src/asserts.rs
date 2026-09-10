@@ -14,7 +14,9 @@ use crate::contract::{AssertSpec, ProjectIsa};
 use crate::cx::Cx;
 use crate::dispatch::resolve_call_target;
 use crate::env::{ContractArm, Known, Store, Stratum};
-use crate::predicates::{in_array_literals, pure_question_builtin, type_predicate};
+use crate::predicates::{
+    by_value_guard_builtin, in_array_literals, pure_question_builtin, type_predicate,
+};
 use crate::refine::{clear_null, refine_fact, subtract_contract_lane};
 use crate::shapes::{
     apply_shape_guard, array_all_any_predicate, array_guard_base, array_guard_key_var,
@@ -803,6 +805,14 @@ fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &m
         || type_predicate(cx, call).is_some()
         || pure_question_builtin(cx, call).is_some()
         || in_array_literals(cx, call, cx.php_minor).is_some()
+        // The mined generalization of the exemption above it (issue #637): a
+        // builtin certified BY VALUE at every position this call supplies,
+        // called with arguments that cannot themselves write, cannot have
+        // changed what the branch reads — the same argument
+        // `pure_question_builtin` makes name by name, made from the arginfo
+        // table instead of from a list. `by_value_guard_builtin` owns the
+        // conditions; this is the one place the guard floor consults it.
+        || by_value_guard_builtin(cx, call).is_some()
     {
         return;
     }
