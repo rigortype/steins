@@ -1129,7 +1129,23 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     //   re-subtract an arm after the fact — a slice of its own, unchanged here.
     // The same seam split is why `symfony/process` and `briannesbitt/Carbon`
     // below do not move either; see their entries.
-    ("sebastianbergmann/phpunit", 1),
+    // 1 → 3 (+2), 2026-09-11 with issue #637 (the mined by-value certification).
+    // Both new rows are `variable.maybe-undefined` on `$tmpFile` in the vendored
+    // `phar-utils/src/Linter.php` (`:66` and `:85`), and both are FALSE: the
+    // variable is assigned inside `if ($isWindows = defined('PHP_WINDOWS_VERSION_BUILD'))`
+    // and read inside `if ($isWindows)`, a branch correlation through a variable
+    // that the binding-presence pass does not follow — the same class as the
+    // `symfony/console` rows below, and unchanged by this issue.
+    // What this issue changed is why they were SILENT. `check_undefined_variables`
+    // subtracts every argument a call might be *writing* (`out_param_argument_spans`),
+    // and an uncertified callee counts as "might be": `file_put_contents($tmpFile, …)`
+    // at `:66` was excused as a possible out-parameter, which also BOUND `$tmpFile`
+    // for everything downstream, taking `:85` with it. `file_put_contents(string
+    // $filename, …)` has no reference parameter at `PINNED_PHP`, so the excuse was
+    // never true; certifying the name removes it and the pre-existing correlation
+    // FP surfaces at both reads. A false excuse hiding a false positive is not a
+    // reason to keep either, and the proof layer is untouched (0 diagnostics).
+    ("sebastianbergmann/phpunit", 3),
     // 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
     // `SymfonyStyle.php`; four class 5 in `Tests/`.
     ("symfony/console", 10),

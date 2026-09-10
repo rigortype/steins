@@ -460,8 +460,17 @@ The residue is attributed rather than counted:
   (`strchr(...) == ''`, and a comparison in an assignment's right-hand side).
   Not this amendment's question.
 
-The fp-gate's public half stays green over all ten pinned packages, with no
-ledger movement in either direction.
+The fp-gate's public half is green over all ten pinned packages: zero
+proof-layer diagnostics, warm ≡ cold everywhere, and no `phpdoc.*` / `throw.*`
+/ `effect.*` movement. The `possibly`-grade ledger moves once, by two —
+`sebastianbergmann/phpunit` 1 → 3, both `variable.maybe-undefined` on one
+`$tmpFile` in a vendored file. Both are false, both are the branch-correlation
+FP the ledger's neighbours already record, and what changed is only that they
+stopped being hidden: an uncertified callee counts as a possible out-parameter
+in `check_undefined_variables`, which both excused the read AND bound the
+variable for everything downstream. `file_put_contents(string $filename, …)`
+declares no reference parameter, so that excuse was never true. §3 predicted
+exactly this surface; the triage is recorded in `xtask/src/gate.rs`.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation.
