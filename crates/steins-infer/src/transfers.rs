@@ -1471,9 +1471,9 @@ fn filter_var_transfer(
     // An absent filter argument is `FILTER_DEFAULT` (php.net's own default).
     let kinds = match filter {
         None => vec![FilterKind::Raw],
-        Some(v) => filter_kinds(v)?,
+        Some(v) => filter_kinds(cx, folder, v, env)?,
     };
-    let flag_sets = filter_var_flags(options)?;
+    let flag_sets = filter_var_flags(cx, folder, options, env)?;
     let input = transfer_arg_fact(cx, folder, value, env, store);
     // A ternary in either position contributes its arms as ALTERNATIVES, so the
     // answer is the join over the cross product. The join declines whole, never
@@ -1643,13 +1643,57 @@ fn fact_only_base(f: &Fact, base: Base) -> bool {
 ///
 /// A `|` is deliberately NOT walked here: filter ids are an enumeration, not a bit
 /// field, and `FILTER_VALIDATE_INT | FILTER_VALIDATE_IP` names no filter.
-fn filter_kinds(value: &ArgValue) -> Option<Vec<FilterKind>> {
+fn filter_kinds(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<Vec<FilterKind>> {
     if let ArgValue::Ternary { then_val, else_val, .. } = value {
-        let mut out = filter_kinds(then_val)?;
-        out.extend(filter_kinds(else_val)?);
+        let mut out = filter_kinds(cx, folder, then_val, env)?;
+        out.extend(filter_kinds(cx, folder, else_val, env)?);
         return Some(out);
     }
-    Some(vec![filter_kind(value)?])
+    // The NAME first, then the VALUE (ADR-0094 §2) — the same two readings the
+    // flags leg takes, and for the same reason: a filter id held in a local, or
+    // reached through a `use const` alias, is the id it is.
+    if let Some(kind) = filter_kind(value) {
+        return Some(vec![kind]);
+    }
+    Some(vec![filter_kind_of_id(int_of(cx, folder, value, env)?)?])
+}
+
+/// The names [`filter_kind_by_name`] answers for — the roster
+/// [`filter_kind_of_id`] resolves an integer id through.
+const FILTER_ID_NAMES: &[&str] = &[
+    "FILTER_DEFAULT",
+    "FILTER_SANITIZE_EMAIL",
+    "FILTER_SANITIZE_URL",
+    "FILTER_SANITIZE_ENCODED",
+    "FILTER_SANITIZE_SPECIAL_CHARS",
+    "FILTER_SANITIZE_FULL_SPECIAL_CHARS",
+    "FILTER_SANITIZE_NUMBER_INT",
+    "FILTER_SANITIZE_NUMBER_FLOAT",
+    "FILTER_SANITIZE_ADD_SLASHES",
+    "FILTER_VALIDATE_INT",
+    "FILTER_VALIDATE_FLOAT",
+    "FILTER_VALIDATE_BOOL",
+    "FILTER_VALIDATE_EMAIL",
+    "FILTER_VALIDATE_URL",
+    "FILTER_VALIDATE_IP",
+    "FILTER_VALIDATE_MAC",
+    "FILTER_VALIDATE_DOMAIN",
+];
+
+/// The [`FilterKind`] an integer filter id names, resolved through the mined
+/// table so the id roster has ONE spelling: the names [`filter_kind`] matches.
+///
+/// `FILTER_DEFAULT` and `FILTER_UNSAFE_RAW` share an engine value and a kind, so
+/// the collision is not one. Every other modeled id is distinct.
+fn filter_kind_of_id(id: i64) -> Option<FilterKind> {
+    FILTER_ID_NAMES.iter().find_map(|name| {
+        (engine_int(name)? == id).then(|| filter_kind_by_name(name))?
+    })
 }
 
 /// The [`FilterKind`] a filter-argument CONSTANT names, or `None` for anything this
@@ -1664,7 +1708,14 @@ fn filter_kind(value: &ArgValue) -> Option<FilterKind> {
     if !matches!(r.kind, RefKind::FullyQualified | RefKind::Unqualified) {
         return None;
     }
-    match r.raw.as_str() {
+    filter_kind_by_name(&r.raw)
+}
+
+/// The id roster, by name. Split out of [`filter_kind`] so the value-keyed
+/// reading ([`filter_kind_of_id`]) resolves through the SAME roster rather than a
+/// second transcription of it.
+fn filter_kind_by_name(name: &str) -> Option<FilterKind> {
+    match name {
         "FILTER_DEFAULT" | "FILTER_UNSAFE_RAW" => Some(FilterKind::Raw),
         "FILTER_SANITIZE_EMAIL"
         | "FILTER_SANITIZE_URL"
@@ -1694,10 +1745,11 @@ fn filter_kind(value: &ArgValue) -> Option<FilterKind> {
 /// here and contributes nothing but permission to proceed.
 ///
 /// A set of booleans rather than the engine's flag integer, deliberately: the
-/// roster keys on constant NAMES (see [`filter_flag_set`]), so the rung never needs
-/// a global constant's *value* and stays clear of issue #598's engine-constant
-/// ruling. `FILTER_FLAG_HOSTNAME`, `_IPV4` and `_EMAIL_UNICODE` share one engine
-/// value, which a value-keyed reading could not tell apart at all.
+/// name-keyed roster ([`filter_flag_set`]) can tell `FILTER_FLAG_HOSTNAME`,
+/// `_IPV4` and `_EMAIL_UNICODE` apart where a value-keyed one cannot — they share
+/// one engine value. Since ADR-0094 §2 the rung ALSO reads a flags integer when
+/// no name is spelled ([`filter_flags_of_bits`]); all three of those names are
+/// modeled no-ops, so collapsing them there costs nothing.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FilterFlags {
     /// `FILTER_NULL_ON_FAILURE` — the failure value is `null`, not `false`.
@@ -1729,7 +1781,12 @@ impl FilterFlags {
 /// only key is a literal `'flags'` holding one. See [`filter_var_transfer`] for why
 /// every other spelling — a variable, a non-zero int literal, an `'options'` key —
 /// is refused.
-fn filter_var_flags(value: Option<&ArgValue>) -> Option<Vec<FilterFlags>> {
+fn filter_var_flags(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: Option<&ArgValue>,
+    env: &HashMap<String, Known>,
+) -> Option<Vec<FilterFlags>> {
     let Some(value) = value else { return Some(vec![FilterFlags::default()]) };
     if let ArgValue::Array(items) = value {
         let mut flags = vec![FilterFlags::default()];
@@ -1738,11 +1795,11 @@ fn filter_var_flags(value: Option<&ArgValue>) -> Option<Vec<FilterFlags>> {
             if k.as_str() != Some("flags") {
                 return None;
             }
-            flags = filter_flag_alternatives(item)?;
+            flags = filter_flag_alternatives(cx, folder, item, env)?;
         }
         return Some(flags);
     }
-    filter_flag_alternatives(value)
+    filter_flag_alternatives(cx, folder, value, env)
 }
 
 /// How many alternative flag sets one flags expression may resolve to before the
@@ -1768,21 +1825,112 @@ const FILTER_FLAG_ALTERNATIVE_CAP: usize = 8;
 /// const-valued local resolves to nothing and stays a decline until issue #598
 /// rules on engine constants. Keying on names also keeps `FILTER_FLAG_HOSTNAME`,
 /// `_IPV4` and `_EMAIL_UNICODE` — which share one engine value — distinguishable.
-fn filter_flag_alternatives(value: &ArgValue) -> Option<Vec<FilterFlags>> {
+fn filter_flag_alternatives(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<Vec<FilterFlags>> {
     match value {
         ArgValue::Ternary { then_val, else_val, .. } => {
-            let mut out = filter_flag_alternatives(then_val)?;
-            out.extend(filter_flag_alternatives(else_val)?);
+            let mut out = filter_flag_alternatives(cx, folder, then_val, env)?;
+            out.extend(filter_flag_alternatives(cx, folder, else_val, env)?);
             (out.len() <= FILTER_FLAG_ALTERNATIVE_CAP).then_some(out)
         }
         ArgValue::Binary { op: ValueOp::BitOr, lhs, rhs } => {
-            let (ls, rs) = (filter_flag_alternatives(lhs)?, filter_flag_alternatives(rhs)?);
+            let (ls, rs) = (
+                filter_flag_alternatives(cx, folder, lhs, env)?,
+                filter_flag_alternatives(cx, folder, rhs, env)?,
+            );
             if ls.len() * rs.len() > FILTER_FLAG_ALTERNATIVE_CAP {
                 return None;
             }
             Some(ls.iter().flat_map(|l| rs.iter().map(|r| l.union(*r))).collect())
         }
-        _ => Some(vec![filter_flag_set(value)?]),
+        // A recognized NAME first — it keeps `FILTER_FLAG_HOSTNAME`, `_IPV4` and
+        // `_EMAIL_UNICODE` (one engine value, three names) distinguishable, and it
+        // is the reading that carries the constant's own shadow discipline.
+        // Otherwise the VALUE, which is what ADR-0094 §2 made available: a local
+        // holding `\FILTER_NULL_ON_FAILURE`, a `use const` alias, a same-file
+        // `const` of the project's own. The bits are decomposed against the same
+        // roster, so an unmodeled bit declines exactly as an unmodeled name does.
+        _ => match filter_flag_set(value) {
+            Some(set) => Some(vec![set]),
+            None => Some(vec![filter_flags_of_bits(
+                int_of(cx, folder, value, env)?,
+            )?]),
+        },
+    }
+}
+
+/// A flags expression's proven integer value, or `None`.
+fn int_of(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+) -> Option<i64> {
+    match transfer_arg_fact(cx, folder, value, env, None)? {
+        Fact::Singleton(Val::Int(n)) => Some(n),
+        _ => None,
+    }
+}
+
+/// **A `FILTER_*` flag bit field, decomposed against the modeled roster.**
+///
+/// The bit values are not transcribed: each comes from the mined engine-constant
+/// table (ADR-0094 §2), so this reading and the name-keyed one above cannot
+/// disagree about what a flag is worth. A bit outside the roster declines the
+/// whole call — the same invariant [`filter_flag_set`] holds, and for the same
+/// reason: an unread flag may be `FILTER_FLAG_STRIP_LOW`, which rewrites the
+/// string and makes `FILTER_DEFAULT` stop being the identity.
+fn filter_flags_of_bits(bits: i64) -> Option<FilterFlags> {
+    let mut out = FilterFlags::default();
+    let mut rest = bits;
+    let take = |name: &str, rest: &mut i64| -> Option<bool> {
+        let bit = engine_int(name)?;
+        if bit == 0 || *rest & bit != bit {
+            return Some(false);
+        }
+        *rest &= !bit;
+        Some(true)
+    };
+    out.null_on_failure = take("FILTER_NULL_ON_FAILURE", &mut rest)?;
+    out.force_array = take("FILTER_FORCE_ARRAY", &mut rest)?;
+    out.require_array = take("FILTER_REQUIRE_ARRAY", &mut rest)?;
+    for name in FILTER_FLAG_NO_OPS {
+        take(name, &mut rest)?;
+    }
+    (rest == 0).then_some(out)
+}
+
+/// The flags that restrict which inputs *validate* without touching the result's
+/// type — measured no-ops for every cell of [`filter_var_transfer`]'s grid, and
+/// the same roster [`filter_flag_set`] accepts by name.
+const FILTER_FLAG_NO_OPS: &[&str] = &[
+    "FILTER_FLAG_ALLOW_OCTAL",
+    "FILTER_FLAG_ALLOW_HEX",
+    "FILTER_FLAG_ALLOW_FRACTION",
+    "FILTER_FLAG_ALLOW_THOUSAND",
+    "FILTER_FLAG_ALLOW_SCIENTIFIC",
+    "FILTER_FLAG_IPV4",
+    "FILTER_FLAG_IPV6",
+    "FILTER_FLAG_HOSTNAME",
+    "FILTER_FLAG_EMAIL_UNICODE",
+    "FILTER_FLAG_NO_PRIV_RANGE",
+    "FILTER_FLAG_NO_RES_RANGE",
+    "FILTER_FLAG_GLOBAL_RANGE",
+    "FILTER_FLAG_PATH_REQUIRED",
+    "FILTER_FLAG_QUERY_REQUIRED",
+];
+
+/// One engine constant's integer value from the mined table (ADR-0094 §2), or
+/// `None` when the table has no int row for it — an extension the mining build
+/// lacked, or a name outside its minor range.
+fn engine_int(name: &str) -> Option<i64> {
+    match steins_catalog::engine_constant(name)?.value {
+        steins_catalog::ConstValue::Int(n) => Some(n),
+        _ => None,
     }
 }
 

@@ -1224,16 +1224,15 @@ fn filter_var_a_flag_read_beside_an_asserted_input_answers_asserted() {
 }
 
 #[test]
-fn filter_var_declines_a_flag_held_in_a_const_valued_local() {
-    // Recorded decline, waiting on issue #598. `$nullFilter =
-    // \FILTER_NULL_ON_FAILURE;` binds NO fact — a global constant carries no
-    // proven value (issue #168) — so the value domain has nothing to hand back
-    // and reading the argument the way the INPUT argument is read resolves
-    // nothing. The dump of the local itself is the witness.
+fn filter_var_reads_a_flag_held_in_a_const_valued_local() {
+    // The decline this test recorded is gone: ADR-0094 §2 gives a global constant
+    // its value, so `$nullFilter = \FILTER_NULL_ON_FAILURE;` binds one, and the
+    // flags leg reads the integer when no flag NAME is spelled. `filterVar.php`
+    // spends a row per filter block on exactly this local.
     let src = "<?php\nfunction f($m): void { $nf = \\FILTER_NULL_ON_FAILURE; \\PHPStan\\dumpType($nf); }\n";
-    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(one_type(src), "dumped type: 134217728");
     let src = "<?php\nfunction f($m): void { $nf = \\FILTER_NULL_ON_FAILURE; \\PHPStan\\dumpType(filter_var($m, FILTER_DEFAULT, ['flags' => $nf])); }\n";
-    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(one_type(src), "dumped type: string|null");
 }
 
 #[test]
@@ -1295,15 +1294,23 @@ fn filter_var_accepts_the_type_neutral_restricting_flags() {
 
 #[test]
 fn filter_var_declines_an_unreadable_flags_argument() {
-    // A variable carries no proven value (issue #168) — `filterVar.php` spends a
-    // row per filter block on `$nullFilter = \FILTER_NULL_ON_FAILURE`.
+    // A declared `int` parameter carries no PROVEN value, so there are no bits to
+    // decompose and the rung declines whole.
     assert_eq!(
         dump("$m, int $flags", "filter_var($m, FILTER_VALIDATE_INT, $flags)"),
         "dumped type: unknown"
     );
-    // A bare non-zero int is not a recognized NAME.
-    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 134217728)"), "dumped type: unknown");
-    // An unrecognized flag constant declines like any other unreadable one.
+    // A bare int IS readable since ADR-0094 §2 gave the roster its bit values: PHP
+    // reads the third argument as a bit field whatever spelling produced it, so
+    // `134217728` and `FILTER_NULL_ON_FAILURE` are one argument.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 134217728)"),
+        "dumped type: int|null"
+    );
+    // A bit outside the modeled roster still declines the whole call — it may be
+    // `FILTER_FLAG_STRIP_LOW`, which rewrites the string.
+    assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 4)"), "dumped type: unknown");
+    // A constant whose value is not an int at all resolves to no bits.
     assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, PHP_EOL)"), "dumped type: unknown");
 }
 
