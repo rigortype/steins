@@ -585,7 +585,23 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   same-day `fee437c` baseline: exactly these rows, nothing removed.
     //   As with the 51 → 55 row, the seeded count is the CI engine's (8.4); a
     //   local 8.5 run reads 84 and stays under the tripwire.
-    ("sebastianbergmann/phpunit", 88),
+    //   88 → 86 (-2), 2026-09-10 with issue #600 and ADR-0093 §2: the two
+    //   `Util/PHP/JobRunner.php:244` rows seeded above come back down. The union
+    //   arm over `bool` now carries its literal member set, so `assert($stdout
+    //   !== false)` subtracts in the value lane and `string|false` minus `false`
+    //   is `string`, with the arm gone rather than surviving whole.
+    //   The reseed is deliberately made on the mechanism rather than on a local
+    //   measurement, because these two rows CANNOT be observed on this machine:
+    //   they need the builtin arm, which declines on a local 8.5 runtime for the
+    //   reason the 51 → 55 row records (phpunit pins `config.platform.php` at
+    //   8.4.1). A local finding-level A/B against master confirms it — both sides
+    //   print the same 82 phpdoc.* rows for this package, byte-identical, with no
+    //   `JobRunner.php` row on either. What the branch does carry is the
+    //   mechanism, pinned in `crates/steins-infer/tests/bool_literal_narrowing.rs`
+    //   (`a_guarded_false_arm_no_longer_reaches_a_string_parameter`) on the same
+    //   shape with a declared `string|false` instead of a builtin one. CI's 8.4
+    //   engine is the measurement that decides this line.
+    ("sebastianbergmann/phpunit", 86),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)

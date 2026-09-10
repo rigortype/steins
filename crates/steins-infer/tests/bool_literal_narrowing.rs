@@ -11,7 +11,9 @@
 //! NB: a call invalidates its argument after the statement (by-ref conservatism),
 //! so each fixture dumps its binding once per branch, never before the guard.
 
-use steins_infer::{DEBUG_TYPE_ID, check};
+use steins_infer::{
+    DEBUG_TYPE_ID, PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID, TYPE_MAYBE_ARGUMENT_MISMATCH_ID, check,
+};
 use steins_syntax::SourceTree;
 
 /// Every `debug.type` message body a source produces, in source order.
@@ -96,4 +98,48 @@ fn both_literals_subtracted_leave_the_emptied_lane() {
     let src = "<?php\nfunction f(bool $v): void {\n\
                assert($v !== false && $v !== true);\n\\PHPStan\\dumpType($v);\n}\n";
     assert_eq!(dumps(src), vec!["*NEVER*".to_owned()]);
+}
+
+/// The fp-gate's own shape, as a finding rather than a spelling.
+///
+/// Two `sebastianbergmann/phpunit` `Util/PHP/JobRunner.php:244` seeds were pinned
+/// in `xtask/src/gate.rs` for exactly this: a `T|false` binding guarded by
+/// `assert($x !== false)` still reached a `string` parameter with its `false` arm
+/// on, because the value lane could not spell the subtraction. It can now, so the
+/// judgment has no rejected arm left to report.
+///
+/// The native `string|false` stands in for the builtin return the corpus rows
+/// carry. The two differ only in the premise's stratum, which routes the id
+/// (ADR-0052 §5) and not the subtraction; the stratum is `maybe_argument_mismatch`'s
+/// own subject, and this test states the value-lane half issue #600 moved.
+#[test]
+fn a_guarded_false_arm_no_longer_reaches_a_string_parameter() {
+    let guarded = "<?php\ndeclare(strict_types=1);\n\
+                   function needString(string $s): void {}\n\
+                   function f(string|false $v): void { assert($v !== false); needString($v); }\n";
+    // The same call without the guard is the control: it still reports, so the
+    // silence above is the subtraction and not a judgment that stopped reading.
+    let unguarded = guarded.replace("assert($v !== false); ", "");
+    assert!(
+        mismatches(guarded).is_empty(),
+        "the guard subtracted the whole rejected arm: {:?}",
+        mismatches(guarded)
+    );
+    let control = mismatches(&unguarded);
+    assert_eq!(control.len(), 1, "the unguarded call is the control: {control:?}");
+    assert!(control[0].contains("its false arm"), "the message names the arm: {}", control[0]);
+}
+
+/// Every possibly-grade argument message a source produces, whichever id the
+/// premise's stratum routed it to (ADR-0052 §5).
+fn mismatches(src: &str) -> Vec<String> {
+    let tree = SourceTree::parse(src);
+    let functions = tree.functions().to_vec();
+    check(&tree, &functions, "t.php")
+        .into_iter()
+        .filter(|d| {
+            d.id == TYPE_MAYBE_ARGUMENT_MISMATCH_ID || d.id == PHPDOC_MAYBE_ARGUMENT_MISMATCH_ID
+        })
+        .map(|d| d.message)
+        .collect()
 }
