@@ -415,6 +415,143 @@ pub(crate) fn resolve_declaration_target<'a>(
     Some((target, stratum))
 }
 
+// ---------------------------------------------------------------------------
+// The builtin-receiver path (issue #673): where the project chain runs out.
+// ---------------------------------------------------------------------------
+
+/// What the builtin class-method return table is to be asked about at a call
+/// site: the builtin class the receiver's declared chain ends at, the method
+/// name, whether the call was written in static form, and the stratum the
+/// receiver's own declaration rides at.
+pub(crate) struct BuiltinCallee {
+    pub(crate) class: String,
+    pub(crate) method: String,
+    /// `Foo::m()` / `self::m()` / `parent::m()`, as opposed to `$o->m()`. PHP
+    /// lets an instance receiver call a static method, so only this direction
+    /// constrains: a `::` call on a row the engine does not declare `static` is
+    /// an `Error` unless it is forwarding `$this` from inside the class.
+    pub(crate) static_call: bool,
+    pub(crate) stratum: Stratum,
+    /// Whether the call site sits inside a class at all — the one thing a
+    /// static-form call needs beyond the row itself (see [`static_call`]).
+    ///
+    /// [`static_call`]: Self::static_call
+    pub(crate) inside_class: bool,
+}
+
+/// Read a call's receiver for the **builtin** class-method return table
+/// (issue #673) — the third resolver, reached only after both
+/// [`resolve_call_target`] and [`resolve_declaration_target`] have declined.
+///
+/// The receiver is read exactly as [`resolve_declaration_target`] reads it
+/// (ADR-0049 A17's declared-receiver lane: an allocation, an `instanceof` fact, a
+/// narrowed one-class contract lane, a declared heap object), so a `SplFileObject $f`
+/// parameter, a `new DOMDocument()` and a `?PDO` past its null guard all arrive here
+/// the same way. What differs is where the name is then looked up.
+///
+/// **A builtin class never reaches [`resolve_in_chain`] as a project class.** It
+/// has no `ClassDecl`, so `cx.find_class` misses and the chain walk answers
+/// `Unknown` at its first step — which is why the two resolvers above declined and
+/// why this one exists. [`builtin_root`] resumes that walk at exactly the point it
+/// stopped: it follows the project `extends` chain and returns the first name the
+/// project does not declare, refusing outright if any project class on the way
+/// **declares the method itself**. That refusal is what keeps the two answers from
+/// disagreeing for a project class extending a builtin — a child's own declaration
+/// is the sharper and the correct answer, and it was already given by
+/// `resolve_declaration_target`; this table answers the inherited names alone.
+pub(crate) fn resolve_builtin_callee(
+    cx: &Cx,
+    receiver: &Callee,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<BuiltinCallee> {
+    if poisoned {
+        return None;
+    }
+    let (class, method, static_call, stratum) = match receiver {
+        Callee::Method { receiver: Receiver::New { class, .. }, method, .. } => {
+            (cx.class_fqn(class), method.clone(), false, Stratum::Verified)
+        }
+        Callee::Method { receiver: Receiver::Var(v), method, .. } => {
+            let (class, stratum) = declared_receiver_class(cx, store, v)?;
+            (class, method.clone(), false, stratum)
+        }
+        Callee::Method { receiver: Receiver::This, method, .. } => {
+            let class = this_exact.unwrap_or(enclosing_class?).to_owned();
+            (class, method.clone(), false, Stratum::Verified)
+        }
+        Callee::Static { class: StaticClass::SelfKw, method } => {
+            (enclosing_class?.to_owned(), method.clone(), true, Stratum::Verified)
+        }
+        Callee::Static { class: StaticClass::Parent, method } => {
+            (cx.parent_fqn(enclosing_class?)?, method.clone(), true, Stratum::Verified)
+        }
+        Callee::Static { class: StaticClass::Named(name), method } => {
+            (cx.class_fqn(name), method.clone(), true, Stratum::Verified)
+        }
+        // The same four silences the declaration path keeps: `static::` names no
+        // class (A19 from the receiver side), a depth-1 property fetch is
+        // ADR-0052 §7's limit, a constructor is the ADR-0036 exactness lane and
+        // has no return envelope, and a function/dynamic callee has no receiver.
+        Callee::Construct { .. }
+        | Callee::Static { class: StaticClass::Static, .. }
+        | Callee::Method { receiver: Receiver::Prop { .. }, .. }
+        | Callee::Function(_)
+        | Callee::DynamicVar(_)
+        | Callee::Dynamic => return None,
+    };
+    Some(BuiltinCallee {
+        class: builtin_root(cx, &class, &method)?,
+        method,
+        static_call,
+        stratum,
+        inside_class: enclosing_class.is_some(),
+    })
+}
+
+/// The **builtin** class a project `extends` chain ends at, when the chain
+/// declares `method` nowhere along the way.
+///
+/// Three outcomes, and the two refusals are the load-bearing half:
+///
+/// * a project class on the chain **declares the method** — refuse. The project's
+///   own declaration is the answer, `resolve_declaration_target` already gave it,
+///   and a table row on the inherited name must never compete with it.
+/// * the chain **ends inside the project** (a root class with no `extends`) —
+///   refuse. Nothing builtin is involved; the name is simply absent, which is the
+///   absence family's question and not this table's.
+/// * the chain **leaves the project** — that name is the answer, whether it is the
+///   receiver's own class (`SplFileObject $f`, never declared here) or a builtin
+///   ancestor of one that is (`class Reader extends SplFileObject`).
+///
+/// Only `extends` is followed, as [`resolve_in_chain_mode`] follows only `extends`:
+/// a method reached through a builtin *interface* the project class implements is
+/// not on this walk. A `use`-ing class that does not declare the name refuses, for
+/// ADR-0049 A18's reason — trait method bodies and return types are not lowered, so
+/// "not found on the class" cannot be read as "inherited from the parent" while a
+/// trait could be declaring it.
+fn builtin_root(cx: &Cx, class: &str, method: &str) -> Option<String> {
+    let mut cur = class.to_owned();
+    let mut seen: HashSet<String> = HashSet::new();
+    loop {
+        if !seen.insert(cur.to_ascii_lowercase()) {
+            return None; // a cycle in the declared chain
+        }
+        let Some((cfile, cd)) = cx.find_class(&cur) else {
+            return Some(cur); // the chain left the project: a builtin name
+        };
+        if cd.methods.iter().any(|m| m.name.eq_ignore_ascii_case(method)) {
+            return None;
+        }
+        if cd.uses_traits {
+            return None;
+        }
+        cur = cx.units[cfile].tree.resolve_class_fqn(cd.parent.as_ref()?);
+    }
+}
+
 /// The class a `$var` receiver is **declared** to be, and the stratum that
 /// declaration rides at (ADR-0049 A17): the declared-receiver lane's carrier, not a
 /// heap object.
