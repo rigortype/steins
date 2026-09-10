@@ -159,7 +159,7 @@ they are under C. Projecting the element's contract arm out of a
 declared `array<DateTimeInterface>` would be the C-shaped answer, but
 it makes a transfer rule take contract arms as *input*, which is half a
 step into the third lane §3.1 declined. Whether an object has a value
-denotation at all is filed separately and is not ruled here; #618's
+denotation at all is filed separately as issue #675 and is not ruled here; #618's
 target population is stated as 73, not 81.
 
 ## 4. Consequences
@@ -171,8 +171,8 @@ target population is stated as 73, not 81.
 - #618 becomes a spelling slice: `spell_arms` and `render_contract_arms`
   learn mixed lists, the ADR-0069 §5 / ADR-0071 §2.3 deferral of
   object-returning functionMap rows lifts under §3.1's sourcing rule,
-  and the builtin class-method return table (filed separately, blocked
-  on #618) can be built on the same carrier.
+  and the builtin class-method return table (issue #673, blocked on
+  #618) can be built on the same carrier.
 - The value domain's "no object values" sentence in
   `docs/type-specification/value-domain.md` stands verbatim. ADR-0057
   A3's asymmetry — "the value domain has no object top to degrade to" —
@@ -184,7 +184,8 @@ target population is stated as 73, not 81.
 
 ## 5. Related
 
-- #600, #618 (the two issues ruled), #339 (the union layer and its Lean
+- #600, #618 (the two issues ruled), #673 (the class-method table),
+  #675 (objects as array elements), #339 (the union layer and its Lean
   stall), #345 (the standing divergence), #443 (bool as a two-point
   domain on the arm lane), #557 (whole-arm truthiness subtraction).
 - ADR-0035 (four layers), ADR-0052 (two lanes, subtraction), ADR-0057
