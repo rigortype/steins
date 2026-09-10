@@ -129,3 +129,5 @@ list in one place.
 | ADR-0090 | [Shape modifiers: the presence axis, the seal axis, and the alias prerequisite](0090-shape-modifiers.md) |
 | ADR-0091 | [The hyphen reservation: a phpdoc type identifier containing `-` is vocabulary, never a class](0091-hyphen-reservation.md) |
 | ADR-0092 | [Frozen generations: cross-run persistence by eager per-package artifacts, not a finer query graph](0092-frozen-generations.md) |
+| ADR-0093 | [The value domain grows one bool literal; objects are spelled in the contract lane, not the value domain](0093-object-spelling-and-bool-literal.md) |
+| ADR-0094 | [Platform constants: a generated table, a union by default, a pin by opt-in, and 64-bit integers](0094-platform-constants.md) |
