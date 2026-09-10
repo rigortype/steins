@@ -629,6 +629,58 @@ function f(): void {
 }
 
 #[test]
+fn a_for_header_tests_its_last_condition_only() {
+    // PHP evaluates every comma-separated condition and tests the LAST one. `!$x`
+    // over an init-carried `true` is decided false, so the body is skipped; put the
+    // undecided `$i < $n` last and the same loop walks. Only the order differs.
+    let with_conditions = |conds: &str| {
+        let src = format!(
+            "<?php
+final class Order {{}}
+function f(int $n): void {{
+    for ($x = true, $i = 0; {conds}; ) {{
+        (new Order())->tyop();
+    }}
+}}
+"
+        );
+        undefined_method_lines(&src)
+    };
+    assert!(with_conditions("$i < $n, !$x").is_empty(), "the last condition is the tested one, and it refutes");
+    assert_eq!(with_conditions("!$x, $i < $n"), vec![5], "reversed, the tested condition is undecided");
+}
+
+#[test]
+fn an_empty_for_header_walks_its_body_unguarded() {
+    // `for (;;)` has no condition to test; it lowers to `CondExpr::Opaque`, which
+    // decides nothing and narrows nothing, so the body is walked as-is.
+    let src = "<?php
+final class Order {}
+function f(): void {
+    for (;;) {
+        (new Order())->tyop();
+    }
+}
+";
+    assert_eq!(undefined_method_lines(src), vec![5], "an opaque header is a walked body");
+}
+
+#[test]
+fn a_write_inside_the_for_condition_is_not_carried() {
+    // `carried` is the init-written names nothing else in the loop writes again —
+    // and the condition is part of the loop. `$x--` in the header rebinds `$x` on
+    // every test, so it is forgotten at the entry and only the cast's floor is left.
+    let src = "<?php
+function f(): void {
+    for ($x = 2; $x-- > 0; ) {
+        \\PHPStan\\dumpType((string) $x);
+    }
+}
+";
+    assert_eq!(dumps(src), vec!["4: dumped type: string".to_owned()], "a condition write leaves `carried`");
+}
+
+#[test]
 fn a_foreach_binds_its_key_and_value_defined_but_untyped() {
     // `$k` and `$v` are ordinary members of the construct's `writes` — the
     // `foreach`-binding row `collect_assign_writes` has always had — so the entry

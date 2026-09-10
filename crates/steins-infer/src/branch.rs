@@ -289,8 +289,12 @@ pub(crate) fn walk_loop_body(
     out: &mut Vec<Diagnostic>,
 ) {
     // The body's own `Flow` is discarded: a body that terminates on every path
-    // terminates an ITERATION, and a loop whose condition is not decided may run
-    // none at all, so the successor stays reachable either way.
+    // terminates an ITERATION, and a `while`, `for` or `foreach` whose condition is
+    // not decided may run none at all, so their successor stays reachable either
+    // way. A `do`-`while` body runs at least once, so there the discard is a
+    // widening — a successor the body provably never reaches is still walked
+    // (issue #679); it never under-reports, and it is the one caller for which
+    // the reasoning above does not hold.
     let _ = walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out);
 }
 

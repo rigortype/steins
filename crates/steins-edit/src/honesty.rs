@@ -739,8 +739,10 @@ fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
 
 /// Collect every structurally-visible `return <value>`, recursing into `if`/`match`
 /// sub-traces — a return inside a loop or a `try` is not modeled here. A structured
-/// `while` (issue #649) carries its body, but a return inside it is reached only on
-/// an iteration that may never happen, so it stays as invisible as an `Opaque`'s.
+/// loop (issues #649, #650) carries its body, but a return inside a `while`, `for`
+/// or `foreach` is reached only on an iteration that may never happen, and a
+/// `do`-`while`'s first iteration is one this pass does not model either, so every
+/// loop body stays as invisible as an `Opaque`'s (`contains_opaque` refuses first).
 fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     for s in stmts {
         match &s.kind {
