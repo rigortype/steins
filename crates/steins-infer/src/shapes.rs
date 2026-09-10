@@ -877,15 +877,101 @@ fn refine_shape_fact(g: &ShapeGuard, env: &mut HashMap<String, Known>, witnessed
 // Write invalidation (ADR-0062 A-G8's table)
 // ---------------------------------------------------------------------------
 
+/// How wide the barrier in front of an offset write has to open (issue #641) —
+/// ADR-0063 §2.3's classification read by a second consumer, the value lane.
+///
+/// The write is `$base[…] = v`, `$base[] = v` or `unset($base[…])`, and the
+/// question is which of the scope's *other* bindings could observe it. PHP's
+/// answer, probed at `PINNED_PHP` 8.5.10 (ADR-0061 §4), is **a reference and
+/// nothing else** — a copy is not aliased and a same-valued sibling is not
+/// aliased:
+///
+/// ```text
+/// php -r '$a = [1,2,3]; $b = $a; $a[0] = 9; var_dump($b[0]);'      => int(1)
+/// php -r '$a = 1; $b = ["key" => &$a]; $b["key"] = 42; var_dump($a);' => int(42)
+/// ```
+///
+/// So the test is ADR-0063 §2.3's two legs, and it **declines to today's total
+/// clear on every premise it cannot prove**:
+///
+/// 1. **Target.** `RefTarget`'s rules, offsets already peeled by the lowering:
+///    a superglobal root is interpreter-global surface and a by-ref parameter
+///    aliases the caller's binding (and can alias a sibling parameter, `f($x, $x)`
+///    into `function f(&$p, &$q)`), so both stay total. Only a plain local
+///    continues.
+/// 2. **Exposure.** [`Scope::poisoned`] — the ADR-0001 give-up list, which is
+///    exactly `frame_aliased`'s own definition (`global`, `static`, `$$v`,
+///    `extract`/`compact`, `eval`, `include`, `$b = &$a`, `use (&$x)`, and since
+///    issue #641's leg 1 a reference written as an array element or a by-ref
+///    `foreach` binding). One such construct anywhere in the frame and the
+///    barrier stays total.
+///
+/// A `false` here means "clear everything", which is what this walk did
+/// unconditionally before, so the barrier remains the floor everywhere.
+///
+/// [`Scope::poisoned`]: steins_syntax::Scope::poisoned
+fn write_is_frame_private(w: &WalkCx, base: &str) -> bool {
+    if steins_syntax::SUPERGLOBALS.contains(&base) {
+        return false;
+    }
+    // Belt over braces, deliberately. A poisoned scope holds nothing this leg
+    // could keep: a named function's env is empty there, and the one thing a
+    // poisoned closure scope still binds — a declared return, at `Asserted`, in a
+    // store lane — is a lane the narrow leg clears whole anyway (measured: the
+    // closure row in `offset_write_barrier_extent` answers the same with this
+    // line deleted). It stays because the rule is "an aliased frame gets the
+    // total clear", not "the lanes happened to be cleared for another reason":
+    // the day `poisoned` stops being all-or-nothing, or the narrow leg keeps a
+    // store lane, this is the line that has to be here. The carrier rows pin the
+    // give-up sites themselves (leg 1).
+    if w.scope.poisoned {
+        return false;
+    }
+    // A by-ref parameter is the one local whose cell belongs to the caller.
+    // `None` (top-level, or a scope whose declaration cannot be resolved) has no
+    // by-ref parameters to be one of.
+    !w.cx
+        .scope_params(w.scope)
+        .is_some_and(|ps| ps.iter().any(|p| p.by_ref && p.name == base))
+}
+
+/// Open the barrier an offset write sits behind, as wide as
+/// [`write_is_frame_private`] says it must (issue #641).
+///
+/// The narrow leg keeps the **value lane** — every `env` binding but the target's,
+/// which the caller re-derives — and `store.contract` with it, since a declared-type
+/// arm list describes a binding this write provably did not touch.
+///
+/// **`refs`, `heap`, `members` and `narrowed` are cleared either way**, and that is
+/// a decision rather than an oversight. `refs` is the alias map the frame-private
+/// test is reasoning *about*; `heap` and `members` describe objects whose identity
+/// the value lane does not track, so `$base['k'] = $v` landing on an `ArrayAccess`
+/// receiver runs `offsetSet`, and nothing here bounds what that body reaches. Keeping
+/// them needs a reachability argument nobody has written; when someone does, this is
+/// the one function that changes.
+fn open_offset_barrier(w: &WalkCx, base: &str, env: &mut HashMap<String, Known>, store: &mut Store) {
+    if !write_is_frame_private(w, base) {
+        env.clear();
+        store.clear();
+        return;
+    }
+    env.remove(base);
+    store.refs.clear();
+    store.heap.clear();
+    store.members.clear();
+    store.narrowed.clear();
+    store.contract.remove(base);
+}
+
 /// `$var[k] = v` / `$var[k1][k2] = v` and `unset($var[k])`, with `k` either a
 /// literal the walk can name or an expression it cannot (issue #636).
 ///
-/// **Barrier first, then one binding.** The walk still clears the whole env and
-/// store, exactly as the pre-S4 `Barrier` lowering did — an offset write can
-/// alias through references the trace does not model — and only then puts back
-/// the base binding's array shape with the key promoted or removed. This rule
-/// can move the shape lane and nothing else, so a finding that did not premise
-/// a shape fact cannot move with it.
+/// **Barrier first, then one binding.** [`open_offset_barrier`] decides how wide
+/// that barrier opens (issue #641) — the whole env and store where the write could
+/// be observed through another name, the target alone where ADR-0063 §2.3's two legs
+/// prove it could not — and only then does this put back the base binding's array
+/// shape with the key promoted or removed. This rule can move the shape lane and
+/// nothing else, so a finding that did not premise a shape fact cannot move with it.
 ///
 /// The by-ref sweep needs no separate fence: the restore reads facts captured
 /// *before* the clear, so a by-ref exposure dropped earlier leaves nothing to
@@ -935,8 +1021,7 @@ pub(crate) fn apply_offset_write(
         _ => KeyClass::ArrayKey,
     };
 
-    env.clear();
-    store.clear();
+    open_offset_barrier(w, base, env, store);
 
     let Some(known) = before else { return };
     // A base holding an order-witnessed VALUE takes the same path, by lifting
@@ -1107,9 +1192,10 @@ pub(crate) fn apply_offset_write(
 
 /// `$var[] = v` — **the auto-index append** (ADR-0062 Amendment K, issue #636).
 ///
-/// The same containment as [`apply_offset_write`]: barrier first, then one
-/// binding. What differs is that the source names no key, so the landing index
-/// is computed from the base's own key sequence rather than read.
+/// The same containment as [`apply_offset_write`], through the same
+/// [`open_offset_barrier`]: barrier first, then one binding. What differs is that
+/// the source names no key, so the landing index is computed from the base's own
+/// key sequence rather than read.
 ///
 /// `$a[] = v` and `array_push($a, v)` are the same operation, so this is
 /// [`array_push_written_fact`]'s rule verbatim rather than a second one — one
@@ -1156,8 +1242,7 @@ pub(crate) fn apply_offset_append(
         }
     };
 
-    env.clear();
-    store.clear();
+    open_offset_barrier(w, base, env, store);
 
     let Some(known) = before else { return };
     let lifted;

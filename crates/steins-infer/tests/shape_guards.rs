@@ -593,13 +593,28 @@ fn unset_marks_the_key_absent_and_stays_silent() {
 }
 
 #[test]
-fn a_write_keeps_barrier_semantics_for_every_other_binding() {
-    // Containment: the write rule may move only the shape lane, so an unrelated
-    // proven binding is still forgotten exactly as pre-S4 `Barrier` forgot it.
+fn a_write_keeps_a_bystander_in_a_frame_that_cannot_alias() {
+    // This pinned `unknown` until issue #641: the write rule moved only the shape
+    // lane, and the barrier in front of it erased every other binding in the scope.
+    // The barrier now opens only as wide as ADR-0063 §2.3's two legs say it must,
+    // and `$other` is a name no reference in this frame could have tied to `$v`.
     assert_eq!(
         one_type(&fixture(
             "array{a?: string}",
             "$other = 7; $v['a'] = 'x'; \\PHPStan\\dumpType($other);"
+        )),
+        "dumped type: 7"
+    );
+}
+
+#[test]
+fn a_write_keeps_barrier_semantics_for_every_other_binding_in_an_aliased_frame() {
+    // The other side of the same rule: one `&` anywhere in the frame and the
+    // barrier is total again, exactly as it was before issue #641.
+    assert_eq!(
+        one_type(&fixture(
+            "array{a?: string}",
+            "$other = 7; $ref = ['k' => &$other]; $v['a'] = 'x'; \\PHPStan\\dumpType($other);"
         )),
         "dumped type: unknown"
     );

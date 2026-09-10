@@ -961,7 +961,7 @@ fn a_nested_scopes_construct_belongs_to_that_scope_only() {
 #[test]
 fn every_construct_kind_has_a_label() {
     // `ALL` sits beside an exhaustive `label` match; pins the pair so a variant can't vanish.
-    assert_eq!(OpaqueConstruct::ALL.len(), 9);
+    assert_eq!(OpaqueConstruct::ALL.len(), 10);
     let mut labels: Vec<&str> = OpaqueConstruct::ALL.iter().map(|c| c.label()).collect();
     labels.sort_unstable();
     labels.dedup();

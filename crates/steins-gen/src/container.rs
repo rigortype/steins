@@ -117,9 +117,20 @@ use crate::names::{PackageName, SectionName};
 /// fields positionally, so a schema-16 `DoWhile` would read its old `body` where the
 /// new `cond` is. On top of that it spells every loop as one nothing is known after,
 /// replaying `unknown` where this binary answers the negated condition.
+/// `18` is the reference-binding give-up site (issue #641), and it is the first entry in
+/// this history bumped for **soundness** rather than precision. `scan_opaque_walk` used to
+/// recognise a reference only as an assignment's right-hand side, so `['key' => &$a]` and
+/// `foreach ($rows as &$row)` produced no `OpaqueSite` and left `Scope::poisoned` false —
+/// `Scope::opaque` is a persisted `Vec<OpaqueSite>`, so a schema-17 artifact records a frame
+/// as unaliased that this binary now records as aliased. Every earlier entry could be
+/// replayed at worst as an under-answer; this one replays a *wrong* one, because the walk
+/// now trusts that verdict to bound how wide an offset write's barrier opens (ADR-0063
+/// §2.3's exposure leg). ADR-0092 §2 forbids a miss that changes meaning, so the bump is not
+/// optional. `OpaqueConstruct::ReferenceBinding` is appended after the last variant, so no
+/// existing index moved — the bump buys the refusal to read the old file, not a decode fix.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 17;
+pub const SCHEMA_VERSION: u32 = 18;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

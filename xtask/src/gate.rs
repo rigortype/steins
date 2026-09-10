@@ -605,7 +605,20 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
     // and `unlink(string $filename)` (Handler/StreamHandlerTest.php:807). The
     // builtin sink is the only new part; the argument's type was already read.
-    ("guzzle/guzzle", 4),
+    //   4 → 5 (+1), 2026-09-11 (issue #641), the whole corpus's only movement under
+    //   the narrowed offset-write barrier — nothing was lost anywhere, and the
+    //   proof-layer `diagnostics` column stayed 0. `CurlFactoryTest.php:4417`:
+    //   `addDecodeResponse(): string` opens `$content = \gzencode('test');`
+    //   (`string|false`, PHP's own documented signature), then writes
+    //   `$headers['Content-Encoding'] = 'gzip';` inside an `if`, then
+    //   `return $content;`. The write is to a DIFFERENT local, in a file with no
+    //   `&` anywhere; it used to erase `$content` along with the rest of the scope,
+    //   so the declared return had no premise to judge. It has one now, and the
+    //   judgment is TRUE: the file declares `strict_types=1`, so the `false` arm is
+    //   a real `TypeError`. Read verbatim, not reseeded blind — it is the same
+    //   `T|false`-into-native-`T` shape as the four rows above it, arriving on the
+    //   return side rather than the argument side.
+    ("guzzle/guzzle", 5),
     // 4 → 5 (+1), 2026-08-14, with ADR-0056 §8: `resource` stopped being an
     // unmodeled spelling and became a relation. `StreamHandlerTest`'s
     // `testWriteMissingResource` constructs `new StreamHandler(null)` against
