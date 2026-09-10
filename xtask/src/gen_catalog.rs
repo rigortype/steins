@@ -809,7 +809,12 @@ fn render_constants(
     let _ = writeln!(s, "//   {:>5}  rows (the spec-fixed literals)", counts.rows);
     let _ = writeln!(s, "//   {:>5}    of those, carrying a minor range the scan could prove", counts.gated);
     s.push_str(
-        "\n/// One engine constant's value, in the four scalar shapes a PHP constant of the\n\
+        "\n// `M_PI` and its siblings ARE the mathematical constants, spelled to the last\n\
+         // bit php-src spells them to, so `clippy::approx_constant` fires on every one of\n\
+         // them. Using Rust's own `std::f64::consts` here would be a second source for a\n\
+         // value this table exists to carry from the engine.\n\
+         #![allow(clippy::approx_constant)]\n\
+         \n/// One engine constant's value, in the four scalar shapes a PHP constant of the\n\
          /// mined extensions takes. No array or object arm: `STDIN` and its two siblings\n\
          /// are resources and are refused at mining time, and nothing else is non-scalar.\n\
          #[derive(Debug, Clone, Copy, PartialEq)]\n\

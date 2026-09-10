@@ -43,6 +43,12 @@
 //    2770  rows (the spec-fixed literals)
 //      15    of those, carrying a minor range the scan could prove
 
+// `M_PI` and its siblings ARE the mathematical constants, spelled to the last
+// bit php-src spells them to, so `clippy::approx_constant` fires on every one of
+// them. Using Rust's own `std::f64::consts` here would be a second source for a
+// value this table exists to carry from the engine.
+#![allow(clippy::approx_constant)]
+
 /// One engine constant's value, in the four scalar shapes a PHP constant of the
 /// mined extensions takes. No array or object arm: `STDIN` and its two siblings
 /// are resources and are refused at mining time, and nothing else is non-scalar.

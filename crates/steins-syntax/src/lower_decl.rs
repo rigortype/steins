@@ -40,6 +40,7 @@ use crate::{bytes_to_string, children, strip_dollar, to_span};
 // Lowering (private): walk the Mago CST, emit owned data.
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn walk(
     node: &Node<'_, '_>,
     aliases: &SteinsAttrAliases,
@@ -123,7 +124,7 @@ pub(crate) fn walk(
                 // a literal, so a same-file read can bind it without a sidecar.
                 // Anything else — an arithmetic constant expression, an array, a
                 // reference to another constant — is `None` and declines.
-                let value = Some(lower_arg_value(&item.value)).filter(ArgValue::is_literal);
+                let value = Some(lower_arg_value(item.value)).filter(ArgValue::is_literal);
                 out.global_const_decls.push(GlobalConstDecl {
                     fqn: normalize_const_fqn(&qualify_const_decl(rc, offset, &name)),
                     span: to_span(item.name.span),
