@@ -3108,6 +3108,24 @@ pub struct GlobalConstDecl {
     pub fqn: String,
     /// The declaration's source span.
     pub span: Span,
+    /// **The declared value, when it is a literal** (ADR-0094 §4): the same-file
+    /// reader binds it for reads in this file, from the declaration the walk has
+    /// already parsed — no sidecar, no generation input.
+    ///
+    /// `None` for a non-literal initializer (`const A = B * 2;`, an array, a
+    /// constant expression over other constants). Those decline rather than
+    /// being folded here: the fold would need an evaluation order this lowering
+    /// does not have, and a declaration whose value depends on another file's is
+    /// the cross-file slice ADR-0094 §4 defers.
+    pub value: Option<ArgValue>,
+    /// Whether the declaration sits below anything but the program root and its
+    /// namespace — an `if`, a loop, a function body (ADR-0049 A2i's own flag,
+    /// which the class and function lowerings already carry).
+    ///
+    /// A conditional definition declines (ADR-0094 §4): `if (!defined('X'))
+    /// define('X', 1);` states what the value is *when this branch runs*, and a
+    /// reader that took it would report one arm of a fork as the answer.
+    pub conditional: bool,
 }
 
 /// Normalize a global constant name into the index's matching key: leading `\` stripped,

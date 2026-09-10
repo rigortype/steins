@@ -130,7 +130,14 @@ use crate::names::{PackageName, SectionName};
 /// existing index moved — the bump buys the refusal to read the old file, not a decode fix.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 18;
+/// `19` is the platform-constant slice (ADR-0094, issue #598), and it is a **misdecode**
+/// bump of schema 16's kind: `GlobalConstDecl` grows two fields — the declared literal
+/// value and the ADR-0049 A2i `conditional` flag — and the wire codec reads a struct's
+/// fields positionally, so a schema-18 artifact's `span` would be read where the new
+/// `value` is. It also changes meaning even where it decodes: a schema-18 file records no
+/// constant value at all, so replaying one would answer `unknown` for every same-file
+/// `const` this binary now binds.
+pub const SCHEMA_VERSION: u32 = 19;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

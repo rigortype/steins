@@ -879,7 +879,7 @@ fn best_dump_type(
     // the range the declared target spans. A single-valued constant answers the
     // same either way; the resolver is one function.
     if let ArgValue::GlobalConst(r) = value
-        && let Some((fact, stratum)) = global_const_fact(cx, &r.raw)
+        && let Some((fact, stratum)) = global_const_fact(cx, r)
     {
         return DumpRendering {
             text: render_dump_fact(&fact),

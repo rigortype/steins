@@ -281,7 +281,7 @@ pub(crate) fn transfer_arg_known(
     // ADR-0094 §3.2), and laundering it to `Verified` here would let it premise a
     // proof-layer finding.
     if let ArgValue::GlobalConst(r) = value {
-        return global_const_fact(cx, &r.raw);
+        return global_const_fact(cx, r);
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
     Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))

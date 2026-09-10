@@ -1077,7 +1077,7 @@ impl<'a> Cx<'a> {
             // union and `PHP_VERSION_ID` is a range; neither is a literal, and
             // picking one member of either would be stating something false. Both
             // still answer at the fact seam (`transfer_arg_known`).
-            ArgValue::GlobalConst(r) => global_const_literal(self, &r.raw),
+            ArgValue::GlobalConst(r) => global_const_literal(self, r),
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
             ArgValue::Array(items) => {

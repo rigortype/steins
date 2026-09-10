@@ -233,3 +233,81 @@ fn a_union_valued_constant_is_not_a_literal() {
         "dumped type: true (asserted)"
     );
 }
+
+
+// -------------------------------------------------- §4, same-file user constants
+
+#[test]
+fn a_same_file_const_declaration_binds_its_literal() {
+    // ADR-0094 §4: bound from the declaration the walk already parsed — no
+    // sidecar, no generation input. Verified: the declaration IS the source.
+    let src = "<?php\n\
+               const GREETING = 'hi';\n\
+               define('ANSWER', 42);\n\
+               \\PHPStan\\dumpType(GREETING);\n\
+               \\PHPStan\\dumpType(ANSWER);\n";
+    assert_eq!(dumps(src), vec!["dumped type: 'hi'".to_owned(), "dumped type: 42".to_owned()]);
+}
+
+#[test]
+fn a_namespaced_const_resolves_the_way_php_resolves_it() {
+    // An unqualified reference inside a namespace tries `App\NAME` first and
+    // falls back to global — which is what lets namespaced code write `PHP_EOL`
+    // and mean the engine's. `define()` always declares the GLOBAL name, even
+    // inside a namespace.
+    let src = "<?php\n\
+               namespace App;\n\
+               const LOCAL = 7;\n\
+               \\define('GLOBAL_ONE', 'g');\n\
+               \\PHPStan\\dumpType(LOCAL);\n\
+               \\PHPStan\\dumpType(GLOBAL_ONE);\n\
+               \\PHPStan\\dumpType(SORT_REGULAR);\n";
+    assert_eq!(
+        dumps(src),
+        vec![
+            "dumped type: 7".to_owned(),
+            "dumped type: 'g'".to_owned(),
+            "dumped type: 0".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_conditional_or_non_literal_definition_declines() {
+    // Three declines, each for its own reason (ADR-0094 §4). A conditional
+    // `define` states what the value is *when that branch runs*; a non-literal
+    // initializer would need an evaluation this lowering does not do; a second
+    // declaration of the same name is a fork without the `if`.
+    let src = "<?php\n\
+               if (\\PHP_INT_SIZE === 8) { define('GUARDED', 1); }\n\
+               const COMPUTED = 2 * 3;\n\
+               define('TWICE', 1);\n\
+               define('TWICE', 2);\n\
+               \\PHPStan\\dumpType(GUARDED);\n\
+               \\PHPStan\\dumpType(COMPUTED);\n\
+               \\PHPStan\\dumpType(TWICE);\n";
+    assert_eq!(
+        dumps(src),
+        vec![
+            "dumped type: unknown".to_owned(),
+            "dumped type: unknown".to_owned(),
+            "dumped type: unknown".to_owned(),
+        ]
+    );
+}
+
+#[test]
+fn a_project_constant_shadows_the_engine_table_for_this_file() {
+    // A file that declares the name is the file whose reader reaches it, so the
+    // mined row must not answer over it — and a declaration that states no
+    // value must not fall THROUGH to the mined row either, which would report
+    // the engine's number for a name the project has taken.
+    let src = "<?php\n\
+               define('SORT_REGULAR', 99);\n\
+               \\PHPStan\\dumpType(SORT_REGULAR);\n";
+    assert_eq!(dumps(src), vec!["dumped type: 99".to_owned()]);
+    let src = "<?php\n\
+               define('SORT_REGULAR', \\some_call());\n\
+               \\PHPStan\\dumpType(SORT_REGULAR);\n";
+    assert_eq!(dumps(src), vec!["dumped type: unknown".to_owned()]);
+}

@@ -490,8 +490,12 @@ fn section_runtime_postures(sec: &mut Section, runtime_cfg: Option<crate::Runtim
     }
     // ADR-0094 §3.1. Not a posture and not configurable — a line, because a
     // reader who has to ask what `PHP_INT_MAX` is worth deserves the answer
-    // where the other runtime truths are.
-    line!(sec, "  integer width: assume 64-bit int; 32-bit targets unsupported");
+    // where the other runtime truths are. Named `integer model` and not
+    // `integer width`, which the Runtime section already uses for a different
+    // fact: that one is the ANALYZING engine's word size, read off the sidecar
+    // and absent under `--no-php`; this one is what Steins assumes about the
+    // deployment target, and it is the same under every configuration.
+    line!(sec, "  integer model: assume 64-bit int; 32-bit targets unsupported");
 
     for w in warnings {
         line!(sec, "  {w}");

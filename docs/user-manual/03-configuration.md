@@ -184,7 +184,7 @@ There is no CLI flag for any of the three keys — all are config-only.
 `steins doctor` prints all three postures, with their value and whether it
 came from the file or from the default, in the Config section. It also
 prints one line that is not a posture at all —
-`integer width: assume 64-bit int; 32-bit targets unsupported` — because
+`integer model: assume 64-bit int; 32-bit targets unsupported` — because
 `PHP_INT_MAX`, `PHP_INT_SIZE` and `PHP_FLOAT_*` are the 64-bit literals
 under every configuration (ADR-0094 §3.1). There is no `4|8` union and no
 knob: a union no runtime check can narrow away would be a worse answer

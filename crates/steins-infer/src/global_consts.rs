@@ -35,10 +35,10 @@
 use steins_catalog::{ConstRow, ConstValue};
 use steins_db::PhpTarget;
 use steins_domain::{Base, Fact, IntRange, PhpStr, Refinement, StrPreds, Val};
-use steins_syntax::ArgValue;
+use steins_syntax::{ArgValue, NameRef, RefKind, normalize_const_fqn};
 
 use crate::cx::Cx;
-use crate::env::Stratum;
+use crate::env::{Stratum, singleton_fact};
 
 /// The `[runtime] os` pin (ADR-0094 §3): the deployment host's `PHP_OS_FAMILY`,
 /// as the project declares it.
@@ -133,13 +133,95 @@ const OS_FAMILIES: &[&str] = &["BSD", "Darwin", "Linux", "Solaris", "Unknown", "
 /// mined row would answer WRONGLY (with the analysis machine's host), then §2's
 /// mined table. The two rosters are disjoint by construction — the miner refuses
 /// every §3 name — so the order is documentation rather than a tie-break.
-pub(crate) fn global_const_fact(cx: &Cx, name: &str) -> Option<(Fact, Stratum)> {
-    let simple = name.trim_start_matches('\\');
-    if let Some(answer) = platform_fact(cx, simple) {
-        return Some(answer);
+pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)> {
+    // PHP's own resolution order for a constant reference, which is what decides
+    // WHICH constant the name means before anything decides what it is worth.
+    for candidate in const_ref_candidates(cx, r) {
+        // §4 — a same-file declaration, first: it is the constant this file's
+        // reader actually reaches, and an engine row of the same spelling would be
+        // a different constant (or a redefinition PHP itself refuses).
+        if let Some(answer) = same_file_fact(cx, &candidate) {
+            return answer;
+        }
+        if let Some(answer) = platform_fact(cx, &candidate) {
+            return Some(answer);
+        }
+        if let Some(row) = steins_catalog::engine_constant(&candidate) {
+            return target_admits(&row, cx.php_target)
+                .then(|| (mined_fact(&row.value), Stratum::Verified));
+        }
     }
-    let row = steins_catalog::engine_constant(simple)?;
-    target_admits(&row, cx.php_target).then(|| (mined_fact(&row.value), Stratum::Verified))
+    None
+}
+
+/// **The names a constant reference can resolve to**, in PHP's own order.
+///
+/// The rule is not the class one and not the function one. A fully-qualified or
+/// `namespace\`-relative name resolves to exactly one place. An unqualified name
+/// consults `use const` first — **exact-case**, since constant names are
+/// case-sensitive — and otherwise tries the current namespace and then falls back
+/// to global, which is the fallback that lets `namespace App;` code write
+/// `PHP_EOL` and mean the engine's.
+///
+/// Every candidate is normalized the way the index and the mined table key
+/// themselves ([`normalize_const_fqn`]): namespace segments folded, final segment
+/// left alone.
+fn const_ref_candidates(cx: &Cx, r: &NameRef) -> Vec<String> {
+    let ctx = cx.tree().ctx_at(r.offset);
+    let ns = ctx.namespace.as_str();
+    let qualify = |n: &str| {
+        if ns.is_empty() { n.to_owned() } else { format!("{ns}\\{n}") }
+    };
+    let names = match r.kind {
+        RefKind::FullyQualified => vec![r.raw.clone()],
+        // `namespace\FOO` resolves against the enclosing namespace ONLY — no
+        // `use`, no global fallback (ADR-0049 A8).
+        RefKind::Relative => vec![qualify(&r.raw)],
+        // A qualified name's FIRST segment is subject to a namespace import.
+        RefKind::Qualified => {
+            let first = r.raw.split('\\').next().unwrap_or(&r.raw);
+            match ctx.class_imports.get(&first.to_ascii_lowercase()) {
+                Some(target) => vec![format!("{target}{}", &r.raw[first.len()..])],
+                None => vec![qualify(&r.raw)],
+            }
+        }
+        RefKind::Unqualified => match ctx.const_imports.get(&r.raw) {
+            Some(target) => vec![target.clone()],
+            None if ns.is_empty() => vec![r.raw.clone()],
+            // The namespace first, the global fallback second — PHP's own order.
+            None => vec![qualify(&r.raw), r.raw.clone()],
+        },
+    };
+    names.iter().map(|n| normalize_const_fqn(n)).collect()
+}
+
+/// **A same-file `const NAME = <literal>;` or `define('NAME', <literal>)`**
+/// (ADR-0094 §4), bound from the declaration the walk already parsed.
+///
+/// `Some(None)` and `Some(Some(..))` are different answers and both are load
+/// bearing: the outer `Some` says this file DECLARES the name, which stops the
+/// engine table from answering for a project constant that happens to share a
+/// spelling, and the inner `None` says the declaration states no value the reader
+/// can take. It declines in three cases, each for its own reason:
+///
+/// * a **non-literal** initializer — the value would need an evaluation this
+///   lowering does not do, and may depend on another file (the cross-file slice
+///   ADR-0094 §4 defers);
+/// * a **conditional** definition — `if (!defined('X')) define('X', 1);` says
+///   what the value is when that branch runs, and taking it would report one arm
+///   of a fork as the answer;
+/// * **more than one** declaration of the name in the file, which is a fork of
+///   the same shape without the `if`.
+///
+/// Verified: the declaration is the source, read directly.
+fn same_file_fact(cx: &Cx, fqn: &str) -> Option<Option<(Fact, Stratum)>> {
+    let mut decls = cx.tree().global_const_decls().iter().filter(|d| d.fqn == fqn);
+    let decl = decls.next()?;
+    if decls.next().is_some() || decl.conditional {
+        return Some(None);
+    }
+    let fact = decl.value.as_ref().and_then(|v| singleton_fact(v, cx.php_minor));
+    Some(fact.map(|f| (f, Stratum::Verified)))
 }
 
 /// The value a constant resolves to as a **literal**, for the seams that carry
@@ -149,8 +231,8 @@ pub(crate) fn global_const_fact(cx: &Cx, name: &str) -> Option<(Fact, Stratum)> 
 /// Only a single-valued answer passes: a union (`PHP_EOL` without a pin) and a
 /// range (`PHP_VERSION_ID`) are facts and not values, and a literal seam that
 /// invented one member of them would be stating something false.
-pub(crate) fn global_const_literal(cx: &Cx, name: &str) -> Option<(ArgValue, Stratum)> {
-    let (fact, stratum) = global_const_fact(cx, name)?;
+pub(crate) fn global_const_literal(cx: &Cx, r: &NameRef) -> Option<(ArgValue, Stratum)> {
+    let (fact, stratum) = global_const_fact(cx, r)?;
     match fact {
         Fact::Singleton(Val::Int(i)) => Some((ArgValue::Int(i), stratum)),
         Fact::Singleton(Val::Float(f)) => Some((ArgValue::Float(f), stratum)),
@@ -287,6 +369,15 @@ fn platform_fact(cx: &Cx, name: &str) -> Option<(Fact, Stratum)> {
 
     // §3 engine version, derived from the declared `PhpTarget`. With no target
     // there is nothing to derive from and the base is the honest floor.
+    //
+    // A project that declares `PHP_VERSION_ID` itself (a polyfill) takes the
+    // whole family out of this rung, which is issue #29's own discipline applied
+    // where it already lives: `Cx::version_id` goes `None` on that flag, and one
+    // binary answering the target-derived range here while the version-guard fold
+    // declines there would be two readings of one constant.
+    if cx.units.iter().any(|u| u.tree.php_version_id_declared()) {
+        return None;
+    }
     version_fact(name, cx.php_target)
 }
 

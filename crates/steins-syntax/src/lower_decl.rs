@@ -46,6 +46,12 @@ pub(crate) fn walk(
     docs: &DocIndex,
     rc: &RefResolver,
     conditional: bool,
+    // Whether the CALL being descended into is reached through anything but the
+    // program root, its namespace and the statement's own expression — the
+    // statement-level question ADR-0094 §4 asks about `define()`, which
+    // `conditional` cannot answer because it advances through the expression
+    // spine that every call sits in.
+    call_conditional: bool,
     typed_sig: bool,
     out: &mut Lowered,
 ) {
@@ -58,7 +64,7 @@ pub(crate) fn walk(
             classify_class_alias(c, rc, out);
             // `define(...)` (ADR-0078, issue #198): same split as `class_alias` above —
             // literal name mints a global constant, computed name dams.
-            classify_define(c, out);
+            classify_define(c, call_conditional, out);
             // `func_get_args()` under a typed signature (issue #30, report-only): the
             // declared argument shape is one the body then bypasses.
             if typed_sig
@@ -113,9 +119,16 @@ pub(crate) fn walk(
             for item in con.items.iter() {
                 let name = bytes_to_string(item.name.value);
                 let offset = to_span(item.name.span).start;
+                // ADR-0094 §4: the VALUE travels with the declaration when it is
+                // a literal, so a same-file read can bind it without a sidecar.
+                // Anything else — an arithmetic constant expression, an array, a
+                // reference to another constant — is `None` and declines.
+                let value = Some(lower_arg_value(&item.value)).filter(ArgValue::is_literal);
                 out.global_const_decls.push(GlobalConstDecl {
                     fqn: normalize_const_fqn(&qualify_const_decl(rc, offset, &name)),
                     span: to_span(item.name.span),
+                    value,
+                    conditional,
                 });
             }
         }
@@ -282,6 +295,7 @@ pub(crate) fn walk(
     // (ADR-0049 A2i); anything else nested below makes declarations conditional —
     // the same rule the class conditional flag uses.
     let child_conditional = conditional || !is_decl_transparent(node);
+    let child_call_conditional = call_conditional || !is_call_transparent(node);
     // The typed-signature flag belongs to the *nearest enclosing* function-like, so
     // every function-like node recomputes it (a nested untyped closure stays untyped).
     let child_typed = match node {
@@ -292,7 +306,7 @@ pub(crate) fn walk(
         _ => typed_sig,
     };
     for child in children(node) {
-        walk(&child, aliases, docs, rc, child_conditional, child_typed, out);
+        walk(&child, aliases, docs, rc, child_conditional, child_call_conditional, child_typed, out);
     }
 }
 
@@ -494,7 +508,7 @@ fn classify_class_alias(c: &FunctionCall<'_>, rc: &RefResolver, out: &mut Lowere
 /// the name is NOT resolved against namespace/`use` (`define('FOO',1)` in `namespace App;`
 /// declares global `FOO`, not `App\FOO` — `php -r`-witnessed on 8.5.9), and `X::class` isn't
 /// accepted. Callee recognition matches `class_alias`'s (unqualified/fully-qualified only).
-fn classify_define(c: &FunctionCall<'_>, out: &mut Lowered) {
+fn classify_define(c: &FunctionCall<'_>, conditional: bool, out: &mut Lowered) {
     let Expression::Identifier(id) = c.function else { return };
     if !matches!(id, Identifier::Local(_) | Identifier::FullyQualified(_)) {
         return;
@@ -513,10 +527,23 @@ fn classify_define(c: &FunctionCall<'_>, out: &mut Lowered) {
         }
         _ => None,
     };
+    // The value is the SECOND positional argument, and only a literal one binds
+    // (ADR-0094 §4). A named or spread argument in either position is not a
+    // shape this reader models, so the value declines while the NAME still
+    // declares — existence and value are separate claims.
+    let value = match c.argument_list.arguments.iter().nth(1) {
+        Some(Argument::Positional(p)) if p.ellipsis.is_none() => {
+            Some(lower_arg_value(p.value.unparenthesized())).filter(ArgValue::is_literal)
+        }
+        _ => None,
+    };
     match literal {
-        Some(name) => out
-            .global_const_decls
-            .push(GlobalConstDecl { fqn: normalize_const_fqn(name.trim()), span }),
+        Some(name) => out.global_const_decls.push(GlobalConstDecl {
+            fqn: normalize_const_fqn(name.trim()),
+            span,
+            value,
+            conditional,
+        }),
         None => out.dynamism.push(DynamismSite { kind: DynamismKind::DefineDynamic, span }),
     }
 }
@@ -670,6 +697,21 @@ fn lower_classes_into(
 /// Whether descending through `node` keeps a declaration **unconditional** (ADR-0049
 /// A2i): only the program root, namespace nodes, and the `Statement` wrapper are
 /// transparent; every other node (control flow, function/method body, block) taints it.
+/// Whether descending through `node` keeps a **call** unconditional — everything
+/// [`is_decl_transparent`] admits, plus the expression spine a statement's own
+/// call sits in.
+///
+/// A separate predicate rather than a widening of that one: A2i is about
+/// DECLARATIONS, none of which is ever reached through an expression, and
+/// widening the shared rule to reach `define()` would move a verdict for
+/// declarations that have nothing to do with this. `if ($c) define('X', 1);`
+/// still passes through `Node::If` and its block, and `$a = define('X', 1);`
+/// through `Node::Assignment` — neither is transparent under either rule.
+fn is_call_transparent(node: &Node<'_, '_>) -> bool {
+    is_decl_transparent(node)
+        || matches!(node, Node::ExpressionStatement(_) | Node::Expression(_) | Node::Call(_))
+}
+
 fn is_decl_transparent(node: &Node<'_, '_>) -> bool {
     matches!(
         node,

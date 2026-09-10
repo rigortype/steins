@@ -146,7 +146,7 @@ impl SourceTree {
         let rc = RefResolver { contexts: &contexts, regions: &regions };
 
         let mut lowered = Lowered::default();
-        walk(&Node::Program(program), &aliases, &docs, &rc, false, false, &mut lowered);
+        walk(&Node::Program(program), &aliases, &docs, &rc, false, false, false, &mut lowered);
 
         let mut classes = lower_classes(&Node::Program(program), &aliases, &docs, &rc);
         let scopes = lower_scopes(program, &contexts, &regions, &docs);
