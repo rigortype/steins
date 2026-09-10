@@ -26,7 +26,7 @@ use crate::arity::{check_arity, check_printf_arity};
 use crate::assert_harness::{ASSERT_SINK, record_subject_probe};
 use crate::asserts::apply_stmt_asserts;
 use crate::assign::apply_assign;
-use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_match, walk_while_body};
+use crate::branch::{GuardChainCoverage, guard_chain_subject, walk_if, walk_loop_body, walk_match, walk_while_body};
 use crate::contract::accepts;
 use crate::cx::Cx;
 use crate::declared_receiver::check_phpdoc_undefined_method;
@@ -608,11 +608,19 @@ fn forget_construct_sets(
 /// performs ([`Store::sweep_object`]) — the class and the readonly props survive it,
 /// the rest does not. This is why the rule is not simply "forget less".
 ///
+/// `carried` is the `for` header's one exception (issue #650): a name its `init`
+/// writes and its condition, increments and body never write again is written once,
+/// before the first iteration, so it holds the same binding at every entry to the
+/// body. It is in `writes` — `init` is part of the construct — and is kept anyway,
+/// under exactly the argument `reads` is kept under, sweep included. Empty for every
+/// other loop form, which has no clause that runs once.
+///
 /// `poisons` clears everything, exactly as it does for the fall-through: a scope
 /// that aliases, `extract`s or `eval`s has no binding worth carrying anywhere.
 fn loop_entry_forget(
     writes: &[String],
     reads: &[String],
+    carried: &[String],
     poisons: bool,
     env: &mut HashMap<String, Known>,
     store: &mut Store,
@@ -623,6 +631,10 @@ fn loop_entry_forget(
         return;
     }
     for v in writes {
+        if carried.contains(v) {
+            store.sweep_object(v);
+            continue;
+        }
         env.remove(v);
         store.unbind(v);
     }
@@ -1180,9 +1192,51 @@ pub(crate) fn walk_trace(
             StmtKind::While { cond, body, writes, reads, poisons, may_return } => {
                 let mut benv = env.clone();
                 let mut bstore = store.clone();
-                loop_entry_forget(writes, reads, *poisons, &mut benv, &mut bstore);
+                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
                 walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+                Flow::FellThrough
+            }
+            // A structured `for` (issue #650). The `while` arm above plus its two
+            // extra clauses: `init` is WALKED — it runs once, here, in the env as it
+            // stands, so its findings are a top-level statement's and its bindings
+            // are what the header reads — and `carried` names the part of `writes`
+            // that survives the entry forgetting because only `init` wrote it. The
+            // increments are not walked: they run in the body's exit env, which this
+            // construct discards.
+            StmtKind::For { init, cond, body, carried, writes, reads, poisons, may_return } => {
+                let mut benv = env.clone();
+                let mut bstore = store.clone();
+                let _ =
+                    walk_trace(w, folder, init, &mut benv, &mut bstore, descent, facts, guarded, out);
+                loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
+                forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+                walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+                Flow::FellThrough
+            }
+            // A structured `foreach` (issue #650): the same entry env, with no header
+            // to narrow it — a `foreach` header binds rather than tests. Its `$k`/`$v`
+            // are ordinary writes, so they arrive defined but untyped (issue #652 types
+            // them from the subject).
+            StmtKind::Foreach { body, writes, reads, poisons, may_return } => {
+                let mut benv = env.clone();
+                let mut bstore = store.clone();
+                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+                forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+                walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+                Flow::FellThrough
+            }
+            // A structured `do`-`while` (issue #650): the same entry env, and the
+            // condition applied to NOTHING. The first iteration runs before the
+            // condition is ever evaluated, so narrowing by it would state a fact that
+            // has not been tested yet, and reading it as false would skip a body that
+            // always runs. Both are why this arm has no `cond` to reach for.
+            StmtKind::DoWhile { body, writes, reads, poisons, may_return } => {
+                let mut benv = env.clone();
+                let mut bstore = store.clone();
+                loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+                forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
+                walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
                 Flow::FellThrough
             }
             // A statement-position call to a resolved `: never` callee is a

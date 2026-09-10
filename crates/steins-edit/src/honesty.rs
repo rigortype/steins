@@ -770,14 +770,18 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
 /// Whether the list contains control flow the trace doesn't model (`Opaque`/
 /// `Barrier`); recurses into modeled `if`/`match` sub-traces.
 ///
-/// A structured `while` (issue #649) answers `true` with its `Opaque` predecessor.
-/// Carrying a body the walk can enter buys findings inside it; it does not model
-/// the construct's data flow — what a loop-carried binding holds on the second
-/// iteration is still unknown — and this predicate is asked the latter question.
+/// A structured loop (issues #649 and #650) answers `true` with its `Opaque`
+/// predecessor. Carrying a body the walk can enter buys findings inside it; it does
+/// not model the construct's data flow — what a loop-carried binding holds on the
+/// second iteration is still unknown — and this predicate is asked the latter
+/// question.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Opaque { .. }
         | StmtKind::While { .. }
+        | StmtKind::For { .. }
+        | StmtKind::Foreach { .. }
+        | StmtKind::DoWhile { .. }
         | StmtKind::LoopJump { .. }
         | StmtKind::Barrier => true,
         StmtKind::If { then_trace, elseifs, else_trace, .. } => {

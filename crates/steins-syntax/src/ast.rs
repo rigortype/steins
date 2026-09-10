@@ -2134,9 +2134,9 @@ pub enum StmtKind {
     /// on. What the body computes stays inside it: the construct's own fall-through
     /// is whatever the sets alone leave standing.
     ///
-    /// `for`, `foreach` and `do`-`while` still lower to [`Self::Opaque`] (issue
-    /// #650), and `do`-`while` will need the entry narrowing withheld when they
-    /// arrive: its first iteration runs before its condition is ever evaluated.
+    /// The other three loop forms join it in issue #650, each with the one
+    /// difference its own semantics forces: [`Self::For`], [`Self::Foreach`] and
+    /// [`Self::DoWhile`].
     While {
         cond: CondExpr,
         body: Vec<Stmt>,
@@ -2145,8 +2145,75 @@ pub enum StmtKind {
         poisons: bool,
         may_return: bool,
     },
-    /// A recognized control-flow construct (`for`/`foreach`/`switch`/`do`-`while`/
-    /// `try`/nested block) whose data-flow isn't modeled, but whose write/read sets are
+    /// A structured `for` (issue #650) — [`Self::While`] plus the two clauses a
+    /// `for` header has that a `while` header does not.
+    ///
+    /// * `init` — the initialization expressions, lowered as the statements they
+    ///   are. They run **once**, before the condition is ever evaluated, in the env
+    ///   as it stands at the construct, so a walker walks them there rather than
+    ///   forgetting them: their findings are as good as a top-level statement's.
+    /// * `carried` — the names `init` writes that the loop *proper* (condition,
+    ///   increments, body) never writes. Nothing after `init` can change one, so its
+    ///   binding is the same on iteration 40 as on iteration 1 and the body entry
+    ///   keeps it — which is the whole of what "`init`'s writes are visible to the
+    ///   condition" means. Every other name in `writes` is forgotten at the entry as
+    ///   a `while`'s is, the increments' targets included: an increment runs after
+    ///   every iteration, so its write is exactly the loop-carried kind.
+    ///
+    /// The increments themselves are not carried. They run in the body's *exit* env,
+    /// which this construct discards, so there is nothing for a walker to walk them
+    /// against; their write and read sets are in the construct's own, which is what
+    /// makes forgetting them at the entry sound.
+    ///
+    /// `cond` is the **last** condition expression — the one PHP tests. A `for` with
+    /// no condition at all (`for (;;)`) carries [`CondExpr::Opaque`], which narrows
+    /// nothing and decides nothing, so its body walks as an unguarded one.
+    For {
+        init: Vec<Stmt>,
+        cond: CondExpr,
+        body: Vec<Stmt>,
+        carried: Vec<String>,
+        writes: Vec<String>,
+        reads: Vec<String>,
+        poisons: bool,
+        may_return: bool,
+    },
+    /// A structured `foreach` (issue #650) — [`Self::While`] with no header
+    /// condition to narrow by, because a `foreach` header is not a test: it binds.
+    ///
+    /// The key and value targets are ordinary members of `writes` (the same
+    /// `collect_assign_writes` row that has always counted a `foreach` binding), so
+    /// the entry forgetting leaves them **defined but untyped** — which is what they
+    /// are, until a slice types them from the subject's own value type (issue #652).
+    /// Nothing here claims otherwise; the gain is that the body is walked at all.
+    Foreach {
+        body: Vec<Stmt>,
+        writes: Vec<String>,
+        reads: Vec<String>,
+        poisons: bool,
+        may_return: bool,
+    },
+    /// A structured `do`-`while` (issue #650) — [`Self::While`] with the entry
+    /// narrowing **withheld**, and the condition therefore not carried at all.
+    ///
+    /// The body's first iteration runs before the condition is ever evaluated, so a
+    /// fact read off the condition does not hold at the entry to that iteration.
+    /// Taking the `while` rule here would be unsound in both directions at once: it
+    /// would narrow the first iteration by a test that has not happened, and it
+    /// would skip the body of a `do { … } while (false)` — a loop whose body always
+    /// runs exactly once.
+    ///
+    /// A walker still gets everything else a `while` gives it: the same sets, the
+    /// same entry forgetting, and a body to walk.
+    DoWhile {
+        body: Vec<Stmt>,
+        writes: Vec<String>,
+        reads: Vec<String>,
+        poisons: bool,
+        may_return: bool,
+    },
+    /// A recognized control-flow construct (an unstructurable `switch`, `try`, a
+    /// nested block) whose data-flow isn't modeled, but whose write/read sets are
     /// (ADR-0027 ratchet: forgets only touched/branched variables, not all known values).
     ///
     /// * `writes` — over-approximated names the subtree may assign (any lvalue, compound/

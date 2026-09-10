@@ -112,13 +112,14 @@ pub(crate) fn lower_stmt(s: &Statement<'_>, out: &mut Vec<Stmt>) {
         Statement::Break(_) | Statement::Continue(_) => {
             Stmt::lowered(StmtKind::LoopJump { span: stmt_span }, Vec::new())
         }
+        // The other three loop forms are structured too (issue #650), each with the
+        // one difference its own semantics forces — see the variant docs.
+        Statement::For(f) => lower_for(s, f),
+        Statement::Foreach(fe) => lower_foreach(s, fe),
+        Statement::DoWhile(d) => lower_do_while(s, d),
         // Every OTHER control-flow construct stays `Opaque` (ADR-0027 ratchet) —
-        // the walk forgets only its write/read set, not the whole env. The three
-        // remaining loop forms join `while` in issue #650.
-        Statement::For(_)
-        | Statement::Foreach(_)
-        | Statement::DoWhile(_)
-        | Statement::Try(_) => lower_opaque(s),
+        // the walk forgets only its write/read set, not the whole env.
+        Statement::Try(_) => lower_opaque(s),
         // `unset($var[<lit>]);` — a constant-key offset unset (ADR-0062 A-G8).
         // Barrier semantics plus the base and key, exactly as `OffsetWrite`; a
         // multi-target unset, `unset($var)` itself, and a dynamic key all fall
@@ -677,6 +678,75 @@ fn lower_while(s: &Statement<'_>, wh: &While<'_>) -> Stmt {
     Stmt::lowered(StmtKind::While { cond, body, writes, reads, poisons, may_return }, Vec::new())
 }
 
+/// Lower a `for` to [`StmtKind::For`] (issue #650). The construct's own sets come
+/// from [`opaque_sets`] over the whole statement, unchanged, so its fall-through is
+/// an `Opaque`'s to the byte; what the variant adds is the body, the tested
+/// condition, the initialization statements and `carried`.
+///
+/// `carried` is the difference between the two write questions a `for` asks. The
+/// fall-through owes the whole construct's writes; the body's **entry** owes only
+/// what can change between iterations, and an `init` write that nothing in the
+/// condition, the increments or the body writes again cannot. Computing it here —
+/// where the clauses are still separable — is what keeps the walk's own rule the
+/// single [`StmtKind::While`] one.
+fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
+    let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
+    let init: Vec<Stmt> = f.initializations.iter().flat_map(|e| lower_expr_position(e)).collect();
+    // PHP tests the LAST condition expression; the earlier ones are evaluated for
+    // their effects alone, and those effects are already in the sets above.
+    let cond = f
+        .conditions
+        .iter()
+        .next_back()
+        .map_or_else(|| CondExpr::Opaque { reads: Vec::new() }, |c| lower_cond(c));
+    let body = lower_trace(f.body.statements());
+    // The loop proper: everything but `init`. A name it writes may hold something
+    // else on iteration 2, so it goes at the entry however it was first bound.
+    let mut loop_writes = Vec::new();
+    let mut note = |node: &Node<'_, '_>| {
+        for w in opaque_sets(node).0 {
+            if !loop_writes.contains(&w) {
+                loop_writes.push(w);
+            }
+        }
+    };
+    for c in f.conditions.iter() {
+        note(&Node::Expression(c));
+    }
+    for inc in f.increments.iter() {
+        note(&Node::Expression(inc));
+    }
+    for st in f.body.statements() {
+        note(&Node::Statement(st));
+    }
+    let carried: Vec<String> =
+        writes.iter().filter(|w| !loop_writes.contains(w)).cloned().collect();
+    let kind = StmtKind::For { init, cond, body, carried, writes, reads, poisons, may_return };
+    Stmt::lowered(kind, Vec::new())
+}
+
+/// Lower a `foreach` to [`StmtKind::Foreach`] (issue #650) — the sets and the body,
+/// and nothing else: a `foreach` header binds rather than tests, so there is no
+/// condition to carry. The `$k`/`$v` targets are ordinary writes (they always were),
+/// so the entry forgetting leaves them defined but untyped; typing them from the
+/// subject is issue #652.
+fn lower_foreach(s: &Statement<'_>, fe: &mago_syntax::cst::Foreach<'_>) -> Stmt {
+    let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
+    let body = lower_trace(fe.body.statements());
+    Stmt::lowered(StmtKind::Foreach { body, writes, reads, poisons, may_return }, Vec::new())
+}
+
+/// Lower a `do`-`while` to [`StmtKind::DoWhile`] (issue #650). The condition is
+/// deliberately **not** carried: it is evaluated after the body, so no reader of
+/// this variant may narrow the body's entry by it, and a field nothing may read is
+/// a field that invites being read. See the variant docs for the two ways taking
+/// the `while` rule here would be unsound.
+fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt {
+    let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
+    let body = lower_trace(std::slice::from_ref(d.statement));
+    Stmt::lowered(StmtKind::DoWhile { body, writes, reads, poisons, may_return }, Vec::new())
+}
+
 /// Lower a borrowed statement list to a sub-trace (a branch body). Shares the
 /// per-statement lowering with the top-level scope walk.
 fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
@@ -687,15 +757,16 @@ fn lower_trace(statements: &[Statement<'_>]) -> Vec<Stmt> {
     out
 }
 
-/// Lower a match-arm body expression (`… => <expr>`) to a sub-trace. The body is
-/// an expression, so it reuses [`lower_expr_stmt`] (an arm body that is `throw …`
-/// therefore lowers to a real [`StmtKind::Throw`] terminator), preceded by the
-/// entries a `match` in value position inside it contributes (issue #430) — an
-/// arm body is a statement position by any other name, so it gets the same
-/// treatment [`lower_stmt`] gives one.
-fn lower_arm_body(expr: &Expression<'_>) -> Vec<Stmt> {
+/// Lower an expression PHP evaluates in statement position to a sub-trace: a
+/// match-arm body (`… => <expr>`) and a `for` initialization are both one. The
+/// expression reuses [`lower_expr_stmt`] (so an arm body that is `throw …` lowers
+/// to a real [`StmtKind::Throw`] terminator), preceded by the entries a `match` in
+/// value position inside it contributes (issue #430) — either is a statement
+/// position by any other name, so it gets the same treatment [`lower_stmt`] gives
+/// one.
+fn lower_expr_position(expr: &Expression<'_>) -> Vec<Stmt> {
     let mut out = Vec::new();
-    // A `match` that IS the arm body is a statement position: `lower_expr_stmt`
+    // A `match` that IS the expression is a statement position: `lower_expr_stmt`
     // structures it below, and hoisting it here too would walk its arms twice.
     if !matches!(expr.unparenthesized(), Expression::Match(_)) {
         scan_value_matches(&Node::Expression(expr), &mut out);
@@ -768,7 +839,7 @@ fn value_position_matches(s: &Statement<'_>, out: &mut Vec<Stmt>) {
 ///
 /// * a nested function-like or class — a separate scope, lowered separately, and
 ///   its free variables are not this statement's env;
-/// * the arms of a `match` this scan has already taken — [`lower_arm_body`] runs
+/// * the arms of a `match` this scan has already taken — [`lower_expr_position`] runs
 ///   the same hoist inside each arm, so descending here would walk them twice.
 ///
 /// A `match` [`lower_match_stmt`] refuses contributes nothing and is not
@@ -839,13 +910,13 @@ fn lower_match_by_value(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                 for c in a.conditions.iter() {
                     conditions.push(usable_operand(c)?);
                 }
-                arms.push(MatchArmT { conditions, trace: lower_arm_body(a.expression) });
+                arms.push(MatchArmT { conditions, trace: lower_expr_position(a.expression) });
             }
             mago_syntax::cst::MatchArm::Default(a) => {
                 if default.is_some() {
                     return None; // two defaults — give up (unreachable in valid PHP)
                 }
-                default = Some(lower_arm_body(a.expression));
+                default = Some(lower_expr_position(a.expression));
             }
         }
     }
@@ -892,13 +963,13 @@ fn lower_match_guard_chain(m: &mago_syntax::cst::Match<'_>) -> Option<Stmt> {
                         Some(acc) => CondExpr::Or(Box::new(acc), Box::new(one)),
                     });
                 }
-                links.push((cond?, lower_arm_body(a.expression)));
+                links.push((cond?, lower_expr_position(a.expression)));
             }
             mago_syntax::cst::MatchArm::Default(a) => {
                 if default.is_some() {
                     return None; // two defaults — give up (unreachable in valid PHP)
                 }
-                default = Some(lower_arm_body(a.expression));
+                default = Some(lower_expr_position(a.expression));
             }
         }
     }

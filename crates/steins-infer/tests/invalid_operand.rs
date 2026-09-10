@@ -426,12 +426,21 @@ fn fires_in_a_while_body_exactly_once() {
 }
 
 #[test]
-fn silent_inside_a_still_unmodelled_loop_body() {
-    // `for`/`foreach`/`do`-`while` are still ADR-0027 `Opaque` constructs (issue
-    // #650): the entry env isn't the env their statements run under, so no site
-    // inside one is judged — out of reach, exactly as `while` was.
-    let src = "<?php\n$x = 1;\nforeach ([1] as $i) {\n    $x = [];\n    $y = $x + 1;\n}\n";
-    assert!(diags(src).is_empty(), "a foreach body is out of reach: {:#?}", diags(src));
+fn fires_in_the_other_loop_bodies_exactly_once() {
+    // `for`, `foreach` and `do`-`while` are walked too (issue #650), so the row
+    // above holds for each of them: the site is judged on the same terms, once.
+    let forms = [
+        ("for ($i = 0; $i < 1; $i++) {", "}"),
+        ("foreach ([1] as $i) {", "}"),
+        ("do {", "} while (rand());"),
+    ];
+    for (header, closer) in forms {
+        let src =
+            format!("<?php\n$x = 1;\n{header}\n    $x = [];\n    $y = $x + 1;\n{closer}\n");
+        let d = diags(&src);
+        assert_eq!(d.len(), 1, "`{header}`: exactly one report: {d:#?}");
+        assert_eq!(d[0].line, 5, "`{header}`: {d:#?}");
+    }
 }
 
 #[test]
