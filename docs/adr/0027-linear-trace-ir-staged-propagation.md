@@ -163,8 +163,9 @@ every iteration, which is the loop-carried kind of write exactly, so their
 targets are forgotten with the rest of `writes`; the increment expressions
 themselves are not walked, since the env they run in is the body's exit, which
 this construct discards. The tested condition is the **last** one PHP evaluates;
-a `for (;;)` carries `CondExpr::Opaque`, which decides nothing and narrows
-nothing, so its body walks unguarded.
+a `for (;;)` carries the literal `true` PHP evaluates there, which narrows
+nothing, so its body walks unguarded (and, per the 2026-09-11 amendment,
+never falls through when no jump can leave it).
 
 **`foreach`.** A header that binds rather than tests, so there is no condition
 and nothing to narrow by. `$k` and `$v` are ordinary members of `writes` — the
@@ -273,10 +274,20 @@ a fact read off it is untested at the entry and freshly tested at the exit.
 `StmtKind::DoWhile` therefore carries `cond` after all, with the one legal
 reading written on the field.
 
+**A header that can never fail, with no jump to leave by, never falls
+through.** The header's verdict on the entry env is the verdict of every
+test the loop makes, since that env holds at each of them. `Yes` plus
+`break_free` therefore proves the successor unreachable — `while (true)
+{ …; return; }` is the `if (true) { return; }` twin `walk_if` already
+terminates — and the `while`/`for` arms answer `Flow::Terminated` rather
+than walking dead code the old `Opaque` washed out by forgetting `reads`.
+A `do`-`while` is not this question (issue #679).
+
 **The order is the soundness, and it is the part worth reading twice.** The
-negation is applied to the **post-forget** env — `writes` gone, `reads` and
-the `for`'s `carried` kept — which is the same env the header applies to at
-the entry. So it never states what a name held *before* the loop; it states
+negation is applied to the **post-forget** env — `writes` gone, `reads` kept
+— which is the entry env minus the `for`'s `carried`: `init` is walked into
+the body env only, so an init-only name is forgotten at the fall-through
+like any other write (recoverable, out of scope here). So it never states what a name held *before* the loop; it states
 what the failing test proves about what the name holds *now*, and the exit
 is reached only through a failing test of exactly that value. Both readings
 fall out of the order without a special case:

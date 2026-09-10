@@ -654,8 +654,8 @@ function f(int $n): void {{
 
 #[test]
 fn an_empty_for_header_walks_its_body_unguarded() {
-    // `for (;;)` has no condition to test; it lowers to `CondExpr::Opaque`, which
-    // decides nothing and narrows nothing, so the body is walked as-is.
+    // `for (;;)` has no condition to test; it lowers as the literal `true` PHP
+    // evaluates there, which narrows nothing, so the body is walked as-is.
     let src = "<?php
 final class Order {}
 function f(): void {
@@ -724,8 +724,9 @@ function f(): void {
 
 #[test]
 fn a_do_while_condition_narrows_nothing_at_the_body_entry() {
-    // The soundness pin, second half, and the reason `StmtKind::DoWhile` does not
-    // carry its condition at all. The first iteration runs BEFORE the header is ever
+    // The soundness pin, second half, and the reason no ENTRY reader may consult
+    // `StmtKind::DoWhile`'s condition (the exit does, issue #651). The first
+    // iteration runs BEFORE the header is ever
     // evaluated, so `$x instanceof Order` is not a fact there: `$x` still holds the
     // `null` the statement above it wrote, `$x->ship()` is a guaranteed runtime
     // `Error`, and the `call.on-null` that says so is a true positive the `while`

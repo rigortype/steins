@@ -2175,9 +2175,9 @@ pub enum StmtKind {
     /// makes forgetting them at the entry sound.
     ///
     /// `cond` is the **last** condition expression — the one PHP tests. A `for` with
-    /// no condition at all (`for (;;)`) carries [`CondExpr::Opaque`], which narrows
-    /// nothing and decides nothing, so its body walks as an unguarded one — and
-    /// negates to nothing at the exit, which is the same statement twice.
+    /// no condition at all (`for (;;)`) carries the literal `true`, which is what PHP
+    /// evaluates there: its body walks as an unguarded one, it negates to nothing at
+    /// the exit, and with no jump to leave by it never falls through (issue #651).
     ///
     /// `break_free` means what it means on [`Self::While`], read off this body.
     For {

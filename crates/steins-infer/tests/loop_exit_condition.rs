@@ -194,6 +194,88 @@ fn a_break_belonging_to_a_nested_construct_does_not_disqualify() {
 }
 
 #[test]
+fn a_header_that_can_never_fail_makes_the_successor_unreachable() {
+    // Keeping `reads` at the fall-through (below) would otherwise carry `$x`'s
+    // proven null into code no path reaches: the old `Opaque` washed this out by
+    // forgetting `$x`, and `if (true) { return; }` already terminates. A header the
+    // entry env decides `Yes` is decided `Yes` at every test, so with no jump to
+    // leave by, nothing after the loop runs.
+    let dead_after = |header: &str| {
+        let src = format!(
+            "<?php
+final class Foo {{ public function bar(): void {{}} }}
+function f(): void {{
+    $x = null;
+    {header} {{ echo $x; return; }}
+    $x->bar();
+}}
+"
+        );
+        let tree = SourceTree::parse(&src);
+        check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count()
+    };
+    assert_eq!(dead_after("while (true)"), 0, "`while (true)` with a returning body");
+    assert_eq!(dead_after("for (;;)"), 0, "`for (;;)` with a returning body");
+    assert_eq!(dead_after("while (1)"), 0, "a truthy literal header");
+    assert_eq!(
+        dead_after("while (rand() > 0)"),
+        1,
+        "an undecided header may fail: the successor is live and the finding is true"
+    );
+}
+
+#[test]
+fn a_break_makes_a_never_failing_header_fall_through_again() {
+    // The pair is what proves unreachability; `break` alone puts the successor back.
+    let src = "<?php
+final class Foo { public function bar(): void {} }
+function f(): void {
+    $x = null;
+    while (true) { if (rand() > 0) { break; } return; }
+    $x->bar();
+}
+";
+    let tree = SourceTree::parse(src);
+    assert_eq!(
+        check(&tree, &[], "t.php").into_iter().filter(|d| d.id == "call.on-null").count(),
+        1,
+        "the break leaves without failing the header, so the successor is reached"
+    );
+}
+
+#[test]
+fn a_for_negates_only_the_last_of_its_conditions_at_the_exit() {
+    // PHP tests the last comma-separated condition and evaluates the others for
+    // their effects, so only the last one's negation is a fact at the fall-through.
+    let src = "<?php
+function f(int $i, int $j): void {
+    for (; $i < 10, $j < 5; ) {
+        echo 1;
+    }
+    \\PHPStan\\dumpType($i);
+    \\PHPStan\\dumpType($j);
+}
+";
+    assert_eq!(
+        answers(src),
+        vec!["int".to_owned(), "int<5, max>".to_owned()],
+        "`$i < 10` is evaluated, never tested; `$j < 5` is the header"
+    );
+}
+
+#[test]
+fn a_break_2_that_targets_an_enclosing_switch_does_not_disqualify() {
+    // Level counting in the other direction: `break 2` inside a `while` that sits
+    // inside a `switch` leaves the switch, which is still inside THIS loop.
+    let body = "        switch (1) { case 1: while (true) { break 2; } }";
+    assert_eq!(
+        answers(&traversal(body)),
+        vec!["null".to_owned()],
+        "two levels reach the switch, not this loop"
+    );
+}
+
+#[test]
 fn a_break_2_reaches_out_of_a_nested_construct_and_does_disqualify() {
     // The same keyword one level further out. `break 2` inside a nested loop or
     // `switch` leaves THIS loop, so it is this loop's `break` and disables the
@@ -314,9 +396,10 @@ function f(Node $node): void {{
 #[test]
 fn a_for_negates_the_condition_php_actually_tests() {
     // A `for`'s tested condition is the LAST one; a `for (;;)` has none at all and
-    // carries `CondExpr::Opaque`, which is as inert at the exit as it is at the
-    // entry. The subject is a parameter the loop never writes, so the negation has
-    // its base — an induction variable the header owns is in `writes` and is gone.
+    // carries the literal `true`, whose negation is nothing. The subject is a
+    // parameter the loop never writes, so the negation has its base — an induction
+    // variable the header owns is in `writes` and is gone. The `for (;;)` needs a
+    // `break` to have a live successor at all (see the reachability fixtures).
     let tested = "<?php
 function f(int $limit): void {
     for ($i = 0; $limit < 10; $i++) { echo $i; }
@@ -331,7 +414,7 @@ function f(int $limit): void {
     );
     let forever = "<?php
 function f(int $limit): void {
-    for (;;) { echo $limit; }
+    for (;;) { if (rand() > 0) { break; } echo $limit; }
     \\PHPStan\\dumpType($limit);
 }
 ";

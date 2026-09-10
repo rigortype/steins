@@ -697,12 +697,15 @@ fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
     let init: Vec<Stmt> = f.initializations.iter().flat_map(|e| lower_expr_position(e)).collect();
     // PHP tests the LAST condition expression; the earlier ones are evaluated for
-    // their effects alone, and those effects are already in the sets above.
+    // their effects alone, and those effects are already in the sets above. No
+    // condition at all is `true` — PHP's own reading of `for (;;)` — and it
+    // lowers as the literal so `for (;;) { …; return; }` terminates the way
+    // `while (true)` does (issue #651), instead of an `Opaque` that decides nothing.
     let cond = f
         .conditions
         .iter()
         .next_back()
-        .map_or_else(|| CondExpr::Opaque { reads: Vec::new() }, |c| lower_cond(c));
+        .map_or_else(|| CondExpr::Truthy(CondOperand::Literal(ArgValue::Bool(true))), |c| lower_cond(c));
     let body = lower_trace(f.body.statements());
     // The loop proper: everything but `init`. A name it writes may hold something
     // else on iteration 2, so it goes at the entry however it was first bound.

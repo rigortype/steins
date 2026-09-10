@@ -596,6 +596,18 @@ fn push_hidden_exit_floor(w: &WalkCx, may_return: bool) {
     }
 }
 
+/// What a `while` or `for` does to the code after it, given the header's verdict on
+/// the entry env (issue #651). That env holds at every header evaluation, so a
+/// `Yes` there is a `Yes` at all of them: no test ever fails, and with no jump able
+/// to leave the body either, the successor is unreachable — `while (true) { …;
+/// return; }` is the `if (true) { return; }` twin `walk_if` already terminates.
+/// Anything less than that pair falls through: an undecided header may fail, and a
+/// `break` leaves without failing it. A `do`-`while` is not this question (its body
+/// runs before any test; issue #679 owns its reachability).
+fn loop_flow(break_free: bool, verdict: Certainty) -> Flow {
+    if break_free && verdict == Certainty::Yes { Flow::Terminated } else { Flow::FellThrough }
+}
+
 /// The env a **structured loop's fall-through** starts in (issue #651) — the same
 /// two-set question [`forget_construct_sets`] answers for an `Opaque`, with the
 /// `reads` half decided the other way.
@@ -1318,8 +1330,8 @@ pub(crate) fn walk_trace(
                 loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
                 loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
                 apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-                walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
-                Flow::FellThrough
+                let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+                loop_flow(*break_free, verdict)
             }
             // A structured `for` (issue #650). The `while` arm above plus its two
             // extra clauses: `init` is WALKED — it runs once, here, in the env as it
@@ -1346,8 +1358,8 @@ pub(crate) fn walk_trace(
                 loop_entry_forget(writes, reads, carried, *poisons, &mut benv, &mut bstore);
                 loop_fallthrough_forget(w, writes, reads, *poisons, *may_return, env, store);
                 apply_loop_exit_negation(w, folder, cond, *break_free, env, store);
-                walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
-                Flow::FellThrough
+                let verdict = walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
+                loop_flow(*break_free, verdict)
             }
             // A structured `foreach` (issues #650 and #652): the same entry env, with
             // no header to narrow it — a `foreach` header binds rather than tests —

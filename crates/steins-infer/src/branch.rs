@@ -301,12 +301,18 @@ pub(crate) fn walk_while_body(
     descent: &mut Option<Descent<'_>>,
     facts: &mut Option<&mut Vec<LineFact>>,
     out: &mut Vec<Diagnostic>,
-) {
-    if eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned) == Certainty::No {
-        return;
+) -> Certainty {
+    // The verdict is on the ENTRY env, which holds at every header evaluation, so
+    // it is the verdict of every test the loop ever makes: `No` skips the body,
+    // and `Yes` is what the caller reads as "no failing test can ever leave this
+    // loop" (issue #651's reachability half).
+    let verdict = eval_cond(w, folder, cond, &benv, &bstore, w.scope.poisoned);
+    if verdict == Certainty::No {
+        return verdict;
     }
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
     walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+    verdict
 }
 
 /// Walk a structured loop body from an entry pair the header has already had its
