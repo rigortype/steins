@@ -971,5 +971,8 @@ recorded as deferred rather than answered wrongly.
 - The chained-receiver limit (ADR-0075 §3 / ADR-0052 §7, ~26 rows) is a
   different refusal and is untouched.
 - Every override/variance finding and every absence-family id keeps its
-  premises; the declaration path feeds the dump surface and the return
-  floor, not a finding.
+  premises. The declaration path feeds the dump surface and the return
+  floor; the one finding surface that reads the floor is the possibly-grade
+  argument premise (`type.maybe-argument-mismatch` for a native envelope at
+  its native stratum, `phpdoc.maybe-*` for an `@return`-derived arm), which
+  A16's strata license — a definite `type.*` never premises on it.
