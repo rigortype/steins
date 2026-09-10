@@ -258,6 +258,137 @@ fn an_unknown_callee_invalidates() {
     }
 }
 
+// The mined arginfo arm (issue #637): past the hand-transcribed lists, a
+// rowless internal name is certified from the generated `param_facts` table —
+// `ReflectionFunction::isPassedByReference()` at `PINNED_PHP`, one row per
+// internal function. What that buys is measured in the nsrt oracle; what it
+// must not cost is pinned here.
+
+/// The issue's own witness, `non-empty-string-file-functions.php:172-175`.
+/// `rmdir(string $directory, $context = null): bool` writes nothing through
+/// either parameter, so the guard reads `$s` and both arms — and the join
+/// after them — still hold the parameter's declared type. The join is the
+/// half this issue buys: it asks for `string`, which was there before the call
+/// and which nothing narrowed.
+#[test]
+fn a_mined_by_value_builtin_keeps_its_argument_on_both_arms_and_at_the_join() {
+    let src = "<?php\nfunction f(string $s): void {\n\
+               if (rmdir($s)) { \\PHPStan\\dumpType($s); } else { \\PHPStan\\dumpType($s); }\n\
+               \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(
+        types(src),
+        vec![
+            "dumped type: string".to_owned(),
+            "dumped type: string".to_owned(),
+            "dumped type: string".to_owned(),
+        ]
+    );
+    // The string-search family, the issue's largest slice: `strstr` reads a
+    // haystack and a needle and writes neither, so a second read of either
+    // still has something to read.
+    assert_eq!(dump_after("$s = 'abc'; strstr($s, 'b'); strstr($s, 'c');"), "dumped type: 'abc'");
+    let two = "<?php\nfunction f(): void { $h = 'abc'; $n = 'b'; strstr($h, $n);\n\
+               \\PHPStan\\dumpType($h); \\PHPStan\\dumpType($n); }\n";
+    assert_eq!(types(two), vec!["dumped type: 'abc'".to_owned(), "dumped type: 'b'".to_owned()]);
+}
+
+/// The guard-position exemption's own refusals. The read set a condition
+/// forgets is the whole condition's, so the exemption may only fire when the
+/// certified callee is the ONLY thing in the call that could have written.
+#[test]
+fn the_guard_position_exemption_refuses_what_it_cannot_read() {
+    // A nested call inside the argument is what actually touched `$s`, and
+    // nothing here knows its parameter modes — `rmdir`'s promise is about
+    // `rmdir`'s parameter.
+    let nested = "<?php\nfunction f(string $s): void { if (rmdir(my_helper($s))) {\n\
+                  \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(one_type(nested), "dumped type: unknown");
+    // A by-reference position condemns the whole call, not just its own
+    // argument: `similar_text(string $string1, string $string2, float
+    // &$percent)` is certified at 0 and 1 and refused at 2, so the guard keeps
+    // the blanket drop and even `$s` — a by-value position — is forgotten.
+    let by_ref = "<?php\nfunction f(string $s): void { $p = 0.0;\n\
+                  if (similar_text($s, 'x', $p)) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(one_type(by_ref), "dumped type: unknown");
+    // A project declaration beside the call makes the spelling ambiguous
+    // (issue #279), and an ambiguous name is exempted from nothing.
+    let shadowed = "<?php\nfunction rmdir($d) { return true; }\n\
+                    function f(string $s): void { if (rmdir($s)) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(one_type(shadowed), "dumped type: unknown");
+    // A method call names no catalog row at all.
+    let method = "<?php\nclass C { public function m(string $x): bool { return true; } }\n\
+                  function f(string $s): void { $c = new C();\n\
+                  if ($c->m($s)) { \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(one_type(method), "dumped type: unknown");
+}
+
+/// The other direction, and the reason the arm reads `by_ref` rather than
+/// assuming: a reference parameter must still condemn the binding. A rowed
+/// name answers positionally (its row is the complete list); an **unrowed**
+/// by-ref name is declined wholesale, because certifying its other positions
+/// would mean inventing the row this arm deliberately does not invent.
+#[test]
+fn a_by_reference_position_still_invalidates_under_the_mined_arm() {
+    // Rowed, positional: `str_replace`'s `$subject` survives and its `$count`
+    // does not — one call, two verdicts, unchanged by the widening.
+    let mixed = "<?php\nfunction f(): void { $s = 'abc'; $c = 1; str_replace('a', 'b', $s, $c);\n\
+                 \\PHPStan\\dumpType($s); \\PHPStan\\dumpType($c); }\n";
+    assert_eq!(
+        types(mixed),
+        vec!["dumped type: 'abc'".to_owned(), "dumped type: unknown".to_owned()]
+    );
+    // Unrowed by-ref: every position keeps the forgetting floor, including the
+    // by-value ones. `exec(string $command, array &$output, int &$result_code)`
+    // and `similar_text`'s unrowed cousins are exactly this shape.
+    for f in ["exec", "parse_str", "settype", "sscanf"] {
+        assert_eq!(
+            dump_after(&format!("$s = 'abc'; {f}($s, $q);")),
+            "dumped type: unknown",
+            "{f} declares a reference parameter"
+        );
+    }
+}
+
+/// Issue #279's rule, over a name the catalog only learned in #637: a project
+/// declaration beside the call makes the spelling **ambiguous**, and an
+/// ambiguous name certifies nothing. Widening the catalog widens the set of
+/// spellings this applies to, which is the direction that costs silence — never
+/// a fact kept on a body the analysis has not read.
+#[test]
+fn a_project_declaration_shadowing_a_mined_name_certifies_nothing() {
+    let shadowed = "<?php\nfunction strpos($h, $n) { return 0; }\n\
+                    function f(): void { $s = 'abc'; strpos($s, 'b'); \\PHPStan\\dumpType($s); }\n";
+    assert_eq!(one_type(shadowed), "dumped type: unknown");
+    // Without the shadow the same call keeps the fact — so the pin above is
+    // measuring the shadow and not the name.
+    assert_eq!(dump_after("$s = 'abc'; strpos($s, 'b');"), "dumped type: 'abc'");
+}
+
+/// The mined arm changes nothing about an argument written by an **embedded
+/// assignment** in the same statement (`f($s = 'x')`). That shape is not a
+/// recorded site — the lowering can only describe a bare variable or an offset
+/// chain — so the assignment channel is what owns it, and the pin is that a
+/// certified callee and an unknown one answer identically.
+///
+/// They answer identically at the WRONG value: a nested assignment expression
+/// is not applied by the walk, so `$s` reads back as its pre-statement value
+/// under either callee. That gap predates this issue and is orthogonal to it
+/// (`$q = ($s = 'zz');` with no call at all does the same); what matters here
+/// is that certification does not launder it — a by-value promise about the
+/// PARAMETER never becomes a promise about the caller's statement.
+#[test]
+fn an_embedded_assignment_reads_the_same_under_a_certified_callee() {
+    let certified = dump_after("$s = 'abc'; strstr($s = 'zz', 'z');");
+    let unknown = dump_after("$s = 'abc'; my_helper($s = 'zz');");
+    let no_call = dump_after("$s = 'abc'; $q = ($s = 'zz');");
+    assert_eq!(certified, unknown, "certification did not move this shape");
+    assert_eq!(certified, no_call, "…and the shape does not need a call at all");
+    // The offset spelling of the by-value rule itself is unaffected (issue
+    // #609/#641): a certified position copies the element out, so the root
+    // survives with its whole shape.
+    assert_eq!(dump_after("$s = ['abc']; strstr($s[0], 'b');"), "dumped type: list{'abc'}");
+}
+
 /// Issue #41 — `use function trim;` names the **global builtin**, and the gate
 /// must read the catalog through the import exactly as it does through `\trim`.
 ///
@@ -516,4 +647,65 @@ fn the_site_list_is_complete_or_absent_per_name() {
     let split = "<?php\nclass C { public function m(string $x): void {} }\n\
                  function f(): void { $s = 'abc'; trim($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(split), "dumped type: 'abc'");
+}
+
+// The two gates the adversarial review of #637 added: an `ArrayAccess` offset
+// read runs userland, and the top-level frame's locals are globals.
+
+/// `$a['k']` on an `ArrayAccess` receiver is `offsetGet`, a userland body that may
+/// write anything — here the receiver's own property. Certifying `strstr` by value
+/// must not keep `$a->p` across it: in guard position the shape gate refuses the
+/// offset read over an object-bound base, in statement position the kept handle
+/// takes the ADR-0036 sweep. Either way no `type.argument-mismatch` is
+/// manufactured on `want($a->p)`, and the property reads `unknown`.
+#[test]
+fn an_offset_read_on_an_array_access_receiver_is_not_a_by_value_shape() {
+    let src = "<?php
+declare(strict_types=1);
+final class AA implements ArrayAccess {
+    public int|string $p = 1;
+    public function offsetGet(mixed $o): mixed { $this->p = 'w'; return 'v'; }
+    public function offsetExists(mixed $o): bool { return true; }
+    public function offsetSet(mixed $o, mixed $v): void {}
+    public function offsetUnset(mixed $o): void {}
+}
+function want(string $s): void {}
+function guard(): void { $a = new AA(); $a->p = 1; if (strstr($a['k'], 'x')) { \\PHPStan\\dumpType($a->p); want($a->p); } }
+function stmt(): void { $a = new AA(); $a->p = 1; strstr($a['k'], 'x'); \\PHPStan\\dumpType($a->p); want($a->p); }
+";
+    let tree = SourceTree::parse(src);
+    let ds = check(&tree, &[], "t.php");
+    assert!(
+        !ds.iter().any(|d| d.id == "type.argument-mismatch"),
+        "offsetGet rewrote the property: {ds:?}"
+    );
+    assert_eq!(types(src), vec!["dumped type: unknown".to_owned(), "dumped type: unknown".to_owned()]);
+}
+
+/// The top-level frame is the one whose locals are globals, so a builtin that runs
+/// userland through a non-`callable` argument — a generator body under
+/// `iterator_to_array` — can rebind them by `global`. The mined certification is
+/// refused there and admitted in a function body, where a callback's `global $g`
+/// reaches a different `$g`: the function keeps the handle (swept), the script
+/// does not.
+#[test]
+fn the_mined_certification_is_refused_in_the_top_level_frame() {
+    let generator = "function gen(): Generator { global $g; $g = 'rebound'; yield 1; }\n";
+    let script = format!("<?php\n{generator}$g = gen();\niterator_to_array($g);\n\\PHPStan\\dumpType($g);\n");
+    assert_eq!(one_type(&script), "dumped type: unknown", "a script local is a global the body rebinds");
+    let func = format!(
+        "<?php\n{generator}function f(): void {{ $g = gen(); iterator_to_array($g); \\PHPStan\\dumpType($g); }}\n"
+    );
+    assert_ne!(one_type(&func), "dumped type: unknown", "a function local is out of the body's reach");
+}
+
+/// Named arguments and a spread are not positional, so the guard exemption never
+/// looks at the table for them: the whole read set takes the floor.
+#[test]
+fn the_guard_exemption_refuses_named_arguments_and_a_spread() {
+    let named = "<?php\nfunction f(string $s, int $c): void {\n\
+                 if (str_replace(subject: $s, search: 'a', replace: 'b', count: $c)) { \\PHPStan\\dumpType($c); \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(types(named), vec!["dumped type: unknown".to_owned(), "dumped type: unknown".to_owned()]);
+    let spread = "<?php\nfunction f(array $a): void { if (strstr(...$a)) { \\PHPStan\\dumpType($a); } }\n";
+    assert_eq!(one_type(spread), "dumped type: unknown");
 }

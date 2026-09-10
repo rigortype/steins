@@ -8,7 +8,7 @@ use steins_domain::{Certainty, Fact, Val};
 use steins_phpdoc::Type as PType;
 use steins_syntax::{
     ArgValue, CallExpr, Callee, CondExpr, InvalidatedVar, NameRef, NamedArg, NativeType, Receiver,
-    RefKind, Scope, Span, Stmt, StmtKind,
+    RefKind, Scope, ScopeOwner, Span, Stmt, StmtKind,
 };
 
 use crate::fold::Folder;
@@ -281,6 +281,7 @@ pub(crate) fn analyze_scope(
         alloc: std::cell::Cell::new(alloc_start),
         summary,
     };
+    let _frame = FrameGuard::enter(scope);
     let flow =
         walk_trace(&w, folder, &scope.stmts, &mut env, &mut store, &mut descent, &mut facts, false, out);
     if let Some(out) = ret_exits
@@ -330,6 +331,40 @@ fn this_exit_contribution(store: &Store) -> ExitContribution {
         Some(obj) => ExitContribution::Heap(Box::new(obj.clone())),
         None => ExitContribution::Floor,
     }
+}
+
+thread_local! {
+    /// Whether the scope being walked is the top-level one — the frame whose
+    /// locals are globals, so a builtin that runs userland through a
+    /// non-`callable` argument (a generator under `iterator_to_array`, a
+    /// `JsonSerializable` under `json_encode`) can rebind them by `global`.
+    /// ADR-0070's mined certification is refused there (issue #637's adversarial
+    /// review); set for the length of [`analyze_scope`]'s walk and restored
+    /// after, so a descent into a callee reads its own frame.
+    static FRAME_TOP_LEVEL: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// RAII for [`FRAME_TOP_LEVEL`]: the previous value comes back on drop.
+struct FrameGuard(bool);
+
+impl FrameGuard {
+    fn enter(scope: &Scope) -> Self {
+        let prev = FRAME_TOP_LEVEL.replace(matches!(scope.owner, ScopeOwner::TopLevel));
+        Self(prev)
+    }
+}
+
+impl Drop for FrameGuard {
+    fn drop(&mut self) {
+        FRAME_TOP_LEVEL.set(self.0);
+    }
+}
+
+/// Whether the mined by-value arm may certify in the frame being walked — every
+/// frame but the top-level one. See [`FRAME_TOP_LEVEL`] and
+/// [`steins_catalog::by_value_arg_frame`].
+pub(crate) fn mined_arm_admitted() -> bool {
+    !FRAME_TOP_LEVEL.get()
 }
 
 /// Whether a walked (sub-)trace runs off its end (its successor is reachable) or
@@ -1572,13 +1607,34 @@ pub(crate) fn walk_trace(
         // 4. After the statement, invalidate any variable handed to a call — except
         // one an assertion just narrowed (its post-call fact is known), and except
         // one every occurrence of which is a proven by-value argument (ADR-0070).
-        let by_value = by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
+        let (by_value, object_kept) =
+            by_value_survivors(cx, scope.poisoned, &stmt.invalidated, env, store);
         for v in &stmt.invalidated {
             if asserted.contains(&v.name) || by_value.contains(v.name.as_str()) {
                 continue;
             }
             env.remove(&v.name);
             store.unbind(&v.name);
+        }
+        // A kept object handle that reached a by-value call site OTHER than as a
+        // direct argument — an offset root, `strstr($a['k'], …)` on an `ArrayAccess`
+        // receiver — keeps the handle and loses the mutable state
+        // (`by_value_survivors`' second set). A direct object argument is the
+        // ADR-0036 escape rule's, which sweeps only for a callee that can reach
+        // the object and keeps the carry through one that provably cannot; this
+        // sweep must not second-guess it.
+        let direct: HashSet<&str> = checkable_calls(&stmt.kind)
+            .iter()
+            .flat_map(|c| c.args.iter())
+            .filter_map(|a| match &a.value {
+                ArgValue::Var(v) => Some(v.as_str()),
+                _ => None,
+            })
+            .collect();
+        for v in object_kept {
+            if !direct.contains(v) {
+                store.sweep_object(v);
+            }
         }
 
         // 5. Rebind what a proven by-ref write left behind (issue #595), over the
@@ -1670,12 +1726,20 @@ pub(crate) fn by_value_survivors<'s>(
     invalidated: &'s [InvalidatedVar],
     env: &HashMap<String, Known>,
     store: &Store,
-) -> HashSet<&'s str> {
+) -> (HashSet<&'s str>, HashSet<&'s str>) {
     let mut kept: HashSet<&'s str> = HashSet::new();
+    // The kept names whose binding is an object handle AND that reached a real
+    // by-value call site (not only a dump/assert read): the call may have run
+    // userland on that object — an offset read on an `ArrayAccess` receiver is
+    // `offsetGet`, a userland body (issue #637's adversarial review) — so the
+    // object's mutable state must take the ADR-0036 sweep even though the name
+    // itself keeps its handle. Direct object arguments are swept by the escape
+    // rule already; an offset ROOT is not an argument, and this is its sweep.
+    let mut object_kept: HashSet<&'s str> = HashSet::new();
     // Condition 4 (this scope's half): every scope on the ADR-0001 give-up list
     // keeps the blanket drop outright.
     if poisoned {
-        return kept;
+        return (kept, object_kept);
     }
     for entry in invalidated {
         // An opaque entry has an unprovable occurrence somewhere in the
@@ -1690,6 +1754,7 @@ pub(crate) fn by_value_survivors<'s>(
         // which never takes that gate.
         let mut sem_ok = false;
         let mut keep = false;
+        let mut via_call = false;
         for (callee, position) in &entry.sites {
             // The read-site exceptions (docs above): a dump (ADR-0053) — and, in
             // the harness universe only, an `assertType` observation (oracle idea
@@ -1712,6 +1777,7 @@ pub(crate) fn by_value_survivors<'s>(
             }
             if arg_is_by_value(cx, callee, *position) {
                 keep = true;
+                via_call = true;
             } else {
                 // One by-ref (or unresolvable) occurrence condemns the name for
                 // the whole statement, whatever its other occurrences promised.
@@ -1721,9 +1787,12 @@ pub(crate) fn by_value_survivors<'s>(
         }
         if keep {
             kept.insert(var);
+            if via_call && store.refs.contains_key(var) {
+                object_kept.insert(var);
+            }
         }
     }
-    kept
+    (kept, object_kept)
 }
 
 /// Whether a call-argument site's callee is a **dump-surface read** (ADR-0053):
@@ -1801,7 +1870,8 @@ pub(crate) fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> b
         // (`use function trim as t;`) spells the call `t`, which the catalog
         // has never heard of (issue #279).
         FnResolution::Builtin(builtin_name) => {
-            steins_catalog::by_value_arg(&builtin_name, position) == Some(true)
+            steins_catalog::by_value_arg_frame(&builtin_name, position, mined_arm_admitted())
+                == Some(true)
         }
         FnResolution::User(fn_site) => {
             // The declaration answers condition 2 directly, and it is the cheap

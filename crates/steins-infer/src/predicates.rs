@@ -416,6 +416,106 @@ pub(crate) fn pure_question_builtin(cx: &Cx, call: &CallExpr) -> Option<&'static
     NAMES.iter().copied().find(|n| callee.eq_ignore_ascii_case(n))
 }
 
+/// The **mined by-value** builtin a guard call names (issue #637), or `None`.
+///
+/// [`pure_question_builtin`] above is the hand-transcribed half of this rule and
+/// the reason the issue exists: `class_exists` was argued for by name while
+/// `rmdir`, `strstr` and forty file-family siblings — identical in the only
+/// respect that matters, every parameter by value in PHP's own signature — were
+/// never reached, so a guard over one of them cost its subject every fact it
+/// had, on both arms and at the join after them. The membership question is
+/// answered here by [`steins_catalog::by_value_arg`], whose certified set is the
+/// generated arginfo table, so a name enters this exemption by being declared
+/// by-value at `PINNED_PHP` rather than by being noticed.
+///
+/// Two conditions beyond the callee's certification, both about this *call*
+/// rather than the name:
+///
+/// * **Every supplied position is certified.** A rowed name answers
+///   positionally, so `preg_match($re, $s, $m)` is refused at position 2 and the
+///   whole call with it — one by-reference position condemns the guard exactly
+///   as it condemns a statement (ADR-0070 §2.2).
+/// * **Every argument is a shape that cannot itself write.** The read set a
+///   guard forgets is the whole condition's, not the argument list's, so
+///   `f(g($s))` would have this exemption keep `$s` on `f`'s promise while `g`
+///   — which may well declare `&$x` — is what actually touched it. A literal, a
+///   bare variable, an offset read of one, or a literal array of those is the
+///   admitted vocabulary; anything else (a nested call, an assignment, a
+///   closure, an unrepresentable operand) refuses the exemption for the call.
+///
+/// What this does NOT claim is what the guard **proves**. `strstr($s, 'a')`
+/// keeping `$s` is not `strstr($s, 'a') !== false` narrowing it to
+/// `non-falsy-string` — that is the type-specifier half (#575/#266), and the
+/// two halves are measured separately on purpose.
+pub(crate) fn by_value_guard_builtin<'a>(
+    cx: &Cx,
+    call: &'a CallExpr,
+    store: &Store,
+) -> Option<&'a str> {
+    let callee = global_function_callee(cx, call)?;
+    if !call.positional_only || !call.args.iter().all(|a| argument_writes_nothing(&a.value, store))
+    {
+        return None;
+    }
+    let mined = crate::walk::mined_arm_admitted();
+    (0..call.args.len())
+        .all(|p| steins_catalog::by_value_arg_frame(callee, p, mined) == Some(true))
+        .then_some(callee)
+}
+
+/// Whether an argument's own lowered shape can write a caller binding —
+/// conservatively, by admitting only the shapes that provably cannot.
+///
+/// A call, a method call, a `new`, a closure, a ternary, a concat, an `isset`
+/// and the unrepresentable `Other` are all refused, not because each of them
+/// writes but because none of them is *read off the source* here: the callee
+/// this exemption certifies is the outer one, and only the outer one.
+///
+/// An offset read is admitted only over a base that is not an object: `$a['k']`
+/// on an `ArrayAccess` receiver runs `offsetGet`, a userland body that may write
+/// anything (issue #637's adversarial review), so the base's binding must not be
+/// an object handle, a guard-derived class, or a declared object arm.
+fn argument_writes_nothing(v: &ArgValue, store: &Store) -> bool {
+    match v {
+        ArgValue::Int(_)
+        | ArgValue::Float(_)
+        | ArgValue::Str(_)
+        | ArgValue::Bool(_)
+        | ArgValue::Null
+        | ArgValue::Var(_)
+        | ArgValue::ClassConst(..)
+        | ArgValue::EnumCase(..)
+        | ArgValue::GlobalConst(_) => true,
+        ArgValue::OffsetRead { base, key } => {
+            let base_is_plain = match base.as_ref() {
+                ArgValue::Var(b) => !object_bound(store, b),
+                other => argument_writes_nothing(other, store),
+            };
+            base_is_plain && argument_writes_nothing(key, store)
+        }
+        ArgValue::Array(items) => items.iter().all(|(_, e)| argument_writes_nothing(e, store)),
+        _ => false,
+    }
+}
+
+/// Whether `var` may denote an object in any lane the walk keeps: a heap handle,
+/// a guard-derived class bound, or a declared arm that names a class.
+fn object_bound(store: &Store, var: &str) -> bool {
+    store.refs.contains_key(var)
+        || store.members.contains_key(var)
+        || store.contract.get(var).is_some_and(|arms| {
+            arms.iter().any(|a| {
+                matches!(
+                    a.ty,
+                    ContractTy::Class(_)
+                        | ContractTy::EnumCase { .. }
+                        | ContractTy::ObjectAny
+                        | ContractTy::Inter(_)
+                )
+            })
+        })
+}
+
 /// One type-vocabulary guard, resolved to a variable and a branch polarity.
 enum TypeGuard {
     /// `is_string($x)` and kin.

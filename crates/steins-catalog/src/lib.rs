@@ -74,8 +74,9 @@ pub use fold::{
 
 mod effects;
 pub use effects::{
-    StreamTarget, WrittenWhen, by_value_arg, callables_in_array_param, effect_labels,
-    method_effect_labels, narrowed_stream_labels, out_param_written_when, out_params,
+    StreamTarget, WrittenWhen, by_value_arg, by_value_arg_frame, callables_in_array_param,
+    effect_labels, method_effect_labels, narrowed_stream_labels, out_param_written_when,
+    out_params,
     variadic_tail_is_data,
 };
 
