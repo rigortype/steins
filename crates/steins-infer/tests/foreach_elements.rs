@@ -207,6 +207,46 @@ fn a_by_reference_target_refuses_the_binding() {
 }
 
 #[test]
+fn a_by_reference_loop_writes_its_subject_so_a_nested_by_value_loop_binds_nothing() {
+    // Issue #677's live shape, and the reason the refusal above is not enough on
+    // its own. The outer loop rewrites `$a`'s elements through `&$v`; the inner
+    // loop reads `$a` by value. If the outer construct did not count `$a` as a
+    // write, the inner entry env would still hold the literal `[1, 2]` and bind
+    // `$w` to `1|2` at Verified — and `$w + []` would be a proven `TypeError` on a
+    // program that never throws (the guard holds only once `$a[0]` is an array).
+    let src = "<?php
+function f(): void {
+    $a = [1, 2];
+    $n = 0;
+    foreach ($a as &$v) {
+        foreach ($a as $i => $w) {
+            \\PHPStan\\dumpType($w);
+            if ($i < $n) { $z = $w + []; }
+        }
+        $v = ['x' => 1];
+        $n++;
+    }
+}
+";
+    let tree = SourceTree::parse(src);
+    let all = check(&tree, &[], "t.php");
+    assert!(
+        !all.iter().any(|d| d.id == "type.invalid-operand"),
+        "no finding on a program that never throws: {all:?}"
+    );
+    assert_eq!(answers(src), vec!["unknown".to_owned()], "the aliased subject is a write of the outer loop");
+}
+
+#[test]
+fn a_target_named_for_both_key_and_value_holds_the_value() {
+    // PHP assigns the key first and the value last, so `$x` is the element. The
+    // key binding is skipped for that name rather than overwritten, so the env and
+    // the arm lane cannot disagree about it.
+    let src = subject("array<int, Foo>", "    foreach ($xs as $x => $x) {\n        \\PHPStan\\dumpType($x);\n    }");
+    assert_eq!(answers(&src), vec!["Foo (asserted)".to_owned()], "the value, not the key");
+}
+
+#[test]
 fn a_destructuring_target_binds_nothing() {
     // Deferred, and pinned as deferred: `as [$a, $b]` binds names the statement does
     // not name, so there is nothing for the header to bind and the two stay writes

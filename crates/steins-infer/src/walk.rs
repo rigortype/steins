@@ -685,7 +685,11 @@ fn bind_foreach_targets(
     let Some(subject) = subject else { return };
     let binding = element_binding(benv.get(subject), bstore.contract_arms(subject));
     let line = w.cx.tree().position(stmt.span.start).line;
+    // `foreach ($xs as $x => $x)` assigns the key first and the value last, so the
+    // name holds the value; binding the key too would leave the env and the arm
+    // lane disagreeing about one variable.
     if let Some(name) = key_var
+        && key_var != value_var
         && let Some(known) = binding.key_known(line)
     {
         benv.insert(name.to_owned(), known);

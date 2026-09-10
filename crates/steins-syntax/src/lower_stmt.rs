@@ -1617,6 +1617,17 @@ pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) 
         }
         // `$x++` / `$x--` (the only postfix operators) write their operand.
         Node::UnaryPostfix(u) => collect_direct_vars(&Node::Expression(u.operand), out),
+        // `foreach ($it as &$v)` writes THROUGH its subject: every element the
+        // body assigns to `$v` lands in `$it`, and the alias outlives the loop. The
+        // subject is a write of the construct (issue #677) — the one thing that
+        // keeps an enclosing loop's entry env from reading `$it` as the literal it
+        // was before the aliased iteration rewrote it. The targets are collected by
+        // the arms below through the ordinary recursion.
+        Node::Foreach(fe) => {
+            if fe.target.value().is_reference() {
+                collect_direct_vars(&Node::Expression(fe.expression), out);
+            }
+        }
         // `foreach ($it as $v)` / `foreach ($it as $k => $v)` bind their targets.
         Node::ForeachValueTarget(t) => {
             collect_direct_vars(&Node::Expression(t.value), out);
