@@ -503,7 +503,11 @@ fn int_range_keyword(r: IntRange) -> String {
 /// stores a normalized (lowercased) FQN, and PHPStan prints what the declaration
 /// wrote, so each class-shaped arm is re-cased through [`Cx::class_display_fqn`]
 /// on the way in. A class nested inside an array arm (`array<DateTime>`) is not
-/// re-cased: it never was, and the arm's own normalization is the honest floor.
+/// re-cased, and — the larger caveat — not **resolved** either: `resolve_class_arms`
+/// walks `Class` and `Inter`, not the element of a `ListOf`/`MapOf`, so the
+/// nested name is the docblock's own spelling lowercased, unqualified in its
+/// namespace. That was so before mixed lists spelled (issue #699 tracks it); this
+/// side only stops hiding it behind `None`.
 ///
 /// An enum whose cases are ALL still present collapses back to the enum's own
 /// name first (issue #429): the expanded case set and the declaration denote the

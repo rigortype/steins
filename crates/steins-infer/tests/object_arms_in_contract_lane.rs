@@ -169,11 +169,18 @@ fn a_computed_answer_never_mints_an_object_arm() {
     // The first two are #675's population (§3.2): the argument is an array OF
     // objects, and `Val::Array` holds `Val`, no `Val` being an object — so there
     // is nothing to project even before the ruling is consulted.
-    let src = "<?php\nfunction f(\\DateTime $a, \\DateTime $b): void {\n\
+    //
+    // The third is the route that COULD mint one without a declaration: a project
+    // function with no declared return whose summary sees `new Analyser` on one
+    // path. The summary is a computed answer, not a declaration, and it stays
+    // `unknown` rather than becoming `Analyser|false` in the lane.
+    let src = "<?php\nfinal class Analyser {}\n\
+               function mk(bool $b) { return $b ? new Analyser() : false; }\n\
+               function f(\\DateTime $a, \\DateTime $b): void {\n\
                $xs = [$a, $b];\n\
                \\PHPStan\\dumpType(min($xs));\n\
                \\PHPStan\\dumpType(array_pop($xs));\n\
-               \\PHPStan\\dumpType(new \\DateTime('now'));\n}\n";
+               \\PHPStan\\dumpType(mk(true));\n}\n";
     assert_eq!(
         dumps(src),
         vec![
