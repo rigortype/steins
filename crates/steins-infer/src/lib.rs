@@ -57,6 +57,7 @@ mod generation;
 mod summaries;
 mod facts;
 mod fold_table;
+mod foreach_bind;
 mod foreach_check;
 mod generics;
 mod heap;
