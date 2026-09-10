@@ -599,7 +599,18 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   The mechanism is pinned independently of the corpus in
     //   `crates/steins-infer/tests/bool_literal_narrowing.rs`
     //   (`a_guarded_false_arm_no_longer_reaches_a_string_parameter`).
-    ("sebastianbergmann/phpunit", 86),
+    //   86 → 88 (+2), 2026-09-11 with issue #637 (ADR-0070's mined certification):
+    //   `tests/end-to-end/regression/5884/tests/FooTest.php:53` and `:78`,
+    //   `phpdoc.maybe-argument-mismatch` on `chmod($filename, …)`. `$filename =
+    //   tempnam(…)` is `non-falsy-string|false`; `file_put_contents($filename,
+    //   'foo')` in the guard used to invalidate it as an uncertified callee, and
+    //   `file_put_contents` declares no reference parameter, so the excuse was
+    //   never true — the fact now survives into `chmod(string $filename)` under
+    //   `strict_types=1`, where the `false` arm is a real `TypeError`. Shape (b),
+    //   the same as the `JobRunner.php:244` rows above. TRUE. Seen on the CI 8.4
+    //   engine only: the local 8.5 A/B for this slice reported no phpdoc.*
+    //   movement, so this row is calibrated where the line is.
+    ("sebastianbergmann/phpunit", 88),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
