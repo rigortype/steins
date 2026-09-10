@@ -13,6 +13,7 @@ use steins_syntax::{
 };
 
 use crate::fold::Folder;
+use crate::global_consts::global_const_fact;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DUMP_PHPDOC_TYPE_FQN,
     DUMP_TYPE_FQN,
@@ -869,6 +870,20 @@ fn best_dump_type(
         return DumpRendering {
             text: render_dump_fact(fact),
             asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
+        };
+    }
+    // A bare global constant (ADR-0094, issue #598), above the literal rung for
+    // the same reason the operator family sits there: the literal seam can only
+    // carry a single value, and most of what ADR-0094 §3 rules is not one —
+    // `PHP_EOL` defaults to the union `\"\\n\"|\"\\r\\n\"` and `PHP_VERSION_ID` to
+    // the range the declared target spans. A single-valued constant answers the
+    // same either way; the resolver is one function.
+    if let ArgValue::GlobalConst(r) = value
+        && let Some((fact, stratum)) = global_const_fact(cx, &r.raw)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
         };
     }
     // A non-variable argument: a resolved literal/foldable value fact wins first (a

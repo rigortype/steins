@@ -24,7 +24,7 @@ use steins_db::{Project, SteinsDatabase, parse as parse_tree};
 use steins_edit::{ByteSpan, Edit, EditPlan};
 use steins_infer::{
     Diagnostic, SOUND_SUBSET_NOTICE, SidecarFolder, apply_inline_ignores,
-    check_project_with_postures,
+    check_project_with_os,
 };
 use steins_syntax::SourceTree;
 
@@ -218,12 +218,13 @@ pub(crate) fn run_check(args: &[String]) -> ExitCode {
             for w in &runtime_warnings {
                 errln!("steins: {w}");
             }
-            let findings: Vec<Diagnostic> = check_project_with_postures(
+            let findings: Vec<Diagnostic> = check_project_with_os(
                 &loaded.db,
                 loaded.project,
                 &mut folder,
                 postures.warning_handler_abort,
                 postures.final_keyword,
+                postures.os_pin,
             );
             let (inline, vendor_suppressed) =
                 suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);

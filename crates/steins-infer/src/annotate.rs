@@ -269,7 +269,7 @@ fn annotate_units(
     // 3. Findings on the target file (project-wide check, filtered by path).
     let target_path = units[target].path;
     for d in
-        check_units(units, index, folder, true, FinalKeyword::Enforced, layout, plugins, policy)
+        check_units(units, index, folder, true, FinalKeyword::Enforced, None, layout, plugins, policy)
     {
         if d.path == target_path {
             facts.push(LineFact { line: d.line, kind: FactKind::Finding { id: d.id } });

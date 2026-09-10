@@ -69,7 +69,7 @@ use std::process::ExitCode;
 
 use serde_json::{Value, json};
 use steins_edit::{CompletenessOracle, EditPlan, unified_diff};
-use steins_infer::{Diagnostic, SidecarFolder, check_project_with_postures};
+use steins_infer::{Diagnostic, SidecarFolder, check_project_with_os};
 
 use crate::profile;
 use crate::transform::TransformKind;
@@ -745,12 +745,13 @@ fn tool_check(_session: &Session, args: &Value) -> Result<Reply, ToolError> {
             // arm and a cold arm must be one analysis, and the posture pair is
             // part of the generation's identity — declaring one of them here
             // and both of them there would key two stores over one tree.
-            let findings = check_project_with_postures(
+            let findings = check_project_with_os(
                 &loaded.db,
                 loaded.project,
                 &mut folder,
                 postures.warning_handler_abort,
                 postures.final_keyword,
+                postures.os_pin,
             );
             let (inline, vendor_suppressed) =
                 crate::suppression_pipeline(&loaded, findings, &surface, vendor_diagnostics);

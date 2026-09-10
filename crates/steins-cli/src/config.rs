@@ -12,7 +12,7 @@ use std::path::PathBuf;
 
 use steins_db::EffectsPolicy;
 use steins_edit::{PartitionMap, VouchSet};
-use steins_infer::FinalKeyword;
+use steins_infer::{FinalKeyword, OsFamily};
 
 use crate::profile;
 
@@ -120,6 +120,17 @@ pub(crate) struct RuntimeConfig {
     /// real under test. See [`steins_infer::FinalKeyword`].
     #[serde(rename = "final-keyword", default)]
     pub(crate) final_keyword: Option<String>,
+    /// `os = "linux"` (ADR-0094 §3) — a `PHP_OS_FAMILY` value, lowercased: the
+    /// deployment host the project runs on. Absent, every host-dependent
+    /// constant answers the UNION of the values it can take, which is sound on
+    /// every host and is what a library must assume. Declaring it pins
+    /// `PHP_OS_FAMILY`, `PHP_EOL`, `DIRECTORY_SEPARATOR` and `PATH_SEPARATOR`
+    /// together — pinning one and leaving the others as unions would let
+    /// `if (PHP_OS_FAMILY === 'Windows')` stay alive while `PHP_EOL` inside it
+    /// is already `"\n"` — and the pinned values enter `Asserted`, the user's
+    /// claim about the host rather than the language's own truth.
+    #[serde(default)]
+    pub(crate) os: Option<String>,
 }
 
 #[derive(serde::Deserialize, Default)]
@@ -246,6 +257,9 @@ pub(crate) struct RuntimePostures {
     pub(crate) warning_handler_abort: bool,
     /// `final-keyword` (issue #234), consumed by steins-contract's inhabitance judgment.
     pub(crate) final_keyword: FinalKeyword,
+    /// `os` (ADR-0094 §3), consumed by the global-constant resolver. `None` is
+    /// the default union.
+    pub(crate) os_pin: Option<OsFamily>,
 }
 
 /// Derive the `[runtime]` pseudo-constants from the already-parsed config.
@@ -276,7 +290,22 @@ pub(crate) fn runtime_from_config(runtime: Option<RuntimeConfig>) -> (RuntimePos
             FinalKeyword::Enforced
         }
     };
-    (RuntimePostures { warning_handler_abort, final_keyword }, warnings)
+    // An unrecognized value falls back to the DEFAULT, exactly as the two keys
+    // above do: a typo must not silently become a pin, because a pin is the one
+    // value in this family that narrows rather than widens.
+    let os_pin = match runtime.os.as_deref() {
+        None => None,
+        Some(value) => {
+            let parsed = OsFamily::from_config(value);
+            if parsed.is_none() {
+                warnings.push(format!(
+                    "steins.toml [runtime] os: unknown value `{value}` (want \"windows\"|\"bsd\"|\"darwin\"|\"solaris\"|\"linux\"|\"unknown\"); using the union"
+                ));
+            }
+            parsed
+        }
+    };
+    (RuntimePostures { warning_handler_abort, final_keyword, os_pin }, warnings)
 }
 
 /// Derive the profile selection and user-profile table from the already-parsed

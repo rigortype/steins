@@ -162,6 +162,7 @@ fn measure_in_store(dir: &Path, store: &Path, php: bool) -> Result<Measurement, 
         effects: &effects,
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
+        os_pin: None,
         php,
         paranoid: false,
     };

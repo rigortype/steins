@@ -1940,6 +1940,23 @@ pub(crate) fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, stor
         ArgValue::Concat(a, b) => {
             value_stratum(a, env, store).min(value_stratum(b, env, store))
         }
+        // A bare global constant (ADR-0094 §3.2). Everything this resolver
+        // answers is `Verified` — true of every host the project can run on —
+        // except a value fixed by the `[runtime] os` pin, which is the user's
+        // claim about the deployment host and must not launder into a
+        // proof-layer premise through a comparison or a concatenation.
+        //
+        // The pin itself is not visible here (this seam carries no `Cx`), and it
+        // does not need to be: without a pin those four constants resolve to a
+        // UNION rather than a literal, so no composed expression decides on them
+        // and this answer is never read for a verdict.
+        ArgValue::GlobalConst(r) => {
+            if crate::global_consts::OS_PINNED_CONSTANTS.contains(&r.raw.trim_start_matches('\\')) {
+                Stratum::Asserted
+            } else {
+                Stratum::Verified
+            }
+        }
         _ => Stratum::Verified,
     }
 }

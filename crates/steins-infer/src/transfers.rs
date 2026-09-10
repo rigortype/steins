@@ -18,6 +18,7 @@ use crate::env::{
 };
 use crate::walk::value_stratum;
 use crate::fold::Folder;
+use crate::global_consts::global_const_fact;
 use crate::fact_is_int;
 use crate::builtin_returns::transfer_envelope_admits;
 use crate::shape_projection::{shape_fact, shape_value_union};
@@ -267,6 +268,20 @@ pub(crate) fn transfer_arg_known(
             .or_else(|| array_literal_fact(cx, folder, items, env, false, store))
     {
         return Some((lit, strat.min(value_stratum(value, env, store))));
+    }
+    // A bare global constant (ADR-0094, issue #598). Above the literal seam
+    // because the literal seam cannot spell what most of these constants ARE: a
+    // host-dependent one defaults to the UNION of its values (`PHP_EOL` is
+    // `"\n"|"\r\n"`), and `PHP_VERSION_ID` is the range the declared target spans.
+    // The single-valued ones would answer through the literal seam below too, and
+    // answer identically here — the resolver is one function.
+    //
+    // The stratum comes from the resolver, not from `value_stratum`: a value fixed
+    // by the `[runtime] os` pin is `Asserted` (the user's claim about the host,
+    // ADR-0094 §3.2), and laundering it to `Verified` here would let it premise a
+    // proof-layer finding.
+    if let ArgValue::GlobalConst(r) = value {
+        return global_const_fact(cx, &r.raw);
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
     Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))

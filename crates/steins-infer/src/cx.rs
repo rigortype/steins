@@ -17,6 +17,7 @@ use steins_syntax::{
 };
 
 use crate::fold::Folder;
+use crate::global_consts::{OsFamily, global_const_literal};
 use crate::fold_args::{UNION_FOLD_COMBINATION_CAP, UNION_FOLD_MEMBER_CAP, concat_cast, is_fold_arg};
 use crate::{ID, RETURN_ID, Sym};
 use crate::arg_check::render_call;
@@ -114,6 +115,13 @@ pub(crate) struct Cx<'a> {
     /// declared range lies at or above one builtin's change boundary. `None` is an
     /// undeclared target, which the floor admits.
     pub(crate) php_target: Option<&'a steins_db::PhpTarget>,
+    /// The `[runtime] os` pin (ADR-0094 §3, ADR-0037 §2 family) — the deployment
+    /// host the project declares. Read only by the global-constant resolver, and
+    /// only for the four constants a host fixes together (`PHP_OS_FAMILY`,
+    /// `PHP_EOL`, `DIRECTORY_SEPARATOR`, `PATH_SEPARATOR`). `None` is the
+    /// default and the sound one: the union of what each can be, since a library
+    /// cannot assume its host.
+    pub(crate) os_pin: Option<OsFamily>,
 }
 
 impl<'a> Cx<'a> {
@@ -130,6 +138,7 @@ impl<'a> Cx<'a> {
             version_id: None,
             purity: None,
             php_target: None,
+            os_pin: None,
         }
     }
 
@@ -147,6 +156,7 @@ impl<'a> Cx<'a> {
         version_id: Option<(u32, Option<u32>)>,
         purity: Option<&'a PurityOracle<'a>>,
         php_target: Option<&'a steins_db::PhpTarget>,
+        os_pin: Option<OsFamily>,
     ) -> Self {
         Self {
             units,
@@ -160,6 +170,7 @@ impl<'a> Cx<'a> {
             version_id,
             purity,
             php_target,
+            os_pin,
         }
     }
 
@@ -178,6 +189,7 @@ impl<'a> Cx<'a> {
             version_id: self.version_id,
             purity: self.purity,
             php_target: self.php_target,
+            os_pin: self.os_pin,
         }
     }
 
@@ -1055,6 +1067,17 @@ impl<'a> Cx<'a> {
                     _ => None,
                 }
             }
+            // A bare global constant (ADR-0094, issue #598). Placed in the LITERAL
+            // seam and not only at the fact seam, because that is what makes a
+            // constant behave like the value it is everywhere at once: a fold
+            // argument (`str_pad($s, 4, ' ', STR_PAD_LEFT)`), a `===` operand, a
+            // concatenation half and an array element all read this one arm.
+            //
+            // Only a single-valued constant passes. `PHP_EOL` without a pin is a
+            // union and `PHP_VERSION_ID` is a range; neither is a literal, and
+            // picking one member of either would be stating something false. Both
+            // still answer at the fact seam (`transfer_arg_known`).
+            ArgValue::GlobalConst(r) => global_const_literal(self, &r.raw),
             // An array is proven iff every element value is proven (keys are fixed
             // at lowering). Folding is never applied to arrays (ADR-0001).
             ArgValue::Array(items) => {

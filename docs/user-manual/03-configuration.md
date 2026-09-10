@@ -41,6 +41,12 @@ warning-handler = "abort"
 # away, the way dg/bypass-finals does under a test harness.
 final-keyword = "enforced"
 
+# The deployment host, as a lowercased PHP_OS_FAMILY value (ADR-0094 §3).
+# Absent — the default — every host-dependent constant answers the union
+# of what it can be. Declaring it pins PHP_OS_FAMILY, PHP_EOL,
+# DIRECTORY_SEPARATOR and PATH_SEPARATOR together, at Asserted.
+# os = "linux"
+
 [plugins]
 # Explicit plugin allowlist, by Composer package name (ADR-0039/0068).
 # Replaces installed.json discovery outright; allow = [] loads nothing.
@@ -170,12 +176,20 @@ This section rejects unrecognized keys outright.
 | Key | Type | Default | Effect |
 | --- | --- | --- | --- |
 | `warning-handler` | `"abort"` \| `"null"` | `"abort"` | What a proven `E_WARNING` does at runtime. `"abort"` treats it as a proven break, so the corresponding proof-layer findings fire. `"null"` declares the app tolerates the warning; those findings go silent. An unrecognized *value* (not an unrecognized key) warns and falls back to `"abort"` rather than erroring. |
+| `os` | one of `"windows"`, `"bsd"`, `"darwin"`, `"solaris"`, `"linux"`, `"unknown"` | none — the union | The deployment host, spelled as a lowercased `PHP_OS_FAMILY` value (ADR-0094 §3). With no pin, a host-dependent constant answers the **union** of the values it can take — `PHP_EOL` is `"\n"\|"\r\n"`, `DIRECTORY_SEPARATOR` is `'/'\|'\\'` — which is sound on every host and is what a library must assume. A pin fixes `PHP_OS_FAMILY`, `PHP_EOL`, `DIRECTORY_SEPARATOR` and `PATH_SEPARATOR` **together**, because pinning one and leaving the others as unions would let `if (PHP_OS_FAMILY === 'Windows')` stay alive while `PHP_EOL` inside it is already `"\n"`. A pinned value is `Asserted` — your claim about the host, not the language's own truth — so it premises no proof-layer finding. `PHP_OS` stays `non-empty-string` under a pin: php-src does not close its value set per family. An unrecognized *value* warns and falls back to the union. |
 | `final-keyword` | `"enforced"` \| `"stripped"` | `"enforced"` | What the runtime does with the `final` keyword. `"enforced"` is PHP's own rule: a `final` class admits no subtype, so an intersection carrying a final class arm is uninhabited. `"stripped"` declares a loader that rewrites the keyword away before the class is compiled — `dg/bypass-finals` installs a stream wrapper that does exactly this — so `FinalClass&MockObject`, the type a mock of a final class actually has, stays inhabited. An unrecognized *value* warns and falls back to `"enforced"`. |
 
-There is no CLI flag for either key — both are config-only.
+There is no CLI flag for any of the three keys — all are config-only.
 
-`steins doctor` prints both postures, with their value and whether it came
-from the file or from the default, in the Config section.
+`steins doctor` prints all three postures, with their value and whether it
+came from the file or from the default, in the Config section. It also
+prints one line that is not a posture at all —
+`integer width: assume 64-bit int; 32-bit targets unsupported` — because
+`PHP_INT_MAX`, `PHP_INT_SIZE` and `PHP_FLOAT_*` are the 64-bit literals
+under every configuration (ADR-0094 §3.1). There is no `4|8` union and no
+knob: a union no runtime check can narrow away would be a worse answer
+than the assumption, and Steins does not model 32-bit PHP anywhere else
+either.
 
 ### What `final-keyword = "stripped"` does not change
 
