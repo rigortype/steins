@@ -317,24 +317,23 @@ fn every_row_renders_asserted() {
     }
 }
 
-/// The negative pin, and the one that matters most: an Asserted arm may not premise
-/// a proof-layer finding. `strlen()` takes a `string`, the row says the call can
-/// return `false`, and a definite `type.argument-mismatch` would be exactly the
-/// laundering ADR-0069 §2's firewall exists to prevent. What may fire is the
-/// possibly-grade `phpdoc.*` twin, which is licensed to read an Asserted premise.
+/// The negative pin, and the one that matters most: a table row may not premise a
+/// proof-layer finding. Each of these shapes would be a `type.*` conviction if the
+/// arms rode `Verified` — a `string|false` handed to `strlen`, a `string` returned
+/// from a `: int` function, a `DOMElement|null` returned from a `: DOMElement` one
+/// — and each is exactly the laundering ADR-0069 §2's firewall exists to prevent.
+/// The whole file must produce nothing at all but the dumps.
 #[test]
 fn an_asserted_row_premises_no_definite_finding() {
     let src = r#"<?php
-function f(\SplFileObject $file): void {
-    strlen($file->getRealPath());
-}
+declare(strict_types=1);
+function a(\SplFileObject $file): void { strlen($file->getRealPath()); }
+function b(\SplFileObject $file): int { return $file->fgets(); }
+function c(\DOMDocument $dom): \DOMElement { return $dom->getElementById('x'); }
+function d(\SplFileObject $file): void { echo $file->getSize() . 'x'; }
 "#;
-    let ids: Vec<String> =
-        findings(src).into_iter().map(|d| d.id.to_owned()).collect();
-    assert!(
-        !ids.iter().any(|id| id.starts_with("type.")),
-        "a table row must premise no definite finding, got {ids:?}"
-    );
+    let ids: Vec<String> = findings(src).into_iter().map(|d| d.id.to_owned()).collect();
+    assert!(ids.is_empty(), "a table row must premise no finding at all, got {ids:?}");
 }
 
 // ---------------------------------------------------------------------------
