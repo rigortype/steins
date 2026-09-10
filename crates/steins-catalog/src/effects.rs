@@ -892,10 +892,13 @@ const SORT_FAMILY: &[&str] = &[
 /// Widening this set is a separate, measured act: every added name is a new
 /// premise for every kept fact downstream. Issue #637 is one such act, and the
 /// last one the hand list has to make name by name: past the lists above, a
-/// rowless name is certified by the **mined arginfo table**
-/// ([`mined_all_by_value`]) rather than by transcription. The hand entries stay
-/// where they are — each records WHY a name matters, which the table cannot —
-/// and the table now answers for the ~2,000 internal names nobody had reached.
+/// rowless name is certified by the **mined arginfo table** ([`param_facts`] —
+/// see this module's `mined_all_by_value` for the membership rule) rather than
+/// by transcription. The hand entries stay where they are — each records WHY a
+/// name matters, which the table cannot — and the table now answers for the
+/// ~2,000 internal names nobody had reached.
+///
+/// [`param_facts`]: crate::param_facts
 #[must_use]
 pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
     /// Certified all-by-value names outside the folding allowlist, each
