@@ -521,7 +521,16 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   Still 34 after issue #599 leg 1 landed (2026-09-01), by construction: leg
     //   1's premise is the callee's own NATIVE `: never`, and `throwEncodeError`
     //   declares `: void`. Leg 2 stays open with this row as its witness.
-    ("composer/composer", 34),
+    //   34 → 35 (+1), 2026-09-10 (issue #650), the only corpus movement of the
+    //   slice that walks `for`/`foreach`/`do`-`while` bodies — and it is the
+    //   whole point of the slice: `PathRepository.php:175` is inside a `foreach`
+    //   body, which no walk had ever entered. TRUE, and the same shape (b) as the
+    //   `JsonLoader.php:44` row eight lines up: `$json = file_get_contents(…)` is
+    //   `string|false` and goes straight into `JsonFile::parseJson(?string $json)`,
+    //   whose `false` arm is a strict-mode `TypeError`. The `file_exists()` two
+    //   lines above it is not a discharge — it proves the path exists, not that
+    //   the read succeeds, and the two are separated by a real window.
+    ("composer/composer", 35),
     //   8 → 12 (+4): `realpath()` into a `string` parameter four times — `new
     //   TestCase($filename)` twice in `Runner/Phpt/TestCaseTest.php`, `new
     //   PhptTestCase($filename)` in `ListTestIdsCommandTest.php`, and

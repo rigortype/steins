@@ -1,15 +1,15 @@
-//! What a loop body is worth to the walk — the structured `while` (issues #649
-//! and #653) and the three forms still behind the ADR-0027 ratchet.
+//! What a loop body is worth to the walk — the four structured loop forms (issues
+//! #649, #653 and #650).
 //!
-//! A `while` lowers to `StmtKind::While`, which carries its condition and its body
-//! as a sub-trace. The construct's effect on the code after it is unchanged — the
-//! same write/read sets an `Opaque` applies — and its body's **entry** env is a
-//! separate answer to a separate question: what the loop provably cannot change.
-//! That drops `writes`, keeps `reads`, sweeps the mutable state of every object a
-//! kept name refers to, and is then narrowed by the header. `for`, `foreach` and
-//! `do`/`while` still lower to `StmtKind::Opaque`, whose body no statement of the
-//! walk ever reaches (issue #650), so this file is where the two states are told
-//! apart.
+//! Each lowers to a `StmtKind` of its own carrying its body as a sub-trace. The
+//! construct's effect on the code after it is unchanged — the same write/read sets
+//! an `Opaque` applies — and its body's **entry** env is a separate answer to a
+//! separate question: what the loop provably cannot change. That drops `writes`,
+//! keeps `reads`, and sweeps the mutable state of every object a kept name refers
+//! to. What the header then does to that env is the one thing the forms disagree
+//! about: a `while` and a `for` narrow by a condition evaluated before every entry,
+//! a `foreach` header binds rather than tests, and a `do`-`while` narrows **nothing**
+//! — its first iteration runs before its condition is ever evaluated.
 //!
 //! The shape that motivated the slice types its subject entirely from the loop
 //! header, which is what a body-less construct could not use:
@@ -28,7 +28,9 @@
 //! that reassigns the subject it was narrowed on is no obstacle), and nothing the
 //! body computes escapes it.
 
-use steins_infer::{CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with};
+use steins_infer::{
+    CALL_ON_NULL_ID, CALL_UNDEFINED_METHOD_ID, DEBUG_TYPE_ID, Diagnostic, Folder, check, check_with,
+};
 use steins_syntax::SourceTree;
 
 /// Every `debug.type` dump a source produces, as `line: rendered fact`.
@@ -234,9 +236,20 @@ fn a_true_positive_inside_a_while_body_is_reported() {
     assert_eq!(placed("(new Order())->tyop();"), vec![4], "top level");
     assert_eq!(placed("if ($n > 0) { (new Order())->tyop(); }"), vec![4], "`if` body (ADR-0031)");
     assert_eq!(placed("while ($n > 0) { (new Order())->tyop(); $n--; }"), vec![4], "`while` body");
-    assert!(
-        placed("foreach ($xs as $x) { (new Order())->tyop(); }").is_empty(),
-        "`foreach` body: still never seen"
+    assert_eq!(
+        placed("for ($i = 0; $i < $n; $i++) { (new Order())->tyop(); }"),
+        vec![4],
+        "`for` body (issue #650)"
+    );
+    assert_eq!(
+        placed("foreach ($xs as $x) { (new Order())->tyop(); }"),
+        vec![4],
+        "`foreach` body (issue #650)"
+    );
+    assert_eq!(
+        placed("do { (new Order())->tyop(); } while ($n > 0);"),
+        vec![4],
+        "`do`-`while` body (issue #650)"
     );
 }
 
@@ -518,18 +531,245 @@ function f(int $n): void {
     );
 }
 
-// ---- The forms still behind the ratchet ------------------------------------
+// ---- The other three forms (issue #650) ------------------------------------
 
 #[test]
-fn for_foreach_and_do_while_bodies_are_still_dark() {
-    // Issue #650. Each still lowers to `StmtKind::Opaque`, so a dump inside one
-    // produces no diagnostic at all — not `unknown`, nothing.
+fn every_loop_form_s_body_is_walked() {
+    // The row this file used to pin as silence. A dump inside one of these bodies
+    // produced no diagnostic at all — not `unknown`, nothing — because the walk
+    // never entered the construct. Each now answers.
     for (label, body) in [
         ("for", "for ($i = 0; $i < 3; $i++) { \\PHPStan\\dumpType($n); }"),
         ("foreach", "foreach ([1, 2] as $i) { \\PHPStan\\dumpType($n); }"),
         ("do-while", "do { \\PHPStan\\dumpType($n); } while (false);"),
     ] {
         let src = format!("<?php\nfunction f(): void {{\n    $n = 5;\n    {body}\n}}\n");
-        assert!(dumps(&src).is_empty(), "{label}: a dump inside the body answered");
+        assert_eq!(
+            dumps(&src),
+            vec!["4: dumped type: unknown".to_owned()],
+            "{label}: the body's dump must answer (`unknown` — the dump hands `$n` to a \
+             call, so the loop's own `writes` took it)"
+        );
     }
+}
+
+#[test]
+fn a_for_header_condition_narrows_the_body_entry() {
+    // The `while` slice's motivating shape, spelled as the `for` nearly every
+    // traversal actually is: the seed in `init`, the test in `cond`, the step in the
+    // increment. The body entry is the same answer to the same question — `$parent`
+    // is written by `init` AND by the increment, so it is forgotten there, and the
+    // header alone types it.
+    let src = format!(
+        "<?php
+{NODES}
+function traverse(Return_ $node): bool {{
+    for ($p = $node->getAttribute('parent'); $p instanceof Node; $p = $p->getAttribute('parent')) {{
+        \\PHPStan\\dumpType($p);
+        if ($p instanceof ClassMethod) {{ return false; }}
+    }}
+    \\PHPStan\\dumpType($p);
+    return false;
+}}
+"
+    );
+    assert_eq!(
+        dumps(&src),
+        vec!["11: dumped type: Node".to_owned(), "14: dumped type: unknown".to_owned()],
+        "line 11 is the body entry, line 14 the unchanged fall-through"
+    );
+}
+
+#[test]
+fn a_for_init_write_reaches_the_condition_and_a_step_write_does_not() {
+    // The two halves of the `for` header's own rule, in one pair of fixtures.
+    //
+    // `init` runs once, before the condition is ever evaluated, so a name it writes
+    // that nothing else in the loop writes again holds that value at every entry —
+    // and the condition is judged against it. `$x === 2` is decided here, both ways:
+    // the body is walked under the header that holds and skipped under the one that
+    // cannot. Nothing but the init value differs between the two.
+    let decided = |init: &str| {
+        let src = format!(
+            "<?php
+final class Order {{}}
+function f(): void {{
+    for ($x = {init}; $x === 2; ) {{
+        (new Order())->tyop();
+    }}
+}}
+"
+        );
+        undefined_method_lines(&src)
+    };
+    assert_eq!(decided("2"), vec![5], "the init value satisfies the header: the body is walked");
+    assert!(decided("1").is_empty(), "the init value refutes it: a zero-iteration body");
+}
+
+#[test]
+fn a_for_step_write_is_forgotten_at_the_body_entry() {
+    // The other half. `$i` is written by `init` and by the increment, so it may hold
+    // something else on iteration 2 and is forgotten; `$s` is written by `init`
+    // alone, so it cannot, and is kept. Both dumps are spelled through a cast, which
+    // is what keeps the subject out of the loop's `writes` (see the `while` twin).
+    let src = "<?php
+function f(): void {
+    for ($i = 0, $s = 'abc'; $i < 10; $i++) {
+        \\PHPStan\\dumpType((string) $i);
+        \\PHPStan\\dumpType((string) $s);
+    }
+}
+";
+    assert_eq!(
+        dumps(src),
+        vec!["4: dumped type: string".to_owned(), "5: dumped type: 'abc'".to_owned()],
+        "the increment's target is forgotten (only the cast's own floor is left); the \
+         init-only name keeps what init wrote"
+    );
+}
+
+#[test]
+fn a_for_header_tests_its_last_condition_only() {
+    // PHP evaluates every comma-separated condition and tests the LAST one. `!$x`
+    // over an init-carried `true` is decided false, so the body is skipped; put the
+    // undecided `$i < $n` last and the same loop walks. Only the order differs.
+    let with_conditions = |conds: &str| {
+        let src = format!(
+            "<?php
+final class Order {{}}
+function f(int $n): void {{
+    for ($x = true, $i = 0; {conds}; ) {{
+        (new Order())->tyop();
+    }}
+}}
+"
+        );
+        undefined_method_lines(&src)
+    };
+    assert!(with_conditions("$i < $n, !$x").is_empty(), "the last condition is the tested one, and it refutes");
+    assert_eq!(with_conditions("!$x, $i < $n"), vec![5], "reversed, the tested condition is undecided");
+}
+
+#[test]
+fn an_empty_for_header_walks_its_body_unguarded() {
+    // `for (;;)` has no condition to test; it lowers to `CondExpr::Opaque`, which
+    // decides nothing and narrows nothing, so the body is walked as-is.
+    let src = "<?php
+final class Order {}
+function f(): void {
+    for (;;) {
+        (new Order())->tyop();
+    }
+}
+";
+    assert_eq!(undefined_method_lines(src), vec![5], "an opaque header is a walked body");
+}
+
+#[test]
+fn a_write_inside_the_for_condition_is_not_carried() {
+    // `carried` is the init-written names nothing else in the loop writes again —
+    // and the condition is part of the loop. `$x--` in the header rebinds `$x` on
+    // every test, so it is forgotten at the entry and only the cast's floor is left.
+    let src = "<?php
+function f(): void {
+    for ($x = 2; $x-- > 0; ) {
+        \\PHPStan\\dumpType((string) $x);
+    }
+}
+";
+    assert_eq!(dumps(src), vec!["4: dumped type: string".to_owned()], "a condition write leaves `carried`");
+}
+
+#[test]
+fn a_foreach_binds_its_key_and_value_defined_but_untyped() {
+    // `$k` and `$v` are ordinary members of the construct's `writes` — the
+    // `foreach`-binding row `collect_assign_writes` has always had — so the entry
+    // forgetting leaves them defined but untyped, and a dump on either answers
+    // rather than staying absent. Typing them from the subject's own value type is
+    // issue #652 and is deliberately not done here.
+    let src = "<?php
+function f(array $xs): void {
+    foreach ($xs as $k => $v) {
+        \\PHPStan\\dumpType($k);
+        \\PHPStan\\dumpType($v);
+    }
+}
+";
+    assert_eq!(
+        dumps(src),
+        vec!["4: dumped type: unknown".to_owned(), "5: dumped type: unknown".to_owned()],
+        "both loop variables answer"
+    );
+}
+
+#[test]
+fn a_do_while_body_runs_even_under_a_header_that_is_false() {
+    // The soundness pin, first half. A `do { … } while (false)` runs its body
+    // **exactly once**; the `while` rule reads a `false` header as a zero-iteration
+    // loop and leaves the body unwalked. Taking it here would silently drop every
+    // finding in the one iteration PHP always runs.
+    let src = "<?php
+final class Order {}
+function f(): void {
+    do {
+        (new Order())->tyop();
+    } while (false);
+}
+";
+    assert_eq!(undefined_method_lines(src), vec![5], "the one iteration is judged");
+}
+
+#[test]
+fn a_do_while_condition_narrows_nothing_at_the_body_entry() {
+    // The soundness pin, second half, and the reason `StmtKind::DoWhile` does not
+    // carry its condition at all. The first iteration runs BEFORE the header is ever
+    // evaluated, so `$x instanceof Order` is not a fact there: `$x` still holds the
+    // `null` the statement above it wrote, `$x->ship()` is a guaranteed runtime
+    // `Error`, and the `call.on-null` that says so is a true positive the `while`
+    // rule would narrow away.
+    //
+    // The `while` twin is the control, and is silent for its own right reason: there
+    // the header IS evaluated first, decides `No` against the same `null`, and the
+    // body never runs. The two differ in nothing but the loop form.
+    let form = |src: &str| {
+        let tree = SourceTree::parse(src);
+        check(&tree, &[], "t.php")
+            .into_iter()
+            .filter(|d: &Diagnostic| d.id == CALL_ON_NULL_ID)
+            .map(|d| d.line)
+            .collect::<Vec<_>>()
+    };
+    let do_while = "<?php
+final class Order { public function ship(): void {} }
+function f(): void {
+    $x = null;
+    do {
+        $x->ship();
+    } while ($x instanceof Order);
+}
+";
+    let while_twin = "<?php
+final class Order { public function ship(): void {} }
+function f(): void {
+    $x = null;
+    while ($x instanceof Order) {
+        $x->ship();
+    }
+}
+";
+    assert_eq!(form(do_while), vec![6], "the first iteration's `$x` is still the proven null");
+    assert!(form(while_twin).is_empty(), "the `while` twin never enters the body at all");
+}
+
+#[test]
+fn a_receiver_answers_inside_every_loop_form() {
+    // The `reads` half (issue #653) reaches all four forms: a receiver is not an
+    // argument, so `$o` stays bound and classed at each body's entry and the same
+    // statement is named wherever it is written.
+    let placed = |wrap: &str| undefined_method_lines(&PLACEMENT.replace("STMT", wrap));
+    assert_eq!(placed("if ($n > 0) { $o->tyop(); }"), vec![4], "`if` body");
+    assert_eq!(placed("while ($n > 0) { $o->tyop(); $n--; }"), vec![4], "`while` body");
+    assert_eq!(placed("for ($i = 0; $i < $n; $i++) { $o->tyop(); }"), vec![4], "`for` body");
+    assert_eq!(placed("foreach ($xs as $x) { $o->tyop(); }"), vec![4], "`foreach` body");
+    assert_eq!(placed("do { $o->tyop(); } while ($n > 0);"), vec![4], "`do`-`while` body");
 }

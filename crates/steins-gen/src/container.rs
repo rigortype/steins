@@ -92,9 +92,18 @@ use crate::names::{PackageName, SectionName};
 /// `12` does nor shifts a variant index the way `13` does. The reach is wider than
 /// the row count suggests, because an `Other` element collapses its enclosing array
 /// literal: a schema-13 trace spells `['k' => "$a/$b"]` as no array at all.
+/// `15` is the other three loop forms (issue #650): `for`, `foreach` and
+/// `do`-`while` lower to `StmtKind::For`/`Foreach`/`DoWhile` instead of `Opaque`,
+/// each carrying its body as a sub-trace. This is the **misdecode** kind, like `12`
+/// and `13` and unlike `11` and `14`: the three variants are inserted after `While`
+/// and the wire codec carries a variant by INDEX, so every later variant's index
+/// moved and a schema-14 payload would decode `Opaque` as one of the new forms —
+/// reading a write set as a statement list. On top of that it spells all three
+/// constructs as `Opaque`, whose body is not carried at all, replaying silence for
+/// bodies this binary judges.
 /// Bumping it is the whole migration — an artifact of the previous schema becomes an
 /// ordinary [`Miss`] and one rebuild.
-pub const SCHEMA_VERSION: u32 = 14;
+pub const SCHEMA_VERSION: u32 = 15;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

@@ -739,8 +739,10 @@ fn scopes_by_function(tree: &SourceTree) -> HashMap<&str, &Scope> {
 
 /// Collect every structurally-visible `return <value>`, recursing into `if`/`match`
 /// sub-traces — a return inside a loop or a `try` is not modeled here. A structured
-/// `while` (issue #649) carries its body, but a return inside it is reached only on
-/// an iteration that may never happen, so it stays as invisible as an `Opaque`'s.
+/// loop (issues #649, #650) carries its body, but a return inside a `while`, `for`
+/// or `foreach` is reached only on an iteration that may never happen, and a
+/// `do`-`while`'s first iteration is one this pass does not model either, so every
+/// loop body stays as invisible as an `Opaque`'s (`contains_opaque` refuses first).
 fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
     for s in stmts {
         match &s.kind {
@@ -770,14 +772,18 @@ fn collect_returns<'a>(stmts: &'a [Stmt], out: &mut Vec<&'a ArgValue>) {
 /// Whether the list contains control flow the trace doesn't model (`Opaque`/
 /// `Barrier`); recurses into modeled `if`/`match` sub-traces.
 ///
-/// A structured `while` (issue #649) answers `true` with its `Opaque` predecessor.
-/// Carrying a body the walk can enter buys findings inside it; it does not model
-/// the construct's data flow — what a loop-carried binding holds on the second
-/// iteration is still unknown — and this predicate is asked the latter question.
+/// A structured loop (issues #649 and #650) answers `true` with its `Opaque`
+/// predecessor. Carrying a body the walk can enter buys findings inside it; it does
+/// not model the construct's data flow — what a loop-carried binding holds on the
+/// second iteration is still unknown — and this predicate is asked the latter
+/// question.
 fn contains_opaque(stmts: &[Stmt]) -> bool {
     stmts.iter().any(|s| match &s.kind {
         StmtKind::Opaque { .. }
         | StmtKind::While { .. }
+        | StmtKind::For { .. }
+        | StmtKind::Foreach { .. }
+        | StmtKind::DoWhile { .. }
         | StmtKind::LoopJump { .. }
         | StmtKind::Barrier => true,
         StmtKind::If { then_trace, elseifs, else_trace, .. } => {

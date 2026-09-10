@@ -57,9 +57,10 @@ fn foreach_subject_abstract_word(fact: &Fact) -> Option<&'static str> {
 /// issue #192).
 ///
 /// Reuses `SourceTree::foreach_sites()` (ADR-0076) rather than re-lowering the
-/// construct — the checker's own trace erases `foreach` into an undifferentiated
-/// `StmtKind::Opaque` (ADR-0027), so the site list is where "this IS a foreach"
-/// survives.
+/// construct. The trace tells a `foreach` apart from its siblings since issue
+/// #650 (`StmtKind::Foreach`), but it carries the body and the sets, never the
+/// **subject** this proof is about, so the site list is still where the subject
+/// survives — and the match stays by span for that reason.
 ///
 /// The subject's fact comes from the SAME lane `offset.missing` reads (a bare
 /// `Var` in `env`, required `Verified` — an `Asserted`/docblock claim never

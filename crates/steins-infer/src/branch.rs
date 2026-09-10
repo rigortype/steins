@@ -264,9 +264,37 @@ pub(crate) fn walk_while_body(
         return;
     }
     apply_cond_side(w, folder, cond, true, &mut benv, &mut bstore);
+    walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
+}
+
+/// Walk a structured loop body from an entry pair the header has already had its
+/// say over — the half of [`walk_while_body`] that is not the header.
+///
+/// It is also the WHOLE of what a `foreach` and a `do`-`while` get (issue #650),
+/// and for opposite reasons. A `foreach` header binds rather than tests, so there is
+/// no condition to narrow by. A `do`-`while` has one and may not use it: the body's
+/// first iteration runs before it is ever evaluated, so narrowing the entry by it
+/// would state an untested fact, and reading it as false would skip a body that runs
+/// exactly once. Neither may take the `while` treatment, and neither loses anything
+/// else by it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn walk_loop_body(
+    w: &WalkCx,
+    folder: &mut dyn Folder,
+    body: &[Stmt],
+    mut benv: HashMap<String, Known>,
+    mut bstore: Store,
+    descent: &mut Option<Descent<'_>>,
+    facts: &mut Option<&mut Vec<LineFact>>,
+    out: &mut Vec<Diagnostic>,
+) {
     // The body's own `Flow` is discarded: a body that terminates on every path
-    // terminates an ITERATION, and a `while` whose condition is not decided may run
-    // none at all, so the successor stays reachable either way.
+    // terminates an ITERATION, and a `while`, `for` or `foreach` whose condition is
+    // not decided may run none at all, so their successor stays reachable either
+    // way. A `do`-`while` body runs at least once, so there the discard is a
+    // widening — a successor the body provably never reaches is still walked
+    // (issue #679); it never under-reports, and it is the one caller for which
+    // the reasoning above does not hold.
     let _ = walk_trace(w, folder, body, &mut benv, &mut bstore, descent, facts, true, out);
 }
 
