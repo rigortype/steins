@@ -890,7 +890,12 @@ const SORT_FAMILY: &[&str] = &[
 ///   is a different question, and neither name has a rule here to serve.
 ///
 /// Widening this set is a separate, measured act: every added name is a new
-/// premise for every kept fact downstream.
+/// premise for every kept fact downstream. Issue #637 is one such act, and the
+/// last one the hand list has to make name by name: past the lists above, a
+/// rowless name is certified by the **mined arginfo table**
+/// ([`mined_all_by_value`]) rather than by transcription. The hand entries stay
+/// where they are — each records WHY a name matters, which the table cannot —
+/// and the table now answers for the ~2,000 internal names nobody had reached.
 #[must_use]
 pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
     /// Certified all-by-value names outside the folding allowlist, each
@@ -1023,10 +1028,69 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         Some(positions) => Some(!positions.contains(&position)),
         None => {
             let certified = foldable(name)
-                || CERTIFIED_EXTRA.iter().any(|&f| name.eq_ignore_ascii_case(f));
+                || CERTIFIED_EXTRA.iter().any(|&f| name.eq_ignore_ascii_case(f))
+                || mined_all_by_value(name);
             certified.then_some(true)
         }
     }
+}
+
+/// Whether the **mined arginfo table** ([`param_facts`], `cargo xtask
+/// mine-param-facts` + `gen-catalog`) certifies every position of `name` as by
+/// value (issue #637, ADR-0070 §2.1's widening discipline applied in bulk).
+///
+/// # Why this table and not a new one
+///
+/// The generated, committed, `PINNED_PHP`-pinned table php-src's parameter
+/// modes belong in already exists: `param_facts_generated.rs` carries one row
+/// per internal function of the mining build, `by_ref` read off
+/// `ReflectionFunction::getParameters()`'s `isPassedByReference()` — the
+/// engine's own arginfo, which is what PHP dispatches on. Mining a second table
+/// from the same source would be the failure its own doc names: a second
+/// transcription agrees with the first wherever the first is wrong. So this arm
+/// READS that table; it adds no data, and a `PINNED_PHP` bump regenerates one
+/// file rather than two.
+///
+/// The reading is analysis-time-free in ADR-0094's sense: the row is a static
+/// `&'static [usize]`, so a replay and a `--no-php` run answer identically to a
+/// run with a live sidecar (ADR-0070 §4 stays true by construction).
+///
+/// # The membership rule, and why each exclusion is not conservatism theatre
+///
+/// * **`by_ref` must be empty.** A name with any reference parameter keeps
+///   answering from its [`out_params`] row, or keeps answering `None` when it
+///   has none — this arm never invents a row (issue #637's "what NOT to
+///   chase"). That is what leaves `sscanf`, `fscanf`, `array_multisort`,
+///   `extract`, `exec` and `parse_str` exactly where they were: their by-ref
+///   tails are open-ended or unrowed, and a positional answer over them would
+///   certify the very position the engine writes through.
+/// * **No parameter declared `callable`, no [`invocation_shape`] row, no
+///   [`callables_in_array_param`] row.** A builtin that invokes a userland
+///   callback re-opens the sideways route ADR-0070 §2.3 closes for a project
+///   callee with the poison flag: the callback's own body may reach a caller
+///   local through `global`, and this table says nothing about it. The
+///   callback-taking names Steins actually reasons about are certified by the
+///   hand lists above, where the argument was made.
+/// * **No `mixed` variadic tail** unless [`variadic_tail_is_data`] argues it.
+///   `array_udiff(array $array, mixed ...$rest)` hides a comparator exactly
+///   there and no declared type gives it away — the one shape the `callable`
+///   column is blind to, and the same predicate the fold seam consults, so the
+///   two cannot disagree about which tails are values.
+///
+/// A name the mining build did not have answers `false` here and `None` there:
+/// the forgetting floor, unchanged, for every userland, vendor and unloaded
+/// extension name (ADR-0094's extension set is the function catalog's).
+///
+/// [`param_facts`]: crate::param_facts
+/// [`invocation_shape`]: crate::invocation_shape
+fn mined_all_by_value(name: &str) -> bool {
+    let Some(facts) = crate::param_facts(name) else { return false };
+    let hides_a_callback = !facts.callable.is_empty()
+        || crate::invocation_shape(name).is_some()
+        || callables_in_array_param(name).is_some()
+        || (!variadic_tail_is_data(name)
+            && facts.variadic.iter().any(|&i| facts.params.get(i) == Some(&"mixed")));
+    facts.by_ref.is_empty() && !hides_a_callback
 }
 
 #[cfg(test)]
@@ -1755,7 +1819,14 @@ mod tests {
             assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
             assert!(!foldable(f), "{f} must NOT become foldable");
         }
-        assert_eq!(by_value_arg("mb_internal_encoding", 0), None);
+        // `mb_internal_encoding(?string $encoding = null)` was the family's
+        // uncertified member, on the grounds that it writes process-global
+        // state. The mined table (issue #637) certifies it, and that is the
+        // right answer for the question this predicate asks: a global write is
+        // an EFFECT, and the effect lane keeps it — the ARGUMENT is a copied
+        // `?string` no call can write through.
+        assert_eq!(by_value_arg("mb_internal_encoding", 0), Some(true));
+        assert!(!foldable("mb_internal_encoding"), "the RESULT is still not foldable");
     }
 
     /// Issue #40: the arithmetic scalar-union family is certified per NAME, so
@@ -1789,8 +1860,16 @@ mod tests {
         }
         assert_eq!(by_value_arg("FILTER_VAR", 0), Some(true), "filter_var folds case");
         assert!(!foldable("filter_var"), "filter_var must NOT become foldable");
+        // The family's array-answering names were left uncertified by hand,
+        // on the belief that `filter_input_array` carries a `&$result`. The
+        // engine's arginfo says otherwise — `(int $type, array|int $options,
+        // bool $add_empty)`, nothing by reference — and the mined table (issue
+        // #637) certifies all three. This is the correction that motivates
+        // mining: a hand list records a belief, and only the engine can
+        // contradict it.
         for f in ["filter_var_array", "filter_input", "filter_input_array"] {
-            assert_eq!(by_value_arg(f, 0), None, "{f} stays uncertified");
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value per arginfo");
+            assert!(param_facts(f).is_some_and(|p| p.by_ref.is_empty()), "{f} has no `&$`");
         }
     }
 
@@ -1800,6 +1879,115 @@ mod tests {
                   "my_helper", "some_unknown_function"] {
             assert_eq!(by_value_arg(f, 0), None, "{f} is not certified");
             assert_eq!(by_value_arg(f, 1), None, "{f} is not certified at any position");
+        }
+    }
+
+    // ---- The mined by-value arm (issue #637) ----
+
+    /// The three families issue #637 measured, name for name — the corpus rows
+    /// it attributes to the forgetting floor were `strstr` 35, `mb_strstr` 11,
+    /// `dir` 10, `strrchr` 10 and roughly forty file-family builtins at two
+    /// rows each, none of which any hand list had reached.
+    #[test]
+    fn the_mined_table_certifies_the_measured_families() {
+        // A. the string-search family.
+        for f in ["strstr", "stristr", "strchr", "strrchr", "strpbrk", "mb_strstr", "mb_strrchr",
+                  "mb_stristr", "substr_compare"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} takes its haystack by value");
+            assert_eq!(by_value_arg(f, 1), Some(true), "{f} takes its needle by value");
+        }
+        // B. the filesystem-predicate family, including the issue's witness
+        // `if (rmdir($s))`.
+        for f in ["dir", "opendir", "scandir", "chdir", "mkdir", "rmdir", "touch", "unlink",
+                  "stat", "lstat", "readlink", "fopen", "file", "readfile", "linkinfo",
+                  "fileatime", "filectime", "filegroup", "fileinode", "filemtime", "fileowner",
+                  "fileperms", "filesize", "filetype"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} takes its path by value");
+        }
+        // C. the remainder.
+        for f in ["fnmatch", "json_validate"] {
+            assert_eq!(by_value_arg(f, 0), Some(true), "{f} is by value");
+        }
+        // Certification is about ARGUMENTS. None of these becomes foldable —
+        // the filesystem ones carry an `io` color and keep it.
+        assert!(!foldable("rmdir") && !foldable("strstr"));
+        assert_eq!(effect_labels("rmdir"), Some(&["io"][..]));
+    }
+
+    /// The arm is a **reading** of the mined table, so its population is that
+    /// table's — and a regeneration that lost rows, or a build mined without
+    /// its extensions, would show up here as a collapse rather than as silent
+    /// forgetting. The floor is loose on purpose: it is a rot tripwire, not a
+    /// transcription of the count.
+    #[test]
+    fn the_mined_arm_answers_for_most_of_the_engines_function_set() {
+        let certified = param_facts_generated::PARAM_FACTS
+            .iter()
+            .filter(|(name, _)| super::mined_all_by_value(name))
+            .count();
+        assert!(
+            certified > 1_800,
+            "only {certified} internal names certify by value — the mined table looks \
+             truncated; rerun `cargo xtask mine-param-facts && cargo xtask gen-catalog`"
+        );
+        // …and it is not a blanket `true`: the exclusions below keep a real
+        // population out.
+        assert!(certified < param_facts_generated::PARAM_FACTS.len());
+    }
+
+    /// **A by-ref parameter is never certified by this arm, rowed or not.**
+    /// The arm invents no [`out_params`] row: a name with any `&$` keeps
+    /// answering from the row it has, or keeps answering `None` when it has
+    /// none — which is what leaves the variadic-by-ref family exactly where
+    /// ADR-0070 §2.1 put it.
+    #[test]
+    fn a_mined_by_ref_name_is_never_certified_by_the_mined_arm() {
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            if facts.by_ref.is_empty() {
+                continue;
+            }
+            assert!(
+                !super::mined_all_by_value(name),
+                "{name} declares `&$` at {:?} and the mined arm certified it",
+                facts.by_ref
+            );
+        }
+        // The named members, spelled out: an unrowed by-ref name stays unknown,
+        // and a rowed one still answers its row positionally.
+        for f in ["sscanf", "fscanf", "array_multisort", "extract", "parse_str", "exec"] {
+            assert_eq!(by_value_arg(f, 0), None, "{f} keeps the forgetting floor");
+        }
+        assert_eq!(by_value_arg("preg_match", 1), Some(true), "the subject is still by value");
+        assert_eq!(by_value_arg("preg_match", 2), Some(false), "$matches is still by reference");
+    }
+
+    /// A builtin that hands an argument to a **userland callback** re-opens the
+    /// route ADR-0070 §2.3 closes with the callee's poison flag: the callback's
+    /// own body may reach a caller local through `global`, and arginfo says
+    /// nothing about that. The mined arm therefore declines every callable
+    /// carrier — declared, rowed as an invoker, or hidden in an untyped
+    /// variadic tail.
+    #[test]
+    fn the_mined_arm_declines_a_callback_carrier() {
+        for f in ["array_all", "array_any", "array_udiff", "array_uintersect",
+                  "array_diff_ukey", "call_user_func", "call_user_func_array",
+                  "set_error_handler", "spl_autoload_register"] {
+            assert!(!super::mined_all_by_value(f), "{f} carries a callee");
+        }
+        // The exclusion is not a blanket refusal of variadic tails: an argued
+        // one (`sprintf`'s values are rendered BY the format string) certifies.
+        assert!(super::variadic_tail_is_data("vsprintf"));
+        assert_eq!(by_value_arg("sprintf", 3), Some(true));
+    }
+
+    /// A name the mining build never had is not a by-value statement — the
+    /// forgetting floor, unchanged, for userland and vendor names alike.
+    #[test]
+    fn an_unmined_name_is_still_unknown_to_the_mined_arm() {
+        for f in ["my_helper", "some_unknown_function", "Acme\\strstr"] {
+            assert!(!param_facts_mined(f), "{f} must not be in the mined table");
+            assert!(!super::mined_all_by_value(f));
+            assert_eq!(by_value_arg(f, 0), None, "{f} is not certified");
         }
     }
 
