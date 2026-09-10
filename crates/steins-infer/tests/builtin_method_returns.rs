@@ -230,6 +230,25 @@ function f(Reader $r): void {
     assert_eq!(one_type(src), "string (asserted)");
 }
 
+/// The refusal that makes the previous test's non-disagreement *structural* rather
+/// than incidental. A child declaring `fgets(): static` is a name the declaration
+/// path cannot answer — ADR-0049 A19 defers `static` with its reason — so if the
+/// table were free to step in it would hand back `SplFileObject`'s `string` and
+/// contradict a declaration sitting right there in the project. `builtin_root`
+/// refuses on the declaration, not on whether the declaration path used it.
+#[test]
+fn a_child_declaration_the_declaration_path_defers_still_blocks_the_table() {
+    let src = r#"<?php
+class Reader extends \SplFileObject {
+    public function fgets(): static { return $this; }
+}
+function f(Reader $r): void {
+    \PHPStan\dumpType($r->fgets());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
 /// `$this` inside a class extending a builtin reaches the same walk from the other
 /// side: the enclosing class is the declared receiver, and the chain leaves the
 /// project one hop up.
