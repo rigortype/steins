@@ -1182,7 +1182,9 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // `setName($_SERVER['argv'][0])`, so the null arm is closed at runtime by a
     // property write this analyzer does not track through `$this` — and the
     // author's own `$this->getName() ?: 'UNKNOWN'` five lines up says the arm was
-    // considered real. Coercive mode, so PHP 8.1+ deprecates rather than fatals.
+    // considered real. Coercive mode, and `null` into a non-nullable parameter of a
+    // USER function is a `TypeError` there too (the 8.1 deprecation is internal
+    // functions only) — the possibly grade is the right one.
     ("symfony/console", 11),
     // 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
     // Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is

@@ -499,3 +499,62 @@ function f(Foo $foo): void {
     let ids: Vec<String> = findings(src).into_iter().map(|d| d.id.to_owned()).collect();
     assert!(!ids.iter().any(|i| i.starts_with("type.")), "no proof-layer finding, got {ids:?}");
 }
+
+// The two refusals the adversarial review added.
+
+/// The private-shadow rule: from inside `P`, which declares a private `m`, `$c->m()`
+/// on a `C extends P` calls `P::m` — a private method is not virtual — whatever `C`
+/// declares under the name. The declared chain would find `C::m(): ?string` and
+/// manufacture a possibly-grade mismatch on an `int` that is really there.
+#[test]
+fn a_private_method_in_the_enclosing_class_shadows_the_declared_chain() {
+    let src = r#"<?php
+class P {
+    private function m(): int { return 1; }
+    public function viaParam(C $c): void { takesInt($c->m()); \PHPStan\dumpType($c->m()); }
+}
+class C extends P {
+    public function m(): ?string { return null; }
+}
+function takesInt(int $i): void {}
+"#;
+    let ids: Vec<String> = findings(src).into_iter().map(|d| d.id.to_owned()).collect();
+    assert!(!ids.iter().any(|i| i.contains("maybe-argument-mismatch")), "P::m() returns int: {ids:?}");
+    assert_eq!(one_type(src), "int");
+}
+
+/// `P::i()` on an instance method with no enclosing class is a PHP 8 `Error`, so
+/// nothing after it runs — parity with the dispatch resolver's own refusal.
+#[test]
+fn a_named_static_call_of_an_instance_method_at_top_level_answers_nothing() {
+    let src = r#"<?php
+class P {
+    public function i(): ?string { return null; }
+}
+function takesString(string $s): void {}
+takesString(P::i());
+\PHPStan\dumpType(P::i());
+"#;
+    let ids: Vec<String> = findings(src).into_iter().map(|d| d.id.to_owned()).collect();
+    assert!(!ids.iter().any(|i| i.contains("maybe-argument-mismatch")), "a dead call premises nothing: {ids:?}");
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The positive half of the stratum split: a docblock-only `@return ?string` on an
+/// open receiver reaches the CONTRACT-layer possibly grade and never the proof one.
+#[test]
+fn a_docblock_return_reaches_the_phpdoc_possibly_grade_and_not_the_proof_one() {
+    let src = r#"<?php
+class Foo {
+    /** @return ?string */
+    public function getName() { return null; }
+}
+function want(string $s): void {}
+function f(Foo $foo): void {
+    want($foo->getName());
+}
+"#;
+    let ids: Vec<String> = findings(src).into_iter().map(|d| d.id.to_owned()).collect();
+    assert!(ids.iter().any(|i| i == "phpdoc.maybe-argument-mismatch"), "the contract-layer id fires: {ids:?}");
+    assert!(!ids.iter().any(|i| i.starts_with("type.")), "no proof-layer id: {ids:?}");
+}

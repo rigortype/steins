@@ -6,7 +6,7 @@ use std::collections::HashSet;
 
 use steins_syntax::{Callee, ClassDecl, MethodDecl, Receiver, StaticClass, Visibility};
 
-use crate::contract::GenericCarry;
+use crate::contract::{GenericCarry, IsA};
 use crate::cx::Cx;
 use crate::declared_receiver::declared_receiver_conjuncts;
 use crate::env::{Store, Stratum};
@@ -358,11 +358,46 @@ pub(crate) fn resolve_declaration_target<'a>(
         | Callee::DynamicVar(_)
         | Callee::Dynamic => return None,
     };
-    let Resolution::Found(r) = resolve_in_chain_mode(cx, &class, &method, ChainMode::Declaration)
-    else {
-        return None;
+    // The private-shadow rule (`ZEND_ACC_CHANGED`): from inside a class that
+    // declares a PRIVATE `m`, `$c->m()` on any `$c` that is-a that class calls the
+    // private one, whatever a subclass declares under the same name — a private
+    // method is not virtual, so the declared chain's answer would be the wrong
+    // declaration. The is-a question must be proven; an undecided hierarchy
+    // answers nothing rather than either declaration.
+    let shadow = enclosing_class.and_then(|enc| {
+        let (efile, ecd) = cx.find_class(enc)?;
+        let pm = ecd
+            .methods
+            .iter()
+            .find(|m| m.name.eq_ignore_ascii_case(&method) && m.visibility == Visibility::Private)?;
+        Some(match cx.is_a(&class, enc) {
+            IsA::Yes => Some(ResolvedMethod { method: pm, declaring_class: ecd, class_file: efile }),
+            IsA::No => None,
+            _ => return Some(None),
+        })
+    });
+    let r = match shadow {
+        Some(Some(r)) => r,
+        Some(None) => return None,
+        None => {
+            let Resolution::Found(r) =
+                resolve_in_chain_mode(cx, &class, &method, ChainMode::Declaration)
+            else {
+                return None;
+            };
+            r
+        }
     };
     if private_blocked(&r, enclosing_class) {
+        return None;
+    }
+    // Parity with `resolve_static_named`: `P::m()` on an instance method with no
+    // enclosing class is a PHP 8 `Error`, so the call never returns and there is
+    // no envelope to hand the statement after it.
+    if matches!(receiver, Callee::Static { class: StaticClass::Named(_), .. })
+        && !r.method.is_static
+        && enclosing_class.is_none()
+    {
         return None;
     }
     // A19: `static`/`self`/`parent` return bounds are deferred with the reason.
