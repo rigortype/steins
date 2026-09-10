@@ -1152,6 +1152,52 @@ mod tests {
         assert_eq!(assigned(&back, "c"), ArgValue::Other, "a heredoc is still `Other`");
     }
 
+    /// **The `SCHEMA_VERSION` 14 → 15 payload** (issue #650): `for`, `foreach` and
+    /// `do`-`while` lower to variants of their own, and each survives the trace
+    /// codec with the body — and, for the `for`, the init trace and the carried set
+    /// — intact.
+    ///
+    /// The three sit after `While`, and the wire codec carries an enum variant **by
+    /// index**, so every later variant's index moved: a schema-14 payload would
+    /// decode an `Opaque`'s write set as one of these bodies. That is the sharp half
+    /// of the bump; the blunt half is that a schema-14 trace spells all three as
+    /// `Opaque`, whose body is not carried at all.
+    #[test]
+    fn the_other_three_loop_forms_round_trip_through_the_trace_payload() {
+        use steins_syntax::StmtKind;
+        let tree = SourceTree::parse(
+            "<?php\nfunction f(array $xs, int $n): void {\n\
+             for ($i = 0, $s = 'abc'; $i < $n; $i++) { $a = 1; $b = 2; }\n\
+             foreach ($xs as $k => $v) { $c = 3; }\n\
+             do { $d = 4; } while ($n > 0);\n}\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let kinds = |t: &SourceTree| -> Vec<String> {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .map(|s| match &s.kind {
+                    StmtKind::For { init, body, carried, .. } => {
+                        format!("for init={} body={} carried={carried:?}", init.len(), body.len())
+                    }
+                    StmtKind::Foreach { body, .. } => format!("foreach body={}", body.len()),
+                    StmtKind::DoWhile { body, .. } => format!("do-while body={}", body.len()),
+                    other => format!("{other:?}"),
+                })
+                .collect()
+        };
+        let got = kinds(&back);
+        assert_eq!(got, kinds(&tree), "the decoded bodies are the encoded ones");
+        assert!(
+            got.contains(&"for init=2 body=2 carried=[\"s\"]".to_owned()),
+            "the `for` lost a clause: {got:?}"
+        );
+        assert!(got.contains(&"foreach body=1".to_owned()), "the `foreach` lost its body: {got:?}");
+        assert!(got.contains(&"do-while body=1".to_owned()), "the `do`-`while` lost its body: {got:?}");
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),
