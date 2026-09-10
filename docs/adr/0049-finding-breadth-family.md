@@ -862,3 +862,114 @@ vocabulary already carries:
 A plain positional argument after any unpacking stays unanalyzable: PHP
 rejects that source at compile time, so there is no call there to answer
 about.
+
+## Amendment (2026-09-10): a declaration-only target for an inexact receiver (issue #619)
+
+Status: PENDING ratification (post-hoc-ratification mode, ADR-0077
+precedent). Source: the owner's grilled design session of 2026-09-10
+over issue #619. This amendment adds one resolution path and rules on
+its carrier; A1 (points 4a, 8) and G1 stand unchanged, and every
+consumer that walks a body keeps the resolver it has.
+
+### A16. An inexact receiver may yield a declaration, never a body
+
+`resolve_call_target` (`crates/steins-infer/src/dispatch.rs`) answers
+`None` for a receiver whose runtime class is not proven: a non-`final`
+class, a non-`final`/non-`private` method, `$this` in an open class.
+That refusal is G1's, and it is right for every consumer that *acts on
+the resolved method* — `descend` walks its body, `promote` rewrites its
+call site, `asserts` applies its `@phpstan-assert` tags — because an
+override may run instead. Measured on the 2026-09-02 unknown-fall
+recount, the same refusal also kills ~290 method-call and ~28
+static-call rows whose only question is *what the call returns*, and the
+machinery behind the refusal (`method_return_arms_by_callee`,
+`crates/steins-infer/src/return_arms.rs`, rendered by the dump surface)
+already answers that question correctly on a `final` receiver.
+
+The ruling is that the two questions get two resolvers:
+
+- A **resolve-for-declaration** path returns the declaration of the
+  method resolved by name in the receiver's *declared* chain, with no
+  exactness claim, no `this_exact`, no receiver carries beyond the
+  declared ones, and no receiver variable. It is consumed by
+  `method_return_arms_by_callee` and its static twin **only**.
+  `descend`, `promote` and `asserts` keep `resolve_call_target`
+  untouched, and a test pins that they still see `None` for every
+  receiver `resolve_guarded` refuses today.
+- The declared **native** return envelope rides at whatever stratum a
+  native hint carries today. PHP enforces return covariance at
+  class-declaration time — a child cannot widen the parent's promise,
+  and `override_return_widens` (`crates/steins-infer/src/overrides.rs`)
+  already convicts the attempt — so the declaring method's native
+  envelope is a sound upper bound under every descendant. That is a
+  membership-direction claim about the *result*, which A1 point 8
+  permits without the exactness bit; it is not a definite-No about the
+  receiver.
+- The declared **`@return`** merges at `Asserted`, by ADR-0069 §2's
+  grade for the builtin declared-return floor; `refine_contract_arms`
+  already merges the two halves for a project function and nothing new
+  is needed for the merge. An `@return`-derived arm renders with the
+  `(asserted)` marker and never premises a proof-layer finding.
+- Unrepresentable hints (`void`, `iterable`, `mixed`, DNF, and the bare
+  `: array` that #603 documents) lower to the same `None` an absent hint
+  gives. The declaration path says nothing there; a fixture pins which
+  of the two gates a `: array`-returning open method hits.
+
+### A17. The receiver carrier is the declared-receiver lane
+
+Three refusals stack inside #619's attribution and the first is not
+`resolve_guarded` at all: the non-exact `Receiver::Var` arm begins with
+`store.obj_of(v)?`, and `seed_declared_param_object` declines a `?C`
+hint, a union, `@param object` narrowed by `instanceof`, and every
+`@param` spelling other than a plain class. Two of the issue's three
+witnesses die there.
+
+The ruling is that the declaration path reads the receiver **the way S6
+does**: from the receiver's contract arms — native `C $o`, phpdoc
+`@param User|Guest`, narrowed by branch analysis to a surviving arm
+list — routed by the **minimum stratum** of the arms that survive (A13).
+A heap object is not required. A `?Reservation` parameter after a null
+guard is a one-arm list and resolves; a `@param object $foo` after
+`assert($foo instanceof Foo)` carries the `Member` fact's class as its
+arm and resolves. This is the same carrier ADR-0093 §3 makes the home
+of object spellings, so the return floor and the object answer share
+one lane rather than two.
+
+### A18. The chain walk's own refusals, re-examined
+
+`resolve_in_chain` returns `Unknown` for an abstract method and for a
+trait-using class before finality is consulted.
+
+- **Abstract**: lifted for the declaration path. An abstract declaration
+  has a return type and a docblock; it is the richest floor source in
+  the corpus (the `@return ($x is null ? null : string)` witness is one)
+  and carries no body the walker could mistake for the one that runs.
+- **Trait-using class**: lifted only when the name resolves on the class
+  itself or its parent chain *without* trait resolution. A method the
+  class obtains from a trait stays refused (about 19 rows): trait method
+  bodies and return types are not lowered today, and "not found on the
+  class" must not be read as "absent" while that is so.
+
+### A19. `@return static` and late static binding are deferred, with the reason
+
+Binding `static` to the declared receiver class is sound as an upper
+bound, but it spells the same as `self` and loses the very identity
+`@return static` exists to carry — the *calling* receiver's type. The
+right mechanism is the one generics use: the calling receiver's contract
+arms substituted for `static`, which is a template-binding question and
+not a dispatch one. `override_return_widens` already goes silent on
+`ret_bound_keyword`; the declaration path does the same, and the ~25
+method-call rows plus the LSB share of the ~28 static-call rows are
+recorded as deferred rather than answered wrongly.
+
+### What the amendment does not change
+
+- Enum receivers are not this amendment's case: `lower_enum` records no
+  methods by design, so an enum resolves `NotFoundChainComplete` before
+  finality is ever the question. Recording enum methods at lowering is
+  issue #631's bounded slice and needs no relaxation here.
+- The chained-receiver limit (ADR-0075 §3 / ADR-0052 §7, ~26 rows) is a
+  different refusal and is untouched.
+- Every override/variance finding and every absence-family id keeps its
+  premises; the declaration path feeds the dump surface and the return
+  floor, not a finding.
