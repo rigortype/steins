@@ -89,12 +89,12 @@ pub(crate) fn element_binding(
     // The value lane first (ADR-0037: proven beats declared). A fully-known array
     // answers both halves exactly, and at its own stratum — `Verified` for a
     // literal, so `foreach ([1, 2] as $v)` may premise a proof.
-    if let Some(k) = known {
-        if let Some(Fact::Singleton(Val::Array(entries))) = &k.fact {
-            let b = from_entries(entries, k.stratum);
-            if !b.is_empty() {
-                return b;
-            }
+    if let Some(k) = known
+        && let Some(Fact::Singleton(Val::Array(entries))) = &k.fact
+    {
+        let b = from_entries(entries, k.stratum);
+        if !b.is_empty() {
+            return b;
         }
     }
     arms.map(from_arms).unwrap_or_default()
@@ -232,7 +232,7 @@ fn element_contracts(ty: &ContractTy) -> Option<(Option<ContractTy>, ContractTy)
             if vals.is_empty() {
                 return None;
             }
-            let key = (!keys.is_empty()).then(|| ContractTy::Union(keys));
+            let key = (!keys.is_empty()).then_some(ContractTy::Union(keys));
             Some((key, ContractTy::Union(vals)))
         }
         // `array` / `non-empty-array` without parameters: the acceptance criterion

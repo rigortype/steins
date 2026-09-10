@@ -685,10 +685,10 @@ fn bind_foreach_targets(
     let Some(subject) = subject else { return };
     let binding = element_binding(benv.get(subject), bstore.contract_arms(subject));
     let line = w.cx.tree().position(stmt.span.start).line;
-    if let Some(name) = key_var {
-        if let Some(known) = binding.key_known(line) {
-            benv.insert(name.to_owned(), known);
-        }
+    if let Some(name) = key_var
+        && let Some(known) = binding.key_known(line)
+    {
+        benv.insert(name.to_owned(), known);
     }
     let Some(name) = value_var else { return };
     if let Some(known) = binding.value_known(line) {
