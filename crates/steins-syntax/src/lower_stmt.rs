@@ -2212,6 +2212,19 @@ fn scan_opaque_walk(node: &Node<'_, '_>, out: &mut Vec<OpaqueSite>, stop_at_firs
         }
         // Reference assignment `$x = &$y`.
         Node::Assignment(a) => a.rhs.is_reference().then_some(OpaqueConstruct::ReferenceAssign),
+        // A `&` standing anywhere else (issue #641). [`Expression::is_reference`] is a
+        // top-level test, so the arm above sees `$b = &$a` and nothing more: `['key' => &$a]`
+        // has an `Expression::Array` right-hand side and `foreach ($rows as &$row)` is not an
+        // assignment at all, yet both tie two names to one cell. Since PHP 8 removed
+        // call-time pass-by-reference, those two are the whole remaining family of a `&`
+        // in EXPRESSION position, so one arm covers it: a `use (&$x)` capture is a
+        // variable behind an ampersand TOKEN (the closure arm below reads it), and a
+        // declaration's `&` (`function &f()`, `&$p` in a parameter list) is not an
+        // expression either. The arm above still takes `$x = &$y` first, so a reference
+        // assignment is never recorded twice.
+        Node::UnaryPrefix(u) if matches!(u.operator, UnaryPrefixOperator::Reference(_)) => {
+            Some(OpaqueConstruct::ReferenceBinding)
+        }
         // Closure: inspect its `use (&$x)` capture list, but do not descend into
         // its body (a separate scope).
         Node::Closure(c) => {

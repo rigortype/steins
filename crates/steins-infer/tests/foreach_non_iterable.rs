@@ -104,12 +104,23 @@ fn fires_on_null_subject() {
 }
 
 #[test]
-fn fires_on_key_value_and_by_ref_forms_too() {
-    // The Singleton proof is orthogonal to the binding shape (`$k => $v`, `&$v`).
+fn fires_on_the_key_value_form_too() {
+    // The Singleton proof is orthogonal to the binding shape (`$k => $v`).
     let kv = diags("<?php\n$a = 7;\nforeach ($a as $k => $v) {\n    echo $v;\n}\n");
     assert_eq!(kv.len(), 1, "{kv:#?}");
+}
+
+#[test]
+fn the_by_ref_form_is_silenced_by_the_give_up_list() {
+    // Not orthogonal, and this is a **cost**, not a design: since issue #641 a
+    // by-ref `foreach` is an `OpaqueConstruct::ReferenceBinding` site, because its
+    // alias really does outlive the loop (`php -r '$r = [[1],[2]]; foreach ($r as
+    // &$v) {} $v[] = 9; var_dump($r[1]);'` mutates `$r`). A poisoned scope knows no
+    // local, so `$a` is no longer proven `7` and the id has nothing to fire on. The
+    // subject really is a fatal at run time; the give-up list declines to say so,
+    // which is what ADR-0001 declining looks like when it costs a true positive.
     let by_ref = diags("<?php\n$a = 7;\nforeach ($a as &$v) {\n    echo $v;\n}\n");
-    assert_eq!(by_ref.len(), 1, "{by_ref:#?}");
+    assert!(by_ref.is_empty(), "{by_ref:#?}");
 }
 
 

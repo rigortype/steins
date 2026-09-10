@@ -2617,6 +2617,13 @@ pub enum OpaqueConstruct {
     VariableVariable,
     /// `$x = &$y` — reference assignment: two names, one cell.
     ReferenceAssign,
+    /// A `&` binding written anywhere an assignment's right-hand side is not (issue
+    /// #641): `['key' => &$a]`, `[&$a, 'normal', &$c]`, `foreach ($rows as &$row)`.
+    /// Each ties a cell of one binding to another name exactly as [`Self::ReferenceAssign`]
+    /// does — `php -r '$a = 1; $b = ["key" => &$a]; $b["key"] = 42; var_dump($a);'` prints
+    /// `int(42)` at 8.5.10 — and a by-ref `foreach`'s alias outlives the loop, which is why
+    /// PHP's own idiom is to `unset($row)` after one.
+    ReferenceBinding,
     /// `global $x` — the local is an alias of a global cell.
     Global,
     /// `static $x` — the local outlives the call and other calls write it.
@@ -2629,13 +2636,14 @@ pub enum OpaqueConstruct {
 impl OpaqueConstruct {
     /// Every variant, in `steins doctor`'s report order. Hand-maintained — adding a variant
     /// without extending it compiles but silently drops it, so a workspace test pins length/labels.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::Eval,
         Self::Include,
         Self::Extract,
         Self::Compact,
         Self::VariableVariable,
         Self::ReferenceAssign,
+        Self::ReferenceBinding,
         Self::Global,
         Self::StaticVar,
         Self::ByRefCapture,
@@ -2651,6 +2659,7 @@ impl OpaqueConstruct {
             Self::Compact => "compact",
             Self::VariableVariable => "variable variable",
             Self::ReferenceAssign => "reference assignment",
+            Self::ReferenceBinding => "reference binding",
             Self::Global => "global",
             Self::StaticVar => "static variable",
             Self::ByRefCapture => "by-ref capture",
