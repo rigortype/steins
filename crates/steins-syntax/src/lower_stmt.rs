@@ -725,15 +725,33 @@ fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
     Stmt::lowered(kind, Vec::new())
 }
 
-/// Lower a `foreach` to [`StmtKind::Foreach`] (issue #650) — the sets and the body,
-/// and nothing else: a `foreach` header binds rather than tests, so there is no
-/// condition to carry. The `$k`/`$v` targets are ordinary writes (they always were),
-/// so the entry forgetting leaves them defined but untyped; typing them from the
-/// subject is issue #652.
+/// Lower a `foreach` to [`StmtKind::Foreach`] (issue #650) — the sets, the body, and
+/// the header's own spelling: a `foreach` header binds rather than tests, so there is
+/// no condition to carry, but there ARE the three names the binding is about. The
+/// `$k`/`$v` targets stay ordinary writes (they always were); carrying the header is
+/// what lets a walker rebind them from the subject's element type (issue #652).
+///
+/// Every field goes through the same two readers [`lower_foreach_site`] uses, so the
+/// trace variant and the ADR-0076 site can never disagree about what the header says.
 fn lower_foreach(s: &Statement<'_>, fe: &mago_syntax::cst::Foreach<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
     let body = lower_trace(fe.body.statements());
-    Stmt::lowered(StmtKind::Foreach { body, writes, reads, poisons, may_return }, Vec::new())
+    let target = &fe.target;
+    let value = target.value();
+    let kind = StmtKind::Foreach {
+        subject: direct_var_name(fe.expression),
+        key_var: target.key().and_then(direct_var_name),
+        // The by-ref flag is the refusal-bearing fact, so the name is read off the
+        // stripped target either way and the walker decides what to do with it.
+        value_var: direct_var_name(strip_reference(value)),
+        by_ref: value.is_reference(),
+        body,
+        writes,
+        reads,
+        poisons,
+        may_return,
+    };
+    Stmt::lowered(kind, Vec::new())
 }
 
 /// Lower a `do`-`while` to [`StmtKind::DoWhile`] (issue #650). The condition is
@@ -1599,6 +1617,17 @@ pub(crate) fn collect_assign_writes(node: &Node<'_, '_>, out: &mut Vec<String>) 
         }
         // `$x++` / `$x--` (the only postfix operators) write their operand.
         Node::UnaryPostfix(u) => collect_direct_vars(&Node::Expression(u.operand), out),
+        // `foreach ($it as &$v)` writes THROUGH its subject: every element the
+        // body assigns to `$v` lands in `$it`, and the alias outlives the loop. The
+        // subject is a write of the construct (issue #677) — the one thing that
+        // keeps an enclosing loop's entry env from reading `$it` as the literal it
+        // was before the aliased iteration rewrote it. The targets are collected by
+        // the arms below through the ordinary recursion.
+        Node::Foreach(fe) => {
+            if fe.target.value().is_reference() {
+                collect_direct_vars(&Node::Expression(fe.expression), out);
+            }
+        }
         // `foreach ($it as $v)` / `foreach ($it as $k => $v)` bind their targets.
         Node::ForeachValueTarget(t) => {
             collect_direct_vars(&Node::Expression(t.value), out);

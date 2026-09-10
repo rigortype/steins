@@ -57,10 +57,11 @@ fn foreach_subject_abstract_word(fact: &Fact) -> Option<&'static str> {
 /// issue #192).
 ///
 /// Reuses `SourceTree::foreach_sites()` (ADR-0076) rather than re-lowering the
-/// construct. The trace tells a `foreach` apart from its siblings since issue
-/// #650 (`StmtKind::Foreach`), but it carries the body and the sets, never the
-/// **subject** this proof is about, so the site list is still where the subject
-/// survives — and the match stays by span for that reason.
+/// construct, and the match stays by span. `StmtKind::Foreach` does carry the
+/// subject since issue #652, so this could read the trace instead — but the site
+/// is where the rest of the ADR-0076 shape lives (the body's append form, the
+/// preceding statement, the scope end) and a proof reading two enumerations of the
+/// same construct is one that can be told two things. One reader, one list.
 ///
 /// The subject's fact comes from the SAME lane `offset.missing` reads (a bare
 /// `Var` in `env`, required `Verified` — an `Asserted`/docblock claim never

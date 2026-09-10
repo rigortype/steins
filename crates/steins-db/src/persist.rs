@@ -1198,6 +1198,57 @@ mod tests {
         assert!(got.contains(&"do-while body=1".to_owned()), "the `do`-`while` lost its body: {got:?}");
     }
 
+    /// **The `SCHEMA_VERSION` 15 → 16 payload** (issue #652): `StmtKind::Foreach`
+    /// grows the header the binding is about — the subject, the two targets, and the
+    /// by-reference flag — and each survives the trace codec.
+    ///
+    /// The bump is the plainest **misdecode** kind: the variant gains fields, and the
+    /// wire codec reads a struct variant's fields positionally, so a schema-15 payload
+    /// would read the old `body` where the new `subject` is. On top of that a
+    /// schema-15 trace carries no header at all, so every `foreach` in it would bind
+    /// its targets untyped — replaying issue #650's silence for elements this binary
+    /// types.
+    #[test]
+    fn a_foreach_header_round_trips_through_the_trace_payload() {
+        use steins_syntax::StmtKind;
+        let tree = SourceTree::parse(
+            "<?php\nfunction f(array $xs, array $ys, array $zs): void {\n\
+             foreach ($xs as $k => $v) { $a = 1; }\n\
+             foreach ($ys as &$r) { $b = 2; }\n\
+             foreach (g() as [$p, $q]) { $c = 3; }\n}\n",
+        );
+        let bytes = trace_payload(&tree);
+        let back: SourceTree =
+            crate::wire::from_slice(&bytes).expect("a lowered tree round-trips");
+        let headers = |t: &SourceTree| -> Vec<String> {
+            t.scopes()
+                .iter()
+                .flat_map(|sc| sc.stmts.iter())
+                .filter_map(|s| match &s.kind {
+                    StmtKind::Foreach { subject, key_var, value_var, by_ref, .. } => {
+                        Some(format!("{subject:?} {key_var:?} {value_var:?} {by_ref}"))
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let got = headers(&back);
+        assert_eq!(got, headers(&tree), "the decoded headers are the encoded ones");
+        assert_eq!(
+            got,
+            vec![
+                "Some(\"xs\") Some(\"k\") Some(\"v\") false".to_owned(),
+                // The by-ref target's NAME survives; the flag is what refuses the
+                // binding, so a reader must see both.
+                "Some(\"ys\") None Some(\"r\") true".to_owned(),
+                // A non-variable subject and a destructuring target are both `None`
+                // — there is nothing for a walker to ask the env about.
+                "None None None false".to_owned(),
+            ],
+            "the header is carried verbatim: {got:?}"
+        );
+    }
+
     /// Acceptance (c) for the nested trace directory: every way the framing
     /// can lie — a section shorter than its prefix, a prefix that overruns, a
     /// directory that is not one (or carries a field this schema does not),

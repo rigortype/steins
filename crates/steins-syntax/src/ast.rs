@@ -2183,10 +2183,30 @@ pub enum StmtKind {
     ///
     /// The key and value targets are ordinary members of `writes` (the same
     /// `collect_assign_writes` row that has always counted a `foreach` binding), so
-    /// the entry forgetting leaves them **defined but untyped** — which is what they
-    /// are, until a slice types them from the subject's own value type (issue #652).
-    /// Nothing here claims otherwise; the gain is that the body is walked at all.
+    /// the entry forgetting drops them — and the header is carried here so a walker
+    /// can put them back typed from the subject's own element type (issue #652).
+    ///
+    /// * `subject` — the iterated expression when it is a plain `$var`; `None` for
+    ///   every other subject (a call, a property, an offset read, …), which names
+    ///   nothing the env can be asked about.
+    /// * `key_var` / `value_var` — the bound targets when each is a plain `$var`.
+    ///   `value_var` is `None` for a destructuring target (`as [$a, $b]` /
+    ///   `as list($a, $b)`) and for a property/offset target (`as $this->x`): those
+    ///   bind names this variant does not resolve, and stay writes alone.
+    /// * `by_ref` — `true` for `as &$v`. The loop writes *through* the subject, and
+    ///   the trace models neither that write nor the aliasing it installs
+    ///   (issue #677), so a reader may not type `$v` from the subject's element
+    ///   type: the element it names is the one the previous iteration may have
+    ///   overwritten.
+    ///
+    /// This is header **spelling**, exactly as [`ForeachSite`] carries it — what the
+    /// subject's type is, and therefore what its elements are, stays the walker's
+    /// question.
     Foreach {
+        subject: Option<String>,
+        key_var: Option<String>,
+        value_var: Option<String>,
+        by_ref: bool,
         body: Vec<Stmt>,
         writes: Vec<String>,
         reads: Vec<String>,

@@ -43,6 +43,7 @@ use crate::env::{
     AllocId, ContractArm, Descent, ExitContribution, HeapSummary, Known, ReturnSummary, Store,
     Stratum, SummaryCtx,
 };
+use crate::foreach_bind::element_binding;
 use crate::foreach_check::check_foreach_subject;
 use crate::heap::{apply_prop_assign, seed_declared_param_object, seed_this_object};
 use crate::inaccessible::{
@@ -643,6 +644,68 @@ fn loop_entry_forget(
     }
 }
 
+/// Bind a `foreach`'s `$k`/`$v` at the body entry from the subject's own element
+/// type (issue #652), into the env [`loop_entry_forget`] has just built.
+///
+/// Applied **after** the forgetting, never instead of it. Both targets are in
+/// `writes` — the `foreach`-binding row the write collector has always had — so the
+/// forgetting drops them first and this puts back only what the subject supports.
+/// That is the whole of the iteration-count-agnosticism: the fact comes from the
+/// subject as the entry env holds it, so a body that reassigns `$v` writes into an
+/// env this construct discards, and the next entry re-derives from the subject.
+///
+/// The subject is read from that same entry env, which is why a subject the body
+/// rebinds contributes nothing: it is in `writes` too, and is gone by the time this
+/// looks for it. A `poisons` scope has an empty env here for the same reason, so
+/// the lookup fails and nothing binds.
+///
+/// **Refusals**, both silent — the target keeps the defined-but-untyped binding the
+/// forgetting left it with:
+///
+/// * `by_ref` (`as &$v`) — the loop writes *through* the subject, and the trace
+///   models neither that write nor the alias it installs (issue #677). Typing `$v`
+///   from the subject would let iteration 2 read an element iteration 1 overwrote.
+/// * a target that is not a plain variable — a destructuring (`as [$a, $b]`) or a
+///   property/offset target (`as $this->x`) binds names this statement does not
+///   name, so there is nothing to bind and it stays a write alone.
+#[allow(clippy::too_many_arguments)]
+fn bind_foreach_targets(
+    w: &WalkCx,
+    stmt: &Stmt,
+    subject: Option<&str>,
+    key_var: Option<&str>,
+    value_var: Option<&str>,
+    by_ref: bool,
+    benv: &mut HashMap<String, Known>,
+    bstore: &mut Store,
+) {
+    if by_ref {
+        return;
+    }
+    let Some(subject) = subject else { return };
+    let binding = element_binding(benv.get(subject), bstore.contract_arms(subject));
+    let line = w.cx.tree().position(stmt.span.start).line;
+    // `foreach ($xs as $x => $x)` assigns the key first and the value last, so the
+    // name holds the value; binding the key too would leave the env and the arm
+    // lane disagreeing about one variable.
+    if let Some(name) = key_var
+        && key_var != value_var
+        && let Some(known) = binding.key_known(line)
+    {
+        benv.insert(name.to_owned(), known);
+    }
+    let Some(name) = value_var else { return };
+    if let Some(known) = binding.value_known(line) {
+        benv.insert(name.to_owned(), known);
+    }
+    // The declared lane too, and for the one thing the value lane cannot hold: a
+    // class element (`array<string, Foo>`) has no `Fact` to be (ADR-0035/0043), so
+    // `$v: Foo` exists only as an arm.
+    if let Some(arms) = binding.value_arms {
+        bstore.contract.insert(name.to_owned(), arms);
+    }
+}
+
 /// Walk an ordered statement (sub-)trace against a mutable env, threading the same
 /// findings sink, descent, and facts. Returns whether the trace falls through.
 /// Statements after a terminator are unreachable and are **not** walked (ADR-0031
@@ -675,9 +738,10 @@ pub(crate) fn walk_trace(
             record_subject_probe(cx, stmt, env);
             // 0a-bis. `foreach.non-iterable` (ADR-0078, issue #192), judged from the
             // same entry env the probe above just read (nothing has touched `env`
-            // for this construct yet). `StmtKind::Foreach` names the construct since
-            // issue #650, but it carries no **subject**, which is what this proof is
-            // about — so the match stays by span against the ADR-0076 enumeration.
+            // for this construct yet). The match stays by span against the ADR-0076
+            // enumeration even though `StmtKind::Foreach` now names the subject too
+            // (issue #652): the site carries the rest of the shape this family reads,
+            // and one construct wants one reader.
             if let Some(site) = cx.tree().foreach_sites().iter().find(|s| s.span == stmt.span) {
                 check_foreach_subject(cx, site, env, scope.poisoned, out);
             }
@@ -1214,14 +1278,37 @@ pub(crate) fn walk_trace(
                 walk_while_body(w, folder, cond, body, benv, bstore, descent, facts, out);
                 Flow::FellThrough
             }
-            // A structured `foreach` (issue #650): the same entry env, with no header
-            // to narrow it — a `foreach` header binds rather than tests. Its `$k`/`$v`
-            // are ordinary writes, so they arrive defined but untyped (issue #652 types
-            // them from the subject).
-            StmtKind::Foreach { body, writes, reads, poisons, may_return } => {
+            // A structured `foreach` (issues #650 and #652): the same entry env, with
+            // no header to narrow it — a `foreach` header binds rather than tests —
+            // and then the binding it DOES perform, applied to that env. The order is
+            // the soundness: `$k`/`$v` are ordinary writes, so the entry forgetting
+            // drops them first and the element fact is put back afterwards, from the
+            // subject as the entry env holds it. A body that reassigns `$v` therefore
+            // cannot reach the next entry through it.
+            StmtKind::Foreach {
+                subject,
+                key_var,
+                value_var,
+                by_ref,
+                body,
+                writes,
+                reads,
+                poisons,
+                may_return,
+            } => {
                 let mut benv = env.clone();
                 let mut bstore = store.clone();
                 loop_entry_forget(writes, reads, &[], *poisons, &mut benv, &mut bstore);
+                bind_foreach_targets(
+                    w,
+                    stmt,
+                    subject.as_deref(),
+                    key_var.as_deref(),
+                    value_var.as_deref(),
+                    *by_ref,
+                    &mut benv,
+                    &mut bstore,
+                );
                 forget_construct_sets(w, writes, reads, *poisons, *may_return, env, store);
                 walk_loop_body(w, folder, body, benv, bstore, descent, facts, out);
                 Flow::FellThrough
