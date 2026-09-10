@@ -249,15 +249,18 @@ function f(Node $node): void {{
 fn a_goto_anywhere_in_the_body_disqualifies() {
     // A `goto`'s label is unbounded, so the scan cannot prove it stays inside; the
     // worst case is the answer.
+    // The label sits BEFORE the loop on purpose: a label statement is a barrier, so
+    // one between the loop and the dump would clear the env and hide what the gate
+    // decided.
     let src = format!(
         "<?php
 {NODES}
 function f(Node $node): void {{
+    top:
     $x = $node->getAttribute('parent');
     while ($x !== null) {{
-        goto done;
+        goto top;
     }}
-    done:
     \\PHPStan\\dumpType($x);
 }}
 "
