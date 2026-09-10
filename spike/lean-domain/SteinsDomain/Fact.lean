@@ -41,12 +41,18 @@ def mkRefined (b : Base) (r : Refinement) (nullable : Bool) : Fact :=
   | .str p => if p.isEmpty then .general b nullable else .refined b r nullable
   | .int q => if q.isFull then .general b nullable else .refined b r nullable
 
-/-- Join two refinements of the same base — the widening join the single-base
-layers already use, lifted out so `mkUnion` and `joinAbstract` share it. -/
-def joinRefinements : Option Refinement → Option Refinement → Option Refinement
-  | some (.str p), some (.str q) => some (.str (p.inter q))
-  | some (.int r), some (.int s) => some (.int (r.hull s))
-  | _, _ => none
+/-- **Join two arms of the same base** — the widening join the single-base layers
+already use, lifted out so `mkUnion` and `joinAbstract` share it.
+
+`whole` is the whole base, which absorbs; two bool literals join by set union, so
+the same inhabitant twice is itself and the two different ones are the base
+(`{true} ⊔ {false} = bool`, ADR-0093 §2). Knowledge of two kinds has no meet in
+either, and widens. -/
+def joinArms : ArmKnown → ArmKnown → ArmKnown
+  | .refined (.str p), .refined (.str q) => .refined (.str (p.inter q))
+  | .refined (.int r), .refined (.int s) => .refined (.int (r.hull s))
+  | .bool x, .bool y => if x = y then .bool x else .whole
+  | _, _ => .whole
 
 /-- Base order, matching Rust's derived `Ord` (declaration order). -/
 def baseRank : Base → Nat
@@ -71,40 +77,46 @@ def refinementIsEmpty : Refinement → Bool
   | .str p => p.isEmpty
   | .int q => q.containsRange IntRange.full
 
-/-- Normalise an arm's refinement: a contentless one is that base's General. -/
-def normArm : Option Refinement → Option Refinement
-  | some r => if refinementIsEmpty r then none else some r
-  | none => none
+/-- Normalise an arm: what constrains nothing IS the whole base. -/
+def normArm : ArmKnown → ArmKnown
+  | .refined r => if refinementIsEmpty r then .whole else .refined r
+  | k => k
 
 /-- Merge an arm into a sorted-by-base arm list, joining refinements when the
 base is already present. Every arm is normalised on the way in, and so is the
 result of a merge. -/
-def insertArm (arms : List (Base × Option Refinement)) (arm : Base × Option Refinement) :
-    List (Base × Option Refinement) :=
+def insertArm (arms : List (Base × ArmKnown)) (arm : Base × ArmKnown) :
+    List (Base × ArmKnown) :=
   match arms with
   | [] => [(arm.1, normArm arm.2)]
   | a :: rest =>
-    if a.1 = arm.1 then (a.1, normArm (joinRefinements a.2 arm.2)) :: rest
+    if a.1 = arm.1 then (a.1, normArm (joinArms a.2 arm.2)) :: rest
     else if baseRank arm.1 < baseRank a.1 then (arm.1, normArm arm.2) :: a :: rest
     else a :: insertArm rest arm
 
 /-- **The normalising union constructor** (issue #339): one arm per base,
 sorted; one arm collapses to the single-base layers, none to `none`. -/
-def mkUnion (arms : List (Base × Option Refinement)) (nullable : Bool) : Option Fact :=
+def mkUnion (arms : List (Base × ArmKnown)) (nullable : Bool) : Option Fact :=
   let merged := arms.foldl insertArm []
   match merged with
   | [] => none
-  | [(b, r)] =>
-    some (match r with
-      | some r => mkRefined b r nullable
-      | none => .general b nullable)
+  | [(b, k)] =>
+    some (match k with
+      | .refined r => mkRefined b r nullable
+      | .whole => .general b nullable
+      -- A lone bool-literal arm **widens to its base**, deliberately. The finite
+      -- layer would say `true` exactly, but this constructor never lands in a
+      -- finite layer and `summarize_finite` rests on that; no caller can reach
+      -- here anyway, since a union has two arms or more and at most one of them
+      -- is `bool`.
+      | .bool _ => .general b nullable)
   | _ => some (.union merged nullable)
 
 /-- This fact's abstract arms — one for a single-base layer, several for a
 union — or `none` for a finite or array fact. -/
-def abstractArms : Fact → Option (List (Base × Option Refinement) × Bool)
-  | .refined b r n => some ([(b, some r)], n)
-  | .general b n => some ([(b, none)], n)
+def abstractArms : Fact → Option (List (Base × ArmKnown) × Bool)
+  | .refined b r n => some ([(b, .refined r)], n)
+  | .general b n => some ([(b, .whole)], n)
   | .union arms n => some (arms, n)
   | .singleton _ => none
   | .oneOf _ => none
@@ -158,8 +170,10 @@ def admits (M : Model) : Fact → Val → Bool
     | _ => arms.any (fun a =>
         decide (v.base = some a.1) &&
           match a.2 with
-          | some r => refAdmits M r v
-          | none => true)
+          | .refined r => refAdmits M r v
+          | .whole => true
+          -- Membership in a two-point domain (ADR-0093 §2).
+          | .bool b => decide (v = Val.bool b))
   | .shape s nullable, v =>
     match v with
     | .null => nullable
@@ -243,6 +257,37 @@ def strPredsOf (M : Model) : List Val → Option StrPreds
     | some p => some (p.inter (M.predsOf k))
   | _ :: vs => strPredsOf M vs
 
+/-- **The computed widening, in the arm vocabulary** (issue #339, ADR-0093 §2):
+one arm per base present in `vals`. The `null` member is the caller's business —
+it is the fact's side-flag, never an arm.
+
+This, not `summarizeScalar`, is what the join widens a finite side with, because
+the arm vocabulary holds one thing the fact vocabulary cannot: a single base's
+bool literal. Route both through it or the two disagree by grouping, and a join
+that disagrees with itself is not associative.
+
+A member with no scalar base yields no arm here; every caller checks for one
+first and drops the fact, since keeping the scalars would admit less than the
+set contained. -/
+def armOfMembers (M : Model) (b : Base) (members : List Val) : ArmKnown :=
+  match b with
+  | .int => ((intHullOf members).map Refinement.int).elim .whole .refined
+  | .str => ((strPredsOf M members).map Refinement.str).elim .whole .refined
+  -- The bool base's widening is *computed* like every other (ADR-0035): a set of
+  -- bools that holds one inhabitant summarizes to that inhabitant, not to `bool`.
+  -- Both inhabitants ARE the base.
+  | .bool => match members with
+    | [.bool x] => .bool x
+    | _ => .whole
+  | .float => .whole
+
+def summarizeToArms (M : Model) (vals : List Val) : List (Base × ArmKnown) :=
+  let scalars := vals.filter (fun v => decide (v ≠ Val.null))
+  [Base.int, .float, .str, .bool].filterMap (fun b =>
+    match scalars.filter (fun w => decide (w.base = some b)) with
+    | [] => none
+    | _ => some (b, armOfMembers M b (scalars.filter (fun w => decide (w.base = some b)))))
+
 /-- Widen a non-empty, deduped value list to an abstract summary. `none` when
 unsummarisable (mixed scalar bases, arrays present). -/
 def summarizeScalar (M : Model) (vals : List Val) : Option Fact :=
@@ -265,15 +310,7 @@ def summarizeScalar (M : Model) (vals : List Val) : Option Fact :=
       else if scalars.any (fun v => decide (v.base ≠ some b)) then
         -- A mixed-base overflow becomes a union (issue #339), where it used to
         -- become nothing. Each base is summarized on its own members.
-        mkUnion ([Base.int, .float, .str, .bool].filterMap (fun bb =>
-          let members := scalars.filter (fun v => decide (v.base = some bb))
-          match members with
-          | [] => none
-          | _ =>
-            match bb with
-            | .int => some (bb, (intHullOf members).map (Refinement.int))
-            | .str => some (bb, (strPredsOf M members).map (Refinement.str))
-            | _ => some (bb, none))) nullable
+        mkUnion (summarizeToArms M vals) nullable
       else
         match b with
         | .int =>
@@ -331,7 +368,18 @@ def joinFiniteAbstract (M : Model) (finite : List Val) (abs : Fact) : Option Fac
       -- The array stratum is not a scalar abstract layer; the scalar join
       -- drops the fact, which is the safe side.
       | .shape _ _ => none
-    | none => joinAbstract summary abs
+    -- The finite side widens into arms and the two arm lists merge per base — the
+    -- same one join every other pair of abstract facts takes. A member with no
+    -- scalar base has no arm summary, and the fact drops, exactly as it did
+    -- before the union layer.
+    | none =>
+      if finite.any (fun v => decide (v.base = none) && decide (v ≠ Val.null)) then
+        joinAbstract summary abs
+      else
+        match abstractArms abs with
+        | none => none
+        | some (brms, bn) =>
+          mkUnion (brms ++ summarizeToArms M finite) (decide (Val.null ∈ finite) || bn)
 
 /-- The least representable fact admitting both denotations. `none` means
 "unrepresentable"; the caller drops the fact, which is the safe side. -/
@@ -683,9 +731,12 @@ def eraseKey (entries : List (Key × Val)) (k : Key) : List (Key × Val) :=
 /-- `(canBeFalsy, canBeTruthy)` for one union arm — the same table the
 single-base layer uses just below, factored out because Lean cannot recurse
 into a `Fact` this function would have to build. -/
-def armFalsyTruthy : Base → Option Refinement → Bool × Bool
-  | .str, some (.str p) => (!p.containsAll StrPreds.NON_FALSY, true)
-  | .int, some (.int q) => (q.contains 0, decide (q ≠ IntRange.point 0))
+def armFalsyTruthy : Base → ArmKnown → Bool × Bool
+  | .str, .refined (.str p) => (!p.containsAll StrPreds.NON_FALSY, true)
+  | .int, .refined (.int q) => (q.contains 0, decide (q ≠ IntRange.point 0))
+  -- A bool literal decides its own truthiness: `true` is the base's one truthy
+  -- inhabitant, `false` its one falsy one (ADR-0093 §2).
+  | _, .bool b => (!b, b)
   | _, _ => (true, true)
 
 /-- `(canBeFalsy, canBeTruthy)` for the abstract layers. The finite layers are
@@ -746,7 +797,7 @@ def satisfiesStr (M : Model) (f : Fact) (pred : StrPreds) : Certainty :=
       if a.1 ≠ .str then .no
       else
         match a.2 with
-        | some (.str p) => if p.containsAll pred && !nullable then .yes else .maybe
+        | .refined (.str p) => if p.containsAll pred && !nullable then .yes else .maybe
         | _ => .maybe))
   -- An array is never a string, and neither is null.
   | .shape _ _ => .no
@@ -776,7 +827,7 @@ def intIn (f : Fact) (range : IntRange) : Certainty :=
       if a.1 ≠ .int then .no
       else
         match a.2 with
-        | some (.int q) =>
+        | .refined (.int q) =>
           if range.containsRange q && !nullable then .yes
           else if q.inter range = none then .no
           else .maybe

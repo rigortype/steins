@@ -208,8 +208,10 @@ def renderFact : Fact → String
   | .union arms n =>
     "U(" ++ String.intercalate "|" (arms.map (fun a =>
       match a.2 with
-      | some r => renderBase a.1 ++ ":" ++ renderRef r
-      | none => renderBase a.1)) ++ "," ++ renderNullable n ++ ")"
+      | .refined r => renderBase a.1 ++ ":" ++ renderRef r
+      | .whole => renderBase a.1
+      -- A bool literal arm (ADR-0093 §2) renders as the inhabitant itself.
+      | .bool b => renderBase a.1 ++ ":" ++ renderVal (.bool b))) ++ "," ++ renderNullable n ++ ")"
   | .shape s n => "A(" ++ renderShape s ++ "," ++ renderNullable n ++ ")"
 termination_by f => sizeOf f
 

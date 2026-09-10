@@ -273,20 +273,14 @@ impl Fact {
                 Some(match known {
                     ArmKnown::Refined(r) => Fact::refined(base, r, nullable),
                     ArmKnown::Whole => Fact::General { base, nullable },
-                    // One base and one inhabitant is the finite layer, which says it
-                    // more precisely than any abstract layer can — and nullably, as
-                    // the two-member set `true|null` (ADR-0093 §2). A literal on a
-                    // base that has no such inhabitant states nothing about that
-                    // base, so it widens to it rather than changing it.
-                    ArmKnown::Bool(_) if base != Base::Bool => Fact::General { base, nullable },
-                    ArmKnown::Bool(b) => {
-                        let v = Val::Bool(b);
-                        if nullable {
-                            Fact::from_vals(vec![Val::Null, v]).expect("two members")
-                        } else {
-                            Fact::Singleton(v)
-                        }
-                    }
+                    // A lone bool-literal arm **widens to its base**, deliberately.
+                    // The finite layer would say `true` exactly, but this
+                    // constructor never lands in a finite layer — the spec rests on
+                    // that ("a union is not a finite fact", `summarize_finite` in
+                    // `spike/lean-domain`), and no caller can reach here anyway: a
+                    // union has two arms or more and at most one of them is `bool`,
+                    // so the collapse to one arm always keeps a non-bool one.
+                    ArmKnown::Bool(_) => Fact::General { base, nullable },
                 })
             }
             _ => Some(Fact::Union { arms: merged, nullable }),
@@ -490,11 +484,11 @@ impl Fact {
             Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, known)| {
                 match known {
                     ArmKnown::Refined(r) => Fact::refined(*base, *r, *nullable).satisfies_str(pred),
-                    ArmKnown::Whole => {
+                    // A bool is not a string, whichever inhabitant it is, so a
+                    // literal arm answers exactly what its base answers.
+                    ArmKnown::Whole | ArmKnown::Bool(_) => {
                         Fact::General { base: *base, nullable: *nullable }.satisfies_str(pred)
                     }
-                    // A bool is not a string, whichever inhabitant it is.
-                    ArmKnown::Bool(_) => Certainty::No,
                 }
             })),
             // An array is never a string, and neither is null.
@@ -529,11 +523,11 @@ impl Fact {
             Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, known)| {
                 match known {
                     ArmKnown::Refined(r) => Fact::refined(*base, *r, *nullable).int_in(range),
-                    ArmKnown::Whole => {
+                    // A bool is not an int, whichever inhabitant it is, so a
+                    // literal arm answers exactly what its base answers.
+                    ArmKnown::Whole | ArmKnown::Bool(_) => {
                         Fact::General { base: *base, nullable: *nullable }.int_in(range)
                     }
-                    // A bool is not an int, whichever inhabitant it is.
-                    ArmKnown::Bool(_) => Certainty::No,
                 }
             })),
             // An array is never an int, and neither is null.

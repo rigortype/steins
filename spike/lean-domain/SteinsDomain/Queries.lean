@@ -48,7 +48,7 @@ private theorem canTruthy_false_of_truthy_no {f : Fact} (hfin : f.finiteMembers 
 `abstractFalsyTruthy` folds the arms, and both `truthy` theorems need to read the
 fold back as "every arm says so" — the arm that admits the value is one of them. -/
 
-private theorem foldl_ft_fst : ∀ (arms : List (Base × Option Refinement)) (acc : Bool × Bool),
+private theorem foldl_ft_fst : ∀ (arms : List (Base × ArmKnown)) (acc : Bool × Bool),
     (arms.foldl (fun acc a =>
       let ft := armFalsyTruthy a.1 a.2
       (acc.1 || ft.1, acc.2 || ft.2)) acc).1
@@ -58,7 +58,7 @@ private theorem foldl_ft_fst : ∀ (arms : List (Base × Option Refinement)) (ac
   | nil => intro acc; simp
   | cons x rest ih => intro acc; rw [List.foldl_cons, ih]; simp [Bool.or_assoc]
 
-private theorem foldl_ft_snd : ∀ (arms : List (Base × Option Refinement)) (acc : Bool × Bool),
+private theorem foldl_ft_snd : ∀ (arms : List (Base × ArmKnown)) (acc : Bool × Bool),
     (arms.foldl (fun acc a =>
       let ft := armFalsyTruthy a.1 a.2
       (acc.1 || ft.1, acc.2 || ft.2)) acc).2
@@ -68,18 +68,48 @@ private theorem foldl_ft_snd : ∀ (arms : List (Base × Option Refinement)) (ac
   | nil => intro acc; simp
   | cons x rest ih => intro acc; rw [List.foldl_cons, ih]; simp [Bool.or_assoc]
 
-private theorem union_canFalsy (arms : List (Base × Option Refinement)) (n : Bool) :
+private theorem union_canFalsy (arms : List (Base × ArmKnown)) (n : Bool) :
     (Fact.abstractFalsyTruthy (.union arms n)).1
       = (n || arms.any (fun a => (armFalsyTruthy a.1 a.2).1)) := by
   simp only [abstractFalsyTruthy]
   exact foldl_ft_fst arms (n, false)
 
-private theorem union_canTruthy (arms : List (Base × Option Refinement)) (n : Bool) :
+private theorem union_canTruthy (arms : List (Base × ArmKnown)) (n : Bool) :
     (Fact.abstractFalsyTruthy (.union arms n)).2
       = arms.any (fun a => (armFalsyTruthy a.1 a.2).2) := by
   simp only [abstractFalsyTruthy]
   rw [foldl_ft_snd arms (n, false)]
   simp
+
+/-- **A bool-literal arm that cannot be falsy is `true`** (ADR-0093 §2), so the
+value it admits is `true`, which is not falsy. The one new case in `truthy_yes`,
+shared by all four bases: the arm's knowledge decides the verdict on its own, and
+the base it sits under does not enter. -/
+private theorem bool_arm_not_falsy {M : Model} {v : Val} {b : Bool}
+    (hb : Val.falsy M v = true) (hft : (armFalsyTruthy ab (.bool b)).1 = false)
+    (har : knownAdmits M (.bool b) v = true) : False := by
+  have hbt : b = true := by
+    cases b
+    · simp [armFalsyTruthy] at hft
+    · rfl
+  subst hbt
+  have hvb : v = Val.bool true := by simpa [knownAdmits] using har
+  subst hvb
+  simp [Val.falsy] at hb
+
+/-- **A bool-literal arm that cannot be truthy is `false`** (ADR-0093 §2) — the
+mirror of `bool_arm_not_falsy`, and the one new case in `truthy_no`. -/
+private theorem bool_arm_not_truthy {M : Model} {v : Val} {b : Bool}
+    (hb : Val.falsy M v = false) (hft : (armFalsyTruthy ab (.bool b)).2 = false)
+    (har : knownAdmits M (.bool b) v = true) : False := by
+  have hbf : b = false := by
+    cases b
+    · rfl
+    · simp [armFalsyTruthy] at hft
+  subst hbf
+  have hvb : v = Val.bool false := by simpa [knownAdmits] using har
+  subst hvb
+  simp [Val.falsy] at hb
 
 /-! ## `truthy` -/
 
@@ -165,16 +195,19 @@ theorem truthy_yes (M : Model) {f : Fact} {v : Val}
       simp only [armAdmits, Bool.and_eq_true, decide_eq_true_eq] at ha
       obtain ⟨hab, har⟩ := ha
       cases ab with
-      | float => rcases ar with _ | rr
-                 · simp [armFalsyTruthy] at hft
-                 · cases rr <;> simp [armFalsyTruthy] at hft
-      | bool => rcases ar with _ | rr
-                · simp [armFalsyTruthy] at hft
-                · cases rr <;> simp [armFalsyTruthy] at hft
+      | float => cases ar with
+                 | whole => simp [armFalsyTruthy] at hft
+                 | bool b => exact bool_arm_not_falsy hb hft har
+                 | refined rr => cases rr <;> simp [armFalsyTruthy] at hft
+      | bool => cases ar with
+                | whole => simp [armFalsyTruthy] at hft
+                | bool b => exact bool_arm_not_falsy hb hft har
+                | refined rr => cases rr <;> simp [armFalsyTruthy] at hft
       | int =>
-        rcases ar with _ | rr
-        · simp [armFalsyTruthy] at hft
-        · cases rr with
+        cases ar with
+        | whole => simp [armFalsyTruthy] at hft
+        | bool b => exact bool_arm_not_falsy hb hft har
+        | refined rr => cases rr with
           | str _ => simp [armFalsyTruthy] at hft
           | int q =>
             obtain ⟨j, rfl⟩ : ∃ j, v = Val.int j := by cases v <;> simp_all [Val.base]
@@ -184,20 +217,21 @@ theorem truthy_yes (M : Model) {f : Fact} {v : Val}
               · simp [Val.falsy, hz] at hb
             subst hzero
             simp only [armFalsyTruthy] at hft
-            simp only [refOptAdmits, refAdmits] at har
+            simp only [knownAdmits, refAdmits] at har
             simp only [IntRange.contains, Bool.and_eq_false_iff,
               decide_eq_false_iff_not] at hft
             simp only [IntRange.contains, Bool.and_eq_true, decide_eq_true_eq] at har
             omega
       | str =>
-        rcases ar with _ | rr
-        · simp [armFalsyTruthy] at hft
-        · cases rr with
+        cases ar with
+        | whole => simp [armFalsyTruthy] at hft
+        | bool b => exact bool_arm_not_falsy hb hft har
+        | refined rr => cases rr with
           | int _ => simp [armFalsyTruthy] at hft
           | str p =>
             obtain ⟨k, rfl⟩ : ∃ k, v = Val.str k := by cases v <;> simp_all [Val.base]
             simp only [armFalsyTruthy, Bool.not_eq_false'] at hft
-            simp only [refOptAdmits, refAdmits] at har
+            simp only [knownAdmits, refAdmits] at har
             have hnf := nonFalsy_of_containsAll (StrPreds.containsAll_trans har hft)
             rw [M.nonFalsy_iff k] at hnf
             simp only [Val.falsy] at hb
@@ -295,19 +329,23 @@ theorem truthy_no (M : Model) {f : Fact} {v : Val}
       simp only [armAdmits, Bool.and_eq_true, decide_eq_true_eq] at ha
       obtain ⟨hab, har⟩ := ha
       cases ab with
-      | float => rcases ar with _ | rr
-                 · simp [armFalsyTruthy] at hft
-                 · cases rr <;> simp [armFalsyTruthy] at hft
-      | bool => rcases ar with _ | rr
-                · simp [armFalsyTruthy] at hft
-                · cases rr <;> simp [armFalsyTruthy] at hft
-      | str => rcases ar with _ | rr
-               · simp [armFalsyTruthy] at hft
-               · cases rr <;> simp [armFalsyTruthy] at hft
+      | float => cases ar with
+                 | whole => simp [armFalsyTruthy] at hft
+                 | bool b => exact bool_arm_not_truthy hb hft har
+                 | refined rr => cases rr <;> simp [armFalsyTruthy] at hft
+      | bool => cases ar with
+                | whole => simp [armFalsyTruthy] at hft
+                | bool b => exact bool_arm_not_truthy hb hft har
+                | refined rr => cases rr <;> simp [armFalsyTruthy] at hft
+      | str => cases ar with
+               | whole => simp [armFalsyTruthy] at hft
+               | bool b => exact bool_arm_not_truthy hb hft har
+               | refined rr => cases rr <;> simp [armFalsyTruthy] at hft
       | int =>
-        rcases ar with _ | rr
-        · simp [armFalsyTruthy] at hft
-        · cases rr with
+        cases ar with
+        | whole => simp [armFalsyTruthy] at hft
+        | bool b => exact bool_arm_not_truthy hb hft har
+        | refined rr => cases rr with
           | str _ => simp [armFalsyTruthy] at hft
           | int q =>
             obtain ⟨j, rfl⟩ : ∃ j, v = Val.int j := by cases v <;> simp_all [Val.base]
@@ -318,7 +356,7 @@ theorem truthy_no (M : Model) {f : Fact} {v : Val}
               · exact hq
               · exact absurd hq hft
             subst hq
-            simp only [refOptAdmits, refAdmits] at har
+            simp only [knownAdmits, refAdmits] at har
             simp only [IntRange.contains, IntRange.point, Bool.and_eq_true,
               decide_eq_true_eq] at har
             omega
@@ -391,15 +429,21 @@ theorem satisfiesStr_yes (M : Model) {f : Fact} {v : Val} {pred : StrPreds}
     simp only [satisfiesStr] at h
     have hyes := (Certainty.allOf_eq_yes_iff _).mp h
     have harm : ∀ a ∈ arms, a.1 = Base.str ∧ n = false ∧
-        ∃ p, a.2 = some (.str p) ∧ p.containsAll pred = true := by
+        ∃ p, a.2 = ArmKnown.refined (.str p) ∧ p.containsAll pred = true := by
       intro a ha
       obtain ⟨ab, ar⟩ := a
       by_cases hs : ab = Base.str
       · subst hs
-        rcases ar with _ | rr
-        · have hy := hyes.2 _ (List.mem_map_of_mem ha)
+        cases ar with
+        | whole =>
+          have hy := hyes.2 _ (List.mem_map_of_mem ha)
           simp at hy
-        · cases rr with
+        -- A bool literal under the `str` base says nothing about a string, so
+        -- the arm answers `maybe` and never contributes a `yes` (ADR-0093 §2).
+        | bool _ =>
+          have hy := hyes.2 _ (List.mem_map_of_mem ha)
+          simp at hy
+        | refined rr => cases rr with
           | int _ =>
             have hy := hyes.2 _ (List.mem_map_of_mem ha)
             simp at hy
@@ -427,7 +471,7 @@ theorem satisfiesStr_yes (M : Model) {f : Fact} {v : Val} {pred : StrPreds}
     rw [admits_union_eq hvn] at hv
     obtain ⟨a, hmem, ha⟩ := List.any_eq_true.mp hv
     obtain ⟨hs, -, p, hp, hcp⟩ := harm a hmem
-    simp only [armAdmits, hs, hp, refOptAdmits, Bool.and_eq_true, decide_eq_true_eq] at ha
+    simp only [armAdmits, hs, hp, knownAdmits, Bool.and_eq_true, decide_eq_true_eq] at ha
     obtain ⟨hab, har⟩ := ha
     obtain ⟨k, rfl⟩ : ∃ k, v = Val.str k := by
       cases v with
@@ -501,10 +545,14 @@ theorem intIn_no (M : Model) {f : Fact} {v : Val} {range : IntRange} {i : Int}
     obtain ⟨hab, har⟩ := ha
     have hbi : Base.int = ab := by simpa [Val.base] using hab
     subst hbi
-    rcases ar with _ | rr
-    · have hc := hno.2 _ (List.mem_map_of_mem hmem)
+    cases ar with
+    | whole =>
+      have hc := hno.2 _ (List.mem_map_of_mem hmem)
       simp at hc
-    · cases rr with
+    -- No `bool` literal admits an `int`, so this arm is not the one the value
+    -- sits in and the hypothesis that it is closes the case (ADR-0093 §2).
+    | bool _ => simp [knownAdmits] at har
+    | refined rr => cases rr with
       | str _ =>
         have hc := hno.2 _ (List.mem_map_of_mem hmem)
         simp at hc
@@ -516,7 +564,7 @@ theorem intIn_no (M : Model) {f : Fact} {v : Val} {range : IntRange} {i : Int}
         · split at hc
           · rename_i hdisj
             have hq : q.contains i = true := by
-              simpa [refOptAdmits, refAdmits] using har
+              simpa [knownAdmits, refAdmits] using har
             cases hr : range.contains i with
             | false => rfl
             | true => exact absurd ⟨hq, hr⟩ (IntRange.inter_none_disjoint hdisj i)

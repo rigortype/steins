@@ -149,6 +149,24 @@ inductive Refinement where
   | int (r : IntRange)
   deriving DecidableEq, Repr, Inhabited
 
+/-- **What one arm of a `union` knows about its base** (ADR-0093 §2) — the arm's
+member set, in the three shapes a set over a base can take.
+
+`bool` has two inhabitants, so `bool` minus `false` is the base-level `{true}`,
+and the member set has four states of which three already had a spelling: the
+full set is `whole`, the empty set is an arm that is not in the list (`mkUnion`
+never builds one), and one inhabitant is `bool`. Growing `Refinement` instead
+would grow every proof over it here, to say what this layer says with one
+constructor. -/
+inductive ArmKnown where
+  /-- Every value of the base — that base's `general`, and the full member set. -/
+  | whole
+  /-- A refinement on the base's values, under `Refinement`'s own invariants. -/
+  | refined (r : Refinement)
+  /-- Exactly one of `bool`'s two inhabitants (`Base.bool` only). -/
+  | bool (b : Bool)
+  deriving DecidableEq, Repr, Inhabited
+
 /-- What the shape says about keys it does not declare. Parameterized over the
 slot type so it can be declared before `Fact` and nested inside it. -/
 inductive GTail (α : Type) where
@@ -181,7 +199,7 @@ inductive Fact where
   /-- Layer 3½: an abstract union across bases (issue #339). One arm per
   `Base`, sorted, at least two of them; `nullable` carries `null` for the whole
   union. The array stratum is not an arm. -/
-  | union (arms : List (Base × Option Refinement)) (nullable : Bool)
+  | union (arms : List (Base × ArmKnown)) (nullable : Bool)
   /-- The abstract array stratum (A-G2). There is no array-`general`: the
   degenerate shape *is* plain `array`. -/
   | shape (s : GShape Fact) (nullable : Bool)
