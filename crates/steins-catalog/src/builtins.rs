@@ -404,6 +404,52 @@ pub fn declared_return(name: &str) -> Option<&'static str> {
         .map(|i| declared_returns_generated::DECLARED_RETURNS[i].1)
 }
 
+pub use crate::constants_generated::{ConstRow, ConstValue};
+
+/// One **engine constant's** mined row (ADR-0094 §2, issue #598), or `None` when
+/// the table has no such name.
+///
+/// `None` is the answer for four different things, and the caller treats them
+/// alike because each of them means "Steins states no value here":
+///
+/// * a constant of an extension the mining build did not have;
+/// * a name that is not a constant at all;
+/// * a constant ADR-0094 §3 answers **by class** — `PHP_EOL`, `PHP_INT_MAX`,
+///   `PHP_VERSION_ID`. Those are the resolver's own roster, and a mined row
+///   would be the analysis machine's answer to a question about the deployment
+///   target;
+/// * a constant whose value is not a property of PHP at all — a linked library's
+///   version, a signal number, a parser-generated token ordinal.
+///
+/// **A row never says the constant EXISTS.** Existence is a boot-surface fact
+/// and the absence family's business (ADR-0094 §5); this table says what the
+/// value is *if* the name resolves. The row's own `since`/`until` are the only
+/// version claim it makes, and the caller gates on them against the project's
+/// declared `PhpTarget`.
+///
+/// The key is PHP's own identity for a constant: a leading `\` is not part of
+/// the name, namespace segments are case-insensitive, and the final segment is
+/// not (`define('Foo', 1)` leaves `defined('FOO')` false).
+#[must_use]
+pub fn engine_constant(name: &str) -> Option<ConstRow> {
+    let name = name.trim_start_matches('\\');
+    let key = match name.rfind('\\') {
+        Some(pos) => format!("{}{}", name[..=pos].to_ascii_lowercase(), &name[pos + 1..]),
+        None => name.to_owned(),
+    };
+    crate::constants_generated::ENGINE_CONSTANTS
+        .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
+        .ok()
+        .map(|i| crate::constants_generated::ENGINE_CONSTANTS[i].1)
+}
+
+/// How many engine constants the table carries — for the completeness tests, which
+/// would otherwise read an empty table as agreement.
+#[must_use]
+pub fn engine_constant_count() -> usize {
+    crate::constants_generated::ENGINE_CONSTANTS.len()
+}
+
 pub use param_facts_generated::ParamFacts;
 
 /// One builtin's per-parameter facts as the **engine's arginfo** reports them
@@ -567,7 +613,65 @@ fn cmp_ascii_lower(a: &str, b: &str) -> core::cmp::Ordering {
 
 #[cfg(test)]
 mod tests {
-    use crate::{is_known_label, subsumes};
+    use crate::{ConstValue, engine_constant, engine_constant_count, is_known_label, subsumes};
+
+    /// The table is keyed for binary search, and a table that is not sorted
+    /// answers `None` for rows it holds — the failure that looks like an absent
+    /// constant rather than like a broken lookup.
+    #[test]
+    fn engine_constants_are_sorted_and_populated() {
+        let rows = crate::constants_generated::ENGINE_CONSTANTS;
+        assert!(rows.len() > 2000, "mined table looks truncated: {} rows", rows.len());
+        assert_eq!(rows.len(), engine_constant_count());
+        assert!(rows.windows(2).all(|w| w[0].0 < w[1].0), "ENGINE_CONSTANTS must be sorted");
+    }
+
+    /// A spec-fixed row of each value shape, and the identity rule for the key.
+    #[test]
+    fn engine_constant_rows_answer_by_value() {
+        assert_eq!(engine_constant("SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(
+            engine_constant("JSON_THROW_ON_ERROR").map(|r| r.value),
+            Some(ConstValue::Int(4_194_304))
+        );
+        assert_eq!(engine_constant("M_PI").map(|r| r.value), Some(ConstValue::Float(std::f64::consts::PI)));
+        assert_eq!(engine_constant("DATE_ATOM").map(|r| r.value), Some(ConstValue::Str("Y-m-d\\TH:i:sP")));
+        // A leading `\` is not part of the name; the final segment is case-SENSITIVE.
+        assert_eq!(engine_constant("\\SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(engine_constant("sort_regular"), None);
+    }
+
+    /// The classes ADR-0094 §3 keeps out of the mined table. Each is answered
+    /// elsewhere (or not at all), and a row appearing here would be the mining
+    /// machine's own build reported as a fact about the target.
+    #[test]
+    fn engine_constants_exclude_the_classes_adr_0094_refuses() {
+        // §3 host sets, §3.1 width, §3 engine version: the resolver's roster.
+        for name in ["PHP_EOL", "DIRECTORY_SEPARATOR", "PHP_OS_FAMILY", "PHP_INT_MAX", "PHP_VERSION_ID"] {
+            assert_eq!(engine_constant(name), None, "{name} must not be mined");
+        }
+        // Build-dependent: a linked library's version, an installation path.
+        for name in ["LIBXML_VERSION", "PHP_EXTENSION_DIR", "OPENSSL_VERSION_NUMBER", "E_ALL"] {
+            assert_eq!(engine_constant(name), None, "{name} must not be mined");
+        }
+        // Whole families whose numbers are the C library's or the parser generator's.
+        for name in ["SIGCHLD", "SO_REUSEPORT", "T_STRING", "POSIX_F_OK"] {
+            assert_eq!(engine_constant(name), None, "{name} must not be mined");
+        }
+    }
+
+    /// A row the range scan proved arrived inside the mined window, and one it
+    /// could say nothing about. Both are load-bearing: the second is the common
+    /// case, and reading it as "eternal" rather than as "unobserved" is the
+    /// mistake the `None` spelling exists to prevent.
+    #[test]
+    fn engine_constant_rows_carry_the_range_the_scan_proved() {
+        assert_eq!(engine_constant("FILTER_THROW_ON_FAILURE").and_then(|r| r.since), Some((8, 5)));
+        assert_eq!(engine_constant("SORT_REGULAR").and_then(|r| r.since), None);
+        // `until` is unfilled at this pin by construction: the engine that
+        // supplied the values has every mined name.
+        assert!(crate::constants_generated::ENGINE_CONSTANTS.iter().all(|(_, r)| r.until.is_none()));
+    }
 
     #[test]
     fn return_facts_r3_r4_rows() {

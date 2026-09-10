@@ -145,6 +145,7 @@ pub fn run(check: bool) -> Result<(), String> {
     gen_declared_returns(check)?;
     gen_declared_method_returns(check)?;
     gen_param_facts(check)?;
+    gen_constants(check)?;
     Ok(())
 }
 
@@ -622,6 +623,255 @@ fn render_param_facts(
     }
     let _ = writeln!(s, "];");
     s
+}
+
+/// The **engine-constant** table (ADR-0094 §2): `constants.toml`, mined off the
+/// resident engine's `get_defined_constants(true)` and php-src's per-minor
+/// branches by `cargo xtask mine-constants`, into `constants_generated.rs`.
+///
+/// Only spec-fixed literals are in the source of record — the host sets, the
+/// integer width and the engine version are answered by class in the resolver,
+/// and the miner records them as refusals rather than rows (ADR-0094 §3).
+fn gen_constants(check: bool) -> Result<(), String> {
+    let src = repo_root().join("docs/research/phpsrc-mining/constants.toml");
+    let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let doc: ConstDoc = toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
+
+    let mut rows: BTreeMap<String, ConstRow> = BTreeMap::new();
+    for (name, row) in &doc.r#const {
+        // The key is PHP's own: namespace segments lowercased, final segment as
+        // written. The miner applies it; re-applying it here would hide a source
+        // of record that had drifted, so this only checks.
+        if name.trim_start_matches('\\') != name.as_str() {
+            return Err(format!("constant row `{name}`: key must not carry a leading `\\`"));
+        }
+        if rows.insert(name.clone(), row.clone()).is_some() {
+            return Err(format!("duplicate constant row for `{name}`"));
+        }
+    }
+
+    let out = render_constants(&doc.meta, &doc.counts, &rows)?;
+    let dst = repo_root().join("crates/steins-catalog/src/constants_generated.rs");
+    emit(&dst, &out, check)?;
+    println!("gen-catalog: {} engine-constant rows {} → {}", rows.len(), verb(check), dst.display());
+    Ok(())
+}
+
+/// The shape of `constants.toml`. `[refused]` is documentation — the names the
+/// miner deliberately left out, recorded so a reviewer can see the refusal —
+/// and deliberately not read: nothing is generated from it.
+#[derive(serde::Deserialize)]
+struct ConstDoc {
+    meta: ConstMeta,
+    counts: ConstCounts,
+    #[serde(default)]
+    r#const: BTreeMap<String, ConstRow>,
+}
+
+#[derive(serde::Deserialize)]
+struct ConstMeta {
+    php: String,
+    extensions: Vec<String>,
+    /// `["8.1", "<php-src commit>"]` per mined minor, low first; empty when the
+    /// mining run had no php-src checkout and every row is rangeless.
+    #[serde(default)]
+    minors: Vec<Vec<String>>,
+}
+
+#[derive(serde::Deserialize)]
+struct ConstCounts {
+    mined: usize,
+    rows: usize,
+    gated: usize,
+}
+
+#[derive(Clone, serde::Deserialize)]
+struct ConstRow {
+    ext: String,
+    t: String,
+    v: String,
+    #[serde(default)]
+    since: Option<String>,
+    #[serde(default)]
+    until: Option<String>,
+}
+
+impl ConstRow {
+    /// The Rust literal for this row's value, in the `ConstValue` vocabulary.
+    ///
+    /// A float goes through PHP's `var_export` spelling (`1.7976931348623157E+308`),
+    /// which Rust parses as its own literal only after the exponent marker is
+    /// lowercased — and the round trip is CHECKED, because a float that does not
+    /// parse back to the mined bits is a wrong answer rather than a missing one.
+    fn value_literal(&self, name: &str) -> Result<String, String> {
+        match self.t.as_str() {
+            "int" => {
+                let n: i64 = self
+                    .v
+                    .parse()
+                    .map_err(|_| format!("constant `{name}`: `{}` is not an i64", self.v))?;
+                // `i64::MIN` has no negative literal in Rust (the `-` is an
+                // operator applied to an out-of-range positive), so it is spelled
+                // by name. `PHP_INT_MIN` itself is platform-ruled and never gets
+                // here, but a mined row may still carry the value.
+                Ok(if n == i64::MIN {
+                    "ConstValue::Int(i64::MIN)".to_owned()
+                } else {
+                    format!("ConstValue::Int({n})")
+                })
+            }
+            "float" => {
+                let spelled = self.v.replace('E', "e");
+                let f: f64 = spelled
+                    .parse()
+                    .map_err(|_| format!("constant `{name}`: `{}` is not an f64", self.v))?;
+                if !f.is_finite() {
+                    return Err(format!(
+                        "constant `{name}`: non-finite float `{}` has no Rust literal",
+                        self.v
+                    ));
+                }
+                Ok(format!("ConstValue::Float({f:?})"))
+            }
+            "bool" => match self.v.as_str() {
+                "true" => Ok("ConstValue::Bool(true)".to_owned()),
+                "false" => Ok("ConstValue::Bool(false)".to_owned()),
+                other => Err(format!("constant `{name}`: `{other}` is not a bool")),
+            },
+            "null" => Ok("ConstValue::Null".to_owned()),
+            "string" => Ok(format!("ConstValue::Str({:?})", self.v)),
+            other => Err(format!("constant `{name}`: unexpected type `{other}`")),
+        }
+    }
+}
+
+/// Render `constants_generated.rs`.
+fn render_constants(
+    meta: &ConstMeta,
+    counts: &ConstCounts,
+    rows: &BTreeMap<String, ConstRow>,
+) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str(
+        "// @generated by `cargo xtask gen-catalog` from\n\
+         // docs/research/phpsrc-mining/constants.toml — DO NOT EDIT BY HAND.\n\
+         //\n\
+         // ENGINE CONSTANTS (ADR-0094 §2, issue #598): the generated, committed table\n\
+         // that gives a bare global constant a value, in place of a sidecar\n\
+         // `constant('PHP_INT_MAX')` call. `ArgValue::GlobalConst` is unproven by\n\
+         // construction (issue #168), and the obvious fix would extend the fold seam's\n\
+         // recognizer surface — the analyzed source naming a symbol the engine then\n\
+         // evaluates — which ADR-0060/ADR-0066 fence. Nothing here runs at analysis time.\n\
+         //\n\
+         // TWO SOURCES, because one of them cannot answer the whole question. Values and\n\
+         // extensions come from ONE engine's `get_defined_constants(true)`. A minor RANGE\n\
+         // cannot: `since` asks whether a name existed at 8.1 and an 8.5 engine has no\n\
+         // opinion, so ranges are read off php-src's per-minor branches. That scan is\n\
+         // blind to a registration built by macro token-pasting, so a name it cannot see\n\
+         // gets NO range rather than a guessed one — the rangeless majority is a\n\
+         // recorded limit of the scan, not a claim that the constant is eternal.\n\
+         //\n\
+         // WHAT IS NOT HERE (ADR-0094 §3). A row is a SPEC-FIXED literal: the same value\n\
+         // on every host that has the constant at all, which is what lets the resolver\n\
+         // seed it `Verified`. The host sets (`PHP_EOL`), the 64-bit integer width\n\
+         // (`PHP_INT_MAX`) and the `PhpTarget`-derived engine version (`PHP_VERSION_ID`)\n\
+         // are answered by CLASS in `steins-infer`'s resolver, never mined — a mined row\n\
+         // would be the analysis machine's answer to a question about the deployment\n\
+         // target. Build-dependent names (a linked library's version, an installation\n\
+         // path) are refused outright and answer nothing.\n\
+         //\n",
+    );
+    let _ = writeln!(s, "// Mined from PHP {} with these extensions loaded:", meta.php);
+    let mut line = String::from("//   ");
+    for e in &meta.extensions {
+        if line.len() + e.len() + 2 > 96 {
+            let _ = writeln!(s, "{}", line.trim_end());
+            line = String::from("//   ");
+        }
+        line.push_str(e);
+        line.push_str(", ");
+    }
+    if line.trim() != "//" {
+        let _ = writeln!(s, "{}", line.trim_end().trim_end_matches(','));
+    }
+    if meta.minors.is_empty() {
+        s.push_str("//\n// No php-src checkout answered: every row is rangeless.\n");
+    } else {
+        s.push_str("//\n// php-src branch tips the range scan read:\n");
+        for m in &meta.minors {
+            let (minor, tip) = (m.first().map_or("", String::as_str), m.get(1).map_or("", String::as_str));
+            let _ = writeln!(s, "//   PHP-{minor}  {}", &tip[..tip.len().min(12)]);
+        }
+    }
+    s.push_str("//\n// Counts at the mining pin:\n");
+    let _ = writeln!(s, "//   {:>5}  constants the build had, over the catalog's extensions", counts.mined);
+    let _ = writeln!(s, "//   {:>5}  rows (the spec-fixed literals)", counts.rows);
+    let _ = writeln!(s, "//   {:>5}    of those, carrying a minor range the scan could prove", counts.gated);
+    s.push_str(
+        "\n/// One engine constant's value, in the four scalar shapes a PHP constant of the\n\
+         /// mined extensions takes. No array or object arm: `STDIN` and its two siblings\n\
+         /// are resources and are refused at mining time, and nothing else is non-scalar.\n\
+         #[derive(Debug, Clone, Copy, PartialEq)]\n\
+         pub enum ConstValue {\n\
+         \x20   /// An integer, at the 64-bit width ADR-0094 §3.1 fixes.\n\
+         \x20   Int(i64),\n\
+         \x20   /// A float, round-tripped through its `var_export` spelling at generation.\n\
+         \x20   Float(f64),\n\
+         \x20   Bool(bool),\n\
+         \x20   Null,\n\
+         \x20   /// A string constant's bytes. Every mined one is valid UTF-8 (the miner\n\
+         \x20   /// refuses a row that is not, rather than inventing a byte spelling).\n\
+         \x20   Str(&'static str),\n\
+         }\n\n\
+         /// One engine constant's row: its value, and the PHP minors it is known over.\n\
+         #[derive(Debug, Clone, Copy, PartialEq)]\n\
+         pub struct ConstRow {\n\
+         \x20   /// The value every host that has this constant gives it.\n\
+         \x20   pub value: ConstValue,\n\
+         \x20   /// The first minor the range scan saw the name at, when it saw it ARRIVE\n\
+         \x20   /// inside the mined window. `None` is the common case and means only that\n\
+         \x20   /// no arrival was observed — never that the constant is eternal.\n\
+         \x20   pub since: Option<(u16, u16)>,\n\
+         \x20   /// The last minor the name is known at, exclusive of what follows. Unfilled\n\
+         \x20   /// at this pin by construction: the engine that supplied the values has\n\
+         \x20   /// every mined name, so nothing mined has left yet, and a constant that\n\
+         \x20   /// left earlier (`E_STRICT`) has no value to mine and so no row at all.\n\
+         \x20   pub until: Option<(u16, u16)>,\n\
+         }\n\n",
+    );
+    let _ = writeln!(
+        s,
+        "/// Sorted by name for binary search. Keys are PHP's own identity for a constant:\n\
+         /// namespace segments lowercased, the final segment exactly as declared."
+    );
+    let _ = writeln!(s, "pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[");
+    for (name, r) in rows {
+        let value = r.value_literal(name)?;
+        let since = minor_literal(r.since.as_deref(), name)?;
+        let until = minor_literal(r.until.as_deref(), name)?;
+        // The extension is provenance, not a decision input — it lives in the
+        // source of record, and appears here only as the row's own comment.
+        let _ = writeln!(
+            s,
+            "    ({name:?}, ConstRow {{ value: {value}, since: {since}, until: {until} }}), // {}",
+            r.ext
+        );
+    }
+    let _ = writeln!(s, "];");
+    Ok(s)
+}
+
+/// Render an optional `"8.2"` minor as its `Option<(u16, u16)>` literal.
+fn minor_literal(spelled: Option<&str>, name: &str) -> Result<String, String> {
+    match spelled {
+        None => Ok("None".to_owned()),
+        Some(m) => {
+            let (major, minor) = parse_minor(m)
+                .ok_or_else(|| format!("constant `{name}`: unparseable minor `{m}`"))?;
+            Ok(format!("Some(({major}, {minor}))"))
+        }
+    }
 }
 
 /// Parse a `"8.5"` minor spelling to `(major, minor)`.

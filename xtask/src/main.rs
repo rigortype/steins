@@ -11,6 +11,7 @@
 //!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
+//!   mine-constants [DIR]     mine the engine's constants (+ php-src ranges) into the constants TOML
 //!   mine-function-map [DIR] [--functions] [--methods]
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
 //!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
@@ -29,6 +30,7 @@ mod fold_probe;
 mod freq;
 mod licenses;
 mod gate;
+mod mine_constants;
 mod mine_function_map;
 mod mine_param_facts;
 mod gen_catalog;
@@ -103,6 +105,13 @@ fn main() -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },
+        Some("mine-constants") => {
+            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
+            match mine_constants::run(dir) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            }
+        }
         Some("mine-function-map") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
             // Neither flag means both halves; either one alone narrows the run
@@ -143,11 +152,11 @@ fn main() -> ExitCode {
             }
         }
         Some(other) => fail(&format!(
-            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-function-map | nsrt | perf | phpdoc-oracle)"
+            "unknown command `{other}` (artifact-bytes | corpus-sync | fp-gate | freq | gen-catalog | lean-check | licenses | mine-constants | mine-function-map | nsrt | perf | phpdoc-oracle)"
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [DIR] | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

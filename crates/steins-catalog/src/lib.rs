@@ -67,6 +67,13 @@ mod declared_returns_generated;
 /// by [`declared_method_return`] and [`declared_method_return_changed_at`].
 mod declared_method_returns_generated;
 
+/// **Engine constants** (ADR-0094 §2, issue #598), from
+/// `docs/research/phpsrc-mining/constants.toml` — the spec-fixed value of every
+/// constant the mined build's extensions register. Consulted only by
+/// [`engine_constant`]. The host-dependent, width and version constants are NOT
+/// here: ADR-0094 §3 answers those by class, in the resolver.
+mod constants_generated;
+
 // Capture-group structure of a literal PCRE pattern (issue #149). Carries its
 // own module doc, so this stays a plain comment to avoid merging headers.
 pub mod preg;
@@ -93,9 +100,10 @@ pub use labels::{
 
 mod builtins;
 pub use builtins::{
-    ArgSource, FailureArms, FailureCause, Invocation, InvocationShape, ParamFacts,
-    builtin_class_display, builtin_class_supers, builtin_exception_parent, builtin_throws,
-    declared_method_return, declared_method_return_blocked, declared_method_return_changed_at,
-    declared_return, declared_return_changed_at, failure_arms, hierarchy_entry_count,
+    ArgSource, ConstRow, ConstValue, FailureArms, FailureCause, Invocation, InvocationShape,
+    ParamFacts, builtin_class_display, builtin_class_supers, builtin_exception_parent,
+    builtin_throws, declared_method_return, declared_method_return_blocked,
+    declared_method_return_changed_at, declared_return, declared_return_changed_at,
+    engine_constant, engine_constant_count, failure_arms, hierarchy_entry_count,
     invocation_shape, param_facts, param_facts_mined, resource_return, return_fact,
 };
