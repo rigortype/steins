@@ -30,9 +30,35 @@ pub enum Refinement {
     Int(IntRange),
 }
 
+/// **What one arm of a [`Fact::Union`] knows about its base** (issue #339, ADR-0093 §2) — the
+/// arm's member set, in the three shapes a set over a base can take here.
+///
+/// The `Bool` variant is the whole of ADR-0093 §2: `bool` has two inhabitants, so `bool` minus
+/// `false` is the base-level `{true}`, and the member set has four states of which three
+/// already had a spelling — the full set is [`ArmKnown::Whole`], the empty set is an arm that
+/// is not there (see [`Fact::union`]), and one inhabitant is this. It is *not* a new
+/// [`Refinement`] variant on purpose: `Refinement` is shared with [`Fact::Refined`], where a
+/// bool literal would be a second spelling of the [`Fact::Singleton`] the finite layer already
+/// carries, and it would grow every case split over `Refinement` in this algebra and every
+/// proof over it in `spike/lean-domain`.
+///
+/// An arm whose knowledge does not match its base (`(Base::Int, ArmKnown::Bool(_))`, as for
+/// `(Base::Int, ArmKnown::Refined(Refinement::Str(_)))` before it) is unreachable through
+/// [`Fact::union`]'s callers and denotes nothing; the operations stay total over it rather
+/// than asserting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ArmKnown {
+    /// Every value of the base — that base's `General`, and the full member set.
+    Whole,
+    /// A refinement on the base's values, under [`Refinement`]'s own invariants.
+    Refined(Refinement),
+    /// Exactly one of `bool`'s two inhabitants ([`Base::Bool`] only, ADR-0093 §2).
+    Bool(bool),
+}
+
 /// One arm of a [`Fact::Union`]: a scalar base and what is known about the values of that
-/// base, `None` being that base's `General` (issue #339).
-pub type UnionArm = (Base, Option<Refinement>);
+/// base, [`ArmKnown::Whole`] being that base's `General` (issue #339).
+pub type UnionArm = (Base, ArmKnown);
 
 /// What is known about a single value, in one of the four layers. Every
 /// variant but `Singleton`/`OneOf` carries `nullable: bool` for whether `null`
@@ -56,8 +82,9 @@ pub enum Fact {
         nullable: bool,
     },
     /// **Layer 3½: an abstract union across bases** (issue #339): one arm per [`Base`], each
-    /// carrying the same `Option<Refinement>` the single-base layers do (`None` = that base's
-    /// General) — the form for a value like `1|'x'` once it widens past [`CAP`]. Bounded at
+    /// carrying what is known of that base ([`ArmKnown`] — the single-base layers' refinement,
+    /// the whole base, or a bool literal per ADR-0093 §2)
+    /// — the form for a value like `1|'x'` once it widens past [`CAP`]. Bounded at
     /// four arms (PHP's scalar bases), a small map rather than an open lattice — what makes
     /// [`Fact::join`] total, not partial, over the abstract layers.
     ///
@@ -138,12 +165,17 @@ impl Fact {
             // `int|non-decimal-int-string`.
             Fact::Union { arms, nullable: false } => {
                 let mut acc: Option<Fact> = None;
-                for (base, refinement) in arms {
-                    let arm = match refinement {
-                        Some(r) => Fact::refined(*base, *r, false),
-                        None => Fact::General { base: *base, nullable: false },
+                for (base, known) in arms {
+                    // A bool literal keys sharper than its base does: the grid's `bool` row is
+                    // `true → 1` / `false → 0`, so one inhabitant is one key (ADR-0093 §2) —
+                    // an exact key, which is the finite layer and not a cast of its own.
+                    let cast = match known {
+                        ArmKnown::Refined(r) => Fact::refined(*base, *r, false).array_key_cast()?,
+                        ArmKnown::Whole => {
+                            Fact::General { base: *base, nullable: false }.array_key_cast()?
+                        }
+                        ArmKnown::Bool(b) => Fact::Singleton(Val::Int(i64::from(*b))),
                     };
-                    let cast = arm.array_key_cast()?;
                     acc = Some(match acc {
                         None => cast,
                         Some(prev) => prev.join(&cast)?,
@@ -217,29 +249,44 @@ impl Fact {
     #[must_use]
     pub fn union(arms: Vec<UnionArm>, nullable: bool) -> Option<Fact> {
         let mut merged: Vec<UnionArm> = Vec::with_capacity(arms.len());
-        for (base, refinement) in arms {
+        for (base, known) in arms {
             // A contentless refinement IS that base's General (same rule as
             // `Fact::refined`, one layer in) — without it `join` is NOT
             // associative: two groupings of `Singleton(1) ⊔ Singleton('a') ⊔
             // numeric-string` reach the string arm as `None` vs. `Some(<empty
             // preds>)`, same denotation, two structures. The vector universe
-            // finds 35698 such cases.
-            let refinement = refinement.filter(|r| !refinement_is_empty(*r));
+            // finds 35698 such cases. A full bool member set is the same rule
+            // one vocabulary further (ADR-0093 §2), and `norm_arm` holds both.
+            let known = norm_arm(known);
             match merged.iter_mut().find(|(b, _)| *b == base) {
                 Some(slot) => {
-                    slot.1 = join_refinements(slot.1, refinement).filter(|r| !refinement_is_empty(*r));
+                    slot.1 = norm_arm(join_arms(slot.1, known));
                 }
-                None => merged.push((base, refinement)),
+                None => merged.push((base, known)),
             }
         }
         merged.sort_by_key(|(b, _)| *b);
         match merged.len() {
             0 => None,
             1 => {
-                let (base, refinement) = merged.pop().expect("len checked");
-                Some(match refinement {
-                    Some(r) => Fact::refined(base, r, nullable),
-                    None => Fact::General { base, nullable },
+                let (base, known) = merged.pop().expect("len checked");
+                Some(match known {
+                    ArmKnown::Refined(r) => Fact::refined(base, r, nullable),
+                    ArmKnown::Whole => Fact::General { base, nullable },
+                    // One base and one inhabitant is the finite layer, which says it
+                    // more precisely than any abstract layer can — and nullably, as
+                    // the two-member set `true|null` (ADR-0093 §2). A literal on a
+                    // base that has no such inhabitant states nothing about that
+                    // base, so it widens to it rather than changing it.
+                    ArmKnown::Bool(_) if base != Base::Bool => Fact::General { base, nullable },
+                    ArmKnown::Bool(b) => {
+                        let v = Val::Bool(b);
+                        if nullable {
+                            Fact::from_vals(vec![Val::Null, v]).expect("two members")
+                        } else {
+                            Fact::Singleton(v)
+                        }
+                    }
                 })
             }
             _ => Some(Fact::Union { arms: merged, nullable }),
@@ -251,9 +298,9 @@ impl Fact {
     fn abstract_arms(&self) -> Option<(Vec<UnionArm>, bool)> {
         match self {
             Fact::Refined { base, refinement, nullable } => {
-                Some((vec![(*base, Some(*refinement))], *nullable))
+                Some((vec![(*base, ArmKnown::Refined(*refinement))], *nullable))
             }
-            Fact::General { base, nullable } => Some((vec![(*base, None)], *nullable)),
+            Fact::General { base, nullable } => Some((vec![(*base, ArmKnown::Whole)], *nullable)),
             Fact::Union { arms, nullable } => Some((arms.clone(), *nullable)),
             Fact::Singleton(_) | Fact::OneOf(_) | Fact::Shape { .. } => None,
         }
@@ -290,9 +337,14 @@ impl Fact {
             // base, so at most one can even apply.
             Fact::Union { arms, nullable } => match v {
                 Val::Null => *nullable,
-                _ => arms.iter().any(|(base, refinement)| match refinement {
-                    Some(r) => Fact::refined(*base, *r, false).admits(v),
-                    None => v.base() == Some(*base),
+                _ => arms.iter().any(|(base, known)| {
+                    v.base() == Some(*base)
+                        && match known {
+                            ArmKnown::Refined(r) => Fact::refined(*base, *r, false).admits(v),
+                            ArmKnown::Whole => true,
+                            // Membership in a two-point domain (ADR-0093 §2).
+                            ArmKnown::Bool(b) => *v == Val::Bool(*b),
+                        }
                 }),
             },
             Fact::Shape { shape, nullable } => match v {
@@ -300,6 +352,50 @@ impl Fact {
                 Val::Array(entries) => shape.admits(entries),
                 _ => false,
             },
+        }
+    }
+
+    /// **Subtract one bool literal** (ADR-0093 §2) — the value-lane half of `!== false` /
+    /// `!== true`, mirroring the rule the arm lane has carried since issue #443.
+    ///
+    /// The subtraction is a set difference over a two-point domain, so it is exact wherever
+    /// the domain can hold the result: `bool` minus `false` is `{true}`, which a single base
+    /// says in the finite layer and a union arm says as [`ArmKnown::Bool`]. Subtracting the
+    /// one inhabitant an arm has left empties that arm, and an empty member set is an arm that
+    /// is **not there** — never a silent return to the whole base.
+    ///
+    /// `None` is the emptied lane (ADR-0052's emptied-`Verified` rule): the guard left nothing
+    /// this domain can hold, which every consumer already reads as "no fact". A fact with no
+    /// bool in it comes back unchanged — a guard subtracts what is there and nothing else.
+    #[must_use]
+    pub fn exclude_bool(&self, b: bool) -> Option<Fact> {
+        let gone = Val::Bool(b);
+        if let Some(members) = self.finite_members() {
+            return Fact::from_vals(members.iter().filter(|m| **m != gone).cloned().collect());
+        }
+        match self {
+            // Two inhabitants, one subtracted: the other IS the whole of what is left, and
+            // the finite layer says it exactly (a nullable base keeps its `null` beside it).
+            Fact::General { base: Base::Bool, nullable } => {
+                let kept = Val::Bool(!b);
+                Some(if *nullable {
+                    Fact::from_vals(vec![Val::Null, kept]).expect("two members")
+                } else {
+                    Fact::Singleton(kept)
+                })
+            }
+            Fact::Union { arms, nullable } => {
+                let kept: Vec<UnionArm> = arms
+                    .iter()
+                    .filter_map(|arm| match arm {
+                        (Base::Bool, ArmKnown::Whole) => Some((Base::Bool, ArmKnown::Bool(!b))),
+                        (Base::Bool, ArmKnown::Bool(x)) if *x == b => None,
+                        other => Some(*other),
+                    })
+                    .collect();
+                Fact::union(kept, *nullable)
+            }
+            other => Some(other.clone()),
         }
     }
 
@@ -391,10 +487,14 @@ impl Fact {
             }
             // Per-arm: `Yes` only if every arm is; a non-string arm is `No` on
             // its own, so a mixed union is at best `Maybe`.
-            Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, refinement)| {
-                match refinement {
-                    Some(r) => Fact::refined(*base, *r, *nullable).satisfies_str(pred),
-                    None => Fact::General { base: *base, nullable: *nullable }.satisfies_str(pred),
+            Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, known)| {
+                match known {
+                    ArmKnown::Refined(r) => Fact::refined(*base, *r, *nullable).satisfies_str(pred),
+                    ArmKnown::Whole => {
+                        Fact::General { base: *base, nullable: *nullable }.satisfies_str(pred)
+                    }
+                    // A bool is not a string, whichever inhabitant it is.
+                    ArmKnown::Bool(_) => Certainty::No,
                 }
             })),
             // An array is never a string, and neither is null.
@@ -426,10 +526,14 @@ impl Fact {
                 if *base == Base::Int { Certainty::Maybe } else { Certainty::No }
             }
             // Per-arm, as in `satisfies_str`: `Yes` only if every arm is.
-            Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, refinement)| {
-                match refinement {
-                    Some(r) => Fact::refined(*base, *r, *nullable).int_in(range),
-                    None => Fact::General { base: *base, nullable: *nullable }.int_in(range),
+            Fact::Union { arms, nullable } => Certainty::all_of(arms.iter().map(|(base, known)| {
+                match known {
+                    ArmKnown::Refined(r) => Fact::refined(*base, *r, *nullable).int_in(range),
+                    ArmKnown::Whole => {
+                        Fact::General { base: *base, nullable: *nullable }.int_in(range)
+                    }
+                    // A bool is not an int, whichever inhabitant it is.
+                    ArmKnown::Bool(_) => Certainty::No,
                 }
             })),
             // An array is never an int, and neither is null.
@@ -456,12 +560,18 @@ impl Fact {
             Fact::Union { arms, nullable } => {
                 let mut falsy = *nullable;
                 let mut truthy = false;
-                for (base, refinement) in arms {
-                    let arm = match refinement {
-                        Some(r) => Fact::refined(*base, *r, false),
-                        None => Fact::General { base: *base, nullable: false },
+                for (base, known) in arms {
+                    // A bool literal decides its own truthiness — `true` is the one
+                    // truthy inhabitant, `false` the one falsy one (ADR-0093 §2).
+                    let (f, t) = match known {
+                        ArmKnown::Bool(b) => (!*b, *b),
+                        ArmKnown::Refined(r) => {
+                            Fact::refined(*base, *r, false).abstract_falsy_truthy()
+                        }
+                        ArmKnown::Whole => {
+                            Fact::General { base: *base, nullable: false }.abstract_falsy_truthy()
+                        }
                     };
-                    let (f, t) = arm.abstract_falsy_truthy();
                     falsy |= f;
                     truthy |= t;
                 }
@@ -618,24 +728,7 @@ fn summarize(vals: &[Val]) -> Option<Fact> {
     // array has none, so a set mixing arrays with scalars still drops the fact whole (keeping
     // the scalars and losing the array would admit less than the set contained).
     if scalars.iter().any(|v| v.base() != Some(base)) {
-        if scalars.iter().any(|v| v.base().is_none()) {
-            return None;
-        }
-        let mut arms: Vec<(Base, Option<Refinement>)> = Vec::new();
-        for b in [Base::Int, Base::Float, Base::String, Base::Bool] {
-            let members: Vec<Val> =
-                scalars.iter().filter(|v| v.base() == Some(b)).map(|v| (*v).clone()).collect();
-            if members.is_empty() {
-                continue;
-            }
-            match summarize(&members) {
-                Some(Fact::Refined { refinement, .. }) => arms.push((b, Some(refinement))),
-                Some(Fact::General { .. }) => arms.push((b, None)),
-                // A base whose own summary is unrepresentable widens to that
-                // base's General, which is sound and keeps the arm.
-                _ => arms.push((b, None)),
-            }
-        }
+        let (arms, nullable) = summarize_to_arms(vals)?;
         return Fact::union(arms, nullable);
     }
     let fact = match base {
@@ -664,6 +757,51 @@ fn summarize(vals: &[Val]) -> Option<Fact> {
     Some(fact)
 }
 
+/// The arm one base's members widen to, when that base's own summary is the one to take: a
+/// refinement where the summary has one, and the whole base otherwise (including where the
+/// summary is unrepresentable, which is sound and keeps the arm).
+fn summarized_arm(members: &[Val]) -> ArmKnown {
+    match summarize(members) {
+        Some(Fact::Refined { refinement, .. }) => ArmKnown::Refined(refinement),
+        _ => ArmKnown::Whole,
+    }
+}
+
+/// **The computed widening, in the arm vocabulary** (issue #339, ADR-0093 §2): one arm per
+/// base present in `vals`, plus whether `null` was among them. `None` when a member has no
+/// scalar base at all — an array has none, and a union has no arm for it, so keeping the
+/// scalars would admit less than the set contained.
+///
+/// This, not [`summarize`], is what the join widens a finite side with, because the arm
+/// vocabulary holds one thing the fact vocabulary cannot: a single base's bool literal. Route
+/// both through it or the two disagree, and a join that disagrees with itself by grouping is
+/// not associative — the vector universe finds 2914 such triples.
+fn summarize_to_arms(vals: &[Val]) -> Option<(Vec<UnionArm>, bool)> {
+    let nullable = vals.contains(&Val::Null);
+    let scalars: Vec<&Val> = vals.iter().filter(|v| **v != Val::Null).collect();
+    if scalars.iter().any(|v| v.base().is_none()) {
+        return None;
+    }
+    let mut arms: Vec<UnionArm> = Vec::new();
+    for b in [Base::Int, Base::Float, Base::String, Base::Bool] {
+        let members: Vec<Val> =
+            scalars.iter().filter(|v| v.base() == Some(b)).map(|v| (*v).clone()).collect();
+        if members.is_empty() {
+            continue;
+        }
+        // The bool base's widening is *computed* like every other (ADR-0035): a set of
+        // bools that holds one inhabitant summarizes to that inhabitant, not to `bool`
+        // (ADR-0093 §2). Both inhabitants ARE the base, and every other base goes through
+        // the same summary it always did.
+        let known = match members.as_slice() {
+            [Val::Bool(v)] if b == Base::Bool => ArmKnown::Bool(*v),
+            other => summarized_arm(other),
+        };
+        arms.push((b, known));
+    }
+    Some((arms, nullable))
+}
+
 fn join_finite_abstract(finite: &[Val], abs: &Fact) -> Option<Fact> {
     let summary = summarize(finite)?;
     match summary.finite_members() {
@@ -679,7 +817,18 @@ fn join_finite_abstract(finite: &[Val], abs: &Fact) -> Option<Fact> {
                 unreachable!("abs is abstract by caller contract")
             }
         },
-        None => join_abstract(&summary, abs),
+        None => match summarize_to_arms(finite) {
+            // The finite side widens into arms and the two arm lists merge per base — the
+            // same one join every other pair of abstract facts takes.
+            Some((arms, nullable)) => {
+                let (mut merged, absnull) = abs.abstract_arms()?;
+                merged.extend(arms);
+                Fact::union(merged, nullable || absnull)
+            }
+            // A member with no scalar base (an array): no arm summary exists, and the fact
+            // drops, exactly as it did before the union layer.
+            None => join_abstract(&summary, abs),
+        },
     }
 }
 
@@ -704,14 +853,31 @@ fn refinement_is_empty(r: Refinement) -> bool {
     }
 }
 
-/// Join two refinements **of the same base** (issue #339): the widening join the single-base
-/// layers already use, lifted out so [`Fact::union`] and `join_abstract` share one definition.
-/// `None` on either side is that base's General, which absorbs.
-fn join_refinements(a: Option<Refinement>, b: Option<Refinement>) -> Option<Refinement> {
+/// Normalize one arm's knowledge: what constrains nothing IS the whole base, so it is spelled
+/// that way and only that way — the invariant [`Fact::union`]'s doc explains, and the reason
+/// the arm merge is associative.
+fn norm_arm(k: ArmKnown) -> ArmKnown {
+    match k {
+        ArmKnown::Refined(r) if refinement_is_empty(r) => ArmKnown::Whole,
+        other => other,
+    }
+}
+
+/// **Join two arms of the same base** (issue #339, ADR-0093 §2): the widening join the
+/// single-base layers already use, lifted out so [`Fact::union`] and `join_abstract` share one
+/// definition. [`ArmKnown::Whole`] is the whole base, which absorbs; two bool literals join by
+/// set union, so the same inhabitant twice is itself and the two different ones are the base —
+/// `join({true}, {false}) = bool`. Knowledge of two kinds has no meet in either, and widens.
+fn join_arms(a: ArmKnown, b: ArmKnown) -> ArmKnown {
     match (a, b) {
-        (Some(Refinement::Str(p)), Some(Refinement::Str(q))) => Some(Refinement::Str(p.intersect(q))),
-        (Some(Refinement::Int(r)), Some(Refinement::Int(s))) => Some(Refinement::Int(r.hull(s))),
-        _ => None,
+        (ArmKnown::Refined(Refinement::Str(p)), ArmKnown::Refined(Refinement::Str(q))) => {
+            ArmKnown::Refined(Refinement::Str(p.intersect(q)))
+        }
+        (ArmKnown::Refined(Refinement::Int(r)), ArmKnown::Refined(Refinement::Int(s))) => {
+            ArmKnown::Refined(Refinement::Int(r.hull(s)))
+        }
+        (ArmKnown::Bool(x), ArmKnown::Bool(y)) if x == y => ArmKnown::Bool(x),
+        _ => ArmKnown::Whole,
     }
 }
 
@@ -858,21 +1024,21 @@ mod tests {
 
     #[test]
     fn the_union_constructor_establishes_its_invariants() {
-        let int = (Base::Int, None);
-        let string = (Base::String, None);
+        let int = (Base::Int, ArmKnown::Whole);
+        let string = (Base::String, ArmKnown::Whole);
         // Sorted by base, one entry per base.
         let Some(Fact::Union { arms, .. }) = Fact::union(vec![string, int], false) else {
             panic!("two bases make a union");
         };
-        assert_eq!(arms, vec![(Base::Int, None), (Base::String, None)]);
+        assert_eq!(arms, vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)]);
         // One arm is not a union — it collapses to the single-base layer.
         assert_eq!(Fact::union(vec![int], false), Some(Fact::General { base: Base::Int, nullable: false }));
         // None is not a fact at all.
         assert_eq!(Fact::union(Vec::new(), false), None);
         // Duplicate bases merge through the refinement join rather than both
         // being kept: `int<1,max>` ⊔ `int<-5,-1>` is the hull.
-        let pos = (Base::Int, Some(Refinement::Int(IntRange::POSITIVE)));
-        let neg = (Base::Int, Some(Refinement::Int(IntRange::NEGATIVE)));
+        let pos = (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::POSITIVE)));
+        let neg = (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::NEGATIVE)));
         let merged = Fact::union(vec![pos, neg, string], false).expect("a union");
         assert!(merged.admits(&Val::Int(5)) && merged.admits(&Val::Int(-5)));
     }

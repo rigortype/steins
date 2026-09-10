@@ -5,7 +5,7 @@
 use std::collections::HashMap;
 
 use steins_domain::{
-    Base, Certainty, Fact, IntRange, PhpStr, Refinement, ShapeFact, Key as VKey, Val,
+    ArmKnown, Base, Certainty, Fact, IntRange, PhpStr, Refinement, ShapeFact, Key as VKey, Val,
 };
 use steins_syntax::{ArgValue, php_canonical_int_string};
 
@@ -1096,7 +1096,7 @@ pub(crate) fn shape_key_union(shape: &ShapeFact) -> Option<Fact> {
                 // (issue #339) where it used to be a two-base union with no
                 // form — which is why this arm read `return None`.
                 KeyClass::ArrayKey => Fact::union(
-                    vec![(Base::Int, None), (Base::String, None)],
+                    vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)],
                     false,
                 )?,
             };
@@ -1644,7 +1644,7 @@ mod shape_projection_tests {
             p.tail,
             Tail::Unsealed {
                 key: KeyClass::Int,
-                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                value: Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
                     .map(Box::new),
             }
         );
@@ -1685,7 +1685,7 @@ mod shape_projection_tests {
             project_keys(&ShapeFact::plain_array()).tail,
             Tail::Unsealed {
                 key: KeyClass::Int,
-                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                value: Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
                     .map(Box::new),
             }
         );
@@ -1835,7 +1835,7 @@ mod shape_projection_tests {
             Vec::new(),
             Tail::Unsealed {
                 key: KeyClass::Int,
-                value: Fact::union(vec![(Base::Int, None), (Base::String, None)], false)
+                value: Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
                     .map(Box::new),
             },
             Certainty::Yes,

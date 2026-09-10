@@ -7,7 +7,7 @@
 use crate::{CField, CKey, ContractTy, MixedCut, ckey_to_domain};
 use steins_domain::Key as VKey;
 use steins_domain::{
-    Base, Certainty, Fact, KeyClass, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
+    ArmKnown, Base, Certainty, Fact, KeyClass, Presence, Refinement, ShapeFact, StrPreds, Tail, Val,
     php_is_falsy,
 };
 
@@ -139,9 +139,11 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
     if let Some(vals) = fact.finite_members() {
         return Certainty::all_of(vals.iter().map(|v| admits_val(ty, v)));
     }
-    let (base, refinement, nullable) = match fact {
-        Fact::Refined { base, refinement, nullable } => (*base, Some(*refinement), *nullable),
-        Fact::General { base, nullable } => (*base, None, *nullable),
+    let (base, known, nullable) = match fact {
+        Fact::Refined { base, refinement, nullable } => {
+            (*base, ArmKnown::Refined(*refinement), *nullable)
+        }
+        Fact::General { base, nullable } => (*base, ArmKnown::Whole, *nullable),
         // Array stratum (ADR-0062): no scalar base, own rule table (ADR-0072).
         Fact::Shape { shape, nullable } => {
             let array_part = admits_shape_fact(ty, shape);
@@ -153,7 +155,7 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
         }
         // For-all over the arms (#339); `null` checked once, as elsewhere.
         Fact::Union { arms, nullable } => {
-            let arm_parts = arms.iter().map(|(b, r)| base_only(ty, *b, *r));
+            let arm_parts = arms.iter().map(|(b, k)| base_only(ty, *b, *k));
             let all_arms = Certainty::all_of(arm_parts);
             return if *nullable {
                 Certainty::all_of([all_arms, admits_val(ty, &Val::Null)])
@@ -163,7 +165,7 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
         }
         Fact::Singleton(_) | Fact::OneOf(_) => unreachable!("finite handled above"),
     };
-    let base_part = base_only(ty, base, refinement);
+    let base_part = base_only(ty, base, known);
     if nullable {
         // The denotation is base-part ∪ {null}: both parts must agree.
         Certainty::all_of([base_part, admits_val(ty, &Val::Null)])
@@ -175,7 +177,10 @@ pub fn admits_fact(ty: &ContractTy, fact: &Fact) -> Certainty {
 /// For-all judgment over the (non-null) base part of an abstract fact. Union
 /// folding needs one member covering the whole base, so jointly-covering
 /// unions answer `Maybe`.
-fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Certainty {
+///
+/// The bool literal an arm may carry (ADR-0093 §2) decides where the whole base only
+/// answers `Maybe`: `true` IS non-falsy, and `false` is not the literal `true`.
+fn base_only(ty: &ContractTy, base: Base, known: ArmKnown) -> Certainty {
     use Certainty::{Maybe, No, Yes};
     match ty {
         ContractTy::Mixed => Yes,
@@ -186,12 +191,14 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         // Base part is non-null by construction; caller judges `nullable` separately.
         ContractTy::MixedMinus(MixedCut::Null) => Yes,
         // Decided only where the refinement carries the answer; otherwise `Maybe`.
-        ContractTy::MixedMinus(MixedCut::Falsy) => match (base, refinement) {
+        ContractTy::MixedMinus(MixedCut::Falsy) => match (base, known) {
+            // `true` is the base's one truthy inhabitant, `false` its one falsy one.
+            (Base::Bool, ArmKnown::Bool(b)) => Certainty::from_bool(b),
             // `non-falsy-string` = not `''`/`'0'`; its absence isn't refutation.
-            (Base::String, Some(Refinement::Str(have))) => {
+            (Base::String, ArmKnown::Refined(Refinement::Str(have))) => {
                 if have.contains_all(StrPreds::NON_FALSY) { Yes } else { Maybe }
             }
-            (Base::Int, Some(Refinement::Int(have))) => {
+            (Base::Int, ArmKnown::Refined(Refinement::Int(have))) => {
                 if !have.contains(0) {
                     Yes
                 } else if have.lo() == 0 && have.hi() == 0 {
@@ -207,8 +214,8 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
             (Base::Float, Base::Int) => Yes,
             _ => No,
         },
-        ContractTy::IntIn(r) => match (base, refinement) {
-            (Base::Int, Some(Refinement::Int(have))) => {
+        ContractTy::IntIn(r) => match (base, known) {
+            (Base::Int, ArmKnown::Refined(Refinement::Int(have))) => {
                 if r.contains_range(have) {
                     Yes
                 } else if r.intersect(have).is_none() {
@@ -220,8 +227,8 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
             (Base::Int, _) => Maybe,
             _ => No,
         },
-        ContractTy::StrWith(p) => match (base, refinement) {
-            (Base::String, Some(Refinement::Str(have))) => {
+        ContractTy::StrWith(p) => match (base, known) {
+            (Base::String, ArmKnown::Refined(Refinement::Str(have))) => {
                 if have.contains_all(*p) {
                     Yes
                 } else {
@@ -235,8 +242,8 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         ContractTy::StrOpaque => {
             if base == Base::String { Maybe } else { No }
         }
-        ContractTy::LitInt(want) => match (base, refinement) {
-            (Base::Int, Some(Refinement::Int(have))) => {
+        ContractTy::LitInt(want) => match (base, known) {
+            (Base::Int, ArmKnown::Refined(Refinement::Int(have))) => {
                 if !have.contains(*want) {
                     No
                 } else {
@@ -250,16 +257,19 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         ContractTy::LitFloat(_) => {
             if matches!(base, Base::Float | Base::Int) { Maybe } else { No }
         }
-        ContractTy::LitStr(want) => match (base, refinement) {
-            (Base::String, Some(Refinement::Str(have))) => {
+        ContractTy::LitStr(want) => match (base, known) {
+            (Base::String, ArmKnown::Refined(Refinement::Str(have))) => {
                 if StrPreds::of(want).contains_all(have) { Maybe } else { No }
             }
             (Base::String, _) => Maybe,
             _ => No,
         },
-        ContractTy::LitBool(_) => {
-            if base == Base::Bool { Maybe } else { No }
-        }
+        ContractTy::LitBool(want) => match (base, known) {
+            // An arm that IS one inhabitant is decided either way (ADR-0093 §2).
+            (Base::Bool, ArmKnown::Bool(have)) => Certainty::from_bool(have == *want),
+            (Base::Bool, _) => Maybe,
+            _ => No,
+        },
         ContractTy::ArrayAny { .. }
         | ContractTy::ListOf { .. }
         | ContractTy::MapOf { .. }
@@ -276,10 +286,10 @@ fn base_only(ty: &ContractTy, base: Base, refinement: Option<Refinement>) -> Cer
         }
         ContractTy::Union(members) => match value_arms(members) {
             None => Maybe,
-            Some(arms) => arms.fold(No, |acc, m| acc.or(base_only(m, base, refinement))),
+            Some(arms) => arms.fold(No, |acc, m| acc.or(base_only(m, base, known))),
         },
         ContractTy::Inter(members) => {
-            members.iter().fold(Yes, |acc, m| acc.and(base_only(m, base, refinement)))
+            members.iter().fold(Yes, |acc, m| acc.and(base_only(m, base, known)))
         }
     }
 }

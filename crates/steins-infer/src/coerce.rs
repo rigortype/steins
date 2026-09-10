@@ -4,8 +4,8 @@
 //! `settype` performs (issue #595), which rests on the same conversions.
 
 use steins_domain::{
-    Base, CAP, Certainty, Fact, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds, Val,
-    php_is_numeric,
+    ArmKnown, Base, CAP, Certainty, Fact, Key as VKey, PhpStr, Refinement, ShapeFact, StrPreds,
+    UnionArm, Val, php_is_numeric,
 };
 use steins_syntax::{ArgValue, CastTarget, NativeType, ScalarType, TypeMember};
 
@@ -129,7 +129,7 @@ pub(crate) fn coerce_fact_to_native(ty: &NativeType, fact: Fact) -> Option<Fact>
         // A union keeps only the arms the native type admits (the parameter is
         // the gate). Losing every arm is no fact rather than an empty one.
         Fact::Union { arms, nullable } => {
-            let kept: Vec<(Base, Option<Refinement>)> =
+            let kept: Vec<UnionArm> =
                 arms.into_iter().filter(|(b, _)| native_has_base(ty, *b)).collect();
             Fact::union(kept, nullable)
         }
@@ -421,7 +421,14 @@ fn cast_input_classes(f: &Fact) -> Vec<CastIn> {
         }
         Fact::Union { arms, nullable } => arms
             .iter()
-            .map(|(base, refinement)| CastIn::Base(*base, *refinement))
+            .map(|(base, known)| match known {
+                ArmKnown::Refined(r) => CastIn::Base(*base, Some(*r)),
+                ArmKnown::Whole => CastIn::Base(*base, None),
+                // A bool-literal arm denotes exactly one value (ADR-0093 §2), so the
+                // grid casts it as the proven value it is — `true` to `1`, not `bool`
+                // to `int` — through the rows that already carry the literal.
+                ArmKnown::Bool(b) => CastIn::Val(Val::Bool(*b)),
+            })
             .chain(nulls(*nullable))
             .collect(),
         Fact::Shape { shape, nullable } => std::iter::once(CastIn::Array((**shape).clone()))

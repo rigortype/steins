@@ -175,7 +175,7 @@ pub use fold_table::{TableEngine, TableFolder, request_key};
 // end return missing (ADR-0078, issue #199)
 
 use steins_phpdoc::ast::TypeKind as PKind;
-use steins_domain::{Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
+use steins_domain::{ArmKnown, Base, Fact, IntRange, Key as VKey, Refinement, StrPreds, Val};
 use steins_phpdoc::Type as PType;
 
 use docblock_hygiene::docblock_hygiene;
@@ -1475,10 +1475,13 @@ fn describe_fact(f: &Fact) -> String {
         Fact::Union { arms, nullable } => {
             let spelled: Vec<String> = arms
                 .iter()
-                .map(|(base, refinement)| {
-                    let arm = match refinement {
-                        Some(r) => Fact::refined(*base, *r, false),
-                        None => Fact::General { base: *base, nullable: false },
+                .map(|(base, known)| {
+                    let arm = match known {
+                        ArmKnown::Refined(r) => Fact::refined(*base, *r, false),
+                        ArmKnown::Whole => Fact::General { base: *base, nullable: false },
+                        // A bool-literal arm is one value (ADR-0093 §2): the message
+                        // names `true`, which is what the guard actually left.
+                        ArmKnown::Bool(b) => Fact::Singleton(Val::Bool(*b)),
                     };
                     describe_fact(&arm)
                         .trim_start_matches("a value of type ")
