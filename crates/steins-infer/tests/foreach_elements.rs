@@ -138,6 +138,24 @@ fn an_iterable_subject_binds_what_its_declaration_states() {
 }
 
 #[test]
+fn a_traversable_subject_binds_nothing() {
+    // The floor every non-array declaration falls to, and the issue's own
+    // out-of-scope ruling: a `Traversable`/`Generator` value type rides
+    // `@implements`/`@extends` template arguments, a lane this reader does not
+    // consult. The declaration names a class, a class states no element type here,
+    // and nothing is bound rather than something being guessed.
+    let src = subject(
+        "\\Traversable",
+        "    foreach ($xs as $k => $v) {\n        \\PHPStan\\dumpType($k);\n        \\PHPStan\\dumpType($v);\n    }",
+    );
+    assert_eq!(
+        answers(&src),
+        vec!["unknown".to_owned(), "unknown".to_owned()],
+        "a class declaration states no element type"
+    );
+}
+
+#[test]
 fn a_proven_array_binds_its_elements_at_the_verified_stratum() {
     // The value lane answers first (ADR-0037: proven beats declared) and answers
     // exactly — the keys and the values as they are, with no `(asserted)` marker, so
