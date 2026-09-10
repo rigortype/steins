@@ -20,12 +20,14 @@
 //! separate way for the frame to have tied two names to one cell, and each is a
 //! separate arm of [`write_is_frame_private`]'s decline.
 //!
-//! The carrier rows pin an **outcome**, not one line: today a poisoned scope binds
-//! nothing at all, so a give-up-list frame would answer `unknown` even with the
-//! exposure leg deleted, and what actually keeps `['key' => &$a]` and
-//! `foreach ($r as &$v)` honest is that they are recognised as give-up sites in the
-//! first place (issue #641's leg 1). Delete that recognition and the four `&` rows
-//! below answer the pre-write value — the wrong answer, not a missing one.
+//! The carrier rows pin an **outcome**: a named function's poisoned scope binds
+//! nothing, so what keeps `['key' => &$a]` and `foreach ($r as &$v)` honest there
+//! is that they are recognised as give-up sites in the first place (issue #641's
+//! leg 1) — delete that recognition and the four `&` rows below answer the
+//! pre-write value, the wrong answer, not a missing one. The exposure leg itself
+//! stays unpinned — a poisoned closure scope binds a declared return in a store
+//! lane the narrow leg clears whole, so the closure row below pins that outcome,
+//! not the line (`write_is_frame_private` says why the line is kept regardless).
 //!
 //! Zero emission (A-G9): every fixture here dumps and nothing else.
 //!
@@ -87,6 +89,67 @@ fn dump_sig(sig: &str, body: &str) -> String {
     let got = types(&format!("<?php\nfunction f({sig}): void {{ {body} }}\n"));
     assert_eq!(got.len(), 1, "expected exactly one dump, got {got:?}");
     got.into_iter().next().unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// The exposure leg, pinned where a poisoned frame still binds something.
+// ---------------------------------------------------------------------------
+
+/// A closure scope keeps a declared return beside a `$y = &$x` (a named function's
+/// poisoned env is empty; a closure's is not), so this is the one frame where a
+/// poisoned scope has something to lose across an offset write. It loses it: the
+/// second dump is `unknown`. Today that outcome does not depend on the exposure
+/// leg alone — the fact sits in a store lane the narrow leg clears whole — so this
+/// row pins the outcome, and the leg's own reason is on `write_is_frame_private`.
+#[test]
+fn an_offset_write_in_a_poisoned_closure_scope_stays_total() {
+    let src = "<?php
+/** @return list<non-empty-array<mixed>> */
+function get_list(): array { return [['a' => 1]]; }
+function (): void {
+    $foo = get_list();
+    $x = 1;
+    $y = &$x;
+    \\PHPStan\\dumpType($foo);
+    $b = ['k' => 1];
+    $b['k'] = 2;
+    \\PHPStan\\dumpType($foo);
+};
+";
+    assert_eq!(
+        types(src),
+        vec!["list<non-empty-array<mixed>> (asserted)".to_owned(), "unknown".to_owned()],
+        "the frame is aliased, so the write clears everything"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The statement's OTHER writers: the total barrier used to mask them.
+// ---------------------------------------------------------------------------
+
+/// `const_key_offset_path` admits any expression as the outermost key, and the
+/// right-hand side may carry an assignment or increment of its own. Each of these
+/// writes `$s`, and each answered the pre-write value before the statement named
+/// its writers. `php -r` for the first: `$s = "foo"; $b = ["k" => 1];
+/// $b[$s = "bar"] = 1; var_dump($s);` prints `string(3) "bar"`.
+#[test]
+fn a_writer_inside_the_key_or_the_value_of_an_offset_write_is_swept() {
+    let by_ref = "function g(string &$s): int { $s = 'bar'; return 1; }\n";
+    for (setup, stmt) in [
+        ("$s = 'foo'; $b = ['k' => 1];", "$b[$s = 'bar'] = 1;"),
+        ("$s = 'foo'; $b = ['k' => 1];", "$b[g($s)] = 1;"),
+        ("$s = 'foo'; $b = ['k' => ['j' => 1]];", "$b['k'][$s = 'j'] = 1;"),
+        ("$s = 1; $b = ['k' => 1];", "$b['k'] = $s++;"),
+        ("$s = 'foo'; $b = ['k' => 1];", "$b['k'] = $s = 'bar';"),
+        ("$s = 'foo'; $b = ['k' => 1];", "$b['k'] = $s .= 'x';"),
+        ("$s = 1; $b = [1];", "$b[] = $s++;"),
+    ] {
+        let src = format!(
+            "<?php\n{by_ref}function f(): void {{ {setup} {stmt} \\PHPStan\\dumpType($s); }}\n"
+        );
+        let got = types(&src);
+        assert_eq!(got, vec!["unknown".to_owned()], "`{stmt}` writes `$s`");
+    }
 }
 
 // ---------------------------------------------------------------------------

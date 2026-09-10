@@ -914,13 +914,16 @@ fn write_is_frame_private(w: &WalkCx, base: &str) -> bool {
     if steins_syntax::SUPERGLOBALS.contains(&base) {
         return false;
     }
-    // Belt over braces, deliberately. A poisoned scope binds nothing today — even a
-    // native `int` parameter reads `unknown` there — so removing this line moves no
-    // fixture, and the carrier tests in `offset_write_barrier_extent` pin the
-    // OUTCOME rather than this arm. It stays because the rule is "an aliased frame
-    // gets the total clear", not "the poison gate happens to have emptied the env
-    // already": the day `poisoned` stops being all-or-nothing, or a later leg keeps
-    // a store lane seeded at scope entry, this is the line that has to be here.
+    // Belt over braces, deliberately. A poisoned scope holds nothing this leg
+    // could keep: a named function's env is empty there, and the one thing a
+    // poisoned closure scope still binds — a declared return, at `Asserted`, in a
+    // store lane — is a lane the narrow leg clears whole anyway (measured: the
+    // closure row in `offset_write_barrier_extent` answers the same with this
+    // line deleted). It stays because the rule is "an aliased frame gets the
+    // total clear", not "the lanes happened to be cleared for another reason":
+    // the day `poisoned` stops being all-or-nothing, or the narrow leg keeps a
+    // store lane, this is the line that has to be here. The carrier rows pin the
+    // give-up sites themselves (leg 1).
     if w.scope.poisoned {
         return false;
     }

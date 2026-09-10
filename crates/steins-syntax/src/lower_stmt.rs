@@ -1355,6 +1355,29 @@ fn node_has_stray_jump(node: &Node<'_, '_>) -> bool {
     })
 }
 
+/// What an offset write or append invalidates besides its base (issue #641). The
+/// total barrier used to mask everything else the statement could touch; once the
+/// write clears only its base, the statement's other writers have to be named:
+/// a by-ref call anywhere in it — the KEY included, since `const_key_offset_path`
+/// admits any expression there — and an embedded assignment or increment on
+/// either side (`$b[$s = 'k'] = 1`, `$b['k'] = $s++`). Echo's recipe exactly: the
+/// calls with their evidence, the writes as opaque entries. The base itself is
+/// not collected — `collect_assign_writes` reads only assignment lvalues, and
+/// the lvalue here is the whole offset path, which is the base's own business.
+fn offset_write_invalidation(
+    whole: &Expression<'_>,
+    a: &mago_syntax::cst::Assignment<'_>,
+) -> Vec<InvalidatedVar> {
+    let mut invalidated = call_invalidation(&Node::Expression(whole));
+    let mut writes = Vec::new();
+    collect_assign_writes(&Node::Expression(a.lhs), &mut writes);
+    collect_assign_writes(&Node::Expression(a.rhs), &mut writes);
+    for name in writes {
+        note_occurrence(&mut invalidated, name, None);
+    }
+    invalidated
+}
+
 /// Lower an expression-statement to a trace entry.
 pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
     match expr.unparenthesized() {
@@ -1387,7 +1410,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // not in the source at all — PHP picks it — so this carries no
                 // key and the walk computes the landing index from the base's
                 // own witnessed key sequence.
-                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let invalidated = offset_write_invalidation(expr, a);
                 let value = lower_arg_value(a.rhs);
                 Stmt::lowered(StmtKind::OffsetAppend { base, value }, invalidated)
             } else if a.operator.is_assign()
@@ -1396,7 +1419,7 @@ pub(crate) fn lower_expr_stmt(expr: &Expression<'_>) -> Stmt {
                 // `$var[<lit>] = …` / `$var[<lit>][<lit>] = …` (ADR-0062 A-G8).
                 // Still a barrier in the walk — see `StmtKind::OffsetWrite` — but
                 // one that names the base and key so the shape lane survives it.
-                let invalidated = call_invalidation(&Node::Expression(a.rhs));
+                let invalidated = offset_write_invalidation(expr, a);
                 let value = lower_arg_value(a.rhs);
                 Stmt::lowered(StmtKind::OffsetWrite { base, keys, value }, invalidated)
             } else if a.operator.is_assign()
