@@ -460,8 +460,10 @@ fn escapeshellcmd_is_refused_outright() {
 #[test]
 fn htmlspecialchars_needs_the_substitute_flag() {
     // `ENT_SUBSTITUTE` is 8; the 8.1+ default `ENT_QUOTES|ENT_SUBSTITUTE|ENT_HTML401`
-    // is 11, so an ABSENT flags arg carries the bit too. A *named* constant declines
-    // like any unseen flags arg (no `ArgValue` form); `$n` resolves as bound (issue #41).
+    // is 11, so an ABSENT flags arg carries the bit too. Spelling the constant by
+    // NAME used to decline for want of a value (issue #168) and now reads 8 like the
+    // literal beside it (ADR-0094 §2) — one argument, two spellings, one answer.
+    // `$n` is a bound variable with no proven value and still declines (issue #41).
     for f in ["htmlspecialchars", "htmlentities"] {
         assert_eq!(
             dump("non-empty-string", &format!("{f}($v, 8)")),
@@ -475,7 +477,7 @@ fn htmlspecialchars_needs_the_substitute_flag() {
         );
         assert_eq!(
             dump("non-empty-string", &format!("{f}($v, ENT_SUBSTITUTE)")),
-            "dumped type: string",
+            "dumped type: non-empty-string (asserted)",
             "{f} under a named constant"
         );
         assert_eq!(

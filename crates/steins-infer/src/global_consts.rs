@@ -143,6 +143,16 @@ pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)>
         if let Some(answer) = same_file_fact(cx, &candidate) {
             return answer;
         }
+        // A project constant declared in ANOTHER file stops the walk (ADR-0094 §4,
+        // which defers cross-file constants to their own slice). Declining here is
+        // not caution, it is the difference between silence and a wrong answer:
+        // `namespace App; PREG_UNMATCHED_AS_NULL` with `App\PREG_UNMATCHED_AS_NULL`
+        // declared next door resolves to the PROJECT's constant, and falling
+        // through to the global fallback would report the engine's 512 for a name
+        // PHP reads as the project's own value.
+        if cx.index.declares_constant(&candidate) {
+            return None;
+        }
         if let Some(answer) = platform_fact(cx, &candidate) {
             return Some(answer);
         }

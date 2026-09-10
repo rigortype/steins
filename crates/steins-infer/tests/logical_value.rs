@@ -306,6 +306,13 @@ fn the_spaceship_is_never_decided_by_subtraction() {
     // ADR-0028 §3's engine-int-width trap, pinned from the outside: operands
     // whose difference overflows a 64-bit int must still answer, and must answer
     // the pole rather than a wrapped number.
-    assert_eq!(dumped("PHP_INT_MIN <=> PHP_INT_MAX"), "int<-1, 1>");
+    //
+    // The constant spelling used to answer the FLOOR here, for a reason that has
+    // nothing to do with overflow: `PHP_INT_MIN` carried no value at all (issue
+    // #168), so there was no pole to compute. ADR-0094 §3.1 gives it the 64-bit
+    // literal, so the two rows below are now the same measurement written twice —
+    // which is what makes the second one a check on the first rather than a
+    // separate case.
+    assert_eq!(dumped("PHP_INT_MIN <=> PHP_INT_MAX"), "-1");
     assert_eq!(dumped("-9223372036854775807 <=> 9223372036854775807"), "-1");
 }

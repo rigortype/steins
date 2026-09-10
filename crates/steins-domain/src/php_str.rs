@@ -113,9 +113,17 @@ impl PhpStr {
     /// Non-UTF-8 values are always double-quoted with `\xNN` escapes — the only PHP spelling
     /// that can carry those bytes (vs. an unactionable lossy `'�'` where the source says
     /// `"\xC0"`).
+    ///
+    /// **A control byte takes the same double-quoted road**, even in a perfectly
+    /// valid UTF-8 string. A single-quoted PHP literal carries a raw newline
+    /// happily, but a diagnostic MESSAGE cannot: the surface is one line per
+    /// finding, and `PHP_EOL` — whose ADR-0094 §3 default is the union
+    /// `"\n"|"\r\n"` — is the first value common enough to make that visible.
     #[must_use]
     pub fn render_with(&self, quote: char) -> String {
-        if let Some(s) = self.as_str() {
+        if let Some(s) = self.as_str()
+            && !s.bytes().any(|b| b < 0x20 || b == 0x7F)
+        {
             return format!("{quote}{s}{quote}");
         }
         let mut out = String::from("\"");
@@ -123,6 +131,10 @@ impl PhpStr {
             match b {
                 b'"' => out.push_str("\\\""),
                 b'\\' => out.push_str("\\\\"),
+                // PHP's own double-quoted escapes for the three that have one.
+                b'\n' => out.push_str("\\n"),
+                b'\r' => out.push_str("\\r"),
+                b'\t' => out.push_str("\\t"),
                 0x20..=0x7E => out.push(b as char),
                 _ => out.push_str(&format!("\\x{b:02X}")),
             }
