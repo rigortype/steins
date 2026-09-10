@@ -707,7 +707,7 @@ fn collect_cond_opaque_reads(cx: &Cx, cond: &CondExpr, ce: &CondEnv, out: &mut V
                 }
             }
         }
-        CondExpr::Call { call, reads } => collect_call_opaque_reads(cx, call, reads, out),
+        CondExpr::Call { call, reads } => collect_call_opaque_reads(cx, call, reads, ce.store, out),
         // **Operand position** (issue #158). A call does not become harmless by
         // sitting inside a comparison: `preg_match($re, $s, $m) === 1` writes `$m`
         // exactly as the bare guard does. The rule: an operand's writes are judged
@@ -758,14 +758,19 @@ fn collect_operand_opaque_reads(
         // The operand *is* a resolvable call: it gets every exemption a guard
         // call gets, including the by-value predicate families and the
         // method-receiver survival.
-        Some(call) => collect_call_opaque_reads(cx, call, invalidates, &mut floor),
+        Some(call) => collect_call_opaque_reads(cx, call, invalidates, ce.store, &mut floor),
         // A write the lowering could not name a callee for — a dynamic call, a
         // call nested inside arithmetic, an assignment or an increment
         // (`($x = f()) === 1`, `$i++ === 5`). No call-shaped exemption applies to
         // something this walk cannot identify, so the whole set is the floor.
         None => floor = invalidates.clone(),
     }
-    let survivors = by_value_survivors(cx, ce.poisoned, sites, ce.env, ce.store);
+    // An object handle kept through a by-value call site cannot take its sweep
+    // here — the branch env is not in hand — so it does not survive the guard.
+    let (mut survivors, object_kept) = by_value_survivors(cx, ce.poisoned, sites, ce.env, ce.store);
+    for v in object_kept {
+        survivors.remove(v);
+    }
     for r in floor {
         if !survivors.contains(r.as_str()) && !out.contains(&r) {
             out.push(r);
@@ -799,7 +804,13 @@ fn collect_operand_opaque_reads(
 /// tested. A base mentioned by any OTHER call in the same condition is still
 /// forgotten — that mention is what might mutate it, collected by that call's
 /// own visit.
-fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &mut Vec<String>) {
+fn collect_call_opaque_reads(
+    cx: &Cx,
+    call: &CallExpr,
+    reads: &[String],
+    store: &Store,
+    out: &mut Vec<String>,
+) {
     if array_guard_predicate(cx, call).is_some()
         || array_all_any_predicate(cx, call).is_some()
         || type_predicate(cx, call).is_some()
@@ -812,7 +823,7 @@ fn collect_call_opaque_reads(cx: &Cx, call: &CallExpr, reads: &[String], out: &m
         // `pure_question_builtin` makes name by name, made from the arginfo
         // table instead of from a list. `by_value_guard_builtin` owns the
         // conditions; this is the one place the guard floor consults it.
-        || by_value_guard_builtin(cx, call).is_some()
+        || by_value_guard_builtin(cx, call, store).is_some()
     {
         return;
     }

@@ -447,13 +447,19 @@ pub(crate) fn pure_question_builtin(cx: &Cx, call: &CallExpr) -> Option<&'static
 /// keeping `$s` is not `strstr($s, 'a') !== false` narrowing it to
 /// `non-falsy-string` — that is the type-specifier half (#575/#266), and the
 /// two halves are measured separately on purpose.
-pub(crate) fn by_value_guard_builtin<'a>(cx: &Cx, call: &'a CallExpr) -> Option<&'a str> {
+pub(crate) fn by_value_guard_builtin<'a>(
+    cx: &Cx,
+    call: &'a CallExpr,
+    store: &Store,
+) -> Option<&'a str> {
     let callee = global_function_callee(cx, call)?;
-    if !call.positional_only || !call.args.iter().all(|a| argument_writes_nothing(&a.value)) {
+    if !call.positional_only || !call.args.iter().all(|a| argument_writes_nothing(&a.value, store))
+    {
         return None;
     }
+    let mined = crate::walk::mined_arm_admitted();
     (0..call.args.len())
-        .all(|p| steins_catalog::by_value_arg(callee, p) == Some(true))
+        .all(|p| steins_catalog::by_value_arg_frame(callee, p, mined) == Some(true))
         .then_some(callee)
 }
 
@@ -464,7 +470,12 @@ pub(crate) fn by_value_guard_builtin<'a>(cx: &Cx, call: &'a CallExpr) -> Option<
 /// and the unrepresentable `Other` are all refused, not because each of them
 /// writes but because none of them is *read off the source* here: the callee
 /// this exemption certifies is the outer one, and only the outer one.
-fn argument_writes_nothing(v: &ArgValue) -> bool {
+///
+/// An offset read is admitted only over a base that is not an object: `$a['k']`
+/// on an `ArrayAccess` receiver runs `offsetGet`, a userland body that may write
+/// anything (issue #637's adversarial review), so the base's binding must not be
+/// an object handle, a guard-derived class, or a declared object arm.
+fn argument_writes_nothing(v: &ArgValue, store: &Store) -> bool {
     match v {
         ArgValue::Int(_)
         | ArgValue::Float(_)
@@ -476,11 +487,33 @@ fn argument_writes_nothing(v: &ArgValue) -> bool {
         | ArgValue::EnumCase(..)
         | ArgValue::GlobalConst(_) => true,
         ArgValue::OffsetRead { base, key } => {
-            argument_writes_nothing(base) && argument_writes_nothing(key)
+            let base_is_plain = match base.as_ref() {
+                ArgValue::Var(b) => !object_bound(store, b),
+                other => argument_writes_nothing(other, store),
+            };
+            base_is_plain && argument_writes_nothing(key, store)
         }
-        ArgValue::Array(items) => items.iter().all(|(_, e)| argument_writes_nothing(e)),
+        ArgValue::Array(items) => items.iter().all(|(_, e)| argument_writes_nothing(e, store)),
         _ => false,
     }
+}
+
+/// Whether `var` may denote an object in any lane the walk keeps: a heap handle,
+/// a guard-derived class bound, or a declared arm that names a class.
+fn object_bound(store: &Store, var: &str) -> bool {
+    store.refs.contains_key(var)
+        || store.members.contains_key(var)
+        || store.contract.get(var).is_some_and(|arms| {
+            arms.iter().any(|a| {
+                matches!(
+                    a.ty,
+                    ContractTy::Class(_)
+                        | ContractTy::EnumCase { .. }
+                        | ContractTy::ObjectAny
+                        | ContractTy::Inter(_)
+                )
+            })
+        })
 }
 
 /// One type-vocabulary guard, resolved to a variable and a branch polarity.

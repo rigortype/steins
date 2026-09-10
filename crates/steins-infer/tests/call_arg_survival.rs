@@ -648,3 +648,64 @@ fn the_site_list_is_complete_or_absent_per_name() {
                  function f(): void { $s = 'abc'; trim($s); \\PHPStan\\dumpType($s); }\n";
     assert_eq!(one_type(split), "dumped type: 'abc'");
 }
+
+// The two gates the adversarial review of #637 added: an `ArrayAccess` offset
+// read runs userland, and the top-level frame's locals are globals.
+
+/// `$a['k']` on an `ArrayAccess` receiver is `offsetGet`, a userland body that may
+/// write anything — here the receiver's own property. Certifying `strstr` by value
+/// must not keep `$a->p` across it: in guard position the shape gate refuses the
+/// offset read over an object-bound base, in statement position the kept handle
+/// takes the ADR-0036 sweep. Either way no `type.argument-mismatch` is
+/// manufactured on `want($a->p)`, and the property reads `unknown`.
+#[test]
+fn an_offset_read_on_an_array_access_receiver_is_not_a_by_value_shape() {
+    let src = "<?php
+declare(strict_types=1);
+final class AA implements ArrayAccess {
+    public int|string $p = 1;
+    public function offsetGet(mixed $o): mixed { $this->p = 'w'; return 'v'; }
+    public function offsetExists(mixed $o): bool { return true; }
+    public function offsetSet(mixed $o, mixed $v): void {}
+    public function offsetUnset(mixed $o): void {}
+}
+function want(string $s): void {}
+function guard(): void { $a = new AA(); $a->p = 1; if (strstr($a['k'], 'x')) { \\PHPStan\\dumpType($a->p); want($a->p); } }
+function stmt(): void { $a = new AA(); $a->p = 1; strstr($a['k'], 'x'); \\PHPStan\\dumpType($a->p); want($a->p); }
+";
+    let tree = SourceTree::parse(src);
+    let ds = check(&tree, &[], "t.php");
+    assert!(
+        !ds.iter().any(|d| d.id == "type.argument-mismatch"),
+        "offsetGet rewrote the property: {ds:?}"
+    );
+    assert_eq!(types(src), vec!["dumped type: unknown".to_owned(), "dumped type: unknown".to_owned()]);
+}
+
+/// The top-level frame is the one whose locals are globals, so a builtin that runs
+/// userland through a non-`callable` argument — a generator body under
+/// `iterator_to_array` — can rebind them by `global`. The mined certification is
+/// refused there and admitted in a function body, where a callback's `global $g`
+/// reaches a different `$g`: the function keeps the handle (swept), the script
+/// does not.
+#[test]
+fn the_mined_certification_is_refused_in_the_top_level_frame() {
+    let generator = "function gen(): Generator { global $g; $g = 'rebound'; yield 1; }\n";
+    let script = format!("<?php\n{generator}$g = gen();\niterator_to_array($g);\n\\PHPStan\\dumpType($g);\n");
+    assert_eq!(one_type(&script), "dumped type: unknown", "a script local is a global the body rebinds");
+    let func = format!(
+        "<?php\n{generator}function f(): void {{ $g = gen(); iterator_to_array($g); \\PHPStan\\dumpType($g); }}\n"
+    );
+    assert_ne!(one_type(&func), "dumped type: unknown", "a function local is out of the body's reach");
+}
+
+/// Named arguments and a spread are not positional, so the guard exemption never
+/// looks at the table for them: the whole read set takes the floor.
+#[test]
+fn the_guard_exemption_refuses_named_arguments_and_a_spread() {
+    let named = "<?php\nfunction f(string $s, int $c): void {\n\
+                 if (str_replace(subject: $s, search: 'a', replace: 'b', count: $c)) { \\PHPStan\\dumpType($c); \\PHPStan\\dumpType($s); } }\n";
+    assert_eq!(types(named), vec!["dumped type: unknown".to_owned(), "dumped type: unknown".to_owned()]);
+    let spread = "<?php\nfunction f(array $a): void { if (strstr(...$a)) { \\PHPStan\\dumpType($a); } }\n";
+    assert_eq!(one_type(spread), "dumped type: unknown");
+}

@@ -122,8 +122,12 @@ about arguments can exclude it.
 
 The veto is the callee's own `Scope::poisoned` flag — the ADR-0001 give-up
 list, reused rather than restated. A project callee whose body carries any of
-those constructs refuses. Builtins need no such gate: PHP's `global` is a
-userland construct.
+those constructs refuses. A builtin needs the gate only where it hands an
+argument to userland — a `callable` (a carrier, refused outright) or a
+non-`callable` type whose methods it invokes (a generator body under
+`iterator_to_array`, `JsonSerializable` under `json_encode`) — and only in
+the frame whose locals are globals, the top-level scope; see the 2026-09-11
+amendment.
 
 The caller's side of condition 4 is the same flag on the enclosing scope, and
 it is why this design needs no reference-liveness analysis of its own: `$x = &$y`,
@@ -474,3 +478,23 @@ exactly this surface; the triage is recorded in `xtask/src/gate.rs`.
 
 **Status: PENDING ratification.** Designed autonomously under the owner's
 standing delegation.
+
+### Two gates the adversarial review added (2026-09-11)
+
+- **An offset read is not a by-value shape over an object.** `$a['k']` on an
+  `ArrayAccess` receiver is `offsetGet`, a userland body that may write
+  anything, the receiver's own state included. In guard position the shape
+  gate refuses an offset read whose base is object-bound (heap handle,
+  guard-derived class, or a declared class arm); in statement position an
+  object handle kept through a by-value call site keeps the handle and takes
+  the ADR-0036 sweep, since an offset root is not an argument and the escape
+  rule never swept it.
+- **The mined arm is refused in the top-level frame.** §2.3's "PHP's `global`
+  is a userland construct" was true of the builtin and false of what the
+  builtin runs: `iterator_to_array(Traversable)` executes a generator body,
+  `json_encode`/`serialize`/`var_export` run `jsonSerialize`/`__serialize`/
+  `__set_state`, and a `global $g` inside any of them rebinds a top-level
+  local. Inside a function it rebinds a different `$g`, so the frame is the
+  gate (`by_value_arg_frame`), not the callee. The folding allowlist and
+  `CERTIFIED_EXTRA` are hand-checked never to invoke userland and stay
+  certified everywhere.

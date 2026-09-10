@@ -901,6 +901,19 @@ const SORT_FAMILY: &[&str] = &[
 /// [`param_facts`]: crate::param_facts
 #[must_use]
 pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
+    by_value_arg_frame(name, position, true)
+}
+
+/// [`by_value_arg`] with the **mined** arm switchable (issue #637's adversarial
+/// review). The arginfo table certifies a builtin's parameters as by value, which
+/// answers ADR-0070 condition 2 — but a builtin that hands an argument to userland
+/// through a non-`callable` type (`iterator_to_array(Traversable)` running a
+/// generator body, `json_encode(JsonSerializable)`, `serialize`, `var_export`)
+/// reopens §2.3's `global` route into the ONE frame whose locals are globals: the
+/// top-level scope. There the walk passes `mined = false` and only the folding
+/// allowlist and `CERTIFIED_EXTRA` — hand-checked never to invoke userland —
+/// certify. Inside a function a callback's `global $g` reaches a different `$g`.
+pub fn by_value_arg_frame(name: &str, position: usize, mined: bool) -> Option<bool> {
     /// Certified all-by-value names outside the folding allowlist, each
     /// transcribed from the `PINNED_PHP` stub. See the membership rules above.
     const CERTIFIED_EXTRA: &[&str] = &[
@@ -1032,7 +1045,7 @@ pub fn by_value_arg(name: &str, position: usize) -> Option<bool> {
         None => {
             let certified = foldable(name)
                 || CERTIFIED_EXTRA.iter().any(|&f| name.eq_ignore_ascii_case(f))
-                || mined_all_by_value(name);
+                || (mined && mined_all_by_value(name));
             certified.then_some(true)
         }
     }
