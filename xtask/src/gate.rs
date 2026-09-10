@@ -1111,7 +1111,21 @@ fn effect_expected(name: &str) -> usize {
 ///    and thus to [`PHPDOC_EXPECTED`].
 const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // 1 — `PluginManager.php:525`, class 1.
-    ("composer/composer", 1),
+    // 1 → 3, 2026-09-11 with issue #619 (the declaration-only dispatch path,
+    // ADR-0049 A16): two `type.maybe-argument-mismatch` rows at
+    // `Downloader/DownloadManager.php:159` and `:161`. Both are TRUE at the
+    // possibly grade and both are the amendment's own yield — the receiver is a
+    // `PackageInterface $package` parameter, so dispatch refused it and the return
+    // envelope was unreadable until now. `PackageInterface::getDistType()` and
+    // `::getSourceType()` are declared `: ?string`; `DownloadManager::
+    // getDownloader(string $type)` is not nullable and the file is
+    // `strict_types=1`, so the null arm is a TypeError. The premise is a NATIVE
+    // return hint on an interface declaration, all-`Verified` under PHP's
+    // class-declaration-time covariance rule (A16), which is what routes it here
+    // rather than to PHPDOC_EXPECTED. Whether the arm is inhabited on a live path
+    // — composer sets `distType` whenever `installationSource` is `'dist'` — is
+    // exactly what the possibly grade does not claim.
+    ("composer/composer", 3),
     // 1 — `Application.php:409`, class 4 (`exitWithErrorMessage`).
     // 1 → 2, 2026-09-01 with issue #589 (the cross-lane guard join; see
     // PHPDOC_EXPECTED's composer entry for the wave): a second class-4 row in the
@@ -1159,7 +1173,17 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     ("sebastianbergmann/phpunit", 3),
     // 10 — six class 1/2/3 in `Application.php`, `CompletionInput.php` and
     // `SymfonyStyle.php`; four class 5 in `Tests/`.
-    ("symfony/console", 10),
+    // 10 → 11, 2026-09-11 with issue #619: one `type.maybe-argument-mismatch` at
+    // `SingleCommandApplication.php:61`, a `$this->` receiver in an open class —
+    // the commonest receiver in any corpus, and the one `resolve_guarded` refused
+    // on the declaring class's own non-finality. `Command::getName(): ?string`
+    // goes straight into `Application::setDefaultCommand(string $commandName)`.
+    // TRUE at the possibly grade: the line above assigns a name through
+    // `setName($_SERVER['argv'][0])`, so the null arm is closed at runtime by a
+    // property write this analyzer does not track through `$this` — and the
+    // author's own `$this->getName() ?: 'UNKNOWN'` five lines up says the arm was
+    // considered real. Coercive mode, so PHP 8.1+ deprecates rather than fatals.
+    ("symfony/console", 11),
     // 6 — every row class 4 (`$this->fail()` in `ProcessTest.php`).
     // Unmoved by issue #599 leg 1 (2026-09-01), and twice over. Every row is
     // `variable.maybe-undefined` on the `$e` of a `try { …; $this->fail(…); }
