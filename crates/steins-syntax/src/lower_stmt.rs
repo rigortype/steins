@@ -674,8 +674,12 @@ fn lower_if(if_stmt: &mago_syntax::cst::If<'_>) -> Stmt {
 fn lower_while(s: &Statement<'_>, wh: &While<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
     let cond = lower_cond(wh.condition);
+    let break_free = body_is_break_free(wh.body.statements());
     let body = lower_trace(wh.body.statements());
-    Stmt::lowered(StmtKind::While { cond, body, writes, reads, poisons, may_return }, Vec::new())
+    Stmt::lowered(
+        StmtKind::While { cond, body, break_free, writes, reads, poisons, may_return },
+        Vec::new(),
+    )
 }
 
 /// Lower a `for` to [`StmtKind::For`] (issue #650). The construct's own sets come
@@ -721,7 +725,9 @@ fn lower_for(s: &Statement<'_>, f: &mago_syntax::cst::For<'_>) -> Stmt {
     }
     let carried: Vec<String> =
         writes.iter().filter(|w| !loop_writes.contains(w)).cloned().collect();
-    let kind = StmtKind::For { init, cond, body, carried, writes, reads, poisons, may_return };
+    let break_free = body_is_break_free(f.body.statements());
+    let kind =
+        StmtKind::For { init, cond, body, carried, break_free, writes, reads, poisons, may_return };
     Stmt::lowered(kind, Vec::new())
 }
 
@@ -754,15 +760,86 @@ fn lower_foreach(s: &Statement<'_>, fe: &mago_syntax::cst::Foreach<'_>) -> Stmt 
     Stmt::lowered(kind, Vec::new())
 }
 
-/// Lower a `do`-`while` to [`StmtKind::DoWhile`] (issue #650). The condition is
-/// deliberately **not** carried: it is evaluated after the body, so no reader of
-/// this variant may narrow the body's entry by it, and a field nothing may read is
-/// a field that invites being read. See the variant docs for the two ways taking
-/// the `while` rule here would be unsound.
+/// Lower a `do`-`while` to [`StmtKind::DoWhile`] (issue #650, amended by #651). The
+/// condition is carried for the **exit** alone — it is evaluated immediately before
+/// the fall-through, and after the body, so a reader that narrows the body's entry
+/// by it is wrong in the two ways the variant docs spell out. Withholding the field
+/// was the previous slice's way of saying so; it cost the exit its condition, which
+/// this form owes on exactly a `while`'s terms.
 fn lower_do_while(s: &Statement<'_>, d: &mago_syntax::cst::DoWhile<'_>) -> Stmt {
     let (writes, reads, poisons, may_return) = opaque_sets(&Node::Statement(s));
+    let cond = lower_cond(d.condition);
     let body = lower_trace(std::slice::from_ref(d.statement));
-    Stmt::lowered(StmtKind::DoWhile { body, writes, reads, poisons, may_return }, Vec::new())
+    let break_free = body_is_break_free(std::slice::from_ref(d.statement));
+    Stmt::lowered(
+        StmtKind::DoWhile { cond, body, break_free, writes, reads, poisons, may_return },
+        Vec::new(),
+    )
+}
+
+/// Whether a loop body can be left by anything but its own header going false
+/// (issue #651) — the gate on carrying the negated condition to the fall-through.
+///
+/// A loop is left in exactly two ways: the condition went false, or a jump left the
+/// body. When no jump can, the condition is false at the statement after the loop,
+/// and the negation holds there for the same reason an `if`'s else-branch's does.
+/// So this answers `true` only when nothing in the body targets this loop or
+/// anything outside it:
+///
+/// * `break N` (`N` defaulting to 1) leaves `N` enclosing breakable structures.
+///   Counting the loops and `switch`es between the jump and the body's top level as
+///   `depth`, it targets THIS loop when `N > depth` — so a `break;` inside a nested
+///   `switch` is the switch's and disqualifies nothing, while a `break 2;` in the
+///   same place is this loop's and disqualifies it.
+/// * `continue N` targets this loop at `N == depth + 1`, which is harmless: it
+///   re-tests the header. A larger `N` targets a loop OUTSIDE this one, which leaves
+///   this body without evaluating this header at all, and disqualifies.
+/// * any `goto` disqualifies — its label is unbounded, so it may leave the loop.
+/// * a non-literal level (`break $n`, which PHP has rejected since 5.4) is read as
+///   the worst case and disqualifies.
+///
+/// `return`, `throw` and `exit` are not jumps out of the loop in the sense that
+/// matters: they do not reach the fall-through at all, so what holds there is not
+/// their business. Nested function-likes are separate scopes and are not descended.
+fn body_is_break_free(body: &[Statement<'_>]) -> bool {
+    !body.iter().any(|s| node_escapes_loop(&Node::Statement(s), 0))
+}
+
+/// One node of [`body_is_break_free`]'s scan. `depth` is the number of breakable
+/// structures (loops and `switch`es) between this node and the body's top level.
+fn node_escapes_loop(node: &Node<'_, '_>, depth: u32) -> bool {
+    match node {
+        Node::Break(b) => jump_level(b.level).is_none_or(|n| n > depth),
+        Node::Continue(c) => jump_level(c.level).is_none_or(|n| n > depth + 1),
+        Node::Goto(_) => true,
+        // A nested breakable structure absorbs one level of every jump beneath it.
+        Node::While(_) | Node::For(_) | Node::Foreach(_) | Node::DoWhile(_) | Node::Switch(_) => {
+            children(node).iter().any(|c| node_escapes_loop(c, depth + 1))
+        }
+        // Separate scopes: their bodies do not run here, and PHP does not let a jump
+        // in one target a structure out here.
+        Node::Function(_)
+        | Node::Closure(_)
+        | Node::ArrowFunction(_)
+        | Node::AnonymousClass(_)
+        | Node::Class(_)
+        | Node::Interface(_)
+        | Node::Trait(_)
+        | Node::Enum(_) => false,
+        other => children(other).iter().any(|c| node_escapes_loop(c, depth)),
+    }
+}
+
+/// A `break`/`continue` level as written: `None` for one this lowering cannot read
+/// as a literal count, which every caller must treat as the worst case.
+fn jump_level(level: Option<&Expression<'_>>) -> Option<u32> {
+    match level {
+        None => Some(1),
+        Some(e) => match lower_arg_value(e) {
+            ArgValue::Int(n) => u32::try_from(n).ok(),
+            _ => None,
+        },
+    }
 }
 
 /// Lower a borrowed statement list to a sub-trace (a branch body). Shares the
