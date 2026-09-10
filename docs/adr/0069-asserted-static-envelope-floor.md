@@ -523,3 +523,142 @@ browser and a spawn failure answer `None` and judge no builtin argument —
 which is the sound subset (ADR-0004), and which keeps `steins check` and
 `steins check --no-php` differing in *reach* and never in *verdict*.
 ADR-0069's scope is unchanged: returns, by name, Asserted.
+
+## Amendment (2026-09-11): the floor stops being function-keyed (issue #673)
+
+**Status: PENDING ratification** (post-hoc-ratification mode, ADR-0077
+precedent). §5's last standing deferral was the one it stated in a single
+clause — "**the 6,658 method rows**, untouched — the floor is still
+function-keyed" — and this amendment closes it. Nothing about the grade, the
+countersign, the version gate or the firewall changes; what changes is the key.
+
+**Why it was deferred, and what lifted it.** The reason was never the key
+grammar. It was that so many `Class::method` rows return objects
+(`DOMElement|false`, `DateTime`, `SplFileInfo`), and the object bucket was
+deferred because an object arm had nowhere to go — ADR-0071 §2.3, restated in
+issue #618's inventory. ADR-0093 §3.1 ruled on that directly: an object arm may
+enter the contract lane when it is **sourced from a declaration**, at
+`Asserted`, and it names "a builtin's declared return (the functionMap / stub
+lineage ADR-0069 §4 names)" as the first such source. A mined `Class::method`
+row is exactly that. So the same carrier that answers `date_create()` answers
+`$dom->getElementById()`, and nothing in the value domain moved.
+
+**One pipeline, two populations.** `mine_function_map.php` stops counting
+method keys and reduces them, with the same alternate folding and the same
+one-return-type-or-excluded rule. The Rust stages differ in exactly three
+places, and each difference is forced:
+
+- The countersign asks `reflect_class(Class)` rather than `reflect(name)`. That
+  reply carries every method the engine resolves on the class, **inherited ones
+  included**, so a row keyed on a subclass is checked against the declaration
+  the runtime would actually reach.
+- The engine also decides `static`. functionMap's key spells an instance method
+  and a static one identically, so reflection is the only witness, and the
+  shipped row carries the bit.
+- The absence bucket splits in two. A class the engine does not have at all is
+  this build's extension set; a class it has *without* the method is drift, in
+  the direction ADR-0014 warns about. Conflating them would hide the second
+  under the first.
+
+**The numbers, at the same pin (`dcde2be6`), cross-checked against PHP 8.5.10:**
+
+| | rows |
+|---|---|
+| `Class::method` keys after the delta ladder | 6,658 |
+| keys whose alternate signatures disagree | 12 |
+| reduced rows | 6,606 |
+| carriable by the arm lane | 4,919 |
+| — dropped: objects / `callable` / `resource` / `void` / keywords | 1,127 |
+| — dropped: `void` / `never` / `mixed` | 218 |
+| — dropped: unparseable | 327 |
+| — dropped: multi-base unions | 15 |
+| rows on 325 classes the pinned engine does not have | 3,593 |
+| rows whose class the engine has *without* the method | 68 |
+| refused by the arm-wise countersign | 225 |
+| **admitted** | **1,033** |
+| — of which static | 84 |
+| — of which richer than a single-base envelope | 346 |
+
+The 225 refusals are the demonstration, and they are the same shape the
+function half caught one vocabulary over: `Collator::getLocale` says `string`
+where PHP 8.5 declares `string|false`, `DirectoryIterator::getMTime` says `int`
+over `int|false`, `DateTime::getTimezone` says `DateTimeZone` over
+`DateTimeZone|false`, `ArrayObject::getIterator` says `ArrayIterator` where the
+engine says `Iterator` — a hierarchy-dependent claim the reflexive floor still
+refuses in both directions. Every one of them is a row that would have made the
+dump surface confidently wrong, caught by machinery at generation time.
+
+**What is excluded, and it is the same list.** `callable`, the intersections
+and `resource` have no extensional denotation `subsumes` could use, so the
+countersign could only answer `Maybe`. Two exclusions are worth naming because
+they take named witnesses out of issue #673's own list:
+
+- `Closure::bind` and `Closure::bindTo` return `Closure`, and
+  `lower_identifier` case-folds `Closure` to a **keyword** lowering to an opaque
+  arm rather than a class one. The row is uncarriable for the same reason
+  `resource` is.
+- `DateInterval::createFromDateString` and the two `DateTime*::modify` rows
+  return `static`, which ADR-0049 A19 defers with its reason: bound to the
+  declared class it is sound as an upper bound but spells the same as `self`,
+  losing the calling receiver's identity that `static` exists to carry.
+- `PDO::connect` has no functionMap row at this pin at all, and
+  `PDOStatement::fetchObject` has one saying `mixed`. The table never invents
+  what the map does not state.
+
+**Properties are not deferred; they have no source.** functionMap's key grammar
+has no spelling for a property, so the vendor and builtin property reads issue
+#673 counts alongside the method rows are a *source* exclusion rather than a
+filter's. Nor could a property row be countersigned as things stand:
+`ReflectedProperty` carries a name, a static bit and a visibility, and no type.
+A property table needs a different source and a widened `reflect_class` reply,
+which is a slice of its own.
+
+**Consumption: one new rung, and the two refusals that keep it honest.** The
+method return ladder gains a third rung below #619's declaration path.
+`resolve_call_target` refuses an unproven receiver (audit G1);
+`resolve_declaration_target` (ADR-0049 A16) answers from the receiver's declared
+chain, but that walk asks `cx.find_class`, and **a builtin class has no
+`ClassDecl`** — so it answers `Unknown` at its very first step, which is both
+why the rung is needed and why a builtin class never reaches `resolve_in_chain`
+as a project class. `builtin_root` resumes the walk where it stopped and returns
+the first name the project does not declare, refusing outright if any project
+class on the way declares the method itself. That refusal is the whole of the
+non-disagreement argument: a project class extending a builtin keeps its own
+declaration on every name it declares, and this table answers the inherited
+names alone.
+
+The receiver is read the way A17 rules — a `SplFileObject $f` parameter, a
+`new DOMDocument()`, a `$this` in a class extending a builtin, a `?PDO` past its
+null guard — so the two halves of #619's carrier serve both tables. Inheritance
+is walked at the call site rather than stored in the rows, breadth-first over
+`builtin_class_supers`: a row on `SplFileInfo::getPath` answers for an
+`SplFileObject` receiver because PHP enforces return covariance at
+class-declaration time, making the declaring class's envelope an upper bound
+under every descendant (A16). That is a membership-direction claim about the
+*result*, and needs no exactness about the receiver.
+
+**Two asymmetries with the function half, stated rather than left to be
+noticed.** First, there is no engine rung *above* this one: ADR-0056's reflected
+envelope is function-keyed, so where the function floor speaks only where the
+engine is silent about a name, the method floor is the only rung that speaks at
+all. It therefore fires with a live sidecar exactly as it does under `--no-php`.
+Second, it feeds the **value-position** reader (`method_return_arms_by_callee`)
+and not the assignment rung, because A16 confined the declaration path to that
+one consumer and this rides the same seam; `$p = $f->getRealPath();` is still
+`unknown`, and moving that boundary is #619's question rather than this one's.
+
+**The grade is pinned, and there is no Verified twin to build.** Every row seeds
+`Asserted` and renders `(asserted)`; the proof layer's all-Verified premise rule
+excludes it from every finding by construction, and an object row is doubly
+excluded because the value domain has no object inhabitant to seed. A `@return`
+docblock does not exist for a builtin, and a native stub's would be the Verified
+source — functionMap is not a stub but a third party's claim about the engine,
+which is precisely what the Asserted lane is for. The asymmetry §2 drew stands
+unmoved.
+
+**The version gate has no end-to-end fixture yet, and the tripwire says so.**
+All three version-sensitive method keys return `static`, so none has an admitted
+row and the two mined method tables are disjoint at this pin — the same state
+§5's last paragraph recorded for the function tables at #79, where the
+disjointness assertion was named as the tripwire and later fired. The assertion
+here is written to fire the same way.

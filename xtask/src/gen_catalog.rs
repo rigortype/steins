@@ -660,11 +660,12 @@ fn render_declared_returns(
          // declaration — this table is one). ADR-0069 §5 / ADR-0071 §2.3 lift for the\n\
          // object rows on that ruling (ADR-0093 is PENDING ratification).\n\
          //\n\
-         // Still deferred, and for the reason §5 gave: the skipped methods (issue #673\n\
-         // is the class-method table), and what is LEFT in the bucket the count names —\n\
-         // `callable`, the intersections, `resource` and `void`. Those have no\n\
-         // extensional denotation the countersign could use, so it could only answer\n\
-         // `Maybe`, which ADR-0069 §3 refuses.\n\
+         // The `Class::method` rows this count calls skipped are no longer deferred\n\
+         // either: they are `declared_method_returns_generated.rs`, mined by the same\n\
+         // pipeline at the same pin (issue #673). What is LEFT in the bucket the count\n\
+         // names is `callable`, the intersections, `resource` and `void` — those have\n\
+         // no extensional denotation the countersign could use, so it could only\n\
+         // answer `Maybe`, which ADR-0069 §3 refuses.\n\
          //\n\
          // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2) — it\n\
          // reaches the dump surface and contracts-tier reasoning, but the proof\n\
