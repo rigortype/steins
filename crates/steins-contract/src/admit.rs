@@ -1516,3 +1516,63 @@ mod shape_fact_tests {
         assert_eq!(judge("array{n: string}", &positive), Certainty::No);
     }
 }
+
+/// ADR-0093 §2 — a union arm's bool literal decides two rows the whole base can
+/// only shrug at: the literal contract, and the falsy cut.
+#[cfg(test)]
+mod bool_literal_arm_tests {
+    use super::*;
+    use crate::lower_str;
+    use steins_domain::{ArmKnown, IntRange};
+
+    fn ty(src: &str) -> ContractTy {
+        lower_str(src).unwrap_or_else(|| panic!("`{src}` must lower"))
+    }
+
+    /// `string|<bool arm>` — the shape a guarded `T|false` reaches.
+    fn string_or(known: ArmKnown) -> Fact {
+        Fact::union(vec![(Base::String, ArmKnown::Whole), (Base::Bool, known)], false)
+            .expect("two bases make a union")
+    }
+
+    /// `int<1, max>|<bool arm>` — no falsy member but the bool arm's own.
+    fn positive_or(known: ArmKnown) -> Fact {
+        Fact::union(
+            vec![
+                (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::POSITIVE))),
+                (Base::Bool, known),
+            ],
+            false,
+        )
+        .expect("two bases make a union")
+    }
+
+    #[test]
+    fn a_literal_arm_refutes_the_other_literal() {
+        // Every arm of `string|true` is outside `false`, so the judgment is a
+        // definite `No` where the whole `bool` base could only answer `Maybe`.
+        assert_eq!(admits_fact(&ty("false"), &string_or(ArmKnown::Bool(true))), Certainty::No);
+        assert_eq!(admits_fact(&ty("false"), &string_or(ArmKnown::Whole)), Certainty::Maybe);
+    }
+
+    #[test]
+    fn a_literal_arm_answers_the_falsy_cut() {
+        // `true` IS the base's one truthy inhabitant, so `int<1, max>|true` is
+        // provably non-falsy; with both inhabitants in play, `false` is not.
+        let falsy_cut = ContractTy::MixedMinus(MixedCut::Falsy);
+        assert_eq!(admits_fact(&falsy_cut, &positive_or(ArmKnown::Bool(true))), Certainty::Yes);
+        assert_eq!(admits_fact(&falsy_cut, &positive_or(ArmKnown::Whole)), Certainty::Maybe);
+        // The other inhabitant is decided the other way: `int<0, 0>|false` has no
+        // non-falsy member at all, which needs the bool arm to be `false` and not
+        // merely `bool`.
+        let zero_or_false = Fact::union(
+            vec![
+                (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::new(0, 0).expect("a point")))),
+                (Base::Bool, ArmKnown::Bool(false)),
+            ],
+            false,
+        )
+        .expect("two bases make a union");
+        assert_eq!(admits_fact(&falsy_cut, &zero_or_false), Certainty::No);
+    }
+}

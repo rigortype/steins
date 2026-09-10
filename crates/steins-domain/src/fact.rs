@@ -1043,6 +1043,97 @@ mod tests {
         assert!(merged.admits(&Val::Int(5)) && merged.admits(&Val::Int(-5)));
     }
 
+    // -- the bool base's literal member set (ADR-0093 §2) --
+
+    /// `string|true` — the shape issue #600 could not spell.
+    fn string_or(known: ArmKnown) -> Fact {
+        Fact::union(vec![(Base::String, ArmKnown::Whole), (Base::Bool, known)], false)
+            .expect("two bases make a union")
+    }
+
+    #[test]
+    fn a_bool_arms_member_set_is_membership() {
+        let t = string_or(ArmKnown::Bool(true));
+        assert!(t.admits(&Val::Bool(true)) && t.admits(&s("x")));
+        assert!(!t.admits(&Val::Bool(false)), "the literal is the whole arm: {t:?}");
+        let f = string_or(ArmKnown::Bool(false));
+        assert!(f.admits(&Val::Bool(false)) && !f.admits(&Val::Bool(true)));
+    }
+
+    #[test]
+    fn the_arm_join_is_set_union_over_two_points() {
+        // `{true} ⊔ {false}` is the whole base, and the full set normalizes to it.
+        let both = Fact::union(
+            vec![
+                (Base::String, ArmKnown::Whole),
+                (Base::Bool, ArmKnown::Bool(true)),
+                (Base::Bool, ArmKnown::Bool(false)),
+            ],
+            false,
+        );
+        assert_eq!(both, Some(string_or(ArmKnown::Whole)));
+        // The same inhabitant twice is itself.
+        assert_eq!(
+            string_or(ArmKnown::Bool(true)).join(&string_or(ArmKnown::Bool(true))),
+            Some(string_or(ArmKnown::Bool(true)))
+        );
+        // And a whole base absorbs the literal, whichever side it is on.
+        assert_eq!(
+            string_or(ArmKnown::Bool(false)).join(&string_or(ArmKnown::Whole)),
+            Some(string_or(ArmKnown::Whole))
+        );
+    }
+
+    #[test]
+    fn a_finite_bool_joins_a_base_as_its_own_arm() {
+        // `false ⊔ string` is `string|false`, which is what makes a builtin's
+        // declared `string|false` lower to a fact carrying the literal.
+        let j = Fact::singleton(Val::Bool(false))
+            .join(&Fact::General { base: Base::String, nullable: false })
+            .expect("a bool and a string make a union");
+        assert_eq!(j, string_or(ArmKnown::Bool(false)));
+        assert!(!j.admits(&Val::Bool(true)), "the literal survived the join: {j:?}");
+    }
+
+    #[test]
+    fn subtracting_a_literal_is_a_set_difference() {
+        // One base: the other inhabitant is the whole of what is left.
+        assert_eq!(
+            Fact::General { base: Base::Bool, nullable: false }.exclude_bool(false),
+            Some(Fact::Singleton(Val::Bool(true)))
+        );
+        // A union arm narrows in place…
+        assert_eq!(
+            string_or(ArmKnown::Whole).exclude_bool(false),
+            Some(string_or(ArmKnown::Bool(true)))
+        );
+        // …and an arm that IS the subtracted inhabitant disappears, rather than
+        // widening back to its base.
+        assert_eq!(
+            string_or(ArmKnown::Bool(false)).exclude_bool(false),
+            Some(Fact::General { base: Base::String, nullable: false })
+        );
+        // Nothing left is the emptied lane, not a fact.
+        assert_eq!(Fact::Singleton(Val::Bool(true)).exclude_bool(true), None);
+        // A fact with no bool in it is untouched.
+        let ints = Fact::refined(Base::Int, Refinement::Int(IntRange::POSITIVE), false);
+        assert_eq!(ints.exclude_bool(false), Some(ints.clone()));
+    }
+
+    #[test]
+    fn a_literal_arm_decides_truthiness_and_keys_exactly() {
+        // `int<1,max>|true` has no falsy member at all, where the same union with
+        // the whole bool base answers `Maybe` because of `false`.
+        let pos = (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::POSITIVE)));
+        let with = |k: ArmKnown| Fact::union(vec![pos, (Base::Bool, k)], false).expect("a union");
+        assert_eq!(with(ArmKnown::Bool(true)).truthy(), Certainty::Yes);
+        assert_eq!(with(ArmKnown::Whole).truthy(), Certainty::Maybe);
+        // The array-key grid's bool row at one inhabitant: `true` is the key `1`,
+        // so the union's key is the int side alone.
+        let key = with(ArmKnown::Bool(true)).array_key_cast().expect("both arms key");
+        assert!(key.admits(&Val::Int(1)) && !key.admits(&Val::Bool(true)));
+    }
+
     #[test]
     fn a_mixed_overflow_summarizes_to_a_union() {
         let mut vals: Vec<Val> = (0..6).map(Val::Int).collect();
