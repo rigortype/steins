@@ -140,3 +140,54 @@ a statement's, which moves every `Opaque`'s fall-through too. `for`,
 so a stored trace from the amendment above replays into this walk unchanged;
 what separates the two readings of it is the analyzer version, which the
 generation fingerprint already covers (ADR-0092).
+
+## Amendment (2026-09-10): the other three loop forms, and the one `do`/`while` refuses — PENDING ratification
+
+Issue #650. The two amendments above are stated for `while` and argued for
+loops. `for`, `foreach` and `do`/`while` now lower to structured variants of
+their own — `StmtKind::For`, `StmtKind::Foreach`, `StmtKind::DoWhile` — each
+carrying its body as a sub-trace entered from the same iteration-count-
+agnostic env: `writes` forgotten, `reads` kept, the mutable state of every
+object a kept name points at swept. Every construct's fall-through is
+byte-identical to the `Opaque` it replaces. `try` is the only construct left
+without a body, and stays one: its `finally` overwrites the exit point, which
+is a control-flow question this IR does not answer yet.
+
+**`for`.** Its header has two clauses a `while`'s does not, and they are on
+opposite sides of the entry env. `init` runs **once**, before the condition is
+ever evaluated, so the walk enters it in the env as it stands at the construct
+— its findings are a top-level statement's, and a name it writes that the
+condition, the increments and the body never write again cannot differ between
+iterations, so the entry env keeps it (`carried`). The **increments** run after
+every iteration, which is the loop-carried kind of write exactly, so their
+targets are forgotten with the rest of `writes`; the increment expressions
+themselves are not walked, since the env they run in is the body's exit, which
+this construct discards. The tested condition is the **last** one PHP evaluates;
+a `for (;;)` carries `CondExpr::Opaque`, which decides nothing and narrows
+nothing, so its body walks unguarded.
+
+**`foreach`.** A header that binds rather than tests, so there is no condition
+and nothing to narrow by. `$k` and `$v` are ordinary members of `writes` — the
+`foreach`-binding row the write collector has always had — so the entry env
+leaves them defined but untyped, which is what they are. Typing them from the
+subject's own value type is issue #652.
+
+**`do`/`while` refuses the entry narrowing, and the variant does not carry the
+condition at all.** The body's first iteration runs *before* the header is
+evaluated, so taking the `while` rule there would be unsound in two directions
+at once: it would narrow that iteration by a fact no test has established, and
+it would read a `do { … } while (false)` — a loop whose body runs exactly once
+— as a zero-iteration loop and walk nothing. A field no reader may consult is
+a field that invites being consulted, so it is absent rather than ignored, and
+both halves are pinned by fixtures whose expected answers invert under the
+`while` rule.
+
+What the bodies contribute is unchanged from #649: **findings, not facts**.
+Every exit env is discarded, so the fall-through of each form is what its sets
+alone leave standing and the negated condition still does not ride it
+(issue #651).
+
+The three variants sit after `While` and the wire codec carries a variant by
+index, so `SCHEMA_VERSION` moves 14 → 15: a stored trace of the previous schema
+must miss rather than decode, and would in any case spell all three constructs
+as `Opaque`, replaying silence for bodies this analyzer judges.
