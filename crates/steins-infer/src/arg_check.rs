@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
-use steins_domain::{ArmKnown, Base, Fact, Val};
+use steins_domain::{ArmKnown, Base, Fact};
 use steins_sidecar::BuiltinParam;
 use steins_syntax::{ArgValue, CallExpr, NativeType, Param, ScalarType, Span, TypeMember};
 

@@ -1133,25 +1133,22 @@ mod tests {
 
     #[test]
     fn a_literal_arm_is_not_a_string_and_is_not_an_int() {
-        // A base that is neither answers `No`, and `all_of` carries that verdict
-        // out of the union: a literal arm decides its own row rather than
-        // abstaining, so the whole fact is refuted rather than left `Maybe`.
-        let ne = Refinement::Str(StrPreds::NON_EMPTY);
-        let strs = Fact::union(
-            vec![(Base::String, ArmKnown::Refined(ne)), (Base::Bool, ArmKnown::Bool(true))],
+        // A base that is neither answers `No`, like the whole base it sits under,
+        // and a union where every arm says `No` says `No`. Route the literal to
+        // `Maybe` instead and the union stops refuting, which is what the spec's
+        // `satisfiesStr`/`intIn` say it must not do.
+        let ints_or = Fact::union(
+            vec![(Base::Int, ArmKnown::Whole), (Base::Bool, ArmKnown::Bool(true))],
             false,
         )
         .expect("a union");
-        assert_eq!(strs.satisfies_str(StrPreds::NON_EMPTY), Certainty::No);
-        let ints = Fact::union(
-            vec![
-                (Base::Int, ArmKnown::Refined(Refinement::Int(IntRange::POSITIVE))),
-                (Base::Bool, ArmKnown::Bool(true)),
-            ],
+        assert_eq!(ints_or.satisfies_str(StrPreds::NON_EMPTY), Certainty::No);
+        let strs_or = Fact::union(
+            vec![(Base::String, ArmKnown::Whole), (Base::Bool, ArmKnown::Bool(false))],
             false,
         )
         .expect("a union");
-        assert_eq!(ints.int_in(IntRange::POSITIVE), Certainty::No);
+        assert_eq!(strs_or.int_in(IntRange::POSITIVE), Certainty::No);
     }
 
     #[test]
