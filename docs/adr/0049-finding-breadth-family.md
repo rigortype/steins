@@ -914,6 +914,15 @@ The ruling is that the two questions get two resolvers:
   `: array` that #603 documents) lower to the same `None` an absent hint
   gives. The declaration path says nothing there; a fixture pins which
   of the two gates a `: array`-returning open method hits.
+  **Amended 2026-09-11 (issue #603, ADR-0057 A9.5):** the bare `array`,
+  `object` and `iterable` no longer lower to nothing — they lower to an
+  enforced top — so the lowering gate is not the one holding them any
+  more. The bullet's outcome is unchanged and its mechanism is not:
+  `CallTarget::enforced_top` withholds the top from a declaration-only
+  target, which makes A16's silence its own withholding rather than an
+  absence elsewhere. Seeding it here is sound under this bullet's own
+  covariance argument — a child overriding `: array` can only narrow it
+  — and is deferred for measurement, not soundness.
 
 ### A17. The receiver carrier is the declared-receiver lane
 
