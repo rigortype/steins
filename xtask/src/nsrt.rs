@@ -810,7 +810,15 @@ fn is_supported_atom(a: &str) -> bool {
         return true;
     }
     if a.starts_with('\'') && a.ends_with('\'') && a.len() >= 2 {
-        return true; // a string literal
+        return true; // a single-quoted string literal
+    }
+    // A DOUBLE-quoted one is the same literal, and the reference implementation
+    // uses it for exactly the strings a single-quoted spelling cannot carry — a
+    // control character (`"\n"|"\r\n"` for `PHP_EOL`, ADR-0094 §3's default
+    // union). Gating on the quote measured the harness's vocabulary rather than
+    // the analyzer's, the same defect issues #240, #77 and #236 each fixed here.
+    if a.starts_with('"') && a.ends_with('"') && a.len() >= 2 {
+        return true;
     }
     if is_array_shape_atom(a) || is_array_generic_atom(a) {
         return true;

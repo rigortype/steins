@@ -319,3 +319,53 @@ fn a_project_constant_shadows_the_engine_table_for_this_file() {
                \\PHPStan\\dumpType(SORT_REGULAR);\n";
     assert_eq!(dumps(src), vec!["dumped type: unknown".to_owned()]);
 }
+
+
+#[test]
+fn a_cross_file_project_constant_stops_the_walk() {
+    // ADR-0094 §4 defers cross-file constants to their own slice, and the decline
+    // is not caution: inside `namespace App;` an unqualified `SORT_REGULAR` means
+    // `App\SORT_REGULAR`, so falling through to the global fallback would report
+    // the engine's `0` for a name PHP reads as the project's own value.
+    //
+    // The same name in a file that does NOT declare it — and is not in that
+    // namespace — still reads the engine row, so the guard costs nothing where it
+    // has nothing to protect.
+    let db = SteinsDatabase::default();
+    let decl = SourceFile::new(
+        &db,
+        "/proj/a.php".to_owned(),
+        "<?php\nnamespace App;\nconst SORT_REGULAR = 99;\n".to_owned(),
+    );
+    let read = SourceFile::new(
+        &db,
+        "/proj/b.php".to_owned(),
+        "<?php\nnamespace App;\n\\PHPStan\\dumpType(SORT_REGULAR);\n".to_owned(),
+    );
+    let elsewhere = SourceFile::new(
+        &db,
+        "/proj/c.php".to_owned(),
+        "<?php\nnamespace Other;\n\\PHPStan\\dumpType(SORT_REGULAR);\n".to_owned(),
+    );
+    let layout = ProjectLayout::new(PathBuf::from("/proj"), vec![]);
+    let project = Project::new(
+        &db,
+        vec![decl, read, elsewhere],
+        layout,
+        steins_db::PluginFacts::none(),
+    );
+    let mut dumps: Vec<(String, String)> =
+        check_project_with_os(&db, project, &mut NoFold, true, FinalKeyword::Enforced, None)
+            .into_iter()
+            .filter(|d| d.id == DEBUG_TYPE_ID)
+            .map(|d| (d.path.clone(), d.message.clone()))
+            .collect();
+    dumps.sort();
+    assert_eq!(
+        dumps,
+        vec![
+            ("/proj/b.php".to_owned(), "dumped type: unknown".to_owned()),
+            ("/proj/c.php".to_owned(), "dumped type: 0".to_owned()),
+        ]
+    );
+}
