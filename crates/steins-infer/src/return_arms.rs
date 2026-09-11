@@ -11,13 +11,16 @@ use steins_phpdoc::ast::{ConstExpr, TypeKind as PKind, StringLit};
 use steins_syntax::{ArgValue, CallExpr, Callee, NativeType, Param, ScalarType, TypeMember};
 
 use crate::fold::Folder;
+use crate::builtin_returns::builtin_method_return_floor;
 use crate::contract::{
     CArg, CVal, Envelopes, TemplateShadow, declared_carrier, for_each_child_type, template_names_of,
     type_aliases_of,
 };
 use crate::cx::Cx;
 use crate::descent::value_lane_fn_site;
-use crate::dispatch::{CallTarget, resolve_call_target, resolve_declaration_target};
+use crate::dispatch::{
+    CallTarget, resolve_builtin_callee, resolve_call_target, resolve_declaration_target,
+};
 use crate::env::{ContractArm, Known, Store, Stratum};
 use crate::generics::{
     CarriedArg, carg_contract_ty, get_template_type, names_unknown_class, template_arg_carries,
@@ -132,21 +135,55 @@ pub(crate) fn method_return_arms_by_callee(
     // its declared chain names still binds the return, PHP enforcing covariance
     // over every descendant. Second, never first — a proven target keeps every
     // sharper answer it had (its exactness, its receiver variable, its carries).
+    //
+    // Third and last, where BOTH refuse because the declared chain leaves the
+    // project altogether: the builtin class-method return table (issue #673). Its
+    // gate order is the ladder's, so a row can never compete with a project
+    // declaration — `resolve_builtin_callee` refuses outright if any project class
+    // on the receiver's chain declares the name, and a builtin class reaches
+    // `resolve_in_chain` as nothing at all, having no `ClassDecl`.
     let (target, receiver_stratum) =
         match resolve_call_target(cx, callee, store, this_exact, enclosing_class, poisoned) {
             Some(t) => (t, Stratum::Verified),
-            None => resolve_declaration_target(
+            None => match resolve_declaration_target(
                 cx,
                 callee,
                 store,
                 this_exact,
                 enclosing_class,
                 poisoned,
-            )?,
+            ) {
+                Some(t) => t,
+                None => return builtin_method_arms(cx, callee, store, this_exact, enclosing_class, poisoned),
+            },
         };
     let bindable: Vec<&ArgValue> = args.iter().collect();
     let arms = method_return_arms_at_call(cx, folder, &target, &bindable, env, store, poisoned)?;
     Some(demote_arms(arms, receiver_stratum))
+}
+
+/// The builtin class-method rung of [`method_return_arms_by_callee`] (issue #673):
+/// the receiver's declared class leaves the project, so the answer comes from the
+/// mined `Class::method` table rather than from any declaration this project holds.
+///
+/// Every arm is `Asserted` before the demotion below can even apply — the table's
+/// grade is fixed (ADR-0069 §2) and `refine_declared_arms` over an empty native
+/// list marks it so. [`demote_arms`] still runs, because the receiver carrier can
+/// be weaker than the row and nothing here may launder it upward; it simply has
+/// nothing left to lower.
+fn builtin_method_arms(
+    cx: &Cx,
+    callee: &Callee,
+    store: &Store,
+    this_exact: Option<&str>,
+    enclosing_class: Option<&str>,
+    poisoned: bool,
+) -> Option<Vec<ContractArm>> {
+    let target =
+        resolve_builtin_callee(cx, callee, store, this_exact, enclosing_class, poisoned)?;
+    let stratum = target.stratum;
+    let arms = builtin_method_return_floor(cx, &target)?;
+    Some(demote_arms(arms, stratum))
 }
 
 /// Lower every arm to `stratum` when the premise it rests on is the weaker one

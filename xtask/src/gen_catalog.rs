@@ -24,10 +24,12 @@
 //!   against those interfaces. Absence → `None` → `Unknown` is the FP-safe
 //!   verdict ADR-0043 §3 requires; re-mining backing data would allow `Some`.
 //!
-//! Two further tables ride the pipeline: curated return-fact refinements
+//! Three further tables ride the pipeline: curated return-fact refinements
 //! ([`gen_return_facts`], `return_facts.toml`) and the ADR-0069 declared-return
-//! floor ([`gen_declared_returns`], `phpstan-mining/declared_returns.toml`,
-//! sourced by `cargo xtask mine-function-map`).
+//! floor in both its halves — function-keyed ([`gen_declared_returns`],
+//! `phpstan-mining/declared_returns.toml`) and `Class::method`-keyed
+//! ([`gen_declared_method_returns`], `phpstan-mining/declared_method_returns.toml`,
+//! issue #673), both sourced by `cargo xtask mine-function-map`.
 //!
 //! A fourth, byproduct table: builtin-class **display names**
 //! (`display_names_generated.rs`), lowercased key → php-src's declared casing
@@ -141,6 +143,7 @@ pub fn run(check: bool) -> Result<(), String> {
     gen_return_facts(check)?;
     gen_resource_returns(check)?;
     gen_declared_returns(check)?;
+    gen_declared_method_returns(check)?;
     gen_param_facts(check)?;
     Ok(())
 }
@@ -257,6 +260,226 @@ fn gen_declared_returns(check: bool) -> Result<(), String> {
         dst.display()
     );
     Ok(())
+}
+
+
+/// Regenerate the **class-method** declared-return table (issue #673) from
+/// `phpstan-mining/declared_method_returns.toml` into
+/// `declared_method_returns_generated.rs` — the method twin of
+/// [`gen_declared_returns`], sourced by `cargo xtask mine-function-map --methods`.
+///
+/// Keys are `class::method`, lowercased whole and sorted, so one binary search
+/// answers both halves of the name; the static bit rides beside the spelling
+/// because functionMap's key grammar cannot spell it and only reflection knows.
+fn gen_declared_method_returns(check: bool) -> Result<(), String> {
+    let src = repo_root().join("docs/research/phpstan-mining/declared_method_returns.toml");
+    let text = std::fs::read_to_string(&src).map_err(|e| format!("read {}: {e}", src.display()))?;
+    let doc: MethodEnvelopeDoc =
+        toml::from_str(&text).map_err(|e| format!("parse {}: {e}", src.display()))?;
+
+    let mut rows: BTreeMap<String, (String, bool)> = BTreeMap::new();
+    for (key, row) in &doc.declared {
+        let key = key.to_ascii_lowercase();
+        if !key.contains("::") {
+            return Err(format!("method row `{key}` is not a `class::method` key"));
+        }
+        rows.insert(key, row.clone());
+    }
+    let mut sensitive: BTreeMap<String, (u16, u16)> = BTreeMap::new();
+    for (key, minor) in &doc.version_sensitive {
+        let parsed = parse_minor(minor)
+            .ok_or_else(|| format!("unparseable version_sensitive minor `{minor}` for `{key}`"))?;
+        sensitive.insert(key.to_ascii_lowercase(), parsed);
+    }
+
+    // The shadow keys ship as a table of their own: the consumer needs them at the
+    // call site, where "no row on this class" and "functionMap states this class
+    // differently" must answer differently.
+    let mut blocked: Vec<String> = Vec::new();
+    for key in doc.blocked.keys() {
+        let key = key.to_ascii_lowercase();
+        if !key.contains("::") {
+            return Err(format!("blocked key `{key}` is not a `class::method` key"));
+        }
+        if rows.contains_key(&key) {
+            return Err(format!("`{key}` is both admitted and blocked — the miner disagrees with itself"));
+        }
+        blocked.push(key);
+    }
+    blocked.sort();
+
+    let out = render_declared_method_returns(&doc.meta, &doc.counts, &rows, &sensitive, &blocked);
+    let dst = repo_root().join("crates/steins-catalog/src/declared_method_returns_generated.rs");
+    emit(&dst, &out, check)?;
+    println!(
+        "gen-catalog: {} declared method-return rows + {} version-sensitive keys + {} shadow keys {} → {}",
+        rows.len(),
+        sensitive.len(),
+        blocked.len(),
+        verb(check),
+        dst.display()
+    );
+    Ok(())
+}
+
+/// The shape of `declared_method_returns.toml`. The `[exclusions]` sections
+/// document refusals and are deliberately not read — nothing is generated from
+/// them. `[blocked]` is the one refusal record that IS read, because a refused
+/// key is not merely an absence: it shadows the ancestor's row.
+#[derive(serde::Deserialize)]
+struct MethodEnvelopeDoc {
+    meta: EnvelopeMeta,
+    counts: MethodEnvelopeCounts,
+    /// `class::method` -> `[canonical spelling, is_static]`.
+    #[serde(default)]
+    declared: BTreeMap<String, (String, bool)>,
+    #[serde(default)]
+    version_sensitive: BTreeMap<String, String>,
+    /// `class::method` -> `[why it was refused, the ancestor it shadows]`. Only
+    /// the key is generated; the pair is the audit trail.
+    #[serde(default)]
+    blocked: BTreeMap<String, (String, String)>,
+}
+
+#[derive(serde::Deserialize)]
+struct MethodEnvelopeCounts {
+    keys: usize,
+    alternates_disagree: usize,
+    not_lowerable: usize,
+    not_lowerable_object_or_resource: usize,
+    class_missing_rows: usize,
+    class_missing_classes: usize,
+    method_missing: usize,
+    reflection_disagree: usize,
+    engine_untyped: usize,
+    engine_mixed: usize,
+    blocked: usize,
+    admitted: usize,
+    admitted_static: usize,
+    admitted_rich: usize,
+}
+
+/// Render the committed class-method declared-return tables, provenance header
+/// and all.
+fn render_declared_method_returns(
+    meta: &EnvelopeMeta,
+    counts: &MethodEnvelopeCounts,
+    rows: &BTreeMap<String, (String, bool)>,
+    sensitive: &BTreeMap<String, (u16, u16)>,
+    blocked: &[String],
+) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::new();
+    s.push_str(
+        "// @generated by `cargo xtask gen-catalog` from\n\
+         // docs/research/phpstan-mining/declared_method_returns.toml — DO NOT EDIT BY HAND.\n\
+         //\n\
+         // Builtin DECLARED METHOD RETURN TYPES: the ADR-0069 Asserted floor, keyed\n\
+         // `class::method` (issue #673). The function table beside this one raised the\n\
+         // floor for `str_repeat($s, $n)`; this one raises it for `$f->fgets()`, where\n\
+         // the receiver is a builtin class BY DECLARATION and the project chain answers\n\
+         // nothing.\n\
+         //\n\
+         // LINEAGE — see the root NOTICE file for both MIT permission notices:\n\
+         //   Steins <- phpstan-src `resources/functionMap.php`\n\
+         //              (MIT, Copyright (c) Ondrej Mirtes and contributors)\n\
+         //          <- Phan `src/Phan/Language/Internal/FunctionSignatureMap.php`\n\
+         //              (MIT, Copyright (c) 2015 Rasmus Lerdorf,\n\
+         //                   Copyright (c) 2015 Andrew Morrison)\n\
+         //\n",
+    );
+    let _ = writeln!(s, "// phpstan-src pin: {}", meta.phpstan_src_commit);
+    let _ = writeln!(s, "// cross-checked against PHP {} via the real sidecar.", meta.crosscheck_php);
+    s.push_str("//\n// Mining counts at the pin:\n");
+    let _ = writeln!(s, "//   {:>5}  `Class::method` entries (after the delta ladder)", counts.keys);
+    let _ = writeln!(s, "//   {:>5}  keys whose alternate signatures disagree on the return type", counts.alternates_disagree);
+    let _ = writeln!(s, "//   {:>5}  rows the declared-contract arm lane cannot carry, of which", counts.not_lowerable);
+    let _ = writeln!(s, "//   {:>5}    objects / `callable` / `resource` / `void` / the `self`-family keywords", counts.not_lowerable_object_or_resource);
+    let _ = writeln!(s, "//   {:>5}  rows on {} classes the pinned engine does not have", counts.class_missing_rows, counts.class_missing_classes);
+    let _ = writeln!(s, "//   {:>5}  rows whose class the engine has WITHOUT the method", counts.method_missing);
+    let _ = writeln!(s, "//   {:>5}  rows the arm-wise engine countersign refuses", counts.reflection_disagree);
+    let _ = writeln!(s, "//   {:>5}  rows REFUSED because the engine declares no return type", counts.engine_untyped);
+    let _ = writeln!(s, "//   {:>5}  rows REFUSED because the engine declares `mixed`", counts.engine_mixed);
+    let _ = writeln!(s, "//   {:>5}  refused keys that SHADOW an ancestor's row (the second table below)", counts.blocked);
+    let _ = writeln!(s, "//   {:>5}  ADMITTED (the table below), of which", counts.admitted);
+    let _ = writeln!(s, "//   {:>5}    STATIC, by the engine's own reckoning", counts.admitted_static);
+    let _ = writeln!(s, "//   {:>5}    RICHER than a single-base envelope", counts.admitted_rich);
+    s.push_str(
+        "//\n\
+         // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2), and an\n\
+         // object-returning row is in the contract lane at all only because ADR-0093\n\
+         // §3.1 sources it from a declaration. There is no Verified twin waiting to be\n\
+         // built: a native stub's `@return` would be one, and functionMap is not a stub\n\
+         // — it is a third party's claim about the engine, which is what the Asserted\n\
+         // lane is for. The proof layer's all-Verified premise rule therefore excludes\n\
+         // every row here from every finding by construction.\n\
+         //\n\
+         // WHERE IT SPEAKS: at a method or static call whose receiver's DECLARED class\n\
+         // is a builtin, consulted after the project chain has answered nothing —\n\
+         // ADR-0049 A17's declared-receiver lane supplies the class, A16 licenses\n\
+         // reading a declaration off an unproven receiver, and a builtin class has no\n\
+         // `ClassDecl` so it never reaches `resolve_in_chain` as a project class. A\n\
+         // project class extending a builtin keeps its own declaration on every name it\n\
+         // declares; this table answers the inherited names alone, and the two cannot\n\
+         // disagree because the walk stops at the first project declaration it finds.\n\
+         //\n\
+         // INHERITANCE: the key is where functionMap puts the row, which may be a\n\
+         // subclass of the class that declares the method. The consuming lookup walks\n\
+         // the builtin hierarchy (ADR-0043) from the receiver's declared class upward,\n\
+         // so `SplFileInfo::getPath` answers for an `SplFileObject` receiver — sound\n\
+         // because PHP enforces return covariance at class-declaration time, making the\n\
+         // declaring class's NATIVE, NON-`mixed` engine envelope an upper bound on\n\
+         // every override (ADR-0049 A16). That is exactly why no row here was admitted\n\
+         // over an untyped or `mixed` engine answer: such a row bounds nothing, and the\n\
+         // walk would hand it to every descendant.\n\
+         //\n\
+         // ...and why the walk needs `BLOCKED_METHOD_KEYS` below. \"No row on the\n\
+         // child\" is not the same fact as \"functionMap never mentioned the child\":\n\
+         // only 957 of the 6,606 reduced keys became rows, so a key the map STATES and\n\
+         // the miner dropped or refused is positive evidence that the child's own\n\
+         // declaration differs from the ancestor's. `PDOException::getCode` is the\n\
+         // witness the review found — stated as `['']`, unparseable, and the walk read\n\
+         // it as `RuntimeException`'s `int` where PHP returns `\"HY000\"`.\n\
+         //\n\
+         // Each row: (lowercased `class::method`, canonical phpdoc spelling, whether\n\
+         // the engine declares the method `static`). Re-lowered through the same\n\
+         // `lower_str` → `flatten_arms` seam a project method's declared return takes.\n\
+         // Sorted by key for binary search.\n\n",
+    );
+    s.push_str("pub(crate) static DECLARED_METHOD_RETURNS: &[(&str, &str, bool)] = &[\n");
+    for (key, (ty, is_static)) in rows {
+        let _ = writeln!(s, "    ({key:?}, {ty:?}, {is_static}),");
+    }
+    s.push_str("];\n\n");
+    s.push_str(
+        "// The A11-shaped change oracle, keyed the same way: `class::method` entries\n\
+         // whose declared RETURN type moves between two adjacent supported minors, keyed\n\
+         // to the minor it moved AT. A project whose declared PhpTarget is below that\n\
+         // minor declines the row; unknown target admits (the row is Asserted anyway,\n\
+         // ADR-0069 §3). Listed independently of the table above since a key can be\n\
+         // version-sensitive without an admitted row.\n\
+         // Sorted by key for binary search.\n\n",
+    );
+    s.push_str("pub(crate) static METHOD_RETURN_VERSION_SENSITIVE: &[(&str, (u16, u16))] = &[\n");
+    for (key, (major, minor)) in sensitive {
+        let _ = writeln!(s, "    ({key:?}, ({major}, {minor})),");
+    }
+    s.push_str("];\n\n");
+    s.push_str(
+        "// The SHADOW keys: `class::method` entries functionMap states and the miner\n\
+         // dropped or refused, whose ancestor carries an admitted row for the same\n\
+         // method. The consuming walk answers NOTHING at these keys rather than\n\
+         // climbing to the ancestor's row, since the map itself says the child's\n\
+         // declaration is not the ancestor's. Disjoint from the table above by\n\
+         // construction — the generator refuses a key that is in both.\n\
+         // Sorted by key for binary search.\n\n",
+    );
+    s.push_str("pub(crate) static BLOCKED_METHOD_KEYS: &[&str] = &[\n");
+    for key in blocked {
+        let _ = writeln!(s, "    {key:?},");
+    }
+    s.push_str("];\n");
+    s
 }
 
 /// The per-parameter facts table (issue #382): `param_facts.toml`, mined off the
@@ -491,11 +714,12 @@ fn render_declared_returns(
          // declaration — this table is one). ADR-0069 §5 / ADR-0071 §2.3 lift for the\n\
          // object rows on that ruling (ADR-0093 is PENDING ratification).\n\
          //\n\
-         // Still deferred, and for the reason §5 gave: the skipped methods (issue #673\n\
-         // is the class-method table), and what is LEFT in the bucket the count names —\n\
-         // `callable`, the intersections, `resource` and `void`. Those have no\n\
-         // extensional denotation the countersign could use, so it could only answer\n\
-         // `Maybe`, which ADR-0069 §3 refuses.\n\
+         // The `Class::method` rows this count calls skipped are no longer deferred\n\
+         // either: they are `declared_method_returns_generated.rs`, mined by the same\n\
+         // pipeline at the same pin (issue #673). What is LEFT in the bucket the count\n\
+         // names is `callable`, the intersections, `resource` and `void` — those have\n\
+         // no extensional denotation the countersign could use, so it could only\n\
+         // answer `Maybe`, which ADR-0069 §3 refuses.\n\
          //\n\
          // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2) — it\n\
          // reaches the dump surface and contracts-tier reasoning, but the proof\n\

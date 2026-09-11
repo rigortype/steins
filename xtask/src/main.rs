@@ -11,7 +11,8 @@
 //!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
-//!   mine-function-map [DIR]  mine phpstan-src's functionMap into the declared-envelope TOML
+//!   mine-function-map [DIR] [--functions] [--methods]
+//!                            mine phpstan-src's functionMap into the declared-return TOMLs
 //!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   perf <DIR>… [--bless]    cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
@@ -104,7 +105,15 @@ fn main() -> ExitCode {
         },
         Some("mine-function-map") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
-            match mine_function_map::run(dir) {
+            // Neither flag means both halves; either one alone narrows the run
+            // (see `mine_function_map::Halves`).
+            let functions = args.iter().any(|a| a == "--functions");
+            let methods = args.iter().any(|a| a == "--methods");
+            let halves = mine_function_map::Halves {
+                functions: functions || !methods,
+                methods: methods || !functions,
+            };
+            match mine_function_map::run(dir, halves) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
             }
@@ -138,7 +147,7 @@ fn main() -> ExitCode {
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

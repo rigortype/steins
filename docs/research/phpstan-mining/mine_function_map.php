@@ -29,8 +29,11 @@ declare(strict_types=1);
  * itself would use at each minor — not the raw base map.
  *
  * What this script does, and deliberately does not:
- *   - METHOD rows (`::` in the key) are skipped — the floor is function-keyed
- *     (ADR-0056 §6's "method-keyed rows in v1" refusal still stands).
+ *   - METHOD rows (`::` in the key) are emitted as their own population (issue #673),
+ *     keyed `class::method`, lowercased whole. They were skipped while the floor was
+ *     function-keyed; ADR-0093 §3.1 lifted the object deferral that kept them out.
+ *     PROPERTY rows do not exist: functionMap's key grammar has no spelling for one,
+ *     so the property half of the gap is a source exclusion, not a filter's.
  *   - ALTERNATE signatures are folded into their base name. When every alternate
  *     agrees on the return type the name keeps it; when they disagree the name is
  *     EXCLUDED and listed, because a floor row must state one envelope.
@@ -92,8 +95,13 @@ function apply_delta(array $map, array $delta): array
 /**
  * Reduce a raw signature map to `name => return type`, folding alternates.
  *
+ * Two populations come out of one walk, split on `::` in the key: plain functions
+ * (`rows`) and `Class::method` rows (`method_rows`, issue #673). Each gets the same
+ * alternate folding and the same one-return-type-or-excluded rule; a method row's key
+ * is lowercased whole, so `SplFileObject::fgets` becomes `splfileobject::fgets`.
+ *
  * @param array<string, mixed> $map
- * @return array{rows: array<string, string>, disagree: array<string, list<string>>, methods: int, malformed: list<string>}
+ * @return array{rows: array<string, string>, disagree: array<string, list<string>>, method_rows: array<string, string>, method_disagree: array<string, list<string>>, methods: int, malformed: list<string>}
  */
 function reduce_map(array $map): array
 {
@@ -101,21 +109,49 @@ function reduce_map(array $map): array
     $malformed = [];
     /** @var array<string, array<string, true>> $byName */
     $byName = [];
+    /** @var array<string, array<string, true>> $byMethod */
+    $byMethod = [];
     foreach ($map as $key => $signature) {
         $key = (string) $key;
-        if (str_contains($key, '::')) {
+        $isMethod = str_contains($key, '::');
+        if ($isMethod) {
             $methods++;
-            continue;
         }
         if (!is_array($signature) || !isset($signature[0]) || !is_string($signature[0])) {
             $malformed[] = $key;
             continue;
         }
-        $byName[strtolower(base_name($key))][$signature[0]] = true;
+        if ($isMethod) {
+            $byMethod[strtolower(base_name($key))][$signature[0]] = true;
+        } else {
+            $byName[strtolower(base_name($key))][$signature[0]] = true;
+        }
     }
+    [$rows, $disagree] = fold_alternates($byName);
+    [$methodRows, $methodDisagree] = fold_alternates($byMethod);
+    return [
+        'rows' => $rows,
+        'disagree' => $disagree,
+        'method_rows' => $methodRows,
+        'method_disagree' => $methodDisagree,
+        'methods' => $methods,
+        'malformed' => $malformed,
+    ];
+}
+
+/**
+ * Fold one key's alternate signatures into a single return type, or exclude the key.
+ * A floor row must state ONE type, so a key whose alternates disagree is dropped and
+ * listed rather than arbitrated.
+ *
+ * @param array<string, array<string, true>> $byKey
+ * @return array{0: array<string, string>, 1: array<string, list<string>>}
+ */
+function fold_alternates(array $byKey): array
+{
     $rows = [];
     $disagree = [];
-    foreach ($byName as $name => $types) {
+    foreach ($byKey as $name => $types) {
         $seen = array_keys($types);
         if (count($seen) === 1) {
             $rows[$name] = $seen[0];
@@ -126,7 +162,7 @@ function reduce_map(array $map): array
     }
     ksort($rows);
     ksort($disagree);
-    return ['rows' => $rows, 'disagree' => $disagree, 'methods' => $methods, 'malformed' => $malformed];
+    return [$rows, $disagree];
 }
 
 /** @var array<string, mixed> $base */
@@ -149,6 +185,8 @@ $ladder = [
 
 /** @var array<string, array<string, string>> $perMinor "8.1" => rows */
 $perMinor = [];
+/** @var array<string, array<string, string>> $perMinorMethods "8.1" => method rows */
+$perMinorMethods = [];
 $map = $base;
 $reduced = null;
 foreach ($ladder as [$tag, $minor]) {
@@ -162,30 +200,45 @@ foreach ($ladder as [$tag, $minor]) {
     $map = apply_delta($map, $delta);
     $reduced = reduce_map($map);
     $perMinor[$minor[0] . '.' . $minor[1]] = $reduced['rows'];
+    $perMinorMethods[$minor[0] . '.' . $minor[1]] = $reduced['method_rows'];
 }
 
 // The pin: PHP 8.5, the last rung of the ladder. `$reduced` holds its reduction.
 assert($reduced !== null);
 $pinRows = $reduced['rows'];
+$pinMethodRows = $reduced['method_rows'];
 
 // The change oracle: walk the SUPPORTED minors pairwise (8.1 → 8.5). A name whose
 // return type differs between two adjacent minors changed at the upper one.
 $supported = ['8.1', '8.2', '8.3', '8.4', '8.5'];
-/** @var array<string, list<string>> $versionSensitive */
-$versionSensitive = [];
-for ($i = 1; $i < count($supported); $i++) {
-    $lo = $perMinor[$supported[$i - 1]];
-    $hi = $perMinor[$supported[$i]];
-    foreach ($hi as $name => $type) {
-        if (!isset($lo[$name])) {
-            continue; // appeared at this minor: existence, not a return-type change
-        }
-        if ($lo[$name] !== $type) {
-            $versionSensitive[$name][] = $supported[$i];
+
+/**
+ * @param array<string, array<string, string>> $perMinor
+ * @param list<string> $supported
+ * @return array<string, list<string>>
+ */
+function change_oracle(array $perMinor, array $supported): array
+{
+    /** @var array<string, list<string>> $sensitive */
+    $sensitive = [];
+    for ($i = 1; $i < count($supported); $i++) {
+        $lo = $perMinor[$supported[$i - 1]];
+        $hi = $perMinor[$supported[$i]];
+        foreach ($hi as $name => $type) {
+            if (!isset($lo[$name])) {
+                continue; // appeared at this minor: existence, not a return-type change
+            }
+            if ($lo[$name] !== $type) {
+                $sensitive[$name][] = $supported[$i];
+            }
         }
     }
+    ksort($sensitive);
+    return $sensitive;
 }
-ksort($versionSensitive);
+
+$versionSensitive = change_oracle($perMinor, $supported);
+$methodVersionSensitive = change_oracle($perMinorMethods, $supported);
 
 echo json_encode([
     'phpstan_src' => $root,
@@ -196,4 +249,7 @@ echo json_encode([
     'rows' => $pinRows,
     'alternates_disagree' => $reduced['disagree'],
     'version_sensitive' => $versionSensitive,
+    'method_rows' => $pinMethodRows,
+    'method_alternates_disagree' => $reduced['method_disagree'],
+    'method_version_sensitive' => $methodVersionSensitive,
 ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES) . "\n";

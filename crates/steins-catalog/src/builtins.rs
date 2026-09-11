@@ -5,7 +5,8 @@
 //! curated throw facts ([`builtin_throws`]) and failure-arm causes
 //! ([`failure_arms`], ADR-0042), the callback invocation shapes
 //! ([`invocation_shape`], ADR-0033), the return ladder's catalog rungs
-//! ([`return_fact`], [`resource_return`], [`declared_return`], ADR-0056 and
+//! ([`return_fact`], [`resource_return`], [`declared_return`] and its
+//! `Class::method`-keyed twin [`declared_method_return`], ADR-0056 and
 //! ADR-0069), and the engine's own per-parameter facts ([`param_facts`],
 //! issue #382).
 //!
@@ -13,8 +14,8 @@
 //! only from here.
 
 use crate::{
-    declared_returns_generated, display_names_generated, hierarchy_generated,
-    param_facts_generated, resource_returns_generated, return_facts_generated,
+    declared_method_returns_generated, declared_returns_generated, display_names_generated,
+    hierarchy_generated, param_facts_generated, resource_returns_generated, return_facts_generated,
 };
 
 /// The **builtin SPL/engine exception hierarchy** (ADR-0040): the parent of a
@@ -460,6 +461,110 @@ pub fn declared_return_changed_at(name: &str) -> Option<(u16, u16)> {
         .map(|i| declared_returns_generated::RETURN_VERSION_SENSITIVE[i].1)
 }
 
+/// The **declared return type** of a builtin `class::method` (ADR-0069 as
+/// widened by issue #673): the canonical phpdoc spelling and whether the pinned
+/// engine declares the method `static`, or `None` when no row covers the pair.
+///
+/// This is the function floor's method twin and carries the same three
+/// load-bearing properties: **Asserted, never Verified**; **any engine answer
+/// wins**; **never an existence answer**. One further property is its own —
+/// an object-returning row is representable at all only under ADR-0093 §3.1,
+/// which lets an object arm into the contract lane when it is sourced from a
+/// declaration, and a mined declared return is one.
+///
+/// **Exact key, no hierarchy.** The lookup answers for the class the row is
+/// keyed on and no other; walking the builtin hierarchy so that a parent's row
+/// answers for a child receiver is the *consumer's* job
+/// ([`builtin_class_supers`] is the walk), because it is a soundness argument
+/// about return covariance (ADR-0049 A16) rather than a table property.
+///
+/// Rows are mined from PHPStan's `resources/functionMap.php` at a pinned commit
+/// (inherited from Phan; see the root `NOTICE`) and countersigned arm-wise
+/// against the pinned engine's `reflect_class`. Both halves of the key are
+/// case-insensitive; a leading `\` on the class is stripped.
+#[must_use]
+pub fn declared_method_return(class: &str, method: &str) -> Option<(&'static str, bool)> {
+    let class = class.trim_start_matches('\\');
+    declared_method_returns_generated::DECLARED_METHOD_RETURNS
+        .binary_search_by(|(k, _, _)| cmp_member_key(k, class, method))
+        .ok()
+        .map(|i| {
+            let row = &declared_method_returns_generated::DECLARED_METHOD_RETURNS[i];
+            (row.1, row.2)
+        })
+}
+
+/// Whether a builtin `class::method` key is a **shadow**: one functionMap states
+/// and the miner dropped or refused, on a class some ancestor of which carries an
+/// admitted row for the same method (issue #673, review finding 2).
+///
+/// [`declared_method_return`] answers per key and says nothing about the walk, so
+/// the consumer reading a parent's row for a child receiver needs a second
+/// question: *did the source have something to say about the child, that this
+/// table could not carry?* A `true` here means yes, and the walk must answer
+/// nothing rather than inherit — the map's own row for the child is evidence that
+/// the nearest declaration is not the ancestor's, whatever this table failed to
+/// admit about it. `PDOException::getCode` is the witness: functionMap states it
+/// (as `['']`, which is unparseable), `Exception::getCode` is `final` and untyped,
+/// and PHP returns the string `"HY000"`.
+///
+/// Disjoint from [`declared_method_return`] by construction: the generator refuses
+/// a key that is in both tables. Both halves of the key are case-insensitive; a
+/// leading `\` on the class is stripped.
+#[must_use]
+pub fn declared_method_return_blocked(class: &str, method: &str) -> bool {
+    let class = class.trim_start_matches('\\');
+    declared_method_returns_generated::BLOCKED_METHOD_KEYS
+        .binary_search_by(|k| cmp_member_key(k, class, method))
+        .is_ok()
+}
+
+/// The minor at which a builtin **method's** declared return type last moved
+/// across the supported 8.x line, or `None` when it never did — the A11-shaped
+/// oracle of [`declared_return_changed_at`], one key grammar over.
+///
+/// Deliberately **independent** of [`declared_method_return`]: a key can be
+/// version-sensitive without an admitted row.
+#[must_use]
+pub fn declared_method_return_changed_at(class: &str, method: &str) -> Option<(u16, u16)> {
+    let class = class.trim_start_matches('\\');
+    declared_method_returns_generated::METHOD_RETURN_VERSION_SENSITIVE
+        .binary_search_by(|(k, _)| cmp_member_key(k, class, method))
+        .ok()
+        .map(|i| declared_method_returns_generated::METHOD_RETURN_VERSION_SENSITIVE[i].1)
+}
+
+/// Order a stored `class::method` key against a `(class, method)` pair, ASCII
+/// case-insensitively — the comparator the two member tables binary-search with.
+///
+/// Comparing the halves in place rather than formatting a lookup key keeps the
+/// accessors allocation-free on a path the return ladder takes at every method
+/// call. The stored keys are lowercased whole and sorted as such, so comparing
+/// each half case-insensitively and breaking the tie on `::` reproduces exactly
+/// the generator's `BTreeMap` order: `::` (0x3a) sorts below every character a
+/// lowercased PHP identifier can hold, so a class that is a prefix of another
+/// orders first, which is what a plain byte comparison of the whole key does too.
+fn cmp_member_key(key: &str, class: &str, method: &str) -> core::cmp::Ordering {
+    use core::cmp::Ordering;
+    let Some((kclass, kmethod)) = key.split_once("::") else {
+        // A key without `::` cannot come out of the generator (it rejects one),
+        // so this is unreachable; ordering it below every pair keeps the
+        // comparator total rather than panicking on impossible data.
+        return Ordering::Less;
+    };
+    match cmp_ascii_lower(kclass, class) {
+        Ordering::Equal => cmp_ascii_lower(kmethod, method),
+        other => other,
+    }
+}
+
+/// ASCII-case-insensitive byte order over two identifiers.
+fn cmp_ascii_lower(a: &str, b: &str) -> core::cmp::Ordering {
+    let a = a.bytes().map(|c| c.to_ascii_lowercase());
+    let b = b.bytes().map(|c| c.to_ascii_lowercase());
+    a.cmp(b)
+}
+
 #[cfg(test)]
 mod tests {
     use crate::{is_known_label, subsumes};
@@ -899,5 +1004,84 @@ mod tests {
         for n in ["strtolower", "count", "array_merge", "some_unknown_fn"] {
             assert_eq!(invocation_shape(n), None, "{n}");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // The `Class::method` declared-return table (issue #673).
+    // -----------------------------------------------------------------------
+
+    /// The witnesses issue #673 names, read straight off the table — instance,
+    /// static, object-returning, and inherited-from-a-parent alike.
+    #[test]
+    fn declared_method_return_answers_the_issues_witnesses() {
+        use super::declared_method_return as m;
+        assert_eq!(m("SplFileObject", "fgets"), Some(("string", false)));
+        assert_eq!(m("SplFileInfo", "getPath"), Some(("string", false)));
+        assert_eq!(m("DateTime", "format"), Some(("string", false)));
+        assert_eq!(m("DOMDocument", "getElementById"), Some(("DOMElement|null", false)));
+        assert_eq!(m("PDO", "query"), Some(("PDOStatement|false", false)));
+        assert_eq!(m("PDO", "getAvailableDrivers"), Some(("array", true)));
+        // Case-insensitive in both halves, and a leading `\` on the class is
+        // stripped — the spellings a call site can actually produce.
+        assert_eq!(m("splfileobject", "FGETS"), Some(("string", false)));
+        assert_eq!(m("\\SplFileObject", "fgets"), Some(("string", false)));
+        // An unadmitted pair, an unknown class and an unknown method all decline.
+        assert_eq!(m("SplFileObject", "fgetcsv"), None, "refused by the countersign");
+        assert_eq!(m("NoSuchBuiltin", "fgets"), None);
+        assert_eq!(m("SplFileObject", "noSuchMethod"), None);
+    }
+
+    /// The exclusions worth naming, because each is a *stated* refusal rather
+    /// than an omission: a keyword the arm lane cannot carry, a row the engine
+    /// contradicts, and a name functionMap simply has no row for.
+    #[test]
+    fn declared_method_return_states_its_refusals() {
+        use super::declared_method_return as m;
+        // `Closure` and `static` are KNOWN_UNENFORCED keywords that lower to an
+        // opaque arm, not a class one, so neither can be carried or
+        // countersigned (ADR-0069 §5's residual, ADR-0049 A19 for `static`).
+        assert_eq!(m("Closure", "bind"), None);
+        assert_eq!(m("DateInterval", "createFromDateString"), None);
+        // functionMap says `int` where the engine declares `int|false`: the row
+        // drops an arm, which is the silent rot ADR-0069 §3's countersign exists
+        // to catch, one key grammar over from `ftp_raw`.
+        assert_eq!(m("Collator", "getLocale"), None);
+        // The map has no row at all for this one; the table never invents one.
+        assert_eq!(m("PDO", "connect"), None);
+    }
+
+    /// The comparator is what makes the two-part key binary-searchable without
+    /// building a lookup string, so it must reproduce the generator's own byte
+    /// order over the whole key — including the case where one class name is a
+    /// prefix of another.
+    #[test]
+    fn the_member_comparator_reproduces_the_generators_order() {
+        let table = super::declared_method_returns_generated::DECLARED_METHOD_RETURNS;
+        assert!(table.windows(2).all(|w| w[0].0 < w[1].0), "the table must be sorted by key");
+        // Every row must be findable by the comparator the accessors use.
+        for (key, ty, is_static) in table {
+            let (class, method) = key.split_once("::").expect("a `class::method` key");
+            assert_eq!(
+                super::declared_method_return(class, method),
+                Some((*ty, *is_static)),
+                "{key} is in the table but the comparator cannot find it"
+            );
+        }
+        // `SplFileInfo` is a strict prefix of `SplFileInfoNotAClass`, and `::`
+        // sorts below every character an identifier can hold — the property the
+        // comparator's tie-break relies on.
+        assert!("splfileinfo::getpath" < "splfileinfox::a");
+    }
+
+    /// The version oracle is keyed the same way and is independent of the table.
+    #[test]
+    fn the_method_version_oracle_is_independent_of_the_table() {
+        use super::{declared_method_return, declared_method_return_changed_at as changed};
+        assert_eq!(changed("DateInterval", "createFromDateString"), Some((8, 3)));
+        // …and that key has no admitted row, which is the independence.
+        assert_eq!(declared_method_return("DateInterval", "createFromDateString"), None);
+        assert_eq!(changed("SplFileObject", "fgets"), None);
+        let oracle = super::declared_method_returns_generated::METHOD_RETURN_VERSION_SENSITIVE;
+        assert!(oracle.windows(2).all(|w| w[0].0 < w[1].0), "the oracle must be sorted by key");
     }
 }

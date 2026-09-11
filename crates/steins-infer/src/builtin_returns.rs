@@ -3,13 +3,14 @@
 //! factored into pure functions so every leg is unit-testable without a sidecar;
 //! the declared-return floor (ADR-0069) and the shape-builtin rows live here too.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use steins_contract::{ContractTy, normalize};
 use steins_domain::{Base, Certainty, Fact, Refinement, ShapeFact, Key as VKey, Val};
 use steins_syntax::ArgValue;
 
 use crate::cx::Cx;
+use crate::dispatch::BuiltinCallee;
 use crate::env::{ContractArm, Known, Store, Stratum, array_literal_fact, singleton_fact};
 use crate::refine::{flatten_arms, refine_declared_arms, seed_shape_fact};
 use crate::walk::value_stratum;
@@ -293,6 +294,140 @@ pub(crate) fn builtin_return_floor(cx: &Cx, name: &str) -> Option<Vec<ContractAr
     // generation-time countersign. Same argument for a class inside an array row's
     // element type.
     refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
+}
+
+/// The declared-return floor's **method** half (issue #673): the contract arms a
+/// builtin `class::method` call seeds, every arm `Asserted`.
+///
+/// It is the last rung of the method return ladder, reached only where the project
+/// chain answered nothing (`resolve_builtin_callee` is that reading, and refuses if
+/// any project class on the receiver's chain declares the name). The lowering is
+/// [`builtin_return_floor`]'s, verbatim and for the same reasons — the same
+/// `lower_str` → [`flatten_arms`] → [`refine_declared_arms`] path against an empty
+/// native list, and the same **identity** class resolver, since a functionMap row
+/// has no declaring namespace and every class it names is a global builtin FQN.
+///
+/// Three gates, and the first two are this rung's own:
+///
+/// 1. **Inheritance, walked here rather than stored in the table.** A row is keyed
+///    where functionMap puts it, so a `SplFileObject` receiver finds
+///    `SplFileInfo::getPath` only by walking upward. That walk is sound because PHP
+///    enforces return covariance at class-declaration time — a child cannot widen
+///    the parent's promise — so the declaring class's **native, non-`mixed`**
+///    engine envelope is an upper bound on every override (ADR-0049 A16), which is
+///    a membership-direction claim about the *result* and needs no exactness about
+///    the receiver. The miner is what makes the envelope native: it admits no row
+///    the engine declared nothing or `mixed` for, precisely because those bound no
+///    descendant. The walk is [`builtin_class_supers`]' transitive closure,
+///    breadth-first so the nearest row wins; an unknown class contributes no supers
+///    and simply ends its branch (ADR-0043's FP-safe absence), and a **shadow key**
+///    on the way up ends the walk with no answer at all — see
+///    [`builtin_method_row`].
+/// 2. **The static form constrains, the instance form does not.** PHP lets `$o->m()`
+///    call a `static` method, so an instance call accepts either kind of row. `C::m()`
+///    on an instance method is a PHP 8 `Error` unless it is forwarding `$this` from
+///    inside a class — the same parity `resolve_static_named` and
+///    [`resolve_declaration_target`] already keep, so a call that never returns is
+///    handed no envelope.
+/// 3. **Version discipline** ([`builtin_method_target_admits`]) — the A11-shaped
+///    target gate, keyed on the class the row was *found* on, since that is the row
+///    whose minor moved.
+///
+/// The stratum is not returned, exactly as for the function half:
+/// `refine_declared_arms` over an empty native list marks every arm `Asserted`, so
+/// the proof layer's all-Verified premise rule keeps these arms out of every finding
+/// by construction. An object-returning row is doubly excluded — the value domain has
+/// no object inhabitant, so [`floor_value_fact`] finds no fact to seed either.
+///
+/// [`builtin_class_supers`]: steins_catalog::builtin_class_supers
+/// [`resolve_declaration_target`]: crate::dispatch::resolve_declaration_target
+pub(crate) fn builtin_method_return_floor(
+    cx: &Cx,
+    callee: &BuiltinCallee,
+) -> Option<Vec<ContractArm>> {
+    let (declared, is_static) =
+        builtin_method_row(&callee.class, &callee.method, cx.php_target)?;
+    if callee.static_call && !is_static && !callee.inside_class {
+        return None;
+    }
+    let arms = flatten_arms(steins_contract::lower_str(declared)?);
+    refine_declared_arms(&[], arms, &|n: &str| n.to_owned())
+}
+
+/// The row a builtin `class::method` resolves to, walking the builtin hierarchy
+/// upward from `class` — the inheritance half of [`builtin_method_return_floor`],
+/// with the version gate applied at the class the row was found on.
+///
+/// Breadth-first over [`builtin_class_supers`], so the nearest declaration wins
+/// where two ancestors both carry a row (`SplFileObject::key` shadows
+/// `SplFileInfo`'s were there one). The frontier is deduplicated, which both
+/// terminates on the diamond every SPL interface makes and bounds the walk.
+///
+/// **A shadow key ends the walk with no answer.** Climbing past a class reads "no
+/// row here" as "inherit", and that reading is only sound where functionMap was
+/// *silent* about the class. Where it stated a row the miner could not carry or
+/// the engine refused, the map is saying the child's declaration differs — so
+/// [`declared_method_return_blocked`] is asked at every class on the way up, ahead
+/// of the row lookup, and a hit answers nothing at all. It is checked ahead
+/// because it is the stronger fact; the two tables are disjoint by construction,
+/// so the order cannot change which one answers, only which one is read first.
+///
+/// [`builtin_class_supers`]: steins_catalog::builtin_class_supers
+/// [`declared_method_return_blocked`]: steins_catalog::declared_method_return_blocked
+fn builtin_method_row(
+    class: &str,
+    method: &str,
+    target: Option<&steins_db::PhpTarget>,
+) -> Option<(&'static str, bool)> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut frontier = vec![class.to_owned()];
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for name in &frontier {
+            if !seen.insert(name.to_ascii_lowercase()) {
+                continue;
+            }
+            if steins_catalog::declared_method_return_blocked(name, method) {
+                return None;
+            }
+            if let Some(row) = steins_catalog::declared_method_return(name, method) {
+                // A row found and then declined by the version gate ENDS the walk
+                // rather than resuming it up the chain: the nearest declaration is
+                // the one this call reaches, and a grandparent's row for the same
+                // name is a different row, not a fallback for this one.
+                return method_target_admits(name, method, target).then_some(row);
+            }
+            next.extend(
+                steins_catalog::builtin_class_supers(name)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+        }
+        frontier = next;
+    }
+    None
+}
+
+/// The method floor's version gate (ADR-0069 §3, A11-shaped): the twin of
+/// [`floor_target_admits`], keyed on `class::method`.
+///
+/// A `Some(m)` from the change oracle says the method's declared return type last
+/// moved at minor `m`, so the mined row is known good only for a target lying wholly
+/// at or above it. An **undeclared target admits**, the row being Asserted anyway; a
+/// key the oracle does not list admits unconditionally.
+pub(crate) fn method_target_admits(
+    class: &str,
+    method: &str,
+    target: Option<&steins_db::PhpTarget>,
+) -> bool {
+    let Some(boundary) = steins_catalog::declared_method_return_changed_at(class, method) else {
+        return true;
+    };
+    match target {
+        Some(t) => t.floor >= boundary,
+        None => true,
+    }
 }
 
 /// The value-lane seed a floor arm list contributes: the single value-domain
@@ -797,5 +932,51 @@ mod return_fact_admission_tests {
         // return type never moved across the supported line.
         assert!(floor_target_admits("str_repeat", Some(&target((8, 1), None))));
         assert!(floor_target_admits("str_repeat", None));
+    }
+
+    /// The method floor's version gate (issue #673), the same shape one key
+    /// grammar over. It is unit-tested rather than fixtured because the three
+    /// version-sensitive method keys all return `static`, so none of them has an
+    /// admitted row at this pin — `the_method_table_and_its_version_oracle_are_disjoint_at_this_pin`
+    /// is the tripwire that will demand the fixture when one does.
+    #[test]
+    fn the_method_target_gate_declines_below_a_keys_change_boundary() {
+        use steins_db::{PhpTarget, PhpTargetSource};
+        let target = |floor: (u16, u16), ceiling: Option<(u16, u16)>| PhpTarget {
+            floor,
+            ceiling,
+            source: PhpTargetSource::Require,
+            raw: "test".to_owned(),
+        };
+        // `DateTime::modify`'s declared return type moved at 8.3.
+        let (c, m) = ("DateTime", "modify");
+        assert_eq!(steins_catalog::declared_method_return_changed_at(c, m), Some((8, 3)));
+        assert!(!method_target_admits(c, m, Some(&target((8, 1), Some((8, 5))))));
+        assert!(!method_target_admits(c, m, Some(&target((8, 1), None))));
+        assert!(!method_target_admits(c, m, Some(&target((8, 1), Some((8, 1))))));
+        assert!(method_target_admits(c, m, Some(&target((8, 3), Some((8, 3))))));
+        assert!(method_target_admits(c, m, Some(&target((8, 4), None))));
+        // An undeclared target admits, and so does a key the oracle does not list.
+        assert!(method_target_admits(c, m, None));
+        assert!(method_target_admits("SplFileObject", "fgets", Some(&target((8, 1), None))));
+    }
+
+    /// The inheritance walk, exercised on the table rather than through a fixture,
+    /// so a hierarchy regression names itself.
+    #[test]
+    fn the_method_row_walk_climbs_the_builtin_hierarchy_nearest_first() {
+        // Declared on the receiver's own class.
+        assert_eq!(builtin_method_row("SplFileObject", "fgets", None), Some(("string", false)));
+        // Declared on a PARENT: `SplFileObject` has no `getPath` row, `SplFileInfo`
+        // does, and the hierarchy table carries the edge (ADR-0043).
+        assert_eq!(steins_catalog::declared_method_return("SplFileObject", "getPath"), None);
+        assert_eq!(builtin_method_row("SplFileObject", "getPath", None), Some(("string", false)));
+        // Nearest-first: `SplFileObject` declares `key` itself, so the walk stops
+        // there rather than reaching any ancestor's row for the same name.
+        assert_eq!(builtin_method_row("SplFileObject", "key", None), Some(("int", false)));
+        // A class the hierarchy does not know contributes no supers and ends its
+        // branch — absence is `Unknown`, never a wrong row (ADR-0043 §3).
+        assert_eq!(builtin_method_row("NoSuchBuiltin", "getPath", None), None);
+        assert_eq!(builtin_method_row("SplFileObject", "noSuchMethodAnywhere", None), None);
     }
 }
