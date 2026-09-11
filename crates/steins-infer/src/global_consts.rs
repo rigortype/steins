@@ -122,6 +122,42 @@ impl OsFamily {
 pub(crate) const OS_PINNED_CONSTANTS: &[&str] =
     &["DIRECTORY_SEPARATOR", "PATH_SEPARATOR", "PHP_EOL", "PHP_OS_FAMILY"];
 
+/// **Every name ADR-0094 §3 answers by class** — the roster [`platform_fact`]
+/// matches on, as a list rather than as a `match`'s reachability.
+///
+/// The difference is load bearing in one place: §3's version family DECLINES when
+/// the project declares `PHP_VERSION_ID` (issue #29's discipline), and the engine
+/// still holds the name. Reading "§3 gave no answer" as "the engine does not have
+/// this name" is what let a polyfill's own `define('PHP_VERSION_ID', 70400)`
+/// answer through §4 — walking straight around the discipline that decline exists
+/// to enforce.
+///
+/// The same roster the miner refuses by (`xtask/src/mine_constants.rs`'s
+/// `PLATFORM_RULED`), and the two are disjoint from the table by construction.
+const PLATFORM_RULED: &[&str] = &[
+    // Closed host sets and the open one.
+    "PHP_EOL",
+    "DIRECTORY_SEPARATOR",
+    "PATH_SEPARATOR",
+    "PHP_OS_FAMILY",
+    "PHP_OS",
+    // The engine version, derived from `PhpTarget`.
+    "PHP_VERSION",
+    "PHP_MAJOR_VERSION",
+    "PHP_MINOR_VERSION",
+    "PHP_RELEASE_VERSION",
+    "PHP_VERSION_ID",
+    "PHP_EXTRA_VERSION",
+    // Integer width and float limits (§3.1).
+    "PHP_INT_MAX",
+    "PHP_INT_MIN",
+    "PHP_INT_SIZE",
+    "PHP_FLOAT_DIG",
+    "PHP_FLOAT_EPSILON",
+    "PHP_FLOAT_MAX",
+    "PHP_FLOAT_MIN",
+];
+
 /// The six values php-src closes `PHP_OS_FAMILY` over, in the order
 /// `Fact::OneOf` sorts them into.
 const OS_FAMILIES: &[&str] = &["BSD", "Darwin", "Linux", "Solaris", "Unknown", "Windows"];
@@ -137,31 +173,121 @@ pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)>
     // PHP's own resolution order for a constant reference, which is what decides
     // WHICH constant the name means before anything decides what it is worth.
     for candidate in const_ref_candidates(cx, r) {
-        // §4 — a same-file declaration, first: it is the constant this file's
-        // reader actually reaches, and an engine row of the same spelling would be
-        // a different constant (or a redefinition PHP itself refuses).
-        if let Some(answer) = same_file_fact(cx, &candidate) {
+        let platform = platform_fact(cx, &candidate);
+        let row = steins_catalog::engine_constant(&candidate);
+        // By the NAME and not by whether §3 produced an answer: the version family
+        // declines outright when the project declares `PHP_VERSION_ID` (issue
+        // #29's discipline), and reading that decline as "the engine does not have
+        // this name" is what let the polyfill's own literal answer.
+        if !PLATFORM_RULED.contains(&candidate.as_str()) && row.is_none() {
+            // No engine constant of this spelling, so §4's project declarations
+            // are the only thing that can answer.
+            //
+            // A same-file declaration is the constant this file's reader actually
+            // reaches. A project constant declared in ANOTHER file stops the walk
+            // (ADR-0094 §4, which defers cross-file constants to their own slice),
+            // and declining there is not caution: `namespace App;
+            // PREG_UNMATCHED_AS_NULL` with `App\PREG_UNMATCHED_AS_NULL` declared
+            // next door resolves to the PROJECT's constant, and falling through to
+            // the global fallback would report the engine's 512 for a name PHP
+            // reads as the project's own value.
+            if let Some(answer) = same_file_fact(cx, &candidate) {
+                return answer;
+            }
+            if cx.index.declares_constant(&candidate) {
+                return None;
+            }
+            continue;
+        }
+        // The engine defines this name, and PHP does not let a project take it
+        // (see [`engine_over_project`]). Answering the project's literal here is
+        // what this check used to do, and it is a wrong answer of exactly the
+        // shape ADR-0094 §2's version gate exists to avoid.
+        if let Some(answer) = engine_over_project(cx, &candidate, row.as_ref()) {
             return answer;
         }
-        // A project constant declared in ANOTHER file stops the walk (ADR-0094 §4,
-        // which defers cross-file constants to their own slice). Declining here is
-        // not caution, it is the difference between silence and a wrong answer:
-        // `namespace App; PREG_UNMATCHED_AS_NULL` with `App\PREG_UNMATCHED_AS_NULL`
-        // declared next door resolves to the PROJECT's constant, and falling
-        // through to the global fallback would report the engine's 512 for a name
-        // PHP reads as the project's own value.
-        if cx.index.declares_constant(&candidate) {
-            return None;
-        }
-        if let Some(answer) = platform_fact(cx, &candidate) {
+        // §3's classes before §2's table, because they are the constants a mined
+        // row would answer WRONGLY (with the analysis machine's host). The two
+        // rosters are disjoint by construction — the miner refuses every §3 name —
+        // so the order is documentation rather than a tie-break.
+        if let Some(answer) = platform {
             return Some(answer);
         }
-        if let Some(row) = steins_catalog::engine_constant(&candidate) {
+        if let Some(row) = row {
             return target_admits(&row, cx.php_target)
                 .then(|| (mined_fact(&row.value), Stratum::Verified));
         }
     }
     None
+}
+
+/// **What a project declaration of a name the ENGINE already has is worth**
+/// (ADR-0094 §4), or `None` when the project declares no such name and the engine
+/// answers alone.
+///
+/// PHP does not let a project take a name the engine holds. `define('SORT_REGULAR',
+/// 99)` raises `Constant SORT_REGULAR already defined` and leaves the constant at
+/// `0`; `define('PHP_EOL', 'x')` leaves it `"\n"`. So §4's same-file binding is not
+/// a shadow of the table — above the row's `since` the engine wins outright and the
+/// declaration the file carries is dead code. Reading it was how a project could
+/// walk `PHP_VERSION_ID` past issue #29's discipline by declaring it.
+///
+/// Below the row's `since` the declaration is not dead: at a minor where the engine
+/// has no constant of that name, the project's `define` is what the reader reaches.
+/// That is only decidable when the target's WHOLE minor range lies outside the
+/// row's — a range that straddles the arrival would need a union of the engine's
+/// value and the project's, and a project that defines a name PHP is about to take
+/// away does not earn one. It declines.
+///
+/// The outer `Option` says "this is the answer"; the inner one is
+/// [`global_const_fact`]'s own "no answer", so a decline here stops the candidate
+/// walk rather than falling through to the engine.
+fn engine_over_project(
+    cx: &Cx,
+    candidate: &str,
+    row: Option<&ConstRow>,
+) -> Option<Option<(Fact, Stratum)>> {
+    let same_file = same_file_fact(cx, candidate);
+    if same_file.is_none() && !cx.index.declares_constant(candidate) {
+        return None;
+    }
+    match engine_holds_the_name(row, cx.php_target) {
+        // Every minor the target spans has the engine's constant: the declaration
+        // is the dead code PHP makes it, and the engine answers over it.
+        Presence::Always => None,
+        // No minor the target spans has it, so the project's own declaration is
+        // what runs. Only a SAME-FILE one answers; a cross-file declaration is the
+        // slice §4 defers, and declines here as it does everywhere else.
+        Presence::Never => Some(same_file.unwrap_or(None)),
+        Presence::Straddles => Some(None),
+    }
+}
+
+/// Whether the engine holds a name over the target's WHOLE minor range, none of
+/// it, or part of it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Presence {
+    Always,
+    Never,
+    Straddles,
+}
+
+/// [`Presence`] for one engine name against the declared target.
+fn engine_holds_the_name(row: Option<&ConstRow>, target: Option<&PhpTarget>) -> Presence {
+    // A §3 class has no row and no arrival: the host sets, the integer width and
+    // the version family exist at every minor Steins analyzes for.
+    let (Some(row), Some(t)) = (row, target) else {
+        // An undeclared target admits, the way [`target_admits`] does: a project
+        // that says nothing about its PHP has not said it runs on the minor the
+        // row excludes.
+        return Presence::Always;
+    };
+    let below = row.since.is_some_and(|s| t.ceiling.is_some_and(|c| c < s));
+    let above = row.until.is_some_and(|u| t.floor > u);
+    if below || above {
+        return Presence::Never;
+    }
+    if target_admits(row, Some(t)) { Presence::Always } else { Presence::Straddles }
 }
 
 /// **The names a constant reference can resolve to**, in PHP's own order.

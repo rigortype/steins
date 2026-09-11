@@ -514,27 +514,33 @@ fn value_moves(
 ) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
     // The engines key their rows the way the miner reported them and the table's
     // key is normalized, so each engine is re-keyed once rather than per row.
-    let mut byminor: Vec<((u16, u16), String, BTreeMap<String, String>)> = Vec::new();
+    /// One engine's answers, re-keyed the way the table keys its rows.
+    struct Answers {
+        minor: (u16, u16),
+        version: String,
+        values: BTreeMap<String, String>,
+    }
+    let mut answers: Vec<Answers> = Vec::new();
     for e in others.iter().chain(std::iter::once(top)) {
-        let mut vals = BTreeMap::new();
+        let mut values = BTreeMap::new();
         for (n, m) in &e.mined.rows {
             let key = normalize_const_fqn(n);
             if rows.contains_key(&key) {
-                vals.insert(key, decode_value(n, &m.ty, &m.value)?);
+                values.insert(key, decode_value(n, &m.ty, &m.value)?);
             }
         }
-        byminor.push((e.minor, e.mined.php.clone(), vals));
+        answers.push(Answers { minor: e.minor, version: e.mined.php.clone(), values });
     }
 
     let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (name, row) in rows {
         let mut seen: Vec<(String, String)> = Vec::new();
-        for (minor, version, vals) in &byminor {
-            if row.since.is_some_and(|s| *minor < s) {
+        for a in &answers {
+            if row.since.is_some_and(|s| a.minor < s) {
                 continue;
             }
-            let Some(v) = vals.get(name) else { continue };
-            seen.push((version.clone(), v.clone()));
+            let Some(v) = a.values.get(name) else { continue };
+            seen.push((a.version.clone(), v.clone()));
         }
         if seen.iter().any(|(_, v)| *v != row.value) {
             out.insert(name.clone(), seen);
