@@ -26,7 +26,8 @@ From there, three clusters:
 - **Type semantics** — 0029–0033, 0035–0037, 0042–0045, 0052, 0056.
 - **Effects and throws** — 0005–0008, 0018, 0019, 0040, 0055, 0067, 0068,
   0082.
-- **Apparatus and surfaces** — 0013, 0020–0026, 0049, 0050, 0053, 0054, 0059.
+- **Apparatus and surfaces** — 0013, 0020–0026, 0049, 0050, 0053, 0054, 0059,
+  0095.
 
 Steins ADRs carry no `Status:` field. An ADR is in this directory because it was
 accepted; where implementation is still in flight, the ADR says so inline and
@@ -131,3 +132,4 @@ list in one place.
 | ADR-0092 | [Frozen generations: cross-run persistence by eager per-package artifacts, not a finer query graph](0092-frozen-generations.md) |
 | ADR-0093 | [The value domain grows one bool literal; objects are spelled in the contract lane, not the value domain](0093-object-spelling-and-bool-literal.md) |
 | ADR-0094 | [Platform constants: a generated table, a union by default, a pin by opt-in, and 64-bit integers](0094-platform-constants.md) |
+| ADR-0095 | [Triage: a report over the check stream, never a second surface](0095-triage-report-over-the-check-stream.md) |

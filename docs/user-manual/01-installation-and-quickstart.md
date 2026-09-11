@@ -63,7 +63,7 @@ this workspace, `cargo build --release -p steins-cli` (binary lands at
 `target/release/steins`) or `cargo install --path crates/steins-cli` both
 work.
 
-The binary has eight subcommands and no `--help`; run it with no arguments
+The binary has nine subcommands and no `--help`; run it with no arguments
 to see the surface:
 
 ```
@@ -74,6 +74,7 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
+       steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
        steins version | -v | --version
        steins license
 ```

@@ -42,17 +42,18 @@ usage: steins check [--format text|json|github|sarif] [--profile <name>] [--no-p
        steins effect-diff [--baseline <path>] [--set-baseline] [--format text|json] <paths...>
        steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]
        steins mcp
+       steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
        steins version | -v | --version
        steins license
 $ echo $?
 2
 ```
 
-An unrecognized subcommand names the eight that exist:
+An unrecognized subcommand names the nine that exist:
 
 ```
 $ steins lsp
-steins: unknown command `lsp` (available: check, annotate, transform, effect-diff, doctor, mcp, version, license)
+steins: unknown command `lsp` (available: check, annotate, transform, effect-diff, doctor, mcp, triage, version, license)
 $ echo $?
 2
 ```
@@ -75,10 +76,11 @@ problem". The other two codes vary by subcommand:
 | `effect-diff` | report produced, deltas or none | — | usage error, or an unreadable/unparseable baseline |
 | `doctor` | posture reported, degraded ones included | configuration contradiction | usage error |
 | `mcp` | the client closed the connection | stdin could not be read | an argument was given (it takes none) |
+| `triage` | report produced, whatever the counts | — | usage error, an unreadable or non-JSON input, or a `check` run that exited `2` |
 | `version` | always | — | — |
 | `license` | always | — | — |
 
-Two rules cut across all eight. A path argument that names nothing is a
+Two rules cut across all nine. A path argument that names nothing is a
 usage error everywhere, checked before any output, so a renamed directory
 reds the build instead of producing a clean empty report (ADR-0050 §7,
 ADR-0054 §10). And a hard stdout write failure forces `1` regardless of the
@@ -1211,6 +1213,147 @@ about the code should not be answered through it.
 when the client closes the connection.
 
 ---
+
+## `triage`
+
+```
+steins triage [--format text|json] [--input <file>|-] [--top <n>] [--profile <name>] [--no-php] [--no-cache] [--no-tolerated-effects] [--vendor-diagnostics] [--ignore-baseline] [--baseline <path>] [<paths...>]
+```
+
+Aggregates a `check --format json` document into one report: totals by
+level and layer, findings per id, the files carrying the most, the offset
+family's guard-status buckets, and a short list of hints. It is the
+measuring instrument behind the adoption flow in [profiles and
+baseline](05-profiles-and-baseline.md#a-triage-first-adoption-flow):
+measure a stage before you enable it, then judge on the numbers.
+
+Two ways in, one report. With `<paths>`, `triage` runs this binary's own
+`check --format json` over them — one analysis pass, `check`'s own code —
+and aggregates what it printed. Every flag after `--top` is handed to that
+`check` untouched, so `--profile strict` measures the `strict` surface
+exactly as `check --profile strict` would display it, and `--no-php`,
+`--no-cache`, `--ignore-baseline` and the rest mean what they mean on
+`check`. With `--input <file>` (or `--input -` for stdin), `triage` reads a
+document a previous `check` wrote and runs nothing; the `check` flags are a
+usage error there, because they would have had to shape a run that already
+happened. `--input` and `<paths>` cannot combine.
+
+`triage` is a measurement, never a gate: it exits `0` on every successful
+run, whatever it counted. The `check` it starts may exit `1` — that is a
+stream with findings in it, the normal case — and `triage` still exits `0`.
+Only a usage error, an unreadable or non-JSON input, or a `check` that
+exited `2` (an unknown profile, a path that names nothing) exits `2`, with
+`check`'s own message.
+
+The transcript below is over one file, `src/Shape.php`, which reads an
+optional shape key once unguarded and once behind `isset`:
+
+```php
+<?php
+
+declare(strict_types=1);
+
+/** @param array{host: string, port?: int} $dsn */
+function port(array $dsn): int
+{
+    return $dsn['port'];
+}
+
+/** @param array{host: string, port?: int} $dsn */
+function guarded(array $dsn): int
+{
+    return isset($dsn['port']) ? $dsn['port'] : 0;
+}
+```
+
+A bare `check` is clean here; `offset.maybe-missing` lives on the `strict`
+rung. The what-if measures that rung without enabling it:
+
+```
+$ steins triage --no-php --profile strict src
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
+triage of surface `strict`: 1 finding(s) in 1 file(s)
+
+Summary
+  by level: fail 1
+  by layer: contract 1
+  held back: vendor 0, inline ignores 0, baseline 0
+
+Distribution
+       1  offset.maybe-missing  (1 file(s), contract/fail)
+
+Hotspots (top 1 of 1 file(s))
+       1  src/Shape.php
+          1 offset.maybe-missing
+
+Offset guard status (1 offset.* finding(s))
+  unguarded                    1  [offset.maybe-missing]
+    optional-key reads no guard discharges on their path; each would be a finding on the `strict` surface
+  guarded-and-discharged    not measured
+    a discharged read leaves no finding, and the check stream carries findings only; measuring this bucket needs a check-side count of discharges
+  provably-missing             0  [offset.missing]
+    reads of a key provably absent from a proven container; on the default surface, so these are runtime warnings today
+
+Hints (advice, not findings; the exit code is 0 either way)
+  (none)
+$ echo $?
+0
+$ steins check --no-php src
+note: running as sound subset (no PHP sidecar) — findings that require executing PHP are omitted, and builtin return types come from the catalog's declarations, unverified
+$ echo $?
+0
+```
+
+The five sections, in order:
+
+- **Summary** — the finding count and the number of files carrying one,
+  split by exit level (`fail`/`warn`) and by layer; then what the run held
+  back (vendor, inline ignores, baseline), so you know the totals are of the
+  displayed surface and not of the whole debt.
+- **Distribution** — one row per id, heaviest first: the count, how many
+  files it fires in, its layer and level. Count against files is the
+  systemic-vs-localised signal: forty findings in forty files is a pattern,
+  forty in one file is an afternoon.
+- **Hotspots** — the files with the most findings, each with its per-id
+  breakdown. `--top <n>` caps the list (default 10); the heading and the
+  JSON's `files_with_findings` say how many files the cap hid.
+- **Offset guard status** — the three buckets of the offset family.
+  `provably-missing` counts `offset.missing`, on every surface.
+  `unguarded` counts `offset.maybe-missing`, which only the `strict` rung
+  admits: measured when the stream came from `strict` (or a profile that
+  extends it and fired the id), otherwise reported as *not measured* — the
+  stream names the profile but not the id set it resolved to, so a user
+  profile extending `strict` with zero fires reads as 0-or-unmeasured, and
+  the note names the run that settles it. `guarded-and-discharged` —
+  reads a guard or a `??` discharged — is *not measured* from any stream,
+  because a discharged read leaves no finding to count; the report says
+  so rather than printing a zero.
+- **Hints** — advice from a small catalogue of recognizers over the counts
+  above, each tagged with the recognizer's name: a strict what-if you have
+  not run yet, a baseline hiding debt from the totals, an id whose findings
+  are mostly in one file, optional-key reads concentrated under one
+  directory. A hint is not a finding: it names no line, enters no
+  suppression channel, and never touches the exit code.
+
+### `--format json`
+
+The document is the report's data model, serialized: the same five keys in
+the same order, plus `source` naming where the stream came from
+(`check-run` with its `paths`, or `input` with the file name) and the
+`profile` it measured. Nothing in the text rendering is computed outside
+this document, so a consumer reading `offset.buckets[].status` or
+`hints[].recognizer` sees exactly what the text reader saw:
+
+```
+$ steins triage --no-php --profile strict --format json src | jq -c '.offset.buckets[] | {name, status, count}'
+{"name":"unguarded","status":"measured","count":1}
+{"name":"guarded-and-discharged","status":"not-measured","count":null}
+{"name":"provably-missing","status":"measured","count":0}
+```
+
+Piping is the other direction too: `steins check --format json src >
+run.json` once, then `steins triage --input run.json` and `--format json`
+over the same file as often as you like, with no re-analysis.
 
 ## `version`
 

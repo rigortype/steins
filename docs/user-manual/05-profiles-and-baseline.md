@@ -318,6 +318,57 @@ Flag-by-flag detail for `--baseline`, `--set-baseline`, and
 CI-side loop — where the capture runs, what the job does with a stale count —
 is in [CI integration](06-ci.md).
 
+## A triage-first adoption flow
+
+The loop above assumes you already know which stage you want. `steins
+triage` is how you find out: it aggregates a `check --format json` stream
+into totals, a per-id distribution, per-file hotspots, the offset family's
+guard-status buckets, and a few hints — and it can do that for a surface
+you have **not** enabled, without touching `check`'s behavior or exit code.
+The flow is **measure → judge → enable → baseline**.
+
+1. **Measure the target stage.** Point `triage` at the stage you are
+   considering; `check` keeps running on whatever `steins.toml` says.
+
+   ```
+   $ steins triage --profile strict src/
+   ```
+
+   The command exits `0` whatever it counts — it is a measurement, and the
+   `check` it runs on your behalf is the shipped `check` with the flag you
+   gave it. The report's `Offset guard status` section answers the question
+   behind `strict` directly: `unguarded` is how many optional-key reads
+   `strict` would report; `provably-missing` is the proven debt you already
+   see on `default`. The bucket a stream cannot fill —
+   `guarded-and-discharged`, the reads a guard already proved safe — says
+   *not measured* rather than showing a misleading zero.
+
+2. **Judge on the shape, not the count.** Read `Distribution` against
+   `Hotspots`. An id with many findings in a few files is localised: fix
+   those files first and the count collapses before anything is frozen. An
+   id spread thin across the tree is systemic: that is what a baseline is
+   for. The hints put the obvious cases into words — a `localised-id` hint
+   names the file; an `optional-reads-concentrated` hint names the
+   directory whose optional-key reads would go away together under a
+   typed object in place of the array. Hints are advice, never findings.
+
+3. **Enable the stage** in `steins.toml` once the numbers say the surface
+   fits your code reality:
+
+   ```toml
+   [check]
+   profile = "strict"
+   ```
+
+4. **Baseline the accepted debt** with `--set-baseline` under the new
+   profile, then follow [the loop](#the-loop) above to burn it down.
+
+Re-run `triage` from time to time with `--ignore-baseline`: the report's
+`baseline` count in `held back` is what the ratchet is currently hiding
+from the totals, and the `baseline-hides-debt` hint says so whenever it is
+nonzero. Flag-by-flag detail, the JSON shape and a full transcript are in
+[the CLI reference](02-cli-reference.md#triage).
+
 ## User profiles in steins.toml
 
 Built-in stages cover the common ladder. A repo composes its own named
@@ -582,7 +633,7 @@ each one prints.
 
 ## Where to go next
 
-- **Every flag on `check` and `effect-diff`:** [the CLI
+- **Every flag on `check`, `triage` and `effect-diff`:** [the CLI
   reference](02-cli-reference.md).
 - **Every `steins.toml` key:** [configuration](03-configuration.md) —
   including the `[profile.<name>]` table this chapter selects from.

@@ -1,11 +1,12 @@
 //! The `steins` binary (ADR-0020). `check` walks `.php` files, runs the salsa
 //! pipeline, prints proof-layer diagnostics, exits 1 if any finding was
 //! reported. `annotate` reprints a file with a right-margin *proven*-fact
-//! column. `transform`, `effect-diff`, `doctor`, `version`, `license` complete it.
+//! column. `transform`, `effect-diff`, `doctor`, `triage`, `version`, `license`
+//! complete it.
 //!
 //! One file per subcommand (`check`, `annotate`, `transform`, `effect_diff`,
-//! `doctor`, `mcp`); `config` parses `steins.toml` and `project` loads the
-//! salsa project they share. Sibling modules (`doctor`, `mcp`, `render`) reach
+//! `doctor`, `mcp`, `triage`); `config` parses `steins.toml` and `project` loads
+//! the salsa project they share. Sibling modules (`doctor`, `mcp`, `render`) reach
 //! the shared helpers as `crate::X` through the re-exports below.
 
 // Output seam (issue #44), declared first: `outln!`/`out!`/`errln!` are
@@ -27,6 +28,7 @@ mod render;
 mod sarif;
 mod sha256;
 mod transform;
+mod triage;
 
 // Shared with the wasm playground (no-second-relation discipline for surface selection).
 pub(crate) use steins_infer::profile;
@@ -49,7 +51,7 @@ use check::run_check;
 use effect_diff::run_effect_diff;
 use transform::run_transform;
 
-/// The `text|json` pair `annotate`, `transform` and `effect-diff` share.
+/// The `text|json` pair `annotate`, `transform`, `effect-diff` and `triage` share.
 /// `check` uses its own [`render::CheckFormat`] instead (CI renderings, ADR-0054).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Format {
@@ -90,11 +92,12 @@ fn dispatch(args: &[String]) -> ExitCode {
         Some("effect-diff") => run_effect_diff(&args[1..]),
         Some("doctor") => doctor::run_doctor(&args[1..]),
         Some("mcp") => mcp::run_mcp(&args[1..]),
+        Some("triage") => triage::run_triage(&args[1..]),
         Some("version" | "--version" | "-v") => print_version(),
         Some("license" | "licenses") => print_license(),
         Some(other) => {
             errln!(
-                "steins: unknown command `{other}` (available: check, annotate, transform, effect-diff, doctor, mcp, version, license)"
+                "steins: unknown command `{other}` (available: check, annotate, transform, effect-diff, doctor, mcp, triage, version, license)"
             );
             ExitCode::from(2)
         }
@@ -111,6 +114,7 @@ fn dispatch(args: &[String]) -> ExitCode {
             );
             errln!("       steins doctor [--no-php] [--baseline <path>] [--format text|json] [path]");
             errln!("       steins mcp");
+            errln!("       {}", triage::USAGE);
             errln!("       steins version | -v | --version");
             errln!("       steins license");
             ExitCode::from(2)
