@@ -1004,6 +1004,26 @@ fn normalize_atom(a: &str) -> String {
     }
     let a = a.strip_prefix('\\').unwrap_or(a); // drop a leading namespace slash
     let low = a.to_ascii_lowercase();
+    // A sealed, fully positional shape: `list{…}` and `array{…}` are ONE head
+    // here (issue #648, owner ruling 2026-09-11). Steins states an `is_list`
+    // verdict PHPStan does not (issue #163), and for a sealed shape whose printed
+    // keys are exactly `0..n-1`, all required, that verdict is derivable from the
+    // printed fields — so scoring the two spellings apart measures vocabulary
+    // rather than an answer. This narrows the 2026-08-07 amendment recorded at
+    // `d4_native_list_vs_array_divergence_is_equal`, and narrows it only here:
+    // `spell_shape`, `sealed_keyword` and every output surface are untouched, so
+    // Steins still writes `list{…}` (the 2026-08-08 vocabulary ruling).
+    //
+    // The three exclusions are what keep it from laundering a different key SET:
+    // an explicit non-positional key (`array{0: int, 1: string}`), any optional
+    // member (`list{0: 'z', 1?: 'w'}` — the rows PHPStan itself spells `list`),
+    // and the empty braces (`array{}` vs `list{}`, which stay issue #172's
+    // `equal`).
+    if let Some(body) = low.strip_prefix("list{").and_then(|r| r.strip_suffix('}'))
+        && shape_body_is_positional(body)
+    {
+        return format!("array{{{body}}}");
+    }
     // Collapse the three int-range spellings onto one canonical keyword, and vice
     // versa, so `positive-int` == `int<1, max>` etc.
     match canonical_int_range(&low) {
@@ -1012,6 +1032,36 @@ fn normalize_atom(a: &str) -> String {
     }
 }
 
+/// Whether a printed sealed shape's body is **fully positional**: at least one
+/// field, every field required, and the keys exactly `0..n-1` in order.
+///
+/// This is `spell_shape`'s own `positional` predicate (`spell.rs`) read off the
+/// text it printed, which is all a harness can see. An **empty** body is not
+/// positional: `list{}` and `array{}` keep their own heads, so the ADR-0062 §6
+/// divergence they witness stays an `equal` (issue #172).
+fn shape_body_is_positional(body: &str) -> bool {
+    if body.trim().is_empty() {
+        return false;
+    }
+    split_top_level(body, b',').iter().enumerate().all(|(i, f)| match field_key(f) {
+        // No key printed: the speller drops keys only when the whole shape is
+        // positional, so a keyless field IS field `i`.
+        None => !f.trim().is_empty(),
+        // A printed key is positional only spelled exactly as its index. An
+        // optional member prints `1?`, which is not `1` — and must not be.
+        Some(key) => key.trim() == i.to_string(),
+    })
+}
+
+/// The key half of a printed shape field (`0: int` → `Some("0")`, `1?: int` →
+/// `Some("1?")`, a bare `int` → `None`), read at depth zero and outside string
+/// literals so a nested `array{a: int}` and a quoted `'17:00'` are not mistaken
+/// for one.
+fn field_key(field: &str) -> Option<&str> {
+    top_level_offsets(field, b':').first().map(|&i| &field[..i])
+}
+
+/// Map an int-range atom (either the named keyword or the `int<lo, hi>` interval)
 /// Map an int-range atom (either the named keyword or the `int<lo, hi>` interval)
 /// to one canonical spelling, so the two forms compare equal. Returns `None` for a
 /// non-int-range atom.
@@ -1071,39 +1121,55 @@ fn strip_outer_parens(s: &str) -> &str {
 /// nesting depth of `<>`, `{}`, and `()`. (Supported comparison strings carry no
 /// brackets, but the splitter stays correct for the unsupported-detector's pass.)
 fn split_union(s: &str) -> Vec<&str> {
+    split_top_level(s, b'|')
+}
+
+/// Split on every top-level `delim`, the way [`split_union`] splits on `|` — the
+/// shape-field reader (issue #648) needs the same scan for `,`.
+fn split_top_level(s: &str, delim: u8) -> Vec<&str> {
     let mut parts = Vec::new();
+    let mut start = 0usize;
+    for i in top_level_offsets(s, delim) {
+        parts.push(&s[start..i]);
+        start = i + 1;
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Byte offsets of every `delim` that is outside a `'…'` string literal and
+/// outside a `<>` / `{}` / `()` group — the one scan the union splitter, the
+/// field splitter and the key reader share. `delim` is never a grouping
+/// character, so the group arms are checked first.
+fn top_level_offsets(s: &str, delim: u8) -> Vec<usize> {
+    let mut out = Vec::new();
     let mut depth = 0i32;
     let mut in_str = false;
-    let mut start = 0usize;
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        let c = bytes[i] as char;
+        let c = bytes[i];
         if in_str {
-            if c == '\\' {
+            if c == b'\\' {
                 i += 2;
                 continue;
             }
-            if c == '\'' {
+            if c == b'\'' {
                 in_str = false;
             }
             i += 1;
             continue;
         }
         match c {
-            '\'' => in_str = true,
-            '<' | '{' | '(' => depth += 1,
-            '>' | '}' | ')' => depth -= 1,
-            '|' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
+            b'\'' => in_str = true,
+            b'<' | b'{' | b'(' => depth += 1,
+            b'>' | b'}' | b')' => depth -= 1,
+            _ if c == delim && depth == 0 => out.push(i),
             _ => {}
         }
         i += 1;
     }
-    parts.push(&s[start..]);
-    parts
+    out
 }
 
 // ----------------------------------------------------------------------------
@@ -1786,6 +1852,44 @@ mod tests {
         // The proof, spelled out: mutual Yes through the checker's own relation.
         let dirs = subsumption_directions("array{}", "list{}");
         assert!(dirs.covers && dirs.covered);
+    }
+
+    /// Issue #648 (owner ruling 2026-09-11) narrows the divergence above: for a
+    /// **sealed** shape whose printed keys are exactly `0..n-1`, all required,
+    /// `list{…}` and `array{…}` are one head. The `is_list` verdict Steins states
+    /// there (issue #163) is derivable from the printed fields, so scoring the two
+    /// spellings apart measures vocabulary rather than an answer — and it is the
+    /// scorer that moves, never `spell_shape`, so Steins still writes `list{…}`.
+    #[test]
+    fn a_sealed_positional_shape_is_one_head() {
+        assert_eq!(normalize("list{int, string}"), normalize("array{int, string}"));
+        assert_eq!(classify("array{17}", "list{17}").0, Verdict::Match);
+        assert_eq!(classify("array{1, 2}", "list{1, 2}").0, Verdict::Match);
+        // Read at depth zero and outside string literals: a nested shape's key
+        // and a quoted time literal are not this shape's keys.
+        assert_eq!(normalize("list{array{a: int}}"), normalize("array{array{a: int}}"));
+        assert_eq!(normalize("list{'17:00'}"), normalize("array{'17:00'}"));
+    }
+
+    /// …and it must not launder a genuinely different key SET. Each exclusion here
+    /// is one the 195 reachable rows depend on, or one that would break a row
+    /// PHPStan itself spells `list{…}`.
+    #[test]
+    fn a_key_set_that_is_not_a_sequence_still_differs() {
+        // The brief's own row: an explicit key set states no sequence.
+        assert_ne!(normalize("array{0: int, 1: string}"), normalize("list{int, string}"));
+        assert_ne!(classify("array{0: int, 1: string}", "list{int, string}").0, Verdict::Match);
+        // Out of order, and with a gap — neither is `0..n-1` in order.
+        assert_ne!(normalize("array{1: int, 0: string}"), normalize("list{int, string}"));
+        assert_ne!(normalize("array{0: int, 2: string}"), normalize("list{int, string}"));
+        // An OPTIONAL member keeps whichever head it was written with: the six
+        // rows PHPStan writes `list{…}` for all carry one.
+        assert_ne!(
+            normalize("list{0: string, 1?: int}"),
+            normalize("array{0: string, 1?: int}")
+        );
+        // And the empty braces stay issue #172's `equal`, pinned above.
+        assert_ne!(normalize("array{}"), normalize("list{}"));
     }
 
     /// The boundary of `equal` (issue #172): proven equality both ways, never a
