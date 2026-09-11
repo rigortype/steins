@@ -128,6 +128,18 @@ pub(crate) fn unknown_vocabulary(cx: &Cx, allow: &VocabularyAllowlist, out: &mut
         // no reason why. The refusal is what makes the reading provable: since
         // the alias never binds, the name is still an identifier that denotes
         // nothing, which is exactly what the walk above reports at the use site.
+        //
+        // **Only where the tag declares anything** (issue #668). PHPStan reads
+        // `@phpstan-type` off a class-like's docblock and nowhere else, so the
+        // same tag on a function or a method binds no alias there and none here
+        // — and a refusal is a claim about a declaration that was attempted.
+        // Reporting one where the oracle sees no declaration at all is a finding
+        // about a comment, not about the program, which is not what ADR-0091 §6
+        // is calibrated for. The use-site walk above is untouched: a hyphenated
+        // `@param` denotes nothing wherever it is written.
+        if !cx.tree().docblock_heads_a_class_like(comment.span.end) {
+            continue;
+        }
         for decl in steins_phpdoc::scan_type_aliases(&comment.text) {
             if !decl.refused {
                 continue;

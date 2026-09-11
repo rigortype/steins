@@ -533,6 +533,62 @@ impl SourceTree {
         rest.is_empty() || rest.starts_with('}') || rest.starts_with("/*")
     }
 
+    /// Whether the docblock trivium ending at `doc_end` is a **class-like's**
+    /// docblock — the declaration a `@phpstan-type` tag binds its alias to (issue #668).
+    ///
+    /// Answered from the text for the reason [`Self::docblock_adopts_nothing`] is: the
+    /// lowered [`ClassDecl`] carries a `docblock` for a class and an interface only, so a
+    /// trait's or an enum's would read as "not a class-like" and go silent, which is the
+    /// one answer a reservation ruling must not give by accident. Skipped on the way:
+    /// whitespace, `#[Attr]` groups, and the `final` / `abstract` / `readonly` modifiers,
+    /// in any order and any number, since none of them changes what is being declared.
+    ///
+    /// Crude in the same direction as its sibling and for the same reason. A `true` it
+    /// gets wrong reports where PHPStan reads nothing; a `false` it gets wrong is a
+    /// silence. It never parses, so a construct it cannot follow reads as `false`.
+    ///
+    /// [`ClassDecl`]: crate::ClassDecl
+    #[must_use]
+    pub fn docblock_heads_a_class_like(&self, doc_end: u32) -> bool {
+        let Some(mut rest) = self.text.get(doc_end as usize..) else { return false };
+        loop {
+            rest = rest.trim_start();
+            if let Some(after) = rest.strip_prefix("#[") {
+                // Nesting only, and the attribute's own arguments are never read: an
+                // unbalanced group runs to the end of the file and answers `false`.
+                let mut depth = 1u32;
+                let mut it = after.char_indices();
+                let end = loop {
+                    let Some((i, c)) = it.next() else { return false };
+                    match c {
+                        '[' => depth += 1,
+                        ']' => {
+                            depth -= 1;
+                            if depth == 0 {
+                                break i + 1;
+                            }
+                        }
+                        _ => {}
+                    }
+                };
+                rest = &after[end..];
+                continue;
+            }
+            // The whole leading word, digits included, so `class1` is a name and not
+            // the keyword plus a remainder. PHP keywords are case-insensitive.
+            let n = rest.bytes().take_while(|b| b.is_ascii_alphanumeric() || *b == b'_').count();
+            let word = &rest[..n];
+            if ["class", "interface", "trait", "enum"].iter().any(|k| word.eq_ignore_ascii_case(k))
+            {
+                return true;
+            }
+            if !["final", "abstract", "readonly"].iter().any(|k| word.eq_ignore_ascii_case(k)) {
+                return false;
+            }
+            rest = &rest[n..];
+        }
+    }
+
     /// Whether `$name` occurs anywhere in the file before `offset` — a deliberately crude
     /// textual probe, used by `phpdoc.stale-var` to ask whether a named variable plausibly
     /// exists at all (issue #186). Counts every occurrence alike (parameter, assignment

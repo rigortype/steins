@@ -263,3 +263,52 @@ fn a_hyphenated_alias_declaration_is_reported() {
         .is_empty()
     );
 }
+
+/// Where the refusal speaks (issue #668): a class-like's docblock, which is the
+/// only place PHPStan reads `@phpstan-type` at all.
+///
+/// A refusal is a claim about a *declaration that was attempted*. On a function
+/// or a method the tag declares nothing upstream and nothing here, so reporting
+/// it was a finding about a comment rather than about the program — not what
+/// ADR-0091 §6 is calibrated for. Divergence-registry entry 17 is narrowed to
+/// match.
+#[test]
+fn the_refusal_speaks_only_where_the_tag_declares_something() {
+    for head in ["class C {}", "interface C {}", "trait C {}", "enum C {}"] {
+        assert_eq!(
+            vocab(&format!("<?php\n/**\n * @phpstan-type foo-bar int\n */\n{head}\n")).len(),
+            1,
+            "a class-like declaration still reports: {head}"
+        );
+    }
+    // The modifiers and an attribute are not a different declaration.
+    for head in [
+        "final class C {}",
+        "abstract class C {}",
+        "final readonly class C {}",
+        "#[Attr(['x' => 1])] final class C {}",
+    ] {
+        assert_eq!(
+            vocab(&format!("<?php\n/**\n * @phpstan-type foo-bar int\n */\n{head}\n")).len(),
+            1,
+            "{head}"
+        );
+    }
+    // Nowhere else. The tag binds no alias on any of these, upstream or here.
+    assert!(vocab("<?php\n/**\n * @phpstan-type foo-bar int\n */\nfunction f(): void {}\n").is_empty());
+    assert!(
+        vocab(
+            "<?php\nclass C {\n/**\n * @phpstan-type foo-bar int\n */\n\
+             public function m(): void {}\n}\n"
+        )
+        .is_empty()
+    );
+    assert!(vocab("<?php\n/**\n * @phpstan-type foo-bar int\n */\n$x = 1;\n").is_empty());
+    // The *use* site is untouched by any of this: a hyphenated name in a type
+    // position denotes nothing wherever it is written.
+    assert_eq!(
+        vocab("<?php\n/** @param foo-bar $v */\nfunction f($v): void {}\n").len(),
+        1,
+        "the use-site walk still reports on a free function"
+    );
+}

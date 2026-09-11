@@ -275,6 +275,14 @@ author a name that resolves nowhere and no reason why, and the reading is
 provable for the reason the reservation is airtight — since the alias never
 binds, the name is still an identifier that denotes nothing.
 
+The declaration half speaks **on a class, interface, trait or enum docblock
+only** (issue #668), which is where PHPStan reads `@phpstan-type` at all. The
+same tag on a function or a method binds no alias upstream and binds none here,
+so a refusal there would be a claim about a declaration nobody attempted — a
+finding about a comment rather than about the program, which is not the thing
+ADR-0091 §6 is calibrated for. The use-site half is not narrowed: a hyphenated
+name in a type position denotes nothing wherever it is written.
+
 **18. An unresolvable type alias is `Opaque`, not the class its name spells.**
 Entry 12's rule, applied to the second pre-lowering rewrite (issue #472). PHPStan
 resolves an invalid `@phpstan-import-type` — an owner that is not a class, an
