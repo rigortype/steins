@@ -316,6 +316,11 @@ enum Refusal {
     ValueMoves,
 }
 
+/// A row's minor range: `(since, until)`, each absent when the engines proved no
+/// boundary there. Named because the pair is what [`range`] answers with and a
+/// bare tuple of two optional tuples reads as noise at the call site.
+type MinorRange = (Option<(u16, u16)>, Option<(u16, u16)>);
+
 /// One admitted row, as the source of record spells it.
 struct Row {
     ext: String,
@@ -480,7 +485,7 @@ fn range(
     engines: &[Engine],
     key: &str,
     ext: &str,
-) -> (Option<(u16, u16)>, Option<(u16, u16)>) {
+) -> MinorRange {
     let judges: Vec<(&Engine, bool)> = engines
         .iter()
         .filter(|e| e.judges(ext))
