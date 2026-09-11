@@ -578,8 +578,9 @@ mod tests {
     ///   value domain. `system`, `unlink` and the rest are the same call.
     ///
     /// Since issue #382 the seam refuses such a call unless every callable
-    /// position is **absent or a literal `null`** (`fold_admitted_by_shape`,
-    /// reading this crate's mined [`param_facts`] rather than the curated
+    /// position is **absent or a literal `null`** (`fold_shape_refusal` in
+    /// `steins-infer`, over this crate's [`callback_carriers`] — the mined
+    /// [`param_facts`] and the curated routes together — rather than the curated
     /// [`invocation_shape`], which has one position per row and could not
     /// express `session_set_save_handler`'s seven). Two things have to hold on
     /// this side for that gate to be reachable at all, and neither is implied by

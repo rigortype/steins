@@ -159,10 +159,11 @@ fn a_callback_carrier_never_reaches_the_runner() {
     assert!(before.engaged && before.sidecar_backed_throughout(), "got {before:?}");
 
     let d = dumps(CARRIERS_THEN_FOLDABLE, &mut folder);
-    // Neither call folded: the refused ones widen to their declared floor, and
-    // in particular neither answers the value its callback would have produced.
-    assert!(!d[0].starts_with("array{"), "a `var_dump` argument reached the runner: {}", d[0]);
-    assert!(!d[1].starts_with("array{"), "`getenv` ran inside the analysis: {}", d[1]);
+    // Neither call folded: each refused one answers exactly its declared floor.
+    // The floor is asserted by equality on purpose — a fold of `["PATH"]` renders
+    // `list{'PATH'}`, which a `starts_with("array{")` test would wave through.
+    assert_eq!(d[0], "array (asserted)", "a `var_dump` argument reached the runner");
+    assert_eq!(d[1], "array (asserted)", "`getenv` ran inside the analysis");
     // …and the engine is intact, which is the claim the dumps alone cannot make.
     assert_eq!(d[2], "'AB'", "the next fold still answers from the engine");
 
