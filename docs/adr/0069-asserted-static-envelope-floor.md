@@ -559,6 +559,24 @@ places, and each difference is forced:
   this build's extension set; a class it has *without* the method is drift, in
   the direction ADR-0014 warns about. Conflating them would hide the second
   under the first.
+- **The two silent countersigns are refusals here.** The function half admits a
+  row the engine declares no return type for, and admits one the engine declares
+  `mixed` for — everything "refines" `mixed`, so the arm-wise test passes
+  vacuously. Both are safe *there* because ADR-0056's reflected envelope is a
+  rung above the function floor at analysis time and corrects it per name. There
+  is no such rung here (see the first asymmetry below), and worse: this half
+  walks the hierarchy, so a row with no native envelope is handed to every
+  descendant on a covariance argument that a native envelope is precisely what
+  makes. So §3's own rule applies without an exception — **no countersign, no
+  row** — and the refusals are recorded by name under `[exclusions]`.
+- **A key the miner refused shadows the ancestor's row.** The walk reads "no row
+  on the child" as "inherit", which is only sound where functionMap was *silent*
+  about the child. 5,649 of the 6,606 reduced keys are not rows, so silence is
+  the rare case; where the map states a key this miner dropped or refused, it is
+  saying the child declares something of its own, and the table has no admitted
+  claim about what. The miner emits those keys — the ones whose ancestor does
+  carry a row for the same method, 25 at this pin — as a `[blocked]` table, and
+  the walk answers nothing at them rather than climbing past.
 
 **The numbers, at the same pin (`dcde2be6`), cross-checked against PHP 8.5.10:**
 
@@ -575,9 +593,24 @@ places, and each difference is forced:
 | rows on 325 classes the pinned engine does not have | 3,593 |
 | rows whose class the engine has *without* the method | 68 |
 | refused by the arm-wise countersign | 225 |
-| **admitted** | **1,033** |
-| — of which static | 84 |
-| — of which richer than a single-base envelope | 346 |
+| refused: the engine declares no return type | 67 |
+| refused: the engine declares `mixed` | 9 |
+| **admitted** | **957** |
+| — of which static | 82 |
+| — of which richer than a single-base envelope | 305 |
+| refused keys that shadow an ancestor's row (`[blocked]`) | 25 |
+
+The 76 rows the two silent countersigns take out are not a rounding error, and
+five of them were checked against the runtime one by one. `Exception::getCode`
+is `final` and untyped, so functionMap's `int` bounded nothing and the walk
+handed it to `PDOException`, whose code is the SQLSTATE **string** `"HY000"` —
+and to any subclass setting the plain untyped `$code` property to a string.
+`Iterator::key(): mixed` bounds nothing either, so `DirectoryIterator::key` read
+`string` where PHP returns `int(0)`. `PDOStatement::fetchColumn` is `mixed`, and
+its `int|string|false|null` row misses the `float` a REAL column returns on 8.1+.
+`mysqli::init` is untyped, and functionMap says it returns a `mysqli` where PHP
+returns `NULL`. Each is a row that would have made the dump surface confidently
+wrong, and none of them is the kind of wrongness a later rung corrects.
 
 The 225 refusals are the demonstration, and they are the same shape the
 function half caught one vocabulary over: `Collator::getLocale` says `string`
@@ -633,9 +666,12 @@ null guard — so the two halves of #619's carrier serve both tables. Inheritanc
 is walked at the call site rather than stored in the rows, breadth-first over
 `builtin_class_supers`: a row on `SplFileInfo::getPath` answers for an
 `SplFileObject` receiver because PHP enforces return covariance at
-class-declaration time, making the declaring class's envelope an upper bound
-under every descendant (A16). That is a membership-direction claim about the
-*result*, and needs no exactness about the receiver.
+class-declaration time, making the declaring class's **native, non-`mixed`**
+engine envelope an upper bound on every override (A16). That is a
+membership-direction claim about the *result*, and needs no exactness about the
+receiver. The qualifier is load-bearing in both directions, and is why the two
+gates above exist: an untyped or `mixed` parent bounds no override at all, and a
+child functionMap states differently is a child the argument was never about.
 
 **Two asymmetries with the function half, stated rather than left to be
 noticed.** First, there is no engine rung *above* this one: ADR-0056's reflected
