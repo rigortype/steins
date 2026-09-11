@@ -421,11 +421,12 @@ pub use crate::constants_generated::{ConstRow, ConstValue};
 /// * a constant whose value is not a property of PHP at all — a linked library's
 ///   version, a signal number, a parser-generated token ordinal.
 ///
-/// **A row never says the constant EXISTS.** Existence is a boot-surface fact
-/// and the absence family's business (ADR-0094 §5); this table says what the
-/// value is *if* the name resolves. The row's own `since`/`until` are the only
-/// version claim it makes, and the caller gates on them against the project's
-/// declared `PhpTarget`.
+/// **A row never says the constant EXISTS, and never says it does not.**
+/// Existence is a boot-surface fact and the absence family's business
+/// (ADR-0094 §5); this table says what the value is *if* the name resolves.
+/// `since` is what the value lane gates on against the project's declared
+/// `PhpTarget`; `until` is RECORDED and read by nobody — a value-less row is a
+/// departure the mined engines witnessed, not an absence oracle.
 ///
 /// The key is PHP's own identity for a constant: a leading `\` is not part of
 /// the name, namespace segments are case-insensitive, and the final segment is
@@ -441,24 +442,6 @@ pub fn engine_constant(name: &str) -> Option<ConstRow> {
         .binary_search_by(|(n, _)| (*n).cmp(key.as_str()))
         .ok()
         .map(|i| crate::constants_generated::ENGINE_CONSTANTS[i].1)
-}
-
-/// **Whether the engine had taken this constant away before `floor`** — the one
-/// question the absence family may ask this table (ADR-0094 §2 as amended by the
-/// owner's 2026-09-11 ruling, issue #718).
-///
-/// ADR-0094 §5 says the table never claims a constant IS defined, and it still
-/// does not: this answers the opposite direction. A value-less row records that
-/// the mined engines had the name and the top one no longer does, so at a target
-/// whose floor is above that `until` there is no minor where the name resolves —
-/// and `constant.undefined` may say so over an analysis host that still has it
-/// (the boot surface answers for the machine's own minor, not the project's).
-///
-/// `false` for every row without an `until`, which is every row that carries a
-/// value: a name the top engine has has not left.
-#[must_use]
-pub fn engine_constant_removed_by(name: &str, floor: (u16, u16)) -> bool {
-    engine_constant(name).is_some_and(|r| r.until.is_some_and(|until| floor > until))
 }
 
 /// How many engine constants the table carries — for the completeness tests, which

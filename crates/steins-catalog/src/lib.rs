@@ -104,7 +104,6 @@ pub use builtins::{
     ParamFacts, builtin_class_display, builtin_class_supers, builtin_exception_parent,
     builtin_throws, declared_method_return, declared_method_return_blocked,
     declared_method_return_changed_at, declared_return, declared_return_changed_at,
-    engine_constant, engine_constant_count, engine_constant_removed_by, failure_arms,
-    hierarchy_entry_count, invocation_shape, param_facts, param_facts_mined, resource_return,
-    return_fact,
+    engine_constant, engine_constant_count, failure_arms, hierarchy_entry_count,
+    invocation_shape, param_facts, param_facts_mined, resource_return, return_fact,
 };

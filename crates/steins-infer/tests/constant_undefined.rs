@@ -457,13 +457,13 @@ fn silent_on_a_real_engine_constant() {
     assert!(d.is_empty(), "{d:#?}");
 }
 
-// The value-less row leg (ADR-0094 §2 as amended 2026-09-11, issue #718).
+// The value-less rows, and the leg they are NOT (ADR-0094 §2/§5, issue #718).
 
 /// Every `constant.undefined` a project declaring `target` raises, with `boot`
 /// standing in for the analysis machine's own engine.
 ///
-/// A project-level check, unlike [`run`] above, because the leg under test reads
-/// the declared `PhpTarget` — which is a project fact and has no single-file seam.
+/// A project-level check, unlike [`run`] above, because these tests are about the
+/// declared `PhpTarget` — which is a project fact and has no single-file seam.
 fn run_under(src: &str, target: PhpTarget, boot: &mut dyn Folder) -> Vec<Diagnostic> {
     let root = GoverningRoot::new(
         PathBuf::from("/proj/composer.json"),
@@ -486,42 +486,38 @@ fn require_target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> 
     PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: raw.to_owned() }
 }
 
-/// **The one thing this id reads out of a catalog** — and it reads it in the
-/// direction ADR-0049 §1 leaves open. A value-less row says the mined engines had
-/// `MYSQLI_SET_CHARSET_DIR` through 8.3 and 8.4 does not, so a project that
-/// supports 8.4 and up has no minor where the name resolves. The analysis machine
-/// here is an 8.3-era engine that still defines it, and its `Some(true)` is an
-/// answer about the wrong minor.
+/// **The catalog is not an absence oracle in EITHER direction** (ADR-0094 §5).
 ///
-/// Delete the `engine_constant_removed_by` clause in `check_undefined_constant`
-/// and this goes silent: the boot surface's own host takes the finding away.
+/// `MYSQLI_SET_CHARSET_DIR` is a value-less row: the mined engines had it through
+/// 8.3 and 8.4 does not. A project declaring `>=8.4` therefore supports no minor
+/// that has the name — and this id still says nothing, because the boot surface
+/// it must clear is the only thing allowed to answer about existence, and this
+/// boot surface has the name.
+///
+/// That is not a gap. `absence_family_available` (issue #28) has already declined
+/// every claim from a runtime outside the declared target, so a boot surface that
+/// reaches this leg is running a minor the project supports — and a supported
+/// minor at or above 8.4 does not define the name, which is what makes it fire.
+/// A clause reading `until` here could change the outcome only where the row's
+/// `until` is WRONG, and would then manufacture a finding no engine agrees with.
 #[test]
-fn fires_on_a_constant_the_engine_removed_below_the_targets_floor() {
+fn a_value_less_row_does_not_fire_over_a_boot_surface_that_has_the_name() {
     let mut boot = Boot::with_consts(&["MYSQLI_SET_CHARSET_DIR"]);
+    let target = require_target(">=8.4", (8, 4), None);
+    let d = run_under("<?php\necho MYSQLI_SET_CHARSET_DIR;\n", target, &mut boot);
+    assert!(d.is_empty(), "existence is the boot surface's answer alone: {d:#?}");
+}
+
+/// The same row and the same target over a boot surface that agrees with the
+/// project's minors: the name is absent, every other leg is clear, and the id
+/// fires — out of the boot surface's `Some(false)` and nothing else.
+#[test]
+fn a_removed_constant_fires_over_a_boot_surface_that_lacks_it() {
+    let mut boot = Boot::ready();
     let target = require_target(">=8.4", (8, 4), None);
     let d = run_under("<?php\necho MYSQLI_SET_CHARSET_DIR;\n", target, &mut boot);
     assert_eq!(d.len(), 1, "{d:#?}");
     assert!(d[0].message.contains("undefined constant MYSQLI_SET_CHARSET_DIR"), "{}", d[0].message);
-}
-
-/// The same row, the same host, a target that still spans the minors the name
-/// lives at: the row proves nothing and the boot surface answers as it always has.
-#[test]
-fn silent_on_a_removed_constant_the_target_still_spans() {
-    let mut boot = Boot::with_consts(&["MYSQLI_SET_CHARSET_DIR"]);
-    let target = require_target(">=8.1", (8, 1), None);
-    let d = run_under("<?php\necho MYSQLI_SET_CHARSET_DIR;\n", target, &mut boot);
-    assert!(d.is_empty(), "a target spanning 8.1 reaches a minor that has it: {d:#?}");
-}
-
-/// A row with a VALUE never fires this leg, whatever the target: the name has not
-/// left, so `until` is empty and there is nothing for the clause to read.
-#[test]
-fn silent_on_a_constant_that_is_merely_version_gated() {
-    let mut boot = Boot::with_consts(&["FILTER_THROW_ON_FAILURE"]);
-    let target = require_target(">=8.5", (8, 5), None);
-    let d = run_under("<?php\necho FILTER_THROW_ON_FAILURE;\n", target, &mut boot);
-    assert!(d.is_empty(), "{d:#?}");
 }
 
 /// A project's own `define()` of a name the engine took away is what the reader

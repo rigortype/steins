@@ -1341,21 +1341,19 @@ pub(crate) fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &Nam
     }
     // Boot-surface leg (A2ii): extension constants and an already-loaded bootstrap's
     // `define()`s declare themselves here; the builtin catalog is not a presence
-    // oracle and is never consulted for one.
+    // oracle and is never consulted for one — in EITHER direction (ADR-0094 §5).
     //
-    // The one thing the catalog DOES answer is the opposite question (ADR-0094 §2
-    // as amended 2026-09-11, issue #718). A value-less row records that the mined
-    // engines had the name and the top one no longer does; at a target whose floor
-    // is above that departure, no minor the project supports has the constant. The
-    // boot surface answers for the ANALYSIS machine's minor, which may still be
-    // below the departure — so a candidate the table calls removed skips that leg
-    // rather than being silenced by a host the project does not run on. Every other
-    // leg above still applies, and a target that declares nothing declares no floor,
-    // so nothing fires without the project having said which PHP it supports.
+    // The mined table's value-less rows (issue #718) record that a constant left
+    // the engine at some minor, and it is tempting to read one here: a project
+    // whose floor is above the departure has no minor that still has the name. The
+    // reading buys nothing. The A9 leg above is issue #28's version-skew gate — it
+    // has already declined every claim from a runtime outside the declared target
+    // — so a runtime that reaches this line is inside the target, and a target
+    // whose floor is past the departure admits only runtimes past it, which report
+    // the name absent of their own accord. The only outcome such a clause could
+    // change is one where the row's `until` is WRONG, and there it manufactures a
+    // finding no engine agrees with.
     for c in &candidates {
-        if cx.php_target.is_some_and(|t| steins_catalog::engine_constant_removed_by(c, t.floor)) {
-            continue;
-        }
         match folder.boot_surface_constant(c) {
             Some(false) => {}
             Some(true) | None => return,

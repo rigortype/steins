@@ -171,12 +171,24 @@ and this ADR does not size it.
   user-constant binding (§4). The `filter_var` const-local rows and
   every transfer that matches on a constant *name* can switch to the
   value once §2 lands.
-- The absence family is untouched in the direction that matters:
-  existence stays a boot-surface fact, and the table never says a
-  constant is defined. §2's amendment adds the one reading in the other
-  direction — a value-less row is evidence that a name is *gone* above
-  its `until`, which the boot surface cannot supply because it answers
-  for the analysis machine's minor rather than the project's.
+- The absence family is untouched, in **both** directions: existence is
+  a boot-surface fact, the table never says a constant is defined, and
+  it is not consulted when one is reported absent either. §2's
+  value-less rows were drafted with a reading in the other direction —
+  a candidate whose `until` is below the project's floor skipping the
+  boot-surface leg — and it is not in the code, because it cannot change
+  a correct outcome. `absence_family_available`
+  (`crates/steins-infer/src/fold.rs`, issue #28) already declines every
+  absence claim made from a runtime outside the declared `PhpTarget`, so
+  a runtime that reaches the boot-surface leg is one the project
+  supports; if the floor is above the departure, every supported runtime
+  is past it and reports the name absent unaided. The only outcome such
+  a clause could change is one where the row's `until` is *wrong*, and
+  there it manufactures a `constant.undefined` no engine agrees with —
+  which is what a boundary between two differently-packaged builds
+  produces (§2). The `until` is therefore **recorded and not read**: it
+  is what issue #718 asked the table to know, evidence for a reader and
+  for whatever tool comes next, and no lane's oracle.
 - A host-dependent constant's default union is deliberately wider than
   any one host. A nsrt row asserting the analysis host's literal (the
   upstream fixtures assert `"\n"`) will read `subsumed`, not `match`;

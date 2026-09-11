@@ -231,8 +231,9 @@ pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)>
         }
         if let Some(row) = row {
             // A value-less row (issue #718) states a DEPARTURE and no literal, so
-            // the value lane has nothing to answer with — it is read by the
-            // absence family alone (`steins_catalog::engine_constant_removed_by`).
+            // this lane has nothing to answer with — and no other lane reads it
+            // either: `until` is recorded for a reader, never consulted as an
+            // oracle (ADR-0094 §5).
             let value = row.value?;
             return target_admits(&row, cx.php_target)
                 .then(|| (mined_fact(&value), Stratum::Verified));
