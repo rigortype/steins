@@ -628,6 +628,33 @@ mod tests {
         assert!(!foldable("array_udiff"), "a comparator at a variadic mixed tail is invisible here");
     }
 
+    /// The same claim over **every** carrier route, not only the declared one
+    /// (issue #382's shape gate, and its one shared predicate).
+    ///
+    /// The test above reads the arginfo column directly, which was the whole
+    /// rule when it was written. Four more routes see a callee now, and a
+    /// foldable name that carried one at a REQUIRED position would be a row
+    /// that folds nothing while claiming to: the seam refuses every call to it.
+    ///
+    /// Not vacuous — `array_filter` is on the list with a carrier at 1, and
+    /// that position is optional.
+    #[test]
+    fn a_foldable_name_carries_no_callee_it_cannot_be_called_without() {
+        let mut carriers = 0_usize;
+        for name in PORTABLE.iter().chain(REFUSED).chain(UNVERIFIED) {
+            let Some(facts) = param_facts(name) else { continue };
+            for carrier in crate::callback_carriers(name).positions() {
+                carriers += 1;
+                assert!(
+                    carrier.position >= facts.params_required,
+                    "{name} folds and the seam would refuse every call to it — {}",
+                    carrier.describe(name)
+                );
+            }
+        }
+        assert!(carriers > 0, "no foldable name carries a callee at all; the gate proves nothing");
+    }
+
     /// The alias rows: a second spelling of a name already on the list, and the
     /// pairing itself is the claim being pinned. If PHP ever stopped aliasing
     /// one of these the row would still be *sound* — it was probed on its own

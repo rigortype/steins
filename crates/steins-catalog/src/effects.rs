@@ -585,6 +585,219 @@ pub fn variadic_tail_is_data(name: &str) -> bool {
     }
 }
 
+/// The **Deferred `mixed` callbacks** (issue #705): a builtin that stores a
+/// userland callable for later invocation and declares that parameter `mixed`,
+/// with no [`invocation_shape`] row to say so.
+///
+/// The four mechanical routes below see a callback because something in the
+/// signature or a curated table points at it. These three are the residue: the
+/// engine reads `ob_start($cb)`, `pcntl_signal(SIGINT, $h)` and `assert($x)`
+/// under `assert.callback` as callee names, and arginfo says `mixed` — the same
+/// word it says for an ordinary value. `register_shutdown_function` is the same
+/// family and is caught, only because someone rowed it in `invocation_shape`
+/// for the effects pass. That inconsistency is what this row set removes.
+///
+/// **Not rowed in [`invocation_shape`] instead**, though the issue offers that:
+/// a row there joins the callback's effects and throws into the caller's, which
+/// is a claim about the *effect* lane that nobody has measured for these three.
+/// A carrier row claims only what is being claimed here — the position hands a
+/// name to the engine — so it is the smaller edit and the honest one.
+///
+/// `assert`'s position is the **assertion** itself, not the description.
+/// `assert.callback` names the handler in `php.ini` rather than at the call, so
+/// no position carries it; what position 0 carries is the expression whose
+/// failure runs that handler, and a fold of `assert(…)` is what would run it.
+///
+/// [`invocation_shape`]: crate::invocation_shape
+fn deferred_mixed_callback(name: &str) -> Option<usize> {
+    match name.to_ascii_lowercase().as_str() {
+        // `ob_start(mixed $callback = null, int $chunk_size = 0, int $flags = …)`.
+        "ob_start" => Some(0),
+        // `pcntl_signal(int $signal, mixed $handler, bool $restart_syscalls = true)`.
+        "pcntl_signal" => Some(1),
+        // `assert(mixed $assertion, Throwable|string|null $description = null)`.
+        "assert" => Some(0),
+        _ => None,
+    }
+}
+
+/// Which shape a callback arrives in at a parameter position — the vocabulary a
+/// decline reason names the carrying position with (issue #382).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CarrierShape {
+    /// The engine's own arginfo declares the parameter `callable`
+    /// ([`param_facts`]'s `callable` column).
+    ///
+    /// [`param_facts`]: crate::param_facts
+    Declared,
+    /// The curated [`invocation_shape`] table rows the position as the one the
+    /// builtin invokes.
+    ///
+    /// [`invocation_shape`]: crate::invocation_shape
+    Invoked,
+    /// A `mixed`-typed parameter the engine calls later — see
+    /// [`deferred_mixed_callback`].
+    DeferredMixed,
+    /// An untyped variadic tail the catalog does not argue carries data: the
+    /// `array_udiff`/`array_uintersect` comparator's hiding place.
+    UndeclaredTail,
+    /// An `array` parameter whose VALUES the engine calls
+    /// ([`callables_in_array_param`]).
+    InsideArray,
+}
+
+impl CarrierShape {
+    /// A stable spelling for a decline reason. Present tense, because each says
+    /// what the ENGINE does with the position rather than what a table records.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Declared => "declared callable",
+            Self::Invoked => "invoked callback",
+            Self::DeferredMixed => "deferred callback typed mixed",
+            Self::UndeclaredTail => "undeclared variadic tail",
+            Self::InsideArray => "array of callables",
+        }
+    }
+}
+
+/// One position of a builtin that can carry a userland callee, and how it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CallbackCarrier {
+    /// The 0-based parameter position.
+    pub position: usize,
+    /// Which of the five routes puts a callee there.
+    pub shape: CarrierShape,
+}
+
+impl CallbackCarrier {
+    /// The carrying position in words, for a decline reason.
+    ///
+    /// Names the parameter the way the engine does where the mined row has a
+    /// name for it (`$callback`), since a bare index is the one thing a reader
+    /// cannot check against the manual.
+    #[must_use]
+    pub fn describe(self, name: &str) -> String {
+        let named = crate::param_facts(name)
+            .and_then(|f| f.param_names.get(self.position).copied())
+            .map_or_else(String::new, |p| format!(" (${p})"));
+        format!(
+            "{name} carries a callee at parameter {}{named}: {}",
+            self.position,
+            self.shape.as_str()
+        )
+    }
+}
+
+/// Every position of `name` that can carry a userland callee — the **one**
+/// carrier rule, shared by the two consumers that used to derive it separately
+/// (issue #382).
+///
+/// # Why one predicate and not two
+///
+/// The by-value lane asks it because a callback's own body may reach a caller
+/// local through `global`, which is ADR-0070 §2.3's sideways route; the fold
+/// seam asks it because the analysed source names a function and the seam hands
+/// that name to a real PHP process, which calls it (ADR-0066's 2026-08-16
+/// amendment: `array_filter(["a", "b"], "var_dump")` put the callback's output
+/// on stdout ahead of the JSON-RPC reply and desynced the stream).
+///
+/// Two different hazards, one question — *can a callee arrive here* — and until
+/// this function existed each consumer answered it with its own copy of the
+/// rule. The copies had already drifted: the fold seam's copy knew nothing it
+/// should not, and the by-value copy certified `ob_start` and `pcntl_signal` as
+/// all-by-value while refusing `register_shutdown_function`, the same family
+/// (issue #705). A drift like that is invisible by construction — each copy is
+/// correct about what it can see — so the fix is that there is one copy.
+///
+/// # The five routes
+///
+/// Sound, not complete, and each route is a different *kind* of knowledge:
+///
+/// * [`CarrierShape::Declared`] — the engine's arginfo (mined, mechanical);
+/// * [`CarrierShape::Invoked`] — [`invocation_shape`] (curated for the effects
+///   pass, and the one table that already existed);
+/// * [`CarrierShape::DeferredMixed`] — [`deferred_mixed_callback`] (curated,
+///   issue #705's residue);
+/// * [`CarrierShape::UndeclaredTail`] — a `mixed` variadic tail the catalog
+///   does not argue carries data (positional, mechanical);
+/// * [`CarrierShape::InsideArray`] — [`callables_in_array_param`] (curated;
+///   nothing in a signature distinguishes `[$k => $cb]` from `[$k => $v]`).
+///
+/// A name with no mined row still answers from the three curated routes. That
+/// is deliberate: a caller which cannot see the arginfo should not conclude the
+/// name is callee-free, and the fold seam refuses an unmined name anyway.
+///
+/// [`invocation_shape`]: crate::invocation_shape
+#[must_use]
+pub fn callback_carriers(name: &str) -> CallbackCarriers {
+    let facts = crate::param_facts(name);
+    CallbackCarriers {
+        declared: facts.map_or(&[][..], |f| f.callable),
+        invoked: crate::invocation_shape(name).map(|s| s.callback_param),
+        deferred_mixed: deferred_mixed_callback(name),
+        // At most ONE variadic position exists in the mined table (arginfo has
+        // no way to spell a second), which `a_mined_row_has_at_most_one_variadic`
+        // pins — so a single position is the whole tail and not the first of
+        // several.
+        undeclared_tail: facts.filter(|_| !variadic_tail_is_data(name)).and_then(|f| {
+            f.variadic.iter().copied().find(|&p| f.params.get(p) == Some(&"mixed"))
+        }),
+        inside_array: callables_in_array_param(name),
+    }
+}
+
+/// What [`callback_carriers`] answers: the positions, by route.
+///
+/// Copy and allocation-free on purpose — [`by_value_arg`] asks this question at
+/// every certified call site, and the answer is five machine words.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CallbackCarriers {
+    /// Positions the engine's arginfo declares `callable`.
+    pub declared: &'static [usize],
+    /// The [`invocation_shape`] position, when the table rows the name.
+    ///
+    /// [`invocation_shape`]: crate::invocation_shape
+    pub invoked: Option<usize>,
+    /// The `mixed`-typed deferred callback's position (issue #705).
+    pub deferred_mixed: Option<usize>,
+    /// An untyped variadic tail nothing argues carries data.
+    pub undeclared_tail: Option<usize>,
+    /// The `array` parameter whose values are callables.
+    pub inside_array: Option<usize>,
+}
+
+impl CallbackCarriers {
+    /// Whether no route puts a callee in this name's argument list.
+    #[must_use]
+    pub fn is_empty(self) -> bool {
+        self.declared.is_empty()
+            && self.invoked.is_none()
+            && self.deferred_mixed.is_none()
+            && self.undeclared_tail.is_none()
+            && self.inside_array.is_none()
+    }
+
+    /// Every carrying position, ascending by route rather than by index: a
+    /// consumer that reports the FIRST one reports the most mechanical answer
+    /// available, which is the one a reader can check against the manual.
+    ///
+    /// A position may be named by two routes (`array_filter`'s 1 is declared
+    /// and rowed); both are yielded, since a consumer testing the argument
+    /// tests the same argument twice and a consumer reporting takes the first.
+    pub fn positions(self) -> impl Iterator<Item = CallbackCarrier> {
+        let carrier = |shape: CarrierShape| move |position| CallbackCarrier { position, shape };
+        self.declared
+            .iter()
+            .copied()
+            .map(carrier(CarrierShape::Declared))
+            .chain(self.invoked.map(carrier(CarrierShape::Invoked)))
+            .chain(self.deferred_mixed.map(carrier(CarrierShape::DeferredMixed)))
+            .chain(self.undeclared_tail.map(carrier(CarrierShape::UndeclaredTail)))
+            .chain(self.inside_array.map(carrier(CarrierShape::InsideArray)))
+    }
+}
+
 /// The **by-ref out-parameter rows** (ADR-0063 §2.3): 0-based positional
 /// indices a builtin writes through a reference parameter.
 ///
@@ -1080,18 +1293,18 @@ pub fn by_value_arg_frame(name: &str, position: usize, mined: bool) -> Option<bo
 ///   `extract`, `exec` and `parse_str` exactly where they were: their by-ref
 ///   tails are open-ended or unrowed, and a positional answer over them would
 ///   certify the very position the engine writes through.
-/// * **No parameter declared `callable`, no [`invocation_shape`] row, no
-///   [`callables_in_array_param`] row.** A builtin that invokes a userland
-///   callback re-opens the sideways route ADR-0070 §2.3 closes for a project
-///   callee with the poison flag: the callback's own body may reach a caller
-///   local through `global`, and this table says nothing about it. The
+/// * **No [`callback_carriers`] row of any shape.** A builtin that invokes a
+///   userland callback re-opens the sideways route ADR-0070 §2.3 closes for a
+///   project callee with the poison flag: the callback's own body may reach a
+///   caller local through `global`, and this table says nothing about it. The
 ///   callback-taking names Steins actually reasons about are certified by the
 ///   hand lists above, where the argument was made.
-/// * **No `mixed` variadic tail** unless [`variadic_tail_is_data`] argues it.
-///   `array_udiff(array $array, mixed ...$rest)` hides a comparator exactly
-///   there and no declared type gives it away — the one shape the `callable`
-///   column is blind to, and the same predicate the fold seam consults, so the
-///   two cannot disagree about which tails are values.
+///
+///   That predicate is the fold seam's own, and shared with it since issue
+///   #382 rather than restated here. Restating it is how this arm came to
+///   certify `ob_start` and `pcntl_signal` while refusing
+///   `register_shutdown_function` — the same Deferred family, caught only
+///   because the effects pass happened to row one of the three (issue #705).
 ///
 /// A name the mining build did not have answers `false` here and `None` there:
 /// the forgetting floor, unchanged, for every userland, vendor and unloaded
@@ -1101,12 +1314,7 @@ pub fn by_value_arg_frame(name: &str, position: usize, mined: bool) -> Option<bo
 /// [`invocation_shape`]: crate::invocation_shape
 fn mined_all_by_value(name: &str) -> bool {
     let Some(facts) = crate::param_facts(name) else { return false };
-    let hides_a_callback = !facts.callable.is_empty()
-        || crate::invocation_shape(name).is_some()
-        || callables_in_array_param(name).is_some()
-        || (!variadic_tail_is_data(name)
-            && facts.variadic.iter().any(|&i| facts.params.get(i) == Some(&"mixed")));
-    facts.by_ref.is_empty() && !hides_a_callback
+    facts.by_ref.is_empty() && callback_carriers(name).is_empty()
 }
 
 #[cfg(test)]
@@ -1994,6 +2202,85 @@ mod tests {
         // one (`sprintf`'s values are rendered BY the format string) certifies.
         assert!(super::variadic_tail_is_data("vsprintf"));
         assert_eq!(by_value_arg("sprintf", 3), Some(true));
+    }
+
+    /// Issue #705: the family the carrier rule could see only half of.
+    ///
+    /// `ob_start(mixed $callback)`, `pcntl_signal(int, mixed $handler)` and
+    /// `assert(mixed $assertion)` hand the engine a callee at a parameter
+    /// arginfo types `mixed` — the same word it uses for an ordinary value —
+    /// while `register_shutdown_function`, the same Deferred family, was caught
+    /// because the effects pass happened to row it in `invocation_shape`. Three
+    /// certified and one did not, and nothing about the *rule* distinguished
+    /// them; only which table someone had reached for.
+    ///
+    /// The asymmetry is what this pins. No wrong fact was produced by the old
+    /// answer — the callback runs at flush, signal or assertion-failure time
+    /// and the later trigger carries no read of the variable — so this is the
+    /// membership rule agreeing with its own statement rather than a fix for a
+    /// finding.
+    #[test]
+    fn the_deferred_mixed_callbacks_are_carriers_like_their_family() {
+        for f in ["ob_start", "pcntl_signal", "assert", "register_shutdown_function"] {
+            assert!(!super::mined_all_by_value(f), "{f} stores a callee for later");
+            assert!(!super::callback_carriers(f).is_empty(), "{f} carries a callee");
+        }
+        // The three are invisible to every mechanical route — which is why they
+        // needed a curated one. Each declares its callback `mixed` and nothing
+        // else in the signature gives it away.
+        for (f, position) in [("ob_start", 0), ("pcntl_signal", 1), ("assert", 0)] {
+            let facts = param_facts(f).expect("mined");
+            assert!(facts.callable.is_empty(), "{f}'s callback is not declared callable");
+            assert_eq!(facts.params[position], "mixed", "{f} types the position mixed");
+            assert_eq!(invocation_shape(f), None, "{f} has no curated invocation row");
+            assert_eq!(
+                super::callback_carriers(f).deferred_mixed,
+                Some(position),
+                "{f} carries its callee at {position}"
+            );
+        }
+        // And the certification they lose is real: the position answered
+        // `Some(true)` before the rule learned about them.
+        assert_eq!(by_value_arg("ob_start", 0), None);
+        assert_eq!(by_value_arg("pcntl_signal", 1), None);
+    }
+
+    /// [`super::callback_carriers`] reads ONE untyped variadic position, and
+    /// that is exact rather than a first-of-several: arginfo has no way to
+    /// spell a second variadic, so no mined row carries one.
+    ///
+    /// Stated as a test because it is an assumption about generated data. A
+    /// regeneration that somehow produced two would otherwise make the tail
+    /// route silently cover only the first.
+    #[test]
+    fn a_mined_row_has_at_most_one_variadic() {
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            assert!(facts.variadic.len() <= 1, "{name} declares {:?}", facts.variadic);
+        }
+    }
+
+    /// The two independent witnesses of "this position is a callback" agree
+    /// today: every [`invocation_shape`] row's position is also declared
+    /// `callable` in the engine's own arginfo.
+    ///
+    /// So the [`CarrierShape::Invoked`] route sees no name the `Declared` route
+    /// misses, and deleting it would change no verdict. It stays because the
+    /// agreement is a *finding*, not a guarantee — a curated row for a position
+    /// arginfo types `mixed` is exactly what issue #705 found three of, and the
+    /// next one lands here as a failure rather than as silent folding.
+    #[test]
+    fn the_invocation_rows_are_all_declared_callable() {
+        for (name, facts) in param_facts_generated::PARAM_FACTS {
+            let Some(shape) = invocation_shape(name) else { continue };
+            assert!(
+                facts.callable.contains(&shape.callback_param),
+                "{name} is rowed as invoking parameter {} and arginfo types it {:?}: the \
+                 `Invoked` route is now load-bearing and needs its own case in the fold \
+                 seam's `every_route_is_the_only_one_that_sees_its_name`",
+                shape.callback_param,
+                facts.params.get(shape.callback_param)
+            );
+        }
     }
 
     /// A name the mining build never had is not a by-value statement — the
