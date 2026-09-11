@@ -14,7 +14,7 @@ the semantic inventory.
 
 | Surface | ADR | Note |
 | --- | --- | --- |
-| Narrowing N5/N6 — property-chain guards, static-prop channel, structured loops | 0052 | Deferred out of v0.1.0 by owner decision; designed in full in ADR-0052 §7–8. |
+| Narrowing N5 — property-chain guards, static-prop channel | 0052 | Deferred out of v0.1.0 by owner decision; designed in full in ADR-0052 §7. N6's structured loops **landed** under ADR-0027's 2026-09 amendments instead (see [Control flow](#known-imprecision) below for what a loop still does not carry). |
 | Template scope transfer | 0051 | Templates as functions, render sites as call sites. Out of v0.1.0 scope by owner decision; promoted only if dogfooding demands it. |
 | `template-type<Subject, Owner, 'TName'>` resolution | 0032 | **Resolves on the declared side** (issue #361): a spelled parameterization of the owner, a one-level inheritance edge to it, or the template name itself is rewritten into the type it names before lowering, and judged exactly as that type is. **A `@return` whose subject is a class-level template of the receiver's class resolves too** (issue #362), off the generics carry the receiver object holds at the call site — two lookups, one level each, seeding the arms a hand-written `@return` would seed. **A subject naming the declaration's own function- or method-level `@template` resolves too** (issue #363), bound from the carry of the argument that flowed into a top-level `@param Owner<…, T, …>` (or, for `@param T $p`, from the argument's proven value) — and since #361 rewrites `template-type<Box<T>, Box, 'T'>` to `T`, the same read serves both spellings. The spelling was made recognized vocabulary first (issue #360), which is also why its owner argument is exempt from `untyped.generics` — a class-reference position, not a missing type argument. What still floors to `Opaque`: a receiver that carries nothing to read (a `$this`, static, non-exact or **declared** receiver, or one whose value carry an earlier method call swept — a registered divergence, entry 13); a **union or intersection subject**, where PHPStan unions over the subject's class names; a subject reaching the owner only through a **generic intermediate**, which is substitution rather than lookup (ADR-0032's amendment: one level, no recursion); every argument spelling outside #363's binding rule (a nested or nullable `@param`, a named or spread argument list, a by-ref or variadic parameter, two occurrences that disagree, a **bounded** template — which reads its bound instead); and the resolution does not run over `@var`/property docblocks at all, which keep the #360 floor. |
 | Derived type operators past `key-of` / `value-of` | 0089, 0090 | **The `lower_generic` roster has landed** (#473): `non-nullable<T>`, `return-type<F>`, `parameters-of<F>`, `exclude-from<T, U>` and `extract-from<T, U>` project into an existing `ContractTy` and are judged, spelled and round-tripped as the type they project to. With them, the three rules ADR-0089 fixes for the whole family: **kebab-case** naming (a hyphenated spelling is not a legal PHP identifier, so nothing can shadow it — the lowercase spelling the family was proposed in could not have done this, since PHP class names are case-insensitive); **projection over representation** (no new `ContractTy` variant, so the operator spelling does not survive lowering and `annotate` never emits one); and an **arity-blind `Opaque` floor** through `DERIVED_OPERATORS`, which also closed a live wrong-`No` — `key-of<int, int>` used to lower to `Class("key-of")` and answer a definite `No` for every non-object value. **Deferred**: `constructor-parameters-of<C>` (#474), the one operator whose operand resolves against machinery that already exists, held back because it reads the class registry and so lowers as a pre-lowering rewrite at the seam `Cx::resolve_template_types` runs at rather than in `lower_generic` — `template-type`'s declared-side precedent. And the six **shape modifiers** (ADR-0090, #475), one pair per part of ADR-0062's shape fact: `partial-of` / `required-of` on the presence axis, `unsealed-of` / `sealed-of` on the seal axis, `pick-of` / `omit-of` on the field set. All six require a `ContractTy::Shape` operand — the rule that keeps `sealed-of<array<string, int>>` from sealing a field-less `MapOf` into `array{}` and answering a confident `No` for every non-empty array it was written to describe; `pick-of` / `omit-of` additionally require a *sealed* one, since an unsealed tail re-admits the key they claim to remove. `isList` is recomputed by `ShapeFact::normalize` rather than carried, so a modified `list{…}` generally spells back as `array{…}` under divergence entry 2. **Refused, not deferred**: `Record` (denotes `array<K, V>` exactly; ADR-0030's entry 6 is the measured precedent for refusing a re-spelling), `Readonly` (PHP arrays are value types, so it denotes the same set), `InstanceType` (`class-string`'s bound is dropped at lowering by design, issue #236, so the operand carries nothing to read — and the container idiom is issue #363's argument carry), `NoInfer` (ADR-0032: no solver to steer), `ThisType` / `ThisParameterType` / `OmitThisParameter` (no `this` parameter in a PHP callable type), `Awaited` (no promise in PHP core), and the four casing intrinsics (the refined-string grid holds the predicates, issue #240; the sidecar folds the transforms). A test pins that these keep the ordinary class reading, so the absence is not read later as an oversight. **What the shape modifiers wait on**: an operand that is a *name*. Written inline, every modifier is longer than the type it projects to, so they earn their keep only over a name. ADR-0090 §7 makes issue #472 the prerequisite, and **#472 has landed**: a class-like's `@phpstan-type` / `@psalm-type` declarations are resolved where envelopes are built, so a modifier written over an alias name now has a shape operand to read (within #472's own bound — see the type-alias entry below for the positions that stay dark). **Left open**: whether an operator that provably states nothing — `omit-of` with a key the shape lacks, `non-nullable<null>` yielding `never` — should raise a `phpdoc.*` id at the contracts floor. One id or neither, in its own slice with its own fp-gate evidence. |
@@ -149,9 +149,22 @@ the refuting direction only.
 
 **Control flow** ([narrowing.md](narrowing.md)):
 
-- Loops are `Opaque` — write/read-set invalidation only, no loop-carried facts
-  (ADR-0052 N6, deferred out of v0.1.0 by owner decision).
-- `try`/`catch`/`finally` is `Opaque` for value flow (catch *matching* works).
+- Loop bodies are walked, and a loop's **exit env is discarded** (ADR-0027,
+  the 2026-09 amendments; issues #649–#653). `while`, `for`, `foreach` and
+  `do`/`while` lower to structured variants whose body is entered from an
+  iteration-count-agnostic env — every name the loop can rebind forgotten,
+  every name it cannot kept, the mutable state of every kept object swept —
+  under the header's true-side narrowing (withheld for `do`/`while`, whose
+  first iteration runs untested). `foreach` binds `$k`/`$v` from the
+  subject's element type, witnessed or declared. What the body computes
+  never reaches the code after it: bodies contribute findings, not facts,
+  and there is no fixpoint. The fall-through knows only what the sets leave
+  standing, plus — for a loop no `break`/`goto` can leave — the negated
+  header. A `for`'s `init`-only names are forgotten at the fall-through like
+  any other write; a by-reference `foreach` binds nothing (issue #677);
+  destructuring and property/offset targets stay writes alone.
+- `try`/`catch`/`finally` is `Opaque` for value flow (catch *matching* works),
+  and it is the one construct whose body the trace does not enter.
 - Reachability is decided **structurally only** (ADR-0078 §5, issue #199). Every
   statement carries a `BodyEnd` — `Terminates` / `FallsThrough` / `Unknown` —
   computed from the CST, and `body_end` folds a statement list to the same
@@ -171,10 +184,14 @@ the refuting direction only.
 - `??` refines an *array offset* in guard position (ADR-0062 S5); over any other
   operand it yields a value fact only.
 - Array shapes carry key presence, optionality and list-ness, and the
-  `isset`/`array_key_exists`/`empty`/`??` family narrows them (ADR-0062) — but a
-  write at a key Steins cannot prove widens the whole shape rather than refining
-  it, and the value side of `in_array`/`array_search` declines to project through
-  a shape at all (its answer is a multi-base union the value domain cannot spell).
+  `isset`/`array_key_exists`/`empty`/`??` family narrows them (ADR-0062). A
+  write at a key Steins cannot name (`$a[$i] = v`) **weakens** the shape
+  rather than forgetting it (Amendment J): every same-class key's slot is
+  joined with the value, the tail unsealed, list-ness re-derived, the order
+  witness dropped — so what survives is a coarser shape, never a precise one.
+  The value side of `in_array`/`array_search` declines to project through a
+  shape at all (its answer is a multi-base union the value domain cannot
+  spell).
 - `array_slice` projects through a shape (ADR-0062 Amendment B), but only as far
   as the element union, the key class and list-ness carry: it claims no size
   bound, and it never projects *positionally* from a declared shape — a key set
@@ -186,21 +203,22 @@ the refuting direction only.
   order witness now (issue #328): `array_keys` of a literal-seeded shape is the
   sequence (`list{'a', 'b'}`), and `array_values`/`array_reverse`/`array_slice`
   execute over it — while a *declared* shape still takes the key-set widening,
-  which is the answer a key set with no runtime order deserves. `array_key_exists`
-  and `isset` in **value** position are `bool`/unknown against any array fact,
-  declared or witnessed — they are implemented as guards, and the value transfer
-  is unwritten.
+  which is the answer a key set with no runtime order deserves.
 - The array transfers bind a **property-fetch subject** now (issue #610):
   `count($o->p)`, `array_is_list($o->p)` and the projections read the
   allocation-keyed heap the assignment form reads, so the two spellings cannot
-  disagree. What a property answers is therefore exactly what the walk proved
-  in-trace — a surviving construction default, or a write this scope performed.
-  A property whose only description is its declared `@var`, with no in-trace
-  value (a parameter-declared object, `$this` with no in-method write), still
-  answers nothing: the heap holds no declaration-derived property facts
-  anywhere (`seed_declared_param_object` seeds no props by design), and a rung
-  reading a declaration the plain read next door refuses would split the
-  spellings. That contract lane is its own slice, not a remainder of #610.
+  disagree. A property read with **no in-trace fact** answers its
+  **declaration** since issue #620 (ADR-0049 A20–A21): the native hint at its
+  native stratum, the `@var` at `Asserted`, through the same receiver carrier
+  the declaration-only dispatch path reads, and always underneath an in-trace
+  write. What still answers nothing, each by ruling: a **static** property
+  (ADR-0052 N5), a **hooked** one (PHP 8.4 `get`/`set`), an unrepresentable
+  hint with no `@var` (`array`, `iterable`, `mixed`, `object`, DNF), a
+  declaration found only on a **builtin** ancestor (issue #715), and a
+  receiver whose contract lane holds two or more class arms. The heap itself
+  still holds no declaration-derived property fact, and `$y = $c->x` still
+  binds `$y` nothing — assignment propagation from a declaration is
+  deliberately out, wanting its own measurement.
 
 **`settype`'s cast grid states only cells a probe measured** (issue #595). The
 statement-position write is real, and the cells it declines are the honest
@@ -217,25 +235,32 @@ widens to `int`), and an **out-of-range float value's** truncation
 numeric-string path takes). Every declined cell leaves the by-ref invalidation
 standing, so the name is forgotten exactly as it was before the row existed.
 The vocabulary the row introduced (`WrittenWhen::CallReturns` plus the
-statement-position seed) is what `array_splice` and the other by-ref writers in
-the same bucket need, and none of them carries a witness yet.
+statement-position seed) is what the by-ref array writers needed: eighteen of
+them carry a measured witness since issue #635 (ADR-0077's 2026-09-02
+amendment — the sorts, `reset`/`end`, `array_shift`/`array_pop`,
+`array_push`/`array_unshift`), and where a rule cannot state a precise
+out-state it floors to `list<T>`, `non-empty-array` or `array` rather than
+declining. `array_splice` is not among them and still invalidates.
 
-**`filter_var`'s `T|false` half has no fact to be stated in** (issue #597, the
-remainder issue #600 owns). The transfer answers the combinations the
-four-layer domain spells — every `FILTER_NULL_ON_FAILURE` outcome (`T|null`),
-`FILTER_VALIDATE_BOOL`'s plain `bool`, and the success-proven inputs whose
-failure arm vanishes — and declines the rest rather than widening it: `int|false`
-would have to become `int|bool`, which claims `true` is possible when it is not.
-That is the largest single decline in the rung, and it is a *domain* gap rather
-than a `filter_var` one. The smaller ones are the rule's own: a flags argument
-that is not a literal constant (a variable carries no proven value, and a `|`
-combination lowers to an unrepresentable operand, since the value lane models
-comparisons only), an options array carrying any key but `'flags'` (`'options'
-=> ['default' => …]` replaces the failure value outright, and `min_range` /
-`max_range` narrow a success arm the rung does not read), the array-shaping and
-string-rewriting flags, and `FILTER_THROW_ON_FAILURE` — a PHP 8.5 constant that
-deletes the failure arm and so would answer *more* than anything here, but needs
-a PHP-minor gate the rung does not carry. Two cells are declines **against**
+**`filter_var`'s `T|false` half is still declined by the rung** (issue #597).
+The transfer answers the combinations it was written for — every
+`FILTER_NULL_ON_FAILURE` outcome (`T|null`), `FILTER_VALIDATE_BOOL`'s plain
+`bool`, and the success-proven inputs whose failure arm vanishes — and
+declines the rest rather than widening it. When the rung was written,
+`int|false` had no spelling short of `int|bool`, which claims `true` is
+possible when it is not; issue #600 (ADR-0093 §2) has since given a `bool`
+arm its literal member set, so the spelling exists now, and what remains is
+re-measuring the rung over it — the rung still answers `None` for those
+cells, by the rule it was calibrated under. The smaller declines are the
+rule's own: a flags argument whose value is not proven (a declared
+`int $flags` parameter has no bits to decompose — a constant, a `|` chain of
+constants and a `?:` over them are read, issues #598 and #615), an options
+array carrying any key but `'flags'` (`'options' => ['default' => …]`
+replaces the failure value outright, and `min_range` / `max_range` narrow a
+success arm the rung does not read), the string-rewriting flags, and
+`FILTER_THROW_ON_FAILURE` — a PHP 8.5 constant that deletes the failure arm
+and so would answer *more* than anything here, but needs a PHP-minor gate the
+rung does not carry. Two cells are declines **against**
 upstream PHPStan's own fixtures, because the engine refutes them: a `float`
 input under `FILTER_VALIDATE_FLOAT` is not proven (`NAN`/`INF`/`-INF` answer
 `false`, and `-0.0` returns `+0.0`), and `FILTER_VALIDATE_DOMAIN`'s success
@@ -247,8 +272,9 @@ every call the rung could answer raises a `ValueError` instead of returning.
 
 **`sscanf`'s `%u` and the whole of `fscanf`** (issue #617). The format-shaped
 return rule answers every specifier the four-layer domain can spell and declines
-the rest, both declines being the same domain gap `filter_var` hits above.
-`%u` reinterprets a negative value as unsigned and re-renders it, so
+the rest, both declines being a union of two non-`bool` bases, which no `Fact`
+spells (ADR-0093 grew `bool`'s member set and nothing else). `%u`
+reinterprets a negative value as unsigned and re-renders it, so
 `sscanf('-8', '%u')` is the *string* `'18446744073709551608'` and the slot is
 genuinely `int|string|null` — a two-base union no shape slot states — and one
 unreadable specifier declines the whole call rather than emit a `mixed` slot.
@@ -262,6 +288,15 @@ literal subjects; and `%c` is not a one-byte non-empty string, since
 `sscanf(' ', '%c')` is `['']`. Independently, the `list($a, $b) = sscanf(…)`
 rows stay unknown — the answer is available at the call now, and reading it
 through a destructuring pattern is the separate list-destructure slice.
+
+**Constants** (ADR-0094): an engine constant answers the union of what it can
+be on any host, from a generated table, and `[runtime] os` pins the platform
+family; a same-file `const NAME = <literal>;` or `define('NAME', <literal>)`
+binds its value. What declines: a **cross-file** project constant (its value
+is an input to every file that reads it, which meets ADR-0092's package
+artifacts and name delta — a separate slice), a non-literal initializer, and
+a conditional or guarded `define`. The table's `until` column is recorded and
+never read: no absence claim is ever premised on it.
 
 **Objects** ([object-model.md](object-model.md)):
 
@@ -376,20 +411,19 @@ What is not done, and what it costs:
   ROADMAP M5 names, over its ≤2s target. Everything an edit reaches is
   proportional to the edit; what is left — capture, and the merge and
   fixpoint work that survives — scales with the universe.
-- **Nothing prunes old generations** (#529). A publish never removes what
-  it replaced, so a store grows by roughly one artifact set per
-  invocation — five edits to one file of nikic/PHP-Parser leave five
-  generations and 26 MB against 1.26 MB of source. Artifact sharing does
-  not save it: sharing needs an *unchanged* package, and the ordinary
-  first-party shape is one package. `doctor` makes the size visible; the
-  bound does not exist yet, and sweeping is entangled with the same
-  concurrency question #491 has to answer.
-- **The analysis itself is single-threaded.** Parallelism was re-scoped by
-  measurement (#490) from the generation build to `check_units`' per-file
-  loop, which is where the remaining walk cost is; the walk threads
-  `&mut dyn Folder` and `&mut Vec<Diagnostic>` throughout, so the
-  conversion is one sidecar per worker and per-file diagnostic sinks
-  merged at the end.
+- **The store is bounded at one generation, and that is the whole
+  bound** (#529 landed). A publish sweeps what it superseded and an open
+  collects what a crash left unreachable, with flock-based liveness so a
+  sweep never takes a live build (#533). What does not exist is any
+  finer policy — no size cap, no age, no keeping a second generation for
+  a quick rollback; `doctor` reports the store's size and nothing acts
+  on it.
+- **The per-file walk is parallel; the rest of a run is not.** Parallelism
+  was re-scoped by measurement (#490) from the generation build to
+  `check_units`' per-file loop and landed there (#532), one folder per
+  worker with per-file diagnostic sinks merged at the end. Capture, the
+  package merges and the fixpoints still run on one thread, and they are
+  the phases the unmet scale criterion above is about.
 - **The affected set is sound-conservative, and two of its legs are
   coarse.** A file is walked when it changed, when its footprint meets a
   name whose resolution could have moved, when it reaches a changed file

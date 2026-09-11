@@ -2,12 +2,15 @@
 
 > [!NOTE]
 > This document narrates why the effect system exists and where the idea
-> came from. As of 2026-08-25, the core model it describes — labels,
-> envelopes, propagation, interface Liskov widening, and the PHPStan
-> interop bridge below — is implemented. A handful of illustrations stay
-> forward-looking on purpose (marked "could" or "a future rule"):
-> project-specific semantic labels beyond the manifest plugin channel, and
-> connection-provenance effects. For the precise current state, see
+> came from. As of 2026-09-12, the core model it describes — labels,
+> envelopes, propagation, interface Liskov widening, the PHPStan interop
+> bridge below, and the decomposed "one bit" — is implemented, including
+> the dead-statement finding (`statement.no-effect`) and the
+> argument-dependent narrowing of `file_get_contents` and
+> `print_r(…, true)`. A handful of illustrations stay forward-looking on
+> purpose (marked "could" or "a future rule"): project-specific semantic
+> labels beyond the manifest plugin channel, and connection-provenance
+> effects. For the precise current state, see
 > [What is not implemented](type-specification/not-implemented.md).
 
 Steins started with a question: can a PHP analyzer tell us not only what value
@@ -176,8 +179,11 @@ never was an effect question.
 Labels decompose the bit. Read-shaped effects — `global.read`, `nondet.*`,
 `io.fs.read` — change nothing a caller can observe, so a call whose proven
 effects stay inside that set and whose throw set is empty is a dead statement
-when its result is unused: derivable, no annotation. `nondet.random` forbids
-collapsing two calls into one without making a bare `rand();` meaningful.
+when its result is unused: derivable, no annotation. Steins reports it as
+`statement.no-effect` — for a catalogued builtin over the literal arguments
+its catalog was calibrated on; a project callee is silent. `nondet.random`
+forbids collapsing two calls into one without making a bare `rand();`
+meaningful.
 `clearstatcache()` is `global.write` — exactly what stat-derived memory
 depends on. And `#[\NoDiscard]` shrinks to the one quadrant that genuinely
 needs a declaration: effectful calls whose result is still the point
@@ -185,7 +191,9 @@ needs a declaration: effectful calls whose result is still the point
 [the interop spec](type-specification/phpdoc-effects-interop.md), and the
 argument-dependent narrowing that resolves the `file_get_contents` case is
 implemented: a literal `'/config'` is `io.fs.read`; an unprovable target
-stays `io`.
+stays `io`. The same narrowing runs on the return-mode dumpers:
+`print_r($x, true)` and `var_export($x, true)` write to no output channel,
+so they no longer break a purity envelope.
 
 ## Transport facts and semantic facts
 

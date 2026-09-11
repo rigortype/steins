@@ -287,8 +287,12 @@ section above is exactly why).
 Recorded honestly — each of these costs true positives, never
 false ones, because an unknown widens to silence:
 
-- **Loops** are opaque for flow: no loop-carried facts yet, only
-  a conservative "these variables may have changed."
+- **Loops** are walked inside but carry nothing out: a body is
+  checked under its header's narrowing (a `do`/`while` body is not,
+  since its first pass runs before the test), yet what the body
+  computes never reaches the statement after the loop — only a
+  conservative "these variables may have changed", plus the
+  header's negation when nothing can `break` out.
 - **`try`/`catch`/`finally`** control flow is opaque for value
   narrowing (catch *matching* against declared types still works).
 - **Property chains as guard operands** — one level of property

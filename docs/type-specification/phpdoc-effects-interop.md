@@ -267,7 +267,9 @@ statement rules and the must-use question. Read-shaped effects —
 that declines to count atime) — change nothing a caller can observe, so a
 call whose proven effects stay inside that set, and whose throw set is
 empty, is a **dead statement** when its result is discarded: derivable, no
-annotation needed. Effects outside the set make a discarded call legitimate
+annotation needed — and reported as `statement.no-effect` (ADR-0096), for a
+catalogued builtin over the literal arguments the catalog was calibrated on.
+Effects outside the set make a discarded call legitimate
 by default — it was called *for* the effect — and a must-use declaration
 (PHP 8.5's `#[\NoDiscard]`) is then the opt-in for the one quadrant that
 genuinely needs declaring: effectful calls whose result is still the point

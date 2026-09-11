@@ -347,11 +347,18 @@ be visible to callers this scope cannot see.
 ## Not implemented
 
 Recorded honestly; each costs true positives, never false positives, because an
-unknown widens to silence. The first three are ADR-0052's N5/N6 slices,
-**deferred out of v0.1.0 by owner decision** — designed in full, no code.
+unknown widens to silence. The second is ADR-0052's N5 slice, **deferred out
+of v0.1.0 by owner decision** — designed in full, no code.
 
-- **Loops as anything but `Opaque`** (N6). No structured loop walk, no
-  loop-carried facts; only the write/read-set invalidation above.
+- **Loop-carried facts out of a loop** (N6's remainder). Loop bodies are
+  walked now (ADR-0027's 2026-09 amendments): each body is entered from an
+  env in which every name the loop can rebind is forgotten and every other
+  name kept, narrowed by the header — `do`/`while` excepted — and `foreach`
+  binds its targets from the subject's element type. What a body computes
+  still never reaches the statement after the loop: the exit env is
+  discarded, there is no fixpoint, and the fall-through knows only what the
+  write set leaves standing plus, for a loop no jump can leave, the negated
+  header.
 - **Property chains as guard operands and static properties as a fact lane**
   (N5). One level of property access is modeled
   ([object-model.md](object-model.md)); chained lvalues stay `Barrier`.
