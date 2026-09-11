@@ -567,6 +567,32 @@ fn a_range_bound_is_not_a_class_name_to_qualify() {
     assert_eq!(param_count(src), 2, "-1 is below `int<1, max>` and 1 above `int<min, -1>`");
 }
 
+#[test]
+fn an_imported_bodys_const_fetch_names_the_owners_class() {
+    // Issue #665's acceptance criterion, at the one node the identifier walk
+    // did not reach: the class of a const fetch. `key-of<Geo::MAP>` written in
+    // `Vendor` resolves its `Geo` where the operand is read
+    // (`const_operand_shape`), so left relative it found the importer's
+    // `App\Geo::MAP = ['b' => 2]` and convicted `'a'`, the key the owner's map
+    // has. PHPStan dumps `'a'` and accepts.
+    let src = "<?php\nnamespace Vendor;\n\
+        /**\n * @phpstan-type Ko key-of<Geo::MAP>\n * @phpstan-type Vo value-of<Geo::MAP>\n */\n\
+        class Geo { const MAP = ['a' => 1]; }\n";
+    let user = "namespace App;\nclass Geo { const MAP = ['b' => 2]; }\n\
+        /**\n * @phpstan-import-type Ko from \\Vendor\\Geo\n\
+         * @phpstan-import-type Vo from \\Vendor\\Geo\n */\nclass Probe {\n\
+        /** @param Ko $v */\n\
+        public function ko($v): void {}\n\
+        /** @param Vo $v */\n\
+        public function vo($v): void {}\n}\n\
+        $p = new Probe();\n";
+    let with = |calls: &str| format!("{src}{user}{calls}");
+    assert_eq!(param_count(&with("$p->ko('a');\n$p->vo(1);\n")), 0, "the owner's key and value");
+    // Not a floor: the owner's map is what judges, so the importer's own key is
+    // the one rejected.
+    assert_eq!(param_count(&with("$p->ko('b');\n$p->vo(2);\n")), 2, "the importer's key and value");
+}
+
 // 5. What stays where it was.
 
 #[test]

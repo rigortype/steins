@@ -1083,8 +1083,8 @@ impl<'a> Cx<'a> {
     /// qualified is how a node with nowhere to keep a scope says the same thing,
     /// and an unknown class is still held silent by `Cx::is_known_class`'s valve.
     ///
-    /// One name is not vocabulary by `is_type_vocabulary`'s catch-all and is
-    /// still not a class where it stands:
+    /// Two names are not vocabulary by `is_type_vocabulary`'s catch-all and are
+    /// still not classes where they stand:
     ///
     /// - `min`/`max` in the **bound position** of `int<…>` (issue #665). Upstream
     ///   reads them there by spelling (`TypeNodeResolver`: `->name === 'min'`),
@@ -1093,6 +1093,12 @@ impl<'a> Cx<'a> {
     ///   position: a class literally named `max` anywhere else is qualified like
     ///   any other, and inside `int<…>` upstream would not read it as a class
     ///   either.
+    /// - The class of a **const fetch** (`Geo::MAP` in `key-of<Geo::MAP>`, or
+    ///   bare as a type), issue #665's acceptance criterion. It is a class name
+    ///   written against the owner's scope like any identifier, and it is
+    ///   re-resolved where the body lands (`const_operand_shape` calls
+    ///   `resolve_pclass` at the use site), so left relative it found the
+    ///   importer's `App\Geo::MAP` instead of the owner's `Vendor\Geo::MAP`.
     fn qualify_class_names(&self, ty: &mut PType, efile: usize, eoff: u32) {
         let qualify = |name: &mut String| {
             if name.starts_with('\\') || steins_contract::is_type_vocabulary(name) {
@@ -1101,10 +1107,10 @@ impl<'a> Cx<'a> {
             let fqn = self.resolve_pclass(efile, eoff, name);
             *name = format!("\\{}", fqn.trim_start_matches('\\'));
         };
-        // The names this node itself carries: an identifier, and a generic's base.
-        // A callable's identifier (`Closure`) is deliberately left alone — it names
-        // the callable vocabulary the contract lane matches on, not a class the
-        // edge's file could re-spell.
+        // The names this node itself carries: an identifier, a generic's base,
+        // and a const fetch's class. A callable's identifier (`Closure`) is
+        // deliberately left alone — it names the callable vocabulary the
+        // contract lane matches on, not a class the edge's file could re-spell.
         match &mut ty.kind {
             PKind::Identifier(name) => qualify(name),
             PKind::Generic { base, args } => {
@@ -1118,6 +1124,8 @@ impl<'a> Cx<'a> {
                     return;
                 }
             }
+            // An empty class is a bare `CONST`, which names no class at all.
+            PKind::Const(ConstExpr::Fetch { class, .. }) if !class.is_empty() => qualify(class),
             _ => {}
         }
         for_each_child_type_mut(ty, &mut |child| self.qualify_class_names(child, efile, eoff));
