@@ -146,7 +146,13 @@ use crate::names::{PackageName, SectionName};
 /// decodes: a schema-19 file records a bare `: array` as an unrepresentable hint
 /// that refuses the return summary outright, so replaying one would answer the
 /// arm floor for every call this binary now bounds by `array`.
-/// `21` is the return-mode output narrowing (issue #352), and it is a
+/// `21` carries two slices, and the stricter of the two decides its kind. The
+/// discarded-call family (ADR-0096, issue #320) grows `Stmt` a `value_position`
+/// field, appended last, and the wire codec reads a struct's fields positionally
+/// — so a schema-20 `Stmt`'s trailing bytes would be read where the new field is.
+/// That makes it a **misdecode** bump of schema 16's kind on its own.
+///
+/// The other half is the return-mode output narrowing (issue #352), and it is a
 /// **meaning** bump of schema 18's kind rather than a misdecode one. `CallTarget`
 /// grows a `Bool` variant appended after the last, so no existing index moves and
 /// every schema-20 `ConstArgs` still decodes exactly as it was written. What

@@ -470,6 +470,7 @@ fn build_hook_expr_scope(
             // an arrow-bodied `get` can never be a `type.return-missing` site.
             end: BodyEnd::Terminates,
             has_terminator: true,
+            value_position: false,
         },
         HookKind::Set => Stmt {
             span: to_span(expr.span()),
@@ -1237,6 +1238,7 @@ fn build_closure_scope_from_arrow(
         // site, no matter what it declares (ADR-0078, issue #199).
         end: BodyEnd::Terminates,
         has_terminator: true,
+        value_position: false,
     };
     let mut opaque = Vec::new();
     scan_opaque(&Node::Expression(af.expression), &mut opaque, false);

@@ -6,4 +6,4 @@ function width(int $w): int {
 
 $x = $_GET['w'];
 width($x);
-strlen("abc");
+$r = strlen("abc");

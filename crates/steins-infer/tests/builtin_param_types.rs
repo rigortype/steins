@@ -158,13 +158,14 @@ fn findings(src: &str) -> Vec<Diagnostic> {
     findings_with(src, &mut Mock::sidecar())
 }
 
-/// The ids a fixture emits, `untyped.*` excluded — these sources declare bare
-/// signatures on purpose and a contract-layer id on a missing type is not this
-/// judgment speaking.
+/// The ids a fixture emits, `untyped.*` and `statement.no-effect` excluded —
+/// these sources declare bare signatures on purpose and write their builtin call
+/// as a bare statement on purpose, and neither a contract-layer id on a missing
+/// type nor ADR-0096's discarded-call id is this judgment speaking.
 fn ids(src: &str) -> Vec<String> {
     findings(src)
         .into_iter()
-        .filter(|d| !d.id.starts_with("untyped."))
+        .filter(|d| !d.id.starts_with("untyped.") && d.id != "statement.no-effect")
         .map(|d| d.id.to_owned())
         .collect()
 }
@@ -402,7 +403,7 @@ fn userland_arity_still_reports_beside_the_new_arm() {
     let src = strict("function g(int $a, int $b): void {}\ng(1);\nstrlen('a');\n");
     let ds: Vec<String> = findings_with(&src, &mut Mock::booted())
         .into_iter()
-        .filter(|d| !d.id.starts_with("untyped."))
+        .filter(|d| !d.id.starts_with("untyped.") && d.id != "statement.no-effect")
         .map(|d| d.id.to_owned())
         .collect();
     assert_eq!(ds, vec!["call.too-few-arguments"]);
@@ -456,8 +457,12 @@ fn steins_errors(mode: &str, function: &str, literal: &str) -> bool {
         coercive(&format!("{function}({literal});\n"))
     };
     let ds = findings(&src);
-    let other: Vec<&Diagnostic> =
-        ds.iter().filter(|d| d.id != ID && !d.id.starts_with("untyped.")).collect();
+    // `statement.no-effect` (ADR-0096) is what a grid cell IS — a bare call with
+    // its result discarded — and not what the cell measures.
+    let other: Vec<&Diagnostic> = ds
+        .iter()
+        .filter(|d| d.id != ID && !d.id.starts_with("untyped.") && d.id != "statement.no-effect")
+        .collect();
     assert!(other.is_empty(), "the grid cell emitted an unrelated finding: {other:?}");
     ds.iter().any(|d| d.id == ID)
 }

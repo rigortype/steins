@@ -94,7 +94,8 @@ fn non_literal_and_unknown_are_silent() {
     // A value from an unknown source is unprovable, so it stays silent even under strict.
     assert_eq!(n(&format!("{STRICT_INT}$x = getInput();\nwidth($x);")), 0, "unknown source silent");
     assert_eq!(n(&format!("{STRICT_INT}unknownFunc(\"abc\");")), 0, "unknown fn silent");
-    assert_eq!(n("<?php strlen(\"abc\");"), 0, "builtin not in file silent");
+    // The result is used, or the bare call is ADR-0096's own finding.
+    assert_eq!(n("<?php $n = strlen(\"abc\");"), 0, "builtin not in file silent");
     // spread / named args are skipped (positional mapping unreliable).
     assert_eq!(n(&format!("{STRICT_INT}$a=[1];\nwidth(...$a);")), 0, "spread silent");
 }

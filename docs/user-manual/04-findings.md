@@ -146,11 +146,11 @@ is the authoritative answer for a given binary — two lines out of its
 ```
 $ steins doctor --no-php .
   active profile: `default` (from built-in default)
-  surface: layers [mechanics, proof], 47 checked id(s)
+  surface: layers [mechanics, proof], 48 checked id(s)
 ```
 
-Today that count runs 47 ids at `default`, 48 at `throws-direct`, 63 at
-`contracts`, 69 at `strict` and 64 at `pedantic`. The profiles, the baseline
+Today that count runs 48 ids at `default`, 49 at `throws-direct`, 66 at
+`contracts`, 74 at `strict` and 67 at `pedantic`. The profiles, the baseline
 ratchet that makes raising one survivable, and user-defined profiles all live in
 [chapter 5](05-profiles-and-baseline.md). The normative rules for layers,
 facets, and suppression are in
@@ -164,12 +164,12 @@ facets, and suppression are in
 
 ## The catalogue
 
-The registry holds **78 ids**, 77 of them with a live emitter. It is a closed
+The registry holds **79 ids**, 78 of them with a live emitter. It is a closed
 set bound by a totality test, so an id that reaches your terminal is in it
 and an id outside it cannot be emitted (ADR-0022). Each id below is shown
 with the PHP that triggers it and the transcript it produces.
 
-**The catalogue covers eleven families and is behind the registry.** v0.1.4
+**The catalogue covers twelve families and is behind the registry.** v0.1.4
 landed a large port wave — `property.*`, `variable.*`, `constant.*`,
 `class-const.*`, `override.*`, `string.*`, `preg.*`, `array.*`, `closure.*`
 and `syntax.*` — and those families have no section here yet. `steins doctor`
@@ -976,6 +976,87 @@ A bare `steins check` prints neither: enabling envelope enforcement is what
 turns on the check that keeps enforcement honest. Being contract layer, it is
 also suppressable — `@steins-ignore effect.interop-unknown-label`, or a
 baseline entry — which is what a codebase halfway through a rename needs.
+
+### `statement.*` — a statement that does nothing
+
+One id, proof layer, on the default surface.
+
+**`statement.no-effect`** reports a call written as a statement whose result is
+unused and whose callee, *at that call*, is proven to do nothing anyone can
+observe. The proof, not the name, is what fires it — there is no curated list
+of "side-effect-free functions" anywhere in Steins — and the things that must
+hold are spelled out in
+[ADR-0096](../adr/0096-discardable-effects-and-dead-statements.md): the callee
+is one of PHP's own functions with an effect summary the catalog has, every
+effect it proves is a discardable read (`global.read`, `nondet.random`,
+`nondet.time`), it has no throw row, and every argument is a literal of exactly
+the type the parameter declares.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+function summarize(string $line): int
+{
+    strlen('x');
+    rand();
+
+    return strlen($line);
+}
+```
+
+```
+$ steins check src/summarize.php
+src/summarize.php:7:5: error[statement.no-effect]: `strlen()` has no effect anything can observe and its result is unused — the statement does nothing
+src/summarize.php:8:5: error[statement.no-effect]: `rand()` has no effect anything can observe and its result is unused — the statement does nothing
+```
+
+`rand();` is the line worth looking at. It is *impure* — it advances the random
+number generator — so a tool that gates this family on a per-function
+"has side effects" boolean must stay silent on it. Steins knows *which* effect
+it is, and advancing the RNG and then throwing the number away is dead code all
+the same.
+
+The literal-argument bar is the other line worth looking at. `strlen('x');`
+reports and `strlen($line);` does not, and the difference is not caution: the
+catalog knows `strlen` is pure *given the arguments it accepts*, and `$line`
+could be anything — an object with a `__toString` that logs, say. A literal
+is exactly what it looks like, so what the catalog says about the name is what
+happens at the call.
+
+Shapes that are silent, each for a reason you can check:
+
+- **A throwing callee.** `random_int(1, 10);` can raise a `ValueError`, and a
+  bare call may be exactly how a program asserts something — with the throw as
+  the result. Steins reads the callee's throw row, so this is answered per
+  function rather than by a list of names that look like assertions. The row is
+  per name: `str_repeat('a', 3);` is silent because `str_repeat` can throw on a
+  negative count, not because that call does.
+- **An argument that is not a literal, or not exactly of the declared type.**
+  `strlen($s);`, `strlen(PHP_EOL);`, `array_filter($paths, 'unlink');`,
+  `json_encode($m, JSON_THROW_ON_ERROR);` and `count($countable);` are all
+  silent, and so are `strlen(null);` and `array_merge([], 'string');` in either
+  `strict_types` mode — a coercion, a deprecation or a `TypeError` is something
+  the statement observably does.
+- **A call another check has already proven throws.** A `type.argument-mismatch`
+  on the line is the finding; `statement.no-effect` never fires beside it.
+- **A callee it cannot see all of.** `ob_start();` carries no effect colour at
+  all, and unknown effects are not absent effects. A few catalogued-pure names
+  are refused for a reason of the same kind: a literal call to `json_encode`,
+  `preg_split`, `bindec`, `trim` or `idate` can still raise a warning or write
+  engine state that no catalog row records, and `implode`, `join`, `strtr` and
+  `substr_replace` can throw a `TypeError` on a shape their declared parameter
+  types admit. An array literal counts as a literal only where the parameter
+  is declared `array`, so `strval([1]);` — a warning — is silent too.
+- **A call that mutates.** `sort($rows);` is written for what it does to
+  `$rows`, and `fgets($handle);` advances the stream — both are excluded from
+  the discardable set on purpose.
+- **A method call, and a call to your own code.** `$repo->save($x);` and
+  `myHelper($x);` are both out of scope in this release.
+
+Being proof layer it is red on sight, and like every proof id it is
+suppressable — `@steins-ignore statement.no-effect`, or a baseline entry.
 
 ### `untyped.*` — the type declarations you have not written yet
 

@@ -204,8 +204,11 @@ fn a_declared_only_call_refuses_because_a_cap_is_not_a_proof() {
 #[test]
 fn a_frame_sensitive_builtin_refuses() {
     // `func_get_args()` answers about the *frame* it's written in; an arrow fn changes that.
+    // Wrapped in `implode`, a pure name with no throw row: `count` carries a
+    // `ValueError` row since issue #320, and the throw bar refuses one step
+    // before the frame question is reached.
     let src = with_proven_subject(
-        "    foreach ($xs as $x) {\n        $out[] = count(func_get_args());\n    }",
+        "    foreach ($xs as $x) {\n        $out[] = implode(',', func_get_args());\n    }",
     );
     assert_eq!(refusal_for(&src), REASON_BODY_CALL_UNRESOLVED);
 }

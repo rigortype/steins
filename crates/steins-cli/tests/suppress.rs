@@ -220,10 +220,11 @@ fn editing_the_flagged_line_resurfaces_and_marks_stale() {
 #[test]
 fn duplicate_findings_and_entries_match_one_for_one() {
     let dir = workdir("dup");
-    // Two `width("abc")` calls with identical neighborhoods (`strlen("x");`
+    // Two `width("abc")` calls with identical neighborhoods (`$f = strlen("x");`
     // filler each side) hash identically → two identical baseline lines.
-    // Filler must be a resident builtin, not undefined (self-emits `call.undefined-function`).
-    let src = "<?php\nfunction width(int $w): int { return $w; }\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\nwidth(\"abc\");\nstrlen(\"x\");\n";
+    // Filler must be a resident builtin, not undefined (self-emits `call.undefined-function`),
+    // and its result must be used, or the bare call is itself a `statement.no-effect`.
+    let src = "<?php\nfunction width(int $w): int { return $w; }\n$f = strlen(\"x\");\nwidth(\"abc\");\n$f = strlen(\"x\");\nwidth(\"abc\");\n$f = strlen(\"x\");\n";
     write(&dir, "a.php", src);
     assert_eq!(run_in(&dir, &["check", "--set-baseline", "a.php"]).code, 0);
 

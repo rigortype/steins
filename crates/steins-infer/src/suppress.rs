@@ -34,7 +34,8 @@ use crate::{
     PHPDOC_MAYBE_RETURN_MISMATCH_ID, TYPE_MAYBE_RETURN_MISMATCH_ID,
     PHPDOC_PROP_MISMATCH_ID, PHPDOC_UNDEFINED_METHOD_ID, PREG_INVALID_PATTERN_ID, PROP_MISMATCH_ID,
     READONLY_REASSIGNED_ID,
-    RETURN_ID, RETURN_MISMATCH_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID, UNKNOWN_LABEL_ID,
+    RETURN_ID, RETURN_MISMATCH_ID, STATEMENT_NO_EFFECT_ID, THROW_LISKOV_ID, THROW_UNDECLARED_ID,
+    UNKNOWN_LABEL_ID,
 };
 // string context (ADR-0078, issue #193)
 use crate::{STRING_ARRAY_CONVERSION_ID, STRING_NON_STRINGABLE_ID};
@@ -341,6 +342,13 @@ pub const DIAGNOSTIC_REGISTRY: &[(&str, Layer, Floor)] = &[
     // bucket takes it by derivation with no list to edit; the all-arms-rejected
     // verdict is not built here either.
     (TYPE_MAYBE_RETURN_MISMATCH_ID, Layer::Proof, Floor::Strict),
+    // the discarded-call family (ADR-0096, issue #320): a statement-position call
+    // proven to do nothing. `Layer::Proof` because every leg of the predicate is a
+    // proof off the same proven lane the envelope check reads — an unresolved
+    // callee, a `…?`-tainted summary and a non-empty throw set are each silence —
+    // and `Floor::Default` because a definite claim that established premises make
+    // belongs on the surface a bare `steins check` shows.
+    (STATEMENT_NO_EFFECT_ID, Layer::Proof, Floor::Default),
     // contract — declared-contract acceptance (increase tripwires).
     (PARAM_MISMATCH_ID, Layer::Contract, Floor::Contracts),
     // Sentinel parameter (ADR-0088 §4, issue #428): the `never`-declared carve-out
