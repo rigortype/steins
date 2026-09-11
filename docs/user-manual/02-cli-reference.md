@@ -1324,10 +1324,10 @@ The five sections, in order:
   extends it and fired the id), otherwise reported as *not measured* — the
   stream names the profile but not the id set it resolved to, so a user
   profile extending `strict` with zero fires reads as 0-or-unmeasured, and
-  the note names the run that settles it. `guarded-and-discharged` — reads a guard
-  or a `??` discharged — is *not measured* from any stream, because a
-  discharged read leaves no finding to count; the report says so rather
-  than printing a zero.
+  the note names the run that settles it. `guarded-and-discharged` —
+  reads a guard or a `??` discharged — is *not measured* from any stream,
+  because a discharged read leaves no finding to count; the report says
+  so rather than printing a zero.
 - **Hints** — advice from a small catalogue of recognizers over the counts
   above, each tagged with the recognizer's name: a strict what-if you have
   not run yet, a baseline hiding debt from the totals, an id whose findings
