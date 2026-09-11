@@ -191,7 +191,7 @@ fn builtin_method_arms(
 /// carrier is itself `Asserted`, however native the return hint was. A `Verified`
 /// receiver leaves the list untouched, which is every call the dispatch resolver
 /// already answered.
-fn demote_arms(mut arms: Vec<ContractArm>, stratum: Stratum) -> Vec<ContractArm> {
+pub(crate) fn demote_arms(mut arms: Vec<ContractArm>, stratum: Stratum) -> Vec<ContractArm> {
     if stratum == Stratum::Asserted {
         for a in &mut arms {
             a.stratum = Stratum::Asserted;

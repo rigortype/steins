@@ -474,8 +474,10 @@ function f(int $n): void {{
     );
     assert_eq!(
         dumps(&in_while),
-        vec!["9: dumped type: unknown".to_owned()],
-        "the loop body reads nothing about it — `bump()` runs before the next entry"
+        vec!["9: dumped type: int".to_owned()],
+        "the loop body reads no VALUE about it — `bump()` runs before the next entry, \
+         so the written `7` is gone and what is left is the property's declared type \
+         (issue #620), which no iteration can invalidate"
     );
     assert_eq!(
         undefined_method_lines(&in_while),

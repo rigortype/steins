@@ -446,13 +446,21 @@ fn dump_of_promoted_prop_renders_the_value() {
 }
 
 #[test]
-fn dump_of_prop_after_escape_is_unknown() {
-    // The object escapes to an unknown call, sweeping its non-readonly props; the
-    // dump (read through an alias that keeps the binding) honestly renders unknown.
-    // Passing `$h` itself would also drop `$h`'s binding, so the alias isolates it.
+fn dump_of_prop_after_escape_falls_to_the_declaration() {
+    // The object escapes to an unknown call, sweeping its non-readonly props, so
+    // the written `7` is gone — read through an alias that keeps the binding, since
+    // passing `$h` itself would drop `$h`'s binding too. What the dump renders is
+    // the property's DECLARED type (issue #620), which the sweep cannot invalidate:
+    // whatever the unknown callee stored, PHP type-checked it against `?int`.
     let src = "<?php class H { public ?int $p = null; } \
         $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
-    assert_eq!(one_type(src), "dumped type: unknown");
+    assert_eq!(one_type(src), "dumped type: int|null");
+
+    // The same escape over an UNDECLARED property, where there is no floor to fall
+    // to — the honest unknown, unchanged.
+    let untyped = "<?php class H { public $p = null; } \
+        $h = new H(); $h->p = 7; $a = $h; sink($h); unknownFn(); \\PHPStan\\dumpType($a->p);";
+    assert_eq!(one_type(untyped), "dumped type: unknown");
 }
 
 #[test]

@@ -494,10 +494,13 @@ fn the_memo_key_distinguishes_two_this_states() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn the_private_shape_guard_still_yields_unknown_through_a_delegate() {
+fn the_private_shape_guard_still_yields_no_value_through_a_delegate() {
     // The owner-probe shape, delegated: `view` is computed from an unknown argument,
-    // so what crosses back is the walk's knowledge — which is nothing — and never the
-    // declared `0`. The getter premises nothing against a declared `positive-int`.
+    // so what crosses back is the walk's knowledge — which is no VALUE at all — and
+    // never the declared `0`. What the dump reads is the property's declared TYPE
+    // (issue #620), a claim about the slot rather than about what the delegate
+    // stored, and the getter still premises nothing against a declared
+    // `positive-int` (`int` into `positive-int` is Maybe, never a No).
     let cls = format!(
         "{HEAD}class Hd {{ private int $view = 0; private int $ad_count = 0;\n\
         \x20 public function __construct(int $original) {{ $this->fill($original); }}\n\
@@ -509,7 +512,7 @@ fn the_private_shape_guard_still_yields_unknown_through_a_delegate() {
         dumped(&format!(
             "{cls}function run(int $o): void {{ $h = new Hd($o);\n\\PHPStan\\dumpType($h->view); }}\n"
         )),
-        "dumped type: unknown",
+        "dumped type: int",
     );
     assert_eq!(
         count(&format!(
