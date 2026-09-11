@@ -138,6 +138,25 @@ function f(Child $c): void {
     assert_eq!(one_type(src), "int");
 }
 
+/// An ancestor's `private` slot is not inherited: PHP mangles it per declaring
+/// class, so from `Child` — inside it or through a `Child` receiver — the name is
+/// absent (a warning and `null`), never the ancestor's typed value. The lane
+/// declines rather than answer `int`. A promoted private is the same slot.
+#[test]
+fn an_ancestors_private_property_answers_nothing() {
+    let src = r#"<?php
+class Base {
+    private int $x = 1;
+    public function __construct(private float $pf = 1.0) {}
+}
+class Child extends Base {
+    public function m(): void { \PHPStan\dumpType($this->x); \PHPStan\dumpType($this->pf); }
+}
+function f(Child $c): void { \PHPStan\dumpType($c->x); \PHPStan\dumpType($c->pf); }
+"#;
+    assert_eq!(types(src), vec!["unknown"; 4]);
+}
+
 /// Project-declaration-wins: a child that redeclares the property is met first by
 /// the chain walk, so its docblock — not the parent's — describes the slot. PHP
 /// requires the native type to be kept identically, which is why only the

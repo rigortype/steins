@@ -11,7 +11,7 @@
 //! and never written into it.
 
 use steins_contract::ContractTy;
-use steins_syntax::{ClassDecl, PropertyDecl};
+use steins_syntax::{ClassDecl, PropertyDecl, Visibility};
 
 use crate::contract::{neutralize_templates, template_names_of};
 use crate::cx::Cx;
@@ -48,7 +48,9 @@ struct FoundProperty<'a> {
 ///   property types are a mined table this project does not have; that is issue
 ///   #715, and inventing an answer here would pre-empt it;
 /// * the chain **ends** without the name — nothing. An undeclared read is the
-///   member-absence family's question, not this lane's.
+///   member-absence family's question, not this lane's;
+/// * the name is found as a **`private`** slot of an *ancestor* — nothing, for the
+///   same reason: a private property is invisible from the receiver's own class.
 ///
 /// `static` properties are skipped outright (ADR-0052 N5: owner-deferred), as
 /// [`Cx::class_props`] skips them.
@@ -67,6 +69,14 @@ fn find_declared_property<'a>(
         }
         let (file, cd) = cx.find_class(&cur)?;
         if let Some(decl) = cd.properties.iter().find(|p| !p.is_static && p.name == prop) {
+            // A `private` slot belongs to its declaring class alone: PHP mangles it
+            // per class, so from the receiver's declared class (an ancestor's
+            // descendant) the name is simply absent — a warning and `null`, never
+            // the ancestor's typed value. That is the member-absence family's
+            // question, not a declaration this lane may answer.
+            if decl.visibility == Visibility::Private && !cur.eq_ignore_ascii_case(class_fqn) {
+                return None;
+            }
             return Some(FoundProperty { decl, class_file: file, class: cd });
         }
         let pref = cd.parent.as_ref()?;
