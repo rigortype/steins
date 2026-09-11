@@ -22,6 +22,10 @@ Two gates bite in ways the diff doesn't show: the `docs` job rejects a public do
 
 **Never run `cargo fmt` here.** The tree is hand-formatted, the policy with its numbers is in `rustfmt.toml`, and CI deliberately has no fmt gate — so a routine "tidy" rewrites the tree, nothing catches it, and it buries every later `git blame`.
 
+### Re-mining the generated tables
+
+`mine-constants`, `mine-function-map` and `mine-param-facts` all take a repeatable `--php`, and what a run is given decides what the table is worth — a presence range, a veto, a platform's builtins. `docs/agents/mining.md` has the engine set and the one table CI has to mine: `param_facts.toml` needs a **Linux** engine for `chroot` and its siblings, the `param-facts-linux` job supplies one on dispatch, and until someone merges its artefact the committed table is macOS-only whatever its minors say.
+
 ### Profiling
 
 Measure before optimizing, and read `docs/agents/profiling.md` before measuring — two things make a naive profile worthless here: `[profile.release]` strips symbols, so a stock release binary profiles as a wall of `???`, and every subcommand runs on one worker thread while the main thread sits in `pthread_join`, so an all-threads total buries the real work under `__ulock_wait`. That file also carries the current baseline (master `842f710`, 2026-08-25): the re-run subtree scans in `steins-syntax` are 45–57% of worker CPU, the whole type algebra is under 1% on real code, and interning type values the way phpstan-src#6261 does is ruled out on that evidence.
