@@ -322,7 +322,13 @@ fn classify_ret_hint(hint: &Hint<'_>) -> RetHintKind {
         // bare — possibly parenthesized — spelling is the only one there is.
         Hint::Mixed(_) => RetHintKind::Mixed,
         Hint::Parenthesized(p) => classify_ret_hint(p.hint),
-        _ => RetHintKind::Other,
+        // `array`/`object`/`iterable`: unrepresentable in `NativeType`, enforced by PHP
+        // at the boundary (issue #603). `enforced_top` recognizes exactly the bare
+        // spellings, so `?array` keeps falling to `Other`.
+        _ => match crate::lower_decl::enforced_top(hint) {
+            Some(top) => RetHintKind::Top(top),
+            None => RetHintKind::Other,
+        },
     }
 }
 

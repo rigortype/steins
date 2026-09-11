@@ -15,7 +15,8 @@ use mago_syntax::cst::{
 
 use crate::ast::{
     AnonClassEdge, ArgValue, CatchClause, ClassAliasEdge, ClassConstDecl, ClassDecl, ClassRef,
-    DynamismKind, DynamismSite, EffectEnvelope, EnumCaseDecl, FunctionDecl, GlobalConstDecl,
+    DynamismKind, DynamismSite, EffectEnvelope, EnforcedTop, EnumCaseDecl, FunctionDecl,
+    GlobalConstDecl,
     IncludePath, MethodDecl, NameRef, NativeType, Param, PropertyDecl, ReflectionKind,
     ReflectionSite, RetBoundKeyword, RetBoundKind, ScalarType, Span, StaticClass, TypeMember,
     Visibility, normalize_const_fqn,
@@ -620,6 +621,7 @@ fn lower_function(
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         params: lower_params(&f.parameter_list, rc),
         ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_top: f.return_type_hint.as_ref().and_then(|r| enforced_top(&r.hint)),
         ret_span: f.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(f.name.span()),
         body_span: to_span(f.body.span()),
@@ -1109,6 +1111,7 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         name,
         params: lower_params(&m.parameter_list, rc),
         ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_top: m.return_type_hint.as_ref().and_then(|r| enforced_top(&r.hint)),
         ret_bound_keyword: m.return_type_hint.as_ref().and_then(|r| ret_bound_keyword(&r.hint)),
         ret_span: m.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(m.name.span()),
@@ -1422,6 +1425,20 @@ fn lower_hint_into(
         _ => return None,
     }
     Some(())
+}
+
+/// The [`EnforcedTop`] a **bare** `array`/`object`/`iterable` hint names (issue #603),
+/// or `None` for every other hint — including `?array` and `array|null`, whose whole
+/// point is that the envelope has a second half [`EnforcedTop`] cannot spell. Recurses
+/// through parentheses only, as [`lower_hint`]'s own leaves do.
+pub(crate) fn enforced_top(hint: &Hint<'_>) -> Option<EnforcedTop> {
+    match hint {
+        Hint::Array(_) => Some(EnforcedTop::Array),
+        Hint::Object(_) => Some(EnforcedTop::Object),
+        Hint::Iterable(_) => Some(EnforcedTop::Iterable),
+        Hint::Parenthesized(p) => enforced_top(p.hint),
+        _ => None,
+    }
 }
 
 /// Accumulate the resolved classes of an intersection hint into `out`. Recurses

@@ -8,7 +8,9 @@ use steins_contract::ContractTy;
 use steins_domain::Base;
 use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::{ConstExpr, TypeKind as PKind, StringLit};
-use steins_syntax::{ArgValue, CallExpr, Callee, NativeType, Param, ScalarType, TypeMember};
+use steins_syntax::{
+    ArgValue, CallExpr, Callee, EnforcedTop, NativeType, Param, ScalarType, TypeMember,
+};
 
 use crate::fold::Folder;
 use crate::builtin_returns::builtin_method_return_floor;
@@ -205,7 +207,7 @@ pub(crate) fn demote_arms(mut arms: Vec<ContractArm>, stratum: Stratum) -> Vec<C
 /// [`call_return_arms_by_name`] (a value-position simple name).
 pub(crate) fn fn_return_arms(cx: &Cx, site: Site) -> Option<Vec<ContractArm>> {
     let decl = cx.fn_decl(site);
-    let native: Vec<ContractTy> = decl.ret.as_ref().map(native_arms).unwrap_or_default();
+    let native: Vec<ContractTy> = return_envelope_arms(decl.ret.as_ref(), decl.ret_top);
     // The callee's own `@return` envelope (with its function-level `@template` names
     // already shadowed to `Opaque` by `parse_envelopes`, issue #5). Class arms resolve
     // in the CALLEE's file/namespace (where the return type is written), matching how
@@ -248,7 +250,7 @@ pub(crate) fn fn_return_arms_at_call(
     poisoned: bool,
 ) -> Option<Vec<ContractArm>> {
     let decl = cx.fn_decl(site);
-    let native: Vec<ContractTy> = decl.ret.as_ref().map(native_arms).unwrap_or_default();
+    let native: Vec<ContractTy> = return_envelope_arms(decl.ret.as_ref(), decl.ret_top);
     template_arg_return_arms(
         cx,
         folder,
@@ -287,7 +289,7 @@ pub(crate) fn method_return_arms_at_call(
     poisoned: bool,
 ) -> Option<Vec<ContractArm>> {
     let method = target.method;
-    let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
+    let native: Vec<ContractTy> = return_envelope_arms(method.ret.as_ref(), target.enforced_top());
     template_arg_return_arms(
         cx,
         folder,
@@ -648,7 +650,7 @@ fn read_bound_template(
 /// (issue #5), matching [`scope_return_phpdoc`]'s method leg.
 fn method_return_arms(cx: &Cx, target: &CallTarget<'_>) -> Option<Vec<ContractArm>> {
     let method = target.method;
-    let native: Vec<ContractTy> = method.ret.as_ref().map(native_arms).unwrap_or_default();
+    let native: Vec<ContractTy> = return_envelope_arms(method.ret.as_ref(), target.enforced_top());
     let off = method.span.start;
     let file = target.class_file;
     let mut envelopes = cx.envelopes_of(method.docblock.as_deref(), file, off);
@@ -795,4 +797,45 @@ pub(crate) fn native_arms(ty: &NativeType) -> Vec<ContractTy> {
         arms.push(ContractTy::Null);
     }
     arms
+}
+
+/// The contract arms of an **enforced top** — the bare `: array` / `: object` /
+/// `: iterable` return hint that lowers to no [`NativeType`] (ADR-0057 note, issue
+/// #603). PHP checks the declaration on the callee's side of the boundary, so a call
+/// that returns at all returns a value inside the top: the arms are `Verified`
+/// wherever [`native_arms`]' are, and the A2 oracle drops every exit outside them.
+///
+/// `iterable` is spelled as PHP defines it — `array|Traversable`, two arms — rather
+/// than as [`ContractTy::IterableOf`]: that variant answers `No` for every object,
+/// which would convict the `Traversable` half of the very keyword it is named after.
+/// `object` has no value-domain answer at all (ADR-0035/0043), so [`ContractTy::ObjectAny`]
+/// is where it stops; ADR-0093 candidate B, which would give the value domain an
+/// object, is deferred.
+pub(crate) fn enforced_top_arms(top: EnforcedTop) -> Vec<ContractTy> {
+    match top {
+        EnforcedTop::Array => vec![ContractTy::ArrayAny { non_empty: false }],
+        EnforcedTop::Object => vec![ContractTy::ObjectAny],
+        EnforcedTop::Iterable => {
+            vec![ContractTy::ArrayAny { non_empty: false }, ContractTy::Class("traversable".to_owned())]
+        }
+    }
+}
+
+/// The callee's native return envelope as contract arms: [`native_arms`] of the
+/// lowered [`NativeType`] where the hint had one, else [`enforced_top_arms`] of the
+/// enforced top, else empty — the three cases being mutually exclusive by
+/// construction (a hint lowers to one or the other, never both).
+///
+/// `top` arrives as `None` wherever the caller has decided the enforced top does not
+/// travel — the declaration-only dispatch path, which ADR-0049 A16 keeps silent for
+/// an unrepresentable hint.
+pub(crate) fn return_envelope_arms(
+    ret: Option<&NativeType>,
+    top: Option<EnforcedTop>,
+) -> Vec<ContractTy> {
+    match (ret, top) {
+        (Some(ty), _) => native_arms(ty),
+        (None, Some(t)) => enforced_top_arms(t),
+        (None, None) => Vec::new(),
+    }
 }

@@ -477,6 +477,9 @@ pub struct FunctionDecl {
     pub params: Vec<Param>,
     /// Native scalar/union return type, `None` if untyped/non-scalar/`void`/`never` (return check skips, zero-FP).
     pub ret: Option<NativeType>,
+    /// The enforced top a bare `: array`/`: object`/`: iterable` declares (issue #603),
+    /// beside [`Self::ret`] and never both — the keyword has no [`NativeType`] member.
+    pub ret_top: Option<EnforcedTop>,
     // untyped surface (ADR-0078, issue #200)
     /// File byte span of the native **return** type hint as written, `None` if
     /// none written — return-side twin of [`Param::hint_span`] (`void`, `never`,
@@ -556,6 +559,9 @@ pub struct MethodDecl {
     /// Native scalar/union return type, `None` if untyped/non-scalar/`void`/
     /// `never` (zero-FP); bare/nullable `self`/`static`/`parent` synthesized in the FQN-stamping pass (ADR-0043).
     pub ret: Option<NativeType>,
+    /// The enforced top a bare `: array`/`: object`/`: iterable` declares (issue #603) —
+    /// method-world twin of [`FunctionDecl::ret_top`].
+    pub ret_top: Option<EnforcedTop>,
     /// Recorded LSB return-keyword shape (`self`/`static`/`parent`, nullable-aware),
     /// consumed by the FQN-stamping pass to synthesize [`Self::ret`]; `None` otherwise.
     pub ret_bound_keyword: Option<RetBoundKeyword>,
@@ -2699,6 +2705,33 @@ pub struct OpaqueSite {
     pub span: Span,
 }
 
+/// A return hint the value domain cannot represent but PHP **enforces** at the call
+/// boundary (ADR-0057 note, issue #603): the bare `array`, `object` and `iterable`
+/// keywords. Each names a top the [`NativeType`] union has no member for, yet a call
+/// that returns at all returns a value inside it — PHP raises a `TypeError` on the
+/// callee's side otherwise — so the top is a **Verified** upper bound on the result.
+///
+/// Written beside [`NativeType`] rather than inside it. The union's members are the
+/// types the value domain can *decide* about a value; these three only bound it, and
+/// the one consumer that wants the bound is the return lane (the A2 drop oracle and
+/// the declared-return arm floor). Folding them into [`NativeType`] would hand the same
+/// three keywords to every parameter-side consumer, and to the declaration-only dispatch
+/// path ADR-0049 A16 deliberately keeps silent.
+///
+/// Only the **bare** spelling, possibly parenthesized: `?array` and `array|null` stay
+/// unrepresentable, as they were before #603.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
+pub enum EnforcedTop {
+    /// `array` — every PHP array, of any key and value type.
+    Array,
+    /// `object` — every object. The value domain holds no object (ADR-0035/0043), so
+    /// this one reaches the contract-arm lane (`ContractTy::ObjectAny`) and nothing else.
+    Object,
+    /// `iterable` — exactly `array|Traversable`, which is how PHP defines the keyword.
+    Iterable,
+}
+
 /// Classification of a written return type hint (`: T`), independent of whether Steins
 /// lowers `T` to a [`NativeType`]. Only a fully untyped declaration (no hint) contributes
 /// PHP's implicit `return null` to return-fact fallthrough (ADR-0075); `void`/`never`/other
@@ -2716,7 +2749,13 @@ pub enum RetHintKind {
     /// written hint: a `: mixed` body that falls off its end is a runtime `TypeError`
     /// exactly as `: int` is.
     Mixed,
-    /// Any other hint — scalar, class, `array`, union, …
+    /// `: array` / `: object` / `: iterable` — unrepresentable in [`NativeType`] but
+    /// enforced at the boundary (issue #603). Unlike [`Self::Mixed`] the envelope is a
+    /// real cut, so the return summary reads it as the hint it is and A2 drops the exits
+    /// outside it; unlike [`Self::Other`] it does not refuse the summary for want of an
+    /// oracle.
+    Top(EnforcedTop),
+    /// Any other hint — scalar, class, `?array`, union, …
     Other,
 }
 

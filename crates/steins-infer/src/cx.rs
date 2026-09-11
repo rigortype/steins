@@ -12,8 +12,8 @@ use steins_domain::{Certainty, Fact, PhpStr, Val};
 use steins_phpdoc::Type as PType;
 use steins_phpdoc::ast::TypeKind as PKind;
 use steins_syntax::{
-    ArgValue, CallExpr, ClassDecl, FunctionDecl, MethodDecl, NameRef, NativeType, Param,
-    PropertyDecl, RefKind, Scope, ScopeOwner, SourceTree, StmtKind, ValueOp,
+    ArgValue, CallExpr, ClassDecl, EnforcedTop, FunctionDecl, MethodDecl, NameRef, NativeType,
+    Param, PropertyDecl, RefKind, RetHintKind, Scope, ScopeOwner, SourceTree, StmtKind, ValueOp,
 };
 
 use crate::fold::Folder;
@@ -1633,6 +1633,25 @@ impl<'a> Cx<'a> {
                 .ret_ty
                 .as_ref()
                 .map(|r| (r, format!("{class}::${property}::{}", hook.as_str()))),
+        }
+    }
+
+    /// The **enforced top** a scope's return hint declares (ADR-0057 note, issue #603):
+    /// the bare `: array` / `: object` / `: iterable` that lowers to no [`NativeType`]
+    /// and so never reaches [`Cx::scope_return`], yet bounds the result all the same.
+    ///
+    /// Read off `Scope::ret_hint`, which every owner carries — a function, a method, a
+    /// closure, an arrow function, a property hook — so this needs none of
+    /// [`Cx::scope_return`]'s per-owner lookup. It shares that function's **generator**
+    /// guard and for its reason: `: iterable` on a generator describes the `Generator`
+    /// the call yields, not the values of in-body `return` (issue #128).
+    pub(crate) fn scope_return_top(&self, scope: &Scope) -> Option<EnforcedTop> {
+        if scope.is_generator {
+            return None;
+        }
+        match scope.ret_hint.map(|h| h.kind) {
+            Some(RetHintKind::Top(top)) => Some(top),
+            _ => None,
         }
     }
 
