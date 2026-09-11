@@ -1055,19 +1055,31 @@ impl<'a> Cx<'a> {
     /// to keep one, so the name is made fully qualified instead, which resolves the
     /// same everywhere.
     ///
-    /// Only identifiers that name a **known class** in the edge's own context are
-    /// touched: `int` and its kin must stay bare or they would stop being keywords,
-    /// and an unresolvable name is left alone because qualifying a guess would turn
-    /// a silence into a claim.
+    /// Every identifier that is **not vocabulary** is re-spelled, whether or not a
+    /// class of that name is known (issue #665). `int` and its kin must stay bare
+    /// or they would stop being keywords, which is what `is_type_vocabulary`
+    /// decides — the same catch-all question `type_aliases_of` asks, so `self`,
+    /// `static` and `never` stay as written for the same reason `int` does.
+    ///
+    /// Qualifying a name the edge's own context cannot resolve looks like turning
+    /// a silence into a claim, and it is the opposite. An unqualified name that
+    /// travels stays *relative*, so it resolves again wherever it lands: an
+    /// imported `@phpstan-type Rows list<Thing>` written in `Vendor` where no
+    /// `Vendor\Thing` exists arrived in an importing `App` file and found
+    /// `App\Thing` — a definite contract over a class the owner never named.
+    /// Upstream cannot make that mistake: `TypeAlias` stores the owner's
+    /// `NameScope` and `TypeNodeResolver` returns
+    /// `new ObjectType($nameScope->resolveStringName($name))`, so an unknown name
+    /// is an unknown class **in the owner's namespace**. Spelling it fully
+    /// qualified is how a node with nowhere to keep a scope says the same thing,
+    /// and an unknown class is still held silent by `Cx::is_known_class`'s valve.
     fn qualify_class_names(&self, ty: &mut PType, efile: usize, eoff: u32) {
         let qualify = |name: &mut String| {
-            if name.starts_with('\\') {
+            if name.starts_with('\\') || steins_contract::is_type_vocabulary(name) {
                 return;
             }
             let fqn = self.resolve_pclass(efile, eoff, name);
-            if self.is_known_class(&fqn) {
-                *name = format!("\\{}", fqn.trim_start_matches('\\'));
-            }
+            *name = format!("\\{}", fqn.trim_start_matches('\\'));
         };
         // The names this node itself carries: an identifier, and a generic's base.
         // A callable's identifier (`Closure`) is deliberately left alone — it names

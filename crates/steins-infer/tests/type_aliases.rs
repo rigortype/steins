@@ -431,6 +431,45 @@ fn an_imported_body_keeps_naming_the_classes_it_named() {
     );
 }
 
+#[test]
+fn an_imported_body_keeps_naming_a_class_the_owner_could_not_resolve_either() {
+    // The other half of the same rule (issue #665), and the half #472 got wrong:
+    // a name the *owner's* scope cannot resolve is an unknown class in the
+    // owner's namespace, never a class the importer happens to have. Qualifying
+    // only known classes left `Thing` relative, so it resolved again on arrival
+    // and this dumped `list<app\thing>` — a definite contract over a class
+    // `Vendor\Geo` never named. Upstream cannot make the mistake: `TypeAlias`
+    // carries the owner's `NameScope`, and an unknown identifier resolves through
+    // it to `Vendor\Thing`.
+    let src = "<?php\nnamespace Vendor;\n/** @phpstan-type Rows list<Thing> */\nclass Geo {}\n";
+    let user = "namespace App;\nclass Thing {}\n\
+        /** @phpstan-import-type Rows from \\Vendor\\Geo */\nclass Probe {\n\
+        /** @param Rows $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n";
+    assert_eq!(
+        one_dump(&format!("{src}{user}")),
+        "dumped phpdoc type: list<vendor\\thing> (asserted)"
+    );
+}
+
+#[test]
+fn an_importers_own_class_does_not_answer_for_a_name_the_owner_left_unresolved() {
+    // The same defect at the relation that pays for it. `Vendor\Geo` names
+    // `Thing`, which does not exist in `Vendor`; the importing file has an
+    // `App\Thing` that has nothing to do with it. A relative name arriving here
+    // resolved to `App\Thing`, which IS a known class, so the contract stopped
+    // being silent and convicted every other object — a manufactured definite
+    // `No`, the outcome issue #472 exists to prevent. Qualified in the owner's
+    // scope the name is an unknown class and `Cx::is_known_class`'s valve holds.
+    let src = "<?php\nnamespace Vendor;\n/** @phpstan-type Row Thing */\nclass Geo {}\n";
+    let user = "namespace App;\nclass Thing {}\nclass Other {}\n\
+        /** @phpstan-import-type Row from \\Vendor\\Geo */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void {}\n}\n\
+        $p = new Probe();\n$p->m(new Other());\n";
+    assert_eq!(param_count(&format!("{src}{user}")), 0);
+}
+
 // 5. What stays where it was.
 
 #[test]
