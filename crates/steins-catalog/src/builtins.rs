@@ -443,6 +443,24 @@ pub fn engine_constant(name: &str) -> Option<ConstRow> {
         .map(|i| crate::constants_generated::ENGINE_CONSTANTS[i].1)
 }
 
+/// **Whether the engine had taken this constant away before `floor`** — the one
+/// question the absence family may ask this table (ADR-0094 §2 as amended by the
+/// owner's 2026-09-11 ruling, issue #718).
+///
+/// ADR-0094 §5 says the table never claims a constant IS defined, and it still
+/// does not: this answers the opposite direction. A value-less row records that
+/// the mined engines had the name and the top one no longer does, so at a target
+/// whose floor is above that `until` there is no minor where the name resolves —
+/// and `constant.undefined` may say so over an analysis host that still has it
+/// (the boot surface answers for the machine's own minor, not the project's).
+///
+/// `false` for every row without an `until`, which is every row that carries a
+/// value: a name the top engine has has not left.
+#[must_use]
+pub fn engine_constant_removed_by(name: &str, floor: (u16, u16)) -> bool {
+    engine_constant(name).is_some_and(|r| r.until.is_some_and(|until| floor > until))
+}
+
 /// How many engine constants the table carries — for the completeness tests, which
 /// would otherwise read an empty table as agreement.
 #[must_use]
@@ -629,15 +647,15 @@ mod tests {
     /// A spec-fixed row of each value shape, and the identity rule for the key.
     #[test]
     fn engine_constant_rows_answer_by_value() {
-        assert_eq!(engine_constant("SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(engine_constant("SORT_REGULAR").and_then(|r| r.value), Some(ConstValue::Int(0)));
         assert_eq!(
-            engine_constant("JSON_THROW_ON_ERROR").map(|r| r.value),
+            engine_constant("JSON_THROW_ON_ERROR").and_then(|r| r.value),
             Some(ConstValue::Int(4_194_304))
         );
-        assert_eq!(engine_constant("M_PI").map(|r| r.value), Some(ConstValue::Float(std::f64::consts::PI)));
-        assert_eq!(engine_constant("DATE_ATOM").map(|r| r.value), Some(ConstValue::Str("Y-m-d\\TH:i:sP")));
+        assert_eq!(engine_constant("M_PI").and_then(|r| r.value), Some(ConstValue::Float(std::f64::consts::PI)));
+        assert_eq!(engine_constant("DATE_ATOM").and_then(|r| r.value), Some(ConstValue::Str("Y-m-d\\TH:i:sP")));
         // A leading `\` is not part of the name; the final segment is case-SENSITIVE.
-        assert_eq!(engine_constant("\\SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(engine_constant("\\SORT_REGULAR").and_then(|r| r.value), Some(ConstValue::Int(0)));
         assert_eq!(engine_constant("sort_regular"), None);
     }
 
@@ -660,17 +678,36 @@ mod tests {
         }
     }
 
-    /// A row the range scan proved arrived inside the mined window, and one it
-    /// could say nothing about. Both are load-bearing: the second is the common
-    /// case, and reading it as "eternal" rather than as "unobserved" is the
+    /// A row the mined engines' presence proved arrived inside the window, and one
+    /// they could say nothing about. Both are load-bearing: the second is the
+    /// common case, and reading it as "eternal" rather than as "unobserved" is the
     /// mistake the `None` spelling exists to prevent.
     #[test]
-    fn engine_constant_rows_carry_the_range_the_scan_proved() {
+    fn engine_constant_rows_carry_the_range_the_engines_proved() {
         assert_eq!(engine_constant("FILTER_THROW_ON_FAILURE").and_then(|r| r.since), Some((8, 5)));
         assert_eq!(engine_constant("SORT_REGULAR").and_then(|r| r.since), None);
-        // `until` is unfilled at this pin by construction: the engine that
-        // supplied the values has every mined name.
-        assert!(crate::constants_generated::ENGINE_CONSTANTS.iter().all(|(_, r)| r.until.is_none()));
+    }
+
+    /// **The value-less rows** (issue #718): `until` and nothing else. The
+    /// invariant is the pairing, and it holds in both directions — a name the top
+    /// engine still has cannot have left, and a row that records a departure has
+    /// no value to record.
+    #[test]
+    fn a_row_that_records_a_departure_carries_no_value() {
+        let row = engine_constant("MYSQLI_SET_CHARSET_DIR").expect("a mined departure");
+        assert_eq!(row.until, Some((8, 3)));
+        assert_eq!(row.value, None);
+        for (name, r) in crate::constants_generated::ENGINE_CONSTANTS {
+            assert_eq!(
+                r.until.is_some(),
+                r.value.is_none(),
+                "{name}: `until` and a missing value are the same fact"
+            );
+        }
+        // …and it is not a blanket property: the ordinary row keeps its value and
+        // states no departure.
+        let row = engine_constant("SORT_REGULAR").expect("a mined literal");
+        assert_eq!((row.until, row.value), (None, Some(ConstValue::Int(0))));
     }
 
     #[test]

@@ -53,7 +53,9 @@ Scope of the table:
   at runtime, which is the absence family's business, not a different
   value; `doctor`'s Registry posture may list the table's extensions the
   runtime lacks.
-- **Rows carry a PHP-minor range.** `E_STRICT` left in 8.4; `JSON_*` and
+- **Rows carry a PHP-minor range, read off the engines' own presence.**
+  `MYSQLI_SET_CHARSET_DIR` left in 8.4; `LIBXML_NO_XXE` arrived in 8.4
+  and left in 8.5; `JSON_*` and
   `CURLOPT_*` members arrive per minor. Each row carries `since` and an
   optional `until`, the generator runs over the PHP minors the corpus
   harness already scopes, and the lookup respects the project's
@@ -62,8 +64,22 @@ Scope of the table:
   `crates/steins-db/src/composer.rs`) the way `floor_target_admits`
   already gates the declared-return floor
   (`crates/steins-infer/src/builtin_returns.rs`). A constant outside
-  the target's range answers nothing; whether it is *undefined* there is
-  the absence family's call.
+  the target's range answers nothing.
+
+  **Amendment (owner ruling 2026-09-11, issue #718).** The range comes
+  from the same engines the value diff compares, one per minor, and not
+  from a php-src branch scan: a scan reading `.stub.php` `const`s and
+  `REGISTER_*_CONSTANT` calls is blind to macro token-pasting, needed a
+  per-extension coverage floor to keep its blind spots from minting wrong
+  gates, and left 2,551 of 2,566 rows rangeless. Presence is judged only
+  against the engines that **loaded the name's extension** — a build
+  without `brotli` is not a minor without `BROTLI_*`. A name the older
+  engines have and the top one does not gets a **value-less row**: `until`
+  and nothing else. The value resolver ignores it, and the absence family
+  reads it — at a target whose floor is above `until`, no minor the
+  project supports has the name, and `constant.undefined` may say so over
+  an analysis host that still has it. This does not reopen §5: the table
+  still never says a constant *is* defined, only that it stopped being.
 - **A row's value is diffed across those minors, not mined from one of
   them.** "The same value on every host that has the constant" is the
   whole reason a row may be seeded `Verified`, and one engine cannot
@@ -155,8 +171,12 @@ and this ADR does not size it.
   user-constant binding (§4). The `filter_var` const-local rows and
   every transfer that matches on a constant *name* can switch to the
   value once §2 lands.
-- The absence family is untouched: existence stays a boot-surface fact,
-  and the table never says a constant is defined.
+- The absence family is untouched in the direction that matters:
+  existence stays a boot-surface fact, and the table never says a
+  constant is defined. §2's amendment adds the one reading in the other
+  direction — a value-less row is evidence that a name is *gone* above
+  its `until`, which the boot surface cannot supply because it answers
+  for the analysis machine's minor rather than the project's.
 - A host-dependent constant's default union is deliberately wider than
   any one host. A nsrt row asserting the analysis host's literal (the
   upstream fixtures assert `"\n"`) will read `subsumed`, not `match`;

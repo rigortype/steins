@@ -230,8 +230,12 @@ pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)>
             return Some(answer);
         }
         if let Some(row) = row {
+            // A value-less row (issue #718) states a DEPARTURE and no literal, so
+            // the value lane has nothing to answer with — it is read by the
+            // absence family alone (`steins_catalog::engine_constant_removed_by`).
+            let value = row.value?;
             return target_admits(&row, cx.php_target)
-                .then(|| (mined_fact(&row.value), Stratum::Verified));
+                .then(|| (mined_fact(&value), Stratum::Verified));
         }
     }
     None

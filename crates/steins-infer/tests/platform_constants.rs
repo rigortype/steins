@@ -131,6 +131,27 @@ fn a_constant_with_no_row_still_answers_nothing() {
     assert_eq!(dump("SIGCHLD"), "dumped type: unknown");
 }
 
+/// **A value-less row is invisible to the value lane** (ADR-0094 §2 as amended
+/// 2026-09-11, issue #718). `MYSQLI_SET_CHARSET_DIR` has a row — the mined engines
+/// had it through 8.3 and 8.4 does not — and that row carries `until` and nothing
+/// else. There is no literal to answer with, at any target, so the resolver is
+/// silent the way it is for a name with no row at all.
+///
+/// Reinstate `mined_fact` over an unconditional value in `global_const_fact` and
+/// this cannot even be written: the row has no value to spell.
+#[test]
+fn a_value_less_row_answers_nothing_at_every_target() {
+    assert_eq!(dump("MYSQLI_SET_CHARSET_DIR"), "dumped type: unknown");
+    // Below the departure, where the name still exists — the row records that it
+    // WAS there, never what it was worth.
+    let below = require_target(">=8.1 <8.4", (8, 1), Some((8, 3)));
+    assert_eq!(dump_under("MYSQLI_SET_CHARSET_DIR", Some(below), None), "dumped type: unknown");
+    // Above it, where the name is gone. Same silence from this surface; the
+    // absence family is what reads the row there (`constant_undefined.rs`).
+    let above = require_target(">=8.4", (8, 4), None);
+    assert_eq!(dump_under("MYSQLI_SET_CHARSET_DIR", Some(above), None), "dumped type: unknown");
+}
+
 #[test]
 fn a_constant_outside_the_targets_minor_range_answers_nothing() {
     // `FILTER_THROW_ON_FAILURE` arrived in 8.5. A project that supports 8.1

@@ -1241,10 +1241,12 @@ pub(crate) fn check_undefined_class(cx: &Cx, folder: &mut dyn Folder, r: &NameRe
 /// false); an unqualified name consults `use const` **imports**
 /// ([`steins_syntax::NsCtx::const_imports`]), not `use function` (a qualified name's
 /// first segment still uses the ordinary class/namespace imports); and there is
-/// **no catalog leg** — the builtin catalog is never an absence oracle (ADR-0049
-/// §1), and a presence catalog for constants would be a second, staler copy of the
-/// sidecar's answer, so engine/extension constants are refuted only by the boot
-/// surface.
+/// **no catalog presence leg** — the builtin catalog is never an absence oracle
+/// (ADR-0049 §1), and a presence catalog for constants would be a second, staler
+/// copy of the sidecar's answer, so engine/extension constants are refuted only by
+/// the boot surface. The engine-constant table's value-less rows are the one thing
+/// read out of a catalog here, and they are read in the other direction — see
+/// [`check_undefined_constant`]'s boot-surface leg.
 ///
 /// `display` is the source-cased primary target (PHP's own phrasing at the fatal);
 /// `candidates` are the normalized keys the boot-surface leg must also refute — two
@@ -1338,8 +1340,22 @@ pub(crate) fn check_undefined_constant(cx: &Cx, folder: &mut dyn Folder, r: &Nam
         return;
     }
     // Boot-surface leg (A2ii): extension constants and an already-loaded bootstrap's
-    // `define()`s declare themselves here; the builtin catalog is never consulted.
+    // `define()`s declare themselves here; the builtin catalog is not a presence
+    // oracle and is never consulted for one.
+    //
+    // The one thing the catalog DOES answer is the opposite question (ADR-0094 §2
+    // as amended 2026-09-11, issue #718). A value-less row records that the mined
+    // engines had the name and the top one no longer does; at a target whose floor
+    // is above that departure, no minor the project supports has the constant. The
+    // boot surface answers for the ANALYSIS machine's minor, which may still be
+    // below the departure — so a candidate the table calls removed skips that leg
+    // rather than being silenced by a host the project does not run on. Every other
+    // leg above still applies, and a target that declares nothing declares no floor,
+    // so nothing fires without the project having said which PHP it supports.
     for c in &candidates {
+        if cx.php_target.is_some_and(|t| steins_catalog::engine_constant_removed_by(c, t.floor)) {
+            continue;
+        }
         match folder.boot_surface_constant(c) {
             Some(false) => {}
             Some(true) | None => return,

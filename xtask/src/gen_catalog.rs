@@ -672,13 +672,11 @@ struct ConstDoc {
 struct ConstMeta {
     php: String,
     extensions: Vec<String>,
-    /// `["8.1", "<php-src commit>"]` per mined minor, low first; empty when the
-    /// mining run had no php-src checkout and every row is rangeless.
-    #[serde(default)]
-    minors: Vec<Vec<String>>,
-    /// The engine versions the value diff compared, low minor first (`php` is
-    /// the top one). A single entry means nothing was diffed, which is a real
-    /// difference in what the rows are worth and so belongs in the header.
+    /// The engine versions the run diffed, low minor first (`php` is the top
+    /// one). Since issue #718 these are also the minors whose PRESENCE decided
+    /// every `since` and `until`, so a single entry means both "nothing was
+    /// diffed" and "no row carries a range" — a real difference in what the rows
+    /// are worth, and so part of the header.
     #[serde(default)]
     diffed: Vec<String>,
 }
@@ -688,13 +686,22 @@ struct ConstCounts {
     mined: usize,
     rows: usize,
     gated: usize,
+    /// Rows carrying `until` and no value — the names the top engine no longer
+    /// has (issue #718). `0` on a table mined before the slice.
+    #[serde(default)]
+    value_less: usize,
 }
 
 #[derive(Clone, serde::Deserialize)]
 struct ConstRow {
     ext: String,
-    t: String,
-    v: String,
+    /// The type and the value's spelling, or both absent on a **value-less row**:
+    /// the name is gone from the top engine, so the row carries only its `until`.
+    /// One without the other is a malformed row and fails the run.
+    #[serde(default)]
+    t: Option<String>,
+    #[serde(default)]
+    v: Option<String>,
     #[serde(default)]
     since: Option<String>,
     #[serde(default)]
@@ -708,13 +715,36 @@ impl ConstRow {
     /// which Rust parses as its own literal only after the exponent marker is
     /// lowercased — and the round trip is CHECKED, because a float that does not
     /// parse back to the mined bits is a wrong answer rather than a missing one.
-    fn value_literal(&self, name: &str) -> Result<String, String> {
-        match self.t.as_str() {
+    ///
+    /// `None` for a value-less row (issue #718): the top engine does not have the
+    /// name, so the row carries a departure and no literal. A row with one half of
+    /// the pair and not the other is malformed and fails the run — a type with no
+    /// value describes nothing, and a value with no type cannot be spelled.
+    fn value_literal(&self, name: &str) -> Result<Option<String>, String> {
+        let (t, v) = match (&self.t, &self.v) {
+            (Some(t), Some(v)) => (t.as_str(), v.as_str()),
+            (None, None) => {
+                if self.until.is_none() {
+                    return Err(format!(
+                        "constant `{name}`: a value-less row must carry `until` — it exists only \
+                         to say the engine took the name away"
+                    ));
+                }
+                return Ok(None);
+            }
+            _ => {
+                return Err(format!("constant `{name}`: `t` and `v` must be given together"));
+            }
+        };
+        Self::scalar_literal(name, t, v).map(Some)
+    }
+
+    /// The `ConstValue` literal for one `(type, spelling)` pair.
+    fn scalar_literal(name: &str, t: &str, v: &str) -> Result<String, String> {
+        match t {
             "int" => {
-                let n: i64 = self
-                    .v
-                    .parse()
-                    .map_err(|_| format!("constant `{name}`: `{}` is not an i64", self.v))?;
+                let n: i64 =
+                    v.parse().map_err(|_| format!("constant `{name}`: `{v}` is not an i64"))?;
                 // `i64::MIN` has no negative literal in Rust (the `-` is an
                 // operator applied to an out-of-range positive), so it is spelled
                 // by name. `PHP_INT_MIN` itself is platform-ruled and never gets
@@ -726,25 +756,24 @@ impl ConstRow {
                 })
             }
             "float" => {
-                let spelled = self.v.replace('E', "e");
+                let spelled = v.replace('E', "e");
                 let f: f64 = spelled
                     .parse()
-                    .map_err(|_| format!("constant `{name}`: `{}` is not an f64", self.v))?;
+                    .map_err(|_| format!("constant `{name}`: `{v}` is not an f64"))?;
                 if !f.is_finite() {
                     return Err(format!(
-                        "constant `{name}`: non-finite float `{}` has no Rust literal",
-                        self.v
+                        "constant `{name}`: non-finite float `{v}` has no Rust literal"
                     ));
                 }
                 Ok(format!("ConstValue::Float({f:?})"))
             }
-            "bool" => match self.v.as_str() {
+            "bool" => match v {
                 "true" => Ok("ConstValue::Bool(true)".to_owned()),
                 "false" => Ok("ConstValue::Bool(false)".to_owned()),
                 other => Err(format!("constant `{name}`: `{other}` is not a bool")),
             },
             "null" => Ok("ConstValue::Null".to_owned()),
-            "string" => Ok(format!("ConstValue::Str({:?})", self.v)),
+            "string" => Ok(format!("ConstValue::Str({v:?})")),
             other => Err(format!("constant `{name}`: unexpected type `{other}`")),
         }
     }
@@ -769,13 +798,19 @@ fn render_constants(
          // recognizer surface — the analyzed source naming a symbol the engine then\n\
          // evaluates — which ADR-0060/ADR-0066 fence. Nothing here runs at analysis time.\n\
          //\n\
-         // TWO SOURCES, because one of them cannot answer the whole question. Values and\n\
-         // extensions come from ONE engine's `get_defined_constants(true)`. A minor RANGE\n\
-         // cannot: `since` asks whether a name existed at 8.1 and an 8.5 engine has no\n\
-         // opinion, so ranges are read off php-src's per-minor branches. That scan is\n\
-         // blind to a registration built by macro token-pasting, so a name it cannot see\n\
-         // gets NO range rather than a guessed one — the rangeless majority is a\n\
-         // recorded limit of the scan, not a claim that the constant is eternal.\n\
+         // ONE SOURCE, ASKED ONCE PER MINOR. Values and extensions come from the TOP\n\
+         // engine's `get_defined_constants(true)`; `since` and `until` come from the\n\
+         // SAME engines' PRESENCE, one per minor (issue #718, which retired the php-src\n\
+         // branch scan that was blind to macro token-pasting). Presence is judged only\n\
+         // against the engines that loaded a name's extension: a build without `brotli`\n\
+         // is silent about `BROTLI_*`, and reading its silence as an absence would dress\n\
+         // a packaging difference as a language change.\n\
+         //\n\
+         // A ROW WITH NO VALUE. A name the older engines have and the top one does not\n\
+         // carries `until` and no value at all. The value resolver ignores it — there is\n\
+         // no literal to answer with — and the absence family reads it: above `until` the\n\
+         // engine has taken the name away. The table still never says a constant IS\n\
+         // defined; a value-less row says only that it stopped being.\n\
          //\n\
          // WHAT IS NOT HERE (ADR-0094 §3). A row is a SPEC-FIXED literal: the same value\n\
          // on every host that has the constant at all, which is what lets the resolver\n\
@@ -800,33 +835,28 @@ fn render_constants(
     if line.trim() != "//" {
         let _ = writeln!(s, "{}", line.trim_end().trim_end_matches(','));
     }
-    if meta.minors.is_empty() {
-        s.push_str("//\n// No php-src checkout answered: every row is rangeless.\n");
-    } else {
-        s.push_str("//\n// php-src branch tips the range scan read:\n");
-        for m in &meta.minors {
-            let (minor, tip) = (m.first().map_or("", String::as_str), m.get(1).map_or("", String::as_str));
-            let _ = writeln!(s, "//   PHP-{minor}  {}", &tip[..tip.len().min(12)]);
-        }
-    }
     if meta.diffed.len() > 1 {
         let _ = writeln!(
             s,
-            "//\n// Engines the value diff compared — a name they disagreed about inside its\n\
-             // own minor range is refused, not mined from whichever answered first:\n\
+            "//\n// The engines this run diffed, low minor first — a name they disagreed about\n\
+             // inside its own minor range is refused, not mined from whichever answered\n\
+             // first, and their presence is what every `since` and `until` below is read\n\
+             // off:\n\
              //   {}",
             meta.diffed.join(", ")
         );
     } else {
         s.push_str(
             "//\n// ONE engine answered: no value was diffed across minors, so a name whose\n\
-             // value moves with the build is caught only by the miner's rosters.\n",
+             // value moves with the build is caught only by the miner's rosters — and no\n\
+             // row carries a range, since one engine knows only its own minor.\n",
         );
     }
     s.push_str("//\n// Counts at the mining pin:\n");
     let _ = writeln!(s, "//   {:>5}  constants the build had, over the catalog's extensions", counts.mined);
-    let _ = writeln!(s, "//   {:>5}  rows (the spec-fixed literals)", counts.rows);
-    let _ = writeln!(s, "//   {:>5}    of those, carrying a minor range the scan could prove", counts.gated);
+    let _ = writeln!(s, "//   {:>5}  rows (the spec-fixed literals, plus the value-less)", counts.rows);
+    let _ = writeln!(s, "//   {:>5}    of those, carrying a `since` the engines' presence proved", counts.gated);
+    let _ = writeln!(s, "//   {:>5}    of those, value-less — `until` and nothing else", counts.value_less);
     s.push_str(
         "\n// `M_PI` and its siblings ARE the mathematical constants, spelled to the last\n\
          // bit php-src spells them to, so `clippy::approx_constant` fires on every one of\n\
@@ -848,19 +878,25 @@ fn render_constants(
          \x20   /// refuses a row that is not, rather than inventing a byte spelling).\n\
          \x20   Str(&'static str),\n\
          }\n\n\
-         /// One engine constant's row: its value, and the PHP minors it is known over.\n\
+         /// One engine constant's row: what it is worth, and the PHP minors it is known\n\
+         /// over.\n\
          #[derive(Debug, Clone, Copy, PartialEq)]\n\
          pub struct ConstRow {\n\
-         \x20   /// The value every host that has this constant gives it.\n\
-         \x20   pub value: ConstValue,\n\
-         \x20   /// The first minor the range scan saw the name at, when it saw it ARRIVE\n\
-         \x20   /// inside the mined window. `None` is the common case and means only that\n\
-         \x20   /// no arrival was observed — never that the constant is eternal.\n\
+         \x20   /// The value every host that has this constant gives it, or `None` on a\n\
+         \x20   /// **value-less row**: the top mined engine no longer has the name, so\n\
+         \x20   /// there is no literal to carry and the row exists for its [`Self::until`]\n\
+         \x20   /// alone. The value resolver answers nothing for such a row; the absence\n\
+         \x20   /// family reads it.\n\
+         \x20   pub value: Option<ConstValue>,\n\
+         \x20   /// The lowest mined minor that has the name, when a lower one that loaded\n\
+         \x20   /// its extension does not. `None` is the common case and means only that no\n\
+         \x20   /// arrival was observed inside the mined window — never that the constant\n\
+         \x20   /// is eternal.\n\
          \x20   pub since: Option<(u16, u16)>,\n\
-         \x20   /// The last minor the name is known at, exclusive of what follows. Unfilled\n\
-         \x20   /// at this pin by construction: the engine that supplied the values has\n\
-         \x20   /// every mined name, so nothing mined has left yet, and a constant that\n\
-         \x20   /// left earlier (`E_STRICT`) has no value to mine and so no row at all.\n\
+         \x20   /// The highest mined minor that still has the name, when a higher one that\n\
+         \x20   /// loaded its extension does not — the engine took the name away after it.\n\
+         \x20   /// Always paired with a `None` value: a name the top engine has has not\n\
+         \x20   /// left yet.\n\
          \x20   pub until: Option<(u16, u16)>,\n\
          }\n\n",
     );
@@ -871,7 +907,9 @@ fn render_constants(
     );
     let _ = writeln!(s, "pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[");
     for (name, r) in rows {
-        let value = r.value_literal(name)?;
+        let value = r
+            .value_literal(name)?
+            .map_or_else(|| "None".to_owned(), |v| format!("Some({v})"));
         let since = minor_literal(r.since.as_deref(), name)?;
         let until = minor_literal(r.until.as_deref(), name)?;
         // The extension is provenance, not a decision input — it lives in the

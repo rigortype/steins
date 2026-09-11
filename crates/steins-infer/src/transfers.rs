@@ -1928,9 +1928,10 @@ const FILTER_FLAG_NO_OPS: &[&str] = &[
 
 /// One engine constant's integer value from the mined table (ADR-0094 §2), or
 /// `None` when the table has no int row for it — an extension the mining build
-/// lacked, or a name outside its minor range.
+/// lacked, a name outside its minor range, or a value-less row (issue #718),
+/// which records a departure and carries no literal at all.
 fn engine_int(name: &str) -> Option<i64> {
-    match steins_catalog::engine_constant(name)?.value {
+    match steins_catalog::engine_constant(name)?.value? {
         steins_catalog::ConstValue::Int(n) => Some(n),
         _ => None,
     }
