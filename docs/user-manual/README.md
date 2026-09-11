@@ -24,8 +24,8 @@ Two things worth knowing before you start:
    honest limits of the current release.
 2. [**CLI reference**](02-cli-reference.md) — every subcommand and every
    flag: `check`, `annotate`, `transform`, `effect-diff`, `doctor`, `mcp`,
-   `version`, `license`, the `text`/`json` output modes, and the exit-code
-   contract per command.
+   `triage`, `version`, `license`, the `text`/`json` output modes, and the
+   exit-code contract per command.
 3. [**Configuration**](03-configuration.md) — the `steins.toml` key-by-key
    reference: discovery, which sections parse strictly and which leniently,
    and how config keys interact with command-line flags.
@@ -35,8 +35,8 @@ Two things worth knowing before you start:
 5. [**Profiles, baseline, and suppression**](05-profiles-and-baseline.md) —
    the five named profiles — the `default ⊂ contracts ⊂ strict` ladder plus
    the `throws-direct` and `pedantic` branches — the
-   `.steins-baseline.jsonl` ratchet,
-   user profiles in `steins.toml`, inline `@steins-ignore`, `effect-diff`'s
+   `.steins-baseline.jsonl` ratchet, the triage-first adoption flow
+   (measure → judge → enable → baseline), user profiles in `steins.toml`, inline `@steins-ignore`, `effect-diff`'s
    separate capture loop, and why mechanics ids can never be switched off.
 6. [**CI integration**](06-ci.md) — the exit-code contract in CI, install
    channels and the PHP sidecar on runners, the baseline loop and why
