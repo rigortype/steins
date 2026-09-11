@@ -768,8 +768,8 @@ fn best_dump_type(
         && let Some(fact) =
             eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
     {
-        let stratum = value_stratum(then_val, env, Some(store))
-            .min(value_stratum(else_val, env, Some(store)));
+        let stratum = value_stratum(cx, then_val, env, Some(store))
+            .min(value_stratum(cx, else_val, env, Some(store)));
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,

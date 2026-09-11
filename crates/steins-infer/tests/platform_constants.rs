@@ -473,3 +473,67 @@ fn a_cross_file_project_constant_stops_the_walk() {
         ]
     );
 }
+
+// -------------------------------------- §3.2, what an Asserted value may decide
+
+/// The `type.return-mismatch` messages a source raises under an `os` pin.
+fn return_mismatches(src: &str, os: Option<OsFamily>) -> Vec<String> {
+    diagnostics_under(src, None, os)
+        .into_iter()
+        .filter(|(id, _)| id == "type.return-mismatch")
+        .map(|(_, message)| message)
+        .collect()
+}
+
+#[test]
+fn an_os_pinned_value_decides_no_reachability_through_a_variable() {
+    // ADR-0094 §3.2: a pinned value premises no proof-layer finding. Marking a
+    // branch dead IS a proof-layer act — it withdraws the findings inside it, and
+    // a decided `if` whose arm returns makes the code after it unreachable too —
+    // so under `os = "windows"` this function's `return "not-int"` simply stopped
+    // being checked, and a `type.return-mismatch` present without the pin
+    // disappeared because the user claimed a host.
+    let through_a_variable = "<?php\n\
+        function d3(): int { $v = PHP_EOL; if ($v === \"\\r\\n\") { return 1; } return \"not-int\"; }\n";
+    // The same laundering one derivation further out: the comparison's own
+    // `bool` is bound first and the guard reads THAT.
+    let through_a_bool = "<?php\n\
+        function d4(): int { $x = PHP_EOL === \"\\r\\n\"; if ($x) { return 1; } return \"not-int\"; }\n";
+    let windows = Some(OsFamily::Windows);
+    for src in [through_a_variable, through_a_bool] {
+        assert_eq!(return_mismatches(src, None).len(), 1, "without a pin: {src}");
+        assert_eq!(return_mismatches(src, windows).len(), 1, "under a pin: {src}");
+    }
+
+    // A VERIFIED binding still decides, which is what makes the gate a stratum
+    // check and not a retreat: `PHP_INT_SIZE` is §3.1's 64-bit literal, true of
+    // every target, so the guard is proven and the tail really is unreachable.
+    let verified = "<?php\n\
+        function d5(): int { $v = PHP_INT_SIZE; if ($v === 8) { return 1; } return \"not-int\"; }\n";
+    assert!(return_mismatches(verified, windows).is_empty());
+}
+
+#[test]
+fn an_aliased_pin_is_still_the_pin() {
+    // `use const PHP_EOL as EOL;` spells `EOL`, and the stratum used to be keyed
+    // on that spelling — so the alias carried a pinned value at `Verified` and
+    // `EOL === "\r\n"` dumped `true` with no `(asserted)` on it. The pin is a
+    // property of the constant PHP resolves to, never of the word the file wrote.
+    let src = "<?php\n\
+               use const PHP_EOL as EOL;\n\
+               \\PHPStan\\dumpType(EOL);\n\
+               \\PHPStan\\dumpType(EOL === \"\\r\\n\");\n";
+    assert_eq!(
+        dumps_under(src, None, Some(OsFamily::Windows)),
+        vec![
+            r#"dumped type: "\r\n" (asserted)"#.to_owned(),
+            "dumped type: true (asserted)".to_owned(),
+        ]
+    );
+    // And the alias decides no reachability either, for the same reason the
+    // spelled-out name does not.
+    let src = "<?php\n\
+        use const PHP_EOL as EOL;\n\
+        function d6(): int { $v = EOL; if ($v === \"\\r\\n\") { return 1; } return \"not-int\"; }\n";
+    assert_eq!(return_mismatches(src, Some(OsFamily::Windows)).len(), 1);
+}

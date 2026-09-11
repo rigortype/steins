@@ -77,7 +77,7 @@ pub(crate) fn apply_assign(
                 }
                 // Derivation clause: result stratum is `min` over the arms (either
                 // could be the taken one under a `Maybe` verdict).
-                let strat = value_stratum(then_val, env, Some(&*store)).min(value_stratum(else_val, env, Some(&*store)));
+                let strat = value_stratum(cx, then_val, env, Some(&*store)).min(value_stratum(cx, else_val, env, Some(&*store)));
                 env.insert(var.to_owned(), Known::value_strat(fact, line, None, strat));
                 store.unbind(var);
             }
@@ -678,7 +678,7 @@ pub(crate) fn eval_coalesce_fact(
                 }
                 (
                     arg_value_fact(w, folder, arm, env)
-                        .map(|f| (Some(f), value_stratum(arm, env, store))),
+                        .map(|f| (Some(f), value_stratum(w.cx, arm, env, store))),
                     settled,
                 )
             }

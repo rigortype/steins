@@ -310,7 +310,7 @@ fn cmp_operand_candidates(
     poisoned: bool,
 ) -> Option<(Vec<ArgValue>, Stratum)> {
     if let Some(vals) = cx.cmp_candidates_under(value, env, poisoned, folder, None, None) {
-        return Some((vals, value_stratum(value, env, store)));
+        return Some((vals, value_stratum(cx, value, env, store)));
     }
     if poisoned {
         return None;
@@ -377,8 +377,8 @@ pub(crate) fn eval_binary_fact(
     // own value lane would.
     let derived = l
         .as_ref()
-        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
-        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+        .map_or_else(|| value_stratum(cx, lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(cx, rhs, env, store), |(_, s)| *s));
     let verdict = match (l, r) {
         (Some((l, _)), Some((r, _))) => eval_cmp(cop, &l, &r, cx.php_minor),
         _ => Certainty::Maybe,
@@ -430,7 +430,7 @@ fn value_truthiness(
 ) -> (Certainty, Stratum) {
     match value_operand_fact(w, folder, value, env, store, poisoned) {
         Some((fact, strat)) => (fact.truthy(), strat),
-        None => (Certainty::Maybe, value_stratum(value, env, store)),
+        None => (Certainty::Maybe, value_stratum(w.cx, value, env, store)),
     }
 }
 
@@ -782,8 +782,8 @@ pub(crate) fn eval_concat_fact(
     // lane would.
     let derived = l
         .as_ref()
-        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
-        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+        .map_or_else(|| value_stratum(w.cx, lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(w.cx, rhs, env, store), |(_, s)| *s));
     let (lf, rf) = (l.as_ref().map(|(f, _)| f), r.as_ref().map(|(f, _)| f));
     if let (Some(a), Some(b)) = (lf, rf) {
         // The identity law, above every rung: `'' . $x` and `$x . ''` ARE `$x`'s
@@ -1024,8 +1024,8 @@ pub(crate) fn eval_spaceship_fact(
     let r = cmp_operand_candidates(cx, folder, rhs, env, store, poisoned);
     let derived = l
         .as_ref()
-        .map_or_else(|| value_stratum(lhs, env, store), |(_, s)| *s)
-        .min(r.as_ref().map_or_else(|| value_stratum(rhs, env, store), |(_, s)| *s));
+        .map_or_else(|| value_stratum(cx, lhs, env, store), |(_, s)| *s)
+        .min(r.as_ref().map_or_else(|| value_stratum(cx, rhs, env, store), |(_, s)| *s));
     let decided = match (l, r) {
         (Some((l, _)), Some((r, _))) => spaceship_pole(&l, &r, cx.php_minor),
         _ => None,
@@ -1252,7 +1252,7 @@ pub(crate) fn coalesce_lhs_proven_present(
     if matches!(lhs, ArgValue::OffsetRead { .. }) {
         return false;
     }
-    if value_stratum(lhs, env, Some(store)) != Stratum::Verified {
+    if value_stratum(w.cx, lhs, env, Some(store)) != Stratum::Verified {
         return false;
     }
     match w.cx.resolve_literal(lhs, env, w.scope.poisoned, folder) {
@@ -1369,6 +1369,17 @@ fn cmp_operand_values(
 }
 
 /// variable, the literal itself, else `None` (unknown → the caller yields `Maybe`).
+///
+/// **An `Asserted` binding answers nothing here** (ADR-0052 §5, ADR-0094 §3.2).
+/// Every caller turns this into a reachability VERDICT — `walk_if` marking the
+/// skipped arm dead, `walk_match` making a later arm unreachable — and marking an
+/// arm dead is a proof-layer act: it suppresses the findings inside it, and makes
+/// the code after a decided `if` that returns unreachable too. A `[runtime] os`
+/// pin is the user's claim about the deployment host, so under `os = "windows"`
+/// `$v = PHP_EOL; if ($v === "\r\n") { return 1; } return "not-int";` lost its
+/// `type.return-mismatch` — a proof-layer finding withdrawn on a claim. The claim
+/// keeps every other job it had: the fact stays bound, narrowing still reads it,
+/// and the dump surface still prints it with `(asserted)`.
 pub(crate) fn operand_values(
     op: &CondOperand,
     env: &HashMap<String, Known>,
@@ -1379,9 +1390,13 @@ pub(crate) fn operand_values(
         // Only the finite layers (`Singleton`/`OneOf`) offer concrete candidate
         // values for a comparison; an abstract fact has none → `None` → `Maybe`
         // (the sound side). Condition evaluation over `finite_members()`.
-        CondOperand::Var(name) if !poisoned => {
-            env.get(name).and_then(|k| k.fact.as_ref()?.finite_members().map(|vs| vs.iter().map(arg_of_val).collect()))
-        }
+        CondOperand::Var(name) if !poisoned => env.get(name).and_then(|k| {
+            (k.stratum == Stratum::Verified)
+                .then_some(())
+                .and(k.fact.as_ref())?
+                .finite_members()
+                .map(|vs| vs.iter().map(arg_of_val).collect())
+        }),
         _ => None,
     }
 }

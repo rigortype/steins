@@ -199,7 +199,7 @@ pub(crate) fn arg_dispatch_return_fact(
     let stratum = args.iter().fold(Stratum::Verified, |acc, v| {
         acc.min(
             transfer_arg_known(cx, folder, v, env, store)
-                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
+                .map_or_else(|| value_stratum(cx, v, env, store), |(_, s)| s),
         )
     });
     Some((out, stratum))
@@ -267,7 +267,7 @@ pub(crate) fn transfer_arg_known(
             .and_then(|(l, s)| Some((singleton_fact(&l, cx.php_minor)?, s)))
             .or_else(|| array_literal_fact(cx, folder, items, env, false, store))
     {
-        return Some((lit, strat.min(value_stratum(value, env, store))));
+        return Some((lit, strat.min(value_stratum(cx, value, env, store))));
     }
     // A bare global constant (ADR-0094, issue #598). Above the literal seam
     // because the literal seam cannot spell what most of these constants ARE: a
@@ -284,7 +284,7 @@ pub(crate) fn transfer_arg_known(
         return global_const_fact(cx, r);
     }
     let lit = cx.resolve_literal(value, env, false, folder)?;
-    Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(value, env, store)))
+    Some((singleton_fact(&lit, cx.php_minor)?, value_stratum(cx, value, env, store)))
 }
 
 /// The declared contract lane as ONE fact, with the weakest stratum any arm of it

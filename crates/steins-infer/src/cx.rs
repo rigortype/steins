@@ -1014,7 +1014,7 @@ impl<'a> Cx<'a> {
                     rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
                 // Same derivation as `.` above: result stratum is the operands' min.
-                let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
+                let strat = value_stratum(self, lhs, env, None).min(value_stratum(self, rhs, env, None));
                 match eval_cmp(*cop, &l, &r, self.php_minor) {
                     Certainty::Yes => Some((ArgValue::Bool(true), strat)),
                     Certainty::No => Some((ArgValue::Bool(false), strat)),
@@ -1042,7 +1042,7 @@ impl<'a> Cx<'a> {
                 let r = self.cmp_candidates_under(
                     rhs, env, poisoned, folder, descent.as_deref_mut(), out.as_deref_mut(),
                 )?;
-                let strat = value_stratum(lhs, env, None).min(value_stratum(rhs, env, None));
+                let strat = value_stratum(self, lhs, env, None).min(value_stratum(self, rhs, env, None));
                 spaceship_pole(&l, &r, self.php_minor).map(|n| (ArgValue::Int(n), strat))
             }
             // A cast in value position (issue #626): the SAME grid the fact seam
@@ -1238,7 +1238,7 @@ impl<'a> Cx<'a> {
             } else {
                 // Unresolved: keep the written form for the gate, stratum from
                 // the syntactic arm (env/prop reads only — no summary).
-                (a.clone(), value_stratum(a, env, None))
+                (a.clone(), value_stratum(self, a, env, None))
             };
             arg_strat = arg_strat.min(s);
             resolved.push(r);
@@ -1377,7 +1377,7 @@ impl<'a> Cx<'a> {
         // but the input union carries its own trust — min over the arguments, so an
         // Asserted union in gives an Asserted result out.
         let stratum =
-            args.iter().fold(Stratum::Verified, |acc, a| acc.min(value_stratum(a, env, None)));
+            args.iter().fold(Stratum::Verified, |acc, a| acc.min(value_stratum(self, a, env, None)));
         Some((fact, stratum, format!("folded from {name}() over {combinations} argument combinations")))
     }
 

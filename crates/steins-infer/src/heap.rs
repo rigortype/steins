@@ -931,7 +931,7 @@ pub(crate) fn apply_prop_assign(
     let proven = cx.resolve_literal_strat_ex(value, env, false, folder, None, Some(&mut *out));
     let (proven_lit, rvalue_strat) = match &proven {
         Some((lit, strat)) => (Some(lit.clone()), *strat),
-        None => (None, value_stratum(value, env, Some(&*store))),
+        None => (None, value_stratum(cx, value, env, Some(&*store))),
     };
     let prop_fact_val: Option<Fact> = proven_lit.as_ref().and_then(|l| singleton_fact(l, cx.php_minor)).or_else(|| {
         match value {

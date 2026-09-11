@@ -119,7 +119,7 @@ impl OsFamily {
 /// directions: with a pin these four ARE the user's claim, and without one they
 /// resolve to a union rather than a literal, so nothing downstream decides on
 /// them and the stratum is never consulted for a verdict.
-pub(crate) const OS_PINNED_CONSTANTS: &[&str] =
+const OS_PINNED_CONSTANTS: &[&str] =
     &["DIRECTORY_SEPARATOR", "PATH_SEPARATOR", "PHP_EOL", "PHP_OS_FAMILY"];
 
 /// **Every name ADR-0094 §3 answers by class** — the roster [`platform_fact`]
@@ -157,6 +157,22 @@ const PLATFORM_RULED: &[&str] = &[
     "PHP_FLOAT_MAX",
     "PHP_FLOAT_MIN",
 ];
+
+/// **Whether a constant reference denotes one of the four `[runtime] os` pins**,
+/// by the name PHP resolves it to and never by the name the file spells.
+///
+/// `use const PHP_EOL as EOL;` writes `EOL`, and matching the raw spelling let the
+/// alias launder the pin's `Asserted` stratum into `Verified` — `EOL === "\r\n"`
+/// dumped `true` with no `(asserted)` marker on it. It is the aliasing hole issue
+/// #279 closed for `use function trim as t;`, in the constant lane.
+///
+/// Read by [`crate::walk::value_stratum`], and true whether or not a pin is set.
+/// That is sound in both directions: with a pin these four ARE the user's claim,
+/// and without one they resolve to a union rather than a literal, so nothing
+/// downstream decides on them and the stratum is never consulted for a verdict.
+pub(crate) fn denotes_os_pinned_constant(cx: &Cx, r: &NameRef) -> bool {
+    const_ref_candidates(cx, r).iter().any(|c| OS_PINNED_CONSTANTS.contains(&c.as_str()))
+}
 
 /// The six values php-src closes `PHP_OS_FAMILY` over, in the order
 /// `Fact::OneOf` sorts them into.
