@@ -511,7 +511,7 @@ fn build_hook_expr_scope(
 /// Whether the subtree contains a `yield` / `yield from` that makes this scope a
 /// generator. Nested function/method/closure bodies are their own scopes and are
 /// not counted.
-fn node_is_generator(node: &Node<'_, '_>) -> bool {
+pub(crate) fn node_is_generator(node: &Node<'_, '_>) -> bool {
     match node {
         Node::Yield(_) | Node::YieldFrom(_) | Node::YieldPair(_) | Node::YieldValue(_) => true,
         Node::Function(_) | Node::Method(_) | Node::Closure(_) | Node::ArrowFunction(_) => false,

@@ -202,3 +202,38 @@ fn a_docblock_refines_within_the_array_envelope() {
         \\PHPStan\\dumpType($x);\n";
     assert_eq!(one_type(src), "list<string> (asserted)");
 }
+
+/// A generator is not its `return`s. `: iterable` on a body that `yield`s describes
+/// the `Generator` the CALL hands back, not the values of in-body `return` (issue
+/// #128) — so `scope_return_top` shares `scope_return`'s generator guard and the top
+/// never reaches the oracle. Without the guard this call would bind the envelope's
+/// `array` half, which no generator call can produce.
+#[test]
+fn a_generator_is_not_bounded_by_its_iterable_hint() {
+    let src = "<?php\n\
+        function f(int $trigger): iterable {\n\
+            yield 1;\n\
+            return 'x';\n\
+        }\n\
+        $x = f(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// The method twin of the guard above: `lower_method` withholds the top for a
+/// `MethodBody::Concrete` that yields, so the arm lane on the method side is silent
+/// for the same reason the function side is.
+#[test]
+fn a_generator_method_is_not_bounded_by_its_object_hint() {
+    let src = "<?php\n\
+        final class Box {\n\
+            public function rows(int $trigger): object {\n\
+                yield 1;\n\
+                return 'x';\n\
+            }\n\
+        }\n\
+        $b = new Box();\n\
+        $x = $b->rows(1);\n\
+        \\PHPStan\\dumpType($x);\n";
+    assert_eq!(one_type(src), "unknown");
+}

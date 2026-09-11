@@ -1610,6 +1610,33 @@ and inventing a nullable flag for it would be modelling a union the
 value domain would then have to join against. Pinned by
 `a_nullable_array_hint_is_not_an_enforced_top`.
 
+### A9.7 A generator has no enforced top, in either lane
+
+A body that `yield`s hands its caller a `Generator`, and the return hint
+describes *that* object rather than the values of in-body `return` (issue
+#128, and the reason `Cx::scope_return` has carried an `is_generator`
+guard since it was written). So `: iterable` on a generator does **not**
+bound the call by `array|Traversable`: the `array` half is a claim no
+generator call can satisfy, and the `return 'x'` A2 would drop as a
+boundary `TypeError` is a `getReturn()` value PHP never checks.
+
+Both lanes need the guard and they are guarded in different places, which
+is the one asymmetry worth writing down. `Cx::scope_return_top` reads
+`Scope::is_generator`, as its `NativeType` neighbour does, and covers
+closures and arrow functions — scopes with a `ret_hint` and no
+declaration. The **arm** lane reads `FunctionDecl::ret_top` /
+`MethodDecl::ret_top` directly and those structs carry no generator bit,
+so the guard is taken one step earlier, at the single place the top is
+recorded: `declared_enforced_top` (`lower_decl`) withholds it for a body
+that yields, which guards every reader of the field at once rather than
+asking each to remember.
+
+This was a live hole, not a hypothetical: with only the scope-side guard
+in place, `function f(): iterable { yield 1; return 'x'; }` bound its
+caller `Traversable|array` through the arm lane. Pinned from both sides
+by `a_generator_is_not_bounded_by_its_iterable_hint` and
+`a_generator_method_is_not_bounded_by_its_object_hint`.
+
 ### A9 refusals (each one line, each anchored)
 
 - **A `TypeMember::ArrayTop` inside `NativeType`** — a union member is a
