@@ -676,6 +676,11 @@ struct ConstMeta {
     /// mining run had no php-src checkout and every row is rangeless.
     #[serde(default)]
     minors: Vec<Vec<String>>,
+    /// The engine versions the value diff compared, low minor first (`php` is
+    /// the top one). A single entry means nothing was diffed, which is a real
+    /// difference in what the rows are worth and so belongs in the header.
+    #[serde(default)]
+    diffed: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -803,6 +808,20 @@ fn render_constants(
             let (minor, tip) = (m.first().map_or("", String::as_str), m.get(1).map_or("", String::as_str));
             let _ = writeln!(s, "//   PHP-{minor}  {}", &tip[..tip.len().min(12)]);
         }
+    }
+    if meta.diffed.len() > 1 {
+        let _ = writeln!(
+            s,
+            "//\n// Engines the value diff compared — a name they disagreed about inside its\n\
+             // own minor range is refused, not mined from whichever answered first:\n\
+             //   {}",
+            meta.diffed.join(", ")
+        );
+    } else {
+        s.push_str(
+            "//\n// ONE engine answered: no value was diffed across minors, so a name whose\n\
+             // value moves with the build is caught only by the miner's rosters.\n",
+        );
     }
     s.push_str("//\n// Counts at the mining pin:\n");
     let _ = writeln!(s, "//   {:>5}  constants the build had, over the catalog's extensions", counts.mined);

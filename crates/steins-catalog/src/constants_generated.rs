@@ -38,10 +38,14 @@
 //   PHP-8.4  863263a775ec
 //   PHP-8.5  a8a2eb6cc0cd
 //
+// Engines the value diff compared — a name they disagreed about inside its
+// own minor range is refused, not mined from whichever answered first:
+//   8.2.33, 8.3.33, 8.4.25, 8.5.10
+//
 // Counts at the mining pin:
 //    3286  constants the build had, over the catalog's extensions
-//    2770  rows (the spec-fixed literals)
-//      15    of those, carrying a minor range the scan could prove
+//    2566  rows (the spec-fixed literals)
+//      14    of those, carrying a minor range the scan could prove
 
 // `M_PI` and its siblings ARE the mathematical constants, spelled to the last
 // bit php-src spells them to, so `clippy::approx_constant` fires on every one of
@@ -983,7 +987,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("FILTER_FLAG_ENCODE_AMP", ConstRow { value: ConstValue::Int(64), since: None, until: None }), // filter
     ("FILTER_FLAG_ENCODE_HIGH", ConstRow { value: ConstValue::Int(32), since: None, until: None }), // filter
     ("FILTER_FLAG_ENCODE_LOW", ConstRow { value: ConstValue::Int(16), since: None, until: None }), // filter
-    ("FILTER_FLAG_GLOBAL_RANGE", ConstRow { value: ConstValue::Int(536870912), since: Some((8, 2)), until: None }), // filter
     ("FILTER_FLAG_HOSTNAME", ConstRow { value: ConstValue::Int(1048576), since: None, until: None }), // filter
     ("FILTER_FLAG_IPV4", ConstRow { value: ConstValue::Int(1048576), since: None, until: None }), // filter
     ("FILTER_FLAG_IPV6", ConstRow { value: ConstValue::Int(2097152), since: None, until: None }), // filter
@@ -1040,14 +1043,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("FTP_TIMEOUT_SEC", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // ftp
     ("FTP_USEPASVADDRESS", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // ftp
     ("GD_BUNDLED", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // gd
-    ("GLOB_AVAILABLE_FLAGS", ConstRow { value: ConstValue::Int(1073746108), since: None, until: None }), // standard
-    ("GLOB_BRACE", ConstRow { value: ConstValue::Int(128), since: None, until: None }), // standard
-    ("GLOB_ERR", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // standard
-    ("GLOB_MARK", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // standard
-    ("GLOB_NOCHECK", ConstRow { value: ConstValue::Int(16), since: None, until: None }), // standard
-    ("GLOB_NOESCAPE", ConstRow { value: ConstValue::Int(4096), since: None, until: None }), // standard
-    ("GLOB_NOSORT", ConstRow { value: ConstValue::Int(32), since: None, until: None }), // standard
-    ("GLOB_ONLYDIR", ConstRow { value: ConstValue::Int(1073741824), since: None, until: None }), // standard
     ("GMP_BIG_ENDIAN", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // gmp
     ("GMP_LITTLE_ENDIAN", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // gmp
     ("GMP_LSW_FIRST", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // gmp
@@ -1102,7 +1097,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("IDNA_ALLOW_UNASSIGNED", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // intl
     ("IDNA_CHECK_BIDI", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // intl
     ("IDNA_CHECK_CONTEXTJ", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // intl
-    ("IDNA_DEFAULT", ConstRow { value: ConstValue::Int(48), since: None, until: None }), // intl
     ("IDNA_ERROR_BIDI", ConstRow { value: ConstValue::Int(2048), since: None, until: None }), // intl
     ("IDNA_ERROR_CONTEXTJ", ConstRow { value: ConstValue::Int(4096), since: None, until: None }), // intl
     ("IDNA_ERROR_DISALLOWED", ConstRow { value: ConstValue::Int(128), since: None, until: None }), // intl
@@ -1121,7 +1115,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("IDNA_USE_STD3_RULES", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // intl
     ("IMAGETYPE_AVIF", ConstRow { value: ConstValue::Int(19), since: None, until: None }), // standard
     ("IMAGETYPE_BMP", ConstRow { value: ConstValue::Int(6), since: None, until: None }), // standard
-    ("IMAGETYPE_COUNT", ConstRow { value: ConstValue::Int(22), since: None, until: None }), // standard
     ("IMAGETYPE_GIF", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // standard
     ("IMAGETYPE_HEIF", ConstRow { value: ConstValue::Int(20), since: None, until: None }), // standard
     ("IMAGETYPE_ICO", ConstRow { value: ConstValue::Int(17), since: None, until: None }), // standard
@@ -1685,7 +1678,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("PASSWORD_ARGON2_DEFAULT_THREADS", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // standard
     ("PASSWORD_ARGON2_DEFAULT_TIME_COST", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // standard
     ("PASSWORD_BCRYPT", ConstRow { value: ConstValue::Str("2y"), since: None, until: None }), // standard
-    ("PASSWORD_BCRYPT_DEFAULT_COST", ConstRow { value: ConstValue::Int(12), since: None, until: None }), // standard
     ("PASSWORD_DEFAULT", ConstRow { value: ConstValue::Str("2y"), since: None, until: None }), // standard
     ("PATHINFO_ALL", ConstRow { value: ConstValue::Int(15), since: None, until: None }), // standard
     ("PATHINFO_BASENAME", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // standard
@@ -1693,79 +1685,28 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("PATHINFO_EXTENSION", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // standard
     ("PATHINFO_FILENAME", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // standard
     ("PGSQL_ASSOC", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_BAD_RESPONSE", ConstRow { value: ConstValue::Int(5), since: None, until: None }), // pgsql
     ("PGSQL_BOTH", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_COMMAND_OK", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_AUTH_OK", ConstRow { value: ConstValue::Int(5), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_AWAITING_RESPONSE", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_BAD", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_MADE", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_OK", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_SETENV", ConstRow { value: ConstValue::Int(6), since: None, until: None }), // pgsql
-    ("PGSQL_CONNECTION_STARTED", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_CONNECT_ASYNC", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
     ("PGSQL_CONNECT_FORCE_NEW", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_CONV_FORCE_NULL", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
     ("PGSQL_CONV_IGNORE_DEFAULT", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_CONV_IGNORE_NOT_NULL", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // pgsql
-    ("PGSQL_COPY_IN", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
-    ("PGSQL_COPY_OUT", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_COLUMN_NAME", ConstRow { value: ConstValue::Int(99), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_CONSTRAINT_NAME", ConstRow { value: ConstValue::Int(110), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_CONTEXT", ConstRow { value: ConstValue::Int(87), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_DATATYPE_NAME", ConstRow { value: ConstValue::Int(100), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_INTERNAL_POSITION", ConstRow { value: ConstValue::Int(112), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_INTERNAL_QUERY", ConstRow { value: ConstValue::Int(113), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_MESSAGE_DETAIL", ConstRow { value: ConstValue::Int(68), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_MESSAGE_HINT", ConstRow { value: ConstValue::Int(72), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_MESSAGE_PRIMARY", ConstRow { value: ConstValue::Int(77), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SCHEMA_NAME", ConstRow { value: ConstValue::Int(115), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SEVERITY", ConstRow { value: ConstValue::Int(83), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SEVERITY_NONLOCALIZED", ConstRow { value: ConstValue::Int(86), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SOURCE_FILE", ConstRow { value: ConstValue::Int(70), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SOURCE_FUNCTION", ConstRow { value: ConstValue::Int(82), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SOURCE_LINE", ConstRow { value: ConstValue::Int(76), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_SQLSTATE", ConstRow { value: ConstValue::Int(67), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_STATEMENT_POSITION", ConstRow { value: ConstValue::Int(80), since: None, until: None }), // pgsql
-    ("PGSQL_DIAG_TABLE_NAME", ConstRow { value: ConstValue::Int(116), since: None, until: None }), // pgsql
     ("PGSQL_DML_ASYNC", ConstRow { value: ConstValue::Int(1024), since: None, until: None }), // pgsql
     ("PGSQL_DML_ESCAPE", ConstRow { value: ConstValue::Int(4096), since: None, until: None }), // pgsql
     ("PGSQL_DML_EXEC", ConstRow { value: ConstValue::Int(512), since: None, until: None }), // pgsql
     ("PGSQL_DML_NO_CONV", ConstRow { value: ConstValue::Int(256), since: None, until: None }), // pgsql
     ("PGSQL_DML_STRING", ConstRow { value: ConstValue::Int(2048), since: None, until: None }), // pgsql
-    ("PGSQL_EMPTY_QUERY", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_ERRORS_DEFAULT", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_ERRORS_SQLSTATE", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_ERRORS_TERSE", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_ERRORS_VERBOSE", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
-    ("PGSQL_FATAL_ERROR", ConstRow { value: ConstValue::Int(7), since: None, until: None }), // pgsql
-    ("PGSQL_NONFATAL_ERROR", ConstRow { value: ConstValue::Int(6), since: None, until: None }), // pgsql
     ("PGSQL_NOTICE_ALL", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_NOTICE_CLEAR", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
     ("PGSQL_NOTICE_LAST", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
     ("PGSQL_NUM", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
-    ("PGSQL_POLLING_ACTIVE", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
-    ("PGSQL_POLLING_FAILED", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_POLLING_OK", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_POLLING_READING", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_POLLING_WRITING", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_SEEK_CUR", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
     ("PGSQL_SEEK_END", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_SEEK_SET", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_SHOW_CONTEXT_ALWAYS", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
-    ("PGSQL_SHOW_CONTEXT_ERRORS", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_SHOW_CONTEXT_NEVER", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
     ("PGSQL_STATUS_LONG", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
     ("PGSQL_STATUS_STRING", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_TRACE_REGRESS_MODE", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PGSQL_TRACE_SUPPRESS_TIMESTAMPS", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_TRANSACTION_ACTIVE", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // pgsql
-    ("PGSQL_TRANSACTION_IDLE", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // pgsql
-    ("PGSQL_TRANSACTION_INERROR", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // pgsql
-    ("PGSQL_TRANSACTION_INTRANS", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
-    ("PGSQL_TRANSACTION_UNKNOWN", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // pgsql
-    ("PGSQL_TUPLES_CHUNK", ConstRow { value: ConstValue::Int(12), since: None, until: None }), // pgsql
-    ("PGSQL_TUPLES_OK", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // pgsql
     ("PHP_OUTPUT_HANDLER_CLEAN", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // Core
     ("PHP_OUTPUT_HANDLER_CLEANABLE", ConstRow { value: ConstValue::Int(16), since: None, until: None }), // Core
     ("PHP_OUTPUT_HANDLER_CONT", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // Core
@@ -2333,147 +2274,6 @@ pub(crate) static ENGINE_CONSTANTS: &[(&str, ConstRow)] = &[
     ("UPLOAD_ERR_NO_TMP_DIR", ConstRow { value: ConstValue::Int(6), since: None, until: None }), // Core
     ("UPLOAD_ERR_OK", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // Core
     ("UPLOAD_ERR_PARTIAL", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // Core
-    ("U_AMBIGUOUS_ALIAS_WARNING", ConstRow { value: ConstValue::Int(-122), since: None, until: None }), // intl
-    ("U_BAD_VARIABLE_DEFINITION", ConstRow { value: ConstValue::Int(65536), since: None, until: None }), // intl
-    ("U_BRK_ASSIGN_ERROR", ConstRow { value: ConstValue::Int(66053), since: None, until: None }), // intl
-    ("U_BRK_ERROR_LIMIT", ConstRow { value: ConstValue::Int(66062), since: None, until: None }), // intl
-    ("U_BRK_ERROR_START", ConstRow { value: ConstValue::Int(66048), since: None, until: None }), // intl
-    ("U_BRK_HEX_DIGITS_EXPECTED", ConstRow { value: ConstValue::Int(66049), since: None, until: None }), // intl
-    ("U_BRK_INIT_ERROR", ConstRow { value: ConstValue::Int(66058), since: None, until: None }), // intl
-    ("U_BRK_INTERNAL_ERROR", ConstRow { value: ConstValue::Int(66048), since: None, until: None }), // intl
-    ("U_BRK_MALFORMED_RULE_TAG", ConstRow { value: ConstValue::Int(66061), since: None, until: None }), // intl
-    ("U_BRK_MISMATCHED_PAREN", ConstRow { value: ConstValue::Int(66055), since: None, until: None }), // intl
-    ("U_BRK_NEW_LINE_IN_QUOTED_STRING", ConstRow { value: ConstValue::Int(66056), since: None, until: None }), // intl
-    ("U_BRK_RULE_EMPTY_SET", ConstRow { value: ConstValue::Int(66059), since: None, until: None }), // intl
-    ("U_BRK_RULE_SYNTAX", ConstRow { value: ConstValue::Int(66051), since: None, until: None }), // intl
-    ("U_BRK_SEMICOLON_EXPECTED", ConstRow { value: ConstValue::Int(66050), since: None, until: None }), // intl
-    ("U_BRK_UNCLOSED_SET", ConstRow { value: ConstValue::Int(66052), since: None, until: None }), // intl
-    ("U_BRK_UNDEFINED_VARIABLE", ConstRow { value: ConstValue::Int(66057), since: None, until: None }), // intl
-    ("U_BRK_UNRECOGNIZED_OPTION", ConstRow { value: ConstValue::Int(66060), since: None, until: None }), // intl
-    ("U_BRK_VARIABLE_REDFINITION", ConstRow { value: ConstValue::Int(66054), since: None, until: None }), // intl
-    ("U_BUFFER_OVERFLOW_ERROR", ConstRow { value: ConstValue::Int(15), since: None, until: None }), // intl
-    ("U_CE_NOT_FOUND_ERROR", ConstRow { value: ConstValue::Int(21), since: None, until: None }), // intl
-    ("U_COLLATOR_VERSION_MISMATCH", ConstRow { value: ConstValue::Int(28), since: None, until: None }), // intl
-    ("U_DIFFERENT_UCA_VERSION", ConstRow { value: ConstValue::Int(-121), since: None, until: None }), // intl
-    ("U_ENUM_OUT_OF_SYNC_ERROR", ConstRow { value: ConstValue::Int(25), since: None, until: None }), // intl
-    ("U_ERROR_LIMIT", ConstRow { value: ConstValue::Int(66818), since: None, until: None }), // intl
-    ("U_ERROR_WARNING_LIMIT", ConstRow { value: ConstValue::Int(-119), since: None, until: None }), // intl
-    ("U_ERROR_WARNING_START", ConstRow { value: ConstValue::Int(-128), since: None, until: None }), // intl
-    ("U_FILE_ACCESS_ERROR", ConstRow { value: ConstValue::Int(4), since: None, until: None }), // intl
-    ("U_FMT_PARSE_ERROR_LIMIT", ConstRow { value: ConstValue::Int(65825), since: None, until: None }), // intl
-    ("U_FMT_PARSE_ERROR_START", ConstRow { value: ConstValue::Int(65792), since: None, until: None }), // intl
-    ("U_IDNA_ACE_PREFIX_ERROR", ConstRow { value: ConstValue::Int(66564), since: None, until: None }), // intl
-    ("U_IDNA_CHECK_BIDI_ERROR", ConstRow { value: ConstValue::Int(66562), since: None, until: None }), // intl
-    ("U_IDNA_DOMAIN_NAME_TOO_LONG_ERROR", ConstRow { value: ConstValue::Int(66568), since: None, until: None }), // intl
-    ("U_IDNA_ERROR_LIMIT", ConstRow { value: ConstValue::Int(66569), since: None, until: None }), // intl
-    ("U_IDNA_ERROR_START", ConstRow { value: ConstValue::Int(66560), since: None, until: None }), // intl
-    ("U_IDNA_LABEL_TOO_LONG_ERROR", ConstRow { value: ConstValue::Int(66566), since: None, until: None }), // intl
-    ("U_IDNA_PROHIBITED_ERROR", ConstRow { value: ConstValue::Int(66560), since: None, until: None }), // intl
-    ("U_IDNA_STD3_ASCII_RULES_ERROR", ConstRow { value: ConstValue::Int(66563), since: None, until: None }), // intl
-    ("U_IDNA_UNASSIGNED_ERROR", ConstRow { value: ConstValue::Int(66561), since: None, until: None }), // intl
-    ("U_IDNA_VERIFICATION_ERROR", ConstRow { value: ConstValue::Int(66565), since: None, until: None }), // intl
-    ("U_IDNA_ZERO_LENGTH_LABEL_ERROR", ConstRow { value: ConstValue::Int(66567), since: None, until: None }), // intl
-    ("U_ILLEGAL_ARGUMENT_ERROR", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // intl
-    ("U_ILLEGAL_CHARACTER", ConstRow { value: ConstValue::Int(65567), since: None, until: None }), // intl
-    ("U_ILLEGAL_CHAR_FOUND", ConstRow { value: ConstValue::Int(12), since: None, until: None }), // intl
-    ("U_ILLEGAL_CHAR_IN_SEGMENT", ConstRow { value: ConstValue::Int(65564), since: None, until: None }), // intl
-    ("U_ILLEGAL_ESCAPE_SEQUENCE", ConstRow { value: ConstValue::Int(18), since: None, until: None }), // intl
-    ("U_ILLEGAL_PAD_POSITION", ConstRow { value: ConstValue::Int(65800), since: None, until: None }), // intl
-    ("U_INDEX_OUTOFBOUNDS_ERROR", ConstRow { value: ConstValue::Int(8), since: None, until: None }), // intl
-    ("U_INTERNAL_PROGRAM_ERROR", ConstRow { value: ConstValue::Int(5), since: None, until: None }), // intl
-    ("U_INTERNAL_TRANSLITERATOR_ERROR", ConstRow { value: ConstValue::Int(65568), since: None, until: None }), // intl
-    ("U_INVALID_CHAR_FOUND", ConstRow { value: ConstValue::Int(10), since: None, until: None }), // intl
-    ("U_INVALID_FORMAT_ERROR", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // intl
-    ("U_INVALID_FUNCTION", ConstRow { value: ConstValue::Int(65570), since: None, until: None }), // intl
-    ("U_INVALID_ID", ConstRow { value: ConstValue::Int(65569), since: None, until: None }), // intl
-    ("U_INVALID_PROPERTY_PATTERN", ConstRow { value: ConstValue::Int(65561), since: None, until: None }), // intl
-    ("U_INVALID_RBT_SYNTAX", ConstRow { value: ConstValue::Int(65560), since: None, until: None }), // intl
-    ("U_INVALID_STATE_ERROR", ConstRow { value: ConstValue::Int(27), since: None, until: None }), // intl
-    ("U_INVALID_TABLE_FILE", ConstRow { value: ConstValue::Int(14), since: None, until: None }), // intl
-    ("U_INVALID_TABLE_FORMAT", ConstRow { value: ConstValue::Int(13), since: None, until: None }), // intl
-    ("U_INVARIANT_CONVERSION_ERROR", ConstRow { value: ConstValue::Int(26), since: None, until: None }), // intl
-    ("U_MALFORMED_EXPONENTIAL_PATTERN", ConstRow { value: ConstValue::Int(65795), since: None, until: None }), // intl
-    ("U_MALFORMED_PRAGMA", ConstRow { value: ConstValue::Int(65562), since: None, until: None }), // intl
-    ("U_MALFORMED_RULE", ConstRow { value: ConstValue::Int(65537), since: None, until: None }), // intl
-    ("U_MALFORMED_SET", ConstRow { value: ConstValue::Int(65538), since: None, until: None }), // intl
-    ("U_MALFORMED_SYMBOL_REFERENCE", ConstRow { value: ConstValue::Int(65539), since: None, until: None }), // intl
-    ("U_MALFORMED_UNICODE_ESCAPE", ConstRow { value: ConstValue::Int(65540), since: None, until: None }), // intl
-    ("U_MALFORMED_VARIABLE_DEFINITION", ConstRow { value: ConstValue::Int(65541), since: None, until: None }), // intl
-    ("U_MALFORMED_VARIABLE_REFERENCE", ConstRow { value: ConstValue::Int(65542), since: None, until: None }), // intl
-    ("U_MEMORY_ALLOCATION_ERROR", ConstRow { value: ConstValue::Int(7), since: None, until: None }), // intl
-    ("U_MESSAGE_PARSE_ERROR", ConstRow { value: ConstValue::Int(6), since: None, until: None }), // intl
-    ("U_MISMATCHED_SEGMENT_DELIMITERS", ConstRow { value: ConstValue::Int(65543), since: None, until: None }), // intl
-    ("U_MISPLACED_ANCHOR_START", ConstRow { value: ConstValue::Int(65544), since: None, until: None }), // intl
-    ("U_MISPLACED_COMPOUND_FILTER", ConstRow { value: ConstValue::Int(65558), since: None, until: None }), // intl
-    ("U_MISPLACED_CURSOR_OFFSET", ConstRow { value: ConstValue::Int(65545), since: None, until: None }), // intl
-    ("U_MISPLACED_QUANTIFIER", ConstRow { value: ConstValue::Int(65546), since: None, until: None }), // intl
-    ("U_MISSING_OPERATOR", ConstRow { value: ConstValue::Int(65547), since: None, until: None }), // intl
-    ("U_MISSING_RESOURCE_ERROR", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // intl
-    ("U_MISSING_SEGMENT_CLOSE", ConstRow { value: ConstValue::Int(65548), since: None, until: None }), // intl
-    ("U_MULTIPLE_ANTE_CONTEXTS", ConstRow { value: ConstValue::Int(65549), since: None, until: None }), // intl
-    ("U_MULTIPLE_COMPOUND_FILTERS", ConstRow { value: ConstValue::Int(65559), since: None, until: None }), // intl
-    ("U_MULTIPLE_CURSORS", ConstRow { value: ConstValue::Int(65550), since: None, until: None }), // intl
-    ("U_MULTIPLE_DECIMAL_SEPARATORS", ConstRow { value: ConstValue::Int(65793), since: None, until: None }), // intl
-    ("U_MULTIPLE_DECIMAL_SEPERATORS", ConstRow { value: ConstValue::Int(65793), since: None, until: None }), // intl
-    ("U_MULTIPLE_EXPONENTIAL_SYMBOLS", ConstRow { value: ConstValue::Int(65794), since: None, until: None }), // intl
-    ("U_MULTIPLE_PAD_SPECIFIERS", ConstRow { value: ConstValue::Int(65798), since: None, until: None }), // intl
-    ("U_MULTIPLE_PERCENT_SYMBOLS", ConstRow { value: ConstValue::Int(65796), since: None, until: None }), // intl
-    ("U_MULTIPLE_PERMILL_SYMBOLS", ConstRow { value: ConstValue::Int(65797), since: None, until: None }), // intl
-    ("U_MULTIPLE_POST_CONTEXTS", ConstRow { value: ConstValue::Int(65551), since: None, until: None }), // intl
-    ("U_NO_SPACE_AVAILABLE", ConstRow { value: ConstValue::Int(20), since: None, until: None }), // intl
-    ("U_NO_WRITE_PERMISSION", ConstRow { value: ConstValue::Int(30), since: None, until: None }), // intl
-    ("U_PARSE_ERROR", ConstRow { value: ConstValue::Int(9), since: None, until: None }), // intl
-    ("U_PARSE_ERROR_LIMIT", ConstRow { value: ConstValue::Int(65571), since: None, until: None }), // intl
-    ("U_PARSE_ERROR_START", ConstRow { value: ConstValue::Int(65536), since: None, until: None }), // intl
-    ("U_PATTERN_SYNTAX_ERROR", ConstRow { value: ConstValue::Int(65799), since: None, until: None }), // intl
-    ("U_PRIMARY_TOO_LONG_ERROR", ConstRow { value: ConstValue::Int(22), since: None, until: None }), // intl
-    ("U_REGEX_BAD_ESCAPE_SEQUENCE", ConstRow { value: ConstValue::Int(66307), since: None, until: None }), // intl
-    ("U_REGEX_BAD_INTERVAL", ConstRow { value: ConstValue::Int(66312), since: None, until: None }), // intl
-    ("U_REGEX_ERROR_LIMIT", ConstRow { value: ConstValue::Int(66326), since: None, until: None }), // intl
-    ("U_REGEX_ERROR_START", ConstRow { value: ConstValue::Int(66304), since: None, until: None }), // intl
-    ("U_REGEX_INTERNAL_ERROR", ConstRow { value: ConstValue::Int(66304), since: None, until: None }), // intl
-    ("U_REGEX_INVALID_BACK_REF", ConstRow { value: ConstValue::Int(66314), since: None, until: None }), // intl
-    ("U_REGEX_INVALID_FLAG", ConstRow { value: ConstValue::Int(66315), since: None, until: None }), // intl
-    ("U_REGEX_INVALID_STATE", ConstRow { value: ConstValue::Int(66306), since: None, until: None }), // intl
-    ("U_REGEX_LOOK_BEHIND_LIMIT", ConstRow { value: ConstValue::Int(66316), since: None, until: None }), // intl
-    ("U_REGEX_MAX_LT_MIN", ConstRow { value: ConstValue::Int(66313), since: None, until: None }), // intl
-    ("U_REGEX_MISMATCHED_PAREN", ConstRow { value: ConstValue::Int(66310), since: None, until: None }), // intl
-    ("U_REGEX_NUMBER_TOO_BIG", ConstRow { value: ConstValue::Int(66311), since: None, until: None }), // intl
-    ("U_REGEX_PROPERTY_SYNTAX", ConstRow { value: ConstValue::Int(66308), since: None, until: None }), // intl
-    ("U_REGEX_RULE_SYNTAX", ConstRow { value: ConstValue::Int(66305), since: None, until: None }), // intl
-    ("U_REGEX_SET_CONTAINS_STRING", ConstRow { value: ConstValue::Int(66317), since: None, until: None }), // intl
-    ("U_REGEX_UNIMPLEMENTED", ConstRow { value: ConstValue::Int(66309), since: None, until: None }), // intl
-    ("U_RESOURCE_TYPE_MISMATCH", ConstRow { value: ConstValue::Int(17), since: None, until: None }), // intl
-    ("U_RULE_MASK_ERROR", ConstRow { value: ConstValue::Int(65557), since: None, until: None }), // intl
-    ("U_SAFECLONE_ALLOCATED_WARNING", ConstRow { value: ConstValue::Int(-126), since: None, until: None }), // intl
-    ("U_SORT_KEY_TOO_SHORT_WARNING", ConstRow { value: ConstValue::Int(-123), since: None, until: None }), // intl
-    ("U_STANDARD_ERROR_LIMIT", ConstRow { value: ConstValue::Int(32), since: None, until: None }), // intl
-    ("U_STATE_OLD_WARNING", ConstRow { value: ConstValue::Int(-125), since: None, until: None }), // intl
-    ("U_STATE_TOO_OLD_ERROR", ConstRow { value: ConstValue::Int(23), since: None, until: None }), // intl
-    ("U_STRINGPREP_CHECK_BIDI_ERROR", ConstRow { value: ConstValue::Int(66562), since: None, until: None }), // intl
-    ("U_STRINGPREP_PROHIBITED_ERROR", ConstRow { value: ConstValue::Int(66560), since: None, until: None }), // intl
-    ("U_STRINGPREP_UNASSIGNED_ERROR", ConstRow { value: ConstValue::Int(66561), since: None, until: None }), // intl
-    ("U_STRING_NOT_TERMINATED_WARNING", ConstRow { value: ConstValue::Int(-124), since: None, until: None }), // intl
-    ("U_TOO_MANY_ALIASES_ERROR", ConstRow { value: ConstValue::Int(24), since: None, until: None }), // intl
-    ("U_TRAILING_BACKSLASH", ConstRow { value: ConstValue::Int(65552), since: None, until: None }), // intl
-    ("U_TRUNCATED_CHAR_FOUND", ConstRow { value: ConstValue::Int(11), since: None, until: None }), // intl
-    ("U_UNCLOSED_SEGMENT", ConstRow { value: ConstValue::Int(65563), since: None, until: None }), // intl
-    ("U_UNDEFINED_SEGMENT_REFERENCE", ConstRow { value: ConstValue::Int(65553), since: None, until: None }), // intl
-    ("U_UNDEFINED_VARIABLE", ConstRow { value: ConstValue::Int(65554), since: None, until: None }), // intl
-    ("U_UNEXPECTED_TOKEN", ConstRow { value: ConstValue::Int(65792), since: None, until: None }), // intl
-    ("U_UNMATCHED_BRACES", ConstRow { value: ConstValue::Int(65801), since: None, until: None }), // intl
-    ("U_UNQUOTED_SPECIAL", ConstRow { value: ConstValue::Int(65555), since: None, until: None }), // intl
-    ("U_UNSUPPORTED_ATTRIBUTE", ConstRow { value: ConstValue::Int(65803), since: None, until: None }), // intl
-    ("U_UNSUPPORTED_ERROR", ConstRow { value: ConstValue::Int(16), since: None, until: None }), // intl
-    ("U_UNSUPPORTED_ESCAPE_SEQUENCE", ConstRow { value: ConstValue::Int(19), since: None, until: None }), // intl
-    ("U_UNSUPPORTED_PROPERTY", ConstRow { value: ConstValue::Int(65802), since: None, until: None }), // intl
-    ("U_UNTERMINATED_QUOTE", ConstRow { value: ConstValue::Int(65556), since: None, until: None }), // intl
-    ("U_USELESS_COLLATOR_ERROR", ConstRow { value: ConstValue::Int(29), since: None, until: None }), // intl
-    ("U_USING_DEFAULT_WARNING", ConstRow { value: ConstValue::Int(-127), since: None, until: None }), // intl
-    ("U_USING_FALLBACK_WARNING", ConstRow { value: ConstValue::Int(-128), since: None, until: None }), // intl
-    ("U_VARIABLE_RANGE_EXHAUSTED", ConstRow { value: ConstValue::Int(65565), since: None, until: None }), // intl
-    ("U_VARIABLE_RANGE_OVERLAP", ConstRow { value: ConstValue::Int(65566), since: None, until: None }), // intl
-    ("U_ZERO_ERROR", ConstRow { value: ConstValue::Int(0), since: None, until: None }), // intl
     ("WSDL_CACHE_BOTH", ConstRow { value: ConstValue::Int(3), since: None, until: None }), // soap
     ("WSDL_CACHE_DISK", ConstRow { value: ConstValue::Int(1), since: None, until: None }), // soap
     ("WSDL_CACHE_MEMORY", ConstRow { value: ConstValue::Int(2), since: None, until: None }), // soap

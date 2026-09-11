@@ -1312,6 +1312,21 @@ fn filter_var_declines_an_unreadable_flags_argument() {
     assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 4)"), "dumped type: unknown");
     // A constant whose value is not an int at all resolves to no bits.
     assert_eq!(dump("$m", "filter_var($m, FILTER_VALIDATE_INT, PHP_EOL)"), "dumped type: unknown");
+    // A flag whose VALUE moves across the supported minors has no row at all
+    // (ADR-0094 §2 refuses `FILTER_FLAG_GLOBAL_RANGE`: 268435456 at 8.2–8.4 and
+    // 536870912 at 8.5), so neither number decomposes — the bit is left over and
+    // the call declines. Which is the whole point: on one minor 268435456 is
+    // `FILTER_FLAG_GLOBAL_RANGE` and on another it is `FILTER_THROW_ON_FAILURE`,
+    // and a bit field cannot say which was meant. By NAME the flag still reads,
+    // since the name is stable while the value is not.
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 536870912)"),
+        "dumped type: unknown"
+    );
+    assert_eq!(
+        dump("$m", "filter_var($m, FILTER_VALIDATE_INT, 268435456)"),
+        "dumped type: unknown"
+    );
 }
 
 #[test]

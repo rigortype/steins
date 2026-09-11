@@ -11,7 +11,8 @@
 //!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
-//!   mine-constants [DIR]     mine the engine's constants (+ php-src ranges) into the constants TOML
+//!   mine-constants [DIR] [--php PATH]…
+//!                            mine the engines' constants (+ php-src ranges) into the constants TOML
 //!   mine-function-map [DIR] [--functions] [--methods]
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
 //!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
@@ -107,7 +108,15 @@ fn main() -> ExitCode {
         },
         Some("mine-constants") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
-            match mine_constants::run(dir) {
+            // `--php PATH`, repeatable: the engines whose values the run diffs
+            // (ADR-0094 §2 — the generator runs over the minors the corpus
+            // harness scopes, and one engine cannot disagree with itself).
+            let php: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--php")
+                .map(|w| w[1].clone())
+                .collect();
+            match mine_constants::run(dir, &php) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
             }
@@ -156,7 +165,7 @@ fn main() -> ExitCode {
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [DIR] | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [DIR] [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

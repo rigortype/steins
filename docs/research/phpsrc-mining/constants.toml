@@ -5,7 +5,7 @@
 # `cargo xtask gen-catalog` turns it into the shipped Rust table. Regenerate
 # alongside a `PINNED_PHP` bump, the way `param_facts.toml` is.
 #
-# TWO SOURCES. Values and extensions come from ONE engine's
+# TWO SOURCES. Values and extensions come from the TOP engine's
 # `get_defined_constants(true)` (`mine_constants.php`). Version ranges cannot:
 # `since` asks whether a name existed at 8.1, and an 8.5 engine has no opinion,
 # so they come from php-src's per-minor branches instead — a `.stub.php` global
@@ -20,8 +20,19 @@
 # an installation path) and have no target-independent value at all — as do the
 # extensions refused whole, whose numbers come from the C library (`sockets`,
 # `pcntl`, `posix`) or the parser generator (`tokenizer`), so the NAME is stable
-# while the value is not. `unrepresentable` is `STDIN` and its two siblings
-# (resources) plus `INF`/`NAN`.
+# while the value is not, and the FAMILIES refused the same way for the same
+# reason (`GLOB_*` from `glob.h`, `intl`'s `U_*` from ICU's error enum, the
+# `PGSQL_*` groups from libpq's). `unrepresentable` is `STDIN` and its two
+# siblings (resources) plus `INF`/`NAN`.
+#
+# AND WHAT IS REFUSED BY MEASUREMENT. One engine's value is a claim about every
+# minor the target may span, so the run mines EVERY engine it is given
+# (`--php PATH`, repeatable) and refuses any name they disagree about inside the
+# range its row would claim — `[refused.value_moves]` records the name with what
+# each engine said. This is the check a roster cannot be: a roster is a list
+# somebody maintains, and a missing entry is a WRONG row until something
+# measures it. An engine that lacks the name, or that sits below the row's
+# `since`, takes no part — absence is the version gate's question, not this one.
 #
 # `until` is a schema slot the current mining never fills, and that is a
 # property of the sources rather than of PHP: every mined name exists in the
@@ -81,6 +92,14 @@ extensions = [
   "xsl",
   "zlib",
 ]
+# Engines the value diff compared, low minor first; `php` above is the
+# top one, whose values the rows carry. One entry = nothing was diffed.
+diffed = [
+  "8.2.33",
+  "8.3.33",
+  "8.4.25",
+  "8.5.10",
+]
 # php-src branch tips the presence scan read, low minor first.
 minors = [
   ["8.1", "6f82565f12630ba320c52c96e28160189b15ecbf"],
@@ -94,13 +113,15 @@ minors = [
 # mined      what `get_defined_constants(true)` had, over the catalog's extensions
 # rows       spec-fixed literals admitted to the table
 # gated      of those, carrying a `since` above the mined floor
-# refused_*  the three ADR-0094 §3 classes a mined row cannot carry
+# refused_*  the three ADR-0094 §3 classes a mined row cannot carry, plus
+#            the names the engines themselves disagreed about
 mined = 3286
-rows = 2770
-gated = 15
-refused_build = 493
+rows = 2566
+gated = 14
+refused_build = 693
 refused_platform = 18
 refused_unrepresentable = 5
+refused_value_moves = 4
 
 [refused]
 build = [
@@ -124,6 +145,14 @@ build = [
   "GD_MINOR_VERSION",
   "GD_RELEASE_VERSION",
   "GD_VERSION",
+  "GLOB_AVAILABLE_FLAGS",
+  "GLOB_BRACE",
+  "GLOB_ERR",
+  "GLOB_MARK",
+  "GLOB_NOCHECK",
+  "GLOB_NOESCAPE",
+  "GLOB_NOSORT",
+  "GLOB_ONLYDIR",
   "GMP_VERSION",
   "GNUPG_GPGME_VERSION",
   "ICONV_IMPL",
@@ -206,8 +235,59 @@ build = [
   "PDO_ODBC_TYPE",
   "PEAR_EXTENSION_DIR",
   "PEAR_INSTALL_DIR",
+  "PGSQL_BAD_RESPONSE",
+  "PGSQL_COMMAND_OK",
+  "PGSQL_CONNECTION_AUTH_OK",
+  "PGSQL_CONNECTION_AWAITING_RESPONSE",
+  "PGSQL_CONNECTION_BAD",
+  "PGSQL_CONNECTION_MADE",
+  "PGSQL_CONNECTION_OK",
+  "PGSQL_CONNECTION_SETENV",
+  "PGSQL_CONNECTION_STARTED",
+  "PGSQL_COPY_IN",
+  "PGSQL_COPY_OUT",
+  "PGSQL_DIAG_COLUMN_NAME",
+  "PGSQL_DIAG_CONSTRAINT_NAME",
+  "PGSQL_DIAG_CONTEXT",
+  "PGSQL_DIAG_DATATYPE_NAME",
+  "PGSQL_DIAG_INTERNAL_POSITION",
+  "PGSQL_DIAG_INTERNAL_QUERY",
+  "PGSQL_DIAG_MESSAGE_DETAIL",
+  "PGSQL_DIAG_MESSAGE_HINT",
+  "PGSQL_DIAG_MESSAGE_PRIMARY",
+  "PGSQL_DIAG_SCHEMA_NAME",
+  "PGSQL_DIAG_SEVERITY",
+  "PGSQL_DIAG_SEVERITY_NONLOCALIZED",
+  "PGSQL_DIAG_SOURCE_FILE",
+  "PGSQL_DIAG_SOURCE_FUNCTION",
+  "PGSQL_DIAG_SOURCE_LINE",
+  "PGSQL_DIAG_SQLSTATE",
+  "PGSQL_DIAG_STATEMENT_POSITION",
+  "PGSQL_DIAG_TABLE_NAME",
+  "PGSQL_EMPTY_QUERY",
+  "PGSQL_ERRORS_DEFAULT",
+  "PGSQL_ERRORS_SQLSTATE",
+  "PGSQL_ERRORS_TERSE",
+  "PGSQL_ERRORS_VERBOSE",
+  "PGSQL_FATAL_ERROR",
   "PGSQL_LIBPQ_VERSION",
   "PGSQL_LIBPQ_VERSION_STR",
+  "PGSQL_NONFATAL_ERROR",
+  "PGSQL_POLLING_ACTIVE",
+  "PGSQL_POLLING_FAILED",
+  "PGSQL_POLLING_OK",
+  "PGSQL_POLLING_READING",
+  "PGSQL_POLLING_WRITING",
+  "PGSQL_SHOW_CONTEXT_ALWAYS",
+  "PGSQL_SHOW_CONTEXT_ERRORS",
+  "PGSQL_SHOW_CONTEXT_NEVER",
+  "PGSQL_TRANSACTION_ACTIVE",
+  "PGSQL_TRANSACTION_IDLE",
+  "PGSQL_TRANSACTION_INERROR",
+  "PGSQL_TRANSACTION_INTRANS",
+  "PGSQL_TRANSACTION_UNKNOWN",
+  "PGSQL_TUPLES_CHUNK",
+  "PGSQL_TUPLES_OK",
   "PHP_BINARY",
   "PHP_BINARY_READ",
   "PHP_BINDIR",
@@ -584,6 +664,147 @@ build = [
   "T_XOR_EQUAL",
   "T_YIELD",
   "T_YIELD_FROM",
+  "U_AMBIGUOUS_ALIAS_WARNING",
+  "U_BAD_VARIABLE_DEFINITION",
+  "U_BRK_ASSIGN_ERROR",
+  "U_BRK_ERROR_LIMIT",
+  "U_BRK_ERROR_START",
+  "U_BRK_HEX_DIGITS_EXPECTED",
+  "U_BRK_INIT_ERROR",
+  "U_BRK_INTERNAL_ERROR",
+  "U_BRK_MALFORMED_RULE_TAG",
+  "U_BRK_MISMATCHED_PAREN",
+  "U_BRK_NEW_LINE_IN_QUOTED_STRING",
+  "U_BRK_RULE_EMPTY_SET",
+  "U_BRK_RULE_SYNTAX",
+  "U_BRK_SEMICOLON_EXPECTED",
+  "U_BRK_UNCLOSED_SET",
+  "U_BRK_UNDEFINED_VARIABLE",
+  "U_BRK_UNRECOGNIZED_OPTION",
+  "U_BRK_VARIABLE_REDFINITION",
+  "U_BUFFER_OVERFLOW_ERROR",
+  "U_CE_NOT_FOUND_ERROR",
+  "U_COLLATOR_VERSION_MISMATCH",
+  "U_DIFFERENT_UCA_VERSION",
+  "U_ENUM_OUT_OF_SYNC_ERROR",
+  "U_ERROR_LIMIT",
+  "U_ERROR_WARNING_LIMIT",
+  "U_ERROR_WARNING_START",
+  "U_FILE_ACCESS_ERROR",
+  "U_FMT_PARSE_ERROR_LIMIT",
+  "U_FMT_PARSE_ERROR_START",
+  "U_IDNA_ACE_PREFIX_ERROR",
+  "U_IDNA_CHECK_BIDI_ERROR",
+  "U_IDNA_DOMAIN_NAME_TOO_LONG_ERROR",
+  "U_IDNA_ERROR_LIMIT",
+  "U_IDNA_ERROR_START",
+  "U_IDNA_LABEL_TOO_LONG_ERROR",
+  "U_IDNA_PROHIBITED_ERROR",
+  "U_IDNA_STD3_ASCII_RULES_ERROR",
+  "U_IDNA_UNASSIGNED_ERROR",
+  "U_IDNA_VERIFICATION_ERROR",
+  "U_IDNA_ZERO_LENGTH_LABEL_ERROR",
+  "U_ILLEGAL_ARGUMENT_ERROR",
+  "U_ILLEGAL_CHARACTER",
+  "U_ILLEGAL_CHAR_FOUND",
+  "U_ILLEGAL_CHAR_IN_SEGMENT",
+  "U_ILLEGAL_ESCAPE_SEQUENCE",
+  "U_ILLEGAL_PAD_POSITION",
+  "U_INDEX_OUTOFBOUNDS_ERROR",
+  "U_INTERNAL_PROGRAM_ERROR",
+  "U_INTERNAL_TRANSLITERATOR_ERROR",
+  "U_INVALID_CHAR_FOUND",
+  "U_INVALID_FORMAT_ERROR",
+  "U_INVALID_FUNCTION",
+  "U_INVALID_ID",
+  "U_INVALID_PROPERTY_PATTERN",
+  "U_INVALID_RBT_SYNTAX",
+  "U_INVALID_STATE_ERROR",
+  "U_INVALID_TABLE_FILE",
+  "U_INVALID_TABLE_FORMAT",
+  "U_INVARIANT_CONVERSION_ERROR",
+  "U_MALFORMED_EXPONENTIAL_PATTERN",
+  "U_MALFORMED_PRAGMA",
+  "U_MALFORMED_RULE",
+  "U_MALFORMED_SET",
+  "U_MALFORMED_SYMBOL_REFERENCE",
+  "U_MALFORMED_UNICODE_ESCAPE",
+  "U_MALFORMED_VARIABLE_DEFINITION",
+  "U_MALFORMED_VARIABLE_REFERENCE",
+  "U_MEMORY_ALLOCATION_ERROR",
+  "U_MESSAGE_PARSE_ERROR",
+  "U_MISMATCHED_SEGMENT_DELIMITERS",
+  "U_MISPLACED_ANCHOR_START",
+  "U_MISPLACED_COMPOUND_FILTER",
+  "U_MISPLACED_CURSOR_OFFSET",
+  "U_MISPLACED_QUANTIFIER",
+  "U_MISSING_OPERATOR",
+  "U_MISSING_RESOURCE_ERROR",
+  "U_MISSING_SEGMENT_CLOSE",
+  "U_MULTIPLE_ANTE_CONTEXTS",
+  "U_MULTIPLE_COMPOUND_FILTERS",
+  "U_MULTIPLE_CURSORS",
+  "U_MULTIPLE_DECIMAL_SEPARATORS",
+  "U_MULTIPLE_DECIMAL_SEPERATORS",
+  "U_MULTIPLE_EXPONENTIAL_SYMBOLS",
+  "U_MULTIPLE_PAD_SPECIFIERS",
+  "U_MULTIPLE_PERCENT_SYMBOLS",
+  "U_MULTIPLE_PERMILL_SYMBOLS",
+  "U_MULTIPLE_POST_CONTEXTS",
+  "U_NO_SPACE_AVAILABLE",
+  "U_NO_WRITE_PERMISSION",
+  "U_PARSE_ERROR",
+  "U_PARSE_ERROR_LIMIT",
+  "U_PARSE_ERROR_START",
+  "U_PATTERN_SYNTAX_ERROR",
+  "U_PRIMARY_TOO_LONG_ERROR",
+  "U_REGEX_BAD_ESCAPE_SEQUENCE",
+  "U_REGEX_BAD_INTERVAL",
+  "U_REGEX_ERROR_LIMIT",
+  "U_REGEX_ERROR_START",
+  "U_REGEX_INTERNAL_ERROR",
+  "U_REGEX_INVALID_BACK_REF",
+  "U_REGEX_INVALID_FLAG",
+  "U_REGEX_INVALID_STATE",
+  "U_REGEX_LOOK_BEHIND_LIMIT",
+  "U_REGEX_MAX_LT_MIN",
+  "U_REGEX_MISMATCHED_PAREN",
+  "U_REGEX_NUMBER_TOO_BIG",
+  "U_REGEX_PROPERTY_SYNTAX",
+  "U_REGEX_RULE_SYNTAX",
+  "U_REGEX_SET_CONTAINS_STRING",
+  "U_REGEX_UNIMPLEMENTED",
+  "U_RESOURCE_TYPE_MISMATCH",
+  "U_RULE_MASK_ERROR",
+  "U_SAFECLONE_ALLOCATED_WARNING",
+  "U_SORT_KEY_TOO_SHORT_WARNING",
+  "U_STANDARD_ERROR_LIMIT",
+  "U_STATE_OLD_WARNING",
+  "U_STATE_TOO_OLD_ERROR",
+  "U_STRINGPREP_CHECK_BIDI_ERROR",
+  "U_STRINGPREP_PROHIBITED_ERROR",
+  "U_STRINGPREP_UNASSIGNED_ERROR",
+  "U_STRING_NOT_TERMINATED_WARNING",
+  "U_TOO_MANY_ALIASES_ERROR",
+  "U_TRAILING_BACKSLASH",
+  "U_TRUNCATED_CHAR_FOUND",
+  "U_UNCLOSED_SEGMENT",
+  "U_UNDEFINED_SEGMENT_REFERENCE",
+  "U_UNDEFINED_VARIABLE",
+  "U_UNEXPECTED_TOKEN",
+  "U_UNMATCHED_BRACES",
+  "U_UNQUOTED_SPECIAL",
+  "U_UNSUPPORTED_ATTRIBUTE",
+  "U_UNSUPPORTED_ERROR",
+  "U_UNSUPPORTED_ESCAPE_SEQUENCE",
+  "U_UNSUPPORTED_PROPERTY",
+  "U_UNTERMINATED_QUOTE",
+  "U_USELESS_COLLATOR_ERROR",
+  "U_USING_DEFAULT_WARNING",
+  "U_USING_FALLBACK_WARNING",
+  "U_VARIABLE_RANGE_EXHAUSTED",
+  "U_VARIABLE_RANGE_OVERLAP",
+  "U_ZERO_ERROR",
   "WCONTINUED",
   "WEXITED",
   "WNOHANG",
@@ -625,6 +846,15 @@ unrepresentable = [
   "STDIN",
   "STDOUT",
 ]
+
+[refused.value_moves]
+# name = [["<php version>", "<value>"], …] — every engine that HAS the
+# name at or above the row's `since`, low minor first. Two spellings here
+# are what refused the row.
+"FILTER_FLAG_GLOBAL_RANGE" = [["8.2.33", "268435456"], ["8.3.33", "268435456"], ["8.4.25", "268435456"], ["8.5.10", "536870912"]]
+"IDNA_DEFAULT" = [["8.2.33", "0"], ["8.3.33", "0"], ["8.4.25", "0"], ["8.5.10", "48"]]
+"IMAGETYPE_COUNT" = [["8.2.33", "20"], ["8.3.33", "20"], ["8.4.25", "20"], ["8.5.10", "22"]]
+"PASSWORD_BCRYPT_DEFAULT_COST" = [["8.2.33", "10"], ["8.3.33", "10"], ["8.4.25", "12"], ["8.5.10", "12"]]
 
 [const]
 # name = { ext, t, v, since? } — `v` is the value's SPELLING: a decimal
@@ -1530,7 +1760,6 @@ unrepresentable = [
 "FILTER_FLAG_ENCODE_AMP" = { ext = "filter", t = "int", v = "64" }
 "FILTER_FLAG_ENCODE_HIGH" = { ext = "filter", t = "int", v = "32" }
 "FILTER_FLAG_ENCODE_LOW" = { ext = "filter", t = "int", v = "16" }
-"FILTER_FLAG_GLOBAL_RANGE" = { ext = "filter", t = "int", v = "536870912", since = "8.2" }
 "FILTER_FLAG_HOSTNAME" = { ext = "filter", t = "int", v = "1048576" }
 "FILTER_FLAG_IPV4" = { ext = "filter", t = "int", v = "1048576" }
 "FILTER_FLAG_IPV6" = { ext = "filter", t = "int", v = "2097152" }
@@ -1587,14 +1816,6 @@ unrepresentable = [
 "FTP_TIMEOUT_SEC" = { ext = "ftp", t = "int", v = "0" }
 "FTP_USEPASVADDRESS" = { ext = "ftp", t = "int", v = "2" }
 "GD_BUNDLED" = { ext = "gd", t = "int", v = "0" }
-"GLOB_AVAILABLE_FLAGS" = { ext = "standard", t = "int", v = "1073746108" }
-"GLOB_BRACE" = { ext = "standard", t = "int", v = "128" }
-"GLOB_ERR" = { ext = "standard", t = "int", v = "4" }
-"GLOB_MARK" = { ext = "standard", t = "int", v = "8" }
-"GLOB_NOCHECK" = { ext = "standard", t = "int", v = "16" }
-"GLOB_NOESCAPE" = { ext = "standard", t = "int", v = "4096" }
-"GLOB_NOSORT" = { ext = "standard", t = "int", v = "32" }
-"GLOB_ONLYDIR" = { ext = "standard", t = "int", v = "1073741824" }
 "GMP_BIG_ENDIAN" = { ext = "gmp", t = "int", v = "8" }
 "GMP_LITTLE_ENDIAN" = { ext = "gmp", t = "int", v = "4" }
 "GMP_LSW_FIRST" = { ext = "gmp", t = "int", v = "2" }
@@ -1649,7 +1870,6 @@ unrepresentable = [
 "IDNA_ALLOW_UNASSIGNED" = { ext = "intl", t = "int", v = "1" }
 "IDNA_CHECK_BIDI" = { ext = "intl", t = "int", v = "4" }
 "IDNA_CHECK_CONTEXTJ" = { ext = "intl", t = "int", v = "8" }
-"IDNA_DEFAULT" = { ext = "intl", t = "int", v = "48" }
 "IDNA_ERROR_BIDI" = { ext = "intl", t = "int", v = "2048" }
 "IDNA_ERROR_CONTEXTJ" = { ext = "intl", t = "int", v = "4096" }
 "IDNA_ERROR_DISALLOWED" = { ext = "intl", t = "int", v = "128" }
@@ -1668,7 +1888,6 @@ unrepresentable = [
 "IDNA_USE_STD3_RULES" = { ext = "intl", t = "int", v = "2" }
 "IMAGETYPE_AVIF" = { ext = "standard", t = "int", v = "19" }
 "IMAGETYPE_BMP" = { ext = "standard", t = "int", v = "6" }
-"IMAGETYPE_COUNT" = { ext = "standard", t = "int", v = "22" }
 "IMAGETYPE_GIF" = { ext = "standard", t = "int", v = "1" }
 "IMAGETYPE_HEIF" = { ext = "standard", t = "int", v = "20" }
 "IMAGETYPE_ICO" = { ext = "standard", t = "int", v = "17" }
@@ -2232,7 +2451,6 @@ unrepresentable = [
 "PASSWORD_ARGON2_DEFAULT_THREADS" = { ext = "standard", t = "int", v = "1" }
 "PASSWORD_ARGON2_DEFAULT_TIME_COST" = { ext = "standard", t = "int", v = "4" }
 "PASSWORD_BCRYPT" = { ext = "standard", t = "string", v = "2y" }
-"PASSWORD_BCRYPT_DEFAULT_COST" = { ext = "standard", t = "int", v = "12" }
 "PASSWORD_DEFAULT" = { ext = "standard", t = "string", v = "2y" }
 "PATHINFO_ALL" = { ext = "standard", t = "int", v = "15" }
 "PATHINFO_BASENAME" = { ext = "standard", t = "int", v = "2" }
@@ -2240,79 +2458,28 @@ unrepresentable = [
 "PATHINFO_EXTENSION" = { ext = "standard", t = "int", v = "4" }
 "PATHINFO_FILENAME" = { ext = "standard", t = "int", v = "8" }
 "PGSQL_ASSOC" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_BAD_RESPONSE" = { ext = "pgsql", t = "int", v = "5" }
 "PGSQL_BOTH" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_COMMAND_OK" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_CONNECTION_AUTH_OK" = { ext = "pgsql", t = "int", v = "5" }
-"PGSQL_CONNECTION_AWAITING_RESPONSE" = { ext = "pgsql", t = "int", v = "4" }
-"PGSQL_CONNECTION_BAD" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_CONNECTION_MADE" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_CONNECTION_OK" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_CONNECTION_SETENV" = { ext = "pgsql", t = "int", v = "6" }
-"PGSQL_CONNECTION_STARTED" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_CONNECT_ASYNC" = { ext = "pgsql", t = "int", v = "4" }
 "PGSQL_CONNECT_FORCE_NEW" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_CONV_FORCE_NULL" = { ext = "pgsql", t = "int", v = "4" }
 "PGSQL_CONV_IGNORE_DEFAULT" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_CONV_IGNORE_NOT_NULL" = { ext = "pgsql", t = "int", v = "8" }
-"PGSQL_COPY_IN" = { ext = "pgsql", t = "int", v = "4" }
-"PGSQL_COPY_OUT" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_DIAG_COLUMN_NAME" = { ext = "pgsql", t = "int", v = "99" }
-"PGSQL_DIAG_CONSTRAINT_NAME" = { ext = "pgsql", t = "int", v = "110" }
-"PGSQL_DIAG_CONTEXT" = { ext = "pgsql", t = "int", v = "87" }
-"PGSQL_DIAG_DATATYPE_NAME" = { ext = "pgsql", t = "int", v = "100" }
-"PGSQL_DIAG_INTERNAL_POSITION" = { ext = "pgsql", t = "int", v = "112" }
-"PGSQL_DIAG_INTERNAL_QUERY" = { ext = "pgsql", t = "int", v = "113" }
-"PGSQL_DIAG_MESSAGE_DETAIL" = { ext = "pgsql", t = "int", v = "68" }
-"PGSQL_DIAG_MESSAGE_HINT" = { ext = "pgsql", t = "int", v = "72" }
-"PGSQL_DIAG_MESSAGE_PRIMARY" = { ext = "pgsql", t = "int", v = "77" }
-"PGSQL_DIAG_SCHEMA_NAME" = { ext = "pgsql", t = "int", v = "115" }
-"PGSQL_DIAG_SEVERITY" = { ext = "pgsql", t = "int", v = "83" }
-"PGSQL_DIAG_SEVERITY_NONLOCALIZED" = { ext = "pgsql", t = "int", v = "86" }
-"PGSQL_DIAG_SOURCE_FILE" = { ext = "pgsql", t = "int", v = "70" }
-"PGSQL_DIAG_SOURCE_FUNCTION" = { ext = "pgsql", t = "int", v = "82" }
-"PGSQL_DIAG_SOURCE_LINE" = { ext = "pgsql", t = "int", v = "76" }
-"PGSQL_DIAG_SQLSTATE" = { ext = "pgsql", t = "int", v = "67" }
-"PGSQL_DIAG_STATEMENT_POSITION" = { ext = "pgsql", t = "int", v = "80" }
-"PGSQL_DIAG_TABLE_NAME" = { ext = "pgsql", t = "int", v = "116" }
 "PGSQL_DML_ASYNC" = { ext = "pgsql", t = "int", v = "1024" }
 "PGSQL_DML_ESCAPE" = { ext = "pgsql", t = "int", v = "4096" }
 "PGSQL_DML_EXEC" = { ext = "pgsql", t = "int", v = "512" }
 "PGSQL_DML_NO_CONV" = { ext = "pgsql", t = "int", v = "256" }
 "PGSQL_DML_STRING" = { ext = "pgsql", t = "int", v = "2048" }
-"PGSQL_EMPTY_QUERY" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_ERRORS_DEFAULT" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_ERRORS_SQLSTATE" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_ERRORS_TERSE" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_ERRORS_VERBOSE" = { ext = "pgsql", t = "int", v = "2" }
-"PGSQL_FATAL_ERROR" = { ext = "pgsql", t = "int", v = "7" }
-"PGSQL_NONFATAL_ERROR" = { ext = "pgsql", t = "int", v = "6" }
 "PGSQL_NOTICE_ALL" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_NOTICE_CLEAR" = { ext = "pgsql", t = "int", v = "3" }
 "PGSQL_NOTICE_LAST" = { ext = "pgsql", t = "int", v = "1" }
 "PGSQL_NUM" = { ext = "pgsql", t = "int", v = "2" }
-"PGSQL_POLLING_ACTIVE" = { ext = "pgsql", t = "int", v = "4" }
-"PGSQL_POLLING_FAILED" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_POLLING_OK" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_POLLING_READING" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_POLLING_WRITING" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_SEEK_CUR" = { ext = "pgsql", t = "int", v = "1" }
 "PGSQL_SEEK_END" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_SEEK_SET" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_SHOW_CONTEXT_ALWAYS" = { ext = "pgsql", t = "int", v = "2" }
-"PGSQL_SHOW_CONTEXT_ERRORS" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_SHOW_CONTEXT_NEVER" = { ext = "pgsql", t = "int", v = "0" }
 "PGSQL_STATUS_LONG" = { ext = "pgsql", t = "int", v = "1" }
 "PGSQL_STATUS_STRING" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_TRACE_REGRESS_MODE" = { ext = "pgsql", t = "int", v = "2" }
 "PGSQL_TRACE_SUPPRESS_TIMESTAMPS" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_TRANSACTION_ACTIVE" = { ext = "pgsql", t = "int", v = "1" }
-"PGSQL_TRANSACTION_IDLE" = { ext = "pgsql", t = "int", v = "0" }
-"PGSQL_TRANSACTION_INERROR" = { ext = "pgsql", t = "int", v = "3" }
-"PGSQL_TRANSACTION_INTRANS" = { ext = "pgsql", t = "int", v = "2" }
-"PGSQL_TRANSACTION_UNKNOWN" = { ext = "pgsql", t = "int", v = "4" }
-"PGSQL_TUPLES_CHUNK" = { ext = "pgsql", t = "int", v = "12" }
-"PGSQL_TUPLES_OK" = { ext = "pgsql", t = "int", v = "2" }
 "PHP_OUTPUT_HANDLER_CLEAN" = { ext = "Core", t = "int", v = "2" }
 "PHP_OUTPUT_HANDLER_CLEANABLE" = { ext = "Core", t = "int", v = "16" }
 "PHP_OUTPUT_HANDLER_CONT" = { ext = "Core", t = "int", v = "0" }
@@ -2880,147 +3047,6 @@ unrepresentable = [
 "UPLOAD_ERR_NO_TMP_DIR" = { ext = "Core", t = "int", v = "6" }
 "UPLOAD_ERR_OK" = { ext = "Core", t = "int", v = "0" }
 "UPLOAD_ERR_PARTIAL" = { ext = "Core", t = "int", v = "3" }
-"U_AMBIGUOUS_ALIAS_WARNING" = { ext = "intl", t = "int", v = "-122" }
-"U_BAD_VARIABLE_DEFINITION" = { ext = "intl", t = "int", v = "65536" }
-"U_BRK_ASSIGN_ERROR" = { ext = "intl", t = "int", v = "66053" }
-"U_BRK_ERROR_LIMIT" = { ext = "intl", t = "int", v = "66062" }
-"U_BRK_ERROR_START" = { ext = "intl", t = "int", v = "66048" }
-"U_BRK_HEX_DIGITS_EXPECTED" = { ext = "intl", t = "int", v = "66049" }
-"U_BRK_INIT_ERROR" = { ext = "intl", t = "int", v = "66058" }
-"U_BRK_INTERNAL_ERROR" = { ext = "intl", t = "int", v = "66048" }
-"U_BRK_MALFORMED_RULE_TAG" = { ext = "intl", t = "int", v = "66061" }
-"U_BRK_MISMATCHED_PAREN" = { ext = "intl", t = "int", v = "66055" }
-"U_BRK_NEW_LINE_IN_QUOTED_STRING" = { ext = "intl", t = "int", v = "66056" }
-"U_BRK_RULE_EMPTY_SET" = { ext = "intl", t = "int", v = "66059" }
-"U_BRK_RULE_SYNTAX" = { ext = "intl", t = "int", v = "66051" }
-"U_BRK_SEMICOLON_EXPECTED" = { ext = "intl", t = "int", v = "66050" }
-"U_BRK_UNCLOSED_SET" = { ext = "intl", t = "int", v = "66052" }
-"U_BRK_UNDEFINED_VARIABLE" = { ext = "intl", t = "int", v = "66057" }
-"U_BRK_UNRECOGNIZED_OPTION" = { ext = "intl", t = "int", v = "66060" }
-"U_BRK_VARIABLE_REDFINITION" = { ext = "intl", t = "int", v = "66054" }
-"U_BUFFER_OVERFLOW_ERROR" = { ext = "intl", t = "int", v = "15" }
-"U_CE_NOT_FOUND_ERROR" = { ext = "intl", t = "int", v = "21" }
-"U_COLLATOR_VERSION_MISMATCH" = { ext = "intl", t = "int", v = "28" }
-"U_DIFFERENT_UCA_VERSION" = { ext = "intl", t = "int", v = "-121" }
-"U_ENUM_OUT_OF_SYNC_ERROR" = { ext = "intl", t = "int", v = "25" }
-"U_ERROR_LIMIT" = { ext = "intl", t = "int", v = "66818" }
-"U_ERROR_WARNING_LIMIT" = { ext = "intl", t = "int", v = "-119" }
-"U_ERROR_WARNING_START" = { ext = "intl", t = "int", v = "-128" }
-"U_FILE_ACCESS_ERROR" = { ext = "intl", t = "int", v = "4" }
-"U_FMT_PARSE_ERROR_LIMIT" = { ext = "intl", t = "int", v = "65825" }
-"U_FMT_PARSE_ERROR_START" = { ext = "intl", t = "int", v = "65792" }
-"U_IDNA_ACE_PREFIX_ERROR" = { ext = "intl", t = "int", v = "66564" }
-"U_IDNA_CHECK_BIDI_ERROR" = { ext = "intl", t = "int", v = "66562" }
-"U_IDNA_DOMAIN_NAME_TOO_LONG_ERROR" = { ext = "intl", t = "int", v = "66568" }
-"U_IDNA_ERROR_LIMIT" = { ext = "intl", t = "int", v = "66569" }
-"U_IDNA_ERROR_START" = { ext = "intl", t = "int", v = "66560" }
-"U_IDNA_LABEL_TOO_LONG_ERROR" = { ext = "intl", t = "int", v = "66566" }
-"U_IDNA_PROHIBITED_ERROR" = { ext = "intl", t = "int", v = "66560" }
-"U_IDNA_STD3_ASCII_RULES_ERROR" = { ext = "intl", t = "int", v = "66563" }
-"U_IDNA_UNASSIGNED_ERROR" = { ext = "intl", t = "int", v = "66561" }
-"U_IDNA_VERIFICATION_ERROR" = { ext = "intl", t = "int", v = "66565" }
-"U_IDNA_ZERO_LENGTH_LABEL_ERROR" = { ext = "intl", t = "int", v = "66567" }
-"U_ILLEGAL_ARGUMENT_ERROR" = { ext = "intl", t = "int", v = "1" }
-"U_ILLEGAL_CHARACTER" = { ext = "intl", t = "int", v = "65567" }
-"U_ILLEGAL_CHAR_FOUND" = { ext = "intl", t = "int", v = "12" }
-"U_ILLEGAL_CHAR_IN_SEGMENT" = { ext = "intl", t = "int", v = "65564" }
-"U_ILLEGAL_ESCAPE_SEQUENCE" = { ext = "intl", t = "int", v = "18" }
-"U_ILLEGAL_PAD_POSITION" = { ext = "intl", t = "int", v = "65800" }
-"U_INDEX_OUTOFBOUNDS_ERROR" = { ext = "intl", t = "int", v = "8" }
-"U_INTERNAL_PROGRAM_ERROR" = { ext = "intl", t = "int", v = "5" }
-"U_INTERNAL_TRANSLITERATOR_ERROR" = { ext = "intl", t = "int", v = "65568" }
-"U_INVALID_CHAR_FOUND" = { ext = "intl", t = "int", v = "10" }
-"U_INVALID_FORMAT_ERROR" = { ext = "intl", t = "int", v = "3" }
-"U_INVALID_FUNCTION" = { ext = "intl", t = "int", v = "65570" }
-"U_INVALID_ID" = { ext = "intl", t = "int", v = "65569" }
-"U_INVALID_PROPERTY_PATTERN" = { ext = "intl", t = "int", v = "65561" }
-"U_INVALID_RBT_SYNTAX" = { ext = "intl", t = "int", v = "65560" }
-"U_INVALID_STATE_ERROR" = { ext = "intl", t = "int", v = "27" }
-"U_INVALID_TABLE_FILE" = { ext = "intl", t = "int", v = "14" }
-"U_INVALID_TABLE_FORMAT" = { ext = "intl", t = "int", v = "13" }
-"U_INVARIANT_CONVERSION_ERROR" = { ext = "intl", t = "int", v = "26" }
-"U_MALFORMED_EXPONENTIAL_PATTERN" = { ext = "intl", t = "int", v = "65795" }
-"U_MALFORMED_PRAGMA" = { ext = "intl", t = "int", v = "65562" }
-"U_MALFORMED_RULE" = { ext = "intl", t = "int", v = "65537" }
-"U_MALFORMED_SET" = { ext = "intl", t = "int", v = "65538" }
-"U_MALFORMED_SYMBOL_REFERENCE" = { ext = "intl", t = "int", v = "65539" }
-"U_MALFORMED_UNICODE_ESCAPE" = { ext = "intl", t = "int", v = "65540" }
-"U_MALFORMED_VARIABLE_DEFINITION" = { ext = "intl", t = "int", v = "65541" }
-"U_MALFORMED_VARIABLE_REFERENCE" = { ext = "intl", t = "int", v = "65542" }
-"U_MEMORY_ALLOCATION_ERROR" = { ext = "intl", t = "int", v = "7" }
-"U_MESSAGE_PARSE_ERROR" = { ext = "intl", t = "int", v = "6" }
-"U_MISMATCHED_SEGMENT_DELIMITERS" = { ext = "intl", t = "int", v = "65543" }
-"U_MISPLACED_ANCHOR_START" = { ext = "intl", t = "int", v = "65544" }
-"U_MISPLACED_COMPOUND_FILTER" = { ext = "intl", t = "int", v = "65558" }
-"U_MISPLACED_CURSOR_OFFSET" = { ext = "intl", t = "int", v = "65545" }
-"U_MISPLACED_QUANTIFIER" = { ext = "intl", t = "int", v = "65546" }
-"U_MISSING_OPERATOR" = { ext = "intl", t = "int", v = "65547" }
-"U_MISSING_RESOURCE_ERROR" = { ext = "intl", t = "int", v = "2" }
-"U_MISSING_SEGMENT_CLOSE" = { ext = "intl", t = "int", v = "65548" }
-"U_MULTIPLE_ANTE_CONTEXTS" = { ext = "intl", t = "int", v = "65549" }
-"U_MULTIPLE_COMPOUND_FILTERS" = { ext = "intl", t = "int", v = "65559" }
-"U_MULTIPLE_CURSORS" = { ext = "intl", t = "int", v = "65550" }
-"U_MULTIPLE_DECIMAL_SEPARATORS" = { ext = "intl", t = "int", v = "65793" }
-"U_MULTIPLE_DECIMAL_SEPERATORS" = { ext = "intl", t = "int", v = "65793" }
-"U_MULTIPLE_EXPONENTIAL_SYMBOLS" = { ext = "intl", t = "int", v = "65794" }
-"U_MULTIPLE_PAD_SPECIFIERS" = { ext = "intl", t = "int", v = "65798" }
-"U_MULTIPLE_PERCENT_SYMBOLS" = { ext = "intl", t = "int", v = "65796" }
-"U_MULTIPLE_PERMILL_SYMBOLS" = { ext = "intl", t = "int", v = "65797" }
-"U_MULTIPLE_POST_CONTEXTS" = { ext = "intl", t = "int", v = "65551" }
-"U_NO_SPACE_AVAILABLE" = { ext = "intl", t = "int", v = "20" }
-"U_NO_WRITE_PERMISSION" = { ext = "intl", t = "int", v = "30" }
-"U_PARSE_ERROR" = { ext = "intl", t = "int", v = "9" }
-"U_PARSE_ERROR_LIMIT" = { ext = "intl", t = "int", v = "65571" }
-"U_PARSE_ERROR_START" = { ext = "intl", t = "int", v = "65536" }
-"U_PATTERN_SYNTAX_ERROR" = { ext = "intl", t = "int", v = "65799" }
-"U_PRIMARY_TOO_LONG_ERROR" = { ext = "intl", t = "int", v = "22" }
-"U_REGEX_BAD_ESCAPE_SEQUENCE" = { ext = "intl", t = "int", v = "66307" }
-"U_REGEX_BAD_INTERVAL" = { ext = "intl", t = "int", v = "66312" }
-"U_REGEX_ERROR_LIMIT" = { ext = "intl", t = "int", v = "66326" }
-"U_REGEX_ERROR_START" = { ext = "intl", t = "int", v = "66304" }
-"U_REGEX_INTERNAL_ERROR" = { ext = "intl", t = "int", v = "66304" }
-"U_REGEX_INVALID_BACK_REF" = { ext = "intl", t = "int", v = "66314" }
-"U_REGEX_INVALID_FLAG" = { ext = "intl", t = "int", v = "66315" }
-"U_REGEX_INVALID_STATE" = { ext = "intl", t = "int", v = "66306" }
-"U_REGEX_LOOK_BEHIND_LIMIT" = { ext = "intl", t = "int", v = "66316" }
-"U_REGEX_MAX_LT_MIN" = { ext = "intl", t = "int", v = "66313" }
-"U_REGEX_MISMATCHED_PAREN" = { ext = "intl", t = "int", v = "66310" }
-"U_REGEX_NUMBER_TOO_BIG" = { ext = "intl", t = "int", v = "66311" }
-"U_REGEX_PROPERTY_SYNTAX" = { ext = "intl", t = "int", v = "66308" }
-"U_REGEX_RULE_SYNTAX" = { ext = "intl", t = "int", v = "66305" }
-"U_REGEX_SET_CONTAINS_STRING" = { ext = "intl", t = "int", v = "66317" }
-"U_REGEX_UNIMPLEMENTED" = { ext = "intl", t = "int", v = "66309" }
-"U_RESOURCE_TYPE_MISMATCH" = { ext = "intl", t = "int", v = "17" }
-"U_RULE_MASK_ERROR" = { ext = "intl", t = "int", v = "65557" }
-"U_SAFECLONE_ALLOCATED_WARNING" = { ext = "intl", t = "int", v = "-126" }
-"U_SORT_KEY_TOO_SHORT_WARNING" = { ext = "intl", t = "int", v = "-123" }
-"U_STANDARD_ERROR_LIMIT" = { ext = "intl", t = "int", v = "32" }
-"U_STATE_OLD_WARNING" = { ext = "intl", t = "int", v = "-125" }
-"U_STATE_TOO_OLD_ERROR" = { ext = "intl", t = "int", v = "23" }
-"U_STRINGPREP_CHECK_BIDI_ERROR" = { ext = "intl", t = "int", v = "66562" }
-"U_STRINGPREP_PROHIBITED_ERROR" = { ext = "intl", t = "int", v = "66560" }
-"U_STRINGPREP_UNASSIGNED_ERROR" = { ext = "intl", t = "int", v = "66561" }
-"U_STRING_NOT_TERMINATED_WARNING" = { ext = "intl", t = "int", v = "-124" }
-"U_TOO_MANY_ALIASES_ERROR" = { ext = "intl", t = "int", v = "24" }
-"U_TRAILING_BACKSLASH" = { ext = "intl", t = "int", v = "65552" }
-"U_TRUNCATED_CHAR_FOUND" = { ext = "intl", t = "int", v = "11" }
-"U_UNCLOSED_SEGMENT" = { ext = "intl", t = "int", v = "65563" }
-"U_UNDEFINED_SEGMENT_REFERENCE" = { ext = "intl", t = "int", v = "65553" }
-"U_UNDEFINED_VARIABLE" = { ext = "intl", t = "int", v = "65554" }
-"U_UNEXPECTED_TOKEN" = { ext = "intl", t = "int", v = "65792" }
-"U_UNMATCHED_BRACES" = { ext = "intl", t = "int", v = "65801" }
-"U_UNQUOTED_SPECIAL" = { ext = "intl", t = "int", v = "65555" }
-"U_UNSUPPORTED_ATTRIBUTE" = { ext = "intl", t = "int", v = "65803" }
-"U_UNSUPPORTED_ERROR" = { ext = "intl", t = "int", v = "16" }
-"U_UNSUPPORTED_ESCAPE_SEQUENCE" = { ext = "intl", t = "int", v = "19" }
-"U_UNSUPPORTED_PROPERTY" = { ext = "intl", t = "int", v = "65802" }
-"U_UNTERMINATED_QUOTE" = { ext = "intl", t = "int", v = "65556" }
-"U_USELESS_COLLATOR_ERROR" = { ext = "intl", t = "int", v = "29" }
-"U_USING_DEFAULT_WARNING" = { ext = "intl", t = "int", v = "-127" }
-"U_USING_FALLBACK_WARNING" = { ext = "intl", t = "int", v = "-128" }
-"U_VARIABLE_RANGE_EXHAUSTED" = { ext = "intl", t = "int", v = "65565" }
-"U_VARIABLE_RANGE_OVERLAP" = { ext = "intl", t = "int", v = "65566" }
-"U_ZERO_ERROR" = { ext = "intl", t = "int", v = "0" }
 "WSDL_CACHE_BOTH" = { ext = "soap", t = "int", v = "3" }
 "WSDL_CACHE_DISK" = { ext = "soap", t = "int", v = "1" }
 "WSDL_CACHE_MEMORY" = { ext = "soap", t = "int", v = "2" }

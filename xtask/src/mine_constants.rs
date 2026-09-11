@@ -15,7 +15,12 @@
 //!
 //! * **Values** come from the resident engine's `get_defined_constants(true)`
 //!   (`mine_constants.php`), which is also what says *which extension*
-//!   registered each name. One build answers, and `[meta]` records which.
+//!   registered each name. The TOP build answers, and `[meta]` records which —
+//!   but it is not the only build asked. ADR-0094 §2 says the generator "runs
+//!   over the PHP minors the corpus harness already scopes", and a value mined
+//!   from one engine is a claim about every one of them: any name whose value
+//!   DISAGREES across the engines the run was given is refused outright
+//!   ([`value_moves`]), because a row is a spec-fixed literal or it is nothing.
 //! * **Version ranges** cannot come from one build: `since` is the question
 //!   "did this name exist at 8.1", and an 8.5 engine has no opinion. They come
 //!   from a php-src checkout instead — the per-minor `PHP-8.x` branches, read
@@ -40,6 +45,9 @@
 //! * `BUILD_DEPENDENT` — a value that encodes the *build*: the linked library's
 //!   version, a compile flag, a platform limit. These have no Steins answer at
 //!   all today; refusing them is what keeps the table's rows `Verified`.
+//! * [`BUILD_DEPENDENT_FAMILIES`] — the same property held by a whole family
+//!   whose numbers are a C library's (`glob.h`, ICU's `utypes.h`, `libpq-fe.h`),
+//!   refused by prefix so the next member the library gains is refused too.
 //! * `REFUSED_EXTENSIONS` — whole families whose numbers come from the C library
 //!   (`sockets`, `pcntl`, `posix`) or from the parser generator (`tokenizer`),
 //!   so the NAME is stable while the value is not.
@@ -54,12 +62,16 @@
 //! # Usage
 //!
 //! ```text
-//! cargo xtask mine-constants [PHP_SRC_DIR]
+//! cargo xtask mine-constants [PHP_SRC_DIR] [--php PATH]…
 //! ```
 //!
 //! `PHP_SRC_DIR` (or `$STEINS_PHP_SRC`) is a php-src checkout with the
 //! `origin/PHP-8.x` branches fetched; without one the run mines values only and
-//! every row is rangeless. Output:
+//! every row is rangeless. `--php PATH` (repeatable, or `$STEINS_MINE_PHP` as a
+//! `:`-separated list) names the engines to mine; with none given the run asks
+//! the `php` on PATH alone, and then **no name can be refused as a value move** —
+//! a single engine agrees with itself. The engines' EXTENSION sets need not
+//! agree: a name the lower build does not have is simply not compared. Output:
 //! `docs/research/phpsrc-mining/constants.toml` (source of record).
 //! `cargo xtask gen-catalog` turns it into the shipped Rust table.
 
@@ -186,11 +198,64 @@ const BUILD_DEPENDENT: &[&str] = &[
     "GNUPG_GPGME_VERSION",
     "PASSWORD_ARGON2_PROVIDER",
     "pcov\\version",
+    // libpq's `ExecStatusType`, the one libpq enum whose members PHP spells
+    // without a shared prefix ([`BUILD_DEPENDENT_FAMILIES`] catches the other
+    // five). By name and not by pattern because `PGSQL_COMMAND_OK` and
+    // `PGSQL_CONNECT_ASYNC` are adjacent spellings of different things, and only
+    // the first is PostgreSQL's number. The residual risk is the one a roster
+    // always carries: the next `PGRES_*` PostgreSQL adds needs a line here.
+    "PGSQL_EMPTY_QUERY",
+    "PGSQL_COMMAND_OK",
+    "PGSQL_TUPLES_OK",
+    "PGSQL_TUPLES_CHUNK",
+    "PGSQL_COPY_OUT",
+    "PGSQL_COPY_IN",
+    "PGSQL_BAD_RESPONSE",
+    "PGSQL_NONFATAL_ERROR",
+    "PGSQL_FATAL_ERROR",
     // A value that is the OR of a set php-src has changed inside the mined
     // window: `E_ALL` lost `E_STRICT`'s bit when `E_STRICT` left. `since`/`until`
     // cannot express this — they say when a NAME exists, and this name exists
     // throughout with two different values — so the honest answer is no answer.
     "E_ALL",
+];
+
+/// **A C library's numbering, held by a whole FAMILY**: `(extension, prefix,
+/// the header the numbers come from)`.
+///
+/// [`REFUSED_EXTENSIONS`] makes this argument about an extension and
+/// [`BUILD_DEPENDENT`] makes it about a name; these are the cases where the
+/// property belongs to neither. `standard` is mostly PHP's own numbers and
+/// `GLOB_*` is not; `intl` spells ICU's error enum and its own formatter flags
+/// with equally ordinary names. A prefix is what makes the refusal survive the
+/// library's next release: a name-by-name roster admits whatever member gets
+/// added next, which is precisely how these rows were admitted in the first
+/// place.
+///
+/// The extension is part of the key so a prefix stays as narrow as the claim:
+/// `U_` is ICU's only inside `intl`.
+const BUILD_DEPENDENT_FAMILIES: &[(&str, &str, &str)] = &[
+    // `glob.h`. The flag bits are the C library's own and the libraries
+    // disagree: glibc's `GLOB_BRACE` is 1024 and Darwin's is 128, and
+    // `GLOB_NOESCAPE`, `GLOB_ONLYDIR` and `GLOB_MARK` diverge the same way.
+    // `GLOB_AVAILABLE_FLAGS` is their OR, so it moves whenever any member does —
+    // which is how the multi-engine diff first noticed the family.
+    ("standard", "GLOB_", "the C library's glob.h"),
+    // ICU's `UErrorCode`. Every `U_*` is an ordinal ICU assigns, so adding one
+    // code renumbers the `_LIMIT` sentinel that closes its section and every
+    // section above it — `U_FMT_PARSE_ERROR_LIMIT` is 65812 against one ICU and
+    // 65825 against another. The NAME is stable while the value tracks the
+    // linked ICU, which is `tokenizer`'s property in a family's shape.
+    ("intl", "U_", "the linked ICU's utypes.h"),
+    // libpq's enums, five of the six by prefix. `PGSQL_ERRORS_SQLSTATE` is 3
+    // against one libpq and 0 against an older one, because `PQERRORS_SQLSTATE`
+    // arrived in PostgreSQL 12 and the enum had a different shape before it.
+    ("pgsql", "PGSQL_CONNECTION_", "libpq's ConnStatusType"),
+    ("pgsql", "PGSQL_POLLING_", "libpq's PostgresPollingStatusType"),
+    ("pgsql", "PGSQL_TRANSACTION_", "libpq's PGTransactionStatusType"),
+    ("pgsql", "PGSQL_ERRORS_", "libpq's PGVerbosity"),
+    ("pgsql", "PGSQL_SHOW_CONTEXT_", "libpq's PGContextVisibility"),
+    ("pgsql", "PGSQL_DIAG_", "libpq-fe.h's PG_DIAG_* field codes"),
 ];
 
 /// Extensions whose constant VALUES are not a property of PHP, so no mined
@@ -236,6 +301,11 @@ enum Refusal {
     /// Not a scalar — `STDIN` and its two siblings are resources, `INF`/`NAN`
     /// are floats the value domain cannot compare.
     Unrepresentable,
+    /// The engines the run was given do not agree on the value, inside the very
+    /// minor range the row would claim. Found rather than rostered, which is the
+    /// point: [`BUILD_DEPENDENT`] is a list somebody maintains, and this is the
+    /// check that makes a missing entry a refused row instead of a wrong one.
+    ValueMoves,
 }
 
 /// One admitted row, as the source of record spells it.
@@ -248,16 +318,35 @@ struct Row {
     since: Option<(u16, u16)>,
 }
 
+/// One engine the run asked, and what it answered. The TOP engine supplies the
+/// table's values and extension set; every engine takes part in [`value_moves`].
+struct Engine {
+    bin: String,
+    minor: (u16, u16),
+    mined: Mined,
+}
+
 /// Entry point for `cargo xtask mine-constants`.
-pub fn run(php_src: Option<&str>) -> Result<(), String> {
+pub fn run(php_src: Option<&str>, php_bins: &[String]) -> Result<(), String> {
     let extensions = catalog_extensions()?;
-    let mined = run_miner(&extensions)?;
-    println!(
-        "mine-constants: PHP {} — {} constants over {} extensions",
-        mined.php,
-        mined.constants_total,
-        mined.extensions.len()
-    );
+    let mut engines = Vec::new();
+    for bin in php_binaries(php_bins) {
+        let mined = run_miner(&bin, &extensions)?;
+        let minor = php_minor(&mined.php)?;
+        println!(
+            "mine-constants: PHP {} — {} constants over {} extensions",
+            mined.php,
+            mined.constants_total,
+            mined.extensions.len()
+        );
+        engines.push(Engine { bin, minor, mined });
+    }
+    // The TOP minor is the one whose values the table carries: `since` asks
+    // whether a name existed at the floor and the engine that HAS the most names
+    // is the one that can be asked about the most rows. Ties keep the order given.
+    engines.sort_by_key(|e| e.minor);
+    let top = engines.pop().ok_or("no PHP engine to mine")?;
+    let mined = &top.mined;
 
     let php_src = php_src
         .map(str::to_owned)
@@ -265,9 +354,18 @@ pub fn run(php_src: Option<&str>) -> Result<(), String> {
         .filter(|d| !d.is_empty());
     // The scan's own reliability is measured per extension, so it needs the
     // extension each mined name belongs to before it can judge an absence.
+    //
+    // Over every MINED name, not only the admitted ones: coverage asks whether
+    // the scan can see this extension's registrations at all, and a roster entry
+    // is an answer to a different question. Counting only the admitted names
+    // would let a refusal RAISE coverage — refusing `intl`'s 141 `U_*`, which the
+    // scan cannot see, lifts the extension over the floor and manufactures a
+    // `since = "8.2"` for `ULOC_ACTUAL_LOCALE`, which 8.1 registers through
+    // `COLLATOR_EXPOSE_CONST` and the scan is blind to. A blind spot must not
+    // become invisible because the names that revealed it stopped being mined.
     let mut by_ext: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (name, m) in &mined.rows {
-        if refuse(name, &m.ty, &m.ext).is_none() {
+        if m.ty != "unrepresentable" {
             by_ext.entry(m.ext.clone()).or_default().push(normalize_const_fqn(name));
         }
     }
@@ -282,7 +380,7 @@ pub fn run(php_src: Option<&str>) -> Result<(), String> {
         }
     };
 
-    let dirs = machine_dirs();
+    let dirs = machine_dirs(&top.bin);
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut refused: BTreeMap<String, Refusal> = BTreeMap::new();
     for (name, m) in &mined.rows {
@@ -301,7 +399,16 @@ pub fn run(php_src: Option<&str>) -> Result<(), String> {
         );
     }
 
-    let out = render(&mined, presence.as_ref(), &rows, &refused);
+    // The multi-engine diff, LAST: it judges the rows as they would be written,
+    // so a name the rosters already refused is not diffed, and a `since` the
+    // presence scan found is what decides which engines a disagreement counts at.
+    let moves = value_moves(&top, &engines, &rows)?;
+    for name in moves.keys() {
+        rows.remove(name);
+        refused.insert(name.clone(), Refusal::ValueMoves);
+    }
+
+    let out = render(&top, &engines, presence.as_ref(), &rows, &refused, &moves);
     let dst = repo_root().join("docs/research/phpsrc-mining/constants.toml");
     std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
     let gated = rows.values().filter(|r| r.since.is_some()).count();
@@ -332,19 +439,108 @@ fn catalog_extensions() -> Result<Vec<String>, String> {
     Ok(doc.meta.extensions)
 }
 
-/// Run the PHP miner with the catalog's extension allowlist.
-fn run_miner(extensions: &[String]) -> Result<Mined, String> {
+/// Run the PHP miner on one engine, with the catalog's extension allowlist.
+fn run_miner(bin: &str, extensions: &[String]) -> Result<Mined, String> {
     let script = repo_root().join("docs/research/phpsrc-mining/mine_constants.php");
     let allow = serde_json::to_string(extensions).map_err(|e| format!("encode allowlist: {e}"))?;
-    let out = Command::new("php")
+    let out = Command::new(bin)
         .arg(&script)
         .arg(&allow)
         .output()
-        .map_err(|e| format!("run php {}: {e}", script.display()))?;
+        .map_err(|e| format!("run {bin} {}: {e}", script.display()))?;
     if !out.status.success() {
-        return Err(format!("miner failed: {}", String::from_utf8_lossy(&out.stderr).trim()));
+        return Err(format!("miner failed on {bin}: {}", String::from_utf8_lossy(&out.stderr).trim()));
     }
     serde_json::from_slice(&out.stdout).map_err(|e| format!("parse miner JSON: {e}"))
+}
+
+/// **The engines to ask**: every `--php PATH`, else `$STEINS_MINE_PHP` split on
+/// `:`, else the `php` on PATH alone.
+///
+/// One engine is a working run and not a degraded one — it is what the table has
+/// always been mined from — but it refuses nothing as a value move, and the
+/// header says so, because a single engine cannot disagree with itself.
+fn php_binaries(php_bins: &[String]) -> Vec<String> {
+    if !php_bins.is_empty() {
+        return php_bins.to_vec();
+    }
+    match std::env::var("STEINS_MINE_PHP") {
+        Ok(list) if !list.is_empty() => {
+            list.split(':').filter(|s| !s.is_empty()).map(str::to_owned).collect()
+        }
+        _ => vec!["php".to_owned()],
+    }
+}
+
+/// `"8.4.25"` → `(8, 4)`. A version the miner reports and this cannot read is a
+/// failed run: the minor is what decides whether a disagreement lies inside the
+/// range a row claims, and guessing it would decide that wrongly.
+fn php_minor(version: &str) -> Result<(u16, u16), String> {
+    let mut parts = version.split('.');
+    let maj = parts.next().and_then(|p| p.parse().ok());
+    let min = parts.next().and_then(|p| p.parse().ok());
+    match (maj, min) {
+        (Some(maj), Some(min)) => Ok((maj, min)),
+        _ => Err(format!("engine reported PHP version `{version}`, which has no major.minor")),
+    }
+}
+
+/// **The names the given engines disagree about**, name → the value each engine
+/// that has it reported, in ascending minor order.
+///
+/// A row says its value is the same on every host and every minor the target may
+/// span; two engines that both have the name and report different numbers are a
+/// direct counter-example, and the row is refused rather than mined from
+/// whichever engine happened to answer first. The four names this first caught
+/// are exactly the shape the argument predicts: `IMAGETYPE_COUNT` counts a list
+/// php-src appended to, `PASSWORD_BCRYPT_DEFAULT_COST` was raised from 10 to 12,
+/// `IDNA_DEFAULT` and `FILTER_FLAG_GLOBAL_RANGE` changed bits under names that
+/// stayed.
+///
+/// Two clauses keep the check from refusing rows that are in fact fine:
+///
+/// * an engine that does NOT have the name says nothing — the extension is
+///   absent from that build, and absence is the version gate's question, not
+///   this one;
+/// * an engine BELOW the row's `since` says nothing either — the row does not
+///   speak for that minor, so a disagreement there is outside its claim. This is
+///   the "unless the range scan explains it" clause, and it is the only thing
+///   `since` is allowed to excuse: a disagreement at or above `since` is inside
+///   the row's own range and no scan explains it away.
+fn value_moves(
+    top: &Engine,
+    others: &[Engine],
+    rows: &BTreeMap<String, Row>,
+) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
+    // The engines key their rows the way the miner reported them and the table's
+    // key is normalized, so each engine is re-keyed once rather than per row.
+    let mut byminor: Vec<((u16, u16), String, BTreeMap<String, String>)> = Vec::new();
+    for e in others.iter().chain(std::iter::once(top)) {
+        let mut vals = BTreeMap::new();
+        for (n, m) in &e.mined.rows {
+            let key = normalize_const_fqn(n);
+            if rows.contains_key(&key) {
+                vals.insert(key, decode_value(n, &m.ty, &m.value)?);
+            }
+        }
+        byminor.push((e.minor, e.mined.php.clone(), vals));
+    }
+
+    let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
+    for (name, row) in rows {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for (minor, version, vals) in &byminor {
+            if row.since.is_some_and(|s| *minor < s) {
+                continue;
+            }
+            let Some(v) = vals.get(name) else { continue };
+            seen.push((version.clone(), v.clone()));
+        }
+        if seen.iter().any(|(_, v)| *v != row.value) {
+            out.insert(name.clone(), seen);
+        }
+    }
+    Ok(out)
 }
 
 /// Whether a mined name is refused, and why.
@@ -353,6 +549,9 @@ fn refuse(name: &str, ty: &str, ext: &str) -> Option<Refusal> {
         return Some(Refusal::Platform);
     }
     if BUILD_DEPENDENT.contains(&name) || REFUSED_EXTENSIONS.contains(&ext) {
+        return Some(Refusal::Build);
+    }
+    if BUILD_DEPENDENT_FAMILIES.iter().any(|(e, p, _)| *e == ext && name.starts_with(p)) {
         return Some(Refusal::Build);
     }
     (ty == "unrepresentable").then_some(Refusal::Unrepresentable)
@@ -373,11 +572,13 @@ fn decode_value(name: &str, ty: &str, wire: &str) -> Result<String, String> {
         .map_err(|_| format!("constant `{name}`: value is not valid UTF-8 — needs a byte spelling"))
 }
 
-/// The directories of the mining machine, for [`leak_tripwire`].
-fn machine_dirs() -> Vec<String> {
+/// The directories of the mining machine, for [`leak_tripwire`] — asked of the
+/// engine whose values the table carries, since those are the only paths a row
+/// can be carrying.
+fn machine_dirs(bin: &str) -> Vec<String> {
     let mut out = Vec::new();
     for name in ["PHP_PREFIX", "PHP_BINDIR", "PHP_LIBDIR", "PHP_EXTENSION_DIR"] {
-        if let Ok(o) = Command::new("php").arg("-r").arg(format!("echo {name};")).output()
+        if let Ok(o) = Command::new(bin).arg("-r").arg(format!("echo {name};")).output()
             && o.status.success()
             && let Ok(s) = String::from_utf8(o.stdout)
             && s.len() > 1
@@ -644,11 +845,14 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Render the TOML source of record.
 fn render(
-    mined: &Mined,
+    top: &Engine,
+    others: &[Engine],
     presence: Option<&Presence>,
     rows: &BTreeMap<String, Row>,
     refused: &BTreeMap<String, Refusal>,
+    moves: &BTreeMap<String, Vec<(String, String)>>,
 ) -> String {
+    let mined = &top.mined;
     let mut s = String::new();
     s.push_str(
         "# ENGINE CONSTANTS — the generated, committed table ADR-0094 §2 rules in place\n\
@@ -658,7 +862,7 @@ fn render(
          # `cargo xtask gen-catalog` turns it into the shipped Rust table. Regenerate\n\
          # alongside a `PINNED_PHP` bump, the way `param_facts.toml` is.\n\
          #\n\
-         # TWO SOURCES. Values and extensions come from ONE engine's\n\
+         # TWO SOURCES. Values and extensions come from the TOP engine's\n\
          # `get_defined_constants(true)` (`mine_constants.php`). Version ranges cannot:\n\
          # `since` asks whether a name existed at 8.1, and an 8.5 engine has no opinion,\n\
          # so they come from php-src's per-minor branches instead — a `.stub.php` global\n\
@@ -673,8 +877,19 @@ fn render(
          # an installation path) and have no target-independent value at all — as do the\n\
          # extensions refused whole, whose numbers come from the C library (`sockets`,\n\
          # `pcntl`, `posix`) or the parser generator (`tokenizer`), so the NAME is stable\n\
-         # while the value is not. `unrepresentable` is `STDIN` and its two siblings\n\
-         # (resources) plus `INF`/`NAN`.\n\
+         # while the value is not, and the FAMILIES refused the same way for the same\n\
+         # reason (`GLOB_*` from `glob.h`, `intl`'s `U_*` from ICU's error enum, the\n\
+         # `PGSQL_*` groups from libpq's). `unrepresentable` is `STDIN` and its two\n\
+         # siblings (resources) plus `INF`/`NAN`.\n\
+         #\n\
+         # AND WHAT IS REFUSED BY MEASUREMENT. One engine's value is a claim about every\n\
+         # minor the target may span, so the run mines EVERY engine it is given\n\
+         # (`--php PATH`, repeatable) and refuses any name they disagree about inside the\n\
+         # range its row would claim — `[refused.value_moves]` records the name with what\n\
+         # each engine said. This is the check a roster cannot be: a roster is a list\n\
+         # somebody maintains, and a missing entry is a WRONG row until something\n\
+         # measures it. An engine that lacks the name, or that sits below the row's\n\
+         # `since`, takes no part — absence is the version gate's question, not this one.\n\
          #\n\
          # `until` is a schema slot the current mining never fills, and that is a\n\
          # property of the sources rather than of PHP: every mined name exists in the\n\
@@ -690,6 +905,16 @@ fn render(
     let _ = writeln!(s, "extensions = [");
     for e in &mined.extensions {
         let _ = writeln!(s, "  \"{e}\",");
+    }
+    let _ = writeln!(s, "]");
+    // The engines' VERSIONS and not their paths: a nix store path or a Homebrew
+    // cellar is exactly what `leak_tripwire` exists to keep out of this file, and
+    // the version is the whole of what the diff's reader needs.
+    let _ = writeln!(s, "# Engines the value diff compared, low minor first; `php` above is the");
+    let _ = writeln!(s, "# top one, whose values the rows carry. One entry = nothing was diffed.");
+    let _ = writeln!(s, "diffed = [");
+    for e in others.iter().chain(std::iter::once(top)) {
+        let _ = writeln!(s, "  {},", toml_str(&e.mined.php));
     }
     let _ = writeln!(s, "]");
     match presence {
@@ -714,6 +939,7 @@ fn render(
             Refusal::Platform => "platform",
             Refusal::Build => "build",
             Refusal::Unrepresentable => "unrepresentable",
+            Refusal::ValueMoves => "value_moves",
         };
         by_refusal.entry(key).or_default().push(name);
     }
@@ -722,7 +948,8 @@ fn render(
     let _ = writeln!(s, "# mined      what `get_defined_constants(true)` had, over the catalog's extensions");
     let _ = writeln!(s, "# rows       spec-fixed literals admitted to the table");
     let _ = writeln!(s, "# gated      of those, carrying a `since` above the mined floor");
-    let _ = writeln!(s, "# refused_*  the three ADR-0094 §3 classes a mined row cannot carry");
+    let _ = writeln!(s, "# refused_*  the three ADR-0094 §3 classes a mined row cannot carry, plus");
+    let _ = writeln!(s, "#            the names the engines themselves disagreed about");
     let _ = writeln!(s, "mined = {}", mined.constants_total);
     let _ = writeln!(s, "rows = {}", rows.len());
     let _ = writeln!(s, "gated = {gated}");
@@ -734,10 +961,26 @@ fn render(
     // deliberately left out" and "nobody ever mined it" are different facts, and
     // only the first can be reviewed.
     let _ = writeln!(s, "[refused]");
-    for (key, names) in &by_refusal {
+    for (key, names) in by_refusal.iter().filter(|(k, _)| **k != "value_moves") {
         let _ = writeln!(s, "{key} = [");
         for n in names {
             let _ = writeln!(s, "  {},", toml_key(n));
+        }
+        let _ = writeln!(s, "]");
+    }
+    s.push('\n');
+    // A table and not a list, because the VALUES are the evidence: a reviewer who
+    // wants to know whether a refusal was right reads what each engine said, and
+    // a bare name would make them re-run the diff to find out.
+    let _ = writeln!(s, "[refused.value_moves]");
+    let _ = writeln!(s, "# name = [[\"<php version>\", \"<value>\"], …] — every engine that HAS the");
+    let _ = writeln!(s, "# name at or above the row's `since`, low minor first. Two spellings here");
+    let _ = writeln!(s, "# are what refused the row.");
+    for (name, seen) in moves {
+        let _ = write!(s, "{} = [", toml_key(name));
+        for (i, (version, value)) in seen.iter().enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let _ = write!(s, "{sep}[{}, {}]", toml_str(version), toml_str(value));
         }
         let _ = writeln!(s, "]");
     }
@@ -792,4 +1035,112 @@ fn toml_str(v: &str) -> String {
     }
     out.push('"');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// One engine's answer, spelled the way the miner's JSON does.
+    fn engine(version: &str, rows: &[(&str, &str, &str)]) -> Engine {
+        let mined = Mined {
+            php: version.to_owned(),
+            extensions: Vec::new(),
+            constants_total: rows.len(),
+            rows: rows
+                .iter()
+                .map(|(name, ext, value)| {
+                    (
+                        (*name).to_owned(),
+                        MinedRow {
+                            ext: (*ext).to_owned(),
+                            ty: "int".to_owned(),
+                            value: (*value).to_owned(),
+                        },
+                    )
+                })
+                .collect(),
+        };
+        let minor = php_minor(version).expect("test version");
+        Engine { bin: "php".to_owned(), minor, mined }
+    }
+
+    fn row(ext: &str, value: &str, since: Option<(u16, u16)>) -> Row {
+        Row { ext: ext.to_owned(), ty: "int".to_owned(), value: value.to_owned(), since }
+    }
+
+    #[test]
+    fn engines_that_disagree_inside_a_rows_range_refuse_it() {
+        // The four names this check first caught are all of this shape: the top
+        // engine says one number and a supported minor says another, so the row
+        // the top engine would write is false at a minor the target may span.
+        let top = engine("8.5.10", &[("IMAGETYPE_COUNT", "gd", "22")]);
+        let others = vec![engine("8.4.25", &[("IMAGETYPE_COUNT", "gd", "20")])];
+        let rows = BTreeMap::from([("IMAGETYPE_COUNT".to_owned(), row("gd", "22", None))]);
+        let moves = value_moves(&top, &others, &rows).expect("diff");
+        assert_eq!(
+            moves.get("IMAGETYPE_COUNT").map(Vec::as_slice),
+            Some(
+                [("8.4.25".to_owned(), "20".to_owned()), ("8.5.10".to_owned(), "22".to_owned())]
+                    .as_slice()
+            )
+        );
+    }
+
+    #[test]
+    fn engines_that_agree_leave_the_row_alone() {
+        let top = engine("8.5.10", &[("JSON_THROW_ON_ERROR", "json", "4194304")]);
+        let others = vec![engine("8.4.25", &[("JSON_THROW_ON_ERROR", "json", "4194304")])];
+        let rows =
+            BTreeMap::from([("JSON_THROW_ON_ERROR".to_owned(), row("json", "4194304", None))]);
+        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+    }
+
+    #[test]
+    fn a_disagreement_below_the_rows_since_is_the_range_scans_business() {
+        // The one thing `since` is allowed to excuse: the row does not speak for
+        // 8.2 at all, so what 8.2 calls the name is not a counter-example to it.
+        let top = engine("8.5.10", &[("LATE_ARRIVAL", "standard", "7")]);
+        let others = vec![engine("8.2.33", &[("LATE_ARRIVAL", "standard", "3")])];
+        let rows =
+            BTreeMap::from([("LATE_ARRIVAL".to_owned(), row("standard", "7", Some((8, 3))))]);
+        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+    }
+
+    #[test]
+    fn an_engine_that_lacks_the_name_says_nothing() {
+        // A build without the extension is an absence, which is the version
+        // gate's question — never a disagreement about a value.
+        let top = engine("8.5.10", &[("PGSQL_ASSOC", "pgsql", "1")]);
+        let others = vec![engine("8.2.33", &[])];
+        let rows = BTreeMap::from([("PGSQL_ASSOC".to_owned(), row("pgsql", "1", None))]);
+        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+    }
+
+    #[test]
+    fn a_family_a_c_library_numbers_is_refused_whole() {
+        // Refused by family and not by name, so the next member the library
+        // gains is refused with the ones that are here today.
+        for (name, ext) in [
+            ("GLOB_BRACE", "standard"),
+            ("GLOB_SOMETHING_GLIBC_ADDS_NEXT", "standard"),
+            ("U_ZERO_ERROR", "intl"),
+            ("U_FMT_PARSE_ERROR_LIMIT", "intl"),
+            ("PGSQL_ERRORS_SQLSTATE", "pgsql"),
+            ("PGSQL_DIAG_SEVERITY", "pgsql"),
+            ("PGSQL_COMMAND_OK", "pgsql"),
+        ] {
+            assert!(
+                matches!(refuse(name, "int", ext), Some(Refusal::Build)),
+                "`{name}` must be refused as build-dependent"
+            );
+        }
+        // The prefixes stay as narrow as the claim they make: an extension's own
+        // numbers keep their rows, and `U_` is ICU's only inside `intl`.
+        for (name, ext) in
+            [("GLOB_BRACE", "json"), ("PGSQL_ASSOC", "pgsql"), ("U_ZERO_ERROR", "standard")]
+        {
+            assert!(refuse(name, "int", ext).is_none(), "`{name}` of `{ext}` must stay admitted");
+        }
+    }
 }

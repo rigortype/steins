@@ -1881,19 +1881,27 @@ fn int_of(
 fn filter_flags_of_bits(bits: i64) -> Option<FilterFlags> {
     let mut out = FilterFlags::default();
     let mut rest = bits;
-    let take = |name: &str, rest: &mut i64| -> Option<bool> {
-        let bit = engine_int(name)?;
+    let take = |name: &str, rest: &mut i64| -> bool {
+        // A roster name the TABLE has no row for subtracts nothing. That is not a
+        // hole: its bit, if the caller set it, is then still in `rest` when the
+        // `rest == 0` check below runs, and the call declines — the same refusal
+        // by a shorter route. Declining on the name instead would let ONE
+        // unreadable member blind the whole roster, and one is unreadable by
+        // design: `FILTER_FLAG_GLOBAL_RANGE`'s value MOVED across the supported
+        // minors (268435456 at 8.2–8.4, 536870912 at 8.5), so ADR-0094 §2 refuses
+        // it a row — which is exactly a bit no decomposition may claim to know.
+        let Some(bit) = engine_int(name) else { return false };
         if bit == 0 || *rest & bit != bit {
-            return Some(false);
+            return false;
         }
         *rest &= !bit;
-        Some(true)
+        true
     };
-    out.null_on_failure = take("FILTER_NULL_ON_FAILURE", &mut rest)?;
-    out.force_array = take("FILTER_FORCE_ARRAY", &mut rest)?;
-    out.require_array = take("FILTER_REQUIRE_ARRAY", &mut rest)?;
+    out.null_on_failure = take("FILTER_NULL_ON_FAILURE", &mut rest);
+    out.force_array = take("FILTER_FORCE_ARRAY", &mut rest);
+    out.require_array = take("FILTER_REQUIRE_ARRAY", &mut rest);
     for name in FILTER_FLAG_NO_OPS {
-        take(name, &mut rest)?;
+        take(name, &mut rest);
     }
     (rest == 0).then_some(out)
 }
