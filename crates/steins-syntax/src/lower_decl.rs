@@ -9,13 +9,15 @@ use mago_span::HasSpan;
 use mago_syntax::cst::{
     Access, Argument, Attribute, Class, ClassLikeMember, ClassLikeMemberSelector, Expression,
     Function, FunctionCall, Hint, Identifier, Literal, MagicConstant, Method, MethodBody, Modifier,
-    Node, PartialArgument, PlainProperty, Program, Property, PropertyItem, TriviaKind,
+    Node, PartialArgument, PlainProperty, Program, Property, PropertyItem, Statement,
+    TriviaKind,
     UnaryPrefixOperator, UseItems,
 };
 
 use crate::ast::{
     AnonClassEdge, ArgValue, CatchClause, ClassAliasEdge, ClassConstDecl, ClassDecl, ClassRef,
-    DynamismKind, DynamismSite, EffectEnvelope, EnumCaseDecl, FunctionDecl, GlobalConstDecl,
+    DynamismKind, DynamismSite, EffectEnvelope, EnforcedTop, EnumCaseDecl, FunctionDecl,
+    GlobalConstDecl,
     IncludePath, MethodDecl, NameRef, NativeType, Param, PropertyDecl, ReflectionKind,
     ReflectionSite, RetBoundKeyword, RetBoundKind, ScalarType, Span, StaticClass, TypeMember,
     Visibility, normalize_const_fqn,
@@ -620,6 +622,10 @@ fn lower_function(
         fqn: String::new(), // filled in `parse` from the enclosing namespace ctx
         params: lower_params(&f.parameter_list, rc),
         ret: f.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_top: f
+            .return_type_hint
+            .as_ref()
+            .and_then(|r| declared_enforced_top(&r.hint, f.body.statements.as_slice())),
         ret_span: f.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(f.name.span()),
         body_span: to_span(f.body.span()),
@@ -1109,6 +1115,12 @@ fn lower_method(m: &Method<'_>, aliases: &SteinsAttrAliases, docs: &DocIndex, rc
         name,
         params: lower_params(&m.parameter_list, rc),
         ret: m.return_type_hint.as_ref().and_then(|r| lower_hint(&r.hint, rc)),
+        ret_top: m.return_type_hint.as_ref().and_then(|r| {
+            declared_enforced_top(&r.hint, match &m.body {
+                MethodBody::Concrete(block) => block.statements.as_slice(),
+                MethodBody::Abstract(_) => &[],
+            })
+        }),
         ret_bound_keyword: m.return_type_hint.as_ref().and_then(|r| ret_bound_keyword(&r.hint)),
         ret_span: m.return_type_hint.as_ref().map(|r| to_span(r.hint.span())),
         span: to_span(m.name.span()),
@@ -1422,6 +1434,37 @@ fn lower_hint_into(
         _ => return None,
     }
     Some(())
+}
+
+/// The [`EnforcedTop`] a **bare** `array`/`object`/`iterable` hint names (issue #603),
+/// or `None` for every other hint — including `?array` and `array|null`, whose whole
+/// point is that the envelope has a second half [`EnforcedTop`] cannot spell. Recurses
+/// through parentheses only, as [`lower_hint`]'s own leaves do.
+pub(crate) fn enforced_top(hint: &Hint<'_>) -> Option<EnforcedTop> {
+    match hint {
+        Hint::Array(_) => Some(EnforcedTop::Array),
+        Hint::Object(_) => Some(EnforcedTop::Object),
+        Hint::Iterable(_) => Some(EnforcedTop::Iterable),
+        Hint::Parenthesized(p) => enforced_top(p.hint),
+        _ => None,
+    }
+}
+
+/// [`enforced_top`] of a *declaration's* return hint, which is `None` for a **generator**
+/// whatever the hint says (issue #128, the guard [`crate::ast::Scope::is_generator`] earns
+/// on the scope side). A body that `yield`s hands the caller a `Generator`, and the hint
+/// describes THAT — so `: iterable`'s `array` half is a claim no generator call can
+/// satisfy, and the `return` statements the top would bound are `getReturn()` values PHP
+/// never checks against it.
+///
+/// Taken on the declaration rather than in the arm lane because `FunctionDecl` and
+/// `MethodDecl` carry no generator bit: withholding the top at the one place it is
+/// recorded guards every reader of it at once.
+fn declared_enforced_top(hint: &Hint<'_>, body: &[Statement<'_>]) -> Option<EnforcedTop> {
+    if body.iter().any(|s| crate::lower_scope::node_is_generator(&Node::Statement(s))) {
+        return None;
+    }
+    enforced_top(hint)
 }
 
 /// Accumulate the resolved classes of an intersection hint into `out`. Recurses

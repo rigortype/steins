@@ -413,6 +413,30 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// [`EXPECTED_PROOF_FINDINGS`]; no count here moved when they landed.
 /// `phpstan/phpstan-src` remains absent (measured 0 under the 2026-08-08 corpus
 /// scoping recorded on its `THROW_EXPECTED` row).
+///
+/// **Unmoved by issue #603 (2026-09-11), and the zero is worth the paragraph.**
+/// The enforced-top return hint (ADR-0057 A9) widens a *Verified* envelope —
+/// a bare `: array`/`: object`/`: iterable` now bounds the call — into every
+/// caller in the corpus, which is exactly the shape of change this table exists
+/// to catch. Measured cold+warm over all ten packages: **not one row moved**, in
+/// either direction, in `phpdoc.*`, `throw.*`, `effect.*`, the possibly-grade
+/// strict floor, or `EXPECTED_PROOF_FINDINGS` — the finding sets are byte-identical
+/// to master `965a9b5`'s, 219 rows each.
+///
+/// That zero is **measured, not entailed**. The widening can move this table in
+/// both directions: a newly-bound `array` can silence a row that premised on a
+/// wider fact, and it can *create* one — `$x = $o->all();` (`all(): array`, no
+/// docblock) handed to a `@param string $s` fires `phpdoc.param-mismatch` on the
+/// branch where master, holding `$x` as unknown, said nothing (a true positive,
+/// the envelope being Verified). Neither shape occurs in the public corpus: every
+/// `phpdoc.*` row here premises on a scalar-or-`false` union, and no bare
+/// `: array` return reaches a docblock-typed parameter. So 219 = 219 is the
+/// corpus's arithmetic, and a package that does either will move its row.
+///
+/// Run on PHP **8.5.10**, where CI calibrates on 8.4 — the divergence that buys
+/// (phpunit at 82 against its seeded 88, the four builtin `T|false` rows the 8.5
+/// sidecar declines; see this table's phpunit entry) reproduced **identically on
+/// master and on the branch**, so it is the engine's, not the slice's.
 const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // 19 → 21 (+2) with issue #327 (an array literal keeps its fact when its
     // elements do not). `ArtifactRepositoryTest` lines 45 and 68 build

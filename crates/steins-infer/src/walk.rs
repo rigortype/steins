@@ -66,7 +66,7 @@ use crate::refine::{
     expand_enum_case_arms, seed_contract_arms, seed_fact, seed_refined_scalar_fact, seed_shape_fact,
     then_refinements,
 };
-use crate::return_arms::{bindable_args, fn_return_arms_at_call, native_arms};
+use crate::return_arms::{bindable_args, fn_return_arms_at_call, return_envelope_arms};
 use crate::return_maybe::check_maybe_return_mismatch;
 use crate::shapes::{apply_offset_append, apply_offset_write, apply_shape_narrowing};
 use crate::string_context::check_string_contexts;
@@ -263,9 +263,16 @@ pub(crate) fn analyze_scope(
     // `$this`), so a fresh `new`/`clone` never collides with it.
     let alloc_start = store.heap.keys().copied().max().map_or(0, |m| m + 1);
     // Return-fact summary collection (ADR-0057 T0): active only when the caller
-    // requested exits. Native return arms resolved once, as the A2 drop oracle.
+    // requested exits. Native return arms resolved once, as the A2 drop oracle — the
+    // lowered `NativeType` where the hint had one, else the enforced top of a bare
+    // `: array`/`: object`/`: iterable` (ADR-0057 note, issue #603), which PHP checks
+    // at this very boundary and which therefore drops a non-array exit just as `: int`
+    // drops a string one.
     let summary = ret_exits.as_ref().map(|_| SummaryCtx {
-        native: cx.scope_return(scope).map(|(ty, _)| native_arms(ty)).unwrap_or_default(),
+        native: return_envelope_arms(
+            cx.scope_return(scope).map(|(ty, _)| ty),
+            cx.scope_return_top(scope),
+        ),
         exits: std::cell::RefCell::new(Vec::new()),
         this_exits: this_exits.as_ref().map(|_| std::cell::RefCell::new(Vec::new())),
     });

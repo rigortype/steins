@@ -149,6 +149,21 @@ pub(crate) struct CallTarget<'a> {
     /// [`seed_this_object`]: crate::heap::seed_this_object
     /// [`copy_for_descent`]: crate::heap::copy_for_descent
     pub(crate) receiver_var: Option<String>,
+    /// `true` exactly when [`resolve_declaration_target`] answered this target and the
+    /// dispatch resolver did not — the declaration-only path of ADR-0049 A16.
+    ///
+    /// Read by one consumer, [`enforced_top`](Self::enforced_top): A16 states that an
+    /// unrepresentable hint (`: array` among them) leaves the declaration path saying
+    /// nothing, and issue #603 keeps that gate shut while opening the proven-target one.
+    pub(crate) declaration_only: bool,
+}
+
+impl CallTarget<'_> {
+    /// The enforced top the target's return hint declares (issue #603), withheld on the
+    /// declaration-only path so ADR-0049 A16's silence survives unchanged.
+    pub(crate) fn enforced_top(&self) -> Option<steins_syntax::EnforcedTop> {
+        if self.declaration_only { None } else { self.method.ret_top }
+    }
 }
 
 /// Resolve a method/static/constructor `receiver` to a project target.
@@ -255,6 +270,7 @@ pub(crate) fn resolve_exact<'a>(
             this_exact,
             receiver_carries: Vec::new(),
             receiver_var: None,
+            declaration_only: false,
         }),
         _ => None,
     }
@@ -411,6 +427,7 @@ pub(crate) fn resolve_declaration_target<'a>(
         this_exact: None,
         receiver_carries: carries,
         receiver_var: None,
+        declaration_only: true,
     };
     Some((target, stratum))
 }
@@ -628,6 +645,7 @@ fn resolve_guarded<'a>(
         this_exact: None,
         receiver_carries: Vec::new(),
         receiver_var: None,
+        declaration_only: false,
     })
 }
 
@@ -652,6 +670,7 @@ fn resolve_static_named<'a>(
         this_exact: None,
         receiver_carries: Vec::new(),
         receiver_var: None,
+        declaration_only: false,
     })
 }
 

@@ -137,7 +137,16 @@ use crate::names::{PackageName, SectionName};
 /// `value` is. It also changes meaning even where it decodes: a schema-18 file records no
 /// constant value at all, so replaying one would answer `unknown` for every same-file
 /// `const` this binary now binds.
-pub const SCHEMA_VERSION: u32 = 19;
+/// `20` is the enforced-top return hint (ADR-0057 note, issue #603), and it is a
+/// **misdecode** bump of schema 16's kind on two counts. `FunctionDecl` and
+/// `MethodDecl` each grow a `ret_top` field and the wire codec reads a struct's
+/// fields positionally, so a schema-19 `FunctionDecl`'s `ret_span` would be read
+/// where the new `ret_top` is; and `RetHintKind` grows a `Top` variant ahead of
+/// `Other`, which moves `Other`'s index. It also changes meaning even where it
+/// decodes: a schema-19 file records a bare `: array` as an unrepresentable hint
+/// that refuses the return summary outright, so replaying one would answer the
+/// arm floor for every call this binary now bounds by `array`.
+pub const SCHEMA_VERSION: u32 = 20;
 
 const MAGIC: [u8; 8] = *b"steinsgn";
 const HEADER_LEN: u64 = 16;

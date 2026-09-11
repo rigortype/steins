@@ -700,7 +700,7 @@ mod tests {
             ),
             (
                 "vendor/lib/a/src/widget.php",
-                "<?php\nnamespace Lib\\A;\n/** @method int magic() */\nclass Widget {\n  /** @param string $s @return int */\n  public function m(string $s = \"d\"): int { return \\strlen($s); }\n  public static function n(): self { return new self(); }\n}\nfunction dup(string $x): string { return $x; }\n",
+                "<?php\nnamespace Lib\\A;\n/** @method int magic() */\nclass Widget {\n  /** @param string $s @return int */\n  public function m(string $s = \"d\"): int { return \\strlen($s); }\n  public static function n(): self { return new self(); }\n  public function rows(): array { return [1]; }\n  public function bag(): object { return new self(); }\n}\nfunction dup(string $x): string { return $x; }\n",
             ),
             (
                 "vendor/lib/b/src/dup.php",
@@ -708,7 +708,7 @@ mod tests {
             ),
             (
                 "vendor/lib/b/src/origins.php",
-                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n  }\n}\n",
+                "<?php\nnamespace Lib\\A;\nclass Origins {\n  public function each(array $a, $obj, $dyn): void {\n    $this->each($a, $obj, $dyn);\n    $obj->$dyn();\n    \\array_map('strlen', $a);\n    $f = static function (): int { return 1; };\n    $f();\n    $g = function (): iterable { return []; };\n    $g();\n  }\n}\n",
             ),
             ("vendor/autoload.php", "<?php\nfunction stray_helper() {}\n"),
         ]
@@ -852,6 +852,15 @@ mod tests {
         {
             assert!(kinds.contains_key(variant), "the fixture must carry an {variant} origin");
         }
+        // Schema 20 (issue #603): `ret_top` sits between `ret` and `ret_span` on
+        // both declarations and `RetHintKind::Top` precedes `Other`, so the
+        // enforced tops have to be IN the fixture for the positions to be tested.
+        let tops: usize = parsed
+            .iter()
+            .flat_map(|(_, t)| t.classes().iter().flat_map(|c| c.methods.iter()))
+            .filter(|m| m.ret_top.is_some())
+            .count();
+        assert!(tops >= 2, "the fixture must carry `: array` and `: object` methods, has {tops}");
 
         for p in &packages {
             let path = write_package(&tmp, &parsed, p);

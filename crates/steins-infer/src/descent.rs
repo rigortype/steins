@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
+use steins_domain::Certainty;
 use steins_domain::{Base, Fact, PhpStr};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, NameRef, NamedArg, NativeType, Param, Receiver, RefKind,
@@ -42,7 +43,7 @@ use crate::method_call::{display_of_call, nullsafe_call, receiver_new_object, th
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Site};
 use crate::refine::refine_contract_arms;
-use crate::return_arms::{fn_return_arms, native_arms};
+use crate::return_arms::{enforced_top_arms, fn_return_arms, native_arms};
 use crate::walk::{WalkCx, analyze_scope, value_stratum};
 
 /// The class FQN that lexically owns a method scope; `None` for function/top.
@@ -1786,11 +1787,20 @@ fn join_value_component(
     exits: &[ExitContribution],
 ) -> Option<SummaryValue> {
     let ret = cx.scope_return(callee_scope).map(|(ty, _)| ty);
-    // A written return hint Steins cannot lower (`: object`, `: array`, `: void`,
-    // `: never`, …) leaves `scope_return` as `None`, so the A2 native-oracle arms
-    // are empty and `native_violates` cannot drop boundary TypeErrors (`return
-    // null` under `: object`). Refuse rather than rebind an uncheckable exit as a
-    // Singleton premise (ADR-0075 review).
+    // A written return hint Steins cannot lower (`: void`, `: never`, a DNF union, …)
+    // leaves `scope_return` as `None`, so the A2 native-oracle arms are empty and
+    // `native_violates` cannot drop boundary TypeErrors (`return null` under such a
+    // hint). Refuse rather than rebind an uncheckable exit as a Singleton premise
+    // (ADR-0075 review).
+    //
+    // An **enforced top** is exempt (ADR-0057 note, issue #603): `: array`, `: object`
+    // and `: iterable` lower to no `NativeType` but DO seed the A2 oracle, from
+    // `scope_return_top`, so the arms this refusal exists to require are there. The
+    // value component is then A1's as usual — `return [1, 2]` under `: array` crosses
+    // the shape it proved — and where A1 has nothing the envelope alone is the answer,
+    // which it gives in the arm lane (`return_envelope_arms`), not here: `floor` stays
+    // `None` for want of a single-base value floor, so a factless exit still floors the
+    // value summary out (A3), exactly as it does under `: mixed`.
     //
     // `: mixed` is exempt (issue #364): it is the TOTAL envelope, so the empty
     // oracle has nothing to drop — no value violates `mixed`, and no conversion
@@ -1800,7 +1810,9 @@ fn join_value_component(
     // whole summary out (A3), and everything outside this function keeps treating
     // it as the written hint it is.
     if ret.is_none()
-        && callee_scope.ret_hint.is_some_and(|h| h.kind != RetHintKind::Mixed)
+        && callee_scope
+            .ret_hint
+            .is_some_and(|h| !matches!(h.kind, RetHintKind::Mixed | RetHintKind::Top(_)))
     {
         return None;
     }
@@ -1820,7 +1832,25 @@ fn join_value_component(
                     None => ExitContribution::Floor,
                 }
             }
-            (ExitContribution::Fact(f, s), None) => ExitContribution::Fact(f.clone(), *s),
+            // Under an enforced top there is no conversion, only the boundary: a
+            // fact the top admits WHOLE crosses as it is; a fact it admits only in
+            // part (`null|list{5}` under `: array` — a finite or nullable fact with
+            // one violating member, which A2 keeps because `admits_fact` says
+            // `Maybe`) may not cross, or the caller would hold a Verified member no
+            // call can return. It degrades to `Floor`, and the top has no value
+            // floor, so the value component declines and the arm lane answers
+            // `array` (A3, wider never wrong) — the `: int` twin's degrade to the
+            // native floor, one lane over.
+            (ExitContribution::Fact(f, s), None) => match callee_scope.ret_hint.map(|h| h.kind) {
+                Some(RetHintKind::Top(top))
+                    if !enforced_top_arms(top)
+                        .iter()
+                        .any(|ty| steins_contract::admits_fact(ty, f) == Certainty::Yes) =>
+                {
+                    ExitContribution::Floor
+                }
+                _ => ExitContribution::Fact(f.clone(), *s),
+            },
             // An object exit is a `Floor` on this side and always has been (T1's
             // `Heap` variant only names what the OTHER side reads): a value floor is
             // the widest thing the value domain can say about it, and for an object

@@ -253,13 +253,19 @@ function f(Foo $foo): void {
 // The unrepresentable-hint gate (#603), from the other side.
 // ---------------------------------------------------------------------------
 
-/// A bare `: array` on an open method clears the **dispatch** gate and dies at the
-/// **lowering** one: the hint lowers to no native type at all (#603), so the
-/// declaration path resolves a target and still has nothing to say. Which of the
-/// two gates fires is the thing this pins — the sibling below proves the dispatch
-/// gate is genuinely passed by adding a `@return` the lowering *can* state.
+/// A bare `: array` on an open method is still silent here, and #603 CHANGED WHICH
+/// GATE holds it. The lowering gate no longer does: `: array` now lowers to the
+/// enforced top `array` (ADR-0057 note), and a proven receiver binds it. What keeps
+/// the declaration path silent is A16's own withholding — `CallTarget::enforced_top`
+/// answers `None` for a target only `resolve_declaration_target` produced — so the
+/// bullet's list of unrepresentable hints is now a list of *withheld* ones, and the
+/// pin it asked for reads the same way from the outside.
+///
+/// Nothing in A16's covariance argument forbids the top: a child overriding
+/// `: array` can only narrow it. Extending the path to seed it is #603's stated
+/// out-of-scope and wants its own slice.
 #[test]
-fn a_bare_array_return_hits_the_lowering_gate_not_the_dispatch_gate() {
+fn a_bare_array_return_is_withheld_from_the_declaration_path() {
     let src = r#"<?php
 class Foo {
     public function all(): array { return []; }
@@ -271,8 +277,10 @@ function f(Foo $foo): void {
     assert_eq!(one_type(src), "unknown");
 }
 
-/// The same open method, the same `: array`, with a `@return` the contract lane
-/// can state: the dispatch gate was never the blocker.
+/// The same open method, the same `: array`, with a `@return` the contract lane can
+/// state: the dispatch gate was never the blocker. The `@return` refines against an
+/// EMPTY native list here — a withheld top is not an envelope the docblock must fit
+/// inside — so it arrives `Asserted` exactly as before.
 #[test]
 fn an_array_return_with_a_statable_docblock_answers() {
     let src = r#"<?php
@@ -287,7 +295,8 @@ function f(Foo $foo): void {
     assert_eq!(one_type(src), "list<string> (asserted)");
 }
 
-/// `void`, `mixed` and `iterable` lower to the same `None` an absent hint gives.
+/// `void` and `mixed` lower to the same `None` an absent hint gives, and neither is
+/// an enforced top: `void` names no value and `mixed` cuts nothing.
 #[test]
 fn an_unrepresentable_hint_says_nothing() {
     let src = r#"<?php
@@ -296,6 +305,21 @@ class Foo {
 }
 function f(Foo $foo): void {
     \PHPStan\dumpType($foo->anything());
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// `: object` and `: iterable` are withheld from the declaration path for the same
+/// reason `: array` is — the twins the A16 bullet named alongside it.
+#[test]
+fn the_other_enforced_tops_are_withheld_too() {
+    let src = r#"<?php
+class Foo {
+    public function rows(): iterable { return []; }
+}
+function f(Foo $foo): void {
+    \PHPStan\dumpType($foo->rows());
 }
 "#;
     assert_eq!(one_type(src), "unknown");
