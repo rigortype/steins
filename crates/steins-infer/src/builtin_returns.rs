@@ -18,7 +18,7 @@ use crate::fold::Folder;
 use crate::shape_projection::{
     shape_projection_fact, witnessed_family_fact, witnessed_projection_fact,
 };
-use crate::transfers::{arg_dispatch_return_fact, transfer_arg_known};
+use crate::transfers::{arg_dispatch_return_fact, declared_arm_known, transfer_arg_known};
 
 // ---------------------------------------------------------------------------
 // Builtin return facts (ADR-0056 R1): the reflected envelope seeds the value
@@ -464,6 +464,77 @@ pub(crate) fn floor_value_fact(arms: &[ContractArm]) -> Option<Fact> {
         None => contractty_to_fact(&only.ty)?,
     };
     if nulls.is_empty() { Some(fact) } else { fact_with_null(&fact) }
+}
+
+/// **The fact a builtin call in OPERAND position denotes** (issue #646) — the
+/// same ladder the dump seam ([`crate::dump`]) and the assignment seam
+/// ([`crate::assign`]) already climb, so one value has one answer however it is
+/// spelled.
+///
+/// `value_operand_fact` fell through to [`transfer_arg_known`], which has a
+/// `Var` rung, an array-literal rung and a literal rung and **no builtin-return
+/// rung at all**. So `(string) rand()` reached the cast with nothing and took the
+/// operator's floor, while `$r = rand(); (string) $r` reached it with the
+/// catalog's `int` — two spellings of one value, two answers. This is the missing
+/// rung, and it is the assignment seam's own, in the assignment seam's order
+/// (ADR-0056 §9 made exactly this argument one seam earlier, for arguments):
+///
+/// 1. the **argument-dependent** rung ([`shape_builtin_return_fact`], ADR-0061
+///    §1) — `count($x)` over a declared shape, carrying the argument's stratum;
+/// 2. the engine's **reflected envelope** ([`builtin_call_return_fact`]) at
+///    `Verified`: it is read off the running engine's own arginfo (ADR-0056 §2);
+/// 3. the **declared-return floor** ([`builtin_return_floor`]) at `Asserted`: a
+///    catalog row is a declaration, not a runtime answer (ADR-0069), so
+///    `(string) rand()` prints `(asserted)` exactly as its hoisted twin does and
+///    can never premise a proof-layer finding (ADR-0061 §3).
+///
+/// **It answers no more than those two seams do.** A name the engine is silent
+/// about and the catalog cannot describe declines, totally, and the operator
+/// takes its own floor — which is what every operand of a builtin did before this
+/// rung existed. A rung answering *more* would be a second source of truth and
+/// would reintroduce the drift it closes.
+pub(crate) fn builtin_operand_fact(
+    cx: &Cx,
+    folder: &mut dyn Folder,
+    name: &str,
+    args: &[ArgValue],
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+    poisoned: bool,
+) -> Option<(Fact, Stratum)> {
+    if let Some(out) = shape_builtin_return_fact(cx, folder, name, args, env, store, poisoned) {
+        return Some(out);
+    }
+    if poisoned {
+        return None;
+    }
+    if let Some(fact) = builtin_call_return_fact(cx, folder, name) {
+        return Some((fact, Stratum::Verified));
+    }
+    floor_operand_known(&builtin_return_floor(cx, name)?)
+}
+
+/// The floor's **two** carriers, read the way a variable bound to them is read.
+///
+/// The assignment seam seeds both — the value lane through [`floor_value_fact`],
+/// the arm lane with the arms themselves — and [`transfer_arg_known`]'s `Var`
+/// rung then prefers whichever says more than the bare envelope. Reproducing that
+/// preference here is what makes the agreement hold for a **multi-arm** row
+/// (`realpath`'s `string|false`, which the value lane cannot seed and the arm
+/// lane lowers through ADR-0085's union) and not only for `rand`'s single one.
+fn floor_operand_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
+    let value_lane = floor_value_fact(arms);
+    if let Some(fact) = value_lane.clone()
+        && !matches!(fact, Fact::General { .. })
+    {
+        return Some((fact, Stratum::Asserted));
+    }
+    if let Some((fact, stratum)) = declared_arm_known(arms)
+        && !matches!(fact, Fact::General { .. })
+    {
+        return Some((fact, stratum));
+    }
+    value_lane.map(|f| (f, Stratum::Asserted))
 }
 
 /// The floor's version gate (ADR-0069 §3, A11-shaped): whether the project's

@@ -291,7 +291,7 @@ pub(crate) fn transfer_arg_known(
 /// carries. Every arm must lower ([`steins_contract::to_fact`]) and the domain must
 /// be able to join them — `'foo'|'bar'` becomes a `OneOf`, `int|string` declines,
 /// which is the same honest floor the value-slot lowering takes everywhere else.
-fn declared_arm_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
+pub(crate) fn declared_arm_known(arms: &[ContractArm]) -> Option<(Fact, Stratum)> {
     let mut acc: Option<Fact> = None;
     let mut stratum = Stratum::Verified;
     for arm in arms {

@@ -1360,15 +1360,28 @@ pub fn to_shape_fact(ty: &ContractTy) -> Option<ShapeFact> {
 /// * `literal-string` &c. ([`ContractTy::StrOpaque`]) — non-extensional
 ///   (ADR-0038). `class-string` left this bucket with issue #236 and gets
 ///   the ordinary refined-string fact;
-/// * **`float`/float literals** — `Base(Float)` accepts ints (PHPStan core
-///   semantics) but `Fact::General { base: Float }` does not, so lowering
-///   would reject values the declaration admits. Floor stays the sound side;
+/// * **a float literal the domain cannot state**: `NAN`, `±INF` and `-0.0`
+///   (issue #607's ruling, 2026-09-11). The first two have no value-domain
+///   inhabitant to be a `Singleton` of, and `-0.0` is a value the domain holds
+///   *apart* from `0.0` (representational equality, `total_cmp`, ADR-0035) where
+///   the declaration drew no such distinction — which is why #598 refused the
+///   same three from the constant miner. `float` itself and every other float
+///   literal DO lower: the native seeding path already mints exactly
+///   `General { base: Float }` for `float $x`, so the contract lane was the only
+///   place the claim was being dropped, and a float arm inside a union now joins
+///   through `Fact::join` like any other (ADR-0085). Whether a `float`
+///   *declaration* admits an `int` argument is acceptance's question, answered
+///   against the arm lane; the value lane states what the slot HOLDS;
 /// * unions the domain cannot join into one fact (`int|string`) — the join
 ///   itself decides, so `?int`/`'a'|'b'` do lower.
 #[must_use]
 pub fn to_fact(ty: &ContractTy) -> Option<Fact> {
     match ty {
-        ContractTy::Base(Base::Float) | ContractTy::LitFloat(_) => None,
+        // Issue #607: the three literals the value domain cannot state, and
+        // nothing else. Every other float shape falls through to the ordinary
+        // base / literal arms below.
+        ContractTy::LitFloat(v) if !float_literal_is_statable(*v) => None,
+        ContractTy::LitFloat(v) => Some(Fact::Singleton(Val::Float(*v))),
         ContractTy::Base(b) => Some(Fact::General { base: *b, nullable: false }),
         ContractTy::IntIn(r) => Some(Fact::refined(Base::Int, Refinement::Int(*r), false)),
         ContractTy::StrWith(p) => Some(Fact::refined(Base::String, Refinement::Str(*p), false)),
@@ -1404,6 +1417,21 @@ pub fn to_fact(ty: &ContractTy) -> Option<Fact> {
         }
         _ => None,
     }
+}
+
+/// Whether a declared float literal names a value the domain may hold as a
+/// [`Val::Float`] (issue #607).
+///
+/// `NAN` and `±INF` have no literal spelling the value domain can round-trip —
+/// the constant miner refused them for the same reason (issue #598) — and `-0.0`
+/// is held *apart* from `0.0` under the domain's representational equality
+/// (`f64::total_cmp`, ADR-0035), a distinction the declaration did not make. All
+/// three decline; the declaration itself still stands in the arm lane.
+///
+/// The negative-zero test is on the bit pattern rather than on `==`, which cannot
+/// see the sign at all.
+fn float_literal_is_statable(v: f64) -> bool {
+    v.is_finite() && v.to_bits() != (-0.0f64).to_bits()
 }
 
 /// The single closed [`StrPreds`] set an intersection of string refinements
@@ -2311,14 +2339,16 @@ mod shape_fact_lowering_tests {
 
     #[test]
     fn unrepresentable_slots_floor_to_unknown() {
-        // Classes, callables, `mixed` and the int-accepting `float` floor —
-        // the honest `None` (A-G1a).
+        // Classes, callables and `mixed` floor — the honest `None` (A-G1a).
         let s = shape_of(
             "array{a: Foo, b: callable, c: mixed, d: int|string, e: float, f: literal-string}",
         );
-        for key in ["a", "b", "c", "e", "f"] {
+        for key in ["a", "b", "c", "f"] {
             assert_eq!(slot(&s, key), None, "slot {key} should floor to unknown");
         }
+        // …but `float` no longer does (issue #607's ruling): a slot declared
+        // `float` holds a float, whatever the declaration would ACCEPT.
+        assert_eq!(slot(&s, "e"), Some(Fact::General { base: Base::Float, nullable: false }));
         // …but a scalar UNION no longer floors (issue #339): the value domain
         // now has a two-base form, so the slot carries the union.
         assert_eq!(
@@ -2343,13 +2373,57 @@ mod shape_fact_lowering_tests {
         assert_eq!(fact_of("int"), Some(Fact::General { base: Base::Int, nullable: false }));
         assert_eq!(fact_of("?string"), Some(Fact::General { base: Base::String, nullable: true }));
         assert_eq!(fact_of("5"), Some(Fact::Singleton(Val::Int(5))));
-        // Scalar unions lower into the value lane as of issue #339; `float`
-        // still floors (it accepts an int, so the base alone isn't acceptance).
+        // Scalar unions lower into the value lane as of issue #339.
         assert_eq!(
             fact_of("int|string"),
             Fact::union(vec![(Base::Int, ArmKnown::Whole), (Base::String, ArmKnown::Whole)], false)
         );
-        assert_eq!(fact_of("float"), None);
+        // `float` lowers as of issue #607's ruling (2026-09-11). The value lane
+        // states what the slot HOLDS, and the native seeding path already mints
+        // exactly this fact for `float $x`; whether a `float` DECLARATION admits
+        // an int argument is acceptance's question, judged against the arm lane.
+        assert_eq!(fact_of("float"), Some(Fact::General { base: Base::Float, nullable: false }));
+        assert_eq!(fact_of("?float"), Some(Fact::General { base: Base::Float, nullable: true }));
+        assert_eq!(fact_of("1.0"), Some(Fact::Singleton(Val::Float(1.0))));
+        // …and a float literal is not the int spelled the same way: the domain
+        // separates the bases (ADR-0035), so `0.0` and `0` are two facts.
+        assert_ne!(fact_of("0.0"), fact_of("0"));
+    }
+
+    /// The three float literals the value domain cannot state (issue #607's
+    /// ruling): `NAN` and `±INF` have no inhabitant to be a `Singleton` of, and
+    /// `-0.0` is held apart from `0.0` by representational equality where the
+    /// declaration drew no such distinction — the same three the constant miner
+    /// refused in #598. They are constructed directly because no docblock
+    /// spelling reaches `LitFloat` with them.
+    #[test]
+    fn the_float_literals_the_domain_cannot_state_decline() {
+        for v in [-0.0_f64, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(to_fact(&ContractTy::LitFloat(v)), None, "{v:?} must seed no fact");
+        }
+        // Positive zero is an ordinary literal and does lower — the decline is
+        // the sign bit's, not zero's.
+        assert_eq!(
+            to_fact(&ContractTy::LitFloat(0.0)),
+            Some(Fact::Singleton(Val::Float(0.0)))
+        );
+    }
+
+    /// A float arm inside a union is now joined by the domain rather than
+    /// voiding the whole lowering (issue #607 point 3, through ADR-0085's
+    /// multi-base layer) — the `1.0|int<2, 3>` shape the #40 report was stuck on,
+    /// and the `int|float` native union that travels the same arm lane.
+    #[test]
+    fn a_float_arm_no_longer_voids_its_union() {
+        for src in ["1.0|int<2, 3>", "int|float", "0|1|0.2", "float|null"] {
+            assert!(fact_of(src).is_some(), "{src} must reach the value lane");
+        }
+        // One arm the domain still cannot state still voids it: the decline is
+        // per-arm and unchanged in kind.
+        assert_eq!(to_fact(&ContractTy::Union(vec![
+            ContractTy::LitInt(1),
+            ContractTy::LitFloat(f64::NAN),
+        ])), None);
     }
 
     // ---- count_range through the lowering (ADR-0062 §4) -------------------

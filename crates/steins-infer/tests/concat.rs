@@ -223,7 +223,16 @@ fn an_unresolved_operand_widens_the_whole_concat() {
     // No partial strings: one unresolved operand and the result is the operator's
     // widened fact, never the resolved prefix. `rand()` is not foldable and `$u`
     // is never bound, so `'u='` and `'a'` must not survive as values.
-    assert_eq!(dumped(r#""u=" . rand()"#), "non-falsy-string");
+    //
+    // `rand()` carries a *predicate* answer since issue #646 gave the operand
+    // seam the builtin-return rung the assignment seam always had: the catalog
+    // declares `int`, an int's string projection is lowercase, and the row is
+    // `(asserted)` because a catalog declaration is not a runtime answer. That is
+    // a widening of what is KNOWN, not of what is resolved — the assertion the
+    // test exists for is the one below it.
+    let unresolved = dumped(r#""u=" . rand()"#);
+    assert_eq!(unresolved, "non-falsy-lowercase-string (asserted)");
+    assert!(!unresolved.contains('\''), "a value leaked out of an unresolved concat");
     let src = "<?php\n$y = \"a\" . $undefined;\n\\PHPStan\\dumpType($y);\n";
     assert_eq!(types(src), vec!["non-falsy-string"]);
 }
