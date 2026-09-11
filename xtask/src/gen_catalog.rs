@@ -391,6 +391,12 @@ fn render_declared_method_returns(
     );
     let _ = writeln!(s, "// phpstan-src pin: {}", meta.phpstan_src_commit);
     let _ = writeln!(s, "// cross-checked against PHP {} via the real sidecar.", meta.crosscheck_php);
+    if meta.crosscheck_diffed.len() > 1 {
+        // The top engine decides each row's bucket; a lower minor that
+        // CONTRADICTS an admitted row vetoes it, and the refusal names the
+        // version that objected (issue #714).
+        let _ = writeln!(s, "// Every minor asked, low first: {}.", meta.crosscheck_diffed.join(", "));
+    }
     s.push_str("//\n// Mining counts at the pin:\n");
     let _ = writeln!(s, "//   {:>5}  `Class::method` entries (after the delta ladder)", counts.keys);
     let _ = writeln!(s, "//   {:>5}  keys whose alternate signatures disagree on the return type", counts.alternates_disagree);
@@ -958,6 +964,11 @@ struct EnvelopeDoc {
 struct EnvelopeMeta {
     phpstan_src_commit: String,
     crosscheck_php: String,
+    /// Every engine the countersign asked, low minor first (issue #714);
+    /// `crosscheck_php` is the top one, and the rest were vetoes. Empty on a
+    /// table mined before the slice.
+    #[serde(default)]
+    crosscheck_diffed: Vec<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -1002,6 +1013,12 @@ fn render_declared_returns(
     );
     let _ = writeln!(s, "// phpstan-src pin: {}", meta.phpstan_src_commit);
     let _ = writeln!(s, "// cross-checked against PHP {} via the real sidecar.", meta.crosscheck_php);
+    if meta.crosscheck_diffed.len() > 1 {
+        // The top engine decides each row's bucket; a lower minor that
+        // CONTRADICTS an admitted row vetoes it, and the refusal names the
+        // version that objected (issue #714).
+        let _ = writeln!(s, "// Every minor asked, low first: {}.", meta.crosscheck_diffed.join(", "));
+    }
     s.push_str("//\n// Mining counts at the pin:\n");
     let _ = writeln!(s, "//   {:>5}  functionMap entries (after the delta ladder)", counts.total_keys);
     let _ = writeln!(s, "//   {:>5}  `Class::method` rows skipped (methods stay out of this slice)", counts.methods_skipped);

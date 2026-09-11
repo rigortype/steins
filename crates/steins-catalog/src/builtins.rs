@@ -796,6 +796,35 @@ mod tests {
         "string|null",
     ];
 
+    /// **The lower minors' veto** (issue #714). A row the top engine countersigns
+    /// and a SUPPORTED minor contradicts is false on that minor, so it is refused.
+    /// These five are what the 8.2.33 / 8.3.33 / 8.4.25 / 8.5.10 run caught, all of
+    /// one shape: the map says `bool` (or `array`) where 8.2 declares `?bool` (or
+    /// `?array`), and a row that drops the engine's null arm is exactly what the
+    /// arm-wise countersign exists to refuse (ADR-0069 §3).
+    ///
+    /// Delete the veto pass in `mine-function-map` and every one of these comes
+    /// back at the next mining run, carrying a claim no 8.2 target may premise.
+    #[test]
+    fn a_row_a_lower_minor_contradicts_is_not_in_the_table() {
+        assert_eq!(super::declared_return("datefmt_set_timezone"), None);
+        for key in [
+            "IntlBreakIterator::setText",
+            "IntlDateFormatter::setTimezone",
+            "IntlRuleBasedBreakIterator::setText",
+            "ReflectionClass::getStaticProperties",
+        ] {
+            let (class, method) = key.split_once("::").expect("a method key");
+            assert_eq!(super::declared_method_return(class, method), None, "{key}");
+        }
+        // …and the veto is not a blanket refusal of the families it touched: the
+        // same classes keep every row the lower minors agree with.
+        assert_eq!(
+            super::declared_method_return("IntlDateFormatter", "setPattern"),
+            Some(("bool", false))
+        );
+    }
+
     #[test]
     fn declared_return_rows_and_their_shape() {
         assert_eq!(super::declared_return("str_repeat"), Some("string"));
@@ -840,8 +869,8 @@ mod tests {
             assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
-        assert_eq!(t.len(), 1711, "admitted rows at this pin");
-        assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
+        assert_eq!(t.len(), 1710, "admitted rows at this pin");
+        assert_eq!(t.len() - rich, 918, "the #73 envelope population must be preserved exactly");
         assert_eq!(rich, 792, "the #79, ADR-0071, object-slice and class-string (#236) rich admissions");
     }
 

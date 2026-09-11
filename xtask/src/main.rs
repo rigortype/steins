@@ -13,7 +13,7 @@
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
 //!   mine-constants [--php PATH]…
 //!                            mine the engines' constants and their minor ranges into the constants TOML
-//!   mine-function-map [DIR] [--functions] [--methods]
+//!   mine-function-map [DIR] [--functions] [--methods] [--php PATH]…
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
 //!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
@@ -132,7 +132,14 @@ fn main() -> ExitCode {
                 functions: functions || !methods,
                 methods: methods || !functions,
             };
-            match mine_function_map::run(dir, halves) {
+            // `--php PATH`, repeatable: the countersigning engines (issue #714).
+            // The top minor decides each row's bucket; the rest are vetoes.
+            let php: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--php")
+                .map(|w| w[1].clone())
+                .collect();
+            match mine_function_map::run(dir, halves, &php) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
             }
@@ -166,7 +173,7 @@ fn main() -> ExitCode {
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--php PATH]… | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

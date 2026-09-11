@@ -37,6 +37,12 @@
 [meta]
 phpstan_src_commit = "dcde2be6ca3caae0e0d4bee6bfbc9fd39ea560e7"
 crosscheck_php = "8.5.10"
+crosscheck_diffed = [
+  "8.2.33",
+  "8.3.33",
+  "8.4.25",
+  "8.5.10",
+]
 miner = "docs/research/phpstan-mining/mine_function_map.php"
 generator = "cargo xtask mine-function-map --methods"
 
@@ -86,13 +92,13 @@ not_lowerable_unparseable = 327
 class_missing_rows = 3593
 class_missing_classes = 325
 method_missing = 68
-reflection_disagree = 225
+reflection_disagree = 229
 engine_untyped = 67
 engine_mixed = 9
 blocked = 25
-admitted = 957
+admitted = 953
 admitted_static = 82
-admitted_rich = 305
+admitted_rich = 304
 
 # The admitted rows: lowercased `class::method` -> [canonical phpdoc spelling,
 # whether the ENGINE declares the method static]. The consumer re-lowers the
@@ -321,7 +327,6 @@ admitted_rich = 305
 "intlbreakiterator::next" = ["int", false]
 "intlbreakiterator::preceding" = ["int", false]
 "intlbreakiterator::previous" = ["int", false]
-"intlbreakiterator::settext" = ["bool", false]
 "intlcalendar::add" = ["bool", false]
 "intlcalendar::after" = ["bool", false]
 "intlcalendar::before" = ["bool", false]
@@ -371,7 +376,6 @@ admitted_rich = 305
 "intldateformatter::parse" = ["int|float|false", false]
 "intldateformatter::setcalendar" = ["bool", false]
 "intldateformatter::setpattern" = ["bool", false]
-"intldateformatter::settimezone" = ["bool", false]
 "intlgregoriancalendar::getgregorianchange" = ["float", false]
 "intlgregoriancalendar::isleapyear" = ["bool", false]
 "intlgregoriancalendar::setgregorianchange" = ["bool", false]
@@ -390,7 +394,6 @@ admitted_rich = 305
 "intlrulebasedbreakiterator::next" = ["int", false]
 "intlrulebasedbreakiterator::preceding" = ["int", false]
 "intlrulebasedbreakiterator::previous" = ["int", false]
-"intlrulebasedbreakiterator::settext" = ["bool", false]
 "intltimezone::createdefault" = ["IntlTimeZone", true]
 "intltimezone::getdstsavings" = ["int", false]
 "intltimezone::getgmt" = ["IntlTimeZone", true]
@@ -690,7 +693,6 @@ admitted_rich = 305
 "reflectionclass::getproperties" = ["list<ReflectionProperty>", false]
 "reflectionclass::getreflectionconstants" = ["list<ReflectionClassConstant>", false]
 "reflectionclass::getstartline" = ["int<1, max>|false", false]
-"reflectionclass::getstaticproperties" = ["array<string, mixed>", false]
 "reflectionclass::gettraitaliases" = ["array<string, string>", false]
 "reflectionclass::gettraitnames" = ["list<class-string>", false]
 "reflectionclass::gettraits" = ["array<string,ReflectionClass>", false]
@@ -1674,6 +1676,7 @@ engine_mixed = [
 "intlbreakiterator::createwordinstance" = ["IntlRuleBasedBreakIterator", "?IntlBreakIterator"]
 "intlbreakiterator::getlocale" = ["string", "string|false"]
 "intlbreakiterator::gettext" = ["string", "?string"]
+"intlbreakiterator::settext" = ["bool", "?bool (PHP 8.2.33)"]
 "intlcalendar::createinstance" = ["IntlCalendar", "?IntlCalendar"]
 "intlcalendar::fielddifference" = ["int", "int|false"]
 "intlcalendar::fromdatetime" = ["IntlCalendar", "?IntlCalendar"]
@@ -1741,6 +1744,7 @@ engine_mixed = [
 "intlchar::iswhitespace" = ["bool", "?bool"]
 "intlchar::isxdigit" = ["bool", "?bool"]
 "intlchar::ord" = ["int", "?int"]
+"intldateformatter::settimezone" = ["bool", "?bool (PHP 8.2.33)"]
 "intlrulebasedbreakiterator::createcharacterinstance" = ["IntlRuleBasedBreakIterator", "?IntlBreakIterator"]
 "intlrulebasedbreakiterator::createlineinstance" = ["IntlRuleBasedBreakIterator", "?IntlBreakIterator"]
 "intlrulebasedbreakiterator::createsentenceinstance" = ["IntlRuleBasedBreakIterator", "?IntlBreakIterator"]
@@ -1751,6 +1755,7 @@ engine_mixed = [
 "intlrulebasedbreakiterator::getrules" = ["string", "string|false"]
 "intlrulebasedbreakiterator::getrulestatusvec" = ["array", "array|false"]
 "intlrulebasedbreakiterator::gettext" = ["string", "?string"]
+"intlrulebasedbreakiterator::settext" = ["bool", "?bool (PHP 8.2.33)"]
 "intltimezone::countequivalentids" = ["int", "int|false"]
 "intltimezone::createenumeration" = ["IntlIterator", "IntlIterator|false"]
 "intltimezone::createtimezone" = ["IntlTimeZone", "?IntlTimeZone"]
@@ -1819,6 +1824,7 @@ engine_mixed = [
 "recursiveiteratoriterator::getsubiterator" = ["RecursiveIterator", "?RecursiveIterator"]
 "recursivetreeiterator::beginiteration" = ["RecursiveIterator", "void"]
 "recursivetreeiterator::callgetchildren" = ["RecursiveIterator", "?RecursiveIterator"]
+"reflectionclass::getstaticproperties" = ["array<string, mixed>", "?array (PHP 8.2.33)"]
 "reflectionclass::newinstanceargs" = ["object", "?object"]
 "regexiterator::setflags" = ["bool", "void"]
 "regexiterator::setmode" = ["bool", "void"]

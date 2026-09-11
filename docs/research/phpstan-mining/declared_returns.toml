@@ -20,7 +20,13 @@
 
 [meta]
 phpstan_src_commit = "dcde2be6ca3caae0e0d4bee6bfbc9fd39ea560e7"
-crosscheck_php = "8.5.9"
+crosscheck_php = "8.5.10"
+crosscheck_diffed = [
+  "8.2.33",
+  "8.3.33",
+  "8.4.25",
+  "8.5.10",
+]
 miner = "docs/research/phpstan-mining/mine_function_map.php"
 generator = "cargo xtask mine-function-map"
 
@@ -69,17 +75,17 @@ generator = "cargo xtask mine-function-map"
 total_keys = 12461
 methods_skipped = 6658
 alternates_disagree = 18
-not_lowerable = 1116
+not_lowerable = 1118
 not_lowerable_shaped_arrays = 0
-not_lowerable_multi_base_unions = 199
+not_lowerable_multi_base_unions = 201
 not_lowerable_scalar_refinements = 0
 not_lowerable_object_or_resource = 474
 not_lowerable_void_never_mixed = 139
 not_lowerable_unparseable = 304
-reflection_disagree = 75
-reflection_missing = 2793
+reflection_disagree = 76
+reflection_missing = 2791
 engine_typeless = 22
-admitted = 1711
+admitted = 1710
 admitted_rich = 792
 
 # The admitted rows: lowercased builtin name -> canonical phpdoc spelling.
@@ -88,11 +94,12 @@ admitted_rich = 792
 # and seeds the resulting arms Asserted — one lowering, two provenances
 # (ADR-0069 §2). The spelling is `spell_arms` over the lowered arms and is
 # verified at generation time to re-lower to the arms that were countersigned.
-# Where `spell_arms` declines the arms outright — it has no faithful spelling
-# for a class arm — the row keeps functionMap's OWN string, which lowers back
-# to the countersigned arms by construction and, unlike a canonical respelling,
-# preserves the class's source casing (`ContractTy::Class` case-folds and could
-# not restate it). That is why a few rows read `__benevolent<...>`: it is
+# Where a row NAMES A CLASS, or `spell_arms` declines the arms outright, the
+# row keeps functionMap's OWN string, which lowers back to the countersigned
+# arms by construction and, unlike a canonical respelling, preserves the
+# class's source casing (`ContractTy::Class` case-folds and could not restate
+# it — ADR-0093 §3 gave the speller a class spelling, not a case memory).
+# That is why a few rows read `__benevolent<...>`: it is
 # PHPStan's spelling of a plain union, and the parser expands it to one.
 [declared]
 "_" = "string"
@@ -155,7 +162,7 @@ admitted_rich = 792
 "asort" = "bool"
 "assert" = "bool"
 "ast\\get_kind_name" = "string"
-"ast\\get_metadata" = "array<int, ast\\metadata>"
+"ast\\get_metadata" = "array<int,ast\\Metadata>"
 "ast\\get_supported_versions" = "array<int, int>"
 "ast\\kind_uses_flags" = "bool"
 "ast\\parse_code" = "ast\\Node"
@@ -311,7 +318,6 @@ admitted_rich = 792
 "datefmt_parse" = "int|float|false"
 "datefmt_set_calendar" = "bool"
 "datefmt_set_pattern" = "bool"
-"datefmt_set_timezone" = "bool"
 "dba_delete" = "bool"
 "dba_exists" = "bool"
 "dba_fetch" = "string|false"
@@ -538,7 +544,7 @@ admitted_rich = 792
 "gmp_random_bits" = "GMP"
 "gmp_random_range" = "GMP"
 "gmp_root" = "GMP"
-"gmp_rootrem" = "array<int, gmp>"
+"gmp_rootrem" = "array<int,GMP>"
 "gmp_scan0" = "int"
 "gmp_scan1" = "int"
 "gmp_sign" = "int"
@@ -887,7 +893,7 @@ admitted_rich = 792
 "ldap_unbind" = "bool"
 "levenshtein" = "int"
 "libxml_disable_entity_loader" = "bool"
-"libxml_get_errors" = "list<libxmlerror>"
+"libxml_get_errors" = "list<LibXMLError>"
 "libxml_get_last_error" = "LibXMLError|false"
 "libxml_set_external_entity_loader" = "bool"
 "libxml_use_internal_errors" = "bool"
@@ -1023,7 +1029,7 @@ admitted_rich = 792
 "mysqli_fetch_array" = "false|null|array"
 "mysqli_fetch_assoc" = "false|null|array<string, int|float|string|null>"
 "mysqli_fetch_column" = "int|float|string|false|null"
-"mysqli_fetch_fields" = "list<stdclass&object>"
+"mysqli_fetch_fields" = "list<stdClass&object{name: string, orgname: string, table: string, orgtable: string, def: string, db: string, catalog: \"def\", max_length: 0, length: int, charsetnr: string, flags: int, type: int, decimals: int}>"
 "mysqli_fetch_lengths" = "false|array"
 "mysqli_fetch_object" = "object|false|null"
 "mysqli_field_count" = "int"
@@ -1627,7 +1633,7 @@ admitted_rich = 792
 "stream_set_write_buffer" = "int"
 "stream_socket_enable_crypto" = "0|bool"
 "stream_socket_get_name" = "string|false"
-"stream_socket_pair" = "resource[]|false"
+"stream_socket_pair" = "false|array<resource>"
 "stream_socket_recvfrom" = "string|false"
 "stream_socket_sendto" = "int|false"
 "stream_socket_shutdown" = "bool"
@@ -3472,8 +3478,6 @@ reflection_missing = [
   "oci_lob_truncate",
   "oci_lob_write",
   "oci_lob_write_temporary",
-  "oci_new_collection",
-  "oci_new_descriptor",
   "oci_num_fields",
   "oci_num_rows",
   "oci_password_change",
@@ -4657,6 +4661,7 @@ reflection_missing = [
 "curl_share_strerror" = ["string", "?string"]
 "curl_strerror" = ["string", "?string"]
 "datefmt_create" = ["IntlDateFormatter|false", "?IntlDateFormatter"]
+"datefmt_set_timezone" = ["bool", "?bool (PHP 8.2.33)"]
 "dom_import_simplexml" = ["DOMElement|false", "DOMAttr|DOMElement"]
 "fpassthru" = ["int<1, max>|0|false", "int"]
 "fscanf" = ["int|false|list<mixed>", "array|int|false|null"]
@@ -4712,7 +4717,7 @@ reflection_missing = [
 "pow" = ["int|float", "object|int|float"]
 "rewinddir" = ["false|null", "void"]
 "session_status" = ["PHP_SESSION_NONE|PHP_SESSION_DISABLED|PHP_SESSION_ACTIVE", "int"]
-"socket_addrinfo_lookup" = ["array<addressinfo>", "array|false"]
+"socket_addrinfo_lookup" = ["AddressInfo[]", "array|false"]
 "socket_cmsg_space" = ["int", "?int"]
 "sodium_add" = ["string", "void"]
 "sodium_increment" = ["string", "void"]
