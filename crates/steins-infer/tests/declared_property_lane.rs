@@ -326,6 +326,22 @@ function f(C $c): void {
     assert_eq!(one_type(src), "unknown");
 }
 
+/// A property a class obtains from a **trait** answers nothing, for ADR-0049 A18's
+/// reason one rung over: trait members are not lowered into the using class, so
+/// "not declared on the chain" cannot be read as "absent" while a trait could be
+/// declaring it — and there is no declaration here to read either way.
+#[test]
+fn a_trait_property_answers_nothing() {
+    let src = r#"<?php
+trait T { public int $x = 1; }
+class C { use T; }
+function f(C $c): void {
+    \PHPStan\dumpType($c->x);
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
 /// A hooked property (PHP 8.4) binds no fact ever (FP class 16) — the read side
 /// keeps the rule the write side keeps.
 #[test]

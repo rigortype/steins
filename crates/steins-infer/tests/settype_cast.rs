@@ -227,12 +227,23 @@ fn an_array_to_string_cast_refuses() {
 #[test]
 fn a_property_argument_refuses() {
     // The ADR-0077 §3.6 aliasing leg, verbatim: the write may be visible to
-    // callers this scope cannot see.
-    let d = dumps(
+    // callers this scope cannot see, so the cast seeds NOTHING. Read on an
+    // untyped property, where no declaration stands underneath, that is the
+    // whole answer.
+    let untyped = dumps(
+        "<?php\nclass C { public $p = 'x'; }\n\
+         function f(C $c): void { settype($c->p, 'int'); \\PHPStan\\dumpType($c->p); }\n",
+    );
+    assert_eq!(untyped, vec!["unknown".to_owned()]);
+
+    // A natively typed property still reads its declaration (issue #620), and the
+    // cast does not dent it: `settype` writes back through a typed reference, which
+    // PHP type-checks against the slot, so `string` is true of whatever landed there.
+    let typed = dumps(
         "<?php\nclass C { public string $p = 'x'; }\n\
          function f(C $c): void { settype($c->p, 'int'); \\PHPStan\\dumpType($c->p); }\n",
     );
-    assert_eq!(d, vec!["unknown".to_owned()]);
+    assert_eq!(typed, vec!["string".to_owned()]);
 }
 
 #[test]
