@@ -481,8 +481,16 @@ fn preg_resolved_flags(
     allowed: i64,
 ) -> Option<PregFlags> {
     let Some(arg) = call.args.get(3) else { return Some(PregFlags::default()) };
+    // A modeled `PREG_*` name answers through [`preg_flag_const_value`], which
+    // carries a project-wide shadow check this seam has and the general resolver
+    // does not. Everything else — including a `PREG_*` reached through a
+    // `use const` alias or a same-file `const` — falls through to the general
+    // value seam, which since ADR-0094 §2 resolves a global constant to its
+    // mined value like any other literal.
     let bits = match &arg.value {
-        ArgValue::GlobalConst(r) => preg_flag_const_value(w.cx, r)?,
+        ArgValue::GlobalConst(r) if preg_flag_const_value(w.cx, r).is_some() => {
+            preg_flag_const_value(w.cx, r)?
+        }
         v => match w.cx.resolve_literal(v, env, w.scope.poisoned, folder)? {
             ArgValue::Int(n) => n,
             _ => return None,

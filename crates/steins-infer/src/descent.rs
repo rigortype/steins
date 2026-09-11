@@ -2024,8 +2024,8 @@ pub(crate) fn return_value_fact(
         && let Some(fact) =
             eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
     {
-        let strat = value_stratum(then_val, env, Some(store))
-            .min(value_stratum(else_val, env, Some(store)));
+        let strat = value_stratum(w.cx, then_val, env, Some(store))
+            .min(value_stratum(w.cx, else_val, env, Some(store)));
         return Some((fact, strat));
     }
     // A `??` chain (ADR-0052 §6 + ADR-0062 A-G11, S5): the spine's join under the

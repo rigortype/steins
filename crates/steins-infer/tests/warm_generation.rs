@@ -157,6 +157,7 @@ fn run_with(
         effects: &effects,
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
+        os_pin: None,
         php: true,
         paranoid,
     };

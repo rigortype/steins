@@ -13,6 +13,7 @@ use steins_syntax::{
 };
 
 use crate::fold::Folder;
+use crate::global_consts::global_const_fact;
 use crate::{
     DEBUG_PHPDOC_TYPE_ID, DEBUG_TRACE_ID, DEBUG_TYPE_ID, DEBUG_VAR_DUMP_ID, DUMP_PHPDOC_TYPE_FQN,
     DUMP_TYPE_FQN,
@@ -417,7 +418,18 @@ fn render_finite_precise(members: &[Val]) -> Option<String> {
 /// fractional part (`123.0`, not `123`); every other value uses its shortest
 /// round-tripping decimal (`3.14`, `1.5`).
 fn render_dump_float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() }
+    // A float whose decimal spelling runs long takes PHP's exponent form instead.
+    // Rust's `Display` never uses an exponent, so `PHP_FLOAT_MAX` (ADR-0094 §3.1, a
+    // value the analyzer now carries) spells as 309 digits and one diagnostic fills
+    // a terminal. The rule is on the rendered LENGTH and not on the magnitude, so
+    // every spelling short enough to read — the int-overflow promotions at 1e19 and
+    // 1e20 among them — is left exactly as it was.
+    //
+    // The same rule `ArgValue::render` applies, so the two surfaces cannot
+    // disagree about one value.
+    let decimal =
+        if f.is_finite() && f.fract() == 0.0 { format!("{f:.1}") } else { f.to_string() };
+    if f.is_finite() && decimal.len() > 24 { format!("{f:E}") } else { decimal }
 }
 
 /// Append `|null` when the fact admits null (the honest nullable spelling).
@@ -756,8 +768,8 @@ fn best_dump_type(
         && let Some(fact) =
             eval_ternary_fact(w, folder, cond, then_val, else_val, (*then_span, *else_span), env, store)
     {
-        let stratum = value_stratum(then_val, env, Some(store))
-            .min(value_stratum(else_val, env, Some(store)));
+        let stratum = value_stratum(cx, then_val, env, Some(store))
+            .min(value_stratum(cx, else_val, env, Some(store)));
         return DumpRendering {
             text: render_dump_fact(&fact),
             asserted: stratum == Stratum::Asserted,
@@ -869,6 +881,20 @@ fn best_dump_type(
         return DumpRendering {
             text: render_dump_fact(fact),
             asserted: store.prop_stratum(var, prop) == Stratum::Asserted,
+        };
+    }
+    // A bare global constant (ADR-0094, issue #598), above the literal rung for
+    // the same reason the operator family sits there: the literal seam can only
+    // carry a single value, and most of what ADR-0094 §3 rules is not one —
+    // `PHP_EOL` defaults to the union `\"\\n\"|\"\\r\\n\"` and `PHP_VERSION_ID` to
+    // the range the declared target spans. A single-valued constant answers the
+    // same either way; the resolver is one function.
+    if let ArgValue::GlobalConst(r) = value
+        && let Some((fact, stratum)) = global_const_fact(cx, r)
+    {
+        return DumpRendering {
+            text: render_dump_fact(&fact),
+            asserted: stratum == Stratum::Asserted,
         };
     }
     // A non-variable argument: a resolved literal/foldable value fact wins first (a

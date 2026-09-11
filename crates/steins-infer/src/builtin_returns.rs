@@ -559,7 +559,7 @@ pub(crate) fn shape_builtin_return_fact(
             seeded = cx
                 .resolve_literal(&args[0], env, poisoned, folder)
                 .and_then(|lit| singleton_fact(&lit, cx.php_minor))
-                .map(|f| (f, value_stratum(&args[0], env, store)))
+                .map(|f| (f, value_stratum(cx, &args[0], env, store)))
                 .or_else(|| array_literal_fact(cx, folder, items, env, poisoned, store))?;
             (&seeded.0, seeded.1)
         }
@@ -662,7 +662,7 @@ fn derivation_stratum(
     args.iter().fold(subject, |acc, v| {
         acc.min(
             transfer_arg_known(cx, folder, v, env, store)
-                .map_or_else(|| value_stratum(v, env, store), |(_, s)| s),
+                .map_or_else(|| value_stratum(cx, v, env, store), |(_, s)| s),
         )
     })
 }

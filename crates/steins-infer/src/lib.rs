@@ -60,6 +60,7 @@ mod fold_table;
 mod foreach_bind;
 mod foreach_check;
 mod generics;
+mod global_consts;
 mod heap;
 mod ids;
 mod inaccessible;
@@ -133,6 +134,11 @@ use fold_args::effective_php_view;
 /// mirrors [`check_project_with_runtime`]'s `warning_handler_abort` parameter.
 /// Unused until intersection consumption (issue #238) joins it on `Cx`.
 pub use steins_contract::normalize::FinalKeyword;
+
+/// The `[runtime] os` pin (ADR-0094 §3): the deployment host a project declares,
+/// which fixes `PHP_OS_FAMILY`, `PHP_EOL`, `DIRECTORY_SEPARATOR` and
+/// `PATH_SEPARATOR` together. Absent, each is the union of what it can be.
+pub use global_consts::OsFamily;
 /// The catalog's refusal axis, re-exported: a consumer of [`SurfaceSummary`]
 /// reads the classification without naming `steins-catalog`.
 pub use steins_catalog::RefusalAxis;
@@ -228,6 +234,7 @@ pub fn diagnostics(db: &dyn Db, file: SourceFile) -> Vec<Diagnostic> {
         &mut NoFold,
         true,
         FinalKeyword::Enforced,
+        None,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -247,6 +254,7 @@ pub fn check_file(db: &dyn Db, file: SourceFile, folder: &mut dyn Folder) -> Vec
         folder,
         true,
         FinalKeyword::Enforced,
+        None,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -295,6 +303,25 @@ pub fn check_project_with_postures(
     warning_handler_abort: bool,
     final_keyword: FinalKeyword,
 ) -> Vec<Diagnostic> {
+    check_project_with_os(db, project, folder, warning_handler_abort, final_keyword, None)
+}
+
+/// [`check_project_with_postures`] plus the `[runtime] os` pin (ADR-0094 §3).
+///
+/// The third member of the same `[runtime]` family (ADR-0037 §2), and the same
+/// shape of delegation: `None` is what declaring nothing means — every
+/// host-dependent constant answers the union of what it can be, which is sound on
+/// every host — so the caller that does not pass one keeps byte-identical
+/// semantics.
+#[must_use]
+pub fn check_project_with_os(
+    db: &dyn Db,
+    project: Project,
+    folder: &mut dyn Folder,
+    warning_handler_abort: bool,
+    final_keyword: FinalKeyword,
+    os_pin: Option<OsFamily>,
+) -> Vec<Diagnostic> {
     let handles: Vec<SourceFile> = project.files(db).to_vec();
     // One `LazyTree` per file, borrowing the database's own parse: the salsa
     // path holds every tree already, so nothing here is ever deferred.
@@ -315,6 +342,7 @@ pub fn check_project_with_postures(
         folder,
         warning_handler_abort,
         final_keyword,
+        os_pin,
         project.layout(db),
         project.plugins(db),
         project.effects(db),
@@ -347,6 +375,7 @@ pub fn check_with(
         folder,
         true,
         FinalKeyword::Enforced,
+        None,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -375,6 +404,7 @@ pub fn check_full(
         folder,
         warning_handler_abort,
         FinalKeyword::Enforced,
+        None,
         &ProjectLayout::fallback(),
         &PluginFacts::none(),
         &EffectsPolicy::none(),
@@ -390,6 +420,7 @@ fn check_units(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
     final_keyword: FinalKeyword,
+    os_pin: Option<OsFamily>,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
@@ -400,6 +431,7 @@ fn check_units(
         folder,
         warning_handler_abort,
         final_keyword,
+        os_pin,
         layout,
         plugins,
         policy,
@@ -423,6 +455,7 @@ fn check_units_controlled(
     folder: &mut dyn Folder,
     warning_handler_abort: bool,
     final_keyword: FinalKeyword,
+    os_pin: Option<OsFamily>,
     layout: &ProjectLayout,
     plugins: &PluginFacts,
     policy: &EffectsPolicy,
@@ -571,6 +604,7 @@ fn check_units_controlled(
         unparsable: &unparsable,
         warning_handler_abort,
         final_keyword,
+        os_pin,
         php_minor,
         catalog_skew,
         version_id,
@@ -742,6 +776,10 @@ struct WalkInputs<'a> {
     unparsable: &'a HashSet<&'a str>,
     warning_handler_abort: bool,
     final_keyword: FinalKeyword,
+    /// The `[runtime] os` pin (ADR-0094 §3), read only by the global-constant
+    /// resolver. `None` — the default — is the union of what a host-dependent
+    /// constant can be.
+    os_pin: Option<OsFamily>,
     php_minor: Option<(u16, u16)>,
     catalog_skew: bool,
     version_id: Option<(u32, Option<u32>)>,
@@ -767,6 +805,7 @@ impl WalkInputs<'_> {
             self.unparsable,
             self.warning_handler_abort,
             self.final_keyword,
+            self.os_pin,
             self.php_minor,
             self.catalog_skew,
             self.version_id,
@@ -884,6 +923,7 @@ fn walk_one_file(
     unparsable: &HashSet<&str>,
     warning_handler_abort: bool,
     final_keyword: FinalKeyword,
+    os_pin: Option<OsFamily>,
     php_minor: Option<(u16, u16)>,
     catalog_skew: bool,
     version_id: Option<(u32, Option<u32>)>,
@@ -913,6 +953,7 @@ fn walk_one_file(
             version_id,
             purity,
             layout.php_target(),
+            os_pin,
         );
 
         // --- Propagation pass FIRST: it walks every scope and, as a side

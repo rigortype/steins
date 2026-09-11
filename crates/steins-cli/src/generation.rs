@@ -120,6 +120,7 @@ pub(crate) fn try_generation_check(
         effects,
         warning_handler_abort: postures.warning_handler_abort,
         final_keyword: postures.final_keyword,
+        os_pin: postures.os_pin,
         php: !no_php,
         // The verifier is environment-driven here (`STEINS_GENERATIONS_PARANOID`),
         // which `generation_check` reads for itself; the CLI never forces it.

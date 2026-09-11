@@ -1341,6 +1341,7 @@ mod n4_carrier_tests {
             view.version_id,
             None,
             None,
+            None,
         );
         f(&cx)
     }

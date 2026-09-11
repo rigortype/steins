@@ -600,6 +600,7 @@ fn measure_warm_in_store(
         // `check_project`'s own defaults — what the cold measurement ran under.
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
+        os_pin: None,
         php: matches!(posture, Posture::Php),
         paranoid,
     };
@@ -1337,6 +1338,7 @@ fn run_generation(
         effects: &effects,
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
+        os_pin: None,
         php: matches!(posture, Posture::Php),
         paranoid,
     };

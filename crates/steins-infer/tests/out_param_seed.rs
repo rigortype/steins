@@ -338,15 +338,19 @@ fn the_offset_capture_flag_wraps_every_entry_in_a_measured_pair() {
 }
 
 #[test]
-fn a_userland_twin_of_a_flag_constant_disables_value_resolution() {
-    // PHP resolves an unqualified constant through the current namespace first;
-    // a project's own `PREG_SET_ORDER` makes the name ambiguous, so no engine
-    // value may be assumed.
-    refuses(
-        "<?php\nnamespace App;\nconst PREG_UNMATCHED_AS_NULL = 0;\n\
-         function f(string $s): void {\n\
-         if (preg_match('/(a)(b)?/', $s, $m, PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n",
-    );
+fn a_userland_twin_of_a_flag_constant_is_the_constant_that_answers() {
+    // PHP resolves an unqualified constant through the current namespace first, so
+    // `App\PREG_UNMATCHED_AS_NULL` is what this call reads — and since ADR-0094 §4
+    // the reader binds the project's own literal instead of refusing. `0` is the
+    // documented "no flags", so the seed is the one an absent flags argument gives.
+    //
+    // The refusal this test used to record was the honest answer while a constant
+    // carried no value at all; it is the WRONG answer now that one does, because
+    // the twin's value is right there in the same file.
+    let twin = "<?php\nnamespace App;\nconst PREG_UNMATCHED_AS_NULL = 0;\n\
+                function f(string $s): void {\n\
+                if (preg_match('/(a)(b)?/', $s, $m, PREG_UNMATCHED_AS_NULL)) { \\PHPStan\\dumpType($m); }\n}\n";
+    assert_eq!(one_dump(twin), "list{0: non-empty-string, 1: 'a', 2?: 'b'} (asserted)");
     // Fully-qualified spelling names the engine constant regardless: it's
     // defined first, and redefining an existing constant is a no-op.
     let fq = "<?php\nnamespace App;\nconst PREG_UNMATCHED_AS_NULL = 0;\n\

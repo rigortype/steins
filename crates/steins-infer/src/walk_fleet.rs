@@ -319,6 +319,7 @@ mod fan_out {
             &mut NoFold,
             true,
             FinalKeyword::Enforced,
+            None,
             &ProjectLayout::fallback(),
             &PluginFacts::none(),
             &EffectsPolicy::none(),

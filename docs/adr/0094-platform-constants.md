@@ -64,6 +64,20 @@ Scope of the table:
   (`crates/steins-infer/src/builtin_returns.rs`). A constant outside
   the target's range answers nothing; whether it is *undefined* there is
   the absence family's call.
+- **A row's value is diffed across those minors, not mined from one of
+  them.** "The same value on every host that has the constant" is the
+  whole reason a row may be seeded `Verified`, and one engine cannot
+  check it. The generator mines every engine it is given
+  (`mine-constants --php PATH`, repeatable) and refuses any name they
+  disagree about *inside the range the row would claim*; the refusal is
+  recorded by name with what each engine said. An engine below the row's
+  `since`, or one whose build lacks the name, takes no part — that is
+  absence, which is this section's version gate, not a disagreement
+  about a value. Families whose numbers are a C library's rather than
+  PHP's (`glob.h`, ICU's `UErrorCode`, libpq's enums) are refused by
+  family, on the `tokenizer` argument: the name is stable while the
+  value is not, and a name-by-name roster silently admits the next
+  member the library adds.
 
 ## 3. Decision: the default is the union of what the constant can be; a pin is opt-in
 

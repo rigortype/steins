@@ -565,6 +565,33 @@ pub fn preds_keyword(preds: StrPreds) -> String {
 /// Terminal-safe by construction.
 #[must_use]
 pub fn string_literal(s: &str) -> String {
+    // A CONTROL character takes PHP's double-quoted form, which is the only one
+    // that can spell it: a single-quoted literal would carry the raw byte, and a
+    // raw newline inside a one-line-per-finding surface breaks the surface. It is
+    // also the spelling the reference implementation uses — upstream asserts
+    // `"\n"|"\r\n"` for `PHP_EOL` (ADR-0094 §3's default union) and `'/'|'\\'`
+    // for `DIRECTORY_SEPARATOR`, the same split on the same condition.
+    if s.bytes().any(|b| b < 0x20 || b == 0x7F) {
+        let mut out = String::with_capacity(s.len() + 2);
+        out.push('"');
+        for c in s.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                // `$` would open an interpolation in a double-quoted literal.
+                '$' => out.push_str("\\$"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 || c as u32 == 0x7F => {
+                    out.push_str(&format!("\\x{:02X}", c as u32));
+                }
+                c => out.push(c),
+            }
+        }
+        out.push('"');
+        return out;
+    }
     let mut out = String::with_capacity(s.len() + 2);
     out.push('\'');
     for c in s.chars() {

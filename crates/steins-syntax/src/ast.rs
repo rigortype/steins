@@ -1525,6 +1525,12 @@ impl std::hash::Hash for ArgValue {
     }
 }
 
+/// How long a float's decimal spelling may run before the renderers switch to
+/// the exponent form. Wide enough to keep every spelling that was readable —
+/// `100000000000000000000.0` is 23 characters — and far short of the 309 digits
+/// `PHP_FLOAT_MAX` would otherwise print.
+pub(crate) const FLOAT_DECIMAL_MAX_LEN: usize = 24;
+
 impl ArgValue {
     /// Whether this is a concrete literal (`Int`/`Float`/`Str`/`Bool`/`Null`) —
     /// i.e. a self-evident, already-proven value.
@@ -1560,7 +1566,23 @@ impl ArgValue {
             ArgValue::Int(v) => v.to_string(),
             ArgValue::Float(v) => {
                 // Keep a float visibly a float: `5.0`, not `5`.
-                if v.fract() == 0.0 && v.is_finite() { format!("{v:.1}") } else { v.to_string() }
+                //
+                // A float whose decimal spelling runs long takes PHP's exponent form instead.
+                // Rust's `Display` never uses an exponent, so `PHP_FLOAT_MAX` (ADR-0094 §3.1, a
+                // value the analyzer now carries) spells as 309 digits and one diagnostic fills
+                // a terminal. The rule is on the rendered LENGTH and not on the magnitude, so
+                // every spelling short enough to read — the int-overflow promotions at 1e19 and
+                // 1e20 among them — is left exactly as it was.
+                let decimal = if v.fract() == 0.0 && v.is_finite() {
+                    format!("{v:.1}")
+                } else {
+                    v.to_string()
+                };
+                if v.is_finite() && decimal.len() > FLOAT_DECIMAL_MAX_LEN {
+                    format!("{v:E}")
+                } else {
+                    decimal
+                }
             }
             ArgValue::Str(v) => v.render_with('"'),
             ArgValue::Bool(v) => v.to_string(),
@@ -3108,6 +3130,24 @@ pub struct GlobalConstDecl {
     pub fqn: String,
     /// The declaration's source span.
     pub span: Span,
+    /// **The declared value, when it is a literal** (ADR-0094 §4): the same-file
+    /// reader binds it for reads in this file, from the declaration the walk has
+    /// already parsed — no sidecar, no generation input.
+    ///
+    /// `None` for a non-literal initializer (`const A = B * 2;`, an array, a
+    /// constant expression over other constants). Those decline rather than
+    /// being folded here: the fold would need an evaluation order this lowering
+    /// does not have, and a declaration whose value depends on another file's is
+    /// the cross-file slice ADR-0094 §4 defers.
+    pub value: Option<ArgValue>,
+    /// Whether the declaration sits below anything but the program root and its
+    /// namespace — an `if`, a loop, a function body (ADR-0049 A2i's own flag,
+    /// which the class and function lowerings already carry).
+    ///
+    /// A conditional definition declines (ADR-0094 §4): `if (!defined('X'))
+    /// define('X', 1);` states what the value is *when this branch runs*, and a
+    /// reader that took it would report one arm of a fork as the answer.
+    pub conditional: bool,
 }
 
 /// Normalize a global constant name into the index's matching key: leading `\` stripped,

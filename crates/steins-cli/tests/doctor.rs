@@ -1096,3 +1096,62 @@ fn doctor_finds_a_store_one_directory_below_the_path_argument() {
         r.stdout
     );
 }
+
+
+/// ADR-0094 §3: the `os` pin is the one `[runtime]` key that NARROWS, so its
+/// line has to say which constants it moves and at what stratum — and the
+/// default line has to say that the union is what a project gets for free.
+#[test]
+fn doctor_reports_the_os_pin_and_the_integer_model() {
+    let dir = workdir("runtime-postures-os-default");
+    write(&dir, "a.php", THREE_THROWS);
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0);
+    assert!(
+        r.stdout.contains("[runtime] os: none (default) — PHP_OS_FAMILY/PHP_EOL"),
+        "stdout:\n{}",
+        r.stdout
+    );
+    // §3.1 is not a posture and not configurable, so it prints unconditionally —
+    // and under a name of its own, since the Runtime section's `integer width`
+    // is the ANALYZING engine's word size and absent under `--no-php`.
+    assert!(
+        r.stdout.contains("integer model: assume 64-bit int; 32-bit targets unsupported"),
+        "stdout:\n{}",
+        r.stdout
+    );
+
+    let dir = workdir("runtime-postures-os-pinned");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[runtime]\nos = \"windows\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "a declared pin is not a contradiction; stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("[runtime] os: \"windows\" (declared)"),
+        "the declared pin and its provenance; stdout:\n{}",
+        r.stdout
+    );
+    assert!(
+        r.stdout.contains("Asserted (your claim, not the language's)"),
+        "the line names the stratum it buys; stdout:\n{}",
+        r.stdout
+    );
+}
+
+/// An unrecognized `os` falls back to the UNION, not to a pin — the same
+/// warn-and-proceed the other two keys take, and the safe direction for the one
+/// key that narrows.
+#[test]
+fn doctor_names_an_unrecognized_os_value_and_keeps_the_union() {
+    let dir = workdir("runtime-postures-os-bad-value");
+    write(&dir, "a.php", THREE_THROWS);
+    write(&dir, "steins.toml", "[runtime]\nos = \"Linux\"\n");
+    let r = run_in(&dir, &["doctor", "--no-php", "."]);
+    assert_eq!(r.code, 0, "an unrecognized value is not a contradiction; stdout:\n{}", r.stdout);
+    assert!(r.stdout.contains("os: unknown value `Linux`"), "stdout:\n{}", r.stdout);
+    assert!(
+        r.stdout.contains("[runtime] os: none (declared)"),
+        "and the posture actually in force; stdout:\n{}",
+        r.stdout
+    );
+}

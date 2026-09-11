@@ -2170,6 +2170,7 @@ fn analyze_through_generations(
         effects: &effects,
         warning_handler_abort: true,
         final_keyword: FinalKeyword::Enforced,
+        os_pin: None,
         php: true,
         // The paranoid walk verifier stays environment-driven
         // (`STEINS_GENERATIONS_PARANOID=1`) — it walks every file and would

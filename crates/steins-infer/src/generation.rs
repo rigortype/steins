@@ -276,6 +276,8 @@ pub struct GenerationParams<'a> {
     pub warning_handler_abort: bool,
     /// The `[runtime] final-keyword` posture (issue #234).
     pub final_keyword: FinalKeyword,
+    /// The `[runtime] os` pin (ADR-0094 §3). `None` is the default union.
+    pub os_pin: Option<crate::OsFamily>,
     /// Whether the PHP sidecar may run (the inverse of the CLI's `--no-php`).
     pub php: bool,
     /// Run the paranoid walk verifier ([`PARANOID_ENV`]) whatever the
@@ -1039,6 +1041,7 @@ pub fn generation_check(p: &GenerationParams<'_>) -> Result<GenerationOutcome, G
         &mut folder,
         p.warning_handler_abort,
         p.final_keyword,
+        p.os_pin,
         p.layout,
         p.plugins,
         p.effects,
@@ -1834,6 +1837,9 @@ fn config_identity(p: &GenerationParams<'_>) -> Vec<(String, String)> {
             p.warning_handler_abort.to_string(),
         ),
         ("runtime.final-keyword".to_owned(), format!("{:?}", p.final_keyword)),
+        // ADR-0094 §3: the pin decides `PHP_EOL` and its three siblings, so it
+        // decides findings — a run under a different pin is a different run.
+        ("runtime.os".to_owned(), format!("{:?}", p.os_pin)),
         ("layout".to_owned(), format!("{:?}", p.layout)),
     ];
     for key in p.effects.attribution_keys() {

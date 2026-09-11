@@ -1898,7 +1898,12 @@ pub(crate) fn arg_is_by_value(cx: &Cx<'_>, callee: &NameRef, position: u32) -> b
 /// property fetch takes the prop's stratum; an array/call/ternary takes the min
 /// over its parts. Stamps the derived binding with `min(inputs)`, closing the
 /// laundering hazard the audit's `$pair = [$x, 99]` snippet names.
-pub(crate) fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, store: Option<&Store>) -> Stratum {
+pub(crate) fn value_stratum(
+    cx: &Cx<'_>,
+    value: &ArgValue,
+    env: &HashMap<String, Known>,
+    store: Option<&Store>,
+) -> Stratum {
     match value {
         ArgValue::Var(name) => env.get(name).map_or(Stratum::Verified, |k| k.stratum),
         // A property fetch takes its prop's stratum; with no store in scope (the
@@ -1909,9 +1914,9 @@ pub(crate) fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, stor
         }
         ArgValue::Array(items) => items
             .iter()
-            .fold(Stratum::Verified, |acc, (_, v)| acc.min(value_stratum(v, env, store))),
+            .fold(Stratum::Verified, |acc, (_, v)| acc.min(value_stratum(cx, v, env, store))),
         ArgValue::Call(_, args) => {
-            args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(v, env, store)))
+            args.iter().fold(Stratum::Verified, |acc, v| acc.min(value_stratum(cx, v, env, store)))
         }
         // A method call's own arguments, plus a receiver `new`'s (issue #386): every
         // value the call consumes is a value its result derives from, and the
@@ -1921,24 +1926,40 @@ pub(crate) fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, stor
         ArgValue::MethodCall { callee, args, named } => {
             let recv = match callee {
                 Callee::Method { receiver: Receiver::New { args, named, .. }, .. } => {
-                    value_stratum_of_args(args, named, env, store)
+                    value_stratum_of_args(cx, args, named, env, store)
                 }
                 _ => Stratum::Verified,
             };
-            recv.min(value_stratum_of_args(args, named, env, store))
+            recv.min(value_stratum_of_args(cx, args, named, env, store))
         }
         ArgValue::Ternary { then_val, else_val, .. } => {
-            value_stratum(then_val, env, store).min(value_stratum(else_val, env, store))
+            value_stratum(cx, then_val, env, store).min(value_stratum(cx, else_val, env, store))
         }
         // `$a ?? $b` consumes both operands' facts (a widening join): `min` (§5).
         ArgValue::Coalesce(a, b, _) => {
-            value_stratum(a, env, store).min(value_stratum(b, env, store))
+            value_stratum(cx, a, env, store).min(value_stratum(cx, b, env, store))
         }
         // `$a . $b` consumes both operands' facts to build one string — the same
         // derivation clause: `min`. An asserted operand must not launder itself into
         // a verified result string.
         ArgValue::Concat(a, b) => {
-            value_stratum(a, env, store).min(value_stratum(b, env, store))
+            value_stratum(cx, a, env, store).min(value_stratum(cx, b, env, store))
+        }
+        // A bare global constant (ADR-0094 §3.2). Everything this resolver
+        // answers is `Verified` — true of every host the project can run on —
+        // except a value fixed by the `[runtime] os` pin, which is the user's
+        // claim about the deployment host and must not launder into a
+        // proof-layer premise through a comparison or a concatenation.
+        //
+        // By the name PHP RESOLVES the reference to, which is what the `Cx` is
+        // for: `use const PHP_EOL as EOL;` spells `EOL`, and matching the raw
+        // spelling let the alias carry the pinned value at `Verified`.
+        ArgValue::GlobalConst(r) => {
+            if crate::global_consts::denotes_os_pinned_constant(cx, r) {
+                Stratum::Asserted
+            } else {
+                Stratum::Verified
+            }
         }
         _ => Stratum::Verified,
     }
@@ -1947,13 +1968,14 @@ pub(crate) fn value_stratum(value: &ArgValue, env: &HashMap<String, Known>, stor
 /// The `min` stratum over one call's positional and named argument values — the
 /// [`value_stratum`] derivation clause applied to an argument list.
 fn value_stratum_of_args(
+    cx: &Cx<'_>,
     args: &[ArgValue],
     named: &[NamedArg],
     env: &HashMap<String, Known>,
     store: Option<&Store>,
 ) -> Stratum {
     args.iter()
-        .map(|v| value_stratum(v, env, store))
-        .chain(named.iter().map(|n| value_stratum(&n.value, env, store)))
+        .map(|v| value_stratum(cx, v, env, store))
+        .chain(named.iter().map(|n| value_stratum(cx, &n.value, env, store)))
         .fold(Stratum::Verified, Stratum::min)
 }
