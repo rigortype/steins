@@ -421,11 +421,12 @@ pub use crate::constants_generated::{ConstRow, ConstValue};
 /// * a constant whose value is not a property of PHP at all — a linked library's
 ///   version, a signal number, a parser-generated token ordinal.
 ///
-/// **A row never says the constant EXISTS.** Existence is a boot-surface fact
-/// and the absence family's business (ADR-0094 §5); this table says what the
-/// value is *if* the name resolves. The row's own `since`/`until` are the only
-/// version claim it makes, and the caller gates on them against the project's
-/// declared `PhpTarget`.
+/// **A row never says the constant EXISTS, and never says it does not.**
+/// Existence is a boot-surface fact and the absence family's business
+/// (ADR-0094 §5); this table says what the value is *if* the name resolves.
+/// `since` is what the value lane gates on against the project's declared
+/// `PhpTarget`; `until` is RECORDED and read by nobody — a value-less row is a
+/// departure the mined engines witnessed, not an absence oracle.
 ///
 /// The key is PHP's own identity for a constant: a leading `\` is not part of
 /// the name, namespace segments are case-insensitive, and the final segment is
@@ -629,15 +630,15 @@ mod tests {
     /// A spec-fixed row of each value shape, and the identity rule for the key.
     #[test]
     fn engine_constant_rows_answer_by_value() {
-        assert_eq!(engine_constant("SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(engine_constant("SORT_REGULAR").and_then(|r| r.value), Some(ConstValue::Int(0)));
         assert_eq!(
-            engine_constant("JSON_THROW_ON_ERROR").map(|r| r.value),
+            engine_constant("JSON_THROW_ON_ERROR").and_then(|r| r.value),
             Some(ConstValue::Int(4_194_304))
         );
-        assert_eq!(engine_constant("M_PI").map(|r| r.value), Some(ConstValue::Float(std::f64::consts::PI)));
-        assert_eq!(engine_constant("DATE_ATOM").map(|r| r.value), Some(ConstValue::Str("Y-m-d\\TH:i:sP")));
+        assert_eq!(engine_constant("M_PI").and_then(|r| r.value), Some(ConstValue::Float(std::f64::consts::PI)));
+        assert_eq!(engine_constant("DATE_ATOM").and_then(|r| r.value), Some(ConstValue::Str("Y-m-d\\TH:i:sP")));
         // A leading `\` is not part of the name; the final segment is case-SENSITIVE.
-        assert_eq!(engine_constant("\\SORT_REGULAR").map(|r| r.value), Some(ConstValue::Int(0)));
+        assert_eq!(engine_constant("\\SORT_REGULAR").and_then(|r| r.value), Some(ConstValue::Int(0)));
         assert_eq!(engine_constant("sort_regular"), None);
     }
 
@@ -660,17 +661,36 @@ mod tests {
         }
     }
 
-    /// A row the range scan proved arrived inside the mined window, and one it
-    /// could say nothing about. Both are load-bearing: the second is the common
-    /// case, and reading it as "eternal" rather than as "unobserved" is the
+    /// A row the mined engines' presence proved arrived inside the window, and one
+    /// they could say nothing about. Both are load-bearing: the second is the
+    /// common case, and reading it as "eternal" rather than as "unobserved" is the
     /// mistake the `None` spelling exists to prevent.
     #[test]
-    fn engine_constant_rows_carry_the_range_the_scan_proved() {
+    fn engine_constant_rows_carry_the_range_the_engines_proved() {
         assert_eq!(engine_constant("FILTER_THROW_ON_FAILURE").and_then(|r| r.since), Some((8, 5)));
         assert_eq!(engine_constant("SORT_REGULAR").and_then(|r| r.since), None);
-        // `until` is unfilled at this pin by construction: the engine that
-        // supplied the values has every mined name.
-        assert!(crate::constants_generated::ENGINE_CONSTANTS.iter().all(|(_, r)| r.until.is_none()));
+    }
+
+    /// **The value-less rows** (issue #718): `until` and nothing else. The
+    /// invariant is the pairing, and it holds in both directions — a name the top
+    /// engine still has cannot have left, and a row that records a departure has
+    /// no value to record.
+    #[test]
+    fn a_row_that_records_a_departure_carries_no_value() {
+        let row = engine_constant("MYSQLI_SET_CHARSET_DIR").expect("a mined departure");
+        assert_eq!(row.until, Some((8, 3)));
+        assert_eq!(row.value, None);
+        for (name, r) in crate::constants_generated::ENGINE_CONSTANTS {
+            assert_eq!(
+                r.until.is_some(),
+                r.value.is_none(),
+                "{name}: `until` and a missing value are the same fact"
+            );
+        }
+        // …and it is not a blanket property: the ordinary row keeps its value and
+        // states no departure.
+        let row = engine_constant("SORT_REGULAR").expect("a mined literal");
+        assert_eq!((row.until, row.value), (None, Some(ConstValue::Int(0))));
     }
 
     #[test]
@@ -759,6 +779,35 @@ mod tests {
         "string|null",
     ];
 
+    /// **The lower minors' veto** (issue #714). A row the top engine countersigns
+    /// and a SUPPORTED minor contradicts is false on that minor, so it is refused.
+    /// These five are what the 8.2.33 / 8.3.33 / 8.4.25 / 8.5.10 run caught, all of
+    /// one shape: the map says `bool` (or `array`) where 8.2 declares `?bool` (or
+    /// `?array`), and a row that drops the engine's null arm is exactly what the
+    /// arm-wise countersign exists to refuse (ADR-0069 §3).
+    ///
+    /// Delete the veto pass in `mine-function-map` and every one of these comes
+    /// back at the next mining run, carrying a claim no 8.2 target may premise.
+    #[test]
+    fn a_row_a_lower_minor_contradicts_is_not_in_the_table() {
+        assert_eq!(super::declared_return("datefmt_set_timezone"), None);
+        for key in [
+            "IntlBreakIterator::setText",
+            "IntlDateFormatter::setTimezone",
+            "IntlRuleBasedBreakIterator::setText",
+            "ReflectionClass::getStaticProperties",
+        ] {
+            let (class, method) = key.split_once("::").expect("a method key");
+            assert_eq!(super::declared_method_return(class, method), None, "{key}");
+        }
+        // …and the veto is not a blanket refusal of the families it touched: the
+        // same classes keep every row the lower minors agree with.
+        assert_eq!(
+            super::declared_method_return("IntlDateFormatter", "setPattern"),
+            Some(("bool", false))
+        );
+    }
+
     #[test]
     fn declared_return_rows_and_their_shape() {
         assert_eq!(super::declared_return("str_repeat"), Some("string"));
@@ -803,8 +852,8 @@ mod tests {
             assert!(!ty.is_empty(), "{name} carries an empty spelling");
         }
         let rich = t.iter().filter(|(_, ty)| !ENVELOPE_SPELLINGS.contains(ty)).count();
-        assert_eq!(t.len(), 1711, "admitted rows at this pin");
-        assert_eq!(t.len() - rich, 919, "the #73 envelope population must be preserved exactly");
+        assert_eq!(t.len(), 1710, "admitted rows at this pin");
+        assert_eq!(t.len() - rich, 918, "the #73 envelope population must be preserved exactly");
         assert_eq!(rich, 792, "the #79, ADR-0071, object-slice and class-string (#236) rich admissions");
     }
 

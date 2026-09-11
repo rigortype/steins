@@ -107,6 +107,11 @@ sort($ext);
 
 echo json_encode([
     'php' => PHP_VERSION,
+    // The host family, because this table's universe is a PLATFORM's and not
+    // only a version's: `chroot` is a Linux builtin and no Darwin build has it
+    // at any minor (issue #703). The union's rows record which families answered
+    // for them, so "absent here" and "absent everywhere" stay different facts.
+    'os' => PHP_OS_FAMILY,
     'extensions' => $ext,
     'internal_total' => count($internal),
     'unreflectable' => $missing,

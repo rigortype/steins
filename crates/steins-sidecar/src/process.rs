@@ -59,6 +59,11 @@ struct Channel {
     /// Lines drained from the child's stdout by the reader thread.
     lines: Receiver<std::io::Result<String>>,
     reader: Option<JoinHandle<()>>,
+    /// The interpreter this channel was opened with — `"php"` for the resident
+    /// engine, an explicit path for a mining run that names its minor. A respawn
+    /// must reach the SAME build: a replacement resolved from `PATH` would answer
+    /// the next request as a different PHP.
+    bin: String,
 }
 
 impl Channel {
@@ -76,8 +81,8 @@ impl Channel {
     ///
     /// Trade-offs: source is visible in `ps`/`/proc` (not a secret), and a
     /// parse error reports against "Command line code" (moot: stderr discarded).
-    fn open() -> std::io::Result<Self> {
-        let mut child = Command::new("php")
+    fn open(bin: &str) -> std::io::Result<Self> {
+        let mut child = Command::new(bin)
             .arg("-r")
             .arg(runner_code())
             .stdin(Stdio::piped())
@@ -110,7 +115,7 @@ impl Channel {
             }
         });
 
-        Ok(Self { child, stdin, lines: rx, reader: Some(reader) })
+        Ok(Self { child, stdin, lines: rx, reader: Some(reader), bin: bin.to_owned() })
     }
 
     /// Kill the child, **reap** it, and join the reader thread.
@@ -168,7 +173,18 @@ impl Sidecar {
     /// (missing `php`, IO failure) — the caller turns that into the
     /// sound-subset posture.
     pub fn spawn() -> std::io::Result<Self> {
-        let chan = Channel::open()?;
+        Self::spawn_with("php")
+    }
+
+    /// The same, against a NAMED interpreter rather than the one on `PATH`.
+    ///
+    /// Analysis always uses [`Self::spawn`]: the project's own engine is the one
+    /// boot-surface truth, and choosing a different one would make a finding a
+    /// property of the machine. The named form is for the generators, which ask
+    /// several minors the same question and record which answered
+    /// (`cargo xtask mine-function-map --php PATH`, issue #714).
+    pub fn spawn_with(bin: &str) -> std::io::Result<Self> {
+        let chan = Channel::open(bin)?;
 
         Ok(Self { chan, next_id: 1, timeout: DEFAULT_TIMEOUT, poisoned: false, respawns: 0 })
     }
@@ -187,7 +203,7 @@ impl Sidecar {
         }
         self.respawns += 1;
         self.chan.close();
-        match Channel::open() {
+        match Channel::open(&self.chan.bin) {
             Ok(chan) => {
                 self.chan = chan;
                 self.poisoned = false;

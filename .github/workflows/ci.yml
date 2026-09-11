@@ -25,6 +25,15 @@
 #             bug, not a cosmetic one.
 #   fp-gate   the zero-false-positive bar over the corpus (ADR-0013/0026).
 #
+# One job here is not a gate at all: `param-facts-linux` mines the per-parameter
+# facts table on Linux and uploads the TOML, because `chroot` and its siblings
+# exist on no Darwin build at any minor and the maintaining machines are Macs
+# (issue #703, `docs/agents/mining.md`). It runs only when a dispatch asks for it
+# by name (`mine_param_facts: true`) — its output is merged by hand, a job that
+# rewrote a source of record on every PR would be a generator with two masters,
+# and the webhook escape hatch is dispatched to get the GATES back, not to spend
+# twenty minutes mining.
+#
 # One gate lives outside this file: `lean.yml` builds the Lean 4 specification of
 # the value domain and checks its committed vectors (ADR-0059). It is separate
 # because `on.paths` is a workflow-level filter and it only has something to say
@@ -65,6 +74,15 @@ on:
   # Manual escape hatch: GitHub webhook->Actions delivery dropped this branch's
   # events across three outage windows (2026-08-08); dispatch bypasses the webhook.
   workflow_dispatch:
+    inputs:
+      # `param-facts-linux` is a 20-minute job nobody dispatching the escape
+      # hatch is asking for: a webhook re-run wants the GATES, and the miner
+      # produces an artefact a maintainer downloads on purpose. Off by default,
+      # so the two reasons to dispatch this workflow stay separable.
+      mine_param_facts:
+        description: "Also mine the Linux half of param_facts.toml (see docs/agents/mining.md)"
+        type: boolean
+        default: false
 
 # Cancel superseded runs on the same ref.
 concurrency:
@@ -321,3 +339,65 @@ jobs:
 
       - name: Run FP gate
         run: cargo run -p xtask -- fp-gate
+
+  # Not a gate — a MINING job, and the only reason it lives in CI is that the
+  # thing it mines cannot be reached from the machines the table is maintained
+  # on. `param_facts.toml` is the union of several engines' arginfo (issue #703),
+  # and a build is one operating system: `chroot` is a Linux builtin that no
+  # Darwin PHP has at any minor, so a macOS-only union leaves
+  # `by_value_arg('chroot', …)` with nothing to answer from. nix cannot build a
+  # Linux PHP on an Apple-silicon Mac without a Linux builder, so `ubuntu-latest`
+  # supplies the one.
+  #
+  # It runs on demand, never on a push: its output is a file a human downloads
+  # and merges deliberately (`docs/agents/mining.md`), and a job that rewrote the
+  # source of record on every PR would be a generator with two masters. The `if`
+  # below is what makes it manual, and it reads the INPUT rather than the event:
+  # `on.workflow_dispatch` is the whole file's webhook escape hatch, and a re-run
+  # that only wants the gates back should not pay 20 minutes for an artefact
+  # nobody asked for. `inputs.mine_param_facts` is empty on every other event, so
+  # one condition covers both.
+  param-facts-linux:
+    name: mine param facts (linux)
+    if: inputs.mine_param_facts
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # The minor the union's TOP source is pinned to. The miner reads arginfo
+      # through `ReflectionFunction` and needs no extension beyond Core, but the
+      # UNIVERSE is the build's, so the extension set is what decides how many
+      # Linux-only names this job can contribute.
+      - name: Set up PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: "8.5"
+          extensions: bcmath, calendar, curl, dom, exif, fileinfo, filter, ftp, gd, gettext, gmp, iconv, intl, ldap, mbstring, mysqli, odbc, openssl, pcntl, pgsql, posix, readline, shmop, snmp, soap, sockets, sodium, sqlite3, sysvmsg, sysvsem, sysvshm, tidy, xml, xsl, zip, zlib
+          coverage: none
+
+      - name: Install Rust toolchain (MSRV)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_MSRV }}
+
+      # Shares the `licenses` job's cache key — the same `xtask` binary.
+      - name: Cache cargo artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: xtask
+
+      # No `--php`: the run asks the `php` this job set up, and its `[meta] os`
+      # records `Linux`. The artifact is that whole TOML, which is exactly what
+      # `mine-param-facts --merge` reads back — the CI job runs the same command
+      # a maintainer does, so nothing needs converting on the way down.
+      - name: Mine param facts
+        run: cargo run -p xtask -- mine-param-facts
+
+      - name: Upload the Linux table
+        uses: actions/upload-artifact@v4
+        with:
+          name: param-facts-linux
+          path: docs/research/phpsrc-mining/param_facts.toml
+          if-no-files-found: error

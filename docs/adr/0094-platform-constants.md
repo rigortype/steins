@@ -53,7 +53,9 @@ Scope of the table:
   at runtime, which is the absence family's business, not a different
   value; `doctor`'s Registry posture may list the table's extensions the
   runtime lacks.
-- **Rows carry a PHP-minor range.** `E_STRICT` left in 8.4; `JSON_*` and
+- **Rows carry a PHP-minor range, read off the engines' own presence.**
+  `MYSQLI_SET_CHARSET_DIR` left in 8.4; `FILTER_THROW_ON_FAILURE`
+  arrived in 8.5; `JSON_*` and
   `CURLOPT_*` members arrive per minor. Each row carries `since` and an
   optional `until`, the generator runs over the PHP minors the corpus
   harness already scopes, and the lookup respects the project's
@@ -62,8 +64,46 @@ Scope of the table:
   `crates/steins-db/src/composer.rs`) the way `floor_target_admits`
   already gates the declared-return floor
   (`crates/steins-infer/src/builtin_returns.rs`). A constant outside
-  the target's range answers nothing; whether it is *undefined* there is
-  the absence family's call.
+  the target's range answers nothing.
+
+  **Amendment (owner ruling 2026-09-11, issue #718).** The range comes
+  from the same engines the value diff compares, one per minor, and not
+  from a php-src branch scan: a scan reading `.stub.php` `const`s and
+  `REGISTER_*_CONSTANT` calls is blind to macro token-pasting, needed a
+  per-extension coverage floor to keep its blind spots from minting wrong
+  gates, and left 2,551 of 2,566 rows rangeless. Presence is judged only
+  against the engines that **loaded the name's extension** — a build
+  without `brotli` is not a minor without `BROTLI_*`. A name the older
+  engines have and the top one does not gets a **value-less row**: `until`
+  and nothing else. The value resolver ignores it — there is no literal to
+  answer with — and so does everything else; see §5 for why the absence
+  family does not read it either.
+
+- **A minor boundary needs two comparable builds.** Loading the
+  extension is necessary and not sufficient. php-src registers whole
+  blocks of constants behind the linked library's version or a
+  configure-time feature, so two engines that differ *there* disagree
+  about which names exist for a reason that is not their PHP minor —
+  `LIBXML_NO_XXE` only above libxml2 2.13, `MHASH_*` only with
+  `--with-mhash`, `LDAP_OPT_X_SASL_*` only with `HAVE_LDAP_SASL`,
+  `IMAGETYPE_SWC` only with a zlib compiled in rather than loaded. Each
+  engine therefore reports a **build fingerprint** (the guarded
+  libraries' versions, the guarded features, and which packager built
+  it), a roster in the generator says which of those facts an
+  extension's registrations are guarded on, and a boundary is minted
+  only when the two engines forming it agree on every one. A departure
+  is held higher: an `until` also needs the **same packager** on both
+  sides, since "the name is gone at the next minor" and "the next minor
+  was built by somebody else" are otherwise the same observation, and
+  only one of them is a fact about PHP. What this takes back is recorded
+  by name with the fact that differed.
+
+  This is a mitigation for an engine set that spans two packagers
+  (nix 8.2/8.3/8.4, Homebrew 8.5) and not a substitute for one that does
+  not; `docs/agents/mining.md` says so, and the boundaries the
+  fingerprints decline come back as answers the day all four minors come
+  from one source.
+
 - **A row's value is diffed across those minors, not mined from one of
   them.** "The same value on every host that has the constant" is the
   whole reason a row may be seeded `Verified`, and one engine cannot
@@ -155,8 +195,24 @@ and this ADR does not size it.
   user-constant binding (§4). The `filter_var` const-local rows and
   every transfer that matches on a constant *name* can switch to the
   value once §2 lands.
-- The absence family is untouched: existence stays a boot-surface fact,
-  and the table never says a constant is defined.
+- The absence family is untouched, in **both** directions: existence is
+  a boot-surface fact, the table never says a constant is defined, and
+  it is not consulted when one is reported absent either. §2's
+  value-less rows were drafted with a reading in the other direction —
+  a candidate whose `until` is below the project's floor skipping the
+  boot-surface leg — and it is not in the code, because it cannot change
+  a correct outcome. `absence_family_available`
+  (`crates/steins-infer/src/fold.rs`, issue #28) already declines every
+  absence claim made from a runtime outside the declared `PhpTarget`, so
+  a runtime that reaches the boot-surface leg is one the project
+  supports; if the floor is above the departure, every supported runtime
+  is past it and reports the name absent unaided. The only outcome such
+  a clause could change is one where the row's `until` is *wrong*, and
+  there it manufactures a `constant.undefined` no engine agrees with —
+  which is what a boundary between two differently-packaged builds
+  produces (§2). The `until` is therefore **recorded and not read**: it
+  is what issue #718 asked the table to know, evidence for a reader and
+  for whatever tool comes next, and no lane's oracle.
 - A host-dependent constant's default union is deliberately wider than
   any one host. A nsrt row asserting the analysis host's literal (the
   upstream fixtures assert `"\n"`) will read `subsumed`, not `match`;

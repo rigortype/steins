@@ -25,7 +25,12 @@
 //! `X::CONST` is a **class** constant — a different member namespace, issue #197's
 //! id — and is pinned here as a non-finding of this one.
 
-use steins_db::{PluginFacts, Project, ProjectLayout, SourceFile, SteinsDatabase};
+use std::path::PathBuf;
+
+use steins_db::{
+    GoverningRoot, PhpTarget, PhpTargetSource, PluginFacts, Project, ProjectLayout, SourceFile,
+    SteinsDatabase,
+};
 use steins_infer::{
     CONSTANT_UNDEFINED_ID, Diagnostic, Folder, SidecarFolder, check, check_project, check_with,
 };
@@ -449,5 +454,82 @@ fn silent_on_a_real_extension_constant() {
 fn silent_on_a_real_engine_constant() {
     let Some(mut folder) = live_or_skip("silent_on_a_real_engine_constant") else { return };
     let d = run("<?php\necho PHP_EOL;\n", &mut folder);
+    assert!(d.is_empty(), "{d:#?}");
+}
+
+// The value-less rows, and the leg they are NOT (ADR-0094 §2/§5, issue #718).
+
+/// Every `constant.undefined` a project declaring `target` raises, with `boot`
+/// standing in for the analysis machine's own engine.
+///
+/// A project-level check, unlike [`run`] above, because these tests are about the
+/// declared `PhpTarget` — which is a project fact and has no single-file seam.
+fn run_under(src: &str, target: PhpTarget, boot: &mut dyn Folder) -> Vec<Diagnostic> {
+    let root = GoverningRoot::new(
+        PathBuf::from("/proj/composer.json"),
+        PathBuf::from("/proj"),
+        vec![PathBuf::from("/proj/vendor")],
+        vec![],
+    )
+    .with_php_target(Some(target));
+    let layout = ProjectLayout::new(PathBuf::from("/proj"), vec![root]);
+    let db = SteinsDatabase::default();
+    let file = SourceFile::new(&db, "/proj/t.php".to_owned(), src.to_owned());
+    let project = Project::new(&db, vec![file], layout, PluginFacts::none());
+    check_project(&db, project, boot)
+        .into_iter()
+        .filter(|d| d.id == CONSTANT_UNDEFINED_ID)
+        .collect()
+}
+
+fn require_target(raw: &str, floor: (u16, u16), ceiling: Option<(u16, u16)>) -> PhpTarget {
+    PhpTarget { floor, ceiling, source: PhpTargetSource::Require, raw: raw.to_owned() }
+}
+
+/// **The catalog is not an absence oracle in EITHER direction** (ADR-0094 §5).
+///
+/// `MYSQLI_SET_CHARSET_DIR` is a value-less row: the mined engines had it through
+/// 8.3 and 8.4 does not. A project declaring `>=8.4` therefore supports no minor
+/// that has the name — and this id still says nothing, because the boot surface
+/// it must clear is the only thing allowed to answer about existence, and this
+/// boot surface has the name.
+///
+/// That is not a gap. `absence_family_available` (issue #28) has already declined
+/// every claim from a runtime outside the declared target, so a boot surface that
+/// reaches this leg is running a minor the project supports — and a supported
+/// minor at or above 8.4 does not define the name, which is what makes it fire.
+/// A clause reading `until` here could change the outcome only where the row's
+/// `until` is WRONG, and would then manufacture a finding no engine agrees with.
+#[test]
+fn a_value_less_row_does_not_fire_over_a_boot_surface_that_has_the_name() {
+    let mut boot = Boot::with_consts(&["MYSQLI_SET_CHARSET_DIR"]);
+    let target = require_target(">=8.4", (8, 4), None);
+    let d = run_under("<?php\necho MYSQLI_SET_CHARSET_DIR;\n", target, &mut boot);
+    assert!(d.is_empty(), "existence is the boot surface's answer alone: {d:#?}");
+}
+
+/// The same row and the same target over a boot surface that agrees with the
+/// project's minors: the name is absent, every other leg is clear, and the id
+/// fires — out of the boot surface's `Some(false)` and nothing else.
+#[test]
+fn a_removed_constant_fires_over_a_boot_surface_that_lacks_it() {
+    let mut boot = Boot::ready();
+    let target = require_target(">=8.4", (8, 4), None);
+    let d = run_under("<?php\necho MYSQLI_SET_CHARSET_DIR;\n", target, &mut boot);
+    assert_eq!(d.len(), 1, "{d:#?}");
+    assert!(d[0].message.contains("undefined constant MYSQLI_SET_CHARSET_DIR"), "{}", d[0].message);
+}
+
+/// A project's own `define()` of a name the engine took away is what the reader
+/// reaches, and the index leg — which runs first — keeps this id out of it.
+#[test]
+fn silent_when_the_project_defines_the_name_the_engine_removed() {
+    let mut boot = Boot::ready();
+    let target = require_target(">=8.4", (8, 4), None);
+    let d = run_under(
+        "<?php\ndefine('MYSQLI_SET_CHARSET_DIR', 1);\necho MYSQLI_SET_CHARSET_DIR;\n",
+        target,
+        &mut boot,
+    );
     assert!(d.is_empty(), "{d:#?}");
 }

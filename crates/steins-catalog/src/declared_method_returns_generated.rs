@@ -16,6 +16,7 @@
 //
 // phpstan-src pin: dcde2be6ca3caae0e0d4bee6bfbc9fd39ea560e7
 // cross-checked against PHP 8.5.10 via the real sidecar.
+// Every minor asked, low first: 8.2.33, 8.3.33, 8.4.25, 8.5.10.
 //
 // Mining counts at the pin:
 //    6658  `Class::method` entries (after the delta ladder)
@@ -24,13 +25,13 @@
 //    1127    objects / `callable` / `resource` / `void` / the `self`-family keywords
 //    3593  rows on 325 classes the pinned engine does not have
 //      68  rows whose class the engine has WITHOUT the method
-//     225  rows the arm-wise engine countersign refuses
+//     229  rows the arm-wise engine countersign refuses
 //      67  rows REFUSED because the engine declares no return type
 //       9  rows REFUSED because the engine declares `mixed`
 //      25  refused keys that SHADOW an ancestor's row (the second table below)
-//     957  ADMITTED (the table below), of which
+//     953  ADMITTED (the table below), of which
 //      82    STATIC, by the engine's own reckoning
-//     305    RICHER than a single-base envelope
+//     304    RICHER than a single-base envelope
 //
 // GRADE: every row seeds `Asserted`, never `Verified` (ADR-0069 §2), and an
 // object-returning row is in the contract lane at all only because ADR-0093
@@ -285,7 +286,6 @@ pub(crate) static DECLARED_METHOD_RETURNS: &[(&str, &str, bool)] = &[
     ("intlbreakiterator::next", "int", false),
     ("intlbreakiterator::preceding", "int", false),
     ("intlbreakiterator::previous", "int", false),
-    ("intlbreakiterator::settext", "bool", false),
     ("intlcalendar::add", "bool", false),
     ("intlcalendar::after", "bool", false),
     ("intlcalendar::before", "bool", false),
@@ -335,7 +335,6 @@ pub(crate) static DECLARED_METHOD_RETURNS: &[(&str, &str, bool)] = &[
     ("intldateformatter::parse", "int|float|false", false),
     ("intldateformatter::setcalendar", "bool", false),
     ("intldateformatter::setpattern", "bool", false),
-    ("intldateformatter::settimezone", "bool", false),
     ("intlgregoriancalendar::getgregorianchange", "float", false),
     ("intlgregoriancalendar::isleapyear", "bool", false),
     ("intlgregoriancalendar::setgregorianchange", "bool", false),
@@ -354,7 +353,6 @@ pub(crate) static DECLARED_METHOD_RETURNS: &[(&str, &str, bool)] = &[
     ("intlrulebasedbreakiterator::next", "int", false),
     ("intlrulebasedbreakiterator::preceding", "int", false),
     ("intlrulebasedbreakiterator::previous", "int", false),
-    ("intlrulebasedbreakiterator::settext", "bool", false),
     ("intltimezone::createdefault", "IntlTimeZone", true),
     ("intltimezone::getdstsavings", "int", false),
     ("intltimezone::getgmt", "IntlTimeZone", true),
@@ -654,7 +652,6 @@ pub(crate) static DECLARED_METHOD_RETURNS: &[(&str, &str, bool)] = &[
     ("reflectionclass::getproperties", "list<ReflectionProperty>", false),
     ("reflectionclass::getreflectionconstants", "list<ReflectionClassConstant>", false),
     ("reflectionclass::getstartline", "int<1, max>|false", false),
-    ("reflectionclass::getstaticproperties", "array<string, mixed>", false),
     ("reflectionclass::gettraitaliases", "array<string, string>", false),
     ("reflectionclass::gettraitnames", "list<class-string>", false),
     ("reflectionclass::gettraits", "array<string,ReflectionClass>", false),

@@ -230,8 +230,13 @@ pub(crate) fn global_const_fact(cx: &Cx, r: &NameRef) -> Option<(Fact, Stratum)>
             return Some(answer);
         }
         if let Some(row) = row {
+            // A value-less row (issue #718) states a DEPARTURE and no literal, so
+            // this lane has nothing to answer with — and no other lane reads it
+            // either: `until` is recorded for a reader, never consulted as an
+            // oracle (ADR-0094 §5).
+            let value = row.value?;
             return target_admits(&row, cx.php_target)
-                .then(|| (mined_fact(&row.value), Stratum::Verified));
+                .then(|| (mined_fact(&value), Stratum::Verified));
         }
     }
     None

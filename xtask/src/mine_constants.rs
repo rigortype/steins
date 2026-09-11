@@ -11,27 +11,73 @@
 //! shape of the functionMap declared-return floor (ADR-0069) and the
 //! per-parameter facts (issue #382). This is that table's miner.
 //!
-//! # Two sources, because one of them cannot answer the question
+//! # One source, asked once per minor
 //!
-//! * **Values** come from the resident engine's `get_defined_constants(true)`
-//!   (`mine_constants.php`), which is also what says *which extension*
-//!   registered each name. The TOP build answers, and `[meta]` records which —
-//!   but it is not the only build asked. ADR-0094 §2 says the generator "runs
-//!   over the PHP minors the corpus harness already scopes", and a value mined
-//!   from one engine is a claim about every one of them: any name whose value
-//!   DISAGREES across the engines the run was given is refused outright
+//! Every answer this miner writes comes from the **engines the run was given**,
+//! one per PHP minor (`--php PATH`, repeatable). ADR-0094 §2 says the generator
+//! "runs over the PHP minors the corpus harness already scopes", and each engine
+//! answers two different questions about itself:
+//!
+//! * **What a name is worth.** The TOP build supplies the values and the
+//!   extension set, and `[meta]` records which — but it is not the only build
+//!   asked. A value mined from one engine is a claim about every minor the
+//!   target may span, so any name the engines DISAGREE about is refused outright
 //!   ([`value_moves`]), because a row is a spec-fixed literal or it is nothing.
-//! * **Version ranges** cannot come from one build: `since` is the question
-//!   "did this name exist at 8.1", and an 8.5 engine has no opinion. They come
-//!   from a php-src checkout instead — the per-minor `PHP-8.x` branches, read
-//!   for the two places a constant is declared (a `.stub.php` global `const`,
-//!   or a `REGISTER_*_CONSTANT("NAME", …)` in C).
+//! * **Which minors have the name at all.** `since` and `until` are read off the
+//!   same engines' presence ([`range`]): a name absent at 8.2 and present from
+//!   8.3 up arrived at 8.3, and one present through 8.4 and gone at 8.5 left
+//!   after 8.4. Issue #718 retired the php-src branch scan this used to be —
+//!   that scan read a `.stub.php` `const` or a `REGISTER_*_CONSTANT("NAME", …)`
+//!   in C, was blind to every registration built by macro token-pasting, and
+//!   needed a per-extension coverage floor to keep its blind spots from minting
+//!   wrong gates. An engine either has the name or it does not.
 //!
-//! The presence scan is deliberately **fallible in one direction only**. Macro
-//! token-pasting hides some registrations from any grep, so a name the scan
-//! cannot see at the TOP mined minor is a name the scan is blind to — and such
-//! a row gets **no range at all** rather than a guessed one. A row is gated only
-//! when the scan saw the name appear and stay ([`arrival`]).
+//! The engines' builds differ, and that is the one way presence can lie: the nix
+//! 8.4 build has no `brotli`, so every `BROTLI_*` would read as "arrived in 8.5".
+//! [`range`] therefore judges a name only against the engines that **loaded its
+//! extension** — the same clause the value diff uses for the same reason, since
+//! a build without the extension is not a minor without the constant.
+//!
+//! # A boundary needs two comparable builds
+//!
+//! Presence answers "which minors have the name" only if the engines at a
+//! boundary differ in their MINOR and in nothing else that decides whether the
+//! name is registered. They do not: the 8.2/8.3/8.4 engines here are nix
+//! `php-with-extensions` and the 8.5 one is Homebrew's, and php-src guards whole
+//! blocks of registrations on the linked library's version and on configure-time
+//! features. `LIBXML_NO_XXE` sits behind `LIBXML_VERSION >= 21300`, and the two
+//! packagers link libxml2 2.15.3 and 2.9.13 — so "arrived at 8.4, left at 8.5"
+//! was a fact about libxml2, not about PHP. `MHASH_*` (39 names) needs
+//! `--with-mhash`, `LDAP_OPT_X_SASL_*` needs `HAVE_LDAP_SASL`, and
+//! `IMAGETYPE_SWC` needs a zlib compiled into the binary rather than loaded as a
+//! shared module.
+//!
+//! So each engine also reports a **build fingerprint** (`mine_constants.php`'s
+//! `build` map, plus the linkage probe [`static_extensions`] runs),
+//! [`BUILD_PARITY`] says which of those facts an extension's registrations are
+//! guarded on, and [`range`] mints a boundary only when the two engines AT that
+//! boundary agree on every one of them. A declined boundary is recorded by name
+//! with the fact that differed, the way a refused value is. Two further rules:
+//!
+//! * an `until` additionally needs the same **packager** on both sides. A name
+//!   gone at the next minor and a next minor somebody else built are
+//!   indistinguishable, and only one of them is a fact about PHP.
+//! * an extension [`BUILD_PARITY`] says nothing about is compared on nothing,
+//!   which is the residual risk a roster always carries — the same one
+//!   [`BUILD_DEPENDENT`] carries. The packager rule is what backs the roster up
+//!   on the departure boundary, which is the one a row goes on to ASSERT.
+//!
+//! # A row with no value
+//!
+//! A name present in the older engines and gone from the top one has no value to
+//! mine and still has something to say, so it gets a **value-less row** carrying
+//! `until` and nothing else (owner ruling 2026-09-11). The value resolver ignores
+//! it — there is no literal to answer with — and no other lane reads it: the
+//! absence family's own version-skew gate (issue #28) already declines every
+//! claim made from a runtime outside the project's `PhpTarget`, so a runtime past
+//! the departure reports the name absent on its own. The `until` is what the
+//! table RECORDS, for a reader and for the next tool; it is not a second absence
+//! oracle. The table still never says a constant IS defined.
 //!
 //! # What is admitted, and what is refused
 //!
@@ -62,16 +108,15 @@
 //! # Usage
 //!
 //! ```text
-//! cargo xtask mine-constants [PHP_SRC_DIR] [--php PATH]…
+//! cargo xtask mine-constants [--php PATH]…
 //! ```
 //!
-//! `PHP_SRC_DIR` (or `$STEINS_PHP_SRC`) is a php-src checkout with the
-//! `origin/PHP-8.x` branches fetched; without one the run mines values only and
-//! every row is rangeless. `--php PATH` (repeatable, or `$STEINS_MINE_PHP` as a
-//! `:`-separated list) names the engines to mine; with none given the run asks
-//! the `php` on PATH alone, and then **no name can be refused as a value move** —
-//! a single engine agrees with itself. The engines' EXTENSION sets need not
-//! agree: a name the lower build does not have is simply not compared. Output:
+//! `--php PATH` (repeatable, or `$STEINS_MINE_PHP` as a `:`-separated list) names
+//! the engines to mine, one per minor; with none given the run asks the `php` on
+//! PATH alone, and then **nothing is diffed and no row carries a range** — a
+//! single engine agrees with itself and knows only its own minor. Two engines of
+//! the SAME minor are refused: presence is read per minor, and two answers for
+//! one minor is not a table. Output:
 //! `docs/research/phpsrc-mining/constants.toml` (source of record).
 //! `cargo xtask gen-catalog` turns it into the shipped Rust table.
 
@@ -80,13 +125,6 @@ use std::fmt::Write as _;
 use std::process::Command;
 
 use crate::corpus::repo_root;
-
-/// The PHP minors the presence scan reads, low to high. The floor is the
-/// workspace's own declared floor (ADR-0011) and the ceiling is the branch the
-/// mining engine belongs to: a range wider at the bottom would claim knowledge
-/// of a minor Steins does not analyze for, and one wider at the top would read a
-/// branch no released engine matches.
-const MINED_MINORS: &[(u16, u16)] = &[(8, 1), (8, 2), (8, 3), (8, 4), (8, 5)];
 
 /// Constants ADR-0094 §3 answers by CLASS rather than by mined value — the host
 /// sets, the 64-bit integer width, and the `PhpTarget`-derived engine version.
@@ -274,10 +312,78 @@ const BUILD_DEPENDENT_FAMILIES: &[(&str, &str, &str)] = &[
 /// constant the extension gains.
 const REFUSED_EXTENSIONS: &[&str] = &["pcntl", "posix", "sockets", "tokenizer"];
 
+/// **What an extension's registrations are guarded on**: `(extension, the build
+/// facts a minor boundary must agree about)`.
+///
+/// php-src does not register a constant unconditionally. Whole blocks sit behind
+/// the linked library's version (`#if LIBXML_VERSION >= 21300`, `#if
+/// LIBCURL_VERSION_NUM >= …`) or behind a configure-time feature
+/// (`#ifdef PHP_MHASH_BC`, `#ifdef HAVE_LDAP_SASL`, `#ifdef HAVE_ZLIB`), so two
+/// engines that differ THERE disagree about which names exist for a reason that
+/// is not their PHP minor. [`range`] refuses to mint a boundary between two such
+/// engines.
+///
+/// The facts are named the way `mine_constants.php`'s `build` map and
+/// [`static_extensions`] spell them. An extension absent from this table is
+/// compared on nothing, which is the roster's residual risk: the next library
+/// guard php-src adds needs a line here, exactly as the next `PGRES_*` needs one
+/// in [`BUILD_DEPENDENT`]. The packager rule in [`range`] is what backs it up on
+/// the departure boundary, the one a value-less row goes on to assert.
+const BUILD_PARITY: &[(&str, &[&str])] = &[
+    // libxml2's version, read by every extension that links it. `LIBXML_NO_XXE`
+    // is the row this table was written for: it is registered only above libxml2
+    // 2.13, and the nix builds link 2.15.3 against Homebrew's 2.9.13.
+    ("libxml", &["libxml"]),
+    ("dom", &["libxml"]),
+    ("SimpleXML", &["libxml"]),
+    ("xml", &["libxml"]),
+    ("xmlreader", &["libxml"]),
+    ("xmlwriter", &["libxml"]),
+    ("soap", &["libxml"]),
+    ("xsl", &["libxml", "libxslt"]),
+    // `MHASH_*` is the `--with-mhash` BC layer, not a hash algorithm roster:
+    // 39 names that exist or do not exist by configure flag.
+    ("hash", &["mhash_bc"]),
+    // `LDAP_OPT_X_SASL_*` is `#ifdef HAVE_LDAP_SASL`.
+    ("ldap", &["ldap_sasl"]),
+    ("curl", &["curl"]),
+    ("openssl", &["openssl"]),
+    ("intl", &["icu"]),
+    ("mbstring", &["oniguruma"]),
+    ("pcre", &["pcre"]),
+    ("gd", &["gd", "zlib", "zlib_linkage"]),
+    ("sodium", &["sodium"]),
+    ("gmp", &["gmp"]),
+    ("iconv", &["iconv"]),
+    ("pgsql", &["libpq"]),
+    ("pdo_pgsql", &["libpq"]),
+    ("zlib", &["zlib", "zlib_linkage"]),
+    ("zip", &["libzip", "zlib", "zlib_linkage"]),
+    ("readline", &["readline"]),
+    ("sqlite3", &["sqlite"]),
+    ("pdo_sqlite", &["sqlite"]),
+    // `ext/standard` is PHP's own, with one library guard inside it:
+    // `IMAGETYPE_SWC` is `#ifdef HAVE_ZLIB`, which follows the zlib the binary
+    // was CONFIGURED with — the nix builds load zlib as a shared module and
+    // Homebrew's compiles it in, and `extension_loaded('zlib')` is true either
+    // way, so the linkage is the fact and the mere presence is not.
+    ("standard", &["zlib_linkage"]),
+];
+
+/// Extensions whose STATIC linkage is a build fact some other extension's
+/// registrations are guarded on, probed by running the engine with `-n` — no
+/// `php.ini`, so only what is compiled into the binary answers.
+const LINKAGE_PROBES: &[&str] = &["zlib"];
+
 /// The miner's JSON shape.
 #[derive(serde::Deserialize)]
 struct Mined {
     php: String,
+    /// The build fingerprint: `fact => spelling`, as `mine_constants.php` reads
+    /// it off the linked libraries and the configure-time features php-src guards
+    /// registrations on. [`BUILD_PARITY`] says which facts matter per extension.
+    #[serde(default)]
+    build: BTreeMap<String, String>,
     extensions: Vec<String>,
     constants_total: usize,
     rows: BTreeMap<String, MinedRow>,
@@ -308,117 +414,343 @@ enum Refusal {
     ValueMoves,
 }
 
+/// A row's minor range: `(since, until)`, each absent when the engines proved no
+/// boundary there. Named because the pair is what [`range`] answers with and a
+/// bare tuple of two optional tuples reads as noise at the call site.
+type MinorRange = (Option<(u16, u16)>, Option<(u16, u16)>);
+
+/// **A boundary the presence run found and the build fingerprints took back**:
+/// which boundary, the two engines that form it, and the fact they spell
+/// differently ([`BUILD_PARITY`], or `packager` for the `until` rule).
+///
+/// Recorded and not merely counted, for the reason [`Refusal`] is: a reviewer who
+/// wants to know whether `MHASH_ADLER32` really arrived in 8.5 reads that the two
+/// builds disagree about `mhash_bc`, and a smaller `gated` number tells them
+/// nothing.
+#[derive(PartialEq, Eq, Debug)]
+struct Decline {
+    boundary: &'static str,
+    below: String,
+    above: String,
+    fact: &'static str,
+}
+
+impl Decline {
+    fn new(boundary: &'static str, below: &Engine, above: &Engine, fact: &'static str) -> Self {
+        Decline {
+            boundary,
+            below: below.mined.php.clone(),
+            above: above.mined.php.clone(),
+            fact,
+        }
+    }
+}
+
 /// One admitted row, as the source of record spells it.
 struct Row {
     ext: String,
-    ty: String,
-    value: String,
-    /// The lowest mined minor from which the presence scan saw the name, when it
-    /// saw it arrive strictly above the mined floor. `None` = no lower gate.
+    /// The value's type and spelling, or `None` for a **value-less row**: the
+    /// name is gone from the top engine, so there is no value to mine and the row
+    /// carries only its departure. Both halves move together — a type without a
+    /// value describes nothing.
+    value: Option<(String, String)>,
+    /// The lowest engine minor that has the name, when a lower one that loaded
+    /// its extension does not. `None` = no lower gate.
     since: Option<(u16, u16)>,
+    /// The highest engine minor that has the name, when a higher one that loaded
+    /// its extension does not. `None` = the name is still there at the top.
+    until: Option<(u16, u16)>,
 }
 
 /// One engine the run asked, and what it answered. The TOP engine supplies the
-/// table's values and extension set; every engine takes part in [`value_moves`].
+/// table's values and extension set; every engine takes part in [`value_moves`]
+/// and in [`range`].
 struct Engine {
     bin: String,
     minor: (u16, u16),
     mined: Mined,
+    /// The extensions this build loaded. A build WITHOUT an extension has no
+    /// opinion about that extension's constants, which is what keeps a packaging
+    /// difference from reading as a language change ([`range`]).
+    exts: BTreeSet<String>,
+    /// This build's names, keyed the way the table keys its rows.
+    names: BTreeSet<String>,
+    /// The build fingerprint: the engine's own `build` map plus the linkage
+    /// probes. Two engines that differ in a fact [`BUILD_PARITY`] charges to an
+    /// extension cannot range that extension's names between them.
+    build: BTreeMap<String, String>,
+}
+
+impl Engine {
+    /// Whether this build can be asked about `ext`'s constants at all.
+    fn judges(&self, ext: &str) -> bool {
+        self.exts.contains(ext)
+    }
+
+    /// Which packager built this engine (`nix`, `homebrew`, `system`, …), as
+    /// `mine_constants.php` classifies its `PHP_PREFIX`. The label and never the
+    /// path: an install root is exactly what [`leak_tripwire`] keeps out of a
+    /// committed file.
+    fn packager(&self) -> &str {
+        self.build.get("packager").map_or("other", String::as_str)
+    }
+
+    /// The first fact `other` spells differently among those [`BUILD_PARITY`]
+    /// charges to `ext`, or `None` when the two builds are comparable there.
+    ///
+    /// A fact neither build reports is not a difference; a fact one reports and
+    /// the other does not IS one, and the `absent` spelling makes that the same
+    /// comparison as any other.
+    fn parity_gap(&self, other: &Engine, ext: &str) -> Option<&'static str> {
+        BUILD_PARITY
+            .iter()
+            .find(|(e, _)| *e == ext)
+            .into_iter()
+            .flat_map(|(_, facts)| facts.iter())
+            .find(|fact| self.build.get(**fact) != other.build.get(**fact))
+            .copied()
+    }
+}
+
+/// One mined name, as the union across engines sees it: the spelling the miner
+/// reported, the extension and type the NEWEST engine that has it reported, and
+/// which engine that was.
+struct Candidate {
+    raw: String,
+    ext: String,
+    ty: String,
+    newest: usize,
 }
 
 /// Entry point for `cargo xtask mine-constants`.
-pub fn run(php_src: Option<&str>, php_bins: &[String]) -> Result<(), String> {
+pub fn run(php_bins: &[String]) -> Result<(), String> {
     let extensions = catalog_extensions()?;
     let mut engines = Vec::new();
     for bin in php_binaries(php_bins) {
         let mined = run_miner(&bin, &extensions)?;
         let minor = php_minor(&mined.php)?;
+        let build = build_fingerprint(&bin, &mined)?;
         println!(
-            "mine-constants: PHP {} — {} constants over {} extensions",
+            "mine-constants: PHP {} — {} constants over {} extensions, built by {}",
             mined.php,
             mined.constants_total,
-            mined.extensions.len()
+            mined.extensions.len(),
+            build.get("packager").map_or("other", String::as_str),
         );
-        engines.push(Engine { bin, minor, mined });
+        let exts = mined.extensions.iter().cloned().collect();
+        let names = mined.rows.keys().map(|n| normalize_const_fqn(n)).collect();
+        engines.push(Engine { bin, minor, mined, exts, names, build });
     }
-    // The TOP minor is the one whose values the table carries: `since` asks
-    // whether a name existed at the floor and the engine that HAS the most names
-    // is the one that can be asked about the most rows. Ties keep the order given.
+    // The TOP minor is the one whose values the table carries, and the order is
+    // also the presence table's axis, so it is established before anything reads
+    // it. Two engines of one minor would give that axis two answers for one
+    // column: refuse rather than let the later one silently win.
     engines.sort_by_key(|e| e.minor);
-    let top = engines.pop().ok_or("no PHP engine to mine")?;
-    let mined = &top.mined;
+    if let Some(w) = engines.windows(2).find(|w| w[0].minor == w[1].minor) {
+        return Err(format!(
+            "two engines report PHP {}.{} ({} and {}) — presence is read one engine per minor",
+            w[0].minor.0, w[0].minor.1, w[0].mined.php, w[1].mined.php
+        ));
+    }
+    let top = engines.last().ok_or("no PHP engine to mine")?;
 
-    let php_src = php_src
-        .map(str::to_owned)
-        .or_else(|| std::env::var("STEINS_PHP_SRC").ok())
-        .filter(|d| !d.is_empty());
-    // The scan's own reliability is measured per extension, so it needs the
-    // extension each mined name belongs to before it can judge an absence.
-    //
-    // Over every MINED name, not only the admitted ones: coverage asks whether
-    // the scan can see this extension's registrations at all, and a roster entry
-    // is an answer to a different question. Counting only the admitted names
-    // would let a refusal RAISE coverage — refusing `intl`'s 141 `U_*`, which the
-    // scan cannot see, lifts the extension over the floor and manufactures a
-    // `since = "8.2"` for `ULOC_ACTUAL_LOCALE`, which 8.1 registers through
-    // `COLLATOR_EXPOSE_CONST` and the scan is blind to. A blind spot must not
-    // become invisible because the names that revealed it stopped being mined.
-    let mut by_ext: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (name, m) in &mined.rows {
-        if m.ty != "unrepresentable" {
-            by_ext.entry(m.ext.clone()).or_default().push(normalize_const_fqn(name));
+    // The union of every engine's names, not the top engine's alone: a name the
+    // top build no longer has is exactly the `until` case, and iterating one
+    // engine would never see it. The ext and type come from the NEWEST engine
+    // that has the name, which is the one whose value the row would carry.
+    let mut candidates: BTreeMap<String, Candidate> = BTreeMap::new();
+    for (i, e) in engines.iter().enumerate() {
+        for (name, m) in &e.mined.rows {
+            candidates.insert(
+                normalize_const_fqn(name),
+                Candidate { raw: name.clone(), ext: m.ext.clone(), ty: m.ty.clone(), newest: i },
+            );
         }
     }
-    let presence = match &php_src {
-        Some(dir) => Some(scan_presence(dir, &by_ext)?),
-        None => {
-            println!(
-                "mine-constants: no php-src checkout given (argument or $STEINS_PHP_SRC) — \
-                 every row will be rangeless"
-            );
-            None
-        }
-    };
 
     let dirs = machine_dirs(&top.bin);
     let mut rows: BTreeMap<String, Row> = BTreeMap::new();
     let mut refused: BTreeMap<String, Refusal> = BTreeMap::new();
-    for (name, m) in &mined.rows {
-        if let Some(r) = refuse(name, &m.ty, &m.ext) {
-            refused.insert(name.clone(), r);
+    // The boundaries the presence run found and the build fingerprints took back
+    // ([`BUILD_PARITY`]). Recorded rather than counted: "this name's arrival was
+    // a packaging difference" is reviewable and a smaller `gated` number is not.
+    let mut declined: BTreeMap<String, Vec<Decline>> = BTreeMap::new();
+    for (key, c) in &candidates {
+        if let Some(r) = refuse(&c.raw, &c.ty, &c.ext) {
+            refused.insert(c.raw.clone(), r);
             continue;
         }
-        let value = decode_value(name, &m.ty, &m.value)?;
-        if m.ty == "string" {
-            leak_tripwire(name, &value, &dirs)?;
+        let ((since, until), gaps) = range(&engines, key, &c.ext);
+        if !gaps.is_empty() {
+            declined.insert(c.raw.clone(), gaps);
         }
-        let since = presence.as_ref().and_then(|p| arrival(p, &normalize_const_fqn(name), &m.ext));
-        rows.insert(
-            normalize_const_fqn(name),
-            Row { ext: m.ext.clone(), ty: m.ty.clone(), value, since },
-        );
+        let value = if c.newest + 1 == engines.len() {
+            let m = &engines[c.newest].mined.rows[&c.raw];
+            let value = decode_value(&c.raw, &m.ty, &m.value)?;
+            if m.ty == "string" {
+                leak_tripwire(&format!("constant `{}`", c.raw), &value, &dirs)?;
+            }
+            Some((m.ty.clone(), value))
+        } else if until.is_some() {
+            // Present below the top and gone at it, with the engines that loaded
+            // the extension agreeing on where: a value-less row.
+            None
+        } else {
+            // Absent from the top build with no proven departure — the top build
+            // simply lacks the extension. Nothing is known and nothing is said.
+            continue;
+        };
+        rows.insert(key.clone(), Row { ext: c.ext.clone(), value, since, until });
     }
 
     // The multi-engine diff, LAST: it judges the rows as they would be written,
-    // so a name the rosters already refused is not diffed, and a `since` the
-    // presence scan found is what decides which engines a disagreement counts at.
-    let moves = value_moves(&top, &engines, &rows)?;
+    // so a name the rosters already refused is not diffed, and the `since` the
+    // presence range found is what decides which engines a disagreement counts at.
+    let moves = value_moves(&engines, &rows)?;
     for name in moves.keys() {
         rows.remove(name);
         refused.insert(name.clone(), Refusal::ValueMoves);
     }
 
-    let out = render(&top, &engines, presence.as_ref(), &rows, &refused, &moves);
+    let out = render(&engines, &rows, &refused, &moves, &declined);
     let dst = repo_root().join("docs/research/phpsrc-mining/constants.toml");
     std::fs::write(&dst, &out).map_err(|e| format!("write {}: {e}", dst.display()))?;
     let gated = rows.values().filter(|r| r.since.is_some()).count();
+    let value_less = rows.values().filter(|r| r.value.is_none()).count();
     println!(
-        "mine-constants: {} rows ({gated} version-gated), {} refused → {}",
+        "mine-constants: {} rows ({gated} version-gated, {value_less} value-less), {} refused, \
+         {} boundaries declined for build parity → {}",
         rows.len(),
         refused.len(),
+        declined.len(),
         dst.display()
     );
     Ok(())
+}
+
+/// **The minors an engine set proves a name over**: `(since, until)`, with the
+/// boundaries the build fingerprints took back.
+///
+/// Only the engines that LOADED the name's extension take part. A build without
+/// `brotli` is silent about `BROTLI_*`, and reading its silence as an absence
+/// would mint `since = "8.5"` for a constant that has been there all along —
+/// a packaging difference dressed as a language change. This is the same clause
+/// [`value_moves`] applies for the same reason, and it is the whole of what
+/// replaced the php-src scan's per-extension coverage floor (issue #718).
+///
+/// Having the extension is necessary and not sufficient, which is what
+/// [`BUILD_PARITY`] adds: two builds that load `libxml` and link different
+/// libxml2s disagree about `LIBXML_NO_XXE` for libxml2's reasons, so the
+/// boundary BETWEEN them states nothing about PHP. Each boundary is therefore
+/// checked against the two engines that form it, and an `until` — the boundary a
+/// value-less row records — additionally needs the same packager on both sides.
+///
+/// Three declines beyond that, each for its own reason:
+///
+/// * no judge has the name — nothing to range over (the caller drops it);
+/// * a boundary with no engine on its far side: a lone judge knows only its own
+///   minor, and the top judge cannot see a departure it is not there to miss;
+/// * the presence is not contiguous (present, absent, present) — the builds
+///   differ in some way the extension check did not catch, so no range at all
+///   rather than a guessed one.
+fn range(engines: &[Engine], key: &str, ext: &str) -> (MinorRange, Vec<Decline>) {
+    let judges: Vec<(&Engine, bool)> = engines
+        .iter()
+        .filter(|e| e.judges(ext))
+        .map(|e| (e, e.names.contains(key)))
+        .collect();
+    let (Some(first), Some(last)) = (
+        judges.iter().position(|(_, present)| *present),
+        judges.iter().rposition(|(_, present)| *present),
+    ) else {
+        return ((None, None), Vec::new());
+    };
+    if !judges[first..=last].iter().all(|(_, present)| *present) {
+        return ((None, None), Vec::new());
+    }
+    let mut declined = Vec::new();
+    // The arrival: the engine that first has the name, against the one below it
+    // that does not.
+    let since = (first > 0)
+        .then(|| {
+            let (below, at) = (judges[first - 1].0, judges[first].0);
+            match below.parity_gap(at, ext) {
+                None => Some(at.minor),
+                Some(fact) => {
+                    declined.push(Decline::new("since", below, at, fact));
+                    None
+                }
+            }
+        })
+        .flatten();
+    // The departure, held to the stricter bar: this is the boundary a value-less
+    // row is made of, and a packager change alone is enough to explain it.
+    let until = (last + 1 < judges.len())
+        .then(|| {
+            let (at, above) = (judges[last].0, judges[last + 1].0);
+            let gap = at
+                .parity_gap(above, ext)
+                .or_else(|| (at.packager() != above.packager()).then_some("packager"));
+            match gap {
+                None => Some(at.minor),
+                Some(fact) => {
+                    declined.push(Decline::new("until", at, above, fact));
+                    None
+                }
+            }
+        })
+        .flatten();
+    ((since, until), declined)
+}
+
+/// **The build fingerprint of one engine**: what `mine_constants.php` read off
+/// the linked libraries and the configure-time features, plus the linkage probes
+/// only a second run of the binary can answer.
+fn build_fingerprint(bin: &str, mined: &Mined) -> Result<BTreeMap<String, String>, String> {
+    let mut build = mined.build.clone();
+    // The fingerprints are committed too, so they go past the same tripwire an
+    // admitted value does — against THIS engine's directories, since these are
+    // the only paths this engine's facts could be carrying.
+    let dirs = machine_dirs(bin);
+    for (fact, value) in &build {
+        leak_tripwire(&format!("build fact `{fact}`"), value, &dirs)?;
+    }
+    let statics = static_extensions(bin)?;
+    for ext in LINKAGE_PROBES {
+        // Three states and not two: a build that does not have the library at
+        // all is a third thing, and collapsing it into `shared` would make two
+        // different builds compare equal.
+        let linkage = if statics.contains(*ext) {
+            "static"
+        } else if mined.extensions.iter().any(|e| e == ext) {
+            "shared"
+        } else {
+            "absent"
+        };
+        build.insert(format!("{ext}_linkage"), linkage.to_owned());
+    }
+    Ok(build)
+}
+
+/// The extensions COMPILED INTO an engine, asked with `-n` so no `php.ini` loads
+/// a shared module and answers for one that is built in.
+///
+/// `ext/standard`'s `HAVE_ZLIB` guard follows the zlib the binary was configured
+/// with, which `extension_loaded('zlib')` cannot see: the nix builds load zlib as
+/// a shared module and lack `IMAGETYPE_SWC`, Homebrew's compiles it in and has
+/// it, and both answer `true` to the runtime question.
+fn static_extensions(bin: &str) -> Result<BTreeSet<String>, String> {
+    let out = Command::new(bin)
+        .args(["-n", "-r", "echo implode(\",\", get_loaded_extensions());"])
+        .output()
+        .map_err(|e| format!("run {bin} -n: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "linkage probe failed on {bin}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).split(',').map(|e| e.trim().to_owned()).collect())
 }
 
 /// The extension set the FUNCTION catalog mines (ADR-0094 §2: "the extension set
@@ -504,12 +836,14 @@ fn php_minor(version: &str) -> Result<(u16, u16), String> {
 ///   this one;
 /// * an engine BELOW the row's `since` says nothing either — the row does not
 ///   speak for that minor, so a disagreement there is outside its claim. This is
-///   the "unless the range scan explains it" clause, and it is the only thing
-///   `since` is allowed to excuse: a disagreement at or above `since` is inside
-///   the row's own range and no scan explains it away.
+///   the "unless the range explains it" clause, and it is the only thing `since`
+///   is allowed to excuse: a disagreement at or above `since` is inside the row's
+///   own range and nothing explains it away.
+///
+/// A value-less row takes no part at all: it claims no value, so nothing can
+/// disagree with it.
 fn value_moves(
-    top: &Engine,
-    others: &[Engine],
+    engines: &[Engine],
     rows: &BTreeMap<String, Row>,
 ) -> Result<BTreeMap<String, Vec<(String, String)>>, String> {
     // The engines key their rows the way the miner reported them and the table's
@@ -521,7 +855,7 @@ fn value_moves(
         values: BTreeMap<String, String>,
     }
     let mut answers: Vec<Answers> = Vec::new();
-    for e in others.iter().chain(std::iter::once(top)) {
+    for e in engines {
         let mut values = BTreeMap::new();
         for (n, m) in &e.mined.rows {
             let key = normalize_const_fqn(n);
@@ -534,6 +868,7 @@ fn value_moves(
 
     let mut out: BTreeMap<String, Vec<(String, String)>> = BTreeMap::new();
     for (name, row) in rows {
+        let Some((_, mined)) = &row.value else { continue };
         let mut seen: Vec<(String, String)> = Vec::new();
         for a in &answers {
             if row.since.is_some_and(|s| a.minor < s) {
@@ -542,7 +877,7 @@ fn value_moves(
             let Some(v) = a.values.get(name) else { continue };
             seen.push((a.version.clone(), v.clone()));
         }
-        if seen.iter().any(|(_, v)| *v != row.value) {
+        if seen.iter().any(|(_, v)| v != mined) {
             out.insert(name.clone(), seen);
         }
     }
@@ -600,16 +935,18 @@ fn machine_dirs(bin: &str) -> Vec<String> {
     out
 }
 
-/// Fail the run if an admitted string value carries one of this machine's own
-/// directories. The [`BUILD_DEPENDENT`] roster is what *should* catch these; this
-/// is what makes a missing roster entry a failed mining run rather than an
-/// absolute path in a committed file.
-fn leak_tripwire(name: &str, value: &str, dirs: &[String]) -> Result<(), String> {
+/// Fail the run if a value bound for the committed file carries one of this
+/// machine's own directories — an admitted string constant, or a build fact.
+/// The [`BUILD_DEPENDENT`] roster is what *should* catch the first kind; this is
+/// what makes a missing roster entry, or a fingerprint probe that answers with a
+/// path, a failed mining run rather than an absolute path in a committed file.
+fn leak_tripwire(what: &str, value: &str, dirs: &[String]) -> Result<(), String> {
     for d in dirs {
         if value.contains(d.as_str()) {
             return Err(format!(
-                "constant `{name}` carries a directory of the mining machine — \
-                 add it to BUILD_DEPENDENT in xtask/src/mine_constants.rs"
+                "{what} carries a directory of the mining machine — a constant belongs in \
+                 BUILD_DEPENDENT in xtask/src/mine_constants.rs, a build fact needs a probe \
+                 that answers without a path"
             ));
         }
     }
@@ -627,204 +964,6 @@ fn normalize_const_fqn(name: &str) -> String {
         Some(pos) => format!("{}{}", name[..=pos].to_ascii_lowercase(), &name[pos + 1..]),
         None => name.to_owned(),
     }
-}
-
-/// The presence scan's result: for each mined minor, the php-src branch tip it
-/// read and the set of constant names it could see declared there.
-struct Presence {
-    tips: Vec<((u16, u16), String)>,
-    names: Vec<((u16, u16), BTreeSet<String>)>,
-    /// Extensions the scan covers well enough for an absence to be evidence.
-    covered: BTreeSet<String>,
-}
-
-/// The share of an extension's constants the scan must see at a minor before
-/// "absent there" is read as evidence rather than as a blind spot.
-///
-/// The number is calibrated, not chosen: at 8.1 curl still registered its ~700
-/// constants through a wrapper macro that pastes the name token
-/// (`REGISTER_CURL_CONSTANT(__c)` → `REGISTER_LONG_CONSTANT(#__c, …)`), so the
-/// literal never appears anywhere a grep can reach and the scan sees almost none
-/// of them. Reading that as "curl gained 700 constants in 8.2" would gate the
-/// whole extension off for every project targeting 8.1 — a systematic wrong
-/// answer produced by a systematic blind spot. Coverage measured per extension
-/// per minor is exactly the signal that tells the two apart, and 0.90 leaves
-/// room for the handful of constants an extension genuinely gains in a minor.
-const COVERAGE_FLOOR: f64 = 0.90;
-
-/// **When the scan says a name arrived**, or `None` for no gate.
-///
-/// Four outcomes, and the three that decline are the point:
-///
-/// * the name is absent from the TOP mined minor — the engine has it, so the
-///   scan is blind to this name (macro token-pasting) and every verdict it could
-///   give is worthless. No gate.
-/// * the scan does not cover the name's EXTENSION well enough at every mined
-///   minor ([`COVERAGE_FLOOR`]) — "absent" there means nothing. No gate.
-/// * the name is present at every mined minor — it did not arrive inside the
-///   mined window, so there is nothing to gate on. No gate.
-/// * otherwise the name is present from some minor upward and absent below it:
-///   that minor is `since`. A non-monotone pattern (present, absent, present)
-///   means the scan is unreliable for this name too, and declines.
-fn arrival(p: &Presence, name: &str, ext: &str) -> Option<(u16, u16)> {
-    let seen: Vec<bool> = p.names.iter().map(|(_, set)| set.contains(name)).collect();
-    if !*seen.last()? {
-        return None;
-    }
-    if !p.covered.contains(ext) {
-        return None;
-    }
-    let first = seen.iter().position(|s| *s)?;
-    if !seen[first..].iter().all(|s| *s) {
-        return None;
-    }
-    (first > 0).then(|| p.names[first].0)
-}
-
-/// The extensions whose constants the scan sees well enough at EVERY mined minor
-/// for an absence to mean something ([`COVERAGE_FLOOR`]).
-fn covered_extensions(
-    names: &[((u16, u16), BTreeSet<String>)],
-    by_ext: &BTreeMap<String, Vec<String>>,
-) -> BTreeSet<String> {
-    let mut out = BTreeSet::new();
-    for (ext, members) in by_ext {
-        if members.is_empty() {
-            continue;
-        }
-        let worst = names
-            .iter()
-            .map(|(_, set)| {
-                let hits = members.iter().filter(|n| set.contains(n.as_str())).count();
-                hits as f64 / members.len() as f64
-            })
-            .fold(f64::INFINITY, f64::min);
-        if worst >= COVERAGE_FLOOR {
-            out.insert(ext.clone());
-        } else {
-            println!(
-                "mine-constants: extension `{ext}` — the range scan sees only {:.0}% of its \
-                 {} constants at the worst mined minor; every row of it stays rangeless",
-                worst * 100.0,
-                members.len()
-            );
-        }
-    }
-    out
-}
-
-/// Read each mined minor's php-src branch for the two places a global constant
-/// is declared.
-fn scan_presence(
-    dir: &str,
-    by_ext: &BTreeMap<String, Vec<String>>,
-) -> Result<Presence, String> {
-    let mut tips = Vec::new();
-    let mut names = Vec::new();
-    for &minor in MINED_MINORS {
-        let branch = format!("origin/PHP-{}.{}", minor.0, minor.1);
-        let tip = git(dir, &["rev-parse", &branch])?.trim().to_owned();
-        let mut set = BTreeSet::new();
-        stub_constants(dir, &branch, &mut set)?;
-        c_constants(dir, &branch, &mut set)?;
-        println!(
-            "mine-constants: php-src {branch} ({}) declares {} constants the scan can see",
-            &tip[..tip.len().min(10)],
-            set.len()
-        );
-        tips.push((minor, tip));
-        names.push((minor, set));
-    }
-    let covered = covered_extensions(&names, by_ext);
-    Ok(Presence { tips, names, covered })
-}
-
-/// Global `const NAME = …;` in a `.stub.php`, resolved against the file's own
-/// `namespace` line — `ext/dom/dom.stub.php` declares `Dom\HTML_NO_DEFAULT_NS`
-/// that way, and reading the bare segment would file it under the wrong name.
-/// Column 0 is what makes this the GLOBAL form: a class constant in a stub is
-/// indented inside its class block.
-fn stub_constants(dir: &str, branch: &str, out: &mut BTreeSet<String>) -> Result<(), String> {
-    let text = git(
-        dir,
-        &["grep", "-n", "-E", "^(namespace [A-Za-z_0-9\\\\]+ *;|const [A-Za-z_0-9]+ *=)", branch, "--", "*.stub.php"],
-    )?;
-    let mut ns_of: BTreeMap<String, String> = BTreeMap::new();
-    // `git grep` output is `<branch>:<path>:<line>:<content>`, in path order, so
-    // a file's `namespace` line always precedes its constants.
-    for line in text.lines() {
-        let Some((path, content)) = grep_fields(line) else { continue };
-        if let Some(rest) = content.strip_prefix("namespace ") {
-            let ns = rest.trim().trim_end_matches(';').trim();
-            ns_of.insert(path.to_owned(), format!("{ns}\\"));
-        } else if let Some(rest) = content.strip_prefix("const ") {
-            let name = rest.split(['=', ' ']).next().unwrap_or("").trim();
-            if !name.is_empty() {
-                let ns = ns_of.get(path).map_or("", String::as_str);
-                out.insert(normalize_const_fqn(&format!("{ns}{name}")));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// `REGISTER_*_CONSTANT("NAME", …)` and `zend_register_*_constant("NAME", …)` in
-/// C — the pre-stub registration form, still how `ext/json` declares its flags on
-/// the older branches.
-fn c_constants(dir: &str, branch: &str, out: &mut BTreeSet<String>) -> Result<(), String> {
-    let text = git(
-        dir,
-        &[
-            "grep",
-            "-h",
-            "-o",
-            "-E",
-            "(REGISTER_[A-Z_]*CONSTANT[A-Z_]*|zend_register_[a-z_]*constant[a-z_]*) *\\( *\"[A-Za-z_0-9\\\\]+\"",
-            branch,
-            "--",
-            "*.c",
-            "*.h",
-        ],
-    )?;
-    for line in text.lines() {
-        if let Some(open) = line.find('"') {
-            let rest = &line[open + 1..];
-            if let Some(close) = rest.find('"') {
-                out.insert(normalize_const_fqn(&rest[..close]));
-            }
-        }
-    }
-    Ok(())
-}
-
-/// Split a `git grep -n` line into `(path, content)`, dropping the branch and the
-/// line number. Paths never contain a colon in php-src, and the content may.
-fn grep_fields(line: &str) -> Option<(&str, &str)> {
-    let (_branch, rest) = line.split_once(':')?;
-    let (path, rest) = rest.split_once(':')?;
-    let (_lineno, content) = rest.split_once(':')?;
-    Some((path, content.trim()))
-}
-
-/// Run `git` inside the php-src checkout. A non-zero exit is the caller's error:
-/// a missing branch means the checkout has not fetched what the scan needs, and
-/// silently mining a partial range would be worse than refusing.
-fn git(dir: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("run git -C {dir} {}: {e}", args.join(" ")))?;
-    // `git grep` exits 1 for "no match", which is data, not failure.
-    if !out.status.success() && out.stdout.is_empty() && args.first() != Some(&"grep") {
-        return Err(format!(
-            "git -C {dir} {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Decode standard base64 (the miner's string-value encoding). Small and local:
@@ -851,13 +990,13 @@ fn base64_decode(s: &str) -> Option<Vec<u8>> {
 
 /// Render the TOML source of record.
 fn render(
-    top: &Engine,
-    others: &[Engine],
-    presence: Option<&Presence>,
+    engines: &[Engine],
     rows: &BTreeMap<String, Row>,
     refused: &BTreeMap<String, Refusal>,
     moves: &BTreeMap<String, Vec<(String, String)>>,
+    declined: &BTreeMap<String, Vec<Decline>>,
 ) -> String {
+    let top = engines.last().expect("at least one engine");
     let mined = &top.mined;
     let mut s = String::new();
     s.push_str(
@@ -868,13 +1007,20 @@ fn render(
          # `cargo xtask gen-catalog` turns it into the shipped Rust table. Regenerate\n\
          # alongside a `PINNED_PHP` bump, the way `param_facts.toml` is.\n\
          #\n\
-         # TWO SOURCES. Values and extensions come from the TOP engine's\n\
-         # `get_defined_constants(true)` (`mine_constants.php`). Version ranges cannot:\n\
-         # `since` asks whether a name existed at 8.1, and an 8.5 engine has no opinion,\n\
-         # so they come from php-src's per-minor branches instead — a `.stub.php` global\n\
-         # `const` or a `REGISTER_*_CONSTANT(\"NAME\", …)` in C. That scan is blind to a\n\
-         # registration built by macro token-pasting, so a name it cannot see at the TOP\n\
-         # mined minor gets NO range rather than a guessed one.\n\
+         # ONE SOURCE, ASKED ONCE PER MINOR. Values and extensions come from the TOP\n\
+         # engine's `get_defined_constants(true)` (`mine_constants.php`); `since` and\n\
+         # `until` come from the SAME engines' presence, one per minor. Issue #718\n\
+         # retired the php-src branch scan that used to answer the range question: it\n\
+         # read a `.stub.php` `const` or a `REGISTER_*_CONSTANT(\"NAME\", …)` in C, was\n\
+         # blind to every registration built by macro token-pasting, and needed a\n\
+         # per-extension coverage floor to keep its blind spots from minting wrong\n\
+         # gates. An engine either has the name or it does not.\n\
+         #\n\
+         # PRESENCE IS JUDGED PER EXTENSION. The builds differ — the nix 8.4 build has\n\
+         # no `brotli` — so a name is ranged only against the engines that LOADED its\n\
+         # extension. A build without the extension is not a minor without the\n\
+         # constant, and reading its silence as an absence would dress a packaging\n\
+         # difference as a language change.\n\
          #\n\
          # WHAT IS REFUSED (ADR-0094 §3). A mined row is a spec-fixed literal and\n\
          # nothing else. `platform` names are answered by class — the host sets, the\n\
@@ -897,12 +1043,30 @@ fn render(
          # measures it. An engine that lacks the name, or that sits below the row's\n\
          # `since`, takes no part — absence is the version gate's question, not this one.\n\
          #\n\
-         # `until` is a schema slot the current mining never fills, and that is a\n\
-         # property of the sources rather than of PHP: every mined name exists in the\n\
-         # engine that supplied the values, so nothing mined has left yet. A constant\n\
-         # that left before that engine (`E_STRICT`, gone in 8.5) has no value to mine\n\
-         # and therefore no row — it answers nothing at every target, which is the\n\
-         # honest verdict and not a gate.\n\n",
+         # AND A BOUNDARY NEEDS TWO COMPARABLE BUILDS. Having the extension is necessary\n\
+         # and not sufficient: php-src guards whole blocks of registrations on the\n\
+         # linked library's version and on configure-time features, so two engines that\n\
+         # differ THERE disagree about which names exist for a reason that is not their\n\
+         # PHP minor. `[engines.build]` records each build's fingerprint, and a boundary\n\
+         # is minted only when the two engines forming it agree on every fact the\n\
+         # extension's registrations are guarded on — `LIBXML_NO_XXE` is registered only\n\
+         # above libxml2 2.13, `MHASH_*` only with `--with-mhash`, `LDAP_OPT_X_SASL_*`\n\
+         # only with `HAVE_LDAP_SASL`, `IMAGETYPE_SWC` only with a zlib compiled in. An\n\
+         # `until` is held higher still: it needs the same PACKAGER on both sides, since\n\
+         # `gone at the next minor` and `the next minor was built by somebody else` are\n\
+         # otherwise indistinguishable. `[declined.build_parity]` records what this took\n\
+         # back and why.\n\
+         #\n\
+         # A ROW WITH NO VALUE. A name the older engines have and the top one does not\n\
+         # has no value to mine and still has something to say, so it gets a row with\n\
+         # `until` and no `v` at all (owner ruling 2026-09-11). Nothing reads it as an\n\
+         # oracle: the value resolver has no literal to answer with, and the absence\n\
+         # family's own version-skew gate (issue #28) already declines a claim made from\n\
+         # a runtime outside the project's target, so a runtime past the departure\n\
+         # reports the name absent on its own. The `until` is what this file RECORDS.\n\
+         # `E_STRICT` is NOT one of these: the row exists (2048) and 8.5 still defines\n\
+         # it, deprecated (issue #720). A name deprecated in place keeps its value and\n\
+         # its row; only a name actually REMOVED loses the value and keeps the row.\n\n",
     );
     let _ = writeln!(s, "[meta]");
     let _ = writeln!(s, "php = \"{}\"", mined.php);
@@ -916,26 +1080,32 @@ fn render(
     // The engines' VERSIONS and not their paths: a nix store path or a Homebrew
     // cellar is exactly what `leak_tripwire` exists to keep out of this file, and
     // the version is the whole of what the diff's reader needs.
-    let _ = writeln!(s, "# Engines the value diff compared, low minor first; `php` above is the");
-    let _ = writeln!(s, "# top one, whose values the rows carry. One entry = nothing was diffed.");
+    let _ = writeln!(s, "# The engines this run diffed, low minor first; `php` above is the top");
+    let _ = writeln!(s, "# one, whose values the rows carry. They answer BOTH questions: what a");
+    let _ = writeln!(s, "# name is worth, and which minors have it. One entry = nothing was");
+    let _ = writeln!(s, "# diffed and no row carries a range.");
     let _ = writeln!(s, "diffed = [");
-    for e in others.iter().chain(std::iter::once(top)) {
+    for e in engines {
         let _ = writeln!(s, "  {},", toml_str(&e.mined.php));
     }
     let _ = writeln!(s, "]");
-    match presence {
-        Some(p) => {
-            let _ = writeln!(s, "# php-src branch tips the presence scan read, low minor first.");
-            let _ = writeln!(s, "minors = [");
-            for ((maj, min), tip) in &p.tips {
-                let _ = writeln!(s, "  [\"{maj}.{min}\", \"{tip}\"],");
-            }
-            let _ = writeln!(s, "]");
+    s.push('\n');
+
+    // The fingerprints themselves, so a reader can check a declined boundary
+    // against the two builds that declined it without re-running the miner.
+    let _ = writeln!(s, "[engines.build]");
+    let _ = writeln!(s, "# \"<php version>\" = {{ <fact> = \"<spelling>\", … }} — the linked-library");
+    let _ = writeln!(s, "# versions and configure-time features php-src guards constant");
+    let _ = writeln!(s, "# registrations on, plus `packager` and the `*_linkage` probes. `absent`");
+    let _ = writeln!(s, "# is a value like any other: a build that cannot answer a fact differs");
+    let _ = writeln!(s, "# from one that can.");
+    for e in engines {
+        let _ = write!(s, "{} = {{", toml_str(&e.mined.php));
+        for (i, (fact, value)) in e.build.iter().enumerate() {
+            let sep = if i == 0 { " " } else { ", " };
+            let _ = write!(s, "{sep}{fact} = {}", toml_str(value));
         }
-        None => {
-            let _ = writeln!(s, "# No php-src checkout was given: every row is rangeless.");
-            let _ = writeln!(s, "minors = []");
-        }
+        let _ = writeln!(s, " }}");
     }
     s.push('\n');
 
@@ -950,15 +1120,22 @@ fn render(
         by_refusal.entry(key).or_default().push(name);
     }
     let gated = rows.values().filter(|r| r.since.is_some()).count();
+    let value_less = rows.values().filter(|r| r.value.is_none()).count();
     let _ = writeln!(s, "[counts]");
-    let _ = writeln!(s, "# mined      what `get_defined_constants(true)` had, over the catalog's extensions");
-    let _ = writeln!(s, "# rows       spec-fixed literals admitted to the table");
-    let _ = writeln!(s, "# gated      of those, carrying a `since` above the mined floor");
+    let _ = writeln!(s, "# mined      what `get_defined_constants(true)` had on the TOP engine, over");
+    let _ = writeln!(s, "#            the catalog's extensions");
+    let _ = writeln!(s, "# rows       spec-fixed literals admitted to the table, plus the value-less");
+    let _ = writeln!(s, "# gated      of those, carrying a `since` the engines' presence proved");
+    let _ = writeln!(s, "# value_less of those, carrying `until` and no value — the removed names");
     let _ = writeln!(s, "# refused_*  the three ADR-0094 §3 classes a mined row cannot carry, plus");
     let _ = writeln!(s, "#            the names the engines themselves disagreed about");
+    let _ = writeln!(s, "# declined   names whose boundary the presence run found and the build");
+    let _ = writeln!(s, "#            fingerprints took back — a packaging difference, not a minor");
     let _ = writeln!(s, "mined = {}", mined.constants_total);
     let _ = writeln!(s, "rows = {}", rows.len());
     let _ = writeln!(s, "gated = {gated}");
+    let _ = writeln!(s, "value_less = {value_less}");
+    let _ = writeln!(s, "declined_build_parity = {}", declined.len());
     for (key, names) in &by_refusal {
         let _ = writeln!(s, "refused_{key} = {}", names.len());
     }
@@ -992,22 +1169,50 @@ fn render(
     }
     s.push('\n');
 
+    // What the fingerprints took back. The evidence is the FACT the two builds
+    // spell differently: `MHASH_ADLER32` does not arrive at 8.5, the 8.5 build is
+    // the one configured `--with-mhash`, and that sentence is the whole review.
+    let _ = writeln!(s, "[declined.build_parity]");
+    let _ = writeln!(s, "# name = [[\"since|until\", \"<lower php>\", \"<upper php>\", \"<fact>\"], …] —");
+    let _ = writeln!(s, "# a boundary the presence run found between two builds that are not");
+    let _ = writeln!(s, "# comparable there. The row keeps its value and loses the range — and a");
+    let _ = writeln!(s, "# name the TOP build lacks loses its row outright, since a departure it");
+    let _ = writeln!(s, "# cannot prove is the only thing that row would have said.");
+    for (name, gaps) in declined {
+        let _ = write!(s, "{} = [", toml_key(name));
+        for (i, d) in gaps.iter().enumerate() {
+            let sep = if i == 0 { "" } else { ", " };
+            let _ = write!(
+                s,
+                "{sep}[{}, {}, {}, {}]",
+                toml_str(d.boundary),
+                toml_str(&d.below),
+                toml_str(&d.above),
+                toml_str(d.fact)
+            );
+        }
+        let _ = writeln!(s, "]");
+    }
+    s.push('\n');
+
     let _ = writeln!(s, "[const]");
-    let _ = writeln!(s, "# name = {{ ext, t, v, since? }} — `v` is the value's SPELLING: a decimal");
-    let _ = writeln!(s, "# integer, PHP's own `var_export` float, `true`/`false`/`null`, or the");
-    let _ = writeln!(s, "# string itself. Namespace segments are lowercased, the final segment is");
-    let _ = writeln!(s, "# not (PHP's own rule for a constant's identity).");
+    let _ = writeln!(s, "# name = {{ ext, t?, v?, since?, until? }} — `v` is the value's SPELLING: a");
+    let _ = writeln!(s, "# decimal integer, PHP's own `var_export` float, `true`/`false`/`null`, or");
+    let _ = writeln!(s, "# the string itself. Namespace segments are lowercased, the final segment");
+    let _ = writeln!(s, "# is not (PHP's own rule for a constant's identity). A row with `until`");
+    let _ = writeln!(s, "# and neither `t` nor `v` is a value-less row: the name is gone from the");
+    let _ = writeln!(s, "# top engine, so there is no value to carry and only its departure is");
+    let _ = writeln!(s, "# recorded.");
     for (name, r) in rows {
-        let _ = write!(
-            s,
-            "{} = {{ ext = {}, t = {}, v = {}",
-            toml_key(name),
-            toml_str(&r.ext),
-            toml_str(&r.ty),
-            toml_str(&r.value)
-        );
+        let _ = write!(s, "{} = {{ ext = {}", toml_key(name), toml_str(&r.ext));
+        if let Some((ty, value)) = &r.value {
+            let _ = write!(s, ", t = {}, v = {}", toml_str(ty), toml_str(value));
+        }
         if let Some((maj, min)) = r.since {
             let _ = write!(s, ", since = \"{maj}.{min}\"");
+        }
+        if let Some((maj, min)) = r.until {
+            let _ = write!(s, ", until = \"{maj}.{min}\"");
         }
         let _ = writeln!(s, " }}");
     }
@@ -1047,11 +1252,26 @@ fn toml_str(v: &str) -> String {
 mod tests {
     use super::*;
 
-    /// One engine's answer, spelled the way the miner's JSON does.
-    fn engine(version: &str, rows: &[(&str, &str, &str)]) -> Engine {
+    /// One engine's answer, spelled the way the miner's JSON does. `exts` is the
+    /// build's extension set — what decides whether this engine may judge a
+    /// name's presence at all.
+    fn engine(version: &str, exts: &[&str], rows: &[(&str, &str, &str)]) -> Engine {
+        build_of(version, exts, rows, &[])
+    }
+
+    /// The same, with a build fingerprint: `facts` is `(fact, spelling)`, and
+    /// `packager` defaults to one shared value so a test that says nothing about
+    /// packaging is not silently testing the `until` packager rule.
+    fn build_of(
+        version: &str,
+        exts: &[&str],
+        rows: &[(&str, &str, &str)],
+        facts: &[(&str, &str)],
+    ) -> Engine {
         let mined = Mined {
             php: version.to_owned(),
-            extensions: Vec::new(),
+            build: BTreeMap::new(),
+            extensions: exts.iter().map(|e| (*e).to_owned()).collect(),
             constants_total: rows.len(),
             rows: rows
                 .iter()
@@ -1068,11 +1288,26 @@ mod tests {
                 .collect(),
         };
         let minor = php_minor(version).expect("test version");
-        Engine { bin: "php".to_owned(), minor, mined }
+        let names = mined.rows.keys().map(|n| normalize_const_fqn(n)).collect();
+        let exts = mined.extensions.iter().cloned().collect();
+        let mut build = BTreeMap::from([("packager".to_owned(), "nix".to_owned())]);
+        build.extend(facts.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())));
+        Engine { bin: "php".to_owned(), minor, mined, exts, names, build }
+    }
+
+    /// `range`'s pair alone, for the tests that have nothing to say about why a
+    /// boundary was declined.
+    fn ranged(engines: &[Engine], key: &str, ext: &str) -> MinorRange {
+        range(engines, key, ext).0
     }
 
     fn row(ext: &str, value: &str, since: Option<(u16, u16)>) -> Row {
-        Row { ext: ext.to_owned(), ty: "int".to_owned(), value: value.to_owned(), since }
+        Row {
+            ext: ext.to_owned(),
+            value: Some(("int".to_owned(), value.to_owned())),
+            since,
+            until: None,
+        }
     }
 
     #[test]
@@ -1080,10 +1315,12 @@ mod tests {
         // The four names this check first caught are all of this shape: the top
         // engine says one number and a supported minor says another, so the row
         // the top engine would write is false at a minor the target may span.
-        let top = engine("8.5.10", &[("IMAGETYPE_COUNT", "gd", "22")]);
-        let others = vec![engine("8.4.25", &[("IMAGETYPE_COUNT", "gd", "20")])];
+        let engines = vec![
+            engine("8.4.25", &["gd"], &[("IMAGETYPE_COUNT", "gd", "20")]),
+            engine("8.5.10", &["gd"], &[("IMAGETYPE_COUNT", "gd", "22")]),
+        ];
         let rows = BTreeMap::from([("IMAGETYPE_COUNT".to_owned(), row("gd", "22", None))]);
-        let moves = value_moves(&top, &others, &rows).expect("diff");
+        let moves = value_moves(&engines, &rows).expect("diff");
         assert_eq!(
             moves.get("IMAGETYPE_COUNT").map(Vec::as_slice),
             Some(
@@ -1095,32 +1332,193 @@ mod tests {
 
     #[test]
     fn engines_that_agree_leave_the_row_alone() {
-        let top = engine("8.5.10", &[("JSON_THROW_ON_ERROR", "json", "4194304")]);
-        let others = vec![engine("8.4.25", &[("JSON_THROW_ON_ERROR", "json", "4194304")])];
+        let engines = vec![
+            engine("8.4.25", &["json"], &[("JSON_THROW_ON_ERROR", "json", "4194304")]),
+            engine("8.5.10", &["json"], &[("JSON_THROW_ON_ERROR", "json", "4194304")]),
+        ];
         let rows =
             BTreeMap::from([("JSON_THROW_ON_ERROR".to_owned(), row("json", "4194304", None))]);
-        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+        assert!(value_moves(&engines, &rows).expect("diff").is_empty());
     }
 
     #[test]
-    fn a_disagreement_below_the_rows_since_is_the_range_scans_business() {
+    fn a_disagreement_below_the_rows_since_is_the_ranges_business() {
         // The one thing `since` is allowed to excuse: the row does not speak for
         // 8.2 at all, so what 8.2 calls the name is not a counter-example to it.
-        let top = engine("8.5.10", &[("LATE_ARRIVAL", "standard", "7")]);
-        let others = vec![engine("8.2.33", &[("LATE_ARRIVAL", "standard", "3")])];
+        let engines = vec![
+            engine("8.2.33", &["standard"], &[("LATE_ARRIVAL", "standard", "3")]),
+            engine("8.5.10", &["standard"], &[("LATE_ARRIVAL", "standard", "7")]),
+        ];
         let rows =
             BTreeMap::from([("LATE_ARRIVAL".to_owned(), row("standard", "7", Some((8, 3))))]);
-        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+        assert!(value_moves(&engines, &rows).expect("diff").is_empty());
     }
 
     #[test]
     fn an_engine_that_lacks_the_name_says_nothing() {
         // A build without the extension is an absence, which is the version
         // gate's question — never a disagreement about a value.
-        let top = engine("8.5.10", &[("PGSQL_ASSOC", "pgsql", "1")]);
-        let others = vec![engine("8.2.33", &[])];
+        let engines = vec![
+            engine("8.2.33", &[], &[]),
+            engine("8.5.10", &["pgsql"], &[("PGSQL_ASSOC", "pgsql", "1")]),
+        ];
         let rows = BTreeMap::from([("PGSQL_ASSOC".to_owned(), row("pgsql", "1", None))]);
-        assert!(value_moves(&top, &others, &rows).expect("diff").is_empty());
+        assert!(value_moves(&engines, &rows).expect("diff").is_empty());
+    }
+
+    /// **The presence-derived `since`** (issue #718): the engines that loaded the
+    /// extension disagree about whether the NAME is there, and the lowest one that
+    /// has it is where it arrived. Delete the `first > 0` clause in [`range`] and
+    /// this reads `None`, which is the rangeless table the php-src scan produced.
+    #[test]
+    fn a_name_the_lower_engines_lack_is_gated_at_its_arrival() {
+        let engines = vec![
+            engine("8.2.33", &["standard"], &[]),
+            engine("8.3.33", &["standard"], &[("LATE_ARRIVAL", "standard", "7")]),
+            engine("8.5.10", &["standard"], &[("LATE_ARRIVAL", "standard", "7")]),
+        ];
+        assert_eq!(ranged(&engines, "LATE_ARRIVAL", "standard"), (Some((8, 3)), None));
+    }
+
+    /// **The presence-derived `until`**: the name is there through 8.4 and gone at
+    /// 8.5, so the row it mints is the value-less one the absence family reads.
+    #[test]
+    fn a_name_the_top_engine_lost_carries_its_departure() {
+        let engines = vec![
+            engine("8.4.25", &["standard"], &[("DEPARTED", "standard", "7")]),
+            engine("8.5.10", &["standard"], &[]),
+        ];
+        assert_eq!(ranged(&engines, "DEPARTED", "standard"), (None, Some((8, 4))));
+    }
+
+    /// **A build difference is not a language change.** The nix 8.4 build has no
+    /// `brotli`, and reading its silence as an absence would gate the whole
+    /// extension at 8.5. Delete [`Engine::judges`] from [`range`]'s filter and this
+    /// test reports `since = 8.5` for a constant that has been there all along.
+    #[test]
+    fn an_engine_without_the_extension_judges_nothing() {
+        let engines = vec![
+            engine("8.4.25", &["standard"], &[]),
+            engine("8.5.10", &["standard", "brotli"], &[("BROTLI_GENERIC", "brotli", "0")]),
+        ];
+        assert_eq!(ranged(&engines, "BROTLI_GENERIC", "brotli"), (None, None));
+    }
+
+    /// One engine knows only its own minor, so it proves neither an arrival nor a
+    /// departure — which is what makes a single-engine run rangeless rather than a
+    /// table claiming every name arrived at that minor.
+    ///
+    /// The pair is the point, and the clauses it pins are [`range`]'s `first > 0`
+    /// and `last + 1 < judges.len()`: a boundary is the gap BETWEEN two engines,
+    /// so the second engine is what creates one. Drop either clause and the lone
+    /// judge starts answering `since = 8.5` — which is the rangeless run turned
+    /// into a table claiming every name arrived at the top minor.
+    #[test]
+    fn one_judge_ranges_nothing() {
+        let alone = vec![engine("8.5.10", &["standard"], &[("SORT_REGULAR", "standard", "0")])];
+        assert_eq!(ranged(&alone, "SORT_REGULAR", "standard"), (None, None));
+        assert_eq!(ranged(&alone, "NOT_HERE", "standard"), (None, None));
+        // The same top engine with a neighbour below it that lacks the name: now
+        // there IS a gap, and it is the arrival.
+        let paired = vec![
+            engine("8.4.25", &["standard"], &[]),
+            engine("8.5.10", &["standard"], &[("SORT_REGULAR", "standard", "0")]),
+        ];
+        assert_eq!(ranged(&paired, "SORT_REGULAR", "standard"), (Some((8, 5)), None));
+    }
+
+    /// Absent, present, absent, present: the builds differ in some way the
+    /// extension check did not catch, so no range at all rather than a guessed one.
+    ///
+    /// Four engines and not three, so the clause is load-bearing: with the
+    /// contiguity check deleted, the first `present` reads as an arrival and the
+    /// row mints `since = 8.3` over a minor that does not have the name.
+    #[test]
+    fn a_gap_in_the_presence_run_ranges_nothing() {
+        let engines = vec![
+            engine("8.2.33", &["standard"], &[]),
+            engine("8.3.33", &["standard"], &[("PATCHY", "standard", "1")]),
+            engine("8.4.25", &["standard"], &[]),
+            engine("8.5.10", &["standard"], &[("PATCHY", "standard", "1")]),
+        ];
+        assert_eq!(ranged(&engines, "PATCHY", "standard"), (None, None));
+    }
+
+    /// **The boundary the fingerprints take back** — `LIBXML_NO_XXE` in miniature.
+    /// Both builds load `libxml` and they link different libxml2s, and php-src
+    /// registers the name only above 2.13: the presence run sees an arrival and
+    /// the arrival is libxml2's, not PHP's.
+    #[test]
+    fn a_boundary_between_two_incomparable_builds_is_declined() {
+        let engines = vec![
+            build_of("8.4.25", &["libxml"], &[], &[("libxml", "20913")]),
+            build_of(
+                "8.5.10",
+                &["libxml"],
+                &[("LIBXML_NO_XXE", "libxml", "1")],
+                &[("libxml", "21503")],
+            ),
+        ];
+        let (pair, declined) = range(&engines, "LIBXML_NO_XXE", "libxml");
+        assert_eq!(pair, (None, None));
+        assert_eq!(
+            declined,
+            vec![Decline {
+                boundary: "since",
+                below: "8.4.25".to_owned(),
+                above: "8.5.10".to_owned(),
+                fact: "libxml",
+            }]
+        );
+        // The same two minors with ONE libxml2 between them: now the arrival is
+        // PHP's, and the row is gated at it.
+        let agreed = vec![
+            build_of("8.4.25", &["libxml"], &[], &[("libxml", "21503")]),
+            build_of(
+                "8.5.10",
+                &["libxml"],
+                &[("LIBXML_NO_XXE", "libxml", "1")],
+                &[("libxml", "21503")],
+            ),
+        ];
+        assert_eq!(ranged(&agreed, "LIBXML_NO_XXE", "libxml"), (Some((8, 5)), None));
+    }
+
+    /// A fact `BUILD_PARITY` charges to some OTHER extension is not this row's
+    /// business: the prefixes stay as narrow as the claim, the way the
+    /// build-dependent families' do.
+    #[test]
+    fn a_fact_another_extension_is_guarded_on_declines_nothing() {
+        let engines = vec![
+            build_of("8.4.25", &["json"], &[], &[("libxml", "20913")]),
+            build_of("8.5.10", &["json"], &[("JSON_LATE", "json", "1")], &[("libxml", "21503")]),
+        ];
+        assert_eq!(ranged(&engines, "JSON_LATE", "json"), (Some((8, 5)), None));
+    }
+
+    /// **An `until` is never minted across a packager change.** The two builds
+    /// agree on every fact the extension is guarded on and were built by different
+    /// people, and "the name is gone at 8.5" and "8.5 was packaged by somebody
+    /// else" are the same observation until a second 8.5 build says otherwise.
+    ///
+    /// The arrival at the same boundary is NOT held to this bar: a wrong `since`
+    /// keeps the resolver quiet below it, and a wrong `until` is a row asserting a
+    /// departure that never happened.
+    #[test]
+    fn a_departure_across_a_packager_change_is_declined() {
+        let engines = vec![
+            build_of("8.4.25", &["mysqli"], &[("GONE", "mysqli", "1")], &[("packager", "nix")]),
+            build_of("8.5.10", &["mysqli"], &[], &[("packager", "homebrew")]),
+        ];
+        let (pair, declined) = range(&engines, "GONE", "mysqli");
+        assert_eq!(pair, (None, None));
+        assert_eq!(declined.first().map(|d| (d.boundary, d.fact)), Some(("until", "packager")));
+        // One packager on both sides and the departure stands.
+        let same = vec![
+            build_of("8.3.33", &["mysqli"], &[("GONE", "mysqli", "1")], &[]),
+            build_of("8.4.25", &["mysqli"], &[], &[]),
+        ];
+        assert_eq!(ranged(&same, "GONE", "mysqli"), (None, Some((8, 3))));
     }
 
     #[test]

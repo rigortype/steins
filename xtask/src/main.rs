@@ -11,11 +11,12 @@
 //!   gen-catalog [--check]    regenerate the builtin tables from mining TOML (--check: verify only)
 //!   lean-check [--bless]     check the committed Lean 4 vectors against the spec
 //!   licenses                 regenerate THIRD-PARTY-LICENSES.md from cargo-about
-//!   mine-constants [DIR] [--php PATH]…
-//!                            mine the engines' constants (+ php-src ranges) into the constants TOML
-//!   mine-function-map [DIR] [--functions] [--methods]
+//!   mine-constants [--php PATH]…
+//!                            mine the engines' constants and their minor ranges into the constants TOML
+//!   mine-function-map [DIR] [--functions] [--methods] [--php PATH]…
 //!                            mine phpstan-src's functionMap into the declared-return TOMLs
-//!   mine-param-facts         mine the engine's own arginfo into the parameter-facts TOML
+//!   mine-param-facts [--php PATH]… [--merge TOML]…
+//!                            union the engines' own arginfo into the parameter-facts TOML
 //!   nsrt [DIR]               assertType harness (oracle idea B) over phpstan-src nsrt
 //!   perf <DIR>… [--bless]    cold perf baseline + the determinism half of warm ≡ cold (ADR-0092 §5)
 //!   phpdoc-oracle [--check]  diff steins-phpdoc against the real phpstan/phpdoc-parser
@@ -107,16 +108,17 @@ fn main() -> ExitCode {
             Err(e) => fail(&e),
         },
         Some("mine-constants") => {
-            let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
-            // `--php PATH`, repeatable: the engines whose values the run diffs
+            // `--php PATH`, repeatable: the engines the run diffs, one per minor
             // (ADR-0094 §2 — the generator runs over the minors the corpus
-            // harness scopes, and one engine cannot disagree with itself).
+            // harness scopes, and one engine cannot disagree with itself). Since
+            // issue #718 these engines also answer the RANGE question, so a
+            // single-engine run is rangeless as well as undiffed.
             let php: Vec<String> = args
                 .windows(2)
                 .filter(|w| w[0] == "--php")
                 .map(|w| w[1].clone())
                 .collect();
-            match mine_constants::run(dir, &php) {
+            match mine_constants::run(&php) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
             }
@@ -131,15 +133,39 @@ fn main() -> ExitCode {
                 functions: functions || !methods,
                 methods: methods || !functions,
             };
-            match mine_function_map::run(dir, halves) {
+            // `--php PATH`, repeatable: the countersigning engines (issue #714).
+            // The top minor decides each row's bucket; the rest are vetoes.
+            let php: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--php")
+                .map(|w| w[1].clone())
+                .collect();
+            match mine_function_map::run(dir, halves, &php) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => fail(&e),
             }
         }
-        Some("mine-param-facts") => match mine_param_facts::run() {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(e) => fail(&e),
-        },
+        Some("mine-param-facts") => {
+            // `--php PATH`, repeatable: the engines whose rows the run unions
+            // (issue #703 — a build is one operating system, and `chroot` is a
+            // Linux builtin). `--merge TOML` takes a previously-mined table as one
+            // more source, which is how a Linux engine reaches this table from a
+            // machine that has none.
+            let php: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--php")
+                .map(|w| w[1].clone())
+                .collect();
+            let merges: Vec<String> = args
+                .windows(2)
+                .filter(|w| w[0] == "--merge")
+                .map(|w| w[1].clone())
+                .collect();
+            match mine_param_facts::run(&php, &merges) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(e) => fail(&e),
+            }
+        }
         Some("nsrt") => {
             let dir = args.get(1).filter(|a| !a.starts_with("--")).map(String::as_str);
             match nsrt::run(dir) {
@@ -165,7 +191,7 @@ fn main() -> ExitCode {
         )),
         None => {
             eprintln!(
-                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [DIR] [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
+                "usage: cargo xtask <artifact-bytes <DIR>… [--no-php] | corpus-sync [--update] | fp-gate | freq | gen-catalog | lean-check [--bless] | licenses | mine-constants [--php PATH]… | mine-function-map [DIR] [--functions] [--methods] [--php PATH]… | mine-param-facts [--php PATH]… [--merge TOML]… | nsrt [DIR] | perf <DIR>… [--runs N] [--bless] [--no-php] | phpdoc-oracle [--check]>"
             );
             ExitCode::from(2)
         }

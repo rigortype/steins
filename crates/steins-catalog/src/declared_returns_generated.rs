@@ -14,18 +14,19 @@
 //                   Copyright (c) 2015 Andrew Morrison)
 //
 // phpstan-src pin: dcde2be6ca3caae0e0d4bee6bfbc9fd39ea560e7
-// cross-checked against PHP 8.5.9 via the real sidecar.
+// cross-checked against PHP 8.5.10 via the real sidecar.
+// Every minor asked, low first: 8.2.33, 8.3.33, 8.4.25, 8.5.10.
 //
 // Mining counts at the pin:
 //   12461  functionMap entries (after the delta ladder)
 //    6658  `Class::method` rows skipped (methods stay out of this slice)
 //      18  names whose alternate signatures disagree on the return type
-//    1116  rows the declared-contract arm lane cannot carry, of which
+//    1118  rows the declared-contract arm lane cannot carry, of which
 //       0    shaped arrays / lists
 //     474    objects / class names / callable / resource
-//      75  rows the arm-wise engine countersign refuses
-//    2793  names the pinned engine does not know as functions
-//    1711  ADMITTED (the table below), of which
+//      76  rows the arm-wise engine countersign refuses
+//    2791  names the pinned engine does not know as functions
+//    1710  ADMITTED (the table below), of which
 //     792    RICHER than a single-base envelope (the #79 and ADR-0071 reach)
 //
 // The object half of that bucket is no longer deferred. ADR-0071 emptied the
@@ -123,7 +124,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("asort", "bool"),
     ("assert", "bool"),
     ("ast\\get_kind_name", "string"),
-    ("ast\\get_metadata", "array<int, ast\\metadata>"),
+    ("ast\\get_metadata", "array<int,ast\\Metadata>"),
     ("ast\\get_supported_versions", "array<int, int>"),
     ("ast\\kind_uses_flags", "bool"),
     ("ast\\parse_code", "ast\\Node"),
@@ -279,7 +280,6 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("datefmt_parse", "int|float|false"),
     ("datefmt_set_calendar", "bool"),
     ("datefmt_set_pattern", "bool"),
-    ("datefmt_set_timezone", "bool"),
     ("dba_delete", "bool"),
     ("dba_exists", "bool"),
     ("dba_fetch", "string|false"),
@@ -506,7 +506,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("gmp_random_bits", "GMP"),
     ("gmp_random_range", "GMP"),
     ("gmp_root", "GMP"),
-    ("gmp_rootrem", "array<int, gmp>"),
+    ("gmp_rootrem", "array<int,GMP>"),
     ("gmp_scan0", "int"),
     ("gmp_scan1", "int"),
     ("gmp_sign", "int"),
@@ -855,7 +855,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("ldap_unbind", "bool"),
     ("levenshtein", "int"),
     ("libxml_disable_entity_loader", "bool"),
-    ("libxml_get_errors", "list<libxmlerror>"),
+    ("libxml_get_errors", "list<LibXMLError>"),
     ("libxml_get_last_error", "LibXMLError|false"),
     ("libxml_set_external_entity_loader", "bool"),
     ("libxml_use_internal_errors", "bool"),
@@ -991,7 +991,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("mysqli_fetch_array", "false|null|array"),
     ("mysqli_fetch_assoc", "false|null|array<string, int|float|string|null>"),
     ("mysqli_fetch_column", "int|float|string|false|null"),
-    ("mysqli_fetch_fields", "list<stdclass&object>"),
+    ("mysqli_fetch_fields", "list<stdClass&object{name: string, orgname: string, table: string, orgtable: string, def: string, db: string, catalog: \"def\", max_length: 0, length: int, charsetnr: string, flags: int, type: int, decimals: int}>"),
     ("mysqli_fetch_lengths", "false|array"),
     ("mysqli_fetch_object", "object|false|null"),
     ("mysqli_field_count", "int"),
@@ -1595,7 +1595,7 @@ pub(crate) static DECLARED_RETURNS: &[(&str, &str)] = &[
     ("stream_set_write_buffer", "int"),
     ("stream_socket_enable_crypto", "0|bool"),
     ("stream_socket_get_name", "string|false"),
-    ("stream_socket_pair", "resource[]|false"),
+    ("stream_socket_pair", "false|array<resource>"),
     ("stream_socket_recvfrom", "string|false"),
     ("stream_socket_sendto", "int|false"),
     ("stream_socket_shutdown", "bool"),

@@ -17,14 +17,32 @@
 //!    `array<K, V>`, `array{…}`, `iterable<K, V>`) once `subsumes` could judge array pairs
 //!    instead of answering `Maybe`. Objects, `mixed`/`void`/`never` and opaque strings stay
 //!    dropped and counted.
-//! 3. The engine countersigns: every surviving row is checked arm-wise against the real
-//!    sidecar's `reflect(name)` at the pin (PHP 8.5.8) via
-//!    [`steins_contract::normalize::subsumes`], total in both directions — every row arm
-//!    subsumed by some engine arm (never invented), and every engine arm subsuming some row
-//!    arm (may sharpen, never drop: `string` vs `?string` loses a null, `int` vs `int|false`
-//!    loses the failure arm; both excluded and listed verbatim). A name unknown to the engine
-//!    is excluded; a function with no declared return type is not a disagreement — that's
-//!    where the map adds reach.
+//! 3. The engines countersign: every surviving row is checked arm-wise against the real
+//!    sidecar's `reflect(name)` via [`steins_contract::normalize::subsumes`], total in both
+//!    directions — every row arm subsumed by some engine arm (never invented), and every
+//!    engine arm subsuming some row arm (may sharpen, never drop: `string` vs `?string` loses
+//!    a null, `int` vs `int|false` loses the failure arm; both excluded and listed verbatim).
+//!    A name unknown to the engine is excluded; a function with no declared return type is
+//!    not a disagreement — that's where the map adds reach.
+//!
+//! # Several engines, and what each of them may do (issue #714)
+//!
+//! `--php PATH` is repeatable, the way `mine-constants`' is, and the engines answer in
+//! ascending minor order. The division of labour is deliberately asymmetric, because the
+//! two halves of "countersign" are different claims:
+//!
+//! * **The TOP engine decides a row's fate**, exactly as the single-engine run did. Which
+//!   bucket a refusal is charged to is the cross-run comparison series ADR-0069 §5's table
+//!   is built on, and letting a lower minor reclassify a row would make the columns
+//!   incomparable between pins.
+//! * **Every LOWER engine is a veto** ([`veto`]). A row the top engine admits and a
+//!   supported minor CONTRADICTS is a row that is false on that minor, so it is refused and
+//!   listed with the version that objected. An engine that lacks the name, or declares no
+//!   return type, vetoes nothing — that is absence, not disagreement, and it is the same
+//!   clause `mine-constants` applies for the same reason (ADR-0094 §2).
+//!
+//! `[meta] crosscheck_php` is the top engine and `crosscheck_diffed` is the whole set, so a
+//! row's provenance names every PHP that vouched for it.
 //!
 //! ADR-0069 §3: rot answered by machinery, not diligence.
 //!
@@ -42,12 +60,14 @@
 //! # Usage
 //!
 //! ```text
-//! cargo xtask mine-function-map [/path/to/phpstan-src] [--functions] [--methods]
+//! cargo xtask mine-function-map [/path/to/phpstan-src] [--functions] [--methods] [--php PATH]…
 //! ```
 //!
 //! Default checkout: `~/repo/php/phpstan-src`, read-only. Its `HEAD` becomes
 //! the mining pin recorded in the emitted TOMLs. With neither flag both halves
-//! are written; see [`Halves`] for why either may be written alone.
+//! are written; see [`Halves`] for why either may be written alone. `--php PATH`
+//! (repeatable) names the countersigning engines, low minor last; with none given
+//! the run asks the `php` on `PATH` alone and nothing is vetoed.
 //!
 //! Output: `docs/research/phpstan-mining/declared_returns.toml` and
 //! `declared_method_returns.toml` (sources of record). `cargo xtask gen-catalog`
@@ -92,8 +112,74 @@ pub struct Halves {
     pub methods: bool,
 }
 
+/// One countersigning engine: its own version string and a live sidecar on it.
+struct Engine {
+    version: String,
+    minor: (u16, u16),
+    sidecar: Sidecar,
+}
+
+/// Spawn one sidecar per `--php PATH`, ascending by minor so the TOP engine is
+/// last. With no path given the run asks the `php` on `PATH` alone, which is the
+/// single-engine run this command has always been.
+fn engines(php_bins: &[String]) -> Result<Vec<Engine>, String> {
+    let bins: Vec<String> =
+        if php_bins.is_empty() { vec!["php".to_owned()] } else { php_bins.to_vec() };
+    let mut out = Vec::new();
+    for bin in bins {
+        let mut sidecar =
+            Sidecar::spawn_with(&bin).map_err(|e| format!("spawn php sidecar on {bin}: {e}"))?;
+        let version = engine_version(&mut sidecar)?;
+        let minor = php_minor(&version)?;
+        out.push(Engine { version, minor, sidecar });
+    }
+    out.sort_by_key(|e| e.minor);
+    Ok(out)
+}
+
+/// `"8.4.25"` -> `(8, 4)`. A version this cannot read is a failed run: the minor is
+/// what orders the engines, and guessing it would pick the wrong top one.
+fn php_minor(version: &str) -> Result<(u16, u16), String> {
+    let mut parts = version.split('.');
+    let maj = parts.next().and_then(|p| p.parse().ok());
+    let min = parts.next().and_then(|p| p.parse().ok());
+    match (maj, min) {
+        (Some(maj), Some(min)) => Ok((maj, min)),
+        _ => Err(format!("engine reported PHP version `{version}`, which has no major.minor")),
+    }
+}
+
+/// **The lower engines' veto over an admitted FUNCTION row**: the version that
+/// contradicted it and what it declared, or `None` when none of them does.
+///
+/// Only a CONTRADICTION vetoes. An engine that does not have the name is a build
+/// or a minor without it, and an engine that declares no return type is the very
+/// silence this table exists to fill — neither is a counter-example to the row.
+fn veto(
+    lower: &mut [Engine],
+    name: &str,
+    arms: &[ContractTy],
+) -> Result<Option<(String, String)>, String> {
+    for e in lower.iter_mut() {
+        let Some(refl) = e.sidecar.reflect(name) else {
+            return Err(format!(
+                "sidecar `reflect({name})` failed on PHP {} — refusing to mine a partial table",
+                e.version
+            ));
+        };
+        if !refl.function_exists {
+            continue;
+        }
+        let Some(engine_ty) = refl.return_type.as_deref() else { continue };
+        if !countersigned(arms, engine_ty) {
+            return Ok(Some((e.version.clone(), engine_ty.to_owned())));
+        }
+    }
+    Ok(None)
+}
+
 /// Entry point for `cargo xtask mine-function-map`.
-pub fn run(checkout: Option<&str>, halves: Halves) -> Result<(), String> {
+pub fn run(checkout: Option<&str>, halves: Halves, php_bins: &[String]) -> Result<(), String> {
     let root = match checkout {
         Some(p) => PathBuf::from(p),
         None => default_checkout()?,
@@ -115,10 +201,12 @@ pub fn run(checkout: Option<&str>, halves: Halves) -> Result<(), String> {
     if !mined.malformed.is_empty() {
         return Err(format!("{} malformed signature rows: {:?}", mined.malformed.len(), mined.malformed));
     }
+    let mut engines = engines(php_bins)?;
+    let versions: Vec<String> = engines.iter().map(|e| e.version.clone()).collect();
+    let engine_version =
+        versions.last().ok_or("no PHP engine to countersign with")?.clone();
     if !halves.functions {
-        let mut sidecar = Sidecar::spawn().map_err(|e| format!("spawn php sidecar: {e}"))?;
-        let engine_version = engine_version(&mut sidecar)?;
-        return mine_methods(&mined, &pin, &engine_version, &mut sidecar);
+        return mine_methods(&mined, &pin, &versions, &mut engines);
     }
 
     // Stage 2 — lowerability: `floor_row` is the whole filter (see its doc and
@@ -152,41 +240,59 @@ pub fn run(checkout: Option<&str>, halves: Halves) -> Result<(), String> {
         dropped.unparseable,
     );
 
-    // Stage 3 — the engine countersigns.
-    let mut sidecar = Sidecar::spawn().map_err(|e| format!("spawn php sidecar: {e}"))?;
-    let engine_version = engine_version(&mut sidecar)?;
-    println!("mine-function-map: cross-checking {} rows against PHP {engine_version}", candidates.len());
+    // Stage 3 — the engines countersign: the TOP one decides, the lower ones veto.
+    println!(
+        "mine-function-map: cross-checking {} rows against PHP {}",
+        candidates.len(),
+        versions.join(", ")
+    );
 
     let mut admitted: BTreeMap<String, String> = BTreeMap::new();
-    let mut admitted_rich = 0usize;
     let mut disagree: BTreeMap<String, Vec<String>> = BTreeMap::new();
     let mut missing: Vec<String> = Vec::new();
     let mut typeless = 0usize;
+    let (lower, top) = engines.split_at_mut(versions.len() - 1);
+    let top = &mut top[0];
     for (name, row) in &candidates {
-        let Some(refl) = sidecar.reflect(name) else {
+        let Some(refl) = top.sidecar.reflect(name) else {
             return Err(format!("sidecar `reflect({name})` failed — refusing to mine a partial table"));
         };
         if !refl.function_exists {
             missing.push(name.clone());
             continue;
         }
-        let mut admit = |row: &Row| {
-            if !row.envelope {
-                admitted_rich += 1;
-            }
-            admitted.insert(name.clone(), row.canon.clone());
-        };
         match refl.return_type.as_deref() {
             // The engine declares nothing: the map adds reach, not a contradiction.
             None => {
                 typeless += 1;
-                admit(row);
+                admitted.insert(name.clone(), row.canon.clone());
             }
-            Some(engine_ty) if countersigned(&row.arms, engine_ty) => admit(row),
+            Some(engine_ty) if countersigned(&row.arms, engine_ty) => {
+                admitted.insert(name.clone(), row.canon.clone());
+            }
             Some(engine_ty) => {
                 disagree.insert(name.clone(), vec![row.canon.clone(), engine_ty.to_owned()]);
             }
         }
+    }
+    // The veto pass, over the rows the top engine let through. Recorded in the same
+    // `[exclusions.reflection_disagree]` table, with the version that objected, so a
+    // reviewer sees WHICH minor the row was false on.
+    let mut vetoed = 0usize;
+    for name in admitted.keys().cloned().collect::<Vec<_>>() {
+        let row = &candidates[&name];
+        if let Some((version, engine_ty)) = veto(lower, &name, &row.arms)? {
+            admitted.remove(&name);
+            disagree.insert(
+                name.clone(),
+                vec![row.canon.clone(), format!("{engine_ty} (PHP {version})")],
+            );
+            vetoed += 1;
+        }
+    }
+    let admitted_rich = admitted.keys().filter(|n| !candidates[*n].envelope).count();
+    if vetoed > 0 {
+        println!("mine-function-map: {vetoed} rows vetoed by a lower minor");
     }
 
     println!(
@@ -212,6 +318,7 @@ pub fn run(checkout: Option<&str>, halves: Halves) -> Result<(), String> {
     let toml = render(
         &pin,
         &engine_version,
+        &versions,
         &counts,
         &admitted,
         &mined.version_sensitive,
@@ -223,7 +330,7 @@ pub fn run(checkout: Option<&str>, halves: Halves) -> Result<(), String> {
     std::fs::write(&dst, &toml).map_err(|e| format!("write {}: {e}", dst.display()))?;
     println!("mine-function-map: wrote {}", dst.display());
     if halves.methods {
-        mine_methods(&mined, &pin, &engine_version, &mut sidecar)?;
+        mine_methods(&mined, &pin, &versions, &mut engines)?;
     }
     println!("mine-function-map: now run `cargo xtask gen-catalog`");
     Ok(())
@@ -563,6 +670,7 @@ fn countersigned(row: &[ContractTy], engine_ty: &str) -> bool {
 fn render(
     pin: &str,
     engine_version: &str,
+    versions: &[String],
     counts: &Counts,
     admitted: &BTreeMap<String, String>,
     version_sensitive: &BTreeMap<String, Vec<String>>,
@@ -595,6 +703,15 @@ fn render(
     let _ = writeln!(s, "[meta]");
     let _ = writeln!(s, "phpstan_src_commit = {pin:?}");
     let _ = writeln!(s, "crosscheck_php = {engine_version:?}");
+    // Every engine the run asked, low minor first. `crosscheck_php` above is the
+    // TOP one, which decides each row's bucket; the rest are vetoes, and a row a
+    // lower minor contradicted is in `[exclusions.reflection_disagree]` with the
+    // version that objected. One entry = nothing was vetoed.
+    let _ = writeln!(s, "crosscheck_diffed = [");
+    for v in versions {
+        let _ = writeln!(s, "  {v:?},");
+    }
+    let _ = writeln!(s, "]");
     let _ = writeln!(
         s,
         "miner = \"docs/research/phpstan-mining/mine_function_map.php\"\n\
@@ -865,9 +982,12 @@ fn builtin_ancestors(class: &str) -> Vec<String> {
 fn mine_methods(
     mined: &Mined,
     pin: &str,
-    engine_version: &str,
-    sidecar: &mut Sidecar,
+    versions: &[String],
+    engines: &mut [Engine],
 ) -> Result<(), String> {
+    let engine_version = versions.last().ok_or("no PHP engine to countersign with")?.clone();
+    let (lower, top) = engines.split_at_mut(versions.len() - 1);
+    let sidecar = &mut top[0].sidecar;
     // Stage 2 — lowerability, the same filter and the same buckets. Every key that
     // does NOT survive to a row is also remembered by name, with why: difference 5
     // reads that list back once the admitted set is known.
@@ -965,6 +1085,47 @@ fn mine_methods(
         }
     }
 
+    // The veto pass (issue #714), over the keys the top engine let through. A lower
+    // minor that has the class, has the method, and DECLARES a contradicting return
+    // type is a counter-example; a minor that lacks either, or declares nothing, is
+    // an absence and vetoes nothing.
+    let mut vetoed = 0usize;
+    for key in admitted.keys().cloned().collect::<Vec<_>>() {
+        let Some((class, method)) = key.split_once("::") else { continue };
+        let arms = &candidates[&key].arms;
+        for e in lower.iter_mut() {
+            let refl = e.sidecar.reflect_class(class).ok_or_else(|| {
+                format!(
+                    "sidecar `reflect_class({class})` failed on PHP {} — refusing to mine a \
+                     partial table",
+                    e.version
+                )
+            })?;
+            let Some(decl) = refl.declaration else { continue };
+            let Some(m) = decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) else {
+                continue;
+            };
+            let Some(engine_ty) = m.return_type.as_deref() else { continue };
+            if engine_says_mixed(engine_ty) || countersigned(arms, engine_ty) {
+                continue;
+            }
+            admitted.remove(&key);
+            disagree.insert(
+                key.clone(),
+                vec![
+                    candidates[&key].canon.clone(),
+                    format!("{engine_ty} (PHP {})", e.version),
+                ],
+            );
+            refused.insert(key.clone(), "reflection_disagree");
+            vetoed += 1;
+            break;
+        }
+    }
+    if vetoed > 0 {
+        println!("mine-function-map: {vetoed} method rows vetoed by a lower minor");
+    }
+
     // Difference 5 — the shadow set. A key functionMap states and this miner did
     // not admit is a statement that the child's own declaration differs from
     // whatever an ancestor declares; the walk must not climb past it. Only the keys
@@ -1018,7 +1179,8 @@ fn mine_methods(
     };
     let toml = render_methods(
         pin,
-        engine_version,
+        &engine_version,
+        versions,
         &counts,
         &admitted,
         &mined.method_version_sensitive,
@@ -1041,6 +1203,7 @@ fn mine_methods(
 fn render_methods(
     pin: &str,
     engine_version: &str,
+    versions: &[String],
     counts: &MethodCounts,
     admitted: &BTreeMap<String, MethodRow>,
     version_sensitive: &BTreeMap<String, Vec<String>>,
@@ -1093,6 +1256,15 @@ fn render_methods(
     let _ = writeln!(s, "[meta]");
     let _ = writeln!(s, "phpstan_src_commit = {pin:?}");
     let _ = writeln!(s, "crosscheck_php = {engine_version:?}");
+    // Every engine the run asked, low minor first. `crosscheck_php` above is the
+    // TOP one, which decides each row's bucket; the rest are vetoes, and a row a
+    // lower minor contradicted is in `[exclusions.reflection_disagree]` with the
+    // version that objected. One entry = nothing was vetoed.
+    let _ = writeln!(s, "crosscheck_diffed = [");
+    for v in versions {
+        let _ = writeln!(s, "  {v:?},");
+    }
+    let _ = writeln!(s, "]");
     let _ = writeln!(
         s,
         "miner = \"docs/research/phpstan-mining/mine_function_map.php\"\n\
