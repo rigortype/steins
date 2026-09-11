@@ -375,6 +375,40 @@ fn an_alias_body_wrapped_across_lines_is_reassembled() {
 }
 
 #[test]
+fn a_bracket_inside_a_shape_key_does_not_decide_where_the_body_ends() {
+    // Issue #666. The continuation rule counts brackets, and a shape key is a
+    // string literal that may spell one. Both repros are the same defect read in
+    // opposite directions, and both are what `is_unclosed` now refuses to read.
+    //
+    // The `>` cancelled the `{`, so the body looked finished and bound the half
+    // before the wrap — the narrowing this whole join exists to prevent.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{a: 'x>',\n *   b: int}", "Row")),
+        "dumped phpdoc type: array{a: 'x>', b: int} (asserted)"
+    );
+    assert_eq!(
+        param_count(&format!(
+            "{}\n(new Probe())->m(['a' => 'x>', 'b' => 1]);\n",
+            probe(" * @phpstan-type Row array{a: 'x>',\n *   b: int}", "Row")
+        )),
+        0,
+        "the shape the author wrote across the wrap admits its own value"
+    );
+    // And the other way: the `{` in the key left a finished shape looking open,
+    // so the prose below joined it and the whole declaration floored.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}\n * Some prose.", "Row")),
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}", "Row"))
+    );
+    // Spelled out as well as paired, because two floors also agree: what the
+    // prose used to cost was the whole declaration.
+    assert_eq!(
+        one_dump(&probe(" * @phpstan-type Row array{'{': int}\n * Some prose.", "Row")),
+        "dumped phpdoc type: array{'{': int} (asserted)"
+    );
+}
+
+#[test]
 fn a_template_name_is_not_captured_by_a_same_named_alias() {
     // The ordering claim, from the outside: aliases expand *after* both `@template`
     // shadow stages, so by then a declared template name is no longer an identifier
