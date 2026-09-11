@@ -423,15 +423,15 @@ fn is_effect_contract(d: &Diagnostic) -> bool {
 /// strict floor, or `EXPECTED_PROOF_FINDINGS` — the finding sets are byte-identical
 /// to master `965a9b5`'s, 219 rows each.
 ///
-/// That is a consequence of what the widening *is*, not luck. An envelope is an
-/// upper bound, so it can only ever make a type narrower, and every finding in
-/// this table fires on a type being **too wide** for what a contract demands — a
-/// `string|false` reaching a `string` parameter, a `null` arm reaching a return.
-/// Narrowing an argument or a return can silence such a row; it cannot create
-/// one. The rows that *could* have moved are the ones a newly-bound `array` would
-/// have silenced, and there were none: every `phpdoc.*` row in the public corpus
-/// premises on a scalar-or-`false` union, none on a call whose only type came from
-/// a bare `array` hint.
+/// That zero is **measured, not entailed**. The widening can move this table in
+/// both directions: a newly-bound `array` can silence a row that premised on a
+/// wider fact, and it can *create* one — `$x = $o->all();` (`all(): array`, no
+/// docblock) handed to a `@param string $s` fires `phpdoc.param-mismatch` on the
+/// branch where master, holding `$x` as unknown, said nothing (a true positive,
+/// the envelope being Verified). Neither shape occurs in the public corpus: every
+/// `phpdoc.*` row here premises on a scalar-or-`false` union, and no bare
+/// `: array` return reaches a docblock-typed parameter. So 219 = 219 is the
+/// corpus's arithmetic, and a package that does either will move its row.
 ///
 /// Run on PHP **8.5.10**, where CI calibrates on 8.4 — the divergence that buys
 /// (phpunit at 82 against its seeded 88, the four builtin `T|false` rows the 8.5

@@ -1570,8 +1570,10 @@ The two-arm union is PHP's own definition and needs no new vocabulary.
 
 A2 is the whole point: `SummaryCtx::native` is seeded from the enforced
 top where the hint lowered to no `NativeType`, so a `return 'x'` under
-`: array` is dropped as the boundary `TypeError` it is, and the callee's
-own `type.return-mismatch` stays the standing record. The refusal in
+`: array` is dropped as the boundary `TypeError` it is. **Nothing records
+that exit today**: `type.return-mismatch` never learned the top, so the
+drop is a gap the return check must close (issue #727) — the drop itself
+stays correct, since the exit cannot return. The refusal in
 `join_value_component` keeps its shape and loses only these three: the
 arms it exists to require are now there.
 
