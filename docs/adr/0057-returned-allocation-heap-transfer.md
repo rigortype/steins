@@ -1637,6 +1637,58 @@ caller `Traversable|array` through the arm lane. Pinned from both sides
 by `a_generator_is_not_bounded_by_its_iterable_hint` and
 `a_generator_method_is_not_bounded_by_its_object_hint`.
 
+### A9.8 What it measured, including the shortfall
+
+Against master `965a9b5`, PHP 8.5.10, phpstan-src's nsrt corpus:
+
+| | master | branch |
+| --- | --- | --- |
+| nsrt rows measured | 16699 | 16698 |
+| `match` | 3775 | 3771 |
+| admissible (`match`+`equal`+`subsumed`) | 4507 | **4512** |
+| fp-gate public half | 219 findings | 219, byte-identical |
+
+Fifteen nsrt rows changed their answer. Nine are strictly better
+(`differ`→`subsumed` ×6, `differ`→`match` ×1, and two rows whose spelling
+sharpened inside an unchanged verdict), one row *disappeared* because the
+slice proved its statement dead (`bug-11642.php:44` sits after
+`if (count($entries) > 3) throw`, and the body returns exactly four
+elements, so the throw is unconditional — PHPStan keeps the row because it
+tracks no exact count), and **two are `match`→`differ`**:
+
+- `generics.php:1561` — `arrayBound2([1, 2, 3])` under
+  `@template T of array<string>`. PHPStan answers the template *bound*,
+  `array<string>`, because the argument violates it; we now answer
+  `list{1, 2, 3}`, which is the value the call actually returns. The
+  oracle grades spelling agreement, so a more correct answer scores as a
+  loss. Not repaired.
+- `bug-11642.php:31` — the one real cost, and it is A9.3's asymmetry
+  arriving at a call site. The callee is `findBy(array $c): array` with
+  `@return object[]`; we used to answer the docblock's `list<stdClass>`
+  and now answer A1's proof, `list{mixed, mixed, mixed, mixed}`. The
+  length is *gained* and the element type is *lost*, because the exits are
+  four `new stdClass` allocations and the value domain holds no object —
+  so each element contributes `mixed`. Both answers are sound; the trade
+  is a **Verified** claim displacing an `Asserted` one, which is the
+  stratum order working as designed, and the same trade the other
+  `match`→`differ` row makes. Closing it is ADR-0093 candidate B's job,
+  not a merge rule invented here.
+
+The **shortfall against the issue's estimate** is the other thing to
+record. #603 predicted ~120 nsrt rows; 15 moved. The estimate counted
+declaration sites, and two gates stand between a site and a row. Of the
+254 bare enforced-top return declarations in the nsrt corpus, **183
+already carry a `@return`-family docblock** — the contract lane answered
+those before this slice and answers them still, now refined *within* the
+envelope rather than against an empty native list — and **49 take no
+parameters**, which T0 declines to descend into, so the value component
+never arrives and the envelope alone answers (`array`, up from `unknown`,
+which is a real gain that the oracle scores as `differ` either way). That
+leaves 63 sites with arguments and no docblock, most of which are declared
+in the fixtures as template or bound demonstrations and never called at an
+asserted site. The estimate was not wrong about the population; it was
+wrong about how much of the population this lane can reach.
+
 ### A9 refusals (each one line, each anchored)
 
 - **A `TypeMember::ArrayTop` inside `NativeType`** — a union member is a
@@ -1661,4 +1713,11 @@ by `a_generator_is_not_bounded_by_its_iterable_hint` and
   is a measurement question A9.5 leaves open rather than a soundness one.
 - Whether `: object` is worth revisiting once ADR-0093 candidate B gives
   the value domain an object, at which point the value component would
-  have somewhere to land.
+  have somewhere to land — and with it `bug-11642.php:31` (A9.8), whose
+  element type is lost for exactly that reason.
+- Whether the arm lane and the value summary should **merge** rather than
+  the second shadowing the first. `list{mixed, mixed, mixed, mixed}` and
+  `list<stdClass>` are both true of the same value and the render picks
+  one; nothing about #603 created that precedence, but #603 is the first
+  slice to put two informative answers in front of it often enough to
+  notice.
