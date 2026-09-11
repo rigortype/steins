@@ -6,6 +6,7 @@
 use std::collections::HashMap;
 
 use steins_contract::ContractTy;
+use steins_domain::Certainty;
 use steins_domain::{Base, Fact, PhpStr};
 use steins_syntax::{
     ArgValue, CallExpr, Callee, NameRef, NamedArg, NativeType, Param, Receiver, RefKind,
@@ -42,7 +43,7 @@ use crate::method_call::{display_of_call, nullsafe_call, receiver_new_object, th
 use crate::offsets::shape_read_at;
 use crate::project::{Diagnostic, Site};
 use crate::refine::refine_contract_arms;
-use crate::return_arms::{fn_return_arms, native_arms};
+use crate::return_arms::{enforced_top_arms, fn_return_arms, native_arms};
 use crate::walk::{WalkCx, analyze_scope, value_stratum};
 
 /// The class FQN that lexically owns a method scope; `None` for function/top.
@@ -1831,7 +1832,25 @@ fn join_value_component(
                     None => ExitContribution::Floor,
                 }
             }
-            (ExitContribution::Fact(f, s), None) => ExitContribution::Fact(f.clone(), *s),
+            // Under an enforced top there is no conversion, only the boundary: a
+            // fact the top admits WHOLE crosses as it is; a fact it admits only in
+            // part (`null|list{5}` under `: array` — a finite or nullable fact with
+            // one violating member, which A2 keeps because `admits_fact` says
+            // `Maybe`) may not cross, or the caller would hold a Verified member no
+            // call can return. It degrades to `Floor`, and the top has no value
+            // floor, so the value component declines and the arm lane answers
+            // `array` (A3, wider never wrong) — the `: int` twin's degrade to the
+            // native floor, one lane over.
+            (ExitContribution::Fact(f, s), None) => match callee_scope.ret_hint.map(|h| h.kind) {
+                Some(RetHintKind::Top(top))
+                    if !enforced_top_arms(top)
+                        .iter()
+                        .any(|ty| steins_contract::admits_fact(ty, f) == Certainty::Yes) =>
+                {
+                    ExitContribution::Floor
+                }
+                _ => ExitContribution::Fact(f.clone(), *s),
+            },
             // An object exit is a `Floor` on this side and always has been (T1's
             // `Heap` variant only names what the OTHER side reads): a value floor is
             // the widest thing the value domain can say about it, and for an object

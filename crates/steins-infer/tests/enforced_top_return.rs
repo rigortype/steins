@@ -140,6 +140,50 @@ fn a2_drops_a_non_array_exit_under_an_array_hint() {
     assert_eq!(one_type(src), "list{1}");
 }
 
+/// A2 keeps an exit whose fact the top admits only in PART (`null|list{5}`: the
+/// `null` member violates, the list member conforms, so `admits_fact` says `Maybe`).
+/// Such a fact may not cross the boundary whole — the caller would hold a Verified
+/// `null` no `: array` call can return. It degrades to the floor, the top has no
+/// value floor, and the arm lane answers `array`.
+#[test]
+fn a_partially_conforming_exit_does_not_cross_an_enforced_top() {
+    let src = "<?php\n\
+        function unk() { return $GLOBALS['q']; }\n\
+        function nn(int $t, bool $b, bool $c): array {\n\
+            $a = null;\n\
+            if ($c) { $a = [5]; }\n\
+            if ($b) { return [7]; }\n\
+            return $a;\n\
+        }\n\
+        \\PHPStan\\dumpType(nn(1, unk(), unk()));\n";
+    assert_eq!(one_type(src), "array");
+    let strs = "<?php\n\
+        function unk() { return $GLOBALS['q']; }\n\
+        function ss(int $t, bool $b, bool $c): array {\n\
+            $a = 'str';\n\
+            if ($c) { $a = [5]; }\n\
+            if ($b) { return [7]; }\n\
+            return $a;\n\
+        }\n\
+        \\PHPStan\\dumpType(ss(1, unk(), unk()));\n";
+    assert_eq!(one_type(strs), "array");
+}
+
+/// The generator guard's negative direction: a `yield` inside a nested closure,
+/// arrow function or anonymous-class method belongs to THAT scope, so the outer
+/// function keeps its enforced top.
+#[test]
+fn a_yield_in_a_nested_scope_does_not_make_the_outer_a_generator() {
+    let arrow = "<?php\n\
+        function h(int $t): array { $g = fn() => yield 1; return 'str'; }\n\
+        \\PHPStan\\dumpType(h(1));\n";
+    assert_eq!(one_type(arrow), "array", "the string exit is dropped, the envelope answers");
+    let anon = "<?php\n\
+        function k(int $t): array { $o = new class { function m() { yield 1; } }; return [3]; }\n\
+        \\PHPStan\\dumpType(k(1));\n";
+    assert_eq!(one_type(anon), "list{3}");
+}
+
 /// The same drop under `: iterable`: a string is neither an array nor a `Traversable`.
 #[test]
 fn a2_drops_a_string_exit_under_an_iterable_hint() {
