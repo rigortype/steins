@@ -376,6 +376,13 @@ enum AliasBody {
 /// the using member's.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct AliasTable {
+    /// Keyed by the alias name **as spelled** (issue #670). Upstream's
+    /// `NameScope::hasTypeAlias` is `array_key_exists($alias, …)` on the exact
+    /// spelling, so `@phpstan-type Row int` beside `class Row {}` leaves `@param
+    /// row` naming the class (a `class.nameCase` remark, not the alias). Folding
+    /// case here would make that `row` the alias and convict `new Row()` —
+    /// with the alias now winning a same-spelled collision, the fold is the one
+    /// step that manufactures a `No` the oracle does not give.
     entries: HashMap<String, AliasBody>,
     /// The declaring class-like's `@template` shadow, applied to a substituted
     /// body so the invariant "no template name survives as a class" holds inside
@@ -448,7 +455,7 @@ pub(crate) fn type_aliases_of(docblock: Option<&str>, file: usize, off: u32) -> 
                 }
                 steins_phpdoc::TypeAliasBody::Imported { .. } => AliasBody::Floor,
             };
-            table.entries.insert(decl.name.to_ascii_lowercase(), body);
+            table.entries.insert(decl.name.clone(), body);
         }
     }
     // The shadow is only ever read to neutralize templates inside a substituted
@@ -982,14 +989,16 @@ impl<'a> Cx<'a> {
     fn resolve_aliases_at(&self, ty: &mut PType, table: &AliasTable, depth: u32) {
         if let PKind::Identifier(name) = &ty.kind {
             // `\Row` names a class, whatever the docblock aliases. Unreachable
-            // today — the table is keyed by bare lowercased names, so a
+            // today — the table is keyed by bare names as spelled, so a
             // qualified spelling misses it anyway — and kept as the statement of
             // the invariant: a key normalization that ever stripped the leading
             // `\` would otherwise turn a class reference into an alias silently.
             if name.contains('\\') {
                 return;
             }
-            let Some(body) = table.entries.get(&name.to_ascii_lowercase()) else { return };
+            // Exact spelling, not a case fold: `row` is not the alias `Row`
+            // upstream, so it must not be one here (see [`AliasTable::entries`]).
+            let Some(body) = table.entries.get(name) else { return };
             match self.expand_alias(body, table, depth) {
                 Some(expanded) => ty.kind = expanded.kind,
                 None => {
@@ -1026,7 +1035,7 @@ impl<'a> Cx<'a> {
                 let owner_fqn = self.resolve_pclass(table.site.0, table.site.1, owner);
                 let (ofile, od) = self.find_class(&owner_fqn)?;
                 let owner_table = type_aliases_of(od.docblock.as_deref(), ofile, od.span.start);
-                let ty = match owner_table.entries.get(&name.to_ascii_lowercase())? {
+                let ty = match owner_table.entries.get(name)? {
                     // One hop across the class boundary, not a chain of imports:
                     // re-importing an import is the walk ADR-0032 declines.
                     AliasBody::Local(ty) => ty.clone(),

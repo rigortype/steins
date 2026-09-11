@@ -279,6 +279,36 @@ fn the_collision_no_longer_convicts_a_value_the_alias_admits() {
 }
 
 #[test]
+fn an_alias_is_looked_up_by_its_spelling_not_its_case() {
+    // `NameScope::hasTypeAlias` is `array_key_exists($alias, …)` on the exact
+    // spelling (issue #670), so beside `class Row {}` an alias `Row` leaves
+    // `@param row` naming the class — PHPStan says `class.nameCase` and resolves
+    // `App\row` — and only the same-spelled `@param Row` is the alias. Keyed by
+    // a case fold, `row` was the alias too, and with the alias now winning the
+    // collision `m(new Row())` was convicted against `int`, a `No` the oracle
+    // never gives. Both directions, because the fold hid both.
+    let src = "<?php\nnamespace App;\nclass Row {}\n/** @phpstan-type Row int */\nclass Probe {\n\
+        /** @param row $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(new Row());\n";
+    assert_eq!(one_dump(src), "dumped phpdoc type: App\\Row (asserted)");
+    assert_eq!(param_count(src), 0, "`row` is the class, which `new Row()` inhabits");
+    // The other way round: a lower-case alias does not capture the class-cased
+    // spelling either, and the exact spelling still is the alias.
+    let mirror = "<?php\nnamespace App;\nclass Row {}\n/** @phpstan-type row int */\nclass Probe {\n\
+        /** @param Row $v */\n\
+        public function m($v): void { \\PHPStan\\dumpPhpDocType($v); }\n\
+        /** @param row $v */\n\
+        public function n($v): void { \\PHPStan\\dumpPhpDocType($v); }\n}\n\
+        $p = new Probe();\n$p->m(new Row());\n$p->n(new Row());\n";
+    assert_eq!(
+        dumps(mirror),
+        ["dumped phpdoc type: App\\Row (asserted)", "dumped phpdoc type: int (asserted)"]
+    );
+    assert_eq!(param_count(mirror), 1, "only `n`, whose `row` is the alias, rejects the object");
+}
+
+#[test]
 fn built_in_vocabulary_cannot_be_aliased() {
     // phpstan-src's own `type-aliases.php` writes `@phpstan-type int
     // ShouldNotHappen` and then asserts that `@param int` is still `int`.
