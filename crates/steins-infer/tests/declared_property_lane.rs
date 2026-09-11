@@ -342,16 +342,64 @@ function f(C $c): void {
     assert_eq!(one_type(src), "unknown");
 }
 
-/// A hooked property (PHP 8.4) binds no fact ever (FP class 16) — the read side
-/// keeps the rule the write side keeps.
+/// A class-body hooked property (PHP 8.4) answers nothing, and does so one rung
+/// earlier than the refusal: the declaration is dropped entirely at lowering, so
+/// the chain walk never finds a name to read.
 #[test]
-fn a_hooked_property_answers_nothing() {
+fn a_class_body_hooked_property_answers_nothing() {
     let src = r#"<?php
 class C {
     public int $x { get => 1; }
     public int $y = 2;
 }
 function f(C $c): void {
+    \PHPStan\dumpType($c->x);
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+}
+
+/// A **promoted** hooked property is the spelling that survives lowering, carrying
+/// its `hooked` flag — the refusal's first half. Its value is whatever the hook
+/// computes, and this crate's rule for the hooked surface is that it binds no fact
+/// ever (FP class 16); the read side keeps the rule the write side keeps.
+#[test]
+fn a_promoted_hooked_property_answers_nothing() {
+    let src = r#"<?php
+class C {
+    public function __construct(public int $n { get => 1; }) {}
+}
+function f(C $c): void {
+    \PHPStan\dumpType($c->n);
+}
+"#;
+    assert_eq!(one_type(src), "unknown");
+
+    // The same declaration without the hook does answer — so the silence above is
+    // the refusal talking, not the promoted spelling failing to reach the lane.
+    let unhooked = r#"<?php
+class C {
+    public function __construct(public int $n) {}
+}
+function f(C $c): void {
+    \PHPStan\dumpType($c->n);
+}
+"#;
+    assert_eq!(one_type(unhooked), "int");
+}
+
+/// The refusal's second half: a child that **hooks** a property its parent
+/// declares plainly. The chain walk finds the parent's declaration, which knows
+/// nothing about the hook, so the hooked-name query is asked separately — exactly
+/// as the write side asks it.
+#[test]
+fn a_child_hooking_an_inherited_property_answers_nothing() {
+    let src = r#"<?php
+class Base { public int $x = 1; }
+class Child extends Base {
+    public int $x { get => 2; }
+}
+function f(Child $c): void {
     \PHPStan\dumpType($c->x);
 }
 "#;

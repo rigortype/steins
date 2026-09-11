@@ -18,7 +18,7 @@ use crate::cx::Cx;
 use crate::dispatch::declared_receiver_class;
 use crate::env::{ContractArm, Store};
 use crate::heap::parse_var_type;
-use crate::refine::{expand_enum_case_arms, refine_contract_arms};
+use crate::refine::refine_contract_arms;
 use crate::return_arms::{demote_arms, native_arms};
 
 /// A property declaration found on a class's own chain, with the file that
@@ -164,9 +164,10 @@ fn property_arms(cx: &Cx, found: &FoundProperty<'_>) -> Option<Vec<ContractArm>>
     let resolve = |n: &str| {
         cx.resolve_pclass(file, off, n).trim_start_matches('\\').to_ascii_lowercase()
     };
-    let mut arms = refine_contract_arms(&native, phpdoc.as_ref(), &resolve)?;
-    // The finite enum domain travels this direction too (issue #429): a `Suit $s`
-    // property declares the same enforced case set a `: Suit` return does.
-    expand_enum_case_arms(cx, &mut arms);
-    Some(arms)
+    // No enum-case expansion here, unlike the declared-return floor. Expansion buys
+    // a lane that guards can subtract from (issue #429), and nothing subtracts from
+    // this one — the dump is its only reader and renders through
+    // `collapse_whole_enums`, which folds an untouched case set straight back to the
+    // enum's name. Expanding would be a round trip with no observable step in it.
+    refine_contract_arms(&native, phpdoc.as_ref(), &resolve)
 }
