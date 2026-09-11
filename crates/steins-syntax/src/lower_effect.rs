@@ -138,6 +138,11 @@ fn const_arg_of(expr: &Expression<'_>) -> Option<CallTarget> {
         Expression::Literal(Literal::String(ls)) => {
             Some(CallTarget::Literal(bytes_to_string(ls.value?)))
         }
+        // The return-mode flag (issue #352). PHP's `true`/`false` are keywords to
+        // the lexer, case-insensitively, so they never reach the `ConstantAccess`
+        // arm below however they are spelled.
+        Expression::Literal(Literal::True(_)) => Some(CallTarget::Bool(true)),
+        Expression::Literal(Literal::False(_)) => Some(CallTarget::Bool(false)),
         Expression::ConstantAccess(ca) => {
             let name = name_ref(&ca.name);
             (!name.raw.contains('\\')).then_some(CallTarget::ConstFetch(name.raw))

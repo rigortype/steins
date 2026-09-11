@@ -354,11 +354,19 @@ pub enum CallTarget {
     /// A bare global-constant fetch by spelling, leading `\` stripped (`STDOUT`,
     /// `\STDERR`); namespaced fetches excluded, unqualified kept (PHP global fallback).
     ConstFetch(String),
+    /// A bare `true` / `false` keyword, case-insensitively as PHP spells it
+    /// (issue #352). Not a stream target — the return-mode flag of
+    /// `print_r`/`var_export` is the argument this reads, and
+    /// [`Self::ConstFetch`] cannot carry it because the parser lexes the
+    /// keyword as a literal rather than a constant fetch. Appended
+    /// **after** the existing variants so no persisted variant index moves.
+    Bool(bool),
 }
 
 /// The **proven-constant leading arguments** of a named call (issue #318):
 /// positions 0/1, `None` unless [`CallTarget`] could read it — matching what
-/// stream rows need (a target + mode/second target). Named/spread empties both.
+/// stream rows need (a target + mode/second target) and what the output rows
+/// need (a return-mode flag at position 1, issue #352). Named/spread empties both.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 #[cfg_attr(feature = "persist", derive(serde::Serialize, serde::Deserialize))]
 pub struct ConstArgs {

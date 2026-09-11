@@ -2135,6 +2135,10 @@ fn stream_target(
     match target? {
         steins_syntax::CallTarget::Literal(s) => Some(steins_catalog::StreamTarget::Literal(s)),
         steins_syntax::CallTarget::ConstFetch(s) => Some(steins_catalog::StreamTarget::Constant(s)),
+        // A return-mode flag is no stream target (issue #352): `fopen($p, true)`
+        // is a program with a type error, not a mode string, and the row keeps
+        // its arg-blind default.
+        steins_syntax::CallTarget::Bool(_) => None,
     }
 }
 
@@ -2155,9 +2159,11 @@ fn stream_target(
 /// of them, exactly what leg 2's `every` asks.
 ///
 /// `const_args` is the third axis and the only one that can make a row *narrower*
-/// (issue #318): a wrapper-capable stream row is `io` until the call site proves
-/// which channel it opens, and [`steins_catalog::narrowed_stream_labels`] is what
-/// reads the proof. Both consumers of a call origin — the summary fixpoint and
+/// (issues #318, #352): a wrapper-capable stream row is `io` until the call site
+/// proves which channel it opens, and a dumper is `io.output.buffer` until the
+/// call site proves return-mode — [`steins_catalog::narrowed_stream_labels`] and
+/// [`steins_catalog::narrowed_output_labels`] are what read the two proofs.
+/// Both consumers of a call origin — the summary fixpoint and
 /// the envelope check — reach the decision through this one function, so the two
 /// cannot answer differently. `None` is the honest answer wherever the arguments
 /// are not in hand (a builtin passed *as* a callback is invoked with arguments of
@@ -2178,8 +2184,18 @@ fn builtin_findings(
             stream_target(c.second.as_ref()),
         )
     });
-    let colored: &[&str] =
-        narrowed.as_deref().unwrap_or_else(|| steins_catalog::effect_labels(name).unwrap_or(&[]));
+    // The output family's own narrowing (issue #352), on the same axis and with
+    // the same syntactic bar: `print_r($x, true)` renders into a return value and
+    // writes nothing. Disjoint from the stream narrowing above by name — no row
+    // is both wrapper-capable and a dumper — so the two never contend.
+    let return_mode = const_args
+        .is_some_and(|c| matches!(c.second, Some(steins_syntax::CallTarget::Bool(true))));
+    let colored: &[&str] = match narrowed.as_deref() {
+        Some(labels) => labels,
+        None => steins_catalog::narrowed_output_labels(name, return_mode)
+            .or_else(|| steins_catalog::effect_labels(name))
+            .unwrap_or(&[]),
+    };
     let by_ref = out_param_labels(name, arg_targets);
     if colored.is_empty() && by_ref.is_empty() {
         return Vec::new();

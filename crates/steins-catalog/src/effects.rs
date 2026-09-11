@@ -1,7 +1,8 @@
 //! The effect tables of builtins (ADR-0018 labels, ADR-0021 argument-blind
 //! upper bounds): [`effect_labels`] and its method-shaped twin
 //! [`method_effect_labels`], the call-site narrowing of the wrapper-capable
-//! stream rows ([`narrowed_stream_labels`], issue #318), the two callback
+//! stream rows ([`narrowed_stream_labels`], issue #318) and of the return-mode
+//! dumpers ([`narrowed_output_labels`], issue #352), the two callback
 //! shapes no parameter table can see ([`callables_in_array_param`],
 //! [`variadic_tail_is_data`], issue #382), and the by-ref out-parameter rows
 //! ([`out_params`], ADR-0063) with their written-when witnesses
@@ -29,8 +30,10 @@ use crate::fold::foldable;
 ///   filesystem one. A call site that *proves* its target narrows back down;
 ///   see [`narrowed_stream_labels`]. `session_start` is the one composite
 ///   exception.
-/// * `print_r`/`var_export`/`var_dump` are `io.output.buffer` even though the
-///   first two are pure in return-mode — the arg-blind safe choice.
+/// * `print_r`/`var_export`/`var_dump` are `io.output.buffer`; the first two are
+///   pure in return-mode, and a call site that *proves* the flag narrows the row
+///   away — see [`narrowed_output_labels`] (issue #352). `var_dump` has no such
+///   mode and keeps the row at every call site.
 /// * `sleep`/`usleep` are `io`: an observable timing side effect.
 /// * `curl_exec` keeps `io.output` arg-blind (only `CURLOPT_RETURNTRANSFER`
 ///   suppresses it); `system`/`passthru` take parent `io.output` since
@@ -167,6 +170,37 @@ pub fn effect_labels(name: &str) -> Option<&'static [&'static str]> {
     };
 
     colored.or_else(|| foldable(name).then_some(EMPTY))
+}
+
+/// The **narrowed** effect labels a dumper earns at a call site that proves
+/// **return-mode** (issue #352), or `None` — the caller then keeps
+/// [`effect_labels`]' arg-blind `io.output.buffer`.
+///
+/// `print_r` and `var_export` take a second argument that, when true, makes them
+/// build the rendering and hand it back instead of writing it: nothing reaches
+/// the output channel, and what is left is pure. `return_mode` is that argument
+/// as a call site *proved* it — a written `true`, never a dataflow guess (the
+/// same syntactic bar [`narrowed_stream_labels`] holds its targets to), so an
+/// omitted argument, a variable, and a written `false` all answer `None` and the
+/// arg-blind row stands.
+///
+/// # What it declines
+///
+/// `var_dump` has no return-mode parameter at all — it always writes, and a
+/// second argument to it is just another value to dump. `printf`/`vprintf`
+/// return a *length* rather than the rendered string and write either way.
+/// `flush`/`ob_flush` take no such argument. Every one of them keeps the row.
+#[must_use]
+pub fn narrowed_output_labels(name: &str, return_mode: bool) -> Option<&'static [&'static str]> {
+    // The flag leads: nearly every call to these names omits it, and that call
+    // answers before paying for a lowercase copy of the name.
+    if !return_mode {
+        return None;
+    }
+    match name.to_ascii_lowercase().as_str() {
+        "print_r" | "var_export" => Some(&[]),
+        _ => None,
+    }
 }
 
 /// A call argument a **call site** proved constant (issue #318) — the evidence
@@ -2343,6 +2377,15 @@ mod tests {
         // The OB flush pair writes through the buffer like `echo` does.
         assert_eq!(effect_labels("flush"), Some(&["io.output.buffer"][..]));
         assert_eq!(effect_labels("ob_flush"), Some(&["io.output.buffer"][..]));
+        // Return-mode (issue #352): the two dumpers that have one narrow to no
+        // label at a call site that proves it, and to nothing anywhere else.
+        for name in ["print_r", "var_export", "PRINT_R"] {
+            assert_eq!(super::narrowed_output_labels(name, true), Some(&[][..]));
+            assert_eq!(super::narrowed_output_labels(name, false), None);
+        }
+        for name in ["var_dump", "printf", "vprintf", "flush", "ob_flush", "echo"] {
+            assert_eq!(super::narrowed_output_labels(name, true), None, "{name} has no return mode");
+        }
         // `ob_start`/`ob_get_clean` stay uncatalogued: unknown-effect widening is
         // the sound default until masking exists (ADR-0083, deferred).
         assert_eq!(effect_labels("ob_start"), None);

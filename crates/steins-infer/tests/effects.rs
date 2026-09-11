@@ -655,3 +655,70 @@ fn the_time_familys_siblings_exceed_a_pure_envelope() {
     let clean = "<?php\n/** @phpstan-pure */\nfunction f(string $s): string { return strtoupper($s); }\n";
     assert_eq!(effects(clean).len(), 0, "coloring the time family colored nothing else");
 }
+
+// Issue #352: `print_r`/`var_export` write nothing in return-mode, and a call
+// site that proves the `true` narrows the arg-blind `io.output.buffer` row away.
+
+#[test]
+fn a_proven_return_mode_dumper_writes_to_no_channel() {
+    for name in ["print_r", "var_export"] {
+        let src = format!(
+            "<?php\n#[\\Steins\\Pure]\nfunction render($x): string {{ return {name}($x, true); }}\n"
+        );
+        assert_eq!(
+            effects(&src).len(),
+            0,
+            "{name}(…, true) renders into a return value → nothing reaches output"
+        );
+    }
+}
+
+#[test]
+fn an_unproven_return_mode_keeps_the_output_row() {
+    // The three refutations, one per reason the flag is not proven `true`:
+    // omitted, written `false`, and carried by a variable the origins lane —
+    // a structural scan, ADR-0001's give-up discipline — cannot read.
+    for (args, why) in [
+        ("$x", "omitted: the default writes"),
+        ("$x, false", "written false: the default, spelled"),
+        ("$x, $flag", "a variable is no proof"),
+    ] {
+        let src = format!(
+            "<?php\n#[\\Steins\\Pure]\nfunction render($x, $flag): mixed {{ return print_r({args}); }}\n"
+        );
+        assert_eq!(
+            one(&src).message,
+            "print_r() has effect io.output.buffer, but render() is declared #[\\Steins\\Pure]",
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn the_dumpers_without_a_return_mode_are_untouched() {
+    // `var_dump`'s further arguments are more values to dump, never a flag;
+    // `printf` returns a length and writes either way.
+    for (call, name) in [("var_dump($x, true)", "var_dump"), ("printf('%s', true)", "printf")] {
+        let src =
+            format!("<?php\n#[\\Steins\\Pure]\nfunction render($x): mixed {{ return {call}; }}\n");
+        assert_eq!(
+            one(&src).message,
+            format!(
+                "{name}() has effect io.output.buffer, but render() is declared #[\\Steins\\Pure]"
+            ),
+            "{name} has no return mode"
+        );
+    }
+}
+
+#[test]
+fn the_return_mode_flag_is_read_however_php_spells_it() {
+    // PHP's `true` is a case-insensitive keyword, so the lexer hands the same
+    // literal for every spelling.
+    for spelling in ["true", "TRUE", "True"] {
+        let src = format!(
+            "<?php\n#[\\Steins\\Pure]\nfunction render($x): string {{ return print_r($x, {spelling}); }}\n"
+        );
+        assert_eq!(effects(&src).len(), 0, "`{spelling}` is the same keyword");
+    }
+}
