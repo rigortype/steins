@@ -634,7 +634,21 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     //   the same as the `JobRunner.php:244` rows above. TRUE. Seen on the CI 8.4
     //   engine only: the local 8.5 A/B for this slice reported no phpdoc.*
     //   movement, so this row is calibrated where the line is.
-    ("sebastianbergmann/phpunit", 88),
+    //   88 → 104 (+16), 2026-09-12 with issue #607 (a declared float reaches the
+    //   value lane): sixteen `phpdoc.maybe-argument-mismatch` rows in
+    //   `tests/unit/Framework/Assert/assert{File,Directory,}Is*Test.php`, all
+    //   one shape — `chmod($path, octdec('0'))` / `mkdir($path, octdec('0'))`
+    //   under `strict_types=1`. `octdec` declares `int|float` (the float arm is
+    //   the over-`PHP_INT_MAX` return) and the lowering used to drop any union
+    //   carrying a float, so the claim never reached `int $permissions`. Same
+    //   family as the `nikic/PHP-Parser` 17 → 20 rows below and TRUE at the
+    //   possibly grade for the same reason; here the closure — a one-digit
+    //   literal — sits in the argument itself, so the honest fix is folding
+    //   `octdec`/`hexdec`/`bindec` over a literal (issue #736), which would
+    //   answer `0` and retire these rows, not a wider refusal. Seen on the CI
+    //   8.4 engine; the local 8.5 A/B for this slice reported +4 rows elsewhere
+    //   and none here.
+    ("sebastianbergmann/phpunit", 104),
     // 0 → 4 (+4), 2026-08-17 (issue #423), all shape (a) — the tempnam idiom:
     // `$certFile` / `$tmpfname` carry `non-falsy-string|false` and go straight
     // into `rename(string $from)` (Handler/CurlFactoryTest.php:4031, 4045, 4061)
