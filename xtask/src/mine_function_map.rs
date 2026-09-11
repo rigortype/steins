@@ -769,17 +769,57 @@ struct MethodCounts {
     class_missing_classes: usize,
     method_missing: usize,
     reflection_disagree: usize,
-    engine_typeless: usize,
+    engine_untyped: usize,
+    engine_mixed: usize,
+    blocked: usize,
     admitted: usize,
     admitted_static: usize,
     admitted_rich: usize,
+}
+
+/// Whether the engine's own rendering of a return type is the one native answer
+/// that binds nothing: `mixed`.
+///
+/// The function half can afford to admit over `mixed`, because ADR-0056's
+/// reflected envelope is a rung ABOVE the floor at analysis time and corrects it
+/// per name. The method half has no such rung, so a row admitted over `mixed`
+/// would be the last word — and `mixed` subsumes everything, so "refines the
+/// engine" degenerates into "was not checked at all". `DirectoryIterator::key`
+/// is the witness: functionMap says `string`, `Iterator::key(): mixed` says
+/// nothing, and PHP returns `int(0)`.
+fn engine_says_mixed(engine_ty: &str) -> bool {
+    engine_ty.trim().trim_start_matches('\\').eq_ignore_ascii_case("mixed")
+}
+
+/// The transitive builtin ancestors of `class`, lowercased and NEAREST FIRST,
+/// excluding `class` itself — the same breadth-first
+/// [`steins_catalog::builtin_class_supers`] closure the consuming walk takes, run
+/// here so the miner can see which row a refused key would otherwise inherit.
+fn builtin_ancestors(class: &str) -> Vec<String> {
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut frontier = vec![class.to_ascii_lowercase()];
+    let mut out = Vec::new();
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for name in &frontier {
+            for sup in steins_catalog::builtin_class_supers(name).unwrap_or_default() {
+                let sup = sup.to_ascii_lowercase();
+                if seen.insert(sup.clone()) {
+                    out.push(sup.clone());
+                    next.push(sup);
+                }
+            }
+        }
+        frontier = next;
+    }
+    out
 }
 
 /// Mine the `Class::method` rows into `declared_method_returns.toml`, the method
 /// twin of the function table above (issue #673, ADR-0069 §3's machinery applied
 /// unchanged one key-grammar over).
 ///
-/// Three things differ from the function half, and only three:
+/// Five things differ from the function half, and only five:
 ///
 /// 1. **The countersign asks a class, not a name.** `reflect_class(Class)` reports
 ///    every method the engine resolves on that class, INHERITED ONES INCLUDED, so a
@@ -792,6 +832,26 @@ struct MethodCounts {
 ///    (an unloaded extension) is charged per class *and* per row; a class it has
 ///    without the method is its own bucket, and the two say different things about
 ///    the map — the first is this build's extension set, the second is drift.
+/// 4. **No countersign, no row — including the silent countersigns.** The function
+///    half admits a row the engine declares nothing for, and admits one the engine
+///    declares `mixed` for (everything "refines" `mixed`). Both are safe THERE
+///    because ADR-0056's reflected envelope sits above the function floor at
+///    analysis time and corrects it per name. Here there is no rung above, and a
+///    row admitted without a native envelope is not merely unchecked at the key it
+///    is keyed on: the consuming walk hands it to every descendant on a covariance
+///    argument that only a native envelope can make (ADR-0049 A16 bounds an
+///    override by what the PARENT natively declares, and an untyped or `mixed`
+///    parent declares no bound at all). So both are refused, into
+///    [`MethodCounts::engine_untyped`] and [`MethodCounts::engine_mixed`], and
+///    listed by name. `PDOException::getCode` — `Exception::getCode` is `final`
+///    and untyped, PHP returns `"HY000"` — is what the old rule got wrong.
+/// 5. **A refused child SHADOWS an admitted ancestor.** The consuming walk reads
+///    "no row on the child" as "inherit the ancestor's", but 5,573 of the 6,606
+///    reduced keys never became rows. A key functionMap states and this miner
+///    dropped or refused says the nearest declaration is NOT the ancestor's — so
+///    every such key whose ancestor DOES carry a row for the same method is
+///    emitted into the `[blocked]` table, and the walk stops there rather than
+///    climbing past it.
 ///
 /// Everything else is the function half verbatim: the same [`floor_row`] carriability
 /// filter, the same arm-wise [`countersigned`] relation in both directions, the same
@@ -808,15 +868,24 @@ fn mine_methods(
     engine_version: &str,
     sidecar: &mut Sidecar,
 ) -> Result<(), String> {
-    // Stage 2 — lowerability, the same filter and the same buckets.
+    // Stage 2 — lowerability, the same filter and the same buckets. Every key that
+    // does NOT survive to a row is also remembered by name, with why: difference 5
+    // reads that list back once the admitted set is known.
     let mut candidates: BTreeMap<String, Row> = BTreeMap::new();
     let mut dropped = Dropped::default();
+    let mut refused: BTreeMap<String, &'static str> = BTreeMap::new();
+    for key in mined.method_alternates_disagree.keys() {
+        refused.insert(key.clone(), "alternates_disagree");
+    }
     for (key, ty) in &mined.method_rows {
         match floor_row(ty) {
             Some(row) => {
                 candidates.insert(key.clone(), row);
             }
-            None => dropped.charge(ty),
+            None => {
+                dropped.charge(ty);
+                refused.insert(key.clone(), "not_lowerable");
+            }
         }
     }
     println!(
@@ -840,7 +909,8 @@ fn mine_methods(
     let mut class_missing: Vec<String> = Vec::new();
     let mut class_missing_rows = 0usize;
     let mut method_missing: Vec<String> = Vec::new();
-    let mut typeless = 0usize;
+    let mut engine_untyped: Vec<String> = Vec::new();
+    let mut engine_mixed: Vec<String> = Vec::new();
     for (key, row) in &candidates {
         let Some((class, method)) = key.split_once("::") else {
             return Err(format!("method key `{key}` has no `::`"));
@@ -856,10 +926,12 @@ fn mine_methods(
         }
         let Some(decl) = classes.get(class).and_then(Option::as_ref) else {
             class_missing_rows += 1;
+            refused.insert(key.clone(), "class_missing");
             continue;
         };
         let Some(m) = decl.methods.iter().find(|m| m.name.eq_ignore_ascii_case(method)) else {
             method_missing.push(key.clone());
+            refused.insert(key.clone(), "method_missing");
             continue;
         };
         let mut admit = || {
@@ -873,34 +945,60 @@ fn mine_methods(
             );
         };
         match m.return_type.as_deref() {
-            // The engine declares nothing: the map adds reach, not a contradiction.
-            // A tentative return type already arrived as `Some` (ADR-0056 R1), so
-            // this really is silence.
+            // No countersign, no row (ADR-0069 §3, and difference 4 above). The
+            // function half admits both of these and is corrected from above by
+            // ADR-0056; nothing sits above this table, and the hierarchy walk would
+            // hand an unbound row to every descendant.
             None => {
-                typeless += 1;
-                admit();
+                engine_untyped.push(key.clone());
+                refused.insert(key.clone(), "engine_untyped");
+            }
+            Some(engine_ty) if engine_says_mixed(engine_ty) => {
+                engine_mixed.push(key.clone());
+                refused.insert(key.clone(), "engine_mixed");
             }
             Some(engine_ty) if countersigned(&row.arms, engine_ty) => admit(),
             Some(engine_ty) => {
                 disagree.insert(key.clone(), vec![row.canon.clone(), engine_ty.to_owned()]);
+                refused.insert(key.clone(), "reflection_disagree");
             }
         }
+    }
+
+    // Difference 5 — the shadow set. A key functionMap states and this miner did
+    // not admit is a statement that the child's own declaration differs from
+    // whatever an ancestor declares; the walk must not climb past it. Only the keys
+    // whose ancestor actually carries a row for the same method matter, which is
+    // what keeps the table small enough to read.
+    let mut blocked: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (key, why) in &refused {
+        let Some((class, method)) = key.split_once("::") else { continue };
+        let Some(ancestor) = builtin_ancestors(class)
+            .into_iter()
+            .find(|a| admitted.contains_key(&format!("{a}::{method}")))
+        else {
+            continue;
+        };
+        blocked.insert(key.clone(), vec![(*why).to_owned(), ancestor]);
     }
 
     let admitted_static = admitted.values().filter(|r| r.is_static).count();
     let admitted_rich = admitted.values().filter(|r| !r.envelope).count();
     println!(
-        "mine-function-map: {} method rows admitted ({} static, {} richer than an envelope, \
-         {} where the engine declares no return type), {} disagreements, \
-         {} rows on {} classes the engine does not have, {} rows the class does not declare",
+        "mine-function-map: {} method rows admitted ({} static, {} richer than an envelope), \
+         {} disagreements, {} the engine declares no return type for, {} it declares `mixed` for, \
+         {} rows on {} classes the engine does not have, {} rows the class does not declare; \
+         {} refused keys shadow an ancestor's row",
         admitted.len(),
         admitted_static,
         admitted_rich,
-        typeless,
         disagree.len(),
+        engine_untyped.len(),
+        engine_mixed.len(),
         class_missing_rows,
         class_missing.len(),
         method_missing.len(),
+        blocked.len(),
     );
 
     let counts = MethodCounts {
@@ -911,7 +1009,9 @@ fn mine_methods(
         class_missing_classes: class_missing.len(),
         method_missing: method_missing.len(),
         reflection_disagree: disagree.len(),
-        engine_typeless: typeless,
+        engine_untyped: engine_untyped.len(),
+        engine_mixed: engine_mixed.len(),
+        blocked: blocked.len(),
         admitted: admitted.len(),
         admitted_static,
         admitted_rich,
@@ -926,6 +1026,9 @@ fn mine_methods(
         &disagree,
         &class_missing,
         &method_missing,
+        &engine_untyped,
+        &engine_mixed,
+        &blocked,
     );
     let dst = repo_root().join("docs/research/phpstan-mining/declared_method_returns.toml");
     std::fs::write(&dst, &toml).map_err(|e| format!("write {}: {e}", dst.display()))?;
@@ -945,6 +1048,9 @@ fn render_methods(
     reflection_disagree: &BTreeMap<String, Vec<String>>,
     class_missing: &[String],
     method_missing: &[String],
+    engine_untyped: &[String],
+    engine_mixed: &[String],
+    blocked: &BTreeMap<String, Vec<String>>,
 ) -> String {
     let mut s = String::new();
     s.push_str(
@@ -973,7 +1079,16 @@ fn render_methods(
          # WHERE IT SPEAKS: at a method or static call whose receiver is a BUILTIN\n\
          # class by declaration, after the project chain has answered nothing. A\n\
          # project class that extends a builtin keeps its own declaration on every\n\
-         # name it declares; this table answers only the inherited names.\n\n",
+         # name it declares; this table answers only the inherited names.\n\
+         #\n\
+         # NO COUNTERSIGN, NO ROW — and unlike the function half, that includes the\n\
+         # two SILENT countersigns. A row the engine declares no return type for, and\n\
+         # a row it declares `mixed` for, are both refused here and listed under\n\
+         # `[exclusions]`. The function table admits them because ADR-0056's reflected\n\
+         # envelope is a rung ABOVE it at analysis time and corrects it per name;\n\
+         # nothing sits above this table, and the consuming walk hands a row to every\n\
+         # DESCENDANT on a covariance argument (ADR-0049 A16) that only a native,\n\
+         # non-`mixed` envelope can make.\n\n",
     );
     let _ = writeln!(s, "[meta]");
     let _ = writeln!(s, "phpstan_src_commit = {pin:?}");
@@ -995,7 +1110,10 @@ fn render_methods(
          # method_missing       rows whose class the engine has WITHOUT the method — the\n\
          #                      drift bucket, distinct from the extension-set one above\n\
          # reflection_disagree  rows the arm-wise countersign refuses\n\
-         # engine_typeless      admitted rows where the engine declares NO return type\n\
+         # engine_untyped       rows REFUSED because the engine declares no return type\n\
+         # engine_mixed         rows REFUSED because the engine declares `mixed`\n\
+         # blocked              refused keys whose ancestor carries a row for the same\n\
+         #                      method — the walk stops at them instead of inheriting\n\
          # admitted             rows emitted into the shipped table\n\
          # admitted_static      of those, the ones the engine declares `static`\n\
          # admitted_rich        of those, the rows RICHER than a single-base envelope\n\
@@ -1030,7 +1148,9 @@ fn render_methods(
     let _ = writeln!(s, "class_missing_classes = {}", counts.class_missing_classes);
     let _ = writeln!(s, "method_missing = {}", counts.method_missing);
     let _ = writeln!(s, "reflection_disagree = {}", counts.reflection_disagree);
-    let _ = writeln!(s, "engine_typeless = {}", counts.engine_typeless);
+    let _ = writeln!(s, "engine_untyped = {}", counts.engine_untyped);
+    let _ = writeln!(s, "engine_mixed = {}", counts.engine_mixed);
+    let _ = writeln!(s, "blocked = {}", counts.blocked);
     let _ = writeln!(s, "admitted = {}", counts.admitted);
     let _ = writeln!(s, "admitted_static = {}", counts.admitted_static);
     let _ = writeln!(s, "admitted_rich = {}\n", counts.admitted_rich);
@@ -1043,7 +1163,10 @@ fn render_methods(
          # key is where functionMap puts the row, which may be a SUBCLASS of the class\n\
          # that declares the method; the consuming lookup walks the builtin hierarchy\n\
          # (ADR-0043) so a row on a parent answers for a child receiver too — the\n\
-         # declared envelope is an upper bound under covariance (ADR-0049 A16).\n\
+         # parent's NATIVE, NON-`mixed` engine envelope is an upper bound on every\n\
+         # override under covariance (ADR-0049 A16), which is why a row the engine\n\
+         # could not countersign never reaches this section, and why `[blocked]` below\n\
+         # stops the walk at a child functionMap states differently.\n\
          # Where a row NAMES A CLASS, or `spell_arms` declines the arms outright, it\n\
          # keeps functionMap's OWN string, which lowers back to the countersigned arms\n\
          # by construction and preserves the class's source casing.\n",
@@ -1068,6 +1191,27 @@ fn render_methods(
     }
     s.push('\n');
 
+    s.push_str(
+        "# SHADOWS. The consuming walk climbs `builtin_class_supers` and reads \"no row\n\
+         # on the child\" as \"inherit the ancestor's\" — but only 1 key in 7 became a\n\
+         # row, so that reading is wrong wherever functionMap STATES the child and this\n\
+         # miner dropped or refused it. Such a key is positive evidence that the\n\
+         # nearest declaration is not the ancestor's, so it BLOCKS the walk: a receiver\n\
+         # of that class, or of any class between it and the row-bearing ancestor,\n\
+         # answers nothing at all. Listed only where an ancestor actually carries a row\n\
+         # for the same method, which is what keeps the table short.\n\
+         # key = [why the key was refused, the nearest ancestor whose row it shadows].\n\
+         # `pdoexception::getcode` is the live witness: functionMap states it as `['']`,\n\
+         # which is unparseable, and without this table the walk would reach\n\
+         # `runtimeexception::getcode` and answer `int` where PHP returns `\"HY000\"`.\n",
+    );
+    let _ = writeln!(s, "[blocked]");
+    for (key, why) in blocked {
+        let items: Vec<String> = why.iter().map(|t| format!("{t:?}")).collect();
+        let _ = writeln!(s, "{key:?} = [{}]", items.join(", "));
+    }
+    s.push('\n');
+
     s.push_str("# Exclusions, recorded so the refusals are auditable rather than invisible.\n");
     let _ = writeln!(s, "[exclusions]");
     let _ = writeln!(
@@ -1089,6 +1233,33 @@ fn render_methods(
          method_missing = ["
     );
     for name in method_missing {
+        let _ = writeln!(s, "  {name:?},");
+    }
+    s.push_str("]\n\n");
+
+    let _ = writeln!(
+        s,
+        "# Rows the engine declares NO return type for. The map may well be right about\n\
+         # them, but right is not countersigned, and with no rung above this table and a\n\
+         # hierarchy walk below it an uncountersigned row becomes every descendant's\n\
+         # answer. `exception::getcode` is `final` and untyped and returns `\"HY000\"` out\n\
+         # of a PDOException; `mysqli::init` is untyped and returns `NULL`.\n\
+         engine_untyped = ["
+    );
+    for name in engine_untyped {
+        let _ = writeln!(s, "  {name:?},");
+    }
+    s.push_str("]\n\n");
+
+    let _ = writeln!(
+        s,
+        "# Rows the engine declares `mixed` for. `mixed` subsumes everything, so the\n\
+         # arm-wise countersign would pass ANY row against it — the check degenerates\n\
+         # into no check. `directoryiterator::key` is the witness: the map says\n\
+         # `string`, `Iterator::key(): mixed` says nothing, PHP returns `int(0)`.\n\
+         engine_mixed = ["
+    );
+    for name in engine_mixed {
         let _ = writeln!(s, "  {name:?},");
     }
     s.push_str("]\n\n");
@@ -1121,7 +1292,39 @@ fn render_methods(
 
 #[cfg(test)]
 mod tests {
-    use super::{countersigned, floor_row};
+    use super::{builtin_ancestors, countersigned, engine_says_mixed, floor_row};
+
+    /// The method half's own refusal (issue #673 review): `mixed` is the engine
+    /// answer that makes the countersign vacuous, so it is recognized by name
+    /// rather than run through `subsumes`.
+    #[test]
+    fn the_mixed_engine_envelope_is_recognized_however_it_is_spelled() {
+        assert!(engine_says_mixed("mixed"));
+        assert!(engine_says_mixed(" mixed "));
+        assert!(engine_says_mixed("\\mixed"));
+        assert!(engine_says_mixed("MIXED"));
+        assert!(!engine_says_mixed("string"));
+        assert!(!engine_says_mixed("mixed|false"), "a union is a real envelope again");
+        assert!(!engine_says_mixed(""));
+        // And the reason it must be its own gate: `subsumes` says yes to
+        // everything under `mixed`, so the countersign alone would admit a row
+        // that contradicts the runtime.
+        let arms = floor_row("string").expect("carriable").arms;
+        assert!(countersigned(&arms, "mixed"), "directoryiterator::key's shape");
+    }
+
+    /// The shadow set's walk must be the consumer's walk: breadth-first over
+    /// `builtin_class_supers`, nearest ancestor first, and the class itself out.
+    #[test]
+    fn the_ancestor_walk_is_breadth_first_and_excludes_the_class() {
+        let supers = builtin_ancestors("PDOException");
+        assert!(!supers.contains(&"pdoexception".to_owned()), "the class itself is not its ancestor");
+        let at = |n: &str| supers.iter().position(|s| s == n);
+        let (rt, ex) = (at("runtimeexception"), at("exception"));
+        assert!(rt.is_some() && ex.is_some(), "the SPL chain is in the hierarchy table: {supers:?}");
+        assert!(rt < ex, "nearest first: {supers:?}");
+        assert!(builtin_ancestors("NoSuchBuiltinClassAnywhere").is_empty());
+    }
 
     fn canon(ty: &str) -> Option<String> {
         floor_row(ty).map(|r| r.canon)

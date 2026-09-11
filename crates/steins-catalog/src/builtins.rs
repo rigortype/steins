@@ -494,6 +494,31 @@ pub fn declared_method_return(class: &str, method: &str) -> Option<(&'static str
         })
 }
 
+/// Whether a builtin `class::method` key is a **shadow**: one functionMap states
+/// and the miner dropped or refused, on a class some ancestor of which carries an
+/// admitted row for the same method (issue #673, review finding 2).
+///
+/// [`declared_method_return`] answers per key and says nothing about the walk, so
+/// the consumer reading a parent's row for a child receiver needs a second
+/// question: *did the source have something to say about the child, that this
+/// table could not carry?* A `true` here means yes, and the walk must answer
+/// nothing rather than inherit — the map's own row for the child is evidence that
+/// the nearest declaration is not the ancestor's, whatever this table failed to
+/// admit about it. `PDOException::getCode` is the witness: functionMap states it
+/// (as `['']`, which is unparseable), `Exception::getCode` is `final` and untyped,
+/// and PHP returns the string `"HY000"`.
+///
+/// Disjoint from [`declared_method_return`] by construction: the generator refuses
+/// a key that is in both tables. Both halves of the key are case-insensitive; a
+/// leading `\` on the class is stripped.
+#[must_use]
+pub fn declared_method_return_blocked(class: &str, method: &str) -> bool {
+    let class = class.trim_start_matches('\\');
+    declared_method_returns_generated::BLOCKED_METHOD_KEYS
+        .binary_search_by(|k| cmp_member_key(k, class, method))
+        .is_ok()
+}
+
 /// The minor at which a builtin **method's** declared return type last moved
 /// across the supported 8.x line, or `None` when it never did — the A11-shaped
 /// oracle of [`declared_return_changed_at`], one key grammar over.

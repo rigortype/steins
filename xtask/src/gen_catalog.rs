@@ -292,21 +292,40 @@ fn gen_declared_method_returns(check: bool) -> Result<(), String> {
         sensitive.insert(key.to_ascii_lowercase(), parsed);
     }
 
-    let out = render_declared_method_returns(&doc.meta, &doc.counts, &rows, &sensitive);
+    // The shadow keys ship as a table of their own: the consumer needs them at the
+    // call site, where "no row on this class" and "functionMap states this class
+    // differently" must answer differently.
+    let mut blocked: Vec<String> = Vec::new();
+    for key in doc.blocked.keys() {
+        let key = key.to_ascii_lowercase();
+        if !key.contains("::") {
+            return Err(format!("blocked key `{key}` is not a `class::method` key"));
+        }
+        if rows.contains_key(&key) {
+            return Err(format!("`{key}` is both admitted and blocked — the miner disagrees with itself"));
+        }
+        blocked.push(key);
+    }
+    blocked.sort();
+
+    let out = render_declared_method_returns(&doc.meta, &doc.counts, &rows, &sensitive, &blocked);
     let dst = repo_root().join("crates/steins-catalog/src/declared_method_returns_generated.rs");
     emit(&dst, &out, check)?;
     println!(
-        "gen-catalog: {} declared method-return rows + {} version-sensitive keys {} → {}",
+        "gen-catalog: {} declared method-return rows + {} version-sensitive keys + {} shadow keys {} → {}",
         rows.len(),
         sensitive.len(),
+        blocked.len(),
         verb(check),
         dst.display()
     );
     Ok(())
 }
 
-/// The shape of `declared_method_returns.toml`. Exclusion sections document
-/// refusals and are deliberately not read — nothing is generated from them.
+/// The shape of `declared_method_returns.toml`. The `[exclusions]` sections
+/// document refusals and are deliberately not read — nothing is generated from
+/// them. `[blocked]` is the one refusal record that IS read, because a refused
+/// key is not merely an absence: it shadows the ancestor's row.
 #[derive(serde::Deserialize)]
 struct MethodEnvelopeDoc {
     meta: EnvelopeMeta,
@@ -316,6 +335,10 @@ struct MethodEnvelopeDoc {
     declared: BTreeMap<String, (String, bool)>,
     #[serde(default)]
     version_sensitive: BTreeMap<String, String>,
+    /// `class::method` -> `[why it was refused, the ancestor it shadows]`. Only
+    /// the key is generated; the pair is the audit trail.
+    #[serde(default)]
+    blocked: BTreeMap<String, (String, String)>,
 }
 
 #[derive(serde::Deserialize)]
@@ -328,6 +351,9 @@ struct MethodEnvelopeCounts {
     class_missing_classes: usize,
     method_missing: usize,
     reflection_disagree: usize,
+    engine_untyped: usize,
+    engine_mixed: usize,
+    blocked: usize,
     admitted: usize,
     admitted_static: usize,
     admitted_rich: usize,
@@ -340,6 +366,7 @@ fn render_declared_method_returns(
     counts: &MethodEnvelopeCounts,
     rows: &BTreeMap<String, (String, bool)>,
     sensitive: &BTreeMap<String, (u16, u16)>,
+    blocked: &[String],
 ) -> String {
     use std::fmt::Write as _;
     let mut s = String::new();
@@ -371,6 +398,9 @@ fn render_declared_method_returns(
     let _ = writeln!(s, "//   {:>5}  rows on {} classes the pinned engine does not have", counts.class_missing_rows, counts.class_missing_classes);
     let _ = writeln!(s, "//   {:>5}  rows whose class the engine has WITHOUT the method", counts.method_missing);
     let _ = writeln!(s, "//   {:>5}  rows the arm-wise engine countersign refuses", counts.reflection_disagree);
+    let _ = writeln!(s, "//   {:>5}  rows REFUSED because the engine declares no return type", counts.engine_untyped);
+    let _ = writeln!(s, "//   {:>5}  rows REFUSED because the engine declares `mixed`", counts.engine_mixed);
+    let _ = writeln!(s, "//   {:>5}  refused keys that SHADOW an ancestor's row (the second table below)", counts.blocked);
     let _ = writeln!(s, "//   {:>5}  ADMITTED (the table below), of which", counts.admitted);
     let _ = writeln!(s, "//   {:>5}    STATIC, by the engine's own reckoning", counts.admitted_static);
     let _ = writeln!(s, "//   {:>5}    RICHER than a single-base envelope", counts.admitted_rich);
@@ -398,8 +428,18 @@ fn render_declared_method_returns(
          // the builtin hierarchy (ADR-0043) from the receiver's declared class upward,\n\
          // so `SplFileInfo::getPath` answers for an `SplFileObject` receiver — sound\n\
          // because PHP enforces return covariance at class-declaration time, making the\n\
-         // declaring class's envelope an upper bound under every descendant\n\
-         // (ADR-0049 A16).\n\
+         // declaring class's NATIVE, NON-`mixed` engine envelope an upper bound on\n\
+         // every override (ADR-0049 A16). That is exactly why no row here was admitted\n\
+         // over an untyped or `mixed` engine answer: such a row bounds nothing, and the\n\
+         // walk would hand it to every descendant.\n\
+         //\n\
+         // ...and why the walk needs `BLOCKED_METHOD_KEYS` below. \"No row on the\n\
+         // child\" is not the same fact as \"functionMap never mentioned the child\":\n\
+         // only 957 of the 6,606 reduced keys became rows, so a key the map STATES and\n\
+         // the miner dropped or refused is positive evidence that the child's own\n\
+         // declaration differs from the ancestor's. `PDOException::getCode` is the\n\
+         // witness the review found — stated as `['']`, unparseable, and the walk read\n\
+         // it as `RuntimeException`'s `int` where PHP returns `\"HY000\"`.\n\
          //\n\
          // Each row: (lowercased `class::method`, canonical phpdoc spelling, whether\n\
          // the engine declares the method `static`). Re-lowered through the same\n\
@@ -423,6 +463,20 @@ fn render_declared_method_returns(
     s.push_str("pub(crate) static METHOD_RETURN_VERSION_SENSITIVE: &[(&str, (u16, u16))] = &[\n");
     for (key, (major, minor)) in sensitive {
         let _ = writeln!(s, "    ({key:?}, ({major}, {minor})),");
+    }
+    s.push_str("];\n\n");
+    s.push_str(
+        "// The SHADOW keys: `class::method` entries functionMap states and the miner\n\
+         // dropped or refused, whose ancestor carries an admitted row for the same\n\
+         // method. The consuming walk answers NOTHING at these keys rather than\n\
+         // climbing to the ancestor's row, since the map itself says the child's\n\
+         // declaration is not the ancestor's. Disjoint from the table above by\n\
+         // construction — the generator refuses a key that is in both.\n\
+         // Sorted by key for binary search.\n\n",
+    );
+    s.push_str("pub(crate) static BLOCKED_METHOD_KEYS: &[&str] = &[\n");
+    for key in blocked {
+        let _ = writeln!(s, "    {key:?},");
     }
     s.push_str("];\n");
     s

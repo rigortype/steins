@@ -95,7 +95,7 @@ mod builtins;
 pub use builtins::{
     ArgSource, FailureArms, FailureCause, Invocation, InvocationShape, ParamFacts,
     builtin_class_display, builtin_class_supers, builtin_exception_parent, builtin_throws,
-    declared_method_return, declared_method_return_changed_at,
+    declared_method_return, declared_method_return_blocked, declared_method_return_changed_at,
     declared_return, declared_return_changed_at, failure_arms, hierarchy_entry_count,
     invocation_shape, param_facts, param_facts_mined, resource_return, return_fact,
 };
