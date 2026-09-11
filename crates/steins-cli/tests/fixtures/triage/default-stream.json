@@ -1,0 +1,9 @@
+{
+  "findings": [
+    { "id": "offset.missing", "layer": "proof", "level": "fail", "path": "src/Cli/C.php", "line": 9, "column": 12, "message": "offset 'hostname' provably missing" }
+  ],
+  "profile": "default",
+  "vendor_suppressed": 0,
+  "suppressed": 0,
+  "baselined": 0
+}
