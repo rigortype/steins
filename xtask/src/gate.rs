@@ -749,7 +749,22 @@ const PHPDOC_EXPECTED: &[(&str, usize)] = &[
     // `$offset` is a native `int`, so the string arm fatals — TRUE at the
     // possibly grade, and contract-layer because the `int|string` is a docblock's
     // claim about the array's keys rather than anything PHP enforces.
-    ("nikic/PHP-Parser", 17),
+    // 17 → 20 (+3), 2026-09-12 (issue #607): `hexdec()`/`bindec()` declare
+    // `int|float` — the float arm is what an argument wider than `PHP_INT_MAX`
+    // returns — and the contract lowering used to refuse any union carrying a
+    // float, so the whole claim was dropped and the three call sites premised
+    // nothing. `Int_::fromString` hands `hexdec($str)` and `bindec($str)` to
+    // `Int_::__construct(int $value)` (`Int_.php:54`, `:59`) and the string
+    // unescaper hands `hexdec(...)` to `chr(int $codepoint)`
+    // (`String_.php:120`), all under `strict_types=1`, where a float argument is
+    // a `TypeError`. TRUE at the possibly grade and no higher: each is closed by
+    // something outside the call — PHP's own lexer emits a DNUMBER for an
+    // overflowing literal, and the unescaper's regex admits at most two hex
+    // digits — and neither closure is visible here. The `u` branch four lines
+    // below `String_.php:120` guards the same arm by hand
+    // (`\is_int($dec) ? $dec : \PHP_INT_MAX`), which is the author agreeing the
+    // arm is real in general.
+    ("nikic/PHP-Parser", 20),
     // 0 → 9 (+9), 2026-08-17 (issue #423), all shape (a). Two in `src/`:
     // `preg_split('/[_.-]+/', $completeLocale)` with `$completeLocale` a
     // `string|false` (AbstractTranslator.php:353), and `array_splice($arguments,
@@ -1258,7 +1273,22 @@ const POSSIBLY_EXPECTED: &[(&str, usize)] = &[
     // `variable.maybe-undefined` on the binding-presence seam, and
     // `$this->markTestSkipped()` resolves to nothing anyway with no `vendor/` in
     // the checkout. The `CarbonInterval.php:739` row is TRUE and untouched.
-    ("briannesbitt/Carbon", 3),
+    // 3 → 4 (+1), 2026-09-12 (issue #607): `type.maybe-return-mismatch` at
+    // `CarbonTimeZone.php:60`. `getDateTimeZoneNameFromMixed(string|int|float
+    // $timezone): string` reassigns `$timezone = preg_replace(…)` inside its
+    // `is_string` branch, so `null` joins the union, and the bare `return
+    // $timezone;` at the end is that union. The claim existed in the arm lane
+    // before; what it lacked was a lowering — `arm_lane_premise` folds the arms
+    // through `to_fact`, which refused any union with a float member, so the
+    // premise was silently dropped. TRUE at the possibly grade on the **null**
+    // arm: PCRE answers `null` on a pattern or backtrack failure, `is_numeric
+    // (null)` is `false` so the guard above does not close it, and returning
+    // `null` from a `: string` function under `strict_types=1` is a `TypeError`
+    // — the same reasoning the `nikic` `preg_replace` row below already carries.
+    // The message also names the `int` and `float` arms, which `is_numeric`
+    // ought to have subtracted; that is a narrowing gap in the message's
+    // explanation, not in its verdict, and it does not make the row false.
+    ("briannesbitt/Carbon", 4),
     // 0 → 1, 2026-08-16 with issue #391 — and a sixth class, the first that is not
     // a binding claim at all: `type.maybe-argument-mismatch` on
     // `PrettyPrinter/Standard.php:1100`. `preg_replace()` declares `string|null`
